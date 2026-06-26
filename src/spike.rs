@@ -13,7 +13,8 @@ use anyhow::{bail, Context, Result};
 use rquickjs::{
     loader::{Loader, Resolver},
     module::Declared,
-    Array, Context as JsContext, Ctx, Filter, Function, Module, Object, Runtime, Value,
+    Array, CatchResultExt, Context as JsContext, Ctx, Filter, Function, Module, Object, Runtime,
+    Value,
 };
 use walkdir::WalkDir;
 
@@ -22,6 +23,19 @@ const BUILD_FILE: &str = "BUILD.js";
 
 /// The built-in `imp:core` module exposed to every plugin and BUILD file.
 const CORE_JS: &str = r#"
+/**
+ * Declare a target and return a target handle.
+ *
+ * @param {object} opts
+ * @param {string} opts.kind Stable target kind understood by extension rules.
+ * @param {Record<string, string>} [opts.fields={}] String fields stored on the target.
+ * @param {Array<object>} [opts.deps=[]] Dependencies as target handles returned by target().
+ * @returns {object} An opaque target handle for exports and dependency lists.
+ *
+ * Constructors should perform domain validation in JavaScript and throw normal
+ * Error objects for invalid arguments. The host validates only core invariants,
+ * such as dependency values being target handles.
+ */
 export function target(opts) {
     const depIds = (opts.deps || []).map(d => {
         if (!d || d.__imp !== true) throw new Error('dep must be a target handle, got: ' + JSON.stringify(d));
@@ -29,6 +43,18 @@ export function target(opts) {
     });
     return __host_target(opts.kind, opts.fields || {}, depIds);
 }
+
+/**
+ * Register a rule for producing a product from a target kind.
+ *
+ * @param {object} opts
+ * @param {string} opts.kind Target kind this rule applies to.
+ * @param {string} opts.product Product name produced by the rule.
+ * @param {string} opts.action Human-readable action template used by the spike planner.
+ * @param {boolean} [opts.requiresOwnSources=false] Whether non-source products depend on this target's sources product.
+ * @param {string|null|undefined} [opts.dependencyProduct=null] Product requested from dependencies; use "default" for their default product.
+ * @returns {void}
+ */
 export function rule(opts) {
     __host_rule(
         opts.kind, opts.product, opts.action,
@@ -129,15 +155,73 @@ struct PendingTarget {
 // QuickJS module resolver / loader
 // ---------------------------------------------------------------------------
 
-struct ImpResolver;
+struct ImpResolver {
+    workspace_root: PathBuf,
+}
+
 struct ImpLoader {
     workspace_root: PathBuf,
 }
 
 impl Resolver for ImpResolver {
-    fn resolve<'js>(&mut self, _ctx: &Ctx<'js>, _base: &str, name: &str) -> rquickjs::Result<String> {
-        // All module names are already canonical (absolute `//` paths or `imp:*`).
-        Ok(name.to_owned())
+    fn resolve<'js>(
+        &mut self,
+        _ctx: &Ctx<'js>,
+        base: &str,
+        name: &str,
+    ) -> rquickjs::Result<String> {
+        if name == "imp:core" {
+            return Ok(name.to_owned());
+        }
+
+        if name.starts_with("imp:") {
+            return Err(rquickjs::Error::new_resolving_message(
+                base,
+                name,
+                format!(
+                    "unknown built-in module '{name}' while importing from {}",
+                    module_location(&self.workspace_root, base)
+                ),
+            ));
+        }
+
+        if name.starts_with("//") {
+            let resolution =
+                resolve_workspace_module(&self.workspace_root, name).map_err(|message| {
+                    rquickjs::Error::new_resolving_message(
+                        base,
+                        name,
+                        format!(
+                            "{message} while importing from {}",
+                            module_location(&self.workspace_root, base)
+                        ),
+                    )
+                })?;
+            return Ok(resolution.name);
+        }
+
+        if name.starts_with('.') {
+            let importer = module_location(&self.workspace_root, base);
+            let message = if module_kind(&self.workspace_root, base) == ModuleKind::Build {
+                format!(
+                    "relative import '{name}' is prohibited in BUILD.js module {importer}; use workspace-rooted //... imports or imp:* built-ins"
+                )
+            } else {
+                format!(
+                    "relative import '{name}' is unsupported in module {importer}; use workspace-rooted //... imports or imp:* built-ins"
+                )
+            };
+            return Err(rquickjs::Error::new_resolving_message(base, name, message));
+        }
+
+        Err(rquickjs::Error::new_resolving_message(
+            base,
+            name,
+            format!(
+                "module specifier '{name}' is unsupported while importing from {}; use //... or imp:*",
+                module_location(&self.workspace_root, base)
+            ),
+        ))
     }
 }
 
@@ -147,30 +231,136 @@ impl Loader for ImpLoader {
             return Module::declare(ctx.clone(), name, CORE_JS);
         }
 
-        if let Some(rel) = name.strip_prefix("//") {
-            // Try `{root}/{rel}.js` first (plugin / rule files like `//rules/cpp`).
-            let js_path = self.workspace_root.join(format!("{rel}.js"));
-            if js_path.exists() {
-                let source = std::fs::read_to_string(&js_path)
-                    .map_err(|e| rquickjs::Error::new_loading_message(name, e.to_string()))?;
-                return Module::declare(ctx.clone(), name, source);
-            }
-
-            // Fall back to `{root}/{rel}/BUILD.js` (or `{root}/BUILD.js` when rel is empty).
-            let build_path = if rel.is_empty() {
-                self.workspace_root.join(BUILD_FILE)
-            } else {
-                self.workspace_root.join(rel).join(BUILD_FILE)
-            };
-            if build_path.exists() {
-                let source = std::fs::read_to_string(&build_path)
-                    .map_err(|e| rquickjs::Error::new_loading_message(name, e.to_string()))?;
-                return Module::declare(ctx.clone(), name, source);
-            }
+        if name.starts_with("//") {
+            let resolution = resolve_workspace_module(&self.workspace_root, name)
+                .map_err(|message| rquickjs::Error::new_loading_message(name, message))?;
+            let source = std::fs::read_to_string(&resolution.path).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    name,
+                    format!("read {}: {e}", resolution.path.display()),
+                )
+            })?;
+            return Module::declare(ctx.clone(), name, source);
         }
 
         Err(rquickjs::Error::new_loading(name))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleKind {
+    BuiltIn,
+    Build,
+    Extension,
+    Workspace,
+    Unknown,
+}
+
+struct WorkspaceModuleResolution {
+    name: String,
+    path: PathBuf,
+    kind: ModuleKind,
+}
+
+fn resolve_workspace_module(
+    root: &Path,
+    name: &str,
+) -> std::result::Result<WorkspaceModuleResolution, String> {
+    let rel = name
+        .strip_prefix("//")
+        .ok_or_else(|| format!("workspace module '{name}' must start with //"))?;
+    validate_workspace_module_path(name, rel)?;
+
+    let mut candidates = Vec::new();
+
+    if rel.is_empty() {
+        let build_path = root.join(BUILD_FILE);
+        candidates.push(build_path.clone());
+        if build_path.is_file() {
+            return Ok(WorkspaceModuleResolution {
+                name: name.to_owned(),
+                path: build_path,
+                kind: ModuleKind::Build,
+            });
+        }
+    } else {
+        let js_path = root.join(format!("{rel}.js"));
+        candidates.push(js_path.clone());
+        if js_path.is_file() {
+            return Ok(WorkspaceModuleResolution {
+                name: name.to_owned(),
+                path: js_path,
+                kind: ModuleKind::Extension,
+            });
+        }
+
+        let build_path = root.join(rel).join(BUILD_FILE);
+        candidates.push(build_path.clone());
+        if build_path.is_file() {
+            return Ok(WorkspaceModuleResolution {
+                name: name.to_owned(),
+                path: build_path,
+                kind: ModuleKind::Build,
+            });
+        }
+    }
+
+    let tried = candidates
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "cannot resolve workspace module '{name}'; tried {tried}"
+    ))
+}
+
+fn validate_workspace_module_path(name: &str, rel: &str) -> std::result::Result<(), String> {
+    if rel.starts_with('/') {
+        return Err(format!("workspace module '{name}' must be relative to //"));
+    }
+
+    for component in Path::new(rel).components() {
+        use std::path::Component;
+        match component {
+            Component::Normal(_) => {}
+            _ => {
+                return Err(format!(
+                    "workspace module '{name}' must not contain '.', '..', or platform prefixes"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn module_kind(root: &Path, name: &str) -> ModuleKind {
+    if name == "imp:core" {
+        ModuleKind::BuiltIn
+    } else if name == WORKSPACE_FILE {
+        ModuleKind::Workspace
+    } else if name.starts_with("//") {
+        resolve_workspace_module(root, name)
+            .map(|resolution| resolution.kind)
+            .unwrap_or(ModuleKind::Unknown)
+    } else {
+        ModuleKind::Unknown
+    }
+}
+
+fn module_location(root: &Path, name: &str) -> String {
+    if name == "imp:core" {
+        return "built-in imp:core".to_owned();
+    }
+    if name == WORKSPACE_FILE {
+        return root.join(WORKSPACE_FILE).display().to_string();
+    }
+    if name.starts_with("//") {
+        if let Ok(resolution) = resolve_workspace_module(root, name) {
+            return resolution.path.display().to_string();
+        }
+    }
+    name.to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -218,16 +408,21 @@ pub fn load_workspace(root: &Path) -> Result<Workspace> {
 
     // ----- QuickJS runtime + context -----
     let rt = Runtime::new().context("create QuickJS runtime")?;
-    rt.set_loader(ImpResolver, ImpLoader { workspace_root: root.clone() });
+    rt.set_loader(
+        ImpResolver {
+            workspace_root: root.clone(),
+        },
+        ImpLoader {
+            workspace_root: root.clone(),
+        },
+    );
     let ctx = JsContext::full(&rt).context("create QuickJS context")?;
 
     // ----- Register host globals -----
     {
         let state_clone = Arc::clone(&state);
-        ctx.with(|ctx| -> rquickjs::Result<()> {
-            register_globals(ctx, state_clone)
-        })
-        .map_err(|e| anyhow::anyhow!("register QuickJS globals: {e}"))?;
+        ctx.with(|ctx| -> rquickjs::Result<()> { register_globals(ctx, state_clone) })
+            .map_err(|e| anyhow::anyhow!("register QuickJS globals: {e}"))?;
     }
 
     // ----- Evaluate imp.workspace.js if present -----
@@ -235,13 +430,21 @@ pub fn load_workspace(root: &Path) -> Result<Workspace> {
     if workspace_js.is_file() {
         let source = std::fs::read_to_string(&workspace_js)
             .with_context(|| format!("read {}", workspace_js.display()))?;
-        ctx.with(|ctx| -> rquickjs::Result<()> {
-            let module = Module::declare(ctx.clone(), WORKSPACE_FILE, source)?;
-            let (_, promise) = module.eval()?;
-            promise.finish::<rquickjs::Value>()?;
+        ctx.with(|ctx| -> Result<()> {
+            let module = Module::declare(ctx.clone(), WORKSPACE_FILE, source)
+                .catch(&ctx)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let (_, promise) = module
+                .eval()
+                .catch(&ctx)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            promise
+                .finish::<rquickjs::Value>()
+                .catch(&ctx)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(())
         })
-        .map_err(|e| anyhow::anyhow!("evaluate {}: {e}", workspace_js.display()))?;
+            .with_context(|| format!("evaluate {}", workspace_js.display()))?;
     }
 
     // ----- Collect BUILD.js files -----
@@ -271,14 +474,19 @@ pub fn load_workspace(root: &Path) -> Result<Workspace> {
         let module_name = scope.clone();
 
         let exports = ctx
-            .with(|ctx| -> rquickjs::Result<Vec<(String, u32)>> {
+            .with(|ctx| -> Result<Vec<(String, u32)>> {
                 // dynamic import → Promise<namespace>
-                let promise = Module::import(&ctx, module_name.as_str())?;
-                let ns: Object = promise.finish()?;
+                let promise = Module::import(&ctx, module_name.as_str())
+                    .catch(&ctx)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let ns: Object = promise
+                    .finish()
+                    .catch(&ctx)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
                 let mut result = Vec::new();
                 for entry in ns.own_props::<String, Value>(Filter::default()) {
-                    let (key, val) = entry?;
+                    let (key, val) = entry.map_err(|e| anyhow::anyhow!("{e}"))?;
                     if let Some(obj) = val.as_object() {
                         if let Ok(true) = obj.get::<_, bool>("__imp") {
                             if let Ok(id) = obj.get::<_, u32>("__id") {
@@ -289,9 +497,7 @@ pub fn load_workspace(root: &Path) -> Result<Workspace> {
                 }
                 Ok(result)
             })
-            .map_err(|e| {
-                anyhow::anyhow!("process {}: {e}", build_file.display())
-            })?;
+            .with_context(|| format!("process {}", build_file.display()))?;
 
         for (name, id) in exports {
             named_exports.push((format!("{scope}:{name}"), id));
@@ -996,6 +1202,13 @@ export const ui = asset({ srcs: ["**/*.png"] });
         root
     }
 
+    fn write_file(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
+    }
+
     // ---- Tests ---------------------------------------------------------
 
     #[test]
@@ -1055,6 +1268,88 @@ export const ui = asset({ srcs: ["**/*.png"] });
         assert_eq!(plan.roots, ["//assets:ui#bundle"]);
         assert_eq!(plan.tasks.len(), 2);
         assert!(plan.tasks.iter().any(|t| t.action.contains("**/*.png")));
+    }
+
+    #[test]
+    fn root_relative_imports_can_resolve_build_directory_modules() {
+        let root = fixture();
+        let workspace = load_workspace(root.path()).unwrap();
+
+        let jodin = &workspace.targets["//library/jodin:jodin"];
+        assert_eq!(jodin.dependencies[0].address, "//src/cpp/joltphysics:cmake");
+    }
+
+    #[test]
+    fn relative_imports_from_build_files_are_rejected_with_context() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/asset";
+"#,
+        );
+        write_file(&p.join("rules/asset.js"), ASSET_RULES_JS);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { asset } from "./rules/asset";
+
+export const ui = asset({ srcs: ["**/*.png"] });
+"#,
+        );
+
+        let error = format!("{:#}", load_workspace(p).unwrap_err());
+        assert!(
+            error.contains("relative import './rules/asset' is prohibited in BUILD.js"),
+            "{error}"
+        );
+        assert!(error.contains("BUILD.js"), "{error}");
+        assert!(error.contains("//..."), "{error}");
+    }
+
+    #[test]
+    fn unknown_builtin_modules_are_reported_distinctly() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "imp:missing";
+"#,
+        );
+        write_file(&p.join(BUILD_FILE), "export const ignored = 1;\n");
+
+        let error = format!("{:#}", load_workspace(p).unwrap_err());
+        assert!(
+            error.contains("unknown built-in module 'imp:missing'"),
+            "{error}"
+        );
+        assert!(error.contains(WORKSPACE_FILE), "{error}");
+    }
+
+    #[test]
+    fn missing_workspace_modules_report_importer_and_candidates() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), "");
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { missing } from "//rules/missing";
+
+export const ignored = missing;
+"#,
+        );
+
+        let error = format!("{:#}", load_workspace(p).unwrap_err());
+        assert!(
+            error.contains("cannot resolve workspace module '//rules/missing'"),
+            "{error}"
+        );
+        assert!(error.contains("rules/missing.js"), "{error}");
+        assert!(error.contains("rules/missing/BUILD.js"), "{error}");
+        assert!(error.contains(BUILD_FILE), "{error}");
     }
 
     #[test]

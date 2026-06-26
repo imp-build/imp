@@ -86,13 +86,14 @@ Deliberately incomplete:
 
 Replace ad-hoc host primitives with a small, documented JS API.
 
-- [ ] Finalise `imp:core` API surface (`target`, `rule`) with JSDoc.
-- [ ] Add extension imports rooted at the workspace, with source locations in
+- [x] Finalise `imp:core` API surface (`target`, `rule`) with JSDoc.
+- [x] Add extension imports rooted at the workspace, with source locations in
   diagnostics.
-- [ ] Define the module resolution protocol: `//path` → file, `imp:*` →
+- [x] Define the module resolution protocol: `//path` → file, `imp:*` →
   built-in, relative → prohibited in BUILD files.
-- [ ] Decide constructor validation story: JS-side (throw in constructor) or
-  host-side (typed field declarations).
+- [x] Decide constructor validation story: JS-side (throw in constructor) or
+  host-side (typed field declarations). Current v1 uses JS-side validation,
+  with the host validating only core target-handle and field invariants.
 - [x] Add `imp targets`, `imp dependencies`, and `imp rules` inspection
   commands.
 
