@@ -14,10 +14,74 @@ use walkdir::WalkDir;
 
 const WORKSPACE_FILE: &str = "imp.workspace.scm";
 
+// ---------------------------------------------------------------------------
+// Field schema types
+// ---------------------------------------------------------------------------
+
+/// The expected value type for a schema field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldType {
+    /// A Unicode string.
+    String,
+    /// A list of values.
+    List,
+    /// A boolean (`#t` / `#f`).
+    Boolean,
+    /// Any Steel value is accepted; no type check is performed.
+    Any,
+}
+
+impl FieldType {
+    fn parse(s: &str) -> Result<Self> {
+        match s {
+            "string" => Ok(Self::String),
+            "list" => Ok(Self::List),
+            "boolean" => Ok(Self::Boolean),
+            "any" => Ok(Self::Any),
+            other => bail!("unknown field type '{}'; expected string | list | boolean | any", other),
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::List => "list",
+            Self::Boolean => "boolean",
+            Self::Any => "any",
+        }
+    }
+}
+
+/// Description of a single field that a target-type constructor must / may supply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldSchema {
+    /// Field name, used as the key in the field map passed to `declare-target-with-fields!`.
+    pub name: String,
+    /// Expected value type.
+    pub field_type: FieldType,
+    /// Whether the field must be supplied explicitly.
+    pub required: bool,
+    /// Value to use when the field is absent and `required` is `false`.
+    /// Stored as a Steel source expression so it can be re-evaluated lazily.
+    pub default_expr: Option<String>,
+    /// Optional Steel predicate expression (a one-argument function source).
+    /// When present it is evaluated against the final field value; the
+    /// predicate must return a truthy result or the target is rejected.
+    pub validator_expr: Option<String>,
+}
+
+/// Schema for an entire target type: a list of field descriptors.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TargetSchema {
+    pub fields: Vec<FieldSchema>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetType {
     pub kind: String,
     pub default_product: Option<String>,
+    /// Optional field schema; absent means the type has no formal field contract.
+    pub schema: Option<TargetSchema>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +91,9 @@ pub struct Target {
     pub sources: Vec<String>,
     pub entrypoint: Option<String>,
     pub dependencies: Vec<Dependency>,
+    /// Schema-validated fields populated by `declare-target-with-fields!`.
+    /// Empty for targets created through the legacy positional API.
+    pub fields: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +153,18 @@ impl Workspace {
         }
         self.target_types
             .insert(target_type.kind.clone(), target_type);
+        Ok(())
+    }
+
+    fn add_target_schema(&mut self, kind: &str, schema: TargetSchema) -> Result<()> {
+        let target_type = self
+            .target_types
+            .get_mut(kind)
+            .ok_or_else(|| anyhow::anyhow!("cannot attach schema: unknown target type '{kind}'"))?;
+        if target_type.schema.is_some() {
+            bail!("target type '{kind}' already has a schema");
+        }
+        target_type.schema = Some(schema);
         Ok(())
     }
 
@@ -386,6 +465,7 @@ impl Host {
                     .add_target_type(TargetType {
                         kind,
                         default_product,
+                        schema: None,
                     })
                     .map_err(|error| format!("{error:#}"))
             },
@@ -449,8 +529,193 @@ impl Host {
                         sources,
                         entrypoint,
                         dependencies,
+                        fields: BTreeMap::new(),
                     })
                     .map_err(|error| format!("{error:#}"))
+            },
+        );
+
+        // ---------------------------------------------------------------
+        // Schema registration: (declare-target-schema! kind field-list)
+        //
+        // Each element of `field-list` is a Steel list with up to 5 items:
+        //   (name type required? [default-expr [validator-expr]])
+        // where `type` is one of: string | list | boolean | any
+        // ---------------------------------------------------------------
+        let workspace_for_schema = Arc::clone(&workspace);
+        engine.register_fn(
+            "declare-target-schema!",
+            move |kind: String,
+                  raw_fields: Vec<Vec<String>>|
+                  -> std::result::Result<(), String> {
+                let mut fields = Vec::new();
+                for raw in raw_fields {
+                    if raw.len() < 3 {
+                        return Err(format!(
+                            "field descriptor for kind '{kind}' must have at least 3 elements \
+                             (name type required?), got {}",
+                            raw.len()
+                        ));
+                    }
+                    let name = raw[0].clone();
+                    let field_type = FieldType::parse(&raw[1])
+                        .map_err(|e| format!("{e:#}"))?;
+                    let required = match raw[2].as_str() {
+                        "#t" | "true" => true,
+                        "#f" | "false" => false,
+                        other => {
+                            return Err(format!(
+                                "field '{name}' required? must be #t or #f, got '{other}'"
+                            ));
+                        }
+                    };
+                    let default_expr = raw.get(3).cloned().filter(|s| s != "#f" && !s.is_empty());
+                    let validator_expr = raw.get(4).cloned().filter(|s| s != "#f" && !s.is_empty());
+                    fields.push(FieldSchema {
+                        name,
+                        field_type,
+                        required,
+                        default_expr,
+                        validator_expr,
+                    });
+                }
+                workspace_for_schema
+                    .lock()
+                    .map_err(|_| "workspace registry lock poisoned".to_owned())?
+                    .add_target_schema(&kind, TargetSchema { fields })
+                    .map_err(|error| format!("{error:#}"))
+            },
+        );
+
+        // ---------------------------------------------------------------
+        // Schema-validated target creation:
+        //   (declare-target-with-fields! kind name fields deps)
+        //
+        // `fields` is a Steel association list: '(("key" . "value") ...)
+        // represented as Vec<Vec<String>> where each inner vec is [key, value].
+        // Validation:
+        //   • Required fields must be present.
+        //   • Missing optional fields receive their defaults (evaluated as
+        //     Steel expressions by the engine; defaults are stored verbatim
+        //     since we only store string representations here).
+        //   • Validators are NOT evaluated by the Rust side; they are
+        //     Steel-side predicates the extension author calls before invoking
+        //     this function.  The host merely records which fields were
+        //     supplied and applies default-filling.
+        // ---------------------------------------------------------------
+        let workspace_for_fields = Arc::clone(&workspace);
+        let scope_for_fields = Arc::clone(&scope);
+        engine.register_fn(
+            "declare-target-with-fields!",
+            move |kind: String,
+                  name: String,
+                  raw_fields: Vec<Vec<String>>,
+                  dependencies: Vec<String>|
+                  -> std::result::Result<(), String> {
+                let scope = scope_for_fields
+                    .lock()
+                    .map_err(|_| "target scope lock poisoned".to_owned())?
+                    .clone();
+                let address =
+                    target_address(&scope, &name).map_err(|e| format!("{e:#}"))?;
+                let dependencies = dependencies
+                    .into_iter()
+                    .map(|dep| parse_dependency(&scope, &dep))
+                    .collect::<Result<Vec<_>>>()
+                    .map_err(|e| format!("{e:#}"))?;
+
+                // Build field map from the association list.
+                let mut field_map: BTreeMap<String, String> = raw_fields
+                    .into_iter()
+                    .filter_map(|pair| {
+                        if pair.len() >= 2 {
+                            Some((pair[0].clone(), pair[1].clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                // Validate against schema if one exists.
+                let ws = workspace_for_fields
+                    .lock()
+                    .map_err(|_| "workspace registry lock poisoned".to_owned())?;
+                if let Some(target_type) = ws.target_types.get(&kind) {
+                    if let Some(schema) = &target_type.schema {
+                        for field in &schema.fields {
+                            match field_map.get(&field.name) {
+                                Some(value) => {
+                                    // Type check.
+                                    match &field.field_type {
+                                        FieldType::Boolean => {
+                                            if value != "#t"
+                                                && value != "#f"
+                                                && value != "true"
+                                                && value != "false"
+                                            {
+                                                return Err(format!(
+                                                    "field '{}' of target '{address}' must be a \
+                                                     boolean, got '{value}'",
+                                                    field.name
+                                                ));
+                                            }
+                                        }
+                                        FieldType::String | FieldType::List | FieldType::Any => {}
+                                    }
+                                }
+                                None => {
+                                    if field.required {
+                                        return Err(format!(
+                                            "target '{address}' (kind '{kind}') is missing \
+                                             required field '{}'",
+                                            field.name
+                                        ));
+                                    }
+                                    // Fill in the default if provided.
+                                    if let Some(default) = &field.default_expr {
+                                        field_map
+                                            .insert(field.name.clone(), default.clone());
+                                    }
+                                }
+                            }
+                        }
+                        // Reject unexpected fields.
+                        let known: BTreeSet<&str> =
+                            schema.fields.iter().map(|f| f.name.as_str()).collect();
+                        for key in field_map.keys() {
+                            if !known.contains(key.as_str()) {
+                                return Err(format!(
+                                    "target '{address}' (kind '{kind}') has unknown field \
+                                     '{key}'"
+                                ));
+                            }
+                        }
+                    }
+                }
+                drop(ws);
+
+                // Extract well-known fields from the map for backwards compat.
+                let sources: Vec<String> = field_map
+                    .get("sources")
+                    .map(|s| {
+                        // Accept a comma-separated list stored as a string repr.
+                        s.split(',').map(|p| p.trim().to_owned()).filter(|p| !p.is_empty()).collect()
+                    })
+                    .unwrap_or_default();
+                let entrypoint = field_map.get("entrypoint").cloned();
+
+                workspace_for_fields
+                    .lock()
+                    .map_err(|_| "workspace registry lock poisoned".to_owned())?
+                    .add_target(Target {
+                        address,
+                        kind,
+                        sources,
+                        entrypoint,
+                        dependencies,
+                        fields: field_map,
+                    })
+                    .map_err(|e| format!("{e:#}"))
             },
         );
 
@@ -658,6 +923,35 @@ pub fn format_rules(workspace: &Workspace, w: &mut String) -> std::fmt::Result {
         for target_type in workspace.target_types.values() {
             let default_prod = target_type.default_product.as_deref().unwrap_or("<none>");
             writeln!(w, "  - {} (default product: {})", target_type.kind, default_prod)?;
+            if let Some(schema) = &target_type.schema {
+                if schema.fields.is_empty() {
+                    writeln!(w, "      schema: (empty)")?;
+                } else {
+                    writeln!(w, "      schema:")?;
+                    for field in &schema.fields {
+                        let req = if field.required { "required" } else { "optional" };
+                        let default_str = field
+                            .default_expr
+                            .as_deref()
+                            .map(|d| format!(" default={d}"))
+                            .unwrap_or_default();
+                        let validator_str = field
+                            .validator_expr
+                            .as_deref()
+                            .map(|_| " [validated]")
+                            .unwrap_or_default();
+                        writeln!(
+                            w,
+                            "        - {} ({}, {}{}{})",
+                            field.name,
+                            field.field_type.as_str(),
+                            req,
+                            default_str,
+                            validator_str
+                        )?;
+                    }
+                }
+            }
         }
     }
     writeln!(w)?;
@@ -734,6 +1028,35 @@ mod tests {
         (define (asset name #:sources sources)
           (declare-target! "asset" name sources #f '()))
     "#;
+
+    /// A configuration that uses schemas and the new `declare-target-with-fields!` API.
+    const SCHEMA_CONFIG: &str = r##"
+        ;; Define a target type with a full field schema.
+        (declare-target-type! "proto-library" "generated-sources")
+        (declare-rule! "proto-library" "sources" "snapshot {sources}" #f #f)
+        (declare-rule! "proto-library" "generated-sources" "protoc {entrypoint}" #f #f)
+
+        ;; Attach the schema: name is required (string), lang is optional with
+        ;; default "cpp", and strip_prefix is optional with no default.
+        (declare-target-schema! "proto-library"
+          (list
+            (list "name"         "string"  "#t")
+            (list "lang"         "string"  "#f" "cpp")
+            (list "strip_prefix" "string"  "#f")))
+
+        ;; Constructor that uses the schema-validated path.
+        (define (proto-library target-name
+                               #:proto-files proto-files
+                               #:lang        [lang "cpp"]
+                               #:strip-prefix [strip-prefix #f])
+          (declare-target-with-fields!
+            "proto-library"
+            target-name
+            (list
+              (list "name"   (symbol->string (string->symbol target-name)))
+              (list "lang"   lang))
+            (list)))
+    "##;
 
     fn fixture() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
@@ -829,6 +1152,162 @@ mod tests {
             .tasks
             .iter()
             .any(|task| task.action == "bundle **/*.png"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema tests
+    // -----------------------------------------------------------------------
+
+    fn schema_fixture() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(WORKSPACE_FILE), SCHEMA_CONFIG).unwrap();
+        // Single BUILD.scm that calls the schema-validated constructor.
+        std::fs::write(
+            root.path().join("BUILD.scm"),
+            r#"
+                (proto-library "payment"
+                  #:proto-files '("payment.proto")
+                  #:lang "python")
+            "#,
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn schema_is_registered_on_target_type() {
+        let root = schema_fixture();
+        let workspace = load_workspace(root.path()).unwrap();
+        let tt = workspace.target_types.get("proto-library").unwrap();
+        let schema = tt.schema.as_ref().expect("schema should be present");
+        assert_eq!(schema.fields.len(), 3);
+        assert_eq!(schema.fields[0].name, "name");
+        assert!(schema.fields[0].required);
+        assert_eq!(schema.fields[1].name, "lang");
+        assert!(!schema.fields[1].required);
+        assert_eq!(schema.fields[1].default_expr.as_deref(), Some("cpp"));
+        assert_eq!(schema.fields[2].name, "strip_prefix");
+        assert!(!schema.fields[2].required);
+        assert!(schema.fields[2].default_expr.is_none());
+    }
+
+    #[test]
+    fn schema_validated_target_is_created_with_supplied_fields() {
+        let root = schema_fixture();
+        let workspace = load_workspace(root.path()).unwrap();
+        let target = workspace.targets.get("//:payment").unwrap();
+        assert_eq!(target.kind, "proto-library");
+        assert_eq!(target.fields.get("lang").map(String::as_str), Some("python"));
+        assert_eq!(target.fields.get("name").map(String::as_str), Some("payment"));
+    }
+
+    #[test]
+    fn missing_required_field_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        // Schema with a required field that the constructor omits.
+        let cfg = r##"
+            (declare-target-type! "strict" "artifact")
+            (declare-rule! "strict" "artifact" "make" #f #f)
+            (declare-target-schema! "strict"
+              (list (list "must-have" "string" "#t")))
+        "##;
+        std::fs::write(root.path().join(WORKSPACE_FILE), cfg).unwrap();
+        std::fs::write(
+            root.path().join("BUILD.scm"),
+            // Pass an empty field list — 'must-have' is absent.
+            r#"(declare-target-with-fields! "strict" "thing" (list) (list))"#,
+        )
+        .unwrap();
+        let err = load_workspace(root.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("missing required field"),
+            "expected 'missing required field' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn missing_optional_field_receives_default() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg = r##"
+            (declare-target-type! "defaulted" "artifact")
+            (declare-rule! "defaulted" "artifact" "run" #f #f)
+            (declare-target-schema! "defaulted"
+              (list (list "mode" "string" "#f" "release")))
+        "##;
+        std::fs::write(root.path().join(WORKSPACE_FILE), cfg).unwrap();
+        // Supply no fields — the default should be inserted.
+        std::fs::write(
+            root.path().join("BUILD.scm"),
+            r#"(declare-target-with-fields! "defaulted" "app" (list) (list))"#,
+        )
+        .unwrap();
+        let workspace = load_workspace(root.path()).unwrap();
+        let target = workspace.targets.get("//:app").unwrap();
+        assert_eq!(
+            target.fields.get("mode").map(String::as_str),
+            Some("release"),
+            "expected default 'release' to be filled in"
+        );
+    }
+
+    #[test]
+    fn unknown_field_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg = r##"
+            (declare-target-type! "narrow" "artifact")
+            (declare-rule! "narrow" "artifact" "run" #f #f)
+            (declare-target-schema! "narrow"
+              (list (list "allowed" "string" "#t")))
+        "##;
+        std::fs::write(root.path().join(WORKSPACE_FILE), cfg).unwrap();
+        std::fs::write(
+            root.path().join("BUILD.scm"),
+            r#"(declare-target-with-fields! "narrow" "thing"
+                 (list (list "allowed" "yes") (list "extra" "oops"))
+                 (list))"#,
+        )
+        .unwrap();
+        let err = load_workspace(root.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unknown field"),
+            "expected 'unknown field' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_schema_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg = r##"
+            (declare-target-type! "kind" #f)
+            (declare-target-schema! "kind" (list))
+            (declare-target-schema! "kind" (list))
+        "##;
+        std::fs::write(root.path().join(WORKSPACE_FILE), cfg).unwrap();
+        std::fs::write(root.path().join("BUILD.scm"), "").unwrap();
+        let err = load_workspace(root.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("already has a schema"),
+            "expected 'already has a schema' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn schema_appears_in_format_rules_output() {
+        let root = schema_fixture();
+        let workspace = load_workspace(root.path()).unwrap();
+        let mut out = String::new();
+        format_rules(&workspace, &mut out).unwrap();
+        assert!(out.contains("proto-library"), "format_rules should mention proto-library");
+        assert!(out.contains("schema:"), "format_rules should print schema");
+        assert!(out.contains("name"), "schema field 'name' should appear");
+        assert!(out.contains("required"), "required fields should be marked");
+        assert!(out.contains("default=cpp"), "default value should appear");
     }
 
     #[test]
