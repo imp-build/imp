@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
@@ -180,6 +181,31 @@ pub struct Plan {
 pub struct Workspace {
     pub rules: BTreeMap<(String, String), Rule>,
     pub targets: BTreeMap<String, Target>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    DryRun,
+    Local,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskExecutionStatus {
+    WouldRun,
+    Ran,
+    Noop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskExecution {
+    pub task_id: String,
+    pub status: TaskExecutionStatus,
+    pub command: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionReport {
+    pub tasks: Vec<TaskExecution>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1112,6 +1138,158 @@ pub fn render_text_plan(plan: &Plan) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Execution
+// ---------------------------------------------------------------------------
+
+pub fn execute_plan(
+    plan: &Plan,
+    workspace_root: &Path,
+    mode: ExecutionMode,
+) -> Result<ExecutionReport> {
+    let ordered = ordered_tasks(plan)?;
+    let mut executions = Vec::with_capacity(ordered.len());
+
+    for task in ordered {
+        let command = task.action.argv.clone();
+        let status = match mode {
+            ExecutionMode::DryRun => TaskExecutionStatus::WouldRun,
+            ExecutionMode::Local if command.is_empty() => TaskExecutionStatus::Noop,
+            ExecutionMode::Local => {
+                run_local_task(task, workspace_root)?;
+                check_declared_outputs(task, workspace_root)?;
+                TaskExecutionStatus::Ran
+            }
+        };
+
+        executions.push(TaskExecution {
+            task_id: task.id.clone(),
+            status,
+            command,
+        });
+    }
+
+    Ok(ExecutionReport { tasks: executions })
+}
+
+fn ordered_tasks(plan: &Plan) -> Result<Vec<&Task>> {
+    let mut pending: BTreeMap<&str, &Task> = plan
+        .tasks
+        .iter()
+        .map(|task| (task.id.as_str(), task))
+        .collect();
+    let mut completed = BTreeSet::new();
+    let mut ordered = Vec::with_capacity(plan.tasks.len());
+
+    while !pending.is_empty() {
+        let ready_ids: Vec<String> = pending
+            .iter()
+            .filter_map(|(id, task)| {
+                let ready = task.dependencies.iter().all(|dep| completed.contains(dep));
+                ready.then(|| (*id).to_owned())
+            })
+            .collect();
+
+        if ready_ids.is_empty() {
+            let unresolved = pending
+                .values()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!("task graph has unresolved dependencies or a cycle: {unresolved}");
+        }
+
+        for id in ready_ids {
+            let task = pending
+                .remove(id.as_str())
+                .expect("ready id came from pending");
+            for dep in &task.dependencies {
+                if !completed.contains(dep)
+                    && !plan.tasks.iter().any(|candidate| &candidate.id == dep)
+                {
+                    bail!("{} depends on missing task {dep}", task.id);
+                }
+            }
+            completed.insert(id);
+            ordered.push(task);
+        }
+    }
+
+    Ok(ordered)
+}
+
+fn run_local_task(task: &Task, workspace_root: &Path) -> Result<()> {
+    let cwd = task
+        .action
+        .cwd
+        .as_deref()
+        .map(|cwd| resolve_workspace_path(workspace_root, cwd))
+        .unwrap_or_else(|| workspace_root.to_owned());
+    let (program, args) = task
+        .action
+        .argv
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("{} has no argv", task.id))?;
+
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(&cwd)
+        .envs(&task.action.env)
+        .output()
+        .with_context(|| format!("execute {} in {}", task.id, cwd.display()))?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "{} failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            task.id,
+            output.status,
+            stdout.trim_end(),
+            stderr.trim_end()
+        );
+    }
+
+    Ok(())
+}
+
+fn check_declared_outputs(task: &Task, workspace_root: &Path) -> Result<()> {
+    for artifact in &task.outputs {
+        let Some(path) = &artifact.path else {
+            continue;
+        };
+        let path = resolve_workspace_path(workspace_root, path);
+        match artifact.kind.as_str() {
+            "file" | "manifest" if !path.is_file() => {
+                bail!(
+                    "{} declared {} output {} but it was not created as a file",
+                    task.id,
+                    artifact.kind,
+                    path.display()
+                );
+            }
+            "directory" if !path.is_dir() => {
+                bail!(
+                    "{} declared directory output {} but it was not created",
+                    task.id,
+                    path.display()
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn resolve_workspace_path(root: &Path, path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        root.join(path)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Selection and formatting
 // ---------------------------------------------------------------------------
 
@@ -1550,6 +1728,38 @@ export const ui = asset({ srcs: ["**/*.png"] });
         std::fs::write(path, contents).unwrap();
     }
 
+    fn executable_task(id: &str, deps: &[&str], argv: &[&str], output: Option<&str>) -> Task {
+        let outputs = output
+            .map(|path| {
+                vec![Artifact {
+                    id: format!("{id}:out"),
+                    kind: "file".to_owned(),
+                    path: Some(path.to_owned()),
+                    value: None,
+                    producer: Some(id.to_owned()),
+                }]
+            })
+            .unwrap_or_default();
+
+        Task {
+            id: id.to_owned(),
+            target: "//:fixture".to_owned(),
+            product: "fixture".to_owned(),
+            inputs: Vec::new(),
+            action: Action {
+                argv: argv.iter().map(|arg| (*arg).to_owned()).collect(),
+                cwd: None,
+                env: BTreeMap::new(),
+                platform: None,
+                inputs: Vec::new(),
+                outputs: outputs.iter().map(|artifact| artifact.id.clone()).collect(),
+                display: argv.join(" "),
+            },
+            outputs,
+            dependencies: deps.iter().map(|dep| (*dep).to_owned()).collect(),
+        }
+    }
+
     // ---- Tests ---------------------------------------------------------
 
     #[test]
@@ -1703,6 +1913,75 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         );
         assert_eq!(task.action.inputs, ["//:schema#generated:input0"]);
         assert_eq!(task.action.outputs, ["//:schema#out"]);
+    }
+
+    #[test]
+    fn dry_run_executor_uses_dependency_order_without_running_commands() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec!["consumer".to_owned()],
+            tasks: vec![
+                executable_task("consumer", &["producer"], &["sh", "-c", "exit 1"], None),
+                executable_task("producer", &[], &["sh", "-c", "exit 1"], None),
+            ],
+        };
+
+        let report = execute_plan(&plan, root.path(), ExecutionMode::DryRun).unwrap();
+        let ids: Vec<_> = report
+            .tasks
+            .iter()
+            .map(|execution| execution.task_id.as_str())
+            .collect();
+        assert_eq!(ids, ["producer", "consumer"]);
+        assert!(report
+            .tasks
+            .iter()
+            .all(|execution| execution.status == TaskExecutionStatus::WouldRun));
+    }
+
+    #[test]
+    fn local_executor_runs_commands_and_checks_declared_outputs() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec!["write".to_owned()],
+            tasks: vec![executable_task(
+                "write",
+                &[],
+                &["sh", "-c", "mkdir -p build && printf ok > build/out.txt"],
+                Some("build/out.txt"),
+            )],
+        };
+
+        let report = execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
+        assert_eq!(report.tasks[0].status, TaskExecutionStatus::Ran);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("build/out.txt")).unwrap(),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn local_executor_reports_missing_declared_outputs() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec!["missing".to_owned()],
+            tasks: vec![executable_task(
+                "missing",
+                &[],
+                &["sh", "-c", "true"],
+                Some("build/missing.txt"),
+            )],
+        };
+
+        let error = format!(
+            "{:#}",
+            execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap_err()
+        );
+        assert!(error.contains("declared file output"), "{error}");
+        assert!(error.contains("build/missing.txt"), "{error}");
     }
 
     #[test]

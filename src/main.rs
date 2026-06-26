@@ -69,6 +69,12 @@ enum Cmd {
         /// JSON plan output path
         #[arg(long)]
         json: Option<PathBuf>,
+        /// Execute the planned task graph locally after rendering it
+        #[arg(long)]
+        execute: bool,
+        /// Exercise the executor without running commands or checking outputs
+        #[arg(long)]
+        dry_run: bool,
     },
     /// List targets in the workspace (QuickJS spike)
     Targets {
@@ -174,8 +180,10 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
             selectors,
             dot,
             json,
+            execute,
+            dry_run,
         } => {
-            return cmd_plan(goal, selectors, dot, json.as_deref());
+            return cmd_plan(goal, selectors, dot, json.as_deref(), *execute, *dry_run);
         }
         Cmd::Targets { selectors } => {
             return cmd_targets(selectors);
@@ -316,6 +324,8 @@ fn cmd_plan(
     selectors: &[String],
     dot: &std::path::Path,
     json: Option<&std::path::Path>,
+    execute: bool,
+    dry_run: bool,
 ) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
@@ -331,6 +341,28 @@ fn cmd_plan(
         std::fs::write(json, encoded)
             .with_context(|| format!("write JSON plan {}", json.display()))?;
         println!("  JSON: {}", json.display());
+    }
+    if execute || dry_run {
+        let mode = if dry_run {
+            spike::ExecutionMode::DryRun
+        } else {
+            spike::ExecutionMode::Local
+        };
+        let report = spike::execute_plan(&plan, &workspace_root, mode)?;
+        println!("  execution:");
+        for task in report.tasks {
+            let status = match task.status {
+                spike::TaskExecutionStatus::WouldRun => "would run",
+                spike::TaskExecutionStatus::Ran => "ran",
+                spike::TaskExecutionStatus::Noop => "noop",
+            };
+            let command = if task.command.is_empty() {
+                String::from("<no argv>")
+            } else {
+                task.command.join(" ")
+            };
+            println!("    {}: {status} {command}", task.task_id);
+        }
     }
     Ok(())
 }

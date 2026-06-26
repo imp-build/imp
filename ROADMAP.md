@@ -104,13 +104,17 @@ a workspace can import it and inspect its targets without Rust changes.
 
 Replace rule action strings with serialisable task specifications.
 
-- `Action`: argv, cwd, environment, platform requirements, declared inputs,
+- [x] `Action`: argv, cwd, environment, platform requirements, declared inputs,
   declared outputs, and display metadata.
-- `Artifact`: file, directory, manifest, or value output with a producing task.
-- `Task`: stable identity, input artifacts, output artifacts, action, and
+- [x] `Artifact`: file, directory, manifest, or value output with a producing task.
+- [x] `Task`: stable identity, input artifacts, output artifacts, action, and
   dependency edges.
-- Make `rule()` accept task/artifact specifications, not prose strings.
-- Keep DOT and text plans as renderers over the same graph IR.
+- [x] Make `rule()` accept task/artifact specifications, not prose strings.
+- [x] Keep DOT and text plans as renderers over the same graph IR.
+- [x] Add JSON plan output through `imp plan --json <path>`.
+
+Compatibility note: legacy string `action` values are still accepted and lowered
+into structured action display metadata so existing rules continue to load.
 
 Acceptance: a plan can be serialised to JSON and re-rendered without loading
 JS again.
@@ -121,11 +125,15 @@ Execute the task graph locally before adding any remote system.
 
 - Add `imp build` execution for planned actions while retaining `imp plan`
   as a pure inspection command.
+- [x] Add local execution for planned actions through `imp plan --execute`
+  while the command migration path is decided.
 - Stream process output through the existing progress UI.
-- Materialise declared outputs atomically and report missing outputs as errors.
-- Add failure propagation, cancellation, bounded parallelism, and deterministic
-  task ordering where it affects observable output.
-- Introduce a no-op/dry-run executor for planner tests.
+- [x] Report missing declared file, directory, and manifest outputs as errors.
+- Materialise declared outputs atomically.
+- [x] Add failure propagation for failed local commands.
+- Add cancellation and bounded parallelism.
+- [x] Add deterministic dependency ordering for observable execution output.
+- [x] Introduce a no-op/dry-run executor for planner tests.
 
 Acceptance: one migrated build target runs through the new executor and has no
 project-specific command logic in Rust.
