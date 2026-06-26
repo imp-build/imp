@@ -1,10 +1,5 @@
 # imp framework roadmap
 
-This repository currently contains a Steel-backed planning spike. It proves
-that a workspace can define target types, product rules, and target
-constructors dynamically, then plan a `build` goal into a directed task graph.
-It does not yet execute that graph.
-
 ## Projects this framework replaces
 
 The framework is intended to replace the repeated `imp` implementations that
@@ -29,68 +24,95 @@ workflow at a time after the shared primitives are proven.
 
 ## Design commitments
 
-- `imp.workspace.scm` marks the workspace root and defines extensions.
-- `BUILD.scm` files declare addressable targets. Their directory determines
+- `imp.workspace.js` marks the workspace root and loads extension modules.
+- `BUILD.js` files declare addressable targets. Their directory determines
   their `//path:name` address scope.
-- A goal selects targets and requests products. Rules resolve those product
-  requests into tasks; targets do not run work directly.
+- Targets are declared by calling constructor functions imported from plugin
+  modules. Constructors return target handles — first-class JS values.
+- Dependencies are expressed by passing handles directly, not by address
+  strings. `export const name = constructor(...)` makes the variable name
+  the target's address within its file.
+- Cross-file references use ES module imports: `import { name } from "//path"`.
+  The `//path:name` address syntax only appears at the CLI level.
+- A goal selects targets and requests products. Rules (defined in plugin
+  modules) resolve those product requests into tasks.
 - The Rust engine owns addresses, graph validation, planning, scheduling,
-  caching, and reporting. Steel defines project-specific target types, rules,
-  and constructors without a Rust rebuild.
+  caching, and reporting. Plugin modules written in JS define target
+  constructors and rules without a Rust rebuild.
+- Plugin files are ordinary JS modules — no separate registration ceremony
+  or different paradigm. A plugin is just a module you import.
 - Definition-time side effects remain possible, but they must be visibly
   classified as impure before they participate in caching or CI generation.
+
+## Extension language
+
+The extension language is **JavaScript** (QuickJS, embedded via `rquickjs`).
+
+QuickJS was chosen over Steel/Scheme because:
+- ES module `import`/`export` syntax provides natural cross-file target
+  references without string address duplication.
+- `export const name = constructor(...)` captures the target name from the
+  variable binding — no `name =` argument needed.
+- Dependencies are passed as values (handles), not as strings, so the
+  dependency graph is expressed directly in code rather than through a
+  host registry.
+- Plugin files are conventional JS modules; there is no distinction between
+  a "plugin API" and "library code."
+- QuickJS is lightweight, has no external runtime dependency, and embeds
+  cleanly in Rust via `rquickjs`.
 
 ## Current spike
 
 Implemented:
 
-- upward workspace discovery using `imp.workspace.scm`;
-- recursive `BUILD.scm` discovery;
-- Steel-defined target types, products, rules, and constructors;
-- local and absolute target-address dependencies;
-- `build` goal planning, DOT rendering, and task deduplication.
+- upward workspace discovery using `imp.workspace.js`;
+- recursive `BUILD.js` discovery;
+- JS-defined target constructors and rules via `imp:core` built-in module;
+- ES module imports for cross-file target references;
+- target handles as first-class JS values — deps passed by value, not string;
+- `export const name = ...` as the target naming mechanism;
+- `build` goal planning, DOT rendering, and task deduplication;
+- `imp targets`, `imp dependencies`, and `imp rules` inspection commands.
 
 Deliberately incomplete:
 
 - only the `build` goal exists;
 - rules describe action strings rather than structured executable actions;
 - no artifact model, execution, caching, tool resolution, or CI backend;
-- `auto` has one product-selection behavior only;
-- workspace extensions are currently one root file rather than an importable
-  module/package system.
+- `auto` has one product-selection behaviour only;
+- no field schema validation (removed from scope — JS constructors own validation).
 
 ## Milestone 1 — Stabilise the definition API
 
-Replace the positional host primitives with a small, documented Steel API.
+Replace ad-hoc host primitives with a small, documented JS API.
 
-- [ ] Add field schemas to target types: required fields, optional fields,
-  defaults, and validation.
-- [ ] Make target constructors ordinary extension functions/macros over that API.
+- [ ] Finalise `imp:core` API surface (`target`, `rule`) with JSDoc.
 - [ ] Add extension imports rooted at the workspace, with source locations in
   diagnostics.
-- [ ] Replace the temporary Steel-home workaround with an explicit host-owned
-  module/cache directory.
+- [ ] Define the module resolution protocol: `//path` → file, `imp:*` →
+  built-in, relative → prohibited in BUILD files.
+- [ ] Decide constructor validation story: JS-side (throw in constructor) or
+  host-side (typed field declarations).
 - [x] Add `imp targets`, `imp dependencies`, and `imp rules` inspection
   commands.
 
-Acceptance: a separate Steel extension can define a target type, rule, and
-constructor; a workspace can import it and inspect its targets without Rust
-changes.
+Acceptance: a separate JS module can define a target constructor and rule;
+a workspace can import it and inspect its targets without Rust changes.
 
 ## Milestone 2 — Structured task and artifact model
 
-Replace rule action strings with serializable task specifications.
+Replace rule action strings with serialisable task specifications.
 
 - `Action`: argv, cwd, environment, platform requirements, declared inputs,
   declared outputs, and display metadata.
 - `Artifact`: file, directory, manifest, or value output with a producing task.
 - `Task`: stable identity, input artifacts, output artifacts, action, and
   dependency edges.
-- Make product rules return task/artifact specifications, not prose strings.
+- Make `rule()` accept task/artifact specifications, not prose strings.
 - Keep DOT and text plans as renderers over the same graph IR.
 
-Acceptance: a plan can be serialized to JSON and re-rendered without loading
-Steel again.
+Acceptance: a plan can be serialised to JSON and re-rendered without loading
+JS again.
 
 ## Milestone 3 — Local execution and correctness
 
@@ -99,7 +121,7 @@ Execute the task graph locally before adding any remote system.
 - Add `imp build` execution for planned actions while retaining `imp plan`
   as a pure inspection command.
 - Stream process output through the existing progress UI.
-- Materialize declared outputs atomically and report missing outputs as errors.
+- Materialise declared outputs atomically and report missing outputs as errors.
 - Add failure propagation, cancellation, bounded parallelism, and deterministic
   task ordering where it affects observable output.
 - Introduce a no-op/dry-run executor for planner tests.
@@ -114,7 +136,7 @@ explicit.
 
 - Hash action definitions, tool identities, declared environment, and input
   artifact digests.
-- Store output manifests and materialize cache hits into the workspace.
+- Store output manifests and materialise cache hits into the workspace.
 - Mark definition-time or execution-time impure tasks as uncacheable by
   default, with an explicit override for users who accept that risk.
 - Provide `imp cache explain <task>` for cache-key diagnostics.
@@ -170,11 +192,11 @@ superseded imperative command path.
 
 ## Open decisions
 
-- Steel versioning and compatibility policy while its embedding API is pre-1.0.
-- Whether extensions are Steel source only or may include versioned native/Wasm
-  modules.
-- Whether `BUILD.scm` may import arbitrary workspace files, and how those files
+- QuickJS versioning and compatibility policy as `rquickjs` evolves.
+- Whether extensions may include native/Wasm modules alongside JS.
+- Whether `BUILD.js` may import arbitrary workspace files, and how those files
   participate in invalidation.
 - Default target-selection semantics for bare goals.
 - Required reproducibility boundary for downloads, network access, and external
   mutable tools.
+- Constructor validation: JS-side throws vs host-side typed field declarations.

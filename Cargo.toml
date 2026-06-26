@@ -20,7 +20,7 @@ rusqlite     = { version = "0.31", features = ["bundled"] }
 md5          = "0.7"
 tempfile     = "3"
 futures      = { version = "0.3", default-features = false, features = ["std"] }
-steel-core   = { version = "0.8.2", default-features = false, features = ["std"] }
+rquickjs     = { version = "0.8", features = ["loader"] }
 
 [profile.dev]
 opt-level = 1

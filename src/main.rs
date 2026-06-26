@@ -329,35 +329,38 @@ fn cmd_plan(goal: &str, selectors: &[String], dot: &std::path::Path) -> Result<(
     Ok(())
 }
 
+/// Load the workspace from the current directory, run `$body` with a
+/// `workspace` binding and a `out: String` buffer, then print the buffer.
+/// The `?` operator propagates into the enclosing `Result<()>` function.
+macro_rules! workspace_cmd {
+    (|$ws:ident, $out:ident| $body:block) => {{
+        let current_dir = std::env::current_dir().context("determine current directory")?;
+        let workspace_root = spike::find_workspace_root(&current_dir)?;
+        let $ws = spike::load_workspace(&workspace_root)?;
+        let mut $out = String::new();
+        $body
+        print!("{}", $out);
+        Ok(())
+    }};
+}
+
 fn cmd_targets(selectors: &[String]) -> Result<()> {
-    let current_dir = std::env::current_dir().context("determine current directory")?;
-    let workspace_root = spike::find_workspace_root(&current_dir)?;
-    let workspace = spike::load_workspace(&workspace_root)?;
-    let targets = spike::select_targets(&workspace, selectors)?;
-    let mut out = String::new();
-    spike::format_targets(&targets, &mut out)?;
-    print!("{out}");
-    Ok(())
+    workspace_cmd!(|workspace, out| {
+        let targets = spike::select_targets(&workspace, selectors)?;
+        spike::format_targets(&targets, &mut out)?;
+    })
 }
 
 fn cmd_dependencies(selectors: &[String]) -> Result<()> {
-    let current_dir = std::env::current_dir().context("determine current directory")?;
-    let workspace_root = spike::find_workspace_root(&current_dir)?;
-    let workspace = spike::load_workspace(&workspace_root)?;
-    let mut out = String::new();
-    spike::format_dependencies(&workspace, selectors, &mut out)?;
-    print!("{out}");
-    Ok(())
+    workspace_cmd!(|workspace, out| {
+        spike::format_dependencies(&workspace, selectors, &mut out)?;
+    })
 }
 
 fn cmd_rules() -> Result<()> {
-    let current_dir = std::env::current_dir().context("determine current directory")?;
-    let workspace_root = spike::find_workspace_root(&current_dir)?;
-    let workspace = spike::load_workspace(&workspace_root)?;
-    let mut out = String::new();
-    spike::format_rules(&workspace, &mut out)?;
-    print!("{out}");
-    Ok(())
+    workspace_cmd!(|workspace, out| {
+        spike::format_rules(&workspace, &mut out)?;
+    })
 }
 
 // ---------------------------------------------------------------------------
