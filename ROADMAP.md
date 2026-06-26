@@ -181,7 +181,7 @@ that participates in an existing goal, both without changing the engine.
 
 Move current environment-specific code behind graph abstractions.
 
-- Model local, WSL/Windows, and future container execution as platforms.
+- [x] Model local, WSL/Windows, and future container execution as platforms.
 - Turn Odin, CMake, Godot, `uv`, and other provisioned tools into versioned
   tool artifacts.
 - Make workspace sync an explicit platform-transfer task rather than a global

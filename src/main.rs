@@ -78,6 +78,9 @@ enum Cmd {
         /// Maximum number of ready tasks to execute concurrently
         #[arg(long, default_value_t = 1)]
         jobs: usize,
+        /// Active execution platform (default: local)
+        #[arg(long, default_value = "local")]
+        platform: String,
     },
     /// List targets in the workspace (QuickJS spike)
     Targets {
@@ -208,6 +211,7 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
             execute,
             dry_run,
             jobs,
+            platform,
         } => {
             return cmd_plan(
                 goal,
@@ -217,6 +221,7 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
                 *execute,
                 *dry_run,
                 *jobs,
+                platform,
                 tree,
             );
         }
@@ -387,6 +392,7 @@ fn cmd_plan(
     execute: bool,
     dry_run: bool,
     jobs: usize,
+    platform: &str,
     tree: &Tree,
 ) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
@@ -405,16 +411,26 @@ fn cmd_plan(
         println!("  JSON: {}", json.display());
     }
     if execute || dry_run {
+        // Validate platform against workspace before executing.
+        if !workspace.platforms.contains_key(platform) {
+            let known: Vec<_> = workspace.platforms.keys().map(String::as_str).collect();
+            anyhow::bail!(
+                "unknown platform '{platform}'; registered platforms: {}",
+                known.join(", ")
+            );
+        }
         let mode = if dry_run {
             spike::ExecutionMode::DryRun
         } else {
             spike::ExecutionMode::Local
         };
         let mut progress = tree.add_child("execute plan");
+        let options = spike::ExecutionOptions::new(mode, jobs)
+            .with_platform(platform);
         let report = match spike::execute_plan_with_options(
             &plan,
             &workspace_root,
-            spike::ExecutionOptions::new(mode, jobs),
+            options,
             Some(&mut progress),
         ) {
             Ok(report) => {
@@ -433,6 +449,7 @@ fn cmd_plan(
                 spike::TaskExecutionStatus::CacheHit => "cache hit",
                 spike::TaskExecutionStatus::Ran => "ran",
                 spike::TaskExecutionStatus::Noop => "noop",
+                spike::TaskExecutionStatus::SkippedPlatform => "skipped (platform)",
             };
             let command = if task.command.is_empty() {
                 String::from("<no argv>")
@@ -488,6 +505,7 @@ fn cmd_build_planned(
             spike::TaskExecutionStatus::CacheHit => "cache hit",
             spike::TaskExecutionStatus::Ran => "ran",
             spike::TaskExecutionStatus::Noop => "noop",
+            spike::TaskExecutionStatus::SkippedPlatform => "skipped (platform)",
         };
         let command = if task.command.is_empty() {
             String::from("<no argv>")

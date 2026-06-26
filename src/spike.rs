@@ -119,6 +119,23 @@ export function namedCache(opts) {
 export function goal(opts) {
     __host_goal(opts.name, opts.productPolicy !== undefined ? opts.productPolicy : "default");
 }
+
+/**
+ * Register a named platform.
+ *
+ * The built-in "local" platform is pre-registered with the native executor and
+ * the current machine's OS-arch as the target. Duplicate platform names are
+ * silently ignored (first registration wins).
+ *
+ * @param {object} opts
+ * @param {string} opts.name Platform name referenced in action.platform.
+ * @param {string} opts.executor Execution backend: "local", "wsl", or "container".
+ * @param {string} opts.target Target OS-arch string, e.g. "windows-x86_64".
+ * @returns {void}
+ */
+export function platform(opts) {
+    __host_platform(opts.name, opts.executor, opts.target);
+}
 "#;
 
 // ---------------------------------------------------------------------------
@@ -146,6 +163,46 @@ pub enum DependencyMode {
     /// overriding the rule's `dependencyProduct`. Well-known values are
     /// `"sources"`, `"link"`, and `"runtime"`.
     Named(String),
+}
+
+/// Execution backend — where task commands are dispatched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Executor {
+    /// Native `std::process::Command` on the local machine.
+    Local,
+    /// PowerShell bridge through WSL (model only — not yet implemented).
+    Wsl,
+    /// Container runtime (future).
+    Container,
+}
+
+impl Executor {
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "local" => Some(Self::Local),
+            "wsl" => Some(Self::Wsl),
+            "container" => Some(Self::Container),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Wsl => "wsl",
+            Self::Container => "container",
+        }
+    }
+}
+
+/// A registered platform: bundles executor (where to run) and target (what to build for).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformDef {
+    pub name: String,
+    pub executor: Executor,
+    /// Opaque OS-arch string, e.g. `"linux-x86_64"` or `"windows-x86_64"`.
+    pub target: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,6 +322,7 @@ pub struct Workspace {
     pub targets: BTreeMap<String, Target>,
     pub named_caches: BTreeMap<String, NamedCache>,
     pub goals: BTreeMap<String, Goal>,
+    pub platforms: BTreeMap<String, PlatformDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,10 +337,13 @@ pub enum ExecutionMode {
     Local,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ExecutionOptions {
     pub mode: ExecutionMode,
     pub jobs: usize,
+    /// Name of the active platform; only tasks whose `action.platform` matches
+    /// (or is `None`) are executed. Defaults to `"local"`.
+    pub platform: String,
 }
 
 impl ExecutionOptions {
@@ -290,7 +351,13 @@ impl ExecutionOptions {
         Self {
             mode,
             jobs: jobs.max(1),
+            platform: "local".to_owned(),
         }
+    }
+
+    pub fn with_platform(mut self, platform: impl Into<String>) -> Self {
+        self.platform = platform.into();
+        self
     }
 }
 
@@ -300,6 +367,9 @@ pub enum TaskExecutionStatus {
     CacheHit,
     Ran,
     Noop,
+    /// Task was not executed because its platform requirement doesn't match the
+    /// active platform.
+    SkippedPlatform,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -429,6 +499,7 @@ struct HostState {
     rules: BTreeMap<(String, String), Rule>,
     named_caches: BTreeMap<String, NamedCache>,
     goals: BTreeMap<String, Goal>,
+    platforms: BTreeMap<String, PlatformDef>,
 }
 
 impl Default for HostState {
@@ -450,12 +521,23 @@ impl Default for HostState {
                 },
             );
         }
+        let mut platforms = BTreeMap::new();
+        let local_target = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        platforms.insert(
+            "local".to_owned(),
+            PlatformDef {
+                name: "local".to_owned(),
+                executor: Executor::Local,
+                target: local_target,
+            },
+        );
         Self {
             next_id: 0,
             pending: BTreeMap::new(),
             rules: BTreeMap::new(),
             named_caches: BTreeMap::new(),
             goals,
+            platforms,
         }
     }
 }
@@ -873,6 +955,7 @@ pub fn load_workspace(root: &Path) -> Result<Workspace> {
         targets,
         named_caches: hs.named_caches.clone(),
         goals: hs.goals.clone(),
+        platforms: hs.platforms.clone(),
     })
 }
 
@@ -1017,7 +1100,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, state: Arc<Mutex<HostState>>) -> rquickj
     // __host_goal(name, productPolicy)
     // ------------------------------------------------------------------
     let state_g = Arc::clone(&state);
-    let host_goal = Function::new(ctx, move |name: String, policy_val: Value| -> rquickjs::Result<()> {
+    let host_goal = Function::new(ctx.clone(), move |name: String, policy_val: Value| -> rquickjs::Result<()> {
         if name.is_empty() {
             return Err(action_spec_error("goal name must not be empty".to_owned()));
         }
@@ -1038,6 +1121,33 @@ fn register_globals<'js>(ctx: Ctx<'js>, state: Arc<Mutex<HostState>>) -> rquickj
         Ok(())
     })?;
     globals.set("__host_goal", host_goal)?;
+
+    // ------------------------------------------------------------------
+    // __host_platform(name, executor, target)
+    // ------------------------------------------------------------------
+    let state_p = Arc::clone(&state);
+    let host_platform = Function::new(
+        ctx,
+        move |name: String, executor_str: String, target: String| -> rquickjs::Result<()> {
+            if name.is_empty() {
+                return Err(action_spec_error("platform name must not be empty".to_owned()));
+            }
+            let executor = Executor::from_str(&executor_str).ok_or_else(|| {
+                action_spec_error(format!(
+                    "unknown executor '{executor_str}'; known: local, wsl, container"
+                ))
+            })?;
+            let mut hs = state_p.lock().unwrap();
+            if !hs.platforms.contains_key(&name) {
+                hs.platforms.insert(
+                    name.clone(),
+                    PlatformDef { name, executor, target },
+                );
+            }
+            Ok(())
+        },
+    )?;
+    globals.set("__host_platform", host_platform)?;
 
     Ok(())
 }
@@ -1285,11 +1395,27 @@ pub fn plan(workspace: &Workspace, goal: &str, selectors: &[String]) -> Result<P
         root_tasks.push(planner.request(&target.address, &product)?);
     }
 
+    let tasks: Vec<Task> = planner.tasks.into_values().collect();
+
+    // Validate that every task's platform constraint references a registered platform.
+    for task in &tasks {
+        if let Some(p) = task.action.platform.as_deref() {
+            if !workspace.platforms.contains_key(p) {
+                let known: Vec<_> = workspace.platforms.keys().map(String::as_str).collect();
+                bail!(
+                    "{}: unknown platform '{p}'; registered platforms: {}",
+                    task.id,
+                    known.join(", ")
+                );
+            }
+        }
+    }
+
     Ok(Plan {
         goal: goal.to_owned(),
         roots: root_tasks,
         named_caches: workspace.named_caches.values().cloned().collect(),
-        tasks: planner.tasks.into_values().collect(),
+        tasks,
     })
 }
 
@@ -1570,6 +1696,7 @@ pub fn execute_plan_with_options(
             &ordered,
             workspace_root,
             options.mode,
+            &options.platform,
             &plan.named_caches,
             progress,
         )?
@@ -1583,6 +1710,7 @@ fn execute_ordered_tasks_sequentially(
     ordered: &[&Task],
     workspace_root: &Path,
     mode: ExecutionMode,
+    active_platform: &str,
     named_caches: &[NamedCache],
     mut progress: Option<&mut prodash::tree::Item>,
 ) -> Result<Vec<TaskExecution>> {
@@ -1598,6 +1726,7 @@ fn execute_ordered_tasks_sequentially(
             task,
             workspace_root,
             mode,
+            active_platform,
             named_caches,
             &summaries,
             task_progress.as_mut(),
@@ -1654,6 +1783,7 @@ fn execute_ordered_tasks_parallel(
                 let sender = sender.clone();
                 let workspace_root = workspace_root.to_owned();
                 let mode = options.mode;
+                let active_platform = options.platform.clone();
                 let named_caches = named_caches.to_vec();
                 let dependency_summaries = summaries.clone();
                 let task = task.clone();
@@ -1664,6 +1794,7 @@ fn execute_ordered_tasks_parallel(
                         &task,
                         &workspace_root,
                         mode,
+                        &active_platform,
                         &named_caches,
                         &dependency_summaries,
                         None,
@@ -1718,12 +1849,33 @@ fn execute_one_task(
     task: &Task,
     workspace_root: &Path,
     mode: ExecutionMode,
+    active_platform: &str,
     named_caches: &[NamedCache],
     completed_dependencies: &BTreeMap<String, TaskCacheSummary>,
     mut progress: Option<&mut prodash::tree::Item>,
     cancellation: &AtomicBool,
 ) -> Result<(TaskExecution, TaskCacheSummary)> {
     let command = task.action.argv.clone();
+
+    // Platform check: tasks with a platform constraint only run on that platform.
+    let task_platform = task.action.platform.as_deref().unwrap_or("local");
+    if task_platform != active_platform {
+        if let Some(progress) = progress.as_mut() {
+            progress.done("skipped (platform)");
+        }
+        return Ok((
+            TaskExecution {
+                task_id: task.id.clone(),
+                status: TaskExecutionStatus::SkippedPlatform,
+                command,
+            },
+            TaskCacheSummary {
+                task_id: task.id.clone(),
+                task_key: String::new(),
+            },
+        ));
+    }
+
     let status = match mode {
         ExecutionMode::DryRun => {
             if let Some(progress) = progress.as_mut() {
