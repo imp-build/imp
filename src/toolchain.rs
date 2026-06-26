@@ -1,7 +1,144 @@
-use anyhow::{bail, Result};
+use std::path::{Path, PathBuf};
+
+use anyhow::{bail, Context, Result};
 
 use crate::env::LocalEnv;
 use crate::workspace;
+
+// ---------------------------------------------------------------------------
+// Host-accessible primitives for JS toolchain acquisition
+// ---------------------------------------------------------------------------
+
+/// Detect the current platform. Returns (os, arch) with normalized names:
+/// - os: "linux", "macos", "windows"
+/// - arch: "x86_64", "aarch64"
+pub fn host_detect_platform() -> Result<(&'static str, &'static str)> {
+    let os = if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        bail!("unsupported OS");
+    };
+
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        bail!("unsupported architecture");
+    };
+
+    Ok((os, arch))
+}
+
+/// Download a URL to a cached local file. Uses `md5` of the URL as the cache
+/// key within a temp directory so repeated downloads of the same URL are
+/// served from disk without re-fetching.
+pub fn host_download(url: &str) -> Result<PathBuf> {
+    let download_dir = std::env::temp_dir().join("imp-downloads");
+    std::fs::create_dir_all(&download_dir)
+        .with_context(|| format!("create download dir {}", download_dir.display()))?;
+
+    let filename = format!("dl-{:x}", md5::compute(url.as_bytes()));
+    let dest = download_dir.join(&filename);
+
+    if dest.is_file() {
+        return Ok(dest);
+    }
+
+    let status = std::process::Command::new("curl")
+        .args(["-fSL", "-o", &dest.to_string_lossy(), url])
+        .status()
+        .with_context(|| format!("spawn curl for {url}"))?;
+
+    if !status.success() {
+        let _ = std::fs::remove_file(&dest);
+        bail!("curl download of {url} failed with exit code {:?}", status.code());
+    }
+
+    Ok(dest)
+}
+
+/// Extract an archive to a destination directory.
+///
+/// Supported `format` values: `"tar.gz"`, `"tgz"`, `"zip"`.
+///
+/// `strip_components` is only supported for tar.gz archives (it maps to
+/// `--strip-components=N`). For zip archives with non-zero `strip_components`,
+/// extraction goes to a temporary directory first and the top-level entry is
+/// moved into `dest`.
+pub fn host_extract(archive: &Path, dest: &Path, format: &str, strip_components: u32) -> Result<()> {
+    let archive_str = archive.to_string_lossy();
+    let dest_str = dest.to_string_lossy();
+
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("create extract dest {}", dest.display()))?;
+
+    match format {
+        "tar.gz" | "tgz" => {
+            let mut cmd = std::process::Command::new("tar");
+            cmd.args(["xzf", &archive_str, "-C", &dest_str]);
+            if strip_components > 0 {
+                cmd.arg(format!("--strip-components={strip_components}"));
+            }
+            let status = cmd.status().with_context(|| {
+                format!("spawn tar for {}", archive.display())
+            })?;
+            if !status.success() {
+                bail!("tar extraction of {} failed", archive.display());
+            }
+        }
+        "zip" => {
+            let status = extract_zip(archive, dest, strip_components)?;
+            if !status.success() {
+                bail!("unzip extraction of {} failed", archive.display());
+            }
+        }
+        other => bail!("unsupported archive format: {other}"),
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn extract_zip(archive: &Path, dest: &Path, _strip_components: u32) -> Result<std::process::ExitStatus> {
+    std::process::Command::new("unzip")
+        .args(["-qo", &archive.to_string_lossy(), "-d", &dest.to_string_lossy()])
+        .status()
+        .with_context(|| format!("spawn unzip for {}", archive.display()))
+}
+
+#[cfg(windows)]
+fn extract_zip(archive: &Path, dest: &Path, _strip_components: u32) -> Result<std::process::ExitStatus> {
+    std::process::Command::new("tar.exe")
+        .args(["-xf", &archive.to_string_lossy(), "-C", &dest.to_string_lossy()])
+        .status()
+        .with_context(|| format!("spawn tar.exe for {}", archive.display()))
+}
+
+/// Compute SHA-256 hex digest of a file.
+pub fn host_sha256(path: &Path) -> Result<String> {
+    let output = std::process::Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .with_context(|| format!("spawn sha256sum for {}", path.display()))?;
+    if !output.status.success() {
+        bail!("sha256sum failed for {}", path.display());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_owned())
+}
+
+// ---------------------------------------------------------------------------
+// Existing Odin-specific setup (kept for backward compat)
+// ---------------------------------------------------------------------------
 
 pub async fn setup_odin(progress: &mut prodash::tree::Item) -> Result<()> {
     let version = workspace::odin_version();

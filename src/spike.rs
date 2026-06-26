@@ -17,12 +17,14 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use crate::toolchain;
 use rquickjs::{
     loader::{Loader, Resolver},
     module::Declared,
     Array, CatchResultExt, Context as JsContext, Ctx, Filter, Function, Module, Object, Runtime,
     Value,
 };
+use rquickjs_core::Persistent;
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -135,6 +137,79 @@ export function goal(opts) {
  */
 export function platform(opts) {
     __host_platform(opts.name, opts.executor, opts.target);
+}
+
+// ---------------------------------------------------------------------------
+// Toolchain acquisition primitives
+// ---------------------------------------------------------------------------
+
+/**
+ * Download a URL to the local download cache.
+ * @param {string} url
+ * @returns {string} Local path to the downloaded file.
+ */
+export function download(url) {
+    return __host_download(url);
+}
+
+/**
+ * Extract an archive to a directory.
+ * @param {string} archive Path to the archive file.
+ * @param {string} dest    Destination directory.
+ * @param {object} opts
+ * @param {string} opts.format Archive format: "tar.gz", "tgz", or "zip".
+ * @param {number} [opts.strip_components=0] Number of leading path components to strip (tar.gz only).
+ * @returns {void}
+ */
+export function extract(archive, dest, opts) {
+    __host_extract(archive, dest, opts.format, opts.strip_components || 0);
+}
+
+/**
+ * Detect the current platform.
+ * @returns {{ os: string, arch: string }}
+ */
+export function platformInfo() {
+    return JSON.parse(__host_platform_info());
+}
+
+/**
+ * Compute the SHA-256 digest of a file.
+ * @param {string} path
+ * @returns {string} Hex-encoded digest.
+ */
+export function sha256(path) {
+    return __host_sha256(path);
+}
+
+/**
+ * Store a file or directory into a named cache under a key.
+ * @param {string} name   Cache name (matches a namedCache() declaration).
+ * @param {string} key    Sub-key within the cache (e.g. "dev-2026-03/linux-x86_64").
+ * @param {string} source Path to the file or directory to cache.
+ */
+export function cachePut(name, key, source) {
+    __host_cache_put(name, key, source);
+}
+
+/**
+ * Retrieve the path of a cached item.
+ * @param {string} name Cache name.
+ * @param {string} key  Sub-key.
+ * @returns {string|null} Local path if the key exists, null otherwise.
+ */
+export function cacheGet(name, key) {
+    return __host_cache_get(name, key);
+}
+
+/**
+ * Check whether a key exists in a named cache.
+ * @param {string} name Cache name.
+ * @param {string} key  Sub-key.
+ * @returns {boolean}
+ */
+export function cacheHas(name, key) {
+    return __host_cache_has(name, key);
 }
 "#;
 
@@ -323,6 +398,36 @@ pub struct Workspace {
     pub named_caches: BTreeMap<String, NamedCache>,
     pub goals: BTreeMap<String, Goal>,
     pub platforms: BTreeMap<String, PlatformDef>,
+}
+
+/// A loaded workspace with a live QuickJS runtime.
+///
+/// Keeps the runtime and context alive so that rule `exec` functions can be
+/// called during task execution. Use `Deref` to access the underlying
+/// [`Workspace`] for planning and inspection.
+pub struct LiveWorkspace {
+    pub workspace: Workspace,
+    pub(super) runtime: Runtime,
+    pub(super) ctx: JsContext,
+    pub(super) exec_fns: Vec<Persistent<Function<'static>>>,
+}
+
+impl std::fmt::Debug for LiveWorkspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveWorkspace")
+            .field("workspace", &self.workspace)
+            .field("runtime", &"Runtime { .. }")
+            .field("ctx", &"Context { .. }")
+            .field("exec_fns", &format_args!("Vec<{}>", self.exec_fns.len()))
+            .finish()
+    }
+}
+
+impl std::ops::Deref for LiveWorkspace {
+    type Target = Workspace;
+    fn deref(&self) -> &Workspace {
+        &self.workspace
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -796,7 +901,10 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
 /// Load the workspace rooted at `root`.  Evaluates `imp.workspace.js` (for
 /// rule registration) then every `BUILD.js` found below `root`, assigns
 /// addresses from export names, and resolves dependency IDs to addresses.
-pub fn load_workspace(root: &Path) -> Result<Workspace> {
+///
+/// Returns a [`LiveWorkspace`] that keeps the QuickJS runtime alive so rule
+/// `exec` functions can be invoked during task execution.
+pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
     let root = root
         .canonicalize()
         .with_context(|| format!("canonicalize workspace root {}", root.display()))?;
@@ -818,7 +926,7 @@ pub fn load_workspace(root: &Path) -> Result<Workspace> {
     // ----- Register host globals -----
     {
         let state_clone = Arc::clone(&state);
-        ctx.with(|ctx| -> rquickjs::Result<()> { register_globals(ctx, state_clone) })
+        ctx.with(|ctx| -> rquickjs::Result<()> { register_globals(ctx, state_clone, root.clone()) })
             .map_err(|e| anyhow::anyhow!("register QuickJS globals: {e}"))?;
     }
 
@@ -950,17 +1058,26 @@ pub fn load_workspace(root: &Path) -> Result<Workspace> {
         );
     }
 
-    Ok(Workspace {
-        rules: hs.rules.clone(),
-        targets,
-        named_caches: hs.named_caches.clone(),
-        goals: hs.goals.clone(),
-        platforms: hs.platforms.clone(),
+    Ok(LiveWorkspace {
+        workspace: Workspace {
+            rules: hs.rules.clone(),
+            targets,
+            named_caches: hs.named_caches.clone(),
+            goals: hs.goals.clone(),
+            platforms: hs.platforms.clone(),
+        },
+        runtime: rt,
+        ctx,
+        exec_fns: Vec::new(),
     })
 }
 
-/// Register `__host_target` and `__host_rule` as JS globals on `ctx`.
-fn register_globals<'js>(ctx: Ctx<'js>, state: Arc<Mutex<HostState>>) -> rquickjs::Result<()> {
+/// Register host globals on `ctx`.
+fn register_globals<'js>(
+    ctx: Ctx<'js>,
+    state: Arc<Mutex<HostState>>,
+    workspace_root: PathBuf,
+) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
     // ------------------------------------------------------------------
@@ -1127,7 +1244,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, state: Arc<Mutex<HostState>>) -> rquickj
     // ------------------------------------------------------------------
     let state_p = Arc::clone(&state);
     let host_platform = Function::new(
-        ctx,
+        ctx.clone(),
         move |name: String, executor_str: String, target: String| -> rquickjs::Result<()> {
             if name.is_empty() {
                 return Err(action_spec_error("platform name must not be empty".to_owned()));
@@ -1149,6 +1266,131 @@ fn register_globals<'js>(ctx: Ctx<'js>, state: Arc<Mutex<HostState>>) -> rquickj
     )?;
     globals.set("__host_platform", host_platform)?;
 
+    // ------------------------------------------------------------------
+    // __host_download(url) → path string
+    // ------------------------------------------------------------------
+    let host_download = Function::new(
+        ctx.clone(),
+        |url: String| -> rquickjs::Result<String> {
+            let path = toolchain::host_download(&url)
+                .map_err(|e| rquickjs::Error::new_loading_message("download", format!("{e:#}")))?;
+            Ok(path.to_string_lossy().into_owned())
+        },
+    )?;
+    globals.set("__host_download", host_download)?;
+
+    // ------------------------------------------------------------------
+    // __host_extract(archive, dest, format, strip_components)
+    // ------------------------------------------------------------------
+    let host_extract = Function::new(
+        ctx.clone(),
+        |archive: String, dest: String, format: String, strip: u32| -> rquickjs::Result<()> {
+            toolchain::host_extract(Path::new(&archive), Path::new(&dest), &format, strip)
+                .map_err(|e| rquickjs::Error::new_loading_message("extract", format!("{e:#}")))?;
+            Ok(())
+        },
+    )?;
+    globals.set("__host_extract", host_extract)?;
+
+    // ------------------------------------------------------------------
+    // __host_platform() → JSON string { "os": "...", "arch": "..." }
+    // ------------------------------------------------------------------
+    let host_platform_fn = Function::new(ctx.clone(), || -> rquickjs::Result<String> {
+        let (os, arch) = toolchain::host_detect_platform()
+            .map_err(|e| rquickjs::Error::new_loading_message("platform", format!("{e:#}")))?;
+        Ok(format!(r#"{{"os":"{os}","arch":"{arch}"}}"#))
+    })?;
+    globals.set("__host_platform_info", host_platform_fn)?;
+
+    // ------------------------------------------------------------------
+    // __host_sha256(path) → hex string
+    // ------------------------------------------------------------------
+    let host_sha256 = Function::new(
+        ctx.clone(),
+        |path: String| -> rquickjs::Result<String> {
+            toolchain::host_sha256(Path::new(&path))
+                .map_err(|e| rquickjs::Error::new_loading_message("sha256", format!("{e:#}")))
+        },
+    )?;
+    globals.set("__host_sha256", host_sha256)?;
+
+    // ------------------------------------------------------------------
+    // __host_cache_put(name, key, source)
+    // __host_cache_get(name, key) → path | null
+    // __host_cache_has(name, key) → bool
+    // ------------------------------------------------------------------
+    let wc = workspace_root.clone();
+    let host_cache_put = Function::new(
+        ctx.clone(),
+        move |name: String, key: String, source: String| -> rquickjs::Result<()> {
+            let target = named_cache_key_path(&wc, &name, &key)
+                .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("{e:#}")))?;
+            std::fs::create_dir_all(&target)
+                .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("create {target:?}: {e}")))?;
+            let src = Path::new(&source);
+            if src.is_dir() {
+                copy_dir_into(src, &target)
+                    .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("copy dir {source}: {e}")))?;
+            } else {
+                let file_name = src.file_name()
+                    .ok_or_else(|| rquickjs::Error::new_loading_message("cache", "source has no filename".to_owned()))?;
+                std::fs::copy(src, target.join(file_name))
+                    .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("copy {source}: {e}")))?;
+            }
+            Ok(())
+        },
+    )?;
+    globals.set("__host_cache_put", host_cache_put)?;
+
+    let wc = workspace_root.clone();
+    let host_cache_get = Function::new(
+        ctx.clone(),
+        move |name: String, key: String| -> rquickjs::Result<Option<String>> {
+            match named_cache_key_path(&wc, &name, &key) {
+                Ok(p) if p.is_dir() => Ok(Some(p.to_string_lossy().into_owned())),
+                _ => Ok(None),
+            }
+        },
+    )?;
+    globals.set("__host_cache_get", host_cache_get)?;
+
+    let wc = workspace_root.clone();
+    let host_cache_has = Function::new(
+        ctx.clone(),
+        move |name: String, key: String| -> rquickjs::Result<bool> {
+            Ok(named_cache_key_path(&wc, &name, &key)
+                .map(|p| p.is_dir())
+                .unwrap_or(false))
+        },
+    )?;
+    globals.set("__host_cache_has", host_cache_has)?;
+
+    Ok(())
+}
+
+fn named_cache_key_path(workspace_root: &Path, name: &str, key: &str) -> Result<PathBuf> {
+    let root = cache_root()?
+        .join("named")
+        .join(workspace_cache_id(workspace_root))
+        .join(name)
+        .join(key);
+    Ok(root)
+}
+
+/// Recursively copy the contents of `src` into `dst` (which already exists as a
+/// directory). Unlike `std::fs::rename` this works across mount boundaries.
+fn copy_dir_into(src: &Path, dst: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            std::fs::create_dir_all(&target)?;
+            copy_dir_into(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(&entry.path(), &target)
+                .with_context(|| format!("copy {} -> {}", entry.path().display(), target.display()))?;
+        }
+    }
     Ok(())
 }
 
@@ -4482,5 +4724,180 @@ export const ignored = missing;
         let explanation = explain_task_cache(&plan, root.path(), &task_id).unwrap();
         assert!(explanation.cacheable);
         assert!(!explanation.impure);
+    }
+
+    // -----------------------------------------------------------------------
+    // Host function integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn javascript_can_use_platform_info() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"import "//rules/test";"#,
+        );
+        write_file(
+            &p.join("rules/test.js"),
+            r#"
+import { platformInfo } from "imp:core";
+const info = platformInfo();
+if (typeof info.os !== "string" || info.os.length === 0) {
+    throw new Error("platformInfo().os is missing: " + JSON.stringify(info));
+}
+if (typeof info.arch !== "string" || info.arch.length === 0) {
+    throw new Error("platformInfo().arch is missing: " + JSON.stringify(info));
+}
+export const ok = 1;
+"#,
+        );
+        write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
+
+        load_workspace(p).unwrap();
+    }
+
+    #[test]
+    fn javascript_can_use_sha256() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        // Write a known file and compute its sha256sum externally.
+        let test_file = p.join("data.bin");
+        std::fs::write(&test_file, b"hello world\n").unwrap();
+        let expected = std::process::Command::new("sha256sum")
+            .arg(&test_file)
+            .output()
+            .unwrap();
+        let expected_hex = String::from_utf8_lossy(&expected.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_owned();
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"import "//rules/test";"#,
+        );
+        write_file(
+            &p.join("rules/test.js"),
+            &format!(
+                r#"
+import {{ sha256 }} from "imp:core";
+const digest = sha256("{path}");
+if (digest !== "{expected}") {{
+    throw new Error("sha256 mismatch: got " + digest + ", expected {expected}");
+}}
+export const ok = 1;
+"#,
+                path = test_file.to_string_lossy().replace('\\', "\\\\"),
+                expected = expected_hex,
+            ),
+        );
+        write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
+
+        load_workspace(p).unwrap();
+    }
+
+    #[test]
+    fn javascript_can_use_cache_operations() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        // Create a source file to cache.
+        let src_dir = p.join("source");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("tool.txt"), b"cached-content").unwrap();
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            &format!(
+                r#"
+import {{ namedCache, cachePut, cacheGet, cacheHas }} from "imp:core";
+namedCache({{ name: "test-cache" }});
+
+// Put content into the cache.
+cachePut("test-cache", "v1/linux-x86_64", "{src}");
+
+// Check it exists.
+if (!cacheHas("test-cache", "v1/linux-x86_64")) {{
+    throw new Error("cacheHas returned false after put");
+}}
+
+// Retrieve the path.
+const path = cacheGet("test-cache", "v1/linux-x86_64");
+if (path === null || path === undefined) {{
+    throw new Error("cacheGet returned null after put");
+}}
+
+// Check a missing key.
+if (cacheHas("test-cache", "missing-key")) {{
+    throw new Error("cacheHas returned true for missing key");
+}}
+
+export const ok = 1;
+"#,
+                src = src_dir.to_string_lossy().replace('\\', "\\\\"),
+            ),
+        );
+        write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
+
+        load_workspace(p).unwrap();
+    }
+
+    #[test]
+    fn javascript_can_use_extract() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        // Create a tar.gz archive using the system tar.
+        let content_dir = p.join("archive-content");
+        std::fs::create_dir_all(content_dir.join("sub")).unwrap();
+        std::fs::write(content_dir.join("sub/file.txt"), b"extracted").unwrap();
+        let archive = p.join("test.tar.gz");
+
+        let status = std::process::Command::new("tar")
+            .args([
+                "czf",
+                &archive.to_string_lossy(),
+                "-C",
+                &content_dir.to_string_lossy(),
+                "sub",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to create test archive");
+
+        let extract_dir = p.join("extracted");
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            &format!(
+                r#"
+import {{ extract }} from "imp:core";
+extract("{archive}", "{dest}", {{ format: "tar.gz", strip_components: 0 }});
+export const ok = 1;
+"#,
+                archive = archive.to_string_lossy(),
+                dest = extract_dir.to_string_lossy(),
+            ),
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            "export const done = 1;\n",
+        );
+
+        load_workspace(p).unwrap();
+        // Verify the file was extracted correctly.
+        let extracted_file = extract_dir.join("sub/file.txt");
+        assert!(
+            extracted_file.is_file(),
+            "extracted file not found at {}",
+            extracted_file.display()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&extracted_file).unwrap(),
+            "extracted"
+        );
     }
 }
