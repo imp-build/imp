@@ -211,6 +211,31 @@ pub struct ExecutionReport {
     pub tasks: Vec<TaskExecution>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SandboxManifest {
+    task_id: String,
+    sandbox_root: PathBuf,
+    cache_root: PathBuf,
+    input_runlist: Vec<SandboxInput>,
+    output_runlist: Vec<SandboxOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SandboxInput {
+    artifact_id: String,
+    source: PathBuf,
+    sandbox_path: PathBuf,
+    kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SandboxOutput {
+    artifact_id: String,
+    sandbox_path: PathBuf,
+    cache_path: PathBuf,
+    kind: String,
+}
+
 // ---------------------------------------------------------------------------
 // Internal host state
 // ---------------------------------------------------------------------------
@@ -1187,12 +1212,6 @@ pub fn execute_plan_with_progress(
                     }
                     return Err(error);
                 }
-                if let Err(error) = check_declared_outputs(task, workspace_root) {
-                    if let Some(progress) = task_progress.as_mut() {
-                        progress.fail("missing output");
-                    }
-                    return Err(error);
-                }
                 if let Some(progress) = task_progress.as_mut() {
                     progress.done("done");
                 }
@@ -1261,12 +1280,19 @@ fn run_local_task(
     workspace_root: &Path,
     progress: Option<&prodash::tree::Item>,
 ) -> Result<()> {
+    let sandbox = prepare_sandbox(task, workspace_root)?;
+    let manifest_path = sandbox.sandbox_root.join("imp-sandbox.json");
+    std::fs::write(&manifest_path, serde_json::to_string_pretty(&sandbox)?)
+        .with_context(|| format!("write sandbox manifest {}", manifest_path.display()))?;
+
     let cwd = task
         .action
         .cwd
         .as_deref()
-        .map(|cwd| resolve_workspace_path(workspace_root, cwd))
-        .unwrap_or_else(|| workspace_root.to_owned());
+        .map(|cwd| resolve_sandbox_path(&sandbox.sandbox_root, cwd))
+        .transpose()?
+        .unwrap_or_else(|| sandbox.sandbox_root.clone());
+    std::fs::create_dir_all(&cwd).with_context(|| format!("create cwd {}", cwd.display()))?;
     let (program, args) = task
         .action
         .argv
@@ -1277,6 +1303,9 @@ fn run_local_task(
         .args(args)
         .current_dir(&cwd)
         .envs(&task.action.env)
+        .env("IMP_SANDBOX_ROOT", &sandbox.sandbox_root)
+        .env("IMP_CACHE_ROOT", &sandbox.cache_root)
+        .env("IMP_SANDBOX_MANIFEST", &manifest_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1325,44 +1354,236 @@ fn run_local_task(
         );
     }
 
+    copy_sandbox_outputs(task, &sandbox)?;
     Ok(())
 }
 
-fn check_declared_outputs(task: &Task, workspace_root: &Path) -> Result<()> {
+fn prepare_sandbox(task: &Task, workspace_root: &Path) -> Result<SandboxManifest> {
+    let sandbox_root = create_sandbox_root()?;
+    let cache_root = cache_root()?
+        .join("artifacts")
+        .join(sanitize_path_component(&task.id));
+    let mut input_runlist = Vec::new();
+    let mut output_runlist = Vec::new();
+
+    for artifact in &task.inputs {
+        let Some(path) = &artifact.path else {
+            continue;
+        };
+        let relative = artifact_relative_path(path)?;
+        let source = workspace_root.join(&relative);
+        let sandbox_path = sandbox_root.join(&relative);
+        copy_artifact_into_sandbox(artifact, &source, &sandbox_path)?;
+        input_runlist.push(SandboxInput {
+            artifact_id: artifact.id.clone(),
+            source,
+            sandbox_path,
+            kind: artifact.kind.clone(),
+        });
+    }
+
     for artifact in &task.outputs {
         let Some(path) = &artifact.path else {
             continue;
         };
-        let path = resolve_workspace_path(workspace_root, path);
-        match artifact.kind.as_str() {
-            "file" | "manifest" if !path.is_file() => {
+        let relative = artifact_relative_path(path)?;
+        let sandbox_path = sandbox_root.join(&relative);
+        let cache_path = cache_root.join(&relative);
+        output_runlist.push(SandboxOutput {
+            artifact_id: artifact.id.clone(),
+            sandbox_path,
+            cache_path,
+            kind: artifact.kind.clone(),
+        });
+    }
+
+    Ok(SandboxManifest {
+        task_id: task.id.clone(),
+        sandbox_root,
+        cache_root,
+        input_runlist,
+        output_runlist,
+    })
+}
+
+fn create_sandbox_root() -> Result<PathBuf> {
+    let base = PathBuf::from("/tmp/imp");
+    std::fs::create_dir_all(&base).with_context(|| format!("create {}", base.display()))?;
+    let unique = format!(
+        "sandbox-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let root = base.join(unique);
+    std::fs::create_dir(&root).with_context(|| format!("create sandbox {}", root.display()))?;
+    Ok(root)
+}
+
+fn cache_root() -> Result<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
+        candidates.push(PathBuf::from(cache).join("imp"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".cache").join("imp"));
+    }
+    candidates.push(PathBuf::from("/tmp/imp/cache"));
+
+    let mut last_error = None;
+    for candidate in candidates {
+        match std::fs::create_dir_all(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) => last_error = Some((candidate, error)),
+        }
+    }
+
+    if let Some((candidate, error)) = last_error {
+        bail!("create cache root {}: {error}", candidate.display());
+    }
+    bail!("no cache root candidates available")
+}
+
+fn artifact_relative_path(path: &str) -> Result<PathBuf> {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        bail!(
+            "artifact path {} must be relative for sandbox execution",
+            path.display()
+        );
+    }
+
+    let mut relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(component) => relative.push(component),
+            std::path::Component::CurDir => {}
+            _ => bail!(
+                "artifact path {} must not contain parent or prefix components",
+                path.display()
+            ),
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        bail!("artifact path must not be empty");
+    }
+    Ok(relative)
+}
+
+fn resolve_sandbox_path(root: &Path, path: &str) -> Result<PathBuf> {
+    let relative = artifact_relative_path(path)?;
+    Ok(root.join(relative))
+}
+
+fn copy_artifact_into_sandbox(
+    artifact: &Artifact,
+    source: &Path,
+    destination: &Path,
+) -> Result<()> {
+    match artifact.kind.as_str() {
+        "file" | "manifest" => {
+            if !source.is_file() {
                 bail!(
-                    "{} declared {} output {} but it was not created as a file",
-                    task.id,
+                    "{} declared {} input {} but it is not a file",
+                    artifact.id,
                     artifact.kind,
-                    path.display()
+                    source.display()
                 );
             }
-            "directory" if !path.is_dir() => {
+            copy_file(source, destination)?;
+        }
+        "directory" => {
+            if !source.is_dir() {
                 bail!(
-                    "{} declared directory output {} but it was not created",
-                    task.id,
-                    path.display()
+                    "{} declared directory input {} but it is not a directory",
+                    artifact.id,
+                    source.display()
                 );
             }
-            _ => {}
+            copy_directory(source, destination)?;
+        }
+        "value" => {}
+        other => bail!(
+            "{} has unsupported input artifact kind {other}",
+            artifact.id
+        ),
+    }
+    Ok(())
+}
+
+fn copy_sandbox_outputs(task: &Task, sandbox: &SandboxManifest) -> Result<()> {
+    for output in &sandbox.output_runlist {
+        match output.kind.as_str() {
+            "file" | "manifest" => {
+                if !output.sandbox_path.is_file() {
+                    bail!(
+                        "{} declared {} output {} but it was not created as a file in sandbox",
+                        task.id,
+                        output.kind,
+                        output.sandbox_path.display()
+                    );
+                }
+                copy_file(&output.sandbox_path, &output.cache_path)?;
+            }
+            "directory" => {
+                if !output.sandbox_path.is_dir() {
+                    bail!(
+                        "{} declared directory output {} but it was not created in sandbox",
+                        task.id,
+                        output.sandbox_path.display()
+                    );
+                }
+                copy_directory(&output.sandbox_path, &output.cache_path)?;
+            }
+            "value" => {}
+            other => bail!(
+                "{} has unsupported output artifact kind {other}",
+                output.artifact_id
+            ),
         }
     }
     Ok(())
 }
 
-fn resolve_workspace_path(root: &Path, path: &str) -> PathBuf {
-    let path = Path::new(path);
-    if path.is_absolute() {
-        path.to_owned()
-    } else {
-        root.join(path)
+fn copy_file(source: &Path, destination: &Path) -> Result<()> {
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
+    std::fs::copy(source, destination)
+        .with_context(|| format!("copy {} to {}", source.display(), destination.display()))?;
+    Ok(())
+}
+
+fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
+    for entry in WalkDir::new(source) {
+        let entry = entry.with_context(|| format!("walk {}", source.display()))?;
+        let relative = entry.path().strip_prefix(source).with_context(|| {
+            format!("strip {} from {}", source.display(), entry.path().display())
+        })?;
+        let target = destination.join(relative);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&target)
+                .with_context(|| format!("create {}", target.display()))?;
+        } else if entry.file_type().is_file() {
+            copy_file(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn sanitize_path_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1909,6 +2130,25 @@ export const ui = asset({ srcs: ["**/*.png"] });
         }
     }
 
+    fn unique_task_id(prefix: &str) -> String {
+        format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    }
+
+    fn cached_artifact_path(task_id: &str, path: &str) -> PathBuf {
+        cache_root()
+            .unwrap()
+            .join("artifacts")
+            .join(sanitize_path_component(task_id))
+            .join(path)
+    }
+
     // ---- Tests ---------------------------------------------------------
 
     #[test]
@@ -2092,11 +2332,13 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
     #[test]
     fn local_executor_runs_commands_and_checks_declared_outputs() {
         let root = tempfile::tempdir().unwrap();
+        let task_id = unique_task_id("write");
+        let cached = cached_artifact_path(&task_id, "build/out.txt");
         let plan = Plan {
             goal: "build".to_owned(),
-            roots: vec!["write".to_owned()],
+            roots: vec![task_id.clone()],
             tasks: vec![executable_task(
-                "write",
+                &task_id,
                 &[],
                 &["sh", "-c", "mkdir -p build && printf ok > build/out.txt"],
                 Some("build/out.txt"),
@@ -2105,20 +2347,58 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
 
         let report = execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
         assert_eq!(report.tasks[0].status, TaskExecutionStatus::Ran);
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("build/out.txt")).unwrap(),
-            "ok"
+        assert_eq!(std::fs::read_to_string(cached).unwrap(), "ok");
+        assert!(!root.path().join("build/out.txt").exists());
+    }
+
+    #[test]
+    fn local_executor_gathers_declared_file_inputs_into_sandbox() {
+        let root = tempfile::tempdir().unwrap();
+        write_file(&root.path().join("inputs/message.txt"), "hello");
+        let task_id = unique_task_id("copy-input");
+        let cached = cached_artifact_path(&task_id, "build/out.txt");
+        let mut task = executable_task(
+            &task_id,
+            &[],
+            &[
+                "sh",
+                "-c",
+                "mkdir -p build && cp inputs/message.txt build/out.txt",
+            ],
+            Some("build/out.txt"),
         );
+        task.inputs = vec![Artifact {
+            id: format!("{task_id}:in"),
+            kind: "file".to_owned(),
+            path: Some("inputs/message.txt".to_owned()),
+            value: None,
+            producer: None,
+        }];
+        task.action.inputs = task
+            .inputs
+            .iter()
+            .map(|artifact| artifact.id.clone())
+            .collect();
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![task_id],
+            tasks: vec![task],
+        };
+
+        execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
+        assert_eq!(std::fs::read_to_string(cached).unwrap(), "hello");
     }
 
     #[test]
     fn progress_executor_streams_process_output_path() {
         let root = tempfile::tempdir().unwrap();
+        let task_id = unique_task_id("progress-write");
+        let cached = cached_artifact_path(&task_id, "build/out.txt");
         let plan = Plan {
             goal: "build".to_owned(),
-            roots: vec!["write".to_owned()],
+            roots: vec![task_id.clone()],
             tasks: vec![executable_task(
-                "write",
+                &task_id,
                 &[],
                 &[
                     "sh",
@@ -2140,10 +2420,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         .unwrap();
 
         assert_eq!(report.tasks[0].status, TaskExecutionStatus::Ran);
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("build/out.txt")).unwrap(),
-            "ok"
-        );
+        assert_eq!(std::fs::read_to_string(cached).unwrap(), "ok");
     }
 
     #[test]

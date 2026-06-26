@@ -129,6 +129,11 @@ Execute the task graph locally before adding any remote system.
   while the command migration path is decided.
 - [x] Stream process stdout through the existing progress UI.
 - [x] Stream process stderr through the existing progress UI.
+- [x] Run local actions in per-task sandboxes under `/tmp/imp/sandbox-*`.
+- [x] Gather declared file and directory inputs into sandbox runlists.
+- [x] Write a sandbox manifest before command execution.
+- [x] Copy declared file, directory, and manifest outputs to the local artifact
+  cache.
 - [x] Report missing declared file, directory, and manifest outputs as errors.
 - Materialise declared file outputs atomically.
 - Materialise declared directory outputs atomically.
