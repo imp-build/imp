@@ -47,11 +47,20 @@ const CORE_JS: &str = r#"
  * such as dependency values being target handles.
  */
 export function target(opts) {
-    const depIds = (opts.deps || []).map(d => {
-        if (!d || d.__imp !== true) throw new Error('dep must be a target handle, got: ' + JSON.stringify(d));
-        return d.__id;
-    });
-    return __host_target(opts.kind, opts.fields || {}, depIds);
+    const depIds = [];
+    const depModes = [];
+    for (const d of (opts.deps || [])) {
+        if (d && d.__imp === true) {
+            depIds.push(d.__id);
+            depModes.push(null);
+        } else if (d && d.target && d.target.__imp === true) {
+            depIds.push(d.target.__id);
+            depModes.push(d.mode != null ? String(d.mode) : null);
+        } else {
+            throw new Error('dep must be a target handle or { target, mode }, got: ' + JSON.stringify(d));
+        }
+    }
+    return __host_target(opts.kind, opts.fields || {}, depIds, depModes);
 }
 
 /**
@@ -130,9 +139,13 @@ pub struct Dependency {
     pub mode: DependencyMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DependencyMode {
     Auto,
+    /// The dependency edge requests a specific named product from the dep target,
+    /// overriding the rule's `dependencyProduct`. Well-known values are
+    /// `"sources"`, `"link"`, and `"runtime"`.
+    Named(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -450,7 +463,7 @@ impl Default for HostState {
 struct PendingTarget {
     kind: String,
     fields: BTreeMap<String, String>,
-    dep_ids: Vec<u32>,
+    dep_ids: Vec<(u32, Option<String>)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -825,18 +838,22 @@ pub fn load_workspace(root: &Path) -> Result<Workspace> {
         let deps = pending
             .dep_ids
             .iter()
-            .map(|dep_id| {
-                id_to_address
+            .map(|(dep_id, mode_str)| {
+                let addr = id_to_address
                     .get(dep_id)
                     .ok_or_else(|| {
                         anyhow::anyhow!(
                             "dep id {dep_id} has no address (not exported from any BUILD.js)"
                         )
-                    })
-                    .map(|addr| Dependency {
-                        address: addr.to_string(),
-                        mode: DependencyMode::Auto,
-                    })
+                    })?;
+                let mode = match mode_str.as_deref() {
+                    None | Some("auto") => DependencyMode::Auto,
+                    Some(m) => DependencyMode::Named(m.to_owned()),
+                };
+                Ok(Dependency {
+                    address: addr.to_string(),
+                    mode,
+                })
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -864,7 +881,8 @@ fn register_globals<'js>(ctx: Ctx<'js>, state: Arc<Mutex<HostState>>) -> rquickj
     let globals = ctx.globals();
 
     // ------------------------------------------------------------------
-    // __host_target(kind, fields, depIds) → { __imp: true, __id: N }
+    // __host_target(kind, fields, depIds, depModes) → { __imp: true, __id: N }
+    // depIds: Array<number>, depModes: Array<string|null> (parallel arrays)
     // ------------------------------------------------------------------
     let state_t = Arc::clone(&state);
     let host_target = Function::new(
@@ -872,7 +890,8 @@ fn register_globals<'js>(ctx: Ctx<'js>, state: Arc<Mutex<HostState>>) -> rquickj
         move |ctx: Ctx<'js>,
               kind: String,
               fields: Object<'js>,
-              dep_ids: Array<'js>|
+              dep_ids: Array<'js>,
+              dep_modes: Array<'js>|
               -> rquickjs::Result<Object<'js>> {
             let mut hs = state_t.lock().unwrap();
             let id = hs.next_id;
@@ -886,12 +905,18 @@ fn register_globals<'js>(ctx: Ctx<'js>, state: Arc<Mutex<HostState>>) -> rquickj
                 field_map.insert(k, s);
             }
 
-            // Extract numeric dep IDs from the JS array.
+            // Extract (dep_id, mode) pairs from the two parallel arrays.
             let len = dep_ids.len();
-            let mut dep_id_list = Vec::with_capacity(len);
+            let mut dep_id_list: Vec<(u32, Option<String>)> = Vec::with_capacity(len);
             for i in 0..len {
                 let dep_id: u32 = dep_ids.get(i)?;
-                dep_id_list.push(dep_id);
+                let mode_val: Value = dep_modes.get(i)?;
+                let mode = if mode_val.is_null() || mode_val.is_undefined() {
+                    None
+                } else {
+                    Some(mode_val.get::<String>()?)
+                };
+                dep_id_list.push((dep_id, mode));
             }
 
             hs.pending.insert(
@@ -1385,26 +1410,28 @@ impl Planner<'_> {
         if rule.requires_own_sources && product != "sources" {
             dependencies.push(self.request(&target.address, "sources")?);
         }
-        match &rule.dependency_product {
-            DependencyProduct::None => {}
-            DependencyProduct::Named(dep_product) => {
-                let dep_product = dep_product.clone();
-                for dep in &target.dependencies {
-                    dependencies.push(self.request(&dep.address, &dep_product)?);
-                }
-            }
-            DependencyProduct::Default => {
-                for dep in &target.dependencies {
-                    let dep_target = self.workspace.targets.get(&dep.address).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "{} depends on missing target {}",
-                            target.address,
-                            dep.address
-                        )
-                    })?;
-                    let prod = self.default_product(dep_target)?;
-                    dependencies.push(self.request(&dep.address, &prod)?);
-                }
+        for dep in &target.dependencies {
+            // A named-mode edge overrides the rule's dependencyProduct.
+            let dep_prod = match &dep.mode {
+                DependencyMode::Named(mode) => Some(mode.clone()),
+                DependencyMode::Auto => match &rule.dependency_product {
+                    DependencyProduct::None => None,
+                    DependencyProduct::Named(p) => Some(p.clone()),
+                    DependencyProduct::Default => {
+                        let dep_target =
+                            self.workspace.targets.get(&dep.address).ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "{} depends on missing target {}",
+                                    target.address,
+                                    dep.address
+                                )
+                            })?;
+                        Some(self.default_product(dep_target)?)
+                    }
+                },
+            };
+            if let Some(prod) = dep_prod {
+                dependencies.push(self.request(&dep.address, &prod)?);
             }
         }
 
@@ -2785,7 +2812,7 @@ pub fn format_dependencies(
 
     for target in targets {
         let mut visited = BTreeSet::new();
-        format_dep_tree(workspace, target, "", true, &mut visited, true, w)?;
+        format_dep_tree(workspace, target, "", true, &mut visited, true, None, w)?;
     }
     Ok(())
 }
@@ -2797,23 +2824,29 @@ fn format_dep_tree(
     is_last: bool,
     visited: &mut BTreeSet<String>,
     is_root: bool,
+    edge_mode: Option<&DependencyMode>,
     w: &mut String,
 ) -> Result<()> {
     use std::fmt::Write;
     let already = visited.contains(&target.address);
 
+    let mode_suffix = match edge_mode {
+        Some(DependencyMode::Named(m)) => format!(" [{}]", m),
+        _ => String::new(),
+    };
+
     if is_root {
         if already {
-            writeln!(w, "{} (*)", target.address)?;
+            writeln!(w, "{}{} (*)", target.address, mode_suffix)?;
         } else {
-            writeln!(w, "{}", target.address)?;
+            writeln!(w, "{}{}", target.address, mode_suffix)?;
         }
     } else {
         let marker = if is_last { "└── " } else { "├── " };
         if already {
-            writeln!(w, "{}{}{} (*)", prefix, marker, target.address)?;
+            writeln!(w, "{}{}{}{} (*)", prefix, marker, target.address, mode_suffix)?;
         } else {
-            writeln!(w, "{}{}{}", prefix, marker, target.address)?;
+            writeln!(w, "{}{}{}{}", prefix, marker, target.address, mode_suffix)?;
         }
     }
 
@@ -2839,15 +2872,20 @@ fn format_dep_tree(
                 dep_is_last,
                 visited,
                 false,
+                Some(&dep.mode),
                 w,
             )?;
         } else {
-            let marker = if dep_is_last {
-                "└── "
-            } else {
-                "├── "
+            let marker = if dep_is_last { "└── " } else { "├── " };
+            let mode_sfx = match &dep.mode {
+                DependencyMode::Named(m) => format!(" [{}]", m),
+                DependencyMode::Auto => String::new(),
             };
-            writeln!(w, "{}{}{} <missing>", next_prefix, marker, dep.address)?;
+            writeln!(
+                w,
+                "{}{}{}{} <missing>",
+                next_prefix, marker, dep.address, mode_sfx
+            )?;
         }
     }
     Ok(())
