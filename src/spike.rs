@@ -1300,9 +1300,23 @@ fn select_roots<'a>(
 ) -> Result<Vec<&'a Target>> {
     let mut selected = BTreeMap::new();
     if selectors.is_empty() {
-        for target in workspace.targets.values() {
-            if goal_product_for_kind(workspace, goal, &target.kind).is_some() {
-                selected.insert(target.address.as_str(), target);
+        // If the workspace exports a `//:default` target, it acts as the
+        // implicit root for selector-less invocations. Otherwise every target
+        // that has a product for the current goal is selected.
+        if let Some(default_target) = workspace.targets.get("//:default") {
+            if goal_product_for_kind(workspace, goal, &default_target.kind).is_none() {
+                bail!(
+                    "//:default has no {} product; add a rule for kind '{}'",
+                    goal.name,
+                    default_target.kind
+                );
+            }
+            selected.insert(default_target.address.as_str(), default_target);
+        } else {
+            for target in workspace.targets.values() {
+                if goal_product_for_kind(workspace, goal, &target.kind).is_some() {
+                    selected.insert(target.address.as_str(), target);
+                }
             }
         }
     } else {

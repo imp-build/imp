@@ -171,7 +171,7 @@ Generalise beyond `build` without adding goal-specific Rust branching.
 - [x] Implement `test`, `fmt`, `lint`, `package`, and `run` as product requests.
 - [x] Extend dependency modes beyond `auto`, initially `sources`, `link`, and
   `runtime`.
-- Decide whether a selector-less goal means all buildable targets or an
+- [x] Decide whether a selector-less goal means all buildable targets or an
   explicit workspace default target such as `//:default`.
 
 Acceptance: an extension adds a new goal and another adds a new target type
