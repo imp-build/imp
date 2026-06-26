@@ -123,15 +123,18 @@ JS again.
 
 Execute the task graph locally before adding any remote system.
 
-- Add `imp build` execution for planned actions while retaining `imp plan`
-  as a pure inspection command.
+- [x] Add `imp build --planned` execution for planned actions.
+- [x] Keep `imp plan` as a pure inspection command by default.
 - [x] Add local execution for planned actions through `imp plan --execute`
   while the command migration path is decided.
-- Stream process output through the existing progress UI.
+- [x] Stream process stdout through the existing progress UI.
+- [x] Stream process stderr through the existing progress UI.
 - [x] Report missing declared file, directory, and manifest outputs as errors.
-- Materialise declared outputs atomically.
+- Materialise declared file outputs atomically.
+- Materialise declared directory outputs atomically.
 - [x] Add failure propagation for failed local commands.
-- Add cancellation and bounded parallelism.
+- Add cancellation for in-flight task execution.
+- Add bounded parallelism for ready tasks.
 - [x] Add deterministic dependency ordering for observable execution output.
 - [x] Introduce a no-op/dry-run executor for planner tests.
 

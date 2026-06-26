@@ -9,7 +9,7 @@ mod workspace;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
 use commands::BuildMode;
@@ -103,6 +103,11 @@ enum Cmd {
         /// Build only this target
         #[arg(long)]
         target: Option<String>,
+        /// Execute the QuickJS planned build graph instead of the legacy project build
+        #[arg(long)]
+        planned: bool,
+        /// Planned target selectors; only valid with --planned
+        selectors: Vec<String>,
     },
     /// Build and run ottar
     Run {
@@ -183,7 +188,15 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
             execute,
             dry_run,
         } => {
-            return cmd_plan(goal, selectors, dot, json.as_deref(), *execute, *dry_run);
+            return cmd_plan(
+                goal,
+                selectors,
+                dot,
+                json.as_deref(),
+                *execute,
+                *dry_run,
+                tree,
+            );
         }
         Cmd::Targets { selectors } => {
             return cmd_targets(selectors);
@@ -193,6 +206,14 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
         }
         Cmd::Rules => {
             return cmd_rules();
+        }
+        Cmd::Build {
+            target,
+            planned: true,
+            selectors,
+            ..
+        } => {
+            return cmd_build_planned(target.as_deref(), selectors, tree);
         }
         _ => {}
     }
@@ -283,7 +304,18 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
 
         Cmd::Check { path } => commands::build::cmd_check(env, path, tree).await,
 
-        Cmd::Build { mode, target } => {
+        Cmd::Build {
+            mode,
+            target,
+            planned,
+            selectors,
+        } => {
+            if *planned {
+                unreachable!("handled before environment setup");
+            }
+            if !selectors.is_empty() {
+                bail!("planned build selectors require --planned");
+            }
             commands::build::cmd_build(env, *mode, target.as_deref(), tree).await
         }
 
@@ -326,6 +358,7 @@ fn cmd_plan(
     json: Option<&std::path::Path>,
     execute: bool,
     dry_run: bool,
+    tree: &Tree,
 ) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
@@ -348,7 +381,22 @@ fn cmd_plan(
         } else {
             spike::ExecutionMode::Local
         };
-        let report = spike::execute_plan(&plan, &workspace_root, mode)?;
+        let mut progress = tree.add_child("execute plan");
+        let report = match spike::execute_plan_with_progress(
+            &plan,
+            &workspace_root,
+            mode,
+            Some(&mut progress),
+        ) {
+            Ok(report) => {
+                progress.done("done");
+                report
+            }
+            Err(error) => {
+                progress.fail("failed");
+                return Err(error);
+            }
+        };
         println!("  execution:");
         for task in report.tasks {
             let status = match task.status {
@@ -364,6 +412,55 @@ fn cmd_plan(
             println!("    {}: {status} {command}", task.task_id);
         }
     }
+    Ok(())
+}
+
+fn cmd_build_planned(target: Option<&str>, selectors: &[String], tree: &Tree) -> Result<()> {
+    let current_dir = std::env::current_dir().context("determine current directory")?;
+    let workspace_root = spike::find_workspace_root(&current_dir)?;
+    let workspace = spike::load_workspace(&workspace_root)?;
+
+    let mut requested = Vec::new();
+    if let Some(target) = target {
+        requested.push(target.to_owned());
+    }
+    requested.extend(selectors.iter().cloned());
+
+    let plan = spike::plan(&workspace, "build", &requested)?;
+    print!("{}", spike::render_text_plan(&plan));
+
+    let mut progress = tree.add_child("execute planned build");
+    let report = match spike::execute_plan_with_progress(
+        &plan,
+        &workspace_root,
+        spike::ExecutionMode::Local,
+        Some(&mut progress),
+    ) {
+        Ok(report) => {
+            progress.done("done");
+            report
+        }
+        Err(error) => {
+            progress.fail("failed");
+            return Err(error);
+        }
+    };
+
+    println!("  execution:");
+    for task in report.tasks {
+        let status = match task.status {
+            spike::TaskExecutionStatus::WouldRun => "would run",
+            spike::TaskExecutionStatus::Ran => "ran",
+            spike::TaskExecutionStatus::Noop => "noop",
+        };
+        let command = if task.command.is_empty() {
+            String::from("<no argv>")
+        } else {
+            task.command.join(" ")
+        };
+        println!("    {}: {status} {command}", task.task_id);
+    }
+
     Ok(())
 }
 

@@ -6,9 +6,12 @@
 //! DAG without executing it.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::process::{Command, Stdio};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use rquickjs::{
@@ -1141,22 +1144,58 @@ pub fn render_text_plan(plan: &Plan) -> String {
 // Execution
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 pub fn execute_plan(
     plan: &Plan,
     workspace_root: &Path,
     mode: ExecutionMode,
 ) -> Result<ExecutionReport> {
+    execute_plan_with_progress(plan, workspace_root, mode, None)
+}
+
+pub fn execute_plan_with_progress(
+    plan: &Plan,
+    workspace_root: &Path,
+    mode: ExecutionMode,
+    mut progress: Option<&mut prodash::tree::Item>,
+) -> Result<ExecutionReport> {
     let ordered = ordered_tasks(plan)?;
     let mut executions = Vec::with_capacity(ordered.len());
 
     for task in ordered {
+        let mut task_progress = progress
+            .as_deref_mut()
+            .map(|progress| progress.add_child(format!("execute {}", task.id)));
         let command = task.action.argv.clone();
         let status = match mode {
-            ExecutionMode::DryRun => TaskExecutionStatus::WouldRun,
-            ExecutionMode::Local if command.is_empty() => TaskExecutionStatus::Noop,
+            ExecutionMode::DryRun => {
+                if let Some(progress) = task_progress.as_mut() {
+                    progress.done("would run");
+                }
+                TaskExecutionStatus::WouldRun
+            }
+            ExecutionMode::Local if command.is_empty() => {
+                if let Some(progress) = task_progress.as_mut() {
+                    progress.done("noop");
+                }
+                TaskExecutionStatus::Noop
+            }
             ExecutionMode::Local => {
-                run_local_task(task, workspace_root)?;
-                check_declared_outputs(task, workspace_root)?;
+                if let Err(error) = run_local_task(task, workspace_root, task_progress.as_ref()) {
+                    if let Some(progress) = task_progress.as_mut() {
+                        progress.fail("failed");
+                    }
+                    return Err(error);
+                }
+                if let Err(error) = check_declared_outputs(task, workspace_root) {
+                    if let Some(progress) = task_progress.as_mut() {
+                        progress.fail("missing output");
+                    }
+                    return Err(error);
+                }
+                if let Some(progress) = task_progress.as_mut() {
+                    progress.done("done");
+                }
                 TaskExecutionStatus::Ran
             }
         };
@@ -1217,7 +1256,11 @@ fn ordered_tasks(plan: &Plan) -> Result<Vec<&Task>> {
     Ok(ordered)
 }
 
-fn run_local_task(task: &Task, workspace_root: &Path) -> Result<()> {
+fn run_local_task(
+    task: &Task,
+    workspace_root: &Path,
+    progress: Option<&prodash::tree::Item>,
+) -> Result<()> {
     let cwd = task
         .action
         .cwd
@@ -1230,20 +1273,53 @@ fn run_local_task(task: &Task, workspace_root: &Path) -> Result<()> {
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("{} has no argv", task.id))?;
 
-    let output = Command::new(program)
+    let mut child = Command::new(program)
         .args(args)
         .current_dir(&cwd)
         .envs(&task.action.env)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("execute {} in {}", task.id, cwd.display()))?;
 
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("{} stdout was not piped", task.id))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("{} stderr was not piped", task.id))?;
+    let (sender, receiver) = mpsc::channel();
+    let stdout_thread = spawn_output_reader(stdout, ProcessStream::Stdout, sender.clone());
+    let stderr_thread = spawn_output_reader(stderr, ProcessStream::Stderr, sender);
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let status = loop {
+        drain_process_lines(&receiver, progress, &mut stdout, &mut stderr);
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("wait for {}", task.id))?
+        {
+            break status;
+        }
+        match receiver.recv_timeout(Duration::from_millis(20)) {
+            Ok(line) => record_process_line(line, progress, &mut stdout, &mut stderr),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {}
+        }
+    };
+
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+    drain_process_lines(&receiver, progress, &mut stdout, &mut stderr);
+
+    if !status.success() {
         bail!(
             "{} failed with status {}\nstdout:\n{}\nstderr:\n{}",
             task.id,
-            output.status,
+            status,
             stdout.trim_end(),
             stderr.trim_end()
         );
@@ -1526,6 +1602,79 @@ fn parse_dependency(scope: &str, value: &str) -> Result<Dependency> {
         address,
         mode: DependencyMode::Auto,
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProcessStream {
+    Stdout,
+    Stderr,
+}
+
+struct ProcessLine {
+    stream: ProcessStream,
+    line: String,
+}
+
+fn spawn_output_reader<R: Read + Send + 'static>(
+    reader: R,
+    stream: ProcessStream,
+    sender: mpsc::Sender<ProcessLine>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let reader = BufReader::new(reader);
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    if sender.send(ProcessLine { stream, line }).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(ProcessLine {
+                        stream: ProcessStream::Stderr,
+                        line: format!("failed to read process output: {error}"),
+                    });
+                    break;
+                }
+            }
+        }
+    })
+}
+
+fn drain_process_lines(
+    receiver: &mpsc::Receiver<ProcessLine>,
+    progress: Option<&prodash::tree::Item>,
+    stdout: &mut String,
+    stderr: &mut String,
+) {
+    while let Ok(line) = receiver.try_recv() {
+        record_process_line(line, progress, stdout, stderr);
+    }
+}
+
+fn record_process_line(
+    line: ProcessLine,
+    progress: Option<&prodash::tree::Item>,
+    stdout: &mut String,
+    stderr: &mut String,
+) {
+    let level = match line.stream {
+        ProcessStream::Stdout => prodash::messages::MessageLevel::Info,
+        ProcessStream::Stderr => prodash::messages::MessageLevel::Failure,
+    };
+    if let Some(progress) = progress {
+        progress.message(level, line.line.clone());
+    }
+    match line.stream {
+        ProcessStream::Stdout => {
+            stdout.push_str(&line.line);
+            stdout.push('\n');
+        }
+        ProcessStream::Stderr => {
+            stderr.push_str(&line.line);
+            stderr.push('\n');
+        }
+    }
 }
 
 fn lower_action(
@@ -1955,6 +2104,41 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         };
 
         let report = execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
+        assert_eq!(report.tasks[0].status, TaskExecutionStatus::Ran);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("build/out.txt")).unwrap(),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn progress_executor_streams_process_output_path() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec!["write".to_owned()],
+            tasks: vec![executable_task(
+                "write",
+                &[],
+                &[
+                    "sh",
+                    "-c",
+                    "printf stdout-line && printf '\\nstderr-line\\n' >&2 && mkdir -p build && printf ok > build/out.txt",
+                ],
+                Some("build/out.txt"),
+            )],
+        };
+        let progress_root = prodash::tree::Root::new();
+        let mut progress = progress_root.add_child("execute plan");
+
+        let report = execute_plan_with_progress(
+            &plan,
+            root.path(),
+            ExecutionMode::Local,
+            Some(&mut progress),
+        )
+        .unwrap();
+
         assert_eq!(report.tasks[0].status, TaskExecutionStatus::Ran);
         assert_eq!(
             std::fs::read_to_string(root.path().join("build/out.txt")).unwrap(),
