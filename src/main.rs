@@ -429,6 +429,7 @@ fn cmd_plan(
             .with_platform(platform);
         let report = match spike::execute_plan_with_options(
             &plan,
+            Some(&workspace),
             &workspace_root,
             options,
             Some(&mut progress),
@@ -484,6 +485,7 @@ fn cmd_build_planned(
     let mut progress = tree.add_child("execute planned build");
     let report = match spike::execute_plan_with_options(
         &plan,
+        Some(&workspace),
         &workspace_root,
         spike::ExecutionOptions::new(spike::ExecutionMode::Local, jobs),
         Some(&mut progress),

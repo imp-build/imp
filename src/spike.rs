@@ -383,6 +383,7 @@ pub struct Task {
     pub inputs: Vec<Artifact>,
     pub outputs: Vec<Artifact>,
     pub action: Action,
+    pub exec_fn: Option<String>,
     pub dependencies: Vec<String>,
 }
 
@@ -411,7 +412,7 @@ pub struct Workspace {
 pub struct LiveWorkspace {
     pub workspace: Workspace,
     pub(super) runtime: Runtime,
-    pub(super) ctx: JsContext,
+    pub(super) ctx: Mutex<JsContext>,
 }
 
 impl std::fmt::Debug for LiveWorkspace {
@@ -1070,7 +1071,7 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
             platforms: hs.platforms.clone(),
         },
         runtime: rt,
-        ctx,
+        ctx: Mutex::new(ctx),
     })
 }
 
@@ -1843,6 +1844,7 @@ impl Planner<'_> {
                 inputs,
                 outputs,
                 action,
+                exec_fn: rule.exec_fn.clone(),
                 dependencies,
             },
         );
@@ -1924,7 +1926,7 @@ pub fn execute_plan(
     workspace_root: &Path,
     mode: ExecutionMode,
 ) -> Result<ExecutionReport> {
-    execute_plan_with_options(plan, workspace_root, ExecutionOptions::new(mode, 1), None)
+    execute_plan_with_options(plan, None, workspace_root, ExecutionOptions::new(mode, 1), None)
 }
 
 #[allow(dead_code)]
@@ -1936,6 +1938,7 @@ pub fn execute_plan_with_progress(
 ) -> Result<ExecutionReport> {
     execute_plan_with_options(
         plan,
+        None,
         workspace_root,
         ExecutionOptions::new(mode, 1),
         progress.as_deref_mut(),
@@ -1944,14 +1947,28 @@ pub fn execute_plan_with_progress(
 
 pub fn execute_plan_with_options(
     plan: &Plan,
+    live: Option<&LiveWorkspace>,
     workspace_root: &Path,
     options: ExecutionOptions,
     progress: Option<&mut prodash::tree::Item>,
 ) -> Result<ExecutionReport> {
     let ordered = ordered_tasks(plan)?;
+
+    if options.jobs > 1 {
+        for task in &ordered {
+            if task.exec_fn.is_some() {
+                bail!(
+                    "task {} uses an exec function; exec is not supported in parallel mode",
+                    task.id
+                );
+            }
+        }
+    }
+
     let executions = if options.jobs <= 1 {
         execute_ordered_tasks_sequentially(
             &ordered,
+            live,
             workspace_root,
             options.mode,
             &options.platform,
@@ -1966,6 +1983,7 @@ pub fn execute_plan_with_options(
 
 fn execute_ordered_tasks_sequentially(
     ordered: &[&Task],
+    live: Option<&LiveWorkspace>,
     workspace_root: &Path,
     mode: ExecutionMode,
     active_platform: &str,
@@ -1980,16 +1998,22 @@ fn execute_ordered_tasks_sequentially(
         let mut task_progress = progress
             .as_deref_mut()
             .map(|progress| progress.add_child(format!("execute {}", task.id)));
-        let (execution, summary) = execute_one_task(
-            task,
-            workspace_root,
-            mode,
-            active_platform,
-            named_caches,
-            &summaries,
-            task_progress.as_mut(),
-            &cancellation,
-        )?;
+
+        let (execution, summary) = if let (Some(live), true) = (live, task.exec_fn.is_some()) {
+            execute_task_with_exec(task, live, workspace_root)?
+        } else {
+            execute_one_task(
+                task,
+                workspace_root,
+                mode,
+                active_platform,
+                named_caches,
+                &summaries,
+                task_progress.as_mut(),
+                &cancellation,
+            )?
+        };
+
         summaries.insert(task.id.clone(), summary);
         executions.push(execution);
     }
@@ -3908,6 +3932,56 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
     })
 }
 
+/// Build a JS `target` object for an `exec(target, ctx)` call.
+fn build_exec_target<'js>(ctx: Ctx<'js>, task: &Task) -> rquickjs::Result<Object<'js>> {
+    let obj = Object::new(ctx)?;
+    obj.set("id", task.id.as_str())?;
+    obj.set("target", task.target.as_str())?;
+    obj.set("product", task.product.as_str())?;
+    Ok(obj)
+}
+
+/// Execute a task whose rule has an `exec` function.
+///
+/// The exec function is looked up from the QuickJS globals (registered during
+/// workspace loading) and called with a `target` and `ctx` JS object.
+fn execute_task_with_exec(
+    task: &Task,
+    live: &LiveWorkspace,
+    workspace_root: &Path,
+) -> Result<(TaskExecution, TaskCacheSummary)> {
+    let exec_fn_name = task
+        .exec_fn
+        .as_deref()
+        .expect("execute_task_with_exec called on task without exec_fn");
+
+    let ctx_guard = live.ctx.lock().unwrap();
+    ctx_guard
+        .with(|ctx| -> rquickjs::Result<()> {
+            let exec_fn: Function = ctx.globals().get(exec_fn_name)?;
+            let target_obj = build_exec_target(ctx.clone(), task)?;
+            let ctx_obj = build_exec_ctx(ctx, workspace_root)?;
+            exec_fn.call::<_, ()>((target_obj, ctx_obj))?;
+            Ok(())
+        })
+        .map_err(|e| {
+            anyhow::anyhow!("exec function '{exec_fn_name}' failed for {}: {e}", task.id)
+        })?;
+
+    let task_key = digest_bytes(task.id.as_bytes());
+    Ok((
+        TaskExecution {
+            task_id: task.id.clone(),
+            status: TaskExecutionStatus::Ran,
+            command: task.action.argv.clone(),
+        },
+        TaskCacheSummary {
+            task_id: task.id.clone(),
+            task_key,
+        },
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -4058,6 +4132,7 @@ export const ui = asset({ srcs: ["**/*.png"] });
                 impure: false,
                 force_cache: false,
             },
+            exec_fn: None,
             outputs,
             dependencies: deps.iter().map(|dep| (*dep).to_owned()).collect(),
         }
@@ -4282,6 +4357,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
 
         let report = execute_plan_with_options(
             &plan,
+            None,
             root.path(),
             ExecutionOptions::new(ExecutionMode::Local, 2),
             None,
@@ -4331,6 +4407,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
 
         let report = execute_plan_with_options(
             &plan,
+            None,
             root.path(),
             ExecutionOptions::new(ExecutionMode::Local, 2),
             None,
@@ -4374,6 +4451,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             "{:#}",
             execute_plan_with_options(
                 &plan,
+                None,
                 root.path(),
                 ExecutionOptions::new(ExecutionMode::Local, 2),
                 None,
@@ -4406,6 +4484,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             "{:#}",
             execute_plan_with_options(
                 &plan,
+                None,
                 root.path(),
                 ExecutionOptions::new(ExecutionMode::Local, 2),
                 None,
@@ -4439,6 +4518,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
 
         let report = execute_plan_with_options(
             &plan,
+            None,
             root.path(),
             ExecutionOptions::new(ExecutionMode::Local, 1),
             None,
