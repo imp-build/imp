@@ -24,7 +24,6 @@ use rquickjs::{
     Array, CatchResultExt, Context as JsContext, Ctx, Filter, Function, Module, Object, Runtime,
     Value,
 };
-use rquickjs_core::Persistent;
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -83,7 +82,8 @@ export function rule(opts) {
     __host_rule(
         opts.kind, opts.product, opts.action,
         opts.requiresOwnSources === true,
-        opts.dependencyProduct !== undefined ? opts.dependencyProduct : null
+        opts.dependencyProduct !== undefined ? opts.dependencyProduct : null,
+        opts.exec || null
     );
 }
 
@@ -287,6 +287,9 @@ pub struct Rule {
     pub action: ActionSpec,
     pub requires_own_sources: bool,
     pub dependency_product: DependencyProduct,
+    /// Name of the JS global storing this rule's `exec(target, ctx)` function,
+    /// if one was provided. `None` means the rule uses the legacy `action` path.
+    pub exec_fn: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -409,7 +412,6 @@ pub struct LiveWorkspace {
     pub workspace: Workspace,
     pub(super) runtime: Runtime,
     pub(super) ctx: JsContext,
-    pub(super) exec_fns: Vec<Persistent<Function<'static>>>,
 }
 
 impl std::fmt::Debug for LiveWorkspace {
@@ -418,7 +420,6 @@ impl std::fmt::Debug for LiveWorkspace {
             .field("workspace", &self.workspace)
             .field("runtime", &"Runtime { .. }")
             .field("ctx", &"Context { .. }")
-            .field("exec_fns", &format_args!("Vec<{}>", self.exec_fns.len()))
             .finish()
     }
 }
@@ -600,6 +601,7 @@ pub struct CacheExplanation {
 
 struct HostState {
     next_id: u32,
+    next_exec: u32,
     pending: BTreeMap<u32, PendingTarget>,
     rules: BTreeMap<(String, String), Rule>,
     named_caches: BTreeMap<String, NamedCache>,
@@ -638,6 +640,7 @@ impl Default for HostState {
         );
         Self {
             next_id: 0,
+            next_exec: 0,
             pending: BTreeMap::new(),
             rules: BTreeMap::new(),
             named_caches: BTreeMap::new(),
@@ -1068,7 +1071,6 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
         },
         runtime: rt,
         ctx,
-        exec_fns: Vec::new(),
     })
 }
 
@@ -1143,11 +1145,13 @@ fn register_globals<'js>(
     let state_r = Arc::clone(&state);
     let host_rule = Function::new(
         ctx.clone(),
-        move |kind: String,
+        move |ctx: Ctx<'js>,
+              kind: String,
               product: String,
               action_value: Value<'js>,
               requires_own_sources: bool,
-              dep_prod_val: Value<'js>|
+              dep_prod_val: Value<'js>,
+              exec_val: Value<'js>|
               -> rquickjs::Result<()> {
             let action = parse_rule_action(action_value)?;
             let dependency_product = if dep_prod_val.is_null() || dep_prod_val.is_undefined() {
@@ -1161,10 +1165,21 @@ fn register_globals<'js>(
                 }
             };
 
+            let exec_fn = if exec_val.is_null() || exec_val.is_undefined() {
+                None
+            } else {
+                let name = {
+                    let mut hs = state_r.lock().unwrap();
+                    let n = format!("__imp_exec_{}", hs.next_exec);
+                    hs.next_exec += 1;
+                    n
+                };
+                ctx.globals().set(name.as_str(), exec_val)?;
+                Some(name)
+            };
+
             let key = (kind.clone(), product.clone());
             let mut hs = state_r.lock().unwrap();
-            // Silently ignore duplicate rules (e.g., when a plugin is imported
-            // by both workspace.js and a BUILD.js).
             if !hs.rules.contains_key(&key) {
                 hs.rules.insert(
                     key,
@@ -1174,6 +1189,7 @@ fn register_globals<'js>(
                         action,
                         requires_own_sources,
                         dependency_product,
+                        exec_fn,
                     },
                 );
             }

@@ -21,7 +21,6 @@ md5          = "0.7"
 tempfile     = "3"
 futures      = { version = "0.3", default-features = false, features = ["std"] }
 rquickjs     = { version = "0.8", features = ["loader"] }
-rquickjs-core = { version = "0.8", default-features = false }
 
 [profile.dev]
 opt-level = 1

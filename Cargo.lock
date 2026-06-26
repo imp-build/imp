@@ -382,7 +382,6 @@ dependencies = [
  "prodash",
  "regex",
  "rquickjs",
- "rquickjs-core",
  "rusqlite",
  "serde",
  "serde_json",
