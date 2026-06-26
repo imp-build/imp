@@ -9,7 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc, Mutex,
+};
 use std::thread;
 use std::time::Duration;
 
@@ -21,6 +24,8 @@ use rquickjs::{
     Value,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use walkdir::WalkDir;
 
 const WORKSPACE_FILE: &str = "imp.workspace.js";
@@ -1230,6 +1235,7 @@ fn execute_ordered_tasks_sequentially(
     mut progress: Option<&mut prodash::tree::Item>,
 ) -> Result<Vec<TaskExecution>> {
     let mut executions = Vec::with_capacity(ordered.len());
+    let cancellation = AtomicBool::new(false);
 
     for task in ordered {
         let mut task_progress = progress
@@ -1240,6 +1246,7 @@ fn execute_ordered_tasks_sequentially(
             workspace_root,
             mode,
             task_progress.as_mut(),
+            &cancellation,
         )?);
     }
 
@@ -1264,36 +1271,45 @@ fn execute_ordered_tasks_parallel(
     let mut running = BTreeSet::new();
     let mut executions: Vec<Option<TaskExecution>> = vec![None; ordered.len()];
     let (sender, receiver) = mpsc::channel();
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let mut first_error = None;
 
     while completed.len() < ordered.len() {
-        let ready_ids: Vec<String> = task_by_id
-            .iter()
-            .filter_map(|(id, task)| {
-                let ready = !running.contains(*id)
-                    && !completed.contains(*id)
-                    && task.dependencies.iter().all(|dep| completed.contains(dep));
-                ready.then(|| (*id).to_owned())
-            })
-            .take(options.jobs.saturating_sub(running.len()))
-            .collect();
+        if first_error.is_none() {
+            let ready_ids: Vec<String> = task_by_id
+                .iter()
+                .filter_map(|(id, task)| {
+                    let ready = !running.contains(*id)
+                        && !completed.contains(*id)
+                        && task.dependencies.iter().all(|dep| completed.contains(dep));
+                    ready.then(|| (*id).to_owned())
+                })
+                .take(options.jobs.saturating_sub(running.len()))
+                .collect();
 
-        for id in ready_ids {
-            let task = task_by_id
-                .remove(id.as_str())
-                .expect("ready id came from pending tasks");
-            running.insert(id.clone());
-            let sender = sender.clone();
-            let workspace_root = workspace_root.to_owned();
-            let mode = options.mode;
-            let task = task.clone();
-            thread::spawn(move || {
-                let id = task.id.clone();
-                let result = execute_one_task(&task, &workspace_root, mode, None);
-                let _ = sender.send((id, result));
-            });
+            for id in ready_ids {
+                let task = task_by_id
+                    .remove(id.as_str())
+                    .expect("ready id came from pending tasks");
+                running.insert(id.clone());
+                let sender = sender.clone();
+                let workspace_root = workspace_root.to_owned();
+                let mode = options.mode;
+                let task = task.clone();
+                let cancellation = Arc::clone(&cancellation);
+                thread::spawn(move || {
+                    let id = task.id.clone();
+                    let result =
+                        execute_one_task(&task, &workspace_root, mode, None, &cancellation);
+                    let _ = sender.send((id, result));
+                });
+            }
         }
 
         if running.is_empty() {
+            if let Some(error) = first_error {
+                return Err(error);
+            }
             let unresolved = task_by_id.keys().copied().collect::<Vec<_>>().join(", ");
             bail!("task graph has unresolved dependencies or a cycle: {unresolved}");
         }
@@ -1302,12 +1318,25 @@ fn execute_ordered_tasks_parallel(
             .recv()
             .context("parallel task worker channel closed unexpectedly")?;
         running.remove(id.as_str());
-        let execution = result?;
-        let index = *plan_index
-            .get(id.as_str())
-            .ok_or_else(|| anyhow::anyhow!("completed unknown task {id}"))?;
-        executions[index] = Some(execution);
-        completed.insert(id);
+        match result {
+            Ok(execution) => {
+                let index = *plan_index
+                    .get(id.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("completed unknown task {id}"))?;
+                executions[index] = Some(execution);
+                completed.insert(id);
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    cancellation.store(true, Ordering::SeqCst);
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+
+    if let Some(error) = first_error {
+        return Err(error);
     }
 
     executions
@@ -1321,6 +1350,7 @@ fn execute_one_task(
     workspace_root: &Path,
     mode: ExecutionMode,
     mut progress: Option<&mut prodash::tree::Item>,
+    cancellation: &AtomicBool,
 ) -> Result<TaskExecution> {
     let command = task.action.argv.clone();
     let status = match mode {
@@ -1337,7 +1367,9 @@ fn execute_one_task(
             TaskExecutionStatus::Noop
         }
         ExecutionMode::Local => {
-            if let Err(error) = run_local_task(task, workspace_root, progress.as_deref()) {
+            if let Err(error) =
+                run_local_task(task, workspace_root, progress.as_deref(), cancellation)
+            {
                 if let Some(progress) = progress.as_mut() {
                     progress.fail("failed");
                 }
@@ -1407,7 +1439,12 @@ fn run_local_task(
     task: &Task,
     workspace_root: &Path,
     progress: Option<&prodash::tree::Item>,
+    cancellation: &AtomicBool,
 ) -> Result<()> {
+    if cancellation.load(Ordering::SeqCst) {
+        bail!("{} canceled before execution", task.id);
+    }
+
     let sandbox = prepare_sandbox(task, workspace_root)?;
     let manifest_path = sandbox.sandbox_root.join("imp-sandbox.json");
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&sandbox)?)
@@ -1427,7 +1464,8 @@ fn run_local_task(
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("{} has no argv", task.id))?;
 
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .current_dir(&cwd)
         .envs(&task.action.env)
@@ -1435,7 +1473,10 @@ fn run_local_task(
         .env("IMP_CACHE_ROOT", &sandbox.cache_root)
         .env("IMP_SANDBOX_MANIFEST", &manifest_path)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
         .spawn()
         .with_context(|| format!("execute {} in {}", task.id, cwd.display()))?;
 
@@ -1454,6 +1495,14 @@ fn run_local_task(
     let mut stdout = String::new();
     let mut stderr = String::new();
     let status = loop {
+        if cancellation.load(Ordering::SeqCst) {
+            terminate_child(&mut child);
+            let _ = child.wait();
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            drain_process_lines(&receiver, progress, &mut stdout, &mut stderr);
+            bail!("{} canceled", task.id);
+        }
         drain_process_lines(&receiver, progress, &mut stdout, &mut stderr);
         if let Some(status) = child
             .try_wait()
@@ -1484,6 +1533,22 @@ fn run_local_task(
 
     copy_sandbox_outputs(task, &sandbox)?;
     Ok(())
+}
+
+fn terminate_child(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let group = format!("-{}", child.id());
+        if Command::new("kill")
+            .args(["-TERM", "--", group.as_str()])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+    }
+    let _ = child.kill();
 }
 
 fn prepare_sandbox(task: &Task, workspace_root: &Path) -> Result<SandboxManifest> {
@@ -2577,6 +2642,43 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             .unwrap_err()
         );
         assert!(error.contains("failed with status"), "{error}");
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn parallel_executor_cancels_running_siblings_after_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("slow.marker");
+        let failing_id = unique_task_id("fail-fast");
+        let slow_id = unique_task_id("slow-sibling");
+        let slow_cmd = format!("sleep 1 && printf slow > {}", marker.display());
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![failing_id.clone(), slow_id.clone()],
+            tasks: vec![
+                executable_task(&failing_id, &[], &["sh", "-c", "exit 9"], None),
+                executable_task(&slow_id, &[], &["sh", "-c", &slow_cmd], None),
+            ],
+        };
+
+        let started = std::time::Instant::now();
+        let error = format!(
+            "{:#}",
+            execute_plan_with_options(
+                &plan,
+                root.path(),
+                ExecutionOptions::new(ExecutionMode::Local, 2),
+                None,
+            )
+            .unwrap_err()
+        );
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "cancellation waited for slow sibling to finish"
+        );
+        assert!(error.contains("failed with status"), "{error}");
+        std::thread::sleep(Duration::from_millis(1100));
         assert!(!marker.exists());
     }
 

@@ -138,7 +138,7 @@ Execute the task graph locally before adding any remote system.
 - Materialise declared file outputs atomically.
 - Materialise declared directory outputs atomically.
 - [x] Add failure propagation for failed local commands.
-- Add cancellation for in-flight task execution.
+- [x] Add cancellation for in-flight task execution.
 - [x] Add bounded parallelism for ready tasks.
 - [x] Add deterministic dependency ordering for observable execution output.
 - [x] Introduce a no-op/dry-run executor for planner tests.
