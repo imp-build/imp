@@ -135,8 +135,8 @@ Execute the task graph locally before adding any remote system.
 - [x] Copy declared file, directory, and manifest outputs to the local artifact
   cache.
 - [x] Report missing declared file, directory, and manifest outputs as errors.
-- Materialise declared file outputs atomically.
-- Materialise declared directory outputs atomically.
+- [x] Materialise declared file outputs atomically.
+- [x] Materialise declared directory outputs atomically.
 - [x] Add failure propagation for failed local commands.
 - [x] Add cancellation for in-flight task execution.
 - [x] Add bounded parallelism for ready tasks.

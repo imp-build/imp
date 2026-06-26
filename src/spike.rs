@@ -1718,7 +1718,7 @@ fn copy_sandbox_outputs(task: &Task, sandbox: &SandboxManifest) -> Result<()> {
                         output.sandbox_path.display()
                     );
                 }
-                copy_file(&output.sandbox_path, &output.cache_path)?;
+                publish_file_atomically(&output.sandbox_path, &output.cache_path)?;
             }
             "directory" => {
                 if !output.sandbox_path.is_dir() {
@@ -1728,7 +1728,7 @@ fn copy_sandbox_outputs(task: &Task, sandbox: &SandboxManifest) -> Result<()> {
                         output.sandbox_path.display()
                     );
                 }
-                copy_directory(&output.sandbox_path, &output.cache_path)?;
+                publish_directory_atomically(&output.sandbox_path, &output.cache_path)?;
             }
             "value" => {}
             other => bail!(
@@ -1738,6 +1738,61 @@ fn copy_sandbox_outputs(task: &Task, sandbox: &SandboxManifest) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn publish_file_atomically(source: &Path, destination: &Path) -> Result<()> {
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let temp = temp_sibling_path(destination, "tmp-file");
+    copy_file(source, &temp)?;
+    std::fs::rename(&temp, destination).with_context(|| {
+        format!(
+            "publish file {} to {}",
+            temp.display(),
+            destination.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn publish_directory_atomically(source: &Path, destination: &Path) -> Result<()> {
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let temp = temp_sibling_path(destination, "tmp-dir");
+    if temp.exists() {
+        std::fs::remove_dir_all(&temp).with_context(|| format!("remove {}", temp.display()))?;
+    }
+    copy_directory(source, &temp)?;
+    if destination.exists() {
+        std::fs::remove_dir_all(destination)
+            .with_context(|| format!("remove {}", destination.display()))?;
+    }
+    std::fs::rename(&temp, destination).with_context(|| {
+        format!(
+            "publish directory {} to {}",
+            temp.display(),
+            destination.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn temp_sibling_path(destination: &Path, suffix: &str) -> PathBuf {
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artifact");
+    let temp_name = format!(
+        ".{file_name}.{suffix}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    destination.with_file_name(temp_name)
 }
 
 fn copy_file(source: &Path, destination: &Path) -> Result<()> {
@@ -2342,6 +2397,13 @@ export const ui = asset({ srcs: ["**/*.png"] });
             .join(path)
     }
 
+    fn cache_task_root(task_id: &str) -> PathBuf {
+        cache_root()
+            .unwrap()
+            .join("artifacts")
+            .join(sanitize_path_component(task_id))
+    }
+
     // ---- Tests ---------------------------------------------------------
 
     #[test]
@@ -2731,6 +2793,14 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         assert_eq!(report.tasks[0].status, TaskExecutionStatus::Ran);
         assert_eq!(std::fs::read_to_string(cached).unwrap(), "ok");
         assert!(!root.path().join("build/out.txt").exists());
+
+        let cache_dir = cache_task_root(&task_id).join("build");
+        let temp_leftovers: Vec<_> = std::fs::read_dir(cache_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains("tmp-file"))
+            .collect();
+        assert!(temp_leftovers.is_empty());
     }
 
     #[test]
@@ -2769,6 +2839,49 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
 
         execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
         assert_eq!(std::fs::read_to_string(cached).unwrap(), "hello");
+    }
+
+    #[test]
+    fn local_executor_publishes_directory_outputs_atomically() {
+        let root = tempfile::tempdir().unwrap();
+        let task_id = unique_task_id("dir-output");
+        let cached_dir = cached_artifact_path(&task_id, "build/tree");
+        std::fs::create_dir_all(&cached_dir).unwrap();
+        std::fs::write(cached_dir.join("stale.txt"), "stale").unwrap();
+        let mut task = executable_task(
+            &task_id,
+            &[],
+            &[
+                "sh",
+                "-c",
+                "mkdir -p build/tree/nested && printf fresh > build/tree/nested/out.txt",
+            ],
+            None,
+        );
+        task.outputs = vec![Artifact {
+            id: format!("{task_id}:dir"),
+            kind: "directory".to_owned(),
+            path: Some("build/tree".to_owned()),
+            value: None,
+            producer: Some(task_id.clone()),
+        }];
+        task.action.outputs = task
+            .outputs
+            .iter()
+            .map(|artifact| artifact.id.clone())
+            .collect();
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![task_id.clone()],
+            tasks: vec![task],
+        };
+
+        execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(cached_dir.join("nested/out.txt")).unwrap(),
+            "fresh"
+        );
+        assert!(!cached_dir.join("stale.txt").exists());
     }
 
     #[test]
