@@ -57,7 +57,7 @@ enum Cmd {
         #[arg(long)]
         files: bool,
     },
-    /// Plan a target goal from workspace BUILD.scm files (Steel spike)
+    /// Plan a target goal from workspace BUILD.js files (QuickJS spike)
     Plan {
         /// Goal to plan; currently build
         goal: String,
@@ -66,18 +66,21 @@ enum Cmd {
         /// Graphviz DOT output path
         #[arg(long, default_value = "plan.dot")]
         dot: PathBuf,
+        /// JSON plan output path
+        #[arg(long)]
+        json: Option<PathBuf>,
     },
-    /// List targets in the workspace (Steel spike)
+    /// List targets in the workspace (QuickJS spike)
     Targets {
         /// Target addresses or names to select; defaults to all targets
         selectors: Vec<String>,
     },
-    /// List target dependencies (Steel spike)
+    /// List target dependencies (QuickJS spike)
     Dependencies {
         /// Target addresses or names to select; defaults to all root targets
         selectors: Vec<String>,
     },
-    /// List target types and rules in the workspace (Steel spike)
+    /// List target types and rules in the workspace (QuickJS spike)
     Rules,
     /// Format all Odin source files
     Fmt,
@@ -163,11 +166,16 @@ async fn run() -> Result<()> {
 }
 
 async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
-    // The operation-registry spike only evaluates the supplied Steel file. It
+    // The QuickJS spike only evaluates workspace definition files. It
     // must not acquire this project's toolchains or generate workspace files.
     match &cli.command {
-        Cmd::Plan { goal, selectors, dot } => {
-            return cmd_plan(goal, selectors, dot);
+        Cmd::Plan {
+            goal,
+            selectors,
+            dot,
+            json,
+        } => {
+            return cmd_plan(goal, selectors, dot, json.as_deref());
         }
         Cmd::Targets { selectors } => {
             return cmd_targets(selectors);
@@ -303,29 +311,27 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
     }
 }
 
-fn cmd_plan(goal: &str, selectors: &[String], dot: &std::path::Path) -> Result<()> {
+fn cmd_plan(
+    goal: &str,
+    selectors: &[String],
+    dot: &std::path::Path,
+    json: Option<&std::path::Path>,
+) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let workspace = spike::load_workspace(&workspace_root)?;
     let plan = spike::plan(&workspace, goal, selectors)?;
 
-    println!("{} plan:", plan.goal);
-    println!("  roots:");
-    for root in &plan.roots {
-        println!("    {root}");
-    }
-    println!("  tasks:");
-    for task in &plan.tasks {
-        let dependencies = if task.dependencies.is_empty() {
-            String::new()
-        } else {
-            format!(" ← {}", task.dependencies.join(", "))
-        };
-        println!("    {}: {}{}", task.id, task.action, dependencies);
-    }
+    print!("{}", spike::render_text_plan(&plan));
     std::fs::write(dot, spike::render_dot(&plan))
         .with_context(|| format!("write DOT graph {}", dot.display()))?;
     println!("  DOT: {}", dot.display());
+    if let Some(json) = json {
+        let encoded = serde_json::to_string_pretty(&plan).context("serialize JSON plan")?;
+        std::fs::write(json, encoded)
+            .with_context(|| format!("write JSON plan {}", json.display()))?;
+        println!("  JSON: {}", json.display());
+    }
     Ok(())
 }
 
