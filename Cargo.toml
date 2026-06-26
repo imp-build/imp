@@ -1,0 +1,26 @@
+[package]
+name = "imp"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "imp"
+path = "src/main.rs"
+
+[dependencies]
+tokio        = { version = "1",    features = ["full"] }
+clap         = { version = "4",    features = ["derive"] }
+prodash      = { version = "28",   features = ["render-line", "render-line-crossterm"] }
+anyhow       = "1"
+serde        = { version = "1",    features = ["derive"] }
+serde_json   = "1"
+walkdir      = "2"
+regex        = "1"
+rusqlite     = { version = "0.31", features = ["bundled"] }
+md5          = "0.7"
+tempfile     = "3"
+futures      = { version = "0.3", default-features = false, features = ["std"] }
+steel-core   = { version = "0.8.2", default-features = false, features = ["std"] }
+
+[profile.dev]
+opt-level = 1
