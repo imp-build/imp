@@ -3560,6 +3560,355 @@ fn dot_escape(value: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Exec context for rule exec() functions
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ExecRunResult {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+}
+
+struct ExecRunOpts {
+    argv: Vec<String>,
+    display: String,
+    env: BTreeMap<String, String>,
+    inputs: Vec<ExecIoSpec>,
+    outputs: Vec<ExecIoSpec>,
+    impure: bool,
+    force_cache: bool,
+}
+
+struct ExecIoSpec {
+    path: String,
+    kind: String,
+}
+
+/// Build a JS `ctx` object for `exec(target, ctx)` functions.
+///
+/// The returned object provides:
+/// * `ctx.platform` — `{ os, arch }`
+/// * `ctx.run(opts)` — cached subprocess execution
+pub(super) fn build_exec_ctx<'js>(
+    ctx: Ctx<'js>,
+    workspace_root: &Path,
+) -> rquickjs::Result<Object<'js>> {
+    let obj = Object::new(ctx.clone())?;
+
+    // platform property
+    let (os, arch) = toolchain::host_detect_platform()
+        .map_err(|e| rquickjs::Error::new_loading_message("platform", format!("{e:#}")))?;
+    let plat = Object::new(ctx.clone())?;
+    plat.set("os", &*os)?;
+    plat.set("arch", &*arch)?;
+    obj.set("platform", plat)?;
+
+    // run method
+    let wr = workspace_root.to_owned();
+    let run_fn = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, opts: Object<'js>| -> rquickjs::Result<Object<'js>> {
+            let argv: Vec<String> = opts.get("argv")?;
+            let display: Option<String> = opts.get("display")?;
+            let display = display.unwrap_or_else(|| argv.join(" "));
+            let env_obj: Option<Object<'js>> = opts.get("env")?;
+            let mut env = BTreeMap::new();
+            if let Some(e) = env_obj {
+                for entry in e.own_props::<String, String>(Filter::default()) {
+                    let (k, v) = entry?;
+                    env.insert(k, v);
+                }
+            }
+            let inputs = parse_io_specs(opts.get("inputs")?)?;
+            let outputs = parse_io_specs(opts.get("outputs")?)?;
+            let impure: Option<bool> = opts.get("impure")?;
+            let impure = impure.unwrap_or(false);
+            let force_cache: Option<bool> = opts.get("forceCache")?;
+            let force_cache = force_cache.unwrap_or(false);
+
+            let run_opts = ExecRunOpts {
+                argv,
+                display,
+                env,
+                inputs,
+                outputs,
+                impure,
+                force_cache,
+            };
+
+            let result = exec_run_inner(&wr, run_opts)
+                .map_err(|e| rquickjs::Error::new_loading_message("run", format!("{e:#}")))?;
+
+            let obj = Object::new(ctx)?;
+            obj.set("stdout", &result.stdout)?;
+            obj.set("stderr", &result.stderr)?;
+            obj.set("exitCode", result.exit_code)?;
+            Ok(obj)
+        },
+    )?;
+    obj.set("run", run_fn)?;
+
+    Ok(obj)
+}
+
+fn parse_io_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Vec<ExecIoSpec>> {
+    let mut specs = Vec::new();
+    for val in vals {
+        let path: Option<String> = val.get("path")?;
+        let Some(path) = path else {
+            continue;
+        };
+        let kind: Option<String> = val.get("kind")?;
+        let kind = kind.unwrap_or_else(|| "file".to_owned());
+        specs.push(ExecIoSpec { path, kind });
+    }
+    Ok(specs)
+}
+
+fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunResult> {
+    let sandbox_root = create_sandbox_root()?;
+
+    // Copy inputs into sandbox.
+    for input in &opts.inputs {
+        let relative = artifact_relative_path(&input.path)?;
+        let source = workspace_root.join(&relative);
+        let sandbox_path = sandbox_root.join(&relative);
+        if let Some(parent) = sandbox_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        match input.kind.as_str() {
+            "file" | "manifest" => copy_file(&source, &sandbox_path)?,
+            "directory" => copy_directory(&source, &sandbox_path)?,
+            other => bail!("run() input {} has unsupported kind {other}", input.path),
+        }
+    }
+
+    // Compute input digests.
+    let mut input_digests = Vec::new();
+    for input in &opts.inputs {
+        let relative = artifact_relative_path(&input.path)?;
+        let sandbox_path = sandbox_root.join(&relative);
+        let (digest, kind) = match input.kind.as_str() {
+            "file" | "manifest" => {
+                let (d, _) = store_file_blob(&sandbox_path, &input.kind)?;
+                (d, input.kind.clone())
+            }
+            "directory" => {
+                let entries = directory_entries(&sandbox_path)?;
+                (digest_json(&entries)?, "directory".to_owned())
+            }
+            other => bail!("run() input {} has unsupported kind {other}", input.path),
+        };
+        input_digests.push(CacheInputDigest {
+            artifact_id: input.path.clone(),
+            kind,
+            path: Some(input.path.clone()),
+            value: None,
+            digest,
+        });
+    }
+
+    // Compute action digest.
+    let action_digest = digest_json(&serde_json::json!({
+        "argv": opts.argv,
+        "env": opts.env,
+        "display": opts.display,
+    }))?;
+
+    // Compute task key.
+    let out_specs: Vec<serde_json::Value> = opts
+        .outputs
+        .iter()
+        .map(|o| serde_json::json!({ "path": o.path, "kind": o.kind }))
+        .collect();
+    let task_key = digest_json(&serde_json::json!({
+        "version": 1,
+        "action_digest": action_digest,
+        "input_digests": input_digests,
+        "outputs": out_specs,
+    }))?;
+
+    // Check cache.
+    let cacheable = !opts.impure || opts.force_cache;
+    let record_path = task_record_path(&task_key)?;
+    let cached_outputs_opt: Option<Vec<CachedArtifact>> = if cacheable {
+        match std::fs::read_to_string(&record_path) {
+            Ok(encoded) => {
+                let record: TaskCacheRecord =
+                    serde_json::from_str(&encoded).with_context(|| {
+                        format!("parse exec cache record {}", record_path.display())
+                    })?;
+                match cached_outputs_present(&record) {
+                    Ok(()) => Some(record.outputs),
+                    Err(_) => None,
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(e).with_context(|| format!("read {}", record_path.display()));
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Some(outputs) = cached_outputs_opt {
+        let record = TaskCacheRecord {
+            version: 1,
+            task_id: task_key.clone(),
+            task_key,
+            action_digest,
+            input_digests,
+            dependency_keys: vec![],
+            named_caches: vec![],
+            outputs,
+        };
+        materialize_cached_outputs(&record, workspace_root)?;
+        return Ok(ExecRunResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+        });
+    }
+
+    // Cache miss — run the command.
+    let (program, args) = opts
+        .argv
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("run() argv must not be empty"))?;
+
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir(&sandbox_root)
+        .envs(&opts.env)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("run() command in {}", sandbox_root.display()))?;
+
+    let stdout_handle = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("run() stdout was not piped"))?;
+    let stderr_handle = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("run() stderr was not piped"))?;
+
+    let (sender, receiver) = mpsc::channel();
+    let stdout_reader = spawn_output_reader(stdout_handle, ProcessStream::Stdout, sender.clone());
+    let stderr_reader = spawn_output_reader(stderr_handle, ProcessStream::Stderr, sender);
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let status = loop {
+        drain_process_lines(&receiver, None, &mut stdout, &mut stderr);
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("wait for {}", opts.display))?
+        {
+            break status;
+        }
+        match receiver.recv_timeout(Duration::from_millis(20)) {
+            Ok(line) => record_process_line(line, None, &mut stdout, &mut stderr),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {}
+        }
+    };
+
+    let _ = stdout_reader.join();
+    let _ = stderr_reader.join();
+    drain_process_lines(&receiver, None, &mut stdout, &mut stderr);
+
+    let exit_code = status.code().unwrap_or(-1);
+    if !status.success() {
+        bail!(
+            "{} failed with exit code {}\nstdout:\n{}\nstderr:\n{}",
+            opts.display,
+            exit_code,
+            stdout.trim_end(),
+            stderr.trim_end()
+        );
+    }
+
+    // Ingest outputs into CAS.
+    let mut cached_outputs = Vec::new();
+    for output in &opts.outputs {
+        let relative = artifact_relative_path(&output.path)?;
+        let sandbox_path = sandbox_root.join(&relative);
+        match output.kind.as_str() {
+            "file" | "manifest" => {
+                if !sandbox_path.is_file() {
+                    bail!(
+                        "run() output {} was not created as a file in sandbox",
+                        output.path
+                    );
+                }
+                let (digest, bytes) = store_file_blob(&sandbox_path, &output.kind)?;
+                cached_outputs.push(CachedArtifact {
+                    artifact_id: output.path.clone(),
+                    kind: output.kind.clone(),
+                    path: Some(output.path.clone()),
+                    value: None,
+                    digest,
+                    bytes: Some(bytes),
+                    files: Vec::new(),
+                });
+            }
+            "directory" => {
+                if !sandbox_path.is_dir() {
+                    bail!(
+                        "run() output {} was not created as a directory in sandbox",
+                        output.path
+                    );
+                }
+                let files = directory_entries(&sandbox_path)?;
+                let digest = digest_json(&files)?;
+                cached_outputs.push(CachedArtifact {
+                    artifact_id: output.path.clone(),
+                    kind: output.kind.clone(),
+                    path: Some(output.path.clone()),
+                    value: None,
+                    digest,
+                    bytes: None,
+                    files,
+                });
+            }
+            other => bail!("run() output {} has unsupported kind {other}", output.path),
+        }
+    }
+
+    // Cache record and materialize.
+    if cacheable {
+        let record = TaskCacheRecord {
+            version: 1,
+            task_id: task_key.clone(),
+            task_key,
+            action_digest,
+            input_digests,
+            dependency_keys: vec![],
+            named_caches: vec![],
+            outputs: cached_outputs,
+        };
+        write_task_cache_record(&record)?;
+        materialize_cached_outputs(&record, workspace_root)?;
+    }
+
+    Ok(ExecRunResult {
+        stdout,
+        stderr,
+        exit_code,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
