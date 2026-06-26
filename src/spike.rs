@@ -380,6 +380,7 @@ pub struct Task {
     pub id: String,
     pub target: String,
     pub product: String,
+    pub fields: BTreeMap<String, String>,
     pub inputs: Vec<Artifact>,
     pub outputs: Vec<Artifact>,
     pub action: Action,
@@ -1841,6 +1842,7 @@ impl Planner<'_> {
                 id: id.clone(),
                 target: target.address.clone(),
                 product: product.to_owned(),
+                fields: target.fields.clone(),
                 inputs,
                 outputs,
                 action,
@@ -3934,10 +3936,15 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
 
 /// Build a JS `target` object for an `exec(target, ctx)` call.
 fn build_exec_target<'js>(ctx: Ctx<'js>, task: &Task) -> rquickjs::Result<Object<'js>> {
-    let obj = Object::new(ctx)?;
+    let obj = Object::new(ctx.clone())?;
     obj.set("id", task.id.as_str())?;
     obj.set("target", task.target.as_str())?;
     obj.set("product", task.product.as_str())?;
+    let fields = Object::new(ctx)?;
+    for (k, v) in &task.fields {
+        fields.set(k.as_str(), v.as_str())?;
+    }
+    obj.set("fields", fields)?;
     Ok(obj)
 }
 
@@ -4010,8 +4017,11 @@ export function cmakeLib({ entrypoint, deps = [] }) {
     const ODIN_RULES_JS: &str = r#"
 import { target, rule } from "imp:core";
 
-rule({ kind: "odin-package", product: "sources",      action: "snapshot {sources}", requiresOwnSources: false, dependencyProduct: null });
-rule({ kind: "odin-package", product: "odin-package", action: "odin build",         requiresOwnSources: true,  dependencyProduct: "default" });
+function snapshotSourcesExec(target, ctx) {}
+function odinBuildExec(target, ctx) {}
+
+rule({ kind: "odin-package", product: "sources",      action: "snapshot {sources}", exec: snapshotSourcesExec, requiresOwnSources: false, dependencyProduct: null });
+rule({ kind: "odin-package", product: "odin-package", action: "odin build",         exec: odinBuildExec, requiresOwnSources: true,  dependencyProduct: "default" });
 
 export function odinPackage({ srcs, deps = [] }) {
     return target({ kind: "odin-package", fields: { sources: srcs.join(",") }, deps });
@@ -4120,6 +4130,7 @@ export const ui = asset({ srcs: ["**/*.png"] });
             id: id.to_owned(),
             target: "//:fixture".to_owned(),
             product: "fixture".to_owned(),
+            fields: BTreeMap::new(),
             inputs: Vec::new(),
             action: Action {
                 argv: argv.iter().map(|arg| (*arg).to_owned()).collect(),

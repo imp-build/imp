@@ -9,10 +9,6 @@ let _defaultVersion = null;
 /**
  * Declare an Odin toolchain version and optionally set it as the default.
  *
- * Call during module load (in imp.workspace.js or a rules file):
- *
- *     odinToolchain("dev-2026-03", { default: true });
- *
  * @param {string} version  Odin release version (matches .odin-version).
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]  Set as the default toolchain.
@@ -26,7 +22,6 @@ export function odinToolchain(version, opts = {}) {
         _defaultVersion = version;
     }
 
-    // Return the cache key so callers can reference it.
     const plat = platformInfo();
     return `${cacheName}/${version}/${plat.os}-${plat.arch}`;
 }
@@ -34,8 +29,7 @@ export function odinToolchain(version, opts = {}) {
 /**
  * Acquire (download and cache) an Odin toolchain.
  *
- * Returns the local directory containing the `odin` binary. Subsequent calls
- * for the same version+platform return instantly from the named cache.
+ * Returns the local directory containing the `odin` binary.
  *
  * @param {string} version  Odin release version, e.g. "dev-2026-03".
  * @returns {string} Local path to the toolchain root (contains `odin` binary).
@@ -57,7 +51,6 @@ export function acquireOdinToolchain(version) {
 
     const archive = download(url);
 
-    // Extract to a staging location, then move into the named cache.
     const staging = `/tmp/imp-odin-${version}-${plat.arch}`;
     extract(archive, staging, { format: ext === "zip" ? "zip" : "tar.gz", strip_components: 1 });
 
@@ -68,6 +61,9 @@ export function acquireOdinToolchain(version) {
 /**
  * Return the path to the odin binary for a given toolchain version.
  * Uses the default version when none is given.
+ *
+ * @param {string} [version]
+ * @returns {string}
  */
 export function odinBin(version) {
     if (!version && _defaultVersion) version = _defaultVersion;
@@ -78,11 +74,52 @@ export function odinBin(version) {
 }
 
 // ---------------------------------------------------------------------------
-// Rules and target constructors
+// Exec functions for odin-package rules
 // ---------------------------------------------------------------------------
 
-rule({ kind: "odin-package", product: "sources",      action: "snapshot {sources}", requiresOwnSources: false, dependencyProduct: null });
-rule({ kind: "odin-package", product: "odin-package", action: "odin build",         requiresOwnSources: true,  dependencyProduct: "default" });
+function snapshotSourcesExec(target, ctx) {
+    // Sources are on disk; this task exists to wire up the dependency graph
+    // so the odin-build task waits for dependency resolution.
+}
+
+function odinBuildExec(target, ctx) {
+    const version = target.fields && target.fields.toolchain || _defaultVersion;
+    if (!version) throw new Error("no Odin toolchain version specified and no default set");
+    const bin = odinBin(version);
+    const result = ctx.run({
+        argv: [bin, "build", "."],
+        display: `odin build ${target.target}`,
+    });
+    if (result.exitCode !== 0) {
+        throw new Error(`odin build failed (exit ${result.exitCode}): ${result.stderr}`);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rules
+// ---------------------------------------------------------------------------
+
+rule({
+    kind: "odin-package",
+    product: "sources",
+    action: "snapshot {sources}",
+    exec: snapshotSourcesExec,
+    requiresOwnSources: false,
+    dependencyProduct: null,
+});
+
+rule({
+    kind: "odin-package",
+    product: "odin-package",
+    action: "odin build",
+    exec: odinBuildExec,
+    requiresOwnSources: true,
+    dependencyProduct: "default",
+});
+
+// ---------------------------------------------------------------------------
+// Target constructors
+// ---------------------------------------------------------------------------
 
 /**
  * Declare an odin package target.
