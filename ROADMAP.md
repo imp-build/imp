@@ -153,12 +153,12 @@ project-specific command logic in Rust.
 Add a content-addressed local cache only after task inputs and outputs are
 explicit.
 
-- Hash action definitions, tool identities, declared environment, and input
+- [x] Hash action definitions, tool identities, declared environment, and input
   artifact digests.
-- Store output manifests and materialise cache hits into the workspace.
-- Mark definition-time or execution-time impure tasks as uncacheable by
+- [x] Store output manifests and materialise cache hits into the workspace.
+- [x] Mark definition-time or execution-time impure tasks as uncacheable by
   default, with an explicit override for users who accept that risk.
-- Provide `imp cache explain <task>` for cache-key diagnostics.
+- [x] Provide `imp cache explain <task>` for cache-key diagnostics.
 
 Acceptance: a second unchanged build skips all cacheable actions; editing a
 declared input invalidates only its affected downstream tasks.

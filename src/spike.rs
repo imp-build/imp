@@ -62,6 +62,8 @@ export function target(opts) {
  * @param {string} opts.product Product name produced by the rule.
  * @param {string|object} opts.action Human-readable action template, or a
  * structured action object with argv/cwd/env/platform/inputs/outputs/display.
+ * @param {boolean} [opts.action.impure=false] Mark the action as impure (non-deterministic). Impure tasks are uncacheable by default.
+ * @param {boolean} [opts.action.force_cache=false] Force caching of an impure task. The caller accepts that stale outputs may be reused.
  * @param {boolean} [opts.requiresOwnSources=false] Whether non-source products depend on this target's sources product.
  * @param {string|null|undefined} [opts.dependencyProduct=null] Product requested from dependencies; use "default" for their default product.
  * @returns {void}
@@ -72,6 +74,22 @@ export function rule(opts) {
         opts.requiresOwnSources === true,
         opts.dependencyProduct !== undefined ? opts.dependencyProduct : null
     );
+}
+
+/**
+ * Declare a plugin-managed raw cache directory.
+ *
+ * Named caches are intentionally opaque to the task cache. Actions receive a
+ * stable directory path through IMP_NAMED_CACHE_<NAME>, and plugins decide
+ * what to store there.
+ *
+ * @param {object} opts
+ * @param {string} opts.name Stable cache name, using lowercase ASCII, digits,
+ * hyphens, or underscores.
+ * @returns {void}
+ */
+export function namedCache(opts) {
+    __host_named_cache(opts.name);
 }
 "#;
 
@@ -123,6 +141,8 @@ pub struct ActionSpec {
     pub inputs: Vec<ArtifactSpec>,
     pub outputs: Vec<ArtifactSpec>,
     pub display: String,
+    pub impure: bool,
+    pub force_cache: bool,
 }
 
 impl ActionSpec {
@@ -135,6 +155,8 @@ impl ActionSpec {
             inputs: Vec::new(),
             outputs: Vec::new(),
             display,
+            impure: false,
+            force_cache: false,
         }
     }
 }
@@ -165,6 +187,10 @@ pub struct Action {
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
     pub display: String,
+    #[serde(default)]
+    pub impure: bool,
+    #[serde(default)]
+    pub force_cache: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +208,7 @@ pub struct Task {
 pub struct Plan {
     pub goal: String,
     pub roots: Vec<String>,
+    pub named_caches: Vec<NamedCache>,
     pub tasks: Vec<Task>,
 }
 
@@ -189,6 +216,13 @@ pub struct Plan {
 pub struct Workspace {
     pub rules: BTreeMap<(String, String), Rule>,
     pub targets: BTreeMap<String, Target>,
+    pub named_caches: BTreeMap<String, NamedCache>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedCache {
+    pub name: String,
+    pub env_var: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +249,7 @@ impl ExecutionOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskExecutionStatus {
     WouldRun,
+    CacheHit,
     Ran,
     Noop,
 }
@@ -256,6 +291,86 @@ struct SandboxOutput {
     kind: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheInputDigest {
+    pub artifact_id: String,
+    pub kind: String,
+    pub path: Option<String>,
+    pub value: Option<String>,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CacheDirectoryEntry {
+    path: String,
+    digest: String,
+    bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CachedArtifact {
+    artifact_id: String,
+    kind: String,
+    path: Option<String>,
+    value: Option<String>,
+    digest: String,
+    bytes: Option<u64>,
+    files: Vec<CacheDirectoryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TaskCacheRecord {
+    version: u32,
+    task_id: String,
+    task_key: String,
+    action_digest: String,
+    input_digests: Vec<CacheInputDigest>,
+    dependency_keys: Vec<(String, String)>,
+    named_caches: Vec<NamedCacheBinding>,
+    outputs: Vec<CachedArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedCacheBinding {
+    pub name: String,
+    pub env_var: String,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskCacheSummary {
+    task_id: String,
+    task_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskCacheEvaluation {
+    cacheable: bool,
+    task_key: String,
+    action_digest: String,
+    input_digests: Vec<CacheInputDigest>,
+    dependency_keys: Vec<(String, String)>,
+    named_caches: Vec<NamedCacheBinding>,
+    hit: bool,
+    miss_reason: Option<String>,
+    record: Option<TaskCacheRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheExplanation {
+    pub task_id: String,
+    pub cacheable: bool,
+    pub impure: bool,
+    pub force_cache: bool,
+    pub task_key: String,
+    pub action_digest: String,
+    pub input_digests: Vec<CacheInputDigest>,
+    pub dependency_keys: Vec<(String, String)>,
+    pub named_caches: Vec<NamedCacheBinding>,
+    pub hit: bool,
+    pub miss_reason: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Internal host state
 // ---------------------------------------------------------------------------
@@ -264,6 +379,7 @@ struct HostState {
     next_id: u32,
     pending: BTreeMap<u32, PendingTarget>,
     rules: BTreeMap<(String, String), Rule>,
+    named_caches: BTreeMap<String, NamedCache>,
 }
 
 impl Default for HostState {
@@ -272,6 +388,7 @@ impl Default for HostState {
             next_id: 0,
             pending: BTreeMap::new(),
             rules: BTreeMap::new(),
+            named_caches: BTreeMap::new(),
         }
     }
 }
@@ -683,6 +800,7 @@ pub fn load_workspace(root: &Path) -> Result<Workspace> {
     Ok(Workspace {
         rules: hs.rules.clone(),
         targets,
+        named_caches: hs.named_caches.clone(),
     })
 }
 
@@ -784,7 +902,59 @@ fn register_globals<'js>(ctx: Ctx<'js>, state: Arc<Mutex<HostState>>) -> rquickj
     )?;
     globals.set("__host_rule", host_rule)?;
 
+    // ------------------------------------------------------------------
+    // __host_named_cache(name)
+    // ------------------------------------------------------------------
+    let state_c = Arc::clone(&state);
+    let host_named_cache = Function::new(ctx, move |name: String| -> rquickjs::Result<()> {
+        let cache = named_cache_from_name(&name)?;
+        let mut hs = state_c.lock().unwrap();
+        if let Some(existing) = hs.named_caches.get(&cache.name) {
+            if existing != &cache {
+                return Err(action_spec_error(format!(
+                    "named cache '{}' was declared with conflicting metadata",
+                    cache.name
+                )));
+            }
+            return Ok(());
+        }
+        if let Some(existing) = hs
+            .named_caches
+            .values()
+            .find(|existing| existing.env_var == cache.env_var)
+        {
+            return Err(action_spec_error(format!(
+                "named cache '{}' maps to env var {} already used by '{}'",
+                cache.name, cache.env_var, existing.name
+            )));
+        }
+        hs.named_caches.insert(cache.name.clone(), cache);
+        Ok(())
+    })?;
+    globals.set("__host_named_cache", host_named_cache)?;
+
     Ok(())
+}
+
+fn named_cache_from_name(name: &str) -> rquickjs::Result<NamedCache> {
+    if name.is_empty() {
+        return Err(action_spec_error(
+            "named cache name must not be empty".to_owned(),
+        ));
+    }
+    if !name
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
+    {
+        return Err(action_spec_error(format!(
+            "named cache '{name}' must contain only lowercase ASCII letters, digits, '-' or '_'"
+        )));
+    }
+    let env_suffix = name.replace('-', "_").to_ascii_uppercase();
+    Ok(NamedCache {
+        name: name.to_owned(),
+        env_var: format!("IMP_NAMED_CACHE_{env_suffix}"),
+    })
 }
 
 fn parse_rule_action<'js>(action_value: Value<'js>) -> rquickjs::Result<ActionSpec> {
@@ -811,6 +981,9 @@ fn parse_rule_action<'js>(action_value: Value<'js>) -> rquickjs::Result<ActionSp
     let outputs = optional_artifact_array(&action, "outputs")?.unwrap_or_default();
     let display = optional_string(&action, "display", "action")?.unwrap_or_else(|| argv.join(" "));
 
+    let impure = optional_bool(&action, "impure", "action")?.unwrap_or(false);
+    let force_cache = optional_bool(&action, "force_cache", "action")?.unwrap_or(false);
+
     Ok(ActionSpec {
         argv,
         cwd,
@@ -819,7 +992,30 @@ fn parse_rule_action<'js>(action_value: Value<'js>) -> rquickjs::Result<ActionSp
         inputs,
         outputs,
         display,
+        impure,
+        force_cache,
     })
+}
+
+fn optional_bool<'js>(
+    object: &Object<'js>,
+    key: &'static str,
+    context: &'static str,
+) -> rquickjs::Result<Option<bool>> {
+    if !object.contains_key(key)? {
+        return Ok(None);
+    }
+    let value: Value = object.get(key)?;
+    if value.is_null() || value.is_undefined() {
+        return Ok(None);
+    }
+    if !value.is_bool() {
+        return Err(action_spec_error(format!(
+            "{context}.{key} must be a boolean, got {}",
+            value.type_name()
+        )));
+    }
+    value.get().map(Some)
 }
 
 fn optional_string<'js>(
@@ -981,6 +1177,7 @@ pub fn plan(workspace: &Workspace, goal: &str, selectors: &[String]) -> Result<P
     Ok(Plan {
         goal: goal.to_owned(),
         roots: root_tasks,
+        named_caches: workspace.named_caches.values().cloned().collect(),
         tasks: planner.tasks.into_values().collect(),
     })
 }
@@ -1221,9 +1418,15 @@ pub fn execute_plan_with_options(
 ) -> Result<ExecutionReport> {
     let ordered = ordered_tasks(plan)?;
     let executions = if options.jobs <= 1 {
-        execute_ordered_tasks_sequentially(&ordered, workspace_root, options.mode, progress)?
+        execute_ordered_tasks_sequentially(
+            &ordered,
+            workspace_root,
+            options.mode,
+            &plan.named_caches,
+            progress,
+        )?
     } else {
-        execute_ordered_tasks_parallel(&ordered, workspace_root, options)?
+        execute_ordered_tasks_parallel(&ordered, workspace_root, options, &plan.named_caches)?
     };
     Ok(ExecutionReport { tasks: executions })
 }
@@ -1232,22 +1435,28 @@ fn execute_ordered_tasks_sequentially(
     ordered: &[&Task],
     workspace_root: &Path,
     mode: ExecutionMode,
+    named_caches: &[NamedCache],
     mut progress: Option<&mut prodash::tree::Item>,
 ) -> Result<Vec<TaskExecution>> {
     let mut executions = Vec::with_capacity(ordered.len());
+    let mut summaries = BTreeMap::new();
     let cancellation = AtomicBool::new(false);
 
     for task in ordered {
         let mut task_progress = progress
             .as_deref_mut()
             .map(|progress| progress.add_child(format!("execute {}", task.id)));
-        executions.push(execute_one_task(
+        let (execution, summary) = execute_one_task(
             task,
             workspace_root,
             mode,
+            named_caches,
+            &summaries,
             task_progress.as_mut(),
             &cancellation,
-        )?);
+        )?;
+        summaries.insert(task.id.clone(), summary);
+        executions.push(execution);
     }
 
     Ok(executions)
@@ -1257,6 +1466,7 @@ fn execute_ordered_tasks_parallel(
     ordered: &[&Task],
     workspace_root: &Path,
     options: ExecutionOptions,
+    named_caches: &[NamedCache],
 ) -> Result<Vec<TaskExecution>> {
     let mut task_by_id: BTreeMap<&str, &Task> = ordered
         .iter()
@@ -1268,6 +1478,7 @@ fn execute_ordered_tasks_parallel(
         .map(|(i, task)| (task.id.as_str(), i))
         .collect();
     let mut completed = BTreeSet::new();
+    let mut summaries = BTreeMap::new();
     let mut running = BTreeSet::new();
     let mut executions: Vec<Option<TaskExecution>> = vec![None; ordered.len()];
     let (sender, receiver) = mpsc::channel();
@@ -1295,12 +1506,21 @@ fn execute_ordered_tasks_parallel(
                 let sender = sender.clone();
                 let workspace_root = workspace_root.to_owned();
                 let mode = options.mode;
+                let named_caches = named_caches.to_vec();
+                let dependency_summaries = summaries.clone();
                 let task = task.clone();
                 let cancellation = Arc::clone(&cancellation);
                 thread::spawn(move || {
                     let id = task.id.clone();
-                    let result =
-                        execute_one_task(&task, &workspace_root, mode, None, &cancellation);
+                    let result = execute_one_task(
+                        &task,
+                        &workspace_root,
+                        mode,
+                        &named_caches,
+                        &dependency_summaries,
+                        None,
+                        &cancellation,
+                    );
                     let _ = sender.send((id, result));
                 });
             }
@@ -1319,11 +1539,12 @@ fn execute_ordered_tasks_parallel(
             .context("parallel task worker channel closed unexpectedly")?;
         running.remove(id.as_str());
         match result {
-            Ok(execution) => {
+            Ok((execution, summary)) => {
                 let index = *plan_index
                     .get(id.as_str())
                     .ok_or_else(|| anyhow::anyhow!("completed unknown task {id}"))?;
                 executions[index] = Some(execution);
+                summaries.insert(id.clone(), summary);
                 completed.insert(id);
             }
             Err(error) => {
@@ -1349,9 +1570,11 @@ fn execute_one_task(
     task: &Task,
     workspace_root: &Path,
     mode: ExecutionMode,
+    named_caches: &[NamedCache],
+    completed_dependencies: &BTreeMap<String, TaskCacheSummary>,
     mut progress: Option<&mut prodash::tree::Item>,
     cancellation: &AtomicBool,
-) -> Result<TaskExecution> {
+) -> Result<(TaskExecution, TaskCacheSummary)> {
     let command = task.action.argv.clone();
     let status = match mode {
         ExecutionMode::DryRun => {
@@ -1367,9 +1590,37 @@ fn execute_one_task(
             TaskExecutionStatus::Noop
         }
         ExecutionMode::Local => {
-            if let Err(error) =
-                run_local_task(task, workspace_root, progress.as_deref(), cancellation)
-            {
+            let evaluation =
+                evaluate_task_cache(task, workspace_root, named_caches, completed_dependencies)?;
+            if evaluation.hit {
+                let record = evaluation
+                    .record
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("cache hit for {} had no record", task.id))?;
+                materialize_cached_outputs(record, workspace_root)?;
+                if let Some(progress) = progress.as_mut() {
+                    progress.done("cache hit");
+                }
+                return Ok((
+                    TaskExecution {
+                        task_id: task.id.clone(),
+                        status: TaskExecutionStatus::CacheHit,
+                        command,
+                    },
+                    TaskCacheSummary {
+                        task_id: task.id.clone(),
+                        task_key: evaluation.task_key,
+                    },
+                ));
+            }
+
+            if let Err(error) = run_local_task(
+                task,
+                workspace_root,
+                progress.as_deref(),
+                cancellation,
+                &evaluation,
+            ) {
                 if let Some(progress) = progress.as_mut() {
                     progress.fail("failed");
                 }
@@ -1382,11 +1633,24 @@ fn execute_one_task(
         }
     };
 
-    Ok(TaskExecution {
-        task_id: task.id.clone(),
-        status,
-        command,
-    })
+    let summary_key = match mode {
+        ExecutionMode::DryRun => digest_bytes(task.id.as_bytes()),
+        ExecutionMode::Local => {
+            evaluate_task_cache(task, workspace_root, named_caches, completed_dependencies)?
+                .task_key
+        }
+    };
+    Ok((
+        TaskExecution {
+            task_id: task.id.clone(),
+            status,
+            command,
+        },
+        TaskCacheSummary {
+            task_id: task.id.clone(),
+            task_key: summary_key,
+        },
+    ))
 }
 
 fn ordered_tasks(plan: &Plan) -> Result<Vec<&Task>> {
@@ -1440,6 +1704,7 @@ fn run_local_task(
     workspace_root: &Path,
     progress: Option<&prodash::tree::Item>,
     cancellation: &AtomicBool,
+    cache: &TaskCacheEvaluation,
 ) -> Result<()> {
     if cancellation.load(Ordering::SeqCst) {
         bail!("{} canceled before execution", task.id);
@@ -1465,6 +1730,11 @@ fn run_local_task(
         .ok_or_else(|| anyhow::anyhow!("{} has no argv", task.id))?;
 
     let mut command = Command::new(program);
+    for binding in &cache.named_caches {
+        std::fs::create_dir_all(&binding.path)
+            .with_context(|| format!("create named cache {}", binding.path.display()))?;
+        command.env(&binding.env_var, &binding.path);
+    }
     command
         .args(args)
         .current_dir(&cwd)
@@ -1531,7 +1801,21 @@ fn run_local_task(
         );
     }
 
-    copy_sandbox_outputs(task, &sandbox)?;
+    let outputs = ingest_task_outputs(task, &sandbox)?;
+    if cache.cacheable {
+        let record = TaskCacheRecord {
+            version: 1,
+            task_id: task.id.clone(),
+            task_key: cache.task_key.clone(),
+            action_digest: cache.action_digest.clone(),
+            input_digests: cache.input_digests.clone(),
+            dependency_keys: cache.dependency_keys.clone(),
+            named_caches: cache.named_caches.clone(),
+            outputs,
+        };
+        write_task_cache_record(&record)?;
+        materialize_cached_outputs(&record, workspace_root)?;
+    }
     Ok(())
 }
 
@@ -1553,9 +1837,7 @@ fn terminate_child(child: &mut std::process::Child) {
 
 fn prepare_sandbox(task: &Task, workspace_root: &Path) -> Result<SandboxManifest> {
     let sandbox_root = create_sandbox_root()?;
-    let cache_root = cache_root()?
-        .join("artifacts")
-        .join(sanitize_path_component(&task.id));
+    let cache_root = cache_root()?;
     let mut input_runlist = Vec::new();
     let mut output_runlist = Vec::new();
 
@@ -1639,6 +1921,116 @@ fn cache_root() -> Result<PathBuf> {
     bail!("no cache root candidates available")
 }
 
+fn workspace_cache_id(workspace_root: &Path) -> String {
+    digest_bytes(workspace_root.to_string_lossy().as_bytes())
+}
+
+fn named_cache_bindings(
+    workspace_root: &Path,
+    named_caches: &[NamedCache],
+) -> Result<Vec<NamedCacheBinding>> {
+    let root = cache_root()?
+        .join("named")
+        .join(workspace_cache_id(workspace_root));
+    let mut bindings = Vec::with_capacity(named_caches.len());
+    for cache in named_caches {
+        let path = root.join(&cache.name);
+        bindings.push(NamedCacheBinding {
+            name: cache.name.clone(),
+            env_var: cache.env_var.clone(),
+            path,
+        });
+    }
+    Ok(bindings)
+}
+
+fn cas_blob_path(digest: &str) -> Result<PathBuf> {
+    Ok(cache_root()?.join("cas").join("blobs").join(digest))
+}
+
+fn cas_meta_path(digest: &str) -> Result<PathBuf> {
+    Ok(cache_root()?
+        .join("cas")
+        .join("meta")
+        .join(format!("{digest}.json")))
+}
+
+fn task_record_path(task_key: &str) -> Result<PathBuf> {
+    Ok(cache_root()?.join("tasks").join(format!("{task_key}.json")))
+}
+
+fn digest_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", md5::compute(bytes))
+}
+
+fn digest_json<T: Serialize>(value: &T) -> Result<String> {
+    let encoded = serde_json::to_vec(value).context("serialize digest input")?;
+    Ok(digest_bytes(&encoded))
+}
+
+fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
+    let digest = digest_bytes(bytes);
+    let blob_path = cas_blob_path(&digest)?;
+    if !blob_path.is_file() {
+        if let Some(parent) = blob_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        let temp = temp_sibling_path(&blob_path, "tmp-blob");
+        std::fs::write(&temp, bytes).with_context(|| format!("write {}", temp.display()))?;
+        std::fs::rename(&temp, &blob_path).with_context(|| {
+            format!("publish blob {} to {}", temp.display(), blob_path.display())
+        })?;
+    }
+
+    let meta_path = cas_meta_path(&digest)?;
+    if !meta_path.is_file() {
+        if let Some(parent) = meta_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        let metadata = serde_json::json!({
+            "digest": digest,
+            "kind": kind,
+            "bytes": bytes.len(),
+        });
+        std::fs::write(&meta_path, serde_json::to_vec_pretty(&metadata)?)
+            .with_context(|| format!("write {}", meta_path.display()))?;
+    }
+    Ok(digest)
+}
+
+fn store_file_blob(path: &Path, kind: &str) -> Result<(String, u64)> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let size = bytes.len() as u64;
+    Ok((store_blob(&bytes, kind)?, size))
+}
+
+fn directory_entries(path: &Path) -> Result<Vec<CacheDirectoryEntry>> {
+    let mut entries = Vec::new();
+    for entry in WalkDir::new(path) {
+        let entry = entry.with_context(|| format!("walk {}", path.display()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(path)
+            .with_context(|| format!("strip {} from {}", path.display(), entry.path().display()))?;
+        let relative = relative
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let (digest, bytes) = store_file_blob(entry.path(), "directory-entry")?;
+        entries.push(CacheDirectoryEntry {
+            path: relative,
+            digest,
+            bytes,
+        });
+    }
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(entries)
+}
+
 fn artifact_relative_path(path: &str) -> Result<PathBuf> {
     let path = Path::new(path);
     if path.is_absolute() {
@@ -1706,10 +2098,206 @@ fn copy_artifact_into_sandbox(
     Ok(())
 }
 
-fn copy_sandbox_outputs(task: &Task, sandbox: &SandboxManifest) -> Result<()> {
-    for output in &sandbox.output_runlist {
+fn evaluate_task_cache(
+    task: &Task,
+    workspace_root: &Path,
+    named_caches: &[NamedCache],
+    completed_dependencies: &BTreeMap<String, TaskCacheSummary>,
+) -> Result<TaskCacheEvaluation> {
+    let bindings = named_cache_bindings(workspace_root, named_caches)?;
+    let input_digests = digest_task_inputs(task, workspace_root)?;
+    let mut dependency_keys = Vec::new();
+    for dependency in &task.dependencies {
+        if let Some(summary) = completed_dependencies.get(dependency) {
+            dependency_keys.push((dependency.clone(), summary.task_key.clone()));
+        } else {
+            dependency_keys.push((dependency.clone(), "<missing>".to_owned()));
+        }
+    }
+    let action_digest = digest_json(&serde_json::json!({
+        "task_id": task.id,
+        "target": task.target,
+        "product": task.product,
+        "action": task.action,
+        "outputs": task.outputs,
+    }))?;
+    let task_key = digest_json(&serde_json::json!({
+        "version": 1u32,
+        "task_id": task.id,
+        "action_digest": action_digest,
+        "input_digests": input_digests,
+        "dependency_keys": dependency_keys,
+        "named_caches": bindings,
+    }))?;
+    let cacheable = if task.action.force_cache {
+        true
+    } else if task.action.impure {
+        false
+    } else {
+        !task.action.argv.is_empty() && !task.outputs.is_empty()
+    };
+    if !cacheable {
+        let miss_reason = if task.action.impure && !task.action.force_cache {
+            "task is marked impure (set force_cache: true to override)".to_owned()
+        } else {
+            "task has no executable argv or no declared outputs".to_owned()
+        };
+        return Ok(TaskCacheEvaluation {
+            cacheable,
+            task_key,
+            action_digest,
+            input_digests,
+            dependency_keys,
+            named_caches: bindings,
+            hit: false,
+            miss_reason: Some(miss_reason),
+            record: None,
+        });
+    }
+
+    let record_path = task_record_path(&task_key)?;
+    let record = match std::fs::read_to_string(&record_path) {
+        Ok(encoded) => {
+            let record: TaskCacheRecord = serde_json::from_str(&encoded)
+                .with_context(|| format!("parse task cache record {}", record_path.display()))?;
+            Some(record)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read task cache record {}", record_path.display()));
+        }
+    };
+
+    let (hit, miss_reason) = match &record {
+        None => (false, Some("no task cache record".to_owned())),
+        Some(record) if record.task_key != task_key => {
+            (false, Some("task cache record key mismatch".to_owned()))
+        }
+        Some(record) => match cached_outputs_present(record) {
+            Ok(()) => (true, None),
+            Err(error) => (false, Some(format!("{error:#}"))),
+        },
+    };
+
+    Ok(TaskCacheEvaluation {
+        cacheable,
+        task_key,
+        action_digest,
+        input_digests,
+        dependency_keys,
+        named_caches: bindings,
+        hit,
+        miss_reason,
+        record,
+    })
+}
+
+fn digest_task_inputs(task: &Task, workspace_root: &Path) -> Result<Vec<CacheInputDigest>> {
+    let mut digests = Vec::new();
+    for artifact in &task.inputs {
+        let digest = match artifact.kind.as_str() {
+            "file" | "manifest" => {
+                let path = artifact
+                    .path
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("{} input has no path", artifact.id))?;
+                let relative = artifact_relative_path(path)?;
+                let source = workspace_root.join(relative);
+                if !source.is_file() {
+                    bail!(
+                        "{} declared {} input {} but it is not a file",
+                        artifact.id,
+                        artifact.kind,
+                        source.display()
+                    );
+                }
+                let (digest, _) = store_file_blob(&source, &artifact.kind)?;
+                digest
+            }
+            "directory" => {
+                let path = artifact.path.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("{} directory input has no path", artifact.id)
+                })?;
+                let relative = artifact_relative_path(path)?;
+                let source = workspace_root.join(relative);
+                if !source.is_dir() {
+                    bail!(
+                        "{} declared directory input {} but it is not a directory",
+                        artifact.id,
+                        source.display()
+                    );
+                }
+                digest_json(&directory_entries(&source)?)?
+            }
+            "value" => {
+                let value = artifact.value.as_deref().unwrap_or_default();
+                store_blob(value.as_bytes(), "value")?
+            }
+            other => bail!(
+                "{} has unsupported input artifact kind {other}",
+                artifact.id
+            ),
+        };
+        digests.push(CacheInputDigest {
+            artifact_id: artifact.id.clone(),
+            kind: artifact.kind.clone(),
+            path: artifact.path.clone(),
+            value: artifact.value.clone(),
+            digest,
+        });
+    }
+    Ok(digests)
+}
+
+fn cached_outputs_present(record: &TaskCacheRecord) -> Result<()> {
+    for output in &record.outputs {
         match output.kind.as_str() {
             "file" | "manifest" => {
+                let path = cas_blob_path(&output.digest)?;
+                if !path.is_file() {
+                    bail!(
+                        "{} cached blob {} is missing",
+                        output.artifact_id,
+                        path.display()
+                    );
+                }
+            }
+            "directory" => {
+                for file in &output.files {
+                    let path = cas_blob_path(&file.digest)?;
+                    if !path.is_file() {
+                        bail!(
+                            "{} cached directory blob {} is missing",
+                            output.artifact_id,
+                            path.display()
+                        );
+                    }
+                }
+            }
+            "value" => {}
+            other => bail!(
+                "{} has unsupported cached artifact kind {other}",
+                output.artifact_id
+            ),
+        }
+    }
+    Ok(())
+}
+
+fn ingest_task_outputs(task: &Task, sandbox: &SandboxManifest) -> Result<Vec<CachedArtifact>> {
+    let outputs_by_id: BTreeMap<&str, &SandboxOutput> = sandbox
+        .output_runlist
+        .iter()
+        .map(|output| (output.artifact_id.as_str(), output))
+        .collect();
+    let mut cached = Vec::new();
+    for artifact in &task.outputs {
+        let cached_artifact = match artifact.kind.as_str() {
+            "file" | "manifest" => {
+                let output = outputs_by_id.get(artifact.id.as_str()).ok_or_else(|| {
+                    anyhow::anyhow!("{} output was not present in sandbox runlist", artifact.id)
+                })?;
                 if !output.sandbox_path.is_file() {
                     bail!(
                         "{} declared {} output {} but it was not created as a file in sandbox",
@@ -1718,9 +2306,21 @@ fn copy_sandbox_outputs(task: &Task, sandbox: &SandboxManifest) -> Result<()> {
                         output.sandbox_path.display()
                     );
                 }
-                publish_file_atomically(&output.sandbox_path, &output.cache_path)?;
+                let (digest, bytes) = store_file_blob(&output.sandbox_path, &artifact.kind)?;
+                CachedArtifact {
+                    artifact_id: artifact.id.clone(),
+                    kind: artifact.kind.clone(),
+                    path: artifact.path.clone(),
+                    value: artifact.value.clone(),
+                    digest,
+                    bytes: Some(bytes),
+                    files: Vec::new(),
+                }
             }
             "directory" => {
+                let output = outputs_by_id.get(artifact.id.as_str()).ok_or_else(|| {
+                    anyhow::anyhow!("{} output was not present in sandbox runlist", artifact.id)
+                })?;
                 if !output.sandbox_path.is_dir() {
                     bail!(
                         "{} declared directory output {} but it was not created in sandbox",
@@ -1728,16 +2328,108 @@ fn copy_sandbox_outputs(task: &Task, sandbox: &SandboxManifest) -> Result<()> {
                         output.sandbox_path.display()
                     );
                 }
-                publish_directory_atomically(&output.sandbox_path, &output.cache_path)?;
+                let files = directory_entries(&output.sandbox_path)?;
+                let digest = digest_json(&files)?;
+                CachedArtifact {
+                    artifact_id: artifact.id.clone(),
+                    kind: artifact.kind.clone(),
+                    path: artifact.path.clone(),
+                    value: artifact.value.clone(),
+                    digest,
+                    bytes: None,
+                    files,
+                }
             }
-            "value" => {}
+            "value" => {
+                let value = artifact.value.as_deref().unwrap_or_default();
+                CachedArtifact {
+                    artifact_id: artifact.id.clone(),
+                    kind: artifact.kind.clone(),
+                    path: artifact.path.clone(),
+                    value: artifact.value.clone(),
+                    digest: store_blob(value.as_bytes(), "value")?,
+                    bytes: Some(value.len() as u64),
+                    files: Vec::new(),
+                }
+            }
             other => bail!(
                 "{} has unsupported output artifact kind {other}",
+                artifact.id
+            ),
+        };
+        cached.push(cached_artifact);
+    }
+    Ok(cached)
+}
+
+fn write_task_cache_record(record: &TaskCacheRecord) -> Result<()> {
+    let path = task_record_path(&record.task_key)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let temp = temp_sibling_path(&path, "tmp-record");
+    std::fs::write(&temp, serde_json::to_vec_pretty(record)?)
+        .with_context(|| format!("write {}", temp.display()))?;
+    std::fs::rename(&temp, &path)
+        .with_context(|| format!("publish task cache record {}", path.display()))?;
+    Ok(())
+}
+
+fn materialize_cached_outputs(record: &TaskCacheRecord, workspace_root: &Path) -> Result<()> {
+    for output in &record.outputs {
+        let Some(path) = &output.path else {
+            continue;
+        };
+        let destination = workspace_root.join(artifact_relative_path(path)?);
+        match output.kind.as_str() {
+            "file" | "manifest" => {
+                let source = cas_blob_path(&output.digest)?;
+                publish_file_atomically(&source, &destination)?;
+            }
+            "directory" => materialize_cached_directory(output, &destination)?,
+            "value" => {}
+            other => bail!(
+                "{} has unsupported cached output artifact kind {other}",
                 output.artifact_id
             ),
         }
     }
     Ok(())
+}
+
+fn materialize_cached_directory(output: &CachedArtifact, destination: &Path) -> Result<()> {
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let temp = temp_sibling_path(destination, "tmp-dir");
+    remove_path_if_exists(&temp)?;
+    std::fs::create_dir_all(&temp).with_context(|| format!("create {}", temp.display()))?;
+    for file in &output.files {
+        let relative = artifact_relative_path(&file.path)?;
+        let source = cas_blob_path(&file.digest)?;
+        copy_file(&source, &temp.join(relative))?;
+    }
+    remove_path_if_exists(destination)?;
+    std::fs::rename(&temp, destination).with_context(|| {
+        format!(
+            "publish directory {} to {}",
+            temp.display(),
+            destination.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path)
+            .with_context(|| format!("remove directory {}", path.display())),
+        Ok(_) => {
+            std::fs::remove_file(path).with_context(|| format!("remove file {}", path.display()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("stat {}", path.display())),
+    }
 }
 
 fn publish_file_atomically(source: &Path, destination: &Path) -> Result<()> {
@@ -1749,29 +2441,6 @@ fn publish_file_atomically(source: &Path, destination: &Path) -> Result<()> {
     std::fs::rename(&temp, destination).with_context(|| {
         format!(
             "publish file {} to {}",
-            temp.display(),
-            destination.display()
-        )
-    })?;
-    Ok(())
-}
-
-fn publish_directory_atomically(source: &Path, destination: &Path) -> Result<()> {
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let temp = temp_sibling_path(destination, "tmp-dir");
-    if temp.exists() {
-        std::fs::remove_dir_all(&temp).with_context(|| format!("remove {}", temp.display()))?;
-    }
-    copy_directory(source, &temp)?;
-    if destination.exists() {
-        std::fs::remove_dir_all(destination)
-            .with_context(|| format!("remove {}", destination.display()))?;
-    }
-    std::fs::rename(&temp, destination).with_context(|| {
-        format!(
-            "publish directory {} to {}",
             temp.display(),
             destination.display()
         )
@@ -1821,17 +2490,111 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn sanitize_path_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
+pub fn explain_task_cache(
+    plan: &Plan,
+    workspace_root: &Path,
+    task_selector: &str,
+) -> Result<CacheExplanation> {
+    let ordered = ordered_tasks(plan)?;
+    let selected_id = if ordered.iter().any(|task| task.id == task_selector) {
+        task_selector.to_owned()
+    } else if plan.roots.len() == 1 {
+        plan.roots[0].clone()
+    } else {
+        bail!("cache explain selector '{task_selector}' did not match a task id");
+    };
+
+    let mut summaries = BTreeMap::new();
+    for task in ordered {
+        let evaluation = evaluate_task_cache(task, workspace_root, &plan.named_caches, &summaries)?;
+        if task.id == selected_id {
+            return Ok(CacheExplanation {
+                task_id: task.id.clone(),
+                cacheable: evaluation.cacheable,
+                impure: task.action.impure,
+                force_cache: task.action.force_cache,
+                task_key: evaluation.task_key,
+                action_digest: evaluation.action_digest,
+                input_digests: evaluation.input_digests,
+                dependency_keys: evaluation.dependency_keys,
+                named_caches: evaluation.named_caches,
+                hit: evaluation.hit,
+                miss_reason: evaluation.miss_reason,
+            });
+        }
+        summaries.insert(
+            task.id.clone(),
+            TaskCacheSummary {
+                task_id: task.id.clone(),
+                task_key: evaluation.task_key,
+            },
+        );
+    }
+
+    bail!("task {selected_id} was not present in the plan")
+}
+
+pub fn format_cache_explanation(
+    explanation: &CacheExplanation,
+    w: &mut String,
+) -> std::fmt::Result {
+    use std::fmt::Write;
+
+    writeln!(w, "Cache explanation for {}", explanation.task_id)?;
+    writeln!(w, "  cacheable: {}", explanation.cacheable)?;
+    if explanation.impure {
+        if explanation.force_cache {
+            writeln!(w, "  impure: true (force_cache override — caching anyway)")?;
+        } else {
+            writeln!(w, "  impure: true (caching disabled)")?;
+        }
+    }
+    writeln!(
+        w,
+        "  status: {}",
+        if explanation.hit { "hit" } else { "miss" }
+    )?;
+    if let Some(reason) = &explanation.miss_reason {
+        writeln!(w, "  miss reason: {reason}")?;
+    }
+    writeln!(w, "  task key: {}", explanation.task_key)?;
+    writeln!(w, "  action digest: {}", explanation.action_digest)?;
+    writeln!(w, "  inputs:")?;
+    if explanation.input_digests.is_empty() {
+        writeln!(w, "    (none)")?;
+    } else {
+        for input in &explanation.input_digests {
+            let path = input.path.as_deref().unwrap_or("<value>");
+            writeln!(
+                w,
+                "    {} {} {} {}",
+                input.artifact_id, input.kind, path, input.digest
+            )?;
+        }
+    }
+    writeln!(w, "  dependencies:")?;
+    if explanation.dependency_keys.is_empty() {
+        writeln!(w, "    (none)")?;
+    } else {
+        for (task, key) in &explanation.dependency_keys {
+            writeln!(w, "    {task} {key}")?;
+        }
+    }
+    writeln!(w, "  named caches:")?;
+    if explanation.named_caches.is_empty() {
+        writeln!(w, "    (none)")?;
+    } else {
+        for binding in &explanation.named_caches {
+            writeln!(
+                w,
+                "    {} {} {}",
+                binding.name,
+                binding.env_var,
+                binding.path.display()
+            )?;
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2175,6 +2938,8 @@ fn lower_action(
         inputs: inputs.iter().map(|artifact| artifact.id.clone()).collect(),
         outputs: outputs.iter().map(|artifact| artifact.id.clone()).collect(),
         display: expand_template(&spec.display, target),
+        impure: spec.impure,
+        force_cache: spec.force_cache,
     };
     (action, inputs, outputs)
 }
@@ -2372,6 +3137,8 @@ export const ui = asset({ srcs: ["**/*.png"] });
                 inputs: Vec::new(),
                 outputs: outputs.iter().map(|artifact| artifact.id.clone()).collect(),
                 display: argv.join(" "),
+                impure: false,
+                force_cache: false,
             },
             outputs,
             dependencies: deps.iter().map(|dep| (*dep).to_owned()).collect(),
@@ -2387,21 +3154,6 @@ export const ui = asset({ srcs: ["**/*.png"] });
                 .unwrap()
                 .as_nanos()
         )
-    }
-
-    fn cached_artifact_path(task_id: &str, path: &str) -> PathBuf {
-        cache_root()
-            .unwrap()
-            .join("artifacts")
-            .join(sanitize_path_component(task_id))
-            .join(path)
-    }
-
-    fn cache_task_root(task_id: &str) -> PathBuf {
-        cache_root()
-            .unwrap()
-            .join("artifacts")
-            .join(sanitize_path_component(task_id))
     }
 
     // ---- Tests ---------------------------------------------------------
@@ -2565,6 +3317,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let plan = Plan {
             goal: "build".to_owned(),
             roots: vec!["consumer".to_owned()],
+            named_caches: Vec::new(),
             tasks: vec![
                 executable_task("consumer", &["producer"], &["sh", "-c", "exit 1"], None),
                 executable_task("producer", &[], &["sh", "-c", "exit 1"], None),
@@ -2589,11 +3342,10 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let root = tempfile::tempdir().unwrap();
         let first_id = unique_task_id("parallel-a");
         let second_id = unique_task_id("parallel-b");
-        let first_cached = cached_artifact_path(&first_id, "build/a.txt");
-        let second_cached = cached_artifact_path(&second_id, "build/b.txt");
         let plan = Plan {
             goal: "build".to_owned(),
             roots: vec![first_id.clone(), second_id.clone()],
+            named_caches: Vec::new(),
             tasks: vec![
                 executable_task(
                     &first_id,
@@ -2623,8 +3375,14 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             .map(|execution| execution.task_id.as_str())
             .collect();
         assert_eq!(ids, [first_id.as_str(), second_id.as_str()]);
-        assert_eq!(std::fs::read_to_string(first_cached).unwrap(), "a");
-        assert_eq!(std::fs::read_to_string(second_cached).unwrap(), "b");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("build/a.txt")).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("build/b.txt")).unwrap(),
+            "b"
+        );
     }
 
     #[test]
@@ -2633,7 +3391,6 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let marker = root.path().join("producer.marker");
         let producer_id = unique_task_id("producer");
         let consumer_id = unique_task_id("consumer");
-        let consumer_cached = cached_artifact_path(&consumer_id, "build/consumer.txt");
         let producer_cmd = format!("sleep 0.05 && printf ready > {}", marker.display());
         let consumer_cmd = format!(
             "test -f {} && mkdir -p build && printf consumer > build/consumer.txt",
@@ -2642,6 +3399,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let plan = Plan {
             goal: "build".to_owned(),
             roots: vec![consumer_id.clone()],
+            named_caches: Vec::new(),
             tasks: vec![
                 executable_task(&producer_id, &[], &["sh", "-c", &producer_cmd], None),
                 executable_task(
@@ -2667,7 +3425,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             .collect();
         assert_eq!(ids, [producer_id.as_str(), consumer_id.as_str()]);
         assert_eq!(
-            std::fs::read_to_string(consumer_cached).unwrap(),
+            std::fs::read_to_string(root.path().join("build/consumer.txt")).unwrap(),
             "consumer"
         );
     }
@@ -2682,6 +3440,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let plan = Plan {
             goal: "build".to_owned(),
             roots: vec![downstream_id.clone()],
+            named_caches: Vec::new(),
             tasks: vec![
                 executable_task(&failing_id, &[], &["sh", "-c", "exit 7"], None),
                 executable_task(
@@ -2717,6 +3476,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let plan = Plan {
             goal: "build".to_owned(),
             roots: vec![failing_id.clone(), slow_id.clone()],
+            named_caches: Vec::new(),
             tasks: vec![
                 executable_task(&failing_id, &[], &["sh", "-c", "exit 9"], None),
                 executable_task(&slow_id, &[], &["sh", "-c", &slow_cmd], None),
@@ -2752,6 +3512,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let plan = Plan {
             goal: "build".to_owned(),
             roots: vec![first_id.clone(), second_id.clone()],
+            named_caches: Vec::new(),
             tasks: vec![
                 executable_task(&first_id, &[], &["sh", "-c", "true"], None),
                 executable_task(&second_id, &[], &["sh", "-c", "true"], None),
@@ -2777,10 +3538,10 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
     fn local_executor_runs_commands_and_checks_declared_outputs() {
         let root = tempfile::tempdir().unwrap();
         let task_id = unique_task_id("write");
-        let cached = cached_artifact_path(&task_id, "build/out.txt");
         let plan = Plan {
             goal: "build".to_owned(),
             roots: vec![task_id.clone()],
+            named_caches: Vec::new(),
             tasks: vec![executable_task(
                 &task_id,
                 &[],
@@ -2791,11 +3552,12 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
 
         let report = execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
         assert_eq!(report.tasks[0].status, TaskExecutionStatus::Ran);
-        assert_eq!(std::fs::read_to_string(cached).unwrap(), "ok");
-        assert!(!root.path().join("build/out.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("build/out.txt")).unwrap(),
+            "ok"
+        );
 
-        let cache_dir = cache_task_root(&task_id).join("build");
-        let temp_leftovers: Vec<_> = std::fs::read_dir(cache_dir)
+        let temp_leftovers: Vec<_> = std::fs::read_dir(root.path().join("build"))
             .unwrap()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_name().to_string_lossy().contains("tmp-file"))
@@ -2808,7 +3570,6 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let root = tempfile::tempdir().unwrap();
         write_file(&root.path().join("inputs/message.txt"), "hello");
         let task_id = unique_task_id("copy-input");
-        let cached = cached_artifact_path(&task_id, "build/out.txt");
         let mut task = executable_task(
             &task_id,
             &[],
@@ -2834,18 +3595,22 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let plan = Plan {
             goal: "build".to_owned(),
             roots: vec![task_id],
+            named_caches: Vec::new(),
             tasks: vec![task],
         };
 
         execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
-        assert_eq!(std::fs::read_to_string(cached).unwrap(), "hello");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("build/out.txt")).unwrap(),
+            "hello"
+        );
     }
 
     #[test]
     fn local_executor_publishes_directory_outputs_atomically() {
         let root = tempfile::tempdir().unwrap();
         let task_id = unique_task_id("dir-output");
-        let cached_dir = cached_artifact_path(&task_id, "build/tree");
+        let cached_dir = root.path().join("build/tree");
         std::fs::create_dir_all(&cached_dir).unwrap();
         std::fs::write(cached_dir.join("stale.txt"), "stale").unwrap();
         let mut task = executable_task(
@@ -2873,6 +3638,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let plan = Plan {
             goal: "build".to_owned(),
             roots: vec![task_id.clone()],
+            named_caches: Vec::new(),
             tasks: vec![task],
         };
 
@@ -2888,10 +3654,10 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
     fn progress_executor_streams_process_output_path() {
         let root = tempfile::tempdir().unwrap();
         let task_id = unique_task_id("progress-write");
-        let cached = cached_artifact_path(&task_id, "build/out.txt");
         let plan = Plan {
             goal: "build".to_owned(),
             roots: vec![task_id.clone()],
+            named_caches: Vec::new(),
             tasks: vec![executable_task(
                 &task_id,
                 &[],
@@ -2915,7 +3681,161 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         .unwrap();
 
         assert_eq!(report.tasks[0].status, TaskExecutionStatus::Ran);
-        assert_eq!(std::fs::read_to_string(cached).unwrap(), "ok");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("build/out.txt")).unwrap(),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn unchanged_second_execution_uses_task_cache_hit() {
+        let root = tempfile::tempdir().unwrap();
+        let task_id = unique_task_id("cache-hit");
+        let marker = root.path().join("runs.txt");
+        let command = format!(
+            "printf ran >> {} && mkdir -p build && printf ok > build/out.txt",
+            marker.display()
+        );
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![task_id.clone()],
+            named_caches: Vec::new(),
+            tasks: vec![executable_task(
+                &task_id,
+                &[],
+                &["sh", "-c", &command],
+                Some("build/out.txt"),
+            )],
+        };
+
+        let first = execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
+        assert_eq!(first.tasks[0].status, TaskExecutionStatus::Ran);
+        std::fs::remove_file(root.path().join("build/out.txt")).unwrap();
+
+        let second = execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
+        assert_eq!(second.tasks[0].status, TaskExecutionStatus::CacheHit);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("build/out.txt")).unwrap(),
+            "ok"
+        );
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "ran");
+
+        let explanation = explain_task_cache(&plan, root.path(), &task_id).unwrap();
+        assert!(explanation.hit);
+    }
+
+    #[test]
+    fn editing_declared_input_invalidates_downstream_tasks() {
+        let root = tempfile::tempdir().unwrap();
+        write_file(&root.path().join("inputs/message.txt"), "one");
+        let producer_id = unique_task_id("input-producer");
+        let consumer_id = unique_task_id("input-consumer");
+        let producer_marker = root.path().join("producer-runs.txt");
+        let consumer_marker = root.path().join("consumer-runs.txt");
+        let producer_cmd = format!(
+            "printf p >> {} && mkdir -p build && cp inputs/message.txt build/producer.txt",
+            producer_marker.display()
+        );
+        let consumer_cmd = format!(
+            "printf c >> {} && mkdir -p build && cp build/producer.txt build/consumer.txt",
+            consumer_marker.display()
+        );
+        let mut producer = executable_task(
+            &producer_id,
+            &[],
+            &["sh", "-c", &producer_cmd],
+            Some("build/producer.txt"),
+        );
+        producer.inputs = vec![Artifact {
+            id: format!("{producer_id}:in"),
+            kind: "file".to_owned(),
+            path: Some("inputs/message.txt".to_owned()),
+            value: None,
+            producer: None,
+        }];
+        producer.action.inputs = producer
+            .inputs
+            .iter()
+            .map(|artifact| artifact.id.clone())
+            .collect();
+        let mut consumer = executable_task(
+            &consumer_id,
+            &[&producer_id],
+            &["sh", "-c", &consumer_cmd],
+            Some("build/consumer.txt"),
+        );
+        consumer.inputs = vec![Artifact {
+            id: format!("{consumer_id}:in"),
+            kind: "file".to_owned(),
+            path: Some("build/producer.txt".to_owned()),
+            value: None,
+            producer: Some(producer_id.clone()),
+        }];
+        consumer.action.inputs = consumer
+            .inputs
+            .iter()
+            .map(|artifact| artifact.id.clone())
+            .collect();
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![consumer_id.clone()],
+            named_caches: Vec::new(),
+            tasks: vec![producer, consumer],
+        };
+
+        let first = execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
+        assert_eq!(first.tasks[0].status, TaskExecutionStatus::Ran);
+        assert_eq!(first.tasks[1].status, TaskExecutionStatus::Ran);
+        let second = execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
+        assert_eq!(second.tasks[0].status, TaskExecutionStatus::CacheHit);
+        assert_eq!(second.tasks[1].status, TaskExecutionStatus::CacheHit);
+
+        write_file(&root.path().join("inputs/message.txt"), "two");
+        let third = execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
+        assert_eq!(third.tasks[0].status, TaskExecutionStatus::Ran);
+        assert_eq!(third.tasks[1].status, TaskExecutionStatus::Ran);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("build/consumer.txt")).unwrap(),
+            "two"
+        );
+        assert_eq!(std::fs::read_to_string(producer_marker).unwrap(), "pp");
+        assert_eq!(std::fs::read_to_string(consumer_marker).unwrap(), "cc");
+    }
+
+    #[test]
+    fn local_executor_exposes_named_cache_environment_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let task_id = unique_task_id("named-cache");
+        let named_caches = vec![NamedCache {
+            name: "tool-cache".to_owned(),
+            env_var: "IMP_NAMED_CACHE_TOOL_CACHE".to_owned(),
+        }];
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![task_id.clone()],
+            named_caches: named_caches.clone(),
+            tasks: vec![executable_task(
+                &task_id,
+                &[],
+                &[
+                    "sh",
+                    "-c",
+                    "test -d \"$IMP_NAMED_CACHE_TOOL_CACHE\" && printf cache > \"$IMP_NAMED_CACHE_TOOL_CACHE/value.txt\" && mkdir -p build && printf ok > build/out.txt",
+                ],
+                Some("build/out.txt"),
+            )],
+        };
+
+        let report = execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
+        assert_eq!(report.tasks[0].status, TaskExecutionStatus::Ran);
+        let binding = named_cache_bindings(root.path(), &named_caches)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(binding.path.join("value.txt")).unwrap(),
+            "cache"
+        );
     }
 
     #[test]
@@ -2924,6 +3844,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let plan = Plan {
             goal: "build".to_owned(),
             roots: vec!["missing".to_owned()],
+            named_caches: Vec::new(),
             tasks: vec![executable_task(
                 "missing",
                 &[],
@@ -2947,6 +3868,80 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
 
         let jodin = &workspace.targets["//library/jodin:jodin"];
         assert_eq!(jodin.dependencies[0].address, "//src/cpp/joltphysics:cmake");
+    }
+
+    #[test]
+    fn javascript_can_declare_named_caches_during_load() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/tool";
+"#,
+        );
+        write_file(
+            &p.join("rules/tool.js"),
+            r#"
+import { namedCache, rule, target } from "imp:core";
+
+namedCache({ name: "tool-cache" });
+namedCache({ name: "tool-cache" });
+
+rule({
+  kind: "tool-target",
+  product: "file",
+  action: {
+    argv: ["sh", "-c", "mkdir -p build && printf ok > build/out.txt"],
+    outputs: [{ kind: "file", path: "build/out.txt" }],
+    display: "tool"
+  }
+});
+
+export function tool() {
+  return target({ kind: "tool-target" });
+}
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { tool } from "//rules/tool";
+export const generated = tool();
+"#,
+        );
+
+        let workspace = load_workspace(p).unwrap();
+        let cache = workspace.named_caches.get("tool-cache").unwrap();
+        assert_eq!(cache.env_var, "IMP_NAMED_CACHE_TOOL_CACHE");
+        let plan = plan(&workspace, "build", &["generated".to_owned()]).unwrap();
+        assert_eq!(plan.named_caches, vec![cache.clone()]);
+    }
+
+    #[test]
+    fn invalid_named_cache_names_are_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/bad";
+"#,
+        );
+        write_file(
+            &p.join("rules/bad.js"),
+            r#"
+import { namedCache } from "imp:core";
+namedCache({ name: "Bad Cache" });
+"#,
+        );
+        write_file(&p.join(BUILD_FILE), "export const nothing = 1;\n");
+
+        let error = format!("{:#}", load_workspace(p).unwrap_err());
+        assert!(
+            error.contains("must contain only lowercase ASCII letters"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -3090,5 +4085,91 @@ export const ignored = missing;
         assert!(dot.contains("rankdir=TB"));
         assert!(dot.contains("//src/cpp/joltphysics:joltphysics#sources"));
         assert!(dot.contains(" -> "));
+    }
+
+    #[test]
+    fn impure_task_is_not_cacheable() {
+        let root = tempfile::tempdir().unwrap();
+        let task_id = unique_task_id("impure");
+        let mut task = executable_task(
+            &task_id,
+            &[],
+            &["sh", "-c", "mkdir -p build && printf ok > build/out.txt"],
+            Some("build/out.txt"),
+        );
+        task.action.impure = true;
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![task_id.clone()],
+            named_caches: Vec::new(),
+            tasks: vec![task],
+        };
+
+        let explanation = explain_task_cache(&plan, root.path(), &task_id).unwrap();
+        assert!(!explanation.cacheable);
+        assert!(explanation.impure);
+        assert!(!explanation.force_cache);
+        assert!(explanation
+            .miss_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("impure"));
+
+        let mut output = String::new();
+        format_cache_explanation(&explanation, &mut output).unwrap();
+        assert!(output.contains("impure: true (caching disabled)"));
+    }
+
+    #[test]
+    fn force_cache_overrides_impure_task() {
+        let root = tempfile::tempdir().unwrap();
+        let task_id = unique_task_id("force-cache");
+        let mut task = executable_task(
+            &task_id,
+            &[],
+            &["sh", "-c", "mkdir -p build && printf ok > build/out.txt"],
+            Some("build/out.txt"),
+        );
+        task.action.impure = true;
+        task.action.force_cache = true;
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![task_id.clone()],
+            named_caches: Vec::new(),
+            tasks: vec![task],
+        };
+
+        let explanation = explain_task_cache(&plan, root.path(), &task_id).unwrap();
+        assert!(explanation.cacheable);
+        assert!(explanation.impure);
+        assert!(explanation.force_cache);
+
+        let mut output = String::new();
+        format_cache_explanation(&explanation, &mut output).unwrap();
+        assert!(output.contains("force_cache override"));
+    }
+
+    #[test]
+    fn non_impure_task_uses_existing_heuristic() {
+        let root = tempfile::tempdir().unwrap();
+        let task_id = unique_task_id("heuristic");
+        let mut task = executable_task(
+            &task_id,
+            &[],
+            &["sh", "-c", "mkdir -p build && printf ok > build/out.txt"],
+            Some("build/out.txt"),
+        );
+        task.action.impure = false;
+        task.action.force_cache = false;
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![task_id.clone()],
+            named_caches: Vec::new(),
+            tasks: vec![task],
+        };
+
+        let explanation = explain_task_cache(&plan, root.path(), &task_id).unwrap();
+        assert!(explanation.cacheable);
+        assert!(!explanation.impure);
     }
 }

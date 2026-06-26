@@ -91,6 +91,11 @@ enum Cmd {
     },
     /// List target types and rules in the workspace (QuickJS spike)
     Rules,
+    /// Inspect local cache state for planned tasks (QuickJS spike)
+    Cache {
+        #[command(subcommand)]
+        command: CacheCmd,
+    },
     /// Format all Odin source files
     Fmt,
     /// Type-check an Odin package without building
@@ -144,6 +149,15 @@ enum Cmd {
     },
     /// Generate Visual Studio and VS Code configuration files
     Vs,
+}
+
+#[derive(Subcommand)]
+enum CacheCmd {
+    /// Explain the cache key and hit/miss state for a planned build target
+    Explain {
+        /// Target selector, or a task id if it appears in the selected plan
+        selector: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +228,9 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
         }
         Cmd::Rules => {
             return cmd_rules();
+        }
+        Cmd::Cache { command } => {
+            return cmd_cache(command);
         }
         Cmd::Build {
             target,
@@ -308,6 +325,7 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
         Cmd::Targets { .. } => unreachable!("handled before environment setup"),
         Cmd::Dependencies { .. } => unreachable!("handled before environment setup"),
         Cmd::Rules => unreachable!("handled before environment setup"),
+        Cmd::Cache { .. } => unreachable!("handled before environment setup"),
 
         Cmd::Fmt => commands::fmt::cmd_fmt(tree).await,
 
@@ -412,6 +430,7 @@ fn cmd_plan(
         for task in report.tasks {
             let status = match task.status {
                 spike::TaskExecutionStatus::WouldRun => "would run",
+                spike::TaskExecutionStatus::CacheHit => "cache hit",
                 spike::TaskExecutionStatus::Ran => "ran",
                 spike::TaskExecutionStatus::Noop => "noop",
             };
@@ -466,6 +485,7 @@ fn cmd_build_planned(
     for task in report.tasks {
         let status = match task.status {
             spike::TaskExecutionStatus::WouldRun => "would run",
+            spike::TaskExecutionStatus::CacheHit => "cache hit",
             spike::TaskExecutionStatus::Ran => "ran",
             spike::TaskExecutionStatus::Noop => "noop",
         };
@@ -512,6 +532,38 @@ fn cmd_rules() -> Result<()> {
     workspace_cmd!(|workspace, out| {
         spike::format_rules(&workspace, &mut out)?;
     })
+}
+
+fn cmd_cache(command: &CacheCmd) -> Result<()> {
+    match command {
+        CacheCmd::Explain { selector } => cmd_cache_explain(selector),
+    }
+}
+
+fn cmd_cache_explain(selector: &str) -> Result<()> {
+    let current_dir = std::env::current_dir().context("determine current directory")?;
+    let workspace_root = spike::find_workspace_root(&current_dir)?;
+    let workspace = spike::load_workspace(&workspace_root)?;
+    let selectors = if selector.contains('#') {
+        Vec::new()
+    } else {
+        vec![selector.to_owned()]
+    };
+    let plan = spike::plan(&workspace, "build", &selectors)?;
+    let task_selector =
+        if selector.contains('#') && plan.tasks.iter().any(|task| task.id == selector) {
+            selector
+        } else {
+            plan.roots
+                .first()
+                .map(String::as_str)
+                .ok_or_else(|| anyhow::anyhow!("planned cache explanation had no root task"))?
+        };
+    let explanation = spike::explain_task_cache(&plan, &workspace_root, task_selector)?;
+    let mut out = String::new();
+    spike::format_cache_explanation(&explanation, &mut out)?;
+    print!("{out}");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
