@@ -4003,8 +4003,11 @@ mod tests {
     const CPP_RULES_JS: &str = r#"
 import { target, rule } from "imp:core";
 
-rule({ kind: "cpp-sources",  product: "sources",             action: "snapshot {sources}",        requiresOwnSources: false, dependencyProduct: null });
-rule({ kind: "cmake-lib",    product: "native-link-library", action: "cmake --build {entrypoint}", requiresOwnSources: false, dependencyProduct: "sources" });
+function snapshotSourcesExec(target, ctx) {}
+function cmakeBuildExec(target, ctx) {}
+
+rule({ kind: "cpp-sources",  product: "sources",             action: "snapshot {sources}",        exec: snapshotSourcesExec, requiresOwnSources: false, dependencyProduct: null });
+rule({ kind: "cmake-lib",    product: "native-link-library", action: "cmake --build {entrypoint}", exec: cmakeBuildExec, requiresOwnSources: false, dependencyProduct: "sources" });
 
 export function cppSources({ srcs }) {
     return target({ kind: "cpp-sources", fields: { sources: srcs.join(",") } });
@@ -4031,8 +4034,11 @@ export function odinPackage({ srcs, deps = [] }) {
     const ASSET_RULES_JS: &str = r#"
 import { target, rule } from "imp:core";
 
-rule({ kind: "asset", product: "sources", action: "snapshot {sources}", requiresOwnSources: false, dependencyProduct: null });
-rule({ kind: "asset", product: "bundle",  action: "bundle {sources}",   requiresOwnSources: true,  dependencyProduct: null });
+function snapshotSourcesExec(target, ctx) {}
+function bundleExec(target, ctx) {}
+
+rule({ kind: "asset", product: "sources", action: "snapshot {sources}", exec: snapshotSourcesExec, requiresOwnSources: false, dependencyProduct: null });
+rule({ kind: "asset", product: "bundle",  action: "bundle {sources}",   exec: bundleExec, requiresOwnSources: true,  dependencyProduct: null });
 
 export function asset({ srcs }) {
     return target({ kind: "asset", fields: { sources: srcs.join(",") } });

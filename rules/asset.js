@@ -1,20 +1,22 @@
 import { target, rule } from "imp:core";
 
 // ---------------------------------------------------------------------------
-// Exec functions for cpp rules
+// Exec functions for asset rules
 // ---------------------------------------------------------------------------
 
 function snapshotSourcesExec(target, ctx) {
     // Sources are on disk; this task exists to wire up the dependency graph.
 }
 
-function cmakeBuildExec(target, ctx) {
+function bundleExec(target, ctx) {
+    // Bundle assets — currently a placeholder.
+    // A real implementation would copy/optimize the source assets into an output bundle.
     const result = ctx.run({
-        argv: ["cmake", "--build", target.fields.entrypoint],
-        display: `cmake --build ${target.fields.entrypoint}`,
+        argv: ["cp", "-r", ...target.fields.sources.split(","), "build"],
+        display: `bundle ${target.fields.sources}`,
     });
     if (result.exitCode !== 0) {
-        throw new Error(`cmake build failed (exit ${result.exitCode}): ${result.stderr}`);
+        throw new Error(`bundle failed (exit ${result.exitCode}): ${result.stderr}`);
     }
 }
 
@@ -23,7 +25,7 @@ function cmakeBuildExec(target, ctx) {
 // ---------------------------------------------------------------------------
 
 rule({
-    kind: "cpp-sources",
+    kind: "asset",
     product: "sources",
     action: "snapshot {sources}",
     exec: snapshotSourcesExec,
@@ -32,22 +34,18 @@ rule({
 });
 
 rule({
-    kind: "cmake-lib",
-    product: "native-link-library",
-    action: "cmake --build {entrypoint}",
-    exec: cmakeBuildExec,
-    requiresOwnSources: false,
-    dependencyProduct: "sources",
+    kind: "asset",
+    product: "bundle",
+    action: "bundle {sources}",
+    exec: bundleExec,
+    requiresOwnSources: true,
+    dependencyProduct: null,
 });
 
 // ---------------------------------------------------------------------------
 // Target constructors
 // ---------------------------------------------------------------------------
 
-export function cppSources({ srcs }) {
-    return target({ kind: "cpp-sources", fields: { sources: srcs.join(",") } });
-}
-
-export function cmakeLib({ entrypoint, deps = [] }) {
-    return target({ kind: "cmake-lib", fields: { entrypoint }, deps });
+export function asset({ srcs }) {
+    return target({ kind: "asset", fields: { sources: srcs.join(",") } });
 }
