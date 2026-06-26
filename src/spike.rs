@@ -192,6 +192,21 @@ pub enum ExecutionMode {
     Local,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionOptions {
+    pub mode: ExecutionMode,
+    pub jobs: usize,
+}
+
+impl ExecutionOptions {
+    pub fn new(mode: ExecutionMode, jobs: usize) -> Self {
+        Self {
+            mode,
+            jobs: jobs.max(1),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskExecutionStatus {
     WouldRun,
@@ -1175,58 +1190,171 @@ pub fn execute_plan(
     workspace_root: &Path,
     mode: ExecutionMode,
 ) -> Result<ExecutionReport> {
-    execute_plan_with_progress(plan, workspace_root, mode, None)
+    execute_plan_with_options(plan, workspace_root, ExecutionOptions::new(mode, 1), None)
 }
 
+#[allow(dead_code)]
 pub fn execute_plan_with_progress(
     plan: &Plan,
     workspace_root: &Path,
     mode: ExecutionMode,
     mut progress: Option<&mut prodash::tree::Item>,
 ) -> Result<ExecutionReport> {
+    execute_plan_with_options(
+        plan,
+        workspace_root,
+        ExecutionOptions::new(mode, 1),
+        progress.as_deref_mut(),
+    )
+}
+
+pub fn execute_plan_with_options(
+    plan: &Plan,
+    workspace_root: &Path,
+    options: ExecutionOptions,
+    progress: Option<&mut prodash::tree::Item>,
+) -> Result<ExecutionReport> {
     let ordered = ordered_tasks(plan)?;
+    let executions = if options.jobs <= 1 {
+        execute_ordered_tasks_sequentially(&ordered, workspace_root, options.mode, progress)?
+    } else {
+        execute_ordered_tasks_parallel(&ordered, workspace_root, options)?
+    };
+    Ok(ExecutionReport { tasks: executions })
+}
+
+fn execute_ordered_tasks_sequentially(
+    ordered: &[&Task],
+    workspace_root: &Path,
+    mode: ExecutionMode,
+    mut progress: Option<&mut prodash::tree::Item>,
+) -> Result<Vec<TaskExecution>> {
     let mut executions = Vec::with_capacity(ordered.len());
 
     for task in ordered {
         let mut task_progress = progress
             .as_deref_mut()
             .map(|progress| progress.add_child(format!("execute {}", task.id)));
-        let command = task.action.argv.clone();
-        let status = match mode {
-            ExecutionMode::DryRun => {
-                if let Some(progress) = task_progress.as_mut() {
-                    progress.done("would run");
-                }
-                TaskExecutionStatus::WouldRun
-            }
-            ExecutionMode::Local if command.is_empty() => {
-                if let Some(progress) = task_progress.as_mut() {
-                    progress.done("noop");
-                }
-                TaskExecutionStatus::Noop
-            }
-            ExecutionMode::Local => {
-                if let Err(error) = run_local_task(task, workspace_root, task_progress.as_ref()) {
-                    if let Some(progress) = task_progress.as_mut() {
-                        progress.fail("failed");
-                    }
-                    return Err(error);
-                }
-                if let Some(progress) = task_progress.as_mut() {
-                    progress.done("done");
-                }
-                TaskExecutionStatus::Ran
-            }
-        };
-
-        executions.push(TaskExecution {
-            task_id: task.id.clone(),
-            status,
-            command,
-        });
+        executions.push(execute_one_task(
+            task,
+            workspace_root,
+            mode,
+            task_progress.as_mut(),
+        )?);
     }
 
-    Ok(ExecutionReport { tasks: executions })
+    Ok(executions)
+}
+
+fn execute_ordered_tasks_parallel(
+    ordered: &[&Task],
+    workspace_root: &Path,
+    options: ExecutionOptions,
+) -> Result<Vec<TaskExecution>> {
+    let mut task_by_id: BTreeMap<&str, &Task> = ordered
+        .iter()
+        .map(|task| (task.id.as_str(), *task))
+        .collect();
+    let plan_index: BTreeMap<&str, usize> = ordered
+        .iter()
+        .enumerate()
+        .map(|(i, task)| (task.id.as_str(), i))
+        .collect();
+    let mut completed = BTreeSet::new();
+    let mut running = BTreeSet::new();
+    let mut executions: Vec<Option<TaskExecution>> = vec![None; ordered.len()];
+    let (sender, receiver) = mpsc::channel();
+
+    while completed.len() < ordered.len() {
+        let ready_ids: Vec<String> = task_by_id
+            .iter()
+            .filter_map(|(id, task)| {
+                let ready = !running.contains(*id)
+                    && !completed.contains(*id)
+                    && task.dependencies.iter().all(|dep| completed.contains(dep));
+                ready.then(|| (*id).to_owned())
+            })
+            .take(options.jobs.saturating_sub(running.len()))
+            .collect();
+
+        for id in ready_ids {
+            let task = task_by_id
+                .remove(id.as_str())
+                .expect("ready id came from pending tasks");
+            running.insert(id.clone());
+            let sender = sender.clone();
+            let workspace_root = workspace_root.to_owned();
+            let mode = options.mode;
+            let task = task.clone();
+            thread::spawn(move || {
+                let id = task.id.clone();
+                let result = execute_one_task(&task, &workspace_root, mode, None);
+                let _ = sender.send((id, result));
+            });
+        }
+
+        if running.is_empty() {
+            let unresolved = task_by_id.keys().copied().collect::<Vec<_>>().join(", ");
+            bail!("task graph has unresolved dependencies or a cycle: {unresolved}");
+        }
+
+        let (id, result) = receiver
+            .recv()
+            .context("parallel task worker channel closed unexpectedly")?;
+        running.remove(id.as_str());
+        let execution = result?;
+        let index = *plan_index
+            .get(id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("completed unknown task {id}"))?;
+        executions[index] = Some(execution);
+        completed.insert(id);
+    }
+
+    executions
+        .into_iter()
+        .map(|execution| execution.ok_or_else(|| anyhow::anyhow!("missing task execution result")))
+        .collect()
+}
+
+fn execute_one_task(
+    task: &Task,
+    workspace_root: &Path,
+    mode: ExecutionMode,
+    mut progress: Option<&mut prodash::tree::Item>,
+) -> Result<TaskExecution> {
+    let command = task.action.argv.clone();
+    let status = match mode {
+        ExecutionMode::DryRun => {
+            if let Some(progress) = progress.as_mut() {
+                progress.done("would run");
+            }
+            TaskExecutionStatus::WouldRun
+        }
+        ExecutionMode::Local if command.is_empty() => {
+            if let Some(progress) = progress.as_mut() {
+                progress.done("noop");
+            }
+            TaskExecutionStatus::Noop
+        }
+        ExecutionMode::Local => {
+            if let Err(error) = run_local_task(task, workspace_root, progress.as_deref()) {
+                if let Some(progress) = progress.as_mut() {
+                    progress.fail("failed");
+                }
+                return Err(error);
+            }
+            if let Some(progress) = progress.as_mut() {
+                progress.done("done");
+            }
+            TaskExecutionStatus::Ran
+        }
+    };
+
+    Ok(TaskExecution {
+        task_id: task.id.clone(),
+        status,
+        command,
+    })
 }
 
 fn ordered_tasks(plan: &Plan) -> Result<Vec<&Task>> {
@@ -2327,6 +2455,158 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             .tasks
             .iter()
             .all(|execution| execution.status == TaskExecutionStatus::WouldRun));
+    }
+
+    #[test]
+    fn parallel_executor_runs_independent_ready_tasks() {
+        let root = tempfile::tempdir().unwrap();
+        let first_id = unique_task_id("parallel-a");
+        let second_id = unique_task_id("parallel-b");
+        let first_cached = cached_artifact_path(&first_id, "build/a.txt");
+        let second_cached = cached_artifact_path(&second_id, "build/b.txt");
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![first_id.clone(), second_id.clone()],
+            tasks: vec![
+                executable_task(
+                    &first_id,
+                    &[],
+                    &["sh", "-c", "mkdir -p build && printf a > build/a.txt"],
+                    Some("build/a.txt"),
+                ),
+                executable_task(
+                    &second_id,
+                    &[],
+                    &["sh", "-c", "mkdir -p build && printf b > build/b.txt"],
+                    Some("build/b.txt"),
+                ),
+            ],
+        };
+
+        let report = execute_plan_with_options(
+            &plan,
+            root.path(),
+            ExecutionOptions::new(ExecutionMode::Local, 2),
+            None,
+        )
+        .unwrap();
+        let ids: Vec<_> = report
+            .tasks
+            .iter()
+            .map(|execution| execution.task_id.as_str())
+            .collect();
+        assert_eq!(ids, [first_id.as_str(), second_id.as_str()]);
+        assert_eq!(std::fs::read_to_string(first_cached).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(second_cached).unwrap(), "b");
+    }
+
+    #[test]
+    fn parallel_executor_waits_for_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("producer.marker");
+        let producer_id = unique_task_id("producer");
+        let consumer_id = unique_task_id("consumer");
+        let consumer_cached = cached_artifact_path(&consumer_id, "build/consumer.txt");
+        let producer_cmd = format!("sleep 0.05 && printf ready > {}", marker.display());
+        let consumer_cmd = format!(
+            "test -f {} && mkdir -p build && printf consumer > build/consumer.txt",
+            marker.display()
+        );
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![consumer_id.clone()],
+            tasks: vec![
+                executable_task(&producer_id, &[], &["sh", "-c", &producer_cmd], None),
+                executable_task(
+                    &consumer_id,
+                    &[&producer_id],
+                    &["sh", "-c", &consumer_cmd],
+                    Some("build/consumer.txt"),
+                ),
+            ],
+        };
+
+        let report = execute_plan_with_options(
+            &plan,
+            root.path(),
+            ExecutionOptions::new(ExecutionMode::Local, 2),
+            None,
+        )
+        .unwrap();
+        let ids: Vec<_> = report
+            .tasks
+            .iter()
+            .map(|execution| execution.task_id.as_str())
+            .collect();
+        assert_eq!(ids, [producer_id.as_str(), consumer_id.as_str()]);
+        assert_eq!(
+            std::fs::read_to_string(consumer_cached).unwrap(),
+            "consumer"
+        );
+    }
+
+    #[test]
+    fn parallel_executor_failure_prevents_downstream_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("downstream.marker");
+        let failing_id = unique_task_id("failing");
+        let downstream_id = unique_task_id("downstream");
+        let downstream_cmd = format!("printf ran > {}", marker.display());
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![downstream_id.clone()],
+            tasks: vec![
+                executable_task(&failing_id, &[], &["sh", "-c", "exit 7"], None),
+                executable_task(
+                    &downstream_id,
+                    &[&failing_id],
+                    &["sh", "-c", &downstream_cmd],
+                    None,
+                ),
+            ],
+        };
+
+        let error = format!(
+            "{:#}",
+            execute_plan_with_options(
+                &plan,
+                root.path(),
+                ExecutionOptions::new(ExecutionMode::Local, 2),
+                None,
+            )
+            .unwrap_err()
+        );
+        assert!(error.contains("failed with status"), "{error}");
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn jobs_one_preserves_sequential_execution_order() {
+        let root = tempfile::tempdir().unwrap();
+        let first_id = unique_task_id("seq-a");
+        let second_id = unique_task_id("seq-b");
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![first_id.clone(), second_id.clone()],
+            tasks: vec![
+                executable_task(&first_id, &[], &["sh", "-c", "true"], None),
+                executable_task(&second_id, &[], &["sh", "-c", "true"], None),
+            ],
+        };
+
+        let report = execute_plan_with_options(
+            &plan,
+            root.path(),
+            ExecutionOptions::new(ExecutionMode::Local, 1),
+            None,
+        )
+        .unwrap();
+        let ids: Vec<_> = report
+            .tasks
+            .iter()
+            .map(|execution| execution.task_id.as_str())
+            .collect();
+        assert_eq!(ids, [first_id.as_str(), second_id.as_str()]);
     }
 
     #[test]

@@ -139,9 +139,11 @@ Execute the task graph locally before adding any remote system.
 - Materialise declared directory outputs atomically.
 - [x] Add failure propagation for failed local commands.
 - Add cancellation for in-flight task execution.
-- Add bounded parallelism for ready tasks.
+- [x] Add bounded parallelism for ready tasks.
 - [x] Add deterministic dependency ordering for observable execution output.
 - [x] Introduce a no-op/dry-run executor for planner tests.
+- [x] Migrate one simple build target (`//:generated_stamp`) to a structured
+  executable action with declared cached output.
 
 Acceptance: one migrated build target runs through the new executor and has no
 project-specific command logic in Rust.

@@ -75,6 +75,9 @@ enum Cmd {
         /// Exercise the executor without running commands or checking outputs
         #[arg(long)]
         dry_run: bool,
+        /// Maximum number of ready tasks to execute concurrently
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
     },
     /// List targets in the workspace (QuickJS spike)
     Targets {
@@ -108,6 +111,9 @@ enum Cmd {
         planned: bool,
         /// Planned target selectors; only valid with --planned
         selectors: Vec<String>,
+        /// Maximum number of ready planned tasks to execute concurrently
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
     },
     /// Build and run ottar
     Run {
@@ -187,6 +193,7 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
             json,
             execute,
             dry_run,
+            jobs,
         } => {
             return cmd_plan(
                 goal,
@@ -195,6 +202,7 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
                 json.as_deref(),
                 *execute,
                 *dry_run,
+                *jobs,
                 tree,
             );
         }
@@ -211,9 +219,10 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
             target,
             planned: true,
             selectors,
+            jobs,
             ..
         } => {
-            return cmd_build_planned(target.as_deref(), selectors, tree);
+            return cmd_build_planned(target.as_deref(), selectors, *jobs, tree);
         }
         _ => {}
     }
@@ -309,6 +318,7 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
             target,
             planned,
             selectors,
+            jobs: _,
         } => {
             if *planned {
                 unreachable!("handled before environment setup");
@@ -358,6 +368,7 @@ fn cmd_plan(
     json: Option<&std::path::Path>,
     execute: bool,
     dry_run: bool,
+    jobs: usize,
     tree: &Tree,
 ) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
@@ -382,10 +393,10 @@ fn cmd_plan(
             spike::ExecutionMode::Local
         };
         let mut progress = tree.add_child("execute plan");
-        let report = match spike::execute_plan_with_progress(
+        let report = match spike::execute_plan_with_options(
             &plan,
             &workspace_root,
-            mode,
+            spike::ExecutionOptions::new(mode, jobs),
             Some(&mut progress),
         ) {
             Ok(report) => {
@@ -415,7 +426,12 @@ fn cmd_plan(
     Ok(())
 }
 
-fn cmd_build_planned(target: Option<&str>, selectors: &[String], tree: &Tree) -> Result<()> {
+fn cmd_build_planned(
+    target: Option<&str>,
+    selectors: &[String],
+    jobs: usize,
+    tree: &Tree,
+) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let workspace = spike::load_workspace(&workspace_root)?;
@@ -430,10 +446,10 @@ fn cmd_build_planned(target: Option<&str>, selectors: &[String], tree: &Tree) ->
     print!("{}", spike::render_text_plan(&plan));
 
     let mut progress = tree.add_child("execute planned build");
-    let report = match spike::execute_plan_with_progress(
+    let report = match spike::execute_plan_with_options(
         &plan,
         &workspace_root,
-        spike::ExecutionMode::Local,
+        spike::ExecutionOptions::new(spike::ExecutionMode::Local, jobs),
         Some(&mut progress),
     ) {
         Ok(report) => {
