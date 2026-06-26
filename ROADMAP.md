@@ -168,7 +168,7 @@ declared input invalidates only its affected downstream tasks.
 Generalise beyond `build` without adding goal-specific Rust branching.
 
 - [x] Add goal registration and product-selection policies to extensions.
-- Implement `test`, `fmt`, `lint`, `package`, and `run` as product requests.
+- [x] Implement `test`, `fmt`, `lint`, `package`, and `run` as product requests.
 - Extend dependency modes beyond `auto`, initially `sources`, `link`, and
   `runtime`.
 - Decide whether a selector-less goal means all buildable targets or an

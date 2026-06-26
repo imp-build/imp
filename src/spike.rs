@@ -421,13 +421,22 @@ struct HostState {
 impl Default for HostState {
     fn default() -> Self {
         let mut goals = BTreeMap::new();
-        goals.insert(
-            "build".to_owned(),
-            Goal {
-                name: "build".to_owned(),
-                product_policy: GoalProductPolicy::Default,
-            },
-        );
+        for (name, policy) in [
+            ("build", GoalProductPolicy::Default),
+            ("test", GoalProductPolicy::Named("test".to_owned())),
+            ("fmt", GoalProductPolicy::Named("fmt".to_owned())),
+            ("lint", GoalProductPolicy::Named("lint".to_owned())),
+            ("package", GoalProductPolicy::Named("package".to_owned())),
+            ("run", GoalProductPolicy::Named("run".to_owned())),
+        ] {
+            goals.insert(
+                name.to_owned(),
+                Goal {
+                    name: name.to_owned(),
+                    product_policy: policy,
+                },
+            );
+        }
         Self {
             next_id: 0,
             pending: BTreeMap::new(),
