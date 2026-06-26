@@ -91,6 +91,25 @@ export function rule(opts) {
 export function namedCache(opts) {
     __host_named_cache(opts.name);
 }
+
+/**
+ * Register a goal and its product-selection policy.
+ *
+ * The built-in "build" goal is pre-registered with productPolicy "default".
+ * Extensions may register additional goals. Duplicate goal names are silently
+ * ignored (first registration wins).
+ *
+ * @param {object} opts
+ * @param {string} opts.name Goal name, e.g. "test" or "fmt".
+ * @param {string} [opts.productPolicy="default"] Product to request from each
+ *   selected target. Use "default" to request each target's default product
+ *   (first non-"sources" rule), or a product name to request that specific
+ *   product (targets lacking a rule for it are skipped).
+ * @returns {void}
+ */
+export function goal(opts) {
+    __host_goal(opts.name, opts.productPolicy !== undefined ? opts.productPolicy : "default");
+}
 "#;
 
 // ---------------------------------------------------------------------------
@@ -130,6 +149,21 @@ pub enum DependencyProduct {
     None,
     Named(String),
     Default,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Goal {
+    pub name: String,
+    pub product_policy: GoalProductPolicy,
+}
+
+/// How a goal selects a product from each matching target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalProductPolicy {
+    /// Use the target's default product (first non-`"sources"` rule).
+    Default,
+    /// Request this specific product; targets lacking a rule for it are skipped.
+    Named(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +251,7 @@ pub struct Workspace {
     pub rules: BTreeMap<(String, String), Rule>,
     pub targets: BTreeMap<String, Target>,
     pub named_caches: BTreeMap<String, NamedCache>,
+    pub goals: BTreeMap<String, Goal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -380,15 +415,25 @@ struct HostState {
     pending: BTreeMap<u32, PendingTarget>,
     rules: BTreeMap<(String, String), Rule>,
     named_caches: BTreeMap<String, NamedCache>,
+    goals: BTreeMap<String, Goal>,
 }
 
 impl Default for HostState {
     fn default() -> Self {
+        let mut goals = BTreeMap::new();
+        goals.insert(
+            "build".to_owned(),
+            Goal {
+                name: "build".to_owned(),
+                product_policy: GoalProductPolicy::Default,
+            },
+        );
         Self {
             next_id: 0,
             pending: BTreeMap::new(),
             rules: BTreeMap::new(),
             named_caches: BTreeMap::new(),
+            goals,
         }
     }
 }
@@ -801,6 +846,7 @@ pub fn load_workspace(root: &Path) -> Result<Workspace> {
         rules: hs.rules.clone(),
         targets,
         named_caches: hs.named_caches.clone(),
+        goals: hs.goals.clone(),
     })
 }
 
@@ -906,7 +952,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, state: Arc<Mutex<HostState>>) -> rquickj
     // __host_named_cache(name)
     // ------------------------------------------------------------------
     let state_c = Arc::clone(&state);
-    let host_named_cache = Function::new(ctx, move |name: String| -> rquickjs::Result<()> {
+    let host_named_cache = Function::new(ctx.clone(), move |name: String| -> rquickjs::Result<()> {
         let cache = named_cache_from_name(&name)?;
         let mut hs = state_c.lock().unwrap();
         if let Some(existing) = hs.named_caches.get(&cache.name) {
@@ -932,6 +978,32 @@ fn register_globals<'js>(ctx: Ctx<'js>, state: Arc<Mutex<HostState>>) -> rquickj
         Ok(())
     })?;
     globals.set("__host_named_cache", host_named_cache)?;
+
+    // ------------------------------------------------------------------
+    // __host_goal(name, productPolicy)
+    // ------------------------------------------------------------------
+    let state_g = Arc::clone(&state);
+    let host_goal = Function::new(ctx, move |name: String, policy_val: Value| -> rquickjs::Result<()> {
+        if name.is_empty() {
+            return Err(action_spec_error("goal name must not be empty".to_owned()));
+        }
+        let product_policy = {
+            let s: String = policy_val
+                .get()
+                .map_err(|_| action_spec_error("goal productPolicy must be a string".to_owned()))?;
+            if s == "default" {
+                GoalProductPolicy::Default
+            } else {
+                GoalProductPolicy::Named(s)
+            }
+        };
+        let mut hs = state_g.lock().unwrap();
+        if !hs.goals.contains_key(&name) {
+            hs.goals.insert(name.clone(), Goal { name, product_policy });
+        }
+        Ok(())
+    })?;
+    globals.set("__host_goal", host_goal)?;
 
     Ok(())
 }
@@ -1159,18 +1231,23 @@ fn action_spec_error(message: String) -> rquickjs::Error {
 // ---------------------------------------------------------------------------
 
 pub fn plan(workspace: &Workspace, goal: &str, selectors: &[String]) -> Result<Plan> {
-    if goal != "build" {
-        bail!("unknown goal '{goal}'; the spike currently implements build only");
-    }
+    let goal_def = workspace.goals.get(goal).ok_or_else(|| {
+        let known: Vec<_> = workspace.goals.keys().map(String::as_str).collect();
+        anyhow::anyhow!(
+            "unknown goal '{goal}'; registered goals: {}",
+            known.join(", ")
+        )
+    })?;
 
-    let roots = select_roots(workspace, selectors)?;
+    let roots = select_roots(workspace, goal_def, selectors)?;
     let mut planner = Planner {
         workspace,
         tasks: BTreeMap::new(),
     };
     let mut root_tasks = Vec::new();
     for target in roots {
-        let product = planner.default_product(target)?;
+        let product = goal_product_for_kind(workspace, goal_def, &target.kind)
+            .ok_or_else(|| anyhow::anyhow!("{} has no {} product", target.address, goal))?;
         root_tasks.push(planner.request(&target.address, &product)?);
     }
 
@@ -1182,11 +1259,15 @@ pub fn plan(workspace: &Workspace, goal: &str, selectors: &[String]) -> Result<P
     })
 }
 
-fn select_roots<'a>(workspace: &'a Workspace, selectors: &[String]) -> Result<Vec<&'a Target>> {
+fn select_roots<'a>(
+    workspace: &'a Workspace,
+    goal: &Goal,
+    selectors: &[String],
+) -> Result<Vec<&'a Target>> {
     let mut selected = BTreeMap::new();
     if selectors.is_empty() {
         for target in workspace.targets.values() {
-            if default_product_for_kind(workspace, &target.kind).is_some() {
+            if goal_product_for_kind(workspace, goal, &target.kind).is_some() {
                 selected.insert(target.address.as_str(), target);
             }
         }
@@ -1201,14 +1282,31 @@ fn select_roots<'a>(workspace: &'a Workspace, selectors: &[String]) -> Result<Ve
                 bail!("no target matches selector '{selector}'");
             }
             for target in matches {
-                if default_product_for_kind(workspace, &target.kind).is_none() {
-                    bail!("{} has no build product", target.address);
+                if goal_product_for_kind(workspace, goal, &target.kind).is_none() {
+                    bail!("{} has no {} product", target.address, goal.name);
                 }
                 selected.insert(target.address.as_str(), target);
             }
         }
     }
     Ok(selected.into_values().collect())
+}
+
+/// Return the product a goal would request for a given target kind, or `None`
+/// if the goal has nothing to produce for that kind.
+fn goal_product_for_kind(workspace: &Workspace, goal: &Goal, kind: &str) -> Option<String> {
+    match &goal.product_policy {
+        GoalProductPolicy::Default => {
+            default_product_for_kind(workspace, kind).map(|s| s.to_owned())
+        }
+        GoalProductPolicy::Named(p) => {
+            if workspace.rules.contains_key(&(kind.to_owned(), p.clone())) {
+                Some(p.clone())
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// Infer the default product for a target kind from its registered rules.
