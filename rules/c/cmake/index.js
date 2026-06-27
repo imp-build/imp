@@ -1,7 +1,19 @@
 import { target, rule } from "imp:core";
+import { cmakeBin } from "//rules/c/cmake/toolchain";
+
+export {
+    acquireCmakeToolchain,
+    cmakeBin,
+    cmakeCacheKey,
+    cmakeToolchain,
+    createCmakeToolchainApi,
+    defaultCmakeToolchainVersion,
+    installCmakeToolchain,
+    resolveCmakeToolchainVersion,
+} from "//rules/c/cmake/toolchain";
 
 // ---------------------------------------------------------------------------
-// Exec functions for cpp rules
+// Exec functions for C/CMake rules
 // ---------------------------------------------------------------------------
 
 function snapshotSourcesExec(target, ctx) {
@@ -10,7 +22,7 @@ function snapshotSourcesExec(target, ctx) {
 
 function cmakeBuildExec(target, ctx) {
     const result = ctx.run({
-        argv: ["cmake", "--build", target.fields.entrypoint],
+        argv: [cmakeBin(target.fields.toolchain), "--build", target.fields.entrypoint],
         display: `cmake --build ${target.fields.entrypoint}`,
     });
     if (result.exitCode !== 0) {
@@ -48,6 +60,13 @@ export function cppSources({ srcs }) {
     return target({ kind: "cpp-sources", fields: { sources: srcs.join(",") } });
 }
 
-export function cmakeLib({ entrypoint, deps = [] }) {
-    return target({ kind: "cmake-lib", fields: { entrypoint }, deps });
+export function cmakeLib({ entrypoint, toolchain, deps = [] }) {
+    return target({
+        kind: "cmake-lib",
+        fields: {
+            entrypoint,
+            ...(toolchain ? { toolchain } : {}),
+        },
+        deps,
+    });
 }

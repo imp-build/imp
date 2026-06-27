@@ -122,6 +122,19 @@ export function createOdinToolchainApi(host = defaultHost) {
         return `${dir}/${exe}`;
     }
 
+    function tool(version) {
+        const resolved = resolveVersion(version);
+        acquireToolchain(resolved);
+        const plat = host.platformInfo();
+        return {
+            kind: "tool",
+            name: "odin",
+            cache: ODIN_TOOLCHAIN_CACHE,
+            key: odinCacheKey(resolved, plat),
+            binDirs: ["."],
+        };
+    }
+
     function currentDefaultVersion() {
         return defaultVersion;
     }
@@ -131,6 +144,7 @@ export function createOdinToolchainApi(host = defaultHost) {
         acquireOdinToolchain: acquireToolchain,
         resolveOdinToolchainVersion: resolveVersion,
         odinBin: bin,
+        odinTool: tool,
         defaultOdinToolchainVersion: currentDefaultVersion,
     };
 }
@@ -177,6 +191,16 @@ export function resolveOdinToolchainVersion(version) {
  */
 export function odinBin(version) {
     return defaultApi.odinBin(version);
+}
+
+/**
+ * Return a named-cache-backed Odin tool descriptor for sandbox execution.
+ *
+ * @param {string} [version]
+ * @returns {object}
+ */
+export function odinTool(version) {
+    return defaultApi.odinTool(version);
 }
 
 /**

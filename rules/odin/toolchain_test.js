@@ -130,12 +130,27 @@ function testOdinBinUsesDefaultVersion() {
     );
 }
 
+function testOdinToolDescriptorUsesNamedCache() {
+    const host = fakeHost();
+    const api = createOdinToolchainApi(host);
+
+    api.odinToolchain("dev-2026-03", { default: true });
+    const tool = api.odinTool();
+
+    assertEqual(tool.kind, "tool", "tool kind");
+    assertEqual(tool.name, "odin", "tool name");
+    assertEqual(tool.cache, "odin-toolchains", "tool cache");
+    assertEqual(tool.key, "dev-2026-03/linux-x86_64", "tool cache key");
+    assertEqual(tool.binDirs.join(","), ".", "tool bin dirs");
+}
+
 export function runOdinToolchainTests() {
     testArtifactNames();
     testToolchainDeclaration();
     testAcquireInstallsMissingToolchain();
     testAcquireUsesExistingCache();
     testOdinBinUsesDefaultVersion();
+    testOdinToolDescriptorUsesNamedCache();
 }
 
 runOdinToolchainTests();

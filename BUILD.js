@@ -1,4 +1,4 @@
-import { cppSources, cmakeLib } from "//rules/cpp";
+import { cppSources, cmakeLib } from "//rules/c/cmake";
 import { stampFile } from "//rules/gen";
 import { odinPackage } from "//rules/odin";
 

@@ -21,6 +21,7 @@ use crate::toolchain;
 use rquickjs::{
     loader::{Loader, Resolver},
     module::Declared,
+    promise::MaybePromise,
     Array, CatchResultExt, Context as JsContext, Ctx, Filter, Function, Module, Object, Runtime,
     Value,
 };
@@ -3612,6 +3613,7 @@ struct ExecRunOpts {
     env: BTreeMap<String, String>,
     inputs: Vec<ExecIoSpec>,
     outputs: Vec<ExecIoSpec>,
+    tools: Vec<ExecToolSpec>,
     impure: bool,
     force_cache: bool,
 }
@@ -3621,11 +3623,22 @@ struct ExecIoSpec {
     kind: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ExecToolSpec {
+    name: String,
+    cache: String,
+    key: String,
+    path: PathBuf,
+    bin_dirs: Vec<String>,
+}
+
 /// Build a JS `ctx` object for `exec(target, ctx)` functions.
 ///
 /// The returned object provides:
 /// * `ctx.platform` — `{ os, arch }`
 /// * `ctx.run(opts)` — cached subprocess execution
+/// * `ctx.tool(spec)` — resolves a named-cache-backed tool descriptor
+/// * `ctx.inSandbox(opts)` — cached subprocess execution with tool PATH setup
 pub(super) fn build_exec_ctx<'js>(
     ctx: Ctx<'js>,
     workspace_root: &Path,
@@ -3640,7 +3653,45 @@ pub(super) fn build_exec_ctx<'js>(
     plat.set("arch", &*arch)?;
     obj.set("platform", plat)?;
 
-    // run method
+    // tool method
+    let tool_workspace = workspace_root.to_owned();
+    let tool_fn = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, spec: Object<'js>| -> rquickjs::Result<Object<'js>> {
+            let name: String = spec.get("name")?;
+            let cache: String = spec.get("cache")?;
+            let key: String = spec.get("key")?;
+            let bin_dirs: Option<Vec<String>> = spec.get("binDirs")?;
+            let bin_dirs = bin_dirs.unwrap_or_else(|| vec!["bin".to_owned()]);
+            let path = named_cache_key_path(&tool_workspace, &cache, &key)
+                .map_err(|e| rquickjs::Error::new_loading_message("tool", format!("{e:#}")))?;
+            if !path.is_dir() {
+                return Err(rquickjs::Error::new_loading_message(
+                    "tool",
+                    format!(
+                        "tool {name} is not installed in named cache {cache}/{key} ({})",
+                        path.display()
+                    ),
+                ));
+            }
+
+            let tool = Object::new(ctx.clone())?;
+            tool.set("kind", "tool")?;
+            tool.set("name", name)?;
+            tool.set("cache", cache)?;
+            tool.set("key", key)?;
+            tool.set("path", path.to_string_lossy().as_ref())?;
+            let dirs = Array::new(ctx)?;
+            for (i, dir) in bin_dirs.iter().enumerate() {
+                dirs.set(i, dir.as_str())?;
+            }
+            tool.set("binDirs", dirs)?;
+            Ok(tool)
+        },
+    )?;
+    obj.set("tool", tool_fn)?;
+
+    // run/inSandbox method
     let wr = workspace_root.to_owned();
     let run_fn = Function::new(
         ctx.clone(),
@@ -3656,8 +3707,18 @@ pub(super) fn build_exec_ctx<'js>(
                     env.insert(k, v);
                 }
             }
-            let inputs = parse_io_specs(opts.get("inputs")?)?;
-            let outputs = parse_io_specs(opts.get("outputs")?)?;
+            let inputs = parse_io_specs(
+                opts.get::<_, Option<Vec<Object>>>("inputs")?
+                    .unwrap_or_default(),
+            )?;
+            let outputs = parse_io_specs(
+                opts.get::<_, Option<Vec<Object>>>("outputs")?
+                    .unwrap_or_default(),
+            )?;
+            let tools = parse_tool_specs(
+                opts.get::<_, Option<Vec<Object>>>("tools")?
+                    .unwrap_or_default(),
+            )?;
             let impure: Option<bool> = opts.get("impure")?;
             let impure = impure.unwrap_or(false);
             let force_cache: Option<bool> = opts.get("forceCache")?;
@@ -3669,6 +3730,7 @@ pub(super) fn build_exec_ctx<'js>(
                 env,
                 inputs,
                 outputs,
+                tools,
                 impure,
                 force_cache,
             };
@@ -3683,7 +3745,8 @@ pub(super) fn build_exec_ctx<'js>(
             Ok(obj)
         },
     )?;
-    obj.set("run", run_fn)?;
+    obj.set("run", run_fn.clone())?;
+    obj.set("inSandbox", run_fn)?;
 
     Ok(obj)
 }
@@ -3702,8 +3765,114 @@ fn parse_io_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Vec<ExecIoSpe
     Ok(specs)
 }
 
+fn parse_tool_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Vec<ExecToolSpec>> {
+    let mut specs = Vec::new();
+    for val in vals {
+        let name: Option<String> = val.get("name")?;
+        let Some(name) = name else {
+            continue;
+        };
+        let cache: String = val.get("cache")?;
+        let key: String = val.get("key")?;
+        let path: String = val.get("path")?;
+        let bin_dirs: Option<Vec<String>> = val.get("binDirs")?;
+        specs.push(ExecToolSpec {
+            name,
+            cache,
+            key,
+            path: PathBuf::from(path),
+            bin_dirs: bin_dirs.unwrap_or_else(|| vec!["bin".to_owned()]),
+        });
+    }
+    Ok(specs)
+}
+
+fn materialize_tools_into_sandbox(
+    tools: &[ExecToolSpec],
+    sandbox_root: &Path,
+) -> Result<Vec<PathBuf>> {
+    let tools_root = sandbox_root.join(".imp").join("tools");
+    let mut path_entries = Vec::new();
+
+    for tool in tools {
+        validate_tool_name(&tool.name)?;
+        if !tool.path.is_dir() {
+            bail!(
+                "tool {} cache path {} is not a directory",
+                tool.name,
+                tool.path.display()
+            );
+        }
+
+        std::fs::create_dir_all(&tools_root)
+            .with_context(|| format!("create {}", tools_root.display()))?;
+        let sandbox_tool_root = tools_root.join(&tool.name);
+        symlink_tool_root(&tool.path, &sandbox_tool_root)?;
+
+        for bin_dir in &tool.bin_dirs {
+            path_entries.push(resolve_tool_bin_dir(&sandbox_tool_root, bin_dir)?);
+        }
+    }
+
+    Ok(path_entries)
+}
+
+fn validate_tool_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        bail!("tool name '{name}' must contain only ASCII letters, digits, '-', '_' or '.'");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn symlink_tool_root(source: &Path, destination: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(source, destination)
+        .with_context(|| format!("symlink {} -> {}", destination.display(), source.display()))
+}
+
+#[cfg(not(unix))]
+fn symlink_tool_root(source: &Path, destination: &Path) -> Result<()> {
+    copy_directory(source, destination)
+}
+
+fn resolve_tool_bin_dir(tool_root: &Path, bin_dir: &str) -> Result<PathBuf> {
+    if bin_dir == "." {
+        return Ok(tool_root.to_owned());
+    }
+    if bin_dir.is_empty() {
+        bail!("tool binDir must not be empty");
+    }
+    let relative = artifact_relative_path(bin_dir)?;
+    Ok(tool_root.join(relative))
+}
+
+fn sandbox_command_env(
+    env: &BTreeMap<String, String>,
+    tool_path_entries: &[PathBuf],
+) -> Result<BTreeMap<String, String>> {
+    let mut command_env = env.clone();
+    if tool_path_entries.is_empty() {
+        return Ok(command_env);
+    }
+
+    let mut entries = tool_path_entries.to_vec();
+    if let Some(existing) = env.get("PATH") {
+        entries.extend(std::env::split_paths(existing));
+    } else if let Some(existing) = std::env::var_os("PATH") {
+        entries.extend(std::env::split_paths(&existing));
+    }
+    let joined = std::env::join_paths(entries).context("join tool PATH entries")?;
+    command_env.insert("PATH".to_owned(), joined.to_string_lossy().into_owned());
+    Ok(command_env)
+}
+
 fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunResult> {
     let sandbox_root = create_sandbox_root()?;
+    let tool_path_entries = materialize_tools_into_sandbox(&opts.tools, &sandbox_root)?;
 
     // Copy inputs into sandbox.
     for input in &opts.inputs {
@@ -3751,6 +3920,7 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
         "argv": opts.argv,
         "env": opts.env,
         "display": opts.display,
+        "tools": opts.tools,
     }))?;
 
     // Compute task key.
@@ -3815,11 +3985,12 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("run() argv must not be empty"))?;
 
+    let command_env = sandbox_command_env(&opts.env, &tool_path_entries)?;
     let mut command = Command::new(program);
     command
         .args(args)
         .current_dir(&sandbox_root)
-        .envs(&opts.env)
+        .envs(&command_env)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
@@ -3977,8 +4148,15 @@ fn execute_task_with_exec(
         .with(|ctx| -> rquickjs::Result<()> {
             let exec_fn: Function = ctx.globals().get(exec_fn_name)?;
             let target_obj = build_exec_target(ctx.clone(), task)?;
-            let ctx_obj = build_exec_ctx(ctx, workspace_root)?;
-            exec_fn.call::<_, ()>((target_obj, ctx_obj))?;
+            let ctx_obj = build_exec_ctx(ctx.clone(), workspace_root)?;
+            let result: MaybePromise = exec_fn
+                .call((target_obj, ctx_obj))
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("exec", format!("{e}")))?;
+            result
+                .finish::<()>()
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("exec", format!("{e}")))?;
             Ok(())
         })
         .map_err(|e| {
@@ -4065,7 +4243,7 @@ export function asset({ srcs }) {
         std::fs::write(
             p.join(WORKSPACE_FILE),
             r#"
-import "//rules/cpp";
+import "//rules/c/cmake";
 import "//rules/odin";
 import "//rules/asset";
 "#,
@@ -4074,7 +4252,8 @@ import "//rules/asset";
 
         let rules = p.join("rules");
         std::fs::create_dir_all(&rules).unwrap();
-        std::fs::write(rules.join("cpp.js"), CPP_RULES_JS).unwrap();
+        std::fs::create_dir_all(rules.join("c/cmake")).unwrap();
+        std::fs::write(rules.join("c/cmake/index.js"), CPP_RULES_JS).unwrap();
         std::fs::write(rules.join("odin.js"), ODIN_RULES_JS).unwrap();
         std::fs::write(rules.join("asset.js"), ASSET_RULES_JS).unwrap();
 
@@ -4084,7 +4263,7 @@ import "//rules/asset";
         std::fs::write(
             cpp.join(BUILD_FILE),
             r#"
-import { cppSources, cmakeLib } from "//rules/cpp";
+import { cppSources, cmakeLib } from "//rules/c/cmake";
 
 export const joltphysics = cppSources({ srcs: ["**/*.h", "**/*.cpp"] });
 export const cmake = cmakeLib({ entrypoint: "CMakeLists.txt", deps: [joltphysics] });
@@ -4863,6 +5042,88 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn exec_context_materializes_named_cache_tools_on_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        let tool_dir = named_cache_key_path(p, "test-tools", "v1/linux-x86_64").unwrap();
+        std::fs::create_dir_all(tool_dir.join("bin")).unwrap();
+        let tool_bin = tool_dir.join("bin/hello-tool");
+        std::fs::write(&tool_bin, "#!/bin/sh\nprintf from-tool > out.txt\n").unwrap();
+        let mut perms = std::fs::metadata(&tool_bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&tool_bin, perms).unwrap();
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/tool";
+"#,
+        );
+        write_file(
+            &p.join("rules/tool.js"),
+            r#"
+import { namedCache, rule, target } from "imp:core";
+
+namedCache({ name: "test-tools" });
+
+async function buildExec(target, ctx) {
+    const tool = await ctx.tool({
+        name: "hello",
+        cache: "test-tools",
+        key: "v1/linux-x86_64",
+        binDirs: ["bin"],
+    });
+    const result = await ctx.inSandbox({
+        argv: ["hello-tool"],
+        tools: [tool],
+        outputs: [{ kind: "file", path: "out.txt" }],
+        display: "hello tool",
+    });
+    if (result.exitCode !== 0) {
+        throw new Error(result.stderr);
+    }
+}
+
+rule({
+    kind: "tool-user",
+    product: "file",
+    action: "hello tool",
+    exec: buildExec,
+});
+
+export function toolUser() {
+    return target({ kind: "tool-user" });
+}
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { toolUser } from "//rules/tool";
+export const generated = toolUser();
+"#,
+        );
+
+        let live = load_workspace(p).unwrap();
+        let plan = plan(&live, "build", &["generated".to_owned()]).unwrap();
+        let report = execute_plan_with_options(
+            &plan,
+            Some(&live),
+            p,
+            ExecutionOptions::new(ExecutionMode::Local, 1),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(report.tasks[0].status, TaskExecutionStatus::Ran);
+        assert_eq!(std::fs::read_to_string(p.join("out.txt")).unwrap(), "from-tool");
+    }
+
     #[test]
     fn local_executor_reports_missing_declared_outputs() {
         let root = tempfile::tempdir().unwrap();
@@ -4942,6 +5203,29 @@ import "//rules/odin/toolchain_test";
         write_file(
             &p.join("rules/odin/toolchain_test.js"),
             include_str!("../rules/odin/toolchain_test.js"),
+        );
+        write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
+
+        load_workspace(p).unwrap();
+    }
+
+    #[test]
+    fn cmake_toolchain_js_tests_pass() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/c/cmake/toolchain_test";
+"#,
+        );
+        write_file(
+            &p.join("rules/c/cmake/toolchain.js"),
+            include_str!("../rules/c/cmake/toolchain.js"),
+        );
+        write_file(
+            &p.join("rules/c/cmake/toolchain_test.js"),
+            include_str!("../rules/c/cmake/toolchain_test.js"),
         );
         write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
 

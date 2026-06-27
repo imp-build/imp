@@ -1,6 +1,6 @@
 // Workspace root marker. Import plugin modules here to register their rules
 // before any BUILD.js is evaluated.
-import "//rules/cpp";
+import "//rules/c/cmake";
 import "//rules/gen";
 import { odinToolchain } from "//rules/odin";
 

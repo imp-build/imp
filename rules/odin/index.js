@@ -1,5 +1,5 @@
 import { target, rule } from "imp:core";
-import { odinBin, resolveOdinToolchainVersion } from "//rules/odin/toolchain";
+import { odinTool, resolveOdinToolchainVersion } from "//rules/odin/toolchain";
 
 export {
     acquireOdinToolchain,
@@ -10,6 +10,7 @@ export {
     odinCacheKey,
     odinDownloadUrl,
     odinToolchain,
+    odinTool,
     resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
 
@@ -22,11 +23,12 @@ function snapshotSourcesExec(target, ctx) {
     // so the odin-build task waits for dependency resolution.
 }
 
-function odinBuildExec(target, ctx) {
+async function odinBuildExec(target, ctx) {
     const version = resolveOdinToolchainVersion(target.fields && target.fields.toolchain);
-    const bin = odinBin(version);
-    const result = ctx.run({
-        argv: [bin, "build", "."],
+    const odin = await ctx.tool(odinTool(version));
+    const result = await ctx.inSandbox({
+        argv: ["odin", "build", "."],
+        tools: [odin],
         display: `odin build ${target.target}`,
     });
     if (result.exitCode !== 0) {
