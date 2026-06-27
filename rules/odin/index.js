@@ -1,4 +1,4 @@
-import { target, rule, workspaceSourceEntries, hydrateTarget, gatherTransitiveClosure } from "imp:core";
+import { target, rule, workspaceSourceEntries, casTreeStore, casTreeMerge, hydrateTarget, gatherTransitiveClosure } from "imp:core";
 import {
     acquireOdinToolchain,
     defaultOdinToolchain,
@@ -21,12 +21,20 @@ export {
 } from "//rules/odin/toolchain";
 
 // ---------------------------------------------------------------------------
-// Exec functions for odin-package rules
+// Exec functions
 // ---------------------------------------------------------------------------
 
+function sourceSetExec(target, ctx) {
+    const entries = workspaceSourceEntries({
+        root: target.fields.root || ".",
+        include: target.fields.include.split(","),
+        exclude: target.fields.exclude ? target.fields.exclude.split(",") : [],
+    });
+    ctx.output(casTreeStore(entries));
+}
+
 function snapshotSourcesExec(target, ctx) {
-    // Sources are on disk; this task exists to wire up the dependency graph
-    // so the odin-build task waits for dependency resolution.
+    ctx.output(casTreeMerge(...target.depOutputs));
 }
 
 function odinToolchainExec(target, ctx) {
@@ -76,15 +84,8 @@ rule({
 rule({
     kind: "source-set",
     product: "sources",
-    action: {
-        display: "read sources {sourceManifest}",
-        outputs: [{
-            id: "{address}#manifest",
-            kind: "manifest",
-            path: "{sourceManifest}",
-            value: "{sourceManifestValue}",
-        }],
-    },
+    action: { display: "capture sources {root}" },
+    exec: sourceSetExec,
     requiresOwnSources: false,
     dependencyProduct: null,
 });
@@ -92,16 +93,10 @@ rule({
 rule({
     kind: "odin-package",
     product: "sources",
-    action: {
-        display: "snapshot {sourceManifest}",
-        inputs: [{
-            kind: "manifest",
-            path: "{sourceManifest}",
-        }],
-    },
+    action: { display: "snapshot sources {path}" },
     exec: snapshotSourcesExec,
     requiresOwnSources: false,
-    dependencyProduct: null,
+    dependencyProduct: "sources",
 });
 
 rule({

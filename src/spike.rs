@@ -272,6 +272,42 @@ export function workspaceSourceEntries(opts) {
 }
 
 /**
+ * Store a set of source entries as a CAS tree, returning its digest.
+ *
+ * Entries are sorted by path before storage, so the digest is stable
+ * regardless of input order.
+ *
+ * @param {{ path: string, digest: string, bytes: number }[]} entries
+ * @returns {string} Tree digest.
+ */
+export function casTreeStore(entries) {
+    return __host_cas_tree_store(JSON.stringify(entries));
+}
+
+/**
+ * Retrieve the entries of a CAS tree by digest.
+ *
+ * @param {string} digest Tree digest returned by casTreeStore or casTreeMerge.
+ * @returns {{ path: string, digest: string, bytes: number }[]} Sorted entries.
+ */
+export function casTreeGet(digest) {
+    return JSON.parse(__host_cas_tree_get(digest));
+}
+
+/**
+ * Merge multiple CAS trees into one, returning the merged tree's digest.
+ *
+ * Same path with the same digest is deduplicated silently. Same path with
+ * different digests (conflicting content) is an error.
+ *
+ * @param {...string} digests Tree digests to merge.
+ * @returns {string} Merged tree digest.
+ */
+export function casTreeMerge(...digests) {
+    return __host_cas_tree_merge(JSON.stringify(digests));
+}
+
+/**
  * Retrieve the kind, fields, and dep handles for a target handle.
  *
  * @param {object} handle A target handle returned by target().
@@ -1779,6 +1815,53 @@ fn register_globals<'js>(
     )?;
     globals.set("__host_hydrate_target", host_hydrate_target)?;
 
+    // ------------------------------------------------------------------
+    // __host_cas_tree_store(entriesJson) → digest
+    // __host_cas_tree_get(digest) → entriesJson
+    // __host_cas_tree_merge(digestsJson) → digest
+    // ------------------------------------------------------------------
+    let host_cas_tree_store = Function::new(
+        ctx.clone(),
+        move |entries_json: String| -> rquickjs::Result<String> {
+            let entries: Vec<SourceFileEntry> =
+                serde_json::from_str(&entries_json).map_err(|e| {
+                    rquickjs::Error::new_loading_message("casTreeStore", e.to_string())
+                })?;
+            cas_tree_store(&entries).map_err(|e| {
+                rquickjs::Error::new_loading_message("casTreeStore", format!("{e:#}"))
+            })
+        },
+    )?;
+    globals.set("__host_cas_tree_store", host_cas_tree_store)?;
+
+    let host_cas_tree_get = Function::new(
+        ctx.clone(),
+        move |digest: String| -> rquickjs::Result<String> {
+            let entries = cas_tree_get(&digest).map_err(|e| {
+                rquickjs::Error::new_loading_message("casTreeGet", format!("{e:#}"))
+            })?;
+            serde_json::to_string(&entries).map_err(|e| {
+                rquickjs::Error::new_loading_message("casTreeGet", e.to_string())
+            })
+        },
+    )?;
+    globals.set("__host_cas_tree_get", host_cas_tree_get)?;
+
+    let host_cas_tree_merge = Function::new(
+        ctx.clone(),
+        move |digests_json: String| -> rquickjs::Result<String> {
+            let digests: Vec<String> =
+                serde_json::from_str(&digests_json).map_err(|e| {
+                    rquickjs::Error::new_loading_message("casTreeMerge", e.to_string())
+                })?;
+            let refs: Vec<&str> = digests.iter().map(|s| s.as_str()).collect();
+            cas_tree_merge(&refs).map_err(|e| {
+                rquickjs::Error::new_loading_message("casTreeMerge", format!("{e:#}"))
+            })
+        },
+    )?;
+    globals.set("__host_cas_tree_merge", host_cas_tree_merge)?;
+
     Ok(())
 }
 
@@ -2565,6 +2648,8 @@ fn execute_ordered_tasks_sequentially(
     let mut executions = Vec::with_capacity(ordered.len());
     let mut summaries = BTreeMap::new();
     let cancellation = AtomicBool::new(false);
+    // Values produced by exec functions, keyed by task id.
+    let mut exec_values: BTreeMap<String, String> = BTreeMap::new();
 
     for task in ordered {
         let mut task_progress = progress
@@ -2572,7 +2657,17 @@ fn execute_ordered_tasks_sequentially(
             .map(|progress| progress.add_child(format!("execute {}", task.id)));
 
         let (execution, summary) = if let (Some(live), true) = (live, task.exec_fn.is_some()) {
-            execute_task_with_exec(task, live, workspace_root)?
+            let dep_values: Vec<String> = task
+                .dependencies
+                .iter()
+                .filter_map(|dep_id| exec_values.get(dep_id).cloned())
+                .collect();
+            let (execution, summary, value) =
+                execute_task_with_exec(task, live, workspace_root, &dep_values)?;
+            if let Some(v) = value {
+                exec_values.insert(task.id.clone(), v);
+            }
+            (execution, summary)
         } else {
             execute_one_task(
                 task,
@@ -3256,6 +3351,54 @@ fn directory_entries(path: &Path) -> Result<Vec<CacheDirectoryEntry>> {
     }
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(entries)
+}
+
+fn cas_tree_path(digest: &str) -> Result<PathBuf> {
+    Ok(cache_root()?.join("cas").join("trees").join(digest))
+}
+
+fn cas_tree_store(entries: &[SourceFileEntry]) -> Result<String> {
+    let mut sorted = entries.to_vec();
+    sorted.sort_by(|a, b| a.path.cmp(&b.path));
+    let bytes = serde_json::to_vec(&sorted).context("serialize tree")?;
+    let digest = digest_bytes(&bytes);
+    let tree_path = cas_tree_path(&digest)?;
+    if !tree_path.is_file() {
+        if let Some(parent) = tree_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        let temp = temp_sibling_path(&tree_path, "tmp-tree");
+        std::fs::write(&temp, &bytes).with_context(|| format!("write {}", temp.display()))?;
+        std::fs::rename(&temp, &tree_path).with_context(|| {
+            format!("publish tree {} to {}", temp.display(), tree_path.display())
+        })?;
+    }
+    Ok(digest)
+}
+
+fn cas_tree_get(digest: &str) -> Result<Vec<SourceFileEntry>> {
+    let tree_path = cas_tree_path(digest)?;
+    let bytes = std::fs::read(&tree_path)
+        .with_context(|| format!("read tree {}", tree_path.display()))?;
+    serde_json::from_slice(&bytes).context("deserialize tree")
+}
+
+fn cas_tree_merge(digests: &[&str]) -> Result<String> {
+    let mut seen: BTreeMap<String, SourceFileEntry> = BTreeMap::new();
+    for digest in digests {
+        for entry in cas_tree_get(digest)? {
+            if let Some(existing) = seen.get(&entry.path) {
+                if existing.digest != entry.digest {
+                    bail!("tree merge: conflicting content for '{}'", entry.path);
+                }
+            } else {
+                seen.insert(entry.path.clone(), entry);
+            }
+        }
+    }
+    let merged: Vec<SourceFileEntry> = seen.into_values().collect();
+    cas_tree_store(&merged)
 }
 
 fn artifact_relative_path(path: &str) -> Result<PathBuf> {
@@ -4326,13 +4469,25 @@ struct ExecToolSpec {
 /// The returned object provides:
 /// * `ctx.platform` — `{ os, arch }`
 /// * `ctx.run(opts)` — cached subprocess execution
+/// * `ctx.output(value)` — records a string value produced by this exec task
 /// * `ctx.tool(spec)` — resolves a named-cache-backed tool descriptor
 /// * `ctx.inSandbox(opts)` — cached subprocess execution with tool PATH setup
 pub(super) fn build_exec_ctx<'js>(
     ctx: Ctx<'js>,
     workspace_root: &Path,
+    output_cell: Arc<Mutex<Option<String>>>,
 ) -> rquickjs::Result<Object<'js>> {
     let obj = Object::new(ctx.clone())?;
+
+    // output method — records a string value produced by this exec task
+    let output_fn = Function::new(
+        ctx.clone(),
+        move |value: String| -> rquickjs::Result<()> {
+            *output_cell.lock().unwrap() = Some(value);
+            Ok(())
+        },
+    )?;
+    obj.set("output", output_fn)?;
 
     // platform property
     let (os, arch) = toolchain::host_detect_platform()
@@ -4805,16 +4960,25 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
 }
 
 /// Build a JS `target` object for an `exec(target, ctx)` call.
-fn build_exec_target<'js>(ctx: Ctx<'js>, task: &Task) -> rquickjs::Result<Object<'js>> {
+fn build_exec_target<'js>(
+    ctx: Ctx<'js>,
+    task: &Task,
+    dep_values: &[String],
+) -> rquickjs::Result<Object<'js>> {
     let obj = Object::new(ctx.clone())?;
     obj.set("id", task.id.as_str())?;
     obj.set("target", task.target.as_str())?;
     obj.set("product", task.product.as_str())?;
-    let fields = Object::new(ctx)?;
+    let fields = Object::new(ctx.clone())?;
     for (k, v) in &task.fields {
         fields.set(k.as_str(), v.as_str())?;
     }
     obj.set("fields", fields)?;
+    let dep_outputs = Array::new(ctx)?;
+    for (i, v) in dep_values.iter().enumerate() {
+        dep_outputs.set(i, v.as_str())?;
+    }
+    obj.set("depOutputs", dep_outputs)?;
     Ok(obj)
 }
 
@@ -4822,22 +4986,27 @@ fn build_exec_target<'js>(ctx: Ctx<'js>, task: &Task) -> rquickjs::Result<Object
 ///
 /// The exec function is looked up from the QuickJS globals (registered during
 /// workspace loading) and called with a `target` and `ctx` JS object.
+/// Returns `(execution, summary, output_value)` where `output_value` is the
+/// string produced by `ctx.output(...)`, if any.
 fn execute_task_with_exec(
     task: &Task,
     live: &LiveWorkspace,
     workspace_root: &Path,
-) -> Result<(TaskExecution, TaskCacheSummary)> {
+    dep_values: &[String],
+) -> Result<(TaskExecution, TaskCacheSummary, Option<String>)> {
     let exec_fn_name = task
         .exec_fn
         .as_deref()
         .expect("execute_task_with_exec called on task without exec_fn");
 
+    let output_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
     let ctx_guard = live.ctx.lock().unwrap();
     ctx_guard
         .with(|ctx| -> rquickjs::Result<()> {
             let exec_fn: Function = ctx.globals().get(exec_fn_name)?;
-            let target_obj = build_exec_target(ctx.clone(), task)?;
-            let ctx_obj = build_exec_ctx(ctx.clone(), workspace_root)?;
+            let target_obj = build_exec_target(ctx.clone(), task, dep_values)?;
+            let ctx_obj = build_exec_ctx(ctx.clone(), workspace_root, Arc::clone(&output_cell))?;
             let result: MaybePromise = exec_fn
                 .call((target_obj, ctx_obj))
                 .catch(&ctx)
@@ -4852,6 +5021,7 @@ fn execute_task_with_exec(
             anyhow::anyhow!("exec function '{exec_fn_name}' failed for {}: {e}", task.id)
         })?;
 
+    let output_value = output_cell.lock().unwrap().take();
     let task_key = digest_bytes(task.id.as_bytes());
     Ok((
         TaskExecution {
@@ -4863,6 +5033,7 @@ fn execute_task_with_exec(
             task_id: task.id.clone(),
             task_key,
         },
+        output_value,
     ))
 }
 
@@ -5172,11 +5343,6 @@ export const app = odinPackage({
         let source_target = &workspace.targets[source_address];
         assert_eq!(source_target.kind, "source-set");
         assert_eq!(source_target.fields["files"], "app/main.odin");
-        let manifest: serde_json::Value =
-            serde_json::from_str(&source_target.fields["sourceManifestValue"]).unwrap();
-        assert_eq!(manifest["cas"][0]["path"], "app/main.odin");
-        assert!(manifest["cas"][0]["digest"].as_str().unwrap().len() > 8);
-        assert!(manifest["cas"][0]["bytes"].as_u64().unwrap() > 0);
 
         let plan = plan(&workspace, "build", &["app".into()]).unwrap();
         let source_task = plan
@@ -5184,12 +5350,9 @@ export const app = odinPackage({
             .iter()
             .find(|task| task.target == *source_address && task.product == "sources")
             .unwrap();
-        assert_eq!(source_task.outputs[0].kind, "manifest");
-        assert!(source_task.outputs[0]
-            .value
-            .as_deref()
-            .unwrap()
-            .contains("app/main.odin"));
+        // source-set tasks now produce tree digests via exec, not manifest file outputs
+        assert!(source_task.exec_fn.is_some());
+        assert!(source_task.outputs.is_empty());
     }
 
     #[test]
@@ -5951,6 +6114,84 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         );
     }
 
+    #[test]
+    fn exec_ctx_output_flows_to_downstream_dep_outputs() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"import "//rules/producer";
+import "//rules/consumer";"#,
+        );
+        write_file(
+            &p.join("rules/producer.js"),
+            r#"
+import { target, rule } from "imp:core";
+rule({
+    kind: "producer",
+    product: "value",
+    action: "produce",
+    exec: (target, ctx) => { ctx.output("hello-from-producer"); },
+    requiresOwnSources: false,
+    dependencyProduct: null,
+});
+export function producer() { return target({ kind: "producer" }); }
+"#,
+        );
+        write_file(
+            &p.join("rules/consumer.js"),
+            r#"
+import { target, rule } from "imp:core";
+rule({
+    kind: "consumer",
+    product: "result",
+    action: "consume",
+    exec: (target, ctx) => {
+        if (target.depOutputs.length !== 1) throw new Error("expected 1 dep output");
+        if (target.depOutputs[0] !== "hello-from-producer") throw new Error("wrong value: " + target.depOutputs[0]);
+        ctx.output("hello-from-consumer");
+    },
+    requiresOwnSources: false,
+    dependencyProduct: "value",
+});
+export function consumer(dep) { return target({ kind: "consumer", deps: [dep] }); }
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { producer } from "//rules/producer";
+import { consumer } from "//rules/consumer";
+export const p = producer();
+export const c = consumer(p);
+"#,
+        );
+
+        let live = load_workspace(p).unwrap();
+        let plan = plan(&live, "build", &["c".into()]).unwrap();
+        assert_eq!(plan.roots, ["//:c#result"]);
+
+        let ordered = ordered_tasks(&plan).unwrap();
+        let mut exec_values: BTreeMap<String, String> = BTreeMap::new();
+        for task in &ordered {
+            if task.exec_fn.is_some() {
+                let dep_values: Vec<String> = task
+                    .dependencies
+                    .iter()
+                    .filter_map(|id| exec_values.get(id).cloned())
+                    .collect();
+                let (_, _, value) =
+                    execute_task_with_exec(task, &live, p, &dep_values).unwrap();
+                if let Some(v) = value {
+                    exec_values.insert(task.id.clone(), v);
+                }
+            }
+        }
+
+        assert_eq!(exec_values.get("//:c#result").map(|s| s.as_str()), Some("hello-from-consumer"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn exec_context_materializes_named_cache_tools_on_path() {
@@ -6576,6 +6817,71 @@ export const ok = 1;
         write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
 
         load_workspace(p).unwrap();
+    }
+
+    #[test]
+    fn cas_tree_store_get_roundtrip() {
+        let entries = vec![
+            SourceFileEntry { path: "b.odin".into(), digest: "d2".into(), bytes: 20 },
+            SourceFileEntry { path: "a.odin".into(), digest: "d1".into(), bytes: 10 },
+        ];
+        let digest = cas_tree_store(&entries).unwrap();
+        let retrieved = cas_tree_get(&digest).unwrap();
+        // stored sorted by path
+        assert_eq!(retrieved[0].path, "a.odin");
+        assert_eq!(retrieved[1].path, "b.odin");
+        // same digest for same logical content regardless of input order
+        let digest2 = cas_tree_store(&[entries[1].clone(), entries[0].clone()]).unwrap();
+        assert_eq!(digest, digest2);
+    }
+
+    #[test]
+    fn cas_tree_merge_combines_disjoint_trees() {
+        let a = cas_tree_store(&[SourceFileEntry { path: "a.odin".into(), digest: "d1".into(), bytes: 10 }]).unwrap();
+        let b = cas_tree_store(&[SourceFileEntry { path: "b.odin".into(), digest: "d2".into(), bytes: 20 }]).unwrap();
+        let merged = cas_tree_merge(&[&a, &b]).unwrap();
+        let entries = cas_tree_get(&merged).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "a.odin");
+        assert_eq!(entries[1].path, "b.odin");
+    }
+
+    #[test]
+    fn cas_tree_merge_deduplicates_identical_entries() {
+        let a = cas_tree_store(&[SourceFileEntry { path: "a.odin".into(), digest: "d1".into(), bytes: 10 }]).unwrap();
+        let merged = cas_tree_merge(&[&a, &a]).unwrap();
+        assert_eq!(cas_tree_get(&merged).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cas_tree_merge_errors_on_conflicting_content() {
+        let a = cas_tree_store(&[SourceFileEntry { path: "a.odin".into(), digest: "d1".into(), bytes: 10 }]).unwrap();
+        let b = cas_tree_store(&[SourceFileEntry { path: "a.odin".into(), digest: "d2".into(), bytes: 99 }]).unwrap();
+        let err = cas_tree_merge(&[&a, &b]).unwrap_err();
+        assert!(err.to_string().contains("conflicting content"), "{err}");
+    }
+
+    #[test]
+    fn javascript_can_use_cas_tree_operations() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { casTreeStore, casTreeGet, casTreeMerge } from "imp:core";
+
+const a = casTreeStore([{ path: "a.odin", digest: "d1", bytes: 10 }]);
+const b = casTreeStore([{ path: "b.odin", digest: "d2", bytes: 20 }]);
+const merged = casTreeMerge(a, b);
+const entries = casTreeGet(merged);
+
+export const tree_digest = { __imp: false, result: { a, b, merged, entries } };
+"#,
+        );
+        let live = load_workspace(p).unwrap();
+        // loading without error is sufficient — the BUILD.js ran the operations
+        assert!(live.targets.is_empty()); // no target() calls, but no crash
     }
 
     #[test]

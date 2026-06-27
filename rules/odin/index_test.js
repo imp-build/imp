@@ -10,7 +10,7 @@ import {
     odinToolchain,
     readSources,
 } from "//rules/odin";
-import { hydrateTarget, gatherTransitiveClosure } from "imp:core";
+import { hydrateTarget, gatherTransitiveClosure, casTreeStore, casTreeGet, casTreeMerge } from "imp:core";
 
 describe("Odin rules", () => {
 test("uses the default Odin toolchain target", () => {
@@ -124,7 +124,7 @@ test("gatherTransitiveClosure finds all odin-package targets", () => {
     expect(closure.length).toBe(2);
 });
 
-test("odinPackage merges transitive sources from deps", () => {
+test("odinPackage merges transitive sources from deps at build time", () => {
     const lib = odinPackage({ srcs: ["^rules/odin/index\\.js$"], toolchain: "dev-2026-04" });
     const app = odinPackage({ srcs: ["^rules/odin/index_test\\.js$"], toolchain: "dev-2026-04", deps: [lib] });
 
@@ -132,5 +132,26 @@ test("odinPackage merges transitive sources from deps", () => {
         "rules/odin/index.js",
         "rules/odin/index_test.js",
     ]);
+});
+
+test("casTreeStore round-trips through casTreeGet", () => {
+    const sources = readSources({ include: ["^rules/odin/index\\.js$"] });
+    const digest = casTreeStore(sources.cas);
+    const entries = casTreeGet(digest);
+
+    expect(entries.length).toBe(1);
+    expect(entries[0].path).toBe("rules/odin/index.js");
+    expect(typeof entries[0].digest).toBe("string");
+});
+
+test("casTreeMerge combines disjoint trees", () => {
+    const a = casTreeStore(readSources({ include: ["^rules/odin/index\\.js$"] }).cas);
+    const b = casTreeStore(readSources({ include: ["^rules/odin/index_test\\.js$"] }).cas);
+    const merged = casTreeMerge(a, b);
+    const entries = casTreeGet(merged);
+
+    expect(entries.length).toBe(2);
+    expect(entries[0].path).toBe("rules/odin/index.js");
+    expect(entries[1].path).toBe("rules/odin/index_test.js");
 });
 });
