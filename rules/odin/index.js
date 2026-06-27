@@ -33,6 +33,11 @@ function odinToolchainExec(target, ctx) {
     acquireOdinToolchain(target.fields.version);
 }
 
+function odinCollectionExec(target, ctx) {
+    // A collection target is a namespace mapping such as `lib=library`.
+    // It intentionally does not model or own the packages below that path.
+}
+
 async function odinBuildExec(target, ctx) {
     const version = resolveOdinToolchainVersion(target.fields && target.fields.toolchain);
     const odin = await ctx.tool(odinTool(version));
@@ -60,6 +65,15 @@ rule({
 });
 
 rule({
+    kind: "odin-collection",
+    product: "collection",
+    action: "odin collection {name}={path}",
+    exec: odinCollectionExec,
+    requiresOwnSources: false,
+    dependencyProduct: null,
+});
+
+rule({
     kind: "odin-package",
     product: "sources",
     action: "snapshot {sources}",
@@ -82,33 +96,69 @@ rule({
 // ---------------------------------------------------------------------------
 
 /**
+ * Declare an Odin collection namespace mapping.
+ *
+ * This target represents only the compiler flag `-collection:name=path`.
+ * It does not depend on, contain, or own the packages below `path`; package
+ * dependencies should be discovered from imports or declared separately.
+ *
+ * @param {object} opts
+ * @param {string} opts.name Collection name, e.g. "lib".
+ * @param {string} opts.path Workspace-relative collection path, e.g. "library".
+ * @returns {object} Target handle.
+ */
+export function odinCollection({ name, path }) {
+    if (!name || !path) {
+        throw new Error("odinCollection({ name, path }) requires name and path");
+    }
+    const collection = target({
+        kind: "odin-collection",
+        fields: {
+            name,
+            path,
+        },
+    });
+    collection.name = name;
+    collection.path = path;
+    collection.flag = `-collection:${name}=${path}`;
+    return collection;
+}
+
+/**
  * Declare an Odin package target.
  *
  * @param {object} opts
  * @param {string[]} opts.srcs Odin source files.
+ * @param {object[]} [opts.collections=[]] Odin collection namespace mappings.
  * @param {object|string} [opts.toolchain] Odin toolchain target handle or version.
  * @param {Array} [opts.deps=[]]
  * @returns {object} Target handle.
  */
-export function odinPackage({ srcs, toolchain, deps = [] }) {
+export function odinPackage({ srcs, collections = [], toolchain, deps = [] }) {
     const explicitToolchainTarget = toolchain && toolchain.__imp === true ? toolchain : null;
     const explicitVersion = toolchain && toolchain.__imp !== true ? toolchain : null;
     const toolchainTarget = explicitToolchainTarget || (!explicitVersion ? defaultOdinToolchain() : null);
     const toolchainVersion = explicitVersion || (toolchainTarget && toolchainTarget.version);
+    const collectionFlags = collections.map((collection) => collection.flag);
+    const collectionDeps = collections.map((collection) => ({ target: collection, mode: "collection" }));
     const allDeps = toolchainTarget
-        ? [{ target: toolchainTarget, mode: "tool" }, ...deps]
-        : deps;
+        ? [{ target: toolchainTarget, mode: "tool" }, ...collectionDeps, ...deps]
+        : [...collectionDeps, ...deps];
 
     const pkg = target({
         kind: "odin-package",
         fields: {
             sources: srcs.join(","),
+            ...(collectionFlags.length ? { collections: collectionFlags.join(",") } : {}),
             ...(toolchainVersion ? { toolchain: toolchainVersion } : {}),
         },
         deps: allDeps,
     });
     pkg.toolchainVersion = toolchainVersion || null;
     pkg.toolchainTarget = toolchainTarget || null;
+    pkg.collections = collections;
+    pkg.collectionFlags = collectionFlags;
+    pkg.collectionCount = collections.length;
     pkg.dependencyCount = allDeps.length;
     return pkg;
 }

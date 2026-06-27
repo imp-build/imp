@@ -16,8 +16,8 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
 use crate::toolchain;
+use anyhow::{bail, Context, Result};
 use rquickjs::{
     loader::{Loader, Resolver},
     module::Declared,
@@ -226,6 +226,27 @@ export function cacheHas(name, key) {
  */
 export function workspaceFiles(opts) {
     return JSON.parse(__host_workspace_files(opts.root, opts.suffix || ""));
+}
+
+/**
+ * Mount an external directory into the workspace module namespace.
+ *
+ * Static imports are resolved before a workspace module body runs, so mount
+ * first, then use dynamic import:
+ *
+ *   workspaceMount({ prefix: "//rules", path: "../imp/rules" });
+ *   await import("//rules/odin");
+ *
+ * @param {object} opts
+ * @param {string} opts.prefix Workspace module prefix, e.g. "//rules".
+ * @param {string} opts.path Directory containing modules for that prefix.
+ * @returns {void}
+ */
+export function workspaceMount(opts) {
+    if (!opts || typeof opts.prefix !== "string" || typeof opts.path !== "string") {
+        throw new Error("workspaceMount({ prefix, path }) requires prefix and path strings");
+    }
+    __host_workspace_mount(opts.prefix, opts.path);
 }
 "#;
 
@@ -680,10 +701,18 @@ struct PendingTarget {
 
 struct ImpResolver {
     workspace_root: PathBuf,
+    module_mounts: Arc<Mutex<Vec<ModuleMount>>>,
 }
 
 struct ImpLoader {
     workspace_root: PathBuf,
+    module_mounts: Arc<Mutex<Vec<ModuleMount>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModuleMount {
+    prefix: String,
+    root: PathBuf,
 }
 
 impl Resolver for ImpResolver {
@@ -698,34 +727,41 @@ impl Resolver for ImpResolver {
         }
 
         if name.starts_with("imp:") {
+            let mounts = self.module_mounts.lock().unwrap();
             return Err(rquickjs::Error::new_resolving_message(
                 base,
                 name,
                 format!(
                     "unknown built-in module '{name}' while importing from {}",
-                    module_location(&self.workspace_root, base)
+                    module_location_with_mounts(&self.workspace_root, &mounts, base)
                 ),
             ));
         }
 
         if name.starts_with("//") {
+            let mounts = self.module_mounts.lock().unwrap();
             let resolution =
-                resolve_workspace_module(&self.workspace_root, name).map_err(|message| {
-                    rquickjs::Error::new_resolving_message(
-                        base,
-                        name,
-                        format!(
-                            "{message} while importing from {}",
-                            module_location(&self.workspace_root, base)
-                        ),
-                    )
-                })?;
+                resolve_workspace_module_with_mounts(&self.workspace_root, &mounts, name).map_err(
+                    |message| {
+                        rquickjs::Error::new_resolving_message(
+                            base,
+                            name,
+                            format!(
+                                "{message} while importing from {}",
+                                module_location_with_mounts(&self.workspace_root, &mounts, base)
+                            ),
+                        )
+                    },
+                )?;
             return Ok(resolution.name);
         }
 
         if name.starts_with('.') {
-            let importer = module_location(&self.workspace_root, base);
-            let message = if module_kind(&self.workspace_root, base) == ModuleKind::Build {
+            let mounts = self.module_mounts.lock().unwrap();
+            let importer = module_location_with_mounts(&self.workspace_root, &mounts, base);
+            let message = if module_kind_with_mounts(&self.workspace_root, &mounts, base)
+                == ModuleKind::Build
+            {
                 format!(
                     "relative import '{name}' is prohibited in BUILD.js module {importer}; use workspace-rooted //... imports or imp:* built-ins"
                 )
@@ -742,7 +778,10 @@ impl Resolver for ImpResolver {
             name,
             format!(
                 "module specifier '{name}' is unsupported while importing from {}; use //... or imp:*",
-                module_location(&self.workspace_root, base)
+                {
+                    let mounts = self.module_mounts.lock().unwrap();
+                    module_location_with_mounts(&self.workspace_root, &mounts, base)
+                }
             ),
         ))
     }
@@ -755,8 +794,11 @@ impl Loader for ImpLoader {
         }
 
         if name.starts_with("//") {
-            let resolution = resolve_workspace_module(&self.workspace_root, name)
-                .map_err(|message| rquickjs::Error::new_loading_message(name, message))?;
+            let resolution = {
+                let mounts = self.module_mounts.lock().unwrap();
+                resolve_workspace_module_with_mounts(&self.workspace_root, &mounts, name)
+                    .map_err(|message| rquickjs::Error::new_loading_message(name, message))?
+            };
             let source = std::fs::read_to_string(&resolution.path).map_err(|e| {
                 rquickjs::Error::new_loading_message(
                     name,
@@ -789,11 +831,31 @@ fn resolve_workspace_module(
     root: &Path,
     name: &str,
 ) -> std::result::Result<WorkspaceModuleResolution, String> {
+    resolve_workspace_module_with_mounts(root, &[], name)
+}
+
+fn resolve_workspace_module_with_mounts(
+    root: &Path,
+    mounts: &[ModuleMount],
+    name: &str,
+) -> std::result::Result<WorkspaceModuleResolution, String> {
     let rel = name
         .strip_prefix("//")
         .ok_or_else(|| format!("workspace module '{name}' must start with //"))?;
     validate_workspace_module_path(name, rel)?;
 
+    if let Some((mount, mounted_rel)) = matching_mount(mounts, name) {
+        return resolve_workspace_module_in_root(&mount.root, name, &mounted_rel);
+    }
+
+    resolve_workspace_module_in_root(root, name, rel)
+}
+
+fn resolve_workspace_module_in_root(
+    root: &Path,
+    name: &str,
+    rel: &str,
+) -> std::result::Result<WorkspaceModuleResolution, String> {
     let mut candidates = Vec::new();
 
     if rel.is_empty() {
@@ -860,6 +922,19 @@ fn resolve_workspace_module(
     ))
 }
 
+fn matching_mount<'a>(mounts: &'a [ModuleMount], name: &str) -> Option<(&'a ModuleMount, String)> {
+    let mount = mounts
+        .iter()
+        .filter(|mount| name == mount.prefix || name.starts_with(&format!("{}/", mount.prefix)))
+        .max_by_key(|mount| mount.prefix.len())?;
+    let mounted_rel = name
+        .strip_prefix(&mount.prefix)
+        .unwrap_or("")
+        .strip_prefix('/')
+        .unwrap_or("");
+    Some((mount, mounted_rel.to_owned()))
+}
+
 fn validate_workspace_module_path(name: &str, rel: &str) -> std::result::Result<(), String> {
     if rel.starts_with('/') {
         return Err(format!("workspace module '{name}' must be relative to //"));
@@ -879,13 +954,13 @@ fn validate_workspace_module_path(name: &str, rel: &str) -> std::result::Result<
     Ok(())
 }
 
-fn module_kind(root: &Path, name: &str) -> ModuleKind {
+fn module_kind_with_mounts(root: &Path, mounts: &[ModuleMount], name: &str) -> ModuleKind {
     if name == "imp:core" {
         ModuleKind::BuiltIn
     } else if name == WORKSPACE_FILE {
         ModuleKind::Workspace
     } else if name.starts_with("//") {
-        resolve_workspace_module(root, name)
+        resolve_workspace_module_with_mounts(root, mounts, name)
             .map(|resolution| resolution.kind)
             .unwrap_or(ModuleKind::Unknown)
     } else {
@@ -893,7 +968,7 @@ fn module_kind(root: &Path, name: &str) -> ModuleKind {
     }
 }
 
-fn module_location(root: &Path, name: &str) -> String {
+fn module_location_with_mounts(root: &Path, mounts: &[ModuleMount], name: &str) -> String {
     if name == "imp:core" {
         return "built-in imp:core".to_owned();
     }
@@ -901,7 +976,7 @@ fn module_location(root: &Path, name: &str) -> String {
         return root.join(WORKSPACE_FILE).display().to_string();
     }
     if name.starts_with("//") {
-        if let Ok(resolution) = resolve_workspace_module(root, name) {
+        if let Ok(resolution) = resolve_workspace_module_with_mounts(root, mounts, name) {
             return resolution.path.display().to_string();
         }
     }
@@ -953,15 +1028,18 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
         .with_context(|| format!("canonicalize workspace root {}", root.display()))?;
 
     let state: Arc<Mutex<HostState>> = Arc::new(Mutex::new(HostState::default()));
+    let module_mounts: Arc<Mutex<Vec<ModuleMount>>> = Arc::new(Mutex::new(Vec::new()));
 
     // ----- QuickJS runtime + context -----
     let rt = Runtime::new().context("create QuickJS runtime")?;
     rt.set_loader(
         ImpResolver {
             workspace_root: root.clone(),
+            module_mounts: Arc::clone(&module_mounts),
         },
         ImpLoader {
             workspace_root: root.clone(),
+            module_mounts: Arc::clone(&module_mounts),
         },
     );
     let ctx = JsContext::full(&rt).context("create QuickJS context")?;
@@ -969,8 +1047,11 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
     // ----- Register host globals -----
     {
         let state_clone = Arc::clone(&state);
-        ctx.with(|ctx| -> rquickjs::Result<()> { register_globals(ctx, state_clone, root.clone()) })
-            .map_err(|e| anyhow::anyhow!("register QuickJS globals: {e}"))?;
+        let mounts_clone = Arc::clone(&module_mounts);
+        ctx.with(|ctx| -> rquickjs::Result<()> {
+            register_globals(ctx, state_clone, root.clone(), mounts_clone)
+        })
+        .map_err(|e| anyhow::anyhow!("register QuickJS globals: {e}"))?;
     }
 
     // ----- Evaluate imp.workspace.js if present -----
@@ -1072,13 +1153,11 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
             .dep_ids
             .iter()
             .map(|(dep_id, mode_str)| {
-                let addr = id_to_address
-                    .get(dep_id)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "dep id {dep_id} has no address (not exported from any BUILD.js)"
-                        )
-                    })?;
+                let addr = id_to_address.get(dep_id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "dep id {dep_id} has no address (not exported from any BUILD.js)"
+                    )
+                })?;
                 let mode = match mode_str.as_deref() {
                     None | Some("auto") => DependencyMode::Auto,
                     Some(m) => DependencyMode::Named(m.to_owned()),
@@ -1119,6 +1198,7 @@ fn register_globals<'js>(
     ctx: Ctx<'js>,
     state: Arc<Mutex<HostState>>,
     workspace_root: PathBuf,
+    module_mounts: Arc<Mutex<Vec<ModuleMount>>>,
 ) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
@@ -1242,57 +1322,67 @@ fn register_globals<'js>(
     // __host_named_cache(name)
     // ------------------------------------------------------------------
     let state_c = Arc::clone(&state);
-    let host_named_cache = Function::new(ctx.clone(), move |name: String| -> rquickjs::Result<()> {
-        let cache = named_cache_from_name(&name)?;
-        let mut hs = state_c.lock().unwrap();
-        if let Some(existing) = hs.named_caches.get(&cache.name) {
-            if existing != &cache {
+    let host_named_cache =
+        Function::new(ctx.clone(), move |name: String| -> rquickjs::Result<()> {
+            let cache = named_cache_from_name(&name)?;
+            let mut hs = state_c.lock().unwrap();
+            if let Some(existing) = hs.named_caches.get(&cache.name) {
+                if existing != &cache {
+                    return Err(action_spec_error(format!(
+                        "named cache '{}' was declared with conflicting metadata",
+                        cache.name
+                    )));
+                }
+                return Ok(());
+            }
+            if let Some(existing) = hs
+                .named_caches
+                .values()
+                .find(|existing| existing.env_var == cache.env_var)
+            {
                 return Err(action_spec_error(format!(
-                    "named cache '{}' was declared with conflicting metadata",
-                    cache.name
+                    "named cache '{}' maps to env var {} already used by '{}'",
+                    cache.name, cache.env_var, existing.name
                 )));
             }
-            return Ok(());
-        }
-        if let Some(existing) = hs
-            .named_caches
-            .values()
-            .find(|existing| existing.env_var == cache.env_var)
-        {
-            return Err(action_spec_error(format!(
-                "named cache '{}' maps to env var {} already used by '{}'",
-                cache.name, cache.env_var, existing.name
-            )));
-        }
-        hs.named_caches.insert(cache.name.clone(), cache);
-        Ok(())
-    })?;
+            hs.named_caches.insert(cache.name.clone(), cache);
+            Ok(())
+        })?;
     globals.set("__host_named_cache", host_named_cache)?;
 
     // ------------------------------------------------------------------
     // __host_goal(name, productPolicy)
     // ------------------------------------------------------------------
     let state_g = Arc::clone(&state);
-    let host_goal = Function::new(ctx.clone(), move |name: String, policy_val: Value| -> rquickjs::Result<()> {
-        if name.is_empty() {
-            return Err(action_spec_error("goal name must not be empty".to_owned()));
-        }
-        let product_policy = {
-            let s: String = policy_val
-                .get()
-                .map_err(|_| action_spec_error("goal productPolicy must be a string".to_owned()))?;
-            if s == "default" {
-                GoalProductPolicy::Default
-            } else {
-                GoalProductPolicy::Named(s)
+    let host_goal = Function::new(
+        ctx.clone(),
+        move |name: String, policy_val: Value| -> rquickjs::Result<()> {
+            if name.is_empty() {
+                return Err(action_spec_error("goal name must not be empty".to_owned()));
             }
-        };
-        let mut hs = state_g.lock().unwrap();
-        if !hs.goals.contains_key(&name) {
-            hs.goals.insert(name.clone(), Goal { name, product_policy });
-        }
-        Ok(())
-    })?;
+            let product_policy = {
+                let s: String = policy_val.get().map_err(|_| {
+                    action_spec_error("goal productPolicy must be a string".to_owned())
+                })?;
+                if s == "default" {
+                    GoalProductPolicy::Default
+                } else {
+                    GoalProductPolicy::Named(s)
+                }
+            };
+            let mut hs = state_g.lock().unwrap();
+            if !hs.goals.contains_key(&name) {
+                hs.goals.insert(
+                    name.clone(),
+                    Goal {
+                        name,
+                        product_policy,
+                    },
+                );
+            }
+            Ok(())
+        },
+    )?;
     globals.set("__host_goal", host_goal)?;
 
     // ------------------------------------------------------------------
@@ -1303,7 +1393,9 @@ fn register_globals<'js>(
         ctx.clone(),
         move |name: String, executor_str: String, target: String| -> rquickjs::Result<()> {
             if name.is_empty() {
-                return Err(action_spec_error("platform name must not be empty".to_owned()));
+                return Err(action_spec_error(
+                    "platform name must not be empty".to_owned(),
+                ));
             }
             let executor = Executor::from_str(&executor_str).ok_or_else(|| {
                 action_spec_error(format!(
@@ -1314,7 +1406,11 @@ fn register_globals<'js>(
             if !hs.platforms.contains_key(&name) {
                 hs.platforms.insert(
                     name.clone(),
-                    PlatformDef { name, executor, target },
+                    PlatformDef {
+                        name,
+                        executor,
+                        target,
+                    },
                 );
             }
             Ok(())
@@ -1325,14 +1421,11 @@ fn register_globals<'js>(
     // ------------------------------------------------------------------
     // __host_download(url) → path string
     // ------------------------------------------------------------------
-    let host_download = Function::new(
-        ctx.clone(),
-        |url: String| -> rquickjs::Result<String> {
-            let path = toolchain::host_download(&url)
-                .map_err(|e| rquickjs::Error::new_loading_message("download", format!("{e:#}")))?;
-            Ok(path.to_string_lossy().into_owned())
-        },
-    )?;
+    let host_download = Function::new(ctx.clone(), |url: String| -> rquickjs::Result<String> {
+        let path = toolchain::host_download(&url)
+            .map_err(|e| rquickjs::Error::new_loading_message("download", format!("{e:#}")))?;
+        Ok(path.to_string_lossy().into_owned())
+    })?;
     globals.set("__host_download", host_download)?;
 
     // ------------------------------------------------------------------
@@ -1361,13 +1454,10 @@ fn register_globals<'js>(
     // ------------------------------------------------------------------
     // __host_sha256(path) → hex string
     // ------------------------------------------------------------------
-    let host_sha256 = Function::new(
-        ctx.clone(),
-        |path: String| -> rquickjs::Result<String> {
-            toolchain::host_sha256(Path::new(&path))
-                .map_err(|e| rquickjs::Error::new_loading_message("sha256", format!("{e:#}")))
-        },
-    )?;
+    let host_sha256 = Function::new(ctx.clone(), |path: String| -> rquickjs::Result<String> {
+        toolchain::host_sha256(Path::new(&path))
+            .map_err(|e| rquickjs::Error::new_loading_message("sha256", format!("{e:#}")))
+    })?;
     globals.set("__host_sha256", host_sha256)?;
 
     // ------------------------------------------------------------------
@@ -1381,17 +1471,24 @@ fn register_globals<'js>(
         move |name: String, key: String, source: String| -> rquickjs::Result<()> {
             let target = named_cache_key_path(&wc, &name, &key)
                 .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("{e:#}")))?;
-            std::fs::create_dir_all(&target)
-                .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("create {target:?}: {e}")))?;
+            std::fs::create_dir_all(&target).map_err(|e| {
+                rquickjs::Error::new_loading_message("cache", format!("create {target:?}: {e}"))
+            })?;
             let src = Path::new(&source);
             if src.is_dir() {
-                copy_dir_into(src, &target)
-                    .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("copy dir {source}: {e}")))?;
+                copy_dir_into(src, &target).map_err(|e| {
+                    rquickjs::Error::new_loading_message("cache", format!("copy dir {source}: {e}"))
+                })?;
             } else {
-                let file_name = src.file_name()
-                    .ok_or_else(|| rquickjs::Error::new_loading_message("cache", "source has no filename".to_owned()))?;
-                std::fs::copy(src, target.join(file_name))
-                    .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("copy {source}: {e}")))?;
+                let file_name = src.file_name().ok_or_else(|| {
+                    rquickjs::Error::new_loading_message(
+                        "cache",
+                        "source has no filename".to_owned(),
+                    )
+                })?;
+                std::fs::copy(src, target.join(file_name)).map_err(|e| {
+                    rquickjs::Error::new_loading_message("cache", format!("copy {source}: {e}"))
+                })?;
             }
             Ok(())
         },
@@ -1437,7 +1534,83 @@ fn register_globals<'js>(
     )?;
     globals.set("__host_workspace_files", host_workspace_files)?;
 
+    // ------------------------------------------------------------------
+    // __host_workspace_mount(prefix, path)
+    // ------------------------------------------------------------------
+    let wc = workspace_root.clone();
+    let host_workspace_mount = Function::new(
+        ctx.clone(),
+        move |prefix: String, path: String| -> rquickjs::Result<()> {
+            let mount = module_mount_from_args(&wc, &prefix, &path)?;
+            let mut mounts = module_mounts.lock().unwrap();
+            if let Some(existing) = mounts
+                .iter()
+                .find(|existing| existing.prefix == mount.prefix)
+            {
+                if existing.root == mount.root {
+                    return Ok(());
+                }
+                return Err(rquickjs::Error::new_loading_message(
+                    "workspaceMount",
+                    format!(
+                        "module prefix '{}' is already mounted at {}",
+                        existing.prefix,
+                        existing.root.display()
+                    ),
+                ));
+            }
+            mounts.push(mount);
+            Ok(())
+        },
+    )?;
+    globals.set("__host_workspace_mount", host_workspace_mount)?;
+
     Ok(())
+}
+
+fn module_mount_from_args(
+    workspace_root: &Path,
+    prefix: &str,
+    path: &str,
+) -> rquickjs::Result<ModuleMount> {
+    let prefix = normalize_mount_prefix(prefix)
+        .map_err(|message| rquickjs::Error::new_loading_message("workspaceMount", message))?;
+    let source = Path::new(path);
+    let source = if source.is_absolute() {
+        source.to_owned()
+    } else {
+        workspace_root.join(source)
+    };
+    let root = source.canonicalize().map_err(|e| {
+        rquickjs::Error::new_loading_message(
+            "workspaceMount",
+            format!("canonicalize mount path {}: {e}", source.display()),
+        )
+    })?;
+    if !root.is_dir() {
+        return Err(rquickjs::Error::new_loading_message(
+            "workspaceMount",
+            format!("mount path {} is not a directory", root.display()),
+        ));
+    }
+    Ok(ModuleMount { prefix, root })
+}
+
+fn normalize_mount_prefix(prefix: &str) -> std::result::Result<String, String> {
+    if !prefix.starts_with("//") {
+        return Err(format!(
+            "workspace mount prefix '{prefix}' must start with //"
+        ));
+    }
+    let normalized = prefix.trim_end_matches('/');
+    if normalized.len() <= 2 {
+        return Err("workspace mount prefix must name a non-root prefix".to_owned());
+    }
+    let rel = normalized
+        .strip_prefix("//")
+        .expect("checked prefix starts with //");
+    validate_workspace_module_path(normalized, rel)?;
+    Ok(normalized.to_owned())
 }
 
 fn workspace_files(workspace_root: &Path, root: &str, suffix: &str) -> Result<Vec<String>> {
@@ -1497,8 +1670,9 @@ fn copy_dir_into(src: &Path, dst: &Path) -> Result<()> {
             std::fs::create_dir_all(&target)?;
             copy_dir_into(&entry.path(), &target)?;
         } else {
-            std::fs::copy(&entry.path(), &target)
-                .with_context(|| format!("copy {} -> {}", entry.path().display(), target.display()))?;
+            std::fs::copy(&entry.path(), &target).with_context(|| {
+                format!("copy {} -> {}", entry.path().display(), target.display())
+            })?;
         }
     }
     Ok(())
@@ -1836,29 +2010,25 @@ fn goal_product_for_kind(workspace: &Workspace, goal: &Goal, kind: &str) -> Opti
 }
 
 /// Infer the default product for a target kind from its registered rules.
-/// Convention: the first non-`"sources"` rule is the default; if the only
-/// rule produces `"sources"`, the kind has no build product.
+/// Convention: the first non-config product is the default; if the only
+/// rules produce config/source products, the kind has no build product.
 fn default_product_for_kind<'a>(workspace: &'a Workspace, kind: &str) -> Option<&'a str> {
-    let mut found_sources_only = false;
     let mut non_sources: Option<&str> = Option::None;
 
     for ((k, _), rule) in &workspace.rules {
         if k != kind {
             continue;
         }
-        if rule.product != "sources" {
+        if !matches!(rule.product.as_str(), "sources" | "collection") {
             non_sources = Some(rule.product.as_str());
             break;
-        } else {
-            found_sources_only = true;
         }
     }
 
     if non_sources.is_some() {
         return non_sources;
     }
-    // Only "sources" rules → no build product.
-    let _ = found_sources_only;
+    // Only config/source rules → no build product.
     Option::None
 }
 
@@ -2020,7 +2190,13 @@ pub fn execute_plan(
     workspace_root: &Path,
     mode: ExecutionMode,
 ) -> Result<ExecutionReport> {
-    execute_plan_with_options(plan, None, workspace_root, ExecutionOptions::new(mode, 1), None)
+    execute_plan_with_options(
+        plan,
+        None,
+        workspace_root,
+        ExecutionOptions::new(mode, 1),
+        None,
+    )
 }
 
 #[allow(dead_code)]
@@ -3389,7 +3565,11 @@ fn format_dep_tree(
     } else {
         let marker = if is_last { "└── " } else { "├── " };
         if already {
-            writeln!(w, "{}{}{}{} (*)", prefix, marker, target.address, mode_suffix)?;
+            writeln!(
+                w,
+                "{}{}{}{} (*)",
+                prefix, marker, target.address, mode_suffix
+            )?;
         } else {
             writeln!(w, "{}{}{}{}", prefix, marker, target.address, mode_suffix)?;
         }
@@ -3421,7 +3601,11 @@ fn format_dep_tree(
                 w,
             )?;
         } else {
-            let marker = if dep_is_last { "└── " } else { "├── " };
+            let marker = if dep_is_last {
+                "└── "
+            } else {
+                "├── "
+            };
             let mode_sfx = match &dep.mode {
                 DependencyMode::Named(m) => format!(" [{}]", m),
                 DependencyMode::Auto => String::new(),
@@ -3688,11 +3872,15 @@ fn lower_artifacts(
 fn expand_template(template: &str, target: &Target) -> String {
     let sources = target.fields.get("sources").cloned().unwrap_or_default();
     let entrypoint = target.fields.get("entrypoint").cloned().unwrap_or_default();
+    let name = target.fields.get("name").cloned().unwrap_or_default();
+    let path = target.fields.get("path").cloned().unwrap_or_default();
     let version = target.fields.get("version").cloned().unwrap_or_default();
     template
         .replace("{address}", &target.address)
         .replace("{sources}", &sources)
         .replace("{entrypoint}", &entrypoint)
+        .replace("{name}", &name)
+        .replace("{path}", &path)
         .replace("{version}", &version)
 }
 
@@ -4415,6 +4603,12 @@ export const ui = asset({ srcs: ["**/*.png"] });
         std::fs::write(path, contents).unwrap();
     }
 
+    fn js_string_path(path: &Path) -> String {
+        path.to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+    }
+
     fn executable_task(id: &str, deps: &[&str], argv: &[&str], output: Option<&str>) -> Task {
         let outputs = output
             .map(|path| {
@@ -4489,6 +4683,65 @@ export const ui = asset({ srcs: ["**/*.png"] });
     }
 
     #[test]
+    fn workspace_can_mount_external_rule_packages() {
+        let root = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let external_rules = external.path().join("rules");
+
+        write_file(
+            &external_rules.join("external/helper.js"),
+            r#"
+export const actionName = "external build {address}";
+"#,
+        );
+        write_file(
+            &external_rules.join("external/index.js"),
+            r#"
+import { target, rule } from "imp:core";
+import { actionName } from "//rules/external/helper";
+
+rule({ kind: "external", product: "external-product", action: actionName, requiresOwnSources: false, dependencyProduct: null });
+
+export function externalThing(name) {
+    return target({ kind: "external", fields: { name } });
+}
+"#,
+        );
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            &format!(
+                r#"
+import {{ workspaceMount }} from "imp:core";
+
+workspaceMount({{ prefix: "//rules", path: "{rules}" }});
+await import("//rules/external");
+"#,
+                rules = js_string_path(&external_rules),
+            ),
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { externalThing } from "//rules/external";
+
+export const app = externalThing("app");
+"#,
+        );
+
+        let workspace = load_workspace(p).unwrap();
+        assert!(workspace
+            .rules
+            .contains_key(&("external".into(), "external-product".into())));
+        assert_eq!(workspace.targets["//:app"].fields["name"], "app");
+
+        let plan = plan(&workspace, "build", &["app".into()]).unwrap();
+        assert_eq!(plan.roots, ["//:app#external-product"]);
+        assert_eq!(plan.tasks[0].action.display, "external build //:app");
+    }
+
+    #[test]
     fn workspace_root_is_discovered_from_a_nested_directory() {
         let root = fixture();
         let nested = root.path().join("library/jodin");
@@ -4516,6 +4769,71 @@ export const ui = asset({ srcs: ["**/*.png"] });
                 "//src/cpp/joltphysics:cmake#native-link-library",
             ]
         );
+    }
+
+    #[test]
+    fn odin_collections_are_namespace_config_not_package_sets() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/odin";
+"#,
+        );
+        write_file(
+            &p.join("rules/odin.js"),
+            r#"
+import { target, rule } from "imp:core";
+
+rule({ kind: "odin-collection", product: "collection", action: "odin collection {name}={path}", requiresOwnSources: false, dependencyProduct: null });
+rule({ kind: "odin-package", product: "sources", action: "snapshot {sources}", requiresOwnSources: false, dependencyProduct: null });
+rule({ kind: "odin-package", product: "odin-package", action: "odin build", requiresOwnSources: true, dependencyProduct: "default" });
+
+export function odinCollection({ name, path }) {
+    return target({ kind: "odin-collection", fields: { name, path } });
+}
+
+export function odinPackage({ srcs, collections = [] }) {
+    const collectionDeps = collections.map((collection) => ({ target: collection, mode: "collection" }));
+    return target({ kind: "odin-package", fields: { sources: srcs.join(",") }, deps: collectionDeps });
+}
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { odinCollection, odinPackage } from "//rules/odin";
+
+export const lib = odinCollection({ name: "lib", path: "library" });
+export const pkg = odinPackage({ srcs: ["*.odin"], collections: [lib] });
+"#,
+        );
+
+        let workspace = load_workspace(p).unwrap();
+        let pkg_plan = plan(&workspace, "build", &["pkg".into()]).unwrap();
+
+        let collection = pkg_plan
+            .tasks
+            .iter()
+            .find(|task| task.id == "//:lib#collection")
+            .unwrap();
+        assert_eq!(collection.dependencies, Vec::<String>::new());
+        assert_eq!(collection.action.display, "odin collection lib=library");
+
+        let package = pkg_plan
+            .tasks
+            .iter()
+            .find(|task| task.id == "//:pkg#odin-package")
+            .unwrap();
+        assert_eq!(
+            package.dependencies,
+            ["//:pkg#sources", "//:lib#collection"]
+        );
+
+        let all = plan(&workspace, "build", &[]).unwrap();
+        assert_eq!(all.roots, ["//:pkg#odin-package"]);
     }
 
     #[test]
@@ -5228,7 +5546,10 @@ export const generated = toolUser();
         .unwrap();
 
         assert_eq!(report.tasks[0].status, TaskExecutionStatus::Ran);
-        assert_eq!(std::fs::read_to_string(p.join("out.txt")).unwrap(), "from-tool");
+        assert_eq!(
+            std::fs::read_to_string(p.join("out.txt")).unwrap(),
+            "from-tool"
+        );
     }
 
     #[test]
@@ -5698,10 +6019,7 @@ export const ignored = missing;
     fn javascript_can_use_platform_info() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
-        write_file(
-            &p.join(WORKSPACE_FILE),
-            r#"import "//rules/test";"#,
-        );
+        write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/test";"#);
         write_file(
             &p.join("rules/test.js"),
             r#"
@@ -5739,10 +6057,7 @@ export const ok = 1;
             .unwrap()
             .to_owned();
 
-        write_file(
-            &p.join(WORKSPACE_FILE),
-            r#"import "//rules/test";"#,
-        );
+        write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/test";"#);
         write_file(
             &p.join("rules/test.js"),
             &format!(
@@ -5758,10 +6073,7 @@ export const ok = 1;
                 expected = expected_hex,
             ),
         );
-        write_file(
-            &p.join(BUILD_FILE),
-            "export const done = 1;\n",
-        );
+        write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
 
         load_workspace(p).unwrap();
     }
