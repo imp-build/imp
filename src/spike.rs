@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use crate::toolchain;
 use anyhow::{bail, Context, Result};
+use regex::Regex;
 use rquickjs::{
     loader::{Loader, Resolver},
     module::Declared,
@@ -226,6 +227,84 @@ export function cacheHas(name, key) {
  */
 export function workspaceFiles(opts) {
     return JSON.parse(__host_workspace_files(opts.root, opts.suffix || ""));
+}
+
+/**
+ * List workspace source files matching Rust regular expressions.
+ *
+ * Returned paths are workspace-relative, using `/` separators.
+ *
+ * @param {object} opts
+ * @param {string} [opts.root="."] Workspace-relative directory to search.
+ * @param {string[]} opts.include Regexes; a file is included if any matches.
+ * @param {string[]} [opts.exclude=[]] Regexes; a file is excluded if any matches.
+ * @returns {string[]} Sorted workspace-relative file paths.
+ */
+export function workspaceSourceFiles(opts) {
+    if (!opts || !Array.isArray(opts.include)) {
+        throw new Error("workspaceSourceFiles({ root?, include, exclude? }) requires include regexes");
+    }
+    return JSON.parse(__host_workspace_source_files(
+        opts.root || ".",
+        JSON.stringify(opts.include),
+        JSON.stringify(opts.exclude || []),
+    ));
+}
+
+/**
+ * List matching workspace source files and capture each file into CAS.
+ *
+ * @param {object} opts
+ * @param {string} [opts.root="."] Workspace-relative directory to search.
+ * @param {string[]} opts.include Regexes; a file is included if any matches.
+ * @param {string[]} [opts.exclude=[]] Regexes; a file is excluded if any matches.
+ * @returns {{ path: string, digest: string, bytes: number }[]} Sorted source entries.
+ */
+export function workspaceSourceEntries(opts) {
+    if (!opts || !Array.isArray(opts.include)) {
+        throw new Error("workspaceSourceEntries({ root?, include, exclude? }) requires include regexes");
+    }
+    return JSON.parse(__host_workspace_source_entries(
+        opts.root || ".",
+        JSON.stringify(opts.include),
+        JSON.stringify(opts.exclude || []),
+    ));
+}
+
+/**
+ * Retrieve the kind, fields, and dep handles for a target handle.
+ *
+ * @param {object} handle A target handle returned by target().
+ * @returns {{ kind: string, fields: Record<string, string>, deps: Array<{ handle: object, mode: string|null }> }}
+ */
+export function hydrateTarget(handle) {
+    if (!handle || handle.__imp !== true) {
+        throw new Error('hydrateTarget: expected a target handle');
+    }
+    return JSON.parse(__host_hydrate_target(handle.__id));
+}
+
+/**
+ * Collect all targets of a given kind reachable from a handle (depth-first, deduped).
+ *
+ * @param {object} handle Root target handle.
+ * @param {string} kind Target kind to collect, e.g. "odin-package".
+ * @returns {object[]} Handles of all matching targets in the transitive closure.
+ */
+export function gatherTransitiveClosure(handle, kind) {
+    const visited = new Set();
+    const result = [];
+    function walk(h) {
+        if (!h || h.__imp !== true) return;
+        const id = h.__id;
+        if (visited.has(id)) return;
+        visited.add(id);
+        const t = hydrateTarget(h);
+        if (t.kind === kind) result.push(h);
+        for (const dep of t.deps) walk(dep.handle);
+    }
+    walk(handle);
+    return result;
 }
 
 /**
@@ -565,6 +644,13 @@ pub struct CacheInputDigest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CacheDirectoryEntry {
+    path: String,
+    digest: String,
+    bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SourceFileEntry {
     path: String,
     digest: String,
     bytes: u64,
@@ -1138,46 +1224,22 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
 
     // ----- Resolve dep IDs to addresses -----
     let hs = state.lock().unwrap();
-    let id_to_address: BTreeMap<u32, &str> = named_exports
+    let mut id_to_address: BTreeMap<u32, String> = named_exports
         .iter()
-        .map(|(addr, id)| (*id, addr.as_str()))
+        .map(|(addr, id)| (*id, addr.clone()))
         .collect();
 
     let mut targets = BTreeMap::new();
+    let mut visiting = BTreeSet::new();
     for (address, id) in &named_exports {
-        let pending = hs
-            .pending
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("no pending target for id {id}"))?;
-        let deps = pending
-            .dep_ids
-            .iter()
-            .map(|(dep_id, mode_str)| {
-                let addr = id_to_address.get(dep_id).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "dep id {dep_id} has no address (not exported from any BUILD.js)"
-                    )
-                })?;
-                let mode = match mode_str.as_deref() {
-                    None | Some("auto") => DependencyMode::Auto,
-                    Some(m) => DependencyMode::Named(m.to_owned()),
-                };
-                Ok(Dependency {
-                    address: addr.to_string(),
-                    mode,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        targets.insert(
+        materialize_pending_target(
+            &hs,
+            &mut id_to_address,
+            &mut targets,
+            &mut visiting,
+            *id,
             address.clone(),
-            Target {
-                address: address.clone(),
-                kind: pending.kind.clone(),
-                fields: pending.fields.clone(),
-                dependencies: deps,
-            },
-        );
+        )?;
     }
 
     Ok(LiveWorkspace {
@@ -1191,6 +1253,60 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
         runtime: rt,
         ctx: Mutex::new(ctx),
     })
+}
+
+fn materialize_pending_target(
+    hs: &HostState,
+    id_to_address: &mut BTreeMap<u32, String>,
+    targets: &mut BTreeMap<String, Target>,
+    visiting: &mut BTreeSet<u32>,
+    id: u32,
+    fallback_address: String,
+) -> Result<String> {
+    let address = id_to_address
+        .entry(id)
+        .or_insert_with(|| fallback_address.clone())
+        .clone();
+    if targets.contains_key(&address) {
+        return Ok(address);
+    }
+    if !visiting.insert(id) {
+        bail!("target dependency cycle includes pending id {id}");
+    }
+
+    let pending = hs
+        .pending
+        .get(&id)
+        .ok_or_else(|| anyhow::anyhow!("no pending target for id {id}"))?;
+    let mut deps = Vec::new();
+    for (index, (dep_id, mode_str)) in pending.dep_ids.iter().enumerate() {
+        let dep_address = id_to_address
+            .get(dep_id)
+            .cloned()
+            .unwrap_or_else(|| format!("{address}__implicit{index}"));
+        let dep_address =
+            materialize_pending_target(hs, id_to_address, targets, visiting, *dep_id, dep_address)?;
+        let mode = match mode_str.as_deref() {
+            None | Some("auto") => DependencyMode::Auto,
+            Some(m) => DependencyMode::Named(m.to_owned()),
+        };
+        deps.push(Dependency {
+            address: dep_address,
+            mode,
+        });
+    }
+
+    visiting.remove(&id);
+    targets.insert(
+        address.clone(),
+        Target {
+            address: address.clone(),
+            kind: pending.kind.clone(),
+            fields: pending.fields.clone(),
+            dependencies: deps,
+        },
+    );
+    Ok(address)
 }
 
 /// Register host globals on `ctx`.
@@ -1535,6 +1651,68 @@ fn register_globals<'js>(
     globals.set("__host_workspace_files", host_workspace_files)?;
 
     // ------------------------------------------------------------------
+    // __host_workspace_source_files(root, includeJson, excludeJson)
+    // ------------------------------------------------------------------
+    let wc = workspace_root.clone();
+    let host_workspace_source_files = Function::new(
+        ctx.clone(),
+        move |root: String,
+              include_json: String,
+              exclude_json: String|
+              -> rquickjs::Result<String> {
+            let include: Vec<String> = serde_json::from_str(&include_json).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    "workspaceSourceFiles",
+                    format!("parse include regexes: {e}"),
+                )
+            })?;
+            let exclude: Vec<String> = serde_json::from_str(&exclude_json).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    "workspaceSourceFiles",
+                    format!("parse exclude regexes: {e}"),
+                )
+            })?;
+            workspace_source_files(&wc, &root, &include, &exclude)
+                .and_then(|files| serde_json::to_string(&files).context("encode source files"))
+                .map_err(|e| {
+                    rquickjs::Error::new_loading_message("workspaceSourceFiles", format!("{e:#}"))
+                })
+        },
+    )?;
+    globals.set("__host_workspace_source_files", host_workspace_source_files)?;
+
+    // ------------------------------------------------------------------
+    // __host_workspace_source_entries(root, includeJson, excludeJson)
+    // ------------------------------------------------------------------
+    let wc = workspace_root.clone();
+    let host_workspace_source_entries = Function::new(
+        ctx.clone(),
+        move |root: String,
+              include_json: String,
+              exclude_json: String|
+              -> rquickjs::Result<String> {
+            let include: Vec<String> = serde_json::from_str(&include_json).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    "workspaceSourceEntries",
+                    format!("parse include regexes: {e}"),
+                )
+            })?;
+            let exclude: Vec<String> = serde_json::from_str(&exclude_json).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    "workspaceSourceEntries",
+                    format!("parse exclude regexes: {e}"),
+                )
+            })?;
+            workspace_source_entries(&wc, &root, &include, &exclude)
+                .and_then(|entries| serde_json::to_string(&entries).context("encode source entries"))
+                .map_err(|e| {
+                    rquickjs::Error::new_loading_message("workspaceSourceEntries", format!("{e:#}"))
+                })
+        },
+    )?;
+    globals.set("__host_workspace_source_entries", host_workspace_source_entries)?;
+
+    // ------------------------------------------------------------------
     // __host_workspace_mount(prefix, path)
     // ------------------------------------------------------------------
     let wc = workspace_root.clone();
@@ -1564,6 +1742,42 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_workspace_mount", host_workspace_mount)?;
+
+    // ------------------------------------------------------------------
+    // __host_hydrate_target(id) → JSON { kind, fields, deps: [{handle, mode}] }
+    // ------------------------------------------------------------------
+    let state_h = Arc::clone(&state);
+    let host_hydrate_target = Function::new(
+        ctx.clone(),
+        move |id: u32| -> rquickjs::Result<String> {
+            let hs = state_h.lock().unwrap();
+            let pending = hs.pending.get(&id).ok_or_else(|| {
+                rquickjs::Error::new_loading_message(
+                    "hydrateTarget",
+                    format!("no pending target for id {id}"),
+                )
+            })?;
+            let deps: Vec<serde_json::Value> = pending
+                .dep_ids
+                .iter()
+                .map(|(dep_id, mode)| {
+                    serde_json::json!({
+                        "handle": { "__imp": true, "__id": dep_id },
+                        "mode": mode,
+                    })
+                })
+                .collect();
+            let json = serde_json::json!({
+                "kind": pending.kind,
+                "fields": pending.fields,
+                "deps": deps,
+            });
+            serde_json::to_string(&json).map_err(|e| {
+                rquickjs::Error::new_loading_message("hydrateTarget", e.to_string())
+            })
+        },
+    )?;
+    globals.set("__host_hydrate_target", host_hydrate_target)?;
 
     Ok(())
 }
@@ -1649,6 +1863,94 @@ fn workspace_files(workspace_root: &Path, root: &str, suffix: &str) -> Result<Ve
     }
     files.sort();
     Ok(files)
+}
+
+fn workspace_source_files(
+    workspace_root: &Path,
+    root: &str,
+    include: &[String],
+    exclude: &[String],
+) -> Result<Vec<String>> {
+    matching_workspace_source_paths(workspace_root, root, include, exclude)
+}
+
+fn workspace_source_entries(
+    workspace_root: &Path,
+    root: &str,
+    include: &[String],
+    exclude: &[String],
+) -> Result<Vec<SourceFileEntry>> {
+    let paths = matching_workspace_source_paths(workspace_root, root, include, exclude)?;
+    paths
+        .into_iter()
+        .map(|path| {
+            let source = workspace_root.join(artifact_relative_path(&path)?);
+            let (digest, bytes) = store_file_blob(&source, "source")?;
+            Ok(SourceFileEntry {
+                path,
+                digest,
+                bytes,
+            })
+        })
+        .collect()
+}
+
+fn matching_workspace_source_paths(
+    workspace_root: &Path,
+    root: &str,
+    include: &[String],
+    exclude: &[String],
+) -> Result<Vec<String>> {
+    if include.is_empty() {
+        bail!("workspaceSourceFiles include must not be empty");
+    }
+    let include = compile_regexes("include", include)?;
+    let exclude = compile_regexes("exclude", exclude)?;
+    let directory = workspace_root.join(workspace_relative_directory(root)?);
+    if !directory.is_dir() {
+        bail!(
+            "workspaceSourceFiles root '{}' is not a directory",
+            directory.display()
+        );
+    }
+
+    let mut files = Vec::new();
+    for entry in WalkDir::new(&directory)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let relative = entry
+            .path()
+            .strip_prefix(workspace_root)
+            .with_context(|| format!("relativize {}", entry.path().display()))?;
+        let relative = relative
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        if include.iter().any(|regex| regex.is_match(&relative))
+            && !exclude.iter().any(|regex| regex.is_match(&relative))
+        {
+            files.push(relative);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn compile_regexes(label: &str, patterns: &[String]) -> Result<Vec<Regex>> {
+    patterns
+        .iter()
+        .map(|pattern| {
+            Regex::new(pattern).with_context(|| format!("compile {label} source regex {pattern:?}"))
+        })
+        .collect()
+}
+
+fn workspace_relative_directory(path: &str) -> Result<PathBuf> {
+    if path.is_empty() || path == "." {
+        return Ok(PathBuf::new());
+    }
+    artifact_relative_path(path)
 }
 
 fn named_cache_key_path(workspace_root: &Path, name: &str, key: &str) -> Result<PathBuf> {
@@ -2435,11 +2737,42 @@ fn execute_one_task(
             }
             TaskExecutionStatus::WouldRun
         }
-        ExecutionMode::Local if command.is_empty() => {
+        ExecutionMode::Local if command.is_empty() && task.outputs.is_empty() => {
             if let Some(progress) = progress.as_mut() {
                 progress.done("noop");
             }
             TaskExecutionStatus::Noop
+        }
+        ExecutionMode::Local if command.is_empty() => {
+            let evaluation =
+                evaluate_task_cache(task, workspace_root, named_caches, completed_dependencies)?;
+            if evaluation.hit {
+                let record = evaluation
+                    .record
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("cache hit for {} had no record", task.id))?;
+                materialize_cached_outputs(record, workspace_root)?;
+                if let Some(progress) = progress.as_mut() {
+                    progress.done("cache hit");
+                }
+                return Ok((
+                    TaskExecution {
+                        task_id: task.id.clone(),
+                        status: TaskExecutionStatus::CacheHit,
+                        command,
+                    },
+                    TaskCacheSummary {
+                        task_id: task.id.clone(),
+                        task_key: evaluation.task_key,
+                    },
+                ));
+            }
+
+            materialize_embedded_output_task(task, workspace_root, &evaluation)?;
+            if let Some(progress) = progress.as_mut() {
+                progress.done("done");
+            }
+            TaskExecutionStatus::Ran
         }
         ExecutionMode::Local => {
             let evaluation =
@@ -2654,6 +2987,48 @@ fn run_local_task(
     }
 
     let outputs = ingest_task_outputs(task, &sandbox)?;
+    if cache.cacheable {
+        let record = TaskCacheRecord {
+            version: 1,
+            task_id: task.id.clone(),
+            task_key: cache.task_key.clone(),
+            action_digest: cache.action_digest.clone(),
+            input_digests: cache.input_digests.clone(),
+            dependency_keys: cache.dependency_keys.clone(),
+            named_caches: cache.named_caches.clone(),
+            outputs,
+        };
+        write_task_cache_record(&record)?;
+        materialize_cached_outputs(&record, workspace_root)?;
+    }
+    Ok(())
+}
+
+fn materialize_embedded_output_task(
+    task: &Task,
+    workspace_root: &Path,
+    cache: &TaskCacheEvaluation,
+) -> Result<()> {
+    if !task_has_embedded_outputs(task) {
+        bail!(
+            "{} has no executable argv and contains outputs that cannot be materialized from embedded values",
+            task.id
+        );
+    }
+    let mut outputs = Vec::new();
+    for artifact in &task.outputs {
+        let value = artifact.value.as_deref().unwrap_or_default();
+        outputs.push(CachedArtifact {
+            artifact_id: artifact.id.clone(),
+            kind: artifact.kind.clone(),
+            path: artifact.path.clone(),
+            value: artifact.value.clone(),
+            digest: store_blob(value.as_bytes(), &artifact.kind)?,
+            bytes: Some(value.len() as u64),
+            files: Vec::new(),
+        });
+    }
+
     if cache.cacheable {
         let record = TaskCacheRecord {
             version: 1,
@@ -2986,13 +3361,14 @@ fn evaluate_task_cache(
     } else if task.action.impure {
         false
     } else {
-        !task.action.argv.is_empty() && !task.outputs.is_empty()
+        !task.outputs.is_empty()
+            && (!task.action.argv.is_empty() || task_has_embedded_outputs(task))
     };
     if !cacheable {
         let miss_reason = if task.action.impure && !task.action.force_cache {
             "task is marked impure (set force_cache: true to override)".to_owned()
         } else {
-            "task has no executable argv or no declared outputs".to_owned()
+            "task has no executable argv or embedded declared outputs".to_owned()
         };
         return Ok(TaskCacheEvaluation {
             cacheable,
@@ -3043,6 +3419,18 @@ fn evaluate_task_cache(
         miss_reason,
         record,
     })
+}
+
+fn task_has_embedded_outputs(task: &Task) -> bool {
+    !task.outputs.is_empty()
+        && task
+            .outputs
+            .iter()
+            .all(|artifact| match artifact.kind.as_str() {
+                "file" | "manifest" => artifact.value.is_some(),
+                "value" => true,
+                _ => false,
+            })
 }
 
 fn digest_task_inputs(task: &Task, workspace_root: &Path) -> Result<Vec<CacheInputDigest>> {
@@ -3875,13 +4263,19 @@ fn expand_template(template: &str, target: &Target) -> String {
     let name = target.fields.get("name").cloned().unwrap_or_default();
     let path = target.fields.get("path").cloned().unwrap_or_default();
     let version = target.fields.get("version").cloned().unwrap_or_default();
-    template
+    let expanded = template
         .replace("{address}", &target.address)
         .replace("{sources}", &sources)
         .replace("{entrypoint}", &entrypoint)
         .replace("{name}", &name)
         .replace("{path}", &path)
-        .replace("{version}", &version)
+        .replace("{version}", &version);
+    target
+        .fields
+        .iter()
+        .fold(expanded, |expanded, (field, value)| {
+            expanded.replace(&format!("{{{field}}}"), value)
+        })
 }
 
 fn dot_escape(value: &str) -> String {
@@ -4742,6 +5136,63 @@ export const app = externalThing("app");
     }
 
     #[test]
+    fn implicit_dependency_targets_are_materialized() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let repo_rules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rules");
+
+        write_file(&p.join("app/main.odin"), "package app\n");
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            &format!(
+                r#"
+import {{ workspaceMount }} from "imp:core";
+
+workspaceMount({{ prefix: "//rules", path: "{rules}" }});
+await import("//rules/odin");
+"#,
+                rules = js_string_path(&repo_rules),
+            ),
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { odinPackage } from "//rules/odin";
+
+export const app = odinPackage({
+    path: "app",
+    srcs: ["^app/.*\\.odin$"],
+    toolchain: "dev-2026-05",
+});
+"#,
+        );
+
+        let workspace = load_workspace(p).unwrap();
+        let source_address = &workspace.targets["//:app"].dependencies[0].address;
+        let source_target = &workspace.targets[source_address];
+        assert_eq!(source_target.kind, "source-set");
+        assert_eq!(source_target.fields["files"], "app/main.odin");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&source_target.fields["sourceManifestValue"]).unwrap();
+        assert_eq!(manifest["cas"][0]["path"], "app/main.odin");
+        assert!(manifest["cas"][0]["digest"].as_str().unwrap().len() > 8);
+        assert!(manifest["cas"][0]["bytes"].as_u64().unwrap() > 0);
+
+        let plan = plan(&workspace, "build", &["app".into()]).unwrap();
+        let source_task = plan
+            .tasks
+            .iter()
+            .find(|task| task.target == *source_address && task.product == "sources")
+            .unwrap();
+        assert_eq!(source_task.outputs[0].kind, "manifest");
+        assert!(source_task.outputs[0]
+            .value
+            .as_deref()
+            .unwrap()
+            .contains("app/main.odin"));
+    }
+
+    #[test]
     fn workspace_root_is_discovered_from_a_nested_directory() {
         let root = fixture();
         let nested = root.path().join("library/jodin");
@@ -4959,6 +5410,39 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             .tasks
             .iter()
             .all(|execution| execution.status == TaskExecutionStatus::WouldRun));
+    }
+
+    #[test]
+    fn local_executor_materializes_embedded_manifest_outputs() {
+        let root = tempfile::tempdir().unwrap();
+        let task_id = unique_task_id("source-manifest");
+        let mut task = executable_task(&task_id, &[], &[], None);
+        task.outputs = vec![Artifact {
+            id: format!("{task_id}:manifest"),
+            kind: "manifest".to_owned(),
+            path: Some(".imp/sources/app.json".to_owned()),
+            value: Some("{\"files\":[\"app/main.odin\"]}\n".to_owned()),
+            producer: Some(task_id.clone()),
+        }];
+        task.action.outputs = task
+            .outputs
+            .iter()
+            .map(|artifact| artifact.id.clone())
+            .collect();
+
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![task_id.clone()],
+            named_caches: Vec::new(),
+            tasks: vec![task],
+        };
+
+        let report = execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
+        assert_eq!(report.tasks[0].status, TaskExecutionStatus::Ran);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(".imp/sources/app.json")).unwrap(),
+            "{\"files\":[\"app/main.odin\"]}\n"
+        );
     }
 
     #[test]
@@ -5706,6 +6190,61 @@ export const rules_test = rulesTest({ root: "//rules/other" });
             .tasks
             .iter()
             .all(|execution| execution.status == TaskExecutionStatus::Ran));
+    }
+
+    #[test]
+    fn odin_js_rule_tests_pass() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/imp/test";
+import "//rules/odin";
+"#,
+        );
+        write_file(
+            &p.join("rules/imp/test/index.js"),
+            include_str!("../rules/imp/test/index.js"),
+        );
+        write_file(
+            &p.join("rules/odin/index.js"),
+            include_str!("../rules/odin/index.js"),
+        );
+        write_file(
+            &p.join("rules/odin/toolchain.js"),
+            include_str!("../rules/odin/toolchain.js"),
+        );
+        write_file(
+            &p.join("rules/odin/index_test.js"),
+            include_str!("../rules/odin/index_test.js"),
+        );
+        write_file(
+            &p.join("rules/odin/BUILD.js"),
+            r#"
+import { rulesTest } from "//rules/imp/test";
+export const rules_test = rulesTest({ root: "//rules/odin" });
+"#,
+        );
+
+        let live = load_workspace(p).unwrap();
+        let plan = plan(&live, "test", &[]).unwrap();
+        let report = execute_plan_with_options(
+            &plan,
+            Some(&live),
+            p,
+            ExecutionOptions::new(ExecutionMode::Local, 1),
+            None,
+        )
+        .unwrap();
+        assert!(
+            report
+                .tasks
+                .iter()
+                .all(|execution| execution.status == TaskExecutionStatus::Ran),
+            "some odin JS rule tests failed"
+        );
     }
 
     #[test]
