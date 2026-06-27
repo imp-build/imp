@@ -1,19 +1,12 @@
 import {
+    describe,
+    expect,
+    test,
+} from "//rules/imp/test";
+import {
     cmakeCacheKey,
     createCmakeToolchainApi,
 } from "//rules/c/cmake/toolchain";
-
-function assert(condition, message) {
-    if (!condition) {
-        throw new Error(message);
-    }
-}
-
-function assertEqual(actual, expected, message) {
-    if (actual !== expected) {
-        throw new Error(`${message}: got ${actual}, expected ${expected}`);
-    }
-}
 
 function fakeHost(plat = { os: "linux", arch: "x86_64" }) {
     const calls = [];
@@ -46,52 +39,46 @@ function fakeHost(plat = { os: "linux", arch: "x86_64" }) {
     };
 }
 
-function testToolchainDeclaration() {
+describe("CMake toolchain", () => {
+test("declares a default CMake toolchain", () => {
     const host = fakeHost();
     const api = createCmakeToolchainApi(host);
 
     const key = api.cmakeToolchain("3.30.5", { default: true });
 
-    assertEqual(key, "cmake-toolchains/3.30.5/linux-x86_64", "declared cache key");
-    assertEqual(api.defaultCmakeToolchainVersion(), "3.30.5", "default version");
-    assertEqual(host.calls[0][0], "namedCache", "declares named cache first");
-}
+    expect(key).toBe("cmake-toolchains/3.30.5/linux-x86_64");
+    expect(api.defaultCmakeToolchainVersion()).toBe("3.30.5");
+    expect(host.calls[0][0]).toBe("namedCache");
+});
 
-function testSystemCmakeIsDefaultWithoutToolchain() {
+test("uses system cmake without a declared toolchain", () => {
     const host = fakeHost();
     const api = createCmakeToolchainApi(host);
 
-    assertEqual(api.cmakeBin(), "cmake", "system cmake binary");
-}
+    expect(api.cmakeBin()).toBe("cmake");
+});
 
-function testInstallAndAcquireToolchain() {
+test("installs and acquires a toolchain from the named cache", () => {
     const host = fakeHost();
     const api = createCmakeToolchainApi(host);
     const key = cmakeCacheKey("3.30.5", { os: "linux", arch: "x86_64" });
 
-    assertEqual(
+    expect(
         api.installCmakeToolchain("3.30.5", "/tmp/cmake-3.30.5"),
-        "/cache/cmake-toolchains/3.30.5/linux-x86_64",
-        "installed toolchain dir",
-    );
-    assert(
+    ).toBe("/cache/cmake-toolchains/3.30.5/linux-x86_64");
+    expect(
         host.calls.some((call) => call[0] === "cachePut" && call[1] === "cmake-toolchains" && call[2] === key && call[3] === "/tmp/cmake-3.30.5"),
-        "stores local CMake toolchain in named cache",
-    );
+    ).toBe(true);
 
-    assertEqual(
+    expect(
         api.acquireCmakeToolchain("3.30.5"),
-        "/cache/cmake-toolchains/3.30.5/linux-x86_64",
-        "installed toolchain dir",
-    );
-    assertEqual(
+    ).toBe("/cache/cmake-toolchains/3.30.5/linux-x86_64");
+    expect(
         api.cmakeBin("3.30.5"),
-        "/cache/cmake-toolchains/3.30.5/linux-x86_64/bin/cmake",
-        "installed cmake binary",
-    );
-}
+    ).toBe("/cache/cmake-toolchains/3.30.5/linux-x86_64/bin/cmake");
+});
 
-function testAcquireReportsMissingToolchain() {
+test("reports a missing toolchain", () => {
     const host = fakeHost();
     const api = createCmakeToolchainApi(host);
     let message = null;
@@ -102,14 +89,6 @@ function testAcquireReportsMissingToolchain() {
         message = error.message;
     }
 
-    assert(message && message.includes("CMake toolchain 3.30.5 is not installed"), "missing toolchain error");
-}
-
-export function runCmakeToolchainTests() {
-    testToolchainDeclaration();
-    testSystemCmakeIsDefaultWithoutToolchain();
-    testInstallAndAcquireToolchain();
-    testAcquireReportsMissingToolchain();
-}
-
-runCmakeToolchainTests();
+    expect(message).toContain("CMake toolchain 3.30.5 is not installed");
+});
+});

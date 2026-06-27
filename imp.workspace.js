@@ -3,3 +3,4 @@
 import "//rules/c/cmake";
 import "//rules/gen";
 import "//rules/odin";
+import "//rules/imp/test";

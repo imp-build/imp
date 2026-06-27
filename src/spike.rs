@@ -212,6 +212,21 @@ export function cacheGet(name, key) {
 export function cacheHas(name, key) {
     return __host_cache_has(name, key);
 }
+
+/**
+ * List workspace files below a workspace-rooted directory.
+ *
+ * Returned paths are module specifiers without the trailing `.js`, so they can
+ * be passed directly to dynamic import().
+ *
+ * @param {object} opts
+ * @param {string} opts.root Workspace-rooted directory, e.g. "//rules/odin".
+ * @param {string} [opts.suffix] File suffix to include, e.g. "_test.js".
+ * @returns {string[]} Sorted workspace module specifiers.
+ */
+export function workspaceFiles(opts) {
+    return JSON.parse(__host_workspace_files(opts.root, opts.suffix || ""));
+}
 "#;
 
 // ---------------------------------------------------------------------------
@@ -792,6 +807,18 @@ fn resolve_workspace_module(
             });
         }
     } else {
+        if rel == "BUILD" || rel.ends_with("/BUILD") {
+            let build_path = root.join(format!("{rel}.js"));
+            candidates.push(build_path.clone());
+            if build_path.is_file() {
+                return Ok(WorkspaceModuleResolution {
+                    name: name.to_owned(),
+                    path: build_path,
+                    kind: ModuleKind::Build,
+                });
+            }
+        }
+
         let js_path = root.join(format!("{rel}.js"));
         candidates.push(js_path.clone());
         if js_path.is_file() {
@@ -995,7 +1022,7 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
 
     for build_file in &build_files {
         let scope = scope_for(&root, build_file)?;
-        let module_name = scope.clone();
+        let module_name = build_module_name_for(&root, build_file, &scope)?;
 
         let exports = ctx
             .with(|ctx| -> Result<Vec<(String, u32)>> {
@@ -1394,7 +1421,61 @@ fn register_globals<'js>(
     )?;
     globals.set("__host_cache_has", host_cache_has)?;
 
+    // ------------------------------------------------------------------
+    // __host_workspace_files(root, suffix) → JSON string ["//path/module"]
+    // ------------------------------------------------------------------
+    let wc = workspace_root.clone();
+    let host_workspace_files = Function::new(
+        ctx.clone(),
+        move |root: String, suffix: String| -> rquickjs::Result<String> {
+            workspace_files(&wc, &root, &suffix)
+                .and_then(|files| serde_json::to_string(&files).context("encode workspace files"))
+                .map_err(|e| {
+                    rquickjs::Error::new_loading_message("workspaceFiles", format!("{e:#}"))
+                })
+        },
+    )?;
+    globals.set("__host_workspace_files", host_workspace_files)?;
+
     Ok(())
+}
+
+fn workspace_files(workspace_root: &Path, root: &str, suffix: &str) -> Result<Vec<String>> {
+    let rel = root
+        .strip_prefix("//")
+        .ok_or_else(|| anyhow::anyhow!("workspaceFiles root '{root}' must start with //"))?;
+    validate_workspace_module_path(root, rel).map_err(anyhow::Error::msg)?;
+
+    let directory = workspace_root.join(rel);
+    if !directory.is_dir() {
+        bail!(
+            "workspaceFiles root '{}' is not a directory",
+            directory.display()
+        );
+    }
+
+    let mut files = Vec::new();
+    for entry in WalkDir::new(&directory)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".js") || !name.ends_with(suffix) {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(workspace_root)
+            .with_context(|| format!("relativize {}", path.display()))?;
+        let mut module = relative.to_string_lossy().replace('\\', "/");
+        module.truncate(module.len() - ".js".len());
+        files.push(format!("//{module}"));
+    }
+    files.sort();
+    Ok(files)
 }
 
 fn named_cache_key_path(workspace_root: &Path, name: &str, key: &str) -> Result<PathBuf> {
@@ -3421,6 +3502,27 @@ fn scope_for(root: &Path, build_file: &Path) -> Result<String> {
     ))
 }
 
+fn build_module_name_for(root: &Path, build_file: &Path, scope: &str) -> Result<String> {
+    if resolve_workspace_module(root, scope)
+        .map(|resolution| resolution.kind == ModuleKind::Build && resolution.path == build_file)
+        .unwrap_or(false)
+    {
+        return Ok(scope.to_owned());
+    }
+
+    let relative = build_file
+        .strip_prefix(root)
+        .with_context(|| format!("{} is outside workspace", build_file.display()))?;
+    let mut module = relative
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    if !module.ends_with(".js") {
+        bail!("{} is not a JavaScript module", build_file.display());
+    }
+    module.truncate(module.len() - ".js".len());
+    Ok(format!("//{module}"))
+}
+
 #[allow(dead_code)]
 fn target_address(scope: &str, name: &str) -> Result<String> {
     if name.is_empty() || name.contains(':') || name.contains('/') {
@@ -5202,6 +5304,10 @@ import "//rules/odin/toolchain_test";
 "#,
         );
         write_file(
+            &p.join("rules/imp/test/index.js"),
+            include_str!("../rules/imp/test/index.js"),
+        );
+        write_file(
             &p.join("rules/odin/toolchain.js"),
             include_str!("../rules/odin/toolchain.js"),
         );
@@ -5284,6 +5390,10 @@ import "//rules/c/cmake/toolchain_test";
 "#,
         );
         write_file(
+            &p.join("rules/imp/test/index.js"),
+            include_str!("../rules/imp/test/index.js"),
+        );
+        write_file(
             &p.join("rules/c/cmake/toolchain.js"),
             include_str!("../rules/c/cmake/toolchain.js"),
         );
@@ -5294,6 +5404,89 @@ import "//rules/c/cmake/toolchain_test";
         write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
 
         load_workspace(p).unwrap();
+    }
+
+    #[test]
+    fn rules_test_targets_discover_and_run_js_tests_by_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/imp/test";
+"#,
+        );
+        write_file(
+            &p.join("rules/imp/test/index.js"),
+            include_str!("../rules/imp/test/index.js"),
+        );
+        write_file(
+            &p.join("rules/odin/index.js"),
+            "export const loaded = true;\n",
+        );
+        write_file(
+            &p.join("rules/odin/toolchain.js"),
+            include_str!("../rules/odin/toolchain.js"),
+        );
+        write_file(
+            &p.join("rules/odin/toolchain_test.js"),
+            include_str!("../rules/odin/toolchain_test.js"),
+        );
+        write_file(
+            &p.join("rules/odin/BUILD.js"),
+            r#"
+import { rulesTest } from "//rules/imp/test";
+export const rules_test = rulesTest({ root: "//rules/odin" });
+"#,
+        );
+        write_file(
+            &p.join("rules/c/cmake/index.js"),
+            "export const loaded = true;\n",
+        );
+        write_file(
+            &p.join("rules/c/cmake/toolchain.js"),
+            include_str!("../rules/c/cmake/toolchain.js"),
+        );
+        write_file(
+            &p.join("rules/c/cmake/toolchain_test.js"),
+            include_str!("../rules/c/cmake/toolchain_test.js"),
+        );
+        write_file(
+            &p.join("rules/c/cmake/BUILD.js"),
+            r#"
+import { rulesTest } from "//rules/imp/test";
+export const rules_test = rulesTest({ root: "//rules/c/cmake" });
+"#,
+        );
+
+        let live = load_workspace(p).unwrap();
+        let plan = plan(&live, "test", &[]).unwrap();
+
+        assert_eq!(
+            plan.roots,
+            [
+                "//rules/c/cmake:rules_test#test".to_owned(),
+                "//rules/odin:rules_test#test".to_owned(),
+            ]
+        );
+
+        let odin = live.targets.get("//rules/odin:rules_test").unwrap();
+        assert_eq!(odin.fields["tests"], "//rules/odin/toolchain_test");
+        let cmake = live.targets.get("//rules/c/cmake:rules_test").unwrap();
+        assert_eq!(cmake.fields["tests"], "//rules/c/cmake/toolchain_test");
+
+        let report = execute_plan_with_options(
+            &plan,
+            Some(&live),
+            p,
+            ExecutionOptions::new(ExecutionMode::Local, 1),
+            None,
+        )
+        .unwrap();
+        assert!(report
+            .tasks
+            .iter()
+            .all(|execution| execution.status == TaskExecutionStatus::Ran));
     }
 
     #[test]
@@ -5667,7 +5860,10 @@ export const ok = 1;
                 expected = expected_hex,
             ),
         );
-        write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
+        write_file(
+            &p.join(BUILD_FILE),
+            "export const done = 1;\n",
+        );
 
         load_workspace(p).unwrap();
     }
@@ -5755,10 +5951,7 @@ export const ok = 1;
                 dest = extract_dir.to_string_lossy(),
             ),
         );
-        write_file(
-            &p.join(BUILD_FILE),
-            "export const done = 1;\n",
-        );
+        write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
 
         load_workspace(p).unwrap();
         // Verify the file was extracted correctly.

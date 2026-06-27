@@ -1,21 +1,14 @@
 import {
+    describe,
+    expect,
+    test,
+} from "//rules/imp/test";
+import {
     createOdinToolchainApi,
     odinArtifactName,
     odinCacheKey,
     odinDownloadUrl,
 } from "//rules/odin/toolchain";
-
-function assert(condition, message) {
-    if (!condition) {
-        throw new Error(message);
-    }
-}
-
-function assertEqual(actual, expected, message) {
-    if (actual !== expected) {
-        throw new Error(`${message}: got ${actual}, expected ${expected}`);
-    }
-}
 
 function fakeHost(plat = { os: "linux", arch: "x86_64" }) {
     const calls = [];
@@ -52,61 +45,53 @@ function fakeHost(plat = { os: "linux", arch: "x86_64" }) {
     };
 }
 
-function testArtifactNames() {
-    assertEqual(
+describe("Odin toolchain", () => {
+test("formats release artifact names", () => {
+    expect(
         odinArtifactName("dev-2026-03", { os: "linux", arch: "x86_64" }),
-        "odin-linux-amd64-dev-2026-03.tar.gz",
-        "linux artifact name",
-    );
-    assertEqual(
+    ).toBe("odin-linux-amd64-dev-2026-03.tar.gz");
+    expect(
         odinArtifactName("dev-2026-03", { os: "macos", arch: "aarch64" }),
-        "odin-macos-arm64-dev-2026-03.tar.gz",
-        "macos artifact name",
-    );
-    assertEqual(
+    ).toBe("odin-macos-arm64-dev-2026-03.tar.gz");
+    expect(
         odinArtifactName("dev-2026-03", { os: "windows", arch: "x86_64" }),
-        "odin-windows-amd64-dev-2026-03.zip",
-        "windows artifact name",
-    );
-}
+    ).toBe("odin-windows-amd64-dev-2026-03.zip");
+});
 
-function testToolchainDeclaration() {
+test("declares a default toolchain target", () => {
     const host = fakeHost();
     const api = createOdinToolchainApi(host);
 
     const toolchain = api.odinToolchain("dev-2026-03", { default: true });
 
-    assert(toolchain.__imp === true, "toolchain is a target handle");
-    assertEqual(toolchain.version, "dev-2026-03", "toolchain version");
-    assertEqual(toolchain.cacheKey, "odin-toolchains/dev-2026-03/linux-x86_64", "declared cache key");
-    assertEqual(api.defaultOdinToolchainVersion(), "dev-2026-03", "default version");
-    assertEqual(api.defaultOdinToolchain(), toolchain, "default toolchain handle");
-    assertEqual(host.calls[0][0], "namedCache", "declares named cache first");
-}
+    expect(toolchain.__imp).toBe(true);
+    expect(toolchain.version).toBe("dev-2026-03");
+    expect(toolchain.cacheKey).toBe("odin-toolchains/dev-2026-03/linux-x86_64");
+    expect(api.defaultOdinToolchainVersion()).toBe("dev-2026-03");
+    expect(api.defaultOdinToolchain()).toBe(toolchain);
+    expect(host.calls[0][0]).toBe("namedCache");
+});
 
-function testAcquireInstallsMissingToolchain() {
+test("installs a missing toolchain into the named cache", () => {
     const host = fakeHost();
     const api = createOdinToolchainApi(host);
 
     const dir = api.acquireOdinToolchain("dev-2026-03");
     const key = odinCacheKey("dev-2026-03", { os: "linux", arch: "x86_64" });
 
-    assertEqual(dir, `/cache/odin-toolchains/${key}`, "installed toolchain dir");
-    assert(
+    expect(dir).toBe(`/cache/odin-toolchains/${key}`);
+    expect(
         host.calls.some((call) => call[0] === "download" && call[1] === odinDownloadUrl("dev-2026-03", { os: "linux", arch: "x86_64" })),
-        "downloads expected Odin release URL",
-    );
-    assert(
+    ).toBe(true);
+    expect(
         host.calls.some((call) => call[0] === "extract" && call[1] === "/downloads/odin-release" && call[2] === "/tmp/imp-odin-dev-2026-03-x86_64" && call[3] === "tar.gz" && call[4] === 1),
-        "extracts release archive into staging dir",
-    );
-    assert(
+    ).toBe(true);
+    expect(
         host.calls.some((call) => call[0] === "cachePut" && call[1] === "odin-toolchains" && call[2] === key && call[3] === "/tmp/imp-odin-dev-2026-03-x86_64"),
-        "stores staged toolchain in named cache",
-    );
-}
+    ).toBe(true);
+});
 
-function testAcquireUsesExistingCache() {
+test("uses an existing toolchain cache entry", () => {
     const host = fakeHost();
     const api = createOdinToolchainApi(host);
 
@@ -115,45 +100,33 @@ function testAcquireUsesExistingCache() {
 
     const dir = api.acquireOdinToolchain("dev-2026-03");
 
-    assertEqual(dir, "/cache/odin-toolchains/dev-2026-03/linux-x86_64", "cached toolchain dir");
-    assert(!host.calls.some((call) => call[0] === "download"), "does not download cache hits");
-    assert(!host.calls.some((call) => call[0] === "extract"), "does not extract cache hits");
-}
+    expect(dir).toBe("/cache/odin-toolchains/dev-2026-03/linux-x86_64");
+    expect(host.calls.some((call) => call[0] === "download")).toBe(false);
+    expect(host.calls.some((call) => call[0] === "extract")).toBe(false);
+});
 
-function testOdinBinUsesDefaultVersion() {
+test("uses the default version for odin binary lookup", () => {
     const host = fakeHost({ os: "windows", arch: "x86_64" });
     const api = createOdinToolchainApi(host);
 
     api.odinToolchain("dev-2026-03", { default: true });
 
-    assertEqual(
+    expect(
         api.odinBin(),
-        "/cache/odin-toolchains/dev-2026-03/windows-x86_64/odin.exe",
-        "windows default odin binary",
-    );
-}
+    ).toBe("/cache/odin-toolchains/dev-2026-03/windows-x86_64/odin.exe");
+});
 
-function testOdinToolDescriptorUsesNamedCache() {
+test("describes the named-cache-backed odin tool", () => {
     const host = fakeHost();
     const api = createOdinToolchainApi(host);
 
     api.odinToolchain("dev-2026-03", { default: true });
     const tool = api.odinTool();
 
-    assertEqual(tool.kind, "tool", "tool kind");
-    assertEqual(tool.name, "odin", "tool name");
-    assertEqual(tool.cache, "odin-toolchains", "tool cache");
-    assertEqual(tool.key, "dev-2026-03/linux-x86_64", "tool cache key");
-    assertEqual(tool.binDirs.join(","), ".", "tool bin dirs");
-}
-
-export function runOdinToolchainTests() {
-    testArtifactNames();
-    testToolchainDeclaration();
-    testAcquireInstallsMissingToolchain();
-    testAcquireUsesExistingCache();
-    testOdinBinUsesDefaultVersion();
-    testOdinToolDescriptorUsesNamedCache();
-}
-
-runOdinToolchainTests();
+    expect(tool.kind).toBe("tool");
+    expect(tool.name).toBe("odin");
+    expect(tool.cache).toBe("odin-toolchains");
+    expect(tool.key).toBe("dev-2026-03/linux-x86_64");
+    expect(tool.binDirs.join(",")).toBe(".");
+});
+});
