@@ -1,4 +1,4 @@
-import { namedCache, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { target, namedCache, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 
 const CMAKE_TOOLCHAIN_CACHE = "cmake-toolchains";
 
@@ -30,16 +30,25 @@ export function cmakeCacheKey(version, plat) {
  */
 export function createCmakeToolchainApi(host = defaultHost) {
     let defaultVersion = null;
+    let defaultToolchain = null;
 
     function declareToolchain(version, opts = {}) {
         host.namedCache({ name: CMAKE_TOOLCHAIN_CACHE });
 
+        const toolchain = target({
+            kind: "cmake-toolchain",
+            fields: { version },
+        });
+        toolchain.version = version;
+
         if (opts.default) {
             defaultVersion = version;
+            defaultToolchain = toolchain;
         }
 
         const plat = host.platformInfo();
-        return `${CMAKE_TOOLCHAIN_CACHE}/${cmakeCacheKey(version, plat)}`;
+        toolchain.cacheKey = `${CMAKE_TOOLCHAIN_CACHE}/${cmakeCacheKey(version, plat)}`;
+        return toolchain;
     }
 
     function installToolchain(version, source) {
@@ -76,8 +85,28 @@ export function createCmakeToolchainApi(host = defaultHost) {
         return `${acquireToolchain(resolved)}/bin/cmake`;
     }
 
+    function tool(version) {
+        const resolved = resolveVersion(version);
+        if (!resolved) {
+            throw new Error("no CMake toolchain version specified and no default set");
+        }
+        acquireToolchain(resolved);
+        const plat = host.platformInfo();
+        return {
+            kind: "tool",
+            name: "cmake",
+            cache: CMAKE_TOOLCHAIN_CACHE,
+            key: cmakeCacheKey(resolved, plat),
+            binDirs: ["bin"],
+        };
+    }
+
     function currentDefaultVersion() {
         return defaultVersion;
+    }
+
+    function currentDefaultToolchain() {
+        return defaultToolchain;
     }
 
     return {
@@ -86,7 +115,9 @@ export function createCmakeToolchainApi(host = defaultHost) {
         acquireCmakeToolchain: acquireToolchain,
         resolveCmakeToolchainVersion: resolveVersion,
         cmakeBin: bin,
+        cmakeTool: tool,
         defaultCmakeToolchainVersion: currentDefaultVersion,
+        defaultCmakeToolchain: currentDefaultToolchain,
     };
 }
 
@@ -98,7 +129,7 @@ const defaultApi = createCmakeToolchainApi();
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
- * @returns {string} The named cache key for this toolchain version+platform.
+ * @returns {object} Target handle for this CMake toolchain.
  */
 export function cmakeToolchain(version, opts = {}) {
     return defaultApi.cmakeToolchain(version, opts);
@@ -147,10 +178,29 @@ export function cmakeBin(version) {
 }
 
 /**
+ * Return a named-cache-backed CMake tool descriptor for sandbox execution.
+ *
+ * @param {string} [version]
+ * @returns {object}
+ */
+export function cmakeTool(version) {
+    return defaultApi.cmakeTool(version);
+}
+
+/**
  * Return the currently configured default CMake toolchain version.
  *
  * @returns {string|null}
  */
 export function defaultCmakeToolchainVersion() {
     return defaultApi.defaultCmakeToolchainVersion();
+}
+
+/**
+ * Return the currently configured default CMake toolchain target handle.
+ *
+ * @returns {object|null}
+ */
+export function defaultCmakeToolchain() {
+    return defaultApi.defaultCmakeToolchain();
 }

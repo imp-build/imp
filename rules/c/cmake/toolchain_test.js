@@ -44,10 +44,13 @@ test("declares a default CMake toolchain", () => {
     const host = fakeHost();
     const api = createCmakeToolchainApi(host);
 
-    const key = api.cmakeToolchain("3.30.5", { default: true });
+    const toolchain = api.cmakeToolchain("3.30.5", { default: true });
 
-    expect(key).toBe("cmake-toolchains/3.30.5/linux-x86_64");
+    expect(toolchain.__imp).toBe(true);
+    expect(toolchain.version).toBe("3.30.5");
+    expect(toolchain.cacheKey).toBe("cmake-toolchains/3.30.5/linux-x86_64");
     expect(api.defaultCmakeToolchainVersion()).toBe("3.30.5");
+    expect(api.defaultCmakeToolchain()).toBe(toolchain);
     expect(host.calls[0][0]).toBe("namedCache");
 });
 
@@ -76,6 +79,21 @@ test("installs and acquires a toolchain from the named cache", () => {
     expect(
         api.cmakeBin("3.30.5"),
     ).toBe("/cache/cmake-toolchains/3.30.5/linux-x86_64/bin/cmake");
+});
+
+test("describes the named-cache-backed cmake tool", () => {
+    const host = fakeHost();
+    const api = createCmakeToolchainApi(host);
+
+    api.installCmakeToolchain("3.30.5", "/tmp/cmake-3.30.5");
+    api.cmakeToolchain("3.30.5", { default: true });
+    const tool = api.cmakeTool();
+
+    expect(tool.kind).toBe("tool");
+    expect(tool.name).toBe("cmake");
+    expect(tool.cache).toBe("cmake-toolchains");
+    expect(tool.key).toBe("3.30.5/linux-x86_64");
+    expect(tool.binDirs.join(",")).toBe("bin");
 });
 
 test("reports a missing toolchain", () => {

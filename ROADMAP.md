@@ -71,15 +71,28 @@ Implemented:
 - ES module imports for cross-file target references;
 - target handles as first-class JS values — deps passed by value, not string;
 - `export const name = ...` as the target naming mechanism;
-- `build` goal planning, DOT rendering, and task deduplication;
-- `imp targets`, `imp dependencies`, and `imp rules` inspection commands.
+- `build`, `test`, `fmt`, `lint`, `package`, and `run` goals as product
+  requests;
+- structured task and artifact planning with DOT, text, and JSON renderers;
+- local planned execution through `imp plan --execute` and
+  `imp build --planned`;
+- per-task sandboxes, declared input/output materialisation, and progress
+  streaming;
+- content-addressed local task caching plus `imp cache explain`;
+- bounded local parallelism, dry-run execution, and failure cancellation;
+- named caches and JS `exec(target, ctx)` functions for extension-owned
+  execution logic;
+- platform definitions for local, WSL/Windows, and future container execution;
+- `imp targets`, `imp dependencies`, and `imp rules` inspection commands;
+- QuickJS-native JS rule tests through `rules/imp/test` and `rules-test`
+  targets.
 
 Deliberately incomplete:
 
-- only the `build` goal exists;
-- rules describe action strings rather than structured executable actions;
-- no artifact model, execution, caching, tool resolution, or CI backend;
-- `auto` has one product-selection behaviour only;
+- tool provisioning is only partially modelled as graph artifacts;
+- workspace sync still runs as a command preamble rather than a graph task;
+- there is no Buildkite/CI lowering backend yet;
+- only a small set of real workflows have been migrated to planned execution;
 - no field schema validation (removed from scope — JS constructors own validation).
 
 ## Milestone 1 — Stabilise the definition API
@@ -177,21 +190,23 @@ Generalise beyond `build` without adding goal-specific Rust branching.
 Acceptance: an extension adds a new goal and another adds a new target type
 that participates in an existing goal, both without changing the engine.
 
-## Milestone 6 — Platforms, tools, and CI
+## Milestone 6 — Platforms, tools, and graph consumers
 
 Move current environment-specific code behind graph abstractions.
 
 - [x] Model local, WSL/Windows, and future container execution as platforms.
-- Turn Odin, CMake, Godot, `uv`, and other provisioned tools into versioned
-  tool artifacts.
-- Make workspace sync an explicit platform-transfer task rather than a global
-  preamble.
-- Lower selected graph roots to Buildkite from the same graph used locally.
+- [x] Turn Odin and CMake into versioned tool artifacts. Odin currently
+  supports download-backed acquisition; CMake is installed-cache-only.
+- Turn Godot, `uv`, and other provisioned tools into versioned tool artifacts
+  as their rule packages need them.
+- Expose enough stable graph data for extension rules or end-user projects to
+  lower selected roots to CI systems such as Buildkite.
 - Keep remote caching out of scope until the local cache model has proven
   correct.
 
-Acceptance: local and Buildkite plans originate from identical selected targets
-and differ only in execution backend details.
+Acceptance: local execution and external graph consumers originate from the
+same selected targets and differ only in backend-specific lowering code outside
+the core engine.
 
 ## Milestone 7 — Migrate real workflows
 

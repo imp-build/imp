@@ -99,7 +99,7 @@ export function odinPackage({ srcs, toolchain, deps = [] }) {
         ? [{ target: toolchainTarget, mode: "tool" }, ...deps]
         : deps;
 
-    return target({
+    const pkg = target({
         kind: "odin-package",
         fields: {
             sources: srcs.join(","),
@@ -107,4 +107,8 @@ export function odinPackage({ srcs, toolchain, deps = [] }) {
         },
         deps: allDeps,
     });
+    pkg.toolchainVersion = toolchainVersion || null;
+    pkg.toolchainTarget = toolchainTarget || null;
+    pkg.dependencyCount = allDeps.length;
+    return pkg;
 }

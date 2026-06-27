@@ -1,12 +1,19 @@
 import { target, rule } from "imp:core";
-import { cmakeBin } from "//rules/c/cmake/toolchain";
+import {
+    acquireCmakeToolchain,
+    cmakeBin,
+    cmakeTool,
+    defaultCmakeToolchain,
+} from "//rules/c/cmake/toolchain";
 
 export {
     acquireCmakeToolchain,
     cmakeBin,
     cmakeCacheKey,
+    cmakeTool,
     cmakeToolchain,
     createCmakeToolchainApi,
+    defaultCmakeToolchain,
     defaultCmakeToolchainVersion,
     installCmakeToolchain,
     resolveCmakeToolchainVersion,
@@ -20,11 +27,25 @@ function snapshotSourcesExec(target, ctx) {
     // Sources are on disk; this task exists to wire up the dependency graph.
 }
 
-function cmakeBuildExec(target, ctx) {
-    const result = ctx.run({
-        argv: [cmakeBin(target.fields.toolchain), "--build", target.fields.entrypoint],
-        display: `cmake --build ${target.fields.entrypoint}`,
-    });
+function cmakeToolchainExec(target, ctx) {
+    acquireCmakeToolchain(target.fields.version);
+}
+
+async function cmakeBuildExec(target, ctx) {
+    let result;
+    if (target.fields.toolchain) {
+        const cmake = await ctx.tool(cmakeTool(target.fields.toolchain));
+        result = await ctx.inSandbox({
+            argv: ["cmake", "--build", target.fields.entrypoint],
+            tools: [cmake],
+            display: `cmake --build ${target.fields.entrypoint}`,
+        });
+    } else {
+        result = ctx.run({
+            argv: [cmakeBin(), "--build", target.fields.entrypoint],
+            display: `cmake --build ${target.fields.entrypoint}`,
+        });
+    }
     if (result.exitCode !== 0) {
         throw new Error(`cmake build failed (exit ${result.exitCode}): ${result.stderr}`);
     }
@@ -33,6 +54,15 @@ function cmakeBuildExec(target, ctx) {
 // ---------------------------------------------------------------------------
 // Rules
 // ---------------------------------------------------------------------------
+
+rule({
+    kind: "cmake-toolchain",
+    product: "tool",
+    action: "install cmake {version}",
+    exec: cmakeToolchainExec,
+    requiresOwnSources: false,
+    dependencyProduct: null,
+});
 
 rule({
     kind: "cpp-sources",
@@ -61,12 +91,24 @@ export function cppSources({ srcs }) {
 }
 
 export function cmakeLib({ entrypoint, toolchain, deps = [] }) {
-    return target({
+    const explicitToolchainTarget = toolchain && toolchain.__imp === true ? toolchain : null;
+    const explicitVersion = toolchain && toolchain.__imp !== true ? toolchain : null;
+    const toolchainTarget = explicitToolchainTarget || (!explicitVersion ? defaultCmakeToolchain() : null);
+    const toolchainVersion = explicitVersion || (toolchainTarget && toolchainTarget.version);
+    const allDeps = toolchainTarget
+        ? [{ target: toolchainTarget, mode: "tool" }, ...deps]
+        : deps;
+
+    const lib = target({
         kind: "cmake-lib",
         fields: {
             entrypoint,
-            ...(toolchain ? { toolchain } : {}),
+            ...(toolchainVersion ? { toolchain: toolchainVersion } : {}),
         },
-        deps,
+        deps: allDeps,
     });
+    lib.toolchainVersion = toolchainVersion || null;
+    lib.toolchainTarget = toolchainTarget || null;
+    lib.dependencyCount = allDeps.length;
+    return lib;
 }

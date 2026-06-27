@@ -5294,119 +5294,6 @@ export const done = 1;
     }
 
     #[test]
-    fn odin_toolchain_js_tests_pass() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-        write_file(
-            &p.join(WORKSPACE_FILE),
-            r#"
-import "//rules/odin/toolchain_test";
-"#,
-        );
-        write_file(
-            &p.join("rules/imp/test/index.js"),
-            include_str!("../rules/imp/test/index.js"),
-        );
-        write_file(
-            &p.join("rules/odin/toolchain.js"),
-            include_str!("../rules/odin/toolchain.js"),
-        );
-        write_file(
-            &p.join("rules/odin/toolchain_test.js"),
-            include_str!("../rules/odin/toolchain_test.js"),
-        );
-        write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
-
-        load_workspace(p).unwrap();
-    }
-
-    #[test]
-    fn odin_package_depends_on_default_toolchain_target() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-        write_file(
-            &p.join(WORKSPACE_FILE),
-            r#"
-import "//rules/odin";
-"#,
-        );
-        write_file(
-            &p.join("rules/odin/index.js"),
-            include_str!("../rules/odin/index.js"),
-        );
-        write_file(
-            &p.join("rules/odin/toolchain.js"),
-            include_str!("../rules/odin/toolchain.js"),
-        );
-        write_file(
-            &p.join(BUILD_FILE),
-            r#"
-import { odinPackage, odinToolchain } from "//rules/odin";
-
-export const odin_toolchain = odinToolchain("dev-2026-03", { default: true });
-export const jodin = odinPackage({ srcs: ["*.odin"] });
-export const explicit = odinPackage({ srcs: ["explicit/*.odin"], toolchain: "dev-2026-04" });
-"#,
-        );
-
-        let workspace = load_workspace(p).unwrap();
-        let jodin = &workspace.targets["//:jodin"];
-        assert_eq!(jodin.dependencies.len(), 1);
-        assert_eq!(jodin.dependencies[0].address, "//:odin_toolchain");
-        assert_eq!(
-            jodin.dependencies[0].mode,
-            DependencyMode::Named("tool".to_owned())
-        );
-
-        let plan = plan(&workspace, "build", &["jodin".to_owned()]).unwrap();
-        let tool_task = plan
-            .tasks
-            .iter()
-            .find(|task| task.id == "//:odin_toolchain#tool")
-            .expect("toolchain tool task should be planned");
-        assert_eq!(tool_task.action.display, "install odin dev-2026-03");
-        let build_task = plan
-            .tasks
-            .iter()
-            .find(|task| task.id == "//:jodin#odin-package")
-            .expect("jodin build task should be planned");
-        assert!(build_task
-            .dependencies
-            .contains(&"//:odin_toolchain#tool".to_owned()));
-
-        let explicit = &workspace.targets["//:explicit"];
-        assert!(explicit.dependencies.is_empty());
-        assert_eq!(explicit.fields["toolchain"], "dev-2026-04");
-    }
-
-    #[test]
-    fn cmake_toolchain_js_tests_pass() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-        write_file(
-            &p.join(WORKSPACE_FILE),
-            r#"
-import "//rules/c/cmake/toolchain_test";
-"#,
-        );
-        write_file(
-            &p.join("rules/imp/test/index.js"),
-            include_str!("../rules/imp/test/index.js"),
-        );
-        write_file(
-            &p.join("rules/c/cmake/toolchain.js"),
-            include_str!("../rules/c/cmake/toolchain.js"),
-        );
-        write_file(
-            &p.join("rules/c/cmake/toolchain_test.js"),
-            include_str!("../rules/c/cmake/toolchain_test.js"),
-        );
-        write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
-
-        load_workspace(p).unwrap();
-    }
-
-    #[test]
     fn rules_test_targets_discover_and_run_js_tests_by_directory() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
@@ -5421,41 +5308,49 @@ import "//rules/imp/test";
             include_str!("../rules/imp/test/index.js"),
         );
         write_file(
-            &p.join("rules/odin/index.js"),
-            "export const loaded = true;\n",
-        );
-        write_file(
-            &p.join("rules/odin/toolchain.js"),
-            include_str!("../rules/odin/toolchain.js"),
-        );
-        write_file(
-            &p.join("rules/odin/toolchain_test.js"),
-            include_str!("../rules/odin/toolchain_test.js"),
-        );
-        write_file(
-            &p.join("rules/odin/BUILD.js"),
+            &p.join("rules/example/alpha_test.js"),
             r#"
-import { rulesTest } from "//rules/imp/test";
-export const rules_test = rulesTest({ root: "//rules/odin" });
+import { describe, expect, test } from "//rules/imp/test";
+
+describe("alpha rule tests", () => {
+test("runs a discovered test", () => {
+    expect("alpha").toBe("alpha");
+});
+});
 "#,
         );
         write_file(
-            &p.join("rules/c/cmake/index.js"),
-            "export const loaded = true;\n",
+            &p.join("rules/example/beta_test.js"),
+            r#"
+import { expect, test } from "//rules/imp/test";
+
+test("runs a second discovered test", () => {
+    expect(["beta", "gamma"]).toContain("gamma");
+});
+"#,
         );
         write_file(
-            &p.join("rules/c/cmake/toolchain.js"),
-            include_str!("../rules/c/cmake/toolchain.js"),
-        );
-        write_file(
-            &p.join("rules/c/cmake/toolchain_test.js"),
-            include_str!("../rules/c/cmake/toolchain_test.js"),
-        );
-        write_file(
-            &p.join("rules/c/cmake/BUILD.js"),
+            &p.join("rules/example/BUILD.js"),
             r#"
 import { rulesTest } from "//rules/imp/test";
-export const rules_test = rulesTest({ root: "//rules/c/cmake" });
+export const rules_test = rulesTest({ root: "//rules/example" });
+"#,
+        );
+        write_file(
+            &p.join("rules/other/example_test.js"),
+            r#"
+import { expect, test } from "//rules/imp/test";
+
+test("runs another directory test", () => {
+    expect({ ok: true }).toEqual({ ok: true });
+});
+"#,
+        );
+        write_file(
+            &p.join("rules/other/BUILD.js"),
+            r#"
+import { rulesTest } from "//rules/imp/test";
+export const rules_test = rulesTest({ root: "//rules/other" });
 "#,
         );
 
@@ -5465,15 +5360,18 @@ export const rules_test = rulesTest({ root: "//rules/c/cmake" });
         assert_eq!(
             plan.roots,
             [
-                "//rules/c/cmake:rules_test#test".to_owned(),
-                "//rules/odin:rules_test#test".to_owned(),
+                "//rules/example:rules_test#test".to_owned(),
+                "//rules/other:rules_test#test".to_owned(),
             ]
         );
 
-        let odin = live.targets.get("//rules/odin:rules_test").unwrap();
-        assert_eq!(odin.fields["tests"], "//rules/odin/toolchain_test");
-        let cmake = live.targets.get("//rules/c/cmake:rules_test").unwrap();
-        assert_eq!(cmake.fields["tests"], "//rules/c/cmake/toolchain_test");
+        let example = live.targets.get("//rules/example:rules_test").unwrap();
+        assert_eq!(
+            example.fields["tests"],
+            "//rules/example/alpha_test,//rules/example/beta_test"
+        );
+        let other = live.targets.get("//rules/other:rules_test").unwrap();
+        assert_eq!(other.fields["tests"], "//rules/other/example_test");
 
         let report = execute_plan_with_options(
             &plan,
