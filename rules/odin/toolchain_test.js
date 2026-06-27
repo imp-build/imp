@@ -74,10 +74,13 @@ function testToolchainDeclaration() {
     const host = fakeHost();
     const api = createOdinToolchainApi(host);
 
-    const key = api.odinToolchain("dev-2026-03", { default: true });
+    const toolchain = api.odinToolchain("dev-2026-03", { default: true });
 
-    assertEqual(key, "odin-toolchains/dev-2026-03/linux-x86_64", "declared cache key");
+    assert(toolchain.__imp === true, "toolchain is a target handle");
+    assertEqual(toolchain.version, "dev-2026-03", "toolchain version");
+    assertEqual(toolchain.cacheKey, "odin-toolchains/dev-2026-03/linux-x86_64", "declared cache key");
     assertEqual(api.defaultOdinToolchainVersion(), "dev-2026-03", "default version");
+    assertEqual(api.defaultOdinToolchain(), toolchain, "default toolchain handle");
     assertEqual(host.calls[0][0], "namedCache", "declares named cache first");
 }
 

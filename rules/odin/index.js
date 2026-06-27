@@ -1,9 +1,15 @@
 import { target, rule } from "imp:core";
-import { odinTool, resolveOdinToolchainVersion } from "//rules/odin/toolchain";
+import {
+    acquireOdinToolchain,
+    defaultOdinToolchain,
+    odinTool,
+    resolveOdinToolchainVersion,
+} from "//rules/odin/toolchain";
 
 export {
     acquireOdinToolchain,
     createOdinToolchainApi,
+    defaultOdinToolchain,
     defaultOdinToolchainVersion,
     odinArtifactName,
     odinBin,
@@ -23,6 +29,10 @@ function snapshotSourcesExec(target, ctx) {
     // so the odin-build task waits for dependency resolution.
 }
 
+function odinToolchainExec(target, ctx) {
+    acquireOdinToolchain(target.fields.version);
+}
+
 async function odinBuildExec(target, ctx) {
     const version = resolveOdinToolchainVersion(target.fields && target.fields.toolchain);
     const odin = await ctx.tool(odinTool(version));
@@ -39,6 +49,15 @@ async function odinBuildExec(target, ctx) {
 // ---------------------------------------------------------------------------
 // Rules
 // ---------------------------------------------------------------------------
+
+rule({
+    kind: "odin-toolchain",
+    product: "tool",
+    action: "install odin {version}",
+    exec: odinToolchainExec,
+    requiresOwnSources: false,
+    dependencyProduct: null,
+});
 
 rule({
     kind: "odin-package",
@@ -67,17 +86,25 @@ rule({
  *
  * @param {object} opts
  * @param {string[]} opts.srcs Odin source files.
- * @param {string} [opts.toolchain] Odin toolchain version. Uses the default if set.
+ * @param {object|string} [opts.toolchain] Odin toolchain target handle or version.
  * @param {Array} [opts.deps=[]]
  * @returns {object} Target handle.
  */
 export function odinPackage({ srcs, toolchain, deps = [] }) {
+    const explicitToolchainTarget = toolchain && toolchain.__imp === true ? toolchain : null;
+    const explicitVersion = toolchain && toolchain.__imp !== true ? toolchain : null;
+    const toolchainTarget = explicitToolchainTarget || (!explicitVersion ? defaultOdinToolchain() : null);
+    const toolchainVersion = explicitVersion || (toolchainTarget && toolchainTarget.version);
+    const allDeps = toolchainTarget
+        ? [{ target: toolchainTarget, mode: "tool" }, ...deps]
+        : deps;
+
     return target({
         kind: "odin-package",
         fields: {
             sources: srcs.join(","),
-            ...(toolchain ? { toolchain } : {}),
+            ...(toolchainVersion ? { toolchain: toolchainVersion } : {}),
         },
-        deps,
+        deps: allDeps,
     });
 }

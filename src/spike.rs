@@ -3232,6 +3232,9 @@ pub fn format_targets(targets: &[&Target], w: &mut String) -> std::fmt::Result {
         if let Some(ep) = target.fields.get("entrypoint") {
             writeln!(w, "  entrypoint: {ep}")?;
         }
+        if let Some(version) = target.fields.get("version") {
+            writeln!(w, "  version: {version}")?;
+        }
         if !target.dependencies.is_empty() {
             let deps: Vec<_> = target
                 .dependencies
@@ -3583,10 +3586,12 @@ fn lower_artifacts(
 fn expand_template(template: &str, target: &Target) -> String {
     let sources = target.fields.get("sources").cloned().unwrap_or_default();
     let entrypoint = target.fields.get("entrypoint").cloned().unwrap_or_default();
+    let version = target.fields.get("version").cloned().unwrap_or_default();
     template
         .replace("{address}", &target.address)
         .replace("{sources}", &sources)
         .replace("{entrypoint}", &entrypoint)
+        .replace("{version}", &version)
 }
 
 fn dot_escape(value: &str) -> String {
@@ -5207,6 +5212,65 @@ import "//rules/odin/toolchain_test";
         write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
 
         load_workspace(p).unwrap();
+    }
+
+    #[test]
+    fn odin_package_depends_on_default_toolchain_target() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/odin";
+"#,
+        );
+        write_file(
+            &p.join("rules/odin/index.js"),
+            include_str!("../rules/odin/index.js"),
+        );
+        write_file(
+            &p.join("rules/odin/toolchain.js"),
+            include_str!("../rules/odin/toolchain.js"),
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { odinPackage, odinToolchain } from "//rules/odin";
+
+export const odin_toolchain = odinToolchain("dev-2026-03", { default: true });
+export const jodin = odinPackage({ srcs: ["*.odin"] });
+export const explicit = odinPackage({ srcs: ["explicit/*.odin"], toolchain: "dev-2026-04" });
+"#,
+        );
+
+        let workspace = load_workspace(p).unwrap();
+        let jodin = &workspace.targets["//:jodin"];
+        assert_eq!(jodin.dependencies.len(), 1);
+        assert_eq!(jodin.dependencies[0].address, "//:odin_toolchain");
+        assert_eq!(
+            jodin.dependencies[0].mode,
+            DependencyMode::Named("tool".to_owned())
+        );
+
+        let plan = plan(&workspace, "build", &["jodin".to_owned()]).unwrap();
+        let tool_task = plan
+            .tasks
+            .iter()
+            .find(|task| task.id == "//:odin_toolchain#tool")
+            .expect("toolchain tool task should be planned");
+        assert_eq!(tool_task.action.display, "install odin dev-2026-03");
+        let build_task = plan
+            .tasks
+            .iter()
+            .find(|task| task.id == "//:jodin#odin-package")
+            .expect("jodin build task should be planned");
+        assert!(build_task
+            .dependencies
+            .contains(&"//:odin_toolchain#tool".to_owned()));
+
+        let explicit = &workspace.targets["//:explicit"];
+        assert!(explicit.dependencies.is_empty());
+        assert_eq!(explicit.fields["toolchain"], "dev-2026-04");
     }
 
     #[test]

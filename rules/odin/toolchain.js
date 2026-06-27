@@ -1,4 +1,4 @@
-import { namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { target, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 
 const ODIN_TOOLCHAIN_CACHE = "odin-toolchains";
 
@@ -73,16 +73,25 @@ export function odinDownloadUrl(version, plat) {
  */
 export function createOdinToolchainApi(host = defaultHost) {
     let defaultVersion = null;
+    let defaultToolchain = null;
 
     function declareToolchain(version, opts = {}) {
         host.namedCache({ name: ODIN_TOOLCHAIN_CACHE });
 
+        const toolchain = target({
+            kind: "odin-toolchain",
+            fields: { version },
+        });
+        toolchain.version = version;
+
         if (opts.default) {
             defaultVersion = version;
+            defaultToolchain = toolchain;
         }
 
         const plat = host.platformInfo();
-        return `${ODIN_TOOLCHAIN_CACHE}/${odinCacheKey(version, plat)}`;
+        toolchain.cacheKey = `${ODIN_TOOLCHAIN_CACHE}/${odinCacheKey(version, plat)}`;
+        return toolchain;
     }
 
     function acquireToolchain(version) {
@@ -139,6 +148,10 @@ export function createOdinToolchainApi(host = defaultHost) {
         return defaultVersion;
     }
 
+    function currentDefaultToolchain() {
+        return defaultToolchain;
+    }
+
     return {
         odinToolchain: declareToolchain,
         acquireOdinToolchain: acquireToolchain,
@@ -146,6 +159,7 @@ export function createOdinToolchainApi(host = defaultHost) {
         odinBin: bin,
         odinTool: tool,
         defaultOdinToolchainVersion: currentDefaultVersion,
+        defaultOdinToolchain: currentDefaultToolchain,
     };
 }
 
@@ -157,7 +171,7 @@ const defaultApi = createOdinToolchainApi();
  * @param {string} version Odin release version (matches .odin-version).
  * @param {object} [opts]
  * @param {boolean} [opts.default=false] Set as the default toolchain.
- * @returns {string} The named cache key for this toolchain version+platform.
+ * @returns {object} Target handle for this Odin toolchain.
  */
 export function odinToolchain(version, opts = {}) {
     return defaultApi.odinToolchain(version, opts);
@@ -210,4 +224,13 @@ export function odinTool(version) {
  */
 export function defaultOdinToolchainVersion() {
     return defaultApi.defaultOdinToolchainVersion();
+}
+
+/**
+ * Return the currently configured default Odin toolchain target handle.
+ *
+ * @returns {object|null}
+ */
+export function defaultOdinToolchain() {
+    return defaultApi.defaultOdinToolchain();
 }
