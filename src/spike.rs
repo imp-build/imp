@@ -801,6 +801,16 @@ fn resolve_workspace_module(
             });
         }
 
+        let index_path = root.join(rel).join("index.js");
+        candidates.push(index_path.clone());
+        if index_path.is_file() {
+            return Ok(WorkspaceModuleResolution {
+                name: name.to_owned(),
+                path: index_path,
+                kind: ModuleKind::Extension,
+            });
+        }
+
         let build_path = root.join(rel).join(BUILD_FILE);
         candidates.push(build_path.clone());
         if build_path.is_file() {
@@ -4883,6 +4893,59 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
 
         let jodin = &workspace.targets["//library/jodin:jodin"];
         assert_eq!(jodin.dependencies[0].address, "//src/cpp/joltphysics:cmake");
+    }
+
+    #[test]
+    fn root_relative_imports_can_resolve_index_js_modules() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/package";
+"#,
+        );
+        write_file(
+            &p.join("rules/package/index.js"),
+            r#"
+export const loaded = true;
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { loaded } from "//rules/package";
+if (!loaded) {
+    throw new Error("index.js module did not load");
+}
+export const done = 1;
+"#,
+        );
+
+        load_workspace(p).unwrap();
+    }
+
+    #[test]
+    fn odin_toolchain_js_tests_pass() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/odin/toolchain_test";
+"#,
+        );
+        write_file(
+            &p.join("rules/odin/toolchain.js"),
+            include_str!("../rules/odin/toolchain.js"),
+        );
+        write_file(
+            &p.join("rules/odin/toolchain_test.js"),
+            include_str!("../rules/odin/toolchain_test.js"),
+        );
+        write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
+
+        load_workspace(p).unwrap();
     }
 
     #[test]
