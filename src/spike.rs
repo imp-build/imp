@@ -35,7 +35,7 @@ const WORKSPACE_FILE: &str = "imp.workspace.js";
 const BUILD_FILE: &str = "BUILD.js";
 
 /// The built-in `imp:core` module exposed to every plugin and BUILD file.
-const CORE_JS: &str = r#"
+const CORE_JS: &str = r##"
 /**
  * Declare a target and return a target handle.
  *
@@ -363,7 +363,126 @@ export function workspaceMount(opts) {
     }
     __host_workspace_mount(opts.prefix, opts.path);
 }
-"#;
+
+// ---------------------------------------------------------------------------
+// memo() — memoized async build functions (Phase 1)
+// ---------------------------------------------------------------------------
+
+const _memo_fn_ids = new WeakMap();
+let _memo_fn_counter = 0;
+
+function _stable_function_id(fn) {
+    let id = _memo_fn_ids.get(fn);
+    if (id === undefined) {
+        id = (fn.name || "<anonymous>") + "#" + (++_memo_fn_counter);
+        _memo_fn_ids.set(fn, id);
+    }
+    return id;
+}
+
+// Serialize args to a stable string. Target handles ({ __imp: true, __id })
+// are replaced with { __imp_ref: <id> } so identity is by numeric ID.
+function _stable_digest(args) {
+    return JSON.stringify(args, function(key, value) {
+        if (value !== null && typeof value === "object"
+                && value.__imp === true && typeof value.__id === "number") {
+            return { __imp_ref: value.__id };
+        }
+        return value;
+    });
+}
+
+let _memo_table = new Map();
+let _memo_call_stack = [];
+let _memo_call_stack_set = new Set();
+let _memo_deps = [];
+let _memo_trace = [];
+
+function _memo_eval(key_string, thunk) {
+    // Cycle check BEFORE table check: a key in the call stack means it is
+    // currently being evaluated in this call chain.
+    if (_memo_call_stack_set.has(key_string)) {
+        throw new Error("memo cycle detected: " + key_string);
+    }
+    if (_memo_table.has(key_string)) {
+        _memo_trace.push({ event: "hit", key: key_string });
+        return _memo_table.get(key_string);
+    }
+    _memo_trace.push({ event: "miss", key: key_string });
+    // Call thunk() synchronously so _push_call runs before the first await,
+    // keeping the call stack accurate during the synchronous portion.
+    const promise = thunk();
+    _memo_table.set(key_string, promise);
+    return promise;
+}
+
+function _push_call(key_string) {
+    if (_memo_call_stack.length > 0) {
+        _memo_deps.push({
+            caller: _memo_call_stack[_memo_call_stack.length - 1],
+            callee: key_string,
+        });
+    }
+    _memo_call_stack.push(key_string);
+    _memo_call_stack_set.add(key_string);
+}
+
+function _pop_call(key_string) {
+    _memo_call_stack.pop();
+    _memo_call_stack_set.delete(key_string);
+}
+
+/**
+ * Wrap an async function so repeated calls with identical arguments return the
+ * cached result. Cycles in the call graph are detected and thrown as errors.
+ * Call getMemoTrace() for hit/miss events and dependency edges.
+ *
+ * @param {function} fn Named async function to memoize.
+ * @returns {function}
+ */
+export function memo(fn) {
+    const fn_id = _stable_function_id(fn);
+    return async function memoized(...args) {
+        const key_string = JSON.stringify({
+            fn_id,
+            args_digest: _stable_digest(args),
+            config_digest: "",
+        });
+        return _memo_eval(key_string, async () => {
+            _push_call(key_string);
+            try {
+                return await fn(...args);
+            } finally {
+                _pop_call(key_string);
+            }
+        });
+    };
+}
+
+/**
+ * Reset all memo state. Call between test runs to start with a clean slate.
+ * Does NOT reset function identity — the same function reference always maps
+ * to the same ID even across resets.
+ */
+export function resetMemoState() {
+    _memo_table = new Map();
+    _memo_call_stack = [];
+    _memo_call_stack_set = new Set();
+    _memo_deps = [];
+    _memo_trace = [];
+}
+
+/**
+ * Return a snapshot of the memo trace and dependency graph.
+ * @returns {{ trace: Array<{event: string, key: string}>, deps: Array<{caller: string, callee: string}> }}
+ */
+export function getMemoTrace() {
+    return {
+        trace: _memo_trace.slice(),
+        deps: _memo_deps.slice(),
+    };
+}
+"##;
 
 // ---------------------------------------------------------------------------
 // Public data types

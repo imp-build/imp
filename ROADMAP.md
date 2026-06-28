@@ -1,236 +1,1073 @@
-# imp framework roadmap
+Below is the rewritten version using the corrected model:
 
-## Projects this framework replaces
+```text
+ordinary functions as the public API
+memoized functions as the graph primitive
+products as memoized functions with CLI registration
+targets as plain data
+no providers
+no request strings
+no ctx.request pattern
+sandboxing owned by run(...)
+```
 
-The framework is intended to replace the repeated `imp` implementations that
-motivated this repository, not merely the small planning example in this tree.
-They share a command-and-subprocess shape, but exercise materially different
-requirements:
+Your current implementation already has the ingredients: target constructors, products, source capture, toolchain acquisition, and CAS/sandbox execution. The refactor is mostly about moving from "source/product plumbing as rule graph" to "memoized function calls as graph". In the uploaded code, `readSources()` eagerly captures workspace entries, serializes source manifests, creates `source-set` targets, and `odinPackage()` manually merges transitive source CAS entries into target fields. That is the part to remove from the rule API surface.
 
-| Variant | Current responsibilities | Requirements it contributes |
-| --- | --- | --- |
-| Odin engine imp (this crate) | Odin target and test discovery, native Jodin/CMake build, packaging, coverage, toolchain setup, dependency graph generation | generated target discovery, native-library staging, build modes, parallel tasks, local cache inputs, progress reporting |
-| Godot/GDExtension imp (`examples/imp`) | Rust GDExtension build, Godot download/bootstrap/editor/run/pack, Windows cross compilation, protobuf generation, CI-pipeline generation | versioned downloads, platform-specific artifacts, generated source, grouped workflows, release/package products |
-| Hyperfuse imp (`examples/hf-imp`) | Rust/C/CMake/Python build and test, ISA emulation, tool provisioning, kernel/codegen generation, coverage, Buildkite generation | mixed-language products, tool artifacts, variants and execution constraints, external generators, test/coverage result products |
+# Target API example: Odin
 
-The replacement must therefore be general enough that a target can represent
-source ownership, a generated artifact, a tool, a native library, a binary, a
-test suite, or a package. It must not make Odin, Godot, CMake, Cargo, Python,
-or Buildkite special cases in the core engine.
+## Build file
 
-The examples are design inputs and migration candidates. They are not all
-expected to be converted at once; the later migration milestone moves one
-workflow at a time after the shared primitives are proven.
+The build file should remain simple and script-like:
 
-## Design commitments
+```ts
+import { odin } from "//rules/odin";
 
-- `imp.workspace.js` marks the workspace root and loads extension modules.
-- `BUILD.js` files declare addressable targets. Their directory determines
-  their `//path:name` address scope.
-- Targets are declared by calling constructor functions imported from plugin
-  modules. Constructors return target handles — first-class JS values.
-- Dependencies are expressed by passing handles directly, not by address
-  strings. `export const name = constructor(...)` makes the variable name
-  the target's address within its file.
-- Cross-file references use ES module imports: `import { name } from "//path"`.
-  The `//path:name` address syntax only appears at the CLI level.
-- A goal selects targets and requests products. Rules (defined in plugin
-  modules) resolve those product requests into tasks.
-- The Rust engine owns addresses, graph validation, planning, scheduling,
-  caching, and reporting. Plugin modules written in JS define target
-  constructors and rules without a Rust rebuild.
-- Plugin files are ordinary JS modules — no separate registration ceremony
-  or different paradigm. A plugin is just a module you import.
-- Definition-time side effects remain possible, but they must be visibly
-  classified as impure before they participate in caching or CI generation.
+export const root_collection = odin.collection({
+    name: "root",
+    path: ".",
+});
 
-## Extension language
+export const lib_collection = odin.collection({
+    name: "lib",
+    path: "lib",
+});
 
-The extension language is **JavaScript** (QuickJS, embedded via `rquickjs`).
+export const ottar = odin.package({
+    path: "ottar",
 
-QuickJS was chosen over Steel/Scheme because:
-- ES module `import`/`export` syntax provides natural cross-file target
-  references without string address duplication.
-- `export const name = constructor(...)` captures the target name from the
-  variable binding — no `name =` argument needed.
-- Dependencies are passed as values (handles), not as strings, so the
-  dependency graph is expressed directly in code rather than through a
-  host registry.
-- Plugin files are conventional JS modules; there is no distinction between
-  a "plugin API" and "library code."
-- QuickJS is lightweight, has no external runtime dependency, and embeds
-  cleanly in Rust via `rquickjs`.
+    srcs: [
+        "^ottar/.*\\.odin$",
+    ],
 
-## Current spike
+    collections: [
+        root_collection,
+        lib_collection,
+    ],
 
-Implemented:
+    deps: [
+        // other odin.package targets
+    ],
 
-- upward workspace discovery using `imp.workspace.js`;
-- recursive `BUILD.js` discovery;
-- JS-defined target constructors and rules via `imp:core` built-in module;
-- ES module imports for cross-file target references;
-- target handles as first-class JS values — deps passed by value, not string;
-- `export const name = ...` as the target naming mechanism;
-- `build`, `test`, `fmt`, `lint`, `package`, and `run` goals as product
-  requests;
-- structured task and artifact planning with DOT, text, and JSON renderers;
-- local planned execution through `imp plan --execute` and
-  `imp build --planned`;
-- per-task sandboxes, declared input/output materialisation, and progress
-  streaming;
-- content-addressed local task caching plus `imp cache explain`;
-- bounded local parallelism, dry-run execution, and failure cancellation;
-- named caches and JS `exec(target, ctx)` functions for extension-owned
-  execution logic;
-- platform definitions for local, WSL/Windows, and future container execution;
-- `imp targets`, `imp dependencies`, and `imp rules` inspection commands;
-- QuickJS-native JS rule tests through `rules/imp/test` and `rules-test`
-  targets.
+    toolchain: odin.toolchain({
+        version: "dev-2026-06-01",
+    }),
 
-Deliberately incomplete:
+    default_product: "executable",
+});
+```
 
-- tool provisioning is only partially modelled as graph artifacts;
-- workspace sync still runs as a command preamble rather than a graph task;
-- there is no Buildkite/CI lowering backend yet;
-- only a small set of real workflows have been migrated to planned execution;
-- no field schema validation (removed from scope — JS constructors own validation).
+CLI examples:
 
-## Milestone 1 — Stabilise the definition API
+```sh
+imp build //:ottar
+imp build //:ottar#executable
+imp build //:ottar#library
+imp test //:ottar
+imp check //:ottar
+imp fmt //:ottar
+imp sources //:ottar
+```
 
-Replace ad-hoc host primitives with a small, documented JS API.
+Meaning:
 
-- [x] Finalise `imp:core` API surface (`target`, `rule`) with JSDoc.
-- [x] Add extension imports rooted at the workspace, with source locations in
-  diagnostics.
-- [x] Define the module resolution protocol: `//path` → file, `imp:*` →
-  built-in, relative → prohibited in BUILD files.
-- [x] Decide constructor validation story: JS-side (throw in constructor) or
-  host-side (typed field declarations). Current v1 uses JS-side validation,
-  with the host validating only core target-handle and field invariants.
-- [x] Add `imp targets`, `imp dependencies`, and `imp rules` inspection
-  commands.
+```text
+//:ottar                 -> default product
+//:ottar#executable      -> odin.executable(ottar)
+//:ottar#library         -> odin.library(ottar)
+//:ottar#test            -> odin.test(ottar)
+//:ottar#format-check    -> odin.format_check(ottar)
+//:ottar#sources         -> odin.sources(ottar), if exposed as a CLI product/view
+```
 
-Acceptance: a separate JS module can define a target constructor and rule;
-a workspace can import it and inspect its targets without Rust changes.
+# Core model
 
-## Milestone 2 — Structured task and artifact model
+The public model is function calls:
 
-Replace rule action strings with serialisable task specifications.
+```ts
+const srcs = await odin.sources(pkg);
+const flags = await odin.collection_flags(pkg);
+const exe = await odin.executable(pkg);
+```
 
-- [x] `Action`: argv, cwd, environment, platform requirements, declared inputs,
-  declared outputs, and display metadata.
-- [x] `Artifact`: file, directory, manifest, or value output with a producing task.
-- [x] `Task`: stable identity, input artifacts, output artifacts, action, and
-  dependency edges.
-- [x] Make `rule()` accept task/artifact specifications, not prose strings.
-- [x] Keep DOT and text plans as renderers over the same graph IR.
-- [x] Add JSON plan output through `imp plan --json <path>`.
+The internal model is memoized function execution:
 
-Compatibility note: legacy string `action` values are still accepted and lowered
-into structured action display metadata so existing rules continue to load.
+```text
+odin.executable(ottar)
+  calls odin.sources(ottar)
+  calls odin.collection_flags(ottar)
+  calls odin.tool(toolchain)
+  calls run(...)
+```
 
-Acceptance: a plan can be serialised to JSON and re-rendered without loading
-JS again.
+The graph is discovered by executing memoized functions.
 
-## Milestone 3 — Local execution and correctness
+There is no public:
 
-Execute the task graph locally before adding any remote system.
+```ts
+ctx.request(pkg, "odin.sources");
+```
 
-- [x] Add `imp build --planned` execution for planned actions.
-- [x] Keep `imp plan` as a pure inspection command by default.
-- [x] Add local execution for planned actions through `imp plan --execute`
-  while the command migration path is decided.
-- [x] Stream process stdout through the existing progress UI.
-- [x] Stream process stderr through the existing progress UI.
-- [x] Run local actions in per-task sandboxes under `/tmp/imp/sandbox-*`.
-- [x] Gather declared file and directory inputs into sandbox runlists.
-- [x] Write a sandbox manifest before command execution.
-- [x] Copy declared file, directory, and manifest outputs to the local artifact
-  cache.
-- [x] Report missing declared file, directory, and manifest outputs as errors.
-- [x] Materialise declared file outputs atomically.
-- [x] Materialise declared directory outputs atomically.
-- [x] Add failure propagation for failed local commands.
-- [x] Add cancellation for in-flight task execution.
-- [x] Add bounded parallelism for ready tasks.
-- [x] Add deterministic dependency ordering for observable execution output.
-- [x] Introduce a no-op/dry-run executor for planner tests.
-- [x] Migrate one simple build target (`//:generated_stamp`) to a structured
-  executable action with declared cached output.
+and no hidden stringly request layer in the rule API.
 
-Acceptance: one migrated build target runs through the new executor and has no
-project-specific command logic in Rust.
+# Core primitives
 
-## Milestone 4 — Local incremental cache
+## `target`
 
-Add a content-addressed local cache only after task inputs and outputs are
-explicit.
+A target is plain declared data with stable identity.
 
-- [x] Hash action definitions, tool identities, declared environment, and input
-  artifact digests.
-- [x] Store output manifests and materialise cache hits into the workspace.
-- [x] Mark definition-time or execution-time impure tasks as uncacheable by
-  default, with an explicit override for users who accept that risk.
-- [x] Provide `imp cache explain <task>` for cache-key diagnostics.
+```ts
+type Target<TAttrs = unknown> = {
+    __imp: true;
+    label: Label;
+    kind: string;
+    attrs: TAttrs;
+};
+```
 
-Acceptance: a second unchanged build skips all cacheable actions; editing a
-declared input invalidates only its affected downstream tasks.
+Constructor:
 
-## Milestone 5 — Goals and product selection
+```ts
+function target<TAttrs>(opts: {
+    kind: string;
+    attrs: TAttrs;
+}): Target<TAttrs> {
+    // Assign label from export binding / package context.
+    // Store kind + attrs as plain serializable data.
+}
+```
 
-Generalise beyond `build` without adding goal-specific Rust branching.
+## `memo`
 
-- [x] Add goal registration and product-selection policies to extensions.
-- [x] Implement `test`, `fmt`, `lint`, `package`, and `run` as product requests.
-- [x] Extend dependency modes beyond `auto`, initially `sources`, `link`, and
-  `runtime`.
-- [x] Decide whether a selector-less goal means all buildable targets or an
-  explicit workspace default target such as `//:default`.
+`memo` turns an ordinary async function into a cached build function.
 
-Acceptance: an extension adds a new goal and another adds a new target type
-that participates in an existing goal, both without changing the engine.
+```ts
+function memo<F extends (...args: any[]) => Promise<any>>(
+    fn: F,
+): F {
+    const function_id = stable_function_id(fn);
 
-## Milestone 6 — Platforms, tools, and graph consumers
+    return async function memoized(...args: any[]) {
+        const ctx = current_eval_context();
 
-Move current environment-specific code behind graph abstractions.
+        const key = {
+            function_id,
+            args_digest: stable_digest(args),
+            config_digest: ctx.config_digest,
+        };
 
-- [x] Model local, WSL/Windows, and future container execution as platforms.
-- [x] Turn Odin and CMake into versioned tool artifacts. Odin currently
-  supports download-backed acquisition; CMake is installed-cache-only.
-- Turn Godot, `uv`, and other provisioned tools into versioned tool artifacts
-  as their rule packages need them.
-- Expose enough stable graph data for extension rules or end-user projects to
-  lower selected roots to CI systems such as Buildkite.
-- Keep remote caching out of scope until the local cache model has proven
-  correct.
+        return ctx.memo_eval(key, async () => {
+            ctx.push_call(key);
+            try {
+                return await fn(...args);
+            } finally {
+                ctx.pop_call();
+            }
+        });
+    } as F;
+}
+```
 
-Acceptance: local execution and external graph consumers originate from the
-same selected targets and differ only in backend-specific lowering code outside
-the core engine.
+Cache identity is based on:
 
-## Milestone 7 — Migrate real workflows
+```text
+function identity
+arguments
+configuration
+tracked effects
+called memo functions
+actions created by run(...)
+```
 
-Migrate one workflow at a time and delete bespoke command code only after its
-replacement is exercised.
+## `product`
 
-Suggested order:
+`product` is `memo` plus CLI registration.
 
-1. simple code generation;
-2. CMake/native library build;
-3. Odin build plus runtime-library staging;
-4. unit tests and coverage;
-5. package/release and generated CI pipeline.
+```ts
+function product<F extends (target: Target, ...args: any[]) => Promise<any>>(
+    target_kind: string,
+    product_name: string,
+    fn: F,
+): F {
+    const memoized = memo(fn);
 
-Each migration needs a plan snapshot, execution test, and clear removal of the
-superseded imperative command path.
+    register_product({
+        target_kind,
+        product_name,
+        invoke: memoized,
+    });
 
-## Open decisions
+    return memoized;
+}
+```
 
-- QuickJS versioning and compatibility policy as `rquickjs` evolves.
-- Whether extensions may include native/Wasm modules alongside JS.
-- Whether `BUILD.js` may import arbitrary workspace files, and how those files
-  participate in invalidation.
-- Default target-selection semantics for bare goals.
-- Required reproducibility boundary for downloads, network access, and external
-  mutable tools.
-- Constructor validation: JS-side throws vs host-side typed field declarations.
+So this:
+
+```ts
+export const executable = product("odin-package", "executable",
+    async function executable(pkg) {
+        ...
+    }
+);
+```
+
+does two things:
+
+```text
+1. Allows normal calls:
+   await odin.executable(pkg)
+
+2. Allows CLI selection:
+   imp build //:pkg#executable
+```
+
+## `run`
+
+`run` is the only place where execution and sandboxing happen.
+
+```ts
+function run(opts: {
+    mnemonic: string;
+    display?: string;
+    argv: string[];
+    env?: Record<string, string>;
+    tools?: Tool[];
+    inputs?: ActionInput[];
+    outputs?: Output[];
+    sandbox?: boolean;
+}): Promise<ArtifactResult> {
+    // Records an action dependency on the current memo/product call.
+    // Materializes FileSet/Tool/Artifact inputs later.
+    // Owns sandbox/CAS/remote execution details.
+}
+```
+
+Rule packages do not call:
+
+```ts
+casTreeStore(...)
+casTreeMerge(...)
+```
+
+Those remain executor internals. Your current code exposes these through `sourceSetExec()` and `snapshotSourcesExec()`, which is the thing to eliminate from the Odin rule package.
+
+# Odin rule package example
+
+## Target constructors
+
+```ts
+import {
+    target,
+    memo,
+    product,
+    glob,
+    file_set,
+    run,
+    output,
+    group,
+    paths,
+    workspace_mutation,
+} from "imp:core";
+
+export namespace odin {
+    export type ToolchainAttrs = {
+        version: string;
+    };
+
+    export type CollectionAttrs = {
+        name: string;
+        path: string;
+    };
+
+    export type PackageAttrs = {
+        path: string;
+        srcs: string[];
+        exclude: string[];
+        deps: Target<PackageAttrs>[];
+        collections: Target<CollectionAttrs>[];
+        toolchain: Target<ToolchainAttrs>;
+        default_product: string;
+    };
+
+    export function toolchain(opts: {
+        version?: string;
+    }): Target<ToolchainAttrs> {
+        return target({
+            kind: "odin-toolchain",
+            attrs: {
+                version: opts.version ?? "default",
+            },
+        });
+    }
+
+    export function default_toolchain(): Target<ToolchainAttrs> {
+        return toolchain({
+            version: "default",
+        });
+    }
+
+    export function collection(opts: {
+        name: string;
+        path: string;
+    }): Target<CollectionAttrs> {
+        return target({
+            kind: "odin-collection",
+            attrs: {
+                name: opts.name,
+                path: opts.path,
+            },
+        });
+    }
+
+    export function package(opts: {
+        path?: string;
+        srcs: string[];
+        exclude?: string[];
+        deps?: Target<PackageAttrs>[];
+        collections?: Target<CollectionAttrs>[];
+        toolchain?: Target<ToolchainAttrs>;
+        default_product?: string;
+    }): Target<PackageAttrs> {
+        return target({
+            kind: "odin-package",
+            attrs: {
+                path: opts.path ?? ".",
+                srcs: opts.srcs,
+                exclude: opts.exclude ?? [],
+                deps: opts.deps ?? [],
+                collections: opts.collections ?? [],
+                toolchain: opts.toolchain ?? default_toolchain(),
+                default_product: opts.default_product ?? "executable",
+            },
+        });
+    }
+}
+```
+
+# Odin memoized functions
+
+These are not providers and not requests. They are just functions, marked as memoized build functions.
+
+## Own sources
+
+```ts
+export const own_sources = memo(async function own_sources(
+    pkg: Target<odin.PackageAttrs>,
+): Promise<FileSet> {
+    return glob({
+        root: pkg.attrs.path,
+        include: pkg.attrs.srcs,
+        exclude: pkg.attrs.exclude,
+    });
+});
+```
+
+This replaces eager `workspaceSourceEntries(...)` in `readSources()`. Today, `readSources()` captures entries immediately and stores the CAS list and manifest in target fields. That should become a lazy tracked `glob(...)` inside a memoized function.
+
+## Transitive sources
+
+```ts
+export const sources = memo(async function sources(
+    pkg: Target<odin.PackageAttrs>,
+): Promise<FileSet> {
+    const own = await own_sources(pkg);
+
+    const dep_sources = await Promise.all(
+        pkg.attrs.deps.map(dep => sources(dep))
+    );
+
+    return file_set.union(own, ...dep_sources);
+});
+```
+
+This replaces the current manual transitive merge:
+
+```text
+odinPackage()
+  -> sourceTarget
+  -> dep.transitiveSources
+  -> merge(sourceTarget, ...odinDepSources)
+  -> sourceManifestValue
+```
+
+That current merge is visible in `odinPackage()`, where it extracts `transitiveSources` from dependency target handles and creates a merged source manifest.
+
+## Collection flags
+
+```ts
+export const collection_flags = memo(async function collection_flags(
+    pkg: Target<odin.PackageAttrs>,
+): Promise<string[]> {
+    return pkg.attrs.collections.map(collection =>
+        `-collection:${collection.attrs.name}=${collection.attrs.path}`
+    );
+});
+```
+
+Your current `odinCollectionExec()` does no work because collections are semantic metadata, not actions. That is a strong sign they should be plain target data plus memoized functions, not exec rules.
+
+## Tool acquisition
+
+```ts
+export const tool = memo(async function tool(
+    tc: Target<odin.ToolchainAttrs>,
+): Promise<Tool> {
+    const version = resolveOdinToolchainVersion(tc.attrs.version);
+
+    return acquireOdinToolchainAsTool({
+        version,
+        name: "odin",
+    });
+});
+```
+
+This keeps the existing toolchain acquisition concept, but exposes it as a memoized function instead of an exec rule whose product is `"tool"`.
+
+# Odin products
+
+Products are functions too. They are just registered for CLI dispatch.
+
+## Executable
+
+```ts
+export const executable = product("odin-package", "executable",
+    async function executable(
+        pkg: Target<odin.PackageAttrs>,
+    ): Promise<Artifact> {
+        const srcs = await sources(pkg);
+        const flags = await collection_flags(pkg);
+        const odin_bin = await tool(pkg.attrs.toolchain);
+
+        return run({
+            mnemonic: "OdinBuildExecutable",
+            display: `odin build ${pkg.label}`,
+            argv: [
+                odin_bin.path,
+                "build",
+                pkg.attrs.path,
+                ...flags,
+                `-out:${output_path("bin/" + pkg.label.name)}`,
+            ],
+            tools: [odin_bin],
+            inputs: [srcs],
+            outputs: [
+                output("bin/" + pkg.label.name),
+            ],
+            sandbox: true,
+        });
+    }
+);
+```
+
+## Library
+
+```ts
+export const library = product("odin-package", "library",
+    async function library(
+        pkg: Target<odin.PackageAttrs>,
+    ): Promise<Artifact> {
+        const srcs = await sources(pkg);
+        const flags = await collection_flags(pkg);
+        const odin_bin = await tool(pkg.attrs.toolchain);
+
+        return run({
+            mnemonic: "OdinBuildLibrary",
+            display: `odin build library ${pkg.label}`,
+            argv: [
+                odin_bin.path,
+                "build",
+                pkg.attrs.path,
+                ...flags,
+                "-build-mode:obj",
+                `-out:${output_path("lib/" + pkg.label.name + ".o")}`,
+            ],
+            tools: [odin_bin],
+            inputs: [srcs],
+            outputs: [
+                output("lib/" + pkg.label.name + ".o"),
+            ],
+            sandbox: true,
+        });
+    }
+);
+```
+
+## Test
+
+```ts
+export const test = product("odin-package", "test",
+    async function test(
+        pkg: Target<odin.PackageAttrs>,
+    ): Promise<TestResult> {
+        const srcs = await sources(pkg);
+        const flags = await collection_flags(pkg);
+        const odin_bin = await tool(pkg.attrs.toolchain);
+
+        return run({
+            mnemonic: "OdinTest",
+            display: `odin test ${pkg.label}`,
+            argv: [
+                odin_bin.path,
+                "test",
+                pkg.attrs.path,
+                ...flags,
+            ],
+            tools: [odin_bin],
+            inputs: [srcs],
+            outputs: [
+                output("test-results/" + pkg.label.name + ".json", {
+                    optional: true,
+                }),
+            ],
+            sandbox: true,
+        });
+    }
+);
+```
+
+## Format check
+
+```ts
+export const format_check = product("odin-package", "format-check",
+    async function format_check(
+        pkg: Target<odin.PackageAttrs>,
+    ): Promise<CheckResult> {
+        const srcs = await own_sources(pkg);
+        const odin_bin = await tool(pkg.attrs.toolchain);
+
+        return run({
+            mnemonic: "OdinFmtCheck",
+            display: `odin fmt -check ${pkg.label}`,
+            argv: [
+                odin_bin.path,
+                "fmt",
+                "-check",
+                ...paths(srcs),
+            ],
+            tools: [odin_bin],
+            inputs: [srcs],
+            outputs: [],
+            sandbox: true,
+        });
+    }
+);
+```
+
+## Format mutation
+
+Formatting that modifies the workspace should not be a normal cacheable action.
+
+```ts
+export const format = product("odin-package", "format",
+    async function format(
+        pkg: Target<odin.PackageAttrs>,
+    ): Promise<MutationResult> {
+        const srcs = await own_sources(pkg);
+        const odin_bin = await tool(pkg.attrs.toolchain);
+
+        return workspace_mutation({
+            mnemonic: "OdinFmt",
+            display: `odin fmt ${pkg.label}`,
+            argv: [
+                odin_bin.path,
+                "fmt",
+                ...paths(srcs),
+            ],
+            tools: [odin_bin],
+            inputs: [srcs],
+        });
+    }
+);
+```
+
+## Check aggregate
+
+```ts
+export const check = product("odin-package", "check",
+    async function check(
+        pkg: Target<odin.PackageAttrs>,
+    ): Promise<CheckResult> {
+        return group([
+            format_check(pkg),
+            test(pkg),
+        ]);
+    }
+);
+```
+
+# What the graph looks like
+
+Command:
+
+```sh
+imp check //:ottar
+```
+
+CLI dispatch:
+
+```text
+resolve //:ottar
+read default or explicit product
+call odin.check(ottar)
+```
+
+Discovered function graph:
+
+```text
+odin.check(ottar)
+  -> odin.format_check(ottar)
+      -> odin.own_sources(ottar)
+          -> glob(root = "ottar", include = ["^ottar/.*\\.odin$"])
+      -> odin.tool(ottar.toolchain)
+      -> run(OdinFmtCheck)
+
+  -> odin.test(ottar)
+      -> odin.sources(ottar)
+          -> odin.own_sources(ottar)
+          -> odin.sources(depA)
+          -> odin.sources(depB)
+      -> odin.collection_flags(ottar)
+      -> odin.tool(ottar.toolchain)
+      -> run(OdinTest)
+```
+
+Cache graph:
+
+```text
+Memo(odin.check, ottar)
+Memo(odin.format_check, ottar)
+Memo(odin.own_sources, ottar)
+Memo(odin.test, ottar)
+Memo(odin.sources, ottar)
+Memo(odin.collection_flags, ottar)
+Memo(odin.tool, toolchain)
+Action(OdinFmtCheck)
+Action(OdinTest)
+```
+
+No providers. No request strings. No source-set products.
+
+# How sandboxing works
+
+The product function says:
+
+```ts
+return run({
+    inputs: [srcs],
+    tools: [odin_bin],
+    sandbox: true,
+    ...
+});
+```
+
+The executor owns the lowering:
+
+```text
+FileSet -> resolved files + digests
+Tool -> executable files + runtime files
+Artifact -> produced output tree
+ActionInput[] -> sandbox tree or CAS upload
+```
+
+Possible implementations:
+
+```text
+local sandbox with symlinks
+local sandbox with hardlinks
+local sandbox with copies
+CAS tree
+remote execution upload
+debug manifest
+```
+
+Rule code does not know or care.
+
+# Roadmap
+
+## Phase 0: Freeze terms
+
+Use these terms consistently:
+
+| Term               | Meaning                                             |
+| ------------------ | --------------------------------------------------- |
+| target             | Plain declared data with stable label, kind, attrs  |
+| memo function      | Cached build function                               |
+| product function   | Memo function registered for CLI selection          |
+| action             | Concrete `run(...)` execution                       |
+| FileSet            | Lazy tracked file collection                        |
+| workspace mutation | Explicit non-cacheable workspace-changing operation |
+
+Avoid these as user/rule concepts:
+
+```text
+provider
+query
+request
+dependencyProduct
+depOutputs
+sourceManifestValue
+CAS tree merge
+```
+
+These may still exist internally, but not as the rule author model.
+
+## Phase 1: Add `memo(fn)`
+
+Implement memoized function evaluation.
+
+Minimum requirements:
+
+```text
+stable function identity
+stable argument digest
+active evaluation context
+memo table
+cycle detection
+dependency recording between memo calls
+debug trace
+```
+
+Initial key:
+
+```text
+MemoKey {
+    function_id
+    args_digest
+    config_digest
+}
+```
+
+Output:
+
+```text
+MemoKey -> result + dependencies
+```
+
+## Phase 2: Add `product(kind, name, fn)`
+
+Implement product functions as:
+
+```text
+memo(fn) + CLI registration
+```
+
+Product registration table:
+
+```text
+(target_kind, product_name) -> function
+```
+
+CLI dispatch:
+
+```text
+imp build //:ottar#test
+  -> target kind = odin-package
+  -> product name = test
+  -> call odin.test(ottar)
+```
+
+Default product:
+
+```text
+target.attrs.default_product
+or target kind default
+```
+
+## Phase 3: Add tracked runtime APIs
+
+Inside `memo` and `product` functions, provide tracked versions of effects:
+
+```ts
+glob(...)
+read_file(...)
+env(...)
+which(...)
+run(...)
+workspace_mutation(...)
+```
+
+Ban or lint untracked APIs inside memo/product functions:
+
+```ts
+fs.readFileSync(...)
+fs.readdirSync(...)
+process.env.X
+Date.now()
+Math.random()
+child_process.execSync(...)
+```
+
+The rule:
+
+```text
+ordinary language for composition
+tracked APIs for observation and effects
+```
+
+## Phase 4: Add lazy `FileSet`
+
+Introduce:
+
+```ts
+type FileSet =
+    | GlobFileSet
+    | UnionFileSet
+    | LiteralFileSet
+    | GeneratedFileSet;
+```
+
+Operations:
+
+```ts
+glob(spec): FileSet
+file_set.union(...sets): FileSet
+paths(fileset): string[]
+```
+
+`paths(fileset)` should be allowed only when the current execution mode can provide stable paths. For sandboxed actions, the executor may rewrite paths at materialization time.
+
+Track invalidation for:
+
+```text
+matched file digest
+directory listings
+new matching files
+deleted matching files
+exclude/include pattern changes
+negative path checks
+```
+
+## Phase 5: Move CAS and sandboxing behind `run`
+
+Change action inputs to accept:
+
+```ts
+FileSet
+Tool
+Artifact
+LiteralFile
+```
+
+Then materialize them in the executor.
+
+Refactor away from rule-level calls to:
+
+```ts
+casTreeStore(...)
+casTreeMerge(...)
+```
+
+Your current `sourceSetExec()` and `snapshotSourcesExec()` are executor concerns exposed as build rules. Move that logic behind `run(...)` input materialization.
+
+## Phase 6: Port Odin source logic
+
+Replace:
+
+```text
+readSources()
+source-set target
+source-set product
+snapshotSourcesExec()
+merge(...source artifacts)
+sourceManifest
+sourceManifestValue
+transitiveSources target fields
+```
+
+with:
+
+```ts
+odin.own_sources(pkg)
+odin.sources(pkg)
+```
+
+Target constructor becomes only:
+
+```ts
+export function package(opts) {
+    return target({
+        kind: "odin-package",
+        attrs: normalize_package_opts(opts),
+    });
+}
+```
+
+No eager source scanning.
+
+## Phase 7: Port Odin collections
+
+Replace no-op collection exec rule with plain target data and functions.
+
+Current behavior:
+
+```text
+odin-collection target exists only to represent name/path
+exec does nothing
+```
+
+New behavior:
+
+```ts
+odin.collection(...)
+odin.collection_flags(pkg)
+```
+
+No action needed.
+
+## Phase 8: Port Odin toolchain
+
+Move toolchain acquisition into a memoized function:
+
+```ts
+odin.tool(toolchain)
+```
+
+Then products call:
+
+```ts
+const odin_bin = await odin.tool(pkg.attrs.toolchain);
+```
+
+If tool acquisition itself creates files, it can internally call `run(...)` or a special tool acquisition primitive.
+
+## Phase 9: Port products
+
+Implement:
+
+```ts
+odin.executable
+odin.library
+odin.test
+odin.format_check
+odin.format
+odin.check
+```
+
+as product functions.
+
+At this point, requested work is dynamic:
+
+```text
+If user asks for format-check:
+  only own_sources + tool + fmt action happen
+
+If user asks for test:
+  sources + collections + tool + test action happen
+
+If user asks for executable:
+  sources + collections + tool + build action happen
+```
+
+## Phase 10: Add graph introspection
+
+This model needs strong debugging.
+
+Commands:
+
+```sh
+imp explain //:ottar#test
+imp graph //:ottar#test
+imp inputs //:ottar#test
+imp actions //:ottar#test
+imp files //:ottar#sources
+```
+
+Example output:
+
+```text
+odin.test(//:ottar)
+  calls odin.sources(//:ottar)
+  calls odin.collection_flags(//:ottar)
+  calls odin.tool(//toolchains:odin)
+  creates action OdinTest
+```
+
+Also expose cache diagnostics:
+
+```text
+cache hit: odin.own_sources(//:ottar)
+cache miss: odin.sources(//:ottar), dep changed
+cache hit: odin.tool(default)
+action hit: OdinTest
+```
+
+## Phase 11: Add correctness checks
+
+Add optional validation modes:
+
+```text
+sandbox strict mode:
+  action can only read declared materialized inputs
+
+trace mode:
+  compare observed reads with declared inputs
+
+dirty workspace mode:
+  detect changed files during action
+
+untracked effect lint:
+  detect process.env, fs.*, Date.now, random, child_process
+```
+
+This is especially important because the API looks scripted. The runtime must prevent hidden observations from bypassing the memo graph.
+
+## Phase 12: Delete old source/product plumbing
+
+Once Odin is ported, remove or demote:
+
+```text
+requiresOwnSources
+dependencyProduct
+depOutputs
+source-set as rule kind
+source-set as product
+sourceManifestValue as target field
+target-time workspaceSourceEntries
+CAS merge from rule packages
+```
+
+Keep CAS, manifests, and tree merging only as executor internals.
+
+# Final shape
+
+The end-state model is:
+
+```text
+Build files:
+  ordinary code that creates targets
+
+Rule packages:
+  ordinary exported functions
+
+Memo functions:
+  cached build computations
+
+Product functions:
+  memo functions registered for CLI products
+
+Actions:
+  run(...) calls created from product functions
+
+Sandboxing:
+  executor-owned materialization of FileSet/Tool/Artifact inputs
+
+Graph:
+  discovered from memoized function calls and tracked effects
+```
+
+The Odin example becomes:
+
+```ts
+const srcs = await odin.sources(pkg);
+const flags = await odin.collection_flags(pkg);
+const odin_bin = await odin.tool(pkg.attrs.toolchain);
+
+return run({
+    argv: [odin_bin.path, "build", pkg.attrs.path, ...flags],
+    tools: [odin_bin],
+    inputs: [srcs],
+    outputs: [output("bin/" + pkg.label.name)],
+    sandbox: true,
+});
+```
+
+That is the intended shape: plain functions at the API level, memoized function graph underneath, products only where they are user-visible, and sandbox/CAS behavior hidden below `run(...)`.

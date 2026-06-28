@@ -1,4 +1,13 @@
-import { target, rule, workspaceSourceEntries, casTreeStore, casTreeMerge, hydrateTarget, gatherTransitiveClosure } from "imp:core";
+import {
+	target,
+	rule,
+	workspaceSourceEntries,
+	casTreeStore,
+	casTreeMerge,
+	hydrateTarget,
+	gatherTransitiveClosure
+} from "imp:core";
+
 import {
     acquireOdinToolchain,
     defaultOdinToolchain,
