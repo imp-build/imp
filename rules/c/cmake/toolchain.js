@@ -37,17 +37,14 @@ export function createCmakeToolchainApi(host = defaultHost) {
 
         const toolchain = target({
             kind: "cmake-toolchain",
-            fields: { version },
+            attrs: { version },
         });
-        toolchain.version = version;
 
         if (opts.default) {
             defaultVersion = version;
             defaultToolchain = toolchain;
         }
 
-        const plat = host.platformInfo();
-        toolchain.cacheKey = `${CMAKE_TOOLCHAIN_CACHE}/${cmakeCacheKey(version, plat)}`;
         return toolchain;
     }
 

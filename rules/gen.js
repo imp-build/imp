@@ -22,6 +22,6 @@ rule({
 export function stampFile({ output, text }) {
     return target({
         kind: "stamp-file",
-        fields: { entrypoint: output, sources: text },
+        attrs: { entrypoint: output, sources: text },
     });
 }

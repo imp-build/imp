@@ -80,17 +80,14 @@ export function createOdinToolchainApi(host = defaultHost) {
 
         const toolchain = target({
             kind: "odin-toolchain",
-            fields: { version },
+            attrs: { version },
         });
-        toolchain.version = version;
 
         if (opts.default) {
             defaultVersion = version;
             defaultToolchain = toolchain;
         }
 
-        const plat = host.platformInfo();
-        toolchain.cacheKey = `${ODIN_TOOLCHAIN_CACHE}/${odinCacheKey(version, plat)}`;
         return toolchain;
     }
 

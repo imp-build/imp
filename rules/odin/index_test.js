@@ -26,25 +26,22 @@ test("uses the default Odin toolchain target", () => {
     const toolchain = odinToolchain("dev-2026-03", { default: true });
     const pkg = odinPackage({ srcs: [".*\\.odin$"] });
 
-    expect(pkg.toolchainVersion).toBe("dev-2026-03");
-    expect(pkg.toolchainTarget).toBe(toolchain);
-    expect(pkg.dependencyCount).toBe(1);
+    expect(pkg.attrs.toolchain).toBe(toolchain);
+    expect(pkg.attrs.toolchain.attrs.version).toBe("dev-2026-03");
 });
 
 test("keeps explicit string versions free of toolchain target deps", () => {
     const pkg = odinPackage({ srcs: [".*\\.odin$"], toolchain: "dev-2026-04" });
 
-    expect(pkg.toolchainVersion).toBe("dev-2026-04");
-    expect(pkg.toolchainTarget).toBe(null);
-    expect(pkg.dependencyCount).toBe(0);
+    expect(pkg.attrs.toolchainVersion).toBe("dev-2026-04");
+    expect(pkg.attrs.toolchain).toBe(undefined);
 });
 
 test("declares collections as namespace mappings", () => {
     const collection = odinCollection({ name: "lib", path: "library" });
 
-    expect(collection.name).toBe("lib");
-    expect(collection.path).toBe("library");
-    expect(collection.flag).toBe("-collection:lib=library");
+    expect(collection.attrs.name).toBe("lib");
+    expect(collection.attrs.path).toBe("library");
 });
 
 test("packages depend on collection config without collection membership", () => {
@@ -56,20 +53,15 @@ test("packages depend on collection config without collection membership", () =>
         collections: [root, lib],
     });
 
-    expect(pkg.collectionCount).toBe(2);
-    expect(pkg.collectionFlags).toEqual([
-        "-collection:root=.",
-        "-collection:lib=library",
-    ]);
-    expect(pkg.dependencyCount).toBe(2);
+    expect((pkg.attrs.collections || []).length).toBe(2);
 });
 
-test("hydrateTarget returns kind, fields, and dep handles", () => {
+test("hydrateTarget returns kind, attrs, and dep handles", () => {
     const pkg = odinPackage({ srcs: ["^rules/odin/index\\.js$"], toolchain: "dev-2026-04" });
     const hydrated = hydrateTarget(pkg);
 
     expect(hydrated.kind).toBe("odin-package");
-    expect(typeof hydrated.fields.srcs).toBe("string");
+    expect(Array.isArray(hydrated.attrs.srcs)).toBeTruthy();
     expect(Array.isArray(hydrated.deps)).toBeTruthy();
 });
 

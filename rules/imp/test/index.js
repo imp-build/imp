@@ -188,7 +188,7 @@ export function rulesTest({ root }) {
 
     return target({
         kind: "rules-test",
-        fields: {
+        attrs: {
             root,
             tests: discoveredTests.join(","),
         },

@@ -47,5 +47,5 @@ rule({
 // ---------------------------------------------------------------------------
 
 export function asset({ srcs }) {
-    return target({ kind: "asset", fields: { sources: srcs.join(",") } });
+    return target({ kind: "asset", attrs: { sources: srcs.join(",") } });
 }

@@ -6,7 +6,6 @@ import {
 	memo,
 	product,
 	run,
-	hydrateTarget,
 } from "imp:core";
 
 import {
@@ -40,11 +39,10 @@ export {
  * @returns {Promise<object>} FileSet descriptor.
  */
 export const own_sources = memo(async function own_sources(handle) {
-    const t = hydrateTarget(handle);
     return glob({
-        root: t.fields.path || ".",
-        include: JSON.parse(t.fields.srcs || "[]"),
-        exclude: JSON.parse(t.fields.exclude || "[]"),
+        root: handle.attrs.path || ".",
+        include: handle.attrs.srcs || [],
+        exclude: handle.attrs.exclude || [],
     });
 });
 
@@ -55,14 +53,11 @@ export const own_sources = memo(async function own_sources(handle) {
  * @returns {Promise<object>} FileSet descriptor.
  */
 export const sources = memo(async function sources(handle) {
-    const t = hydrateTarget(handle);
     const own = await own_sources(handle);
-    const pkg_deps = t.deps
-        .map(d => d.handle)
-        .filter(h => hydrateTarget(h).kind === "odin-package");
-    if (pkg_deps.length === 0) return own;
-    const dep_sources = await Promise.all(pkg_deps.map(h => sources(h)));
-    return file_set.union(own, ...dep_sources);
+    const pkgDeps = (handle.attrs.deps || []).filter(h => h && h.kind === "odin-package");
+    if (pkgDeps.length === 0) return own;
+    const depSources = await Promise.all(pkgDeps.map(h => sources(h)));
+    return file_set.union(own, ...depSources);
 });
 
 /**
@@ -72,13 +67,7 @@ export const sources = memo(async function sources(handle) {
  * @returns {Promise<string[]>}
  */
 export const collection_flags = memo(async function collection_flags(handle) {
-    const t = hydrateTarget(handle);
-    return t.deps
-        .filter(d => hydrateTarget(d.handle).kind === "odin-collection")
-        .map(d => {
-            const col = hydrateTarget(d.handle);
-            return `-collection:${col.fields.name}=${col.fields.path}`;
-        });
+    return (handle.attrs.collections || []).map(col => `-collection:${col.attrs.name}=${col.attrs.path}`);
 });
 
 /**
@@ -88,8 +77,7 @@ export const collection_flags = memo(async function collection_flags(handle) {
  * @returns {Promise<object>} Tool spec.
  */
 export const tool = memo(async function tool(handle) {
-    const t = hydrateTarget(handle);
-    return odinTool(t.fields.version);
+    return odinTool(handle.attrs.version);
 });
 
 // ---------------------------------------------------------------------------
@@ -104,17 +92,16 @@ export const tool = memo(async function tool(handle) {
  */
 export const odinBuild = product("odin-package", "odin-package",
     async function odinBuild(handle) {
-        const t = hydrateTarget(handle);
-        const toolchain_dep = t.deps.find(d => hydrateTarget(d.handle).kind === "odin-toolchain");
-        const odin_tool = toolchain_dep
-            ? await tool(toolchain_dep.handle)
-            : odinTool(resolveOdinToolchainVersion(t.fields.toolchain));
+        const toolchainHandle = handle.attrs.toolchain;
+        const odinToolSpec = toolchainHandle
+            ? await tool(toolchainHandle)
+            : odinTool(resolveOdinToolchainVersion(handle.attrs.toolchainVersion));
         const srcs = await sources(handle);
         const flags = await collection_flags(handle);
-        const path = t.fields.path || ".";
+        const path = handle.attrs.path || ".";
         return run({
             argv: ["odin", "build", path, ...flags],
-            tools: [odin_tool],
+            tools: [odinToolSpec],
             inputs: [srcs],
             display: `odin build ${path}`,
         });
@@ -137,17 +124,10 @@ export function odinCollection({ name, path }) {
     if (!name || !path) {
         throw new Error("odinCollection({ name, path }) requires name and path");
     }
-    const collection = target({
+    return target({
         kind: "odin-collection",
-        fields: {
-            name,
-            path,
-        },
+        attrs: { name, path },
     });
-    collection.name = name;
-    collection.path = path;
-    collection.flag = `-collection:${name}=${path}`;
-    return collection;
 }
 
 /**
@@ -165,34 +145,23 @@ export function odinCollection({ name, path }) {
  * @returns {object} Target handle.
  */
 export function odinPackage({ srcs = [], exclude = [], path = ".", collections = [], toolchain, deps = [] }) {
-    const explicitToolchainTarget = toolchain && toolchain.__imp === true ? toolchain : null;
-    const explicitVersion = toolchain && toolchain.__imp !== true ? toolchain : null;
-    const toolchainTarget = explicitToolchainTarget || (!explicitVersion ? defaultOdinToolchain() : null);
-    const toolchainVersion = explicitVersion || (toolchainTarget && toolchainTarget.version);
-    const collectionFlags = collections.map((collection) => collection.flag);
-    const collectionDeps = collections.map((collection) => ({ target: collection, mode: "collection" }));
-    const packageDeps = deps
-        .map(d => d && d.__imp ? { target: d } : (d && d.target ? d : null))
+    const toolchainHandle = toolchain && toolchain.__imp ? toolchain
+                          : (typeof toolchain === "string" ? null : defaultOdinToolchain());
+    const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
+    const normalizedDeps = deps
+        .map(d => d && d.__imp ? d : (d && d.target ? d.target : null))
         .filter(Boolean);
-    const allDeps = toolchainTarget
-        ? [{ target: toolchainTarget, mode: "tool" }, ...collectionDeps, ...packageDeps]
-        : [...collectionDeps, ...packageDeps];
 
-    const pkg = target({
+    return target({
         kind: "odin-package",
-        fields: {
+        attrs: {
             path,
-            srcs: JSON.stringify(srcs),
-            exclude: JSON.stringify(exclude),
-            ...(toolchainVersion ? { toolchain: toolchainVersion } : {}),
+            srcs,
+            ...(exclude.length ? { exclude } : {}),
+            ...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
+            ...(toolchainVersion ? { toolchainVersion } : {}),
+            ...(collections.length ? { collections } : {}),
+            ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
         },
-        deps: allDeps,
     });
-    pkg.toolchainVersion = toolchainVersion || null;
-    pkg.toolchainTarget = toolchainTarget || null;
-    pkg.collections = collections;
-    pkg.collectionFlags = collectionFlags;
-    pkg.collectionCount = collections.length;
-    pkg.dependencyCount = allDeps.length;
-    return pkg;
 }

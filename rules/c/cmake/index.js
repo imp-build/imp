@@ -87,28 +87,24 @@ rule({
 // ---------------------------------------------------------------------------
 
 export function cppSources({ srcs }) {
-    return target({ kind: "cpp-sources", fields: { sources: srcs.join(",") } });
+    return target({ kind: "cpp-sources", attrs: { sources: srcs.join(",") } });
 }
 
 export function cmakeLib({ entrypoint, toolchain, deps = [] }) {
     const explicitToolchainTarget = toolchain && toolchain.__imp === true ? toolchain : null;
     const explicitVersion = toolchain && toolchain.__imp !== true ? toolchain : null;
     const toolchainTarget = explicitToolchainTarget || (!explicitVersion ? defaultCmakeToolchain() : null);
-    const toolchainVersion = explicitVersion || (toolchainTarget && toolchainTarget.version);
+    const toolchainVersion = explicitVersion || (toolchainTarget && toolchainTarget.attrs?.version);
     const allDeps = toolchainTarget
         ? [{ target: toolchainTarget, mode: "tool" }, ...deps]
         : deps;
 
-    const lib = target({
+    return target({
         kind: "cmake-lib",
-        fields: {
+        attrs: {
             entrypoint,
             ...(toolchainVersion ? { toolchain: toolchainVersion } : {}),
         },
         deps: allDeps,
     });
-    lib.toolchainVersion = toolchainVersion || null;
-    lib.toolchainTarget = toolchainTarget || null;
-    lib.dependencyCount = allDeps.length;
-    return lib;
 }

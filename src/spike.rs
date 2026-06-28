@@ -36,34 +36,57 @@ const BUILD_FILE: &str = "BUILD.js";
 
 /// The built-in `imp:core` module exposed to every plugin and BUILD file.
 const CORE_JS: &str = r##"
+function _serialize_attrs(value) {
+    if (value === null || value === undefined || typeof value !== "object") return value;
+    if (Array.isArray(value)) return value.map(_serialize_attrs);
+    if (value.__imp === true) return { __imp_ref: value.__id };
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = _serialize_attrs(v);
+    return out;
+}
+
+function _collect_dep_handles(value, out) {
+    if (value === null || value === undefined || typeof value !== "object") return;
+    if (value.__imp === true) { out.push(value); return; }
+    if (Array.isArray(value)) { for (const v of value) _collect_dep_handles(v, out); return; }
+    for (const v of Object.values(value)) _collect_dep_handles(v, out);
+}
+
 /**
  * Declare a target and return a target handle.
  *
  * @param {object} opts
  * @param {string} opts.kind Stable target kind understood by extension rules.
- * @param {Record<string, string>} [opts.fields={}] String fields stored on the target.
- * @param {Array<object>} [opts.deps=[]] Dependencies as target handles returned by target().
- * @returns {object} An opaque target handle for exports and dependency lists.
- *
- * Constructors should perform domain validation in JavaScript and throw normal
- * Error objects for invalid arguments. The host validates only core invariants,
- * such as dependency values being target handles.
+ * @param {object} [opts.attrs={}] Typed attributes stored on the target. May contain nested
+ *   target handles; those are extracted as dep edges automatically when opts.deps is omitted.
+ * @param {Array<object>} [opts.deps] Explicit dependency list as handles or { target, mode } pairs.
+ *   When omitted, deps are discovered by scanning opts.attrs for target handles.
+ * @returns {object} An enriched target handle: { __imp, __id, kind, attrs }.
  */
 export function target(opts) {
     const depIds = [];
     const depModes = [];
-    for (const d of (opts.deps || [])) {
-        if (d && d.__imp === true) {
-            depIds.push(d.__id);
-            depModes.push(null);
-        } else if (d && d.target && d.target.__imp === true) {
-            depIds.push(d.target.__id);
-            depModes.push(d.mode != null ? String(d.mode) : null);
-        } else {
-            throw new Error('dep must be a target handle or { target, mode }, got: ' + JSON.stringify(d));
+    const attrs = opts.attrs !== undefined ? opts.attrs : (opts.fields !== undefined ? opts.fields : {});
+    if (opts.deps != null) {
+        for (const d of opts.deps) {
+            if (d && d.__imp === true) {
+                depIds.push(d.__id); depModes.push(null);
+            } else if (d && d.target && d.target.__imp === true) {
+                depIds.push(d.target.__id);
+                depModes.push(d.mode != null ? String(d.mode) : null);
+            } else {
+                throw new Error('dep must be a target handle or { target, mode }, got: ' + JSON.stringify(d));
+            }
         }
+    } else {
+        const found = [];
+        _collect_dep_handles(attrs, found);
+        for (const h of found) { depIds.push(h.__id); depModes.push(null); }
     }
-    return __host_target(opts.kind, opts.fields || {}, depIds, depModes);
+    const id = __host_target(opts.kind, JSON.stringify(_serialize_attrs(attrs)), depIds, depModes);
+    const handle = { __imp: true, __id: id, kind: opts.kind, attrs };
+    if (globalThis.__imp_handle_by_id) globalThis.__imp_handle_by_id.set(id, handle);
+    return handle;
 }
 
 /**
@@ -253,14 +276,19 @@ export function workspaceSourceFiles(opts) {
 
 /**
 /**
- * Retrieve the kind, fields, and dep handles for a target handle.
+ * Retrieve the kind, attrs, and dep handles for a target handle.
  *
  * @param {object} handle A target handle returned by target().
- * @returns {{ kind: string, fields: Record<string, string>, deps: Array<{ handle: object, mode: string|null }> }}
+ * @returns {{ kind: string, attrs: object, deps: Array<{ handle: object, mode: string|null }> }}
  */
 export function hydrateTarget(handle) {
     if (!handle || handle.__imp !== true) {
         throw new Error('hydrateTarget: expected a target handle');
+    }
+    if (handle.kind !== undefined) {
+        const depHandles = [];
+        _collect_dep_handles(handle.attrs || {}, depHandles);
+        return { kind: handle.kind, attrs: handle.attrs || {}, deps: depHandles.map(h => ({ handle: h, mode: null })) };
     }
     return JSON.parse(__host_hydrate_target(handle.__id));
 }
@@ -609,6 +637,9 @@ export async function workspace_mutation(opts) {
     return result;
 }
 
+// Handle registry: maps numeric js_id → enriched handle for product function dispatch.
+globalThis.__imp_handle_by_id = new Map();
+globalThis.__imp_resolve_handle = function(id) { return globalThis.__imp_handle_by_id.get(id); };
 // Expose introspection helpers as globals so Rust can call them without module imports.
 globalThis.resetMemoState = resetMemoState;
 globalThis.getMemoTrace = getMemoTrace;
@@ -619,11 +650,11 @@ globalThis.setIntrospectMode = setIntrospectMode;
 // Public data types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Target {
     pub address: String,
     pub kind: String,
-    pub fields: BTreeMap<String, String>,
+    pub attrs: serde_json::Value,
     pub dependencies: Vec<Dependency>,
     /// The QuickJS numeric id of this target's handle object (`{ __imp: true, __id: N }`).
     /// Stored so product tasks can reconstruct a valid handle to pass to product functions.
@@ -1074,7 +1105,7 @@ impl Default for HostState {
 
 struct PendingTarget {
     kind: String,
-    fields: BTreeMap<String, String>,
+    attrs: serde_json::Value,
     dep_ids: Vec<(u32, Option<String>)>,
 }
 
@@ -1610,7 +1641,7 @@ fn materialize_pending_target(
         Target {
             address: address.clone(),
             kind: pending.kind.clone(),
-            fields: pending.fields.clone(),
+            attrs: pending.attrs.clone(),
             dependencies: deps,
             js_id: id,
         },
@@ -1629,29 +1660,24 @@ fn register_globals<'js>(
     let globals = ctx.globals();
 
     // ------------------------------------------------------------------
-    // __host_target(kind, fields, depIds, depModes) → { __imp: true, __id: N }
+    // __host_target(kind, attrsJson, depIds, depModes) → u32 (handle id)
     // depIds: Array<number>, depModes: Array<string|null> (parallel arrays)
     // ------------------------------------------------------------------
     let state_t = Arc::clone(&state);
     let host_target = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>,
+        move |_ctx: Ctx<'js>,
               kind: String,
-              fields: Object<'js>,
+              attrs_json: String,
               dep_ids: Array<'js>,
               dep_modes: Array<'js>|
-              -> rquickjs::Result<Object<'js>> {
+              -> rquickjs::Result<u32> {
             let mut hs = state_t.lock().unwrap();
             let id = hs.next_id;
             hs.next_id += 1;
 
-            // Extract string-valued fields from the JS object.
-            let mut field_map: BTreeMap<String, String> = BTreeMap::new();
-            for entry in fields.own_props::<String, Value>(Filter::default()) {
-                let (k, v) = entry?;
-                let s: String = v.get()?;
-                field_map.insert(k, s);
-            }
+            let attrs: serde_json::Value = serde_json::from_str(&attrs_json)
+                .map_err(|e| rquickjs::Error::new_loading_message("__host_target", e.to_string()))?;
 
             // Extract (dep_id, mode) pairs from the two parallel arrays.
             let len = dep_ids.len();
@@ -1667,20 +1693,8 @@ fn register_globals<'js>(
                 dep_id_list.push((dep_id, mode));
             }
 
-            hs.pending.insert(
-                id,
-                PendingTarget {
-                    kind,
-                    fields: field_map,
-                    dep_ids: dep_id_list,
-                },
-            );
-
-            // Return handle object.
-            let handle = Object::new(ctx)?;
-            handle.set("__imp", true)?;
-            handle.set("__id", id)?;
-            Ok(handle)
+            hs.pending.insert(id, PendingTarget { kind, attrs, dep_ids: dep_id_list });
+            Ok(id)
         },
     )?;
     globals.set("__host_target", host_target)?;
@@ -2073,7 +2087,7 @@ fn register_globals<'js>(
                 .collect();
             let json = serde_json::json!({
                 "kind": pending.kind,
-                "fields": pending.fields,
+                "attrs": pending.attrs,
                 "deps": deps,
             });
             serde_json::to_string(&json).map_err(|e| {
@@ -2967,7 +2981,7 @@ impl Planner<'_> {
                     id: id.clone(),
                     target: target.address.clone(),
                     product: product.to_owned(),
-                    fields: target.fields.clone(),
+                    fields: string_attrs(&target.attrs),
                     inputs,
                     outputs,
                     action,
@@ -2992,7 +3006,7 @@ impl Planner<'_> {
                     id: id.clone(),
                     target: target.address.clone(),
                     product: product.to_owned(),
-                    fields: target.fields.clone(),
+                    fields: BTreeMap::new(),
                     inputs: Vec::new(),
                     outputs: Vec::new(),
                     action: Action {
@@ -4479,19 +4493,32 @@ pub fn select_targets<'a>(
     Ok(selected.into_values().collect())
 }
 
+fn attr_str<'a>(attrs: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    attrs.get(key).and_then(|v| v.as_str())
+}
+
+fn string_attrs(attrs: &serde_json::Value) -> BTreeMap<String, String> {
+    attrs
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
+        .collect()
+}
+
 pub fn format_targets(targets: &[&Target], w: &mut String) -> std::fmt::Result {
     use std::fmt::Write;
     for target in targets {
         writeln!(w, "{} ({})", target.address, target.kind)?;
-        if let Some(sources) = target.fields.get("sources") {
+        if let Some(sources) = attr_str(&target.attrs, "sources") {
             if !sources.is_empty() {
                 writeln!(w, "  sources: {sources}")?;
             }
         }
-        if let Some(ep) = target.fields.get("entrypoint") {
+        if let Some(ep) = attr_str(&target.attrs, "entrypoint") {
             writeln!(w, "  entrypoint: {ep}")?;
         }
-        if let Some(version) = target.fields.get("version") {
+        if let Some(version) = attr_str(&target.attrs, "version") {
             writeln!(w, "  version: {version}")?;
         }
         if !target.dependencies.is_empty() {
@@ -5086,24 +5113,22 @@ fn lower_artifacts(
 }
 
 fn expand_template(template: &str, target: &Target) -> String {
-    let sources = target.fields.get("sources").cloned().unwrap_or_default();
-    let entrypoint = target.fields.get("entrypoint").cloned().unwrap_or_default();
-    let name = target.fields.get("name").cloned().unwrap_or_default();
-    let path = target.fields.get("path").cloned().unwrap_or_default();
-    let version = target.fields.get("version").cloned().unwrap_or_default();
-    let expanded = template
+    let get = |key: &str| attr_str(&target.attrs, key).unwrap_or("").to_owned();
+    let mut expanded = template
         .replace("{address}", &target.address)
-        .replace("{sources}", &sources)
-        .replace("{entrypoint}", &entrypoint)
-        .replace("{name}", &name)
-        .replace("{path}", &path)
-        .replace("{version}", &version);
-    target
-        .fields
-        .iter()
-        .fold(expanded, |expanded, (field, value)| {
-            expanded.replace(&format!("{{{field}}}"), value)
-        })
+        .replace("{sources}", &get("sources"))
+        .replace("{entrypoint}", &get("entrypoint"))
+        .replace("{name}", &get("name"))
+        .replace("{path}", &get("path"))
+        .replace("{version}", &get("version"));
+    if let Some(obj) = target.attrs.as_object() {
+        for (k, v) in obj {
+            if let Some(s) = v.as_str() {
+                expanded = expanded.replace(&format!("{{{k}}}"), s);
+            }
+        }
+    }
+    expanded
 }
 
 fn dot_escape(value: &str) -> String {
@@ -5660,12 +5685,10 @@ fn build_exec_target<'js>(
     dep_values: &[String],
 ) -> rquickjs::Result<Object<'js>> {
     if task.is_product {
-        // Product functions receive the target handle ({ __imp: true, __id: N })
-        // rather than the task context object used by rule exec functions.
-        let obj = Object::new(ctx.clone())?;
-        obj.set("__imp", true)?;
-        obj.set("__id", task.js_id)?;
-        return Ok(obj);
+        // Product functions receive the enriched handle registered during workspace loading.
+        let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
+        let handle: Object = resolve_fn.call((task.js_id,))?;
+        return Ok(handle);
     }
     let obj = Object::new(ctx.clone())?;
     obj.set("id", task.id.as_str())?;
@@ -5779,10 +5802,10 @@ rule({ kind: "cpp-sources",  product: "sources",             action: "snapshot {
 rule({ kind: "cmake-lib",    product: "native-link-library", action: "cmake --build {entrypoint}", exec: cmakeBuildExec, requiresOwnSources: false, dependencyProduct: "sources" });
 
 export function cppSources({ srcs }) {
-    return target({ kind: "cpp-sources", fields: { sources: srcs.join(",") } });
+    return target({ kind: "cpp-sources", attrs: { sources: srcs.join(",") } });
 }
 export function cmakeLib({ entrypoint, deps = [] }) {
-    return target({ kind: "cmake-lib", fields: { entrypoint }, deps });
+    return target({ kind: "cmake-lib", attrs: { entrypoint }, deps });
 }
 "#;
 
@@ -5796,7 +5819,7 @@ rule({ kind: "odin-package", product: "sources",      action: "snapshot {sources
 rule({ kind: "odin-package", product: "odin-package", action: "odin build",         exec: odinBuildExec, requiresOwnSources: true,  dependencyProduct: "default" });
 
 export function odinPackage({ srcs, deps = [] }) {
-    return target({ kind: "odin-package", fields: { sources: srcs.join(",") }, deps });
+    return target({ kind: "odin-package", attrs: { sources: srcs.join(",") }, deps });
 }
 "#;
 
@@ -5810,7 +5833,7 @@ rule({ kind: "asset", product: "sources", action: "snapshot {sources}", exec: sn
 rule({ kind: "asset", product: "bundle",  action: "bundle {sources}",   exec: bundleExec, requiresOwnSources: true,  dependencyProduct: null });
 
 export function asset({ srcs }) {
-    return target({ kind: "asset", fields: { sources: srcs.join(",") } });
+    return target({ kind: "asset", attrs: { sources: srcs.join(",") } });
 }
 "#;
 
@@ -5992,7 +6015,7 @@ import { actionName } from "//rules/external/helper";
 rule({ kind: "external", product: "external-product", action: actionName, requiresOwnSources: false, dependencyProduct: null });
 
 export function externalThing(name) {
-    return target({ kind: "external", fields: { name } });
+    return target({ kind: "external", attrs: { name } });
 }
 "#,
         );
@@ -6022,7 +6045,7 @@ export const app = externalThing("app");
         assert!(workspace
             .rules
             .contains_key(&("external".into(), "external-product".into())));
-        assert_eq!(workspace.targets["//:app"].fields["name"], "app");
+        assert_eq!(workspace.targets["//:app"].attrs["name"].as_str().unwrap(), "app");
 
         let plan = plan(&workspace, "build", &["app".into()]).unwrap();
         assert_eq!(plan.roots, ["//:app#external-product"]);
@@ -6065,8 +6088,8 @@ export const app = odinPackage({
         let app = &workspace.targets["//:app"];
         // Phase 6: sources are lazy — no source-set dep, no pre-resolved file list
         assert_eq!(app.dependencies.len(), 0);
-        assert_eq!(app.fields["path"], "app");
-        assert_eq!(app.fields["srcs"], r#"["^app/.*\\.odin$"]"#);
+        assert_eq!(app.attrs["path"].as_str().unwrap(), "app");
+        assert_eq!(app.attrs["srcs"][0].as_str().unwrap(), r#"^app/.*\.odin$"#);
     }
 
     #[test]
@@ -6120,12 +6143,12 @@ rule({ kind: "odin-package", product: "sources", action: "snapshot {sources}", r
 rule({ kind: "odin-package", product: "odin-package", action: "odin build", requiresOwnSources: true, dependencyProduct: "default" });
 
 export function odinCollection({ name, path }) {
-    return target({ kind: "odin-collection", fields: { name, path } });
+    return target({ kind: "odin-collection", attrs: { name, path } });
 }
 
 export function odinPackage({ srcs, collections = [] }) {
     const collectionDeps = collections.map((collection) => ({ target: collection, mode: "collection" }));
-    return target({ kind: "odin-package", fields: { sources: srcs.join(",") }, deps: collectionDeps });
+    return target({ kind: "odin-package", attrs: { sources: srcs.join(",") }, deps: collectionDeps });
 }
 "#,
         );
@@ -7127,11 +7150,11 @@ export const rules_test = rulesTest({ root: "//rules/other" });
 
         let example = live.targets.get("//rules/example:rules_test").unwrap();
         assert_eq!(
-            example.fields["tests"],
+            example.attrs["tests"].as_str().unwrap(),
             "//rules/example/alpha_test,//rules/example/beta_test"
         );
         let other = live.targets.get("//rules/other:rules_test").unwrap();
-        assert_eq!(other.fields["tests"], "//rules/other/example_test");
+        assert_eq!(other.attrs["tests"].as_str().unwrap(), "//rules/other/example_test");
 
         let report = execute_plan_with_options(
             &plan,

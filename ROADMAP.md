@@ -1071,3 +1071,175 @@ return run({
 ```
 
 That is the intended shape: plain functions at the API level, memoized function graph underneath, products only where they are user-visible, and sandbox/CAS behavior hidden below `run(...)`.
+
+# Implementation gaps and divergences
+
+The following were identified by comparing the implemented code against the above design.
+They are ordered by dependency and impact.
+
+## ~~Gap 1: Target data model — `attrs` vs `fields`~~ ✓ Fixed
+
+The implementation used `target({ kind, fields })` where `fields` was a flat
+`Record<string, string>`. Arrays and nested objects were JSON-serialized into string
+values.
+
+**Resolved:** `target()` now accepts `{ kind, attrs }` where `attrs` is a rich typed
+object (any JSON-serializable value). `Target.attrs` is stored as `serde_json::Value`
+in Rust. Handles embedded in `attrs` are serialized as `{ __imp_ref: id }` for Rust
+storage and reconstructed as live handle references on the JS side. The returned
+handle is an enriched object `{ __imp, __id, kind, attrs }` with direct property
+access:
+
+```js
+pkg.attrs.path
+pkg.attrs.srcs          // string[]
+pkg.attrs.toolchain     // enriched handle
+pkg.attrs.collections   // enriched handle[]
+```
+
+`Task.fields` (for the `rule()` exec path) is now populated by extracting top-level
+string attrs, preserving backwards compatibility with existing exec functions that
+read `target.fields.X`.
+
+## ~~Gap 2: `hydrateTarget()` should not appear in rule code~~ ✓ Fixed
+
+`hydrateTarget` was an implementation artifact of the flat fields model. Every memo
+and product function started with `const t = hydrateTarget(handle)`.
+
+**Resolved:** `rules/odin/index.js` has been rewritten. All memo functions and
+constructors access `handle.attrs.X` directly. `hydrateTarget` is still exported for
+internal utilities (`gatherTransitiveClosure`) and now reads from `handle.kind` /
+`handle.attrs` without a host round-trip for enriched handles. Rule authors no longer
+call it.
+
+## ~~Gap 3: Mutating opaque handle objects~~ ✓ Fixed
+
+`odinCollection` and `odinPackage` added extra properties to opaque handles
+(`collection.name`, `collection.flag`, `pkg.collections`, etc.) creating two parallel
+representations.
+
+**Resolved:** All handle mutations removed. `odinCollection` and `odinPackage` store
+all data in `attrs`. `odinToolchain` and `cmakeToolchain` no longer mutate handles
+with `.version` or `.cacheKey`. The toolchain handle's version is accessed via
+`handle.attrs.version`. `build_exec_target` for product functions now calls
+`__imp_resolve_handle(js_id)` to retrieve the registered enriched handle.
+
+## Gap 4: Only one product instead of the full suite
+
+The design (Phase 9) specifies six products:
+`executable`, `library`, `test`, `format_check`, `format`, `check`.
+
+The current implementation has one: `odinBuild`, registered as:
+
+```js
+product("odin-package", "odin-package", ...)
+```
+
+The product name matches the kind name, making the CLI address
+`imp build //:target#odin-package` instead of `imp build //:target#executable`.
+`odinBuild` also declares no `outputs`, so nothing is cached by the output-based
+cache model.
+
+Additionally, Phase 12 cleanup has not happened: `rule()`, `requiresOwnSources`, and
+`dependencyProduct` remain as public symbols in `imp:core`.
+
+## Gap 5: Product task is opaque to the planner
+
+For a `product()` function the planner creates exactly one `Task` with
+`is_product: true`. The internal dependencies (own_sources, collection_flags, tool,
+run) are invisible at planning time. The plan graph for a product is a single
+unlabelled node.
+
+The design intends the full call graph to be discoverable:
+
+```
+imp graph //:ottar#executable
+  odin.executable(ottar)
+    calls odin.sources(ottar)
+      calls odin.own_sources(ottar) → glob(...)
+    calls odin.collection_flags(ottar)
+    calls odin.tool(toolchain)
+    creates action OdinBuildExecutable
+```
+
+After a product function executes, the memo trace contains this structure. It needs
+to be surfaced as discovered task dependencies and exposed through CLI introspection
+commands.
+
+## Gap 6: Two separate execution models
+
+`rule()` tasks are executed by `run_local_task` → `prepare_sandbox` → `copy_artifact_into_sandbox`.
+
+`product()` tasks execute their JS function, which calls `__host_run` →
+`exec_run_inner` — a second, independent sandbox implementation with its own cache
+key format and materialization logic.
+
+The design calls for one unified `run(...)` primitive owned by the executor. The
+`rule()` path (with `exec_fn`, `requiresOwnSources`, `dependencyProduct`) is the
+old model and should be retired once products cover all cases.
+
+## Gap 7: Missing `run()` surface area
+
+Several items specified in the design are absent from the `imp:core` `run()` API:
+
+- **`sandbox: true`** — currently all `run()` calls from product functions use a
+  sandbox but there is no opt-in or opt-out field.
+- **`output_path("bin/foo")`** — no way to obtain the sandbox output path to embed
+  in `argv` (e.g. `-out:${output_path("bin/ottar")}`).
+- **`group([...])`** — needed for aggregate products like `check` that fan out to
+  multiple sub-products.
+- **`pkg.label.name`** — the design uses `pkg.label.name` for output naming.
+  Currently `targetAddress(handle)` returns the full address string
+  (e.g. `//:ottar`), not a structured label object.
+
+## Gap 8: `config_digest` is always empty
+
+The memo key is built as:
+
+```js
+{ fn_id, args_digest, config_digest: "" }
+```
+
+No configuration wiring exists yet. Memo results cannot be invalidated by build
+configuration changes (e.g. debug vs. release).
+
+## Gap 9: Parallel execution blocked for product functions
+
+`execute_plan_with_options` bails immediately when `jobs > 1` and any task has an
+`exec_fn`. Since every product-based task has `exec_fn`, parallel execution is
+completely disabled when the primary pattern is in use.
+
+## Gap 10: Phase 11 correctness checks are minimal
+
+The Phase 11 roadmap item specifies:
+
+```text
+sandbox strict mode       — action can only read declared inputs
+trace mode                — compare observed reads with declared inputs
+dirty workspace mode      — detect changed files during action
+untracked effect lint     — detect fs.*, Date.now(), child_process, etc.
+```
+
+Currently only the dirty-workspace snapshot (`workspace_mutation` + `watch`) is
+implemented. The other three are absent.
+
+## Other concerns
+
+**MD5 for digests**: `digest_bytes` uses MD5. This is fine for a spike but should be
+replaced with SHA-256 before any persistent cache is built on it.
+
+**Toolchain acquisition is synchronous**: `acquireOdinToolchain` runs
+download+extract synchronously on the JS thread, blocking the entire QuickJS runtime.
+Tool acquisition should itself go through `run(...)` so it is cached and
+parallelizable.
+
+**`_stable_function_id` is load-order dependent**: The counter resets between
+processes. Memo keys are ephemeral — not durable across restarts. The name
+"stable" is misleading; it is only stable within a single evaluation session.
+
+**`workspaceFiles` filter bug**: The condition
+`!name.ends_with(".js") || !name.ends_with(suffix)` is inverted; it should use `&&`.
+A file named `foo_test.js` where `suffix = "_test.js"` passes because
+`!foo_test.js.ends_with(".js")` is false while `!foo_test.js.ends_with("_test.js")`
+is also false, so the OR is false and the file is included — but only accidentally.
+Any suffix that is not a suffix of `.js` would incorrectly exclude all `.js` files.
