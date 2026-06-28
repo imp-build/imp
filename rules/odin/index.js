@@ -68,6 +68,22 @@ export const sources = memo(async function sources(handle) {
     return file_set.union(own, ...dep_sources);
 });
 
+/**
+ * Return the `-collection:name=path` flags for all collection deps of a package.
+ *
+ * @param {object} handle Target handle returned by odinPackage().
+ * @returns {Promise<string[]>}
+ */
+export const collection_flags = memo(async function collection_flags(handle) {
+    const t = hydrateTarget(handle);
+    return t.deps
+        .filter(d => hydrateTarget(d.handle).kind === "odin-collection")
+        .map(d => {
+            const col = hydrateTarget(d.handle);
+            return `-collection:${col.fields.name}=${col.fields.path}`;
+        });
+});
+
 // ---------------------------------------------------------------------------
 // Exec functions
 // ---------------------------------------------------------------------------
@@ -76,19 +92,12 @@ function odinToolchainExec(target, ctx) {
     acquireOdinToolchain(target.fields.version);
 }
 
-function odinCollectionExec(target, ctx) {
-    // A collection target is a namespace mapping such as `lib=library`.
-    // It intentionally does not model or own the packages below that path.
-}
-
 async function odinBuildExec(target, ctx) {
     const srcs = await sources(target.handle);
     const file_inputs = paths(srcs).map(p => ({ kind: "file", path: p }));
     const version = resolveOdinToolchainVersion(target.fields && target.fields.toolchain);
     const odin = await ctx.tool(odinTool(version));
-    const collectionFlags = target.fields.collections
-        ? target.fields.collections.split(",").filter(Boolean)
-        : [];
+    const collectionFlags = await collection_flags(target.handle);
     const result = await ctx.inSandbox({
         argv: ["odin", "build", target.fields.path || "."].concat(collectionFlags),
         tools: [odin],
@@ -109,15 +118,6 @@ rule({
     product: "tool",
     action: "install odin {version}",
     exec: odinToolchainExec,
-    requiresOwnSources: false,
-    dependencyProduct: null,
-});
-
-rule({
-    kind: "odin-collection",
-    product: "collection",
-    action: "odin collection {name}={path}",
-    exec: odinCollectionExec,
     requiresOwnSources: false,
     dependencyProduct: null,
 });
@@ -198,7 +198,6 @@ export function odinPackage({ srcs = [], exclude = [], path = ".", collections =
             path,
             srcs: JSON.stringify(srcs),
             exclude: JSON.stringify(exclude),
-            ...(collectionFlags.length ? { collections: collectionFlags.join(",") } : {}),
             ...(toolchainVersion ? { toolchain: toolchainVersion } : {}),
         },
         deps: allDeps,

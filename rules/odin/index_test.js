@@ -9,6 +9,7 @@ import {
     odinToolchain,
     own_sources,
     sources,
+    collection_flags,
 } from "//rules/odin";
 import {
     hydrateTarget,
@@ -109,6 +110,14 @@ test("repeated sources() calls are memoized", async () => {
     const a = await sources(pkg);
     const b = await sources(pkg);
     expect(a).toBe(b);
+});
+
+test("collection_flags(pkg) returns flags for all collection deps", async () => {
+    const root = odinCollection({ name: "root", path: "." });
+    const lib = odinCollection({ name: "lib", path: "library" });
+    const pkg = odinPackage({ srcs: [".*\\.odin$"], toolchain: "dev-2026-04", collections: [root, lib] });
+    const flags = await collection_flags(pkg);
+    expect(flags).toEqual(["-collection:root=.", "-collection:lib=library"]);
 });
 
 test("casTreeStore round-trips through casTreeGet", () => {
