@@ -568,7 +568,7 @@ fn cmd_dependencies(selectors: &[String]) -> Result<()> {
 
 fn cmd_rules() -> Result<()> {
     workspace_cmd!(|workspace, out| {
-        spike::format_rules(&workspace, &mut out)?;
+        spike::format_products(&workspace, &mut out)?;
     })
 }
 

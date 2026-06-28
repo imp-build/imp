@@ -1,7 +1,7 @@
 //! QuickJS-backed target, rule, and goal planning spike.
 //!
 //! `imp.workspace.js` imports plugin modules that register rules via
-//! `__host_rule`.  Workspace `BUILD.js` files declare and export target handles
+//! `product()` registrations. Workspace `BUILD.js` files declare and export target handles
 //! via `__host_target`.  The Rust engine resolves product requests into a task
 //! DAG without executing it.
 
@@ -98,15 +98,6 @@ export function target(opts) {
     });
     if (globalThis.__imp_handle_by_id) globalThis.__imp_handle_by_id.set(id, handle);
     return handle;
-}
-
-export function rule(opts) {
-    __host_rule(
-        opts.kind, opts.product, opts.action,
-        opts.requiresOwnSources === true,
-        opts.dependencyProduct !== undefined ? opts.dependencyProduct : null,
-        opts.exec || null
-    );
 }
 
 /**
@@ -736,13 +727,6 @@ impl Executor {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Local => "local",
-            Self::Wsl => "wsl",
-            Self::Container => "container",
-        }
-    }
 }
 
 /// A registered platform: bundles executor (where to run) and target (what to build for).
@@ -752,25 +736,6 @@ pub struct PlatformDef {
     pub executor: Executor,
     /// Opaque OS-arch string, e.g. `"linux-x86_64"` or `"windows-x86_64"`.
     pub target: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Rule {
-    pub target_kind: String,
-    pub product: String,
-    pub action: ActionSpec,
-    pub requires_own_sources: bool,
-    pub dependency_product: DependencyProduct,
-    /// Name of the JS global storing this rule's `exec(target, ctx)` function,
-    /// if one was provided. `None` means the rule uses the legacy `action` path.
-    pub exec_fn: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DependencyProduct {
-    None,
-    Named(String),
-    Default,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -786,43 +751,6 @@ pub enum GoalProductPolicy {
     Default,
     /// Request this specific product; targets lacking a rule for it are skipped.
     Named(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActionSpec {
-    pub argv: Vec<String>,
-    pub cwd: Option<String>,
-    pub env: BTreeMap<String, String>,
-    pub platform: Option<String>,
-    pub inputs: Vec<ArtifactSpec>,
-    pub outputs: Vec<ArtifactSpec>,
-    pub display: String,
-    pub impure: bool,
-    pub force_cache: bool,
-}
-
-impl ActionSpec {
-    fn legacy(display: String) -> Self {
-        Self {
-            argv: Vec::new(),
-            cwd: None,
-            env: BTreeMap::new(),
-            platform: None,
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-            display,
-            impure: false,
-            force_cache: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArtifactSpec {
-    pub id: Option<String>,
-    pub kind: String,
-    pub path: Option<String>,
-    pub value: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -866,14 +794,10 @@ pub struct Task {
     pub inputs: Vec<Artifact>,
     pub outputs: Vec<Artifact>,
     pub action: Action,
-    pub exec_fn: Option<String>,
     pub dependencies: Vec<String>,
     /// JS handle id for this task's target. Used to reconstruct `{ __imp: true, __id }` for product tasks.
     #[serde(default)]
     pub js_id: u32,
-    /// True when this task was created from a `product()` registration rather than a `rule()`.
-    #[serde(default)]
-    pub is_product: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -886,7 +810,6 @@ pub struct Plan {
 
 #[derive(Debug, Clone, Default)]
 pub struct Workspace {
-    pub rules: BTreeMap<(String, String), Rule>,
     pub targets: BTreeMap<String, Target>,
     pub products: BTreeMap<(String, String), String>,
     pub named_caches: BTreeMap<String, NamedCache>,
@@ -901,9 +824,11 @@ pub struct Workspace {
 /// [`Workspace`] for planning and inspection.
 pub struct LiveWorkspace {
     pub workspace: Workspace,
+    #[allow(dead_code)]
     pub(super) runtime: Runtime,
     pub(super) ctx: Mutex<JsContext>,
     /// Workspace root made available to host functions during task execution.
+    #[allow(dead_code)]
     pub(super) exec_root: Arc<Mutex<Option<PathBuf>>>,
 }
 
@@ -1097,7 +1022,6 @@ struct HostState {
     next_id: u32,
     next_exec: u32,
     pending: BTreeMap<u32, PendingTarget>,
-    rules: BTreeMap<(String, String), Rule>,
     products: BTreeMap<(String, String), String>,
     named_caches: BTreeMap<String, NamedCache>,
     goals: BTreeMap<String, Goal>,
@@ -1138,7 +1062,6 @@ impl Default for HostState {
             next_id: 0,
             next_exec: 0,
             pending: BTreeMap::new(),
-            rules: BTreeMap::new(),
             products: BTreeMap::new(),
             named_caches: BTreeMap::new(),
             goals,
@@ -1618,7 +1541,6 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
         }
 
         let ws = Workspace {
-            rules: hs.rules.clone(),
             targets,
             products: hs.products.clone(),
             named_caches: hs.named_caches.clone(),
@@ -1743,65 +1665,6 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_target", host_target)?;
-
-    // ------------------------------------------------------------------
-    // __host_rule(kind, product, action, requiresOwnSources, depProduct)
-    // ------------------------------------------------------------------
-    let state_r = Arc::clone(&state);
-    let host_rule = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'js>,
-              kind: String,
-              product: String,
-              action_value: Value<'js>,
-              requires_own_sources: bool,
-              dep_prod_val: Value<'js>,
-              exec_val: Value<'js>|
-              -> rquickjs::Result<()> {
-            let action = parse_rule_action(action_value)?;
-            let dependency_product = if dep_prod_val.is_null() || dep_prod_val.is_undefined() {
-                DependencyProduct::None
-            } else {
-                let s: String = dep_prod_val.get()?;
-                if s == "default" {
-                    DependencyProduct::Default
-                } else {
-                    DependencyProduct::Named(s)
-                }
-            };
-
-            let exec_fn = if exec_val.is_null() || exec_val.is_undefined() {
-                None
-            } else {
-                let name = {
-                    let mut hs = state_r.lock().unwrap();
-                    let n = format!("__imp_exec_{}", hs.next_exec);
-                    hs.next_exec += 1;
-                    n
-                };
-                ctx.globals().set(name.as_str(), exec_val)?;
-                Some(name)
-            };
-
-            let key = (kind.clone(), product.clone());
-            let mut hs = state_r.lock().unwrap();
-            if !hs.rules.contains_key(&key) {
-                hs.rules.insert(
-                    key,
-                    Rule {
-                        target_kind: kind,
-                        product,
-                        action,
-                        requires_own_sources,
-                        dependency_product,
-                        exec_fn,
-                    },
-                );
-            }
-            Ok(())
-        },
-    )?;
-    globals.set("__host_rule", host_rule)?;
 
     // ------------------------------------------------------------------
     // __host_product(kind, name, fn)
@@ -2593,207 +2456,15 @@ fn named_cache_from_name(name: &str) -> rquickjs::Result<NamedCache> {
     })
 }
 
-fn parse_rule_action<'js>(action_value: Value<'js>) -> rquickjs::Result<ActionSpec> {
-    if action_value.is_string() {
-        return Ok(ActionSpec::legacy(action_value.get()?));
-    }
-
-    if !action_value.is_object() || action_value.is_array() {
-        return Err(action_spec_error(format!(
-            "rule action must be a string or object, got {}",
-            action_value.type_name()
-        )));
-    }
-
-    let action = action_value
-        .as_object()
-        .expect("checked object above")
-        .clone();
-    let argv = optional_string_array(&action, "argv", "action")?.unwrap_or_default();
-    let cwd = optional_string(&action, "cwd", "action")?;
-    let env = optional_string_map(&action, "env", "action")?.unwrap_or_default();
-    let platform = optional_string(&action, "platform", "action")?;
-    let inputs = optional_artifact_array(&action, "inputs")?.unwrap_or_default();
-    let outputs = optional_artifact_array(&action, "outputs")?.unwrap_or_default();
-    let display = optional_string(&action, "display", "action")?.unwrap_or_else(|| argv.join(" "));
-
-    let impure = optional_bool(&action, "impure", "action")?.unwrap_or(false);
-    let force_cache = optional_bool(&action, "force_cache", "action")?.unwrap_or(false);
-
-    Ok(ActionSpec {
-        argv,
-        cwd,
-        env,
-        platform,
-        inputs,
-        outputs,
-        display,
-        impure,
-        force_cache,
-    })
-}
-
-fn optional_bool<'js>(
-    object: &Object<'js>,
-    key: &'static str,
-    context: &'static str,
-) -> rquickjs::Result<Option<bool>> {
-    if !object.contains_key(key)? {
-        return Ok(None);
-    }
-    let value: Value = object.get(key)?;
-    if value.is_null() || value.is_undefined() {
-        return Ok(None);
-    }
-    if !value.is_bool() {
-        return Err(action_spec_error(format!(
-            "{context}.{key} must be a boolean, got {}",
-            value.type_name()
-        )));
-    }
-    value.get().map(Some)
-}
-
-fn optional_string<'js>(
-    object: &Object<'js>,
-    key: &'static str,
-    context: &'static str,
-) -> rquickjs::Result<Option<String>> {
-    if !object.contains_key(key)? {
-        return Ok(None);
-    }
-    let value: Value = object.get(key)?;
-    if value.is_null() || value.is_undefined() {
-        return Ok(None);
-    }
-    if !value.is_string() {
-        return Err(action_spec_error(format!(
-            "{context}.{key} must be a string, got {}",
-            value.type_name()
-        )));
-    }
-    value.get().map(Some)
-}
-
-fn optional_string_array<'js>(
-    object: &Object<'js>,
-    key: &'static str,
-    context: &'static str,
-) -> rquickjs::Result<Option<Vec<String>>> {
-    if !object.contains_key(key)? {
-        return Ok(None);
-    }
-    let value: Value = object.get(key)?;
-    if value.is_null() || value.is_undefined() {
-        return Ok(None);
-    }
-    if !value.is_array() {
-        return Err(action_spec_error(format!(
-            "{context}.{key} must be an array of strings, got {}",
-            value.type_name()
-        )));
-    }
-    let array: Array = value.get()?;
-    let mut strings = Vec::with_capacity(array.len());
-    for i in 0..array.len() {
-        let item: Value = array.get(i)?;
-        if !item.is_string() {
-            return Err(action_spec_error(format!(
-                "{context}.{key}[{i}] must be a string, got {}",
-                item.type_name()
-            )));
-        }
-        strings.push(item.get()?);
-    }
-    Ok(Some(strings))
-}
-
-fn optional_string_map<'js>(
-    object: &Object<'js>,
-    key: &'static str,
-    context: &'static str,
-) -> rquickjs::Result<Option<BTreeMap<String, String>>> {
-    if !object.contains_key(key)? {
-        return Ok(None);
-    }
-    let value: Value = object.get(key)?;
-    if value.is_null() || value.is_undefined() {
-        return Ok(None);
-    }
-    if !value.is_object() || value.is_array() {
-        return Err(action_spec_error(format!(
-            "{context}.{key} must be an object with string values, got {}",
-            value.type_name()
-        )));
-    }
-    let object = value.as_object().expect("checked object above");
-    let mut strings = BTreeMap::new();
-    for entry in object.own_props::<String, Value>(Filter::default()) {
-        let (field, value) = entry?;
-        if !value.is_string() {
-            return Err(action_spec_error(format!(
-                "{context}.{key}.{field} must be a string, got {}",
-                value.type_name()
-            )));
-        }
-        strings.insert(field, value.get()?);
-    }
-    Ok(Some(strings))
-}
-
-fn optional_artifact_array<'js>(
-    action: &Object<'js>,
-    key: &'static str,
-) -> rquickjs::Result<Option<Vec<ArtifactSpec>>> {
-    if !action.contains_key(key)? {
-        return Ok(None);
-    }
-    let value: Value = action.get(key)?;
-    if value.is_null() || value.is_undefined() {
-        return Ok(None);
-    }
-    if !value.is_array() {
-        return Err(action_spec_error(format!(
-            "action.{key} must be an array of artifact specs, got {}",
-            value.type_name()
-        )));
-    }
-    let array: Array = value.get()?;
-    let mut artifacts = Vec::with_capacity(array.len());
-    for i in 0..array.len() {
-        let item: Value = array.get(i)?;
-        if !item.is_object() || item.is_array() {
-            return Err(action_spec_error(format!(
-                "action.{key}[{i}] must be an object, got {}",
-                item.type_name()
-            )));
-        }
-        let object = item.as_object().expect("checked object above");
-        let kind = optional_string(object, "kind", "artifact")?
-            .ok_or_else(|| action_spec_error(format!("action.{key}[{i}].kind is required")))?;
-        if !matches!(kind.as_str(), "file" | "directory" | "manifest" | "value") {
-            return Err(action_spec_error(format!(
-                "action.{key}[{i}].kind must be file, directory, manifest, or value"
-            )));
-        }
-        artifacts.push(ArtifactSpec {
-            id: optional_string(object, "id", "artifact")?,
-            kind,
-            path: optional_string(object, "path", "artifact")?,
-            value: optional_string(object, "value", "artifact")?,
-        });
-    }
-    Ok(Some(artifacts))
-}
-
 fn action_spec_error(message: String) -> rquickjs::Error {
-    rquickjs::Error::new_from_js_message("value", "ActionSpec", message)
+    rquickjs::Error::new_from_js_message("value", "imp host API", message)
 }
 
 // ---------------------------------------------------------------------------
 // Planning
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 pub fn plan(workspace: &Workspace, goal: &str, selectors: &[String]) -> Result<Plan> {
     plan_inner(workspace, None, None, goal, selectors)
 }
@@ -2903,9 +2574,7 @@ fn select_roots<'a>(
             for target in matches {
                 let product = if let Some(p) = product_override {
                     let key = (target.kind.clone(), p.to_owned());
-                    if !workspace.rules.contains_key(&key)
-                        && !workspace.products.contains_key(&key)
-                    {
+                    if !workspace.products.contains_key(&key) {
                         bail!("{} has no product '{p}'", target.address);
                     }
                     p.to_owned()
@@ -2930,7 +2599,7 @@ fn goal_product_for_kind(workspace: &Workspace, goal: &Goal, kind: &str) -> Opti
         }
         GoalProductPolicy::Named(p) => {
             let key = (kind.to_owned(), p.clone());
-            if workspace.rules.contains_key(&key) || workspace.products.contains_key(&key) {
+            if workspace.products.contains_key(&key) {
                 Some(p.clone())
             } else {
                 None
@@ -2939,27 +2608,8 @@ fn goal_product_for_kind(workspace: &Workspace, goal: &Goal, kind: &str) -> Opti
     }
 }
 
-/// Infer the default product for a target kind from its registered rules.
-/// Convention: the first non-config product is the default; if the only
-/// rules produce config/source products, the kind has no build product.
+/// Infer the default product for a target kind from target attrs or registered products.
 fn default_product_for_kind<'a>(workspace: &'a Workspace, kind: &str) -> Option<&'a str> {
-    let mut non_sources: Option<&str> = Option::None;
-
-    for ((k, _), rule) in &workspace.rules {
-        if k != kind {
-            continue;
-        }
-        if !matches!(rule.product.as_str(), "sources" | "collection") {
-            non_sources = Some(rule.product.as_str());
-            break;
-        }
-    }
-
-    if non_sources.is_some() {
-        return non_sources;
-    }
-
-    // Also check registered products for a default.
     for ((k, p), _) in &workspace.products {
         if k == kind && !matches!(p.as_str(), "sources" | "collection") {
             return Some(p.as_str());
@@ -2983,12 +2633,6 @@ struct Planner<'a> {
 }
 
 impl Planner<'_> {
-    fn default_product(&self, target: &Target) -> Result<String> {
-        default_product_for_kind(self.workspace, &target.kind)
-            .map(|s| s.to_owned())
-            .ok_or_else(|| anyhow::anyhow!("{} has no build product", target.address))
-    }
-
     fn request(&mut self, target_address: &str, product: &str) -> Result<String> {
         let id = format!("{target_address}#{product}");
         if self.tasks.contains_key(&id) {
@@ -3004,67 +2648,11 @@ impl Planner<'_> {
         let kind = target.kind.clone();
         let js_id = target.js_id;
 
-        if let Some(rule) = self
-            .workspace
-            .rules
-            .get(&(kind.clone(), product.to_owned()))
-            .cloned()
-        {
-            let mut dependencies = Vec::new();
-            if rule.requires_own_sources && product != "sources" {
-                dependencies.push(self.request(&target.address, "sources")?);
-            }
-            for dep in &target.dependencies {
-                // A named-mode edge overrides the rule's dependencyProduct.
-                let dep_prod = match &dep.mode {
-                    DependencyMode::Named(mode) => Some(mode.clone()),
-                    DependencyMode::Auto => match &rule.dependency_product {
-                        DependencyProduct::None => None,
-                        DependencyProduct::Named(p) => Some(p.clone()),
-                        DependencyProduct::Default => {
-                            let dep_target = self
-                                .workspace
-                                .targets
-                                .get(&dep.address)
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!(
-                                        "{} depends on missing target {}",
-                                        target.address,
-                                        dep.address
-                                    )
-                                })?;
-                            Some(self.default_product(dep_target)?)
-                        }
-                    },
-                };
-                if let Some(prod) = dep_prod {
-                    dependencies.push(self.request(&dep.address, &prod)?);
-                }
-            }
-
-            let target = self.workspace.targets.get(target_address).unwrap();
-            let (action, inputs, outputs) = lower_action(&rule.action, target, &id);
-            self.tasks.insert(
-                id.clone(),
-                Task {
-                    id: id.clone(),
-                    target: target.address.clone(),
-                    product: product.to_owned(),
-                    fields: string_attrs(&target.attrs),
-                    inputs,
-                    outputs,
-                    action,
-                    exec_fn: rule.exec_fn.clone(),
-                    dependencies,
-                    js_id,
-                    is_product: false,
-                },
-            );
-        } else if let Some(exec_fn_name) = self
+        if self
             .workspace
             .products
             .get(&(kind, product.to_owned()))
-            .cloned()
+            .is_some()
         {
             let target = self.workspace.targets.get(target_address).unwrap();
             if let (Some(live), Some(workspace_root)) = (self.live, self.workspace_root) {
@@ -3101,10 +2689,8 @@ impl Planner<'_> {
                         force_cache: false,
                         sandbox: true,
                     },
-                    exec_fn: Some(exec_fn_name),
                     dependencies: Vec::new(),
                     js_id,
-                    is_product: true,
                 },
             );
         } else {
@@ -3175,10 +2761,8 @@ fn add_product_discovered_tasks(
                 force_cache: false,
                 sandbox: true,
             },
-            exec_fn: None,
             dependencies: Vec::new(),
             js_id: target.js_id,
-            is_product: false,
         });
     }
 
@@ -3251,10 +2835,8 @@ fn add_product_discovered_tasks(
                 inputs,
                 outputs,
                 action,
-                exec_fn: None,
                 dependencies,
                 js_id: target.js_id,
-                is_product: false,
             },
         );
         if let Some(owner_key) = owner_key {
@@ -3296,10 +2878,8 @@ fn add_product_discovered_tasks(
             force_cache: false,
             sandbox: true,
         },
-        exec_fn: None,
         dependencies: Vec::new(),
         js_id: target.js_id,
-        is_product: false,
     });
     Ok(task_id)
 }
@@ -3504,28 +3084,16 @@ pub fn execute_plan_with_progress(
 
 pub fn execute_plan_with_options(
     plan: &Plan,
-    live: Option<&LiveWorkspace>,
+    _live: Option<&LiveWorkspace>,
     workspace_root: &Path,
     options: ExecutionOptions,
     progress: Option<&mut prodash::tree::Item>,
 ) -> Result<ExecutionReport> {
     let ordered = ordered_tasks(plan)?;
 
-    if options.jobs > 1 {
-        for task in &ordered {
-            if task.exec_fn.is_some() {
-                bail!(
-                    "task {} uses an exec function; exec is not supported in parallel mode",
-                    task.id
-                );
-            }
-        }
-    }
-
     let executions = if options.jobs <= 1 {
         execute_ordered_tasks_sequentially(
             &ordered,
-            live,
             workspace_root,
             options.mode,
             &options.platform,
@@ -3540,7 +3108,6 @@ pub fn execute_plan_with_options(
 
 fn execute_ordered_tasks_sequentially(
     ordered: &[&Task],
-    live: Option<&LiveWorkspace>,
     workspace_root: &Path,
     mode: ExecutionMode,
     active_platform: &str,
@@ -3550,38 +3117,21 @@ fn execute_ordered_tasks_sequentially(
     let mut executions = Vec::with_capacity(ordered.len());
     let mut summaries = BTreeMap::new();
     let cancellation = AtomicBool::new(false);
-    // Values produced by exec functions, keyed by task id.
-    let mut exec_values: BTreeMap<String, String> = BTreeMap::new();
-
     for task in ordered {
         let mut task_progress = progress
             .as_deref_mut()
             .map(|progress| progress.add_child(format!("execute {}", task.id)));
 
-        let (execution, summary) = if let (Some(live), true) = (live, task.exec_fn.is_some()) {
-            let dep_values: Vec<String> = task
-                .dependencies
-                .iter()
-                .filter_map(|dep_id| exec_values.get(dep_id).cloned())
-                .collect();
-            let (execution, summary, value) =
-                execute_task_with_exec(task, live, workspace_root, &dep_values)?;
-            if let Some(v) = value {
-                exec_values.insert(task.id.clone(), v);
-            }
-            (execution, summary)
-        } else {
-            execute_one_task(
-                task,
-                workspace_root,
-                mode,
-                active_platform,
-                named_caches,
-                &summaries,
-                task_progress.as_mut(),
-                &cancellation,
-            )?
-        };
+        let (execution, summary) = execute_one_task(
+            task,
+            workspace_root,
+            mode,
+            active_platform,
+            named_caches,
+            &summaries,
+            task_progress.as_mut(),
+            &cancellation,
+        )?;
 
         summaries.insert(task.id.clone(), summary);
         executions.push(execution);
@@ -4911,20 +4461,20 @@ fn attr_str<'a>(attrs: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     attrs.get(key).and_then(|v| v.as_str())
 }
 
-fn string_attrs(attrs: &serde_json::Value) -> BTreeMap<String, String> {
-    attrs
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
-        .collect()
-}
-
 pub fn format_targets(targets: &[&Target], w: &mut String) -> std::fmt::Result {
     use std::fmt::Write;
     for target in targets {
         writeln!(w, "{} ({})", target.address, target.kind)?;
         if let Some(sources) = attr_str(&target.attrs, "sources") {
+            if !sources.is_empty() {
+                writeln!(w, "  sources: {sources}")?;
+            }
+        } else if let Some(sources) = target.attrs.get("sources").and_then(|value| value.as_array()) {
+            let sources = sources
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
             if !sources.is_empty() {
                 writeln!(w, "  sources: {sources}")?;
             }
@@ -5063,11 +4613,10 @@ fn format_dep_tree(
     Ok(())
 }
 
-pub fn format_rules(workspace: &Workspace, w: &mut String) -> std::fmt::Result {
+pub fn format_products(workspace: &Workspace, w: &mut String) -> std::fmt::Result {
     use std::fmt::Write;
 
-    // Infer known kinds from registered rules.
-    let kinds: BTreeSet<&str> = workspace.rules.keys().map(|(k, _)| k.as_str()).collect();
+    let kinds: BTreeSet<&str> = workspace.products.keys().map(|(k, _)| k.as_str()).collect();
 
     writeln!(w, "Target Kinds:")?;
     if kinds.is_empty() {
@@ -5079,29 +4628,17 @@ pub fn format_rules(workspace: &Workspace, w: &mut String) -> std::fmt::Result {
         }
     }
     writeln!(w)?;
-    writeln!(w, "Rules:")?;
-    if workspace.rules.is_empty() {
+    writeln!(w, "Products:")?;
+    if workspace.products.is_empty() {
         writeln!(w, "  (none)")?;
     } else {
         let mut current_kind: Option<&str> = Option::None;
-        for ((kind, _), rule) in &workspace.rules {
+        for ((kind, product), _) in &workspace.products {
             if current_kind != Some(kind.as_str()) {
                 current_kind = Some(kind.as_str());
                 writeln!(w, "  {kind}:")?;
             }
-            let dep_prod = match &rule.dependency_product {
-                DependencyProduct::None => "none".to_owned(),
-                DependencyProduct::Default => "default".to_owned(),
-                DependencyProduct::Named(p) => format!("\"{p}\""),
-            };
-            writeln!(w, "    - {}:", rule.product)?;
-            writeln!(w, "        action: {}", rule.action.display)?;
-            writeln!(
-                w,
-                "        requires own sources: {}",
-                rule.requires_own_sources
-            )?;
-            writeln!(w, "        dependency product: {dep_prod}")?;
+            writeln!(w, "    - {product}")?;
         }
     }
     Ok(())
@@ -5132,7 +4669,7 @@ pub fn introspect_product(
         .get(target_addr)
         .ok_or_else(|| anyhow::anyhow!("no target '{target_addr}' in workspace"))?;
 
-    let exec_fn_name = live
+    let product_fn_name = live
         .workspace
         .products
         .get(&(target.kind.clone(), product_name.to_owned()))
@@ -5159,8 +4696,8 @@ pub fn introspect_product(
             let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
             let handle: Object = resolve_fn.call((js_id,))?;
 
-            let exec_fn: Function = ctx.globals().get(exec_fn_name.as_str())?;
-            let result: MaybePromise = exec_fn
+            let product_fn: Function = ctx.globals().get(product_fn_name.as_str())?;
+            let result: MaybePromise = product_fn
                 .call((handle,))
                 .catch(&ctx)
                 .map_err(|e| rquickjs::Error::new_loading_message("introspect", format!("{e}")))?;
@@ -5460,92 +4997,6 @@ fn record_process_line(
     }
 }
 
-fn lower_action(
-    spec: &ActionSpec,
-    target: &Target,
-    task_id: &str,
-) -> (Action, Vec<Artifact>, Vec<Artifact>) {
-    let inputs = lower_artifacts(&spec.inputs, target, task_id, "input", None);
-    let outputs = lower_artifacts(&spec.outputs, target, task_id, "output", Some(task_id));
-    let action = Action {
-        argv: spec
-            .argv
-            .iter()
-            .map(|value| expand_template(value, target))
-            .collect(),
-        cwd: spec
-            .cwd
-            .as_deref()
-            .map(|value| expand_template(value, target)),
-        env: spec
-            .env
-            .iter()
-            .map(|(key, value)| (key.clone(), expand_template(value, target)))
-            .collect(),
-        platform: spec
-            .platform
-            .as_deref()
-            .map(|value| expand_template(value, target)),
-        inputs: inputs.iter().map(|artifact| artifact.id.clone()).collect(),
-        outputs: outputs.iter().map(|artifact| artifact.id.clone()).collect(),
-        tools: Vec::new(),
-        display: expand_template(&spec.display, target),
-        impure: spec.impure,
-        force_cache: spec.force_cache,
-        sandbox: true,
-    };
-    (action, inputs, outputs)
-}
-
-fn lower_artifacts(
-    specs: &[ArtifactSpec],
-    target: &Target,
-    task_id: &str,
-    role: &str,
-    producer: Option<&str>,
-) -> Vec<Artifact> {
-    specs
-        .iter()
-        .enumerate()
-        .map(|(i, spec)| Artifact {
-            id: spec
-                .id
-                .as_deref()
-                .map(|value| expand_template(value, target))
-                .unwrap_or_else(|| format!("{task_id}:{role}{i}")),
-            kind: spec.kind.clone(),
-            path: spec
-                .path
-                .as_deref()
-                .map(|value| expand_template(value, target)),
-            value: spec
-                .value
-                .as_deref()
-                .map(|value| expand_template(value, target)),
-            producer: producer.map(str::to_owned),
-        })
-        .collect()
-}
-
-fn expand_template(template: &str, target: &Target) -> String {
-    let get = |key: &str| attr_str(&target.attrs, key).unwrap_or("").to_owned();
-    let mut expanded = template
-        .replace("{address}", &target.address)
-        .replace("{sources}", &get("sources"))
-        .replace("{entrypoint}", &get("entrypoint"))
-        .replace("{name}", &get("name"))
-        .replace("{path}", &get("path"))
-        .replace("{version}", &get("version"));
-    if let Some(obj) = target.attrs.as_object() {
-        for (k, v) in obj {
-            if let Some(s) = v.as_str() {
-                expanded = expanded.replace(&format!("{{{k}}}"), s);
-            }
-        }
-    }
-    expanded
-}
-
 fn dot_escape(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -5592,139 +5043,6 @@ pub struct ExecToolSpec {
 
 /// Build a JS `ctx` object for `exec(target, ctx)` functions.
 ///
-/// The returned object provides:
-/// * `ctx.platform` — `{ os, arch }`
-/// * `ctx.run(opts)` — cached subprocess execution
-/// * `ctx.output(value)` — records a string value produced by this exec task
-/// * `ctx.tool(spec)` — resolves a named-cache-backed tool descriptor
-/// * `ctx.inSandbox(opts)` — cached subprocess execution with tool PATH setup
-pub(super) fn build_exec_ctx<'js>(
-    ctx: Ctx<'js>,
-    workspace_root: &Path,
-    output_cell: Arc<Mutex<Option<String>>>,
-) -> rquickjs::Result<Object<'js>> {
-    let obj = Object::new(ctx.clone())?;
-
-    // output method — records a string value produced by this exec task
-    let output_fn = Function::new(
-        ctx.clone(),
-        move |value: String| -> rquickjs::Result<()> {
-            *output_cell.lock().unwrap() = Some(value);
-            Ok(())
-        },
-    )?;
-    obj.set("output", output_fn)?;
-
-    // platform property
-    let (os, arch) = toolchain::host_detect_platform()
-        .map_err(|e| rquickjs::Error::new_loading_message("platform", format!("{e:#}")))?;
-    let plat = Object::new(ctx.clone())?;
-    plat.set("os", &*os)?;
-    plat.set("arch", &*arch)?;
-    obj.set("platform", plat)?;
-
-    // tool method
-    let tool_workspace = workspace_root.to_owned();
-    let tool_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'js>, spec: Object<'js>| -> rquickjs::Result<Object<'js>> {
-            let name: String = spec.get("name")?;
-            let cache: String = spec.get("cache")?;
-            let key: String = spec.get("key")?;
-            let bin_dirs: Option<Vec<String>> = spec.get("binDirs")?;
-            let bin_dirs = bin_dirs.unwrap_or_else(|| vec!["bin".to_owned()]);
-            let path = named_cache_key_path(&tool_workspace, &cache, &key)
-                .map_err(|e| rquickjs::Error::new_loading_message("tool", format!("{e:#}")))?;
-            if !path.is_dir() {
-                return Err(rquickjs::Error::new_loading_message(
-                    "tool",
-                    format!(
-                        "tool {name} is not installed in named cache {cache}/{key} ({})",
-                        path.display()
-                    ),
-                ));
-            }
-
-            let tool = Object::new(ctx.clone())?;
-            tool.set("kind", "tool")?;
-            tool.set("name", name)?;
-            tool.set("cache", cache)?;
-            tool.set("key", key)?;
-            tool.set("path", path.to_string_lossy().as_ref())?;
-            let dirs = Array::new(ctx)?;
-            for (i, dir) in bin_dirs.iter().enumerate() {
-                dirs.set(i, dir.as_str())?;
-            }
-            tool.set("binDirs", dirs)?;
-            Ok(tool)
-        },
-    )?;
-    obj.set("tool", tool_fn)?;
-
-    // run/inSandbox method
-    let wr = workspace_root.to_owned();
-    let run_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'js>, opts: Object<'js>| -> rquickjs::Result<Object<'js>> {
-            let argv: Vec<String> = opts.get("argv")?;
-            let display: Option<String> = opts.get("display")?;
-            let display = display.unwrap_or_else(|| argv.join(" "));
-            let env_obj: Option<Object<'js>> = opts.get("env")?;
-            let mut env = BTreeMap::new();
-            if let Some(e) = env_obj {
-                for entry in e.own_props::<String, String>(Filter::default()) {
-                    let (k, v) = entry?;
-                    env.insert(k, v);
-                }
-            }
-            let inputs = parse_io_specs(
-                opts.get::<_, Option<Vec<Object>>>("inputs")?
-                    .unwrap_or_default(),
-            )?;
-            let outputs = parse_io_specs(
-                opts.get::<_, Option<Vec<Object>>>("outputs")?
-                    .unwrap_or_default(),
-            )?;
-            let tools = parse_tool_specs(
-                opts.get::<_, Option<Vec<Object>>>("tools")?
-                    .unwrap_or_default(),
-                &wr,
-            )?;
-            let impure: Option<bool> = opts.get("impure")?;
-            let impure = impure.unwrap_or(false);
-            let force_cache: Option<bool> = opts.get("forceCache")?;
-            let force_cache = force_cache.unwrap_or(false);
-            let sandbox: Option<bool> = opts.get("sandbox")?;
-            let sandbox = sandbox.unwrap_or(true);
-
-            let run_opts = ExecRunOpts {
-                argv,
-                display,
-                env,
-                inputs,
-                outputs,
-                tools,
-                impure,
-                force_cache,
-                sandbox,
-            };
-
-            let result = exec_run_inner(&wr, run_opts)
-                .map_err(|e| rquickjs::Error::new_loading_message("run", format!("{e:#}")))?;
-
-            let obj = Object::new(ctx)?;
-            obj.set("stdout", &result.stdout)?;
-            obj.set("stderr", &result.stderr)?;
-            obj.set("exitCode", result.exit_code)?;
-            Ok(obj)
-        },
-    )?;
-    obj.set("run", run_fn.clone())?;
-    obj.set("inSandbox", run_fn)?;
-
-    Ok(obj)
-}
-
 fn parse_io_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Vec<ExecIoSpec>> {
     let mut specs = Vec::new();
     for val in vals {
@@ -6164,109 +5482,6 @@ fn direct_tool_path_entries(tools: &[ExecToolSpec]) -> Result<Vec<PathBuf>> {
     Ok(path_entries)
 }
 
-/// Build a JS `target` object for an `exec(target, ctx)` call.
-fn build_exec_target<'js>(
-    ctx: Ctx<'js>,
-    task: &Task,
-    dep_values: &[String],
-) -> rquickjs::Result<Object<'js>> {
-    if task.is_product {
-        // Product functions receive the enriched handle registered during workspace loading.
-        let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
-        let handle: Object = resolve_fn.call((task.js_id,))?;
-        return Ok(handle);
-    }
-    let obj = Object::new(ctx.clone())?;
-    obj.set("id", task.id.as_str())?;
-    obj.set("target", task.target.as_str())?;
-    obj.set("product", task.product.as_str())?;
-    let fields = Object::new(ctx.clone())?;
-    for (k, v) in &task.fields {
-        fields.set(k.as_str(), v.as_str())?;
-    }
-    obj.set("fields", fields)?;
-    let dep_outputs = Array::new(ctx.clone())?;
-    for (i, v) in dep_values.iter().enumerate() {
-        dep_outputs.set(i, v.as_str())?;
-    }
-    obj.set("depOutputs", dep_outputs)?;
-    let handle = Object::new(ctx)?;
-    handle.set("__imp", true)?;
-    handle.set("__id", task.js_id)?;
-    obj.set("handle", handle)?;
-    Ok(obj)
-}
-
-/// Execute a task whose rule has an `exec` function.
-///
-/// The exec function is looked up from the QuickJS globals (registered during
-/// workspace loading) and called with a `target` and `ctx` JS object.
-/// Returns `(execution, summary, output_value)` where `output_value` is the
-/// string produced by `ctx.output(...)`, if any.
-fn execute_task_with_exec(
-    task: &Task,
-    live: &LiveWorkspace,
-    workspace_root: &Path,
-    dep_values: &[String],
-) -> Result<(TaskExecution, TaskCacheSummary, Option<String>)> {
-    let exec_fn_name = task
-        .exec_fn
-        .as_deref()
-        .expect("execute_task_with_exec called on task without exec_fn");
-
-    let output_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-
-    // Make the workspace root accessible to __host_run, __host_glob, etc.
-    *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
-
-    let ctx_guard = live.ctx.lock().unwrap();
-    let eval_result = ctx_guard
-        .with(|ctx| -> rquickjs::Result<()> {
-            let exec_fn: Function = ctx.globals().get(exec_fn_name)?;
-            let target_obj = build_exec_target(ctx.clone(), task, dep_values)?;
-            let result: MaybePromise = if task.is_product {
-                // Product functions take only the target handle; no exec ctx needed.
-                exec_fn
-                    .call((target_obj,))
-                    .catch(&ctx)
-                    .map_err(|e| rquickjs::Error::new_loading_message("exec", format!("{e}")))?
-            } else {
-                let ctx_obj =
-                    build_exec_ctx(ctx.clone(), workspace_root, Arc::clone(&output_cell))?;
-                exec_fn
-                    .call((target_obj, ctx_obj))
-                    .catch(&ctx)
-                    .map_err(|e| rquickjs::Error::new_loading_message("exec", format!("{e}")))?
-            };
-            result
-                .finish::<()>()
-                .catch(&ctx)
-                .map_err(|e| rquickjs::Error::new_loading_message("exec", format!("{e}")))?;
-            Ok(())
-        })
-        .map_err(|e| {
-            anyhow::anyhow!("exec function '{exec_fn_name}' failed for {}: {e}", task.id)
-        });
-    drop(ctx_guard);
-    *live.exec_root.lock().unwrap() = None;
-    eval_result?;
-
-    let output_value = output_cell.lock().unwrap().take();
-    let task_key = digest_bytes(task.id.as_bytes());
-    Ok((
-        TaskExecution {
-            task_id: task.id.clone(),
-            status: TaskExecutionStatus::Ran,
-            command: task.action.argv.clone(),
-        },
-        TaskCacheSummary {
-            task_id: task.id.clone(),
-            task_key,
-        },
-        output_value,
-    ))
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -6279,47 +5494,59 @@ mod tests {
     // ---- Common rule JS strings ----------------------------------------
 
     const CPP_RULES_JS: &str = r#"
-import { target, rule } from "imp:core";
+import { target, glob, memo, product, run } from "imp:core";
 
-function snapshotSourcesExec(target, ctx) {}
-function cmakeBuildExec(target, ctx) {}
+export const sources = memo(async function sources(handle) {
+    return glob({ root: ".", include: handle.attrs.sources || [] });
+});
 
-rule({ kind: "cpp-sources",  product: "sources",             action: "snapshot {sources}",        exec: snapshotSourcesExec, requiresOwnSources: false, dependencyProduct: null });
-rule({ kind: "cmake-lib",    product: "native-link-library", action: "cmake --build {entrypoint}", exec: cmakeBuildExec, requiresOwnSources: false, dependencyProduct: "sources" });
+export const native_link_library = product("cmake-lib", "native-link-library", async function native_link_library(handle) {
+    const inputs = [];
+    for (const dep of handle.attrs.deps || []) {
+        if (dep.kind === "cpp-sources") inputs.push(await sources(dep));
+    }
+    return run({ argv: ["sh", "-c", "true"], inputs, display: `cmake --build ${handle.attrs.entrypoint}`, impure: true });
+});
 
 export function cppSources({ srcs }) {
-    return target({ kind: "cpp-sources", attrs: { sources: srcs.join(",") } });
+    return target({ kind: "cpp-sources", attrs: { sources: srcs } });
 }
 export function cmakeLib({ entrypoint, deps = [] }) {
-    return target({ kind: "cmake-lib", attrs: { entrypoint }, deps });
+    return target({ kind: "cmake-lib", attrs: { entrypoint, deps } });
 }
 "#;
 
     const ODIN_RULES_JS: &str = r#"
-import { target, rule } from "imp:core";
+import { target, glob, memo, product, run } from "imp:core";
 
-function snapshotSourcesExec(target, ctx) {}
-function odinBuildExec(target, ctx) {}
+export const sources = memo(async function sources(handle) {
+    return glob({ root: ".", include: handle.attrs.sources || [] });
+});
 
-rule({ kind: "odin-package", product: "sources",      action: "snapshot {sources}", exec: snapshotSourcesExec, requiresOwnSources: false, dependencyProduct: null });
-rule({ kind: "odin-package", product: "odin-package", action: "odin build",         exec: odinBuildExec, requiresOwnSources: true,  dependencyProduct: "default" });
+export const odin_package = product("odin-package", "odin-package", async function odin_package(handle) {
+    const srcs = await sources(handle);
+    return run({ argv: ["sh", "-c", "true"], inputs: [srcs], display: "odin build", impure: true });
+});
 
 export function odinPackage({ srcs, deps = [] }) {
-    return target({ kind: "odin-package", attrs: { sources: srcs.join(",") }, deps });
+    return target({ kind: "odin-package", attrs: { sources: srcs, deps } });
 }
 "#;
 
     const ASSET_RULES_JS: &str = r#"
-import { target, rule } from "imp:core";
+import { target, glob, memo, product, run } from "imp:core";
 
-function snapshotSourcesExec(target, ctx) {}
-function bundleExec(target, ctx) {}
+export const sources = memo(async function sources(handle) {
+    return glob({ root: ".", include: handle.attrs.sources || [] });
+});
 
-rule({ kind: "asset", product: "sources", action: "snapshot {sources}", exec: snapshotSourcesExec, requiresOwnSources: false, dependencyProduct: null });
-rule({ kind: "asset", product: "bundle",  action: "bundle {sources}",   exec: bundleExec, requiresOwnSources: true,  dependencyProduct: null });
+export const bundle = product("asset", "bundle", async function bundle(handle) {
+    const srcs = await sources(handle);
+    return run({ argv: ["sh", "-c", "true"], inputs: [srcs], display: `bundle ${handle.attrs.sources.join(",")}`, impure: true });
+});
 
 export function asset({ srcs }) {
-    return target({ kind: "asset", attrs: { sources: srcs.join(",") } });
+    return target({ kind: "asset", attrs: { sources: srcs } });
 }
 "#;
 
@@ -6370,7 +5597,7 @@ export const cmake = cmakeLib({ entrypoint: "CMakeLists.txt", deps: [joltphysics
 import { odinPackage } from "//rules/odin";
 import { cmake } from "//src/cpp/joltphysics";
 
-export const jodin = odinPackage({ srcs: ["*.odin"], deps: [cmake] });
+export const jodin = odinPackage({ srcs: [".*\\.odin$"], deps: [cmake] });
 "#,
         )
         .unwrap();
@@ -6383,7 +5610,7 @@ export const jodin = odinPackage({ srcs: ["*.odin"], deps: [cmake] });
             r#"
 import { asset } from "//rules/asset";
 
-export const ui = asset({ srcs: ["**/*.png"] });
+export const ui = asset({ srcs: [".*\\.png$"] });
 "#,
         )
         .unwrap();
@@ -6436,11 +5663,9 @@ export const ui = asset({ srcs: ["**/*.png"] });
                 force_cache: false,
                 sandbox: true,
             },
-            exec_fn: None,
             outputs,
             dependencies: deps.iter().map(|dep| (*dep).to_owned()).collect(),
             js_id: 0,
-            is_product: false,
         }
     }
 
@@ -6462,12 +5687,12 @@ export const ui = asset({ srcs: ["**/*.png"] });
         let root = fixture();
         let workspace = load_workspace(root.path()).unwrap();
 
-        // Rules registered by workspace.js imports.
+        // Products registered by workspace.js imports.
         assert!(workspace
-            .rules
+            .products
             .contains_key(&("odin-package".into(), "odin-package".into())));
         assert!(workspace
-            .rules
+            .products
             .contains_key(&("asset".into(), "bundle".into())));
 
         // Targets declared by BUILD.js files.
@@ -6497,10 +5722,12 @@ export const actionName = "external build {address}";
         write_file(
             &external_rules.join("external/index.js"),
             r#"
-import { target, rule } from "imp:core";
+import { target, product, run } from "imp:core";
 import { actionName } from "//rules/external/helper";
 
-rule({ kind: "external", product: "external-product", action: actionName, requiresOwnSources: false, dependencyProduct: null });
+export const external_product = product("external", "external-product", async function external_product(handle) {
+    return run({ argv: ["sh", "-c", "true"], display: actionName.replace("{address}", handle.label.address), impure: true });
+});
 
 export function externalThing(name) {
     return target({ kind: "external", attrs: { name } });
@@ -6531,13 +5758,16 @@ export const app = externalThing("app");
 
         let workspace = load_workspace(p).unwrap();
         assert!(workspace
-            .rules
+            .products
             .contains_key(&("external".into(), "external-product".into())));
         assert_eq!(workspace.targets["//:app"].attrs["name"].as_str().unwrap(), "app");
 
-        let plan = plan(&workspace, "build", &["app".into()]).unwrap();
-        assert_eq!(plan.roots, ["//:app#external-product"]);
-        assert_eq!(plan.tasks[0].action.display, "external build //:app");
+        let plan = plan_live(&workspace, p, "build", &["app".into()]).unwrap();
+        assert!(plan.roots[0].starts_with("//:app#external-product:memo"));
+        assert!(plan
+            .tasks
+            .iter()
+            .any(|task| task.action.display == "external build //:app"));
     }
 
     #[test]
@@ -6591,23 +5821,17 @@ export const app = odinPackage({
     fn build_goal_plans_transitive_products() {
         let root = fixture();
         let workspace = load_workspace(root.path()).unwrap();
-        let plan = plan(&workspace, "build", &["//library/jodin:jodin".into()]).unwrap();
+        let plan = plan_live(&workspace, root.path(), "build", &["//library/jodin:jodin".into()]).unwrap();
 
-        assert_eq!(plan.roots, ["//library/jodin:jodin#odin-package"]);
-        assert_eq!(plan.tasks.len(), 4);
-
-        let jodin = plan
+        assert!(plan.roots[0].starts_with("//library/jodin:jodin#odin-package:memo"));
+        assert!(plan
             .tasks
             .iter()
-            .find(|t| t.id == "//library/jodin:jodin#odin-package")
-            .unwrap();
-        assert_eq!(
-            jodin.dependencies,
-            [
-                "//library/jodin:jodin#sources",
-                "//src/cpp/joltphysics:cmake#native-link-library",
-            ]
-        );
+            .any(|task| task.action.display == "odin build"));
+        assert!(plan
+            .tasks
+            .iter()
+            .any(|task| task.action.display.contains("sources(")));
     }
 
     #[test]
@@ -6624,19 +5848,28 @@ import "//rules/odin";
         write_file(
             &p.join("rules/odin.js"),
             r#"
-import { target, rule } from "imp:core";
+import { target, glob, memo, product, run } from "imp:core";
 
-rule({ kind: "odin-collection", product: "collection", action: "odin collection {name}={path}", requiresOwnSources: false, dependencyProduct: null });
-rule({ kind: "odin-package", product: "sources", action: "snapshot {sources}", requiresOwnSources: false, dependencyProduct: null });
-rule({ kind: "odin-package", product: "odin-package", action: "odin build", requiresOwnSources: true, dependencyProduct: "default" });
+export const sources = memo(async function sources(handle) {
+    return glob({ root: ".", include: handle.attrs.sources || [] });
+});
+
+export const collection_flags = memo(async function collection_flags(handle) {
+    return (handle.attrs.collections || []).map(collection => `-collection:${collection.attrs.name}=${collection.attrs.path}`);
+});
+
+export const odin_package = product("odin-package", "odin-package", async function odin_package(handle) {
+    const srcs = await sources(handle);
+    const flags = await collection_flags(handle);
+    return run({ argv: ["sh", "-c", "true"], inputs: [srcs], display: `odin build ${flags.join(" ")}`, impure: true });
+});
 
 export function odinCollection({ name, path }) {
     return target({ kind: "odin-collection", attrs: { name, path } });
 }
 
 export function odinPackage({ srcs, collections = [] }) {
-    const collectionDeps = collections.map((collection) => ({ target: collection, mode: "collection" }));
-    return target({ kind: "odin-package", attrs: { sources: srcs.join(",") }, deps: collectionDeps });
+    return target({ kind: "odin-package", attrs: { sources: srcs, collections } });
 }
 "#,
         );
@@ -6646,54 +5879,39 @@ export function odinPackage({ srcs, collections = [] }) {
 import { odinCollection, odinPackage } from "//rules/odin";
 
 export const lib = odinCollection({ name: "lib", path: "library" });
-export const pkg = odinPackage({ srcs: ["*.odin"], collections: [lib] });
+export const pkg = odinPackage({ srcs: [".*\\.odin$"], collections: [lib] });
 "#,
         );
 
         let workspace = load_workspace(p).unwrap();
-        let pkg_plan = plan(&workspace, "build", &["pkg".into()]).unwrap();
-
-        let collection = pkg_plan
+        let pkg_plan = plan_live(&workspace, p, "build", &["pkg".into()]).unwrap();
+        assert!(pkg_plan
             .tasks
             .iter()
-            .find(|task| task.id == "//:lib#collection")
-            .unwrap();
-        assert_eq!(collection.dependencies, Vec::<String>::new());
-        assert_eq!(collection.action.display, "odin collection lib=library");
+            .any(|task| task.action.display.contains("-collection:lib=library")));
 
-        let package = pkg_plan
-            .tasks
-            .iter()
-            .find(|task| task.id == "//:pkg#odin-package")
-            .unwrap();
-        assert_eq!(
-            package.dependencies,
-            ["//:pkg#sources", "//:lib#collection"]
-        );
-
-        let all = plan(&workspace, "build", &[]).unwrap();
-        assert_eq!(all.roots, ["//:pkg#odin-package"]);
+        let all = plan_live(&workspace, p, "build", &[]).unwrap();
+        assert!(all.roots.iter().any(|root| root.starts_with("//:pkg#odin-package:memo")));
     }
 
     #[test]
-    fn new_target_kinds_and_rules_need_no_rust_changes() {
+    fn new_target_kinds_and_products_need_no_rust_changes() {
         let root = fixture();
         let workspace = load_workspace(root.path()).unwrap();
-        let plan = plan(&workspace, "build", &["//assets:ui".into()]).unwrap();
+        let plan = plan_live(&workspace, root.path(), "build", &["//assets:ui".into()]).unwrap();
 
-        assert_eq!(plan.roots, ["//assets:ui#bundle"]);
-        assert_eq!(plan.tasks.len(), 2);
+        assert!(plan.roots[0].starts_with("//assets:ui#bundle:memo"));
         assert!(plan
             .tasks
             .iter()
-            .any(|t| t.action.display.contains("**/*.png")));
+            .any(|t| t.action.display.contains(r#".*\.png$"#)));
     }
 
     #[test]
-    fn legacy_action_plans_round_trip_through_json() {
+    fn product_plans_round_trip_through_json() {
         let root = fixture();
         let workspace = load_workspace(root.path()).unwrap();
-        let plan = plan(&workspace, "build", &["jodin".into()]).unwrap();
+        let plan = plan_live(&workspace, root.path(), "build", &["jodin".into()]).unwrap();
 
         let encoded = serde_json::to_string_pretty(&plan).unwrap();
         assert!(encoded.contains("\"goal\": \"build\""));
@@ -6717,20 +5935,16 @@ import "//rules/generator";
         write_file(
             &p.join("rules/generator.js"),
             r#"
-import { target, rule } from "imp:core";
+import { target, output, product, run } from "imp:core";
 
-rule({
-  kind: "generator",
-  product: "generated",
-  action: {
-    argv: ["gen-tool", "{sources}"],
-    cwd: "{entrypoint}",
-    env: { TARGET: "{address}" },
-    platform: "local",
-    inputs: [{ kind: "file", path: "{sources}" }],
-    outputs: [{ id: "{address}#out", kind: "file", path: "build/{entrypoint}.out" }],
-    display: "generate {sources}"
-  }
+export const generated = product("generator", "generated", async function generated(handle) {
+  return run({
+    argv: ["gen-tool", handle.attrs.sources],
+    env: { TARGET: handle.label.address },
+    inputs: [{ kind: "file", path: handle.attrs.sources }],
+    outputs: [output(`build/${handle.attrs.entrypoint}.out`)],
+    display: `generate ${handle.attrs.sources}`,
+  });
 });
 
 export function generator({ srcs, entrypoint }) {
@@ -6748,30 +5962,23 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         );
 
         let workspace = load_workspace(p).unwrap();
-        let plan = plan(&workspace, "build", &["schema".into()]).unwrap();
+        let plan = plan_live(&workspace, p, "build", &["schema".into()]).unwrap();
         let task = plan
             .tasks
             .iter()
-            .find(|task| task.id == "//:schema#generated")
+            .find(|task| task.action.display == "generate schema.idl")
             .unwrap();
 
         assert_eq!(task.action.argv, ["gen-tool", "schema.idl"]);
-        assert_eq!(task.action.cwd.as_deref(), Some("schemas"));
         assert_eq!(task.action.env["TARGET"], "//:schema");
-        assert_eq!(task.action.platform.as_deref(), Some("local"));
         assert_eq!(task.action.display, "generate schema.idl");
-        assert_eq!(task.inputs[0].id, "//:schema#generated:input0");
         assert_eq!(task.inputs[0].kind, "file");
         assert_eq!(task.inputs[0].path.as_deref(), Some("schema.idl"));
         assert_eq!(task.inputs[0].producer, None);
-        assert_eq!(task.outputs[0].id, "//:schema#out");
         assert_eq!(task.outputs[0].path.as_deref(), Some("build/schemas.out"));
-        assert_eq!(
-            task.outputs[0].producer.as_deref(),
-            Some("//:schema#generated")
-        );
-        assert_eq!(task.action.inputs, ["//:schema#generated:input0"]);
-        assert_eq!(task.action.outputs, ["//:schema#out"]);
+        assert_eq!(task.outputs[0].producer.as_deref(), Some(task.id.as_str()));
+        assert_eq!(task.action.inputs, [task.inputs[0].id.clone()]);
+        assert_eq!(task.action.outputs, [task.outputs[0].id.clone()]);
     }
 
     #[test]
@@ -7339,87 +6546,9 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         );
     }
 
-    #[test]
-    fn exec_ctx_output_flows_to_downstream_dep_outputs() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-
-        write_file(
-            &p.join(WORKSPACE_FILE),
-            r#"import "//rules/producer";
-import "//rules/consumer";"#,
-        );
-        write_file(
-            &p.join("rules/producer.js"),
-            r#"
-import { target, rule } from "imp:core";
-rule({
-    kind: "producer",
-    product: "value",
-    action: "produce",
-    exec: (target, ctx) => { ctx.output("hello-from-producer"); },
-    requiresOwnSources: false,
-    dependencyProduct: null,
-});
-export function producer() { return target({ kind: "producer" }); }
-"#,
-        );
-        write_file(
-            &p.join("rules/consumer.js"),
-            r#"
-import { target, rule } from "imp:core";
-rule({
-    kind: "consumer",
-    product: "result",
-    action: "consume",
-    exec: (target, ctx) => {
-        if (target.depOutputs.length !== 1) throw new Error("expected 1 dep output");
-        if (target.depOutputs[0] !== "hello-from-producer") throw new Error("wrong value: " + target.depOutputs[0]);
-        ctx.output("hello-from-consumer");
-    },
-    requiresOwnSources: false,
-    dependencyProduct: "value",
-});
-export function consumer(dep) { return target({ kind: "consumer", deps: [dep] }); }
-"#,
-        );
-        write_file(
-            &p.join(BUILD_FILE),
-            r#"
-import { producer } from "//rules/producer";
-import { consumer } from "//rules/consumer";
-export const p = producer();
-export const c = consumer(p);
-"#,
-        );
-
-        let live = load_workspace(p).unwrap();
-        let plan = plan(&live, "build", &["c".into()]).unwrap();
-        assert_eq!(plan.roots, ["//:c#result"]);
-
-        let ordered = ordered_tasks(&plan).unwrap();
-        let mut exec_values: BTreeMap<String, String> = BTreeMap::new();
-        for task in &ordered {
-            if task.exec_fn.is_some() {
-                let dep_values: Vec<String> = task
-                    .dependencies
-                    .iter()
-                    .filter_map(|id| exec_values.get(id).cloned())
-                    .collect();
-                let (_, _, value) =
-                    execute_task_with_exec(task, &live, p, &dep_values).unwrap();
-                if let Some(v) = value {
-                    exec_values.insert(task.id.clone(), v);
-                }
-            }
-        }
-
-        assert_eq!(exec_values.get("//:c#result").map(|s| s.as_str()), Some("hello-from-consumer"));
-    }
-
     #[cfg(unix)]
     #[test]
-    fn exec_context_materializes_named_cache_tools_on_path() {
+    fn product_run_materializes_named_cache_tools_on_path() {
         use std::os::unix::fs::PermissionsExt;
 
         let root = tempfile::tempdir().unwrap();
@@ -7442,33 +6571,22 @@ import "//rules/tool";
         write_file(
             &p.join("rules/tool.js"),
             r#"
-import { namedCache, rule, target } from "imp:core";
+import { namedCache, output, product, run, target } from "imp:core";
 
 namedCache({ name: "test-tools" });
 
-async function buildExec(target, ctx) {
-    const tool = await ctx.tool({
-        name: "hello",
-        cache: "test-tools",
-        key: "v1/linux-x86_64",
-        binDirs: ["bin"],
-    });
-    const result = await ctx.inSandbox({
+export const file = product("tool-user", "file", async function file(handle) {
+    return run({
         argv: ["hello-tool"],
-        tools: [tool],
-        outputs: [{ kind: "file", path: "out.txt" }],
+        tools: [{
+            name: "hello",
+            cache: "test-tools",
+            key: "v1/linux-x86_64",
+            binDirs: ["bin"],
+        }],
+        outputs: [output("out.txt")],
         display: "hello tool",
     });
-    if (result.exitCode !== 0) {
-        throw new Error(result.stderr);
-    }
-}
-
-rule({
-    kind: "tool-user",
-    product: "file",
-    action: "hello tool",
-    exec: buildExec,
 });
 
 export function toolUser() {
@@ -7485,7 +6603,7 @@ export const generated = toolUser();
         );
 
         let live = load_workspace(p).unwrap();
-        let plan = plan(&live, "build", &["generated".to_owned()]).unwrap();
+        let plan = plan_live(&live, p, "build", &["generated".to_owned()]).unwrap();
         let report = execute_plan_with_options(
             &plan,
             Some(&live),
@@ -7495,7 +6613,7 @@ export const generated = toolUser();
         )
         .unwrap();
 
-        assert_eq!(report.tasks[0].status, TaskExecutionStatus::Ran);
+        assert!(report.tasks.iter().any(|task| task.status == TaskExecutionStatus::Ran));
         assert_eq!(
             std::fs::read_to_string(p.join("out.txt")).unwrap(),
             "from-tool"
@@ -7529,9 +6647,7 @@ export const generated = toolUser();
     fn root_relative_imports_can_resolve_build_directory_modules() {
         let root = fixture();
         let workspace = load_workspace(root.path()).unwrap();
-
-        let jodin = &workspace.targets["//library/jodin:jodin"];
-        assert_eq!(jodin.dependencies[0].address, "//src/cpp/joltphysics:cmake");
+        assert!(workspace.targets.contains_key("//library/jodin:jodin"));
     }
 
     #[test]
@@ -7541,250 +6657,26 @@ export const generated = toolUser();
         write_file(
             &p.join(WORKSPACE_FILE),
             r#"
-import "//rules/package";
+import "//rules/pkg";
 "#,
         );
         write_file(
-            &p.join("rules/package/index.js"),
+            &p.join("rules/pkg/index.js"),
             r#"
-export const loaded = true;
-"#,
-        );
-        write_file(
-            &p.join(BUILD_FILE),
-            r#"
-import { loaded } from "//rules/package";
-if (!loaded) {
-    throw new Error("index.js module did not load");
-}
-export const done = 1;
-"#,
-        );
-
-        load_workspace(p).unwrap();
-    }
-
-    #[test]
-    fn rules_test_targets_discover_and_run_js_tests_by_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-        write_file(
-            &p.join(WORKSPACE_FILE),
-            r#"
-import "//rules/imp/test";
-"#,
-        );
-        write_file(
-            &p.join("rules/imp/test/index.js"),
-            include_str!("../rules/imp/test/index.js"),
-        );
-        write_file(
-            &p.join("rules/example/alpha_test.js"),
-            r#"
-import { describe, expect, test } from "//rules/imp/test";
-
-describe("alpha rule tests", () => {
-test("runs a discovered test", () => {
-    expect("alpha").toBe("alpha");
-});
-});
-"#,
-        );
-        write_file(
-            &p.join("rules/example/beta_test.js"),
-            r#"
-import { expect, test } from "//rules/imp/test";
-
-test("runs a second discovered test", () => {
-    expect(["beta", "gamma"]).toContain("gamma");
-});
-"#,
-        );
-        write_file(
-            &p.join("rules/example/BUILD.js"),
-            r#"
-import { rulesTest } from "//rules/imp/test";
-export const rules_test = rulesTest({ root: "//rules/example" });
-"#,
-        );
-        write_file(
-            &p.join("rules/other/example_test.js"),
-            r#"
-import { expect, test } from "//rules/imp/test";
-
-test("runs another directory test", () => {
-    expect({ ok: true }).toEqual({ ok: true });
-});
-"#,
-        );
-        write_file(
-            &p.join("rules/other/BUILD.js"),
-            r#"
-import { rulesTest } from "//rules/imp/test";
-export const rules_test = rulesTest({ root: "//rules/other" });
-"#,
-        );
-
-        let live = load_workspace(p).unwrap();
-        let plan = plan(&live, "test", &[]).unwrap();
-
-        assert_eq!(
-            plan.roots,
-            [
-                "//rules/example:rules_test#test".to_owned(),
-                "//rules/other:rules_test#test".to_owned(),
-            ]
-        );
-
-        let example = live.targets.get("//rules/example:rules_test").unwrap();
-        assert_eq!(
-            example.attrs["tests"].as_str().unwrap(),
-            "//rules/example/alpha_test,//rules/example/beta_test"
-        );
-        let other = live.targets.get("//rules/other:rules_test").unwrap();
-        assert_eq!(other.attrs["tests"].as_str().unwrap(), "//rules/other/example_test");
-
-        let report = execute_plan_with_options(
-            &plan,
-            Some(&live),
-            p,
-            ExecutionOptions::new(ExecutionMode::Local, 1),
-            None,
-        )
-        .unwrap();
-        assert!(report
-            .tasks
-            .iter()
-            .all(|execution| execution.status == TaskExecutionStatus::Ran));
-    }
-
-    #[test]
-    fn odin_js_rule_tests_pass() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-
-        write_file(
-            &p.join(WORKSPACE_FILE),
-            r#"
-import "//rules/imp/test";
-import "//rules/odin";
-"#,
-        );
-        write_file(
-            &p.join("rules/imp/test/index.js"),
-            include_str!("../rules/imp/test/index.js"),
-        );
-        write_file(
-            &p.join("rules/odin/index.js"),
-            include_str!("../rules/odin/index.js"),
-        );
-        write_file(
-            &p.join("rules/odin/toolchain.js"),
-            include_str!("../rules/odin/toolchain.js"),
-        );
-        write_file(
-            &p.join("rules/odin/index_test.js"),
-            include_str!("../rules/odin/index_test.js"),
-        );
-        write_file(
-            &p.join("rules/odin/BUILD.js"),
-            r#"
-import { rulesTest } from "//rules/imp/test";
-export const rules_test = rulesTest({ root: "//rules/odin" });
-"#,
-        );
-
-        let live = load_workspace(p).unwrap();
-        let plan = plan(&live, "test", &[]).unwrap();
-        let report = execute_plan_with_options(
-            &plan,
-            Some(&live),
-            p,
-            ExecutionOptions::new(ExecutionMode::Local, 1),
-            None,
-        )
-        .unwrap();
-        assert!(
-            report
-                .tasks
-                .iter()
-                .all(|execution| execution.status == TaskExecutionStatus::Ran),
-            "some odin JS rule tests failed"
-        );
-    }
-
-    #[test]
-    fn javascript_can_declare_named_caches_during_load() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-        write_file(
-            &p.join(WORKSPACE_FILE),
-            r#"
-import "//rules/tool";
-"#,
-        );
-        write_file(
-            &p.join("rules/tool.js"),
-            r#"
-import { namedCache, rule, target } from "imp:core";
-
-namedCache({ name: "tool-cache" });
-namedCache({ name: "tool-cache" });
-
-rule({
-  kind: "tool-target",
-  product: "file",
-  action: {
-    argv: ["sh", "-c", "mkdir -p build && printf ok > build/out.txt"],
-    outputs: [{ kind: "file", path: "build/out.txt" }],
-    display: "tool"
-  }
-});
-
-export function tool() {
-  return target({ kind: "tool-target" });
-}
+import { target } from "imp:core";
+export function pkg() { return target({ kind: "pkg", attrs: {} }); }
 "#,
         );
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { tool } from "//rules/tool";
-export const generated = tool();
+import { pkg } from "//rules/pkg";
+export const app = pkg();
 "#,
         );
 
         let workspace = load_workspace(p).unwrap();
-        let cache = workspace.named_caches.get("tool-cache").unwrap();
-        assert_eq!(cache.env_var, "IMP_NAMED_CACHE_TOOL_CACHE");
-        let plan = plan(&workspace, "build", &["generated".to_owned()]).unwrap();
-        assert_eq!(plan.named_caches, vec![cache.clone()]);
-    }
-
-    #[test]
-    fn invalid_named_cache_names_are_rejected() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-        write_file(
-            &p.join(WORKSPACE_FILE),
-            r#"
-import "//rules/bad";
-"#,
-        );
-        write_file(
-            &p.join("rules/bad.js"),
-            r#"
-import { namedCache } from "imp:core";
-namedCache({ name: "Bad Cache" });
-"#,
-        );
-        write_file(&p.join(BUILD_FILE), "export const nothing = 1;\n");
-
-        let error = format!("{:#}", load_workspace(p).unwrap_err());
-        assert!(
-            error.contains("must contain only lowercase ASCII letters"),
-            "{error}"
-        );
+        assert!(workspace.targets.contains_key("//:app"));
     }
 
     #[test]
@@ -7884,7 +6776,7 @@ export const ignored = missing;
         let mut out = String::new();
         format_targets(&targets, &mut out).unwrap();
         assert!(out.contains("//library/jodin:jodin (odin-package)"));
-        assert!(out.contains("sources: *.odin"));
+        assert!(out.contains(r#"sources: .*\.odin$"#));
         assert!(out.contains("dependencies: //src/cpp/joltphysics:cmake"));
     }
 
@@ -7903,30 +6795,27 @@ export const ignored = missing;
     }
 
     #[test]
-    fn test_format_rules() {
+    fn test_format_products() {
         let root = fixture();
         let workspace = load_workspace(root.path()).unwrap();
         let mut out = String::new();
-        format_rules(&workspace, &mut out).unwrap();
+        format_products(&workspace, &mut out).unwrap();
         assert!(out.contains("Target Kinds:"));
         assert!(out.contains("  - odin-package (default product: odin-package)"));
-        assert!(out.contains("Rules:"));
+        assert!(out.contains("Products:"));
         assert!(out.contains("  odin-package:"));
-        assert!(out.contains("    - odin-package:"));
-        assert!(out.contains("        action: odin build"));
-        assert!(out.contains("        requires own sources: true"));
-        assert!(out.contains("        dependency product: default"));
+        assert!(out.contains("    - odin-package"));
     }
 
     #[test]
     fn dot_edges_flow_from_prerequisites_to_consumers() {
         let root = fixture();
         let workspace = load_workspace(root.path()).unwrap();
-        let plan = plan(&workspace, "build", &["jodin".into()]).unwrap();
+        let plan = plan_live(&workspace, root.path(), "build", &["jodin".into()]).unwrap();
         let dot = render_dot(&plan);
 
         assert!(dot.contains("rankdir=TB"));
-        assert!(dot.contains("//src/cpp/joltphysics:joltphysics#sources"));
+        assert!(dot.contains("//library/jodin:jodin#odin-package"));
         assert!(dot.contains(" -> "));
     }
 
@@ -8062,9 +6951,8 @@ export const ok = 1;
             .unwrap()
             .to_owned();
 
-        write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/test";"#);
         write_file(
-            &p.join("rules/test.js"),
+            &p.join(WORKSPACE_FILE),
             &format!(
                 r#"
 import {{ sha256 }} from "imp:core";
@@ -8212,27 +7100,15 @@ export const report = product("test-pkg", "report", async function report(handle
             "product should be registered in workspace"
         );
 
-        // Planning with an explicit #product selector creates an is_product task.
+        // Static planning with an explicit #product selector creates a product placeholder task.
         let plan = plan(&live, "build", &["//:pkg#report".to_owned()]).unwrap();
         assert_eq!(plan.tasks.len(), 1);
         let task = &plan.tasks[0];
-        assert!(task.is_product, "task should be a product task");
-        assert!(task.exec_fn.is_some(), "task should have an exec_fn");
         assert_eq!(task.product, "report");
 
-        // Execution succeeds (the product function returns "ok" but no ctx.output is called).
-        let report = execute_plan_with_options(
-            &plan,
-            Some(&live),
-            p,
-            ExecutionOptions::new(ExecutionMode::Local, 1),
-            None,
-        )
-        .unwrap();
-        assert!(
-            report.tasks.iter().all(|e| e.status == TaskExecutionStatus::Ran),
-            "product task should have run successfully"
-        );
+        // Live planning discovers the product memo call.
+        let live_plan = plan_live(&live, p, "build", &["//:pkg#report".to_owned()]).unwrap();
+        assert!(live_plan.tasks[0].id.starts_with("//:pkg#report:memo"));
     }
 
     #[test]
@@ -8261,7 +7137,6 @@ export const check = product("kind-a", "check", async function check(handle) {})
         let task_plan = plan(&live, "build", &["//:pkg#check".to_owned()]).unwrap();
         assert_eq!(task_plan.tasks.len(), 1);
         assert_eq!(task_plan.tasks[0].product, "check");
-        assert!(task_plan.tasks[0].is_product);
 
         // An unknown product in the selector should fail.
         let err = plan(&live, "build", &["//:pkg#nonexistent".to_owned()])
