@@ -505,18 +505,66 @@ export function getMemoTrace() {
 // Tracked runtime APIs (Phase 3)
 // ---------------------------------------------------------------------------
 
+// glob() returns a lazy FileSet descriptor — no I/O happens here.
+// Call paths(fileset) to evaluate it.
 export function glob(opts) {
     if (!opts || !Array.isArray(opts.include)) {
         throw new Error("glob({ root?, include, exclude? }) requires include regexes");
     }
-    const result = JSON.parse(__host_glob(
-        opts.root || ".",
-        JSON.stringify(opts.include),
-        JSON.stringify(opts.exclude || []),
-    ));
-    _memo_trace.push({ event: "effect", kind: "glob", root: opts.root || ".", count: result.length });
+    return { __fileset: true, kind: "glob", root: opts.root || ".", include: opts.include, exclude: opts.exclude || [] };
+}
+
+// ---------------------------------------------------------------------------
+// FileSet — lazy file collection (Phase 4)
+// ---------------------------------------------------------------------------
+
+function _eval_fileset(fs) {
+    if (!fs || fs.__fileset !== true) throw new Error("paths() requires a FileSet");
+    if (fs.kind === "glob") {
+        return JSON.parse(__host_glob(
+            fs.root,
+            JSON.stringify(fs.include),
+            JSON.stringify(fs.exclude),
+        ));
+    }
+    if (fs.kind === "union") {
+        const seen = new Set();
+        const all = [];
+        for (const s of fs.sets) {
+            for (const p of _eval_fileset(s)) {
+                if (!seen.has(p)) { seen.add(p); all.push(p); }
+            }
+        }
+        all.sort();
+        return all;
+    }
+    if (fs.kind === "literal") {
+        return fs.paths.slice().sort();
+    }
+    throw new Error("paths(): unsupported FileSet kind: " + fs.kind);
+}
+
+export function paths(fileset) {
+    if (!fileset || fileset.__fileset !== true) {
+        throw new Error("paths() requires a FileSet value");
+    }
+    const result = _eval_fileset(fileset);
+    _memo_trace.push({ event: "effect", kind: "paths", fileset_kind: fileset.kind, count: result.length });
     return result;
 }
+
+export const file_set = {
+    union(...sets) {
+        for (const s of sets) {
+            if (!s || s.__fileset !== true) throw new Error("file_set.union() requires FileSet values");
+        }
+        return { __fileset: true, kind: "union", sets };
+    },
+    literal(file_paths) {
+        if (!Array.isArray(file_paths)) throw new Error("file_set.literal() requires an array of paths");
+        return { __fileset: true, kind: "literal", paths: file_paths };
+    },
+};
 
 export function env(name) {
     const result = __host_env(name);

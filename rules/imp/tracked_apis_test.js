@@ -1,5 +1,5 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { env, which, glob, read_file, run, getMemoTrace, resetMemoState, memo } from "imp:core";
+import { env, which, glob, paths, read_file, run, getMemoTrace, resetMemoState, memo } from "imp:core";
 
 describe("tracked runtime APIs", () => {
 
@@ -45,25 +45,27 @@ test("which records an effect entry in memo trace", async () => {
     expect(effects[0].name).toBe("sh");
 });
 
-test("glob returns an array of strings", async () => {
+test("paths(glob(...)) returns an array of strings", async () => {
     resetMemoState();
-    const files = glob({ root: "rules/imp", include: [".*\\.js$"] });
+    const files = paths(glob({ root: "rules/imp", include: [".*\\.js$"] }));
     expect(Array.isArray(files)).toBe(true);
     expect(files.length > 0).toBe(true);
     expect(typeof files[0]).toBe("string");
 });
 
-test("glob records an effect entry in memo trace", async () => {
+test("paths(glob(...)) records a paths effect entry in memo trace", async () => {
     resetMemoState();
-    glob({ root: "rules/imp", include: [".*\\.js$"] });
+    paths(glob({ root: "rules/imp", include: [".*\\.js$"] }));
     const { trace } = getMemoTrace();
-    const effects = trace.filter(t => t.event === "effect" && t.kind === "glob");
+    const effects = trace.filter(t => t.event === "effect" && t.kind === "paths");
     expect(effects.length).toBe(1);
+    expect(effects[0].fileset_kind).toBe("glob");
 });
 
 test("run executes a command and returns exitCode 0", async () => {
     resetMemoState();
-    const result = await run({ argv: ["sh", "-c", "echo hello"] });
+    // impure: true bypasses caching so stdout is always captured
+    const result = await run({ argv: ["sh", "-c", "echo hello"], impure: true });
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe("hello");
 });
