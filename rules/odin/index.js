@@ -84,19 +84,30 @@ export const collection_flags = memo(async function collection_flags(handle) {
         });
 });
 
+/**
+ * Acquire the Odin toolchain and return a tool spec for sandbox use.
+ *
+ * @param {object} handle Target handle returned by odinToolchain().
+ * @returns {Promise<object>} Tool spec.
+ */
+export const tool = memo(async function tool(handle) {
+    const t = hydrateTarget(handle);
+    return odinTool(t.fields.version);
+});
+
 // ---------------------------------------------------------------------------
 // Exec functions
 // ---------------------------------------------------------------------------
 
-function odinToolchainExec(target, ctx) {
-    acquireOdinToolchain(target.fields.version);
-}
-
 async function odinBuildExec(target, ctx) {
+    const t = hydrateTarget(target.handle);
+    const toolchain_dep = t.deps.find(d => hydrateTarget(d.handle).kind === "odin-toolchain");
+    const tool_spec = toolchain_dep
+        ? await tool(toolchain_dep.handle)
+        : odinTool(resolveOdinToolchainVersion(target.fields.toolchain));
+    const odin = await ctx.tool(tool_spec);
     const srcs = await sources(target.handle);
     const file_inputs = paths(srcs).map(p => ({ kind: "file", path: p }));
-    const version = resolveOdinToolchainVersion(target.fields && target.fields.toolchain);
-    const odin = await ctx.tool(odinTool(version));
     const collectionFlags = await collection_flags(target.handle);
     const result = await ctx.inSandbox({
         argv: ["odin", "build", target.fields.path || "."].concat(collectionFlags),
@@ -112,15 +123,6 @@ async function odinBuildExec(target, ctx) {
 // ---------------------------------------------------------------------------
 // Rules
 // ---------------------------------------------------------------------------
-
-rule({
-    kind: "odin-toolchain",
-    product: "tool",
-    action: "install odin {version}",
-    exec: odinToolchainExec,
-    requiresOwnSources: false,
-    dependencyProduct: null,
-});
 
 rule({
     kind: "odin-package",

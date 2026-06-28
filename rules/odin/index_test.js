@@ -10,6 +10,7 @@ import {
     own_sources,
     sources,
     collection_flags,
+    tool,
 } from "//rules/odin";
 import {
     hydrateTarget,
@@ -110,6 +111,10 @@ test("repeated sources() calls are memoized", async () => {
     const a = await sources(pkg);
     const b = await sources(pkg);
     expect(a).toBe(b);
+});
+
+test("tool is exported as a function", () => {
+    expect(typeof tool).toBe("function");
 });
 
 test("collection_flags(pkg) returns flags for all collection deps", async () => {
