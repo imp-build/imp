@@ -566,6 +566,26 @@ export const file_set = {
     },
 };
 
+// Expand any FileSet objects in an inputs array to flat {kind, path}[] specs.
+// Plain {kind, path} objects are passed through unchanged.
+function _materialise_inputs(inputs) {
+    const result = [];
+    for (const input of (inputs || [])) {
+        if (input && input.__fileset === true) {
+            for (const p of paths(input)) {
+                result.push({ kind: "file", path: p });
+            }
+        } else if (input != null) {
+            result.push(input);
+        }
+    }
+    return result;
+}
+
+export function output(path, opts) {
+    return { kind: (opts && opts.kind) || "file", path };
+}
+
 export function env(name) {
     const result = __host_env(name);
     _memo_trace.push({ event: "effect", kind: "env", name, result });
@@ -586,7 +606,16 @@ export function read_file(path) {
 
 export async function run(opts) {
     _memo_trace.push({ event: "effect", kind: "run", display: opts.display ?? (opts.argv && opts.argv[0]) });
-    return __host_run(opts);
+    return __host_run({
+        argv: opts.argv,
+        display: opts.display,
+        env: opts.env,
+        inputs: _materialise_inputs(opts.inputs),
+        outputs: opts.outputs,
+        tools: opts.tools,
+        impure: opts.impure,
+        forceCache: opts.forceCache,
+    });
 }
 
 export async function workspace_mutation(opts) {
