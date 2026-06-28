@@ -49,10 +49,13 @@ function odinCollectionExec(target, ctx) {
 async function odinBuildExec(target, ctx) {
     const version = resolveOdinToolchainVersion(target.fields && target.fields.toolchain);
     const odin = await ctx.tool(odinTool(version));
+    const manifest = JSON.parse(target.fields.sourceManifestValue);
+    const sourceInputs = manifest.cas.map((entry) => ({ kind: "file", path: entry.path }));
     const result = await ctx.inSandbox({
         argv: ["odin", "build", "."],
         tools: [odin],
         display: `odin build ${target.target}`,
+        inputs: sourceInputs,
     });
     if (result.exitCode !== 0) {
         throw new Error(`odin build failed (exit ${result.exitCode}): ${result.stderr}`);
