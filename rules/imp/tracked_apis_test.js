@@ -1,0 +1,100 @@
+import { describe, expect, test } from "//rules/imp/test";
+import { env, which, glob, read_file, run, getMemoTrace, resetMemoState, memo } from "imp:core";
+
+describe("tracked runtime APIs", () => {
+
+test("env returns a string for PATH", async () => {
+    resetMemoState();
+    const val = env("PATH");
+    expect(typeof val).toBe("string");
+});
+
+test("env returns null for an unset variable", async () => {
+    resetMemoState();
+    const val = env("__IMP_DEFINITELY_UNSET_VAR_12345");
+    expect(val).toBe(null);
+});
+
+test("env records an effect entry in memo trace", async () => {
+    resetMemoState();
+    env("PATH");
+    const { trace } = getMemoTrace();
+    const effects = trace.filter(t => t.event === "effect" && t.kind === "env");
+    expect(effects.length).toBe(1);
+    expect(effects[0].name).toBe("PATH");
+});
+
+test("which returns a string path for sh", async () => {
+    resetMemoState();
+    const p = which("sh");
+    expect(typeof p).toBe("string");
+});
+
+test("which returns null for a nonexistent binary", async () => {
+    resetMemoState();
+    const p = which("__imp_no_such_binary_xyz");
+    expect(p).toBe(null);
+});
+
+test("which records an effect entry in memo trace", async () => {
+    resetMemoState();
+    which("sh");
+    const { trace } = getMemoTrace();
+    const effects = trace.filter(t => t.event === "effect" && t.kind === "which");
+    expect(effects.length).toBe(1);
+    expect(effects[0].name).toBe("sh");
+});
+
+test("glob returns an array of strings", async () => {
+    resetMemoState();
+    const files = glob({ root: "rules/imp", include: [".*\\.js$"] });
+    expect(Array.isArray(files)).toBe(true);
+    expect(files.length > 0).toBe(true);
+    expect(typeof files[0]).toBe("string");
+});
+
+test("glob records an effect entry in memo trace", async () => {
+    resetMemoState();
+    glob({ root: "rules/imp", include: [".*\\.js$"] });
+    const { trace } = getMemoTrace();
+    const effects = trace.filter(t => t.event === "effect" && t.kind === "glob");
+    expect(effects.length).toBe(1);
+});
+
+test("run executes a command and returns exitCode 0", async () => {
+    resetMemoState();
+    const result = await run({ argv: ["sh", "-c", "echo hello"] });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("hello");
+});
+
+test("run records an effect entry in memo trace", async () => {
+    resetMemoState();
+    await run({ argv: ["sh", "-c", "true"], display: "test-run" });
+    const { trace } = getMemoTrace();
+    const effects = trace.filter(t => t.event === "effect" && t.kind === "run");
+    expect(effects.length).toBe(1);
+    expect(effects[0].display).toBe("test-run");
+});
+
+test("memo calling env still deduplicates on repeated calls", async () => {
+    resetMemoState();
+    let calls = 0;
+    const fn_ = memo(async function read_env() {
+        calls++;
+        return env("PATH");
+    });
+    await fn_();
+    await fn_();
+    expect(calls).toBe(1);
+});
+
+test("read_file reads a file written by run", async () => {
+    resetMemoState();
+    const tmpfile = "/tmp/imp_tracked_test_" + Date.now() + ".txt";
+    await run({ argv: ["sh", "-c", `echo tracked > ${tmpfile}`] });
+    const content = read_file(tmpfile);
+    expect(content.trim()).toBe("tracked");
+});
+
+});

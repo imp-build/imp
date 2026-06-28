@@ -500,6 +500,51 @@ export function getMemoTrace() {
         deps: _memo_deps.slice(),
     };
 }
+
+// ---------------------------------------------------------------------------
+// Tracked runtime APIs (Phase 3)
+// ---------------------------------------------------------------------------
+
+export function glob(opts) {
+    if (!opts || !Array.isArray(opts.include)) {
+        throw new Error("glob({ root?, include, exclude? }) requires include regexes");
+    }
+    const result = JSON.parse(__host_glob(
+        opts.root || ".",
+        JSON.stringify(opts.include),
+        JSON.stringify(opts.exclude || []),
+    ));
+    _memo_trace.push({ event: "effect", kind: "glob", root: opts.root || ".", count: result.length });
+    return result;
+}
+
+export function env(name) {
+    const result = __host_env(name);
+    _memo_trace.push({ event: "effect", kind: "env", name, result });
+    return result ?? null;
+}
+
+export function which(name) {
+    const result = __host_which(name);
+    _memo_trace.push({ event: "effect", kind: "which", name, result });
+    return result ?? null;
+}
+
+export function read_file(path) {
+    const result = __host_read_file(path);
+    _memo_trace.push({ event: "effect", kind: "read_file", path });
+    return result;
+}
+
+export async function run(opts) {
+    _memo_trace.push({ event: "effect", kind: "run", display: opts.display ?? (opts.argv && opts.argv[0]) });
+    return __host_run(opts);
+}
+
+export async function workspace_mutation(opts) {
+    _memo_trace.push({ event: "effect", kind: "workspace_mutation", display: opts.display ?? (opts.argv && opts.argv[0]) });
+    return __host_workspace_mutation(opts);
+}
 "##;
 
 // ---------------------------------------------------------------------------
@@ -714,6 +759,8 @@ pub struct LiveWorkspace {
     pub workspace: Workspace,
     pub(super) runtime: Runtime,
     pub(super) ctx: Mutex<JsContext>,
+    /// Workspace root made available to host functions during task execution.
+    pub(super) exec_root: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl std::fmt::Debug for LiveWorkspace {
@@ -722,6 +769,7 @@ impl std::fmt::Debug for LiveWorkspace {
             .field("workspace", &self.workspace)
             .field("runtime", &"Runtime { .. }")
             .field("ctx", &"Context { .. }")
+            .field("exec_root", &"Arc<Mutex<..>>")
             .finish()
     }
 }
@@ -1301,6 +1349,7 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
 
     let state: Arc<Mutex<HostState>> = Arc::new(Mutex::new(HostState::default()));
     let module_mounts: Arc<Mutex<Vec<ModuleMount>>> = Arc::new(Mutex::new(Vec::new()));
+    let exec_root: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
 
     // ----- QuickJS runtime + context -----
     let rt = Runtime::new().context("create QuickJS runtime")?;
@@ -1321,7 +1370,7 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
         let state_clone = Arc::clone(&state);
         let mounts_clone = Arc::clone(&module_mounts);
         ctx.with(|ctx| -> rquickjs::Result<()> {
-            register_globals(ctx, state_clone, root.clone(), mounts_clone)
+            register_globals(ctx, state_clone, root.clone(), mounts_clone, Arc::clone(&exec_root))
         })
         .map_err(|e| anyhow::anyhow!("register QuickJS globals: {e}"))?;
     }
@@ -1439,6 +1488,7 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
         },
         runtime: rt,
         ctx: Mutex::new(ctx),
+        exec_root,
     })
 }
 
@@ -1503,6 +1553,7 @@ fn register_globals<'js>(
     state: Arc<Mutex<HostState>>,
     workspace_root: PathBuf,
     module_mounts: Arc<Mutex<Vec<ModuleMount>>>,
+    exec_root: Arc<Mutex<Option<PathBuf>>>,
 ) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
@@ -2039,7 +2090,163 @@ fn register_globals<'js>(
     )?;
     globals.set("__host_cas_tree_merge", host_cas_tree_merge)?;
 
+    // ------------------------------------------------------------------
+    // Tracked runtime APIs (Phase 3)
+    // ------------------------------------------------------------------
+
+    // __host_glob(root, includeJson, excludeJson) → JSON string[]
+    // Same logic as __host_workspace_source_files but accessible from memos.
+    let wc = workspace_root.clone();
+    let host_glob = Function::new(
+        ctx.clone(),
+        move |root: String, include_json: String, exclude_json: String| -> rquickjs::Result<String> {
+            let include: Vec<String> = serde_json::from_str(&include_json)
+                .map_err(|e| rquickjs::Error::new_loading_message("glob", e.to_string()))?;
+            let exclude: Vec<String> = serde_json::from_str(&exclude_json)
+                .map_err(|e| rquickjs::Error::new_loading_message("glob", e.to_string()))?;
+            workspace_source_files(&wc, &root, &include, &exclude)
+                .and_then(|f| serde_json::to_string(&f).context("encode glob results"))
+                .map_err(|e| rquickjs::Error::new_loading_message("glob", format!("{e:#}")))
+        },
+    )?;
+    globals.set("__host_glob", host_glob)?;
+
+    // __host_env(name) → string | null
+    let host_env = Function::new(
+        ctx.clone(),
+        move |name: String| -> rquickjs::Result<Option<String>> {
+            Ok(std::env::var(&name).ok())
+        },
+    )?;
+    globals.set("__host_env", host_env)?;
+
+    // __host_which(name) → string | null
+    let host_which = Function::new(
+        ctx.clone(),
+        move |name: String| -> rquickjs::Result<Option<String>> {
+            Ok(which_executable(&name))
+        },
+    )?;
+    globals.set("__host_which", host_which)?;
+
+    // __host_read_file(path) → string
+    let exec_root_rf = Arc::clone(&exec_root);
+    let wc_rf = workspace_root.clone();
+    let host_read_file = Function::new(
+        ctx.clone(),
+        move |path: String| -> rquickjs::Result<String> {
+            let p = std::path::Path::new(&path);
+            let resolved = if p.is_absolute() {
+                p.to_owned()
+            } else {
+                let root = exec_root_rf.lock().unwrap().clone().unwrap_or_else(|| wc_rf.clone());
+                root.join(p)
+            };
+            std::fs::read_to_string(&resolved).map_err(|e| {
+                rquickjs::Error::new_loading_message("read_file", format!("{}: {e}", resolved.display()))
+            })
+        },
+    )?;
+    globals.set("__host_read_file", host_read_file)?;
+
+    // __host_run(opts) → { stdout, stderr, exitCode }
+    // Delegates to exec_run_inner with the active exec workspace root.
+    let exec_root_run = Arc::clone(&exec_root);
+    let host_run = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, opts: Object<'js>| -> rquickjs::Result<Object<'js>> {
+            let root = exec_root_run.lock().unwrap().clone().ok_or_else(|| {
+                rquickjs::Error::new_loading_message("run", "run() called outside of execution context")
+            })?;
+            let run_opts = parse_exec_run_opts(opts)?;
+            let result = exec_run_inner(&root, run_opts)
+                .map_err(|e| rquickjs::Error::new_loading_message("run", format!("{e:#}")))?;
+            let obj = Object::new(ctx)?;
+            obj.set("stdout", result.stdout)?;
+            obj.set("stderr", result.stderr)?;
+            obj.set("exitCode", result.exit_code)?;
+            Ok(obj)
+        },
+    )?;
+    globals.set("__host_run", host_run)?;
+
+    // __host_workspace_mutation(opts) → { stdout, stderr, exitCode }
+    // Runs a command directly in the workspace root (not a sandbox). Always impure.
+    let exec_root_wm = Arc::clone(&exec_root);
+    let host_workspace_mutation = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, opts: Object<'js>| -> rquickjs::Result<Object<'js>> {
+            let root = exec_root_wm.lock().unwrap().clone().ok_or_else(|| {
+                rquickjs::Error::new_loading_message(
+                    "workspace_mutation",
+                    "workspace_mutation() called outside of execution context",
+                )
+            })?;
+            let argv: Vec<String> = opts.get("argv")?;
+            let display: Option<String> = opts.get("display")?;
+            let display = display.unwrap_or_else(|| argv.join(" "));
+            let (program, args) = argv.split_first().ok_or_else(|| {
+                rquickjs::Error::new_loading_message("workspace_mutation", "argv must not be empty")
+            })?;
+            let output = std::process::Command::new(program)
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .map_err(|e| {
+                    rquickjs::Error::new_loading_message(
+                        "workspace_mutation",
+                        format!("spawn {display}: {e}"),
+                    )
+                })?;
+            let exit_code = output.status.code().unwrap_or(-1);
+            let obj = Object::new(ctx)?;
+            obj.set("stdout", String::from_utf8_lossy(&output.stdout).to_string())?;
+            obj.set("stderr", String::from_utf8_lossy(&output.stderr).to_string())?;
+            obj.set("exitCode", exit_code)?;
+            Ok(obj)
+        },
+    )?;
+    globals.set("__host_workspace_mutation", host_workspace_mutation)?;
+
     Ok(())
+}
+
+fn which_executable(name: &str) -> Option<String> {
+    let path_var = std::env::var("PATH").ok()?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+        #[cfg(windows)]
+        {
+            let with_exe = dir.join(format!("{name}.exe"));
+            if with_exe.is_file() {
+                return Some(with_exe.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+fn parse_exec_run_opts<'js>(opts: Object<'js>) -> rquickjs::Result<ExecRunOpts> {
+    let argv: Vec<String> = opts.get("argv")?;
+    let display: Option<String> = opts.get("display")?;
+    let display = display.unwrap_or_else(|| argv.join(" "));
+    let env_obj: Option<Object<'js>> = opts.get("env")?;
+    let mut env = BTreeMap::new();
+    if let Some(e) = env_obj {
+        for entry in e.own_props::<String, String>(Filter::default()) {
+            let (k, v) = entry?;
+            env.insert(k, v);
+        }
+    }
+    let inputs = parse_io_specs(opts.get::<_, Option<Vec<Object>>>("inputs")?.unwrap_or_default())?;
+    let outputs = parse_io_specs(opts.get::<_, Option<Vec<Object>>>("outputs")?.unwrap_or_default())?;
+    let tools = parse_tool_specs(opts.get::<_, Option<Vec<Object>>>("tools")?.unwrap_or_default())?;
+    let impure = opts.get::<_, Option<bool>>("impure")?.unwrap_or(false);
+    let force_cache = opts.get::<_, Option<bool>>("forceCache")?.unwrap_or(false);
+    Ok(ExecRunOpts { argv, display, env, inputs, outputs, tools, impure, force_cache })
 }
 
 fn module_mount_from_args(
@@ -5256,8 +5463,11 @@ fn execute_task_with_exec(
 
     let output_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
+    // Make the workspace root accessible to __host_run, __host_glob, etc.
+    *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
+
     let ctx_guard = live.ctx.lock().unwrap();
-    ctx_guard
+    let eval_result = ctx_guard
         .with(|ctx| -> rquickjs::Result<()> {
             let exec_fn: Function = ctx.globals().get(exec_fn_name)?;
             let target_obj = build_exec_target(ctx.clone(), task, dep_values)?;
@@ -5283,7 +5493,10 @@ fn execute_task_with_exec(
         })
         .map_err(|e| {
             anyhow::anyhow!("exec function '{exec_fn_name}' failed for {}: {e}", task.id)
-        })?;
+        });
+    drop(ctx_guard);
+    *live.exec_root.lock().unwrap() = None;
+    eval_result?;
 
     let output_value = output_cell.lock().unwrap().take();
     let task_key = digest_bytes(task.id.as_bytes());
