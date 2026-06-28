@@ -2235,7 +2235,7 @@ fn register_globals<'js>(
             let root = exec_root_run.lock().unwrap().clone().ok_or_else(|| {
                 rquickjs::Error::new_loading_message("run", "run() called outside of execution context")
             })?;
-            let run_opts = parse_exec_run_opts(opts)?;
+            let run_opts = parse_exec_run_opts(opts, &root)?;
             let result = exec_run_inner(&root, run_opts)
                 .map_err(|e| rquickjs::Error::new_loading_message("run", format!("{e:#}")))?;
             let obj = Object::new(ctx)?;
@@ -2306,7 +2306,7 @@ fn which_executable(name: &str) -> Option<String> {
     None
 }
 
-fn parse_exec_run_opts<'js>(opts: Object<'js>) -> rquickjs::Result<ExecRunOpts> {
+fn parse_exec_run_opts<'js>(opts: Object<'js>, workspace_root: &Path) -> rquickjs::Result<ExecRunOpts> {
     let argv: Vec<String> = opts.get("argv")?;
     let display: Option<String> = opts.get("display")?;
     let display = display.unwrap_or_else(|| argv.join(" "));
@@ -2320,7 +2320,7 @@ fn parse_exec_run_opts<'js>(opts: Object<'js>) -> rquickjs::Result<ExecRunOpts> 
     }
     let inputs = parse_io_specs(opts.get::<_, Option<Vec<Object>>>("inputs")?.unwrap_or_default())?;
     let outputs = parse_io_specs(opts.get::<_, Option<Vec<Object>>>("outputs")?.unwrap_or_default())?;
-    let tools = parse_tool_specs(opts.get::<_, Option<Vec<Object>>>("tools")?.unwrap_or_default())?;
+    let tools = parse_tool_specs(opts.get::<_, Option<Vec<Object>>>("tools")?.unwrap_or_default(), workspace_root)?;
     let impure = opts.get::<_, Option<bool>>("impure")?.unwrap_or(false);
     let force_cache = opts.get::<_, Option<bool>>("forceCache")?.unwrap_or(false);
     Ok(ExecRunOpts { argv, display, env, inputs, outputs, tools, impure, force_cache })
@@ -5093,6 +5093,7 @@ pub(super) fn build_exec_ctx<'js>(
             let tools = parse_tool_specs(
                 opts.get::<_, Option<Vec<Object>>>("tools")?
                     .unwrap_or_default(),
+                &wr,
             )?;
             let impure: Option<bool> = opts.get("impure")?;
             let impure = impure.unwrap_or(false);
@@ -5140,7 +5141,10 @@ fn parse_io_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Vec<ExecIoSpe
     Ok(specs)
 }
 
-fn parse_tool_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Vec<ExecToolSpec>> {
+fn parse_tool_specs<'js>(
+    vals: Vec<Object<'js>>,
+    workspace_root: &Path,
+) -> rquickjs::Result<Vec<ExecToolSpec>> {
     let mut specs = Vec::new();
     for val in vals {
         let name: Option<String> = val.get("name")?;
@@ -5149,13 +5153,18 @@ fn parse_tool_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Vec<ExecToo
         };
         let cache: String = val.get("cache")?;
         let key: String = val.get("key")?;
-        let path: String = val.get("path")?;
+        let path: Option<String> = val.get("path")?;
+        let path = match path {
+            Some(p) => PathBuf::from(p),
+            None => named_cache_key_path(workspace_root, &cache, &key)
+                .map_err(|e| rquickjs::Error::new_loading_message("tool", format!("{e:#}")))?,
+        };
         let bin_dirs: Option<Vec<String>> = val.get("binDirs")?;
         specs.push(ExecToolSpec {
             name,
             cache,
             key,
-            path: PathBuf::from(path),
+            path,
             bin_dirs: bin_dirs.unwrap_or_else(|| vec!["bin".to_owned()]),
         });
     }

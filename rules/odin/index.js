@@ -1,18 +1,15 @@
 import {
 	target,
-	rule,
 	glob,
 	file_set,
 	paths,
 	memo,
+	product,
+	run,
 	hydrateTarget,
-	gatherTransitiveClosure,
-	casTreeStore,
-	casTreeMerge,
 } from "imp:core";
 
 import {
-    acquireOdinToolchain,
     defaultOdinToolchain,
     odinTool,
     resolveOdinToolchainVersion,
@@ -96,42 +93,33 @@ export const tool = memo(async function tool(handle) {
 });
 
 // ---------------------------------------------------------------------------
-// Exec functions
+// Product functions
 // ---------------------------------------------------------------------------
 
-async function odinBuildExec(target, ctx) {
-    const t = hydrateTarget(target.handle);
-    const toolchain_dep = t.deps.find(d => hydrateTarget(d.handle).kind === "odin-toolchain");
-    const tool_spec = toolchain_dep
-        ? await tool(toolchain_dep.handle)
-        : odinTool(resolveOdinToolchainVersion(target.fields.toolchain));
-    const odin = await ctx.tool(tool_spec);
-    const srcs = await sources(target.handle);
-    const file_inputs = paths(srcs).map(p => ({ kind: "file", path: p }));
-    const collectionFlags = await collection_flags(target.handle);
-    const result = await ctx.inSandbox({
-        argv: ["odin", "build", target.fields.path || "."].concat(collectionFlags),
-        tools: [odin],
-        display: `odin build ${target.target}`,
-        inputs: file_inputs,
-    });
-    if (result.exitCode !== 0) {
-        throw new Error(`odin build failed (exit ${result.exitCode}): ${result.stderr}`);
+/**
+ * Build an Odin package.
+ *
+ * @param {object} handle Target handle returned by odinPackage().
+ * @returns {Promise<object>} Run result.
+ */
+export const odinBuild = product("odin-package", "odin-package",
+    async function odinBuild(handle) {
+        const t = hydrateTarget(handle);
+        const toolchain_dep = t.deps.find(d => hydrateTarget(d.handle).kind === "odin-toolchain");
+        const odin_tool = toolchain_dep
+            ? await tool(toolchain_dep.handle)
+            : odinTool(resolveOdinToolchainVersion(t.fields.toolchain));
+        const srcs = await sources(handle);
+        const flags = await collection_flags(handle);
+        const path = t.fields.path || ".";
+        return run({
+            argv: ["odin", "build", path, ...flags],
+            tools: [odin_tool],
+            inputs: [srcs],
+            display: `odin build ${path}`,
+        });
     }
-}
-
-// ---------------------------------------------------------------------------
-// Rules
-// ---------------------------------------------------------------------------
-
-rule({
-    kind: "odin-package",
-    product: "odin-package",
-    action: { display: "odin build {path}" },
-    exec: odinBuildExec,
-    requiresOwnSources: false,
-    dependencyProduct: null,
-});
+);
 
 // ---------------------------------------------------------------------------
 // Target constructors
@@ -139,10 +127,6 @@ rule({
 
 /**
  * Declare an Odin collection namespace mapping.
- *
- * This target represents only the compiler flag `-collection:name=path`.
- * It does not depend on, contain, or own the packages below `path`; package
- * dependencies should be discovered from imports or declared separately.
  *
  * @param {object} opts
  * @param {string} opts.name Collection name, e.g. "lib".

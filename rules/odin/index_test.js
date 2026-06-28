@@ -11,6 +11,7 @@ import {
     sources,
     collection_flags,
     tool,
+    odinBuild,
 } from "//rules/odin";
 import {
     hydrateTarget,
@@ -115,6 +116,10 @@ test("repeated sources() calls are memoized", async () => {
 
 test("tool is exported as a function", () => {
     expect(typeof tool).toBe("function");
+});
+
+test("odinBuild product is exported as a function", () => {
+    expect(typeof odinBuild).toBe("function");
 });
 
 test("collection_flags(pkg) returns flags for all collection deps", async () => {
