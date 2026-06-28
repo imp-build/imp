@@ -1,22 +1,18 @@
-import { target, rule } from "imp:core";
+import { target, product, run, output, output_path } from "imp:core";
 
-rule({
-    kind: "stamp-file",
-    product: "file",
-    action: {
+export const file = product("stamp-file", "file", async function file(handle) {
+    return run({
         argv: [
             "sh",
             "-c",
             "mkdir -p \"$(dirname \"$1\")\" && printf '%s\\n' \"$2\" > \"$1\"",
             "imp-stamp",
-            "{entrypoint}",
-            "{sources}",
+            output_path(handle.attrs.entrypoint),
+            handle.attrs.sources,
         ],
-        outputs: [{ kind: "file", path: "{entrypoint}" }],
-        display: "write {entrypoint}",
-    },
-    requiresOwnSources: false,
-    dependencyProduct: null,
+        outputs: [output(handle.attrs.entrypoint)],
+        display: `write ${handle.attrs.entrypoint}`,
+    });
 });
 
 export function stampFile({ output, text }) {

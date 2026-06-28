@@ -1,4 +1,4 @@
-import { target, rule } from "imp:core";
+import { target, glob, memo, product, run } from "imp:core";
 import {
     acquireCmakeToolchain,
     cmakeBin,
@@ -20,66 +20,38 @@ export {
 } from "//rules/c/cmake/toolchain";
 
 // ---------------------------------------------------------------------------
-// Exec functions for C/CMake rules
+// Memo/product functions for C/CMake targets
 // ---------------------------------------------------------------------------
 
-function snapshotSourcesExec(target, ctx) {
-    // Sources are on disk; this task exists to wire up the dependency graph.
-}
-
-function cmakeToolchainExec(target, ctx) {
-    acquireCmakeToolchain(target.fields.version);
-}
-
-async function cmakeBuildExec(target, ctx) {
-    let result;
-    if (target.fields.toolchain) {
-        const cmake = await ctx.tool(cmakeTool(target.fields.toolchain));
-        result = await ctx.inSandbox({
-            argv: ["cmake", "--build", target.fields.entrypoint],
-            tools: [cmake],
-            display: `cmake --build ${target.fields.entrypoint}`,
-        });
-    } else {
-        result = ctx.run({
-            argv: [cmakeBin(), "--build", target.fields.entrypoint],
-            display: `cmake --build ${target.fields.entrypoint}`,
-        });
-    }
-    if (result.exitCode !== 0) {
-        throw new Error(`cmake build failed (exit ${result.exitCode}): ${result.stderr}`);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Rules
-// ---------------------------------------------------------------------------
-
-rule({
-    kind: "cmake-toolchain",
-    product: "tool",
-    action: "install cmake {version}",
-    exec: cmakeToolchainExec,
-    requiresOwnSources: false,
-    dependencyProduct: null,
+export const tool = product("cmake-toolchain", "tool", async function tool(handle) {
+    acquireCmakeToolchain(handle.attrs.version);
+    return { name: "cmake", version: handle.attrs.version };
 });
 
-rule({
-    kind: "cpp-sources",
-    product: "sources",
-    action: "snapshot {sources}",
-    exec: snapshotSourcesExec,
-    requiresOwnSources: false,
-    dependencyProduct: null,
+export const sources = memo(async function sources(handle) {
+    return glob({ root: ".", include: handle.attrs.sources || [] });
 });
 
-rule({
-    kind: "cmake-lib",
-    product: "native-link-library",
-    action: "cmake --build {entrypoint}",
-    exec: cmakeBuildExec,
-    requiresOwnSources: false,
-    dependencyProduct: "sources",
+export const native_link_library = product("cmake-lib", "native-link-library", async function native_link_library(handle) {
+    const inputs = [];
+    for (const dep of handle.attrs.deps || []) {
+        if (dep && dep.kind === "cpp-sources") {
+            inputs.push(await sources(dep));
+        }
+    }
+    if (handle.attrs.toolchain) {
+        return run({
+            argv: ["cmake", "--build", handle.attrs.entrypoint],
+            tools: [cmakeTool(handle.attrs.toolchain)],
+            inputs,
+            display: `cmake --build ${handle.attrs.entrypoint}`,
+        });
+    }
+    return run({
+        argv: [cmakeBin(), "--build", handle.attrs.entrypoint],
+        inputs,
+        display: `cmake --build ${handle.attrs.entrypoint}`,
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -87,7 +59,7 @@ rule({
 // ---------------------------------------------------------------------------
 
 export function cppSources({ srcs }) {
-    return target({ kind: "cpp-sources", attrs: { sources: srcs.join(",") } });
+    return target({ kind: "cpp-sources", attrs: { sources: srcs } });
 }
 
 export function cmakeLib({ entrypoint, toolchain, deps = [] }) {
@@ -104,6 +76,8 @@ export function cmakeLib({ entrypoint, toolchain, deps = [] }) {
         attrs: {
             entrypoint,
             ...(toolchainVersion ? { toolchain: toolchainVersion } : {}),
+            ...(toolchainTarget ? { toolchainTarget } : {}),
+            ...(allDeps.length ? { deps: allDeps.map(dep => dep.target || dep) } : {}),
         },
         deps: allDeps,
     });

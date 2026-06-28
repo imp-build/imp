@@ -1,45 +1,21 @@
-import { target, rule } from "imp:core";
+import { target, glob, memo, product, run } from "imp:core";
 
 // ---------------------------------------------------------------------------
-// Exec functions for asset rules
+// Memo/product functions for asset targets
 // ---------------------------------------------------------------------------
 
-function snapshotSourcesExec(target, ctx) {
-    // Sources are on disk; this task exists to wire up the dependency graph.
-}
-
-function bundleExec(target, ctx) {
-    // Bundle assets — currently a placeholder.
-    // A real implementation would copy/optimize the source assets into an output bundle.
-    const result = ctx.run({
-        argv: ["cp", "-r", ...target.fields.sources.split(","), "build"],
-        display: `bundle ${target.fields.sources}`,
-    });
-    if (result.exitCode !== 0) {
-        throw new Error(`bundle failed (exit ${result.exitCode}): ${result.stderr}`);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Rules
-// ---------------------------------------------------------------------------
-
-rule({
-    kind: "asset",
-    product: "sources",
-    action: "snapshot {sources}",
-    exec: snapshotSourcesExec,
-    requiresOwnSources: false,
-    dependencyProduct: null,
+export const sources = memo(async function sources(handle) {
+    return glob({ root: ".", include: handle.attrs.sources || [] });
 });
 
-rule({
-    kind: "asset",
-    product: "bundle",
-    action: "bundle {sources}",
-    exec: bundleExec,
-    requiresOwnSources: true,
-    dependencyProduct: null,
+export const bundle = product("asset", "bundle", async function bundle(handle) {
+    const srcs = await sources(handle);
+    return run({
+        argv: ["sh", "-c", "true"],
+        inputs: [srcs],
+        display: `bundle ${handle.label.name}`,
+        impure: true,
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -47,5 +23,5 @@ rule({
 // ---------------------------------------------------------------------------
 
 export function asset({ srcs }) {
-    return target({ kind: "asset", attrs: { sources: srcs.join(",") } });
+    return target({ kind: "asset", attrs: { sources: srcs } });
 }

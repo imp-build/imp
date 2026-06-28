@@ -416,7 +416,7 @@ fn cmd_plan(
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let workspace = spike::load_workspace(&workspace_root)?;
-    let plan = spike::plan(&workspace, goal, selectors)?;
+    let plan = spike::plan_live(&workspace, &workspace_root, goal, selectors)?;
 
     print!("{}", spike::render_text_plan(&plan));
     std::fs::write(dot, spike::render_dot(&plan))
@@ -497,7 +497,7 @@ fn cmd_build_planned(
     }
     requested.extend(selectors.iter().cloned());
 
-    let plan = spike::plan(&workspace, "build", &requested)?;
+    let plan = spike::plan_live(&workspace, &workspace_root, "build", &requested)?;
     print!("{}", spike::render_text_plan(&plan));
 
     let mut progress = tree.add_child("execute planned build");
@@ -587,7 +587,7 @@ fn cmd_cache_explain(selector: &str) -> Result<()> {
     } else {
         vec![selector.to_owned()]
     };
-    let plan = spike::plan(&workspace, "build", &selectors)?;
+    let plan = spike::plan_live(&workspace, &workspace_root, "build", &selectors)?;
     let task_selector =
         if selector.contains('#') && plan.tasks.iter().any(|task| task.id == selector) {
             selector

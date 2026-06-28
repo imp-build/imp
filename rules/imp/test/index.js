@@ -1,4 +1,4 @@
-import { target, rule, workspaceFiles } from "imp:core";
+import { target, isIntrospectMode, product, run, workspaceFiles } from "imp:core";
 
 const suites = [];
 const tests = [];
@@ -150,8 +150,16 @@ async function runRegisteredTests({ from = 0, label = "tests" } = {}) {
     }
 }
 
-async function rulesTestExec(target, ctx) {
-    const testModules = target.fields.tests
+export const test_product = product("rules-test", "test", async function test_product(handle) {
+    if (isIntrospectMode()) {
+        return run({
+            argv: ["sh", "-c", "true"],
+            display: `test JS rules ${handle.attrs.root}`,
+            impure: true,
+        });
+    }
+
+    const testModules = handle.attrs.tests
         .split(",")
         .map((testModule) => testModule.trim())
         .filter((testModule) => testModule.length > 0);
@@ -161,16 +169,12 @@ async function rulesTestExec(target, ctx) {
         await import(testModule);
     }
 
-    await runRegisteredTests({ from: firstTest, label: target.fields.root });
-}
-
-rule({
-    kind: "rules-test",
-    product: "test",
-    action: "test JS rules",
-    exec: rulesTestExec,
-    requiresOwnSources: false,
-    dependencyProduct: null,
+    await runRegisteredTests({ from: firstTest, label: handle.attrs.root });
+    return run({
+        argv: ["sh", "-c", "true"],
+        display: `test JS rules ${handle.attrs.root}`,
+        impure: true,
+    });
 });
 
 /**

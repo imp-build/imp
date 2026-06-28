@@ -47,8 +47,8 @@ test("declares a default CMake toolchain", () => {
     const toolchain = api.cmakeToolchain("3.30.5", { default: true });
 
     expect(toolchain.__imp).toBe(true);
-    expect(toolchain.version).toBe("3.30.5");
-    expect(toolchain.cacheKey).toBe("cmake-toolchains/3.30.5/linux-x86_64");
+    expect(toolchain.attrs.version).toBe("3.30.5");
+    expect(cmakeCacheKey(toolchain.attrs.version, { os: "linux", arch: "x86_64" })).toBe("3.30.5/linux-x86_64");
     expect(api.defaultCmakeToolchainVersion()).toBe("3.30.5");
     expect(api.defaultCmakeToolchain()).toBe(toolchain);
     expect(host.calls[0][0]).toBe("namedCache");

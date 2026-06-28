@@ -85,24 +85,21 @@ export function target(opts) {
     }
     const id = __host_target(opts.kind, JSON.stringify(_serialize_attrs(attrs)), depIds, depModes);
     const handle = { __imp: true, __id: id, kind: opts.kind, attrs };
+    Object.defineProperty(handle, "label", {
+        enumerable: true,
+        get() {
+            const address = targetAddress(handle);
+            const colon = address.lastIndexOf(":");
+            return {
+                address,
+                name: colon >= 0 ? address.slice(colon + 1) : address,
+            };
+        },
+    });
     if (globalThis.__imp_handle_by_id) globalThis.__imp_handle_by_id.set(id, handle);
     return handle;
 }
 
-/**
- * Register a rule for producing a product from a target kind.
- *
- * @param {object} opts
- * @param {string} opts.kind Target kind this rule applies to.
- * @param {string} opts.product Product name produced by the rule.
- * @param {string|object} opts.action Human-readable action template, or a
- * structured action object with argv/cwd/env/platform/inputs/outputs/display.
- * @param {boolean} [opts.action.impure=false] Mark the action as impure (non-deterministic). Impure tasks are uncacheable by default.
- * @param {boolean} [opts.action.force_cache=false] Force caching of an impure task. The caller accepts that stale outputs may be reused.
- * @param {boolean} [opts.requiresOwnSources=false] Whether non-source products depend on this target's sources product.
- * @param {string|null|undefined} [opts.dependencyProduct=null] Product requested from dependencies; use "default" for their default product.
- * @returns {void}
- */
 export function rule(opts) {
     __host_rule(
         opts.kind, opts.product, opts.action,
@@ -388,6 +385,17 @@ let _memo_trace = [];
 let _key_display = new Map();  // key_string → "fnName(arg, ...)"
 let _introspect_mode = false;
 
+function _active_memo_key() {
+    if (_memo_call_stack.length === 0) return null;
+    return _memo_call_stack[_memo_call_stack.length - 1];
+}
+
+function _trace_effect(entry) {
+    const owner = _active_memo_key();
+    if (owner !== null) entry.owner = owner;
+    _memo_trace.push(entry);
+}
+
 function _memo_eval(key_string, thunk) {
     // Cycle check BEFORE table check: a key in the call stack means it is
     // currently being evaluated in this call chain.
@@ -501,6 +509,7 @@ export function getMemoTrace() {
 
 /** Enable or disable introspect mode. When enabled, run() captures intent instead of executing. */
 export function setIntrospectMode(v) { _introspect_mode = v; }
+export function isIntrospectMode() { return _introspect_mode; }
 
 // ---------------------------------------------------------------------------
 // Tracked runtime APIs (Phase 3)
@@ -550,7 +559,7 @@ export function paths(fileset) {
         throw new Error("paths() requires a FileSet value");
     }
     const result = _eval_fileset(fileset);
-    _memo_trace.push({ event: "effect", kind: "paths", fileset_kind: fileset.kind, count: result.length });
+    _trace_effect({ event: "effect", kind: "paths", fileset_kind: fileset.kind, count: result.length });
     return result;
 }
 
@@ -587,49 +596,77 @@ export function output(path, opts) {
     return { kind: (opts && opts.kind) || "file", path };
 }
 
+export function output_path(path) {
+    if (typeof path !== "string" || path.length === 0) {
+        throw new Error("output_path(path) requires a non-empty string");
+    }
+    return path;
+}
+
 export function env(name) {
     const result = __host_env(name);
-    _memo_trace.push({ event: "effect", kind: "env", name, result });
+    _trace_effect({ event: "effect", kind: "env", name, result });
     return result ?? null;
 }
 
 export function which(name) {
     const result = __host_which(name);
-    _memo_trace.push({ event: "effect", kind: "which", name, result });
+    _trace_effect({ event: "effect", kind: "which", name, result });
     return result ?? null;
 }
 
 export function read_file(path) {
     const result = __host_read_file(path);
-    _memo_trace.push({ event: "effect", kind: "read_file", path });
+    _trace_effect({ event: "effect", kind: "read_file", path });
     return result;
 }
 
 export async function run(opts) {
+    const inputs = _materialise_inputs(opts.inputs);
+    const outputs = opts.outputs ?? [];
+    const effect = {
+        event: "effect",
+        kind: "run",
+        display: opts.display ?? (opts.argv && opts.argv[0]),
+        argv: opts.argv ?? [],
+        env: opts.env ?? {},
+        inputs,
+        outputs,
+        tools: opts.tools ?? [],
+        impure: opts.impure === true,
+        forceCache: opts.forceCache === true,
+        sandbox: opts.sandbox !== false,
+    };
     if (_introspect_mode) {
-        _memo_trace.push({
-            event: "effect", kind: "run", dry_run: true,
-            display: opts.display ?? (opts.argv && opts.argv[0]),
-            argv: opts.argv ?? [],
-        });
+        effect.dry_run = true;
+        _trace_effect(effect);
         return { exitCode: 0, stdout: "", stderr: "" };
     }
-    _memo_trace.push({ event: "effect", kind: "run", display: opts.display ?? (opts.argv && opts.argv[0]) });
+    _trace_effect(effect);
     return __host_run({
         argv: opts.argv,
         display: opts.display,
         env: opts.env,
-        inputs: _materialise_inputs(opts.inputs),
-        outputs: opts.outputs,
+        inputs,
+        outputs,
         tools: opts.tools,
         impure: opts.impure,
         forceCache: opts.forceCache,
+        sandbox: opts.sandbox,
     });
+}
+
+export async function group(items) {
+    if (!Array.isArray(items)) {
+        throw new Error("group(items) requires an array");
+    }
+    _trace_effect({ event: "effect", kind: "group", count: items.length });
+    return Promise.all(items);
 }
 
 export async function workspace_mutation(opts) {
     const trace_entry = { event: "effect", kind: "workspace_mutation", display: opts.display ?? (opts.argv && opts.argv[0]) };
-    _memo_trace.push(trace_entry);
+    _trace_effect(trace_entry);
     const result = await __host_workspace_mutation(opts);
     if (result.changed_files !== undefined) {
         trace_entry.changed_files = result.changed_files;
@@ -805,11 +842,19 @@ pub struct Action {
     pub platform: Option<String>,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
+    #[serde(default)]
+    pub tools: Vec<ExecToolSpec>,
     pub display: String,
     #[serde(default)]
     pub impure: bool,
     #[serde(default)]
     pub force_cache: bool,
+    #[serde(default = "default_true")]
+    pub sandbox: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2304,7 +2349,8 @@ fn parse_exec_run_opts<'js>(opts: Object<'js>, workspace_root: &Path) -> rquickj
     let tools = parse_tool_specs(opts.get::<_, Option<Vec<Object>>>("tools")?.unwrap_or_default(), workspace_root)?;
     let impure = opts.get::<_, Option<bool>>("impure")?.unwrap_or(false);
     let force_cache = opts.get::<_, Option<bool>>("forceCache")?.unwrap_or(false);
-    Ok(ExecRunOpts { argv, display, env, inputs, outputs, tools, impure, force_cache })
+    let sandbox = opts.get::<_, Option<bool>>("sandbox")?.unwrap_or(true);
+    Ok(ExecRunOpts { argv, display, env, inputs, outputs, tools, impure, force_cache, sandbox })
 }
 
 fn module_mount_from_args(
@@ -2749,6 +2795,25 @@ fn action_spec_error(message: String) -> rquickjs::Error {
 // ---------------------------------------------------------------------------
 
 pub fn plan(workspace: &Workspace, goal: &str, selectors: &[String]) -> Result<Plan> {
+    plan_inner(workspace, None, None, goal, selectors)
+}
+
+pub fn plan_live(
+    live: &LiveWorkspace,
+    workspace_root: &Path,
+    goal: &str,
+    selectors: &[String],
+) -> Result<Plan> {
+    plan_inner(&live.workspace, Some(live), Some(workspace_root), goal, selectors)
+}
+
+fn plan_inner(
+    workspace: &Workspace,
+    live: Option<&LiveWorkspace>,
+    workspace_root: Option<&Path>,
+    goal: &str,
+    selectors: &[String],
+) -> Result<Plan> {
     let goal_def = workspace.goals.get(goal).ok_or_else(|| {
         let known: Vec<_> = workspace.goals.keys().map(String::as_str).collect();
         anyhow::anyhow!(
@@ -2760,6 +2825,8 @@ pub fn plan(workspace: &Workspace, goal: &str, selectors: &[String]) -> Result<P
     let roots = select_roots(workspace, goal_def, selectors)?;
     let mut planner = Planner {
         workspace,
+        live,
+        workspace_root,
         tasks: BTreeMap::new(),
     };
     let mut root_tasks = Vec::new();
@@ -2910,6 +2977,8 @@ fn matches_selector(target: &Target, selector: &str) -> bool {
 
 struct Planner<'a> {
     workspace: &'a Workspace,
+    live: Option<&'a LiveWorkspace>,
+    workspace_root: Option<&'a Path>,
     tasks: BTreeMap<String, Task>,
 }
 
@@ -2997,9 +3066,19 @@ impl Planner<'_> {
             .get(&(kind, product.to_owned()))
             .cloned()
         {
-            // Product function path: no static dependencies, no real action.
-            // Dependencies are discovered dynamically when the memoized function executes.
             let target = self.workspace.targets.get(target_address).unwrap();
+            if let (Some(live), Some(workspace_root)) = (self.live, self.workspace_root) {
+                let root_id = add_product_discovered_tasks(
+                    live,
+                    workspace_root,
+                    target,
+                    product,
+                    &mut self.tasks,
+                )?;
+                return Ok(root_id);
+            }
+
+            // Static compatibility path for callers that only have a serialized Workspace.
             self.tasks.insert(
                 id.clone(),
                 Task {
@@ -3016,9 +3095,11 @@ impl Planner<'_> {
                         platform: None,
                         inputs: Vec::new(),
                         outputs: Vec::new(),
+                        tools: Vec::new(),
                         display: format!("product {product}"),
                         impure: false,
                         force_cache: false,
+                        sandbox: true,
                     },
                     exec_fn: Some(exec_fn_name),
                     dependencies: Vec::new(),
@@ -3032,6 +3113,294 @@ impl Planner<'_> {
 
         Ok(id)
     }
+}
+
+fn add_product_discovered_tasks(
+    live: &LiveWorkspace,
+    workspace_root: &Path,
+    target: &Target,
+    product: &str,
+    tasks: &mut BTreeMap<String, Task>,
+) -> Result<String> {
+    let result = introspect_product(live, &target.address, product)?;
+    let prefix = format!("{}#{}", target.address, product);
+    let mut key_order = Vec::new();
+    let mut seen_keys = BTreeSet::new();
+
+    for entry in &result.trace {
+        if entry["event"] == "miss" {
+            if let Some(key) = entry["key"].as_str() {
+                if seen_keys.insert(key.to_owned()) {
+                    key_order.push(key.to_owned());
+                }
+            }
+        }
+    }
+    for dep in &result.deps {
+        for field in ["caller", "callee"] {
+            if let Some(key) = dep[field].as_str() {
+                if seen_keys.insert(key.to_owned()) {
+                    key_order.push(key.to_owned());
+                }
+            }
+        }
+    }
+
+    let mut key_to_task = BTreeMap::new();
+    for (index, key) in key_order.iter().enumerate() {
+        let task_id = format!("{prefix}:memo{index}");
+        key_to_task.insert(key.clone(), task_id.clone());
+        let display = result
+            .key_display
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| key.clone());
+        tasks.entry(task_id.clone()).or_insert_with(|| Task {
+            id: task_id,
+            target: target.address.clone(),
+            product: product.to_owned(),
+            fields: BTreeMap::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            action: Action {
+                argv: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                platform: None,
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                tools: Vec::new(),
+                display,
+                impure: false,
+                force_cache: false,
+                sandbox: true,
+            },
+            exec_fn: None,
+            dependencies: Vec::new(),
+            js_id: target.js_id,
+            is_product: false,
+        });
+    }
+
+    let mut memo_children: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut has_parent = BTreeSet::new();
+    for dep in &result.deps {
+        let Some(caller_key) = dep["caller"].as_str() else {
+            continue;
+        };
+        let Some(callee_key) = dep["callee"].as_str() else {
+            continue;
+        };
+        let Some(caller_task) = key_to_task.get(caller_key).cloned() else {
+            continue;
+        };
+        let Some(callee_task) = key_to_task.get(callee_key).cloned() else {
+            continue;
+        };
+        has_parent.insert(callee_key.to_owned());
+        memo_children
+            .entry(caller_key.to_owned())
+            .or_default()
+            .push(callee_task.clone());
+        if let Some(task) = tasks.get_mut(&caller_task) {
+            push_unique(&mut task.dependencies, callee_task);
+        }
+    }
+
+    let mut run_index = 0usize;
+    for entry in &result.trace {
+        if !(entry["event"] == "effect" && entry["kind"] == "run") {
+            continue;
+        }
+        let task_id = format!("{prefix}:run{run_index}");
+        run_index += 1;
+        let owner_key = entry["owner"].as_str();
+        let mut dependencies = Vec::new();
+        if let Some(owner_key) = owner_key {
+            if let Some(children) = memo_children.get(owner_key) {
+                for child in children {
+                    push_unique(&mut dependencies, child.clone());
+                }
+            }
+        }
+        let inputs = artifacts_from_json(&entry["inputs"], &task_id, "input", None);
+        let outputs = artifacts_from_json(&entry["outputs"], &task_id, "output", Some(&task_id));
+        let action = Action {
+            argv: strings_from_json_array(&entry["argv"]),
+            cwd: None,
+            env: env_from_json_object(&entry["env"]),
+            platform: None,
+            inputs: inputs.iter().map(|artifact| artifact.id.clone()).collect(),
+            outputs: outputs.iter().map(|artifact| artifact.id.clone()).collect(),
+            tools: tools_from_json_array(&entry["tools"], workspace_root)?,
+            display: entry["display"]
+                .as_str()
+                .unwrap_or("<unnamed run>")
+                .to_owned(),
+            impure: entry["impure"].as_bool().unwrap_or(false),
+            force_cache: entry["forceCache"].as_bool().unwrap_or(false),
+            sandbox: entry["sandbox"].as_bool().unwrap_or(true),
+        };
+        tasks.insert(
+            task_id.clone(),
+            Task {
+                id: task_id.clone(),
+                target: target.address.clone(),
+                product: product.to_owned(),
+                fields: BTreeMap::new(),
+                inputs,
+                outputs,
+                action,
+                exec_fn: None,
+                dependencies,
+                js_id: target.js_id,
+                is_product: false,
+            },
+        );
+        if let Some(owner_key) = owner_key {
+            if let Some(owner_task_id) = key_to_task.get(owner_key) {
+                if let Some(owner_task) = tasks.get_mut(owner_task_id) {
+                    push_unique(&mut owner_task.dependencies, task_id);
+                }
+            }
+        }
+    }
+
+    let roots: Vec<String> = key_order
+        .iter()
+        .filter(|key| !has_parent.contains(*key))
+        .filter_map(|key| key_to_task.get(key).cloned())
+        .collect();
+    if let Some(root) = roots.first() {
+        return Ok(root.clone());
+    }
+
+    let task_id = format!("{prefix}:memo0");
+    tasks.entry(task_id.clone()).or_insert_with(|| Task {
+        id: task_id.clone(),
+        target: target.address.clone(),
+        product: product.to_owned(),
+        fields: BTreeMap::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        action: Action {
+            argv: Vec::new(),
+            cwd: None,
+            env: BTreeMap::new(),
+            platform: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            tools: Vec::new(),
+            display: format!("{}({})", product, target.address),
+            impure: false,
+            force_cache: false,
+            sandbox: true,
+        },
+        exec_fn: None,
+        dependencies: Vec::new(),
+        js_id: target.js_id,
+        is_product: false,
+    });
+    Ok(task_id)
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn strings_from_json_array(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn env_from_json_object(value: &serde_json::Value) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    if let Some(obj) = value.as_object() {
+        for (key, value) in obj {
+            if let Some(value) = value.as_str() {
+                env.insert(key.clone(), value.to_owned());
+            }
+        }
+    }
+    env
+}
+
+fn artifacts_from_json(
+    value: &serde_json::Value,
+    task_id: &str,
+    role: &str,
+    producer: Option<&str>,
+) -> Vec<Artifact> {
+    let mut artifacts = Vec::new();
+    let Some(array) = value.as_array() else {
+        return artifacts;
+    };
+    for (index, item) in array.iter().enumerate() {
+        let kind = item["kind"].as_str().unwrap_or("file").to_owned();
+        let path = item["path"].as_str().map(str::to_owned);
+        let value = item["value"].as_str().map(str::to_owned);
+        let id = item["id"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{task_id}:{role}{index}"));
+        artifacts.push(Artifact {
+            id,
+            kind,
+            path,
+            value,
+            producer: producer.map(str::to_owned),
+        });
+    }
+    artifacts
+}
+
+fn tools_from_json_array(
+    value: &serde_json::Value,
+    workspace_root: &Path,
+) -> Result<Vec<ExecToolSpec>> {
+    let mut tools = Vec::new();
+    let Some(array) = value.as_array() else {
+        return Ok(tools);
+    };
+    for item in array {
+        let Some(name) = item["name"].as_str() else {
+            continue;
+        };
+        let cache = item["cache"].as_str().unwrap_or_default().to_owned();
+        let key = item["key"].as_str().unwrap_or_default().to_owned();
+        let path = if let Some(path) = item["path"].as_str() {
+            PathBuf::from(path)
+        } else {
+            named_cache_key_path(workspace_root, &cache, &key)?
+        };
+        let bin_dirs = item["binDirs"]
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|values| !values.is_empty())
+            .unwrap_or_else(|| vec!["bin".to_owned()]);
+        tools.push(ExecToolSpec {
+            name: name.to_owned(),
+            cache,
+            key,
+            path,
+            bin_dirs,
+        });
+    }
+    Ok(tools)
 }
 
 // ---------------------------------------------------------------------------
@@ -3371,6 +3740,16 @@ fn execute_one_task(
             }
             TaskExecutionStatus::Noop
         }
+        ExecutionMode::Local if !task.action.sandbox => {
+            if !task.action.impure {
+                bail!("{} uses sandbox: false and must set impure: true", task.id);
+            }
+            run_unsandboxed_task(task, workspace_root)?;
+            if let Some(progress) = progress.as_mut() {
+                progress.done("done");
+            }
+            TaskExecutionStatus::Ran
+        }
         ExecutionMode::Local if command.is_empty() => {
             let evaluation =
                 evaluate_task_cache(task, workspace_root, named_caches, completed_dependencies)?;
@@ -3466,6 +3845,39 @@ fn execute_one_task(
     ))
 }
 
+fn run_unsandboxed_task(task: &Task, workspace_root: &Path) -> Result<()> {
+    let opts = ExecRunOpts {
+        argv: task.action.argv.clone(),
+        display: task.action.display.clone(),
+        env: task.action.env.clone(),
+        inputs: task
+            .inputs
+            .iter()
+            .filter_map(|artifact| {
+                artifact.path.as_ref().map(|path| ExecIoSpec {
+                    path: path.clone(),
+                    kind: artifact.kind.clone(),
+                })
+            })
+            .collect(),
+        outputs: task
+            .outputs
+            .iter()
+            .filter_map(|artifact| {
+                artifact.path.as_ref().map(|path| ExecIoSpec {
+                    path: path.clone(),
+                    kind: artifact.kind.clone(),
+                })
+            })
+            .collect(),
+        tools: task.action.tools.clone(),
+        impure: true,
+        force_cache: false,
+        sandbox: false,
+    };
+    exec_run_unsandboxed(workspace_root, opts).map(|_| ())
+}
+
 fn ordered_tasks(plan: &Plan) -> Result<Vec<&Task>> {
     let mut pending: BTreeMap<&str, &Task> = plan
         .tasks
@@ -3524,6 +3936,7 @@ fn run_local_task(
     }
 
     let sandbox = prepare_sandbox(task, workspace_root)?;
+    let tool_path_entries = materialize_tools_into_sandbox(&task.action.tools, &sandbox.sandbox_root)?;
     let manifest_path = sandbox.sandbox_root.join("imp-sandbox.json");
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&sandbox)?)
         .with_context(|| format!("write sandbox manifest {}", manifest_path.display()))?;
@@ -3548,10 +3961,11 @@ fn run_local_task(
             .with_context(|| format!("create named cache {}", binding.path.display()))?;
         command.env(&binding.env_var, &binding.path);
     }
+    let command_env = sandbox_command_env(&task.action.env, &tool_path_entries)?;
     command
         .args(args)
         .current_dir(&cwd)
-        .envs(&task.action.env)
+        .envs(&command_env)
         .env("IMP_SANDBOX_ROOT", &sandbox.sandbox_root)
         .env("IMP_CACHE_ROOT", &sandbox.cache_root)
         .env("IMP_SANDBOX_MANIFEST", &manifest_path)
@@ -4741,10 +5155,9 @@ pub fn introspect_product(
             let reset: Function = ctx.globals().get("resetMemoState")?;
             reset.call::<_, ()>(())?;
 
-            // Call the product function with the target handle.
-            let handle = Object::new(ctx.clone())?;
-            handle.set("__imp", true)?;
-            handle.set("__id", js_id)?;
+            // Call the product function with the enriched target handle.
+            let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
+            let handle: Object = resolve_fn.call((js_id,))?;
 
             let exec_fn: Function = ctx.globals().get(exec_fn_name.as_str())?;
             let result: MaybePromise = exec_fn
@@ -5075,9 +5488,11 @@ fn lower_action(
             .map(|value| expand_template(value, target)),
         inputs: inputs.iter().map(|artifact| artifact.id.clone()).collect(),
         outputs: outputs.iter().map(|artifact| artifact.id.clone()).collect(),
+        tools: Vec::new(),
         display: expand_template(&spec.display, target),
         impure: spec.impure,
         force_cache: spec.force_cache,
+        sandbox: true,
     };
     (action, inputs, outputs)
 }
@@ -5158,6 +5573,7 @@ struct ExecRunOpts {
     tools: Vec<ExecToolSpec>,
     impure: bool,
     force_cache: bool,
+    sandbox: bool,
 }
 
 struct ExecIoSpec {
@@ -5165,13 +5581,13 @@ struct ExecIoSpec {
     kind: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct ExecToolSpec {
-    name: String,
-    cache: String,
-    key: String,
-    path: PathBuf,
-    bin_dirs: Vec<String>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecToolSpec {
+    pub name: String,
+    pub cache: String,
+    pub key: String,
+    pub path: PathBuf,
+    pub bin_dirs: Vec<String>,
 }
 
 /// Build a JS `ctx` object for `exec(target, ctx)` functions.
@@ -5278,6 +5694,8 @@ pub(super) fn build_exec_ctx<'js>(
             let impure = impure.unwrap_or(false);
             let force_cache: Option<bool> = opts.get("forceCache")?;
             let force_cache = force_cache.unwrap_or(false);
+            let sandbox: Option<bool> = opts.get("sandbox")?;
+            let sandbox = sandbox.unwrap_or(true);
 
             let run_opts = ExecRunOpts {
                 argv,
@@ -5288,6 +5706,7 @@ pub(super) fn build_exec_ctx<'js>(
                 tools,
                 impure,
                 force_cache,
+                sandbox,
             };
 
             let result = exec_run_inner(&wr, run_opts)
@@ -5434,6 +5853,13 @@ fn sandbox_command_env(
 }
 
 fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunResult> {
+    if !opts.sandbox {
+        if !opts.impure {
+            bail!("run({{ sandbox: false }}) requires impure: true");
+        }
+        return exec_run_unsandboxed(workspace_root, opts);
+    }
+
     let sandbox_root = create_sandbox_root()?;
     let tool_path_entries = materialize_tools_into_sandbox(&opts.tools, &sandbox_root)?;
 
@@ -5676,6 +6102,66 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
         stderr,
         exit_code,
     })
+}
+
+fn exec_run_unsandboxed(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunResult> {
+    let (program, args) = opts
+        .argv
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("run() argv must not be empty"))?;
+    let tool_path_entries = direct_tool_path_entries(&opts.tools)?;
+    let command_env = sandbox_command_env(&opts.env, &tool_path_entries)?;
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir(workspace_root)
+        .envs(&command_env)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let child = command
+        .spawn()
+        .with_context(|| format!("run() command in {}", workspace_root.display()))?;
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("wait for {}", opts.display))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let exit_code = output.status.code().unwrap_or(-1);
+    if !output.status.success() {
+        bail!(
+            "{} failed with exit code {}\nstdout:\n{}\nstderr:\n{}",
+            opts.display,
+            exit_code,
+            stdout.trim_end(),
+            stderr.trim_end()
+        );
+    }
+    Ok(ExecRunResult {
+        stdout,
+        stderr,
+        exit_code,
+    })
+}
+
+fn direct_tool_path_entries(tools: &[ExecToolSpec]) -> Result<Vec<PathBuf>> {
+    let mut path_entries = Vec::new();
+    for tool in tools {
+        validate_tool_name(&tool.name)?;
+        if !tool.path.is_dir() {
+            bail!(
+                "tool {} cache path {} is not a directory",
+                tool.name,
+                tool.path.display()
+            );
+        }
+        for bin_dir in &tool.bin_dirs {
+            path_entries.push(resolve_tool_bin_dir(&tool.path, bin_dir)?);
+        }
+    }
+    Ok(path_entries)
 }
 
 /// Build a JS `target` object for an `exec(target, ctx)` call.
@@ -5944,9 +6430,11 @@ export const ui = asset({ srcs: ["**/*.png"] });
                 platform: None,
                 inputs: Vec::new(),
                 outputs: outputs.iter().map(|artifact| artifact.id.clone()).collect(),
+                tools: Vec::new(),
                 display: argv.join(" "),
                 impure: false,
                 force_cache: false,
+                sandbox: true,
             },
             exec_fn: None,
             outputs,

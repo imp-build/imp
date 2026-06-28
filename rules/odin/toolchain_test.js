@@ -65,8 +65,8 @@ test("declares a default toolchain target", () => {
     const toolchain = api.odinToolchain("dev-2026-03", { default: true });
 
     expect(toolchain.__imp).toBe(true);
-    expect(toolchain.version).toBe("dev-2026-03");
-    expect(toolchain.cacheKey).toBe("odin-toolchains/dev-2026-03/linux-x86_64");
+    expect(toolchain.attrs.version).toBe("dev-2026-03");
+    expect(odinCacheKey(toolchain.attrs.version, { os: "linux", arch: "x86_64" })).toBe("dev-2026-03/linux-x86_64");
     expect(api.defaultOdinToolchainVersion()).toBe("dev-2026-03");
     expect(api.defaultOdinToolchain()).toBe(toolchain);
     expect(host.calls[0][0]).toBe("namedCache");
