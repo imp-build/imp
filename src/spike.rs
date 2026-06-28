@@ -321,6 +321,19 @@ export function hydrateTarget(handle) {
 }
 
 /**
+ * Return the workspace address for a target handle, e.g. "//:app".
+ *
+ * @param {object} handle A target handle returned by target().
+ * @returns {string}
+ */
+export function targetAddress(handle) {
+    if (!handle || handle.__imp !== true) {
+        throw new Error('targetAddress: expected a target handle');
+    }
+    return __host_target_address(handle.__id);
+}
+
+/**
  * Collect all targets of a given kind reachable from a handle (depth-first, deduped).
  *
  * @param {object} handle Root target handle.
@@ -370,12 +383,14 @@ export function workspaceMount(opts) {
 
 const _memo_fn_ids = new WeakMap();
 let _memo_fn_counter = 0;
+const _fn_id_names = new Map();  // fn_id → fn.name; persists across resetMemoState
 
 function _stable_function_id(fn) {
     let id = _memo_fn_ids.get(fn);
     if (id === undefined) {
         id = (fn.name || "<anonymous>") + "#" + (++_memo_fn_counter);
         _memo_fn_ids.set(fn, id);
+        _fn_id_names.set(id, fn.name || "<anonymous>");
     }
     return id;
 }
@@ -397,6 +412,8 @@ let _memo_call_stack = [];
 let _memo_call_stack_set = new Set();
 let _memo_deps = [];
 let _memo_trace = [];
+let _key_display = new Map();  // key_string → "fnName(arg, ...)"
+let _introspect_mode = false;
 
 function _memo_eval(key_string, thunk) {
     // Cycle check BEFORE table check: a key in the call stack means it is
@@ -466,6 +483,12 @@ export function memo(fn) {
             args_digest: _stable_digest(args),
             config_digest: "",
         });
+        if (!_key_display.has(key_string)) {
+            const label = fn.name + "(" +
+                args.map(a => a && a.__imp === true ? "#" + a.__id : JSON.stringify(a)).join(", ") +
+                ")";
+            _key_display.set(key_string, label);
+        }
         return _memo_eval(key_string, async () => {
             _push_call(key_string);
             try {
@@ -488,18 +511,23 @@ export function resetMemoState() {
     _memo_call_stack_set = new Set();
     _memo_deps = [];
     _memo_trace = [];
+    _key_display = new Map();
 }
 
 /**
  * Return a snapshot of the memo trace and dependency graph.
- * @returns {{ trace: Array<{event: string, key: string}>, deps: Array<{caller: string, callee: string}> }}
+ * @returns {{ trace: Array, deps: Array, key_display: Object }}
  */
 export function getMemoTrace() {
     return {
         trace: _memo_trace.slice(),
         deps: _memo_deps.slice(),
+        key_display: Object.fromEntries(_key_display),
     };
 }
+
+/** Enable or disable introspect mode. When enabled, run() captures intent instead of executing. */
+export function setIntrospectMode(v) { _introspect_mode = v; }
 
 // ---------------------------------------------------------------------------
 // Tracked runtime APIs (Phase 3)
@@ -605,6 +633,14 @@ export function read_file(path) {
 }
 
 export async function run(opts) {
+    if (_introspect_mode) {
+        _memo_trace.push({
+            event: "effect", kind: "run", dry_run: true,
+            display: opts.display ?? (opts.argv && opts.argv[0]),
+            argv: opts.argv ?? [],
+        });
+        return { exitCode: 0, stdout: "", stderr: "" };
+    }
     _memo_trace.push({ event: "effect", kind: "run", display: opts.display ?? (opts.argv && opts.argv[0]) });
     return __host_run({
         argv: opts.argv,
@@ -619,9 +655,19 @@ export async function run(opts) {
 }
 
 export async function workspace_mutation(opts) {
-    _memo_trace.push({ event: "effect", kind: "workspace_mutation", display: opts.display ?? (opts.argv && opts.argv[0]) });
-    return __host_workspace_mutation(opts);
+    const trace_entry = { event: "effect", kind: "workspace_mutation", display: opts.display ?? (opts.argv && opts.argv[0]) };
+    _memo_trace.push(trace_entry);
+    const result = await __host_workspace_mutation(opts);
+    if (result.changed_files !== undefined) {
+        trace_entry.changed_files = result.changed_files;
+    }
+    return result;
 }
+
+// Expose introspection helpers as globals so Rust can call them without module imports.
+globalThis.resetMemoState = resetMemoState;
+globalThis.getMemoTrace = getMemoTrace;
+globalThis.setIntrospectMode = setIntrospectMode;
 "##;
 
 // ---------------------------------------------------------------------------
@@ -1042,6 +1088,7 @@ struct HostState {
     named_caches: BTreeMap<String, NamedCache>,
     goals: BTreeMap<String, Goal>,
     platforms: BTreeMap<String, PlatformDef>,
+    id_to_address: BTreeMap<u32, String>,
 }
 
 impl Default for HostState {
@@ -1082,6 +1129,7 @@ impl Default for HostState {
             named_caches: BTreeMap::new(),
             goals,
             platforms,
+            id_to_address: BTreeMap::new(),
         }
     }
 }
@@ -1535,34 +1583,42 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
     }
 
     // ----- Resolve dep IDs to addresses -----
-    let hs = state.lock().unwrap();
-    let mut id_to_address: BTreeMap<u32, String> = named_exports
-        .iter()
-        .map(|(addr, id)| (*id, addr.clone()))
-        .collect();
+    let (workspace, id_to_address_final) = {
+        let hs = state.lock().unwrap();
+        let mut id_to_address: BTreeMap<u32, String> = named_exports
+            .iter()
+            .map(|(addr, id)| (*id, addr.clone()))
+            .collect();
 
-    let mut targets = BTreeMap::new();
-    let mut visiting = BTreeSet::new();
-    for (address, id) in &named_exports {
-        materialize_pending_target(
-            &hs,
-            &mut id_to_address,
-            &mut targets,
-            &mut visiting,
-            *id,
-            address.clone(),
-        )?;
-    }
+        let mut targets = BTreeMap::new();
+        let mut visiting = BTreeSet::new();
+        for (address, id) in &named_exports {
+            materialize_pending_target(
+                &hs,
+                &mut id_to_address,
+                &mut targets,
+                &mut visiting,
+                *id,
+                address.clone(),
+            )?;
+        }
 
-    Ok(LiveWorkspace {
-        workspace: Workspace {
+        let ws = Workspace {
             rules: hs.rules.clone(),
             targets,
             products: hs.products.clone(),
             named_caches: hs.named_caches.clone(),
             goals: hs.goals.clone(),
             platforms: hs.platforms.clone(),
-        },
+        };
+        (ws, id_to_address)
+    };
+
+    // Store resolved addresses in HostState so __host_target_address can read them.
+    state.lock().unwrap().id_to_address = id_to_address_final;
+
+    Ok(LiveWorkspace {
+        workspace,
         runtime: rt,
         ctx: Mutex::new(ctx),
         exec_root,
@@ -2121,6 +2177,24 @@ fn register_globals<'js>(
     globals.set("__host_hydrate_target", host_hydrate_target)?;
 
     // ------------------------------------------------------------------
+    // __host_target_address(id) → address string
+    // ------------------------------------------------------------------
+    let state_addr = Arc::clone(&state);
+    let host_target_address = Function::new(
+        ctx.clone(),
+        move |id: u32| -> rquickjs::Result<String> {
+            let hs = state_addr.lock().unwrap();
+            hs.id_to_address.get(&id).cloned().ok_or_else(|| {
+                rquickjs::Error::new_loading_message(
+                    "targetAddress",
+                    format!("no address for target id {id}"),
+                )
+            })
+        },
+    )?;
+    globals.set("__host_target_address", host_target_address)?;
+
+    // ------------------------------------------------------------------
     // __host_cas_tree_store(entriesJson) → digest
     // __host_cas_tree_get(digest) → entriesJson
     // __host_cas_tree_merge(digestsJson) → digest
@@ -2247,8 +2321,10 @@ fn register_globals<'js>(
     )?;
     globals.set("__host_run", host_run)?;
 
-    // __host_workspace_mutation(opts) → { stdout, stderr, exitCode }
+    // __host_workspace_mutation(opts) → { stdout, stderr, exitCode, changed_files? }
     // Runs a command directly in the workspace root (not a sandbox). Always impure.
+    // When opts.watch is provided (array of regex strings), snaps workspace files
+    // matching those patterns before and after, and returns changed_files in the result.
     let exec_root_wm = Arc::clone(&exec_root);
     let host_workspace_mutation = Function::new(
         ctx.clone(),
@@ -2262,6 +2338,20 @@ fn register_globals<'js>(
             let argv: Vec<String> = opts.get("argv")?;
             let display: Option<String> = opts.get("display")?;
             let display = display.unwrap_or_else(|| argv.join(" "));
+            let watch: Option<Vec<String>> = opts.get("watch")?;
+
+            let pre = watch
+                .as_deref()
+                .map(|patterns| {
+                    snapshot_watched_files(&root, patterns).map_err(|e| {
+                        rquickjs::Error::new_loading_message(
+                            "workspace_mutation",
+                            format!("pre-snapshot: {e:#}"),
+                        )
+                    })
+                })
+                .transpose()?;
+
             let (program, args) = argv.split_first().ok_or_else(|| {
                 rquickjs::Error::new_loading_message("workspace_mutation", "argv must not be empty")
             })?;
@@ -2275,11 +2365,28 @@ fn register_globals<'js>(
                         format!("spawn {display}: {e}"),
                     )
                 })?;
-            let exit_code = output.status.code().unwrap_or(-1);
-            let obj = Object::new(ctx)?;
+
+            let obj = Object::new(ctx.clone())?;
             obj.set("stdout", String::from_utf8_lossy(&output.stdout).to_string())?;
             obj.set("stderr", String::from_utf8_lossy(&output.stderr).to_string())?;
-            obj.set("exitCode", exit_code)?;
+            obj.set("exitCode", output.status.code().unwrap_or(-1))?;
+
+            if let Some(pre_snap) = pre {
+                let post_snap = snapshot_watched_files(&root, watch.as_deref().unwrap())
+                    .map_err(|e| {
+                        rquickjs::Error::new_loading_message(
+                            "workspace_mutation",
+                            format!("post-snapshot: {e:#}"),
+                        )
+                    })?;
+                let changed = diff_snapshots(&pre_snap, &post_snap);
+                let arr = rquickjs::Array::new(ctx)?;
+                for (i, entry) in changed.iter().enumerate() {
+                    arr.set(i, entry.as_str())?;
+                }
+                obj.set("changed_files", arr)?;
+            }
+
             Ok(obj)
         },
     )?;
@@ -2479,6 +2586,47 @@ fn matching_workspace_source_paths(
     }
     files.sort();
     Ok(files)
+}
+
+/// Snapshot workspace files matching `patterns` (regex strings, rooted at workspace root).
+/// Returns a map of relative path → content digest.
+fn snapshot_watched_files(
+    workspace_root: &Path,
+    patterns: &[String],
+) -> Result<std::collections::HashMap<String, String>> {
+    let paths = matching_workspace_source_paths(workspace_root, ".", patterns, &[])?;
+    let mut snap = std::collections::HashMap::new();
+    for path in paths {
+        let abs = workspace_root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let (digest, _) = store_file_blob(&abs, "watch").with_context(|| {
+            format!("snapshot {}", abs.display())
+        })?;
+        snap.insert(path, digest);
+    }
+    Ok(snap)
+}
+
+/// Diff two snapshots. Returns sorted entries prefixed with `+` (created), `-` (deleted),
+/// or bare (modified).
+fn diff_snapshots(
+    pre: &std::collections::HashMap<String, String>,
+    post: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    let mut result = Vec::new();
+    for (path, post_digest) in post {
+        match pre.get(path) {
+            None => result.push(format!("+{path}")),
+            Some(pre_digest) if pre_digest != post_digest => result.push(path.clone()),
+            _ => {}
+        }
+    }
+    for path in pre.keys() {
+        if !post.contains_key(path) {
+            result.push(format!("-{path}"));
+        }
+    }
+    result.sort();
+    result
 }
 
 fn compile_regexes(label: &str, patterns: &[String]) -> Result<Vec<Regex>> {
@@ -4723,6 +4871,220 @@ pub fn format_rules(workspace: &Workspace, w: &mut String) -> std::fmt::Result {
             writeln!(w, "        dependency product: {dep_prod}")?;
         }
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Graph introspection (Phase 10)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct IntrospectResult {
+    pub trace: Vec<serde_json::Value>,
+    pub deps: Vec<serde_json::Value>,
+    pub key_display: std::collections::HashMap<String, String>,
+}
+
+/// Dry-run a product function and capture its memo call graph and effects.
+///
+/// Calls `setIntrospectMode(true)` so `run()` records intent without executing.
+pub fn introspect_product(
+    live: &LiveWorkspace,
+    target_addr: &str,
+    product_name: &str,
+) -> Result<IntrospectResult> {
+    let target = live
+        .workspace
+        .targets
+        .get(target_addr)
+        .ok_or_else(|| anyhow::anyhow!("no target '{target_addr}' in workspace"))?;
+
+    let exec_fn_name = live
+        .workspace
+        .products
+        .get(&(target.kind.clone(), product_name.to_owned()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no product '{product_name}' for kind '{}' (target '{target_addr}')",
+                target.kind
+            )
+        })?
+        .clone();
+
+    let js_id = target.js_id;
+
+    let ctx_guard = live.ctx.lock().unwrap();
+    let result = ctx_guard
+        .with(|ctx| -> rquickjs::Result<(Vec<serde_json::Value>, Vec<serde_json::Value>, std::collections::HashMap<String, String>)> {
+            // Enable introspect mode and reset trace state.
+            let set_introspect: Function = ctx.globals().get("setIntrospectMode")?;
+            set_introspect.call::<_, ()>((true,))?;
+            let reset: Function = ctx.globals().get("resetMemoState")?;
+            reset.call::<_, ()>(())?;
+
+            // Call the product function with the target handle.
+            let handle = Object::new(ctx.clone())?;
+            handle.set("__imp", true)?;
+            handle.set("__id", js_id)?;
+
+            let exec_fn: Function = ctx.globals().get(exec_fn_name.as_str())?;
+            let result: MaybePromise = exec_fn
+                .call((handle,))
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("introspect", format!("{e}")))?;
+            result
+                .finish::<()>()
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("introspect", format!("{e}")))?;
+
+            // Restore normal mode.
+            set_introspect.call::<_, ()>((false,))?;
+
+            // Read the trace.
+            let get_trace: Function = ctx.globals().get("getMemoTrace")?;
+            let trace_obj: Object = get_trace.call(())?;
+
+            let trace_json: String = ctx
+                .json_stringify(trace_obj)?
+                .ok_or_else(|| rquickjs::Error::new_loading_message("introspect", "trace was null"))?
+                .to_string()?;
+
+            let parsed: serde_json::Value = serde_json::from_str(&trace_json)
+                .map_err(|e| rquickjs::Error::new_loading_message("introspect", e.to_string()))?;
+
+            let trace = parsed["trace"].as_array().cloned().unwrap_or_default();
+            let deps = parsed["deps"].as_array().cloned().unwrap_or_default();
+            let key_display: std::collections::HashMap<String, String> = parsed["key_display"]
+                .as_object()
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            Ok((trace, deps, key_display))
+        })
+        .map_err(|e| anyhow::anyhow!("introspect_product failed: {e}"))?;
+    drop(ctx_guard);
+
+    // Replace "#N" handle tokens in display labels with workspace addresses.
+    let id_to_address: std::collections::HashMap<u32, &str> = live
+        .workspace
+        .targets
+        .values()
+        .map(|t| (t.js_id, t.address.as_str()))
+        .collect();
+
+    let key_display = result
+        .2
+        .into_iter()
+        .map(|(k, mut label)| {
+            for (id, addr) in &id_to_address {
+                label = label.replace(&format!("#{id}"), addr);
+            }
+            (k, label)
+        })
+        .collect();
+
+    Ok(IntrospectResult {
+        trace: result.0,
+        deps: result.1,
+        key_display,
+    })
+}
+
+/// Render the memo call tree for an introspect result.
+pub fn format_inspect_explain(result: &IntrospectResult, w: &mut String) -> std::fmt::Result {
+    use std::fmt::Write;
+    use std::collections::{HashMap, HashSet};
+
+    // Build adjacency list from deps: caller → [callees].
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut has_parent: HashSet<&str> = HashSet::new();
+    for dep in &result.deps {
+        if let (Some(caller), Some(callee)) = (
+            dep["caller"].as_str(),
+            dep["callee"].as_str(),
+        ) {
+            children.entry(caller).or_default().push(callee);
+            has_parent.insert(callee);
+        }
+    }
+
+    // Root nodes: appear in deps but never as a callee.
+    let all_callers: Vec<&str> = result.deps.iter()
+        .filter_map(|d| d["caller"].as_str())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let roots: Vec<&str> = all_callers.iter()
+        .copied()
+        .filter(|k| !has_parent.contains(k))
+        .collect();
+
+    // Fall back to miss events if no deps recorded.
+    let miss_roots: Vec<&str>;
+    let effective_roots: &[&str] = if roots.is_empty() {
+        miss_roots = result.trace.iter()
+            .filter(|e| e["event"] == "miss")
+            .filter_map(|e| e["key"].as_str())
+            .collect();
+        &miss_roots
+    } else {
+        &roots
+    };
+
+    fn render_node(
+        key: &str,
+        depth: usize,
+        children: &HashMap<&str, Vec<&str>>,
+        key_display: &std::collections::HashMap<String, String>,
+        visited: &mut HashSet<String>,
+        w: &mut String,
+    ) -> std::fmt::Result {
+        let indent = "  ".repeat(depth);
+        let label = key_display.get(key).map(|s| s.as_str()).unwrap_or(key);
+        writeln!(w, "{indent}{label}")?;
+        if visited.insert(key.to_owned()) {
+            if let Some(kids) = children.get(key) {
+                for &kid in kids {
+                    render_node(kid, depth + 1, children, key_display, visited, w)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut visited = HashSet::new();
+    for root in effective_roots {
+        render_node(root, 0, &children, &result.key_display, &mut visited, w)?;
+    }
+
+    Ok(())
+}
+
+/// List the actions (run() calls) captured in an introspect result.
+pub fn format_inspect_actions(result: &IntrospectResult, w: &mut String) -> std::fmt::Result {
+    use std::fmt::Write;
+
+    let actions: Vec<_> = result
+        .trace
+        .iter()
+        .filter(|e| e["event"] == "effect" && e["kind"] == "run")
+        .collect();
+
+    if actions.is_empty() {
+        writeln!(w, "  (no actions)")?;
+        return Ok(());
+    }
+
+    for action in actions {
+        let display = action["display"].as_str().unwrap_or("<unnamed>");
+        writeln!(w, "  {display}  (dry-run)")?;
+    }
+
     Ok(())
 }
 

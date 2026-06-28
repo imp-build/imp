@@ -1,5 +1,5 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { env, which, glob, paths, read_file, run, getMemoTrace, resetMemoState, memo } from "imp:core";
+import { env, which, glob, paths, read_file, run, getMemoTrace, resetMemoState, memo, setIntrospectMode, workspace_mutation } from "imp:core";
 
 describe("tracked runtime APIs", () => {
 
@@ -97,6 +97,47 @@ test("read_file reads a file written by run", async () => {
     await run({ argv: ["sh", "-c", `echo tracked > ${tmpfile}`] });
     const content = read_file(tmpfile);
     expect(content.trim()).toBe("tracked");
+});
+
+test("setIntrospectMode: run() returns exitCode 0 without executing", async () => {
+    resetMemoState();
+    setIntrospectMode(true);
+    const result = await run({ argv: ["sh", "-c", "exit 99"], display: "should-not-run" });
+    setIntrospectMode(false);
+    expect(result.exitCode).toBe(0);
+    const { trace } = getMemoTrace();
+    const effects = trace.filter(t => t.event === "effect" && t.kind === "run");
+    expect(effects.length).toBe(1);
+    expect(effects[0].dry_run).toBe(true);
+    expect(effects[0].display).toBe("should-not-run");
+});
+
+test("getMemoTrace includes key_display with function name", async () => {
+    resetMemoState();
+    let calls = 0;
+    const fn_ = memo(async function my_fn() { calls++; return 42; });
+    await fn_();
+    const { key_display } = getMemoTrace();
+    const labels = Object.values(key_display);
+    expect(labels.some(l => l.startsWith("my_fn("))).toBe(true);
+});
+
+test("workspace_mutation with watch reports changed files", async () => {
+    resetMemoState();
+    // Use a fixed name so the regex pattern is simple; clean up before starting.
+    const name = "imp_watch_test.tmp";
+    await workspace_mutation({ argv: ["sh", "-c", `rm -f ${name}`] });
+    const result = await workspace_mutation({
+        argv: ["sh", "-c", `echo hello > ${name}`],
+        watch: ["imp_watch_test\\.tmp"],
+        display: "create watch test file",
+    });
+    await workspace_mutation({ argv: ["sh", "-c", `rm -f ${name}`] });
+    expect(Array.isArray(result.changed_files)).toBe(true);
+    expect(result.changed_files.some(f => f.includes("imp_watch_test.tmp"))).toBe(true);
+    const { trace } = getMemoTrace();
+    const mut = trace.find(t => t.kind === "workspace_mutation" && t.display === "create watch test file");
+    expect(Array.isArray(mut.changed_files)).toBe(true);
 });
 
 });

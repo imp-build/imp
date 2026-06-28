@@ -99,6 +99,16 @@ enum Cmd {
         #[command(subcommand)]
         command: CacheCmd,
     },
+    /// Show the memo call tree for a product (dry-run, no commands executed)
+    Explain {
+        /// Target and product selector, e.g. //:app#odin-package
+        product: String,
+    },
+    /// List the actions a product would create (dry-run, no commands executed)
+    Actions {
+        /// Target and product selector, e.g. //:app#odin-package
+        product: String,
+    },
     /// Format all Odin source files
     Fmt,
     /// Type-check an Odin package without building
@@ -246,6 +256,12 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
         } => {
             return cmd_build_planned(target.as_deref(), selectors, *jobs, tree);
         }
+        Cmd::Explain { product } => {
+            return cmd_explain(product);
+        }
+        Cmd::Actions { product } => {
+            return cmd_actions(product);
+        }
         _ => {}
     }
 
@@ -331,6 +347,8 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
         Cmd::Dependencies { .. } => unreachable!("handled before environment setup"),
         Cmd::Rules => unreachable!("handled before environment setup"),
         Cmd::Cache { .. } => unreachable!("handled before environment setup"),
+        Cmd::Explain { .. } => unreachable!("handled before environment setup"),
+        Cmd::Actions { .. } => unreachable!("handled before environment setup"),
 
         Cmd::Fmt => commands::fmt::cmd_fmt(tree).await,
 
@@ -680,5 +698,40 @@ async fn cmd_env_check(_env: &Env, check_cross: bool, tree: &Tree) -> Result<()>
     }
 
     p.done("done");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Introspection commands
+// ---------------------------------------------------------------------------
+
+fn parse_product_selector(selector: &str) -> Result<(&str, &str)> {
+    let (addr, product) = selector
+        .rsplit_once('#')
+        .ok_or_else(|| anyhow::anyhow!("selector must be <target>#<product>, e.g. //:app#odin-package"))?;
+    Ok((addr, product))
+}
+
+fn cmd_explain(selector: &str) -> Result<()> {
+    let (addr, product_name) = parse_product_selector(selector)?;
+    let current_dir = std::env::current_dir().context("determine current directory")?;
+    let workspace_root = spike::find_workspace_root(&current_dir)?;
+    let live = spike::load_workspace(&workspace_root)?;
+    let result = spike::introspect_product(&live, addr, product_name)?;
+    let mut out = String::new();
+    spike::format_inspect_explain(&result, &mut out).map_err(|e| anyhow::anyhow!("{e}"))?;
+    print!("{out}");
+    Ok(())
+}
+
+fn cmd_actions(selector: &str) -> Result<()> {
+    let (addr, product_name) = parse_product_selector(selector)?;
+    let current_dir = std::env::current_dir().context("determine current directory")?;
+    let workspace_root = spike::find_workspace_root(&current_dir)?;
+    let live = spike::load_workspace(&workspace_root)?;
+    let result = spike::introspect_product(&live, addr, product_name)?;
+    let mut out = String::new();
+    spike::format_inspect_actions(&result, &mut out).map_err(|e| anyhow::anyhow!("{e}"))?;
+    print!("{out}");
     Ok(())
 }
