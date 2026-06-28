@@ -511,7 +511,7 @@ export function isIntrospectMode() { return _introspect_mode; }
 // Call paths(fileset) to evaluate it.
 export function glob(opts) {
     if (!opts || !Array.isArray(opts.include)) {
-        throw new Error("glob({ root?, include, exclude? }) requires include regexes");
+        throw new Error("glob({ root?, include, exclude? }) requires include glob patterns");
     }
     return { __fileset: true, kind: "glob", root: opts.root || ".", include: opts.include, exclude: opts.exclude || [] };
 }
@@ -2029,7 +2029,6 @@ fn register_globals<'js>(
     // ------------------------------------------------------------------
 
     // __host_glob(root, includeJson, excludeJson) → JSON string[]
-    // Same logic as __host_workspace_source_files but accessible from memos.
     let wc = workspace_root.clone();
     let host_glob = Function::new(
         ctx.clone(),
@@ -2038,7 +2037,7 @@ fn register_globals<'js>(
                 .map_err(|e| rquickjs::Error::new_loading_message("glob", e.to_string()))?;
             let exclude: Vec<String> = serde_json::from_str(&exclude_json)
                 .map_err(|e| rquickjs::Error::new_loading_message("glob", e.to_string()))?;
-            workspace_source_files(&wc, &root, &include, &exclude)
+            workspace_glob_files(&wc, &root, &include, &exclude)
                 .and_then(|f| serde_json::to_string(&f).context("encode glob results"))
                 .map_err(|e| rquickjs::Error::new_loading_message("glob", format!("{e:#}")))
         },
@@ -2309,6 +2308,52 @@ fn workspace_source_files(
     matching_workspace_source_paths(workspace_root, root, include, exclude)
 }
 
+fn workspace_glob_files(
+    workspace_root: &Path,
+    root: &str,
+    include: &[String],
+    exclude: &[String],
+) -> Result<Vec<String>> {
+    if include.is_empty() {
+        bail!("glob include must not be empty");
+    }
+    let include = compile_globs("include", include)?;
+    let exclude = compile_globs("exclude", exclude)?;
+    let directory = workspace_root.join(workspace_relative_directory(root)?);
+    if !directory.is_dir() {
+        bail!("glob root '{}' is not a directory", directory.display());
+    }
+
+    let mut files = Vec::new();
+    for entry in WalkDir::new(&directory)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let workspace_relative = entry
+            .path()
+            .strip_prefix(workspace_root)
+            .with_context(|| format!("relativize {}", entry.path().display()))?;
+        let workspace_relative = workspace_relative
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let root_relative = entry
+            .path()
+            .strip_prefix(&directory)
+            .with_context(|| format!("relativize {}", entry.path().display()))?;
+        let root_relative = root_relative
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+
+        if include.iter().any(|glob| glob.is_match(&root_relative))
+            && !exclude.iter().any(|glob| glob.is_match(&root_relative))
+        {
+            files.push(workspace_relative);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
 
 fn matching_workspace_source_paths(
     workspace_root: &Path,
@@ -2400,6 +2445,103 @@ fn compile_regexes(label: &str, patterns: &[String]) -> Result<Vec<Regex>> {
             Regex::new(pattern).with_context(|| format!("compile {label} source regex {pattern:?}"))
         })
         .collect()
+}
+
+fn compile_globs(label: &str, patterns: &[String]) -> Result<Vec<Regex>> {
+    patterns
+        .iter()
+        .map(|pattern| {
+            let regex = glob_pattern_to_regex(pattern);
+            Regex::new(&regex).with_context(|| format!("compile {label} glob {pattern:?}"))
+        })
+        .collect()
+}
+
+fn glob_pattern_to_regex(pattern: &str) -> String {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut regex = String::from("^");
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '*' if chars.get(i + 1) == Some(&'*') => {
+                i += 2;
+                if chars.get(i) == Some(&'/') {
+                    i += 1;
+                    regex.push_str("(?:.*/)?");
+                } else {
+                    regex.push_str(".*");
+                }
+            }
+            '*' => {
+                regex.push_str("[^/]*");
+                i += 1;
+            }
+            '?' => {
+                regex.push_str("[^/]");
+                i += 1;
+            }
+            '[' => {
+                if let Some((class, next)) = glob_char_class_to_regex(&chars, i) {
+                    regex.push_str(&class);
+                    i = next;
+                } else {
+                    regex.push_str(r"\[");
+                    i += 1;
+                }
+            }
+            '\\' => {
+                if let Some(next) = chars.get(i + 1) {
+                    regex.push_str(&regex::escape(&next.to_string()));
+                    i += 2;
+                } else {
+                    regex.push_str(r"\\");
+                    i += 1;
+                }
+            }
+            c => {
+                regex.push_str(&regex::escape(&c.to_string()));
+                i += 1;
+            }
+        }
+    }
+    regex.push('$');
+    regex
+}
+
+fn glob_char_class_to_regex(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let mut i = start + 1;
+    if i >= chars.len() {
+        return None;
+    }
+
+    let mut class = String::from("[");
+    if chars[i] == '!' {
+        class.push('^');
+        i += 1;
+    } else if chars[i] == '^' {
+        class.push('\\');
+        class.push('^');
+        i += 1;
+    }
+
+    let mut has_member = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == ']' && has_member {
+            class.push(']');
+            return Some((class, i + 1));
+        }
+        if c == '\\' {
+            class.push('\\');
+            class.push('\\');
+        } else {
+            class.push(c);
+        }
+        has_member = true;
+        i += 1;
+    }
+
+    None
 }
 
 fn workspace_relative_directory(path: &str) -> Result<PathBuf> {
@@ -5598,7 +5740,7 @@ export const cmake = cmakeLib({ entrypoint: "CMakeLists.txt", deps: [joltphysics
 import { odinPackage } from "//rules/odin";
 import { cmake } from "//src/cpp/joltphysics";
 
-export const jodin = odinPackage({ srcs: [".*\\.odin$"], deps: [cmake] });
+export const jodin = odinPackage({ srcs: ["**/*.odin"], deps: [cmake] });
 "#,
         )
         .unwrap();
@@ -5611,7 +5753,7 @@ export const jodin = odinPackage({ srcs: [".*\\.odin$"], deps: [cmake] });
             r#"
 import { asset } from "//rules/asset";
 
-export const ui = asset({ srcs: [".*\\.png$"] });
+export const ui = asset({ srcs: ["**/*.png"] });
 "#,
         )
         .unwrap();
@@ -5797,7 +5939,7 @@ import { odinPackage } from "//rules/odin";
 
 export const app = odinPackage({
     path: "app",
-    srcs: ["^app/.*\\.odin$"],
+    srcs: ["**/*.odin"],
     toolchain: "dev-2026-05",
 });
 "#,
@@ -5808,7 +5950,7 @@ export const app = odinPackage({
         // Phase 6: sources are lazy — no source-set dep, no pre-resolved file list
         assert_eq!(app.dependencies.len(), 0);
         assert_eq!(app.attrs["path"].as_str().unwrap(), "app");
-        assert_eq!(app.attrs["srcs"][0].as_str().unwrap(), r#"^app/.*\.odin$"#);
+        assert_eq!(app.attrs["srcs"][0].as_str().unwrap(), "**/*.odin");
     }
 
     #[test]
@@ -5880,7 +6022,7 @@ export function odinPackage({ srcs, collections = [] }) {
 import { odinCollection, odinPackage } from "//rules/odin";
 
 export const lib = odinCollection({ name: "lib", path: "library" });
-export const pkg = odinPackage({ srcs: [".*\\.odin$"], collections: [lib] });
+export const pkg = odinPackage({ srcs: ["**/*.odin"], collections: [lib] });
 "#,
         );
 
@@ -5905,7 +6047,7 @@ export const pkg = odinPackage({ srcs: [".*\\.odin$"], collections: [lib] });
         assert!(plan
             .tasks
             .iter()
-            .any(|t| t.action.display.contains(r#".*\.png$"#)));
+            .any(|t| t.action.display.contains("**/*.png")));
     }
 
     #[test]
@@ -6777,7 +6919,7 @@ export const ignored = missing;
         let mut out = String::new();
         format_targets(&targets, &mut out).unwrap();
         assert!(out.contains("//library/jodin:jodin (odin-package)"));
-        assert!(out.contains(r#"sources: .*\.odin$"#));
+        assert!(out.contains("sources: **/*.odin"));
         assert!(out.contains("dependencies: //src/cpp/joltphysics:cmake"));
     }
 

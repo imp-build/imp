@@ -5,14 +5,14 @@ describe("run() with FileSet inputs", () => {
 
 test("run accepts a glob FileSet in inputs", async () => {
     resetMemoState();
-    const srcs = glob({ root: "rules/imp", include: [".*tracked_apis_test\\.js$"] });
+    const srcs = glob({ root: "rules/imp", include: ["tracked_apis_test.js"] });
     const result = await run({ argv: ["sh", "-c", "true"], inputs: [srcs], impure: true });
     expect(result.exitCode).toBe(0);
 });
 
 test("run copies glob files into sandbox", async () => {
     resetMemoState();
-    const srcs = glob({ root: "rules/imp", include: [".*tracked_apis_test\\.js$"] });
+    const srcs = glob({ root: "rules/imp", include: ["tracked_apis_test.js"] });
     const result = await run({
         argv: ["sh", "-c", "test -f rules/imp/tracked_apis_test.js"],
         inputs: [srcs],
@@ -34,8 +34,8 @@ test("run accepts a literal FileSet in inputs", async () => {
 
 test("run accepts a union FileSet in inputs", async () => {
     resetMemoState();
-    const a = glob({ root: "rules/imp", include: [".*memo_test\\.js$"] });
-    const b = glob({ root: "rules/imp", include: [".*product_test\\.js$"] });
+    const a = glob({ root: "rules/imp", include: ["memo_test.js"] });
+    const b = glob({ root: "rules/imp", include: ["product_test.js"] });
     const result = await run({
         argv: ["sh", "-c", "test -f rules/imp/memo_test.js && test -f rules/imp/product_test.js"],
         inputs: [file_set.union(a, b)],
@@ -52,7 +52,7 @@ test("run accepts empty inputs array", async () => {
 
 test("run accepts mixed FileSet and plain spec in inputs", async () => {
     resetMemoState();
-    const srcs = glob({ root: "rules/imp", include: [".*memo_test\\.js$"] });
+    const srcs = glob({ root: "rules/imp", include: ["memo_test.js"] });
     const plain = { kind: "file", path: "rules/imp/product_test.js" };
     const result = await run({
         argv: ["sh", "-c", "test -f rules/imp/memo_test.js && test -f rules/imp/product_test.js"],
@@ -64,7 +64,7 @@ test("run accepts mixed FileSet and plain spec in inputs", async () => {
 
 test("materialising a FileSet input records a paths effect entry", async () => {
     resetMemoState();
-    const srcs = glob({ root: "rules/imp", include: [".*memo_test\\.js$"] });
+    const srcs = glob({ root: "rules/imp", include: ["memo_test.js"] });
     await run({ argv: ["sh", "-c", "true"], inputs: [srcs], impure: true });
     const { trace } = getMemoTrace();
     const pathsEffects = trace.filter(t => t.event === "effect" && t.kind === "paths");

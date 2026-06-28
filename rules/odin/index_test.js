@@ -24,14 +24,14 @@ import {
 describe("Odin rules", () => {
 test("uses the default Odin toolchain target", () => {
     const toolchain = odinToolchain("dev-2026-03", { default: true });
-    const pkg = odinPackage({ srcs: [".*\\.odin$"] });
+    const pkg = odinPackage({ srcs: ["**/*.odin"] });
 
     expect(pkg.attrs.toolchain).toBe(toolchain);
     expect(pkg.attrs.toolchain.attrs.version).toBe("dev-2026-03");
 });
 
 test("keeps explicit string versions free of toolchain target deps", () => {
-    const pkg = odinPackage({ srcs: [".*\\.odin$"], toolchain: "dev-2026-04" });
+    const pkg = odinPackage({ srcs: ["**/*.odin"], toolchain: "dev-2026-04" });
 
     expect(pkg.attrs.toolchainVersion).toBe("dev-2026-04");
     expect(pkg.attrs.toolchain).toBe(undefined);
@@ -48,7 +48,7 @@ test("packages depend on collection config without collection membership", () =>
     const root = odinCollection({ name: "root", path: "." });
     const lib = odinCollection({ name: "lib", path: "library" });
     const pkg = odinPackage({
-        srcs: [".*\\.odin$"],
+        srcs: ["**/*.odin"],
         toolchain: "dev-2026-04",
         collections: [root, lib],
     });
@@ -57,7 +57,7 @@ test("packages depend on collection config without collection membership", () =>
 });
 
 test("hydrateTarget returns kind, attrs, and dep handles", () => {
-    const pkg = odinPackage({ srcs: ["^rules/odin/index\\.js$"], toolchain: "dev-2026-04" });
+    const pkg = odinPackage({ srcs: ["rules/odin/index.js"], toolchain: "dev-2026-04" });
     const hydrated = hydrateTarget(pkg);
 
     expect(hydrated.kind).toBe("odin-package");
@@ -66,29 +66,29 @@ test("hydrateTarget returns kind, attrs, and dep handles", () => {
 });
 
 test("gatherTransitiveClosure finds all odin-package targets", () => {
-    const lib = odinPackage({ srcs: ["^rules/odin/index\\.js$"], toolchain: "dev-2026-04" });
-    const app = odinPackage({ srcs: ["^rules/odin/index_test\\.js$"], toolchain: "dev-2026-04", deps: [lib] });
+    const lib = odinPackage({ srcs: ["rules/odin/index.js"], toolchain: "dev-2026-04" });
+    const app = odinPackage({ srcs: ["rules/odin/index_test.js"], toolchain: "dev-2026-04", deps: [lib] });
     const closure = gatherTransitiveClosure(app, "odin-package");
 
     expect(closure.length).toBe(2);
 });
 
 test("own_sources(pkg) returns a FileSet descriptor", async () => {
-    const pkg = odinPackage({ srcs: [".*\\.odin$"], toolchain: "dev-2026-04" });
+    const pkg = odinPackage({ srcs: ["**/*.odin"], toolchain: "dev-2026-04" });
     const fs = await own_sources(pkg);
     expect(fs.__fileset).toBe(true);
     expect(fs.kind).toBe("glob");
 });
 
 test("sources(pkg) with no deps returns a FileSet", async () => {
-    const pkg = odinPackage({ srcs: [".*\\.odin$"], toolchain: "dev-2026-04" });
+    const pkg = odinPackage({ srcs: ["**/*.odin"], toolchain: "dev-2026-04" });
     const fs = await sources(pkg);
     expect(fs.__fileset).toBe(true);
 });
 
 test("sources(app) with a dep includes transitive files", async () => {
-    const lib = odinPackage({ srcs: ["^rules/odin/index\\.js$"], toolchain: "dev-2026-04" });
-    const app = odinPackage({ srcs: ["^rules/odin/index_test\\.js$"], toolchain: "dev-2026-04", deps: [lib] });
+    const lib = odinPackage({ srcs: ["rules/odin/index.js"], toolchain: "dev-2026-04" });
+    const app = odinPackage({ srcs: ["rules/odin/index_test.js"], toolchain: "dev-2026-04", deps: [lib] });
     const result = paths(await sources(app));
     expect(result).toContain("rules/odin/index.js");
     expect(result).toContain("rules/odin/index_test.js");
@@ -96,7 +96,7 @@ test("sources(app) with a dep includes transitive files", async () => {
 
 test("repeated sources() calls are memoized", async () => {
     resetMemoState();
-    const pkg = odinPackage({ srcs: [".*\\.odin$"], toolchain: "dev-2026-04" });
+    const pkg = odinPackage({ srcs: ["**/*.odin"], toolchain: "dev-2026-04" });
     const a = await sources(pkg);
     const b = await sources(pkg);
     expect(a).toBe(b);
@@ -113,7 +113,7 @@ test("odinBuild product is exported as a function", () => {
 test("collection_flags(pkg) returns flags for all collection deps", async () => {
     const root = odinCollection({ name: "root", path: "." });
     const lib = odinCollection({ name: "lib", path: "library" });
-    const pkg = odinPackage({ srcs: [".*\\.odin$"], toolchain: "dev-2026-04", collections: [root, lib] });
+    const pkg = odinPackage({ srcs: ["**/*.odin"], toolchain: "dev-2026-04", collections: [root, lib] });
     const flags = await collection_flags(pkg);
     expect(flags).toEqual(["-collection:root=.", "-collection:lib=library"]);
 });

@@ -136,8 +136,8 @@ export function odinCollection({ name, path }) {
  * Sources are discovered lazily at build time via own_sources() / sources().
  *
  * @param {object} opts
- * @param {string[]} [opts.srcs=[]] Rust regexes matched against workspace-relative paths.
- * @param {string[]} [opts.exclude=[]] Rust regexes to exclude from matches.
+ * @param {string[]} [opts.srcs=[]] Glob patterns matched against paths relative to opts.path.
+ * @param {string[]} [opts.exclude=[]] Glob patterns to exclude from matches.
  * @param {string} [opts.path="."] Workspace-relative package path.
  * @param {object[]} [opts.collections=[]] Odin collection namespace mappings.
  * @param {object|string} [opts.toolchain] Odin toolchain target handle or version string.

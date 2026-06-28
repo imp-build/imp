@@ -47,7 +47,7 @@ test("which records an effect entry in memo trace", async () => {
 
 test("paths(glob(...)) returns an array of strings", async () => {
     resetMemoState();
-    const files = paths(glob({ root: "rules/imp", include: [".*\\.js$"] }));
+    const files = paths(glob({ root: "rules/imp", include: ["*.js"] }));
     expect(Array.isArray(files)).toBe(true);
     expect(files.length > 0).toBe(true);
     expect(typeof files[0]).toBe("string");
@@ -55,7 +55,7 @@ test("paths(glob(...)) returns an array of strings", async () => {
 
 test("paths(glob(...)) records a paths effect entry in memo trace", async () => {
     resetMemoState();
-    paths(glob({ root: "rules/imp", include: [".*\\.js$"] }));
+    paths(glob({ root: "rules/imp", include: ["*.js"] }));
     const { trace } = getMemoTrace();
     const effects = trace.filter(t => t.event === "effect" && t.kind === "paths");
     expect(effects.length).toBe(1);
