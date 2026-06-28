@@ -252,61 +252,6 @@ export function workspaceSourceFiles(opts) {
 }
 
 /**
- * List matching workspace source files and capture each file into CAS.
- *
- * @param {object} opts
- * @param {string} [opts.root="."] Workspace-relative directory to search.
- * @param {string[]} opts.include Regexes; a file is included if any matches.
- * @param {string[]} [opts.exclude=[]] Regexes; a file is excluded if any matches.
- * @returns {{ path: string, digest: string, bytes: number }[]} Sorted source entries.
- */
-export function workspaceSourceEntries(opts) {
-    if (!opts || !Array.isArray(opts.include)) {
-        throw new Error("workspaceSourceEntries({ root?, include, exclude? }) requires include regexes");
-    }
-    return JSON.parse(__host_workspace_source_entries(
-        opts.root || ".",
-        JSON.stringify(opts.include),
-        JSON.stringify(opts.exclude || []),
-    ));
-}
-
-/**
- * Store a set of source entries as a CAS tree, returning its digest.
- *
- * Entries are sorted by path before storage, so the digest is stable
- * regardless of input order.
- *
- * @param {{ path: string, digest: string, bytes: number }[]} entries
- * @returns {string} Tree digest.
- */
-export function casTreeStore(entries) {
-    return __host_cas_tree_store(JSON.stringify(entries));
-}
-
-/**
- * Retrieve the entries of a CAS tree by digest.
- *
- * @param {string} digest Tree digest returned by casTreeStore or casTreeMerge.
- * @returns {{ path: string, digest: string, bytes: number }[]} Sorted entries.
- */
-export function casTreeGet(digest) {
-    return JSON.parse(__host_cas_tree_get(digest));
-}
-
-/**
- * Merge multiple CAS trees into one, returning the merged tree's digest.
- *
- * Same path with the same digest is deduplicated silently. Same path with
- * different digests (conflicting content) is an error.
- *
- * @param {...string} digests Tree digests to merge.
- * @returns {string} Merged tree digest.
- */
-export function casTreeMerge(...digests) {
-    return __host_cas_tree_merge(JSON.stringify(digests));
-}
-
 /**
  * Retrieve the kind, fields, and dep handles for a target handle.
  *
@@ -999,13 +944,6 @@ pub struct CacheInputDigest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CacheDirectoryEntry {
-    path: String,
-    digest: String,
-    bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct SourceFileEntry {
     path: String,
     digest: String,
     bytes: u64,
@@ -2079,37 +2017,6 @@ fn register_globals<'js>(
     globals.set("__host_workspace_source_files", host_workspace_source_files)?;
 
     // ------------------------------------------------------------------
-    // __host_workspace_source_entries(root, includeJson, excludeJson)
-    // ------------------------------------------------------------------
-    let wc = workspace_root.clone();
-    let host_workspace_source_entries = Function::new(
-        ctx.clone(),
-        move |root: String,
-              include_json: String,
-              exclude_json: String|
-              -> rquickjs::Result<String> {
-            let include: Vec<String> = serde_json::from_str(&include_json).map_err(|e| {
-                rquickjs::Error::new_loading_message(
-                    "workspaceSourceEntries",
-                    format!("parse include regexes: {e}"),
-                )
-            })?;
-            let exclude: Vec<String> = serde_json::from_str(&exclude_json).map_err(|e| {
-                rquickjs::Error::new_loading_message(
-                    "workspaceSourceEntries",
-                    format!("parse exclude regexes: {e}"),
-                )
-            })?;
-            workspace_source_entries(&wc, &root, &include, &exclude)
-                .and_then(|entries| serde_json::to_string(&entries).context("encode source entries"))
-                .map_err(|e| {
-                    rquickjs::Error::new_loading_message("workspaceSourceEntries", format!("{e:#}"))
-                })
-        },
-    )?;
-    globals.set("__host_workspace_source_entries", host_workspace_source_entries)?;
-
-    // ------------------------------------------------------------------
     // __host_workspace_mount(prefix, path)
     // ------------------------------------------------------------------
     let wc = workspace_root.clone();
@@ -2193,53 +2100,6 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_target_address", host_target_address)?;
-
-    // ------------------------------------------------------------------
-    // __host_cas_tree_store(entriesJson) → digest
-    // __host_cas_tree_get(digest) → entriesJson
-    // __host_cas_tree_merge(digestsJson) → digest
-    // ------------------------------------------------------------------
-    let host_cas_tree_store = Function::new(
-        ctx.clone(),
-        move |entries_json: String| -> rquickjs::Result<String> {
-            let entries: Vec<SourceFileEntry> =
-                serde_json::from_str(&entries_json).map_err(|e| {
-                    rquickjs::Error::new_loading_message("casTreeStore", e.to_string())
-                })?;
-            cas_tree_store(&entries).map_err(|e| {
-                rquickjs::Error::new_loading_message("casTreeStore", format!("{e:#}"))
-            })
-        },
-    )?;
-    globals.set("__host_cas_tree_store", host_cas_tree_store)?;
-
-    let host_cas_tree_get = Function::new(
-        ctx.clone(),
-        move |digest: String| -> rquickjs::Result<String> {
-            let entries = cas_tree_get(&digest).map_err(|e| {
-                rquickjs::Error::new_loading_message("casTreeGet", format!("{e:#}"))
-            })?;
-            serde_json::to_string(&entries).map_err(|e| {
-                rquickjs::Error::new_loading_message("casTreeGet", e.to_string())
-            })
-        },
-    )?;
-    globals.set("__host_cas_tree_get", host_cas_tree_get)?;
-
-    let host_cas_tree_merge = Function::new(
-        ctx.clone(),
-        move |digests_json: String| -> rquickjs::Result<String> {
-            let digests: Vec<String> =
-                serde_json::from_str(&digests_json).map_err(|e| {
-                    rquickjs::Error::new_loading_message("casTreeMerge", e.to_string())
-                })?;
-            let refs: Vec<&str> = digests.iter().map(|s| s.as_str()).collect();
-            cas_tree_merge(&refs).map_err(|e| {
-                rquickjs::Error::new_loading_message("casTreeMerge", format!("{e:#}"))
-            })
-        },
-    )?;
-    globals.set("__host_cas_tree_merge", host_cas_tree_merge)?;
 
     // ------------------------------------------------------------------
     // Tracked runtime APIs (Phase 3)
@@ -2525,26 +2385,6 @@ fn workspace_source_files(
     matching_workspace_source_paths(workspace_root, root, include, exclude)
 }
 
-fn workspace_source_entries(
-    workspace_root: &Path,
-    root: &str,
-    include: &[String],
-    exclude: &[String],
-) -> Result<Vec<SourceFileEntry>> {
-    let paths = matching_workspace_source_paths(workspace_root, root, include, exclude)?;
-    paths
-        .into_iter()
-        .map(|path| {
-            let source = workspace_root.join(artifact_relative_path(&path)?);
-            let (digest, bytes) = store_file_blob(&source, "source")?;
-            Ok(SourceFileEntry {
-                path,
-                digest,
-                bytes,
-            })
-        })
-        .collect()
-}
 
 fn matching_workspace_source_paths(
     workspace_root: &Path,
@@ -4030,54 +3870,6 @@ fn directory_entries(path: &Path) -> Result<Vec<CacheDirectoryEntry>> {
     }
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(entries)
-}
-
-fn cas_tree_path(digest: &str) -> Result<PathBuf> {
-    Ok(cache_root()?.join("cas").join("trees").join(digest))
-}
-
-fn cas_tree_store(entries: &[SourceFileEntry]) -> Result<String> {
-    let mut sorted = entries.to_vec();
-    sorted.sort_by(|a, b| a.path.cmp(&b.path));
-    let bytes = serde_json::to_vec(&sorted).context("serialize tree")?;
-    let digest = digest_bytes(&bytes);
-    let tree_path = cas_tree_path(&digest)?;
-    if !tree_path.is_file() {
-        if let Some(parent) = tree_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
-        }
-        let temp = temp_sibling_path(&tree_path, "tmp-tree");
-        std::fs::write(&temp, &bytes).with_context(|| format!("write {}", temp.display()))?;
-        std::fs::rename(&temp, &tree_path).with_context(|| {
-            format!("publish tree {} to {}", temp.display(), tree_path.display())
-        })?;
-    }
-    Ok(digest)
-}
-
-fn cas_tree_get(digest: &str) -> Result<Vec<SourceFileEntry>> {
-    let tree_path = cas_tree_path(digest)?;
-    let bytes = std::fs::read(&tree_path)
-        .with_context(|| format!("read tree {}", tree_path.display()))?;
-    serde_json::from_slice(&bytes).context("deserialize tree")
-}
-
-fn cas_tree_merge(digests: &[&str]) -> Result<String> {
-    let mut seen: BTreeMap<String, SourceFileEntry> = BTreeMap::new();
-    for digest in digests {
-        for entry in cas_tree_get(digest)? {
-            if let Some(existing) = seen.get(&entry.path) {
-                if existing.digest != entry.digest {
-                    bail!("tree merge: conflicting content for '{}'", entry.path);
-                }
-            } else {
-                seen.insert(entry.path.clone(), entry);
-            }
-        }
-    }
-    let merged: Vec<SourceFileEntry> = seen.into_values().collect();
-    cas_tree_store(&merged)
 }
 
 fn artifact_relative_path(path: &str) -> Result<PathBuf> {
@@ -7739,71 +7531,6 @@ export const ok = 1;
         write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
 
         load_workspace(p).unwrap();
-    }
-
-    #[test]
-    fn cas_tree_store_get_roundtrip() {
-        let entries = vec![
-            SourceFileEntry { path: "b.odin".into(), digest: "d2".into(), bytes: 20 },
-            SourceFileEntry { path: "a.odin".into(), digest: "d1".into(), bytes: 10 },
-        ];
-        let digest = cas_tree_store(&entries).unwrap();
-        let retrieved = cas_tree_get(&digest).unwrap();
-        // stored sorted by path
-        assert_eq!(retrieved[0].path, "a.odin");
-        assert_eq!(retrieved[1].path, "b.odin");
-        // same digest for same logical content regardless of input order
-        let digest2 = cas_tree_store(&[entries[1].clone(), entries[0].clone()]).unwrap();
-        assert_eq!(digest, digest2);
-    }
-
-    #[test]
-    fn cas_tree_merge_combines_disjoint_trees() {
-        let a = cas_tree_store(&[SourceFileEntry { path: "a.odin".into(), digest: "d1".into(), bytes: 10 }]).unwrap();
-        let b = cas_tree_store(&[SourceFileEntry { path: "b.odin".into(), digest: "d2".into(), bytes: 20 }]).unwrap();
-        let merged = cas_tree_merge(&[&a, &b]).unwrap();
-        let entries = cas_tree_get(&merged).unwrap();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].path, "a.odin");
-        assert_eq!(entries[1].path, "b.odin");
-    }
-
-    #[test]
-    fn cas_tree_merge_deduplicates_identical_entries() {
-        let a = cas_tree_store(&[SourceFileEntry { path: "a.odin".into(), digest: "d1".into(), bytes: 10 }]).unwrap();
-        let merged = cas_tree_merge(&[&a, &a]).unwrap();
-        assert_eq!(cas_tree_get(&merged).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn cas_tree_merge_errors_on_conflicting_content() {
-        let a = cas_tree_store(&[SourceFileEntry { path: "a.odin".into(), digest: "d1".into(), bytes: 10 }]).unwrap();
-        let b = cas_tree_store(&[SourceFileEntry { path: "a.odin".into(), digest: "d2".into(), bytes: 99 }]).unwrap();
-        let err = cas_tree_merge(&[&a, &b]).unwrap_err();
-        assert!(err.to_string().contains("conflicting content"), "{err}");
-    }
-
-    #[test]
-    fn javascript_can_use_cas_tree_operations() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
-        write_file(
-            &p.join(BUILD_FILE),
-            r#"
-import { casTreeStore, casTreeGet, casTreeMerge } from "imp:core";
-
-const a = casTreeStore([{ path: "a.odin", digest: "d1", bytes: 10 }]);
-const b = casTreeStore([{ path: "b.odin", digest: "d2", bytes: 20 }]);
-const merged = casTreeMerge(a, b);
-const entries = casTreeGet(merged);
-
-export const tree_digest = { __imp: false, result: { a, b, merged, entries } };
-"#,
-        );
-        let live = load_workspace(p).unwrap();
-        // loading without error is sufficient — the BUILD.js ran the operations
-        assert!(live.targets.is_empty()); // no target() calls, but no crash
     }
 
     #[test]

@@ -18,10 +18,6 @@ import {
     gatherTransitiveClosure,
     glob,
     paths,
-    workspaceSourceEntries,
-    casTreeStore,
-    casTreeGet,
-    casTreeMerge,
     resetMemoState,
 } from "imp:core";
 
@@ -130,24 +126,4 @@ test("collection_flags(pkg) returns flags for all collection deps", async () => 
     expect(flags).toEqual(["-collection:root=.", "-collection:lib=library"]);
 });
 
-test("casTreeStore round-trips through casTreeGet", () => {
-    const entries = workspaceSourceEntries({ include: ["^rules/odin/index\\.js$"] });
-    const digest = casTreeStore(entries);
-    const result = casTreeGet(digest);
-
-    expect(result.length).toBe(1);
-    expect(result[0].path).toBe("rules/odin/index.js");
-    expect(typeof result[0].digest).toBe("string");
-});
-
-test("casTreeMerge combines disjoint trees", () => {
-    const a = casTreeStore(workspaceSourceEntries({ include: ["^rules/odin/index\\.js$"] }));
-    const b = casTreeStore(workspaceSourceEntries({ include: ["^rules/odin/index_test\\.js$"] }));
-    const merged = casTreeMerge(a, b);
-    const entries = casTreeGet(merged);
-
-    expect(entries.length).toBe(2);
-    expect(entries[0].path).toBe("rules/odin/index.js");
-    expect(entries[1].path).toBe("rules/odin/index_test.js");
-});
 });
