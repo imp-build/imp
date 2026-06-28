@@ -3,12 +3,14 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
+use sha2::{Digest, Sha256};
 
 use super::file_tracker::FileTracker;
 use super::local::LocalEnv;
 use crate::workspace;
 
 const WINDOWS_WORKSPACE_PATH: &str = "/mnt/c/dev/ottar-windows";
+const SYNC_HASH_ALGORITHM: &str = "sha256";
 
 pub struct WslEnv {
     windows_workspace: PathBuf,
@@ -135,14 +137,17 @@ impl WslEnv {
             move || -> Result<bool> {
                 let tracker = FileTracker::open(&db_path)?;
                 let last_id = tracker.get_metadata("workspace_id")?;
+                let hash_algorithm = tracker.get_metadata("hash_algorithm")?;
                 let sentinel_missing = !sentinel.exists();
-                Ok(sentinel_missing || last_id.as_deref() != Some(&workspace_id))
+                Ok(sentinel_missing
+                    || last_id.as_deref() != Some(&workspace_id)
+                    || hash_algorithm.as_deref() != Some(SYNC_HASH_ALGORITHM))
             }
         })
         .await??;
 
         if need_full_sync {
-            progress.set_name("sync: full sync (workspace moved or deleted)");
+            progress.set_name("sync: full sync (workspace state changed)");
             let sh_cmd = format!("echo '{}' > '{}'", workspace_id, sentinel.display());
             LocalEnv::new()
                 .execute_check(&["sh", "-c", &sh_cmd], None, false)
@@ -153,6 +158,7 @@ impl WslEnv {
                 let tracker = FileTracker::open(&db_path)?;
                 tracker.clear()?;
                 tracker.set_metadata("workspace_id", &workspace_id2)?;
+                tracker.set_metadata("hash_algorithm", SYNC_HASH_ALGORITHM)?;
                 Ok(())
             })
             .await??;
@@ -286,14 +292,14 @@ impl WslEnv {
 
                     if let Some((old_mtime, old_size, old_hash)) = tracked.get(rel_path) {
                         if (*old_mtime - mtime).abs() < 1e-6 && *old_size == size { continue; }
-                        let new_hash = compute_md5(&abs)?;
+                        let new_hash = compute_sha256(&abs)?;
                         if *old_hash == new_hash {
                             to_update_db_only.push((rel_path.clone(), mtime, size, new_hash));
                             continue;
                         }
                         to_sync.push((rel_path.clone(), mtime, size, new_hash));
                     } else {
-                        let new_hash = compute_md5(&abs)?;
+                        let new_hash = compute_sha256(&abs)?;
                         to_sync.push((rel_path.clone(), mtime, size, new_hash));
                     }
                 }
@@ -418,8 +424,8 @@ impl WslEnv {
     }
 }
 
-fn compute_md5(path: &Path) -> Result<String> {
-    let mut ctx = md5::Context::new();
+fn compute_sha256(path: &Path) -> Result<String> {
+    let mut hasher = Sha256::new();
     let mut file = std::fs::File::open(path)?;
     let mut buf = [0u8; 4096];
     loop {
@@ -427,7 +433,7 @@ fn compute_md5(path: &Path) -> Result<String> {
         if n == 0 {
             break;
         }
-        ctx.consume(&buf[..n]);
+        hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", ctx.compute()))
+    Ok(format!("{:x}", hasher.finalize()))
 }

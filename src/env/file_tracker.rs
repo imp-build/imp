@@ -9,7 +9,7 @@ pub struct FileTracker {
     conn: Connection,
 }
 
-pub type FileRecord = (f64, i64, String); // (mtime, size, md5hex)
+pub type FileRecord = (f64, i64, String); // (mtime, size, sha256hex)
 
 impl FileTracker {
     pub fn open(db_path: &PathBuf) -> Result<Self> {

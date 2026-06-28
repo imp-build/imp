@@ -27,6 +27,7 @@ use rquickjs::{
     Value,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use walkdir::WalkDir;
@@ -3779,7 +3780,7 @@ fn task_record_path(task_key: &str) -> Result<PathBuf> {
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", md5::compute(bytes))
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn digest_json<T: Serialize>(value: &T) -> Result<String> {

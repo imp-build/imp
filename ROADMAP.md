@@ -1025,6 +1025,10 @@ target-time workspaceSourceEntries
 CAS merge from rule packages
 ```
 
+Status: the old rule API pieces (`requiresOwnSources`, `dependencyProduct`,
+`depOutputs`, `rule()`, `exec_fn`, and `exec(target, ctx)`) have been removed. The
+remaining entries are Odin/source-plumbing cleanup items.
+
 Keep CAS, manifests, and tree merging only as executor internals.
 
 # Final shape
@@ -1097,9 +1101,8 @@ pkg.attrs.toolchain     // enriched handle
 pkg.attrs.collections   // enriched handle[]
 ```
 
-`Task.fields` (for the `rule()` exec path) is now populated by extracting top-level
-string attrs, preserving backwards compatibility with existing exec functions that
-read `target.fields.X`.
+The legacy `rule()` exec path has since been removed, so `attrs` is the only rule
+author data model.
 
 ## ~~Gap 2: `hydrateTarget()` should not appear in rule code~~ ✓ Fixed
 
@@ -1121,8 +1124,8 @@ representations.
 **Resolved:** All handle mutations removed. `odinCollection` and `odinPackage` store
 all data in `attrs`. `odinToolchain` and `cmakeToolchain` no longer mutate handles
 with `.version` or `.cacheKey`. The toolchain handle's version is accessed via
-`handle.attrs.version`. `build_exec_target` for product functions now calls
-`__imp_resolve_handle(js_id)` to retrieve the registered enriched handle.
+`handle.attrs.version`. Product introspection resolves the registered enriched handle
+before invoking product functions.
 
 ## Gap 4: Only one product instead of the full suite
 
@@ -1140,12 +1143,13 @@ The product name matches the kind name, making the CLI address
 `odinBuild` also declares no `outputs`, so nothing is cached by the output-based
 cache model.
 
-Additionally, Phase 12 cleanup has not happened: `rule()`, `requiresOwnSources`, and
-`dependencyProduct` remain as public symbols in `imp:core`.
+Phase 12 cleanup for the old rule API has happened: `rule()`, `requiresOwnSources`,
+`dependencyProduct`, `depOutputs`, `exec_fn`, and the old `exec(target, ctx)` path
+have been removed.
 
-## Gap 5: Product task is opaque to the planner
+## ~~Gap 5: Product task is opaque to the planner~~ ✓ Fixed
 
-For a `product()` function the planner creates exactly one `Task` with
+Before this fix, a `product()` function made the planner create exactly one `Task` with
 `is_product: true`. The internal dependencies (own_sources, collection_flags, tool,
 run) are invisible at planning time. The plan graph for a product is a single
 unlabelled node.
@@ -1166,11 +1170,17 @@ After a product function executes, the memo trace contains this structure. It ne
 to be surfaced as discovered task dependencies and exposed through CLI introspection
 commands.
 
-## Gap 6: Two separate execution models
+**Resolved:** CLI planning now uses live product introspection. `plan_live(...)`
+dry-runs the selected product, converts memo misses into labelled memo nodes, converts
+traced `run()` effects into executable action nodes, and wires memo/action dependency
+edges into the rendered plan and DOT graph. `explain` and `actions` use the same memo
+trace data.
 
-`rule()` tasks are executed by `run_local_task` → `prepare_sandbox` → `copy_artifact_into_sandbox`.
+## ~~Gap 6: Two separate execution models~~ ✓ Fixed
 
-`product()` tasks execute their JS function, which calls `__host_run` →
+Before this fix, `rule()` tasks were executed by `run_local_task` → `prepare_sandbox` → `copy_artifact_into_sandbox`.
+
+`product()` tasks executed their JS function, which called `__host_run` →
 `exec_run_inner` — a second, independent sandbox implementation with its own cache
 key format and materialization logic.
 
@@ -1178,9 +1188,16 @@ The design calls for one unified `run(...)` primitive owned by the executor. The
 `rule()` path (with `exec_fn`, `requiresOwnSources`, `dependencyProduct`) is the
 old model and should be retired once products cover all cases.
 
-## Gap 7: Missing `run()` surface area
+**Resolved:** The old `rule()` execution model has been removed. `Workspace` now
+tracks registered products rather than rules, `Task` no longer carries `exec_fn` or
+`is_product`, and the old `exec(target, ctx)` helpers (`ctx.output`, `ctx.tool`,
+`ctx.inSandbox`, `depOutputs`) are gone. Product-created actions are represented as
+normal planned tasks and execute through the action executor.
 
-Several items specified in the design are absent from the `imp:core` `run()` API:
+## ~~Gap 7: Missing `run()` surface area~~ ✓ Fixed
+
+Before this fix, several items specified in the design were absent from the
+`imp:core` `run()` API:
 
 - **`sandbox: true`** — currently all `run()` calls from product functions use a
   sandbox but there is no opt-in or opt-out field.
@@ -1191,6 +1208,12 @@ Several items specified in the design are absent from the `imp:core` `run()` API
 - **`pkg.label.name`** — the design uses `pkg.label.name` for output naming.
   Currently `targetAddress(handle)` returns the full address string
   (e.g. `//:ottar`), not a structured label object.
+
+**Resolved:** `run()` now records and accepts `sandbox`, `inputs`, `outputs`, `tools`,
+`impure`, and `forceCache` consistently in normal and introspection modes.
+`sandbox: false` is supported only for impure actions. `output_path(path)` exists for
+argv construction, `group([...])` exists for aggregate products, and target handles
+now expose `handle.label.address` and `handle.label.name`.
 
 ## Gap 8: `config_digest` is always empty
 
@@ -1203,11 +1226,15 @@ The memo key is built as:
 No configuration wiring exists yet. Memo results cannot be invalidated by build
 configuration changes (e.g. debug vs. release).
 
-## Gap 9: Parallel execution blocked for product functions
+## ~~Gap 9: Parallel execution blocked for product functions~~ ✓ Fixed
 
-`execute_plan_with_options` bails immediately when `jobs > 1` and any task has an
+Before this fix, `execute_plan_with_options` bailed immediately when `jobs > 1` and any task had an
 `exec_fn`. Since every product-based task has `exec_fn`, parallel execution is
 completely disabled when the primary pattern is in use.
+
+**Resolved:** Product functions are no longer executed as `exec_fn` tasks. Planning
+expands products into memo/action tasks, and the executor no longer rejects product
+plans when `jobs > 1`.
 
 ## Gap 10: Phase 11 correctness checks are minimal
 
@@ -1224,9 +1251,6 @@ Currently only the dirty-workspace snapshot (`workspace_mutation` + `watch`) is
 implemented. The other three are absent.
 
 ## Other concerns
-
-**MD5 for digests**: `digest_bytes` uses MD5. This is fine for a spike but should be
-replaced with SHA-256 before any persistent cache is built on it.
 
 **Toolchain acquisition is synchronous**: `acquireOdinToolchain` runs
 download+extract synchronously on the JS thread, blocking the entire QuickJS runtime.

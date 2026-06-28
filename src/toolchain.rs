@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 
 use crate::env::LocalEnv;
 use crate::workspace;
@@ -34,7 +35,7 @@ pub fn host_detect_platform() -> Result<(&'static str, &'static str)> {
     Ok((os, arch))
 }
 
-/// Download a URL to a cached local file. Uses `md5` of the URL as the cache
+/// Download a URL to a cached local file. Uses `sha256` of the URL as the cache
 /// key within a temp directory so repeated downloads of the same URL are
 /// served from disk without re-fetching.
 pub fn host_download(url: &str) -> Result<PathBuf> {
@@ -42,7 +43,7 @@ pub fn host_download(url: &str) -> Result<PathBuf> {
     std::fs::create_dir_all(&download_dir)
         .with_context(|| format!("create download dir {}", download_dir.display()))?;
 
-    let filename = format!("dl-{:x}", md5::compute(url.as_bytes()));
+    let filename = format!("dl-{:x}", Sha256::digest(url.as_bytes()));
     let dest = download_dir.join(&filename);
 
     if dest.is_file() {
