@@ -440,6 +440,24 @@ function _pop_call(key_string) {
  * @param {function} fn Named async function to memoize.
  * @returns {function}
  */
+/**
+ * Register a memoized build function as a CLI-dispatchable product.
+ *
+ * Calling `product(kind, name, fn)` is equivalent to `memo(fn)` plus
+ * registering the result so that `imp build --planned //:target#name`
+ * dispatches to it when the target's kind matches.
+ *
+ * @param {string} kind Target kind, e.g. "odin-package".
+ * @param {string} name Product name, e.g. "executable".
+ * @param {function} fn Async function taking a target handle and returning a result.
+ * @returns {function} The same function, wrapped in memo().
+ */
+export function product(kind, name, fn) {
+    const memoized = memo(fn);
+    __host_product(kind, name, memoized);
+    return memoized;
+}
+
 export function memo(fn) {
     const fn_id = _stable_function_id(fn);
     return async function memoized(...args) {
@@ -494,6 +512,10 @@ pub struct Target {
     pub kind: String,
     pub fields: BTreeMap<String, String>,
     pub dependencies: Vec<Dependency>,
+    /// The QuickJS numeric id of this target's handle object (`{ __imp: true, __id: N }`).
+    /// Stored so product tasks can reconstruct a valid handle to pass to product functions.
+    #[serde(skip)]
+    pub js_id: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -657,6 +679,12 @@ pub struct Task {
     pub action: Action,
     pub exec_fn: Option<String>,
     pub dependencies: Vec<String>,
+    /// JS handle id for this task's target. Used to reconstruct `{ __imp: true, __id }` for product tasks.
+    #[serde(default)]
+    pub js_id: u32,
+    /// True when this task was created from a `product()` registration rather than a `rule()`.
+    #[serde(default)]
+    pub is_product: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -671,6 +699,7 @@ pub struct Plan {
 pub struct Workspace {
     pub rules: BTreeMap<(String, String), Rule>,
     pub targets: BTreeMap<String, Target>,
+    pub products: BTreeMap<(String, String), String>,
     pub named_caches: BTreeMap<String, NamedCache>,
     pub goals: BTreeMap<String, Goal>,
     pub platforms: BTreeMap<String, PlatformDef>,
@@ -884,6 +913,7 @@ struct HostState {
     next_exec: u32,
     pending: BTreeMap<u32, PendingTarget>,
     rules: BTreeMap<(String, String), Rule>,
+    products: BTreeMap<(String, String), String>,
     named_caches: BTreeMap<String, NamedCache>,
     goals: BTreeMap<String, Goal>,
     platforms: BTreeMap<String, PlatformDef>,
@@ -923,6 +953,7 @@ impl Default for HostState {
             next_exec: 0,
             pending: BTreeMap::new(),
             rules: BTreeMap::new(),
+            products: BTreeMap::new(),
             named_caches: BTreeMap::new(),
             goals,
             platforms,
@@ -1401,6 +1432,7 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
         workspace: Workspace {
             rules: hs.rules.clone(),
             targets,
+            products: hs.products.clone(),
             named_caches: hs.named_caches.clone(),
             goals: hs.goals.clone(),
             platforms: hs.platforms.clone(),
@@ -1459,6 +1491,7 @@ fn materialize_pending_target(
             kind: pending.kind.clone(),
             fields: pending.fields.clone(),
             dependencies: deps,
+            js_id: id,
         },
     );
     Ok(address)
@@ -1588,6 +1621,31 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_rule", host_rule)?;
+
+    // ------------------------------------------------------------------
+    // __host_product(kind, name, fn)
+    // ------------------------------------------------------------------
+    let state_p = Arc::clone(&state);
+    let host_product = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, kind: String, name: String, fn_val: Value<'js>|
+              -> rquickjs::Result<()> {
+            let exec_name = {
+                let mut hs = state_p.lock().unwrap();
+                let n = format!("__imp_exec_{}", hs.next_exec);
+                hs.next_exec += 1;
+                n
+            };
+            ctx.globals().set(exec_name.as_str(), fn_val)?;
+            state_p
+                .lock()
+                .unwrap()
+                .products
+                .insert((kind, name), exec_name);
+            Ok(())
+        },
+    )?;
+    globals.set("__host_product", host_product)?;
 
     // ------------------------------------------------------------------
     // __host_named_cache(name)
@@ -2419,10 +2477,8 @@ pub fn plan(workspace: &Workspace, goal: &str, selectors: &[String]) -> Result<P
         tasks: BTreeMap::new(),
     };
     let mut root_tasks = Vec::new();
-    for target in roots {
-        let product = goal_product_for_kind(workspace, goal_def, &target.kind)
-            .ok_or_else(|| anyhow::anyhow!("{} has no {} product", target.address, goal))?;
-        root_tasks.push(planner.request(&target.address, &product)?);
+    for (target, product) in &roots {
+        root_tasks.push(planner.request(&target.address, product)?);
     }
 
     let tasks: Vec<Task> = planner.tasks.into_values().collect();
@@ -2453,43 +2509,59 @@ fn select_roots<'a>(
     workspace: &'a Workspace,
     goal: &Goal,
     selectors: &[String],
-) -> Result<Vec<&'a Target>> {
-    let mut selected = BTreeMap::new();
+) -> Result<Vec<(&'a Target, String)>> {
+    let mut selected: BTreeMap<&str, (&Target, String)> = BTreeMap::new();
     if selectors.is_empty() {
         // If the workspace exports a `//:default` target, it acts as the
         // implicit root for selector-less invocations. Otherwise every target
         // that has a product for the current goal is selected.
         if let Some(default_target) = workspace.targets.get("//:default") {
-            if goal_product_for_kind(workspace, goal, &default_target.kind).is_none() {
-                bail!(
-                    "//:default has no {} product; add a rule for kind '{}'",
-                    goal.name,
-                    default_target.kind
-                );
-            }
-            selected.insert(default_target.address.as_str(), default_target);
+            let product = goal_product_for_kind(workspace, goal, &default_target.kind)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "//:default has no {} product; add a rule for kind '{}'",
+                        goal.name,
+                        default_target.kind
+                    )
+                })?;
+            selected.insert(default_target.address.as_str(), (default_target, product));
         } else {
             for target in workspace.targets.values() {
-                if goal_product_for_kind(workspace, goal, &target.kind).is_some() {
-                    selected.insert(target.address.as_str(), target);
+                if let Some(product) = goal_product_for_kind(workspace, goal, &target.kind) {
+                    selected.insert(target.address.as_str(), (target, product));
                 }
             }
         }
     } else {
         for selector in selectors {
+            // A selector may contain a product override: "//:target#product".
+            let (target_sel, product_override) = match selector.split_once('#') {
+                Some((t, p)) => (t, Some(p)),
+                None => (selector.as_str(), None),
+            };
             let matches: Vec<_> = workspace
                 .targets
                 .values()
-                .filter(|t| matches_selector(t, selector))
+                .filter(|t| matches_selector(t, target_sel))
                 .collect();
             if matches.is_empty() {
                 bail!("no target matches selector '{selector}'");
             }
             for target in matches {
-                if goal_product_for_kind(workspace, goal, &target.kind).is_none() {
-                    bail!("{} has no {} product", target.address, goal.name);
-                }
-                selected.insert(target.address.as_str(), target);
+                let product = if let Some(p) = product_override {
+                    let key = (target.kind.clone(), p.to_owned());
+                    if !workspace.rules.contains_key(&key)
+                        && !workspace.products.contains_key(&key)
+                    {
+                        bail!("{} has no product '{p}'", target.address);
+                    }
+                    p.to_owned()
+                } else {
+                    goal_product_for_kind(workspace, goal, &target.kind).ok_or_else(|| {
+                        anyhow::anyhow!("{} has no {} product", target.address, goal.name)
+                    })?
+                };
+                selected.insert(target.address.as_str(), (target, product));
             }
         }
     }
@@ -2504,7 +2576,8 @@ fn goal_product_for_kind(workspace: &Workspace, goal: &Goal, kind: &str) -> Opti
             default_product_for_kind(workspace, kind).map(|s| s.to_owned())
         }
         GoalProductPolicy::Named(p) => {
-            if workspace.rules.contains_key(&(kind.to_owned(), p.clone())) {
+            let key = (kind.to_owned(), p.clone());
+            if workspace.rules.contains_key(&key) || workspace.products.contains_key(&key) {
                 Some(p.clone())
             } else {
                 None
@@ -2532,7 +2605,14 @@ fn default_product_for_kind<'a>(workspace: &'a Workspace, kind: &str) -> Option<
     if non_sources.is_some() {
         return non_sources;
     }
-    // Only config/source rules → no build product.
+
+    // Also check registered products for a default.
+    for ((k, p), _) in &workspace.products {
+        if k == kind && !matches!(p.as_str(), "sources" | "collection") {
+            return Some(p.as_str());
+        }
+    }
+
     Option::None
 }
 
@@ -2565,57 +2645,105 @@ impl Planner<'_> {
             .targets
             .get(target_address)
             .ok_or_else(|| anyhow::anyhow!("target {target_address} does not exist"))?;
-        let rule = self
+
+        let kind = target.kind.clone();
+        let js_id = target.js_id;
+
+        if let Some(rule) = self
             .workspace
             .rules
-            .get(&(target.kind.clone(), product.to_owned()))
+            .get(&(kind.clone(), product.to_owned()))
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("{} cannot produce {product}", target.address))?;
-
-        let mut dependencies = Vec::new();
-        if rule.requires_own_sources && product != "sources" {
-            dependencies.push(self.request(&target.address, "sources")?);
-        }
-        for dep in &target.dependencies {
-            // A named-mode edge overrides the rule's dependencyProduct.
-            let dep_prod = match &dep.mode {
-                DependencyMode::Named(mode) => Some(mode.clone()),
-                DependencyMode::Auto => match &rule.dependency_product {
-                    DependencyProduct::None => None,
-                    DependencyProduct::Named(p) => Some(p.clone()),
-                    DependencyProduct::Default => {
-                        let dep_target =
-                            self.workspace.targets.get(&dep.address).ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "{} depends on missing target {}",
-                                    target.address,
-                                    dep.address
-                                )
-                            })?;
-                        Some(self.default_product(dep_target)?)
-                    }
-                },
-            };
-            if let Some(prod) = dep_prod {
-                dependencies.push(self.request(&dep.address, &prod)?);
+        {
+            let mut dependencies = Vec::new();
+            if rule.requires_own_sources && product != "sources" {
+                dependencies.push(self.request(&target.address, "sources")?);
             }
+            for dep in &target.dependencies {
+                // A named-mode edge overrides the rule's dependencyProduct.
+                let dep_prod = match &dep.mode {
+                    DependencyMode::Named(mode) => Some(mode.clone()),
+                    DependencyMode::Auto => match &rule.dependency_product {
+                        DependencyProduct::None => None,
+                        DependencyProduct::Named(p) => Some(p.clone()),
+                        DependencyProduct::Default => {
+                            let dep_target = self
+                                .workspace
+                                .targets
+                                .get(&dep.address)
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "{} depends on missing target {}",
+                                        target.address,
+                                        dep.address
+                                    )
+                                })?;
+                            Some(self.default_product(dep_target)?)
+                        }
+                    },
+                };
+                if let Some(prod) = dep_prod {
+                    dependencies.push(self.request(&dep.address, &prod)?);
+                }
+            }
+
+            let target = self.workspace.targets.get(target_address).unwrap();
+            let (action, inputs, outputs) = lower_action(&rule.action, target, &id);
+            self.tasks.insert(
+                id.clone(),
+                Task {
+                    id: id.clone(),
+                    target: target.address.clone(),
+                    product: product.to_owned(),
+                    fields: target.fields.clone(),
+                    inputs,
+                    outputs,
+                    action,
+                    exec_fn: rule.exec_fn.clone(),
+                    dependencies,
+                    js_id,
+                    is_product: false,
+                },
+            );
+        } else if let Some(exec_fn_name) = self
+            .workspace
+            .products
+            .get(&(kind, product.to_owned()))
+            .cloned()
+        {
+            // Product function path: no static dependencies, no real action.
+            // Dependencies are discovered dynamically when the memoized function executes.
+            let target = self.workspace.targets.get(target_address).unwrap();
+            self.tasks.insert(
+                id.clone(),
+                Task {
+                    id: id.clone(),
+                    target: target.address.clone(),
+                    product: product.to_owned(),
+                    fields: target.fields.clone(),
+                    inputs: Vec::new(),
+                    outputs: Vec::new(),
+                    action: Action {
+                        argv: Vec::new(),
+                        cwd: None,
+                        env: BTreeMap::new(),
+                        platform: None,
+                        inputs: Vec::new(),
+                        outputs: Vec::new(),
+                        display: format!("product {product}"),
+                        impure: false,
+                        force_cache: false,
+                    },
+                    exec_fn: Some(exec_fn_name),
+                    dependencies: Vec::new(),
+                    js_id,
+                    is_product: true,
+                },
+            );
+        } else {
+            bail!("{} cannot produce {product}", target_address);
         }
 
-        let (action, inputs, outputs) = lower_action(&rule.action, target, &id);
-        self.tasks.insert(
-            id.clone(),
-            Task {
-                id: id.clone(),
-                target: target.address.clone(),
-                product: product.to_owned(),
-                fields: target.fields.clone(),
-                inputs,
-                outputs,
-                action,
-                exec_fn: rule.exec_fn.clone(),
-                dependencies,
-            },
-        );
         Ok(id)
     }
 }
@@ -5084,6 +5212,14 @@ fn build_exec_target<'js>(
     task: &Task,
     dep_values: &[String],
 ) -> rquickjs::Result<Object<'js>> {
+    if task.is_product {
+        // Product functions receive the target handle ({ __imp: true, __id: N })
+        // rather than the task context object used by rule exec functions.
+        let obj = Object::new(ctx.clone())?;
+        obj.set("__imp", true)?;
+        obj.set("__id", task.js_id)?;
+        return Ok(obj);
+    }
     let obj = Object::new(ctx.clone())?;
     obj.set("id", task.id.as_str())?;
     obj.set("target", task.target.as_str())?;
@@ -5125,11 +5261,20 @@ fn execute_task_with_exec(
         .with(|ctx| -> rquickjs::Result<()> {
             let exec_fn: Function = ctx.globals().get(exec_fn_name)?;
             let target_obj = build_exec_target(ctx.clone(), task, dep_values)?;
-            let ctx_obj = build_exec_ctx(ctx.clone(), workspace_root, Arc::clone(&output_cell))?;
-            let result: MaybePromise = exec_fn
-                .call((target_obj, ctx_obj))
-                .catch(&ctx)
-                .map_err(|e| rquickjs::Error::new_loading_message("exec", format!("{e}")))?;
+            let result: MaybePromise = if task.is_product {
+                // Product functions take only the target handle; no exec ctx needed.
+                exec_fn
+                    .call((target_obj,))
+                    .catch(&ctx)
+                    .map_err(|e| rquickjs::Error::new_loading_message("exec", format!("{e}")))?
+            } else {
+                let ctx_obj =
+                    build_exec_ctx(ctx.clone(), workspace_root, Arc::clone(&output_cell))?;
+                exec_fn
+                    .call((target_obj, ctx_obj))
+                    .catch(&ctx)
+                    .map_err(|e| rquickjs::Error::new_loading_message("exec", format!("{e}")))?
+            };
             result
                 .finish::<()>()
                 .catch(&ctx)
@@ -5326,6 +5471,8 @@ export const ui = asset({ srcs: ["**/*.png"] });
             exec_fn: None,
             outputs,
             dependencies: deps.iter().map(|dep| (*dep).to_owned()).collect(),
+            js_id: 0,
+            is_product: false,
         }
     }
 
@@ -7138,6 +7285,97 @@ export const ok = 1;
         assert_eq!(
             std::fs::read_to_string(&extracted_file).unwrap(),
             "extracted"
+        );
+    }
+
+    #[test]
+    fn product_registration_creates_dispatchable_product_task() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"import "imp:core";"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product } from "imp:core";
+
+export const pkg = target({ kind: "test-pkg", fields: { name: "hello" } });
+
+export const report = product("test-pkg", "report", async function report(handle) {
+    return "ok";
+});
+"#,
+        );
+
+        let live = load_workspace(p).unwrap();
+
+        // The product is listed in the workspace.
+        assert!(
+            live.products.contains_key(&("test-pkg".to_owned(), "report".to_owned())),
+            "product should be registered in workspace"
+        );
+
+        // Planning with an explicit #product selector creates an is_product task.
+        let plan = plan(&live, "build", &["//:pkg#report".to_owned()]).unwrap();
+        assert_eq!(plan.tasks.len(), 1);
+        let task = &plan.tasks[0];
+        assert!(task.is_product, "task should be a product task");
+        assert!(task.exec_fn.is_some(), "task should have an exec_fn");
+        assert_eq!(task.product, "report");
+
+        // Execution succeeds (the product function returns "ok" but no ctx.output is called).
+        let report = execute_plan_with_options(
+            &plan,
+            Some(&live),
+            p,
+            ExecutionOptions::new(ExecutionMode::Local, 1),
+            None,
+        )
+        .unwrap();
+        assert!(
+            report.tasks.iter().all(|e| e.status == TaskExecutionStatus::Ran),
+            "product task should have run successfully"
+        );
+    }
+
+    #[test]
+    fn product_selector_hash_syntax_is_parsed() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"import "imp:core";"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product } from "imp:core";
+
+export const pkg = target({ kind: "kind-a", fields: {} });
+
+export const check = product("kind-a", "check", async function check(handle) {});
+"#,
+        );
+
+        let live = load_workspace(p).unwrap();
+
+        // //:pkg#check should select the "check" product explicitly.
+        let task_plan = plan(&live, "build", &["//:pkg#check".to_owned()]).unwrap();
+        assert_eq!(task_plan.tasks.len(), 1);
+        assert_eq!(task_plan.tasks[0].product, "check");
+        assert!(task_plan.tasks[0].is_product);
+
+        // An unknown product in the selector should fail.
+        let err = plan(&live, "build", &["//:pkg#nonexistent".to_owned()])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no product 'nonexistent'"),
+            "expected product-not-found error, got: {err}"
         );
     }
 }
