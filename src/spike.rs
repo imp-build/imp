@@ -5513,11 +5513,15 @@ fn build_exec_target<'js>(
         fields.set(k.as_str(), v.as_str())?;
     }
     obj.set("fields", fields)?;
-    let dep_outputs = Array::new(ctx)?;
+    let dep_outputs = Array::new(ctx.clone())?;
     for (i, v) in dep_values.iter().enumerate() {
         dep_outputs.set(i, v.as_str())?;
     }
     obj.set("depOutputs", dep_outputs)?;
+    let handle = Object::new(ctx)?;
+    handle.set("__imp", true)?;
+    handle.set("__id", task.js_id)?;
+    obj.set("handle", handle)?;
     Ok(obj)
 }
 
@@ -5863,7 +5867,7 @@ export const app = externalThing("app");
     }
 
     #[test]
-    fn implicit_dependency_targets_are_materialized() {
+    fn odin_package_stores_srcs_patterns_in_fields() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         let repo_rules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rules");
@@ -5895,20 +5899,11 @@ export const app = odinPackage({
         );
 
         let workspace = load_workspace(p).unwrap();
-        let source_address = &workspace.targets["//:app"].dependencies[0].address;
-        let source_target = &workspace.targets[source_address];
-        assert_eq!(source_target.kind, "source-set");
-        assert_eq!(source_target.fields["files"], "app/main.odin");
-
-        let plan = plan(&workspace, "build", &["app".into()]).unwrap();
-        let source_task = plan
-            .tasks
-            .iter()
-            .find(|task| task.target == *source_address && task.product == "sources")
-            .unwrap();
-        // source-set tasks now produce tree digests via exec, not manifest file outputs
-        assert!(source_task.exec_fn.is_some());
-        assert!(source_task.outputs.is_empty());
+        let app = &workspace.targets["//:app"];
+        // Phase 6: sources are lazy — no source-set dep, no pre-resolved file list
+        assert_eq!(app.dependencies.len(), 0);
+        assert_eq!(app.fields["path"], "app");
+        assert_eq!(app.fields["srcs"], r#"["^app/.*\\.odin$"]"#);
     }
 
     #[test]
