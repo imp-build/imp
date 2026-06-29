@@ -9,7 +9,7 @@ mod workspace;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
 use commands::BuildMode;
@@ -114,7 +114,7 @@ enum Cmd {
         /// Check that generated BUILD.js files are up to date without writing
         #[arg(long)]
         check: bool,
-        /// Generator target selectors; defaults to all targets with a generate-build product
+        /// Optional generator target selectors; defaults to all registered generate-build products
         selectors: Vec<String>,
     },
     /// Format all Odin source files

@@ -1,4 +1,5 @@
 import {
+	allUnowned,
 	target,
 	glob,
 	file_set,
@@ -9,7 +10,7 @@ import {
 	product,
 	registerBuildRule,
 	run,
-	workspaceSourceFiles,
+	sourcesField,
 	logDebug,
 } from "imp:core";
 
@@ -126,13 +127,13 @@ function default_output_path(handle) {
 }
 
 const DEFAULT_GENERATE_BUILD_EXCLUDES = [
-    "(^|/)\\.[^/]+/",
-    "(^|/)build/",
-    "(^|/)coverage/",
-    "(^|/)dist/",
-    "(^|/)obj/",
-    "(^|/)target/",
-    "(^|/)vendor/",
+    "**/.*/**",
+    "**/build/**",
+    "**/coverage/**",
+    "**/dist/**",
+    "**/obj/**",
+    "**/target/**",
+    "**/vendor/**",
 ];
 
 function dirname(path) {
@@ -198,22 +199,21 @@ export const odinBuild = product("odin-package", "odin-package",
 
 export const generateBuild = product("odin-build-generator", "generate-build",
     async function generateBuild(handle) {
-        const files = workspaceSourceFiles({
+        const files = allUnowned({
             root: handle.attrs.root || ".",
-            include: ["\\.odin$"],
+            include: ["**/*.odin"],
             exclude: handle.attrs.exclude || DEFAULT_GENERATE_BUILD_EXCLUDES,
         });
         const dirs = Array.from(new Set(files.map(dirname))).sort();
         const result = {};
         for (const dir of dirs) {
-            result[build_file_for_dir(dir)] = {
-                mode: "managed",
-                targets: [{
+            result[build_file_for_dir(dir)] = [
+                {
                     name: target_name_for_dir(dir),
                     rule: "odinPackage",
-                    props: { srcs: ["*.odin"] },
-                }],
-            };
+                    props: { },
+                },
+            ];
         }
         return result;
     }
@@ -256,13 +256,23 @@ export function odinCollection({ name, path }) {
  * @param {Array} [opts.deps=[]]
  * @returns {object} Target handle.
  */
-export function odinPackage({ srcs = [], exclude = [], path = ".", collections = [], toolchain, output, deps = [] }) {
+export function odinPackage({ srcs = undefined, exclude = undefined, path = ".", collections = [], toolchain, output, deps = [] }) {
     const toolchainHandle = toolchain && toolchain.__imp ? toolchain
                           : (typeof toolchain === "string" ? null : defaultOdinToolchain());
     const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
     const normalizedDeps = deps
         .map(d => d && d.__imp ? d : (d && d.target ? d.target : null))
         .filter(Boolean);
+
+	// if sources are not specified, default to all .odin files in the package path
+	if (srcs === undefined) {
+		srcs = ["*.odin"];
+	}
+
+	if (exclude === undefined) {
+		// exclude test files by default
+		exclude = ["*_test.odin", "test_*.odin"];
+	}
 
     return target({
         kind: "odin-package",
@@ -276,6 +286,11 @@ export function odinPackage({ srcs = [], exclude = [], path = ".", collections =
             ...(collections.length ? { collections } : {}),
             ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
         },
+        sources: sourcesField({
+            root: path,
+            include: srcs,
+            exclude,
+        }),
     });
 }
 

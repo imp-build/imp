@@ -10,22 +10,21 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
-    mpsc,
+    mpsc, Arc, Mutex,
 };
 use std::thread;
 use std::time::Duration;
 
 use crate::toolchain;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use regex::Regex;
 use rquickjs::{
-    Array, CatchResultExt, Context as JsContext, Ctx, Filter, Function, Module, Object, Runtime,
-    Value,
     loader::{Loader, Resolver},
     module::Declared,
     promise::MaybePromise,
+    Array, CatchResultExt, Context as JsContext, Ctx, Filter, Function, Module, Object, Runtime,
+    Value,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -57,6 +56,38 @@ function _collect_dep_handles(value, out) {
     for (const v of Object.values(value)) _collect_dep_handles(v, out);
 }
 
+function _normalize_source_fields(value) {
+    if (value === null || value === undefined) return [];
+    const values = Array.isArray(value) ? value : [value];
+    return values.map(v => {
+        if (!v || v.__imp_source_field !== true) {
+            throw new Error("target({ sources }) expects sourcesField(...) or an array of sourcesField(...)");
+        }
+        return { root: v.root, include: v.include, exclude: v.exclude };
+    });
+}
+
+/**
+ * Declare source files owned by a target.
+ *
+ * @param {object} opts
+ * @param {string} [opts.root="."] Root relative to the declaring BUILD package.
+ * @param {string[]} opts.include Glob patterns matched relative to root.
+ * @param {string[]} [opts.exclude=[]] Glob patterns excluded relative to root.
+ * @returns {object} Source ownership descriptor for target({ sources }).
+ */
+export function sourcesField(opts) {
+    if (!opts || !Array.isArray(opts.include)) {
+        throw new Error("sourcesField({ root?, include, exclude? }) requires include glob patterns");
+    }
+    return {
+        __imp_source_field: true,
+        root: opts.root || ".",
+        include: opts.include,
+        exclude: opts.exclude || [],
+    };
+}
+
 /**
  * Declare a target and return a target handle.
  *
@@ -72,6 +103,7 @@ export function target(opts) {
     const depIds = [];
     const depModes = [];
     const attrs = opts.attrs !== undefined ? opts.attrs : (opts.fields !== undefined ? opts.fields : {});
+    const sources = _normalize_source_fields(opts.sources);
     if (opts.deps != null) {
         for (const d of opts.deps) {
             if (d && d.__imp === true) {
@@ -88,7 +120,7 @@ export function target(opts) {
         _collect_dep_handles(attrs, found);
         for (const h of found) { depIds.push(h.__id); depModes.push(null); }
     }
-    const id = __host_target(opts.kind, JSON.stringify(_serialize_attrs(attrs)), depIds, depModes);
+    const id = __host_target(opts.kind, JSON.stringify(_serialize_attrs(attrs)), JSON.stringify(sources), depIds, depModes);
     const handle = { __imp: true, __id: id, kind: opts.kind, attrs };
     Object.defineProperty(handle, "label", {
         enumerable: true,
@@ -261,6 +293,28 @@ export function workspaceSourceFiles(opts) {
         throw new Error("workspaceSourceFiles({ root?, include, exclude? }) requires include regexes");
     }
     return JSON.parse(__host_workspace_source_files(
+        opts.root || ".",
+        JSON.stringify(opts.include),
+        JSON.stringify(opts.exclude || []),
+    ));
+}
+
+/**
+ * List source files not owned by any loaded target.
+ *
+ * Returned paths are workspace-relative, using `/` separators.
+ *
+ * @param {object} opts
+ * @param {string} [opts.root="."] Workspace-relative directory to search.
+ * @param {string[]} opts.include Glob patterns matched relative to root.
+ * @param {string[]} [opts.exclude=[]] Glob patterns excluded relative to root.
+ * @returns {string[]} Sorted workspace-relative file paths.
+ */
+export function allUnowned(opts) {
+    if (!opts || !Array.isArray(opts.include)) {
+        throw new Error("allUnowned({ root?, include, exclude? }) requires include glob patterns");
+    }
+    return JSON.parse(__host_all_unowned(
         opts.root || ".",
         JSON.stringify(opts.include),
         JSON.stringify(opts.exclude || []),
@@ -710,11 +764,25 @@ pub struct Target {
     pub address: String,
     pub kind: String,
     pub attrs: serde_json::Value,
+    pub sources: Vec<SourceField>,
     pub dependencies: Vec<Dependency>,
     /// The QuickJS numeric id of this target's handle object (`{ __imp: true, __id: N }`).
     /// Stored so product tasks can reconstruct a valid handle to pass to product functions.
     #[serde(skip)]
     pub js_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceField {
+    #[serde(default = "default_source_root")]
+    pub root: String,
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+fn default_source_root() -> String {
+    ".".to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -839,6 +907,7 @@ pub struct Workspace {
     pub targets: BTreeMap<String, Target>,
     pub products: BTreeMap<(String, String), String>,
     pub build_rules: BTreeMap<String, BuildRuleRender>,
+    pub owned_files: BTreeSet<String>,
     pub named_caches: BTreeMap<String, NamedCache>,
     pub goals: BTreeMap<String, Goal>,
     pub platforms: BTreeMap<String, PlatformDef>,
@@ -1064,6 +1133,7 @@ struct HostState {
     pending: BTreeMap<u32, PendingTarget>,
     products: BTreeMap<(String, String), String>,
     build_rules: BTreeMap<String, BuildRuleRender>,
+    owned_files: BTreeSet<String>,
     named_caches: BTreeMap<String, NamedCache>,
     goals: BTreeMap<String, Goal>,
     platforms: BTreeMap<String, PlatformDef>,
@@ -1105,6 +1175,7 @@ impl Default for HostState {
             pending: BTreeMap::new(),
             products: BTreeMap::new(),
             build_rules: BTreeMap::new(),
+            owned_files: BTreeSet::new(),
             named_caches: BTreeMap::new(),
             goals,
             platforms,
@@ -1116,6 +1187,7 @@ impl Default for HostState {
 struct PendingTarget {
     kind: String,
     attrs: serde_json::Value,
+    sources: Vec<SourceField>,
     dep_ids: Vec<(u32, Option<String>)>,
 }
 
@@ -1588,10 +1660,12 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
             )?;
         }
 
+        let owned_files = compute_owned_files(&root, &targets)?;
         let ws = Workspace {
             targets,
             products: hs.products.clone(),
             build_rules: hs.build_rules.clone(),
+            owned_files,
             named_caches: hs.named_caches.clone(),
             goals: hs.goals.clone(),
             platforms: hs.platforms.clone(),
@@ -1600,7 +1674,11 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
     };
 
     // Store resolved addresses in HostState so __host_target_address can read them.
-    state.lock().unwrap().id_to_address = id_to_address_final;
+    {
+        let mut hs = state.lock().unwrap();
+        hs.id_to_address = id_to_address_final;
+        hs.owned_files = workspace.owned_files.clone();
+    }
 
     Ok(LiveWorkspace {
         workspace,
@@ -1658,11 +1736,68 @@ fn materialize_pending_target(
             address: address.clone(),
             kind: pending.kind.clone(),
             attrs: pending.attrs.clone(),
+            sources: pending.sources.clone(),
             dependencies: deps,
             js_id: id,
         },
     );
     Ok(address)
+}
+
+fn compute_owned_files(
+    workspace_root: &Path,
+    targets: &BTreeMap<String, Target>,
+) -> Result<BTreeSet<String>> {
+    let mut owned = BTreeSet::new();
+    for target in targets.values() {
+        for source in &target.sources {
+            if source.include.is_empty() {
+                continue;
+            }
+            let root = source_field_workspace_root(&target.address, &source.root)?;
+            for file in
+                workspace_glob_files(workspace_root, &root, &source.include, &source.exclude)
+                    .with_context(|| format!("expand sources for {}", target.address))?
+            {
+                owned.insert(file);
+            }
+        }
+    }
+    Ok(owned)
+}
+
+fn source_field_workspace_root(address: &str, root: &str) -> Result<String> {
+    let source_root = root.trim();
+    if let Some(workspace_rooted) = source_root.strip_prefix("//") {
+        let relative = workspace_relative_directory(workspace_rooted)?;
+        return Ok(path_to_workspace_string(&relative));
+    }
+
+    let mut base = target_scope_path(address)?;
+    let local = workspace_relative_directory(source_root)?;
+    if !local.as_os_str().is_empty() {
+        base.push(local);
+    }
+    Ok(path_to_workspace_string(&base))
+}
+
+fn target_scope_path(address: &str) -> Result<PathBuf> {
+    let (scope, _) = address
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("target address '{address}' must include ':'"))?;
+    let scope = scope
+        .strip_prefix("//")
+        .ok_or_else(|| anyhow::anyhow!("target address '{address}' must start with //"))?;
+    workspace_relative_directory(scope)
+}
+
+fn path_to_workspace_string(path: &Path) -> String {
+    if path.as_os_str().is_empty() {
+        ".".to_owned()
+    } else {
+        path.to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/")
+    }
 }
 
 /// Register host globals on `ctx`.
@@ -1676,7 +1811,7 @@ fn register_globals<'js>(
     let globals = ctx.globals();
 
     // ------------------------------------------------------------------
-    // __host_target(kind, attrsJson, depIds, depModes) → u32 (handle id)
+    // __host_target(kind, attrsJson, sourcesJson, depIds, depModes) → u32 (handle id)
     // depIds: Array<number>, depModes: Array<string|null> (parallel arrays)
     // ------------------------------------------------------------------
     let state_t = Arc::clone(&state);
@@ -1685,6 +1820,7 @@ fn register_globals<'js>(
         move |_ctx: Ctx<'js>,
               kind: String,
               attrs_json: String,
+              sources_json: String,
               dep_ids: Array<'js>,
               dep_modes: Array<'js>|
               -> rquickjs::Result<u32> {
@@ -1693,6 +1829,9 @@ fn register_globals<'js>(
             hs.next_id += 1;
 
             let attrs: serde_json::Value = serde_json::from_str(&attrs_json).map_err(|e| {
+                rquickjs::Error::new_loading_message("__host_target", e.to_string())
+            })?;
+            let sources: Vec<SourceField> = serde_json::from_str(&sources_json).map_err(|e| {
                 rquickjs::Error::new_loading_message("__host_target", e.to_string())
             })?;
 
@@ -1715,6 +1854,7 @@ fn register_globals<'js>(
                 PendingTarget {
                     kind,
                     attrs,
+                    sources,
                     dep_ids: dep_id_list,
                 },
             );
@@ -2023,6 +2163,41 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_workspace_source_files", host_workspace_source_files)?;
+
+    // ------------------------------------------------------------------
+    // __host_all_unowned(root, includeJson, excludeJson)
+    // ------------------------------------------------------------------
+    let wc = workspace_root.clone();
+    let state_unowned = Arc::clone(&state);
+    let host_all_unowned = Function::new(
+        ctx.clone(),
+        move |root: String,
+              include_json: String,
+              exclude_json: String|
+              -> rquickjs::Result<String> {
+            let include: Vec<String> = serde_json::from_str(&include_json).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    "allUnowned",
+                    format!("parse include globs: {e}"),
+                )
+            })?;
+            let exclude: Vec<String> = serde_json::from_str(&exclude_json).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    "allUnowned",
+                    format!("parse exclude globs: {e}"),
+                )
+            })?;
+            let owned = state_unowned.lock().unwrap().owned_files.clone();
+            let mut files = workspace_glob_files(&wc, &root, &include, &exclude).map_err(|e| {
+                rquickjs::Error::new_loading_message("allUnowned", format!("{e:#}"))
+            })?;
+            files.retain(|file| !owned.contains(file));
+            serde_json::to_string(&files).map_err(|e| {
+                rquickjs::Error::new_loading_message("allUnowned", format!("encode files: {e}"))
+            })
+        },
+    )?;
+    globals.set("__host_all_unowned", host_all_unowned)?;
 
     // ------------------------------------------------------------------
     // __host_workspace_mount(prefix, path)
@@ -5196,13 +5371,7 @@ pub fn format_inspect_actions(result: &IntrospectResult, w: &mut String) -> std:
     Ok(())
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct BuildFileEdit {
-    mode: String,
-    #[serde(default)]
-    targets: Vec<GeneratedBuildTarget>,
-    content: Option<String>,
-}
+type BuildFileEdit = Vec<GeneratedBuildTarget>;
 
 #[derive(Debug, Clone, Deserialize)]
 struct GeneratedBuildTarget {
@@ -5270,40 +5439,83 @@ pub fn evaluate_product_json(
         .map_err(|e| anyhow::anyhow!("evaluate_product_json failed: {e}"))
 }
 
+fn evaluate_product_function_json(
+    live: &LiveWorkspace,
+    product_fn_name: &str,
+    label: &str,
+) -> Result<serde_json::Value> {
+    let ctx_guard = live.ctx.lock().unwrap();
+    ctx_guard
+        .with(|ctx| -> rquickjs::Result<serde_json::Value> {
+            let reset: Function = ctx.globals().get("resetMemoState")?;
+            reset.call::<_, ()>(())?;
+
+            let handle = Object::new(ctx.clone())?;
+            let attrs = Object::new(ctx.clone())?;
+            handle.set("attrs", attrs)?;
+
+            let product_fn: Function = ctx.globals().get(product_fn_name)?;
+            let result: MaybePromise = product_fn
+                .call((handle,))
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("product", format!("{e}")))?;
+            let value: Value = result
+                .finish()
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("product", format!("{e}")))?;
+
+            let json: String = ctx
+                .json_stringify(value)?
+                .ok_or_else(|| {
+                    rquickjs::Error::new_loading_message(
+                        "product",
+                        "product returned a non-JSON value",
+                    )
+                })?
+                .to_string()?;
+            serde_json::from_str(&json)
+                .map_err(|e| rquickjs::Error::new_loading_message("product", e.to_string()))
+        })
+        .map_err(|e| anyhow::anyhow!("evaluate {label} failed: {e}"))
+}
+
 pub fn generate_build_files(
     live: &LiveWorkspace,
     workspace_root: &Path,
     selectors: &[String],
     check: bool,
 ) -> Result<BuildGenerateReport> {
-    let targets = if selectors.is_empty() {
-        let targets: Vec<_> = live
+    let mut edits = BTreeMap::new();
+    if selectors.is_empty() {
+        let generators: Vec<_> = live
             .workspace
-            .targets
-            .values()
-            .filter(|target| {
-                live.workspace
-                    .products
-                    .contains_key(&(target.kind.clone(), "generate-build".to_owned()))
+            .products
+            .iter()
+            .filter_map(|((kind, name), product_fn)| {
+                (name == "generate-build").then_some((kind.clone(), product_fn.clone()))
             })
             .collect();
-        if targets.is_empty() {
+        if generators.is_empty() {
             bail!(
-                "no targets can produce generate-build\nDeclare one or more generator targets such as `export const generate_build = odinGenerateBuild();`"
+                "no registered products can produce generate-build\nImport one or more rule modules that export a generate-build product, such as `await import(\"//rules/odin\");`"
             );
         }
-        targets
+        for (kind, product_fn) in generators {
+            let label = format!("{kind}#generate-build");
+            let value = evaluate_product_function_json(live, &product_fn, &label)?;
+            let product_edits: BTreeMap<String, BuildFileEdit> = serde_json::from_value(value)
+                .with_context(|| format!("parse generate-build product result for {label}"))?;
+            merge_build_edits(&mut edits, product_edits)?;
+        }
     } else {
-        select_targets(&live.workspace, selectors)?
-    };
-    let mut edits = BTreeMap::new();
-    for target in targets {
-        let value = evaluate_product_json(live, &target.address, "generate-build")?;
-        let product_edits: BTreeMap<String, BuildFileEdit> = serde_json::from_value(value)
-            .with_context(|| {
-                format!("parse generate-build product result for {}", target.address)
-            })?;
-        merge_build_edits(&mut edits, product_edits)?;
+        for target in select_targets(&live.workspace, selectors)? {
+            let value = evaluate_product_json(live, &target.address, "generate-build")?;
+            let product_edits: BTreeMap<String, BuildFileEdit> = serde_json::from_value(value)
+                .with_context(|| {
+                    format!("parse generate-build product result for {}", target.address)
+                })?;
+            merge_build_edits(&mut edits, product_edits)?;
+        }
     }
     apply_build_edits(workspace_root, &live.workspace.build_rules, edits, check)
 }
@@ -5312,16 +5524,8 @@ fn merge_build_edits(
     merged: &mut BTreeMap<String, BuildFileEdit>,
     incoming: BTreeMap<String, BuildFileEdit>,
 ) -> Result<()> {
-    for (file, edit) in incoming {
-        match merged.get_mut(&file) {
-            None => {
-                merged.insert(file, edit);
-            }
-            Some(existing) if existing.mode == "managed" && edit.mode == "managed" => {
-                existing.targets.extend(edit.targets);
-            }
-            Some(_) => bail!("multiple incompatible generated edits for {file}"),
-        }
+    for (file, targets) in incoming {
+        merged.entry(file).or_default().extend(targets);
     }
     Ok(())
 }
@@ -5346,14 +5550,7 @@ fn apply_build_edits(
             }
         };
 
-        let rendered = match edit.mode.as_str() {
-            "managed" => render_managed_build_file(&file, &existing, build_rules, &edit.targets)?,
-            "full" => edit
-                .content
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("{file}: full edit requires content"))?,
-            other => bail!("{file}: unsupported generate-build mode '{other}'"),
-        };
+        let rendered = render_raw_build_file(&file, &existing, build_rules, &edit)?;
 
         checked_files.push(file.clone());
         if existing != rendered {
@@ -5382,41 +5579,34 @@ fn apply_build_edits(
     })
 }
 
-const GENERATED_IMPORTS_BEGIN: &str = "// <imp generated imports>";
-const GENERATED_IMPORTS_END: &str = "// </imp generated imports>";
-const GENERATED_BUILD_BEGIN: &str = "// <imp generated build>";
-const GENERATED_BUILD_END: &str = "// </imp generated build>";
-
-fn render_managed_build_file(
+fn render_raw_build_file(
     file: &str,
     existing: &str,
     build_rules: &BTreeMap<String, BuildRuleRender>,
     targets: &[GeneratedBuildTarget],
 ) -> Result<String> {
-    let without_imports =
-        remove_generated_block(existing, GENERATED_IMPORTS_BEGIN, GENERATED_IMPORTS_END)?;
-    let manual =
-        remove_generated_block(&without_imports, GENERATED_BUILD_BEGIN, GENERATED_BUILD_END)?;
-    let manual_exports = manual_export_names(&manual)?;
-    for target in targets {
-        if manual_exports.contains(&target.name) {
-            bail!(
-                "{file}: generated target '{}' conflicts with a manual export",
-                target.name
-            );
-        }
+    let existing_exports = manual_export_names(existing)?;
+    let targets = targets
+        .iter()
+        .filter(|target| !existing_exports.contains(&target.name))
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return Ok(existing.to_owned());
     }
-
     let current_module = build_file_module(file)?;
-    let imports = render_generated_imports(file, &current_module, build_rules, targets)?;
-    let target_block = render_generated_targets(build_rules, targets, &current_module)?;
+    let imports = render_missing_imports(file, &current_module, existing, build_rules, &targets)?;
+    let target_block = render_generated_targets(build_rules, &targets, &current_module)?;
 
     let mut rendered = String::new();
-    rendered.push_str(&imports);
-    rendered.push('\n');
-    let manual = manual.trim();
-    if !manual.is_empty() {
-        rendered.push_str(manual);
+    if !imports.is_empty() {
+        rendered.push_str(&imports);
+        if !existing.trim().is_empty() {
+            rendered.push('\n');
+        }
+    }
+    let existing = existing.trim_end();
+    if !existing.is_empty() {
+        rendered.push_str(existing);
         rendered.push_str("\n\n");
     }
     rendered.push_str(&target_block);
@@ -5424,24 +5614,6 @@ fn render_managed_build_file(
         rendered.push('\n');
     }
     Ok(rendered)
-}
-
-fn remove_generated_block(content: &str, begin: &str, end: &str) -> Result<String> {
-    let Some(start) = content.find(begin) else {
-        return Ok(content.to_owned());
-    };
-    let after_begin = start + begin.len();
-    let Some(relative_end) = content[after_begin..].find(end) else {
-        bail!("generated block starting with '{begin}' has no matching '{end}'");
-    };
-    let end_pos = after_begin + relative_end + end.len();
-    let mut result = String::new();
-    result.push_str(content[..start].trim_end());
-    if !result.is_empty() {
-        result.push('\n');
-    }
-    result.push_str(content[end_pos..].trim_start());
-    Ok(result)
 }
 
 fn manual_export_names(content: &str) -> Result<BTreeSet<String>> {
@@ -5453,12 +5625,38 @@ fn manual_export_names(content: &str) -> Result<BTreeSet<String>> {
         .collect())
 }
 
-fn render_generated_imports(
+fn render_missing_imports(
+    file: &str,
+    current_module: &str,
+    existing: &str,
+    build_rules: &BTreeMap<String, BuildRuleRender>,
+    targets: &[&GeneratedBuildTarget],
+) -> Result<String> {
+    let mut imports = required_imports(file, current_module, build_rules, targets)?;
+    let existing_imports = existing_imports(existing)?;
+    for (module, symbols) in existing_imports {
+        if let Some(required) = imports.get_mut(&module) {
+            for symbol in symbols {
+                required.remove(&symbol);
+            }
+        }
+    }
+    imports.retain(|_, symbols| !symbols.is_empty());
+
+    let mut rendered = String::new();
+    for (from, symbols) in imports {
+        let names = symbols.into_iter().collect::<Vec<_>>().join(", ");
+        rendered.push_str(&format!("import {{ {names} }} from \"{from}\";\n"));
+    }
+    Ok(rendered)
+}
+
+fn required_imports(
     file: &str,
     current_module: &str,
     build_rules: &BTreeMap<String, BuildRuleRender>,
-    targets: &[GeneratedBuildTarget],
-) -> Result<String> {
+    targets: &[&GeneratedBuildTarget],
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
     let mut imports: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for target in targets {
         let rule = build_rules.get(&target.rule).ok_or_else(|| {
@@ -5481,27 +5679,35 @@ fn render_generated_imports(
             }
         }
     }
+    Ok(imports)
+}
 
-    let mut rendered = String::new();
-    rendered.push_str(GENERATED_IMPORTS_BEGIN);
-    rendered.push('\n');
-    for (from, symbols) in imports {
-        let names = symbols.into_iter().collect::<Vec<_>>().join(", ");
-        rendered.push_str(&format!("import {{ {names} }} from \"{from}\";\n"));
+fn existing_imports(content: &str) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let re = Regex::new(r#"(?m)^\s*import\s+\{\s*([^}]+?)\s*\}\s+from\s+"([^"]+)";"#)
+        .context("compile import regex")?;
+    let mut imports: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for capture in re.captures_iter(content) {
+        let names = capture.get(1).map(|m| m.as_str()).unwrap_or("");
+        let module = capture.get(2).map(|m| m.as_str()).unwrap_or("");
+        for name in names.split(',') {
+            let name = name.trim();
+            if !name.is_empty() {
+                imports
+                    .entry(module.to_owned())
+                    .or_default()
+                    .insert(name.to_owned());
+            }
+        }
     }
-    rendered.push_str(GENERATED_IMPORTS_END);
-    rendered.push('\n');
-    Ok(rendered)
+    Ok(imports)
 }
 
 fn render_generated_targets(
     build_rules: &BTreeMap<String, BuildRuleRender>,
-    targets: &[GeneratedBuildTarget],
+    targets: &[&GeneratedBuildTarget],
     current_module: &str,
 ) -> Result<String> {
     let mut rendered = String::new();
-    rendered.push_str(GENERATED_BUILD_BEGIN);
-    rendered.push('\n');
     for target in targets {
         if !is_js_identifier(&target.name) {
             bail!(
@@ -5524,8 +5730,6 @@ fn render_generated_targets(
             target.name, rule.import_name, props
         ));
     }
-    rendered.push_str(GENERATED_BUILD_END);
-    rendered.push('\n');
     Ok(rendered)
 }
 
@@ -6397,11 +6601,11 @@ export function asset({ srcs }) {
 "#;
 
     const GENERATE_BUILD_RULES_JS: &str = r#"
-import { target, product, workspaceSourceFiles, registerBuildRule } from "imp:core";
+import { allUnowned, target, product, registerBuildRule, sourcesField } from "imp:core";
 
 registerBuildRule({ rule: "odinPackage", importFrom: "//rules/odin" });
 
-const DEFAULT_EXCLUDES = ["(^|/)vendor/"];
+const DEFAULT_EXCLUDES = ["**/vendor/**"];
 
 function dirname(path) {
     const index = path.lastIndexOf("/");
@@ -6415,22 +6619,19 @@ function basename(path) {
 }
 
 export const generateBuild = product("odin-build-generator", "generate-build", async function generateBuild(handle) {
-    const files = workspaceSourceFiles({
+    const files = allUnowned({
         root: handle.attrs.root || ".",
-        include: ["\\.odin$"],
+        include: ["**/*.odin"],
         exclude: handle.attrs.exclude || DEFAULT_EXCLUDES,
     });
     const dirs = Array.from(new Set(files.map(dirname))).sort();
     const result = {};
     for (const dir of dirs) {
-        result[dir === "." ? "BUILD.js" : `${dir}/BUILD.js`] = {
-            mode: "managed",
-            targets: [{
-                name: basename(dir).replace(/[^A-Za-z0-9_$]/g, "_"),
+        result[dir === "." ? "BUILD.js" : `${dir}/BUILD.js`] = [{
+                name: basename(dir).replace(/[^A-Za-z0-9_$]/g, "_") || "root",
                 rule: "odinPackage",
                 props: { srcs: ["*.odin"] },
-            }],
-        };
+            }];
     }
     return result;
 });
@@ -6440,7 +6641,16 @@ export function odinGenerateBuild({ root = ".", exclude = DEFAULT_EXCLUDES } = {
 }
 
 export function odinPackage(opts) {
-    return target({ kind: "odin-package", attrs: opts || {} });
+    const attrs = opts || {};
+    return target({
+        kind: "odin-package",
+        attrs,
+        sources: sourcesField({
+            root: attrs.path || ".",
+            include: attrs.srcs || [],
+            exclude: attrs.exclude || [],
+        }),
+    });
 }
 "#;
 
@@ -6582,23 +6792,17 @@ export const ui = asset({ srcs: ["**/*.png"] });
         let workspace = load_workspace(root.path()).unwrap();
 
         // Products registered by workspace.js imports.
-        assert!(
-            workspace
-                .products
-                .contains_key(&("odin-package".into(), "odin-package".into()))
-        );
-        assert!(
-            workspace
-                .products
-                .contains_key(&("asset".into(), "bundle".into()))
-        );
+        assert!(workspace
+            .products
+            .contains_key(&("odin-package".into(), "odin-package".into())));
+        assert!(workspace
+            .products
+            .contains_key(&("asset".into(), "bundle".into())));
 
         // Targets declared by BUILD.js files.
-        assert!(
-            workspace
-                .targets
-                .contains_key("//src/cpp/joltphysics:joltphysics")
-        );
+        assert!(workspace
+            .targets
+            .contains_key("//src/cpp/joltphysics:joltphysics"));
         assert_eq!(
             workspace.targets["//src/cpp/joltphysics:cmake"].dependencies[0].address,
             "//src/cpp/joltphysics:joltphysics"
@@ -6657,11 +6861,9 @@ export const app = externalThing("app");
         );
 
         let workspace = load_workspace(p).unwrap();
-        assert!(
-            workspace
-                .products
-                .contains_key(&("external".into(), "external-product".into()))
-        );
+        assert!(workspace
+            .products
+            .contains_key(&("external".into(), "external-product".into())));
         assert_eq!(
             workspace.targets["//:app"].attrs["name"].as_str().unwrap(),
             "app"
@@ -6669,11 +6871,10 @@ export const app = externalThing("app");
 
         let plan = plan_live(&workspace, p, "build", &["app".into()]).unwrap();
         assert!(plan.roots[0].starts_with("//:app#external-product:memo"));
-        assert!(
-            plan.tasks
-                .iter()
-                .any(|task| task.action.display == "external build //:app")
-        );
+        assert!(plan
+            .tasks
+            .iter()
+            .any(|task| task.action.display == "external build //:app"));
     }
 
     #[test]
@@ -6736,16 +6937,14 @@ export const app = odinPackage({
         .unwrap();
 
         assert!(plan.roots[0].starts_with("//library/jodin:jodin#odin-package:memo"));
-        assert!(
-            plan.tasks
-                .iter()
-                .any(|task| task.action.display == "odin build")
-        );
-        assert!(
-            plan.tasks
-                .iter()
-                .any(|task| task.action.display.contains("sources("))
-        );
+        assert!(plan
+            .tasks
+            .iter()
+            .any(|task| task.action.display == "odin build"));
+        assert!(plan
+            .tasks
+            .iter()
+            .any(|task| task.action.display.contains("sources(")));
     }
 
     #[test]
@@ -6799,19 +6998,16 @@ export const pkg = odinPackage({ srcs: ["**/*.odin"], collections: [lib] });
 
         let workspace = load_workspace(p).unwrap();
         let pkg_plan = plan_live(&workspace, p, "build", &["pkg".into()]).unwrap();
-        assert!(
-            pkg_plan
-                .tasks
-                .iter()
-                .any(|task| task.action.display.contains("-collection:lib=library"))
-        );
+        assert!(pkg_plan
+            .tasks
+            .iter()
+            .any(|task| task.action.display.contains("-collection:lib=library")));
 
         let all = plan_live(&workspace, p, "build", &[]).unwrap();
-        assert!(
-            all.roots
-                .iter()
-                .any(|root| root.starts_with("//:pkg#odin-package:memo"))
-        );
+        assert!(all
+            .roots
+            .iter()
+            .any(|root| root.starts_with("//:pkg#odin-package:memo")));
     }
 
     #[test]
@@ -6821,11 +7017,10 @@ export const pkg = odinPackage({ srcs: ["**/*.odin"], collections: [lib] });
         let plan = plan_live(&workspace, root.path(), "build", &["//assets:ui".into()]).unwrap();
 
         assert!(plan.roots[0].starts_with("//assets:ui#bundle:memo"));
-        assert!(
-            plan.tasks
-                .iter()
-                .any(|t| t.action.display.contains("**/*.png"))
-        );
+        assert!(plan
+            .tasks
+            .iter()
+            .any(|t| t.action.display.contains("**/*.png")));
     }
 
     #[test]
@@ -6922,12 +7117,10 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             .map(|execution| execution.task_id.as_str())
             .collect();
         assert_eq!(ids, ["producer", "consumer"]);
-        assert!(
-            report
-                .tasks
-                .iter()
-                .all(|execution| execution.status == TaskExecutionStatus::WouldRun)
-        );
+        assert!(report
+            .tasks
+            .iter()
+            .all(|execution| execution.status == TaskExecutionStatus::WouldRun));
     }
 
     #[test]
@@ -7536,12 +7729,10 @@ export const generated = toolUser();
         )
         .unwrap();
 
-        assert!(
-            report
-                .tasks
-                .iter()
-                .any(|task| task.status == TaskExecutionStatus::Ran)
-        );
+        assert!(report
+            .tasks
+            .iter()
+            .any(|task| task.status == TaskExecutionStatus::Ran));
         assert_eq!(
             std::fs::read_to_string(p.join("out.txt")).unwrap(),
             "from-tool"
@@ -7769,13 +7960,11 @@ export const ignored = missing;
         assert!(!explanation.cacheable);
         assert!(explanation.impure);
         assert!(!explanation.force_cache);
-        assert!(
-            explanation
-                .miss_reason
-                .as_deref()
-                .unwrap_or("")
-                .contains("impure")
-        );
+        assert!(explanation
+            .miss_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("impure"));
 
         let mut output = String::new();
         format_cache_explanation(&explanation, &mut output).unwrap();
@@ -8074,7 +8263,47 @@ export const check = product("kind-a", "check", async function check(handle) {})
     }
 
     #[test]
-    fn generate_build_product_creates_managed_build_files() {
+    fn source_fields_mark_owned_files_relative_to_declaring_package() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join("library/pkg/BUILD.js"),
+            r#"
+import { sourcesField, target } from "imp:core";
+
+export const pkg = target({
+    kind: "owned-source-test",
+    attrs: {},
+    sources: sourcesField({
+        root: "src",
+        include: ["*.odin"],
+        exclude: ["ignored.odin"],
+    }),
+});
+"#,
+        );
+        write_file(&p.join("library/pkg/src/main.odin"), "package pkg\n");
+        write_file(&p.join("library/pkg/src/ignored.odin"), "package pkg\n");
+        write_file(&p.join("library/pkg/other.odin"), "package pkg\n");
+
+        let live = load_workspace(p).unwrap();
+        assert!(live
+            .workspace
+            .owned_files
+            .contains("library/pkg/src/main.odin"));
+        assert!(!live
+            .workspace
+            .owned_files
+            .contains("library/pkg/src/ignored.odin"));
+        assert!(!live
+            .workspace
+            .owned_files
+            .contains("library/pkg/other.odin"));
+    }
+
+    #[test]
+    fn generate_build_product_creates_raw_build_files() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/odin";"#);
@@ -8082,9 +8311,7 @@ export const check = product("kind-a", "check", async function check(handle) {})
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { odinGenerateBuild } from "//rules/odin";
-
-export const generate_build = odinGenerateBuild();
+export const done = true;
 "#,
         );
         write_file(&p.join("app/main.odin"), "package app\n");
@@ -8102,10 +8329,10 @@ export const generate_build = odinGenerateBuild();
         );
 
         let app_build = std::fs::read_to_string(p.join("app/BUILD.js")).unwrap();
-        assert!(app_build.contains(GENERATED_IMPORTS_BEGIN));
         assert!(app_build.contains(r#"import { odinPackage } from "//rules/odin";"#));
         assert!(app_build.contains("export const app = odinPackage({"));
         assert!(app_build.contains(r#"srcs: ["*.odin"]"#));
+        assert!(!app_build.contains("imp generated"));
         assert!(!p.join("vendor/ignored/BUILD.js").exists());
 
         let live = load_workspace(p).unwrap();
@@ -8114,34 +8341,49 @@ export const generate_build = odinGenerateBuild();
     }
 
     #[test]
-    fn generate_build_runs_all_generator_targets_by_default() {
+    fn generate_build_runs_all_registered_generate_build_products_by_default() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
-        write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/odin";"#);
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/odin";
+import "//rules/custom";
+"#,
+        );
         write_file(&p.join("rules/odin.js"), GENERATE_BUILD_RULES_JS);
+        write_file(
+            &p.join("rules/custom.js"),
+            r#"
+import { product } from "imp:core";
+
+export const generateBuild = product("custom-generator", "generate-build", async function generateBuild() {
+    return {
+        "custom/BUILD.js": [{
+                name: "custom",
+                rule: "odinPackage",
+                props: { srcs: ["*.odin"] },
+            }],
+    };
+});
+"#,
+        );
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { odinGenerateBuild } from "//rules/odin";
-
-export const generate_app = odinGenerateBuild({ root: "app" });
-export const generate_library = odinGenerateBuild({ root: "library" });
+export const done = true;
 "#,
         );
         write_file(&p.join("app/main.odin"), "package app\n");
-        write_file(&p.join("library/spall/spall.odin"), "package spall\n");
 
         let live = load_workspace(p).unwrap();
         let report = generate_build_files(&live, p, &[], false).unwrap();
         assert_eq!(
             report.changed_files,
-            vec![
-                "app/BUILD.js".to_owned(),
-                "library/spall/BUILD.js".to_owned()
-            ]
+            vec!["app/BUILD.js".to_owned(), "custom/BUILD.js".to_owned()]
         );
         assert!(p.join("app/BUILD.js").exists());
-        assert!(p.join("library/spall/BUILD.js").exists());
+        assert!(p.join("custom/BUILD.js").exists());
     }
 
     #[test]
@@ -8153,9 +8395,7 @@ export const generate_library = odinGenerateBuild({ root: "library" });
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { odinGenerateBuild } from "//rules/odin";
-
-export const generate_build = odinGenerateBuild();
+export const done = true;
 "#,
         );
         write_file(&p.join("app/main.odin"), "package app\n");
@@ -8169,7 +8409,7 @@ export const generate_build = odinGenerateBuild();
     }
 
     #[test]
-    fn generate_build_fails_on_manual_export_conflict() {
+    fn generate_build_skips_files_owned_by_existing_targets() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/odin";"#);
@@ -8177,28 +8417,33 @@ export const generate_build = odinGenerateBuild();
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { odinGenerateBuild } from "//rules/odin";
-
-export const generate_build = odinGenerateBuild();
+export const done = true;
 "#,
         );
         write_file(&p.join("app/main.odin"), "package app\n");
+        write_file(&p.join("library/spall/spall.odin"), "package spall\n");
         write_file(
-            &p.join("app/BUILD.js"),
+            &p.join("library/spall/BUILD.js"),
             r#"
-export const app = "manual";
+import { odinPackage } from "//rules/odin";
+
+export const spall = odinPackage({ srcs: ["*.odin"] });
 "#,
         );
 
         let live = load_workspace(p).unwrap();
-        let error = generate_build_files(&live, p, &[], false)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("conflicts with a manual export"));
+        assert!(live
+            .workspace
+            .owned_files
+            .contains("library/spall/spall.odin"));
+        let report = generate_build_files(&live, p, &[], false).unwrap();
+        assert_eq!(report.changed_files, vec!["app/BUILD.js".to_owned()]);
+        let spall_build = std::fs::read_to_string(p.join("library/spall/BUILD.js")).unwrap();
+        assert_eq!(spall_build.matches("export const spall").count(), 1);
     }
 
     #[test]
-    fn managed_build_renderer_renders_target_refs_as_imports() {
+    fn raw_build_renderer_renders_target_refs_as_imports() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         let mut build_rules = BTreeMap::new();
@@ -8212,23 +8457,20 @@ export const app = "manual";
         let mut edits = BTreeMap::new();
         edits.insert(
             "app/BUILD.js".to_owned(),
-            BuildFileEdit {
-                mode: "managed".to_owned(),
-                targets: vec![GeneratedBuildTarget {
-                    name: "app".to_owned(),
-                    rule: "odinPackage".to_owned(),
-                    props: serde_json::json!({
-                        "srcs": ["*.odin"],
-                        "deps": [{ "__imp_target_ref": true, "address": "//library/spall:spall" }]
-                    }),
-                }],
-                content: None,
-            },
+            vec![GeneratedBuildTarget {
+                name: "app".to_owned(),
+                rule: "odinPackage".to_owned(),
+                props: serde_json::json!({
+                    "srcs": ["*.odin"],
+                    "deps": [{ "__imp_target_ref": true, "address": "//library/spall:spall" }]
+                }),
+            }],
         );
 
         apply_build_edits(p, &build_rules, edits, false).unwrap();
         let content = std::fs::read_to_string(p.join("app/BUILD.js")).unwrap();
         assert!(content.contains(r#"import { spall } from "//library/spall";"#));
         assert!(content.contains("deps: [spall]"));
+        assert!(!content.contains("imp generated"));
     }
 }
