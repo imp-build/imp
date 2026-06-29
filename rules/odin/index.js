@@ -7,7 +7,9 @@ import {
 	output,
 	output_path,
 	product,
+	registerBuildRule,
 	run,
+	workspaceSourceFiles,
 	logDebug,
 } from "imp:core";
 
@@ -31,6 +33,10 @@ export {
     resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
 
+registerBuildRule({
+    rule: "odinPackage",
+    importFrom: "//rules/odin",
+});
 
 // ---------------------------------------------------------------------------
 // Memo functions — source discovery
@@ -119,6 +125,38 @@ function default_output_path(handle) {
     return `build/odin/${handle.label.name}`;
 }
 
+const DEFAULT_GENERATE_BUILD_EXCLUDES = [
+    "(^|/)\\.[^/]+/",
+    "(^|/)build/",
+    "(^|/)coverage/",
+    "(^|/)dist/",
+    "(^|/)obj/",
+    "(^|/)target/",
+    "(^|/)vendor/",
+];
+
+function dirname(path) {
+    const index = path.lastIndexOf("/");
+    return index < 0 ? "." : path.slice(0, index);
+}
+
+function basename(path) {
+    if (path === ".") return "root";
+    const index = path.lastIndexOf("/");
+    return index < 0 ? path : path.slice(index + 1);
+}
+
+function target_name_for_dir(dir) {
+    let name = basename(dir).replace(/[^A-Za-z0-9_$]/g, "_");
+    if (name.length === 0) name = "root";
+    if (!/^[A-Za-z_$]/.test(name)) name = `_${name}`;
+    return name;
+}
+
+function build_file_for_dir(dir) {
+    return dir === "." ? "BUILD.js" : `${dir}/BUILD.js`;
+}
+
 // ---------------------------------------------------------------------------
 // Product functions
 // ---------------------------------------------------------------------------
@@ -155,6 +193,29 @@ export const odinBuild = product("odin-package", "odin-package",
             outputs: [output(out)],
             display: `odin build ${path}`,
         });
+    }
+);
+
+export const generateBuild = product("odin-build-generator", "generate-build",
+    async function generateBuild(handle) {
+        const files = workspaceSourceFiles({
+            root: handle.attrs.root || ".",
+            include: ["\\.odin$"],
+            exclude: handle.attrs.exclude || DEFAULT_GENERATE_BUILD_EXCLUDES,
+        });
+        const dirs = Array.from(new Set(files.map(dirname))).sort();
+        const result = {};
+        for (const dir of dirs) {
+            result[build_file_for_dir(dir)] = {
+                mode: "managed",
+                targets: [{
+                    name: target_name_for_dir(dir),
+                    rule: "odinPackage",
+                    props: { srcs: ["*.odin"] },
+                }],
+            };
+        }
+        return result;
     }
 );
 
@@ -215,5 +276,15 @@ export function odinPackage({ srcs = [], exclude = [], path = ".", collections =
             ...(collections.length ? { collections } : {}),
             ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
         },
+    });
+}
+
+export function odinGenerateBuild({
+    root = ".",
+    exclude = DEFAULT_GENERATE_BUILD_EXCLUDES,
+} = {}) {
+    return target({
+        kind: "odin-build-generator",
+        attrs: { root, exclude },
     });
 }

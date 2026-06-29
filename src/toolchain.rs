@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
 use crate::env::LocalEnv;
@@ -57,7 +57,10 @@ pub fn host_download(url: &str) -> Result<PathBuf> {
 
     if !status.success() {
         let _ = std::fs::remove_file(&dest);
-        bail!("curl download of {url} failed with exit code {:?}", status.code());
+        bail!(
+            "curl download of {url} failed with exit code {:?}",
+            status.code()
+        );
     }
 
     Ok(dest)
@@ -71,7 +74,12 @@ pub fn host_download(url: &str) -> Result<PathBuf> {
 /// `--strip-components=N`). For zip archives with non-zero `strip_components`,
 /// extraction goes to a temporary directory first and the top-level entry is
 /// moved into `dest`.
-pub fn host_extract(archive: &Path, dest: &Path, format: &str, strip_components: u32) -> Result<()> {
+pub fn host_extract(
+    archive: &Path,
+    dest: &Path,
+    format: &str,
+    strip_components: u32,
+) -> Result<()> {
     let archive_str = archive.to_string_lossy();
     let dest_str = dest.to_string_lossy();
 
@@ -85,9 +93,9 @@ pub fn host_extract(archive: &Path, dest: &Path, format: &str, strip_components:
             if strip_components > 0 {
                 cmd.arg(format!("--strip-components={strip_components}"));
             }
-            let status = cmd.status().with_context(|| {
-                format!("spawn tar for {}", archive.display())
-            })?;
+            let status = cmd
+                .status()
+                .with_context(|| format!("spawn tar for {}", archive.display()))?;
             if !status.success() {
                 bail!("tar extraction of {} failed", archive.display());
             }
@@ -105,17 +113,35 @@ pub fn host_extract(archive: &Path, dest: &Path, format: &str, strip_components:
 }
 
 #[cfg(not(windows))]
-fn extract_zip(archive: &Path, dest: &Path, _strip_components: u32) -> Result<std::process::ExitStatus> {
+fn extract_zip(
+    archive: &Path,
+    dest: &Path,
+    _strip_components: u32,
+) -> Result<std::process::ExitStatus> {
     std::process::Command::new("unzip")
-        .args(["-qo", &archive.to_string_lossy(), "-d", &dest.to_string_lossy()])
+        .args([
+            "-qo",
+            &archive.to_string_lossy(),
+            "-d",
+            &dest.to_string_lossy(),
+        ])
         .status()
         .with_context(|| format!("spawn unzip for {}", archive.display()))
 }
 
 #[cfg(windows)]
-fn extract_zip(archive: &Path, dest: &Path, _strip_components: u32) -> Result<std::process::ExitStatus> {
+fn extract_zip(
+    archive: &Path,
+    dest: &Path,
+    _strip_components: u32,
+) -> Result<std::process::ExitStatus> {
     std::process::Command::new("tar.exe")
-        .args(["-xf", &archive.to_string_lossy(), "-C", &dest.to_string_lossy()])
+        .args([
+            "-xf",
+            &archive.to_string_lossy(),
+            "-C",
+            &dest.to_string_lossy(),
+        ])
         .status()
         .with_context(|| format!("spawn tar.exe for {}", archive.display()))
 }
@@ -130,11 +156,7 @@ pub fn host_sha256(path: &Path) -> Result<String> {
         bail!("sha256sum failed for {}", path.display());
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_owned())
+    Ok(stdout.split_whitespace().next().unwrap_or("").to_owned())
 }
 
 // ---------------------------------------------------------------------------

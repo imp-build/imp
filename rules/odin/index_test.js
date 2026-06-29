@@ -10,6 +10,8 @@ import {
     own_sources,
     sources,
     collection_flags,
+    generateBuild,
+    odinGenerateBuild,
     tool,
     odinBuild,
 } from "//rules/odin";
@@ -108,6 +110,16 @@ test("tool is exported as a function", () => {
 
 test("odinBuild product is exported as a function", () => {
     expect(typeof odinBuild).toBe("function");
+});
+
+test("generateBuild product is exported as a function", () => {
+    expect(typeof generateBuild).toBe("function");
+});
+
+test("odinGenerateBuild declares a generator target", () => {
+    const generator = odinGenerateBuild({ root: "src" });
+    expect(generator.kind).toBe("odin-build-generator");
+    expect(generator.attrs.root).toBe("src");
 });
 
 test("collection_flags(pkg) returns flags for all collection deps", async () => {

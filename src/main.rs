@@ -9,7 +9,7 @@ mod workspace;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use commands::BuildMode;
@@ -108,6 +108,14 @@ enum Cmd {
     Actions {
         /// Target and product selector, e.g. //:app#odin-package
         product: String,
+    },
+    /// Generate or check BUILD.js files from declared generator targets
+    GenerateBuild {
+        /// Check that generated BUILD.js files are up to date without writing
+        #[arg(long)]
+        check: bool,
+        /// Generator target selectors; defaults to all targets with a generate-build product
+        selectors: Vec<String>,
     },
     /// Format all Odin source files
     Fmt,
@@ -262,6 +270,9 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
         Cmd::Actions { product } => {
             return cmd_actions(product);
         }
+        Cmd::GenerateBuild { check, selectors } => {
+            return cmd_generate_build(*check, selectors);
+        }
         _ => {}
     }
 
@@ -349,6 +360,7 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
         Cmd::Cache { .. } => unreachable!("handled before environment setup"),
         Cmd::Explain { .. } => unreachable!("handled before environment setup"),
         Cmd::Actions { .. } => unreachable!("handled before environment setup"),
+        Cmd::GenerateBuild { .. } => unreachable!("handled before environment setup"),
 
         Cmd::Fmt => commands::fmt::cmd_fmt(tree).await,
 
@@ -443,8 +455,7 @@ fn cmd_plan(
             spike::ExecutionMode::Local
         };
         let mut progress = tree.add_child("execute plan");
-        let options = spike::ExecutionOptions::new(mode, jobs)
-            .with_platform(platform);
+        let options = spike::ExecutionOptions::new(mode, jobs).with_platform(platform);
         let report = match spike::execute_plan_with_options(
             &plan,
             Some(&workspace),
@@ -551,6 +562,30 @@ macro_rules! workspace_cmd {
         print!("{}", $out);
         Ok(())
     }};
+}
+
+fn cmd_generate_build(check: bool, selectors: &[String]) -> Result<()> {
+    let current_dir = std::env::current_dir().context("determine current directory")?;
+    let workspace_root = spike::find_workspace_root(&current_dir)?;
+    let workspace = spike::load_workspace(&workspace_root)?;
+    let report = spike::generate_build_files(&workspace, &workspace_root, selectors, check)?;
+    if check {
+        println!(
+            "generated BUILD files are up to date ({} checked)",
+            report.checked_files.len()
+        );
+    } else if report.changed_files.is_empty() {
+        println!(
+            "generated BUILD files are already up to date ({} checked)",
+            report.checked_files.len()
+        );
+    } else {
+        println!("updated generated BUILD files:");
+        for file in report.changed_files {
+            println!("  {file}");
+        }
+    }
+    Ok(())
 }
 
 fn cmd_targets(selectors: &[String]) -> Result<()> {
@@ -706,9 +741,9 @@ async fn cmd_env_check(_env: &Env, check_cross: bool, tree: &Tree) -> Result<()>
 // ---------------------------------------------------------------------------
 
 fn parse_product_selector(selector: &str) -> Result<(&str, &str)> {
-    let (addr, product) = selector
-        .rsplit_once('#')
-        .ok_or_else(|| anyhow::anyhow!("selector must be <target>#<product>, e.g. //:app#odin-package"))?;
+    let (addr, product) = selector.rsplit_once('#').ok_or_else(|| {
+        anyhow::anyhow!("selector must be <target>#<product>, e.g. //:app#odin-package")
+    })?;
     Ok((addr, product))
 }
 

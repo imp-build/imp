@@ -10,28 +10,29 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
-    mpsc, Arc, Mutex,
+    mpsc,
 };
 use std::thread;
 use std::time::Duration;
 
 use crate::toolchain;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use regex::Regex;
 use rquickjs::{
+    Array, CatchResultExt, Context as JsContext, Ctx, Filter, Function, Module, Object, Runtime,
+    Value,
     loader::{Loader, Resolver},
     module::Declared,
     promise::MaybePromise,
-    Array, CatchResultExt, Context as JsContext, Ctx, Filter, Function, Module, Object, Runtime,
-    Value,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
-use std::os::unix::process::CommandExt;
-#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use walkdir::WalkDir;
 
 const WORKSPACE_FILE: &str = "imp.workspace.js";
@@ -340,6 +341,20 @@ export function workspaceMount(opts) {
         throw new Error("workspaceMount({ prefix, path }) requires prefix and path strings");
     }
     __host_workspace_mount(opts.prefix, opts.path);
+}
+
+export function registerBuildRule(opts) {
+    if (!opts || typeof opts.rule !== "string" || typeof opts.importFrom !== "string") {
+        throw new Error("registerBuildRule({ rule, importFrom, importName? }) requires rule and importFrom");
+    }
+    __host_register_build_rule(opts.rule, opts.importFrom, opts.importName || opts.rule);
+}
+
+export function targetRef(address) {
+    if (typeof address !== "string" || !address.startsWith("//")) {
+        throw new Error("targetRef(address) requires a workspace target address");
+    }
+    return { __imp_target_ref: true, address };
 }
 
 // ---------------------------------------------------------------------------
@@ -738,7 +753,6 @@ impl Executor {
             _ => None,
         }
     }
-
 }
 
 /// A registered platform: bundles executor (where to run) and target (what to build for).
@@ -824,9 +838,22 @@ pub struct Plan {
 pub struct Workspace {
     pub targets: BTreeMap<String, Target>,
     pub products: BTreeMap<(String, String), String>,
+    pub build_rules: BTreeMap<String, BuildRuleRender>,
     pub named_caches: BTreeMap<String, NamedCache>,
     pub goals: BTreeMap<String, Goal>,
     pub platforms: BTreeMap<String, PlatformDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildRuleRender {
+    pub import_from: String,
+    pub import_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildGenerateReport {
+    pub changed_files: Vec<String>,
+    pub checked_files: Vec<String>,
 }
 
 /// A loaded workspace with a live QuickJS runtime.
@@ -1036,6 +1063,7 @@ struct HostState {
     next_exec: u32,
     pending: BTreeMap<u32, PendingTarget>,
     products: BTreeMap<(String, String), String>,
+    build_rules: BTreeMap<String, BuildRuleRender>,
     named_caches: BTreeMap<String, NamedCache>,
     goals: BTreeMap<String, Goal>,
     platforms: BTreeMap<String, PlatformDef>,
@@ -1076,6 +1104,7 @@ impl Default for HostState {
             next_exec: 0,
             pending: BTreeMap::new(),
             products: BTreeMap::new(),
+            build_rules: BTreeMap::new(),
             named_caches: BTreeMap::new(),
             goals,
             platforms,
@@ -1445,7 +1474,13 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
         let state_clone = Arc::clone(&state);
         let mounts_clone = Arc::clone(&module_mounts);
         ctx.with(|ctx| -> rquickjs::Result<()> {
-            register_globals(ctx, state_clone, root.clone(), mounts_clone, Arc::clone(&exec_root))
+            register_globals(
+                ctx,
+                state_clone,
+                root.clone(),
+                mounts_clone,
+                Arc::clone(&exec_root),
+            )
         })
         .map_err(|e| anyhow::anyhow!("register QuickJS globals: {e}"))?;
     }
@@ -1556,6 +1591,7 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
         let ws = Workspace {
             targets,
             products: hs.products.clone(),
+            build_rules: hs.build_rules.clone(),
             named_caches: hs.named_caches.clone(),
             goals: hs.goals.clone(),
             platforms: hs.platforms.clone(),
@@ -1656,8 +1692,9 @@ fn register_globals<'js>(
             let id = hs.next_id;
             hs.next_id += 1;
 
-            let attrs: serde_json::Value = serde_json::from_str(&attrs_json)
-                .map_err(|e| rquickjs::Error::new_loading_message("__host_target", e.to_string()))?;
+            let attrs: serde_json::Value = serde_json::from_str(&attrs_json).map_err(|e| {
+                rquickjs::Error::new_loading_message("__host_target", e.to_string())
+            })?;
 
             // Extract (dep_id, mode) pairs from the two parallel arrays.
             let len = dep_ids.len();
@@ -1673,7 +1710,14 @@ fn register_globals<'js>(
                 dep_id_list.push((dep_id, mode));
             }
 
-            hs.pending.insert(id, PendingTarget { kind, attrs, dep_ids: dep_id_list });
+            hs.pending.insert(
+                id,
+                PendingTarget {
+                    kind,
+                    attrs,
+                    dep_ids: dep_id_list,
+                },
+            );
             Ok(id)
         },
     )?;
@@ -1685,7 +1729,10 @@ fn register_globals<'js>(
     let state_p = Arc::clone(&state);
     let host_product = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>, kind: String, name: String, fn_val: Value<'js>|
+        move |ctx: Ctx<'js>,
+              kind: String,
+              name: String,
+              fn_val: Value<'js>|
               -> rquickjs::Result<()> {
             let exec_name = {
                 let mut hs = state_p.lock().unwrap();
@@ -1703,6 +1750,32 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_product", host_product)?;
+
+    let state_br = Arc::clone(&state);
+    let host_register_build_rule = Function::new(
+        ctx.clone(),
+        move |_ctx: Ctx<'js>,
+              rule: String,
+              import_from: String,
+              import_name: String|
+              -> rquickjs::Result<()> {
+            if rule.is_empty() || import_from.is_empty() || import_name.is_empty() {
+                return Err(rquickjs::Error::new_loading_message(
+                    "__host_register_build_rule",
+                    "rule, importFrom, and importName must be non-empty",
+                ));
+            }
+            state_br.lock().unwrap().build_rules.insert(
+                rule,
+                BuildRuleRender {
+                    import_from,
+                    import_name,
+                },
+            );
+            Ok(())
+        },
+    )?;
+    globals.set("__host_register_build_rule", host_register_build_rule)?;
 
     // ------------------------------------------------------------------
     // __host_named_cache(name)
@@ -1986,9 +2059,8 @@ fn register_globals<'js>(
     // __host_hydrate_target(id) → JSON { kind, fields, deps: [{handle, mode}] }
     // ------------------------------------------------------------------
     let state_h = Arc::clone(&state);
-    let host_hydrate_target = Function::new(
-        ctx.clone(),
-        move |id: u32| -> rquickjs::Result<String> {
+    let host_hydrate_target =
+        Function::new(ctx.clone(), move |id: u32| -> rquickjs::Result<String> {
             let hs = state_h.lock().unwrap();
             let pending = hs.pending.get(&id).ok_or_else(|| {
                 rquickjs::Error::new_loading_message(
@@ -2011,20 +2083,17 @@ fn register_globals<'js>(
                 "attrs": pending.attrs,
                 "deps": deps,
             });
-            serde_json::to_string(&json).map_err(|e| {
-                rquickjs::Error::new_loading_message("hydrateTarget", e.to_string())
-            })
-        },
-    )?;
+            serde_json::to_string(&json)
+                .map_err(|e| rquickjs::Error::new_loading_message("hydrateTarget", e.to_string()))
+        })?;
     globals.set("__host_hydrate_target", host_hydrate_target)?;
 
     // ------------------------------------------------------------------
     // __host_target_address(id) → address string
     // ------------------------------------------------------------------
     let state_addr = Arc::clone(&state);
-    let host_target_address = Function::new(
-        ctx.clone(),
-        move |id: u32| -> rquickjs::Result<String> {
+    let host_target_address =
+        Function::new(ctx.clone(), move |id: u32| -> rquickjs::Result<String> {
             let hs = state_addr.lock().unwrap();
             hs.id_to_address.get(&id).cloned().ok_or_else(|| {
                 rquickjs::Error::new_loading_message(
@@ -2032,8 +2101,7 @@ fn register_globals<'js>(
                     format!("no address for target id {id}"),
                 )
             })
-        },
-    )?;
+        })?;
     globals.set("__host_target_address", host_target_address)?;
 
     // ------------------------------------------------------------------
@@ -2044,7 +2112,10 @@ fn register_globals<'js>(
     let wc = workspace_root.clone();
     let host_glob = Function::new(
         ctx.clone(),
-        move |root: String, include_json: String, exclude_json: String| -> rquickjs::Result<String> {
+        move |root: String,
+              include_json: String,
+              exclude_json: String|
+              -> rquickjs::Result<String> {
             let include: Vec<String> = serde_json::from_str(&include_json)
                 .map_err(|e| rquickjs::Error::new_loading_message("glob", e.to_string()))?;
             let exclude: Vec<String> = serde_json::from_str(&exclude_json)
@@ -2059,18 +2130,14 @@ fn register_globals<'js>(
     // __host_env(name) → string | null
     let host_env = Function::new(
         ctx.clone(),
-        move |name: String| -> rquickjs::Result<Option<String>> {
-            Ok(std::env::var(&name).ok())
-        },
+        move |name: String| -> rquickjs::Result<Option<String>> { Ok(std::env::var(&name).ok()) },
     )?;
     globals.set("__host_env", host_env)?;
 
     // __host_which(name) → string | null
     let host_which = Function::new(
         ctx.clone(),
-        move |name: String| -> rquickjs::Result<Option<String>> {
-            Ok(which_executable(&name))
-        },
+        move |name: String| -> rquickjs::Result<Option<String>> { Ok(which_executable(&name)) },
     )?;
     globals.set("__host_which", host_which)?;
 
@@ -2084,11 +2151,18 @@ fn register_globals<'js>(
             let resolved = if p.is_absolute() {
                 p.to_owned()
             } else {
-                let root = exec_root_rf.lock().unwrap().clone().unwrap_or_else(|| wc_rf.clone());
+                let root = exec_root_rf
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| wc_rf.clone());
                 root.join(p)
             };
             std::fs::read_to_string(&resolved).map_err(|e| {
-                rquickjs::Error::new_loading_message("read_file", format!("{}: {e}", resolved.display()))
+                rquickjs::Error::new_loading_message(
+                    "read_file",
+                    format!("{}: {e}", resolved.display()),
+                )
             })
         },
     )?;
@@ -2101,7 +2175,10 @@ fn register_globals<'js>(
         ctx.clone(),
         move |ctx: Ctx<'js>, opts: Object<'js>| -> rquickjs::Result<Object<'js>> {
             let root = exec_root_run.lock().unwrap().clone().ok_or_else(|| {
-                rquickjs::Error::new_loading_message("run", "run() called outside of execution context")
+                rquickjs::Error::new_loading_message(
+                    "run",
+                    "run() called outside of execution context",
+                )
             })?;
             let run_opts = parse_exec_run_opts(opts, &root)?;
             let result = exec_run_inner(&root, run_opts)
@@ -2161,13 +2238,19 @@ fn register_globals<'js>(
                 })?;
 
             let obj = Object::new(ctx.clone())?;
-            obj.set("stdout", String::from_utf8_lossy(&output.stdout).to_string())?;
-            obj.set("stderr", String::from_utf8_lossy(&output.stderr).to_string())?;
+            obj.set(
+                "stdout",
+                String::from_utf8_lossy(&output.stdout).to_string(),
+            )?;
+            obj.set(
+                "stderr",
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            )?;
             obj.set("exitCode", output.status.code().unwrap_or(-1))?;
 
             if let Some(pre_snap) = pre {
-                let post_snap = snapshot_watched_files(&root, watch.as_deref().unwrap())
-                    .map_err(|e| {
+                let post_snap =
+                    snapshot_watched_files(&root, watch.as_deref().unwrap()).map_err(|e| {
                         rquickjs::Error::new_loading_message(
                             "workspace_mutation",
                             format!("post-snapshot: {e:#}"),
@@ -2219,7 +2302,10 @@ fn which_executable(name: &str) -> Option<String> {
     None
 }
 
-fn parse_exec_run_opts<'js>(opts: Object<'js>, workspace_root: &Path) -> rquickjs::Result<ExecRunOpts> {
+fn parse_exec_run_opts<'js>(
+    opts: Object<'js>,
+    workspace_root: &Path,
+) -> rquickjs::Result<ExecRunOpts> {
     let argv: Vec<String> = opts.get("argv")?;
     let display: Option<String> = opts.get("display")?;
     let display = display.unwrap_or_else(|| argv.join(" "));
@@ -2231,13 +2317,33 @@ fn parse_exec_run_opts<'js>(opts: Object<'js>, workspace_root: &Path) -> rquickj
             env.insert(k, v);
         }
     }
-    let inputs = parse_io_specs(opts.get::<_, Option<Vec<Object>>>("inputs")?.unwrap_or_default())?;
-    let outputs = parse_io_specs(opts.get::<_, Option<Vec<Object>>>("outputs")?.unwrap_or_default())?;
-    let tools = parse_tool_specs(opts.get::<_, Option<Vec<Object>>>("tools")?.unwrap_or_default(), workspace_root)?;
+    let inputs = parse_io_specs(
+        opts.get::<_, Option<Vec<Object>>>("inputs")?
+            .unwrap_or_default(),
+    )?;
+    let outputs = parse_io_specs(
+        opts.get::<_, Option<Vec<Object>>>("outputs")?
+            .unwrap_or_default(),
+    )?;
+    let tools = parse_tool_specs(
+        opts.get::<_, Option<Vec<Object>>>("tools")?
+            .unwrap_or_default(),
+        workspace_root,
+    )?;
     let impure = opts.get::<_, Option<bool>>("impure")?.unwrap_or(false);
     let force_cache = opts.get::<_, Option<bool>>("forceCache")?.unwrap_or(false);
     let sandbox = opts.get::<_, Option<bool>>("sandbox")?.unwrap_or(true);
-    Ok(ExecRunOpts { argv, display, env, inputs, outputs, tools, impure, force_cache, sandbox })
+    Ok(ExecRunOpts {
+        argv,
+        display,
+        env,
+        inputs,
+        outputs,
+        tools,
+        impure,
+        force_cache,
+        sandbox,
+    })
 }
 
 fn module_mount_from_args(
@@ -2431,9 +2537,8 @@ fn snapshot_watched_files(
     let mut snap = std::collections::HashMap::new();
     for path in paths {
         let abs = workspace_root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
-        let (digest, _) = store_file_blob(&abs, "watch").with_context(|| {
-            format!("snapshot {}", abs.display())
-        })?;
+        let (digest, _) = store_file_blob(&abs, "watch")
+            .with_context(|| format!("snapshot {}", abs.display()))?;
         snap.insert(path, digest);
     }
     Ok(snap)
@@ -2642,7 +2747,13 @@ pub fn plan_live(
     goal: &str,
     selectors: &[String],
 ) -> Result<Plan> {
-    plan_inner(&live.workspace, Some(live), Some(workspace_root), goal, selectors)
+    plan_inner(
+        &live.workspace,
+        Some(live),
+        Some(workspace_root),
+        goal,
+        selectors,
+    )
 }
 
 fn plan_inner(
@@ -2707,8 +2818,8 @@ fn select_roots<'a>(
         // implicit root for selector-less invocations. Otherwise every target
         // that has a product for the current goal is selected.
         if let Some(default_target) = workspace.targets.get("//:default") {
-            let product = goal_product_for_kind(workspace, goal, &default_target.kind)
-                .ok_or_else(|| {
+            let product =
+                goal_product_for_kind(workspace, goal, &default_target.kind).ok_or_else(|| {
                     anyhow::anyhow!(
                         "//:default has no {} product; add a rule for kind '{}'",
                         goal.name,
@@ -3653,7 +3764,8 @@ fn run_local_task(
     }
 
     let sandbox = prepare_sandbox(task, workspace_root)?;
-    let tool_path_entries = materialize_tools_into_sandbox(&task.action.tools, &sandbox.sandbox_root)?;
+    let tool_path_entries =
+        materialize_tools_into_sandbox(&task.action.tools, &sandbox.sandbox_root)?;
     let manifest_path = sandbox.sandbox_root.join("imp-sandbox.json");
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&sandbox)?)
         .with_context(|| format!("write sandbox manifest {}", manifest_path.display()))?;
@@ -3674,7 +3786,11 @@ fn run_local_task(
     if let Some(progress) = progress {
         progress.message(
             prodash::messages::MessageLevel::Info,
-            format!("[sandbox: {}] {}", sandbox.sandbox_root.display(), cmd_display),
+            format!(
+                "[sandbox: {}] {}",
+                sandbox.sandbox_root.display(),
+                cmd_display
+            ),
         );
     }
 
@@ -4679,7 +4795,11 @@ pub fn format_targets(targets: &[&Target], w: &mut String) -> std::fmt::Result {
             if !sources.is_empty() {
                 writeln!(w, "  sources: {sources}")?;
             }
-        } else if let Some(sources) = target.attrs.get("sources").and_then(|value| value.as_array()) {
+        } else if let Some(sources) = target
+            .attrs
+            .get("sources")
+            .and_then(|value| value.as_array())
+        {
             let sources = sources
                 .iter()
                 .filter_map(|value| value.as_str())
@@ -4895,55 +5015,62 @@ pub fn introspect_product(
 
     let ctx_guard = live.ctx.lock().unwrap();
     let result = ctx_guard
-        .with(|ctx| -> rquickjs::Result<(Vec<serde_json::Value>, Vec<serde_json::Value>, std::collections::HashMap<String, String>)> {
-            // Enable introspect mode and reset trace state.
-            let set_introspect: Function = ctx.globals().get("setIntrospectMode")?;
-            set_introspect.call::<_, ()>((true,))?;
-            let reset: Function = ctx.globals().get("resetMemoState")?;
-            reset.call::<_, ()>(())?;
+        .with(
+            |ctx| -> rquickjs::Result<(
+                Vec<serde_json::Value>,
+                Vec<serde_json::Value>,
+                std::collections::HashMap<String, String>,
+            )> {
+                // Enable introspect mode and reset trace state.
+                let set_introspect: Function = ctx.globals().get("setIntrospectMode")?;
+                set_introspect.call::<_, ()>((true,))?;
+                let reset: Function = ctx.globals().get("resetMemoState")?;
+                reset.call::<_, ()>(())?;
 
-            // Call the product function with the enriched target handle.
-            let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
-            let handle: Object = resolve_fn.call((js_id,))?;
+                // Call the product function with the enriched target handle.
+                let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
+                let handle: Object = resolve_fn.call((js_id,))?;
 
-            let product_fn: Function = ctx.globals().get(product_fn_name.as_str())?;
-            let result: MaybePromise = product_fn
-                .call((handle,))
-                .catch(&ctx)
-                .map_err(|e| rquickjs::Error::new_loading_message("introspect", format!("{e}")))?;
-            result
-                .finish::<()>()
-                .catch(&ctx)
-                .map_err(|e| rquickjs::Error::new_loading_message("introspect", format!("{e}")))?;
+                let product_fn: Function = ctx.globals().get(product_fn_name.as_str())?;
+                let result: MaybePromise = product_fn.call((handle,)).catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message("introspect", format!("{e}"))
+                })?;
+                result.finish::<()>().catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message("introspect", format!("{e}"))
+                })?;
 
-            // Restore normal mode.
-            set_introspect.call::<_, ()>((false,))?;
+                // Restore normal mode.
+                set_introspect.call::<_, ()>((false,))?;
 
-            // Read the trace.
-            let get_trace: Function = ctx.globals().get("getMemoTrace")?;
-            let trace_obj: Object = get_trace.call(())?;
+                // Read the trace.
+                let get_trace: Function = ctx.globals().get("getMemoTrace")?;
+                let trace_obj: Object = get_trace.call(())?;
 
-            let trace_json: String = ctx
-                .json_stringify(trace_obj)?
-                .ok_or_else(|| rquickjs::Error::new_loading_message("introspect", "trace was null"))?
-                .to_string()?;
+                let trace_json: String = ctx
+                    .json_stringify(trace_obj)?
+                    .ok_or_else(|| {
+                        rquickjs::Error::new_loading_message("introspect", "trace was null")
+                    })?
+                    .to_string()?;
 
-            let parsed: serde_json::Value = serde_json::from_str(&trace_json)
-                .map_err(|e| rquickjs::Error::new_loading_message("introspect", e.to_string()))?;
+                let parsed: serde_json::Value = serde_json::from_str(&trace_json).map_err(|e| {
+                    rquickjs::Error::new_loading_message("introspect", e.to_string())
+                })?;
 
-            let trace = parsed["trace"].as_array().cloned().unwrap_or_default();
-            let deps = parsed["deps"].as_array().cloned().unwrap_or_default();
-            let key_display: std::collections::HashMap<String, String> = parsed["key_display"]
-                .as_object()
-                .map(|m| {
-                    m.iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
-                        .collect()
-                })
-                .unwrap_or_default();
+                let trace = parsed["trace"].as_array().cloned().unwrap_or_default();
+                let deps = parsed["deps"].as_array().cloned().unwrap_or_default();
+                let key_display: std::collections::HashMap<String, String> = parsed["key_display"]
+                    .as_object()
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
-            Ok((trace, deps, key_display))
-        })
+                Ok((trace, deps, key_display))
+            },
+        )
         .map_err(|e| anyhow::anyhow!("introspect_product failed: {e}"))?;
     drop(ctx_guard);
 
@@ -4975,30 +5102,30 @@ pub fn introspect_product(
 
 /// Render the memo call tree for an introspect result.
 pub fn format_inspect_explain(result: &IntrospectResult, w: &mut String) -> std::fmt::Result {
-    use std::fmt::Write;
     use std::collections::{HashMap, HashSet};
+    use std::fmt::Write;
 
     // Build adjacency list from deps: caller → [callees].
     let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut has_parent: HashSet<&str> = HashSet::new();
     for dep in &result.deps {
-        if let (Some(caller), Some(callee)) = (
-            dep["caller"].as_str(),
-            dep["callee"].as_str(),
-        ) {
+        if let (Some(caller), Some(callee)) = (dep["caller"].as_str(), dep["callee"].as_str()) {
             children.entry(caller).or_default().push(callee);
             has_parent.insert(callee);
         }
     }
 
     // Root nodes: appear in deps but never as a callee.
-    let all_callers: Vec<&str> = result.deps.iter()
+    let all_callers: Vec<&str> = result
+        .deps
+        .iter()
         .filter_map(|d| d["caller"].as_str())
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
 
-    let roots: Vec<&str> = all_callers.iter()
+    let roots: Vec<&str> = all_callers
+        .iter()
         .copied()
         .filter(|k| !has_parent.contains(k))
         .collect();
@@ -5006,7 +5133,9 @@ pub fn format_inspect_explain(result: &IntrospectResult, w: &mut String) -> std:
     // Fall back to miss events if no deps recorded.
     let miss_roots: Vec<&str>;
     let effective_roots: &[&str] = if roots.is_empty() {
-        miss_roots = result.trace.iter()
+        miss_roots = result
+            .trace
+            .iter()
             .filter(|e| e["event"] == "miss")
             .filter_map(|e| e["key"].as_str())
             .collect();
@@ -5065,6 +5194,497 @@ pub fn format_inspect_actions(result: &IntrospectResult, w: &mut String) -> std:
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BuildFileEdit {
+    mode: String,
+    #[serde(default)]
+    targets: Vec<GeneratedBuildTarget>,
+    content: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GeneratedBuildTarget {
+    name: String,
+    rule: String,
+    #[serde(default)]
+    props: serde_json::Value,
+}
+
+/// Evaluate a product and return its JSON-serializable value.
+pub fn evaluate_product_json(
+    live: &LiveWorkspace,
+    target_addr: &str,
+    product_name: &str,
+) -> Result<serde_json::Value> {
+    let target = live
+        .workspace
+        .targets
+        .get(target_addr)
+        .ok_or_else(|| anyhow::anyhow!("no target '{target_addr}' in workspace"))?;
+
+    let product_fn_name = live
+        .workspace
+        .products
+        .get(&(target.kind.clone(), product_name.to_owned()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no product '{product_name}' for kind '{}' (target '{target_addr}')",
+                target.kind
+            )
+        })?
+        .clone();
+
+    let ctx_guard = live.ctx.lock().unwrap();
+    ctx_guard
+        .with(|ctx| -> rquickjs::Result<serde_json::Value> {
+            let reset: Function = ctx.globals().get("resetMemoState")?;
+            reset.call::<_, ()>(())?;
+
+            let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
+            let handle: Object = resolve_fn.call((target.js_id,))?;
+
+            let product_fn: Function = ctx.globals().get(product_fn_name.as_str())?;
+            let result: MaybePromise = product_fn
+                .call((handle,))
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("product", format!("{e}")))?;
+            let value: Value = result
+                .finish()
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("product", format!("{e}")))?;
+
+            let json: String = ctx
+                .json_stringify(value)?
+                .ok_or_else(|| {
+                    rquickjs::Error::new_loading_message(
+                        "product",
+                        "product returned a non-JSON value",
+                    )
+                })?
+                .to_string()?;
+            serde_json::from_str(&json)
+                .map_err(|e| rquickjs::Error::new_loading_message("product", e.to_string()))
+        })
+        .map_err(|e| anyhow::anyhow!("evaluate_product_json failed: {e}"))
+}
+
+pub fn generate_build_files(
+    live: &LiveWorkspace,
+    workspace_root: &Path,
+    selectors: &[String],
+    check: bool,
+) -> Result<BuildGenerateReport> {
+    let targets = if selectors.is_empty() {
+        let targets: Vec<_> = live
+            .workspace
+            .targets
+            .values()
+            .filter(|target| {
+                live.workspace
+                    .products
+                    .contains_key(&(target.kind.clone(), "generate-build".to_owned()))
+            })
+            .collect();
+        if targets.is_empty() {
+            bail!(
+                "no targets can produce generate-build\nDeclare one or more generator targets such as `export const generate_build = odinGenerateBuild();`"
+            );
+        }
+        targets
+    } else {
+        select_targets(&live.workspace, selectors)?
+    };
+    let mut edits = BTreeMap::new();
+    for target in targets {
+        let value = evaluate_product_json(live, &target.address, "generate-build")?;
+        let product_edits: BTreeMap<String, BuildFileEdit> = serde_json::from_value(value)
+            .with_context(|| {
+                format!("parse generate-build product result for {}", target.address)
+            })?;
+        merge_build_edits(&mut edits, product_edits)?;
+    }
+    apply_build_edits(workspace_root, &live.workspace.build_rules, edits, check)
+}
+
+fn merge_build_edits(
+    merged: &mut BTreeMap<String, BuildFileEdit>,
+    incoming: BTreeMap<String, BuildFileEdit>,
+) -> Result<()> {
+    for (file, edit) in incoming {
+        match merged.get_mut(&file) {
+            None => {
+                merged.insert(file, edit);
+            }
+            Some(existing) if existing.mode == "managed" && edit.mode == "managed" => {
+                existing.targets.extend(edit.targets);
+            }
+            Some(_) => bail!("multiple incompatible generated edits for {file}"),
+        }
+    }
+    Ok(())
+}
+
+fn apply_build_edits(
+    workspace_root: &Path,
+    build_rules: &BTreeMap<String, BuildRuleRender>,
+    edits: BTreeMap<String, BuildFileEdit>,
+    check: bool,
+) -> Result<BuildGenerateReport> {
+    let mut changed_files = Vec::new();
+    let mut checked_files = Vec::new();
+
+    for (file, edit) in edits {
+        let relative = artifact_relative_path(&file)?;
+        let destination = workspace_root.join(relative);
+        let existing = match std::fs::read_to_string(&destination) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(error).with_context(|| format!("read {}", destination.display()));
+            }
+        };
+
+        let rendered = match edit.mode.as_str() {
+            "managed" => render_managed_build_file(&file, &existing, build_rules, &edit.targets)?,
+            "full" => edit
+                .content
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("{file}: full edit requires content"))?,
+            other => bail!("{file}: unsupported generate-build mode '{other}'"),
+        };
+
+        checked_files.push(file.clone());
+        if existing != rendered {
+            changed_files.push(file.clone());
+            if !check {
+                if let Some(parent) = destination.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("create {}", parent.display()))?;
+                }
+                std::fs::write(&destination, rendered)
+                    .with_context(|| format!("write {}", destination.display()))?;
+            }
+        }
+    }
+
+    if check && !changed_files.is_empty() {
+        bail!(
+            "generated BUILD files are out of date: {}",
+            changed_files.join(", ")
+        );
+    }
+
+    Ok(BuildGenerateReport {
+        changed_files,
+        checked_files,
+    })
+}
+
+const GENERATED_IMPORTS_BEGIN: &str = "// <imp generated imports>";
+const GENERATED_IMPORTS_END: &str = "// </imp generated imports>";
+const GENERATED_BUILD_BEGIN: &str = "// <imp generated build>";
+const GENERATED_BUILD_END: &str = "// </imp generated build>";
+
+fn render_managed_build_file(
+    file: &str,
+    existing: &str,
+    build_rules: &BTreeMap<String, BuildRuleRender>,
+    targets: &[GeneratedBuildTarget],
+) -> Result<String> {
+    let without_imports =
+        remove_generated_block(existing, GENERATED_IMPORTS_BEGIN, GENERATED_IMPORTS_END)?;
+    let manual =
+        remove_generated_block(&without_imports, GENERATED_BUILD_BEGIN, GENERATED_BUILD_END)?;
+    let manual_exports = manual_export_names(&manual)?;
+    for target in targets {
+        if manual_exports.contains(&target.name) {
+            bail!(
+                "{file}: generated target '{}' conflicts with a manual export",
+                target.name
+            );
+        }
+    }
+
+    let current_module = build_file_module(file)?;
+    let imports = render_generated_imports(file, &current_module, build_rules, targets)?;
+    let target_block = render_generated_targets(build_rules, targets, &current_module)?;
+
+    let mut rendered = String::new();
+    rendered.push_str(&imports);
+    rendered.push('\n');
+    let manual = manual.trim();
+    if !manual.is_empty() {
+        rendered.push_str(manual);
+        rendered.push_str("\n\n");
+    }
+    rendered.push_str(&target_block);
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    Ok(rendered)
+}
+
+fn remove_generated_block(content: &str, begin: &str, end: &str) -> Result<String> {
+    let Some(start) = content.find(begin) else {
+        return Ok(content.to_owned());
+    };
+    let after_begin = start + begin.len();
+    let Some(relative_end) = content[after_begin..].find(end) else {
+        bail!("generated block starting with '{begin}' has no matching '{end}'");
+    };
+    let end_pos = after_begin + relative_end + end.len();
+    let mut result = String::new();
+    result.push_str(content[..start].trim_end());
+    if !result.is_empty() {
+        result.push('\n');
+    }
+    result.push_str(content[end_pos..].trim_start());
+    Ok(result)
+}
+
+fn manual_export_names(content: &str) -> Result<BTreeSet<String>> {
+    let re = Regex::new(r"(?m)^\s*export\s+const\s+([A-Za-z_$][A-Za-z0-9_$]*)\b")
+        .context("compile export regex")?;
+    Ok(re
+        .captures_iter(content)
+        .filter_map(|capture| capture.get(1).map(|m| m.as_str().to_owned()))
+        .collect())
+}
+
+fn render_generated_imports(
+    file: &str,
+    current_module: &str,
+    build_rules: &BTreeMap<String, BuildRuleRender>,
+    targets: &[GeneratedBuildTarget],
+) -> Result<String> {
+    let mut imports: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for target in targets {
+        let rule = build_rules.get(&target.rule).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{file}: no render metadata registered for rule '{}'",
+                target.rule
+            )
+        })?;
+        imports
+            .entry(rule.import_from.clone())
+            .or_default()
+            .insert(rule.import_name.clone());
+
+        let mut refs = BTreeSet::new();
+        collect_target_refs(&target.props, &mut refs)?;
+        for address in refs {
+            let (module, symbol) = target_ref_parts(&address)?;
+            if module != current_module {
+                imports.entry(module).or_default().insert(symbol);
+            }
+        }
+    }
+
+    let mut rendered = String::new();
+    rendered.push_str(GENERATED_IMPORTS_BEGIN);
+    rendered.push('\n');
+    for (from, symbols) in imports {
+        let names = symbols.into_iter().collect::<Vec<_>>().join(", ");
+        rendered.push_str(&format!("import {{ {names} }} from \"{from}\";\n"));
+    }
+    rendered.push_str(GENERATED_IMPORTS_END);
+    rendered.push('\n');
+    Ok(rendered)
+}
+
+fn render_generated_targets(
+    build_rules: &BTreeMap<String, BuildRuleRender>,
+    targets: &[GeneratedBuildTarget],
+    current_module: &str,
+) -> Result<String> {
+    let mut rendered = String::new();
+    rendered.push_str(GENERATED_BUILD_BEGIN);
+    rendered.push('\n');
+    for target in targets {
+        if !is_js_identifier(&target.name) {
+            bail!(
+                "generated target name '{}' is not a valid JavaScript identifier",
+                target.name
+            );
+        }
+        let rule = build_rules.get(&target.rule).ok_or_else(|| {
+            anyhow::anyhow!("no render metadata registered for rule '{}'", target.rule)
+        })?;
+        if !is_js_identifier(&rule.import_name) {
+            bail!(
+                "generated rule import '{}' is not a valid JavaScript identifier",
+                rule.import_name
+            );
+        }
+        let props = render_js_value(&target.props, 0, current_module)?;
+        rendered.push_str(&format!(
+            "export const {} = {}({});\n",
+            target.name, rule.import_name, props
+        ));
+    }
+    rendered.push_str(GENERATED_BUILD_END);
+    rendered.push('\n');
+    Ok(rendered)
+}
+
+fn collect_target_refs(value: &serde_json::Value, refs: &mut BTreeSet<String>) -> Result<()> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_target_refs(value, refs)?;
+            }
+        }
+        serde_json::Value::Object(object) if is_target_ref(value) => {
+            let address = object
+                .get("address")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| anyhow::anyhow!("targetRef value is missing address"))?;
+            refs.insert(address.to_owned());
+        }
+        serde_json::Value::Object(object) => {
+            for value in object.values() {
+                collect_target_refs(value, refs)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn render_js_value(
+    value: &serde_json::Value,
+    indent: usize,
+    current_module: &str,
+) -> Result<String> {
+    match value {
+        serde_json::Value::Null => Ok("null".to_owned()),
+        serde_json::Value::Bool(value) => Ok(value.to_string()),
+        serde_json::Value::Number(value) => Ok(value.to_string()),
+        serde_json::Value::String(value) => Ok(serde_json::to_string(value)?),
+        serde_json::Value::Array(values) => {
+            if values.is_empty() {
+                return Ok("[]".to_owned());
+            }
+            if values.iter().all(is_simple_js_value) {
+                let items = values
+                    .iter()
+                    .map(|value| render_js_value(value, indent, current_module))
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(format!("[{}]", items.join(", ")));
+            }
+            let child_indent = " ".repeat(indent + 4);
+            let mut rendered = String::from("[\n");
+            for value in values {
+                rendered.push_str(&child_indent);
+                rendered.push_str(&render_js_value(value, indent + 4, current_module)?);
+                rendered.push_str(",\n");
+            }
+            rendered.push_str(&" ".repeat(indent));
+            rendered.push(']');
+            Ok(rendered)
+        }
+        serde_json::Value::Object(object) if is_target_ref(value) => {
+            let address = object
+                .get("address")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| anyhow::anyhow!("targetRef value is missing address"))?;
+            let (module, symbol) = target_ref_parts(address)?;
+            if module == current_module || is_js_identifier(&symbol) {
+                Ok(symbol)
+            } else {
+                bail!("targetRef symbol '{symbol}' is not a valid JavaScript identifier")
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if object.is_empty() {
+                return Ok("{}".to_owned());
+            }
+            let child_indent = " ".repeat(indent + 4);
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort();
+            let mut rendered = String::from("{\n");
+            for key in keys {
+                let value = object.get(key).unwrap();
+                rendered.push_str(&child_indent);
+                rendered.push_str(&render_js_key(key));
+                rendered.push_str(": ");
+                rendered.push_str(&render_js_value(value, indent + 4, current_module)?);
+                rendered.push_str(",\n");
+            }
+            rendered.push_str(&" ".repeat(indent));
+            rendered.push('}');
+            Ok(rendered)
+        }
+    }
+}
+
+fn is_simple_js_value(value: &serde_json::Value) -> bool {
+    matches!(
+        value,
+        serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_)
+    ) || is_target_ref(value)
+}
+
+fn is_target_ref(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .and_then(|object| object.get("__imp_target_ref"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+fn render_js_key(key: &str) -> String {
+    if is_js_identifier(key) {
+        key.to_owned()
+    } else {
+        serde_json::to_string(key).expect("serialize object key")
+    }
+}
+
+fn is_js_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+}
+
+fn target_ref_parts(address: &str) -> Result<(String, String)> {
+    let (module, name) = address
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("targetRef address '{address}' must include ':'"))?;
+    if !module.starts_with("//") || name.is_empty() {
+        bail!("targetRef address '{address}' must be a workspace target address");
+    }
+    if !is_js_identifier(name) {
+        bail!("targetRef target name '{name}' is not a valid JavaScript identifier");
+    }
+    Ok((module.to_owned(), name.to_owned()))
+}
+
+fn build_file_module(file: &str) -> Result<String> {
+    let relative = artifact_relative_path(file)?;
+    if relative.file_name().and_then(|name| name.to_str()) != Some(BUILD_FILE) {
+        bail!("generated BUILD edit path must end in {BUILD_FILE}: {file}");
+    }
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    if parent.as_os_str().is_empty() {
+        return Ok("//".to_owned());
+    }
+    Ok(format!(
+        "//{}",
+        parent
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/")
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -5776,6 +6396,54 @@ export function asset({ srcs }) {
 }
 "#;
 
+    const GENERATE_BUILD_RULES_JS: &str = r#"
+import { target, product, workspaceSourceFiles, registerBuildRule } from "imp:core";
+
+registerBuildRule({ rule: "odinPackage", importFrom: "//rules/odin" });
+
+const DEFAULT_EXCLUDES = ["(^|/)vendor/"];
+
+function dirname(path) {
+    const index = path.lastIndexOf("/");
+    return index < 0 ? "." : path.slice(0, index);
+}
+
+function basename(path) {
+    if (path === ".") return "root";
+    const index = path.lastIndexOf("/");
+    return index < 0 ? path : path.slice(index + 1);
+}
+
+export const generateBuild = product("odin-build-generator", "generate-build", async function generateBuild(handle) {
+    const files = workspaceSourceFiles({
+        root: handle.attrs.root || ".",
+        include: ["\\.odin$"],
+        exclude: handle.attrs.exclude || DEFAULT_EXCLUDES,
+    });
+    const dirs = Array.from(new Set(files.map(dirname))).sort();
+    const result = {};
+    for (const dir of dirs) {
+        result[dir === "." ? "BUILD.js" : `${dir}/BUILD.js`] = {
+            mode: "managed",
+            targets: [{
+                name: basename(dir).replace(/[^A-Za-z0-9_$]/g, "_"),
+                rule: "odinPackage",
+                props: { srcs: ["*.odin"] },
+            }],
+        };
+    }
+    return result;
+});
+
+export function odinGenerateBuild({ root = ".", exclude = DEFAULT_EXCLUDES } = {}) {
+    return target({ kind: "odin-build-generator", attrs: { root, exclude } });
+}
+
+export function odinPackage(opts) {
+    return target({ kind: "odin-package", attrs: opts || {} });
+}
+"#;
+
     // ---- Fixture -------------------------------------------------------
 
     fn fixture() -> TempDir {
@@ -5914,17 +6582,23 @@ export const ui = asset({ srcs: ["**/*.png"] });
         let workspace = load_workspace(root.path()).unwrap();
 
         // Products registered by workspace.js imports.
-        assert!(workspace
-            .products
-            .contains_key(&("odin-package".into(), "odin-package".into())));
-        assert!(workspace
-            .products
-            .contains_key(&("asset".into(), "bundle".into())));
+        assert!(
+            workspace
+                .products
+                .contains_key(&("odin-package".into(), "odin-package".into()))
+        );
+        assert!(
+            workspace
+                .products
+                .contains_key(&("asset".into(), "bundle".into()))
+        );
 
         // Targets declared by BUILD.js files.
-        assert!(workspace
-            .targets
-            .contains_key("//src/cpp/joltphysics:joltphysics"));
+        assert!(
+            workspace
+                .targets
+                .contains_key("//src/cpp/joltphysics:joltphysics")
+        );
         assert_eq!(
             workspace.targets["//src/cpp/joltphysics:cmake"].dependencies[0].address,
             "//src/cpp/joltphysics:joltphysics"
@@ -5983,17 +6657,23 @@ export const app = externalThing("app");
         );
 
         let workspace = load_workspace(p).unwrap();
-        assert!(workspace
-            .products
-            .contains_key(&("external".into(), "external-product".into())));
-        assert_eq!(workspace.targets["//:app"].attrs["name"].as_str().unwrap(), "app");
+        assert!(
+            workspace
+                .products
+                .contains_key(&("external".into(), "external-product".into()))
+        );
+        assert_eq!(
+            workspace.targets["//:app"].attrs["name"].as_str().unwrap(),
+            "app"
+        );
 
         let plan = plan_live(&workspace, p, "build", &["app".into()]).unwrap();
         assert!(plan.roots[0].starts_with("//:app#external-product:memo"));
-        assert!(plan
-            .tasks
-            .iter()
-            .any(|task| task.action.display == "external build //:app"));
+        assert!(
+            plan.tasks
+                .iter()
+                .any(|task| task.action.display == "external build //:app")
+        );
     }
 
     #[test]
@@ -6047,17 +6727,25 @@ export const app = odinPackage({
     fn build_goal_plans_transitive_products() {
         let root = fixture();
         let workspace = load_workspace(root.path()).unwrap();
-        let plan = plan_live(&workspace, root.path(), "build", &["//library/jodin:jodin".into()]).unwrap();
+        let plan = plan_live(
+            &workspace,
+            root.path(),
+            "build",
+            &["//library/jodin:jodin".into()],
+        )
+        .unwrap();
 
         assert!(plan.roots[0].starts_with("//library/jodin:jodin#odin-package:memo"));
-        assert!(plan
-            .tasks
-            .iter()
-            .any(|task| task.action.display == "odin build"));
-        assert!(plan
-            .tasks
-            .iter()
-            .any(|task| task.action.display.contains("sources(")));
+        assert!(
+            plan.tasks
+                .iter()
+                .any(|task| task.action.display == "odin build")
+        );
+        assert!(
+            plan.tasks
+                .iter()
+                .any(|task| task.action.display.contains("sources("))
+        );
     }
 
     #[test]
@@ -6111,13 +6799,19 @@ export const pkg = odinPackage({ srcs: ["**/*.odin"], collections: [lib] });
 
         let workspace = load_workspace(p).unwrap();
         let pkg_plan = plan_live(&workspace, p, "build", &["pkg".into()]).unwrap();
-        assert!(pkg_plan
-            .tasks
-            .iter()
-            .any(|task| task.action.display.contains("-collection:lib=library")));
+        assert!(
+            pkg_plan
+                .tasks
+                .iter()
+                .any(|task| task.action.display.contains("-collection:lib=library"))
+        );
 
         let all = plan_live(&workspace, p, "build", &[]).unwrap();
-        assert!(all.roots.iter().any(|root| root.starts_with("//:pkg#odin-package:memo")));
+        assert!(
+            all.roots
+                .iter()
+                .any(|root| root.starts_with("//:pkg#odin-package:memo"))
+        );
     }
 
     #[test]
@@ -6127,10 +6821,11 @@ export const pkg = odinPackage({ srcs: ["**/*.odin"], collections: [lib] });
         let plan = plan_live(&workspace, root.path(), "build", &["//assets:ui".into()]).unwrap();
 
         assert!(plan.roots[0].starts_with("//assets:ui#bundle:memo"));
-        assert!(plan
-            .tasks
-            .iter()
-            .any(|t| t.action.display.contains("**/*.png")));
+        assert!(
+            plan.tasks
+                .iter()
+                .any(|t| t.action.display.contains("**/*.png"))
+        );
     }
 
     #[test]
@@ -6227,10 +6922,12 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             .map(|execution| execution.task_id.as_str())
             .collect();
         assert_eq!(ids, ["producer", "consumer"]);
-        assert!(report
-            .tasks
-            .iter()
-            .all(|execution| execution.status == TaskExecutionStatus::WouldRun));
+        assert!(
+            report
+                .tasks
+                .iter()
+                .all(|execution| execution.status == TaskExecutionStatus::WouldRun)
+        );
     }
 
     #[test]
@@ -6839,7 +7536,12 @@ export const generated = toolUser();
         )
         .unwrap();
 
-        assert!(report.tasks.iter().any(|task| task.status == TaskExecutionStatus::Ran));
+        assert!(
+            report
+                .tasks
+                .iter()
+                .any(|task| task.status == TaskExecutionStatus::Ran)
+        );
         assert_eq!(
             std::fs::read_to_string(p.join("out.txt")).unwrap(),
             "from-tool"
@@ -7067,11 +7769,13 @@ export const ignored = missing;
         assert!(!explanation.cacheable);
         assert!(explanation.impure);
         assert!(!explanation.force_cache);
-        assert!(explanation
-            .miss_reason
-            .as_deref()
-            .unwrap_or("")
-            .contains("impure"));
+        assert!(
+            explanation
+                .miss_reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("impure")
+        );
 
         let mut output = String::new();
         format_cache_explanation(&explanation, &mut output).unwrap();
@@ -7301,10 +8005,7 @@ export const ok = 1;
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
 
-        write_file(
-            &p.join(WORKSPACE_FILE),
-            r#"import "imp:core";"#,
-        );
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
         write_file(
             &p.join(BUILD_FILE),
             r#"
@@ -7322,7 +8023,8 @@ export const report = product("test-pkg", "report", async function report(handle
 
         // The product is listed in the workspace.
         assert!(
-            live.products.contains_key(&("test-pkg".to_owned(), "report".to_owned())),
+            live.products
+                .contains_key(&("test-pkg".to_owned(), "report".to_owned())),
             "product should be registered in workspace"
         );
 
@@ -7342,10 +8044,7 @@ export const report = product("test-pkg", "report", async function report(handle
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
 
-        write_file(
-            &p.join(WORKSPACE_FILE),
-            r#"import "imp:core";"#,
-        );
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
         write_file(
             &p.join(BUILD_FILE),
             r#"
@@ -7372,5 +8071,164 @@ export const check = product("kind-a", "check", async function check(handle) {})
             err.contains("no product 'nonexistent'"),
             "expected product-not-found error, got: {err}"
         );
+    }
+
+    #[test]
+    fn generate_build_product_creates_managed_build_files() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/odin";"#);
+        write_file(&p.join("rules/odin.js"), GENERATE_BUILD_RULES_JS);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { odinGenerateBuild } from "//rules/odin";
+
+export const generate_build = odinGenerateBuild();
+"#,
+        );
+        write_file(&p.join("app/main.odin"), "package app\n");
+        write_file(&p.join("library/spall/spall.odin"), "package spall\n");
+        write_file(&p.join("vendor/ignored/main.odin"), "package ignored\n");
+
+        let live = load_workspace(p).unwrap();
+        let report = generate_build_files(&live, p, &[], false).unwrap();
+        assert_eq!(
+            report.changed_files,
+            vec![
+                "app/BUILD.js".to_owned(),
+                "library/spall/BUILD.js".to_owned()
+            ]
+        );
+
+        let app_build = std::fs::read_to_string(p.join("app/BUILD.js")).unwrap();
+        assert!(app_build.contains(GENERATED_IMPORTS_BEGIN));
+        assert!(app_build.contains(r#"import { odinPackage } from "//rules/odin";"#));
+        assert!(app_build.contains("export const app = odinPackage({"));
+        assert!(app_build.contains(r#"srcs: ["*.odin"]"#));
+        assert!(!p.join("vendor/ignored/BUILD.js").exists());
+
+        let live = load_workspace(p).unwrap();
+        let check_report = generate_build_files(&live, p, &[], true).unwrap();
+        assert!(check_report.changed_files.is_empty());
+    }
+
+    #[test]
+    fn generate_build_runs_all_generator_targets_by_default() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/odin";"#);
+        write_file(&p.join("rules/odin.js"), GENERATE_BUILD_RULES_JS);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { odinGenerateBuild } from "//rules/odin";
+
+export const generate_app = odinGenerateBuild({ root: "app" });
+export const generate_library = odinGenerateBuild({ root: "library" });
+"#,
+        );
+        write_file(&p.join("app/main.odin"), "package app\n");
+        write_file(&p.join("library/spall/spall.odin"), "package spall\n");
+
+        let live = load_workspace(p).unwrap();
+        let report = generate_build_files(&live, p, &[], false).unwrap();
+        assert_eq!(
+            report.changed_files,
+            vec![
+                "app/BUILD.js".to_owned(),
+                "library/spall/BUILD.js".to_owned()
+            ]
+        );
+        assert!(p.join("app/BUILD.js").exists());
+        assert!(p.join("library/spall/BUILD.js").exists());
+    }
+
+    #[test]
+    fn generate_build_check_fails_when_files_are_stale() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/odin";"#);
+        write_file(&p.join("rules/odin.js"), GENERATE_BUILD_RULES_JS);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { odinGenerateBuild } from "//rules/odin";
+
+export const generate_build = odinGenerateBuild();
+"#,
+        );
+        write_file(&p.join("app/main.odin"), "package app\n");
+
+        let live = load_workspace(p).unwrap();
+        let error = generate_build_files(&live, p, &[], true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("generated BUILD files are out of date"));
+        assert!(error.contains("app/BUILD.js"));
+    }
+
+    #[test]
+    fn generate_build_fails_on_manual_export_conflict() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/odin";"#);
+        write_file(&p.join("rules/odin.js"), GENERATE_BUILD_RULES_JS);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { odinGenerateBuild } from "//rules/odin";
+
+export const generate_build = odinGenerateBuild();
+"#,
+        );
+        write_file(&p.join("app/main.odin"), "package app\n");
+        write_file(
+            &p.join("app/BUILD.js"),
+            r#"
+export const app = "manual";
+"#,
+        );
+
+        let live = load_workspace(p).unwrap();
+        let error = generate_build_files(&live, p, &[], false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("conflicts with a manual export"));
+    }
+
+    #[test]
+    fn managed_build_renderer_renders_target_refs_as_imports() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let mut build_rules = BTreeMap::new();
+        build_rules.insert(
+            "odinPackage".to_owned(),
+            BuildRuleRender {
+                import_from: "//rules/odin".to_owned(),
+                import_name: "odinPackage".to_owned(),
+            },
+        );
+        let mut edits = BTreeMap::new();
+        edits.insert(
+            "app/BUILD.js".to_owned(),
+            BuildFileEdit {
+                mode: "managed".to_owned(),
+                targets: vec![GeneratedBuildTarget {
+                    name: "app".to_owned(),
+                    rule: "odinPackage".to_owned(),
+                    props: serde_json::json!({
+                        "srcs": ["*.odin"],
+                        "deps": [{ "__imp_target_ref": true, "address": "//library/spall:spall" }]
+                    }),
+                }],
+                content: None,
+            },
+        );
+
+        apply_build_edits(p, &build_rules, edits, false).unwrap();
+        let content = std::fs::read_to_string(p.join("app/BUILD.js")).unwrap();
+        assert!(content.contains(r#"import { spall } from "//library/spall";"#));
+        assert!(content.contains("deps: [spall]"));
     }
 }
