@@ -173,6 +173,43 @@ export function goal(opts) {
 }
 
 /**
+ * Merge JSON-serializable workspace configuration into a namespace.
+ *
+ * Configuration is evaluated before BUILD.js files when called from
+ * imp.workspace.js, and can be read by rule functions via configuration().
+ *
+ * @param {string} namespace Stable configuration namespace, e.g. "odin".
+ * @param {any} value JSON-serializable configuration value.
+ * @returns {void}
+ */
+export function configure(namespace, value) {
+    if (typeof namespace !== "string" || namespace.length === 0) {
+        throw new Error("configure(namespace, value) requires a non-empty namespace");
+    }
+    const encoded = JSON.stringify(_serialize_attrs(value));
+    if (encoded === undefined) {
+        throw new Error("configure(namespace, value) requires a JSON-serializable value");
+    }
+    __host_configure(namespace, encoded);
+}
+
+/**
+ * Read workspace configuration for a namespace.
+ *
+ * @param {string} namespace Stable configuration namespace, e.g. "odin".
+ * @param {any} [fallback] Value returned when no namespace config exists.
+ * @returns {any}
+ */
+export function configuration(namespace, fallback = undefined) {
+    if (typeof namespace !== "string" || namespace.length === 0) {
+        throw new Error("configuration(namespace) requires a non-empty namespace");
+    }
+    const encoded = __host_configuration(namespace);
+    _trace_effect({ event: "effect", kind: "configuration", namespace, configured: encoded != null });
+    return encoded == null ? fallback : JSON.parse(encoded);
+}
+
+/**
  * Register a named platform.
  *
  * The built-in "local" platform is pre-registered with the native executor and
@@ -332,12 +369,12 @@ export function hydrateTarget(handle) {
     if (!handle || handle.__imp !== true) {
         throw new Error('hydrateTarget: expected a target handle');
     }
-    if (handle.kind !== undefined) {
-        const depHandles = [];
-        _collect_dep_handles(handle.attrs || {}, depHandles);
-        return { kind: handle.kind, attrs: handle.attrs || {}, deps: depHandles.map(h => ({ handle: h, mode: null })) };
-    }
-    return JSON.parse(__host_hydrate_target(handle.__id));
+    const hydrated = JSON.parse(__host_hydrate_target(handle.__id));
+    hydrated.deps = (hydrated.deps || []).map(dep => ({
+        ...dep,
+        handle: globalThis.__imp_resolve_handle(dep.handle.__id) || dep.handle,
+    }));
+    return hydrated;
 }
 
 /**
@@ -351,6 +388,32 @@ export function targetAddress(handle) {
         throw new Error('targetAddress: expected a target handle');
     }
     return __host_target_address(handle.__id);
+}
+
+/**
+ * List loaded workspace targets.
+ *
+ * Anonymous target handles created outside BUILD exports are omitted because
+ * they do not have stable workspace addresses.
+ *
+ * @param {string} [kind] Optional target kind filter.
+ * @returns {Array<{ id: number, address: string, kind: string, attrs: object, handle: object }>}
+ */
+export function workspaceTargets(kind = undefined) {
+    if (kind !== undefined && typeof kind !== "string") {
+        throw new Error("workspaceTargets(kind?) expects kind to be a string when provided");
+    }
+    const targets = JSON.parse(__host_workspace_targets(kind ?? ""));
+    _trace_effect({ event: "effect", kind: "workspaceTargets", target_kind: kind ?? null, count: targets.length });
+    return targets.map((target) => ({
+        ...target,
+        handle: globalThis.__imp_resolve_handle(target.id) || {
+            __imp: true,
+            __id: target.id,
+            kind: target.kind,
+            attrs: target.attrs || {},
+        },
+    }));
 }
 
 /**
@@ -460,11 +523,29 @@ function _trace_effect(entry) {
     _memo_trace.push(entry);
 }
 
+function _memo_label(key_string) {
+    return _key_display.get(key_string) || key_string;
+}
+
+function _memo_cycle_message(key_string) {
+    const start = _memo_call_stack.indexOf(key_string);
+    const cycle = (start >= 0 ? _memo_call_stack.slice(start) : _memo_call_stack.slice())
+        .concat([key_string]);
+    const lines = [
+        "memo cycle detected:",
+        ...cycle.map((key, index) => `  ${index + 1}. ${_memo_label(key)}`),
+        "",
+        "repeated key:",
+        `  ${key_string}`,
+    ];
+    return lines.join("\n");
+}
+
 function _memo_eval(key_string, thunk) {
     // Cycle check BEFORE table check: a key in the call stack means it is
     // currently being evaluated in this call chain.
     if (_memo_call_stack_set.has(key_string)) {
-        throw new Error("memo cycle detected: " + key_string);
+        throw new Error(_memo_cycle_message(key_string));
     }
     if (_memo_table.has(key_string)) {
         _memo_trace.push({ event: "hit", key: key_string });
@@ -522,15 +603,25 @@ export function product(kind, name, fn) {
 
 export function memo(fn) {
     const fn_id = _stable_function_id(fn);
+    function display_arg(arg) {
+        if (arg && arg.__imp === true) {
+            try {
+                return targetAddress(arg);
+            } catch (_) {
+                return "#" + arg.__id;
+            }
+        }
+        return JSON.stringify(arg);
+    }
     return async function memoized(...args) {
         const key_string = JSON.stringify({
             fn_id,
             args_digest: _stable_digest(args),
-            config_digest: "",
+            config_digest: __host_configuration_digest(),
         });
         if (!_key_display.has(key_string)) {
             const label = fn.name + "(" +
-                args.map(a => a && a.__imp === true ? "#" + a.__id : JSON.stringify(a)).join(", ") +
+                args.map(display_arg).join(", ") +
                 ")";
             _key_display.set(key_string, label);
         }
@@ -907,6 +998,8 @@ pub struct Workspace {
     pub targets: BTreeMap<String, Target>,
     pub products: BTreeMap<(String, String), String>,
     pub build_rules: BTreeMap<String, BuildRuleRender>,
+    #[allow(dead_code)]
+    pub workspace_config: BTreeMap<String, serde_json::Value>,
     pub owned_files: BTreeSet<String>,
     pub named_caches: BTreeMap<String, NamedCache>,
     pub goals: BTreeMap<String, Goal>,
@@ -1133,6 +1226,7 @@ struct HostState {
     pending: BTreeMap<u32, PendingTarget>,
     products: BTreeMap<(String, String), String>,
     build_rules: BTreeMap<String, BuildRuleRender>,
+    workspace_config: BTreeMap<String, serde_json::Value>,
     owned_files: BTreeSet<String>,
     named_caches: BTreeMap<String, NamedCache>,
     goals: BTreeMap<String, Goal>,
@@ -1175,6 +1269,7 @@ impl Default for HostState {
             pending: BTreeMap::new(),
             products: BTreeMap::new(),
             build_rules: BTreeMap::new(),
+            workspace_config: BTreeMap::new(),
             owned_files: BTreeSet::new(),
             named_caches: BTreeMap::new(),
             goals,
@@ -1641,7 +1736,7 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
 
     // ----- Resolve dep IDs to addresses -----
     let (workspace, id_to_address_final) = {
-        let hs = state.lock().unwrap();
+        let mut hs = state.lock().unwrap();
         let mut id_to_address: BTreeMap<u32, String> = named_exports
             .iter()
             .map(|(addr, id)| (*id, addr.clone()))
@@ -1660,11 +1755,16 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
             )?;
         }
 
+        run_workspace_analysis(&root, &mut targets, &hs.workspace_config)
+            .context("run workspace analysis")?;
+        sync_analyzed_dependencies_to_host(&mut hs, &targets);
+
         let owned_files = compute_owned_files(&root, &targets)?;
         let ws = Workspace {
             targets,
             products: hs.products.clone(),
             build_rules: hs.build_rules.clone(),
+            workspace_config: hs.workspace_config.clone(),
             owned_files,
             named_caches: hs.named_caches.clone(),
             goals: hs.goals.clone(),
@@ -1744,6 +1844,131 @@ fn materialize_pending_target(
     Ok(address)
 }
 
+fn run_workspace_analysis(
+    workspace_root: &Path,
+    targets: &mut BTreeMap<String, Target>,
+    workspace_config: &BTreeMap<String, serde_json::Value>,
+) -> Result<()> {
+    infer_odin_dependencies(workspace_root, targets, workspace_config)
+}
+
+fn sync_analyzed_dependencies_to_host(hs: &mut HostState, targets: &BTreeMap<String, Target>) {
+    let address_to_id: BTreeMap<&str, u32> = targets
+        .values()
+        .map(|target| (target.address.as_str(), target.js_id))
+        .collect();
+    for target in targets.values() {
+        let Some(pending) = hs.pending.get_mut(&target.js_id) else {
+            continue;
+        };
+        for dep in &target.dependencies {
+            let Some(dep_id) = address_to_id.get(dep.address.as_str()).copied() else {
+                continue;
+            };
+            if pending
+                .dep_ids
+                .iter()
+                .any(|(existing_id, _)| *existing_id == dep_id)
+            {
+                continue;
+            }
+            let mode = match &dep.mode {
+                DependencyMode::Auto => None,
+                DependencyMode::Named(name) => Some(name.clone()),
+            };
+            pending.dep_ids.push((dep_id, mode));
+        }
+    }
+}
+
+fn infer_odin_dependencies(
+    workspace_root: &Path,
+    targets: &mut BTreeMap<String, Target>,
+    workspace_config: &BTreeMap<String, serde_json::Value>,
+) -> Result<()> {
+    let odin_packages: Vec<String> = targets
+        .values()
+        .filter(|target| target.kind == "odin-package")
+        .map(|target| target.address.clone())
+        .collect();
+    if odin_packages.is_empty() {
+        return Ok(());
+    }
+
+    let mut package_by_path: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for address in &odin_packages {
+        let target = &targets[address];
+        package_by_path
+            .entry(odin_package_path(target)?)
+            .or_default()
+            .push(address.clone());
+    }
+
+    let global_collections = odin_collections_from_workspace_config(workspace_config)?;
+    let mut inferred: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for address in &odin_packages {
+        let target = &targets[address];
+        let self_path = odin_package_path(target)?;
+        let mut collections = global_collections.clone();
+        for (name, path) in odin_collections_from_target(target, targets)? {
+            collections.insert(name, path);
+        }
+
+        let mut deps = BTreeSet::new();
+        for import in odin_imports_for_target(workspace_root, target)? {
+            let Some(resolved_path) = resolve_odin_import_path(&import, &collections)? else {
+                continue;
+            };
+            if resolved_path == self_path {
+                continue;
+            }
+            let candidates = package_by_path
+                .get(&resolved_path)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|candidate| candidate != address)
+                .collect::<Vec<_>>();
+            match candidates.as_slice() {
+                [] => {}
+                [dep] => {
+                    deps.insert(dep.clone());
+                }
+                many => {
+                    bail!(
+                        "{}: Odin import '{}' resolves to multiple packages: {}",
+                        address,
+                        import.path,
+                        many.join(", ")
+                    );
+                }
+            }
+        }
+        inferred.insert(address.clone(), deps.into_iter().collect());
+    }
+
+    for (address, deps) in inferred {
+        let Some(target) = targets.get_mut(&address) else {
+            continue;
+        };
+        for dep in deps {
+            if target
+                .dependencies
+                .iter()
+                .any(|existing| existing.address == dep)
+            {
+                continue;
+            }
+            target.dependencies.push(Dependency {
+                address: dep,
+                mode: DependencyMode::Auto,
+            });
+        }
+    }
+
+    Ok(())
+}
+
 fn compute_owned_files(
     workspace_root: &Path,
     targets: &BTreeMap<String, Target>,
@@ -1798,6 +2023,300 @@ fn path_to_workspace_string(path: &Path) -> String {
         path.to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/")
     }
+}
+
+fn odin_package_path(target: &Target) -> Result<String> {
+    let path = target
+        .attrs
+        .get("path")
+        .and_then(|value| value.as_str())
+        .unwrap_or(".");
+    normalize_workspace_string(&source_field_workspace_root(&target.address, path)?)
+}
+
+fn normalize_workspace_string(path: &str) -> Result<String> {
+    Ok(path_to_workspace_string(&workspace_relative_directory(
+        path,
+    )?))
+}
+
+fn target_scope_string(address: &str) -> Result<String> {
+    Ok(path_to_workspace_string(&target_scope_path(address)?))
+}
+
+fn workspace_join_string(base: &str, path: &str) -> Result<String> {
+    let mut parts = Vec::new();
+    for part in base.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            bail!("workspace path '{base}' must not contain parent components");
+        }
+        parts.push(part.to_owned());
+    }
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            if parts.pop().is_none() {
+                bail!("workspace path '{base}/{path}' escapes the workspace");
+            }
+            continue;
+        }
+        parts.push(part.to_owned());
+    }
+    Ok(if parts.is_empty() {
+        ".".to_owned()
+    } else {
+        parts.join("/")
+    })
+}
+
+fn odin_collections_from_workspace_config(
+    workspace_config: &BTreeMap<String, serde_json::Value>,
+) -> Result<BTreeMap<String, String>> {
+    let Some(odin) = workspace_config.get("odin") else {
+        return Ok(BTreeMap::new());
+    };
+    odin_collections_from_value(
+        odin.get("collections").unwrap_or(&serde_json::Value::Null),
+        ".",
+    )
+}
+
+fn odin_collections_from_target(
+    target: &Target,
+    targets: &BTreeMap<String, Target>,
+) -> Result<BTreeMap<String, String>> {
+    let mut collections = BTreeMap::new();
+    if let Some(value) = target.attrs.get("collections") {
+        collections.extend(odin_collections_from_value(
+            value,
+            &target_scope_string(&target.address)?,
+        )?);
+    }
+    for dep in &target.dependencies {
+        let Some(collection) = targets.get(&dep.address) else {
+            continue;
+        };
+        if collection.kind != "odin-collection" {
+            continue;
+        }
+        let Some(name) = collection
+            .attrs
+            .get("name")
+            .and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+        let Some(path) = collection
+            .attrs
+            .get("path")
+            .and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+        collections.insert(
+            name.to_owned(),
+            workspace_join_string(&target_scope_string(&collection.address)?, path)?,
+        );
+    }
+    Ok(collections)
+}
+
+fn odin_collections_from_value(
+    value: &serde_json::Value,
+    base: &str,
+) -> Result<BTreeMap<String, String>> {
+    let mut collections = BTreeMap::new();
+    match value {
+        serde_json::Value::Null => {}
+        serde_json::Value::Object(object) => {
+            for (name, spec) in object {
+                if spec.get("__imp_ref").is_some() {
+                    continue;
+                }
+                let path = if let Some(path) = spec.as_str() {
+                    path
+                } else if let Some(path) = spec.get("path").and_then(|value| value.as_str()) {
+                    path
+                } else {
+                    bail!("Odin collection '{name}' must be a path string or {{ path }} object");
+                };
+                collections.insert(name.clone(), workspace_join_string(base, path)?);
+            }
+        }
+        serde_json::Value::Array(entries) => {
+            for entry in entries {
+                if entry.get("__imp_ref").is_some() {
+                    continue;
+                }
+                let name = entry
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Odin collection entries require string name")
+                    })?;
+                let path = entry
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Odin collection entries require string path")
+                    })?;
+                collections.insert(name.to_owned(), workspace_join_string(base, path)?);
+            }
+        }
+        _ => bail!("Odin collections config must be an object or array"),
+    }
+    Ok(collections)
+}
+
+struct OdinImport {
+    path: String,
+    source_file: String,
+}
+
+fn resolve_odin_import_path(
+    import: &OdinImport,
+    collections: &BTreeMap<String, String>,
+) -> Result<Option<String>> {
+    if import.path.starts_with("./") || import.path.starts_with("../") {
+        let base = dirname_workspace_path(&import.source_file);
+        return Ok(Some(workspace_join_string(&base, &import.path)?));
+    }
+
+    let Some((collection, relative)) = import.path.split_once(':') else {
+        return Ok(None);
+    };
+    let Some(base) = collections.get(collection) else {
+        return Ok(None);
+    };
+    Ok(Some(workspace_join_string(base, relative)?))
+}
+
+fn dirname_workspace_path(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(dir, _)| if dir.is_empty() { "." } else { dir })
+        .unwrap_or(".")
+        .to_owned()
+}
+
+fn odin_imports_for_target(workspace_root: &Path, target: &Target) -> Result<Vec<OdinImport>> {
+    let mut imports = Vec::new();
+    for source in &target.sources {
+        if source.include.is_empty() {
+            continue;
+        }
+        let root = source_field_workspace_root(&target.address, &source.root)?;
+        for file in workspace_glob_files(workspace_root, &root, &source.include, &source.exclude)
+            .with_context(|| format!("expand Odin sources for {}", target.address))?
+        {
+            let content = std::fs::read_to_string(workspace_root.join(&file))
+                .with_context(|| format!("read {file}"))?;
+            for import in scan_odin_imports(&content)? {
+                imports.push(OdinImport {
+                    path: import,
+                    source_file: file.clone(),
+                });
+            }
+        }
+    }
+    Ok(imports)
+}
+
+fn scan_odin_imports(content: &str) -> Result<Vec<String>> {
+    let text = strip_odin_comments(content);
+    let mut imports = BTreeSet::new();
+    let single = Regex::new(r#"(?m)^\s*import(?:\s+[A-Za-z_$][A-Za-z0-9_$]*)?\s+"([^"]+)""#)
+        .context("compile Odin import regex")?;
+    for capture in single.captures_iter(&text) {
+        if let Some(import) = capture.get(1) {
+            imports.insert(import.as_str().to_owned());
+        }
+    }
+
+    let block = Regex::new(r#"(?ms)^\s*import\s*\((.*?)^\s*\)"#)
+        .context("compile Odin import block regex")?;
+    let entry = Regex::new(r#"(?m)^\s*(?:[A-Za-z_$][A-Za-z0-9_$]*\s+)?"([^"]+)""#)
+        .context("compile Odin import block entry regex")?;
+    for capture in block.captures_iter(&text) {
+        let Some(body) = capture.get(1) else {
+            continue;
+        };
+        for entry_capture in entry.captures_iter(body.as_str()) {
+            if let Some(import) = entry_capture.get(1) {
+                imports.insert(import.as_str().to_owned());
+            }
+        }
+    }
+    Ok(imports.into_iter().collect())
+}
+
+fn strip_odin_comments(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    let mut in_string = false;
+    let mut in_rune = false;
+    let mut in_line_comment = false;
+    let mut block_depth = 0usize;
+
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
+        let next = bytes.get(i + 1).map(|b| *b as char);
+
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+                out.push('\n');
+            } else {
+                out.push(' ');
+            }
+            i += 1;
+            continue;
+        }
+
+        if block_depth > 0 {
+            if ch == '/' && next == Some('*') {
+                block_depth += 1;
+                out.push_str("  ");
+                i += 2;
+            } else if ch == '*' && next == Some('/') {
+                block_depth -= 1;
+                out.push_str("  ");
+                i += 2;
+            } else {
+                out.push(if ch == '\n' { '\n' } else { ' ' });
+                i += 1;
+            }
+            continue;
+        }
+
+        if !in_string && !in_rune && ch == '/' && next == Some('/') {
+            in_line_comment = true;
+            out.push_str("  ");
+            i += 2;
+            continue;
+        }
+        if !in_string && !in_rune && ch == '/' && next == Some('*') {
+            block_depth = 1;
+            out.push_str("  ");
+            i += 2;
+            continue;
+        }
+
+        out.push(ch);
+        let escaped = i > 0 && bytes[i - 1] == b'\\';
+        if ch == '"' && !in_rune && !escaped {
+            in_string = !in_string;
+        } else if ch == '\'' && !in_string && !escaped {
+            in_rune = !in_rune;
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Register host globals on `ctx`.
@@ -1983,6 +2502,59 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_goal", host_goal)?;
+
+    // ------------------------------------------------------------------
+    // __host_configure(namespace, valueJson)
+    // __host_configuration(namespace) → JSON string | null
+    // __host_configuration_digest() → hex digest
+    // ------------------------------------------------------------------
+    let state_cfg = Arc::clone(&state);
+    let host_configure = Function::new(
+        ctx.clone(),
+        move |namespace: String, value_json: String| -> rquickjs::Result<()> {
+            validate_config_namespace(&namespace)?;
+            let value: serde_json::Value = serde_json::from_str(&value_json).map_err(|e| {
+                rquickjs::Error::new_loading_message("configure", format!("parse value: {e}"))
+            })?;
+
+            let mut hs = state_cfg.lock().unwrap();
+            if let Some(existing) = hs.workspace_config.get_mut(&namespace) {
+                merge_workspace_config(existing, value);
+            } else {
+                hs.workspace_config.insert(namespace, value);
+            }
+            Ok(())
+        },
+    )?;
+    globals.set("__host_configure", host_configure)?;
+
+    let state_cfg = Arc::clone(&state);
+    let host_configuration = Function::new(
+        ctx.clone(),
+        move |namespace: String| -> rquickjs::Result<Option<String>> {
+            validate_config_namespace(&namespace)?;
+            let hs = state_cfg.lock().unwrap();
+            hs.workspace_config
+                .get(&namespace)
+                .map(|value| {
+                    serde_json::to_string(value).map_err(|e| {
+                        rquickjs::Error::new_loading_message("configuration", e.to_string())
+                    })
+                })
+                .transpose()
+        },
+    )?;
+    globals.set("__host_configuration", host_configuration)?;
+
+    let state_cfg = Arc::clone(&state);
+    let host_configuration_digest =
+        Function::new(ctx.clone(), move || -> rquickjs::Result<String> {
+            let hs = state_cfg.lock().unwrap();
+            digest_json(&hs.workspace_config).map_err(|e| {
+                rquickjs::Error::new_loading_message("configurationDigest", format!("{e:#}"))
+            })
+        })?;
+    globals.set("__host_configuration_digest", host_configuration_digest)?;
 
     // ------------------------------------------------------------------
     // __host_platform(name, executor, target)
@@ -2278,6 +2850,36 @@ fn register_globals<'js>(
             })
         })?;
     globals.set("__host_target_address", host_target_address)?;
+
+    // ------------------------------------------------------------------
+    // __host_workspace_targets(kind) → JSON [{ id, address, kind, attrs }]
+    // ------------------------------------------------------------------
+    let state_targets = Arc::clone(&state);
+    let host_workspace_targets = Function::new(
+        ctx.clone(),
+        move |kind: String| -> rquickjs::Result<String> {
+            let hs = state_targets.lock().unwrap();
+            let mut targets = Vec::new();
+            for (id, address) in &hs.id_to_address {
+                let Some(pending) = hs.pending.get(id) else {
+                    continue;
+                };
+                if !kind.is_empty() && pending.kind != kind {
+                    continue;
+                }
+                targets.push(serde_json::json!({
+                    "id": id,
+                    "address": address,
+                    "kind": pending.kind,
+                    "attrs": pending.attrs,
+                }));
+            }
+            serde_json::to_string(&targets).map_err(|e| {
+                rquickjs::Error::new_loading_message("workspaceTargets", e.to_string())
+            })
+        },
+    )?;
+    globals.set("__host_workspace_targets", host_workspace_targets)?;
 
     // ------------------------------------------------------------------
     // Tracked runtime APIs (Phase 3)
@@ -2905,6 +3507,36 @@ fn named_cache_from_name(name: &str) -> rquickjs::Result<NamedCache> {
 
 fn action_spec_error(message: String) -> rquickjs::Error {
     rquickjs::Error::new_from_js_message("value", "imp host API", message)
+}
+
+fn validate_config_namespace(namespace: &str) -> rquickjs::Result<()> {
+    if namespace.is_empty()
+        || !namespace
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err(action_spec_error(format!(
+            "configuration namespace '{namespace}' must use ASCII letters, digits, '.', '-', or '_'"
+        )));
+    }
+    Ok(())
+}
+
+fn merge_workspace_config(existing: &mut serde_json::Value, patch: serde_json::Value) {
+    match (existing, patch) {
+        (serde_json::Value::Object(existing), serde_json::Value::Object(patch)) => {
+            for (key, value) in patch {
+                if let Some(existing_value) = existing.get_mut(&key) {
+                    merge_workspace_config(existing_value, value);
+                } else {
+                    existing.insert(key, value);
+                }
+            }
+        }
+        (existing, patch) => {
+            *existing = patch;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3958,13 +4590,15 @@ fn run_local_task(
     } else {
         task.action.display.clone()
     };
+    let command_line = format_argv(&task.action.argv);
     if let Some(progress) = progress {
         progress.message(
             prodash::messages::MessageLevel::Info,
             format!(
-                "[sandbox: {}] {}",
+                "[sandbox: {}] {}\nargv: {}",
                 sandbox.sandbox_root.display(),
-                cmd_display
+                cmd_display,
+                command_line,
             ),
         );
     }
@@ -4040,9 +4674,11 @@ fn run_local_task(
 
     if !status.success() {
         bail!(
-            "{} failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            "{} failed with status {}\ncommand: {}\ncwd: {}\nstdout:\n{}\nstderr:\n{}",
             task.id,
             status,
+            command_line,
+            cwd.display(),
             stdout.trim_end(),
             stderr.trim_end()
         );
@@ -4064,6 +4700,24 @@ fn run_local_task(
         materialize_cached_outputs(&record, workspace_root)?;
     }
     Ok(())
+}
+
+fn format_argv(argv: &[String]) -> String {
+    if argv.is_empty() {
+        return "<no argv>".to_owned();
+    }
+    argv.iter()
+        .map(|arg| {
+            if arg.chars().all(|ch| {
+                ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '=')
+            }) {
+                arg.clone()
+            } else {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn materialize_embedded_output_task(
@@ -6948,27 +7602,31 @@ export const app = odinPackage({
     }
 
     #[test]
-    fn odin_collections_are_namespace_config_not_package_sets() {
+    fn odin_collections_can_be_workspace_config() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
 
         write_file(
             &p.join(WORKSPACE_FILE),
             r#"
+import { configure } from "imp:core";
 import "//rules/odin";
+
+configure("odin", { collections: { lib: "library" } });
 "#,
         );
         write_file(
             &p.join("rules/odin.js"),
             r#"
-import { target, glob, memo, product, run } from "imp:core";
+import { target, glob, memo, product, run, configuration } from "imp:core";
 
 export const sources = memo(async function sources(handle) {
     return glob({ root: ".", include: handle.attrs.sources || [] });
 });
 
 export const collection_flags = memo(async function collection_flags(handle) {
-    return (handle.attrs.collections || []).map(collection => `-collection:${collection.attrs.name}=${collection.attrs.path}`);
+    const config = configuration("odin", {}) || {};
+    return Object.entries(config.collections || {}).map(([name, path]) => `-collection:${name}=${path}`);
 });
 
 export const odin_package = product("odin-package", "odin-package", async function odin_package(handle) {
@@ -6977,26 +7635,31 @@ export const odin_package = product("odin-package", "odin-package", async functi
     return run({ argv: ["sh", "-c", "true"], inputs: [srcs], display: `odin build ${flags.join(" ")}`, impure: true });
 });
 
-export function odinCollection({ name, path }) {
-    return target({ kind: "odin-collection", attrs: { name, path } });
-}
-
-export function odinPackage({ srcs, collections = [] }) {
-    return target({ kind: "odin-package", attrs: { sources: srcs, collections } });
+export function odinPackage({ srcs }) {
+    return target({ kind: "odin-package", attrs: { sources: srcs } });
 }
 "#,
         );
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { odinCollection, odinPackage } from "//rules/odin";
+import { odinPackage } from "//rules/odin";
 
-export const lib = odinCollection({ name: "lib", path: "library" });
-export const pkg = odinPackage({ srcs: ["**/*.odin"], collections: [lib] });
+export const pkg = odinPackage({ srcs: ["**/*.odin"] });
 "#,
         );
 
         let workspace = load_workspace(p).unwrap();
+        assert!(!workspace
+            .targets
+            .values()
+            .any(|target| target.kind == "odin-collection"));
+        assert_eq!(
+            workspace.workspace_config["odin"]["collections"]["lib"]
+                .as_str()
+                .unwrap(),
+            "library"
+        );
         let pkg_plan = plan_live(&workspace, p, "build", &["pkg".into()]).unwrap();
         assert!(pkg_plan
             .tasks
@@ -8440,6 +9103,313 @@ export const spall = odinPackage({ srcs: ["*.odin"] });
         assert_eq!(report.changed_files, vec!["app/BUILD.js".to_owned()]);
         let spall_build = std::fs::read_to_string(p.join("library/spall/BUILD.js")).unwrap();
         assert_eq!(spall_build.matches("export const spall").count(), 1);
+    }
+
+    #[test]
+    fn real_odin_generate_build_infers_deps_from_collections() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let repo_rules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rules");
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            &format!(
+                r#"
+import {{ configure, workspaceMount }} from "imp:core";
+
+workspaceMount({{ prefix: "//rules", path: "{rules}" }});
+configure("odin", {{ collections: {{ lib: "library" }} }});
+await import("//rules/odin");
+"#,
+                rules = js_string_path(&repo_rules),
+            ),
+        );
+        write_file(&p.join(BUILD_FILE), "export const done = true;\n");
+        write_file(
+            &p.join("app/main.odin"),
+            r#"package app
+import "lib:spall"
+"#,
+        );
+        write_file(&p.join("library/spall/spall.odin"), "package spall\n");
+
+        let live = load_workspace(p).unwrap();
+        let report = generate_build_files(&live, p, &[], false).unwrap();
+        assert_eq!(
+            report.changed_files,
+            vec![
+                "app/BUILD.js".to_owned(),
+                "library/spall/BUILD.js".to_owned()
+            ]
+        );
+
+        let app_build = std::fs::read_to_string(p.join("app/BUILD.js")).unwrap();
+        assert!(app_build.contains(r#"import { spall } from "//library/spall";"#));
+        assert!(app_build.contains("deps: [spall]"));
+    }
+
+    #[test]
+    fn real_odin_generate_build_dedupes_existing_package_candidates() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let repo_rules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rules");
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            &format!(
+                r#"
+import {{ configure, workspaceMount }} from "imp:core";
+
+workspaceMount({{ prefix: "//rules", path: "{rules}" }});
+configure("odin", {{ collections: {{ lib: "library" }} }});
+await import("//rules/odin");
+"#,
+                rules = js_string_path(&repo_rules),
+            ),
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { odinPackage } from "//rules/odin";
+
+export const input = odinPackage({ path: "library/input", srcs: ["*.odin"], toolchain: "dev-2026-05" });
+"#,
+        );
+        write_file(
+            &p.join("app/main.odin"),
+            r#"package app
+import "lib:input"
+"#,
+        );
+        write_file(&p.join("library/input/input.odin"), "package input\n");
+
+        let live = load_workspace(p).unwrap();
+        let report = generate_build_files(&live, p, &[], false).unwrap();
+        assert_eq!(report.changed_files, vec!["app/BUILD.js".to_owned()]);
+
+        let app_build = std::fs::read_to_string(p.join("app/BUILD.js")).unwrap();
+        assert!(app_build.contains(r#"import { input } from "//";"#));
+        assert!(app_build.contains("deps: [input]"));
+    }
+
+    #[test]
+    fn real_odin_sources_use_inferred_deps() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let repo_rules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rules");
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            &format!(
+                r#"
+import {{ configure, workspaceMount }} from "imp:core";
+
+workspaceMount({{ prefix: "//rules", path: "{rules}" }});
+configure("odin", {{ collections: {{ lib: "library" }} }});
+await import("//rules/odin");
+"#,
+                rules = js_string_path(&repo_rules),
+            ),
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { odinPackage } from "//rules/odin";
+import { sources } from "//rules/odin";
+import { paths, product } from "imp:core";
+
+export const inspect = product("odin-package", "inspect", async function inspect(handle) {
+    return { paths: paths(await sources(handle)) };
+});
+
+export const app = odinPackage({ path: "app", srcs: ["*.odin"], toolchain: "dev-2026-05" });
+export const spall = odinPackage({ path: "library/spall", srcs: ["*.odin"], toolchain: "dev-2026-05" });
+"#,
+        );
+        write_file(
+            &p.join("app/main.odin"),
+            r#"package app
+import "lib:spall"
+"#,
+        );
+        write_file(&p.join("library/spall/spall.odin"), "package spall\n");
+
+        let live = load_workspace(p).unwrap();
+        let result = evaluate_product_json(&live, "//:app", "inspect").unwrap();
+        let input_paths = result["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        assert!(input_paths.contains(&"app/main.odin"));
+        assert!(input_paths.contains(&"library/spall/spall.odin"));
+    }
+
+    #[test]
+    fn real_odin_sources_walk_multiple_deps_without_false_memo_cycle() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let repo_rules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rules");
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            &format!(
+                r#"
+import {{ workspaceMount }} from "imp:core";
+
+workspaceMount({{ prefix: "//rules", path: "{rules}" }});
+await import("//rules/odin");
+"#,
+                rules = js_string_path(&repo_rules),
+            ),
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { odinPackage } from "//rules/odin";
+import { sources } from "//rules/odin";
+import { paths, product } from "imp:core";
+
+export const inspect = product("odin-package", "inspect", async function inspect(handle) {
+    return { paths: paths(await sources(handle)) };
+});
+
+export const dep_a = odinPackage({ path: "library/dep_a", srcs: ["*.odin"], toolchain: "dev-2026-05" });
+export const dep_b = odinPackage({ path: "library/dep_b", srcs: ["*.odin"], toolchain: "dev-2026-05" });
+export const app = odinPackage({ path: "app", srcs: ["*.odin"], toolchain: "dev-2026-05", deps: [dep_a, dep_b] });
+"#,
+        );
+        write_file(&p.join("app/main.odin"), "package app\n");
+        write_file(&p.join("library/dep_a/a.odin"), "package dep_a\n");
+        write_file(&p.join("library/dep_b/b.odin"), "package dep_b\n");
+
+        let live = load_workspace(p).unwrap();
+        let result = evaluate_product_json(&live, "//:app", "inspect").unwrap();
+        let input_paths = result["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        assert!(input_paths.contains(&"app/main.odin"));
+        assert!(input_paths.contains(&"library/dep_a/a.odin"));
+        assert!(input_paths.contains(&"library/dep_b/b.odin"));
+    }
+
+    #[test]
+    fn real_odin_inference_does_not_self_depend_on_self_import() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let repo_rules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rules");
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            &format!(
+                r#"
+import {{ configure, workspaceMount }} from "imp:core";
+
+workspaceMount({{ prefix: "//rules", path: "{rules}" }});
+configure("odin", {{ collections: {{ root: "." }} }});
+await import("//rules/odin");
+"#,
+                rules = js_string_path(&repo_rules),
+            ),
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { odinPackage } from "//rules/odin";
+import { sources } from "//rules/odin";
+import { paths, product } from "imp:core";
+
+export const inspect = product("odin-package", "inspect", async function inspect(handle) {
+    return { paths: paths(await sources(handle)) };
+});
+
+export const app = odinPackage({ path: "app", srcs: ["*.odin"], toolchain: "dev-2026-05" });
+"#,
+        );
+        write_file(
+            &p.join("app/main.odin"),
+            r#"package app
+import "root:app"
+"#,
+        );
+
+        let live = load_workspace(p).unwrap();
+        let result = evaluate_product_json(&live, "//:app", "inspect").unwrap();
+        assert_eq!(
+            result["paths"].as_array().unwrap(),
+            &vec![serde_json::json!("app/main.odin")]
+        );
+    }
+
+    #[test]
+    fn real_odin_analysis_resolves_relative_and_collection_imports() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let repo_rules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rules");
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            &format!(
+                r#"
+import {{ configure, workspaceMount }} from "imp:core";
+
+workspaceMount({{ prefix: "//rules", path: "{rules}" }});
+configure("odin", {{ collections: {{ root: "." }} }});
+await import("//rules/odin");
+"#,
+                rules = js_string_path(&repo_rules),
+            ),
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { odinPackage } from "//rules/odin";
+import { sources } from "//rules/odin";
+import { paths, product } from "imp:core";
+
+export const inspect = product("odin-package", "inspect", async function inspect(handle) {
+    return { paths: paths(await sources(handle)) };
+});
+
+export const engine = odinPackage({ path: "engine", srcs: ["**/*.odin"], toolchain: "dev-2026-05" });
+export const odinscript = odinPackage({ path: "vendor/odinscript", srcs: ["*.odin"], toolchain: "dev-2026-05" });
+"#,
+        );
+        write_file(
+            &p.join("engine/scripting.odin"),
+            r#"package engine
+import script "../vendor/odinscript"
+"#,
+        );
+        write_file(
+            &p.join("engine/editor/text_editor.odin"),
+            r#"package engine
+import script "root:vendor/odinscript"
+"#,
+        );
+        write_file(&p.join("vendor/odinscript/script.odin"), "package script\n");
+
+        let live = load_workspace(p).unwrap();
+        let engine = &live.workspace.targets["//:engine"];
+        assert!(engine
+            .dependencies
+            .iter()
+            .any(|dep| dep.address == "//:odinscript"));
+
+        let result = evaluate_product_json(&live, "//:engine", "inspect").unwrap();
+        let input_paths = result["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        assert!(input_paths.contains(&"engine/scripting.odin"));
+        assert!(input_paths.contains(&"engine/editor/text_editor.odin"));
+        assert!(input_paths.contains(&"vendor/odinscript/script.odin"));
     }
 
     #[test]

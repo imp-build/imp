@@ -1,5 +1,5 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { env, which, glob, paths, read_file, run, getMemoTrace, resetMemoState, memo, setIntrospectMode, workspace_mutation } from "imp:core";
+import { env, which, glob, paths, read_file, run, getMemoTrace, resetMemoState, memo, setIntrospectMode, workspace_mutation, configure, configuration } from "imp:core";
 
 describe("tracked runtime APIs", () => {
 
@@ -43,6 +43,36 @@ test("which records an effect entry in memo trace", async () => {
     const effects = trace.filter(t => t.event === "effect" && t.kind === "which");
     expect(effects.length).toBe(1);
     expect(effects[0].name).toBe("sh");
+});
+
+test("configuration returns configured workspace values", async () => {
+    resetMemoState();
+    configure("tracked_apis_test", null);
+    configure("tracked_apis_test", { mode: "debug", nested: { enabled: true } });
+    configure("tracked_apis_test", { nested: { level: 2 } });
+
+    const cfg = configuration("tracked_apis_test", {});
+    expect(cfg.mode).toBe("debug");
+    expect(cfg.nested.enabled).toBe(true);
+    expect(cfg.nested.level).toBe(2);
+});
+
+test("workspace configuration changes memo identity", async () => {
+    resetMemoState();
+    configure("tracked_apis_memo_test", null);
+
+    let calls = 0;
+    const fn_ = memo(async function configured_value() {
+        calls++;
+        const cfg = configuration("tracked_apis_memo_test", {}) || {};
+        return cfg.value || 0;
+    });
+
+    expect(await fn_()).toBe(0);
+    expect(await fn_()).toBe(0);
+    configure("tracked_apis_memo_test", { value: 7 });
+    expect(await fn_()).toBe(7);
+    expect(calls).toBe(2);
 });
 
 test("paths(glob(...)) returns an array of strings", async () => {
@@ -120,6 +150,30 @@ test("getMemoTrace includes key_display with function name", async () => {
     const { key_display } = getMemoTrace();
     const labels = Object.values(key_display);
     expect(labels.some(l => l.startsWith("my_fn("))).toBe(true);
+});
+
+test("memo cycle errors include a readable call chain", async () => {
+    resetMemoState();
+    let first;
+    let second;
+    first = memo(async function first_cycle() {
+        return second();
+    });
+    second = memo(async function second_cycle() {
+        return first();
+    });
+
+    let message = "";
+    try {
+        await first();
+    } catch (error) {
+        message = error && error.message ? error.message : String(error);
+    }
+
+    expect(message).toContain("memo cycle detected:");
+    expect(message).toContain("first_cycle()");
+    expect(message).toContain("second_cycle()");
+    expect(message).toContain("repeated key:");
 });
 
 test("workspace_mutation with watch reports changed files", async () => {

@@ -4,6 +4,7 @@ import {
 	glob,
 	file_set,
 	paths,
+	read_file,
 	memo,
 	output,
 	output_path,
@@ -12,6 +13,11 @@ import {
 	run,
 	sourcesField,
 	logDebug,
+	configuration,
+	hydrateTarget,
+	targetAddress,
+	targetRef,
+	workspaceTargets,
 } from "imp:core";
 
 import {
@@ -19,6 +25,10 @@ import {
     odinTool,
     resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
+
+import {
+    resources as resource_package_sources,
+} from "//rules/asset";
 
 export {
     acquireOdinToolchain,
@@ -56,10 +66,19 @@ function normalize_workspace_path(path) {
 }
 
 function declaring_directory(handle) {
-    const address = handle && handle.label && handle.label.address;
+    const address = safe_target_address(handle);
     if (!address || !address.startsWith("//")) return ".";
     const scope = address.slice(2).split(":")[0];
     return scope.length === 0 ? "." : scope;
+}
+
+function safe_target_address(handle) {
+    if (!handle || handle.__imp !== true) return null;
+    try {
+        return targetAddress(handle);
+    } catch (_) {
+        return null;
+    }
 }
 
 function declared_path(handle, path = ".") {
@@ -70,19 +89,32 @@ function declared_path(handle, path = ".") {
     return normalize_workspace_path(`${base}/${local}`);
 }
 
+function package_srcs(attrs) {
+    if (!attrs || attrs.srcs === undefined || attrs.srcs.length === 0) return ["*.odin"];
+    return attrs.srcs;
+}
+
+function package_exclude(attrs) {
+    if (!attrs || attrs.exclude === undefined) return [];
+    return attrs.exclude;
+}
+
 /**
  * Return a FileSet of the package's own source files.
  *
  * @param {object} handle Target handle returned by odinPackage().
  * @returns {Promise<object>} FileSet descriptor.
  */
-export const own_sources = memo(async function own_sources(handle) {
-	logDebug(handle);
+function own_sources_value(handle) {
     return glob({
         root: declared_path(handle, handle.attrs.path || "."),
-        include: handle.attrs.srcs || [],
-        exclude: handle.attrs.exclude || [],
+        include: package_srcs(handle.attrs),
+        exclude: package_exclude(handle.attrs),
     });
+}
+
+export const own_sources = memo(async function own_sources(handle) {
+    return own_sources_value(handle);
 });
 
 /**
@@ -92,24 +124,349 @@ export const own_sources = memo(async function own_sources(handle) {
  * @returns {Promise<object>} FileSet descriptor.
  */
 export const sources = memo(async function sources(handle) {
-    const own = await own_sources(handle);
-	logDebug( {own})
-    const pkgDeps = (handle.attrs.deps || []).filter(h => h && h.kind === "odin-package");
-
-    if (pkgDeps.length === 0) return own;
-    const depSources = await Promise.all(pkgDeps.map(h => sources(h)));
-    return file_set.union(own, ...depSources);
+    const sets = collect_source_sets(handle, new Set());
+    return sets.length === 1 ? sets[0] : file_set.union(...sets);
 });
 
+function collect_source_sets(handle, seen) {
+    const key = dep_key(handle);
+    if (seen.has(key)) return [];
+    seen.add(key);
+
+    const sets = [own_sources_value(handle)];
+    const deps = hydrateTarget(handle).deps
+        .map(dep => dep.handle)
+        .filter(dep => dep && dep.kind === "odin-package");
+    for (const dep of deps) {
+        sets.push(...collect_source_sets(dep, seen));
+    }
+    return sets;
+}
+
 /**
- * Return the `-collection:name=path` flags for all collection deps of a package.
+ * Return a FileSet of all resource-package dep files reachable from an Odin package.
+ *
+ * @param {object} handle Target handle returned by odinPackage().
+ * @returns {Promise<object>} FileSet descriptor.
+ */
+export const resources = memo(async function resources(handle) {
+    const sets = await collect_resource_sets(handle, new Set());
+    if (sets.length === 0) return file_set.literal([]);
+    return sets.length === 1 ? sets[0] : file_set.union(...sets);
+});
+
+async function collect_resource_sets(handle, seen) {
+    const key = dep_key(handle);
+    if (seen.has(key)) return [];
+    seen.add(key);
+
+    const sets = [];
+    const deps = hydrateTarget(handle).deps.map(dep => dep.handle);
+    for (const dep of deps) {
+        if (!dep) continue;
+        if (dep.kind === "resource-package") {
+            sets.push(await resource_package_sources(dep));
+        } else if (dep.kind === "odin-package") {
+            sets.push(...await collect_resource_sets(dep, seen));
+        }
+    }
+    return sets;
+}
+
+function collection_entries_from_config(value, resolvePath) {
+    if (value === null || value === undefined) return [];
+    if (Array.isArray(value)) {
+        return value.map(entry => {
+            if (!entry || typeof entry.name !== "string" || typeof entry.path !== "string") {
+                throw new Error("Odin collection entries must have string name and path fields");
+            }
+            return { name: entry.name, path: resolvePath(entry.path) };
+        });
+    }
+    if (typeof value === "object") {
+        return Object.entries(value).map(([name, spec]) => {
+            const path = typeof spec === "string" ? spec : spec && spec.path;
+            if (typeof path !== "string") {
+                throw new Error(`Odin collection '${name}' must be a path string or { path } object`);
+            }
+            return { name, path: resolvePath(path) };
+        });
+    }
+    throw new Error("Odin collections config must be an object or array");
+}
+
+function package_collection_entries(handle) {
+    const collections = handle.attrs.collections || [];
+    if (Array.isArray(collections) && collections.every(col => col && col.__imp === true)) {
+        return collections.map(col => ({
+            name: col.attrs.name,
+            path: declared_path(col, col.attrs.path),
+        }));
+    }
+    return collection_entries_from_config(collections, path => declared_path(handle, path));
+}
+
+function collection_map(handle = null) {
+    const odinConfig = configuration("odin", {}) || {};
+    const merged = new Map();
+    for (const entry of collection_entries_from_config(odinConfig.collections || {}, normalize_workspace_path)) {
+        merged.set(entry.name, entry.path);
+    }
+    if (handle) {
+        for (const entry of package_collection_entries(handle)) {
+            merged.set(entry.name, entry.path);
+        }
+    }
+    return merged;
+}
+
+function has_collection_config(collections) {
+    if (collections === null || collections === undefined) return false;
+    if (Array.isArray(collections)) return collections.length > 0;
+    if (typeof collections === "object") return Object.keys(collections).length > 0;
+    return true;
+}
+
+/**
+ * Return the `-collection:name=path` flags configured for an Odin package.
  *
  * @param {object} handle Target handle returned by odinPackage().
  * @returns {Promise<string[]>}
  */
 export const collection_flags = memo(async function collection_flags(handle) {
-    return (handle.attrs.collections || [])
-        .map(col => `-collection:${col.attrs.name}=${declared_path(col, col.attrs.path)}`);
+    return Array.from(collection_map(handle), ([name, path]) => `-collection:${name}=${path}`);
+});
+
+function strip_odin_comments(input) {
+    let out = "";
+    let i = 0;
+    let inString = false;
+    let inRune = false;
+    let inLineComment = false;
+    let blockDepth = 0;
+
+    while (i < input.length) {
+        const ch = input[i];
+        const next = input[i + 1];
+
+        if (inLineComment) {
+            if (ch === "\n") {
+                inLineComment = false;
+                out += "\n";
+            } else {
+                out += " ";
+            }
+            i++;
+            continue;
+        }
+
+        if (blockDepth > 0) {
+            if (ch === "/" && next === "*") {
+                blockDepth++;
+                out += "  ";
+                i += 2;
+            } else if (ch === "*" && next === "/") {
+                blockDepth--;
+                out += "  ";
+                i += 2;
+            } else {
+                out += ch === "\n" ? "\n" : " ";
+                i++;
+            }
+            continue;
+        }
+
+        if (!inString && !inRune && ch === "/" && next === "/") {
+            inLineComment = true;
+            out += "  ";
+            i += 2;
+            continue;
+        }
+        if (!inString && !inRune && ch === "/" && next === "*") {
+            blockDepth = 1;
+            out += "  ";
+            i += 2;
+            continue;
+        }
+
+        out += ch;
+
+        if (ch === "\"" && !inRune && input[i - 1] !== "\\") {
+            inString = !inString;
+        } else if (ch === "'" && !inString && input[i - 1] !== "\\") {
+            inRune = !inRune;
+        }
+
+        i++;
+    }
+
+    return out;
+}
+
+function scan_odin_imports(content) {
+    const text = strip_odin_comments(content);
+    const imports = [];
+    const single = /^\s*import(?:\s+[A-Za-z_$][A-Za-z0-9_$]*)?\s+"([^"]+)"/gm;
+    for (const match of text.matchAll(single)) {
+        imports.push(match[1]);
+    }
+
+    const blocks = /^\s*import\s*\(([\s\S]*?)^\s*\)/gm;
+    for (const block of text.matchAll(blocks)) {
+        const entry = /^\s*(?:[A-Za-z_$][A-Za-z0-9_$]*\s+)?"([^"]+)"/gm;
+        for (const match of block[1].matchAll(entry)) {
+            imports.push(match[1]);
+        }
+    }
+
+    return Array.from(new Set(imports)).sort();
+}
+
+function workspace_join(base, path) {
+    if (!path || path === ".") return normalize_workspace_path(base || ".");
+    if (!base || base === ".") return normalize_workspace_path(path);
+    return normalize_workspace_path(`${base}/${path}`);
+}
+
+function resolved_import_path(importPath, collections) {
+    const index = importPath.indexOf(":");
+    if (index <= 0) return null;
+    const collection = importPath.slice(0, index);
+    const relative = importPath.slice(index + 1);
+    if (!collections.has(collection)) return null;
+    return workspace_join(collections.get(collection), relative);
+}
+
+function package_source_paths(pkg) {
+    return paths(glob({
+        root: pkg.path,
+        include: pkg.srcs || ["*.odin"],
+        exclude: pkg.exclude || [],
+    }));
+}
+
+function imports_for_package(pkg) {
+    const imports = new Set();
+    for (const file of package_source_paths(pkg)) {
+        for (const imp of scan_odin_imports(read_file(file))) {
+            imports.add(imp);
+        }
+    }
+    return Array.from(imports).sort();
+}
+
+function package_spec_from_handle(handle) {
+    return {
+        address: safe_target_address(handle),
+        handle,
+        path: declared_path(handle, handle.attrs.path || "."),
+        srcs: package_srcs(handle.attrs),
+        exclude: package_exclude(handle.attrs),
+    };
+}
+
+function package_spec_from_workspace_target(target) {
+    const handle = target.handle;
+    const attrs = { ...target.attrs, ...handle.attrs };
+    return {
+        address: target.address,
+        handle,
+        path: declared_path(handle, handle.attrs.path || "."),
+        srcs: package_srcs(attrs),
+        exclude: package_exclude(attrs),
+    };
+}
+
+function generated_address_for_dir(dir, name) {
+    const module = dir === "." ? "//" : `//${dir}`;
+    return `${module}:${name}`;
+}
+
+function generated_package_spec(dir) {
+    const name = target_name_for_dir(dir);
+    return {
+        address: generated_address_for_dir(dir, name),
+        handle: null,
+        path: dir,
+        srcs: ["*.odin"],
+        exclude: ["*_test.odin", "test_*.odin"],
+    };
+}
+
+function build_package_index(packages) {
+    const index = new Map();
+    for (const pkg of packages) {
+        const path = normalize_workspace_path(pkg.path || ".");
+        const entries = index.get(path) || [];
+        if (entries.some(entry => entry.address === pkg.address)) {
+            continue;
+        }
+        entries.push(pkg);
+        index.set(path, entries);
+    }
+    return index;
+}
+
+export const imports = memo(async function imports(handle) {
+    return imports_for_package(package_spec_from_handle(handle));
+});
+
+export const package_index = memo(async function package_index() {
+    return build_package_index(
+        workspaceTargets("odin-package").map(package_spec_from_workspace_target),
+    );
+});
+
+function same_package(left, right) {
+    if (!left || !right) return false;
+    if (left.address && right.address && left.address === right.address) return true;
+    if (left.handle && right.handle && left.handle.__id === right.handle.__id) return true;
+    return normalize_workspace_path(left.path || ".") === normalize_workspace_path(right.path || ".");
+}
+
+function lookup_package(index, path, selfPkg = null) {
+    const candidates = (index.get(normalize_workspace_path(path)) || [])
+        .filter(pkg => !same_package(pkg, selfPkg));
+    if (candidates.length > 1) {
+        const labels = candidates.map(pkg => pkg.address).join(", ");
+        throw new Error(`Odin import '${path}' resolves to multiple packages: ${labels}`);
+    }
+    return candidates[0] || null;
+}
+
+function infer_dep_entries(pkg, index, collections) {
+    const deps = new Map();
+    for (const imp of imports_for_package(pkg)) {
+        const resolved = resolved_import_path(imp, collections);
+        if (!resolved) continue;
+        const dep = lookup_package(index, resolved, pkg);
+        if (!dep) continue;
+        deps.set(dep.address, dep);
+    }
+    return Array.from(deps.values()).sort((a, b) => a.address.localeCompare(b.address));
+}
+
+export const inferred_deps = memo(async function inferred_deps(handle) {
+    const index = await package_index();
+    return infer_dep_entries(package_spec_from_handle(handle), index, collection_map(handle))
+        .map(dep => dep.handle)
+        .filter(Boolean);
+});
+
+function dep_key(handle) {
+    const address = safe_target_address(handle);
+    return address || `#${handle.__id}`;
+}
+
+export const effective_deps = memo(async function effective_deps(handle) {
+    const deps = new Map();
+    for (const dep of (handle.attrs.deps || []).filter(h => h && h.kind === "odin-package")) {
+        deps.set(dep_key(dep), dep);
+    }
+    for (const dep of await inferred_deps(handle)) {
+        deps.set(dep_key(dep), dep);
+    }
+    return Array.from(deps.values());
 });
 
 /**
@@ -175,7 +532,7 @@ export const odinBuild = product("odin-package", "odin-package",
             ? await tool(toolchainHandle)
             : odinTool(resolveOdinToolchainVersion(handle.attrs.toolchainVersion));
         const srcs = await sources(handle);
-		logDebug(srcs);
+        const resourceInputs = await resources(handle);
         const flags = await collection_flags(handle);
         const path = declared_path(handle, handle.attrs.path || ".");
         const out = handle.attrs.output || default_output_path(handle);
@@ -190,7 +547,7 @@ export const odinBuild = product("odin-package", "odin-package",
                 ...flags,
             ],
             tools: [odinToolSpec],
-            inputs: [srcs],
+            inputs: [srcs, resourceInputs],
             outputs: [output(out)],
             display: `odin build ${path}`,
         });
@@ -205,13 +562,29 @@ export const generateBuild = product("odin-build-generator", "generate-build",
             exclude: handle.attrs.exclude || DEFAULT_GENERATE_BUILD_EXCLUDES,
         });
         const dirs = Array.from(new Set(files.map(dirname))).sort();
+        const existingPackages = workspaceTargets("odin-package").map(package_spec_from_workspace_target);
+        const existingPaths = new Set(existingPackages.map(pkg => normalize_workspace_path(pkg.path || ".")));
+        const generatedPackages = dirs
+            .map(generated_package_spec)
+            .filter(pkg => !existingPaths.has(normalize_workspace_path(pkg.path || ".")));
+        const index = build_package_index([
+            ...existingPackages,
+            ...generatedPackages,
+        ]);
+        const collections = collection_map(null);
         const result = {};
-        for (const dir of dirs) {
-            result[build_file_for_dir(dir)] = [
+        for (const pkg of generatedPackages) {
+            const deps = infer_dep_entries(pkg, index, collections)
+                .map(dep => targetRef(dep.address));
+            const props = { srcs: ["*.odin"] };
+            if (deps.length > 0) {
+                props.deps = deps;
+            }
+            result[build_file_for_dir(pkg.path)] = [
                 {
-                    name: target_name_for_dir(dir),
+                    name: target_name_for_dir(pkg.path),
                     rule: "odinPackage",
-                    props: { },
+                    props,
                 },
             ];
         }
@@ -225,6 +598,10 @@ export const generateBuild = product("odin-build-generator", "generate-build",
 
 /**
  * Declare an Odin collection namespace mapping.
+ *
+ * Prefer workspace config for new code:
+ *
+ * configure("odin", { collections: { lib: "library" } })
  *
  * @param {object} opts
  * @param {string} opts.name Collection name, e.g. "lib".
@@ -250,10 +627,10 @@ export function odinCollection({ name, path }) {
  * @param {string[]} [opts.srcs=[]] Glob patterns matched against paths relative to opts.path.
  * @param {string[]} [opts.exclude=[]] Glob patterns to exclude from matches.
  * @param {string} [opts.path="."] Workspace-relative package path.
- * @param {object[]} [opts.collections=[]] Odin collection namespace mappings.
+ * @param {object[]|object} [opts.collections=[]] Package-local Odin collection namespace mappings.
  * @param {object|string} [opts.toolchain] Odin toolchain target handle or version string.
  * @param {string} [opts.output] Workspace-relative executable output path.
- * @param {Array} [opts.deps=[]]
+ * @param {Array} [opts.deps=[]] Odin package and resource package dependencies.
  * @returns {object} Target handle.
  */
 export function odinPackage({ srcs = undefined, exclude = undefined, path = ".", collections = [], toolchain, output, deps = [] }) {
@@ -264,10 +641,10 @@ export function odinPackage({ srcs = undefined, exclude = undefined, path = ".",
         .map(d => d && d.__imp ? d : (d && d.target ? d.target : null))
         .filter(Boolean);
 
-	// if sources are not specified, default to all .odin files in the package path
-	if (srcs === undefined) {
-		srcs = ["*.odin"];
-	}
+	// If sources are not specified, default to all .odin files in the package path.
+	// Empty source lists are not useful for Odin package builds and produce invalid
+	// glob filesets, so treat them like the omitted case.
+	srcs = package_srcs({ srcs });
 
 	if (exclude === undefined) {
 		// exclude test files by default
@@ -283,7 +660,7 @@ export function odinPackage({ srcs = undefined, exclude = undefined, path = ".",
             ...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
             ...(toolchainVersion ? { toolchainVersion } : {}),
             ...(output ? { output } : {}),
-            ...(collections.length ? { collections } : {}),
+            ...(has_collection_config(collections) ? { collections } : {}),
             ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
         },
         sources: sourcesField({

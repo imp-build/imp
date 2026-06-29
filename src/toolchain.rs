@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::env::LocalEnv;

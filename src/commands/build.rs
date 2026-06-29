@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
 
 use crate::env::Env;

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use sha2::{Digest, Sha256};
 
 use super::file_tracker::FileTracker;

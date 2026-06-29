@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 
-use crate::commands::build::{BuildMode, build_jodin, build_one, copy_jodin_beside};
+use crate::commands::build::{build_jodin, build_one, copy_jodin_beside, BuildMode};
 use crate::env::Env;
 use crate::workspace;
 
