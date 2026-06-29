@@ -481,6 +481,7 @@ export function targetRef(address) {
 const _memo_fn_ids = new WeakMap();
 let _memo_fn_counter = 0;
 const _fn_id_names = new Map();  // fn_id → fn.name; persists across resetMemoState
+const _product_fn_info = new Map();  // fn_id → product_name; persists across resetMemoState
 
 function _stable_function_id(fn) {
     let id = _memo_fn_ids.get(fn);
@@ -510,6 +511,7 @@ let _memo_call_stack_set = new Set();
 let _memo_deps = [];
 let _memo_trace = [];
 let _key_display = new Map();  // key_string → "fnName(arg, ...)"
+let _key_product_call = new Map();  // key_string → {target_id, product_name} for product calls
 let _introspect_mode = false;
 
 function _active_memo_key() {
@@ -598,6 +600,7 @@ function _pop_call(key_string) {
 export function product(kind, name, fn) {
     const memoized = memo(fn);
     __host_product(kind, name, memoized);
+    _product_fn_info.set(_stable_function_id(fn), name);
     return memoized;
 }
 
@@ -624,6 +627,11 @@ export function memo(fn) {
                 args.map(display_arg).join(", ") +
                 ")";
             _key_display.set(key_string, label);
+            const product_name = _product_fn_info.get(fn_id);
+            if (product_name !== undefined && args.length > 0 && args[0] !== null
+                    && typeof args[0] === "object" && args[0].__imp === true) {
+                _key_product_call.set(key_string, { target_id: args[0].__id, product_name });
+            }
         }
         return _memo_eval(key_string, async () => {
             _push_call(key_string);
@@ -648,17 +656,19 @@ export function resetMemoState() {
     _memo_deps = [];
     _memo_trace = [];
     _key_display = new Map();
+    _key_product_call = new Map();
 }
 
 /**
  * Return a snapshot of the memo trace and dependency graph.
- * @returns {{ trace: Array, deps: Array, key_display: Object }}
+ * @returns {{ trace: Array, deps: Array, key_display: Object, key_product_calls: Object }}
  */
 export function getMemoTrace() {
     return {
         trace: _memo_trace.slice(),
         deps: _memo_deps.slice(),
         key_display: Object.fromEntries(_key_display),
+        key_product_calls: Object.fromEntries(_key_product_call),
     };
 }
 
@@ -3828,6 +3838,12 @@ fn add_product_discovered_tasks(
 ) -> Result<String> {
     let result = introspect_product(live, &target.address, product)?;
     let prefix = format!("{}#{}", target.address, product);
+    let id_to_address: std::collections::HashMap<u32, &str> = live
+        .workspace
+        .targets
+        .values()
+        .map(|t| (t.js_id, t.address.as_str()))
+        .collect();
     let mut key_order = Vec::new();
     let mut seen_keys = BTreeSet::new();
 
@@ -3909,15 +3925,36 @@ fn add_product_discovered_tasks(
         }
     }
 
-    let mut run_index = 0usize;
+    let mut run_index_by_prefix: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for entry in &result.trace {
         let kind = entry["kind"].as_str().unwrap_or("");
         if entry["event"] != "effect" || !matches!(kind, "run" | "write_file") {
             continue;
         }
-        let task_id = format!("{prefix}:run{run_index}");
-        run_index += 1;
         let owner_key = entry["owner"].as_str();
+        // Determine the prefix for this run effect. If the owner memo is a product
+        // call on a different (foreign) target, use that target's address and product
+        // name so the task ID reflects where the action actually belongs.
+        let (effective_prefix, effective_target, effective_product) = owner_key
+            .and_then(|ok| result.key_product_calls.get(ok))
+            .and_then(|(foreign_js_id, foreign_product_name)| {
+                let foreign_addr = id_to_address.get(foreign_js_id)?;
+                if *foreign_addr == target.address.as_str() {
+                    return None;
+                }
+                Some((
+                    format!("{}#{}", foreign_addr, foreign_product_name),
+                    foreign_addr.to_string(),
+                    foreign_product_name.clone(),
+                ))
+            })
+            .unwrap_or_else(|| (prefix.clone(), target.address.clone(), product.to_owned()));
+        let run_counter = run_index_by_prefix
+            .entry(effective_prefix.clone())
+            .or_insert(0);
+        let task_id = format!("{}:run{}", effective_prefix, run_counter);
+        *run_counter += 1;
         let mut dependencies = Vec::new();
         if let Some(owner_key) = owner_key {
             if let Some(children) = memo_children.get(owner_key) {
@@ -3976,18 +4013,24 @@ fn add_product_discovered_tasks(
             };
             (inputs, outputs, action)
         };
+        let effective_js_id = live
+            .workspace
+            .targets
+            .get(&effective_target)
+            .map(|t| t.js_id)
+            .unwrap_or(target.js_id);
         tasks.insert(
             task_id.clone(),
             Task {
                 id: task_id.clone(),
-                target: target.address.clone(),
-                product: product.to_owned(),
+                target: effective_target,
+                product: effective_product,
                 fields: BTreeMap::new(),
                 inputs,
                 outputs,
                 action,
                 dependencies,
-                js_id: target.js_id,
+                js_id: effective_js_id,
             },
         );
         if let Some(owner_key) = owner_key {
@@ -5878,6 +5921,10 @@ pub struct IntrospectResult {
     pub trace: Vec<serde_json::Value>,
     pub deps: Vec<serde_json::Value>,
     pub key_display: std::collections::HashMap<String, String>,
+    /// Maps memo key → (target js_id, product_name) for product function calls.
+    /// Used to attribute run effects to the correct target when a product from one
+    /// target's dep is called during another target's product introspection.
+    pub key_product_calls: std::collections::HashMap<String, (u32, String)>,
 }
 
 /// Dry-run a product function and capture its memo call graph and effects.
@@ -5915,6 +5962,7 @@ pub fn introspect_product(
                 Vec<serde_json::Value>,
                 Vec<serde_json::Value>,
                 std::collections::HashMap<String, String>,
+                std::collections::HashMap<String, (u32, String)>,
             )> {
                 // Enable introspect mode and reset trace state.
                 let set_introspect: Function = ctx.globals().get("setIntrospectMode")?;
@@ -5962,8 +6010,21 @@ pub fn introspect_product(
                             .collect()
                     })
                     .unwrap_or_default();
+                let key_product_calls: std::collections::HashMap<String, (u32, String)> =
+                    parsed["key_product_calls"]
+                        .as_object()
+                        .map(|m| {
+                            m.iter()
+                                .filter_map(|(k, v)| {
+                                    let target_id = v["target_id"].as_u64()? as u32;
+                                    let product_name = v["product_name"].as_str()?.to_owned();
+                                    Some((k.clone(), (target_id, product_name)))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
 
-                Ok((trace, deps, key_display))
+                Ok((trace, deps, key_display, key_product_calls))
             },
         )
         .map_err(|e| anyhow::anyhow!("introspect_product failed: {e}"))?;
@@ -5992,6 +6053,7 @@ pub fn introspect_product(
         trace: result.0,
         deps: result.1,
         key_display,
+        key_product_calls: result.3,
     })
 }
 
