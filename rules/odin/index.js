@@ -244,6 +244,18 @@ export const collection_flags = memo(async function collection_flags(handle) {
     return Array.from(collection_map(handle), ([name, path]) => `-collection:${name}=${path}`);
 });
 
+export const collection_dirs = memo(async function collection_dirs(handle) {
+    const seen = new Set();
+    const dirs = [];
+    for (const path of collection_map(handle).values()) {
+        const normalized = normalize_workspace_path(path);
+        if (normalized === "." || seen.has(normalized)) continue;
+        seen.add(normalized);
+        dirs.push(normalized);
+    }
+    return dirs;
+});
+
 function strip_odin_comments(input) {
     let out = "";
     let i = 0;
@@ -542,16 +554,19 @@ export const odinBuild = product("odin-package", "odin-package",
         const genInputs = await collect_gen_sets(handle, new Set());
         const resourceInputs = await resources(handle);
         const flags = await collection_flags(handle);
+        const collectionDirs = await collection_dirs(handle);
         const path = declared_path(handle, handle.attrs.path || ".");
         const out = handle.attrs.output || default_output_path(handle);
         return run({
             argv: [
                 "sh",
                 "-c",
-                "out=$1; pkg=$2; shift 2; mkdir -p \"$(dirname \"$out\")\" && odin build \"$pkg\" \"-out:$out\" \"$@\"",
+                "out=$1; pkg=$2; dir_count=$3; shift 3; mkdir -p \"$(dirname \"$out\")\"; while [ \"$dir_count\" -gt 0 ]; do mkdir -p \"$1\"; shift; dir_count=$((dir_count - 1)); done; odin build \"$pkg\" \"-out:$out\" \"$@\"",
                 "odin-build",
                 output_path(out),
                 path,
+                String(collectionDirs.length),
+                ...collectionDirs,
                 ...flags,
             ],
             tools: [odinToolSpec],

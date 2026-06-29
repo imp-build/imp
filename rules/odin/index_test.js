@@ -13,6 +13,7 @@ import {
     inferred_deps,
     effective_deps,
     collection_flags,
+    collection_dirs,
     resources as odinResources,
     generateBuild,
     odinGenerateBuild,
@@ -228,6 +229,41 @@ test("package collections extend workspace Odin collection config", async () => 
     });
     const flags = await collection_flags(pkg);
     expect(flags).toEqual(["-collection:lib=library", "-collection:vendor=vendor/odin"]);
+});
+
+test("collection_dirs(pkg) returns non-root collection directories once", async () => {
+    configure("odin", null);
+    configure("odin", {
+        collections: {
+            root: ".",
+            lib: "library",
+            libAlias: { path: "library" },
+        },
+    });
+    const pkg = odinPackage({ srcs: ["**/*.odin"], toolchain: "dev-2026-04" });
+    const dirs = await collection_dirs(pkg);
+    expect(dirs).toEqual(["library"]);
+});
+
+test("odinBuild materializes collection directories before invoking Odin", async () => {
+    resetMemoState();
+    configure("odin", null);
+    configure("odin", { collections: { root: ".", lib: "library" } });
+    setIntrospectMode(true);
+    try {
+        const app = odinPackage({ srcs: ["rules/odin/index.js"], toolchain: "dev-2026-04" });
+        await odinBuild(app);
+        const { trace } = getMemoTrace();
+        const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build .");
+        expect(runEffect.argv[6]).toBe("1");
+        expect(runEffect.argv[7]).toBe("library");
+        expect(runEffect.argv[8]).toBe("-collection:root=.");
+        expect(runEffect.argv).toContain("-collection:lib=library");
+        expect(runEffect.inputs.some(input => input.kind === "directory")).toBe(false);
+    } finally {
+        setIntrospectMode(false);
+        configure("odin", null);
+    }
 });
 
 });
