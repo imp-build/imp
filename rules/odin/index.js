@@ -30,6 +30,10 @@ import {
     resources as resource_package_sources,
 } from "//rules/asset";
 
+import {
+    cmake_resources,
+} from "//rules/c/cmake";
+
 export {
     acquireOdinToolchain,
     createOdinToolchainApi,
@@ -168,6 +172,8 @@ async function collect_resource_sets(handle, seen) {
             sets.push(await resource_package_sources(dep));
         } else if (dep.kind === "odin-package") {
             sets.push(...await collect_resource_sets(dep, seen));
+        } else if (dep.kind === "cmake-lib") {
+            sets.push(await cmake_resources(dep));
         }
     }
     return sets;
