@@ -844,6 +844,10 @@ export function logDebug(...args)  { __host_log("debug", _fmt(...args)); }
 export function logInfo(...args)   { __host_log("info", _fmt(...args)); }
 export function logWarn(...args)   { __host_log("warn", _fmt(...args)); }
 export function logError(...args)  { __host_log("error", _fmt(...args)); }
+
+/** Path to the currently running imp executable. Use as the first element of
+ *  an odinGen `cmd` to invoke imp subcommands as generators. */
+export const imp_self = globalThis.__imp_self_bin || "imp";
 "##;
 
 // ---------------------------------------------------------------------------
@@ -3057,6 +3061,11 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_log", host_log)?;
+
+    // Expose the current executable path so JS rules can invoke imp as a generator.
+    if let Ok(exe) = std::env::current_exe() {
+        globals.set("__imp_self_bin", exe.to_string_lossy().into_owned())?;
+    }
 
     Ok(())
 }

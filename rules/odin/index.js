@@ -538,6 +538,7 @@ export const odinBuild = product("odin-package", "odin-package",
             ? await tool(toolchainHandle)
             : odinTool(resolveOdinToolchainVersion(handle.attrs.toolchainVersion));
         const srcs = await sources(handle);
+        const genInputs = await collect_gen_sets(handle, new Set());
         const resourceInputs = await resources(handle);
         const flags = await collection_flags(handle);
         const path = declared_path(handle, handle.attrs.path || ".");
@@ -553,12 +554,57 @@ export const odinBuild = product("odin-package", "odin-package",
                 ...flags,
             ],
             tools: [odinToolSpec],
-            inputs: [srcs, resourceInputs],
+            inputs: [srcs, ...genInputs, resourceInputs],
             outputs: [output(out)],
             display: `odin build ${path}`,
         });
     }
 );
+
+// ---------------------------------------------------------------------------
+// Odin source generation
+// ---------------------------------------------------------------------------
+
+export const gen_input_sources = memo(async function gen_input_sources(handle) {
+    return glob({ root: ".", include: handle.attrs.srcs || [] });
+});
+
+export const odinGenRun = product("odin-gen", "odin-source", async function odinGenRun(handle) {
+    const inputFiles = await gen_input_sources(handle);
+    const outPath = declared_path(handle, handle.attrs.out);
+    return run({
+        argv: [...handle.attrs.cmd, outPath],
+        inputs: [inputFiles],
+        outputs: [output(outPath)],
+        sandbox: false,
+        impure: true,
+        display: `generate ${outPath}`,
+    });
+});
+
+async function collect_gen_sets(handle, seen) {
+    const key = dep_key(handle);
+    if (seen.has(key)) return [];
+    seen.add(key);
+
+    const sets = [];
+    const deps = hydrateTarget(handle).deps.map(dep => dep.handle);
+    for (const dep of deps) {
+        if (!dep) continue;
+        if (dep.kind === "odin-gen") {
+            await odinGenRun(dep);
+            const addr = targetAddress(dep);
+            const scope = addr.slice(2).split(":")[0];
+            const outPath = scope
+                ? normalize_workspace_path(`${scope}/${dep.attrs.out}`)
+                : normalize_workspace_path(dep.attrs.out);
+            sets.push(file_set.literal([outPath]));
+        } else if (dep.kind === "odin-package") {
+            sets.push(...await collect_gen_sets(dep, seen));
+        }
+    }
+    return sets;
+}
 
 export const generateBuild = product("odin-build-generator", "generate-build",
     async function generateBuild(handle) {
@@ -601,6 +647,30 @@ export const generateBuild = product("odin-build-generator", "generate-build",
 // ---------------------------------------------------------------------------
 // Target constructors
 // ---------------------------------------------------------------------------
+
+/**
+ * Declare an Odin source generation target.
+ *
+ * The generator command is run with the output path appended as the last argument.
+ * Generated files must be excluded from any odinPackage glob that covers the same
+ * directory — use the `exclude` option of odinPackage to enforce single ownership.
+ *
+ * @param {object} opts
+ * @param {string[]} [opts.srcs=[]] Glob patterns for input files (for incremental tracking).
+ * @param {string} opts.out Output file path, relative to the declaring BUILD.js directory.
+ * @param {string[]} opts.cmd Command to run; output path is appended as the final argument.
+ * @param {Array} [opts.deps=[]] Additional dependencies.
+ * @returns {object} Target handle.
+ */
+export function odinGen({ srcs = [], out, cmd, deps = [] }) {
+    if (!out) throw new Error("odinGen requires an 'out' path");
+    if (!cmd || cmd.length === 0) throw new Error("odinGen requires a 'cmd' array");
+    return target({
+        kind: "odin-gen",
+        attrs: { srcs, out, cmd },
+        deps,
+    });
+}
 
 /**
  * Declare an Odin collection namespace mapping.

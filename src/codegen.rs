@@ -1,15 +1,64 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use regex::Regex;
+use walkdir::WalkDir;
 
 use crate::env::LocalEnv;
 use crate::workspace;
 
-/// Scan Odin files for generated registration attributes.
+/// Scan Odin files for generated registration attributes, writing to the default workspace path.
 pub async fn update_module_list(progress: &mut prodash::tree::Item) -> Result<()> {
     progress.set_name("codegen: scanning modules/components/assets");
+    let out_path = workspace::root_dir().join("ottar/generated_register.odin");
+    update_module_list_to(&out_path).await?;
+    progress.set_name(format!("codegen: wrote {}", out_path.display()));
+    Ok(())
+}
+
+const CODEGEN_EXCLUDE: &[&str] = &[
+    ".toolchain",
+    "target/",
+    "vendor/jodin/joltphysics",
+    "vendor/jodin/out",
+];
+
+fn get_odin_files_from(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in WalkDir::new(root).into_iter().filter_entry(|e| {
+        let s = e.path().to_string_lossy();
+        !CODEGEN_EXCLUDE.iter().any(|ex| s.contains(ex))
+    }) {
+        let Ok(entry) = entry else { continue };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension() != Some(OsStr::new("odin")) {
+            continue;
+        }
+        // Exclude test files to match odinPackage's default exclude patterns.
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if name.ends_with("_test.odin") || name.starts_with("test_") {
+            continue;
+        }
+        files.push(path.to_owned());
+    }
+    files.sort();
+    files
+}
+
+/// Scan Odin files for generated registration attributes, writing to `out_path`.
+/// Scans from the current working directory.
+pub async fn update_module_list_to(out_path: &Path) -> Result<()> {
+    let root = std::env::current_dir().context("get current directory")?;
+    let out_path_abs = if out_path.is_absolute() {
+        out_path.to_owned()
+    } else {
+        root.join(out_path)
+    };
 
     let package_re = Regex::new(r"package\s+(\w+)").unwrap();
     let module_tag_re =
@@ -19,8 +68,7 @@ pub async fn update_module_list(progress: &mut prodash::tree::Item) -> Result<()
     let asset_tag_re =
         Regex::new(r#"@\(tag\s*=\s*"asset(?:\(([^"]*)\))?"\)\s*(\w+)\s*::\s*struct"#).unwrap();
 
-    let root = workspace::root_dir();
-    let odin_files = workspace::get_odin_files();
+    let odin_files = get_odin_files_from(&root);
 
     let mut modules: Vec<std::collections::HashMap<String, String>> = Vec::new();
     let mut components: Vec<std::collections::HashMap<String, String>> = Vec::new();
@@ -172,24 +220,21 @@ pub async fn update_module_list(progress: &mut prodash::tree::Item) -> Result<()
     out.push("}".to_owned());
     out.push(String::new());
 
-    let out_path = workspace::root_dir().join("ottar/generated_register.odin");
-    std::fs::write(&out_path, out.join("\n"))
-        .with_context(|| format!("write {}", out_path.display()))?;
+    if let Some(parent) = out_path_abs.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create dir {}", parent.display()))?;
+    }
+    std::fs::write(&out_path_abs, out.join("\n"))
+        .with_context(|| format!("write {}", out_path_abs.display()))?;
 
     // format
     let odinfmt = workspace::odinfmt_bin();
     let odinfmt_str = odinfmt.to_string_lossy().into_owned();
-    let out_str = out_path.to_string_lossy().into_owned();
+    let out_str = out_path_abs.to_string_lossy().into_owned();
     LocalEnv::new()
         .execute_check(&[&odinfmt_str, "-w", &out_str], None, false)
         .await?;
 
-    progress.set_name(format!(
-        "codegen: {} module registrations, {} component registrations, {} asset registrations",
-        modules.len(),
-        components.len(),
-        assets.len()
-    ));
     Ok(())
 }
 

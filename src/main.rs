@@ -109,6 +109,11 @@ enum Cmd {
         /// Target and product selector, e.g. //:app#odin-package
         product: String,
     },
+    /// Generate the Odin module/component/asset registration file
+    CodegenRegister {
+        /// Output path for the generated file
+        output: PathBuf,
+    },
     /// Generate or check BUILD.js files from declared generator targets
     GenerateBuild {
         /// Check that generated BUILD.js files are up to date without writing
@@ -273,6 +278,9 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
         Cmd::GenerateBuild { check, selectors } => {
             return cmd_generate_build(*check, selectors);
         }
+        Cmd::CodegenRegister { output } => {
+            return commands::codegen_register::run(output).await;
+        }
         _ => {}
     }
 
@@ -361,6 +369,7 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
         Cmd::Explain { .. } => unreachable!("handled before environment setup"),
         Cmd::Actions { .. } => unreachable!("handled before environment setup"),
         Cmd::GenerateBuild { .. } => unreachable!("handled before environment setup"),
+        Cmd::CodegenRegister { .. } => unreachable!("handled before environment setup"),
 
         Cmd::Fmt => commands::fmt::cmd_fmt(tree).await,
 
