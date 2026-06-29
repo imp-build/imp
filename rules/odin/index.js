@@ -4,8 +4,11 @@ import {
 	file_set,
 	paths,
 	memo,
+	output,
+	output_path,
 	product,
 	run,
+	logDebug,
 } from "imp:core";
 
 import {
@@ -28,9 +31,37 @@ export {
     resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
 
+
 // ---------------------------------------------------------------------------
 // Memo functions — source discovery
 // ---------------------------------------------------------------------------
+
+function normalize_workspace_path(path) {
+    const parts = [];
+    for (const part of path.split("/")) {
+        if (part === "" || part === ".") continue;
+        if (part === "..") {
+            throw new Error(`Odin paths must stay within the workspace: ${path}`);
+        }
+        parts.push(part);
+    }
+    return parts.length === 0 ? "." : parts.join("/");
+}
+
+function declaring_directory(handle) {
+    const address = handle && handle.label && handle.label.address;
+    if (!address || !address.startsWith("//")) return ".";
+    const scope = address.slice(2).split(":")[0];
+    return scope.length === 0 ? "." : scope;
+}
+
+function declared_path(handle, path = ".") {
+    const base = declaring_directory(handle);
+    const local = path || ".";
+    if (base === ".") return normalize_workspace_path(local);
+    if (local === ".") return base;
+    return normalize_workspace_path(`${base}/${local}`);
+}
 
 /**
  * Return a FileSet of the package's own source files.
@@ -39,8 +70,9 @@ export {
  * @returns {Promise<object>} FileSet descriptor.
  */
 export const own_sources = memo(async function own_sources(handle) {
+	logDebug(handle);
     return glob({
-        root: handle.attrs.path || ".",
+        root: declared_path(handle, handle.attrs.path || "."),
         include: handle.attrs.srcs || [],
         exclude: handle.attrs.exclude || [],
     });
@@ -54,7 +86,9 @@ export const own_sources = memo(async function own_sources(handle) {
  */
 export const sources = memo(async function sources(handle) {
     const own = await own_sources(handle);
+	logDebug( {own})
     const pkgDeps = (handle.attrs.deps || []).filter(h => h && h.kind === "odin-package");
+
     if (pkgDeps.length === 0) return own;
     const depSources = await Promise.all(pkgDeps.map(h => sources(h)));
     return file_set.union(own, ...depSources);
@@ -67,7 +101,8 @@ export const sources = memo(async function sources(handle) {
  * @returns {Promise<string[]>}
  */
 export const collection_flags = memo(async function collection_flags(handle) {
-    return (handle.attrs.collections || []).map(col => `-collection:${col.attrs.name}=${col.attrs.path}`);
+    return (handle.attrs.collections || [])
+        .map(col => `-collection:${col.attrs.name}=${declared_path(col, col.attrs.path)}`);
 });
 
 /**
@@ -79,6 +114,10 @@ export const collection_flags = memo(async function collection_flags(handle) {
 export const tool = memo(async function tool(handle) {
     return odinTool(handle.attrs.version);
 });
+
+function default_output_path(handle) {
+    return `build/odin/${handle.label.name}`;
+}
 
 // ---------------------------------------------------------------------------
 // Product functions
@@ -97,12 +136,23 @@ export const odinBuild = product("odin-package", "odin-package",
             ? await tool(toolchainHandle)
             : odinTool(resolveOdinToolchainVersion(handle.attrs.toolchainVersion));
         const srcs = await sources(handle);
+		logDebug(srcs);
         const flags = await collection_flags(handle);
-        const path = handle.attrs.path || ".";
+        const path = declared_path(handle, handle.attrs.path || ".");
+        const out = handle.attrs.output || default_output_path(handle);
         return run({
-            argv: ["odin", "build", path, ...flags],
+            argv: [
+                "sh",
+                "-c",
+                "out=$1; pkg=$2; shift 2; mkdir -p \"$(dirname \"$out\")\" && odin build \"$pkg\" \"-out:$out\" \"$@\"",
+                "odin-build",
+                output_path(out),
+                path,
+                ...flags,
+            ],
             tools: [odinToolSpec],
             inputs: [srcs],
+            outputs: [output(out)],
             display: `odin build ${path}`,
         });
     }
@@ -141,10 +191,11 @@ export function odinCollection({ name, path }) {
  * @param {string} [opts.path="."] Workspace-relative package path.
  * @param {object[]} [opts.collections=[]] Odin collection namespace mappings.
  * @param {object|string} [opts.toolchain] Odin toolchain target handle or version string.
+ * @param {string} [opts.output] Workspace-relative executable output path.
  * @param {Array} [opts.deps=[]]
  * @returns {object} Target handle.
  */
-export function odinPackage({ srcs = [], exclude = [], path = ".", collections = [], toolchain, deps = [] }) {
+export function odinPackage({ srcs = [], exclude = [], path = ".", collections = [], toolchain, output, deps = [] }) {
     const toolchainHandle = toolchain && toolchain.__imp ? toolchain
                           : (typeof toolchain === "string" ? null : defaultOdinToolchain());
     const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
@@ -160,6 +211,7 @@ export function odinPackage({ srcs = [], exclude = [], path = ".", collections =
             ...(exclude.length ? { exclude } : {}),
             ...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
             ...(toolchainVersion ? { toolchainVersion } : {}),
+            ...(output ? { output } : {}),
             ...(collections.length ? { collections } : {}),
             ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
         },

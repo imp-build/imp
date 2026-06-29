@@ -30,10 +30,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use walkdir::WalkDir;
 
 const WORKSPACE_FILE: &str = "imp.workspace.js";
 const BUILD_FILE: &str = "BUILD.js";
+const TASK_CACHE_VERSION: u32 = 2;
 
 /// The built-in `imp:core` module exposed to every plugin and BUILD file.
 const CORE_JS: &str = r##"
@@ -673,6 +676,14 @@ globalThis.__imp_resolve_handle = function(id) { return globalThis.__imp_handle_
 globalThis.resetMemoState = resetMemoState;
 globalThis.getMemoTrace = getMemoTrace;
 globalThis.setIntrospectMode = setIntrospectMode;
+
+function _fmt(...args) {
+    return args.map(a => typeof a === "string" ? a : JSON.stringify(a, null, 2)).join(" ");
+}
+export function logDebug(...args)  { __host_log("debug", _fmt(...args)); }
+export function logInfo(...args)   { __host_log("info", _fmt(...args)); }
+export function logWarn(...args)   { __host_log("warn", _fmt(...args)); }
+export function logError(...args)  { __host_log("error", _fmt(...args)); }
 "##;
 
 // ---------------------------------------------------------------------------
@@ -959,6 +970,7 @@ struct CachedArtifact {
     value: Option<String>,
     digest: String,
     bytes: Option<u64>,
+    mode: Option<u32>,
     files: Vec<CacheDirectoryEntry>,
 }
 
@@ -2173,6 +2185,18 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_workspace_mutation", host_workspace_mutation)?;
+
+    // ------------------------------------------------------------------
+    // __host_log(level, message)
+    // ------------------------------------------------------------------
+    let host_log = Function::new(
+        ctx.clone(),
+        move |_ctx: Ctx<'js>, level: String, message: String| -> rquickjs::Result<()> {
+            eprintln!("[{level}] {message}");
+            Ok(())
+        },
+    )?;
+    globals.set("__host_log", host_log)?;
 
     Ok(())
 }
@@ -3642,6 +3666,18 @@ fn run_local_task(
         .transpose()?
         .unwrap_or_else(|| sandbox.sandbox_root.clone());
     std::fs::create_dir_all(&cwd).with_context(|| format!("create cwd {}", cwd.display()))?;
+    let cmd_display = if task.action.display.is_empty() {
+        task.action.argv.join(" ")
+    } else {
+        task.action.display.clone()
+    };
+    if let Some(progress) = progress {
+        progress.message(
+            prodash::messages::MessageLevel::Info,
+            format!("[sandbox: {}] {}", sandbox.sandbox_root.display(), cmd_display),
+        );
+    }
+
     let (program, args) = task
         .action
         .argv
@@ -3724,7 +3760,7 @@ fn run_local_task(
     let outputs = ingest_task_outputs(task, &sandbox)?;
     if cache.cacheable {
         let record = TaskCacheRecord {
-            version: 1,
+            version: TASK_CACHE_VERSION,
             task_id: task.id.clone(),
             task_key: cache.task_key.clone(),
             action_digest: cache.action_digest.clone(),
@@ -3760,13 +3796,14 @@ fn materialize_embedded_output_task(
             value: artifact.value.clone(),
             digest: store_blob(value.as_bytes(), &artifact.kind)?,
             bytes: Some(value.len() as u64),
+            mode: None,
             files: Vec::new(),
         });
     }
 
     if cache.cacheable {
         let record = TaskCacheRecord {
-            version: 1,
+            version: TASK_CACHE_VERSION,
             task_id: task.id.clone(),
             task_key: cache.task_key.clone(),
             action_digest: cache.action_digest.clone(),
@@ -4084,7 +4121,7 @@ fn evaluate_task_cache(
         "outputs": task.outputs,
     }))?;
     let task_key = digest_json(&serde_json::json!({
-        "version": 1u32,
+        "version": TASK_CACHE_VERSION,
         "task_id": task.id,
         "action_digest": action_digest,
         "input_digests": input_digests,
@@ -4289,6 +4326,7 @@ fn ingest_task_outputs(task: &Task, sandbox: &SandboxManifest) -> Result<Vec<Cac
                     value: artifact.value.clone(),
                     digest,
                     bytes: Some(bytes),
+                    mode: file_mode(&output.sandbox_path)?,
                     files: Vec::new(),
                 }
             }
@@ -4312,6 +4350,7 @@ fn ingest_task_outputs(task: &Task, sandbox: &SandboxManifest) -> Result<Vec<Cac
                     value: artifact.value.clone(),
                     digest,
                     bytes: None,
+                    mode: None,
                     files,
                 }
             }
@@ -4324,6 +4363,7 @@ fn ingest_task_outputs(task: &Task, sandbox: &SandboxManifest) -> Result<Vec<Cac
                     value: artifact.value.clone(),
                     digest: store_blob(value.as_bytes(), "value")?,
                     bytes: Some(value.len() as u64),
+                    mode: None,
                     files: Vec::new(),
                 }
             }
@@ -4360,6 +4400,7 @@ fn materialize_cached_outputs(record: &TaskCacheRecord, workspace_root: &Path) -
             "file" | "manifest" => {
                 let source = cas_blob_path(&output.digest)?;
                 publish_file_atomically(&source, &destination)?;
+                restore_file_mode(&destination, output.mode)?;
             }
             "directory" => materialize_cached_directory(output, &destination)?,
             "value" => {}
@@ -4420,6 +4461,32 @@ fn publish_file_atomically(source: &Path, destination: &Path) -> Result<()> {
             destination.display()
         )
     })?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn file_mode(path: &Path) -> Result<Option<u32>> {
+    Ok(Some(std::fs::metadata(path)?.permissions().mode() & 0o7777))
+}
+
+#[cfg(not(unix))]
+fn file_mode(_path: &Path) -> Result<Option<u32>> {
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn restore_file_mode(path: &Path, mode: Option<u32>) -> Result<()> {
+    let Some(mode) = mode else {
+        return Ok(());
+    };
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_mode(mode);
+    std::fs::set_permissions(path, permissions)
+        .with_context(|| format!("set permissions {:o} on {}", mode, path.display()))
+}
+
+#[cfg(not(unix))]
+fn restore_file_mode(_path: &Path, _mode: Option<u32>) -> Result<()> {
     Ok(())
 }
 
@@ -5380,7 +5447,7 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
         .map(|o| serde_json::json!({ "path": o.path, "kind": o.kind }))
         .collect();
     let task_key = digest_json(&serde_json::json!({
-        "version": 1,
+        "version": TASK_CACHE_VERSION,
         "action_digest": action_digest,
         "input_digests": input_digests,
         "outputs": out_specs,
@@ -5412,7 +5479,7 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
 
     if let Some(outputs) = cached_outputs_opt {
         let record = TaskCacheRecord {
-            version: 1,
+            version: TASK_CACHE_VERSION,
             task_id: task_key.clone(),
             task_key,
             action_digest,
@@ -5430,6 +5497,13 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
     }
 
     // Cache miss — run the command.
+    let cmd_display = if opts.display.is_empty() {
+        opts.argv.join(" ")
+    } else {
+        opts.display.clone()
+    };
+    eprintln!("[sandbox: {}] {}", sandbox_root.display(), cmd_display);
+
     let (program, args) = opts
         .argv
         .split_first()
@@ -5516,6 +5590,7 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
                     value: None,
                     digest,
                     bytes: Some(bytes),
+                    mode: file_mode(&sandbox_path)?,
                     files: Vec::new(),
                 });
             }
@@ -5535,6 +5610,7 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
                     value: None,
                     digest,
                     bytes: None,
+                    mode: None,
                     files,
                 });
             }
@@ -5545,7 +5621,7 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
     // Cache record and materialize.
     if cacheable {
         let record = TaskCacheRecord {
-            version: 1,
+            version: TASK_CACHE_VERSION,
             task_id: task_key.clone(),
             task_key,
             action_digest,
@@ -5566,6 +5642,13 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
 }
 
 fn exec_run_unsandboxed(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunResult> {
+    let cmd_display = if opts.display.is_empty() {
+        opts.argv.join(" ")
+    } else {
+        opts.display.clone()
+    };
+    eprintln!("[unsandboxed] {}", cmd_display);
+
     let (program, args) = opts
         .argv
         .split_first()
