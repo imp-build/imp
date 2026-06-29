@@ -81,6 +81,10 @@ export const native_link_library = product("cmake-lib", "native-link-library", a
     const cmakeArgs = handle.attrs.cmakeArgs || [];
     const stageOutputs = handle.attrs.stageOutputs || [];
     const inputFiles = await sources(handle);
+    const dirInputs = (handle.attrs.dirs || []).map(d => ({
+        kind: "directory",
+        path: declared_path(handle, d),
+    }));
 
     const outputDecls = (handle.attrs.outputs || []).map(name =>
         output(output_path(`${srcPath}/${name}`))
@@ -97,20 +101,16 @@ export const native_link_library = product("cmake-lib", "native-link-library", a
         return run({
             argv: ["sh", "-c", script, "cmake-build", srcPath, buildDirPath, ...cmakeArgs],
             tools: [cmakeTool(handle.attrs.toolchain)],
-            inputs: [inputFiles],
+            inputs: [inputFiles, ...dirInputs],
             outputs: [...outputDecls, ...stagedOutputDecls],
             display: `cmake build ${srcPath}`,
-            sandbox: false,
-            impure: true,
         });
     }
     return run({
         argv: ["sh", "-c", script, "cmake-build", srcPath, buildDirPath, ...cmakeArgs],
-        inputs: [inputFiles],
+        inputs: [inputFiles, ...dirInputs],
         outputs: [...outputDecls, ...stagedOutputDecls],
         display: `cmake build ${srcPath}`,
-        sandbox: false,
-        impure: true,
     });
 });
 
@@ -137,6 +137,7 @@ export function cmakeLib({
     src = ".",
     buildDir,
     srcs,
+    dirs = [],
     cmakeArgs = [],
     outputs = [],
     stageOutputs = [],
@@ -156,6 +157,7 @@ export function cmakeLib({
         attrs: {
             src,    // stored as user-provided; resolved by declared_path in product/memo
             srcs: srcs || DEFAULT_CPP_SRCS,
+            ...(dirs.length ? { dirs } : {}),
             cmakeArgs,
             outputs,
             ...(stageOutputs.length ? { stageOutputs } : {}),
