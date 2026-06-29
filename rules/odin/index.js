@@ -11,6 +11,7 @@ import {
 	product,
 	registerBuildRule,
 	run,
+	write_file,
 	sourcesField,
 	logDebug,
 	configuration,
@@ -566,12 +567,25 @@ export const odinBuild = product("odin-package", "odin-package",
 // ---------------------------------------------------------------------------
 
 export const gen_input_sources = memo(async function gen_input_sources(handle) {
-    return glob({ root: ".", include: handle.attrs.srcs || [] });
+    const outPath = declared_path(handle, handle.attrs.out);
+    return glob({ root: ".", include: handle.attrs.srcs || [], exclude: [outPath] });
 });
 
 export const odinGenRun = product("odin-gen", "odin-source", async function odinGenRun(handle) {
     const inputFiles = await gen_input_sources(handle);
     const outPath = declared_path(handle, handle.attrs.out);
+
+    if (handle.attrs.generator) {
+        const mod = await import(handle.attrs.generator);
+        const content = await mod.generate({ srcs: handle.attrs.srcs });
+        return write_file({
+            path: outPath,
+            content,
+            inputs: [inputFiles],
+            display: `generate ${outPath}`,
+        });
+    }
+
     return run({
         argv: [...handle.attrs.cmd, outPath],
         inputs: [inputFiles],
@@ -662,12 +676,12 @@ export const generateBuild = product("odin-build-generator", "generate-build",
  * @param {Array} [opts.deps=[]] Additional dependencies.
  * @returns {object} Target handle.
  */
-export function odinGen({ srcs = [], out, cmd, deps = [] }) {
+export function odinGen({ srcs = [], out, cmd, generator, deps = [] }) {
     if (!out) throw new Error("odinGen requires an 'out' path");
-    if (!cmd || cmd.length === 0) throw new Error("odinGen requires a 'cmd' array");
+    if (!generator && (!cmd || cmd.length === 0)) throw new Error("odinGen requires either 'cmd' or 'generator'");
     return target({
         kind: "odin-gen",
-        attrs: { srcs, out, cmd },
+        attrs: { srcs, out, ...(generator ? { generator } : { cmd }) },
         deps,
     });
 }

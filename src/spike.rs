@@ -776,6 +776,30 @@ export function read_file(path) {
     return result;
 }
 
+/**
+ * Write file content to a workspace path as a cacheable execution task.
+ * Content is computed at plan-evaluation time; the write happens at execution time.
+ * @param {{ path: string, content: string, inputs?: any[], display?: string }} opts
+ */
+export async function write_file(opts) {
+    const inputs = _materialise_inputs(opts.inputs);
+    const effect = {
+        event: "effect",
+        kind: "write_file",
+        display: opts.display ?? `write ${opts.path}`,
+        path: opts.path,
+        content: opts.content,
+        inputs,
+    };
+    if (_introspect_mode) {
+        effect.dry_run = true;
+        _trace_effect(effect);
+        return { written: opts.path };
+    }
+    _trace_effect(effect);
+    return { written: opts.path };
+}
+
 export async function run(opts) {
     const inputs = _materialise_inputs(opts.inputs);
     const outputs = opts.outputs ?? [];
@@ -3887,7 +3911,8 @@ fn add_product_discovered_tasks(
 
     let mut run_index = 0usize;
     for entry in &result.trace {
-        if !(entry["event"] == "effect" && entry["kind"] == "run") {
+        let kind = entry["kind"].as_str().unwrap_or("");
+        if entry["event"] != "effect" || !matches!(kind, "run" | "write_file") {
             continue;
         }
         let task_id = format!("{prefix}:run{run_index}");
@@ -3901,23 +3926,55 @@ fn add_product_discovered_tasks(
                 }
             }
         }
-        let inputs = artifacts_from_json(&entry["inputs"], &task_id, "input", None);
-        let outputs = artifacts_from_json(&entry["outputs"], &task_id, "output", Some(&task_id));
-        let action = Action {
-            argv: strings_from_json_array(&entry["argv"]),
-            cwd: None,
-            env: env_from_json_object(&entry["env"]),
-            platform: None,
-            inputs: inputs.iter().map(|artifact| artifact.id.clone()).collect(),
-            outputs: outputs.iter().map(|artifact| artifact.id.clone()).collect(),
-            tools: tools_from_json_array(&entry["tools"], workspace_root)?,
-            display: entry["display"]
-                .as_str()
-                .unwrap_or("<unnamed run>")
-                .to_owned(),
-            impure: entry["impure"].as_bool().unwrap_or(false),
-            force_cache: entry["forceCache"].as_bool().unwrap_or(false),
-            sandbox: entry["sandbox"].as_bool().unwrap_or(true),
+        let (inputs, outputs, action) = if kind == "write_file" {
+            let path = entry["path"].as_str().unwrap_or("").to_owned();
+            let content = entry["content"].as_str().unwrap_or("").to_owned();
+            let inputs = artifacts_from_json(&entry["inputs"], &task_id, "input", None);
+            let out_artifact = Artifact {
+                id: format!("{task_id}:output0"),
+                kind: "file".to_owned(),
+                path: Some(path.clone()),
+                value: Some(content),
+                producer: Some(task_id.clone()),
+            };
+            let action = Action {
+                argv: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                platform: None,
+                inputs: inputs.iter().map(|a| a.id.clone()).collect(),
+                outputs: vec![out_artifact.id.clone()],
+                tools: Vec::new(),
+                display: entry["display"]
+                    .as_str()
+                    .unwrap_or_else(|| &path)
+                    .to_owned(),
+                impure: false,
+                force_cache: false,
+                sandbox: true,
+            };
+            (inputs, vec![out_artifact], action)
+        } else {
+            let inputs = artifacts_from_json(&entry["inputs"], &task_id, "input", None);
+            let outputs =
+                artifacts_from_json(&entry["outputs"], &task_id, "output", Some(&task_id));
+            let action = Action {
+                argv: strings_from_json_array(&entry["argv"]),
+                cwd: None,
+                env: env_from_json_object(&entry["env"]),
+                platform: None,
+                inputs: inputs.iter().map(|artifact| artifact.id.clone()).collect(),
+                outputs: outputs.iter().map(|artifact| artifact.id.clone()).collect(),
+                tools: tools_from_json_array(&entry["tools"], workspace_root)?,
+                display: entry["display"]
+                    .as_str()
+                    .unwrap_or("<unnamed run>")
+                    .to_owned(),
+                impure: entry["impure"].as_bool().unwrap_or(false),
+                force_cache: entry["forceCache"].as_bool().unwrap_or(false),
+                sandbox: entry["sandbox"].as_bool().unwrap_or(true),
+            };
+            (inputs, outputs, action)
         };
         tasks.insert(
             task_id.clone(),
@@ -6018,7 +6075,10 @@ pub fn format_inspect_actions(result: &IntrospectResult, w: &mut String) -> std:
     let actions: Vec<_> = result
         .trace
         .iter()
-        .filter(|e| e["event"] == "effect" && e["kind"] == "run")
+        .filter(|e| {
+            e["event"] == "effect"
+                && matches!(e["kind"].as_str(), Some("run") | Some("write_file"))
+        })
         .collect();
 
     if actions.is_empty() {
