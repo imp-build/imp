@@ -54,6 +54,11 @@ registerBuildRule({
     importFrom: "//rules/odin",
 });
 
+registerBuildRule({
+    rule: "odinTestPackage",
+    importFrom: "//rules/odin",
+});
+
 // ---------------------------------------------------------------------------
 // Memo functions — source discovery
 // ---------------------------------------------------------------------------
@@ -102,6 +107,12 @@ function package_srcs(attrs) {
 function package_exclude(attrs) {
     if (!attrs || attrs.exclude === undefined) return [];
     return attrs.exclude;
+}
+
+function normalize_deps(deps) {
+    return deps
+        .map(d => d && d.__imp ? d : (d && d.target ? d.target : null))
+        .filter(Boolean);
 }
 
 /**
@@ -322,7 +333,17 @@ function strip_odin_comments(input) {
     return out;
 }
 
-function scan_odin_imports(content) {
+export class OdinPackageAnalysis {
+    constructor({ sourceFiles = [], packagePath = ".", imports = [], collections = [], hasMainEntrypoint = false } = {}) {
+        this.sourceFiles = sourceFiles;
+        this.packagePath = packagePath;
+        this.imports = imports;
+        this.collections = collections;
+        this.hasMainEntrypoint = hasMainEntrypoint;
+    }
+}
+
+function scan_odin_source(content) {
     const text = strip_odin_comments(content);
     const imports = [];
     const single = /^\s*import(?:\s+[A-Za-z_$][A-Za-z0-9_$]*)?\s+"([^"]+)"/gm;
@@ -338,7 +359,21 @@ function scan_odin_imports(content) {
         }
     }
 
-    return Array.from(new Set(imports)).sort();
+    const uniqueImports = Array.from(new Set(imports)).sort();
+    const collections = Array.from(new Set(
+        uniqueImports
+            .map(imp => {
+                const index = imp.indexOf(":");
+                return index > 0 ? imp.slice(0, index) : null;
+            })
+            .filter(Boolean),
+    )).sort();
+    const hasMainEntrypoint = /^\s*main\s*::\s*proc\s*\(/m.test(text);
+    return new OdinPackageAnalysis({
+        imports: uniqueImports,
+        collections,
+        hasMainEntrypoint,
+    });
 }
 
 function workspace_join(base, path) {
@@ -364,14 +399,43 @@ function package_source_paths(pkg) {
     }));
 }
 
-function imports_for_package(pkg) {
+function analysis_for_package(pkg) {
+    const sourceFiles = package_source_paths(pkg);
+    const packagePath = infer_package_path(pkg, sourceFiles);
     const imports = new Set();
-    for (const file of package_source_paths(pkg)) {
-        for (const imp of scan_odin_imports(read_file(file))) {
+    const collections = new Set();
+    let hasMainEntrypoint = false;
+    for (const file of sourceFiles) {
+        const analysis = scan_odin_source(read_file(file));
+        for (const imp of analysis.imports) {
             imports.add(imp);
         }
+        for (const collection of analysis.collections) {
+            collections.add(collection);
+        }
+        hasMainEntrypoint = hasMainEntrypoint || analysis.hasMainEntrypoint;
     }
-    return Array.from(imports).sort();
+    return new OdinPackageAnalysis({
+        sourceFiles,
+        packagePath,
+        imports: Array.from(imports).sort(),
+        collections: Array.from(collections).sort(),
+        hasMainEntrypoint,
+    });
+}
+
+function infer_package_path(pkg, sourceFiles) {
+    const declared = normalize_workspace_path(pkg.path || ".");
+    if (sourceFiles.length === 0) return declared;
+
+    const sourceDirs = Array.from(new Set(sourceFiles.map(dirname))).sort();
+    if (sourceDirs.includes(declared)) return declared;
+    if (sourceDirs.length === 1) return sourceDirs[0];
+
+    throw new Error(
+        `${pkg.address || "odinPackage"} source files are spread across multiple package directories under '${declared}': ${sourceDirs.join(", ")}. ` +
+        "Set path to the directory passed to odin build, or split this into separate odinPackage targets.",
+    );
 }
 
 function package_spec_from_handle(handle) {
@@ -427,7 +491,11 @@ function build_package_index(packages) {
 }
 
 export const imports = memo(async function imports(handle) {
-    return imports_for_package(package_spec_from_handle(handle));
+    return (await odinPackageAnalysis(handle)).imports;
+});
+
+export const odinPackageAnalysis = memo(async function odinPackageAnalysis(handle) {
+    return analysis_for_package(package_spec_from_handle(handle));
 });
 
 export const package_index = memo(async function package_index() {
@@ -453,9 +521,9 @@ function lookup_package(index, path, selfPkg = null) {
     return candidates[0] || null;
 }
 
-function infer_dep_entries(pkg, index, collections) {
+function infer_dep_entries(pkg, index, collections, analysis = analysis_for_package(pkg)) {
     const deps = new Map();
-    for (const imp of imports_for_package(pkg)) {
+    for (const imp of analysis.imports) {
         const resolved = resolved_import_path(imp, collections);
         if (!resolved) continue;
         const dep = lookup_package(index, resolved, pkg);
@@ -467,7 +535,9 @@ function infer_dep_entries(pkg, index, collections) {
 
 export const inferred_deps = memo(async function inferred_deps(handle) {
     const index = await package_index();
-    return infer_dep_entries(package_spec_from_handle(handle), index, collection_map(handle))
+    const pkg = package_spec_from_handle(handle);
+    const analysis = await odinPackageAnalysis(handle);
+    return infer_dep_entries(pkg, index, collection_map(handle), analysis)
         .map(dep => dep.handle)
         .filter(Boolean);
 });
@@ -502,6 +572,10 @@ function default_output_path(handle) {
     return `build/odin/${handle.label.name}`;
 }
 
+function odin_output_path(out, analysis) {
+    return analysis.hasMainEntrypoint ? out : `${out}.a`;
+}
+
 const DEFAULT_GENERATE_BUILD_EXCLUDES = [
     "**/.*/**",
     "**/build/**",
@@ -534,6 +608,29 @@ function build_file_for_dir(dir) {
     return dir === "." ? "BUILD.js" : `${dir}/BUILD.js`;
 }
 
+function append_build_target(result, file, target) {
+    if (!result[file]) result[file] = [];
+    result[file].push(target);
+}
+
+function default_package_source_file(path) {
+    const name = basename(path);
+    return name.endsWith(".odin")
+        && !name.endsWith("_test.odin")
+        && !name.startsWith("test_");
+}
+
+function default_package_test_file(path) {
+    const name = basename(path);
+    return name.endsWith("_test.odin") || name.startsWith("test_");
+}
+
+function empty_package_error(handle, path) {
+    const address = safe_target_address(handle) || "odinPackage";
+    return `${address} has no Odin source files after applying srcs/exclude filters at '${path}'. ` +
+        "odinPackage excludes *_test.odin and test_*.odin by default; use odinTestPackage for package tests, or pass exclude: [] for a package that intentionally builds test files.";
+}
+
 // ---------------------------------------------------------------------------
 // Product functions
 // ---------------------------------------------------------------------------
@@ -555,8 +652,15 @@ export const odinBuild = product("odin-package", "odin-package",
         const resourceInputs = await resources(handle);
         const flags = await collection_flags(handle);
         const collectionDirs = await collection_dirs(handle);
-        const path = declared_path(handle, handle.attrs.path || ".");
+        const analysis = await odinPackageAnalysis(handle);
+        if (analysis.sourceFiles.length === 0) {
+            const packagePath = declared_path(handle, handle.attrs.path || ".");
+            throw new Error(empty_package_error(handle, packagePath));
+        }
+        const modeFlags = analysis.hasMainEntrypoint ? [] : ["-build-mode:lib"];
+        const path = analysis.packagePath;
         const out = handle.attrs.output || default_output_path(handle);
+        const declaredOut = odin_output_path(out, analysis);
         return run({
             argv: [
                 "sh",
@@ -568,11 +672,48 @@ export const odinBuild = product("odin-package", "odin-package",
                 String(collectionDirs.length),
                 ...collectionDirs,
                 ...flags,
+                ...modeFlags,
             ],
             tools: [odinToolSpec],
             inputs: [srcs, ...genInputs, resourceInputs],
-            outputs: [output(out)],
+            outputs: [output(declaredOut)],
             display: `odin build ${path}`,
+        });
+    }
+);
+
+export const odinTest = product("odin-test-package", "test",
+    async function odinTest(handle) {
+        const toolchainHandle = handle.attrs.toolchain;
+        const odinToolSpec = toolchainHandle
+            ? await tool(toolchainHandle)
+            : odinTool(resolveOdinToolchainVersion(handle.attrs.toolchainVersion));
+        const srcs = await sources(handle);
+        const genInputs = await collect_gen_sets(handle, new Set());
+        const resourceInputs = await resources(handle);
+        const flags = await collection_flags(handle);
+        const collectionDirs = await collection_dirs(handle);
+        const analysis = await odinPackageAnalysis(handle);
+        if (analysis.sourceFiles.length === 0) {
+            const packagePath = declared_path(handle, handle.attrs.path || ".");
+            throw new Error(empty_package_error(handle, packagePath));
+        }
+        const path = analysis.packagePath;
+        return run({
+            argv: [
+                "sh",
+                "-c",
+                "pkg=$1; dir_count=$2; shift 2; while [ \"$dir_count\" -gt 0 ]; do mkdir -p \"$1\"; shift; dir_count=$((dir_count - 1)); done; odin test \"$pkg\" \"$@\"",
+                "odin-test",
+                path,
+                String(collectionDirs.length),
+                ...collectionDirs,
+                ...flags,
+            ],
+            tools: [odinToolSpec],
+            inputs: [srcs, ...genInputs, resourceInputs],
+            impure: true,
+            display: `odin test ${path}`,
         });
     }
 );
@@ -642,9 +783,21 @@ export const generateBuild = product("odin-build-generator", "generate-build",
             include: ["**/*.odin"],
             exclude: handle.attrs.exclude || DEFAULT_GENERATE_BUILD_EXCLUDES,
         });
-        const dirs = Array.from(new Set(files.map(dirname))).sort();
+        const normalDirs = new Set(
+            files
+                .filter(default_package_source_file)
+                .map(dirname),
+        );
+        const testDirs = new Set(
+            files
+                .filter(default_package_test_file)
+                .map(dirname),
+        );
+        const dirs = Array.from(normalDirs).sort();
         const existingPackages = workspaceTargets("odin-package").map(package_spec_from_workspace_target);
+        const existingTestPackages = workspaceTargets("odin-test-package").map(package_spec_from_workspace_target);
         const existingPaths = new Set(existingPackages.map(pkg => normalize_workspace_path(pkg.path || ".")));
+        const existingTestPaths = new Set(existingTestPackages.map(pkg => normalize_workspace_path(pkg.path || ".")));
         const generatedPackages = dirs
             .map(generated_package_spec)
             .filter(pkg => !existingPaths.has(normalize_workspace_path(pkg.path || ".")));
@@ -661,13 +814,34 @@ export const generateBuild = product("odin-build-generator", "generate-build",
             if (deps.length > 0) {
                 props.deps = deps;
             }
-            result[build_file_for_dir(pkg.path)] = [
-                {
-                    name: target_name_for_dir(pkg.path),
-                    rule: "odinPackage",
-                    props,
-                },
-            ];
+            append_build_target(result, build_file_for_dir(pkg.path), {
+                name: target_name_for_dir(pkg.path),
+                rule: "odinPackage",
+                props,
+            });
+        }
+
+        const generatedTestPackages = Array.from(testDirs)
+            .sort()
+            .map(dir => ({
+                ...generated_package_spec(dir),
+                srcs: ["*.odin"],
+                exclude: [],
+            }))
+            .filter(pkg => !existingTestPaths.has(normalize_workspace_path(pkg.path || ".")));
+        for (const pkg of generatedTestPackages) {
+            const deps = infer_dep_entries(pkg, index, collections)
+                .map(dep => targetRef(dep.address));
+            const props = {};
+            if (deps.length > 0) {
+                props.deps = deps;
+            }
+            const baseName = target_name_for_dir(pkg.path);
+            append_build_target(result, build_file_for_dir(pkg.path), {
+                name: normalDirs.has(pkg.path) ? `${baseName}_test` : baseName,
+                rule: "odinTestPackage",
+                props,
+            });
         }
         return result;
     }
@@ -742,9 +916,7 @@ export function odinPackage({ srcs = undefined, exclude = undefined, path = ".",
     const toolchainHandle = toolchain && toolchain.__imp ? toolchain
                           : (typeof toolchain === "string" ? null : defaultOdinToolchain());
     const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
-    const normalizedDeps = deps
-        .map(d => d && d.__imp ? d : (d && d.target ? d.target : null))
-        .filter(Boolean);
+    const normalizedDeps = normalize_deps(deps);
 
 	// If sources are not specified, default to all .odin files in the package path.
 	// Empty source lists are not useful for Odin package builds and produce invalid
@@ -775,6 +947,51 @@ export function odinPackage({ srcs = undefined, exclude = undefined, path = ".",
         }),
     });
 }
+
+/**
+ * Declare an Odin test package target.
+ *
+ * Test packages participate in the `test` goal and run `odin test`.
+ * Unlike odinPackage, they include test files by default.
+ *
+ * @param {object} opts
+ * @param {string[]} [opts.srcs=[]] Glob patterns matched against paths relative to opts.path.
+ * @param {string[]} [opts.exclude=[]] Glob patterns to exclude from matches.
+ * @param {string} [opts.path="."] Workspace-relative package path.
+ * @param {object[]|object} [opts.collections=[]] Package-local Odin collection namespace mappings.
+ * @param {object|string} [opts.toolchain] Odin toolchain target handle or version string.
+ * @param {Array} [opts.deps=[]] Odin package and resource package dependencies.
+ * @returns {object} Target handle.
+ */
+export function odinTestPackage({ srcs = undefined, exclude = undefined, path = ".", collections = [], toolchain, deps = [] }) {
+    const toolchainHandle = toolchain && toolchain.__imp ? toolchain
+                          : (typeof toolchain === "string" ? null : defaultOdinToolchain());
+    const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
+    const normalizedDeps = normalize_deps(deps);
+
+    srcs = package_srcs({ srcs });
+    exclude = exclude || [];
+
+    return target({
+        kind: "odin-test-package",
+        attrs: {
+            path,
+            srcs,
+            ...(exclude.length ? { exclude } : {}),
+            ...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
+            ...(toolchainVersion ? { toolchainVersion } : {}),
+            ...(has_collection_config(collections) ? { collections } : {}),
+            ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
+        },
+        sources: sourcesField({
+            root: path,
+            include: srcs,
+            exclude,
+        }),
+    });
+}
+
+export const odin_test_package = odinTestPackage;
 
 export function odinGenerateBuild({
     root = ".",

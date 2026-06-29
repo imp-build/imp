@@ -6,10 +6,12 @@ import {
 import {
     odinCollection,
     odinPackage,
+    odinTestPackage,
     odinToolchain,
     own_sources,
     sources,
     imports,
+    odinPackageAnalysis,
     inferred_deps,
     effective_deps,
     collection_flags,
@@ -19,6 +21,7 @@ import {
     odinGenerateBuild,
     tool,
     odinBuild,
+    odinTest,
 } from "//rules/odin";
 import {
     resourcePackage,
@@ -121,6 +124,16 @@ test("imports(pkg) scans Odin import declarations", async () => {
     expect(result).toContain("core:fmt");
 });
 
+test("odinPackageAnalysis(pkg) reports imports, collections, and main entrypoint", async () => {
+    const pkg = odinPackage({ path: "rules/odin/example", toolchain: "dev-2026-04" });
+    const analysis = await odinPackageAnalysis(pkg);
+    expect(analysis.sourceFiles).toContain("rules/odin/example/main.odin");
+    expect(analysis.packagePath).toBe("rules/odin/example");
+    expect(analysis.imports).toContain("core:fmt");
+    expect(analysis.collections).toContain("core");
+    expect(analysis.hasMainEntrypoint).toBe(true);
+});
+
 test("sources(app) with a dep includes transitive files", async () => {
     const lib = odinPackage({ srcs: ["rules/odin/index.js"], toolchain: "dev-2026-04" });
     const app = odinPackage({ srcs: ["rules/odin/index_test.js"], toolchain: "dev-2026-04", deps: [lib] });
@@ -159,7 +172,7 @@ test("odinBuild declares resource package files as sandbox inputs", async () => 
         const app = odinPackage({ srcs: ["rules/odin/index.js"], toolchain: "dev-2026-04", deps: [fonts] });
         await odinBuild(app);
         const { trace } = getMemoTrace();
-        const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build .");
+        const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build rules/odin");
         expect(runEffect.inputs.some(input => input.path === "rules/odin/toolchain.js")).toBe(true);
     } finally {
         setIntrospectMode(false);
@@ -180,6 +193,10 @@ test("tool is exported as a function", () => {
 
 test("odinBuild product is exported as a function", () => {
     expect(typeof odinBuild).toBe("function");
+});
+
+test("odinTest product is exported as a function", () => {
+    expect(typeof odinTest).toBe("function");
 });
 
 test("dependency inference helpers are exported as functions", () => {
@@ -254,12 +271,103 @@ test("odinBuild materializes collection directories before invoking Odin", async
         const app = odinPackage({ srcs: ["rules/odin/index.js"], toolchain: "dev-2026-04" });
         await odinBuild(app);
         const { trace } = getMemoTrace();
-        const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build .");
+        const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build rules/odin");
         expect(runEffect.argv[6]).toBe("1");
         expect(runEffect.argv[7]).toBe("library");
         expect(runEffect.argv[8]).toBe("-collection:root=.");
         expect(runEffect.argv).toContain("-collection:lib=library");
         expect(runEffect.inputs.some(input => input.kind === "directory")).toBe(false);
+    } finally {
+        setIntrospectMode(false);
+        configure("odin", null);
+    }
+});
+
+test("odinBuild uses library build mode when package has no main entrypoint", async () => {
+    resetMemoState();
+    configure("odin", null);
+    setIntrospectMode(true);
+    try {
+        const lib = odinPackage({ srcs: ["rules/odin/index.js"], toolchain: "dev-2026-04" });
+        await odinBuild(lib);
+        const { trace } = getMemoTrace();
+        const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build rules/odin");
+        expect(runEffect.argv).toContain("-build-mode:lib");
+        expect(runEffect.outputs).toEqual([{ kind: "file", path: "build/odin/target.a" }]);
+    } finally {
+        setIntrospectMode(false);
+        configure("odin", null);
+    }
+});
+
+test("odinBuild rejects packages with no source files after excludes", async () => {
+    resetMemoState();
+    configure("odin", null);
+    const pkg = odinPackage({ path: "rules/odin", srcs: ["missing*.odin"], toolchain: "dev-2026-04" });
+    let message = "";
+    try {
+        await odinBuild(pkg);
+    } catch (error) {
+        message = error && error.message ? error.message : String(error);
+    }
+    expect(message).toContain("has no Odin source files");
+    expect(message).toContain("exclude: []");
+});
+
+test("odinBuild uses the single source directory when it differs from target path", async () => {
+    resetMemoState();
+    configure("odin", null);
+    setIntrospectMode(true);
+    try {
+        const pkg = odinPackage({ path: "rules/odin", srcs: ["example/*.odin"], toolchain: "dev-2026-04" });
+        await odinBuild(pkg);
+        const { trace } = getMemoTrace();
+        const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build rules/odin/example");
+        expect(runEffect.argv).toContain("rules/odin/example");
+        expect(runEffect.inputs.some(input => input.path === "rules/odin/example/main.odin")).toBe(true);
+    } finally {
+        setIntrospectMode(false);
+        configure("odin", null);
+    }
+});
+
+test("odinBuild does not use library build mode when package has a main entrypoint", async () => {
+    resetMemoState();
+    configure("odin", null);
+    setIntrospectMode(true);
+    try {
+        const app = odinPackage({ path: "rules/odin/example", toolchain: "dev-2026-04" });
+        await odinBuild(app);
+        const { trace } = getMemoTrace();
+        const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build rules/odin/example");
+        expect(runEffect.argv).not.toContain("-build-mode:lib");
+        expect(runEffect.outputs).toEqual([{ kind: "file", path: "build/odin/target" }]);
+    } finally {
+        setIntrospectMode(false);
+        configure("odin", null);
+    }
+});
+
+test("odinTestPackage declares an Odin test target", () => {
+    const pkg = odinTestPackage({ path: "rules/odin/example", toolchain: "dev-2026-04" });
+    expect(pkg.kind).toBe("odin-test-package");
+    expect(pkg.attrs.path).toBe("rules/odin/example");
+    expect(pkg.attrs.exclude).toBe(undefined);
+});
+
+test("odinTest runs odin test with package sources", async () => {
+    resetMemoState();
+    configure("odin", null);
+    setIntrospectMode(true);
+    try {
+        const pkg = odinTestPackage({ path: "rules/odin/example", toolchain: "dev-2026-04" });
+        await odinTest(pkg);
+        const { trace } = getMemoTrace();
+        const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin test rules/odin/example");
+        expect(runEffect.argv).toContain("rules/odin/example");
+        expect(runEffect.argv[2]).toContain("odin test");
+        expect(runEffect.inputs.some(input => input.path === "rules/odin/example/main.odin")).toBe(true);
+        expect(runEffect.impure).toBe(true);
     } finally {
         setIntrospectMode(false);
         configure("odin", null);

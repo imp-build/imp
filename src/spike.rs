@@ -3739,7 +3739,7 @@ fn goal_product_for_kind(workspace: &Workspace, goal: &Goal, kind: &str) -> Opti
 /// Infer the default product for a target kind from target attrs or registered products.
 fn default_product_for_kind<'a>(workspace: &'a Workspace, kind: &str) -> Option<&'a str> {
     for ((k, p), _) in &workspace.products {
-        if k == kind && !matches!(p.as_str(), "sources" | "collection") {
+        if k == kind && !matches!(p.as_str(), "sources" | "collection" | "test") {
             return Some(p.as_str());
         }
     }
@@ -9280,6 +9280,38 @@ import "lib:spall"
     }
 
     #[test]
+    fn real_odin_generate_build_creates_test_packages_for_test_only_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let repo_rules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rules");
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            &format!(
+                r#"
+import {{ workspaceMount }} from "imp:core";
+
+workspaceMount({{ prefix: "//rules", path: "{rules}" }});
+await import("//rules/odin");
+"#,
+                rules = js_string_path(&repo_rules),
+            ),
+        );
+        write_file(&p.join(BUILD_FILE), "export const done = true;\n");
+        write_file(&p.join("library/console/tests/console_test.odin"), "package tests\n");
+
+        let live = load_workspace(p).unwrap();
+        let report = generate_build_files(&live, p, &[], false).unwrap();
+        assert_eq!(
+            report.changed_files,
+            vec!["library/console/tests/BUILD.js".to_owned()]
+        );
+        let build = std::fs::read_to_string(p.join("library/console/tests/BUILD.js")).unwrap();
+        assert!(build.contains(r#"import { odinTestPackage } from "//rules/odin";"#));
+        assert!(build.contains("export const tests = odinTestPackage({});"));
+    }
+
+    #[test]
     fn real_odin_generate_build_dedupes_existing_package_candidates() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
@@ -9321,6 +9353,48 @@ import "lib:input"
         let app_build = std::fs::read_to_string(p.join("app/BUILD.js")).unwrap();
         assert!(app_build.contains(r#"import { input } from "//";"#));
         assert!(app_build.contains("deps: [input]"));
+    }
+
+    #[test]
+    fn real_odin_build_uses_nested_source_dir_as_package_path() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let repo_rules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rules");
+
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            &format!(
+                r#"
+import {{ workspaceMount }} from "imp:core";
+
+workspaceMount({{ prefix: "//rules", path: "{rules}" }});
+await import("//rules/odin");
+"#,
+                rules = js_string_path(&repo_rules),
+            ),
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { odinPackage } from "//rules/odin";
+
+export const odinscript = odinPackage({ path: "vendor", srcs: ["odinscript/*.odin"], toolchain: "dev-2026-05" });
+"#,
+        );
+        write_file(&p.join("vendor/odinscript/lib.odin"), "package odinscript\n");
+
+        let live = load_workspace(p).unwrap();
+        let result = introspect_product(&live, "//:odinscript", "odin-package").unwrap();
+        let run = result
+            .trace
+            .iter()
+            .find(|entry| {
+                entry["event"] == "effect"
+                    && entry["kind"] == "run"
+                    && entry["display"] == "odin build vendor/odinscript"
+            })
+            .expect("expected odin build run effect");
+        assert_eq!(run["argv"][5].as_str().unwrap(), "vendor/odinscript");
     }
 
     #[test]
