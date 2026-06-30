@@ -1,3 +1,5 @@
+// MIGRATING: see rules/workflows/fmt.js
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

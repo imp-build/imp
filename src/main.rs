@@ -1,6 +1,7 @@
 mod codegen;
 mod commands;
 mod env;
+mod odin;
 mod runtime;
 mod spike;
 mod toolchain;

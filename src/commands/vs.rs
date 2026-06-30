@@ -1,3 +1,5 @@
+// MIGRATING: see rules/workflows/vs.js
+
 use std::sync::Arc;
 
 use anyhow::Result;

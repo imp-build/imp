@@ -1,3 +1,5 @@
+// MIGRATING: see rules/workflows/graph.js
+
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;

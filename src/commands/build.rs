@@ -1,3 +1,5 @@
+// MIGRATING: see rules/workflows/build.js
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
