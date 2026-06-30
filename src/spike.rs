@@ -8,13 +8,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::runtime::{HostLogSink, LiveWorkspace};
 use crate::toolchain;
@@ -1078,6 +1078,8 @@ pub struct ExecutionOptions {
     /// Name of the active platform; only tasks whose `action.platform` matches
     /// (or is `None`) are executed. Defaults to `"local"`.
     pub platform: String,
+    /// Shared cancellation flag set by signal handlers or executor failures.
+    pub cancellation: Arc<AtomicBool>,
 }
 
 impl ExecutionOptions {
@@ -1087,6 +1089,7 @@ impl ExecutionOptions {
             jobs: jobs.max(1),
             no_cache: false,
             platform: "local".to_owned(),
+            cancellation: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1097,6 +1100,11 @@ impl ExecutionOptions {
 
     pub fn with_no_cache(mut self, no_cache: bool) -> Self {
         self.no_cache = no_cache;
+        self
+    }
+
+    pub fn with_cancellation(mut self, cancellation: Arc<AtomicBool>) -> Self {
+        self.cancellation = cancellation;
         self
     }
 }
@@ -4318,6 +4326,7 @@ pub fn execute_plan_with_options(
             &options.platform,
             options.no_cache,
             &plan.named_caches,
+            &options.cancellation,
             progress,
         )?
     } else {
@@ -4333,15 +4342,17 @@ fn execute_ordered_tasks_sequentially(
     active_platform: &str,
     no_cache: bool,
     named_caches: &[NamedCache],
+    cancellation: &AtomicBool,
     mut progress: Option<&mut prodash::tree::Item>,
 ) -> Result<Vec<TaskExecution>> {
     let mut executions = Vec::with_capacity(ordered.len());
     let mut summaries = BTreeMap::new();
-    let cancellation = AtomicBool::new(false);
     for task in ordered {
-        let mut task_progress = progress
-            .as_deref_mut()
-            .map(|progress| progress.add_child(task_progress_label(task)));
+        let mut task_progress = progress.as_deref_mut().map(|progress| {
+            let item = progress.add_child(task_progress_label(task));
+            crate::ui::init_task(&item);
+            item
+        });
 
         let (execution, summary) = execute_one_task(
             task,
@@ -4352,7 +4363,7 @@ fn execute_ordered_tasks_sequentially(
             named_caches,
             &summaries,
             task_progress.as_mut(),
-            &cancellation,
+            cancellation,
         )?;
 
         summaries.insert(task.id.clone(), summary);
@@ -4390,7 +4401,7 @@ fn execute_ordered_tasks_parallel(
     let mut running = BTreeSet::new();
     let mut executions: Vec<Option<TaskExecution>> = vec![None; ordered.len()];
     let (sender, receiver) = mpsc::channel();
-    let cancellation = Arc::new(AtomicBool::new(false));
+    let cancellation = options.cancellation;
     let mut first_error = None;
 
     while completed.len() < ordered.len() {
@@ -4528,7 +4539,7 @@ fn execute_one_task(
                 if !task.action.impure {
                     bail!("{} uses sandbox: false and must set impure: true", task.id);
                 }
-                run_unsandboxed_task(task, workspace_root)?;
+                run_unsandboxed_task(task, workspace_root, cancellation)?;
                 if let Some(progress) = progress.as_mut() {
                     progress.done("done");
                 }
@@ -4649,7 +4660,11 @@ fn execute_one_task(
     ))
 }
 
-fn run_unsandboxed_task(task: &Task, workspace_root: &Path) -> Result<()> {
+fn run_unsandboxed_task(
+    task: &Task,
+    workspace_root: &Path,
+    cancellation: &AtomicBool,
+) -> Result<()> {
     let opts = ExecRunOpts {
         argv: task.action.argv.clone(),
         display: task.action.display.clone(),
@@ -4679,7 +4694,7 @@ fn run_unsandboxed_task(task: &Task, workspace_root: &Path) -> Result<()> {
         force_cache: false,
         sandbox: false,
     };
-    exec_run_unsandboxed(workspace_root, opts).map(|_| ())
+    exec_run_unsandboxed(workspace_root, opts, Some(cancellation)).map(|_| ())
 }
 
 fn ordered_tasks(plan: &Plan) -> Result<Vec<&Task>> {
@@ -4792,46 +4807,7 @@ fn run_local_task(
         .spawn()
         .with_context(|| format!("execute {} in {}", task.id, cwd.display()))?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("{} stdout was not piped", task.id))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("{} stderr was not piped", task.id))?;
-    let (sender, receiver) = mpsc::channel();
-    let stdout_thread = spawn_output_reader(stdout, ProcessStream::Stdout, sender.clone());
-    let stderr_thread = spawn_output_reader(stderr, ProcessStream::Stderr, sender);
-
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    let status = loop {
-        if cancellation.load(Ordering::SeqCst) {
-            terminate_child(&mut child);
-            let _ = child.wait();
-            let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
-            drain_process_lines(&receiver, &mut stdout, &mut stderr);
-            bail!("{} canceled", task.id);
-        }
-        drain_process_lines(&receiver, &mut stdout, &mut stderr);
-        if let Some(status) = child
-            .try_wait()
-            .with_context(|| format!("wait for {}", task.id))?
-        {
-            break status;
-        }
-        match receiver.recv_timeout(Duration::from_millis(20)) {
-            Ok(line) => record_process_line(line, &mut stdout, &mut stderr),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {}
-        }
-    };
-
-    let _ = stdout_thread.join();
-    let _ = stderr_thread.join();
-    drain_process_lines(&receiver, &mut stdout, &mut stderr);
+    let (status, stdout, stderr) = wait_for_child_output(&mut child, &task.id, Some(cancellation))?;
 
     if !status.success() {
         report_process_failure(progress, &stdout, &stderr);
@@ -4948,20 +4924,100 @@ fn materialize_task_outputs_without_record(
     materialize_cached_outputs(&record, workspace_root)
 }
 
-fn terminate_child(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        let group = format!("-{}", child.id());
-        if Command::new("kill")
-            .args(["-TERM", "--", group.as_str()])
-            .status()
-            .map(|status| status.success())
+fn wait_for_child_output(
+    child: &mut Child,
+    display: &str,
+    cancellation: Option<&AtomicBool>,
+) -> Result<(ExitStatus, String, String)> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("{display} stdout was not piped"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("{display} stderr was not piped"))?;
+    let (sender, receiver) = mpsc::channel();
+    let stdout_thread = spawn_output_reader(stdout, ProcessStream::Stdout, sender.clone());
+    let stderr_thread = spawn_output_reader(stderr, ProcessStream::Stderr, sender);
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let status = loop {
+        if cancellation
+            .map(|cancellation| cancellation.load(Ordering::SeqCst))
             .unwrap_or(false)
         {
+            terminate_child_and_wait(child);
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            drain_process_lines(&receiver, &mut stdout, &mut stderr);
+            bail!("{display} canceled");
+        }
+        drain_process_lines(&receiver, &mut stdout, &mut stderr);
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("wait for {display}"))?
+        {
+            break status;
+        }
+        match receiver.recv_timeout(Duration::from_millis(20)) {
+            Ok(line) => record_process_line(line, &mut stdout, &mut stderr),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {}
+        }
+    };
+
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+    drain_process_lines(&receiver, &mut stdout, &mut stderr);
+    Ok((status, stdout, stderr))
+}
+
+fn terminate_child_and_wait(child: &mut Child) {
+    terminate_child(child);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() >= deadline => break,
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(_) => return,
+        }
+    }
+    kill_child(child);
+    let _ = child.wait();
+}
+
+fn terminate_child(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        if signal_child_process_group(child, "TERM") {
             return;
         }
     }
     let _ = child.kill();
+}
+
+fn kill_child(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        if signal_child_process_group(child, "KILL") {
+            return;
+        }
+    }
+    let _ = child.kill();
+}
+
+#[cfg(unix)]
+fn signal_child_process_group(child: &Child, signal: &str) -> bool {
+    let group = format!("-{}", child.id());
+    let signal = format!("-{signal}");
+    Command::new("kill")
+        .args([signal.as_str(), "--", group.as_str()])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 fn prepare_sandbox(task: &Task, workspace_root: &Path) -> Result<SandboxManifest> {
@@ -7112,7 +7168,7 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
         if !opts.impure {
             bail!("run({{ sandbox: false }}) requires impure: true");
         }
-        return exec_run_unsandboxed(workspace_root, opts);
+        return exec_run_unsandboxed(workspace_root, opts, None);
     }
 
     let sandbox_root = create_sandbox_root()?;
@@ -7251,39 +7307,7 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
         .spawn()
         .with_context(|| format!("run() command in {}", sandbox_root.display()))?;
 
-    let stdout_handle = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("run() stdout was not piped"))?;
-    let stderr_handle = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("run() stderr was not piped"))?;
-
-    let (sender, receiver) = mpsc::channel();
-    let stdout_reader = spawn_output_reader(stdout_handle, ProcessStream::Stdout, sender.clone());
-    let stderr_reader = spawn_output_reader(stderr_handle, ProcessStream::Stderr, sender);
-
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    let status = loop {
-        drain_process_lines(&receiver, &mut stdout, &mut stderr);
-        if let Some(status) = child
-            .try_wait()
-            .with_context(|| format!("wait for {}", opts.display))?
-        {
-            break status;
-        }
-        match receiver.recv_timeout(Duration::from_millis(20)) {
-            Ok(line) => record_process_line(line, &mut stdout, &mut stderr),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {}
-        }
-    };
-
-    let _ = stdout_reader.join();
-    let _ = stderr_reader.join();
-    drain_process_lines(&receiver, &mut stdout, &mut stderr);
+    let (status, stdout, stderr) = wait_for_child_output(&mut child, &opts.display, None)?;
 
     let exit_code = status.code().unwrap_or(-1);
     if !status.success() {
@@ -7368,7 +7392,11 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
     })
 }
 
-fn exec_run_unsandboxed(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunResult> {
+fn exec_run_unsandboxed(
+    workspace_root: &Path,
+    opts: ExecRunOpts,
+    cancellation: Option<&AtomicBool>,
+) -> Result<ExecRunResult> {
     let cmd_display = if opts.display.is_empty() {
         opts.argv.join(" ")
     } else {
@@ -7392,16 +7420,12 @@ fn exec_run_unsandboxed(workspace_root: &Path, opts: ExecRunOpts) -> Result<Exec
     #[cfg(unix)]
     command.process_group(0);
 
-    let child = command
+    let mut child = command
         .spawn()
         .with_context(|| format!("run() command in {}", workspace_root.display()))?;
-    let output = child
-        .wait_with_output()
-        .with_context(|| format!("wait for {}", opts.display))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    let exit_code = output.status.code().unwrap_or(-1);
-    if !output.status.success() {
+    let (status, stdout, stderr) = wait_for_child_output(&mut child, &opts.display, cancellation)?;
+    let exit_code = status.code().unwrap_or(-1);
+    if !status.success() {
         bail!(
             "{} failed with exit code {}\nstdout:\n{}\nstderr:\n{}",
             opts.display,
@@ -8247,6 +8271,53 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         );
         assert!(error.contains("failed with status"), "{error}");
         std::thread::sleep(Duration::from_millis(1100));
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn executor_cancels_running_task_from_external_flag() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("external-cancel.marker");
+        let task_id = unique_task_id("external-cancel");
+        let slow_cmd = format!("sleep 5 && printf slow > {}", marker.display());
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![task_id.clone()],
+            named_caches: Vec::new(),
+            tasks: vec![executable_task(
+                &task_id,
+                &[],
+                &["sh", "-c", &slow_cmd],
+                None,
+            )],
+        };
+
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let cancellation_thread = Arc::clone(&cancellation);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            cancellation_thread.store(true, Ordering::SeqCst);
+        });
+
+        let started = std::time::Instant::now();
+        let error = format!(
+            "{:#}",
+            execute_plan_with_options(
+                &plan,
+                None,
+                root.path(),
+                ExecutionOptions::new(ExecutionMode::Local, 1).with_cancellation(cancellation),
+                None,
+            )
+            .unwrap_err()
+        );
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "external cancellation waited for task to finish"
+        );
+        assert!(error.contains("canceled"), "{error}");
+        std::thread::sleep(Duration::from_millis(200));
         assert!(!marker.exists());
     }
 

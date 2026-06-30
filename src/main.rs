@@ -4,17 +4,21 @@ mod env;
 mod runtime;
 mod spike;
 mod toolchain;
+mod ui;
 mod workspace;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use env::{Env, LocalEnv, WslEnv};
 
-type Tree = Arc<prodash::tree::Root>;
+type Tree = ui::Tree;
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -155,29 +159,33 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+    let cancellation = install_termination_signal_flag()?;
 
-    let tree: Tree = prodash::tree::Root::new();
-    let render = prodash::render::line::render(
-        std::io::stderr(),
-        Arc::downgrade(&tree),
-        prodash::render::line::Options {
-            throughput: false,
-            initial_delay: Some(std::time::Duration::from_millis(100)),
-            ..prodash::render::line::Options::default()
-        },
-    );
-
-    let result = run_inner(cli, &tree).await;
-
-    // Wait for the renderer thread to finish its last frame before we return.
-    // JoinHandle::drop() only signals shutdown without waiting, which would race
-    // with any output printed by main() after run() returns.
-    render.shutdown_and_wait();
+    let ui = ui::Session::start();
+    let result = run_inner(cli, ui.tree(), cancellation).await;
+    ui.shutdown();
 
     result
 }
 
-async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
+fn install_termination_signal_flag() -> Result<Arc<AtomicBool>> {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    {
+        for signal in signal_hook::consts::TERM_SIGNALS {
+            signal_hook::flag::register(*signal, Arc::clone(&cancellation))
+                .with_context(|| format!("register signal handler for {signal}"))?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&cancellation))
+            .context("register signal handler for SIGINT")?;
+    }
+    Ok(cancellation)
+}
+
+async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Result<()> {
     // The QuickJS spike only evaluates workspace definition files. It
     // must not acquire this project's toolchains or generate workspace files.
     match &cli.command {
@@ -202,6 +210,7 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
                 *jobs,
                 *no_cache,
                 platform,
+                Arc::clone(&cancellation),
                 tree,
             )
             .await;
@@ -223,7 +232,8 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
             jobs,
             no_cache,
         } => {
-            return cmd_build_planned(selectors, *jobs, *no_cache, tree).await;
+            return cmd_build_planned(selectors, *jobs, *no_cache, Arc::clone(&cancellation), tree)
+                .await;
         }
         Cmd::Explain { product } => {
             return cmd_explain(product, tree).await;
@@ -338,6 +348,7 @@ async fn cmd_plan(
     jobs: usize,
     no_cache: bool,
     platform: &str,
+    cancellation: Arc<AtomicBool>,
     tree: &Tree,
 ) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
@@ -369,10 +380,14 @@ async fn cmd_plan(
         } else {
             spike::ExecutionMode::Local
         };
+        if cancellation.load(Ordering::SeqCst) {
+            anyhow::bail!("execution canceled");
+        }
         let mut progress = tree.add_child("execute plan");
         let options = spike::ExecutionOptions::new(mode, jobs)
             .with_platform(platform)
-            .with_no_cache(no_cache);
+            .with_no_cache(no_cache)
+            .with_cancellation(Arc::clone(&cancellation));
         let report = match spike::execute_plan_with_options(
             &plan,
             Some(&workspace),
@@ -396,6 +411,7 @@ async fn cmd_build_planned(
     selectors: &[String],
     jobs: usize,
     no_cache: bool,
+    cancellation: Arc<AtomicBool>,
     tree: &Tree,
 ) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
@@ -418,12 +434,17 @@ async fn cmd_build_planned(
         task_count,
         if task_count == 1 { "task" } else { "tasks" },
     ));
+    if cancellation.load(Ordering::SeqCst) {
+        anyhow::bail!("execution canceled");
+    }
 
     let report = match spike::execute_plan_with_options(
         &plan,
         Some(&workspace),
         &workspace_root,
-        spike::ExecutionOptions::new(spike::ExecutionMode::Local, jobs).with_no_cache(no_cache),
+        spike::ExecutionOptions::new(spike::ExecutionMode::Local, jobs)
+            .with_no_cache(no_cache)
+            .with_cancellation(Arc::clone(&cancellation)),
         Some(&mut progress),
     ) {
         Ok(report) => report,
