@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -9,9 +10,10 @@ use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use walkdir::WalkDir;
 
+use crate::exec::ExecToolSpec;
 use crate::spike::{Artifact, NamedCache, Plan, Task};
 
-pub(crate) const TASK_CACHE_VERSION: u32 = 2;
+pub(crate) const TASK_CACHE_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Cache types
@@ -361,6 +363,95 @@ pub(crate) fn digest_json<T: Serialize>(value: &T) -> Result<String> {
     Ok(digest_bytes(&encoded))
 }
 
+// ---------------------------------------------------------------------------
+// Tool fingerprints
+// ---------------------------------------------------------------------------
+
+/// Identity of a tool, folded into the action digest. The fingerprint is a
+/// content hash of the entire resolved tool tree, so a tool whose bytes change
+/// (e.g. a new compiler build provisioned under the same named-cache key)
+/// invalidates dependent tasks even though its declared `key` is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ToolFingerprint {
+    pub(crate) name: String,
+    pub(crate) digest: String,
+}
+
+/// Per-process stat cache mapping (path, mtime, size) -> content digest so a
+/// tool tree is hashed at most once per file per process. Mirrors Bazel's
+/// stat-based digest cache; not yet persisted across invocations.
+static FILE_DIGEST_CACHE: Mutex<Option<HashMap<(PathBuf, u128, u64), String>>> = Mutex::new(None);
+
+fn cached_file_digest(path: &Path, meta: &std::fs::Metadata) -> Result<String> {
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let key = (path.to_path_buf(), mtime, meta.len());
+    {
+        let mut guard = FILE_DIGEST_CACHE.lock().expect("file digest cache poisoned");
+        if let Some(hit) = guard.get_or_insert_with(HashMap::new).get(&key) {
+            return Ok(hit.clone());
+        }
+    }
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let digest = digest_bytes(&bytes);
+    FILE_DIGEST_CACHE
+        .lock()
+        .expect("file digest cache poisoned")
+        .get_or_insert_with(HashMap::new)
+        .insert(key, digest.clone());
+    Ok(digest)
+}
+
+/// Content-hash an entire tool tree (every regular file under `root`, including
+/// relative path and mode), using the stat cache to avoid re-reading unchanged
+/// files. Errors if the tool has not been provisioned yet.
+fn fingerprint_tool_path(root: &Path) -> Result<String> {
+    let root_meta = std::fs::symlink_metadata(root)
+        .with_context(|| format!("stat tool path {}", root.display()))?;
+    if root_meta.is_file() {
+        return cached_file_digest(root, &root_meta);
+    }
+    let mut entries: Vec<(String, Option<u32>, String)> = Vec::new();
+    for entry in WalkDir::new(root) {
+        let entry = entry.with_context(|| format!("walk tool path {}", root.display()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .with_context(|| format!("strip {} from {}", root.display(), entry.path().display()))?
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let meta = entry
+            .metadata()
+            .with_context(|| format!("stat {}", entry.path().display()))?;
+        let digest = cached_file_digest(entry.path(), &meta)?;
+        entries.push((relative, file_mode(entry.path())?, digest));
+    }
+    entries.sort();
+    digest_json(&entries)
+}
+
+/// Compute the fingerprint of every tool an action depends on. Run at task
+/// cache evaluation time (after dependencies have produced the tools), not at
+/// plan time, so out-of-band provisioned toolchains are present on disk.
+pub(crate) fn fingerprint_tools(tools: &[ExecToolSpec]) -> Result<Vec<ToolFingerprint>> {
+    let mut out = Vec::with_capacity(tools.len());
+    for tool in tools {
+        out.push(ToolFingerprint {
+            name: tool.name.clone(),
+            digest: fingerprint_tool_path(&tool.path)?,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
 pub(crate) fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
     let digest = digest_bytes(bytes);
     let blob_path = cas_blob_path(&digest)?;
@@ -495,12 +586,14 @@ pub(crate) fn evaluate_task_cache(
     task: &Task,
     workspace_root: &Path,
     named_caches: &[NamedCache],
+    config_digest: &str,
     completed_dependencies: &BTreeMap<String, TaskCacheSummary>,
 ) -> Result<TaskCacheEvaluation> {
     evaluate_task_cache_with_lookup(
         task,
         workspace_root,
         named_caches,
+        config_digest,
         completed_dependencies,
         true,
     )
@@ -510,11 +603,13 @@ pub(crate) fn evaluate_task_cache_with_lookup(
     task: &Task,
     workspace_root: &Path,
     named_caches: &[NamedCache],
+    config_digest: &str,
     completed_dependencies: &BTreeMap<String, TaskCacheSummary>,
     lookup_cache: bool,
 ) -> Result<TaskCacheEvaluation> {
     let bindings = named_cache_bindings(workspace_root, named_caches)?;
     let input_digests = digest_task_inputs(task, workspace_root)?;
+    let tool_fingerprints = fingerprint_tools(&task.action.tools)?;
     let mut dependency_keys = Vec::new();
     for dependency in &task.dependencies {
         if let Some(summary) = completed_dependencies.get(dependency) {
@@ -528,12 +623,14 @@ pub(crate) fn evaluate_task_cache_with_lookup(
         "target": task.target,
         "product": task.product,
         "action": task.action,
+        "tool_fingerprints": tool_fingerprints,
         "outputs": task.outputs,
     }))?;
     let task_key = digest_json(&serde_json::json!({
         "version": TASK_CACHE_VERSION,
         "task_id": task.id,
         "action_digest": action_digest,
+        "config_digest": config_digest,
         "input_digests": input_digests,
         "dependency_keys": dependency_keys,
         "named_caches": bindings,
@@ -988,7 +1085,13 @@ pub fn explain_task_cache(
 
     let mut summaries = BTreeMap::new();
     for task in ordered {
-        let evaluation = evaluate_task_cache(task, workspace_root, &plan.named_caches, &summaries)?;
+        let evaluation = evaluate_task_cache(
+            task,
+            workspace_root,
+            &plan.named_caches,
+            &plan.config_digest,
+            &summaries,
+        )?;
         if task.id == selected_id {
             return Ok(CacheExplanation {
                 task_id: task.id.clone(),

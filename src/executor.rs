@@ -22,7 +22,8 @@ use crate::cache::{
 };
 use crate::exec::{
     exec_run_unsandboxed, materialize_tools_into_sandbox, report_process_failure,
-    sandbox_command_env, wait_for_child_output, ExecIoSpec, ExecRunOpts,
+    ensure_path, sandbox_command_env, sandbox_home_tmp, wait_for_child_output, ExecIoSpec,
+    ExecRunOpts,
 };
 use crate::runtime::LiveWorkspace;
 use crate::spike::{NamedCache, Plan, Task};
@@ -206,6 +207,7 @@ pub fn execute_plan_with_options(
             &options.platform,
             options.no_cache,
             &plan.named_caches,
+            &plan.config_digest,
             &options.cancellation,
             progress,
         )?
@@ -215,6 +217,7 @@ pub fn execute_plan_with_options(
             workspace_root,
             options,
             &plan.named_caches,
+            &plan.config_digest,
             progress,
         )?
     };
@@ -228,6 +231,7 @@ fn execute_ordered_tasks_sequentially(
     active_platform: &str,
     no_cache: bool,
     named_caches: &[NamedCache],
+    config_digest: &str,
     cancellation: &AtomicBool,
     mut progress: Option<&mut prodash::tree::Item>,
 ) -> Result<Vec<TaskExecution>> {
@@ -247,6 +251,7 @@ fn execute_ordered_tasks_sequentially(
             active_platform,
             no_cache,
             named_caches,
+            config_digest,
             &summaries,
             task_progress.as_mut(),
             cancellation,
@@ -288,6 +293,7 @@ fn execute_ordered_tasks_parallel(
     workspace_root: &Path,
     options: ExecutionOptions,
     named_caches: &[NamedCache],
+    config_digest: &str,
     mut progress: Option<&mut prodash::tree::Item>,
 ) -> Result<Vec<TaskExecution>> {
     let mut task_by_id: BTreeMap<&str, &Task> = ordered
@@ -336,6 +342,7 @@ fn execute_ordered_tasks_parallel(
                 let active_platform = options.platform.clone();
                 let no_cache = options.no_cache;
                 let named_caches = named_caches.to_vec();
+                let config_digest = config_digest.to_owned();
                 let dependency_summaries = summaries.clone();
                 let task = task.clone();
                 let cancellation = Arc::clone(&cancellation);
@@ -348,6 +355,7 @@ fn execute_ordered_tasks_parallel(
                         &active_platform,
                         no_cache,
                         &named_caches,
+                        &config_digest,
                         &dependency_summaries,
                         task_progress.as_mut(),
                         &cancellation,
@@ -407,6 +415,7 @@ fn execute_one_task(
     active_platform: &str,
     no_cache: bool,
     named_caches: &[NamedCache],
+    config_digest: &str,
     completed_dependencies: &BTreeMap<String, TaskCacheSummary>,
     mut progress: Option<&mut prodash::tree::Item>,
     cancellation: &AtomicBool,
@@ -461,6 +470,7 @@ fn execute_one_task(
                     task,
                     workspace_root,
                     named_caches,
+                    config_digest,
                     completed_dependencies,
                     !no_cache,
                 )?;
@@ -499,6 +509,7 @@ fn execute_one_task(
                     task,
                     workspace_root,
                     named_caches,
+                    config_digest,
                     completed_dependencies,
                     !no_cache,
                 )?;
@@ -552,6 +563,7 @@ fn execute_one_task(
                 task,
                 workspace_root,
                 named_caches,
+                config_digest,
                 completed_dependencies,
                 !no_cache,
             )?
@@ -659,6 +671,10 @@ fn run_local_task(
     }
     let command_env = sandbox_command_env(&task.action.env, &tool_path_entries)?;
     task_env.extend(command_env.clone());
+    let (home_dir, tmp_dir) = sandbox_home_tmp(&sandbox.sandbox_root)?;
+    task_env.insert("HOME".to_owned(), home_dir.to_string_lossy().into_owned());
+    task_env.insert("TMPDIR".to_owned(), tmp_dir.to_string_lossy().into_owned());
+    ensure_path(&mut task_env);
     task_env.insert(
         "IMP_SANDBOX_ROOT".to_owned(),
         sandbox.sandbox_root.to_string_lossy().into_owned(),
@@ -685,6 +701,7 @@ fn run_local_task(
     command
         .args(args)
         .current_dir(&cwd)
+        .env_clear()
         .envs(&task_env)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

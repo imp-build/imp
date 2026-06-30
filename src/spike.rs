@@ -184,6 +184,11 @@ pub struct Plan {
     pub goal: String,
     pub roots: Vec<String>,
     pub named_caches: Vec<NamedCache>,
+    /// Digest of the workspace configuration in effect when this plan was built.
+    /// Folded into every task key so a configuration change invalidates the
+    /// task cache even when it does not surface in a task's argv/env/inputs.
+    #[serde(default)]
+    pub config_digest: String,
     pub tasks: Vec<Task>,
 }
 
@@ -1921,7 +1926,21 @@ async fn plan_inner(
         root_tasks.push(planner.request(&target.address, product).await?);
     }
 
-    let tasks: Vec<Task> = planner.tasks.into_values().collect();
+    let mut tasks: Vec<Task> = planner.tasks.into_values().collect();
+
+    // Snapshot the allowlisted host environment into each task's action env so
+    // ambient state that genuinely affects output is both available at exec time
+    // (after the env scrub) and captured by the task cache key. Explicit action
+    // env wins over the snapshot.
+    let passthrough = crate::exec::passthrough_env_snapshot();
+    for task in &mut tasks {
+        for (key, value) in &passthrough {
+            task.action
+                .env
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+    }
 
     // Validate that every task's platform constraint references a registered platform.
     for task in &tasks {
@@ -1941,6 +1960,7 @@ async fn plan_inner(
         goal: goal.to_owned(),
         roots: root_tasks,
         named_caches: workspace.named_caches.values().cloned().collect(),
+        config_digest: crate::cache::digest_json(&workspace.workspace_config)?,
         tasks,
     })
 }
@@ -4187,6 +4207,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
     async fn dry_run_executor_uses_dependency_order_without_running_commands() {
         let root = tempfile::tempdir().unwrap();
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec!["consumer".to_owned()],
             named_caches: Vec::new(),
@@ -4228,6 +4249,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             .collect();
 
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![task_id.clone()],
             named_caches: Vec::new(),
@@ -4248,6 +4270,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let first_id = unique_task_id("parallel-a");
         let second_id = unique_task_id("parallel-b");
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![first_id.clone(), second_id.clone()],
             named_caches: Vec::new(),
@@ -4303,6 +4326,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             marker.display()
         );
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![consumer_id.clone()],
             named_caches: Vec::new(),
@@ -4345,6 +4369,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let downstream_id = unique_task_id("downstream");
         let downstream_cmd = format!("printf ran > {}", marker.display());
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![downstream_id.clone()],
             named_caches: Vec::new(),
@@ -4382,6 +4407,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let slow_id = unique_task_id("slow-sibling");
         let slow_cmd = format!("sleep 1 && printf slow > {}", marker.display());
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![failing_id.clone(), slow_id.clone()],
             named_caches: Vec::new(),
@@ -4420,6 +4446,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let task_id = unique_task_id("external-cancel");
         let slow_cmd = format!("sleep 5 && printf slow > {}", marker.display());
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![task_id.clone()],
             named_caches: Vec::new(),
@@ -4466,6 +4493,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let first_id = unique_task_id("seq-a");
         let second_id = unique_task_id("seq-b");
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![first_id.clone(), second_id.clone()],
             named_caches: Vec::new(),
@@ -4496,6 +4524,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let root = tempfile::tempdir().unwrap();
         let task_id = unique_task_id("write");
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![task_id.clone()],
             named_caches: Vec::new(),
@@ -4550,6 +4579,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             .map(|artifact| artifact.id.clone())
             .collect();
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![task_id],
             named_caches: Vec::new(),
@@ -4560,6 +4590,40 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         assert_eq!(
             std::fs::read_to_string(root.path().join("build/out.txt")).unwrap(),
             "hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_executor_scrubs_non_allowlisted_host_env() {
+        // A host env var that is not on the passthrough allowlist must not reach
+        // the task: env_clear plus the allowlist should hide it entirely.
+        std::env::set_var("IMP_TEST_LEAK", "leaked");
+        let root = tempfile::tempdir().unwrap();
+        let task_id = unique_task_id("env-scrub");
+        let task = executable_task(
+            &task_id,
+            &[],
+            &[
+                "sh",
+                "-c",
+                "mkdir -p build && printf '%s' \"${IMP_TEST_LEAK:-}\" > build/out.txt",
+            ],
+            Some("build/out.txt"),
+        );
+        let plan = Plan {
+            config_digest: String::new(),
+            goal: "build".to_owned(),
+            roots: vec![task_id.clone()],
+            named_caches: Vec::new(),
+            tasks: vec![task],
+        };
+
+        execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
+        std::env::remove_var("IMP_TEST_LEAK");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("build/out.txt")).unwrap(),
+            "",
+            "non-allowlisted host env var leaked into the sandbox"
         );
     }
 
@@ -4593,6 +4657,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             .map(|artifact| artifact.id.clone())
             .collect();
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![task_id.clone()],
             named_caches: Vec::new(),
@@ -4612,6 +4677,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         let root = tempfile::tempdir().unwrap();
         let task_id = unique_task_id("progress-write");
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![task_id.clone()],
             named_caches: Vec::new(),
@@ -4724,6 +4790,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             marker.display()
         );
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![task_id.clone()],
             named_caches: Vec::new(),
@@ -4761,6 +4828,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             marker.display()
         );
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![task_id.clone()],
             named_caches: Vec::new(),
@@ -4846,6 +4914,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             .map(|artifact| artifact.id.clone())
             .collect();
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![consumer_id.clone()],
             named_caches: Vec::new(),
@@ -4880,6 +4949,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             env_var: "IMP_NAMED_CACHE_TOOL_CACHE".to_owned(),
         }];
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![task_id.clone()],
             named_caches: named_caches.clone(),
@@ -4990,6 +5060,7 @@ export const generated = toolUser();
     async fn local_executor_reports_missing_declared_outputs() {
         let root = tempfile::tempdir().unwrap();
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec!["missing".to_owned()],
             named_caches: Vec::new(),
@@ -5199,6 +5270,7 @@ export const ignored = missing;
         );
         task.action.impure = true;
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![task_id.clone()],
             named_caches: Vec::new(),
@@ -5233,6 +5305,7 @@ export const ignored = missing;
         task.action.impure = true;
         task.action.force_cache = true;
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![task_id.clone()],
             named_caches: Vec::new(),
@@ -5262,6 +5335,7 @@ export const ignored = missing;
         task.action.impure = false;
         task.action.force_cache = false;
         let plan = Plan {
+            config_digest: String::new(),
             goal: "build".to_owned(),
             roots: vec![task_id.clone()],
             named_caches: Vec::new(),

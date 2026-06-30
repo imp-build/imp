@@ -434,6 +434,66 @@ fn resolve_tool_bin_dir(tool_root: &Path, bin_dir: &str) -> Result<PathBuf> {
     Ok(tool_root.join(relative))
 }
 
+/// Host environment variables allowed through the sandbox scrub. Anything not
+/// listed here (and not synthesized below) is removed before a task runs, so
+/// undeclared ambient state cannot silently affect a build. For planned tasks
+/// these are snapshotted into the (hashed) action env at plan time, so a change
+/// to one of them invalidates the task cache.
+pub(crate) const PASSTHROUGH_ENV_VARS: &[&str] = &[
+    "PATH",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "TZ",
+    "LANG",
+    "LANGUAGE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+];
+
+/// Prefixes of host environment variables allowed through (locale family).
+pub(crate) const PASSTHROUGH_ENV_PREFIXES: &[&str] = &["LC_"];
+
+/// Snapshot the allowlisted host environment. Used at plan time to fold ambient
+/// state that genuinely affects output into the hashed action env, and by the
+/// uncached `run()` paths at exec time.
+pub(crate) fn passthrough_env_snapshot() -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (key, value) in std::env::vars() {
+        let allowed = PASSTHROUGH_ENV_VARS.contains(&key.as_str())
+            || PASSTHROUGH_ENV_PREFIXES
+                .iter()
+                .any(|prefix| key.starts_with(prefix));
+        if allowed {
+            out.insert(key, value);
+        }
+    }
+    out
+}
+
+/// Create and return per-sandbox HOME and TMPDIR directories. Pinning these
+/// inside the sandbox stops tasks from reading or writing the real home/tmp.
+pub(crate) fn sandbox_home_tmp(sandbox_root: &Path) -> Result<(PathBuf, PathBuf)> {
+    let home = sandbox_root.join(".imp").join("home");
+    let tmp = sandbox_root.join(".imp").join("tmp");
+    std::fs::create_dir_all(&home).with_context(|| format!("create {}", home.display()))?;
+    std::fs::create_dir_all(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+    Ok((home, tmp))
+}
+
+/// Ensure a scrubbed env still has a PATH. Planned tasks carry PATH in their
+/// hashed action env; ad-hoc/uncached tasks fall back to the host PATH so bare
+/// commands like `sh` still resolve after `env_clear`.
+pub(crate) fn ensure_path(env: &mut BTreeMap<String, String>) {
+    if env.contains_key("PATH") {
+        return;
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        env.insert("PATH".to_owned(), path.to_string_lossy().into_owned());
+    }
+}
+
 pub(crate) fn sandbox_command_env(
     env: &BTreeMap<String, String>,
     tool_path_entries: &[PathBuf],
@@ -585,11 +645,18 @@ pub(crate) fn exec_run_inner(
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("run() argv must not be empty"))?;
 
-    let command_env = sandbox_command_env(&opts.env, &tool_path_entries)?;
+    let mut base_env = passthrough_env_snapshot();
+    base_env.extend(opts.env.clone());
+    let mut command_env = sandbox_command_env(&base_env, &tool_path_entries)?;
+    let (home_dir, tmp_dir) = sandbox_home_tmp(&sandbox_root)?;
+    command_env.insert("HOME".to_owned(), home_dir.to_string_lossy().into_owned());
+    command_env.insert("TMPDIR".to_owned(), tmp_dir.to_string_lossy().into_owned());
+    ensure_path(&mut command_env);
     let mut command = Command::new(program);
     command
         .args(args)
         .current_dir(&sandbox_root)
+        .env_clear()
         .envs(&command_env)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -705,11 +772,24 @@ pub(crate) fn exec_run_unsandboxed(
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("run() argv must not be empty"))?;
 
-    let command_env = sandbox_command_env(&opts.env, &tool_path_entries)?;
+    // Unsandboxed tasks are impure and run in the workspace, so HOME/TMPDIR pass
+    // through from the host rather than being pinned to a sandbox. We still scrub
+    // everything outside the allowlist to keep behaviour consistent with sandboxed
+    // execution.
+    let mut base_env = passthrough_env_snapshot();
+    for var in ["HOME", "TMPDIR"] {
+        if let Some(value) = std::env::var_os(var) {
+            base_env.insert(var.to_owned(), value.to_string_lossy().into_owned());
+        }
+    }
+    base_env.extend(opts.env.clone());
+    let mut command_env = sandbox_command_env(&base_env, &tool_path_entries)?;
+    ensure_path(&mut command_env);
     let mut command = Command::new(program);
     command
         .args(args)
         .current_dir(workspace_root)
+        .env_clear()
         .envs(&command_env)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
