@@ -1,0 +1,7 @@
+[package]
+name = "prodash-random"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+prodash = { version = "31", features = ["local-time", "render-line", "render-line-autoconfigure", "render-line-crossterm", "signal-hook"] }
