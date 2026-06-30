@@ -20,7 +20,7 @@ rusqlite     = { version = "0.31", features = ["bundled"] }
 sha2         = "0.10"
 tempfile     = "3"
 futures      = { version = "0.3", default-features = false, features = ["std"] }
-rquickjs     = { version = "0.8", features = ["loader"] }
+rquickjs     = { version = "0.12", features = ["loader", "futures", "macro"] }
 
 [profile.dev]
 opt-level = 1

@@ -16,15 +16,16 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
+use crate::runtime::{HostLogSink, LiveWorkspace};
 use crate::toolchain;
 use anyhow::{bail, Context, Result};
 use regex::Regex;
 use rquickjs::{
-    loader::{Loader, Resolver},
-    module::Declared,
+    function::Async,
+    loader::{ImportAttributes, Loader, Resolver},
     promise::MaybePromise,
-    Array, CatchResultExt, Context as JsContext, Ctx, Filter, Function, Module, Object, Runtime,
-    Value,
+    Array, AsyncContext as JsContext, AsyncRuntime as Runtime, CatchResultExt, Ctx, Filter,
+    Function, Module, Object, Value,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -37,94 +38,6 @@ use walkdir::WalkDir;
 const WORKSPACE_FILE: &str = "imp.workspace.js";
 const BUILD_FILE: &str = "BUILD.js";
 const TASK_CACHE_VERSION: u32 = 2;
-
-#[derive(Clone)]
-pub struct HostLogSink {
-    inner: Arc<Mutex<HostLogDestination>>,
-}
-
-enum HostLogDestination {
-    #[allow(dead_code)]
-    Stderr,
-    Prodash(prodash::tree::Item),
-}
-
-impl HostLogSink {
-    #[allow(dead_code)]
-    pub fn stderr() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(HostLogDestination::Stderr)),
-        }
-    }
-
-    pub fn prodash(item: prodash::tree::Item) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(HostLogDestination::Prodash(item))),
-        }
-    }
-
-    pub fn writer(&self, level: impl Into<String>) -> HostLogWriter {
-        HostLogWriter {
-            sink: self.clone(),
-            level: level.into(),
-            buffer: String::new(),
-        }
-    }
-
-    fn log(&self, level: &str, message: &str) {
-        let level = level.trim();
-        let text = format!("[{level}] {message}");
-        match &mut *self.inner.lock().unwrap() {
-            HostLogDestination::Stderr => eprintln!("{text}"),
-            HostLogDestination::Prodash(item) => item.message(host_log_message_level(level), text),
-        }
-    }
-}
-
-pub struct HostLogWriter {
-    sink: HostLogSink,
-    level: String,
-    buffer: String,
-}
-
-impl HostLogWriter {
-    fn emit_complete_lines(&mut self) {
-        while let Some(newline) = self.buffer.find('\n') {
-            let mut line = self.buffer.drain(..=newline).collect::<String>();
-            if line.ends_with('\n') {
-                line.pop();
-            }
-            if line.ends_with('\r') {
-                line.pop();
-            }
-            self.sink.log(&self.level, &line);
-        }
-    }
-}
-
-impl Write for HostLogWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.buffer.push_str(&String::from_utf8_lossy(buf));
-        self.emit_complete_lines();
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        if !self.buffer.is_empty() {
-            let line = std::mem::take(&mut self.buffer);
-            self.sink.log(&self.level, &line);
-        }
-        Ok(())
-    }
-}
-
-fn host_log_message_level(level: &str) -> prodash::messages::MessageLevel {
-    match level.to_ascii_lowercase().as_str() {
-        "error" | "failure" | "fail" => prodash::messages::MessageLevel::Failure,
-        "success" | "done" => prodash::messages::MessageLevel::Success,
-        _ => prodash::messages::MessageLevel::Info,
-    }
-}
 
 /// The built-in `imp:core` module exposed to every plugin and BUILD file.
 const CORE_JS: &str = r##"
@@ -1144,39 +1057,6 @@ pub struct BuildGenerateReport {
     pub checked_files: Vec<String>,
 }
 
-/// A loaded workspace with a live QuickJS runtime.
-///
-/// Keeps the runtime and context alive so that rule `exec` functions can be
-/// called during task execution. Use `Deref` to access the underlying
-/// [`Workspace`] for planning and inspection.
-pub struct LiveWorkspace {
-    pub workspace: Workspace,
-    #[allow(dead_code)]
-    pub(super) runtime: Runtime,
-    pub(super) ctx: Mutex<JsContext>,
-    /// Workspace root made available to host functions during task execution.
-    #[allow(dead_code)]
-    pub(super) exec_root: Arc<Mutex<Option<PathBuf>>>,
-}
-
-impl std::fmt::Debug for LiveWorkspace {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LiveWorkspace")
-            .field("workspace", &self.workspace)
-            .field("runtime", &"Runtime { .. }")
-            .field("ctx", &"Context { .. }")
-            .field("exec_root", &"Arc<Mutex<..>>")
-            .finish()
-    }
-}
-
-impl std::ops::Deref for LiveWorkspace {
-    type Target = Workspace;
-    fn deref(&self) -> &Workspace {
-        &self.workspace
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedCache {
     pub name: String,
@@ -1447,6 +1327,7 @@ impl Resolver for ImpResolver {
         _ctx: &Ctx<'js>,
         base: &str,
         name: &str,
+        _attributes: Option<ImportAttributes<'js>>,
     ) -> rquickjs::Result<String> {
         if name == "imp:core" {
             return Ok(name.to_owned());
@@ -1514,7 +1395,12 @@ impl Resolver for ImpResolver {
 }
 
 impl Loader for ImpLoader {
-    fn load<'js>(&mut self, ctx: &Ctx<'js>, name: &str) -> rquickjs::Result<Module<'js, Declared>> {
+    fn load<'js>(
+        &mut self,
+        ctx: &Ctx<'js>,
+        name: &str,
+        _attributes: Option<ImportAttributes<'js>>,
+    ) -> rquickjs::Result<Module<'js>> {
         if name == "imp:core" {
             return Module::declare(ctx.clone(), name, CORE_JS);
         }
@@ -1749,11 +1635,14 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
 /// Returns a [`LiveWorkspace`] that keeps the QuickJS runtime alive so rule
 /// `exec` functions can be invoked during task execution.
 #[allow(dead_code)]
-pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
-    load_workspace_with_host_log(root, HostLogSink::stderr())
+pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
+    load_workspace_with_host_log(root, HostLogSink::stderr()).await
 }
 
-pub fn load_workspace_with_host_log(root: &Path, host_log: HostLogSink) -> Result<LiveWorkspace> {
+pub async fn load_workspace_with_host_log(
+    root: &Path,
+    host_log: HostLogSink,
+) -> Result<LiveWorkspace> {
     let root = root
         .canonicalize()
         .with_context(|| format!("canonicalize workspace root {}", root.display()))?;
@@ -1773,8 +1662,11 @@ pub fn load_workspace_with_host_log(root: &Path, host_log: HostLogSink) -> Resul
             workspace_root: root.clone(),
             module_mounts: Arc::clone(&module_mounts),
         },
-    );
-    let ctx = JsContext::full(&rt).context("create QuickJS context")?;
+    )
+    .await;
+    let ctx = JsContext::full(&rt)
+        .await
+        .context("create QuickJS context")?;
 
     // ----- Register host globals -----
     {
@@ -1790,6 +1682,7 @@ pub fn load_workspace_with_host_log(root: &Path, host_log: HostLogSink) -> Resul
                 host_log.clone(),
             )
         })
+        .await
         .map_err(|e| anyhow::anyhow!("register QuickJS globals: {e}"))?;
     }
 
@@ -1798,7 +1691,7 @@ pub fn load_workspace_with_host_log(root: &Path, host_log: HostLogSink) -> Resul
     if workspace_js.is_file() {
         let source = std::fs::read_to_string(&workspace_js)
             .with_context(|| format!("read {}", workspace_js.display()))?;
-        ctx.with(|ctx| -> Result<()> {
+        ctx.async_with(async |ctx| -> Result<()> {
             let module = Module::declare(ctx.clone(), WORKSPACE_FILE, source)
                 .catch(&ctx)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1807,11 +1700,13 @@ pub fn load_workspace_with_host_log(root: &Path, host_log: HostLogSink) -> Resul
                 .catch(&ctx)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             promise
-                .finish::<rquickjs::Value>()
+                .into_future::<rquickjs::Value>()
+                .await
                 .catch(&ctx)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(())
         })
+        .await
         .with_context(|| format!("evaluate {}", workspace_js.display()))?;
     }
 
@@ -1845,13 +1740,14 @@ pub fn load_workspace_with_host_log(root: &Path, host_log: HostLogSink) -> Resul
         let module_name = build_module_name_for(&root, build_file, &scope)?;
 
         let exports = ctx
-            .with(|ctx| -> Result<Vec<(String, u32)>> {
+            .async_with(async |ctx| -> Result<Vec<(String, u32)>> {
                 // dynamic import → Promise<namespace>
                 let promise = Module::import(&ctx, module_name.as_str())
                     .catch(&ctx)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 let ns: Object = promise
-                    .finish()
+                    .into_future()
+                    .await
                     .catch(&ctx)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -1868,6 +1764,7 @@ pub fn load_workspace_with_host_log(root: &Path, host_log: HostLogSink) -> Resul
                 }
                 Ok(result)
             })
+            .await
             .with_context(|| format!("process {}", build_file.display()))?;
 
         for (name, id) in exports {
@@ -1924,7 +1821,7 @@ pub fn load_workspace_with_host_log(root: &Path, host_log: HostLogSink) -> Resul
     Ok(LiveWorkspace {
         workspace,
         runtime: rt,
-        ctx: Mutex::new(ctx),
+        ctx,
         exec_root,
     })
 }
@@ -3092,22 +2989,32 @@ fn register_globals<'js>(
     let exec_root_run = Arc::clone(&exec_root);
     let host_run = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>, opts: Object<'js>| -> rquickjs::Result<Object<'js>> {
-            let root = exec_root_run.lock().unwrap().clone().ok_or_else(|| {
-                rquickjs::Error::new_loading_message(
-                    "run",
-                    "run() called outside of execution context",
-                )
-            })?;
-            let run_opts = parse_exec_run_opts(opts, &root)?;
-            let result = exec_run_inner(&root, run_opts)
-                .map_err(|e| rquickjs::Error::new_loading_message("run", format!("{e:#}")))?;
-            let obj = Object::new(ctx)?;
-            obj.set("stdout", result.stdout)?;
-            obj.set("stderr", result.stderr)?;
-            obj.set("exitCode", result.exit_code)?;
-            Ok(obj)
-        },
+        Async(move |ctx: Ctx<'js>, opts: Object<'js>| {
+            let exec_root_run = Arc::clone(&exec_root_run);
+            async move {
+                let root = exec_root_run.lock().unwrap().clone().ok_or_else(|| {
+                    rquickjs::Error::new_loading_message(
+                        "run",
+                        "run() called outside of execution context",
+                    )
+                })?;
+                let run_opts = parse_exec_run_opts(opts, &root)?;
+                let result = tokio::task::spawn_blocking(move || exec_run_inner(&root, run_opts))
+                    .await
+                    .map_err(|e| {
+                        rquickjs::Error::new_loading_message(
+                            "run",
+                            format!("native run task failed: {e}"),
+                        )
+                    })?
+                    .map_err(|e| rquickjs::Error::new_loading_message("run", format!("{e:#}")))?;
+                let obj = Object::new(ctx)?;
+                obj.set("stdout", result.stdout)?;
+                obj.set("stderr", result.stderr)?;
+                obj.set("exitCode", result.exit_code)?;
+                Ok::<Object<'js>, rquickjs::Error>(obj)
+            }
+        }),
     )?;
     globals.set("__host_run", host_run)?;
 
@@ -3118,73 +3025,81 @@ fn register_globals<'js>(
     let exec_root_wm = Arc::clone(&exec_root);
     let host_workspace_mutation = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>, opts: Object<'js>| -> rquickjs::Result<Object<'js>> {
-            let root = exec_root_wm.lock().unwrap().clone().ok_or_else(|| {
-                rquickjs::Error::new_loading_message(
-                    "workspace_mutation",
-                    "workspace_mutation() called outside of execution context",
-                )
-            })?;
-            let argv: Vec<String> = opts.get("argv")?;
-            let display: Option<String> = opts.get("display")?;
-            let display = display.unwrap_or_else(|| argv.join(" "));
-            let watch: Option<Vec<String>> = opts.get("watch")?;
-
-            let pre = watch
-                .as_deref()
-                .map(|patterns| {
-                    snapshot_watched_files(&root, patterns).map_err(|e| {
-                        rquickjs::Error::new_loading_message(
-                            "workspace_mutation",
-                            format!("pre-snapshot: {e:#}"),
-                        )
-                    })
-                })
-                .transpose()?;
-
-            let (program, args) = argv.split_first().ok_or_else(|| {
-                rquickjs::Error::new_loading_message("workspace_mutation", "argv must not be empty")
-            })?;
-            let output = std::process::Command::new(program)
-                .args(args)
-                .current_dir(&root)
-                .output()
-                .map_err(|e| {
+        Async(move |ctx: Ctx<'js>, opts: Object<'js>| {
+            let exec_root_wm = Arc::clone(&exec_root_wm);
+            async move {
+                let root = exec_root_wm.lock().unwrap().clone().ok_or_else(|| {
                     rquickjs::Error::new_loading_message(
                         "workspace_mutation",
-                        format!("spawn {display}: {e}"),
+                        "workspace_mutation() called outside of execution context",
                     )
                 })?;
+                let argv: Vec<String> = opts.get("argv")?;
+                let display: Option<String> = opts.get("display")?;
+                let display = display.unwrap_or_else(|| argv.join(" "));
+                let watch: Option<Vec<String>> = opts.get("watch")?;
+                let (stdout, stderr, exit_code, changed_files) =
+                    tokio::task::spawn_blocking(move || -> Result<_> {
+                        let pre = watch
+                            .as_deref()
+                            .map(|patterns| {
+                                snapshot_watched_files(&root, patterns)
+                                    .with_context(|| "pre-snapshot")
+                            })
+                            .transpose()?;
 
-            let obj = Object::new(ctx.clone())?;
-            obj.set(
-                "stdout",
-                String::from_utf8_lossy(&output.stdout).to_string(),
-            )?;
-            obj.set(
-                "stderr",
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            )?;
-            obj.set("exitCode", output.status.code().unwrap_or(-1))?;
+                        let (program, args) = argv
+                            .split_first()
+                            .ok_or_else(|| anyhow::anyhow!("argv must not be empty"))?;
+                        let output = std::process::Command::new(program)
+                            .args(args)
+                            .current_dir(&root)
+                            .output()
+                            .with_context(|| format!("spawn {display}"))?;
 
-            if let Some(pre_snap) = pre {
-                let post_snap =
-                    snapshot_watched_files(&root, watch.as_deref().unwrap()).map_err(|e| {
+                        let changed_files = if let Some(pre_snap) = pre {
+                            let watch = watch.as_deref().unwrap_or_default();
+                            let post_snap = snapshot_watched_files(&root, watch)
+                                .with_context(|| "post-snapshot")?;
+                            Some(diff_snapshots(&pre_snap, &post_snap))
+                        } else {
+                            None
+                        };
+
+                        Ok((
+                            String::from_utf8_lossy(&output.stdout).to_string(),
+                            String::from_utf8_lossy(&output.stderr).to_string(),
+                            output.status.code().unwrap_or(-1),
+                            changed_files,
+                        ))
+                    })
+                    .await
+                    .map_err(|e| {
                         rquickjs::Error::new_loading_message(
                             "workspace_mutation",
-                            format!("post-snapshot: {e:#}"),
+                            format!("native mutation task failed: {e}"),
                         )
+                    })?
+                    .map_err(|e| {
+                        rquickjs::Error::new_loading_message("workspace_mutation", format!("{e:#}"))
                     })?;
-                let changed = diff_snapshots(&pre_snap, &post_snap);
-                let arr = rquickjs::Array::new(ctx)?;
-                for (i, entry) in changed.iter().enumerate() {
-                    arr.set(i, entry.as_str())?;
-                }
-                obj.set("changed_files", arr)?;
-            }
 
-            Ok(obj)
-        },
+                let obj = Object::new(ctx.clone())?;
+                obj.set("stdout", stdout)?;
+                obj.set("stderr", stderr)?;
+                obj.set("exitCode", exit_code)?;
+
+                if let Some(changed) = changed_files {
+                    let arr = rquickjs::Array::new(ctx)?;
+                    for (i, entry) in changed.iter().enumerate() {
+                        arr.set(i, entry.as_str())?;
+                    }
+                    obj.set("changed_files", arr)?;
+                }
+
+                Ok::<Object<'js>, rquickjs::Error>(obj)
+            }
+        }),
     )?;
     globals.set("__host_workspace_mutation", host_workspace_mutation)?;
 
@@ -3695,11 +3610,11 @@ fn merge_workspace_config(existing: &mut serde_json::Value, patch: serde_json::V
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-pub fn plan(workspace: &Workspace, goal: &str, selectors: &[String]) -> Result<Plan> {
-    plan_inner(workspace, None, None, goal, selectors)
+pub async fn plan(workspace: &Workspace, goal: &str, selectors: &[String]) -> Result<Plan> {
+    plan_inner(workspace, None, None, goal, selectors).await
 }
 
-pub fn plan_live(
+pub async fn plan_live(
     live: &LiveWorkspace,
     workspace_root: &Path,
     goal: &str,
@@ -3712,9 +3627,10 @@ pub fn plan_live(
         goal,
         selectors,
     )
+    .await
 }
 
-fn plan_inner(
+async fn plan_inner(
     workspace: &Workspace,
     live: Option<&LiveWorkspace>,
     workspace_root: Option<&Path>,
@@ -3738,7 +3654,7 @@ fn plan_inner(
     };
     let mut root_tasks = Vec::new();
     for (target, product) in &roots {
-        root_tasks.push(planner.request(&target.address, product)?);
+        root_tasks.push(planner.request(&target.address, product).await?);
     }
 
     let tasks: Vec<Task> = planner.tasks.into_values().collect();
@@ -3869,7 +3785,7 @@ struct Planner<'a> {
 }
 
 impl Planner<'_> {
-    fn request(&mut self, target_address: &str, product: &str) -> Result<String> {
+    async fn request(&mut self, target_address: &str, product: &str) -> Result<String> {
         let id = format!("{target_address}#{product}");
         if self.tasks.contains_key(&id) {
             return Ok(id);
@@ -3898,7 +3814,8 @@ impl Planner<'_> {
                     target,
                     product,
                     &mut self.tasks,
-                )?;
+                )
+                .await?;
                 return Ok(root_id);
             }
 
@@ -3937,14 +3854,14 @@ impl Planner<'_> {
     }
 }
 
-fn add_product_discovered_tasks(
+async fn add_product_discovered_tasks(
     live: &LiveWorkspace,
     workspace_root: &Path,
     target: &Target,
     product: &str,
     tasks: &mut BTreeMap<String, Task>,
 ) -> Result<String> {
-    let result = introspect_product(live, &target.address, product)?;
+    let result = introspect_product(live, &target.address, product).await?;
     let prefix = format!("{}#{}", target.address, product);
     let id_to_address: std::collections::HashMap<u32, &str> = live
         .workspace
@@ -6125,7 +6042,7 @@ pub struct IntrospectResult {
 /// Dry-run a product function and capture its memo call graph and effects.
 ///
 /// Calls `setIntrospectMode(true)` so `run()` records intent without executing.
-pub fn introspect_product(
+pub async fn introspect_product(
     live: &LiveWorkspace,
     target_addr: &str,
     product_name: &str,
@@ -6150,10 +6067,10 @@ pub fn introspect_product(
 
     let js_id = target.js_id;
 
-    let ctx_guard = live.ctx.lock().unwrap();
-    let result = ctx_guard
-        .with(
-            |ctx| -> rquickjs::Result<(
+    let result = live
+        .ctx
+        .async_with(
+            async |ctx| -> rquickjs::Result<(
                 Vec<serde_json::Value>,
                 Vec<serde_json::Value>,
                 std::collections::HashMap<String, String>,
@@ -6173,7 +6090,7 @@ pub fn introspect_product(
                 let result: MaybePromise = product_fn.call((handle,)).catch(&ctx).map_err(|e| {
                     rquickjs::Error::new_loading_message("introspect", format!("{e}"))
                 })?;
-                result.finish::<()>().catch(&ctx).map_err(|e| {
+                result.into_future::<()>().await.catch(&ctx).map_err(|e| {
                     rquickjs::Error::new_loading_message("introspect", format!("{e}"))
                 })?;
 
@@ -6222,8 +6139,8 @@ pub fn introspect_product(
                 Ok((trace, deps, key_display, key_product_calls))
             },
         )
+        .await
         .map_err(|e| anyhow::anyhow!("introspect_product failed: {e}"))?;
-    drop(ctx_guard);
 
     // Replace "#N" handle tokens in display labels with workspace addresses.
     let id_to_address: std::collections::HashMap<u32, &str> = live
@@ -6361,7 +6278,7 @@ struct GeneratedBuildTarget {
 }
 
 /// Evaluate a product and return its JSON-serializable value.
-pub fn evaluate_product_json(
+pub async fn evaluate_product_json(
     live: &LiveWorkspace,
     target_addr: &str,
     product_name: &str,
@@ -6384,9 +6301,8 @@ pub fn evaluate_product_json(
         })?
         .clone();
 
-    let ctx_guard = live.ctx.lock().unwrap();
-    ctx_guard
-        .with(|ctx| -> rquickjs::Result<serde_json::Value> {
+    live.ctx
+        .async_with(async |ctx| -> rquickjs::Result<serde_json::Value> {
             let reset: Function = ctx.globals().get("resetMemoState")?;
             reset.call::<_, ()>(())?;
 
@@ -6399,7 +6315,8 @@ pub fn evaluate_product_json(
                 .catch(&ctx)
                 .map_err(|e| rquickjs::Error::new_loading_message("product", format!("{e}")))?;
             let value: Value = result
-                .finish()
+                .into_future()
+                .await
                 .catch(&ctx)
                 .map_err(|e| rquickjs::Error::new_loading_message("product", format!("{e}")))?;
 
@@ -6415,17 +6332,17 @@ pub fn evaluate_product_json(
             serde_json::from_str(&json)
                 .map_err(|e| rquickjs::Error::new_loading_message("product", e.to_string()))
         })
+        .await
         .map_err(|e| anyhow::anyhow!("evaluate_product_json failed: {e}"))
 }
 
-fn evaluate_product_function_json(
+async fn evaluate_product_function_json(
     live: &LiveWorkspace,
     product_fn_name: &str,
     label: &str,
 ) -> Result<serde_json::Value> {
-    let ctx_guard = live.ctx.lock().unwrap();
-    ctx_guard
-        .with(|ctx| -> rquickjs::Result<serde_json::Value> {
+    live.ctx
+        .async_with(async |ctx| -> rquickjs::Result<serde_json::Value> {
             let reset: Function = ctx.globals().get("resetMemoState")?;
             reset.call::<_, ()>(())?;
 
@@ -6439,7 +6356,8 @@ fn evaluate_product_function_json(
                 .catch(&ctx)
                 .map_err(|e| rquickjs::Error::new_loading_message("product", format!("{e}")))?;
             let value: Value = result
-                .finish()
+                .into_future()
+                .await
                 .catch(&ctx)
                 .map_err(|e| rquickjs::Error::new_loading_message("product", format!("{e}")))?;
 
@@ -6455,10 +6373,11 @@ fn evaluate_product_function_json(
             serde_json::from_str(&json)
                 .map_err(|e| rquickjs::Error::new_loading_message("product", e.to_string()))
         })
+        .await
         .map_err(|e| anyhow::anyhow!("evaluate {label} failed: {e}"))
 }
 
-pub fn generate_build_files(
+pub async fn generate_build_files(
     live: &LiveWorkspace,
     workspace_root: &Path,
     selectors: &[String],
@@ -6481,14 +6400,14 @@ pub fn generate_build_files(
         }
         for (kind, product_fn) in generators {
             let label = format!("{kind}#generate-build");
-            let value = evaluate_product_function_json(live, &product_fn, &label)?;
+            let value = evaluate_product_function_json(live, &product_fn, &label).await?;
             let product_edits: BTreeMap<String, BuildFileEdit> = serde_json::from_value(value)
                 .with_context(|| format!("parse generate-build product result for {label}"))?;
             merge_build_edits(&mut edits, product_edits)?;
         }
     } else {
         for target in select_targets(&live.workspace, selectors)? {
-            let value = evaluate_product_json(live, &target.address, "generate-build")?;
+            let value = evaluate_product_json(live, &target.address, "generate-build").await?;
             let product_edits: BTreeMap<String, BuildFileEdit> = serde_json::from_value(value)
                 .with_context(|| {
                     format!("parse generate-build product result for {}", target.address)
@@ -7719,8 +7638,8 @@ export const ui = asset({ srcs: ["**/*.png"] });
             .replace('"', "\\\"")
     }
 
-    #[test]
-    fn host_js_logs_are_written_to_prodash_messages() {
+    #[tokio::test]
+    async fn host_js_logs_are_written_to_prodash_messages() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(p.join(WORKSPACE_FILE).as_path(), "");
@@ -7740,7 +7659,9 @@ export const app = target({ kind: "sample" });
 
         let progress_root = prodash::tree::Root::new();
         let log_item = progress_root.add_child("workspace logs");
-        let _workspace = load_workspace_with_host_log(p, HostLogSink::prodash(log_item)).unwrap();
+        let _workspace = load_workspace_with_host_log(p, HostLogSink::prodash(log_item))
+            .await
+            .unwrap();
 
         let mut messages = Vec::new();
         progress_root.copy_messages(&mut messages);
@@ -7812,10 +7733,10 @@ export const app = target({ kind: "sample" });
 
     // ---- Tests ---------------------------------------------------------
 
-    #[test]
-    fn workspace_loads_config_before_build_files() {
+    #[tokio::test]
+    async fn workspace_loads_config_before_build_files() {
         let root = fixture();
-        let workspace = load_workspace(root.path()).unwrap();
+        let workspace = load_workspace(root.path()).await.unwrap();
 
         // Products registered by workspace.js imports.
         assert!(workspace
@@ -7836,8 +7757,8 @@ export const app = target({ kind: "sample" });
         assert!(workspace.targets.contains_key("//library/jodin:jodin"));
     }
 
-    #[test]
-    fn workspace_can_mount_external_rule_packages() {
+    #[tokio::test]
+    async fn workspace_can_mount_external_rule_packages() {
         let root = tempfile::tempdir().unwrap();
         let external = tempfile::tempdir().unwrap();
         let p = root.path();
@@ -7886,7 +7807,7 @@ export const app = externalThing("app");
 "#,
         );
 
-        let workspace = load_workspace(p).unwrap();
+        let workspace = load_workspace(p).await.unwrap();
         assert!(workspace
             .products
             .contains_key(&("external".into(), "external-product".into())));
@@ -7895,7 +7816,9 @@ export const app = externalThing("app");
             "app"
         );
 
-        let plan = plan_live(&workspace, p, "build", &["app".into()]).unwrap();
+        let plan = plan_live(&workspace, p, "build", &["app".into()])
+            .await
+            .unwrap();
         assert!(plan.roots[0].starts_with("//:app#external-product:memo"));
         assert!(plan
             .tasks
@@ -7903,23 +7826,24 @@ export const app = externalThing("app");
             .any(|task| task.action.display == "external build //:app"));
     }
 
-    #[test]
-    fn workspace_root_is_discovered_from_a_nested_directory() {
+    #[tokio::test]
+    async fn workspace_root_is_discovered_from_a_nested_directory() {
         let root = fixture();
         let nested = root.path().join("library/jodin");
         assert_eq!(find_workspace_root(&nested).unwrap(), root.path());
     }
 
-    #[test]
-    fn build_goal_plans_transitive_products() {
+    #[tokio::test]
+    async fn build_goal_plans_transitive_products() {
         let root = fixture();
-        let workspace = load_workspace(root.path()).unwrap();
+        let workspace = load_workspace(root.path()).await.unwrap();
         let plan = plan_live(
             &workspace,
             root.path(),
             "build",
             &["//library/jodin:jodin".into()],
         )
+        .await
         .unwrap();
 
         assert!(plan.roots[0].starts_with("//library/jodin:jodin#odin-package:memo"));
@@ -7933,8 +7857,8 @@ export const app = externalThing("app");
             .any(|task| task.action.display.contains("sources(")));
     }
 
-    #[test]
-    fn workspace_config_is_available_to_product_functions() {
+    #[tokio::test]
+    async fn workspace_config_is_available_to_product_functions() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
 
@@ -7981,31 +7905,35 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
 "#,
         );
 
-        let workspace = load_workspace(p).unwrap();
+        let workspace = load_workspace(p).await.unwrap();
         assert_eq!(
             workspace.workspace_config["example"]["flags"]["mode"]
                 .as_str()
                 .unwrap(),
             "debug"
         );
-        let pkg_plan = plan_live(&workspace, p, "build", &["pkg".into()]).unwrap();
+        let pkg_plan = plan_live(&workspace, p, "build", &["pkg".into()])
+            .await
+            .unwrap();
         assert!(pkg_plan
             .tasks
             .iter()
             .any(|task| task.action.display.contains("--mode=debug")));
 
-        let all = plan_live(&workspace, p, "build", &[]).unwrap();
+        let all = plan_live(&workspace, p, "build", &[]).await.unwrap();
         assert!(all
             .roots
             .iter()
             .any(|root| root.starts_with("//:pkg#configured-product:memo")));
     }
 
-    #[test]
-    fn new_target_kinds_and_products_need_no_rust_changes() {
+    #[tokio::test]
+    async fn new_target_kinds_and_products_need_no_rust_changes() {
         let root = fixture();
-        let workspace = load_workspace(root.path()).unwrap();
-        let plan = plan_live(&workspace, root.path(), "build", &["//assets:ui".into()]).unwrap();
+        let workspace = load_workspace(root.path()).await.unwrap();
+        let plan = plan_live(&workspace, root.path(), "build", &["//assets:ui".into()])
+            .await
+            .unwrap();
 
         assert!(plan.roots[0].starts_with("//assets:ui#bundle:memo"));
         assert!(plan
@@ -8014,11 +7942,13 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
             .any(|t| t.action.display.contains("**/*.png")));
     }
 
-    #[test]
-    fn product_plans_round_trip_through_json() {
+    #[tokio::test]
+    async fn product_plans_round_trip_through_json() {
         let root = fixture();
-        let workspace = load_workspace(root.path()).unwrap();
-        let plan = plan_live(&workspace, root.path(), "build", &["jodin".into()]).unwrap();
+        let workspace = load_workspace(root.path()).await.unwrap();
+        let plan = plan_live(&workspace, root.path(), "build", &["jodin".into()])
+            .await
+            .unwrap();
 
         let encoded = serde_json::to_string_pretty(&plan).unwrap();
         assert!(encoded.contains("\"goal\": \"build\""));
@@ -8029,8 +7959,8 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
         assert_eq!(render_dot(&decoded), render_dot(&plan));
     }
 
-    #[test]
-    fn structured_rule_actions_lower_to_serializable_tasks() {
+    #[tokio::test]
+    async fn structured_rule_actions_lower_to_serializable_tasks() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(
@@ -8068,8 +7998,10 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
 "#,
         );
 
-        let workspace = load_workspace(p).unwrap();
-        let plan = plan_live(&workspace, p, "build", &["schema".into()]).unwrap();
+        let workspace = load_workspace(p).await.unwrap();
+        let plan = plan_live(&workspace, p, "build", &["schema".into()])
+            .await
+            .unwrap();
         let task = plan
             .tasks
             .iter()
@@ -8088,8 +8020,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         assert_eq!(task.action.outputs, [task.outputs[0].id.clone()]);
     }
 
-    #[test]
-    fn dry_run_executor_uses_dependency_order_without_running_commands() {
+    #[tokio::test]
+    async fn dry_run_executor_uses_dependency_order_without_running_commands() {
         let root = tempfile::tempdir().unwrap();
         let plan = Plan {
             goal: "build".to_owned(),
@@ -8114,8 +8046,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             .all(|execution| execution.status == TaskExecutionStatus::WouldRun));
     }
 
-    #[test]
-    fn local_executor_materializes_embedded_manifest_outputs() {
+    #[tokio::test]
+    async fn local_executor_materializes_embedded_manifest_outputs() {
         let root = tempfile::tempdir().unwrap();
         let task_id = unique_task_id("source-manifest");
         let mut task = executable_task(&task_id, &[], &[], None);
@@ -8147,8 +8079,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         );
     }
 
-    #[test]
-    fn parallel_executor_runs_independent_ready_tasks() {
+    #[tokio::test]
+    async fn parallel_executor_runs_independent_ready_tasks() {
         let root = tempfile::tempdir().unwrap();
         let first_id = unique_task_id("parallel-a");
         let second_id = unique_task_id("parallel-b");
@@ -8196,8 +8128,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         );
     }
 
-    #[test]
-    fn parallel_executor_waits_for_dependencies() {
+    #[tokio::test]
+    async fn parallel_executor_waits_for_dependencies() {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("producer.marker");
         let producer_id = unique_task_id("producer");
@@ -8242,8 +8174,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         );
     }
 
-    #[test]
-    fn parallel_executor_failure_prevents_downstream_execution() {
+    #[tokio::test]
+    async fn parallel_executor_failure_prevents_downstream_execution() {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("downstream.marker");
         let failing_id = unique_task_id("failing");
@@ -8279,8 +8211,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         assert!(!marker.exists());
     }
 
-    #[test]
-    fn parallel_executor_cancels_running_siblings_after_failure() {
+    #[tokio::test]
+    async fn parallel_executor_cancels_running_siblings_after_failure() {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("slow.marker");
         let failing_id = unique_task_id("fail-fast");
@@ -8318,8 +8250,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         assert!(!marker.exists());
     }
 
-    #[test]
-    fn jobs_one_preserves_sequential_execution_order() {
+    #[tokio::test]
+    async fn jobs_one_preserves_sequential_execution_order() {
         let root = tempfile::tempdir().unwrap();
         let first_id = unique_task_id("seq-a");
         let second_id = unique_task_id("seq-b");
@@ -8349,8 +8281,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         assert_eq!(ids, [first_id.as_str(), second_id.as_str()]);
     }
 
-    #[test]
-    fn local_executor_runs_commands_and_checks_declared_outputs() {
+    #[tokio::test]
+    async fn local_executor_runs_commands_and_checks_declared_outputs() {
         let root = tempfile::tempdir().unwrap();
         let task_id = unique_task_id("write");
         let plan = Plan {
@@ -8380,8 +8312,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         assert!(temp_leftovers.is_empty());
     }
 
-    #[test]
-    fn local_executor_gathers_declared_file_inputs_into_sandbox() {
+    #[tokio::test]
+    async fn local_executor_gathers_declared_file_inputs_into_sandbox() {
         let root = tempfile::tempdir().unwrap();
         write_file(&root.path().join("inputs/message.txt"), "hello");
         let task_id = unique_task_id("copy-input");
@@ -8421,8 +8353,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         );
     }
 
-    #[test]
-    fn local_executor_publishes_directory_outputs_atomically() {
+    #[tokio::test]
+    async fn local_executor_publishes_directory_outputs_atomically() {
         let root = tempfile::tempdir().unwrap();
         let task_id = unique_task_id("dir-output");
         let cached_dir = root.path().join("build/tree");
@@ -8465,8 +8397,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         assert!(!cached_dir.join("stale.txt").exists());
     }
 
-    #[test]
-    fn progress_executor_streams_process_output_path() {
+    #[tokio::test]
+    async fn progress_executor_streams_process_output_path() {
         let root = tempfile::tempdir().unwrap();
         let task_id = unique_task_id("progress-write");
         let plan = Plan {
@@ -8502,8 +8434,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         );
     }
 
-    #[test]
-    fn unchanged_second_execution_uses_task_cache_hit() {
+    #[tokio::test]
+    async fn unchanged_second_execution_uses_task_cache_hit() {
         let root = tempfile::tempdir().unwrap();
         let task_id = unique_task_id("cache-hit");
         let marker = root.path().join("runs.txt");
@@ -8539,8 +8471,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         assert!(explanation.hit);
     }
 
-    #[test]
-    fn no_cache_execution_bypasses_and_does_not_populate_task_cache() {
+    #[tokio::test]
+    async fn no_cache_execution_bypasses_and_does_not_populate_task_cache() {
         let root = tempfile::tempdir().unwrap();
         let task_id = unique_task_id("no-cache");
         let marker = root.path().join("runs.txt");
@@ -8581,8 +8513,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         assert_eq!(std::fs::read_to_string(marker).unwrap(), "ranranran");
     }
 
-    #[test]
-    fn editing_declared_input_invalidates_downstream_tasks() {
+    #[tokio::test]
+    async fn editing_declared_input_invalidates_downstream_tasks() {
         let root = tempfile::tempdir().unwrap();
         write_file(&root.path().join("inputs/message.txt"), "one");
         let producer_id = unique_task_id("input-producer");
@@ -8659,8 +8591,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         assert_eq!(std::fs::read_to_string(consumer_marker).unwrap(), "cc");
     }
 
-    #[test]
-    fn local_executor_exposes_named_cache_environment_paths() {
+    #[tokio::test]
+    async fn local_executor_exposes_named_cache_environment_paths() {
         let root = tempfile::tempdir().unwrap();
         let task_id = unique_task_id("named-cache");
         let named_caches = vec![NamedCache {
@@ -8696,8 +8628,8 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
     }
 
     #[cfg(unix)]
-    #[test]
-    fn product_run_materializes_named_cache_tools_on_path() {
+    #[tokio::test]
+    async fn product_run_materializes_named_cache_tools_on_path() {
         use std::os::unix::fs::PermissionsExt;
 
         let root = tempfile::tempdir().unwrap();
@@ -8751,8 +8683,10 @@ export const generated = toolUser();
 "#,
         );
 
-        let live = load_workspace(p).unwrap();
-        let plan = plan_live(&live, p, "build", &["generated".to_owned()]).unwrap();
+        let live = load_workspace(p).await.unwrap();
+        let plan = plan_live(&live, p, "build", &["generated".to_owned()])
+            .await
+            .unwrap();
         let report = execute_plan_with_options(
             &plan,
             Some(&live),
@@ -8772,8 +8706,8 @@ export const generated = toolUser();
         );
     }
 
-    #[test]
-    fn local_executor_reports_missing_declared_outputs() {
+    #[tokio::test]
+    async fn local_executor_reports_missing_declared_outputs() {
         let root = tempfile::tempdir().unwrap();
         let plan = Plan {
             goal: "build".to_owned(),
@@ -8795,15 +8729,15 @@ export const generated = toolUser();
         assert!(error.contains("build/missing.txt"), "{error}");
     }
 
-    #[test]
-    fn root_relative_imports_can_resolve_build_directory_modules() {
+    #[tokio::test]
+    async fn root_relative_imports_can_resolve_build_directory_modules() {
         let root = fixture();
-        let workspace = load_workspace(root.path()).unwrap();
+        let workspace = load_workspace(root.path()).await.unwrap();
         assert!(workspace.targets.contains_key("//library/jodin:jodin"));
     }
 
-    #[test]
-    fn root_relative_imports_can_resolve_index_js_modules() {
+    #[tokio::test]
+    async fn root_relative_imports_can_resolve_index_js_modules() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(
@@ -8827,12 +8761,12 @@ export const app = pkg();
 "#,
         );
 
-        let workspace = load_workspace(p).unwrap();
+        let workspace = load_workspace(p).await.unwrap();
         assert!(workspace.targets.contains_key("//:app"));
     }
 
-    #[test]
-    fn relative_imports_from_build_files_are_rejected_with_context() {
+    #[tokio::test]
+    async fn relative_imports_from_build_files_are_rejected_with_context() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(
@@ -8851,7 +8785,7 @@ export const ui = asset({ srcs: ["**/*.png"] });
 "#,
         );
 
-        let error = format!("{:#}", load_workspace(p).unwrap_err());
+        let error = format!("{:#}", load_workspace(p).await.unwrap_err());
         assert!(
             error.contains("relative import './rules/asset' is prohibited in BUILD.js"),
             "{error}"
@@ -8860,8 +8794,8 @@ export const ui = asset({ srcs: ["**/*.png"] });
         assert!(error.contains("//..."), "{error}");
     }
 
-    #[test]
-    fn unknown_builtin_modules_are_reported_distinctly() {
+    #[tokio::test]
+    async fn unknown_builtin_modules_are_reported_distinctly() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(
@@ -8872,7 +8806,7 @@ import "imp:missing";
         );
         write_file(&p.join(BUILD_FILE), "export const ignored = 1;\n");
 
-        let error = format!("{:#}", load_workspace(p).unwrap_err());
+        let error = format!("{:#}", load_workspace(p).await.unwrap_err());
         assert!(
             error.contains("unknown built-in module 'imp:missing'"),
             "{error}"
@@ -8880,8 +8814,8 @@ import "imp:missing";
         assert!(error.contains(WORKSPACE_FILE), "{error}");
     }
 
-    #[test]
-    fn missing_workspace_modules_report_importer_and_candidates() {
+    #[tokio::test]
+    async fn missing_workspace_modules_report_importer_and_candidates() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), "");
@@ -8894,7 +8828,7 @@ export const ignored = missing;
 "#,
         );
 
-        let error = format!("{:#}", load_workspace(p).unwrap_err());
+        let error = format!("{:#}", load_workspace(p).await.unwrap_err());
         assert!(
             error.contains("cannot resolve workspace module '//rules/missing'"),
             "{error}"
@@ -8904,10 +8838,10 @@ export const ignored = missing;
         assert!(error.contains(BUILD_FILE), "{error}");
     }
 
-    #[test]
-    fn test_select_targets() {
+    #[tokio::test]
+    async fn test_select_targets() {
         let root = fixture();
-        let workspace = load_workspace(root.path()).unwrap();
+        let workspace = load_workspace(root.path()).await.unwrap();
 
         let all = select_targets(&workspace, &[]).unwrap();
         // joltphysics, cmake, jodin, ui = 4
@@ -8920,10 +8854,10 @@ export const ignored = missing;
         assert!(select_targets(&workspace, &["nonexistent".to_owned()]).is_err());
     }
 
-    #[test]
-    fn test_format_targets() {
+    #[tokio::test]
+    async fn test_format_targets() {
         let root = fixture();
-        let workspace = load_workspace(root.path()).unwrap();
+        let workspace = load_workspace(root.path()).await.unwrap();
         let targets = select_targets(&workspace, &["jodin".to_owned()]).unwrap();
         let mut out = String::new();
         format_targets(&targets, &mut out).unwrap();
@@ -8932,10 +8866,10 @@ export const ignored = missing;
         assert!(out.contains("dependencies: //src/cpp/joltphysics:cmake"));
     }
 
-    #[test]
-    fn test_format_dependencies() {
+    #[tokio::test]
+    async fn test_format_dependencies() {
         let root = fixture();
-        let workspace = load_workspace(root.path()).unwrap();
+        let workspace = load_workspace(root.path()).await.unwrap();
         let mut out = String::new();
         format_dependencies(&workspace, &["jodin".to_owned()], &mut out).unwrap();
         let expected = "\
@@ -8946,10 +8880,10 @@ export const ignored = missing;
         assert_eq!(out, expected);
     }
 
-    #[test]
-    fn test_format_products() {
+    #[tokio::test]
+    async fn test_format_products() {
         let root = fixture();
-        let workspace = load_workspace(root.path()).unwrap();
+        let workspace = load_workspace(root.path()).await.unwrap();
         let mut out = String::new();
         format_products(&workspace, &mut out).unwrap();
         assert!(out.contains("Target Kinds:"));
@@ -8959,11 +8893,13 @@ export const ignored = missing;
         assert!(out.contains("    - odin-package"));
     }
 
-    #[test]
-    fn dot_edges_flow_from_prerequisites_to_consumers() {
+    #[tokio::test]
+    async fn dot_edges_flow_from_prerequisites_to_consumers() {
         let root = fixture();
-        let workspace = load_workspace(root.path()).unwrap();
-        let plan = plan_live(&workspace, root.path(), "build", &["jodin".into()]).unwrap();
+        let workspace = load_workspace(root.path()).await.unwrap();
+        let plan = plan_live(&workspace, root.path(), "build", &["jodin".into()])
+            .await
+            .unwrap();
         let dot = render_dot(&plan);
 
         assert!(dot.contains("rankdir=TB"));
@@ -8971,8 +8907,8 @@ export const ignored = missing;
         assert!(dot.contains(" -> "));
     }
 
-    #[test]
-    fn impure_task_is_not_cacheable() {
+    #[tokio::test]
+    async fn impure_task_is_not_cacheable() {
         let root = tempfile::tempdir().unwrap();
         let task_id = unique_task_id("impure");
         let mut task = executable_task(
@@ -9004,8 +8940,8 @@ export const ignored = missing;
         assert!(output.contains("impure: true (caching disabled)"));
     }
 
-    #[test]
-    fn force_cache_overrides_impure_task() {
+    #[tokio::test]
+    async fn force_cache_overrides_impure_task() {
         let root = tempfile::tempdir().unwrap();
         let task_id = unique_task_id("force-cache");
         let mut task = executable_task(
@@ -9033,8 +8969,8 @@ export const ignored = missing;
         assert!(output.contains("force_cache override"));
     }
 
-    #[test]
-    fn non_impure_task_uses_existing_heuristic() {
+    #[tokio::test]
+    async fn non_impure_task_uses_existing_heuristic() {
         let root = tempfile::tempdir().unwrap();
         let task_id = unique_task_id("heuristic");
         let mut task = executable_task(
@@ -9061,8 +8997,8 @@ export const ignored = missing;
     // Host function integration tests
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn javascript_can_use_platform_info() {
+    #[tokio::test]
+    async fn javascript_can_use_platform_info() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/test";"#);
@@ -9082,11 +9018,11 @@ export const ok = 1;
         );
         write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
 
-        load_workspace(p).unwrap();
+        load_workspace(p).await.unwrap();
     }
 
-    #[test]
-    fn javascript_can_use_sha256() {
+    #[tokio::test]
+    async fn javascript_can_use_sha256() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
 
@@ -9120,11 +9056,11 @@ export const ok = 1;
         );
         write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
 
-        load_workspace(p).unwrap();
+        load_workspace(p).await.unwrap();
     }
 
-    #[test]
-    fn javascript_can_use_cache_operations() {
+    #[tokio::test]
+    async fn javascript_can_use_cache_operations() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
 
@@ -9166,11 +9102,11 @@ export const ok = 1;
         );
         write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
 
-        load_workspace(p).unwrap();
+        load_workspace(p).await.unwrap();
     }
 
-    #[test]
-    fn javascript_can_use_extract() {
+    #[tokio::test]
+    async fn javascript_can_use_extract() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
 
@@ -9208,7 +9144,7 @@ export const ok = 1;
         );
         write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
 
-        load_workspace(p).unwrap();
+        load_workspace(p).await.unwrap();
         // Verify the file was extracted correctly.
         let extracted_file = extract_dir.join("sub/file.txt");
         assert!(
@@ -9222,8 +9158,46 @@ export const ok = 1;
         );
     }
 
-    #[test]
-    fn product_registration_creates_dispatchable_product_task() {
+    #[tokio::test]
+    async fn quickjs_host_run_promises_can_resolve_with_promise_all() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(&p.join(BUILD_FILE), r#"export const done = true;"#);
+
+        let live = load_workspace(p).await.unwrap();
+        *live.exec_root.lock().unwrap() = Some(p.to_owned());
+
+        live.ctx
+            .async_with(async |ctx| -> rquickjs::Result<()> {
+                let promise = Module::evaluate(
+                    ctx.clone(),
+                    "host-run-promise-all",
+                    r#"
+import { run } from "imp:core";
+
+const results = await Promise.all([
+    run({ argv: ["sh", "-c", "printf a"], impure: true }),
+    run({ argv: ["sh", "-c", "printf b"], impure: true }),
+]);
+
+if (!results[0].stdout.endsWith("a\n") || !results[1].stdout.endsWith("b\n")) {
+    throw new Error(`unexpected stdout: ${results[0].stdout}/${results[1].stdout}`);
+}
+"#,
+                )?;
+                promise.into_future::<()>().await.catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message("host-run-promise-all", format!("{e}"))
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn product_registration_creates_dispatchable_product_task() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
 
@@ -9241,7 +9215,7 @@ export const report = product("test-pkg", "report", async function report(handle
 "#,
         );
 
-        let live = load_workspace(p).unwrap();
+        let live = load_workspace(p).await.unwrap();
 
         // The product is listed in the workspace.
         assert!(
@@ -9251,18 +9225,22 @@ export const report = product("test-pkg", "report", async function report(handle
         );
 
         // Static planning with an explicit #product selector creates a product placeholder task.
-        let plan = plan(&live, "build", &["//:pkg#report".to_owned()]).unwrap();
+        let plan = plan(&live, "build", &["//:pkg#report".to_owned()])
+            .await
+            .unwrap();
         assert_eq!(plan.tasks.len(), 1);
         let task = &plan.tasks[0];
         assert_eq!(task.product, "report");
 
         // Live planning discovers the product memo call.
-        let live_plan = plan_live(&live, p, "build", &["//:pkg#report".to_owned()]).unwrap();
+        let live_plan = plan_live(&live, p, "build", &["//:pkg#report".to_owned()])
+            .await
+            .unwrap();
         assert!(live_plan.tasks[0].id.starts_with("//:pkg#report:memo"));
     }
 
-    #[test]
-    fn product_selector_hash_syntax_is_parsed() {
+    #[tokio::test]
+    async fn product_selector_hash_syntax_is_parsed() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
 
@@ -9278,15 +9256,18 @@ export const check = product("kind-a", "check", async function check(handle) {})
 "#,
         );
 
-        let live = load_workspace(p).unwrap();
+        let live = load_workspace(p).await.unwrap();
 
         // //:pkg#check should select the "check" product explicitly.
-        let task_plan = plan(&live, "build", &["//:pkg#check".to_owned()]).unwrap();
+        let task_plan = plan(&live, "build", &["//:pkg#check".to_owned()])
+            .await
+            .unwrap();
         assert_eq!(task_plan.tasks.len(), 1);
         assert_eq!(task_plan.tasks[0].product, "check");
 
         // An unknown product in the selector should fail.
         let err = plan(&live, "build", &["//:pkg#nonexistent".to_owned()])
+            .await
             .unwrap_err()
             .to_string();
         assert!(
@@ -9295,8 +9276,8 @@ export const check = product("kind-a", "check", async function check(handle) {})
         );
     }
 
-    #[test]
-    fn source_fields_mark_owned_files_relative_to_declaring_package() {
+    #[tokio::test]
+    async fn source_fields_mark_owned_files_relative_to_declaring_package() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
@@ -9320,7 +9301,7 @@ export const pkg = target({
         write_file(&p.join("library/pkg/src/ignored.odin"), "package pkg\n");
         write_file(&p.join("library/pkg/other.odin"), "package pkg\n");
 
-        let live = load_workspace(p).unwrap();
+        let live = load_workspace(p).await.unwrap();
         assert!(live
             .workspace
             .owned_files
@@ -9335,8 +9316,8 @@ export const pkg = target({
             .contains("library/pkg/other.odin"));
     }
 
-    #[test]
-    fn generate_build_product_creates_raw_build_files() {
+    #[tokio::test]
+    async fn generate_build_product_creates_raw_build_files() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/odin";"#);
@@ -9351,8 +9332,8 @@ export const done = true;
         write_file(&p.join("library/spall/spall.odin"), "package spall\n");
         write_file(&p.join("vendor/ignored/main.odin"), "package ignored\n");
 
-        let live = load_workspace(p).unwrap();
-        let report = generate_build_files(&live, p, &[], false).unwrap();
+        let live = load_workspace(p).await.unwrap();
+        let report = generate_build_files(&live, p, &[], false).await.unwrap();
         assert_eq!(
             report.changed_files,
             vec![
@@ -9368,13 +9349,13 @@ export const done = true;
         assert!(!app_build.contains("imp generated"));
         assert!(!p.join("vendor/ignored/BUILD.js").exists());
 
-        let live = load_workspace(p).unwrap();
-        let check_report = generate_build_files(&live, p, &[], true).unwrap();
+        let live = load_workspace(p).await.unwrap();
+        let check_report = generate_build_files(&live, p, &[], true).await.unwrap();
         assert!(check_report.changed_files.is_empty());
     }
 
-    #[test]
-    fn generate_build_runs_all_registered_generate_build_products_by_default() {
+    #[tokio::test]
+    async fn generate_build_runs_all_registered_generate_build_products_by_default() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(
@@ -9409,8 +9390,8 @@ export const done = true;
         );
         write_file(&p.join("app/main.odin"), "package app\n");
 
-        let live = load_workspace(p).unwrap();
-        let report = generate_build_files(&live, p, &[], false).unwrap();
+        let live = load_workspace(p).await.unwrap();
+        let report = generate_build_files(&live, p, &[], false).await.unwrap();
         assert_eq!(
             report.changed_files,
             vec!["app/BUILD.js".to_owned(), "custom/BUILD.js".to_owned()]
@@ -9419,8 +9400,8 @@ export const done = true;
         assert!(p.join("custom/BUILD.js").exists());
     }
 
-    #[test]
-    fn generate_build_check_fails_when_files_are_stale() {
+    #[tokio::test]
+    async fn generate_build_check_fails_when_files_are_stale() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/odin";"#);
@@ -9433,16 +9414,17 @@ export const done = true;
         );
         write_file(&p.join("app/main.odin"), "package app\n");
 
-        let live = load_workspace(p).unwrap();
+        let live = load_workspace(p).await.unwrap();
         let error = generate_build_files(&live, p, &[], true)
+            .await
             .unwrap_err()
             .to_string();
         assert!(error.contains("generated BUILD files are out of date"));
         assert!(error.contains("app/BUILD.js"));
     }
 
-    #[test]
-    fn generate_build_skips_files_owned_by_existing_targets() {
+    #[tokio::test]
+    async fn generate_build_skips_files_owned_by_existing_targets() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/odin";"#);
@@ -9464,19 +9446,19 @@ export const spall = odinPackage({ srcs: ["*.odin"] });
 "#,
         );
 
-        let live = load_workspace(p).unwrap();
+        let live = load_workspace(p).await.unwrap();
         assert!(live
             .workspace
             .owned_files
             .contains("library/spall/spall.odin"));
-        let report = generate_build_files(&live, p, &[], false).unwrap();
+        let report = generate_build_files(&live, p, &[], false).await.unwrap();
         assert_eq!(report.changed_files, vec!["app/BUILD.js".to_owned()]);
         let spall_build = std::fs::read_to_string(p.join("library/spall/BUILD.js")).unwrap();
         assert_eq!(spall_build.matches("export const spall").count(), 1);
     }
 
-    #[test]
-    fn raw_build_renderer_renders_target_refs_as_imports() {
+    #[tokio::test]
+    async fn raw_build_renderer_renders_target_refs_as_imports() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         let mut build_rules = BTreeMap::new();

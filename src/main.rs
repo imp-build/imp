@@ -1,6 +1,7 @@
 mod codegen;
 mod commands;
 mod env;
+mod runtime;
 mod spike;
 mod toolchain;
 mod workspace;
@@ -202,35 +203,36 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
                 *no_cache,
                 platform,
                 tree,
-            );
+            )
+            .await;
         }
         Cmd::Targets { selectors } => {
-            return cmd_targets(selectors, tree);
+            return cmd_targets(selectors, tree).await;
         }
         Cmd::Dependencies { selectors } => {
-            return cmd_dependencies(selectors, tree);
+            return cmd_dependencies(selectors, tree).await;
         }
         Cmd::Rules => {
-            return cmd_rules(tree);
+            return cmd_rules(tree).await;
         }
         Cmd::Cache { command } => {
-            return cmd_cache(command, tree);
+            return cmd_cache(command, tree).await;
         }
         Cmd::Build {
             selectors,
             jobs,
             no_cache,
         } => {
-            return cmd_build_planned(selectors, *jobs, *no_cache, tree);
+            return cmd_build_planned(selectors, *jobs, *no_cache, tree).await;
         }
         Cmd::Explain { product } => {
-            return cmd_explain(product, tree);
+            return cmd_explain(product, tree).await;
         }
         Cmd::Actions { product } => {
-            return cmd_actions(product, tree);
+            return cmd_actions(product, tree).await;
         }
         Cmd::GenerateBuild { check, selectors } => {
-            return cmd_generate_build(*check, selectors, tree);
+            return cmd_generate_build(*check, selectors, tree).await;
         }
         Cmd::CodegenRegister { output } => {
             return commands::codegen_register::run(output).await;
@@ -326,7 +328,7 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
     }
 }
 
-fn cmd_plan(
+async fn cmd_plan(
     goal: &str,
     selectors: &[String],
     dot: &std::path::Path,
@@ -340,8 +342,8 @@ fn cmd_plan(
 ) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
-    let workspace = load_workspace_with_messages(&workspace_root, tree)?;
-    let plan = spike::plan_live(&workspace, &workspace_root, goal, selectors)?;
+    let workspace = load_workspace_with_messages(&workspace_root, tree).await?;
+    let plan = spike::plan_live(&workspace, &workspace_root, goal, selectors).await?;
 
     print!("{}", spike::render_text_plan(&plan));
     std::fs::write(dot, spike::render_dot(&plan))
@@ -390,12 +392,17 @@ fn cmd_plan(
     Ok(())
 }
 
-fn cmd_build_planned(selectors: &[String], jobs: usize, no_cache: bool, tree: &Tree) -> Result<()> {
+async fn cmd_build_planned(
+    selectors: &[String],
+    jobs: usize,
+    no_cache: bool,
+    tree: &Tree,
+) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
-    let workspace = load_workspace_with_messages(&workspace_root, tree)?;
+    let workspace = load_workspace_with_messages(&workspace_root, tree).await?;
 
-    let plan = spike::plan_live(&workspace, &workspace_root, "build", selectors)?;
+    let plan = spike::plan_live(&workspace, &workspace_root, "build", selectors).await?;
     let mut progress = tree.add_child("execute planned build");
     let target_count = plan.roots.len();
     let task_count = plan.tasks.len();
@@ -457,12 +464,13 @@ fn print_execution_report(
     }
 }
 
-fn load_workspace_with_messages(
+async fn load_workspace_with_messages(
     workspace_root: &std::path::Path,
     tree: &Tree,
-) -> Result<spike::LiveWorkspace> {
+) -> Result<runtime::LiveWorkspace> {
     let log_item = tree.add_child("workspace logs");
-    spike::load_workspace_with_host_log(workspace_root, spike::HostLogSink::prodash(log_item))
+    runtime::load_workspace_with_host_log(workspace_root, runtime::HostLogSink::prodash(log_item))
+        .await
 }
 
 /// Load the workspace from the current directory, run `$body` with a
@@ -472,7 +480,7 @@ macro_rules! workspace_cmd {
     ($tree:expr, |$ws:ident, $out:ident| $body:block) => {{
         let current_dir = std::env::current_dir().context("determine current directory")?;
         let workspace_root = spike::find_workspace_root(&current_dir)?;
-        let $ws = load_workspace_with_messages(&workspace_root, $tree)?;
+        let $ws = load_workspace_with_messages(&workspace_root, $tree).await?;
         let mut $out = String::new();
         $body
         print!("{}", $out);
@@ -480,11 +488,12 @@ macro_rules! workspace_cmd {
     }};
 }
 
-fn cmd_generate_build(check: bool, selectors: &[String], tree: &Tree) -> Result<()> {
+async fn cmd_generate_build(check: bool, selectors: &[String], tree: &Tree) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
-    let workspace = load_workspace_with_messages(&workspace_root, tree)?;
-    let report = spike::generate_build_files(&workspace, &workspace_root, selectors, check)?;
+    let workspace = load_workspace_with_messages(&workspace_root, tree).await?;
+    let report =
+        runtime::generate_build_files(&workspace, &workspace_root, selectors, check).await?;
     if check {
         println!(
             "generated BUILD files are up to date ({} checked)",
@@ -504,41 +513,41 @@ fn cmd_generate_build(check: bool, selectors: &[String], tree: &Tree) -> Result<
     Ok(())
 }
 
-fn cmd_targets(selectors: &[String], tree: &Tree) -> Result<()> {
+async fn cmd_targets(selectors: &[String], tree: &Tree) -> Result<()> {
     workspace_cmd!(tree, |workspace, out| {
         let targets = spike::select_targets(&workspace, selectors)?;
         spike::format_targets(&targets, &mut out)?;
     })
 }
 
-fn cmd_dependencies(selectors: &[String], tree: &Tree) -> Result<()> {
+async fn cmd_dependencies(selectors: &[String], tree: &Tree) -> Result<()> {
     workspace_cmd!(tree, |workspace, out| {
         spike::format_dependencies(&workspace, selectors, &mut out)?;
     })
 }
 
-fn cmd_rules(tree: &Tree) -> Result<()> {
+async fn cmd_rules(tree: &Tree) -> Result<()> {
     workspace_cmd!(tree, |workspace, out| {
         spike::format_products(&workspace, &mut out)?;
     })
 }
 
-fn cmd_cache(command: &CacheCmd, tree: &Tree) -> Result<()> {
+async fn cmd_cache(command: &CacheCmd, tree: &Tree) -> Result<()> {
     match command {
-        CacheCmd::Explain { selector } => cmd_cache_explain(selector, tree),
+        CacheCmd::Explain { selector } => cmd_cache_explain(selector, tree).await,
     }
 }
 
-fn cmd_cache_explain(selector: &str, tree: &Tree) -> Result<()> {
+async fn cmd_cache_explain(selector: &str, tree: &Tree) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
-    let workspace = load_workspace_with_messages(&workspace_root, tree)?;
+    let workspace = load_workspace_with_messages(&workspace_root, tree).await?;
     let selectors = if selector.contains('#') {
         Vec::new()
     } else {
         vec![selector.to_owned()]
     };
-    let plan = spike::plan_live(&workspace, &workspace_root, "build", &selectors)?;
+    let plan = spike::plan_live(&workspace, &workspace_root, "build", &selectors).await?;
     let task_selector =
         if selector.contains('#') && plan.tasks.iter().any(|task| task.id == selector) {
             selector
@@ -663,24 +672,24 @@ fn parse_product_selector(selector: &str) -> Result<(&str, &str)> {
     Ok((addr, product))
 }
 
-fn cmd_explain(selector: &str, tree: &Tree) -> Result<()> {
+async fn cmd_explain(selector: &str, tree: &Tree) -> Result<()> {
     let (addr, product_name) = parse_product_selector(selector)?;
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
-    let live = load_workspace_with_messages(&workspace_root, tree)?;
-    let result = spike::introspect_product(&live, addr, product_name)?;
+    let live = load_workspace_with_messages(&workspace_root, tree).await?;
+    let result = runtime::introspect_product(&live, addr, product_name).await?;
     let mut out = String::new();
     spike::format_inspect_explain(&result, &mut out).map_err(|e| anyhow::anyhow!("{e}"))?;
     print!("{out}");
     Ok(())
 }
 
-fn cmd_actions(selector: &str, tree: &Tree) -> Result<()> {
+async fn cmd_actions(selector: &str, tree: &Tree) -> Result<()> {
     let (addr, product_name) = parse_product_selector(selector)?;
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
-    let live = load_workspace_with_messages(&workspace_root, tree)?;
-    let result = spike::introspect_product(&live, addr, product_name)?;
+    let live = load_workspace_with_messages(&workspace_root, tree).await?;
+    let result = runtime::introspect_product(&live, addr, product_name).await?;
     let mut out = String::new();
     spike::format_inspect_actions(&result, &mut out).map_err(|e| anyhow::anyhow!("{e}"))?;
     print!("{out}");
