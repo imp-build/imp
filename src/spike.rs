@@ -5,7 +5,7 @@
 //! via `__host_target`.  The Rust engine resolves product requests into a task
 //! DAG without executing it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -38,6 +38,7 @@ use walkdir::WalkDir;
 const WORKSPACE_FILE: &str = "imp.workspace.js";
 const BUILD_FILE: &str = "BUILD.js";
 const TASK_CACHE_VERSION: u32 = 2;
+const PROCESS_OUTPUT_VISIBLE_LINES: usize = 5;
 
 /// The built-in `imp:core` module exposed to every plugin and BUILD file.
 const CORE_JS: &str = r##"
@@ -5051,6 +5052,7 @@ fn wait_for_child_output(
 
     let mut stdout = String::new();
     let mut stderr = String::new();
+    let mut recent_output = VecDeque::new();
     let status = loop {
         if cancellation
             .map(|cancellation| cancellation.load(Ordering::SeqCst))
@@ -5059,10 +5061,22 @@ fn wait_for_child_output(
             terminate_child_and_wait(child);
             let _ = stdout_thread.join();
             let _ = stderr_thread.join();
-            drain_process_lines(&receiver, &mut stdout, &mut stderr, progress.as_deref_mut());
+            drain_process_lines(
+                &receiver,
+                &mut stdout,
+                &mut stderr,
+                progress.as_deref_mut(),
+                &mut recent_output,
+            );
             bail!("{display} canceled");
         }
-        drain_process_lines(&receiver, &mut stdout, &mut stderr, progress.as_deref_mut());
+        drain_process_lines(
+            &receiver,
+            &mut stdout,
+            &mut stderr,
+            progress.as_deref_mut(),
+            &mut recent_output,
+        );
         if let Some(status) = child
             .try_wait()
             .with_context(|| format!("wait for {display}"))?
@@ -5070,9 +5084,13 @@ fn wait_for_child_output(
             break status;
         }
         match receiver.recv_timeout(Duration::from_millis(20)) {
-            Ok(line) => {
-                record_process_line(line, &mut stdout, &mut stderr, progress.as_deref_mut())
-            }
+            Ok(line) => record_process_line(
+                line,
+                &mut stdout,
+                &mut stderr,
+                progress.as_deref_mut(),
+                &mut recent_output,
+            ),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {}
         }
@@ -5080,7 +5098,13 @@ fn wait_for_child_output(
 
     let _ = stdout_thread.join();
     let _ = stderr_thread.join();
-    drain_process_lines(&receiver, &mut stdout, &mut stderr, progress.as_deref_mut());
+    drain_process_lines(
+        &receiver,
+        &mut stdout,
+        &mut stderr,
+        progress.as_deref_mut(),
+        &mut recent_output,
+    );
     Ok((status, stdout, stderr))
 }
 
@@ -7100,9 +7124,10 @@ fn drain_process_lines(
     stdout: &mut String,
     stderr: &mut String,
     mut progress: Option<&mut prodash::tree::Item>,
+    recent_output: &mut VecDeque<prodash::tree::Item>,
 ) {
     while let Ok(line) = receiver.try_recv() {
-        record_process_line(line, stdout, stderr, progress.as_deref_mut());
+        record_process_line(line, stdout, stderr, progress.as_deref_mut(), recent_output);
     }
 }
 
@@ -7111,9 +7136,10 @@ fn record_process_line(
     stdout: &mut String,
     stderr: &mut String,
     progress: Option<&mut prodash::tree::Item>,
+    recent_output: &mut VecDeque<prodash::tree::Item>,
 ) {
     if let Some(progress) = progress {
-        report_process_line(progress, &line);
+        report_process_line(progress, recent_output, &line);
     }
 
     match line.stream {
@@ -7128,15 +7154,22 @@ fn record_process_line(
     }
 }
 
-fn report_process_line(progress: &prodash::tree::Item, line: &ProcessLine) {
+fn report_process_line(
+    progress: &mut prodash::tree::Item,
+    recent_output: &mut VecDeque<prodash::tree::Item>,
+    line: &ProcessLine,
+) {
     if line.line.trim().is_empty() {
         return;
     }
-    let (level, stream) = match line.stream {
-        ProcessStream::Stdout => (prodash::messages::MessageLevel::Info, "out"),
-        ProcessStream::Stderr => (prodash::messages::MessageLevel::Failure, "err"),
+    let stream = match line.stream {
+        ProcessStream::Stdout => "out",
+        ProcessStream::Stderr => "err",
     };
-    progress.message(level, format!("{stream}: {}", line.line));
+    recent_output.push_back(progress.add_child(format!("{stream}: {}", line.line)));
+    while recent_output.len() > PROCESS_OUTPUT_VISIBLE_LINES {
+        recent_output.pop_front();
+    }
 }
 
 fn report_process_failure(progress: Option<&prodash::tree::Item>, stdout: &str, stderr: &str) {
@@ -8679,34 +8712,37 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
     }
 
     #[test]
-    fn process_output_is_reported_as_prodash_messages() {
+    fn process_output_is_reported_as_recent_prodash_child_rows() {
         let progress_root = prodash::tree::Root::new();
-        let progress = progress_root.add_child("execute task");
+        let mut progress = progress_root.add_child("execute task");
+        let mut recent_output = VecDeque::new();
 
         report_process_line(
-            &progress,
+            &mut progress,
+            &mut recent_output,
             &ProcessLine {
                 stream: ProcessStream::Stdout,
                 line: "stdout-line".to_owned(),
             },
         );
         report_process_line(
-            &progress,
+            &mut progress,
+            &mut recent_output,
             &ProcessLine {
                 stream: ProcessStream::Stderr,
                 line: "stderr-line".to_owned(),
             },
         );
 
-        let mut messages = Vec::new();
-        progress_root.copy_messages(&mut messages);
+        let mut snapshot = Vec::new();
+        progress_root.sorted_snapshot(&mut snapshot);
 
-        assert!(messages
+        assert!(snapshot
             .iter()
-            .any(|message| message.message == "out: stdout-line"));
-        assert!(messages
+            .any(|(_, task)| task.name == "out: stdout-line" && task.progress.is_none()));
+        assert!(snapshot
             .iter()
-            .any(|message| message.message == "err: stderr-line"));
+            .any(|(_, task)| task.name == "err: stderr-line" && task.progress.is_none()));
     }
 
     #[test]

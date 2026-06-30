@@ -95,7 +95,7 @@ export const native_link_library = product("cmake-lib", "native-link-library", a
         `mkdir -p "$(dirname '${to}')" && cp '${srcPath}/${from}' '${to}'`
     );
     const stageScript = stageCmds.length > 0 ? " && " + stageCmds.join(" && ") : "";
-    const script = `src=$1; bdir=$2; shift 2; mkdir -p "$bdir" && cmake -S "$src" -B "$bdir" "$@" && cmake --build "$bdir" -j1${stageScript}`;
+    const script = `src=$1; bdir=$2; shift 2; mkdir -p "$bdir" && cmake -S "$src" -B "$bdir" "$@" && cmake --build "$bdir" -j10${stageScript}`;
 
     if (handle.attrs.toolchain) {
         return run({
