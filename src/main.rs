@@ -1,5 +1,6 @@
 mod cache;
 mod codegen;
+mod exec;
 mod commands;
 mod env;
 mod loader;
