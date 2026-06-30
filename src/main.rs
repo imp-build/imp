@@ -1,6 +1,7 @@
 mod cache;
 mod codegen;
 mod exec;
+mod executor;
 mod commands;
 mod env;
 mod loader;
@@ -380,19 +381,19 @@ async fn cmd_plan(
             );
         }
         let mode = if dry_run {
-            spike::ExecutionMode::DryRun
+            executor::ExecutionMode::DryRun
         } else {
-            spike::ExecutionMode::Local
+            executor::ExecutionMode::Local
         };
         if cancellation.load(Ordering::SeqCst) {
             anyhow::bail!("execution canceled");
         }
         let mut progress = tree.add_child("execute plan");
-        let options = spike::ExecutionOptions::new(mode, jobs)
+        let options = executor::ExecutionOptions::new(mode, jobs)
             .with_platform(platform)
             .with_no_cache(no_cache)
             .with_cancellation(Arc::clone(&cancellation));
-        let report = match spike::execute_plan_with_options(
+        let report = match executor::execute_plan_with_options(
             &plan,
             Some(&workspace),
             &workspace_root,
@@ -442,11 +443,11 @@ async fn cmd_build_planned(
         anyhow::bail!("execution canceled");
     }
 
-    let report = match spike::execute_plan_with_options(
+    let report = match executor::execute_plan_with_options(
         &plan,
         Some(&workspace),
         &workspace_root,
-        spike::ExecutionOptions::new(spike::ExecutionMode::Local, jobs)
+        executor::ExecutionOptions::new(executor::ExecutionMode::Local, jobs)
             .with_no_cache(no_cache)
             .with_cancellation(Arc::clone(&cancellation)),
         Some(&mut progress),
@@ -466,17 +467,17 @@ async fn cmd_build_planned(
 
 fn print_execution_report(
     plan: &spike::Plan,
-    report: spike::ExecutionReport,
+    report: executor::ExecutionReport,
     progress: &mut prodash::tree::Item,
 ) {
     progress.info("execution:");
     for task in report.tasks {
         let status = match task.status {
-            spike::TaskExecutionStatus::WouldRun => "would run",
-            spike::TaskExecutionStatus::CacheHit => "cache hit",
-            spike::TaskExecutionStatus::Ran => "ran",
-            spike::TaskExecutionStatus::Noop => "noop",
-            spike::TaskExecutionStatus::SkippedPlatform => "skipped (platform)",
+            executor::TaskExecutionStatus::WouldRun => "would run",
+            executor::TaskExecutionStatus::CacheHit => "cache hit",
+            executor::TaskExecutionStatus::Ran => "ran",
+            executor::TaskExecutionStatus::Noop => "noop",
+            executor::TaskExecutionStatus::SkippedPlatform => "skipped (platform)",
         };
         let label = plan
             .tasks

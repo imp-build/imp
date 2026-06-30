@@ -977,7 +977,7 @@ pub fn explain_task_cache(
     workspace_root: &Path,
     task_selector: &str,
 ) -> Result<CacheExplanation> {
-    let ordered = crate::spike::ordered_tasks(plan)?;
+    let ordered = crate::executor::ordered_tasks(plan)?;
     let selected_id = if ordered.iter().any(|task| task.id == task_selector) {
         task_selector.to_owned()
     } else if plan.roots.len() == 1 {
