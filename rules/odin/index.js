@@ -140,21 +140,18 @@ export const own_sources = memo(async function own_sources(handle) {
  * @returns {Promise<object>} FileSet descriptor.
  */
 export const sources = memo(async function sources(handle) {
-    const sets = collect_source_sets(handle, new Set());
+    const sets = await collect_source_sets(handle, new Set());
     return sets.length === 1 ? sets[0] : file_set.union(...sets);
 });
 
-function collect_source_sets(handle, seen) {
+async function collect_source_sets(handle, seen) {
     const key = dep_key(handle);
     if (seen.has(key)) return [];
     seen.add(key);
 
     const sets = [own_sources_value(handle)];
-    const deps = hydrateTarget(handle).deps
-        .map(dep => dep.handle)
-        .filter(dep => dep && dep.kind === "odin-package");
-    for (const dep of deps) {
-        sets.push(...collect_source_sets(dep, seen));
+    for (const dep of await effective_deps(handle)) {
+        sets.push(...await collect_source_sets(dep, seen));
     }
     return sets;
 }
@@ -177,16 +174,16 @@ async function collect_resource_sets(handle, seen) {
     seen.add(key);
 
     const sets = [];
-    const deps = hydrateTarget(handle).deps.map(dep => dep.handle);
-    for (const dep of deps) {
+    for (const dep of hydrateTarget(handle).deps.map(dep => dep.handle)) {
         if (!dep) continue;
         if (dep.kind === "resource-package") {
             sets.push(await resource_package_sources(dep));
-        } else if (dep.kind === "odin-package") {
-            sets.push(...await collect_resource_sets(dep, seen));
         } else if (dep.kind === "cmake-lib") {
             sets.push(await cmake_resources(dep));
         }
+    }
+    for (const dep of await effective_deps(handle)) {
+        sets.push(...await collect_resource_sets(dep, seen));
     }
     return sets;
 }
@@ -758,8 +755,7 @@ async function collect_gen_sets(handle, seen) {
     seen.add(key);
 
     const sets = [];
-    const deps = hydrateTarget(handle).deps.map(dep => dep.handle);
-    for (const dep of deps) {
+    for (const dep of hydrateTarget(handle).deps.map(dep => dep.handle)) {
         if (!dep) continue;
         if (dep.kind === "odin-gen") {
             await odinGenRun(dep);
@@ -769,9 +765,10 @@ async function collect_gen_sets(handle, seen) {
                 ? normalize_workspace_path(`${scope}/${dep.attrs.out}`)
                 : normalize_workspace_path(dep.attrs.out);
             sets.push(file_set.literal([outPath]));
-        } else if (dep.kind === "odin-package") {
-            sets.push(...await collect_gen_sets(dep, seen));
         }
+    }
+    for (const dep of await effective_deps(handle)) {
+        sets.push(...await collect_gen_sets(dep, seen));
     }
     return sets;
 }

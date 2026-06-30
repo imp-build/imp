@@ -468,7 +468,7 @@ pub async fn load_workspace_with_host_log(
 
     // ----- Resolve dep IDs to addresses -----
     let (workspace, id_to_address_final) = {
-        let mut hs = state.lock().unwrap();
+        let hs = state.lock().unwrap();
         let mut id_to_address: BTreeMap<u32, String> = named_exports
             .iter()
             .map(|(addr, id)| (*id, addr.clone()))
@@ -486,10 +486,6 @@ pub async fn load_workspace_with_host_log(
                 address.clone(),
             )?;
         }
-
-        run_workspace_analysis(&root, &mut targets, &hs.workspace_config)
-            .context("run workspace analysis")?;
-        sync_analyzed_dependencies_to_host(&mut hs, &targets);
 
         let owned_files = compute_owned_files(&root, &targets)?;
         let ws = Workspace {
@@ -576,42 +572,6 @@ fn materialize_pending_target(
     Ok(address)
 }
 
-fn run_workspace_analysis(
-    workspace_root: &Path,
-    targets: &mut BTreeMap<String, Target>,
-    workspace_config: &BTreeMap<String, serde_json::Value>,
-) -> Result<()> {
-    crate::odin::infer_odin_dependencies(workspace_root, targets, workspace_config)
-}
-
-fn sync_analyzed_dependencies_to_host(hs: &mut HostState, targets: &BTreeMap<String, Target>) {
-    let address_to_id: BTreeMap<&str, u32> = targets
-        .values()
-        .map(|target| (target.address.as_str(), target.js_id))
-        .collect();
-    for target in targets.values() {
-        let Some(pending) = hs.pending.get_mut(&target.js_id) else {
-            continue;
-        };
-        for dep in &target.dependencies {
-            let Some(dep_id) = address_to_id.get(dep.address.as_str()).copied() else {
-                continue;
-            };
-            if pending
-                .dep_ids
-                .iter()
-                .any(|(existing_id, _)| *existing_id == dep_id)
-            {
-                continue;
-            }
-            let mode = match &dep.mode {
-                DependencyMode::Auto => None,
-                DependencyMode::Named(name) => Some(name.clone()),
-            };
-            pending.dep_ids.push((dep_id, mode));
-        }
-    }
-}
 
 fn compute_owned_files(
     workspace_root: &Path,
