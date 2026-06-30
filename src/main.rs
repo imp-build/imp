@@ -481,22 +481,7 @@ fn cmd_plan(
                 return Err(error);
             }
         };
-        println!("  execution:");
-        for task in report.tasks {
-            let status = match task.status {
-                spike::TaskExecutionStatus::WouldRun => "would run",
-                spike::TaskExecutionStatus::CacheHit => "cache hit",
-                spike::TaskExecutionStatus::Ran => "ran",
-                spike::TaskExecutionStatus::Noop => "noop",
-                spike::TaskExecutionStatus::SkippedPlatform => "skipped (platform)",
-            };
-            let command = if task.command.is_empty() {
-                String::from("<no argv>")
-            } else {
-                task.command.join(" ")
-            };
-            println!("    {}: {status} {command}", task.task_id);
-        }
+        print_execution_report(&plan, report);
     }
     Ok(())
 }
@@ -538,6 +523,12 @@ fn cmd_build_planned(
         }
     };
 
+    print_execution_report(&plan, report);
+
+    Ok(())
+}
+
+fn print_execution_report(plan: &spike::Plan, report: spike::ExecutionReport) {
     println!("  execution:");
     for task in report.tasks {
         let status = match task.status {
@@ -547,15 +538,15 @@ fn cmd_build_planned(
             spike::TaskExecutionStatus::Noop => "noop",
             spike::TaskExecutionStatus::SkippedPlatform => "skipped (platform)",
         };
-        let command = if task.command.is_empty() {
-            String::from("<no argv>")
-        } else {
-            task.command.join(" ")
-        };
-        println!("    {}: {status} {command}", task.task_id);
+        let label = plan
+            .tasks
+            .iter()
+            .find(|planned| planned.id == task.task_id)
+            .map(|planned| planned.action.display.as_str())
+            .filter(|display| !display.is_empty())
+            .unwrap_or(task.task_id.as_str());
+        println!("    {label}: {status}");
     }
-
-    Ok(())
 }
 
 /// Load the workspace from the current directory, run `$body` with a

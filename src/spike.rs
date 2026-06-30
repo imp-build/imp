@@ -4314,7 +4314,7 @@ fn execute_ordered_tasks_sequentially(
     for task in ordered {
         let mut task_progress = progress
             .as_deref_mut()
-            .map(|progress| progress.add_child(format!("execute {}", task.id)));
+            .map(|progress| progress.add_child(task_progress_label(task)));
 
         let (execution, summary) = execute_one_task(
             task,
@@ -4332,6 +4332,14 @@ fn execute_ordered_tasks_sequentially(
     }
 
     Ok(executions)
+}
+
+fn task_progress_label(task: &Task) -> String {
+    if task.action.display.is_empty() {
+        format!("execute {}", task.id)
+    } else {
+        task.action.display.clone()
+    }
 }
 
 fn execute_ordered_tasks_parallel(
@@ -4701,15 +4709,7 @@ fn run_local_task(
     };
     let command_line = format_argv(&task.action.argv);
     if let Some(progress) = progress {
-        progress.message(
-            prodash::messages::MessageLevel::Info,
-            format!(
-                "[sandbox: {}] {}\nargv: {}",
-                sandbox.sandbox_root.display(),
-                cmd_display,
-                command_line,
-            ),
-        );
+        progress.set_name(format!("execute {cmd_display}"));
     }
 
     let (program, args) = task
@@ -4760,10 +4760,10 @@ fn run_local_task(
             let _ = child.wait();
             let _ = stdout_thread.join();
             let _ = stderr_thread.join();
-            drain_process_lines(&receiver, progress, &mut stdout, &mut stderr);
+            drain_process_lines(&receiver, &mut stdout, &mut stderr);
             bail!("{} canceled", task.id);
         }
-        drain_process_lines(&receiver, progress, &mut stdout, &mut stderr);
+        drain_process_lines(&receiver, &mut stdout, &mut stderr);
         if let Some(status) = child
             .try_wait()
             .with_context(|| format!("wait for {}", task.id))?
@@ -4771,7 +4771,7 @@ fn run_local_task(
             break status;
         }
         match receiver.recv_timeout(Duration::from_millis(20)) {
-            Ok(line) => record_process_line(line, progress, &mut stdout, &mut stderr),
+            Ok(line) => record_process_line(line, &mut stdout, &mut stderr),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {}
         }
@@ -4779,9 +4779,10 @@ fn run_local_task(
 
     let _ = stdout_thread.join();
     let _ = stderr_thread.join();
-    drain_process_lines(&receiver, progress, &mut stdout, &mut stderr);
+    drain_process_lines(&receiver, &mut stdout, &mut stderr);
 
     if !status.success() {
+        report_process_failure(progress, &stdout, &stderr);
         bail!(
             "{} failed with status {}\ncommand: {}\ncwd: {}\nstdout:\n{}\nstderr:\n{}",
             task.id,
@@ -6010,19 +6011,19 @@ pub fn introspect_product(
                             .collect()
                     })
                     .unwrap_or_default();
-                let key_product_calls: std::collections::HashMap<String, (u32, String)> =
-                    parsed["key_product_calls"]
-                        .as_object()
-                        .map(|m| {
-                            m.iter()
-                                .filter_map(|(k, v)| {
-                                    let target_id = v["target_id"].as_u64()? as u32;
-                                    let product_name = v["product_name"].as_str()?.to_owned();
-                                    Some((k.clone(), (target_id, product_name)))
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                let key_product_calls: std::collections::HashMap<String, (u32, String)> = parsed
+                    ["key_product_calls"]
+                    .as_object()
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(k, v)| {
+                                let target_id = v["target_id"].as_u64()? as u32;
+                                let product_name = v["product_name"].as_str()?.to_owned();
+                                Some((k.clone(), (target_id, product_name)))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
                 Ok((trace, deps, key_display, key_product_calls))
             },
@@ -6138,8 +6139,7 @@ pub fn format_inspect_actions(result: &IntrospectResult, w: &mut String) -> std:
         .trace
         .iter()
         .filter(|e| {
-            e["event"] == "effect"
-                && matches!(e["kind"].as_str(), Some("run") | Some("write_file"))
+            e["event"] == "effect" && matches!(e["kind"].as_str(), Some("run") | Some("write_file"))
         })
         .collect();
 
@@ -6782,28 +6782,15 @@ fn spawn_output_reader<R: Read + Send + 'static>(
 
 fn drain_process_lines(
     receiver: &mpsc::Receiver<ProcessLine>,
-    progress: Option<&prodash::tree::Item>,
     stdout: &mut String,
     stderr: &mut String,
 ) {
     while let Ok(line) = receiver.try_recv() {
-        record_process_line(line, progress, stdout, stderr);
+        record_process_line(line, stdout, stderr);
     }
 }
 
-fn record_process_line(
-    line: ProcessLine,
-    progress: Option<&prodash::tree::Item>,
-    stdout: &mut String,
-    stderr: &mut String,
-) {
-    let level = match line.stream {
-        ProcessStream::Stdout => prodash::messages::MessageLevel::Info,
-        ProcessStream::Stderr => prodash::messages::MessageLevel::Failure,
-    };
-    if let Some(progress) = progress {
-        progress.message(level, line.line.clone());
-    }
+fn record_process_line(line: ProcessLine, stdout: &mut String, stderr: &mut String) {
     match line.stream {
         ProcessStream::Stdout => {
             stdout.push_str(&line.line);
@@ -6813,6 +6800,24 @@ fn record_process_line(
             stderr.push_str(&line.line);
             stderr.push('\n');
         }
+    }
+}
+
+fn report_process_failure(progress: Option<&prodash::tree::Item>, stdout: &str, stderr: &str) {
+    let Some(progress) = progress else {
+        return;
+    };
+    for line in stderr
+        .lines()
+        .chain(stdout.lines())
+        .filter(|line| !line.trim().is_empty())
+        .rev()
+        .take(20)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        progress.message(prodash::messages::MessageLevel::Failure, line.to_owned());
     }
 }
 
@@ -7149,7 +7154,7 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
     let mut stdout = String::new();
     let mut stderr = String::new();
     let status = loop {
-        drain_process_lines(&receiver, None, &mut stdout, &mut stderr);
+        drain_process_lines(&receiver, &mut stdout, &mut stderr);
         if let Some(status) = child
             .try_wait()
             .with_context(|| format!("wait for {}", opts.display))?
@@ -7157,7 +7162,7 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
             break status;
         }
         match receiver.recv_timeout(Duration::from_millis(20)) {
-            Ok(line) => record_process_line(line, None, &mut stdout, &mut stderr),
+            Ok(line) => record_process_line(line, &mut stdout, &mut stderr),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {}
         }
@@ -7165,7 +7170,7 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
 
     let _ = stdout_reader.join();
     let _ = stderr_reader.join();
-    drain_process_lines(&receiver, None, &mut stdout, &mut stderr);
+    drain_process_lines(&receiver, &mut stdout, &mut stderr);
 
     let exit_code = status.code().unwrap_or(-1);
     if !status.success() {
