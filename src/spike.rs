@@ -2138,6 +2138,28 @@ impl Planner<'_> {
     }
 }
 
+/// Stable, introspection-independent task id for a memo node.
+///
+/// The same memoized call (identical `key`) is re-traced once per top-level
+/// product that reaches it, because each introspection wipes the memo table.
+/// Deriving the task id from the memo key alone — rather than the discovering
+/// product's prefix — lets those duplicates collapse to a single task.
+///
+/// Product-call memos get a readable `//target#product` id (and so dedup with
+/// the product's own root); plain memos get an opaque `memo:<digest>` id.
+fn memo_task_id(
+    key: &str,
+    key_product_calls: &std::collections::HashMap<String, (u32, String)>,
+    id_to_address: &std::collections::HashMap<u32, &str>,
+) -> String {
+    if let Some((target_id, product_name)) = key_product_calls.get(key) {
+        if let Some(addr) = id_to_address.get(target_id) {
+            return format!("{addr}#{product_name}");
+        }
+    }
+    format!("memo:{}", &crate::cache::digest_bytes(key.as_bytes())[..16])
+}
+
 async fn add_product_discovered_tasks(
     live: &LiveWorkspace,
     workspace_root: &Path,
@@ -2176,18 +2198,29 @@ async fn add_product_discovered_tasks(
     }
 
     let mut key_to_task = BTreeMap::new();
-    for (index, key) in key_order.iter().enumerate() {
-        let task_id = format!("{prefix}:memo{index}");
+    for key in &key_order {
+        let task_id = memo_task_id(key, &result.key_product_calls, &id_to_address);
         key_to_task.insert(key.clone(), task_id.clone());
         let display = result
             .key_display
             .get(key)
             .cloned()
             .unwrap_or_else(|| key.clone());
+        // A product-call memo belongs to the foreign target it produces, so its
+        // task records that target rather than whichever product discovered it.
+        let (node_target, node_product, node_js_id) = result
+            .key_product_calls
+            .get(key)
+            .and_then(|(tid, pname)| {
+                id_to_address
+                    .get(tid)
+                    .map(|addr| (addr.to_string(), pname.clone(), *tid))
+            })
+            .unwrap_or_else(|| (target.address.clone(), product.to_owned(), target.js_id));
         tasks.entry(task_id.clone()).or_insert_with(|| Task {
             id: task_id,
-            target: target.address.clone(),
-            product: product.to_owned(),
+            target: node_target,
+            product: node_product,
             fields: BTreeMap::new(),
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -2205,7 +2238,7 @@ async fn add_product_discovered_tasks(
                 sandbox: true,
             },
             dependencies: Vec::new(),
-            js_id: target.js_id,
+            js_id: node_js_id,
         });
     }
 
@@ -2360,7 +2393,7 @@ async fn add_product_discovered_tasks(
         return Ok(root.clone());
     }
 
-    let task_id = format!("{prefix}:memo0");
+    let task_id = prefix.clone();
     tasks.entry(task_id.clone()).or_insert_with(|| Task {
         id: task_id.clone(),
         target: target.address.clone(),
@@ -4002,7 +4035,7 @@ export const app = externalThing("app");
         let plan = plan_live(&workspace, p, "build", &["app".into()])
             .await
             .unwrap();
-        assert!(plan.roots[0].starts_with("//:app#external-product:memo"));
+        assert!(plan.roots[0].starts_with("//:app#external-product"));
         assert!(plan
             .tasks
             .iter()
@@ -4029,7 +4062,7 @@ export const app = externalThing("app");
         .await
         .unwrap();
 
-        assert!(plan.roots[0].starts_with("//library/jodin:jodin#odin-package:memo"));
+        assert!(plan.roots[0].starts_with("//library/jodin:jodin#odin-package"));
         assert!(plan
             .tasks
             .iter()
@@ -4107,7 +4140,7 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
         assert!(all
             .roots
             .iter()
-            .any(|root| root.starts_with("//:pkg#configured-product:memo")));
+            .any(|root| root.starts_with("//:pkg#configured-product")));
     }
 
     #[tokio::test]
@@ -4118,7 +4151,7 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
             .await
             .unwrap();
 
-        assert!(plan.roots[0].starts_with("//assets:ui#bundle:memo"));
+        assert!(plan.roots[0].starts_with("//assets:ui#bundle"));
         assert!(plan
             .tasks
             .iter()
@@ -5590,7 +5623,7 @@ export const report = product("test-pkg", "report", async function report(handle
         let live_plan = plan_live(&live, p, "build", &["//:pkg#report".to_owned()])
             .await
             .unwrap();
-        assert!(live_plan.tasks[0].id.starts_with("//:pkg#report:memo"));
+        assert!(live_plan.tasks[0].id.starts_with("//:pkg#report"));
     }
 
     #[tokio::test]
