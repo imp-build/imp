@@ -1105,6 +1105,8 @@ pub enum ExecutionMode {
 pub struct ExecutionOptions {
     pub mode: ExecutionMode,
     pub jobs: usize,
+    /// When true, planned tasks neither read from nor write to the task cache.
+    pub no_cache: bool,
     /// Name of the active platform; only tasks whose `action.platform` matches
     /// (or is `None`) are executed. Defaults to `"local"`.
     pub platform: String,
@@ -1115,12 +1117,18 @@ impl ExecutionOptions {
         Self {
             mode,
             jobs: jobs.max(1),
+            no_cache: false,
             platform: "local".to_owned(),
         }
     }
 
     pub fn with_platform(mut self, platform: impl Into<String>) -> Self {
         self.platform = platform.into();
+        self
+    }
+
+    pub fn with_no_cache(mut self, no_cache: bool) -> Self {
+        self.no_cache = no_cache;
         self
     }
 }
@@ -1229,6 +1237,7 @@ struct TaskCacheSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TaskCacheEvaluation {
     cacheable: bool,
+    cache_disabled: bool,
     task_key: String,
     action_digest: String,
     input_digests: Vec<CacheInputDigest>,
@@ -4291,6 +4300,7 @@ pub fn execute_plan_with_options(
             workspace_root,
             options.mode,
             &options.platform,
+            options.no_cache,
             &plan.named_caches,
             progress,
         )?
@@ -4305,6 +4315,7 @@ fn execute_ordered_tasks_sequentially(
     workspace_root: &Path,
     mode: ExecutionMode,
     active_platform: &str,
+    no_cache: bool,
     named_caches: &[NamedCache],
     mut progress: Option<&mut prodash::tree::Item>,
 ) -> Result<Vec<TaskExecution>> {
@@ -4321,6 +4332,7 @@ fn execute_ordered_tasks_sequentially(
             workspace_root,
             mode,
             active_platform,
+            no_cache,
             named_caches,
             &summaries,
             task_progress.as_mut(),
@@ -4387,6 +4399,7 @@ fn execute_ordered_tasks_parallel(
                 let workspace_root = workspace_root.to_owned();
                 let mode = options.mode;
                 let active_platform = options.platform.clone();
+                let no_cache = options.no_cache;
                 let named_caches = named_caches.to_vec();
                 let dependency_summaries = summaries.clone();
                 let task = task.clone();
@@ -4398,6 +4411,7 @@ fn execute_ordered_tasks_parallel(
                         &workspace_root,
                         mode,
                         &active_platform,
+                        no_cache,
                         &named_caches,
                         &dependency_summaries,
                         None,
@@ -4453,6 +4467,7 @@ fn execute_one_task(
     workspace_root: &Path,
     mode: ExecutionMode,
     active_platform: &str,
+    no_cache: bool,
     named_caches: &[NamedCache],
     completed_dependencies: &BTreeMap<String, TaskCacheSummary>,
     mut progress: Option<&mut prodash::tree::Item>,
@@ -4479,109 +4494,130 @@ fn execute_one_task(
         ));
     }
 
-    let status = match mode {
-        ExecutionMode::DryRun => {
-            if let Some(progress) = progress.as_mut() {
-                progress.done("would run");
-            }
-            TaskExecutionStatus::WouldRun
-        }
-        ExecutionMode::Local if command.is_empty() && task.outputs.is_empty() => {
-            if let Some(progress) = progress.as_mut() {
-                progress.done("noop");
-            }
-            TaskExecutionStatus::Noop
-        }
-        ExecutionMode::Local if !task.action.sandbox => {
-            if !task.action.impure {
-                bail!("{} uses sandbox: false and must set impure: true", task.id);
-            }
-            run_unsandboxed_task(task, workspace_root)?;
-            if let Some(progress) = progress.as_mut() {
-                progress.done("done");
-            }
-            TaskExecutionStatus::Ran
-        }
-        ExecutionMode::Local if command.is_empty() => {
-            let evaluation =
-                evaluate_task_cache(task, workspace_root, named_caches, completed_dependencies)?;
-            if evaluation.hit {
-                let record = evaluation
-                    .record
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("cache hit for {} had no record", task.id))?;
-                materialize_cached_outputs(record, workspace_root)?;
+    let status =
+        match mode {
+            ExecutionMode::DryRun => {
                 if let Some(progress) = progress.as_mut() {
-                    progress.done("cache hit");
+                    progress.done("would run");
                 }
-                return Ok((
-                    TaskExecution {
-                        task_id: task.id.clone(),
-                        status: TaskExecutionStatus::CacheHit,
-                        command,
-                    },
-                    TaskCacheSummary {
-                        task_id: task.id.clone(),
-                        task_key: evaluation.task_key,
-                    },
-                ));
+                TaskExecutionStatus::WouldRun
             }
+            ExecutionMode::Local if command.is_empty() && task.outputs.is_empty() => {
+                if let Some(progress) = progress.as_mut() {
+                    progress.done("noop");
+                }
+                TaskExecutionStatus::Noop
+            }
+            ExecutionMode::Local if !task.action.sandbox => {
+                if !task.action.impure {
+                    bail!("{} uses sandbox: false and must set impure: true", task.id);
+                }
+                run_unsandboxed_task(task, workspace_root)?;
+                if let Some(progress) = progress.as_mut() {
+                    progress.done("done");
+                }
+                TaskExecutionStatus::Ran
+            }
+            ExecutionMode::Local if command.is_empty() => {
+                let mut evaluation = evaluate_task_cache_with_lookup(
+                    task,
+                    workspace_root,
+                    named_caches,
+                    completed_dependencies,
+                    !no_cache,
+                )?;
+                if no_cache {
+                    disable_task_cache(&mut evaluation);
+                }
+                if evaluation.hit {
+                    let record = evaluation.record.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("cache hit for {} had no record", task.id)
+                    })?;
+                    materialize_cached_outputs(record, workspace_root)?;
+                    if let Some(progress) = progress.as_mut() {
+                        progress.done("cache hit");
+                    }
+                    return Ok((
+                        TaskExecution {
+                            task_id: task.id.clone(),
+                            status: TaskExecutionStatus::CacheHit,
+                            command,
+                        },
+                        TaskCacheSummary {
+                            task_id: task.id.clone(),
+                            task_key: evaluation.task_key,
+                        },
+                    ));
+                }
 
-            materialize_embedded_output_task(task, workspace_root, &evaluation)?;
-            if let Some(progress) = progress.as_mut() {
-                progress.done("done");
-            }
-            TaskExecutionStatus::Ran
-        }
-        ExecutionMode::Local => {
-            let evaluation =
-                evaluate_task_cache(task, workspace_root, named_caches, completed_dependencies)?;
-            if evaluation.hit {
-                let record = evaluation
-                    .record
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("cache hit for {} had no record", task.id))?;
-                materialize_cached_outputs(record, workspace_root)?;
+                materialize_embedded_output_task(task, workspace_root, &evaluation)?;
                 if let Some(progress) = progress.as_mut() {
-                    progress.done("cache hit");
+                    progress.done("done");
                 }
-                return Ok((
-                    TaskExecution {
-                        task_id: task.id.clone(),
-                        status: TaskExecutionStatus::CacheHit,
-                        command,
-                    },
-                    TaskCacheSummary {
-                        task_id: task.id.clone(),
-                        task_key: evaluation.task_key,
-                    },
-                ));
+                TaskExecutionStatus::Ran
             }
+            ExecutionMode::Local => {
+                let mut evaluation = evaluate_task_cache_with_lookup(
+                    task,
+                    workspace_root,
+                    named_caches,
+                    completed_dependencies,
+                    !no_cache,
+                )?;
+                if no_cache {
+                    disable_task_cache(&mut evaluation);
+                }
+                if evaluation.hit {
+                    let record = evaluation.record.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("cache hit for {} had no record", task.id)
+                    })?;
+                    materialize_cached_outputs(record, workspace_root)?;
+                    if let Some(progress) = progress.as_mut() {
+                        progress.done("cache hit");
+                    }
+                    return Ok((
+                        TaskExecution {
+                            task_id: task.id.clone(),
+                            status: TaskExecutionStatus::CacheHit,
+                            command,
+                        },
+                        TaskCacheSummary {
+                            task_id: task.id.clone(),
+                            task_key: evaluation.task_key,
+                        },
+                    ));
+                }
 
-            if let Err(error) = run_local_task(
-                task,
-                workspace_root,
-                progress.as_deref(),
-                cancellation,
-                &evaluation,
-            ) {
-                if let Some(progress) = progress.as_mut() {
-                    progress.fail("failed");
+                if let Err(error) = run_local_task(
+                    task,
+                    workspace_root,
+                    progress.as_deref(),
+                    cancellation,
+                    &evaluation,
+                ) {
+                    if let Some(progress) = progress.as_mut() {
+                        progress.fail("failed");
+                    }
+                    return Err(error);
                 }
-                return Err(error);
+                if let Some(progress) = progress.as_mut() {
+                    progress.done("done");
+                }
+                TaskExecutionStatus::Ran
             }
-            if let Some(progress) = progress.as_mut() {
-                progress.done("done");
-            }
-            TaskExecutionStatus::Ran
-        }
-    };
+        };
 
     let summary_key = match mode {
         ExecutionMode::DryRun => digest_bytes(task.id.as_bytes()),
         ExecutionMode::Local => {
-            evaluate_task_cache(task, workspace_root, named_caches, completed_dependencies)?
-                .task_key
+            evaluate_task_cache_with_lookup(
+                task,
+                workspace_root,
+                named_caches,
+                completed_dependencies,
+                !no_cache,
+            )?
+            .task_key
         }
     };
     Ok((
@@ -4808,6 +4844,8 @@ fn run_local_task(
         };
         write_task_cache_record(&record)?;
         materialize_cached_outputs(&record, workspace_root)?;
+    } else if cache.cache_disabled {
+        materialize_task_outputs_without_record(task, cache, outputs, workspace_root)?;
     }
     Ok(())
 }
@@ -4869,8 +4907,29 @@ fn materialize_embedded_output_task(
         };
         write_task_cache_record(&record)?;
         materialize_cached_outputs(&record, workspace_root)?;
+    } else if cache.cache_disabled {
+        materialize_task_outputs_without_record(task, cache, outputs, workspace_root)?;
     }
     Ok(())
+}
+
+fn materialize_task_outputs_without_record(
+    task: &Task,
+    cache: &TaskCacheEvaluation,
+    outputs: Vec<CachedArtifact>,
+    workspace_root: &Path,
+) -> Result<()> {
+    let record = TaskCacheRecord {
+        version: TASK_CACHE_VERSION,
+        task_id: task.id.clone(),
+        task_key: cache.task_key.clone(),
+        action_digest: cache.action_digest.clone(),
+        input_digests: cache.input_digests.clone(),
+        dependency_keys: cache.dependency_keys.clone(),
+        named_caches: cache.named_caches.clone(),
+        outputs,
+    };
+    materialize_cached_outputs(&record, workspace_root)
 }
 
 fn terminate_child(child: &mut std::process::Child) {
@@ -5158,6 +5217,22 @@ fn evaluate_task_cache(
     named_caches: &[NamedCache],
     completed_dependencies: &BTreeMap<String, TaskCacheSummary>,
 ) -> Result<TaskCacheEvaluation> {
+    evaluate_task_cache_with_lookup(
+        task,
+        workspace_root,
+        named_caches,
+        completed_dependencies,
+        true,
+    )
+}
+
+fn evaluate_task_cache_with_lookup(
+    task: &Task,
+    workspace_root: &Path,
+    named_caches: &[NamedCache],
+    completed_dependencies: &BTreeMap<String, TaskCacheSummary>,
+    lookup_cache: bool,
+) -> Result<TaskCacheEvaluation> {
     let bindings = named_cache_bindings(workspace_root, named_caches)?;
     let input_digests = digest_task_inputs(task, workspace_root)?;
     let mut dependency_keys = Vec::new();
@@ -5199,6 +5274,7 @@ fn evaluate_task_cache(
         };
         return Ok(TaskCacheEvaluation {
             cacheable,
+            cache_disabled: false,
             task_key,
             action_digest,
             input_digests,
@@ -5210,33 +5286,44 @@ fn evaluate_task_cache(
         });
     }
 
-    let record_path = task_record_path(&task_key)?;
-    let record = match std::fs::read_to_string(&record_path) {
-        Ok(encoded) => {
-            let record: TaskCacheRecord = serde_json::from_str(&encoded)
-                .with_context(|| format!("parse task cache record {}", record_path.display()))?;
-            Some(record)
+    let record = if lookup_cache {
+        let record_path = task_record_path(&task_key)?;
+        match std::fs::read_to_string(&record_path) {
+            Ok(encoded) => {
+                let record: TaskCacheRecord =
+                    serde_json::from_str(&encoded).with_context(|| {
+                        format!("parse task cache record {}", record_path.display())
+                    })?;
+                Some(record)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("read task cache record {}", record_path.display()));
+            }
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("read task cache record {}", record_path.display()));
-        }
+    } else {
+        None
     };
 
-    let (hit, miss_reason) = match &record {
-        None => (false, Some("no task cache record".to_owned())),
-        Some(record) if record.task_key != task_key => {
-            (false, Some("task cache record key mismatch".to_owned()))
+    let (hit, miss_reason) = if !lookup_cache {
+        (false, Some("cache disabled".to_owned()))
+    } else {
+        match &record {
+            None => (false, Some("no task cache record".to_owned())),
+            Some(record) if record.task_key != task_key => {
+                (false, Some("task cache record key mismatch".to_owned()))
+            }
+            Some(record) => match cached_outputs_present(record) {
+                Ok(()) => (true, None),
+                Err(error) => (false, Some(format!("{error:#}"))),
+            },
         }
-        Some(record) => match cached_outputs_present(record) {
-            Ok(()) => (true, None),
-            Err(error) => (false, Some(format!("{error:#}"))),
-        },
     };
 
     Ok(TaskCacheEvaluation {
         cacheable,
+        cache_disabled: false,
         task_key,
         action_digest,
         input_digests,
@@ -5246,6 +5333,14 @@ fn evaluate_task_cache(
         miss_reason,
         record,
     })
+}
+
+fn disable_task_cache(evaluation: &mut TaskCacheEvaluation) {
+    evaluation.cacheable = false;
+    evaluation.cache_disabled = true;
+    evaluation.hit = false;
+    evaluation.miss_reason = Some("cache disabled".to_owned());
+    evaluation.record = None;
 }
 
 fn task_has_embedded_outputs(task: &Task) -> bool {
@@ -8301,6 +8396,48 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
 
         let explanation = explain_task_cache(&plan, root.path(), &task_id).unwrap();
         assert!(explanation.hit);
+    }
+
+    #[test]
+    fn no_cache_execution_bypasses_and_does_not_populate_task_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let task_id = unique_task_id("no-cache");
+        let marker = root.path().join("runs.txt");
+        let command = format!(
+            "printf ran >> {} && mkdir -p build && printf ok > build/out.txt",
+            marker.display()
+        );
+        let plan = Plan {
+            goal: "build".to_owned(),
+            roots: vec![task_id.clone()],
+            named_caches: Vec::new(),
+            tasks: vec![executable_task(
+                &task_id,
+                &[],
+                &["sh", "-c", &command],
+                Some("build/out.txt"),
+            )],
+        };
+
+        let no_cache_options = ExecutionOptions::new(ExecutionMode::Local, 1).with_no_cache(true);
+        let first =
+            execute_plan_with_options(&plan, None, root.path(), no_cache_options.clone(), None)
+                .unwrap();
+        assert_eq!(first.tasks[0].status, TaskExecutionStatus::Ran);
+        std::fs::remove_file(root.path().join("build/out.txt")).unwrap();
+
+        let second = execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
+        assert_eq!(second.tasks[0].status, TaskExecutionStatus::Ran);
+        std::fs::remove_file(root.path().join("build/out.txt")).unwrap();
+
+        let third = execute_plan(&plan, root.path(), ExecutionMode::Local).unwrap();
+        assert_eq!(third.tasks[0].status, TaskExecutionStatus::CacheHit);
+        std::fs::remove_file(root.path().join("build/out.txt")).unwrap();
+
+        let fourth =
+            execute_plan_with_options(&plan, None, root.path(), no_cache_options, None).unwrap();
+        assert_eq!(fourth.tasks[0].status, TaskExecutionStatus::Ran);
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "ranranran");
     }
 
     #[test]

@@ -71,6 +71,9 @@ enum Cmd {
         /// Maximum number of ready tasks to execute concurrently
         #[arg(long, default_value_t = 1)]
         jobs: usize,
+        /// Run actions without reading or writing the planned task cache
+        #[arg(long)]
+        no_cache: bool,
         /// Active execution platform (default: local)
         #[arg(long, default_value = "local")]
         platform: String,
@@ -122,6 +125,9 @@ enum Cmd {
         /// Maximum number of ready planned tasks to execute concurrently
         #[arg(long, default_value_t = 1)]
         jobs: usize,
+        /// Run actions without reading or writing the planned task cache
+        #[arg(long)]
+        no_cache: bool,
     },
 }
 
@@ -182,6 +188,7 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
             execute,
             dry_run,
             jobs,
+            no_cache,
             platform,
         } => {
             return cmd_plan(
@@ -192,6 +199,7 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
                 *execute,
                 *dry_run,
                 *jobs,
+                *no_cache,
                 platform,
                 tree,
             );
@@ -208,8 +216,12 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
         Cmd::Cache { command } => {
             return cmd_cache(command);
         }
-        Cmd::Build { selectors, jobs } => {
-            return cmd_build_planned(selectors, *jobs, tree);
+        Cmd::Build {
+            selectors,
+            jobs,
+            no_cache,
+        } => {
+            return cmd_build_planned(selectors, *jobs, *no_cache, tree);
         }
         Cmd::Explain { product } => {
             return cmd_explain(product);
@@ -322,6 +334,7 @@ fn cmd_plan(
     execute: bool,
     dry_run: bool,
     jobs: usize,
+    no_cache: bool,
     platform: &str,
     tree: &Tree,
 ) -> Result<()> {
@@ -355,7 +368,9 @@ fn cmd_plan(
             spike::ExecutionMode::Local
         };
         let mut progress = tree.add_child("execute plan");
-        let options = spike::ExecutionOptions::new(mode, jobs).with_platform(platform);
+        let options = spike::ExecutionOptions::new(mode, jobs)
+            .with_platform(platform)
+            .with_no_cache(no_cache);
         let report = match spike::execute_plan_with_options(
             &plan,
             Some(&workspace),
@@ -375,7 +390,7 @@ fn cmd_plan(
     Ok(())
 }
 
-fn cmd_build_planned(selectors: &[String], jobs: usize, tree: &Tree) -> Result<()> {
+fn cmd_build_planned(selectors: &[String], jobs: usize, no_cache: bool, tree: &Tree) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let workspace = spike::load_workspace(&workspace_root)?;
@@ -401,7 +416,7 @@ fn cmd_build_planned(selectors: &[String], jobs: usize, tree: &Tree) -> Result<(
         &plan,
         Some(&workspace),
         &workspace_root,
-        spike::ExecutionOptions::new(spike::ExecutionMode::Local, jobs),
+        spike::ExecutionOptions::new(spike::ExecutionMode::Local, jobs).with_no_cache(no_cache),
         Some(&mut progress),
     ) {
         Ok(report) => report,
