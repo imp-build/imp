@@ -6,7 +6,7 @@
 //! DAG without executing it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -37,6 +37,94 @@ use walkdir::WalkDir;
 const WORKSPACE_FILE: &str = "imp.workspace.js";
 const BUILD_FILE: &str = "BUILD.js";
 const TASK_CACHE_VERSION: u32 = 2;
+
+#[derive(Clone)]
+pub struct HostLogSink {
+    inner: Arc<Mutex<HostLogDestination>>,
+}
+
+enum HostLogDestination {
+    #[allow(dead_code)]
+    Stderr,
+    Prodash(prodash::tree::Item),
+}
+
+impl HostLogSink {
+    #[allow(dead_code)]
+    pub fn stderr() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HostLogDestination::Stderr)),
+        }
+    }
+
+    pub fn prodash(item: prodash::tree::Item) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HostLogDestination::Prodash(item))),
+        }
+    }
+
+    pub fn writer(&self, level: impl Into<String>) -> HostLogWriter {
+        HostLogWriter {
+            sink: self.clone(),
+            level: level.into(),
+            buffer: String::new(),
+        }
+    }
+
+    fn log(&self, level: &str, message: &str) {
+        let level = level.trim();
+        let text = format!("[{level}] {message}");
+        match &mut *self.inner.lock().unwrap() {
+            HostLogDestination::Stderr => eprintln!("{text}"),
+            HostLogDestination::Prodash(item) => item.message(host_log_message_level(level), text),
+        }
+    }
+}
+
+pub struct HostLogWriter {
+    sink: HostLogSink,
+    level: String,
+    buffer: String,
+}
+
+impl HostLogWriter {
+    fn emit_complete_lines(&mut self) {
+        while let Some(newline) = self.buffer.find('\n') {
+            let mut line = self.buffer.drain(..=newline).collect::<String>();
+            if line.ends_with('\n') {
+                line.pop();
+            }
+            if line.ends_with('\r') {
+                line.pop();
+            }
+            self.sink.log(&self.level, &line);
+        }
+    }
+}
+
+impl Write for HostLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buffer.push_str(&String::from_utf8_lossy(buf));
+        self.emit_complete_lines();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if !self.buffer.is_empty() {
+            let line = std::mem::take(&mut self.buffer);
+            self.sink.log(&self.level, &line);
+        }
+        Ok(())
+    }
+}
+
+fn host_log_message_level(level: &str) -> prodash::messages::MessageLevel {
+    match level.to_ascii_lowercase().as_str() {
+        "error" | "failure" | "fail" => prodash::messages::MessageLevel::Failure,
+        "success" | "done" => prodash::messages::MessageLevel::Success,
+        _ => prodash::messages::MessageLevel::Info,
+    }
+}
 
 /// The built-in `imp:core` module exposed to every plugin and BUILD file.
 const CORE_JS: &str = r##"
@@ -1660,7 +1748,12 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
 ///
 /// Returns a [`LiveWorkspace`] that keeps the QuickJS runtime alive so rule
 /// `exec` functions can be invoked during task execution.
+#[allow(dead_code)]
 pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
+    load_workspace_with_host_log(root, HostLogSink::stderr())
+}
+
+pub fn load_workspace_with_host_log(root: &Path, host_log: HostLogSink) -> Result<LiveWorkspace> {
     let root = root
         .canonicalize()
         .with_context(|| format!("canonicalize workspace root {}", root.display()))?;
@@ -1694,6 +1787,7 @@ pub fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
                 root.clone(),
                 mounts_clone,
                 Arc::clone(&exec_root),
+                host_log.clone(),
             )
         })
         .map_err(|e| anyhow::anyhow!("register QuickJS globals: {e}"))?;
@@ -2373,6 +2467,7 @@ fn register_globals<'js>(
     workspace_root: PathBuf,
     module_mounts: Arc<Mutex<Vec<ModuleMount>>>,
     exec_root: Arc<Mutex<Option<PathBuf>>>,
+    host_log: HostLogSink,
 ) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
@@ -3096,10 +3191,14 @@ fn register_globals<'js>(
     // ------------------------------------------------------------------
     // __host_log(level, message)
     // ------------------------------------------------------------------
+    let host_log_sink = host_log.clone();
     let host_log = Function::new(
         ctx.clone(),
         move |_ctx: Ctx<'js>, level: String, message: String| -> rquickjs::Result<()> {
-            eprintln!("[{level}] {message}");
+            let mut writer = host_log_sink.writer(level);
+            writeln!(&mut writer, "{message}").map_err(|e| {
+                rquickjs::Error::new_loading_message("log", format!("write log message: {e}"))
+            })?;
             Ok(())
         },
     )?;
@@ -7618,6 +7717,48 @@ export const ui = asset({ srcs: ["**/*.png"] });
         path.to_string_lossy()
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
+    }
+
+    #[test]
+    fn host_js_logs_are_written_to_prodash_messages() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(p.join(WORKSPACE_FILE).as_path(), "");
+        write_file(
+            p.join(BUILD_FILE).as_path(),
+            r#"
+import { target, logDebug, logInfo, logWarn, logError } from "imp:core";
+
+logDebug("debug message");
+logInfo("info message");
+logWarn("warn message");
+logError("error message");
+
+export const app = target({ kind: "sample" });
+"#,
+        );
+
+        let progress_root = prodash::tree::Root::new();
+        let log_item = progress_root.add_child("workspace logs");
+        let _workspace = load_workspace_with_host_log(p, HostLogSink::prodash(log_item)).unwrap();
+
+        let mut messages = Vec::new();
+        progress_root.copy_messages(&mut messages);
+        let rendered = messages
+            .iter()
+            .map(|message| {
+                format!(
+                    "{}::{:?}::{}",
+                    message.origin, message.level, message.message
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("workspace logs::Info::[debug] debug message"));
+        assert!(rendered.contains("workspace logs::Info::[info] info message"));
+        assert!(rendered.contains("workspace logs::Info::[warn] warn message"));
+        assert!(rendered.contains("workspace logs::Failure::[error] error message"));
     }
 
     fn executable_task(id: &str, deps: &[&str], argv: &[&str], output: Option<&str>) -> Task {
