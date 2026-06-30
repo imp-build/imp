@@ -420,9 +420,20 @@ async fn cmd_build_planned(
 ) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
-    let workspace = load_workspace_with_messages(&workspace_root, tree).await?;
+    let workspace = {
+        let mut p = tree.add_child("load workspace");
+        let ws = load_workspace_with_messages(&workspace_root, tree).await?;
+        p.done("workspace loaded");
+        ws
+    };
 
-    let plan = spike::plan_live(&workspace, &workspace_root, "build", selectors).await?;
+    let plan = {
+        let mut p = tree.add_child("generate plan");
+        let plan = spike::plan_live(&workspace, &workspace_root, "build", selectors).await?;
+        p.done(format!("{} tasks", plan.tasks.len()));
+        plan
+    };
+
     let mut progress = tree.add_child("execute planned build");
     let target_count = plan.roots.len();
     let task_count = plan.tasks.len();
@@ -493,9 +504,7 @@ async fn load_workspace_with_messages(
     workspace_root: &std::path::Path,
     tree: &Tree,
 ) -> Result<runtime::LiveWorkspace> {
-    let log_item = tree.add_log_child("workspace logs");
-    runtime::load_workspace_with_host_log(workspace_root, runtime::HostLogSink::prodash(log_item))
-        .await
+    runtime::load_workspace_with_host_log(workspace_root, tree.log_sink()).await
 }
 
 /// Load the workspace from the current directory, run `$body` with a

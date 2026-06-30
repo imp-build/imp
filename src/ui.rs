@@ -1,14 +1,21 @@
 use std::sync::Arc;
 
+use crate::runtime::HostLogSink;
+
 pub struct Tree {
     root: Arc<prodash::tree::Root>,
+    log_sink: HostLogSink,
 }
 
 impl Tree {
     fn new() -> Self {
-        Self {
-            root: prodash::tree::Root::new(),
-        }
+        let root = prodash::tree::Root::new();
+        // Raw `add_child` (no `init_task`): this is a message log, not a
+        // stepped task. Created once here so the workspace log sink is shared
+        // across every command rather than re-created on each load.
+        let log_item = root.add_child("workspace logs");
+        let log_sink = HostLogSink::prodash(log_item);
+        Self { root, log_sink }
     }
 
     pub fn add_child(&self, name: impl Into<String>) -> prodash::tree::Item {
@@ -17,8 +24,10 @@ impl Tree {
         item
     }
 
-    pub fn add_log_child(&self, name: impl Into<String>) -> prodash::tree::Item {
-        self.root.add_child(name)
+    /// Shared sink that routes workspace host logs into the `workspace logs`
+    /// node. Cheap to clone — the destination is behind an `Arc<Mutex<_>>`.
+    pub fn log_sink(&self) -> HostLogSink {
+        self.log_sink.clone()
     }
 
     fn downgrade(&self) -> std::sync::Weak<prodash::tree::Root> {
