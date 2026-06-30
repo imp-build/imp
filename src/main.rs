@@ -1,9 +1,9 @@
 mod cache;
 mod codegen;
-mod exec;
-mod executor;
 mod commands;
 mod env;
+mod exec;
+mod executor;
 mod loader;
 mod runtime;
 mod spike;

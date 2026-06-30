@@ -21,9 +21,8 @@ use crate::cache::{
     TASK_CACHE_VERSION,
 };
 use crate::exec::{
-    exec_run_unsandboxed, materialize_tools_into_sandbox, report_process_failure,
-    ensure_path, sandbox_command_env, sandbox_home_tmp, wait_for_child_output, ExecIoSpec,
-    ExecRunOpts,
+    ensure_path, exec_run_unsandboxed, materialize_tools_into_sandbox, report_process_failure,
+    sandbox_command_env, sandbox_home_tmp, wait_for_child_output, ExecIoSpec, ExecRunOpts,
 };
 use crate::runtime::LiveWorkspace;
 use crate::spike::{NamedCache, Plan, Task};
@@ -691,10 +690,14 @@ fn run_local_task(
     let script_path = sandbox.sandbox_root.join("imp-run.sh");
     write_sandbox_run_script(&script_path, &cwd, &task_env, &task.action.argv)?;
 
+    let sandbox_name = sandbox
+        .sandbox_root
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_else(|| "<unknown>".into());
+
     if let Some(progress) = progress.as_mut() {
-        progress.set_name(format!("execute {cmd_display}"));
-        progress.info(format!("sandbox: {}", sandbox.sandbox_root.display()));
-        progress.info(format!("script: {}", script_path.display()));
+        progress.set_name(format!("execute {cmd_display} - {}", sandbox_name));
     }
 
     let mut command = Command::new(program);
