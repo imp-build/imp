@@ -1,6 +1,5 @@
 mod codegen;
 mod commands;
-mod coverage;
 mod env;
 mod spike;
 mod toolchain;
@@ -9,10 +8,9 @@ mod workspace;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use commands::BuildMode;
 use env::{Env, LocalEnv, WslEnv};
 
 type Tree = Arc<prodash::tree::Root>;
@@ -51,11 +49,6 @@ enum Cmd {
     EnvCheck {
         #[arg(long)]
         cross_compile: bool,
-    },
-    /// Generate Mermaid dependency graph
-    Graph {
-        #[arg(long)]
-        files: bool,
     },
     /// Plan a target goal from workspace BUILD.js files (QuickJS spike)
     Plan {
@@ -122,59 +115,14 @@ enum Cmd {
         /// Optional generator target selectors; defaults to all registered generate-build products
         selectors: Vec<String>,
     },
-    /// Format all Odin source files
-    Fmt,
-    /// Type-check an Odin package without building
-    Check {
-        /// Package path to check
-        #[arg(default_value = "ottar")]
-        path: String,
-    },
-    /// Build project targets
+    /// Build planned target selectors; defaults to the workspace default build roots
     Build {
-        #[arg(short = 'm', long, default_value = "release")]
-        mode: BuildMode,
-        /// Build only this target
-        #[arg(long)]
-        target: Option<String>,
-        /// Execute the QuickJS planned build graph instead of the legacy project build
-        #[arg(long)]
-        planned: bool,
-        /// Planned target selectors; only valid with --planned
+        /// Target selectors, e.g. //:app or //:app#odin-package
         selectors: Vec<String>,
         /// Maximum number of ready planned tasks to execute concurrently
         #[arg(long, default_value_t = 1)]
         jobs: usize,
     },
-    /// Build and run ottar
-    Run {
-        #[arg(short = 'm', long, default_value = "release")]
-        mode: BuildMode,
-        /// Extra arguments forwarded to the executable
-        #[arg(last = true)]
-        args: Vec<String>,
-    },
-    /// Run unit test suites
-    Test,
-    /// Build and run the integration test harness
-    IntegrationTest {
-        #[arg(short = 'm', long, default_value = "release")]
-        mode: BuildMode,
-    },
-    /// Generate code coverage report using kcov
-    Coverage,
-    /// Package a release archive
-    Package {
-        /// Target platform(s); defaults to current platform
-        #[arg(long)]
-        platform: Vec<String>,
-        #[arg(long, default_value = "nightly")]
-        version: String,
-        #[arg(long)]
-        skip_content_build: bool,
-    },
-    /// Generate Visual Studio and VS Code configuration files
-    Vs,
 }
 
 #[derive(Subcommand)]
@@ -260,14 +208,8 @@ async fn run_inner(cli: Cli, tree: &Tree) -> Result<()> {
         Cmd::Cache { command } => {
             return cmd_cache(command);
         }
-        Cmd::Build {
-            target,
-            planned: true,
-            selectors,
-            jobs,
-            ..
-        } => {
-            return cmd_build_planned(target.as_deref(), selectors, *jobs, tree);
+        Cmd::Build { selectors, jobs } => {
+            return cmd_build_planned(selectors, *jobs, tree);
         }
         Cmd::Explain { product } => {
             return cmd_explain(product);
@@ -359,8 +301,6 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
 
         Cmd::EnvCheck { cross_compile } => cmd_env_check(env, *cross_compile, tree).await,
 
-        Cmd::Graph { files } => commands::graph::cmd_graph(*files, tree).await,
-
         Cmd::Plan { .. } => unreachable!("handled before environment setup"),
         Cmd::Targets { .. } => unreachable!("handled before environment setup"),
         Cmd::Dependencies { .. } => unreachable!("handled before environment setup"),
@@ -370,56 +310,7 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
         Cmd::Actions { .. } => unreachable!("handled before environment setup"),
         Cmd::GenerateBuild { .. } => unreachable!("handled before environment setup"),
         Cmd::CodegenRegister { .. } => unreachable!("handled before environment setup"),
-
-        Cmd::Fmt => commands::fmt::cmd_fmt(tree).await,
-
-        Cmd::Check { path } => commands::build::cmd_check(env, path, tree).await,
-
-        Cmd::Build {
-            mode,
-            target,
-            planned,
-            selectors,
-            jobs: _,
-        } => {
-            if *planned {
-                unreachable!("handled before environment setup");
-            }
-            if !selectors.is_empty() {
-                bail!("planned build selectors require --planned");
-            }
-            commands::build::cmd_build(env, *mode, target.as_deref(), tree).await
-        }
-
-        Cmd::Run { mode, args } => commands::build::cmd_run(env, *mode, args, tree).await,
-
-        Cmd::Test => commands::test::cmd_test(env, tree).await,
-
-        Cmd::IntegrationTest { mode } => {
-            commands::test::cmd_integration_test(env, *mode, tree).await
-        }
-
-        Cmd::Coverage => commands::test::cmd_coverage(env, tree).await,
-
-        Cmd::Package {
-            platform,
-            version,
-            skip_content_build,
-        } => {
-            let platforms = if platform.is_empty() {
-                vec![if cfg!(windows) {
-                    "windows".into()
-                } else {
-                    "linux".into()
-                }]
-            } else {
-                platform.clone()
-            };
-            commands::package::cmd_package(env, &platforms, version, *skip_content_build, tree)
-                .await
-        }
-
-        Cmd::Vs => commands::vs::cmd_vs(tree).await,
+        Cmd::Build { .. } => unreachable!("handled before environment setup"),
     }
 }
 
@@ -472,40 +363,40 @@ fn cmd_plan(
             options,
             Some(&mut progress),
         ) {
-            Ok(report) => {
-                progress.done("done");
-                report
-            }
+            Ok(report) => report,
             Err(error) => {
                 progress.fail("failed");
                 return Err(error);
             }
         };
-        print_execution_report(&plan, report);
+        print_execution_report(&plan, report, &mut progress);
+        progress.done("done");
     }
     Ok(())
 }
 
-fn cmd_build_planned(
-    target: Option<&str>,
-    selectors: &[String],
-    jobs: usize,
-    tree: &Tree,
-) -> Result<()> {
+fn cmd_build_planned(selectors: &[String], jobs: usize, tree: &Tree) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let workspace = spike::load_workspace(&workspace_root)?;
 
-    let mut requested = Vec::new();
-    if let Some(target) = target {
-        requested.push(target.to_owned());
-    }
-    requested.extend(selectors.iter().cloned());
-
-    let plan = spike::plan_live(&workspace, &workspace_root, "build", &requested)?;
-    print!("{}", spike::render_text_plan(&plan));
-
+    let plan = spike::plan_live(&workspace, &workspace_root, "build", selectors)?;
     let mut progress = tree.add_child("execute planned build");
+    let target_count = plan.roots.len();
+    let task_count = plan.tasks.len();
+    progress.info(format!(
+        "{} plan: {} {}, {} {}",
+        plan.goal,
+        target_count,
+        if target_count == 1 {
+            "target"
+        } else {
+            "targets"
+        },
+        task_count,
+        if task_count == 1 { "task" } else { "tasks" },
+    ));
+
     let report = match spike::execute_plan_with_options(
         &plan,
         Some(&workspace),
@@ -513,23 +404,25 @@ fn cmd_build_planned(
         spike::ExecutionOptions::new(spike::ExecutionMode::Local, jobs),
         Some(&mut progress),
     ) {
-        Ok(report) => {
-            progress.done("done");
-            report
-        }
+        Ok(report) => report,
         Err(error) => {
             progress.fail("failed");
             return Err(error);
         }
     };
 
-    print_execution_report(&plan, report);
+    print_execution_report(&plan, report, &mut progress);
+    progress.done("done");
 
     Ok(())
 }
 
-fn print_execution_report(plan: &spike::Plan, report: spike::ExecutionReport) {
-    println!("  execution:");
+fn print_execution_report(
+    plan: &spike::Plan,
+    report: spike::ExecutionReport,
+    progress: &mut prodash::tree::Item,
+) {
+    progress.info("execution:");
     for task in report.tasks {
         let status = match task.status {
             spike::TaskExecutionStatus::WouldRun => "would run",
@@ -545,7 +438,7 @@ fn print_execution_report(plan: &spike::Plan, report: spike::ExecutionReport) {
             .map(|planned| planned.action.display.as_str())
             .filter(|display| !display.is_empty())
             .unwrap_or(task.task_id.as_str());
-        println!("    {label}: {status}");
+        progress.info(format!("  {label}: {status}"));
     }
 }
 
