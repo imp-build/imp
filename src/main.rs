@@ -1,3 +1,4 @@
+mod cache;
 mod codegen;
 mod commands;
 mod env;
@@ -580,9 +581,9 @@ async fn cmd_cache_explain(selector: &str, tree: &Tree) -> Result<()> {
                 .map(String::as_str)
                 .ok_or_else(|| anyhow::anyhow!("planned cache explanation had no root task"))?
         };
-    let explanation = spike::explain_task_cache(&plan, &workspace_root, task_selector)?;
+    let explanation = cache::explain_task_cache(&plan, &workspace_root, task_selector)?;
     let mut out = String::new();
-    spike::format_cache_explanation(&explanation, &mut out)?;
+    cache::format_cache_explanation(&explanation, &mut out)?;
     print!("{out}");
     Ok(())
 }
