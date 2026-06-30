@@ -489,7 +489,7 @@ async fn load_workspace_with_messages(
     workspace_root: &std::path::Path,
     tree: &Tree,
 ) -> Result<runtime::LiveWorkspace> {
-    let log_item = tree.add_child("workspace logs");
+    let log_item = tree.add_log_child("workspace logs");
     runtime::load_workspace_with_host_log(workspace_root, runtime::HostLogSink::prodash(log_item))
         .await
 }

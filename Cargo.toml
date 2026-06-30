@@ -10,7 +10,7 @@ path = "src/main.rs"
 [dependencies]
 tokio        = { version = "1",    features = ["full"] }
 clap         = { version = "4",    features = ["derive"] }
-prodash      = { version = "31",   features = ["local-time", "render-line", "render-line-crossterm", "signal-hook"] }
+prodash      = { version = "31",   features = ["local-time", "render-line", "render-line-autoconfigure", "render-line-crossterm", "signal-hook"] }
 anyhow       = "1"
 serde        = { version = "1",    features = ["derive"] }
 serde_json   = "1"

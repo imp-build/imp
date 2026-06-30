@@ -6,11 +6,11 @@
 //! DAG without executing it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
 };
 use std::thread;
@@ -4317,6 +4317,10 @@ pub fn execute_plan_with_options(
     progress: Option<&mut prodash::tree::Item>,
 ) -> Result<ExecutionReport> {
     let ordered = ordered_tasks(plan)?;
+    if let Some(progress) = progress.as_deref() {
+        progress.set(0);
+        progress.set_max(Some(ordered.len()));
+    }
 
     let executions = if options.jobs <= 1 {
         execute_ordered_tasks_sequentially(
@@ -4330,7 +4334,13 @@ pub fn execute_plan_with_options(
             progress,
         )?
     } else {
-        execute_ordered_tasks_parallel(&ordered, workspace_root, options, &plan.named_caches)?
+        execute_ordered_tasks_parallel(
+            &ordered,
+            workspace_root,
+            options,
+            &plan.named_caches,
+            progress,
+        )?
     };
     Ok(ExecutionReport { tasks: executions })
 }
@@ -4354,7 +4364,7 @@ fn execute_ordered_tasks_sequentially(
             item
         });
 
-        let (execution, summary) = execute_one_task(
+        let result = execute_one_task(
             task,
             workspace_root,
             mode,
@@ -4364,8 +4374,24 @@ fn execute_ordered_tasks_sequentially(
             &summaries,
             task_progress.as_mut(),
             cancellation,
-        )?;
+        );
 
+        let (execution, summary) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(task_progress) = task_progress.as_mut() {
+                    task_progress.fail("failed");
+                }
+                return Err(error);
+            }
+        };
+
+        if let Some(task_progress) = task_progress.as_ref() {
+            task_progress.set(1);
+        }
+        if let Some(progress) = progress.as_deref() {
+            progress.inc();
+        }
         summaries.insert(task.id.clone(), summary);
         executions.push(execution);
     }
@@ -4386,6 +4412,7 @@ fn execute_ordered_tasks_parallel(
     workspace_root: &Path,
     options: ExecutionOptions,
     named_caches: &[NamedCache],
+    mut progress: Option<&mut prodash::tree::Item>,
 ) -> Result<Vec<TaskExecution>> {
     let mut task_by_id: BTreeMap<&str, &Task> = ordered
         .iter()
@@ -4422,6 +4449,11 @@ fn execute_ordered_tasks_parallel(
                     .remove(id.as_str())
                     .expect("ready id came from pending tasks");
                 running.insert(id.clone());
+                let mut task_progress = progress.as_deref_mut().map(|progress| {
+                    let item = progress.add_child(task_progress_label(task));
+                    crate::ui::init_task(&item);
+                    item
+                });
                 let sender = sender.clone();
                 let workspace_root = workspace_root.to_owned();
                 let mode = options.mode;
@@ -4441,7 +4473,7 @@ fn execute_ordered_tasks_parallel(
                         no_cache,
                         &named_caches,
                         &dependency_summaries,
-                        None,
+                        task_progress.as_mut(),
                         &cancellation,
                     );
                     let _ = sender.send((id, result));
@@ -4463,6 +4495,9 @@ fn execute_ordered_tasks_parallel(
         running.remove(id.as_str());
         match result {
             Ok((execution, summary)) => {
+                if let Some(progress) = progress.as_deref() {
+                    progress.inc();
+                }
                 let index = *plan_index
                     .get(id.as_str())
                     .ok_or_else(|| anyhow::anyhow!("completed unknown task {id}"))?;
@@ -4539,7 +4574,7 @@ fn execute_one_task(
                 if !task.action.impure {
                     bail!("{} uses sandbox: false and must set impure: true", task.id);
                 }
-                run_unsandboxed_task(task, workspace_root, cancellation)?;
+                run_unsandboxed_task(task, workspace_root, cancellation, progress.as_deref_mut())?;
                 if let Some(progress) = progress.as_mut() {
                     progress.done("done");
                 }
@@ -4618,7 +4653,7 @@ fn execute_one_task(
                 if let Err(error) = run_local_task(
                     task,
                     workspace_root,
-                    progress.as_deref(),
+                    progress.as_deref_mut(),
                     cancellation,
                     &evaluation,
                 ) {
@@ -4664,6 +4699,7 @@ fn run_unsandboxed_task(
     task: &Task,
     workspace_root: &Path,
     cancellation: &AtomicBool,
+    progress: Option<&mut prodash::tree::Item>,
 ) -> Result<()> {
     let opts = ExecRunOpts {
         argv: task.action.argv.clone(),
@@ -4694,7 +4730,7 @@ fn run_unsandboxed_task(
         force_cache: false,
         sandbox: false,
     };
-    exec_run_unsandboxed(workspace_root, opts, Some(cancellation)).map(|_| ())
+    exec_run_unsandboxed(workspace_root, opts, Some(cancellation), progress).map(|_| ())
 }
 
 fn ordered_tasks(plan: &Plan) -> Result<Vec<&Task>> {
@@ -4746,7 +4782,7 @@ fn ordered_tasks(plan: &Plan) -> Result<Vec<&Task>> {
 fn run_local_task(
     task: &Task,
     workspace_root: &Path,
-    progress: Option<&prodash::tree::Item>,
+    mut progress: Option<&mut prodash::tree::Item>,
     cancellation: &AtomicBool,
     cache: &TaskCacheEvaluation,
 ) -> Result<()> {
@@ -4775,9 +4811,6 @@ fn run_local_task(
         task.action.display.clone()
     };
     let command_line = format_argv(&task.action.argv);
-    if let Some(progress) = progress {
-        progress.set_name(format!("execute {cmd_display}"));
-    }
 
     let (program, args) = task
         .action
@@ -4785,20 +4818,44 @@ fn run_local_task(
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("{} has no argv", task.id))?;
 
-    let mut command = Command::new(program);
+    let mut task_env = BTreeMap::new();
     for binding in &cache.named_caches {
         std::fs::create_dir_all(&binding.path)
             .with_context(|| format!("create named cache {}", binding.path.display()))?;
-        command.env(&binding.env_var, &binding.path);
+        task_env.insert(
+            binding.env_var.clone(),
+            binding.path.to_string_lossy().into_owned(),
+        );
     }
     let command_env = sandbox_command_env(&task.action.env, &tool_path_entries)?;
+    task_env.extend(command_env.clone());
+    task_env.insert(
+        "IMP_SANDBOX_ROOT".to_owned(),
+        sandbox.sandbox_root.to_string_lossy().into_owned(),
+    );
+    task_env.insert(
+        "IMP_CACHE_ROOT".to_owned(),
+        sandbox.cache_root.to_string_lossy().into_owned(),
+    );
+    task_env.insert(
+        "IMP_SANDBOX_MANIFEST".to_owned(),
+        manifest_path.to_string_lossy().into_owned(),
+    );
+
+    let script_path = sandbox.sandbox_root.join("imp-run.sh");
+    write_sandbox_run_script(&script_path, &cwd, &task_env, &task.action.argv)?;
+
+    if let Some(progress) = progress.as_mut() {
+        progress.set_name(format!("execute {cmd_display}"));
+        progress.info(format!("sandbox: {}", sandbox.sandbox_root.display()));
+        progress.info(format!("script: {}", script_path.display()));
+    }
+
+    let mut command = Command::new(program);
     command
         .args(args)
         .current_dir(&cwd)
-        .envs(&command_env)
-        .env("IMP_SANDBOX_ROOT", &sandbox.sandbox_root)
-        .env("IMP_CACHE_ROOT", &sandbox.cache_root)
-        .env("IMP_SANDBOX_MANIFEST", &manifest_path)
+        .envs(&task_env)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
@@ -4807,10 +4864,15 @@ fn run_local_task(
         .spawn()
         .with_context(|| format!("execute {} in {}", task.id, cwd.display()))?;
 
-    let (status, stdout, stderr) = wait_for_child_output(&mut child, &task.id, Some(cancellation))?;
+    let (status, stdout, stderr) = wait_for_child_output(
+        &mut child,
+        &task.id,
+        Some(cancellation),
+        progress.as_deref_mut(),
+    )?;
 
     if !status.success() {
-        report_process_failure(progress, &stdout, &stderr);
+        report_process_failure(progress.as_deref(), &stdout, &stderr);
         bail!(
             "{} failed with status {}\ncommand: {}\ncwd: {}\nstdout:\n{}\nstderr:\n{}",
             task.id,
@@ -4847,17 +4909,62 @@ fn format_argv(argv: &[String]) -> String {
         return "<no argv>".to_owned();
     }
     argv.iter()
-        .map(|arg| {
-            if arg.chars().all(|ch| {
-                ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '=')
-            }) {
-                arg.clone()
-            } else {
-                format!("'{}'", arg.replace('\'', "'\\''"))
-            }
-        })
+        .map(|arg| shell_quote(arg))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '='))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+fn write_sandbox_run_script(
+    script_path: &Path,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    argv: &[String],
+) -> Result<()> {
+    let mut script = String::new();
+    script.push_str("#!/usr/bin/env sh\n");
+    script.push_str("set -eu\n");
+    script.push_str(&format!("cd {}\n", shell_quote(&cwd.to_string_lossy())));
+    for (key, value) in env {
+        if is_shell_identifier(key) {
+            script.push_str(&format!("export {key}={}\n", shell_quote(value)));
+        } else {
+            script.push_str(&format!(
+                "# skipped non-shell env key {}={}\n",
+                shell_quote(key),
+                shell_quote(value)
+            ));
+        }
+    }
+    script.push_str(&format!("exec {}\n", format_argv(argv)));
+    std::fs::write(script_path, script)
+        .with_context(|| format!("write sandbox run script {}", script_path.display()))?;
+    #[cfg(unix)]
+    {
+        let mut permissions = std::fs::metadata(script_path)
+            .with_context(|| format!("stat sandbox run script {}", script_path.display()))?
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(script_path, permissions)
+            .with_context(|| format!("chmod sandbox run script {}", script_path.display()))?;
+    }
+    Ok(())
+}
+
+fn is_shell_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(ch) if ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn materialize_embedded_output_task(
@@ -4928,6 +5035,7 @@ fn wait_for_child_output(
     child: &mut Child,
     display: &str,
     cancellation: Option<&AtomicBool>,
+    mut progress: Option<&mut prodash::tree::Item>,
 ) -> Result<(ExitStatus, String, String)> {
     let stdout = child
         .stdout
@@ -4951,10 +5059,10 @@ fn wait_for_child_output(
             terminate_child_and_wait(child);
             let _ = stdout_thread.join();
             let _ = stderr_thread.join();
-            drain_process_lines(&receiver, &mut stdout, &mut stderr);
+            drain_process_lines(&receiver, &mut stdout, &mut stderr, progress.as_deref_mut());
             bail!("{display} canceled");
         }
-        drain_process_lines(&receiver, &mut stdout, &mut stderr);
+        drain_process_lines(&receiver, &mut stdout, &mut stderr, progress.as_deref_mut());
         if let Some(status) = child
             .try_wait()
             .with_context(|| format!("wait for {display}"))?
@@ -4962,7 +5070,9 @@ fn wait_for_child_output(
             break status;
         }
         match receiver.recv_timeout(Duration::from_millis(20)) {
-            Ok(line) => record_process_line(line, &mut stdout, &mut stderr),
+            Ok(line) => {
+                record_process_line(line, &mut stdout, &mut stderr, progress.as_deref_mut())
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {}
         }
@@ -4970,7 +5080,7 @@ fn wait_for_child_output(
 
     let _ = stdout_thread.join();
     let _ = stderr_thread.join();
-    drain_process_lines(&receiver, &mut stdout, &mut stderr);
+    drain_process_lines(&receiver, &mut stdout, &mut stderr, progress.as_deref_mut());
     Ok((status, stdout, stderr))
 }
 
@@ -5067,19 +5177,30 @@ fn prepare_sandbox(task: &Task, workspace_root: &Path) -> Result<SandboxManifest
 }
 
 fn create_sandbox_root() -> Result<PathBuf> {
+    static SANDBOX_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let base = PathBuf::from("/tmp/imp");
     std::fs::create_dir_all(&base).with_context(|| format!("create {}", base.display()))?;
-    let unique = format!(
-        "sandbox-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    );
-    let root = base.join(unique);
-    std::fs::create_dir(&root).with_context(|| format!("create sandbox {}", root.display()))?;
-    Ok(root)
+    for _ in 0..100 {
+        let unique = format!(
+            "sandbox-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            SANDBOX_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let root = base.join(unique);
+        match std::fs::create_dir(&root) {
+            Ok(()) => return Ok(root),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("create sandbox {}", root.display()));
+            }
+        }
+    }
+    bail!("failed to create unique sandbox under {}", base.display())
 }
 
 fn cache_root() -> Result<PathBuf> {
@@ -6924,17 +7045,27 @@ struct ProcessLine {
 }
 
 fn spawn_output_reader<R: Read + Send + 'static>(
-    reader: R,
+    mut reader: R,
     stream: ProcessStream,
     sender: mpsc::Sender<ProcessLine>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let reader = BufReader::new(reader);
-        for line in reader.lines() {
-            match line {
-                Ok(line) => {
-                    if sender.send(ProcessLine { stream, line }).is_err() {
-                        break;
+        let mut pending = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => {
+                    send_process_output_line(stream, &mut pending, &sender);
+                    break;
+                }
+                Ok(n) => {
+                    for byte in &buf[..n] {
+                        match *byte {
+                            b'\n' | b'\r' => {
+                                send_process_output_line(stream, &mut pending, &sender);
+                            }
+                            byte => pending.push(byte),
+                        }
                     }
                 }
                 Err(error) => {
@@ -6949,17 +7080,42 @@ fn spawn_output_reader<R: Read + Send + 'static>(
     })
 }
 
+fn send_process_output_line(
+    stream: ProcessStream,
+    pending: &mut Vec<u8>,
+    sender: &mpsc::Sender<ProcessLine>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let line = String::from_utf8_lossy(pending).into_owned();
+    pending.clear();
+    sender
+        .send(ProcessLine { stream, line })
+        .expect("failed sending process line");
+}
+
 fn drain_process_lines(
     receiver: &mpsc::Receiver<ProcessLine>,
     stdout: &mut String,
     stderr: &mut String,
+    mut progress: Option<&mut prodash::tree::Item>,
 ) {
     while let Ok(line) = receiver.try_recv() {
-        record_process_line(line, stdout, stderr);
+        record_process_line(line, stdout, stderr, progress.as_deref_mut());
     }
 }
 
-fn record_process_line(line: ProcessLine, stdout: &mut String, stderr: &mut String) {
+fn record_process_line(
+    line: ProcessLine,
+    stdout: &mut String,
+    stderr: &mut String,
+    progress: Option<&mut prodash::tree::Item>,
+) {
+    if let Some(progress) = progress {
+        report_process_line(progress, &line);
+    }
+
     match line.stream {
         ProcessStream::Stdout => {
             stdout.push_str(&line.line);
@@ -6970,6 +7126,17 @@ fn record_process_line(line: ProcessLine, stdout: &mut String, stderr: &mut Stri
             stderr.push('\n');
         }
     }
+}
+
+fn report_process_line(progress: &prodash::tree::Item, line: &ProcessLine) {
+    if line.line.trim().is_empty() {
+        return;
+    }
+    let (level, stream) = match line.stream {
+        ProcessStream::Stdout => (prodash::messages::MessageLevel::Info, "out"),
+        ProcessStream::Stderr => (prodash::messages::MessageLevel::Failure, "err"),
+    };
+    progress.message(level, format!("{stream}: {}", line.line));
 }
 
 fn report_process_failure(progress: Option<&prodash::tree::Item>, stdout: &str, stderr: &str) {
@@ -7168,7 +7335,7 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
         if !opts.impure {
             bail!("run({{ sandbox: false }}) requires impure: true");
         }
-        return exec_run_unsandboxed(workspace_root, opts, None);
+        return exec_run_unsandboxed(workspace_root, opts, None, None);
     }
 
     let sandbox_root = create_sandbox_root()?;
@@ -7285,7 +7452,7 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
     } else {
         opts.display.clone()
     };
-    eprintln!("[sandbox: {}] {}", sandbox_root.display(), cmd_display);
+    //    eprintln!("[sandbox: {}] {}", sandbox_root.display(), cmd_display);
 
     let (program, args) = opts
         .argv
@@ -7307,7 +7474,7 @@ fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunRes
         .spawn()
         .with_context(|| format!("run() command in {}", sandbox_root.display()))?;
 
-    let (status, stdout, stderr) = wait_for_child_output(&mut child, &opts.display, None)?;
+    let (status, stdout, stderr) = wait_for_child_output(&mut child, &opts.display, None, None)?;
 
     let exit_code = status.code().unwrap_or(-1);
     if !status.success() {
@@ -7396,13 +7563,14 @@ fn exec_run_unsandboxed(
     workspace_root: &Path,
     opts: ExecRunOpts,
     cancellation: Option<&AtomicBool>,
+    mut progress: Option<&mut prodash::tree::Item>,
 ) -> Result<ExecRunResult> {
     let cmd_display = if opts.display.is_empty() {
         opts.argv.join(" ")
     } else {
         opts.display.clone()
     };
-    eprintln!("[unsandboxed] {}", cmd_display);
+    //    eprintln!("[unsandboxed] {}", cmd_display);
 
     let (program, args) = opts
         .argv
@@ -7423,7 +7591,12 @@ fn exec_run_unsandboxed(
     let mut child = command
         .spawn()
         .with_context(|| format!("run() command in {}", workspace_root.display()))?;
-    let (status, stdout, stderr) = wait_for_child_output(&mut child, &opts.display, cancellation)?;
+    let (status, stdout, stderr) = wait_for_child_output(
+        &mut child,
+        &opts.display,
+        cancellation,
+        progress.as_deref_mut(),
+    )?;
     let exit_code = status.code().unwrap_or(-1);
     if !status.success() {
         bail!(
@@ -8503,6 +8676,73 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
             std::fs::read_to_string(root.path().join("build/out.txt")).unwrap(),
             "ok"
         );
+    }
+
+    #[test]
+    fn process_output_is_reported_as_prodash_messages() {
+        let progress_root = prodash::tree::Root::new();
+        let progress = progress_root.add_child("execute task");
+
+        report_process_line(
+            &progress,
+            &ProcessLine {
+                stream: ProcessStream::Stdout,
+                line: "stdout-line".to_owned(),
+            },
+        );
+        report_process_line(
+            &progress,
+            &ProcessLine {
+                stream: ProcessStream::Stderr,
+                line: "stderr-line".to_owned(),
+            },
+        );
+
+        let mut messages = Vec::new();
+        progress_root.copy_messages(&mut messages);
+
+        assert!(messages
+            .iter()
+            .any(|message| message.message == "out: stdout-line"));
+        assert!(messages
+            .iter()
+            .any(|message| message.message == "err: stderr-line"));
+    }
+
+    #[test]
+    fn process_output_reader_splits_carriage_return_progress() {
+        let (sender, receiver) = mpsc::channel();
+        let reader = std::io::Cursor::new(b"configure\rbuild\ninstall\r\n");
+        let thread = spawn_output_reader(reader, ProcessStream::Stdout, sender);
+        thread.join().unwrap();
+
+        let lines = receiver
+            .try_iter()
+            .map(|line| line.line)
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines, ["configure", "build", "install"]);
+    }
+
+    #[test]
+    fn sandbox_run_script_records_cwd_env_and_command() {
+        let root = tempfile::tempdir().unwrap();
+        let script_path = root.path().join("imp-run.sh");
+        let cwd = root.path().join("work dir");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let env = BTreeMap::from([("NAME".to_owned(), "value with spaces".to_owned())]);
+        let argv = vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "printf 'hello world'".to_owned(),
+        ];
+
+        write_sandbox_run_script(&script_path, &cwd, &env, &argv).unwrap();
+        let script = std::fs::read_to_string(script_path).unwrap();
+
+        assert!(script.contains("cd "));
+        assert!(script.contains("export NAME='value with spaces'"));
+        assert!(script.contains("exec sh -c 'printf '\\''hello world'\\'''"));
     }
 
     #[tokio::test]

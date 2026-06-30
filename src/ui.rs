@@ -1,4 +1,4 @@
-use std::{io::IsTerminal, sync::Arc};
+use std::sync::Arc;
 
 pub struct Tree {
     root: Arc<prodash::tree::Root>,
@@ -17,6 +17,10 @@ impl Tree {
         item
     }
 
+    pub fn add_log_child(&self, name: impl Into<String>) -> prodash::tree::Item {
+        self.root.add_child(name)
+    }
+
     fn downgrade(&self) -> std::sync::Weak<prodash::tree::Root> {
         Arc::downgrade(&self.root)
     }
@@ -31,17 +35,15 @@ impl Session {
     pub fn start() -> Self {
         let tree = Tree::new();
 
-        let output_is_terminal = std::io::stderr().is_terminal();
         let render = prodash::render::line::render(
             std::io::stderr(),
             tree.downgrade(),
             prodash::render::line::Options {
-                output_is_terminal,
-                colored: output_is_terminal,
                 throughput: false,
                 initial_delay: Some(std::time::Duration::from_millis(100)),
                 ..prodash::render::line::Options::default()
-            },
+            }
+            .auto_configure(prodash::render::line::StreamKind::Stderr),
         );
 
         Self { tree, render }
