@@ -374,9 +374,17 @@ function scan_odin_source(content) {
 }
 
 function workspace_join(base, path) {
-    if (!path || path === ".") return normalize_workspace_path(base || ".");
-    if (!base || base === ".") return normalize_workspace_path(path);
-    return normalize_workspace_path(`${base}/${path}`);
+    const parts = [];
+    for (const part of `${base || "."}/${path || "."}`.split("/")) {
+        if (part === "" || part === ".") continue;
+        if (part === "..") {
+            if (parts.length === 0) throw new Error(`Odin path escapes the workspace: ${base}/${path}`);
+            parts.pop();
+            continue;
+        }
+        parts.push(part);
+    }
+    return parts.length === 0 ? "." : parts.join("/");
 }
 
 function resolved_import_path(importPath, collections) {
@@ -521,7 +529,12 @@ function lookup_package(index, path, selfPkg = null) {
 function infer_dep_entries(pkg, index, collections, analysis = analysis_for_package(pkg)) {
     const deps = new Map();
     for (const imp of analysis.imports) {
-        const resolved = resolved_import_path(imp, collections);
+        let resolved;
+        if (imp.includes(":")) {
+            resolved = resolved_import_path(imp, collections);
+        } else {
+            resolved = workspace_join(analysis.packagePath, imp);
+        }
         if (!resolved) continue;
         const dep = lookup_package(index, resolved, pkg);
         if (!dep) continue;
