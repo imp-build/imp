@@ -1,6 +1,7 @@
 mod codegen;
 mod commands;
 mod env;
+mod loader;
 mod odin;
 mod runtime;
 mod spike;
