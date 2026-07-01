@@ -194,8 +194,7 @@ pub fn execute_plan_with_options(
 ) -> Result<ExecutionReport> {
     let ordered = ordered_tasks(plan)?;
     if let Some(progress) = progress.as_deref() {
-        progress.set(0);
-        progress.set_max(Some(ordered.len()));
+        crate::ui::init_counted_task(progress, ordered.len());
     }
 
     let executions = if options.jobs <= 1 {

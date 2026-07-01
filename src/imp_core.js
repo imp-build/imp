@@ -771,15 +771,16 @@ function _memo_cycle_message(key_string) {
 }
 
 function _memo_eval(key_string, owner, label, thunk) {
-    if (_effective_context().stackSet.has(key_string)) {
-        throw new Error(_memo_cycle_message(key_string));
-    }
     // A concurrent branch that reaches the same in-flight memo must receive the
     // pending promise. A call from a context that already has this key on its
-    // stack remains a real cycle and is rejected above.
+    // stack can still be a non-awaiting promise touch, so hits must win over
+    // stack-cycle checks.
     if (_memo_table.has(key_string)) {
         _memo_trace.push({ event: "hit", key: key_string });
         return _memo_table.get(key_string);
+    }
+    if (_effective_context().stackSet.has(key_string)) {
+        throw new Error(_memo_cycle_message(key_string));
     }
     _memo_trace.push({ event: "miss", key: key_string });
     // A fresh node for this evaluation, parented at the caller captured at the

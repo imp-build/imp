@@ -17,14 +17,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use env::{Env, LocalEnv, WslEnv};
-
-use crate::ui::MillisAsFloatingPointSecs;
 
 type Tree = ui::Tree;
 
@@ -501,17 +498,17 @@ async fn cmd_build_planned(
         // Idle workers are hidden (name set to " ").
 
         let mut progress = root.add_child("execute build");
-        ui::init_task(&progress);
         if store.total > 0 {
-            progress.set_max(Some(store.total));
+            ui::init_counted_task(&progress, store.total);
             progress.set_name(format!("0/{} targets", store.total));
         } else {
+            ui::init_timed_task(&progress);
             progress.set_name("execute build".to_owned());
         }
 
         let mut js_progress = {
             let js = progress.add_child("js tasks");
-            ui::init_task(&js);
+            ui::init_counted_task(&js, 0);
             js.set_name("js tasks 0/0");
             js
         };
@@ -536,15 +533,7 @@ async fn cmd_build_planned(
                 task_to_slot.remove(&prev);
             }
             state.item.set_name(label);
-            state.item.init(
-                None,
-                Some(prodash::unit::dynamic(MillisAsFloatingPointSecs)),
-            );
-            state
-                .item
-                .set(MillisAsFloatingPointSecs::start_time_to_step(
-                    &SystemTime::now(),
-                ));
+            ui::init_timed_task(&state.item);
             state.task_id = Some(id);
             task_to_slot.insert(id, slot);
         }
@@ -562,7 +551,7 @@ async fn cmd_build_planned(
             if state.task_id == Some(id) {
                 state.task_id = None;
                 state.item.set_name("<idle>");
-                state.item.init(None, None);
+                ui::init_idle_task(&state.item);
             }
             task_to_slot.remove(&id);
         }
@@ -570,7 +559,7 @@ async fn cmd_build_planned(
         let mut js_slots: Vec<SlotState> = Vec::with_capacity(js_workers);
         for _ in 0..js_workers {
             let item = js_progress.add_child("<idle>");
-            ui::init_task(&item);
+            ui::init_idle_task(&item);
             js_slots.push(SlotState {
                 item,
                 task_id: None,
@@ -579,7 +568,7 @@ async fn cmd_build_planned(
         let mut sandbox_slots: Vec<SlotState> = Vec::with_capacity(jobs);
         for _ in 0..jobs {
             let item = progress.add_child("<idle>");
-            ui::init_task(&item);
+            ui::init_idle_task(&item);
             sandbox_slots.push(SlotState {
                 item,
                 task_id: None,
@@ -614,7 +603,8 @@ async fn cmd_build_planned(
                     if detail.is_none() {
                         total_js += 1;
                         is_js_memo.insert(id);
-                        js_progress.set_max(Some(total_js));
+                        ui::init_counted_task(&js_progress, total_js);
+                        js_progress.set(done_js);
                         js_progress.set_name(format!("js tasks {done_js}/{total_js}"));
                     }
                 }

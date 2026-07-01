@@ -120,6 +120,19 @@ impl prodash::unit::DisplayValue for MillisAsFloatingPointSecs {
 }
 
 pub(crate) fn init_task(item: &prodash::tree::Item) {
+    init_timed_task(item);
+}
+
+pub(crate) fn init_counted_task(item: &prodash::tree::Item, max: usize) {
+    item.init(Some(max), Some(prodash::unit::label("steps")));
+    item.set(0);
+}
+
+pub(crate) fn init_idle_task(item: &prodash::tree::Item) {
+    item.init(None, None);
+}
+
+pub(crate) fn init_timed_task(item: &prodash::tree::Item) {
     let start_time = SystemTime::now();
     item.init(
         None,

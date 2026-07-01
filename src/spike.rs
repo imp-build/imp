@@ -2036,7 +2036,7 @@ async fn plan_inner(
         tasks: BTreeMap::new(),
     };
     if let Some(progress) = progress.as_deref_mut() {
-        progress.set_max(Some(roots.len()));
+        crate::ui::init_counted_task(progress, roots.len());
     }
     let mut root_tasks = Vec::new();
     for (target, product) in &roots {
@@ -6455,6 +6455,52 @@ export const build = product("js-lane-bound-test", "build", async function build
 
         assert!(saw_js_lane, "expected JS lane events");
         assert!(saw_memo_running, "expected memo lifecycle events");
+    }
+
+    #[tokio::test]
+    async fn live_goal_single_js_worker_reuses_in_flight_memo_on_inherited_stack() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, memo } from "imp:core";
+
+export const app = target({ kind: "single-js-worker-inflight-test" });
+
+const outer = memo(async function outer() {
+    await inner();
+    return "outer";
+});
+
+const inner = memo(async function inner() {
+    // Touch the already in-flight outer() promise through an inherited stack.
+    // This is a memo hit, not a cycle, as long as it is not awaited here.
+    outer();
+    return "inner";
+});
+
+export const build = product("single-js-worker-inflight-test", "build", async function build() {
+    return await outer();
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let selectors = vec!["app".to_owned()];
+        execute_goal_live(&live, p, "build", &selectors, false, 1)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
