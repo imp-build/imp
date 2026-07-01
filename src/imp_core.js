@@ -472,6 +472,20 @@ let _key_display = new Map();  // key_string → "fnName(arg, ...)"
 let _key_product_call = new Map();  // key_string → {target_id, product_name} for product calls
 let _introspect_mode = false;
 
+// Task-tree tracking. Each memo evaluation is a node with a numeric id; the
+// node currently executing is _current_owner_node, captured explicitly at each
+// call site and re-entered when an instrumented await (a sub-memo, run(), etc.)
+// resolves — the JS analogue of tracing's per-poll span enter. See the memo
+// wrapper and run() for the restore points.
+let _current_owner_node = null;
+let _memo_node_counter = 0;
+
+function _emit_task(state, id, parent, label) {
+    if (typeof globalThis.__host_task_event === "function") {
+        globalThis.__host_task_event(state, id, parent === null ? undefined : parent, label);
+    }
+}
+
 function _active_memo_key() {
     if (_memo_call_stack.length === 0) return null;
     return _memo_call_stack[_memo_call_stack.length - 1];
@@ -501,7 +515,7 @@ function _memo_cycle_message(key_string) {
     return lines.join("\n");
 }
 
-function _memo_eval(key_string, thunk) {
+function _memo_eval(key_string, owner, label, thunk) {
     // Table check BEFORE stack check. Once a memo suspends at its first real
     // await, its promise is registered here while its frame is still on the
     // call stack. A concurrent branch (e.g. two roots sharing a dependency)
@@ -519,10 +533,18 @@ function _memo_eval(key_string, thunk) {
         throw new Error(_memo_cycle_message(key_string));
     }
     _memo_trace.push({ event: "miss", key: key_string });
-    // Call thunk() synchronously so _push_call runs before the first await,
-    // keeping the call stack accurate during the synchronous portion.
-    const promise = thunk();
+    // A fresh node for this evaluation, parented at the caller captured at the
+    // call site. Created on miss only, so a memo appears once (concurrent
+    // reusers just await it). Call thunk() synchronously so _push_call runs
+    // before the first await, keeping the call stack accurate.
+    const nodeId = ++_memo_node_counter;
+    _emit_task("pending", nodeId, owner, label);
+    const promise = thunk(nodeId);
     _memo_table.set(key_string, promise);
+    promise.then(
+        () => _emit_task("done", nodeId, owner, label),
+        (e) => _emit_task("fail", nodeId, owner, (e && e.message) || String(e)),
+    );
     return promise;
 }
 
@@ -598,14 +620,27 @@ export function memo(fn) {
                 _key_product_call.set(key_string, { target_id: args[0].__id, product_name });
             }
         }
-        return _memo_eval(key_string, async () => {
-            _push_call(key_string);
-            try {
-                return await fn(...args);
-            } finally {
-                _pop_call(key_string);
-            }
-        });
+        const label = _key_display.get(key_string) || key_string;
+        // Capture the caller (parent) synchronously at the call site.
+        const owner = _current_owner_node;
+        try {
+            return await _memo_eval(key_string, owner, label, (nodeId) => (async () => {
+                _emit_task("running", nodeId, owner, label);
+                _push_call(key_string);
+                const prevOwner = _current_owner_node;
+                _current_owner_node = nodeId;
+                try {
+                    return await fn(...args);
+                } finally {
+                    _current_owner_node = prevOwner;
+                    _pop_call(key_string);
+                }
+            })());
+        } finally {
+            // Re-enter the caller's owner as this memo settles, so the caller's
+            // continuation resumes under the correct parent.
+            _current_owner_node = owner;
+        }
     };
 }
 
@@ -622,6 +657,8 @@ export function resetMemoState() {
     _memo_trace = [];
     _key_display = new Map();
     _key_product_call = new Map();
+    _current_owner_node = null;
+    _memo_node_counter = 0;
 }
 
 /**
@@ -797,17 +834,25 @@ export async function run(opts) {
         return { exitCode: 0, stdout: "", stderr: "" };
     }
     _trace_effect(effect);
-    return __host_run({
-        argv: opts.argv,
-        display: opts.display,
-        env: opts.env,
-        inputs,
-        outputs,
-        tools: opts.tools,
-        impure: opts.impure,
-        forceCache: opts.forceCache,
-        sandbox: opts.sandbox,
-    });
+    // Instrumented await: the job nests under the owning memo (__owner), and we
+    // re-enter that owner when the job settles so the caller resumes correctly.
+    const owner = _current_owner_node;
+    try {
+        return await __host_run({
+            argv: opts.argv,
+            display: opts.display,
+            env: opts.env,
+            inputs,
+            outputs,
+            tools: opts.tools,
+            impure: opts.impure,
+            forceCache: opts.forceCache,
+            sandbox: opts.sandbox,
+            __owner: owner,
+        });
+    } finally {
+        _current_owner_node = owner;
+    }
 }
 
 export async function group(items) {
@@ -815,13 +860,24 @@ export async function group(items) {
         throw new Error("group(items) requires an array");
     }
     _trace_effect({ event: "effect", kind: "group", count: items.length });
-    return Promise.all(items);
+    const owner = _current_owner_node;
+    try {
+        return await Promise.all(items);
+    } finally {
+        _current_owner_node = owner;
+    }
 }
 
 export async function workspace_mutation(opts) {
     const trace_entry = { event: "effect", kind: "workspace_mutation", display: opts.display ?? (opts.argv && opts.argv[0]) };
     _trace_effect(trace_entry);
-    const result = await __host_workspace_mutation(opts);
+    const owner = _current_owner_node;
+    let result;
+    try {
+        result = await __host_workspace_mutation({ ...opts, __owner: owner });
+    } finally {
+        _current_owner_node = owner;
+    }
     if (result.changed_files !== undefined) {
         trace_entry.changed_files = result.changed_files;
     }

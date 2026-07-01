@@ -1289,10 +1289,12 @@ fn register_globals<'js>(
                         "run() called outside of execution context",
                     )
                 })?;
+                // Owning memo node (if any) so the job nests under it in the UI.
+                let parent: Option<u64> = opts.get::<_, Option<f64>>("__owner")?.map(|n| n as u64);
                 let run_opts = parse_exec_run_opts(opts, &root)?;
                 let display = run_opts.display.clone();
                 let result = sched
-                    .run(display, move || exec_run_inner(&root, run_opts))
+                    .run(parent, display, move || exec_run_inner(&root, run_opts))
                     .await
                     .map_err(|e| rquickjs::Error::new_loading_message("run", format!("{e:#}")))?;
                 let obj = Object::new(ctx)?;
@@ -1304,6 +1306,44 @@ fn register_globals<'js>(
         }),
     )?;
     globals.set("__host_run", host_run)?;
+
+    // __host_task_event(state, id, parent, display)
+    // Lets the JS memo layer report memo nodes onto the same task-event stream
+    // the scheduler uses, so both live in one tree. No-op without a scheduler
+    // (introspection and non-live callers).
+    let scheduler_ev = Arc::clone(&scheduler);
+    let host_task_event = Function::new(
+        ctx.clone(),
+        move |state: String,
+              id: f64,
+              parent: Option<f64>,
+              display: Option<String>|
+              -> rquickjs::Result<()> {
+            if let Some(sched) = scheduler_ev.lock().unwrap().clone() {
+                let id = id as u64;
+                let event = match state.as_str() {
+                    "pending" => crate::scheduler::TaskEvent::Pending {
+                        id,
+                        parent: parent.map(|n| n as u64),
+                        display: display.unwrap_or_default(),
+                    },
+                    "running" => crate::scheduler::TaskEvent::Running { id, detail: None },
+                    "done" => crate::scheduler::TaskEvent::Done {
+                        id,
+                        outcome: crate::scheduler::TaskOutcome::Ok,
+                    },
+                    "fail" => crate::scheduler::TaskEvent::Done {
+                        id,
+                        outcome: crate::scheduler::TaskOutcome::Err(display.unwrap_or_default()),
+                    },
+                    _ => return Ok(()),
+                };
+                sched.emit(event);
+            }
+            Ok(())
+        },
+    )?;
+    globals.set("__host_task_event", host_task_event)?;
 
     // __host_workspace_mutation(opts) → { stdout, stderr, exitCode, changed_files? }
     // Runs a command directly in the workspace root (not a sandbox). Always impure.
@@ -1332,9 +1372,10 @@ fn register_globals<'js>(
                 let argv: Vec<String> = opts.get("argv")?;
                 let display: Option<String> = opts.get("display")?;
                 let display = display.unwrap_or_else(|| argv.join(" "));
+                let parent: Option<u64> = opts.get::<_, Option<f64>>("__owner")?.map(|n| n as u64);
                 let watch: Option<Vec<String>> = opts.get("watch")?;
                 let (stdout, stderr, exit_code, changed_files) = sched
-                    .run(display.clone(), move || -> Result<_> {
+                    .run(parent, display.clone(), move || -> Result<_> {
                         let pre = watch
                             .as_deref()
                             .map(|patterns| {
@@ -5668,9 +5709,11 @@ export const ok = 1;
 
         let live = load_workspace(p).await.unwrap();
         *live.exec_root.lock().unwrap() = Some(p.to_owned());
-        let (scheduler, _events) = crate::scheduler::Scheduler::new(
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
             4,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
@@ -5716,9 +5759,11 @@ if (!results[0].stdout.endsWith("a\n") || !results[1].stdout.endsWith("b\n")) {
 
         let live = load_workspace(p).await.unwrap();
         *live.exec_root.lock().unwrap() = Some(p.to_owned());
-        let (scheduler, _events) = crate::scheduler::Scheduler::new(
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
             4,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 

@@ -445,38 +445,84 @@ async fn cmd_build_planned(
         anyhow::bail!("execution canceled");
     }
 
-    // Install a scheduler and render its single event stream into the tree, so
-    // there is one source of truth for what is running where.
-    let (scheduler, mut events) = scheduler::Scheduler::new(jobs, Arc::clone(&cancellation));
+    // Install a scheduler and render its single task-event stream into a nested
+    // tree, so there is one source of truth for what is running, where, and
+    // under which parent.
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel::<scheduler::TaskEvent>();
+    let scheduler = scheduler::Scheduler::new(jobs, Arc::clone(&cancellation), tx);
     *workspace.scheduler.lock().unwrap() = Some(Arc::clone(&scheduler));
 
     let root = tree.root_handle();
     let render = tokio::spawn(async move {
-        use scheduler::{JobOutcome, SchedulerEvent};
-        let mut items: std::collections::HashMap<u64, prodash::tree::Item> =
+        use scheduler::{TaskEvent, TaskOutcome};
+        // node id → (progress item, display). Parents are kept alive so children
+        // can attach; a node is removed from the tree when it is done.
+        let mut items: std::collections::HashMap<u64, (prodash::tree::Item, String)> =
             std::collections::HashMap::new();
         while let Some(event) = events.recv().await {
             match event {
-                SchedulerEvent::Queued { .. } => {}
-                SchedulerEvent::Started { job, slot, display } => {
-                    let item = root.add_child(format!("[{slot}] {display}"));
+                TaskEvent::Pending {
+                    id,
+                    parent,
+                    display,
+                } => {
+                    let item = match parent.and_then(|p| items.get_mut(&p)) {
+                        Some((parent_item, _)) => parent_item.add_child(display.clone()),
+                        None => root.add_child(display.clone()),
+                    };
                     ui::init_task(&item);
-                    items.insert(job.0, item);
+                    items.insert(id, (item, display));
                 }
-                SchedulerEvent::Finished { job, outcome } => {
-                    if let Some(mut item) = items.remove(&job.0) {
-                        match outcome {
-                            JobOutcome::Ok => item.done("done"),
-                            JobOutcome::Err(error) => item.fail(error),
-                            JobOutcome::Canceled => item.fail("canceled"),
+                TaskEvent::Running { id, detail } => {
+                    if let Some((item, display)) = items.get_mut(&id) {
+                        if let Some(detail) = detail {
+                            item.set_name(format!("{display} [{detail}]"));
                         }
+                    }
+                }
+                TaskEvent::Done { id, outcome } => {
+                    if let Some((mut item, _)) = items.remove(&id) {
+                        match outcome {
+                            TaskOutcome::Ok => item.done("done"),
+                            TaskOutcome::Err(error) => item.fail(error),
+                            TaskOutcome::Canceled => item.fail("canceled"),
+                        }
+                        // item drops here → node removed from the tree.
                     }
                 }
             }
         }
     });
 
-    let result = spike::execute_goal_live(&workspace, &workspace_root, "build", selectors).await;
+    // Drive the build, with a deadlock watchdog: a genuine async dependency
+    // cycle (which QuickJS gives us no way to detect precisely) surfaces as the
+    // scheduler staying fully idle while the evaluation is unfinished. Report it
+    // instead of hanging.
+    const STALL_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+    let drive = spike::execute_goal_live(&workspace, &workspace_root, "build", selectors);
+    let watchdog = async {
+        loop {
+            if scheduler.outstanding() == 0 {
+                tokio::select! {
+                    _ = scheduler.wait_for_activity() => {}
+                    _ = tokio::time::sleep(STALL_GRACE) => {
+                        if scheduler.outstanding() == 0 {
+                            return;
+                        }
+                    }
+                }
+            } else {
+                scheduler.wait_for_activity().await;
+            }
+        }
+    };
+    let result = tokio::select! {
+        biased;
+        r = drive => r,
+        _ = watchdog => Err(anyhow::anyhow!(
+            "build stalled with no runnable work for {STALL_GRACE:?} — likely a dependency cycle"
+        )),
+    };
 
     // Drop every scheduler handle so the event stream closes and the renderer
     // task finishes.
