@@ -349,6 +349,8 @@ pub async fn load_workspace_with_host_log(
     let state: Arc<Mutex<HostState>> = Arc::new(Mutex::new(HostState::default()));
     let module_mounts: Arc<Mutex<Vec<ModuleMount>>> = Arc::new(Mutex::new(Vec::new()));
     let exec_root: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+    let scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>> =
+        Arc::new(Mutex::new(None));
 
     // ----- QuickJS runtime + context -----
     let rt = Runtime::new().context("create QuickJS runtime")?;
@@ -378,6 +380,7 @@ pub async fn load_workspace_with_host_log(
                 root.clone(),
                 mounts_clone,
                 Arc::clone(&exec_root),
+                Arc::clone(&scheduler),
                 host_log.clone(),
             )
         })
@@ -518,6 +521,7 @@ pub async fn load_workspace_with_host_log(
         runtime: rt,
         ctx,
         exec_root,
+        scheduler,
     })
 }
 
@@ -641,6 +645,7 @@ fn register_globals<'js>(
     workspace_root: PathBuf,
     module_mounts: Arc<Mutex<Vec<ModuleMount>>>,
     exec_root: Arc<Mutex<Option<PathBuf>>>,
+    scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>>,
     host_log: HostLogSink,
 ) -> rquickjs::Result<()> {
     let globals = ctx.globals();
@@ -1262,12 +1267,15 @@ fn register_globals<'js>(
     globals.set("__host_read_file", host_read_file)?;
 
     // __host_run(opts) → { stdout, stderr, exitCode }
-    // Delegates to exec_run_inner with the active exec workspace root.
+    // Submits to the active scheduler, which runs exec_run_inner on a bounded
+    // blocking worker and reports the job on the shared event stream.
     let exec_root_run = Arc::clone(&exec_root);
+    let scheduler_run = Arc::clone(&scheduler);
     let host_run = Function::new(
         ctx.clone(),
         Async(move |ctx: Ctx<'js>, opts: Object<'js>| {
             let exec_root_run = Arc::clone(&exec_root_run);
+            let scheduler_run = Arc::clone(&scheduler_run);
             async move {
                 let root = exec_root_run.lock().unwrap().clone().ok_or_else(|| {
                     rquickjs::Error::new_loading_message(
@@ -1275,15 +1283,17 @@ fn register_globals<'js>(
                         "run() called outside of execution context",
                     )
                 })?;
+                let sched = scheduler_run.lock().unwrap().clone().ok_or_else(|| {
+                    rquickjs::Error::new_loading_message(
+                        "run",
+                        "run() called outside of execution context",
+                    )
+                })?;
                 let run_opts = parse_exec_run_opts(opts, &root)?;
-                let result = tokio::task::spawn_blocking(move || exec_run_inner(&root, run_opts))
+                let display = run_opts.display.clone();
+                let result = sched
+                    .run(display, move || exec_run_inner(&root, run_opts))
                     .await
-                    .map_err(|e| {
-                        rquickjs::Error::new_loading_message(
-                            "run",
-                            format!("native run task failed: {e}"),
-                        )
-                    })?
                     .map_err(|e| rquickjs::Error::new_loading_message("run", format!("{e:#}")))?;
                 let obj = Object::new(ctx)?;
                 obj.set("stdout", result.stdout)?;
@@ -1300,12 +1310,20 @@ fn register_globals<'js>(
     // When opts.watch is provided (array of regex strings), snaps workspace files
     // matching those patterns before and after, and returns changed_files in the result.
     let exec_root_wm = Arc::clone(&exec_root);
+    let scheduler_wm = Arc::clone(&scheduler);
     let host_workspace_mutation = Function::new(
         ctx.clone(),
         Async(move |ctx: Ctx<'js>, opts: Object<'js>| {
             let exec_root_wm = Arc::clone(&exec_root_wm);
+            let scheduler_wm = Arc::clone(&scheduler_wm);
             async move {
                 let root = exec_root_wm.lock().unwrap().clone().ok_or_else(|| {
+                    rquickjs::Error::new_loading_message(
+                        "workspace_mutation",
+                        "workspace_mutation() called outside of execution context",
+                    )
+                })?;
+                let sched = scheduler_wm.lock().unwrap().clone().ok_or_else(|| {
                     rquickjs::Error::new_loading_message(
                         "workspace_mutation",
                         "workspace_mutation() called outside of execution context",
@@ -1315,8 +1333,8 @@ fn register_globals<'js>(
                 let display: Option<String> = opts.get("display")?;
                 let display = display.unwrap_or_else(|| argv.join(" "));
                 let watch: Option<Vec<String>> = opts.get("watch")?;
-                let (stdout, stderr, exit_code, changed_files) =
-                    tokio::task::spawn_blocking(move || -> Result<_> {
+                let (stdout, stderr, exit_code, changed_files) = sched
+                    .run(display.clone(), move || -> Result<_> {
                         let pre = watch
                             .as_deref()
                             .map(|patterns| {
@@ -1351,12 +1369,6 @@ fn register_globals<'js>(
                         ))
                     })
                     .await
-                    .map_err(|e| {
-                        rquickjs::Error::new_loading_message(
-                            "workspace_mutation",
-                            format!("native mutation task failed: {e}"),
-                        )
-                    })?
                     .map_err(|e| {
                         rquickjs::Error::new_loading_message("workspace_mutation", format!("{e:#}"))
                     })?;
@@ -1880,14 +1892,21 @@ fn merge_workspace_config(existing: &mut serde_json::Value, patch: serde_json::V
 
 #[cfg(test)]
 pub async fn plan(workspace: &Workspace, goal: &str, selectors: &[String]) -> Result<Plan> {
-    plan_inner(workspace, None, None, goal, selectors).await
+    plan_inner(workspace, None, None, goal, selectors, None).await
 }
 
+/// Plan against a live workspace.
+///
+/// When `progress` is supplied, per-root introspection is reported into it: the
+/// item's max is set to the number of selected roots and a named child is added
+/// per root (marked `done` with its discovered task count). Below-root work runs
+/// opaquely inside a single JS introspection, so that is the finest granularity.
 pub async fn plan_live(
     live: &LiveWorkspace,
     workspace_root: &Path,
     goal: &str,
     selectors: &[String],
+    progress: Option<&mut prodash::tree::Item>,
 ) -> Result<Plan> {
     plan_inner(
         &live.workspace,
@@ -1895,6 +1914,7 @@ pub async fn plan_live(
         Some(workspace_root),
         goal,
         selectors,
+        progress,
     )
     .await
 }
@@ -1905,6 +1925,7 @@ async fn plan_inner(
     workspace_root: Option<&Path>,
     goal: &str,
     selectors: &[String],
+    mut progress: Option<&mut prodash::tree::Item>,
 ) -> Result<Plan> {
     let goal_def = workspace.goals.get(goal).ok_or_else(|| {
         let known: Vec<_> = workspace.goals.keys().map(String::as_str).collect();
@@ -1921,9 +1942,26 @@ async fn plan_inner(
         workspace_root,
         tasks: BTreeMap::new(),
     };
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.set_max(Some(roots.len()));
+    }
     let mut root_tasks = Vec::new();
     for (target, product) in &roots {
-        root_tasks.push(planner.request(&target.address, product).await?);
+        let before = planner.tasks.len();
+        let mut root_progress = progress.as_deref_mut().map(|progress| {
+            let item = progress.add_child(format!("introspect {}#{}", target.address, product));
+            crate::ui::init_task(&item);
+            item
+        });
+        let root_id = planner.request(&target.address, product).await?;
+        if let Some(root_progress) = root_progress.as_mut() {
+            let discovered = planner.tasks.len().saturating_sub(before);
+            root_progress.done(format!("{discovered} tasks"));
+        }
+        if let Some(progress) = progress.as_deref_mut() {
+            progress.inc();
+        }
+        root_tasks.push(root_id);
     }
 
     let mut tasks: Vec<Task> = planner.tasks.into_values().collect();
@@ -3114,6 +3152,80 @@ pub async fn evaluate_product_json(
         .map_err(|e| anyhow::anyhow!("evaluate_product_json failed: {e}"))
 }
 
+/// Drive a goal's root product functions live: their `run()` calls execute
+/// against the active scheduler instead of being recorded. Memo state is reset
+/// once up front (not per root) so a dependency shared across roots resolves to
+/// a single job. All roots are started before any is awaited, so independent
+/// work — and work fanned out with `group()`/`Promise.all` inside a product —
+/// runs concurrently, bounded by the scheduler.
+///
+/// The caller must have installed a scheduler (and this sets `exec_root`).
+pub async fn execute_goal_live(
+    live: &LiveWorkspace,
+    workspace_root: &Path,
+    goal: &str,
+    selectors: &[String],
+) -> Result<()> {
+    let goal_def = live.workspace.goals.get(goal).ok_or_else(|| {
+        let known: Vec<_> = live.workspace.goals.keys().map(String::as_str).collect();
+        anyhow::anyhow!("unknown goal '{goal}'; registered goals: {}", known.join(", "))
+    })?;
+    let roots = select_roots(&live.workspace, goal_def, selectors)?;
+
+    // Resolve owned (js_id, product fn name, label) triples so nothing borrows
+    // the workspace across the JS await below.
+    let mut calls = Vec::with_capacity(roots.len());
+    for (target, product) in &roots {
+        let product_fn_name = live
+            .workspace
+            .products
+            .get(&(target.kind.clone(), product.clone()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no product '{product}' for kind '{}' (target '{})'",
+                    target.kind,
+                    target.address
+                )
+            })?
+            .clone();
+        calls.push((
+            target.js_id,
+            product_fn_name,
+            format!("{}#{}", target.address, product),
+        ));
+    }
+
+    *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
+
+    live.ctx
+        .async_with(async move |ctx| -> rquickjs::Result<()> {
+            let reset: Function = ctx.globals().get("resetMemoState")?;
+            reset.call::<_, ()>(())?;
+            let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
+
+            // Start every root, then await them all: calling a product returns a
+            // pending promise, and awaiting drives the shared JS event loop, so
+            // all roots' jobs progress together regardless of await order.
+            let mut promises = Vec::with_capacity(calls.len());
+            for (js_id, fn_name, label) in &calls {
+                let handle: Object = resolve_fn.call((*js_id,))?;
+                let product_fn: Function = ctx.globals().get(fn_name.as_str())?;
+                let promise: MaybePromise = product_fn.call((handle,)).catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message("execute", format!("{label}: {e}"))
+                })?;
+                promises.push((label.clone(), promise));
+            }
+            for (label, promise) in promises {
+                promise.into_future::<Value>().await.catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message("execute", format!("{label}: {e}"))
+                })?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("execute goal '{goal}' failed: {e}"))
+}
+
 async fn evaluate_product_function_json(
     live: &LiveWorkspace,
     product_fn_name: &str,
@@ -4032,7 +4144,7 @@ export const app = externalThing("app");
             "app"
         );
 
-        let plan = plan_live(&workspace, p, "build", &["app".into()])
+        let plan = plan_live(&workspace, p, "build", &["app".into()], None)
             .await
             .unwrap();
         assert!(plan.roots[0].starts_with("//:app#external-product"));
@@ -4058,6 +4170,7 @@ export const app = externalThing("app");
             root.path(),
             "build",
             &["//library/jodin:jodin".into()],
+            None,
         )
         .await
         .unwrap();
@@ -4128,7 +4241,7 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
                 .unwrap(),
             "debug"
         );
-        let pkg_plan = plan_live(&workspace, p, "build", &["pkg".into()])
+        let pkg_plan = plan_live(&workspace, p, "build", &["pkg".into()], None)
             .await
             .unwrap();
         assert!(pkg_plan
@@ -4136,7 +4249,7 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
             .iter()
             .any(|task| task.action.display.contains("--mode=debug")));
 
-        let all = plan_live(&workspace, p, "build", &[]).await.unwrap();
+        let all = plan_live(&workspace, p, "build", &[], None).await.unwrap();
         assert!(all
             .roots
             .iter()
@@ -4147,7 +4260,7 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
     async fn new_target_kinds_and_products_need_no_rust_changes() {
         let root = fixture();
         let workspace = load_workspace(root.path()).await.unwrap();
-        let plan = plan_live(&workspace, root.path(), "build", &["//assets:ui".into()])
+        let plan = plan_live(&workspace, root.path(), "build", &["//assets:ui".into()], None)
             .await
             .unwrap();
 
@@ -4162,7 +4275,7 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
     async fn product_plans_round_trip_through_json() {
         let root = fixture();
         let workspace = load_workspace(root.path()).await.unwrap();
-        let plan = plan_live(&workspace, root.path(), "build", &["jodin".into()])
+        let plan = plan_live(&workspace, root.path(), "build", &["jodin".into()], None)
             .await
             .unwrap();
 
@@ -4215,7 +4328,7 @@ export const schema = generator({ srcs: ["schema.idl"], entrypoint: "schemas" })
         );
 
         let workspace = load_workspace(p).await.unwrap();
-        let plan = plan_live(&workspace, p, "build", &["schema".into()])
+        let plan = plan_live(&workspace, p, "build", &["schema".into()], None)
             .await
             .unwrap();
         let task = plan
@@ -5067,7 +5180,7 @@ export const generated = toolUser();
         );
 
         let live = load_workspace(p).await.unwrap();
-        let plan = plan_live(&live, p, "build", &["generated".to_owned()])
+        let plan = plan_live(&live, p, "build", &["generated".to_owned()], None)
             .await
             .unwrap();
         let report = execute_plan_with_options(
@@ -5281,7 +5394,7 @@ export const ignored = missing;
     async fn dot_edges_flow_from_prerequisites_to_consumers() {
         let root = fixture();
         let workspace = load_workspace(root.path()).await.unwrap();
-        let plan = plan_live(&workspace, root.path(), "build", &["jodin".into()])
+        let plan = plan_live(&workspace, root.path(), "build", &["jodin".into()], None)
             .await
             .unwrap();
         let dot = render_dot(&plan);
@@ -5555,6 +5668,11 @@ export const ok = 1;
 
         let live = load_workspace(p).await.unwrap();
         *live.exec_root.lock().unwrap() = Some(p.to_owned());
+        let (scheduler, _events) = crate::scheduler::Scheduler::new(
+            4,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
 
         live.ctx
             .async_with(async |ctx| -> rquickjs::Result<()> {
@@ -5620,7 +5738,7 @@ export const report = product("test-pkg", "report", async function report(handle
         assert_eq!(task.product, "report");
 
         // Live planning discovers the product memo call.
-        let live_plan = plan_live(&live, p, "build", &["//:pkg#report".to_owned()])
+        let live_plan = plan_live(&live, p, "build", &["//:pkg#report".to_owned()], None)
             .await
             .unwrap();
         assert!(live_plan.tasks[0].id.starts_with("//:pkg#report"));

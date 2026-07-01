@@ -6,6 +6,7 @@ mod exec;
 mod executor;
 mod loader;
 mod runtime;
+mod scheduler;
 mod spike;
 mod toolchain;
 mod ui;
@@ -358,7 +359,14 @@ async fn cmd_plan(
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let workspace = load_workspace_with_messages(&workspace_root, tree).await?;
-    let plan = spike::plan_live(&workspace, &workspace_root, goal, selectors).await?;
+    let plan = {
+        let mut p = tree.add_child("generate plan");
+        let plan =
+            spike::plan_live(&workspace, &workspace_root, goal, selectors, Some(&mut p))
+                .await?;
+        p.done(format!("{} tasks", plan.tasks.len()));
+        plan
+    };
 
     print!("{}", spike::render_text_plan(&plan));
     std::fs::write(dot, spike::render_dot(&plan))
@@ -427,52 +435,65 @@ async fn cmd_build_planned(
         ws
     };
 
-    let plan = {
-        let mut p = tree.add_child("generate plan");
-        let plan = spike::plan_live(&workspace, &workspace_root, "build", selectors).await?;
-        p.done(format!("{} tasks", plan.tasks.len()));
-        plan
-    };
-
-    let mut progress = tree.add_child("execute planned build");
-    let target_count = plan.roots.len();
-    let task_count = plan.tasks.len();
-    progress.info(format!(
-        "{} plan: {} {}, {} {}",
-        plan.goal,
-        target_count,
-        if target_count == 1 {
-            "target"
-        } else {
-            "targets"
-        },
-        task_count,
-        if task_count == 1 { "task" } else { "tasks" },
-    ));
+    let mut progress = tree.add_child("execute build");
+    if no_cache {
+        // The live executor does not yet thread a cache-bypass flag through to
+        // exec_run_inner; caching stays on. Surfaced rather than silently ignored.
+        progress.info("note: --no-cache is not yet honored by the live executor");
+    }
     if cancellation.load(Ordering::SeqCst) {
         anyhow::bail!("execution canceled");
     }
 
-    let report = match executor::execute_plan_with_options(
-        &plan,
-        Some(&workspace),
-        &workspace_root,
-        executor::ExecutionOptions::new(executor::ExecutionMode::Local, jobs)
-            .with_no_cache(no_cache)
-            .with_cancellation(Arc::clone(&cancellation)),
-        Some(&mut progress),
-    ) {
-        Ok(report) => report,
+    // Install a scheduler and render its single event stream into the tree, so
+    // there is one source of truth for what is running where.
+    let (scheduler, mut events) = scheduler::Scheduler::new(jobs, Arc::clone(&cancellation));
+    *workspace.scheduler.lock().unwrap() = Some(Arc::clone(&scheduler));
+
+    let root = tree.root_handle();
+    let render = tokio::spawn(async move {
+        use scheduler::{JobOutcome, SchedulerEvent};
+        let mut items: std::collections::HashMap<u64, prodash::tree::Item> =
+            std::collections::HashMap::new();
+        while let Some(event) = events.recv().await {
+            match event {
+                SchedulerEvent::Queued { .. } => {}
+                SchedulerEvent::Started { job, slot, display } => {
+                    let item = root.add_child(format!("[{slot}] {display}"));
+                    ui::init_task(&item);
+                    items.insert(job.0, item);
+                }
+                SchedulerEvent::Finished { job, outcome } => {
+                    if let Some(mut item) = items.remove(&job.0) {
+                        match outcome {
+                            JobOutcome::Ok => item.done("done"),
+                            JobOutcome::Err(error) => item.fail(error),
+                            JobOutcome::Canceled => item.fail("canceled"),
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let result = spike::execute_goal_live(&workspace, &workspace_root, "build", selectors).await;
+
+    // Drop every scheduler handle so the event stream closes and the renderer
+    // task finishes.
+    *workspace.scheduler.lock().unwrap() = None;
+    drop(scheduler);
+    let _ = render.await;
+
+    match result {
+        Ok(()) => {
+            progress.done("done");
+            Ok(())
+        }
         Err(error) => {
             progress.fail("failed");
-            return Err(error);
+            Err(error)
         }
-    };
-
-    print_execution_report(&plan, report, &mut progress);
-    progress.done("done");
-
-    Ok(())
+    }
 }
 
 fn print_execution_report(
@@ -581,7 +602,14 @@ async fn cmd_cache_explain(selector: &str, tree: &Tree) -> Result<()> {
     } else {
         vec![selector.to_owned()]
     };
-    let plan = spike::plan_live(&workspace, &workspace_root, "build", &selectors).await?;
+    let plan = {
+        let mut p = tree.add_child("generate plan");
+        let plan =
+            spike::plan_live(&workspace, &workspace_root, "build", &selectors, Some(&mut p))
+                .await?;
+        p.done(format!("{} tasks", plan.tasks.len()));
+        plan
+    };
     let task_selector =
         if selector.contains('#') && plan.tasks.iter().any(|task| task.id == selector) {
             selector

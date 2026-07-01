@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use rquickjs::{AsyncContext as JsContext, AsyncRuntime as Runtime};
 
+use crate::scheduler::Scheduler;
 use crate::spike::Workspace;
 
 #[derive(Clone)]
@@ -113,6 +114,9 @@ pub struct LiveWorkspace {
     /// Workspace root made available to host functions during task execution.
     #[allow(dead_code)]
     pub(crate) exec_root: Arc<Mutex<Option<PathBuf>>>,
+    /// Scheduler that live `run()` calls submit to. Installed for the duration
+    /// of an execution and cleared afterward; `None` outside execution context.
+    pub(crate) scheduler: Arc<Mutex<Option<Arc<Scheduler>>>>,
 }
 
 impl std::fmt::Debug for LiveWorkspace {

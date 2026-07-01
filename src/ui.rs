@@ -30,6 +30,12 @@ impl Tree {
         self.log_sink.clone()
     }
 
+    /// An owned handle to the progress root, suitable for moving into a spawned
+    /// task (e.g. a scheduler event renderer). Adds children via `add_child`.
+    pub fn root_handle(&self) -> Arc<prodash::tree::Root> {
+        Arc::clone(&self.root)
+    }
+
     fn downgrade(&self) -> std::sync::Weak<prodash::tree::Root> {
         Arc::downgrade(&self.root)
     }
