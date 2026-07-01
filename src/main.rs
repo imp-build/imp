@@ -17,11 +17,14 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use env::{Env, LocalEnv, WslEnv};
+
+use crate::ui::MillisAsFloatingPointSecs;
 
 type Tree = ui::Tree;
 
@@ -241,8 +244,15 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
             js_workers,
             no_cache,
         } => {
-            return cmd_build_planned(selectors, *jobs, *js_workers, *no_cache, Arc::clone(&cancellation), tree)
-                .await;
+            return cmd_build_planned(
+                selectors,
+                *jobs,
+                *js_workers,
+                *no_cache,
+                Arc::clone(&cancellation),
+                tree,
+            )
+            .await;
         }
         Cmd::Explain { product } => {
             return cmd_explain(product, tree).await;
@@ -439,10 +449,25 @@ async fn cmd_build_planned(
         ws
     };
 
-    let mut progress = tree.add_child("execute build");
     if cancellation.load(Ordering::SeqCst) {
         anyhow::bail!("execution canceled");
     }
+
+    // Resolve selectors into concrete root targets so we know the total count
+    // upfront, before the scheduler or renderer starts.
+    let total_targets = {
+        let goal_def = workspace.workspace.goals.get("build").ok_or_else(|| {
+            let known: Vec<&str> = workspace
+                .workspace
+                .goals
+                .keys()
+                .map(String::as_str)
+                .collect();
+            anyhow::anyhow!("no 'build' goal; registered goals: {}", known.join(", "))
+        })?;
+        let roots = spike::select_roots(&workspace.workspace, goal_def, selectors)?;
+        roots.len()
+    };
 
     // Install a scheduler and render its single task-event stream into a flat
     // list of worker slots. Each slot corresponds to one concurrent execution
@@ -456,72 +481,166 @@ async fn cmd_build_planned(
     let render = tokio::spawn(async move {
         use scheduler::{TaskEvent, TaskOutcome};
 
-        // Pre-create one progress item per slot. Slots 0..js_workers are JS
-        // workers; slots js_workers..total are sandbox workers.
+        // Data store: target count pre-computed from select_roots.
+        struct TaskStore {
+            total: usize,
+            done: usize,
+        }
+        let mut store = TaskStore {
+            total: total_targets,
+            done: 0,
+        };
+
+        // ── tree structure ──────────────────────────────────────────────
+        // execute build (0/N targets, progress bar)
+        //   ├─ js tasks (done/total memos, progress bar) — if js_workers > 0
+        //   │   ├─<memo name>  ← JS 0, shown when active
+        //   │   └─<memo name>  ← JS 1, shown when active
+        //   ├─ run: <desc>     ← SB 0, shown when active
+        //   └─ run: <desc>     ← SB 1, shown when active
+        // Idle workers are hidden (name set to " ").
+
+        let mut progress = root.add_child("execute build");
+        ui::init_task(&progress);
+        if store.total > 0 {
+            progress.set_max(Some(store.total));
+            progress.set_name(format!("0/{} targets", store.total));
+        } else {
+            progress.set_name("execute build".to_owned());
+        }
+
+        let mut js_progress = if js_workers > 0 {
+            let js = progress.add_child("js tasks");
+            ui::init_task(&js);
+            js.set_name("js tasks 0/0");
+            Some(js)
+        } else {
+            None
+        };
+
+        // Slot items — created under the appropriate parent.
         struct SlotState {
             item: prodash::tree::Item,
             task_id: Option<u64>,
         }
 
-        let mut slots: Vec<SlotState> = (0..total_slots)
-            .map(|i| {
-                let label = if i < js_workers {
-                    format!("JS {i}")
-                } else {
-                    format!("SB {}", i - js_workers)
-                };
-                let item = root.add_child(label);
-                ui::init_task(&item);
-                SlotState { item, task_id: None }
-            })
-            .collect();
+        let mut slots: Vec<SlotState> = Vec::with_capacity(total_slots);
+        for _ in 0..js_workers {
+            let item = js_progress.as_mut().unwrap().add_child("<idle>");
+            ui::init_task(&item);
+            slots.push(SlotState {
+                item,
+                task_id: None,
+            });
+        }
+        for _ in 0..jobs {
+            let item = progress.add_child("<idle>");
+            ui::init_task(&item);
+            slots.push(SlotState {
+                item,
+                task_id: None,
+            });
+        }
 
         let mut task_to_slot: std::collections::HashMap<u64, usize> =
             std::collections::HashMap::new();
-        // Display names arrive in Pending before the task occupies a slot in
-        // Running; stash them here until the slot is known.
         let mut pending_displays: std::collections::HashMap<u64, String> =
             std::collections::HashMap::new();
+        let mut root_tasks: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut is_js_memo: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut total_js: usize = 0;
+        let mut done_js: usize = 0;
 
         while let Some(event) = events.recv().await {
             match event {
-                TaskEvent::Pending { id, display, .. } => {
+                TaskEvent::Pending {
+                    id,
+                    parent,
+                    display,
+                    ..
+                } => {
+                    if parent.is_none() {
+                        root_tasks.insert(id);
+                    }
                     pending_displays.insert(id, display);
                 }
                 TaskEvent::Running { id, detail } => {
                     let display = pending_displays.remove(&id).unwrap_or_default();
 
-                    // Determine which display slot this task occupies.
+                    let is_js = detail.is_none();
+                    if is_js {
+                        total_js += 1;
+                        is_js_memo.insert(id);
+                        if let Some(ref js) = js_progress {
+                            js.set_max(Some(total_js));
+                            js.set_name(format!("js tasks {done_js}/{total_js}"));
+                        }
+                    }
+
                     let slot = if let Some(ref d) = detail {
-                        // Sandbox job: parse the scheduler slot from "slot N".
                         let n = d.trim_start_matches("slot ").parse::<usize>().unwrap_or(0);
                         js_workers + n
                     } else {
-                        // JS memo: find a free JS slot.
                         (0..js_workers)
                             .find(|&i| slots[i].task_id.is_none())
                             .unwrap_or(0)
                     };
-                    // Free the previous occupant of this slot, if any.
                     if let Some(prev) = slots[slot].task_id {
                         task_to_slot.remove(&prev);
                     }
-                    slots[slot].item.set_name(display.clone());
+                    let label = if is_js {
+                        display
+                    } else {
+                        format!("run: {display}")
+                    };
+                    slots[slot].item.set_name(label);
                     slots[slot].task_id = Some(id);
+                    slots[slot].item.init(
+                        None,
+                        Some(prodash::unit::dynamic(MillisAsFloatingPointSecs)),
+                    );
+                    slots[slot]
+                        .item
+                        .set(MillisAsFloatingPointSecs::start_time_to_step(
+                            &SystemTime::now(),
+                        ));
                     task_to_slot.insert(id, slot);
                 }
                 TaskEvent::Done { id, outcome } => {
                     pending_displays.remove(&id);
+
+                    // Track root-task (target) completion on the build bar.
+                    if store.total > 0 && root_tasks.contains(&id) {
+                        root_tasks.remove(&id);
+                        if matches!(outcome, TaskOutcome::Ok) {
+                            store.done += 1;
+                            progress.inc();
+                            progress.set_name(format!("{}/{} targets", store.done, store.total));
+                            if store.done == store.total {
+                                progress.done("done");
+                            }
+                        }
+                    }
+
+                    // Track JS memo completion on the js-tasks bar.
+                    if is_js_memo.remove(&id) && matches!(outcome, TaskOutcome::Ok) {
+                        done_js += 1;
+                        if let Some(ref js) = js_progress {
+                            js.inc();
+                            js.set_name(format!("js tasks {done_js}/{total_js}"));
+                        }
+                        if done_js == total_js && store.done == store.total {
+                            if let Some(ref mut js) = js_progress {
+                                js.done("done");
+                            }
+                        }
+                    }
+
                     if let Some(&slot) = task_to_slot.get(&id) {
                         let s = &mut slots[slot];
                         s.task_id = None;
-                        // Reset the slot to its idle label.
-                        let idle = if slot < js_workers {
-                            format!("JS {slot}")
-                        } else {
-                            format!("SB {}", slot - js_workers)
-                        };
-                        s.item.set_name(idle);
+                        s.item.set_name("<idle>");
+                        s.item.init(None, None);
                         match outcome {
                             TaskOutcome::Ok => {}
                             TaskOutcome::Err(error) => {
@@ -574,16 +693,7 @@ async fn cmd_build_planned(
     drop(scheduler);
     let _ = render.await;
 
-    match result {
-        Ok(()) => {
-            progress.done("done");
-            Ok(())
-        }
-        Err(error) => {
-            progress.fail("failed");
-            Err(error)
-        }
-    }
+    result
 }
 
 fn print_execution_report(

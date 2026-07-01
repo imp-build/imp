@@ -73,6 +73,57 @@ impl Session {
     }
 }
 
+/// Renders a millis-since-epoch unit as floating point seconds.
+#[derive(Copy, Clone, Default, Eq, PartialEq, Ord, PartialOrd, Debug)]
+pub struct MillisAsFloatingPointSecs;
+
+use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
+pub fn format_workunit_duration_ms(duration: Duration) -> String {
+    format!("{:.2}s", (duration.as_millis() as f64) / 1000.0)
+}
+use prodash::progress::Step;
+use std::fmt;
+impl MillisAsFloatingPointSecs {
+    /// Computes a static Step from the given start time by converting it to "millis-since-epoch".
+    pub fn start_time_to_step(start_time: &SystemTime) -> Step {
+        start_time.duration_since(UNIX_EPOCH).unwrap().as_millis() as usize
+    }
+}
+
+impl prodash::unit::DisplayValue for MillisAsFloatingPointSecs {
+    fn display_current_value(
+        &self,
+        w: &mut dyn fmt::Write,
+        value: Step,
+        _upper: Option<Step>,
+    ) -> fmt::Result {
+        // Convert back from millis-since-epoch to millis elapsed.
+        let start_time = UNIX_EPOCH + Duration::from_millis(value as u64);
+        let elapsed_ms = start_time.elapsed().unwrap_or_else(|_| Duration::new(0, 0));
+        w.write_str(&format_workunit_duration_ms(elapsed_ms))
+    }
+    fn display_unit(&self, _w: &mut dyn fmt::Write, _value: Step) -> fmt::Result {
+        Ok(())
+    }
+
+    fn dyn_hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write_u128(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        );
+    }
+}
+
 pub(crate) fn init_task(item: &prodash::tree::Item) {
-    item.init(None, Some(prodash::unit::label("steps")));
+    let start_time = SystemTime::now();
+    item.init(
+        None,
+        Some(prodash::unit::dynamic(MillisAsFloatingPointSecs)),
+    );
+    item.set(MillisAsFloatingPointSecs::start_time_to_step(&start_time));
 }

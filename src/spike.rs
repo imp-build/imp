@@ -2065,7 +2065,7 @@ async fn plan_inner(
     })
 }
 
-fn select_roots<'a>(
+pub(crate) fn select_roots<'a>(
     workspace: &'a Workspace,
     goal: &Goal,
     selectors: &[String],
