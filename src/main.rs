@@ -481,13 +481,14 @@ async fn cmd_build_planned(
                     }
                 }
                 TaskEvent::Done { id, outcome } => {
-                    if let Some((mut item, _)) = items.remove(&id) {
+                    if let Some((mut item, display)) = items.remove(&id) {
                         match outcome {
-                            TaskOutcome::Ok => item.done("done"),
-                            TaskOutcome::Err(error) => item.fail(error),
-                            TaskOutcome::Canceled => item.fail("canceled"),
+                            // Success: drop silently so the node just disappears,
+                            // rather than flooding the log with bare "done" lines.
+                            TaskOutcome::Ok => drop(item),
+                            TaskOutcome::Err(error) => item.fail(format!("{display}: {error}")),
+                            TaskOutcome::Canceled => item.fail(format!("{display}: canceled")),
                         }
-                        // item drops here → node removed from the tree.
                     }
                 }
             }
