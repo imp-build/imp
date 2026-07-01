@@ -710,12 +710,13 @@ function _push_call(key_string) {
     ctx.stackSet.add(key_string);
 }
 
-function _pop_call(key_string, contextId) {
-    const ctx = _memo_contexts.get(contextId);
-    if (ctx === undefined) return;
+function _pop_call(key_string) {
+    const ctx = _current_context();
     ctx.stack.pop();
     ctx.stackSet.delete(key_string);
-    _active_memo_context_ids.delete(contextId);
+    if (_current_memo_context_id !== 0) {
+        _active_memo_context_ids.delete(_current_memo_context_id);
+    }
 }
 
 /**
@@ -787,15 +788,15 @@ export function memo(fn) {
                 try {
                     promise = Promise.resolve(fn(...args));
                 } catch (e) {
-                    _pop_call(key_string, childContextId);
+                    _pop_call(key_string);
                     throw e;
                 }
                 if (_is_object_key(promise)) {
                     _promise_contexts.set(promise, childContextId);
                 }
                 promise.then(
-                    () => _pop_call(key_string, childContextId),
-                    () => _pop_call(key_string, childContextId),
+                    () => _with_context(childContextId, () => _pop_call(key_string)),
+                    () => _with_context(childContextId, () => _pop_call(key_string)),
                 );
                 return promise;
             });
