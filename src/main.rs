@@ -362,8 +362,7 @@ async fn cmd_plan(
     let plan = {
         let mut p = tree.add_child("generate plan");
         let plan =
-            spike::plan_live(&workspace, &workspace_root, goal, selectors, Some(&mut p))
-                .await?;
+            spike::plan_live(&workspace, &workspace_root, goal, selectors, Some(&mut p)).await?;
         p.done(format!("{} tasks", plan.tasks.len()));
         plan
     };
@@ -436,11 +435,6 @@ async fn cmd_build_planned(
     };
 
     let mut progress = tree.add_child("execute build");
-    if no_cache {
-        // The live executor does not yet thread a cache-bypass flag through to
-        // exec_run_inner; caching stays on. Surfaced rather than silently ignored.
-        progress.info("note: --no-cache is not yet honored by the live executor");
-    }
     if cancellation.load(Ordering::SeqCst) {
         anyhow::bail!("execution canceled");
     }
@@ -500,7 +494,7 @@ async fn cmd_build_planned(
     // scheduler staying fully idle while the evaluation is unfinished. Report it
     // instead of hanging.
     const STALL_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
-    let drive = spike::execute_goal_live(&workspace, &workspace_root, "build", selectors);
+    let drive = spike::execute_goal_live(&workspace, &workspace_root, "build", selectors, no_cache);
     let watchdog = async {
         loop {
             if scheduler.outstanding() == 0 {
@@ -651,9 +645,14 @@ async fn cmd_cache_explain(selector: &str, tree: &Tree) -> Result<()> {
     };
     let plan = {
         let mut p = tree.add_child("generate plan");
-        let plan =
-            spike::plan_live(&workspace, &workspace_root, "build", &selectors, Some(&mut p))
-                .await?;
+        let plan = spike::plan_live(
+            &workspace,
+            &workspace_root,
+            "build",
+            &selectors,
+            Some(&mut p),
+        )
+        .await?;
         p.done(format!("{} tasks", plan.tasks.len()));
         plan
     };

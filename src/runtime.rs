@@ -6,7 +6,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
 use rquickjs::{AsyncContext as JsContext, AsyncRuntime as Runtime};
 
@@ -114,6 +114,9 @@ pub struct LiveWorkspace {
     /// Workspace root made available to host functions during task execution.
     #[allow(dead_code)]
     pub(crate) exec_root: Arc<Mutex<Option<PathBuf>>>,
+    /// Cache bypass for live `run()` execution. Set by command entry points for
+    /// the duration of live execution.
+    pub(crate) exec_no_cache: Arc<AtomicBool>,
     /// Scheduler that live `run()` calls submit to. Installed for the duration
     /// of an execution and cleared afterward; `None` outside execution context.
     pub(crate) scheduler: Arc<Mutex<Option<Arc<Scheduler>>>>,
@@ -126,6 +129,7 @@ impl std::fmt::Debug for LiveWorkspace {
             .field("runtime", &"AsyncRuntime { .. }")
             .field("ctx", &"AsyncContext { .. }")
             .field("exec_root", &"Arc<Mutex<..>>")
+            .field("exec_no_cache", &"Arc<AtomicBool>")
             .finish()
     }
 }

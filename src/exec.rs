@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{atomic::{AtomicBool, Ordering}, mpsc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -13,10 +16,10 @@ use serde::{Deserialize, Serialize};
 use std::os::unix::process::CommandExt;
 
 use crate::cache::{
-    artifact_relative_path, cached_outputs_present, copy_directory, copy_file,
-    create_sandbox_root, digest_json, directory_entries, file_mode, materialize_cached_outputs,
-    named_cache_key_path, store_file_blob, task_record_path, write_task_cache_record,
-    CachedArtifact, CacheInputDigest, TaskCacheRecord, TASK_CACHE_VERSION,
+    artifact_relative_path, cached_outputs_present, copy_directory, copy_file, create_sandbox_root,
+    digest_json, directory_entries, file_mode, materialize_cached_outputs, named_cache_key_path,
+    store_file_blob, task_record_path, write_task_cache_record, CacheInputDigest, CachedArtifact,
+    TaskCacheRecord, TASK_CACHE_VERSION,
 };
 
 const PROCESS_OUTPUT_VISIBLE_LINES: usize = 5;
@@ -309,6 +312,7 @@ pub(crate) struct ExecRunOpts {
     pub(crate) impure: bool,
     pub(crate) force_cache: bool,
     pub(crate) sandbox: bool,
+    pub(crate) no_cache: bool,
 }
 
 pub(crate) struct ExecIoSpec {
@@ -325,9 +329,7 @@ pub struct ExecToolSpec {
     pub bin_dirs: Vec<String>,
 }
 
-pub(crate) fn parse_io_specs<'js>(
-    vals: Vec<Object<'js>>,
-) -> rquickjs::Result<Vec<ExecIoSpec>> {
+pub(crate) fn parse_io_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Vec<ExecIoSpec>> {
     let mut specs = Vec::new();
     for val in vals {
         let path: Option<String> = val.get("path")?;
@@ -514,10 +516,7 @@ pub(crate) fn sandbox_command_env(
     Ok(command_env)
 }
 
-pub(crate) fn exec_run_inner(
-    workspace_root: &Path,
-    opts: ExecRunOpts,
-) -> Result<ExecRunResult> {
+pub(crate) fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunResult> {
     if !opts.sandbox {
         if !opts.impure {
             bail!("run({{ sandbox: false }}) requires impure: true");
@@ -593,7 +592,7 @@ pub(crate) fn exec_run_inner(
     // Check cache.
     let cacheable = !opts.impure || opts.force_cache;
     let record_path = task_record_path(&task_key)?;
-    let cached_outputs_opt: Option<Vec<CachedArtifact>> = if cacheable {
+    let cached_outputs_opt: Option<Vec<CachedArtifact>> = if cacheable && !opts.no_cache {
         match std::fs::read_to_string(&record_path) {
             Ok(encoded) => {
                 let record: TaskCacheRecord =
@@ -741,7 +740,9 @@ pub(crate) fn exec_run_inner(
             named_caches: vec![],
             outputs: cached_outputs,
         };
-        write_task_cache_record(&record)?;
+        if !opts.no_cache {
+            write_task_cache_record(&record)?;
+        }
         materialize_cached_outputs(&record, workspace_root)?;
     }
 
@@ -800,8 +801,12 @@ pub(crate) fn exec_run_unsandboxed(
         .spawn()
         .with_context(|| format!("run() unsandboxed command in {}", workspace_root.display()))?;
 
-    let (status, stdout, stderr) =
-        wait_for_child_output(&mut child, &opts.display, cancellation, progress.as_deref_mut())?;
+    let (status, stdout, stderr) = wait_for_child_output(
+        &mut child,
+        &opts.display,
+        cancellation,
+        progress.as_deref_mut(),
+    )?;
 
     let exit_code = status.code().unwrap_or(-1);
     if !status.success() {

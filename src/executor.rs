@@ -616,6 +616,7 @@ fn run_unsandboxed_task(
         impure: true,
         force_cache: false,
         sandbox: false,
+        no_cache: false,
     };
     exec_run_unsandboxed(workspace_root, opts, Some(cancellation), progress).map(|_| ())
 }

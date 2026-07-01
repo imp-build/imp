@@ -8,14 +8,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
-use crate::cache::{
-    artifact_relative_path, digest_json, named_cache_key_path, store_file_blob,
-};
-use crate::exec::{
-    exec_run_inner, parse_io_specs, parse_tool_specs, ExecRunOpts, ExecToolSpec,
-};
+use crate::cache::{artifact_relative_path, digest_json, named_cache_key_path, store_file_blob};
+use crate::exec::{exec_run_inner, parse_io_specs, parse_tool_specs, ExecRunOpts, ExecToolSpec};
 use crate::loader::{
     resolve_workspace_module, validate_workspace_module_path, ModuleKind, ModuleMount, ImpLoader,
     ImpResolver,
@@ -25,20 +24,14 @@ use crate::toolchain;
 use anyhow::{bail, Context, Result};
 use regex::Regex;
 use rquickjs::{
-    function::Async,
-    promise::MaybePromise,
-    Array, AsyncContext as JsContext, AsyncRuntime as Runtime, CatchResultExt, Ctx, Filter,
-    Function, Module, Object, Value,
+    function::Async, promise::MaybePromise, Array, AsyncContext as JsContext,
+    AsyncRuntime as Runtime, CatchResultExt, Ctx, Filter, Function, Module, Object, Value,
 };
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 pub(crate) const WORKSPACE_FILE: &str = "imp.workspace.js";
 pub(crate) const BUILD_FILE: &str = "BUILD.js";
-
-
-
-
 
 // ---------------------------------------------------------------------------
 // Public data types
@@ -223,7 +216,6 @@ pub struct NamedCache {
     pub env_var: String,
 }
 
-
 // ---------------------------------------------------------------------------
 // Internal host state
 // ---------------------------------------------------------------------------
@@ -349,6 +341,7 @@ pub async fn load_workspace_with_host_log(
     let state: Arc<Mutex<HostState>> = Arc::new(Mutex::new(HostState::default()));
     let module_mounts: Arc<Mutex<Vec<ModuleMount>>> = Arc::new(Mutex::new(Vec::new()));
     let exec_root: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+    let exec_no_cache = Arc::new(AtomicBool::new(false));
     let scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>> =
         Arc::new(Mutex::new(None));
 
@@ -380,6 +373,7 @@ pub async fn load_workspace_with_host_log(
                 root.clone(),
                 mounts_clone,
                 Arc::clone(&exec_root),
+                Arc::clone(&exec_no_cache),
                 Arc::clone(&scheduler),
                 host_log.clone(),
             )
@@ -521,6 +515,7 @@ pub async fn load_workspace_with_host_log(
         runtime: rt,
         ctx,
         exec_root,
+        exec_no_cache,
         scheduler,
     })
 }
@@ -580,7 +575,6 @@ fn materialize_pending_target(
     );
     Ok(address)
 }
-
 
 fn compute_owned_files(
     workspace_root: &Path,
@@ -645,6 +639,7 @@ fn register_globals<'js>(
     workspace_root: PathBuf,
     module_mounts: Arc<Mutex<Vec<ModuleMount>>>,
     exec_root: Arc<Mutex<Option<PathBuf>>>,
+    exec_no_cache: Arc<AtomicBool>,
     scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>>,
     host_log: HostLogSink,
 ) -> rquickjs::Result<()> {
@@ -1270,11 +1265,13 @@ fn register_globals<'js>(
     // Submits to the active scheduler, which runs exec_run_inner on a bounded
     // blocking worker and reports the job on the shared event stream.
     let exec_root_run = Arc::clone(&exec_root);
+    let exec_no_cache_run = Arc::clone(&exec_no_cache);
     let scheduler_run = Arc::clone(&scheduler);
     let host_run = Function::new(
         ctx.clone(),
         Async(move |ctx: Ctx<'js>, opts: Object<'js>| {
             let exec_root_run = Arc::clone(&exec_root_run);
+            let exec_no_cache_run = Arc::clone(&exec_no_cache_run);
             let scheduler_run = Arc::clone(&scheduler_run);
             async move {
                 let root = exec_root_run.lock().unwrap().clone().ok_or_else(|| {
@@ -1291,7 +1288,8 @@ fn register_globals<'js>(
                 })?;
                 // Owning memo node (if any) so the job nests under it in the UI.
                 let parent: Option<u64> = opts.get::<_, Option<f64>>("__owner")?.map(|n| n as u64);
-                let run_opts = parse_exec_run_opts(opts, &root)?;
+                let mut run_opts = parse_exec_run_opts(opts, &root)?;
+                run_opts.no_cache = exec_no_cache_run.load(Ordering::SeqCst);
                 let display = run_opts.display.clone();
                 let result = sched
                     .run(parent, display, move || exec_run_inner(&root, run_opts))
@@ -1516,6 +1514,7 @@ fn parse_exec_run_opts<'js>(
         impure,
         force_cache,
         sandbox,
+        no_cache: false,
     })
 }
 
@@ -1852,7 +1851,6 @@ pub(crate) fn workspace_relative_directory(path: &str) -> Result<PathBuf> {
     }
     artifact_relative_path(path)
 }
-
 
 /// Recursively copy the contents of `src` into `dst` (which already exists as a
 /// directory). Unlike `std::fs::rename` this works across mount boundaries.
@@ -3206,10 +3204,14 @@ pub async fn execute_goal_live(
     workspace_root: &Path,
     goal: &str,
     selectors: &[String],
+    no_cache: bool,
 ) -> Result<()> {
     let goal_def = live.workspace.goals.get(goal).ok_or_else(|| {
         let known: Vec<_> = live.workspace.goals.keys().map(String::as_str).collect();
-        anyhow::anyhow!("unknown goal '{goal}'; registered goals: {}", known.join(", "))
+        anyhow::anyhow!(
+            "unknown goal '{goal}'; registered goals: {}",
+            known.join(", ")
+        )
     })?;
     let roots = select_roots(&live.workspace, goal_def, selectors)?;
 
@@ -3237,8 +3239,10 @@ pub async fn execute_goal_live(
     }
 
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
+    live.exec_no_cache.store(no_cache, Ordering::SeqCst);
 
-    live.ctx
+    let result = live
+        .ctx
         .async_with(async move |ctx| -> rquickjs::Result<()> {
             let reset: Function = ctx.globals().get("resetMemoState")?;
             reset.call::<_, ()>(())?;
@@ -3251,20 +3255,27 @@ pub async fn execute_goal_live(
             for (js_id, fn_name, label) in &calls {
                 let handle: Object = resolve_fn.call((*js_id,))?;
                 let product_fn: Function = ctx.globals().get(fn_name.as_str())?;
-                let promise: MaybePromise = product_fn.call((handle,)).catch(&ctx).map_err(|e| {
-                    rquickjs::Error::new_loading_message("execute", format!("{label}: {e}"))
-                })?;
+                let promise: MaybePromise =
+                    product_fn.call((handle,)).catch(&ctx).map_err(|e| {
+                        rquickjs::Error::new_loading_message("execute", format!("{label}: {e}"))
+                    })?;
                 promises.push((label.clone(), promise));
             }
             for (label, promise) in promises {
-                promise.into_future::<Value>().await.catch(&ctx).map_err(|e| {
-                    rquickjs::Error::new_loading_message("execute", format!("{label}: {e}"))
-                })?;
+                promise
+                    .into_future::<Value>()
+                    .await
+                    .catch(&ctx)
+                    .map_err(|e| {
+                        rquickjs::Error::new_loading_message("execute", format!("{label}: {e}"))
+                    })?;
             }
             Ok(())
         })
         .await
-        .map_err(|e| anyhow::anyhow!("execute goal '{goal}' failed: {e}"))
+        .map_err(|e| anyhow::anyhow!("execute goal '{goal}' failed: {e}"));
+    live.exec_no_cache.store(false, Ordering::SeqCst);
+    result
 }
 
 async fn evaluate_product_function_json(
@@ -3794,7 +3805,6 @@ fn dot_escape(value: &str) -> String {
         .replace('\n', "\\n")
 }
 
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -3802,15 +3812,20 @@ fn dot_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
-    use std::sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc};
-    use std::time::Duration;
-    use crate::cache::{explain_task_cache, format_cache_explanation, named_cache_bindings, named_cache_key_path};
-    use crate::exec::{ProcessLine, ProcessStream, report_process_line, spawn_output_reader};
+    use crate::cache::{
+        explain_task_cache, format_cache_explanation, named_cache_bindings, named_cache_key_path,
+    };
+    use crate::exec::{report_process_line, spawn_output_reader, ProcessLine, ProcessStream};
     use crate::executor::{
         execute_plan, execute_plan_with_options, execute_plan_with_progress,
         write_sandbox_run_script, ExecutionMode, ExecutionOptions, TaskExecutionStatus,
     };
+    use std::collections::VecDeque;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    };
+    use std::time::Duration;
     use tempfile::TempDir;
 
     // ---- Common rule JS strings ----------------------------------------
@@ -4301,9 +4316,15 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
     async fn new_target_kinds_and_products_need_no_rust_changes() {
         let root = fixture();
         let workspace = load_workspace(root.path()).await.unwrap();
-        let plan = plan_live(&workspace, root.path(), "build", &["//assets:ui".into()], None)
-            .await
-            .unwrap();
+        let plan = plan_live(
+            &workspace,
+            root.path(),
+            "build",
+            &["//assets:ui".into()],
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(plan.roots[0].starts_with("//assets:ui#bundle"));
         assert!(plan
@@ -5796,6 +5817,82 @@ if (a !== "S" || b !== "S") {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_goal_no_cache_bypasses_run_task_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker = p.join("runs.txt");
+        let command = format!(
+            "printf r >> '{}' && mkdir -p build && printf payload > build/live.txt",
+            marker.display()
+        );
+        let command_js = command.replace('\\', "\\\\").replace('"', "\\\"");
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            &format!(
+                r#"
+import {{ target, product, run, output }} from "imp:core";
+
+export const app = target({{ kind: "live-cache-test" }});
+
+export const build = product("live-cache-test", "build", async function build() {{
+    return run({{
+        argv: ["sh", "-c", "{command_js}"],
+        outputs: [output("build/live.txt")],
+        display: "live cache action",
+    }});
+}});
+"#
+            ),
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let selectors = vec!["app".to_owned()];
+        execute_goal_live(&live, p, "build", &selectors, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/live.txt")).unwrap(),
+            "payload"
+        );
+        std::fs::remove_file(p.join("build/live.txt")).unwrap();
+
+        execute_goal_live(&live, p, "build", &selectors, false)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "rr");
+        std::fs::remove_file(p.join("build/live.txt")).unwrap();
+
+        execute_goal_live(&live, p, "build", &selectors, false)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "rr");
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/live.txt")).unwrap(),
+            "payload"
+        );
+        std::fs::remove_file(p.join("build/live.txt")).unwrap();
+
+        execute_goal_live(&live, p, "build", &selectors, true)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "rrr");
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/live.txt")).unwrap(),
+            "payload"
+        );
     }
 
     #[tokio::test]
