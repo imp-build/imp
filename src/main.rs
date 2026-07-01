@@ -440,6 +440,7 @@ async fn cmd_build_planned(
     cancellation: Arc<AtomicBool>,
     tree: &Tree,
 ) -> Result<()> {
+    let js_workers = js_workers.max(1);
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let workspace = {
@@ -477,9 +478,8 @@ async fn cmd_build_planned(
     *workspace.scheduler.lock().unwrap() = Some(Arc::clone(&scheduler));
 
     let root = tree.root_handle();
-    let total_slots = js_workers + jobs;
     let render = tokio::spawn(async move {
-        use scheduler::{TaskEvent, TaskOutcome};
+        use scheduler::{LaneKind, TaskEvent, TaskOutcome};
 
         // Data store: target count pre-computed from select_roots.
         struct TaskStore {
@@ -509,13 +509,11 @@ async fn cmd_build_planned(
             progress.set_name("execute build".to_owned());
         }
 
-        let mut js_progress = if js_workers > 0 {
+        let mut js_progress = {
             let js = progress.add_child("js tasks");
             ui::init_task(&js);
             js.set_name("js tasks 0/0");
-            Some(js)
-        } else {
-            None
+            js
         };
 
         // Slot items — created under the appropriate parent.
@@ -524,25 +522,73 @@ async fn cmd_build_planned(
             task_id: Option<u64>,
         }
 
-        let mut slots: Vec<SlotState> = Vec::with_capacity(total_slots);
+        fn start_lane(
+            slots: &mut [SlotState],
+            task_to_slot: &mut std::collections::HashMap<u64, usize>,
+            slot: usize,
+            id: u64,
+            label: String,
+        ) {
+            let Some(state) = slots.get_mut(slot) else {
+                return;
+            };
+            if let Some(prev) = state.task_id {
+                task_to_slot.remove(&prev);
+            }
+            state.item.set_name(label);
+            state.item.init(
+                None,
+                Some(prodash::unit::dynamic(MillisAsFloatingPointSecs)),
+            );
+            state
+                .item
+                .set(MillisAsFloatingPointSecs::start_time_to_step(
+                    &SystemTime::now(),
+                ));
+            state.task_id = Some(id);
+            task_to_slot.insert(id, slot);
+        }
+
+        fn clear_lane(
+            slots: &mut [SlotState],
+            task_to_slot: &mut std::collections::HashMap<u64, usize>,
+            slot: usize,
+            id: u64,
+        ) {
+            let Some(state) = slots.get_mut(slot) else {
+                task_to_slot.remove(&id);
+                return;
+            };
+            if state.task_id == Some(id) {
+                state.task_id = None;
+                state.item.set_name("<idle>");
+                state.item.init(None, None);
+            }
+            task_to_slot.remove(&id);
+        }
+
+        let mut js_slots: Vec<SlotState> = Vec::with_capacity(js_workers);
         for _ in 0..js_workers {
-            let item = js_progress.as_mut().unwrap().add_child("<idle>");
+            let item = js_progress.add_child("<idle>");
             ui::init_task(&item);
-            slots.push(SlotState {
+            js_slots.push(SlotState {
                 item,
                 task_id: None,
             });
         }
+        let mut sandbox_slots: Vec<SlotState> = Vec::with_capacity(jobs);
         for _ in 0..jobs {
             let item = progress.add_child("<idle>");
             ui::init_task(&item);
-            slots.push(SlotState {
+            sandbox_slots.push(SlotState {
                 item,
                 task_id: None,
             });
         }
 
-        let mut task_to_slot: std::collections::HashMap<u64, usize> =
+        let mut js_task_to_slot: std::collections::HashMap<u64, usize> =
+            std::collections::HashMap::new();
+        let mut sandbox_task_to_slot: std::collections::HashMap<u64, usize> =
             std::collections::HashMap::new();
         let mut pending_displays: std::collections::HashMap<u64, String> =
             std::collections::HashMap::new();
@@ -565,46 +611,12 @@ async fn cmd_build_planned(
                     pending_displays.insert(id, display);
                 }
                 TaskEvent::Running { id, detail } => {
-                    let display = pending_displays.remove(&id).unwrap_or_default();
-
-                    let is_js = detail.is_none();
-                    if is_js {
+                    if detail.is_none() {
                         total_js += 1;
                         is_js_memo.insert(id);
-                        if let Some(ref js) = js_progress {
-                            js.set_max(Some(total_js));
-                            js.set_name(format!("js tasks {done_js}/{total_js}"));
-                        }
+                        js_progress.set_max(Some(total_js));
+                        js_progress.set_name(format!("js tasks {done_js}/{total_js}"));
                     }
-
-                    let slot = if let Some(ref d) = detail {
-                        let n = d.trim_start_matches("slot ").parse::<usize>().unwrap_or(0);
-                        js_workers + n
-                    } else {
-                        (0..js_workers)
-                            .find(|&i| slots[i].task_id.is_none())
-                            .unwrap_or(0)
-                    };
-                    if let Some(prev) = slots[slot].task_id {
-                        task_to_slot.remove(&prev);
-                    }
-                    let label = if is_js {
-                        display
-                    } else {
-                        format!("run: {display}")
-                    };
-                    slots[slot].item.set_name(label);
-                    slots[slot].task_id = Some(id);
-                    slots[slot].item.init(
-                        None,
-                        Some(prodash::unit::dynamic(MillisAsFloatingPointSecs)),
-                    );
-                    slots[slot]
-                        .item
-                        .set(MillisAsFloatingPointSecs::start_time_to_step(
-                            &SystemTime::now(),
-                        ));
-                    task_to_slot.insert(id, slot);
                 }
                 TaskEvent::Done { id, outcome } => {
                     pending_displays.remove(&id);
@@ -612,47 +624,75 @@ async fn cmd_build_planned(
                     // Track root-task (target) completion on the build bar.
                     if store.total > 0 && root_tasks.contains(&id) {
                         root_tasks.remove(&id);
-                        if matches!(outcome, TaskOutcome::Ok) {
-                            store.done += 1;
-                            progress.inc();
-                            progress.set_name(format!("{}/{} targets", store.done, store.total));
-                            if store.done == store.total {
-                                progress.done("done");
+                        match &outcome {
+                            TaskOutcome::Ok => {
+                                store.done += 1;
+                                progress.inc();
+                                progress
+                                    .set_name(format!("{}/{} targets", store.done, store.total));
+                                if store.done == store.total {
+                                    progress.done("done");
+                                }
+                            }
+                            TaskOutcome::Err(error) => {
+                                progress.fail(error.clone());
+                            }
+                            TaskOutcome::Canceled => {
+                                progress.fail("canceled".to_owned());
                             }
                         }
                     }
 
                     // Track JS memo completion on the js-tasks bar.
-                    if is_js_memo.remove(&id) && matches!(outcome, TaskOutcome::Ok) {
-                        done_js += 1;
-                        if let Some(ref js) = js_progress {
-                            js.inc();
-                            js.set_name(format!("js tasks {done_js}/{total_js}"));
-                        }
-                        if done_js == total_js && store.done == store.total {
-                            if let Some(ref mut js) = js_progress {
-                                js.done("done");
+                    if is_js_memo.remove(&id) {
+                        match &outcome {
+                            TaskOutcome::Ok => {
+                                done_js += 1;
+                                js_progress.inc();
+                                js_progress.set_name(format!("js tasks {done_js}/{total_js}"));
+                                if done_js == total_js && store.done == store.total {
+                                    js_progress.done("done");
+                                }
+                            }
+                            TaskOutcome::Err(error) => {
+                                js_progress.fail(error.clone());
+                            }
+                            TaskOutcome::Canceled => {
+                                js_progress.fail("canceled".to_owned());
                             }
                         }
                     }
 
-                    if let Some(&slot) = task_to_slot.get(&id) {
-                        let s = &mut slots[slot];
-                        s.task_id = None;
-                        s.item.set_name("<idle>");
-                        s.item.init(None, None);
-                        match outcome {
-                            TaskOutcome::Ok => {}
-                            TaskOutcome::Err(error) => {
-                                s.item.fail(error);
-                            }
-                            TaskOutcome::Canceled => {
-                                s.item.fail("canceled".to_owned());
-                            }
-                        }
-                        task_to_slot.remove(&id);
+                    if let Some(slot) = js_task_to_slot.get(&id).copied() {
+                        clear_lane(&mut js_slots, &mut js_task_to_slot, slot, id);
+                    }
+                    if let Some(slot) = sandbox_task_to_slot.get(&id).copied() {
+                        clear_lane(&mut sandbox_slots, &mut sandbox_task_to_slot, slot, id);
                     }
                 }
+                TaskEvent::LaneStarted {
+                    kind,
+                    slot,
+                    id,
+                    display,
+                } => match kind {
+                    LaneKind::Js => {
+                        start_lane(&mut js_slots, &mut js_task_to_slot, slot, id, display)
+                    }
+                    LaneKind::Sandbox => start_lane(
+                        &mut sandbox_slots,
+                        &mut sandbox_task_to_slot,
+                        slot,
+                        id,
+                        format!("run: {display}"),
+                    ),
+                },
+                TaskEvent::LaneCleared { kind, slot, id } => match kind {
+                    LaneKind::Js => clear_lane(&mut js_slots, &mut js_task_to_slot, slot, id),
+                    LaneKind::Sandbox => {
+                        clear_lane(&mut sandbox_slots, &mut sandbox_task_to_slot, slot, id)
+                    }
+                },
             }
         }
     });
@@ -662,7 +702,14 @@ async fn cmd_build_planned(
     // scheduler staying fully idle while the evaluation is unfinished. Report it
     // instead of hanging.
     const STALL_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
-    let drive = spike::execute_goal_live(&workspace, &workspace_root, "build", selectors, no_cache);
+    let drive = spike::execute_goal_live(
+        &workspace,
+        &workspace_root,
+        "build",
+        selectors,
+        no_cache,
+        js_workers,
+    );
     let watchdog = async {
         loop {
             if scheduler.outstanding() == 0 {

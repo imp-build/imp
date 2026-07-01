@@ -485,6 +485,116 @@ let _promise_job_context_stack = [];
 let _promise_context_override = null;
 let _promise_context_override_stack = [];
 let _memo_node_counter = 0;
+let _memo_node_labels = new Map();
+let _memo_context_labels = new Map([[0, ""]]);
+let _js_worker_count = 1;
+let _js_available_lanes = [0];
+let _js_lane_queue = [];
+
+function _emit_js_lane(state, slot, id, label) {
+    if (typeof globalThis.__host_js_lane_event === "function") {
+        globalThis.__host_js_lane_event(state, slot, id, label);
+    }
+}
+
+function _reset_js_lanes() {
+    _js_available_lanes = [];
+    for (let i = 0; i < _js_worker_count; i++) {
+        _js_available_lanes.push(i);
+    }
+    _js_lane_queue = [];
+}
+
+globalThis.__imp_set_js_workers = function(count) {
+    const parsed = Number(count);
+    _js_worker_count = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 1;
+    _reset_js_lanes();
+};
+
+function _grant_js_lane(slot, waiter) {
+    _emit_js_lane("start", slot, waiter.id, waiter.label);
+    waiter.run(slot);
+}
+
+function _take_js_lane(id, label) {
+    const taskId = id || 0;
+    const taskLabel = label || "js";
+    if (_js_available_lanes.length > 0) {
+        const slot = _js_available_lanes.shift();
+        _emit_js_lane("start", slot, taskId, taskLabel);
+        return slot;
+    }
+    return null;
+}
+
+function _enqueue_js_lane(id, label, run) {
+    return new Promise((resolve, reject) => {
+        _js_lane_queue.push({
+            id: id || 0,
+            label: label || "js",
+            run: (slot) => {
+                try {
+                    resolve(run(slot));
+                } catch (error) {
+                    reject(error);
+                }
+            },
+        });
+    });
+}
+
+function _release_js_lane(slot, id) {
+    _emit_js_lane("clear", slot, id || 0, "");
+    const waiter = _js_lane_queue.shift();
+    if (waiter !== undefined) {
+        _grant_js_lane(slot, waiter);
+    } else {
+        _js_available_lanes.push(slot);
+    }
+}
+
+function _with_js_lane(id, label, fn) {
+    const run = (slot) => {
+        try {
+            const result = fn();
+            _release_js_lane(slot, id);
+            return result;
+        } catch (error) {
+            _release_js_lane(slot, id);
+            throw error;
+        }
+    };
+    const slot = _take_js_lane(id, label);
+    if (slot !== null) {
+        return Promise.resolve(run(slot));
+    }
+    return _enqueue_js_lane(id, label, run);
+}
+
+function _context_label(contextId) {
+    return _memo_context_labels.get(contextId) || "";
+}
+
+function _context_owner(contextId) {
+    const ctx = _memo_contexts.get(contextId);
+    return ctx && ctx.owner !== null ? ctx.owner : 0;
+}
+
+function _call_with_context(contextId, fn) {
+    const prevOverride = _promise_context_override;
+    const prevContextId = _current_memo_context_id;
+    _promise_context_override_stack.push(prevOverride);
+    _promise_job_context_stack.push(prevContextId);
+    _promise_context_override = contextId;
+    _current_memo_context_id = contextId;
+    try {
+        return fn();
+    } catch (error) {
+        _promise_context_override = _promise_context_override_stack.pop();
+        _current_memo_context_id = _promise_job_context_stack.pop();
+        throw error;
+    }
+}
 
 function _clone_context(ctx) {
     return {
@@ -530,11 +640,12 @@ function _effective_context(useSingleActive = false) {
     return _effective_context_entry(useSingleActive).ctx;
 }
 
-function _fork_context(owner, baseContext = _effective_context()) {
+function _fork_context(owner, baseContext = _effective_context(), label = "") {
     const id = ++_memo_context_counter;
     const ctx = _clone_context(baseContext);
     ctx.owner = owner;
     _memo_contexts.set(id, ctx);
+    _memo_context_labels.set(id, label);
     _active_memo_context_ids.add(id);
     return id;
 }
@@ -561,19 +672,11 @@ function _contextual_thenable(promise, contextId) {
     const wrap = (callback) => {
         if (typeof callback !== "function") return callback;
         return (value) => {
-            const prevOverride = _promise_context_override;
-            const prevContextId = _current_memo_context_id;
-            _promise_context_override_stack.push(prevOverride);
-            _promise_job_context_stack.push(prevContextId);
-            _promise_context_override = contextId;
-            _current_memo_context_id = contextId;
-            try {
-                return callback(value);
-            } catch (error) {
-                _promise_context_override = _promise_context_override_stack.pop();
-                _current_memo_context_id = _promise_job_context_stack.pop();
-                throw error;
-            }
+            return _with_js_lane(
+                _context_owner(contextId),
+                _context_label(contextId),
+                () => _call_with_context(contextId, () => callback(value)),
+            );
         };
     };
     return {
@@ -668,30 +771,26 @@ function _memo_cycle_message(key_string) {
 }
 
 function _memo_eval(key_string, owner, label, thunk) {
-    // Table check BEFORE stack check. Once a memo suspends at its first real
-    // await, its promise is registered here while its frame is still on the
-    // call stack. A concurrent branch (e.g. two roots sharing a dependency)
-    // that reaches the same in-flight memo must receive that pending promise —
-    // this is normal fan-out, not a cycle.
+    if (_effective_context().stackSet.has(key_string)) {
+        throw new Error(_memo_cycle_message(key_string));
+    }
+    // A concurrent branch that reaches the same in-flight memo must receive the
+    // pending promise. A call from a context that already has this key on its
+    // stack remains a real cycle and is rejected above.
     if (_memo_table.has(key_string)) {
         _memo_trace.push({ event: "hit", key: key_string });
         return _memo_table.get(key_string);
     }
-    // On the call stack but not yet registered ⇒ the thunk re-entered itself
-    // synchronously, before its promise existed: a genuine cycle. (An await
-    // between the calls would have registered the promise above, so only true
-    // synchronous recursion reaches here.)
-    if (_effective_context().stackSet.has(key_string)) {
-        throw new Error(_memo_cycle_message(key_string));
-    }
     _memo_trace.push({ event: "miss", key: key_string });
     // A fresh node for this evaluation, parented at the caller captured at the
     // call site. Created on miss only, so a memo appears once (concurrent
-    // reusers just await it). Call thunk() synchronously so _push_call runs
-    // before the first await, keeping the call stack accurate.
+    // reusers just await it). The thunk runs when a cooperative JS lane is
+    // available, but the promise is recorded first so queued duplicate callers
+    // share the same work.
     const nodeId = ++_memo_node_counter;
+    _memo_node_labels.set(nodeId, label);
     _emit_task("pending", nodeId, owner, label);
-    const promise = thunk(nodeId);
+    const promise = _with_js_lane(nodeId, label, () => thunk(nodeId));
     _memo_table.set(key_string, promise);
     promise.then(
         () => _emit_task("done", nodeId, owner, label),
@@ -718,6 +817,7 @@ function _pop_call(key_string, contextId) {
     ctx.stack.pop();
     ctx.stackSet.delete(key_string);
     _active_memo_context_ids.delete(contextId);
+    _memo_context_labels.delete(contextId);
 }
 
 /**
@@ -781,7 +881,7 @@ export function memo(fn) {
         const callerContextId = callerContext.id;
         const owner = callerContext.ctx.owner;
         return _contextual_thenable(_memo_eval(key_string, owner, label, (nodeId) => {
-            const childContextId = _fork_context(nodeId, callerContext.ctx);
+            const childContextId = _fork_context(nodeId, callerContext.ctx, label);
             return _with_context(childContextId, () => {
                 _emit_task("running", nodeId, owner, label);
                 _push_call(key_string);
@@ -826,6 +926,9 @@ export function resetMemoState() {
     _promise_context_override = null;
     _promise_context_override_stack = [];
     _memo_node_counter = 0;
+    _memo_node_labels = new Map();
+    _memo_context_labels = new Map([[0, ""]]);
+    _reset_js_lanes();
 }
 
 /**

@@ -196,8 +196,10 @@ pub(crate) fn wait_for_child_output(
             .unwrap_or(false)
         {
             terminate_child_and_wait(child);
-            let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
+            // Do not join the output reader threads on cancellation. Descendant
+            // processes can inherit stdout/stderr and keep those pipes open
+            // after the child process group is gone, which would make Ctrl-C
+            // wait for unrelated work instead of returning promptly.
             drain_process_lines(
                 &receiver,
                 &mut stdout,
@@ -516,12 +518,16 @@ pub(crate) fn sandbox_command_env(
     Ok(command_env)
 }
 
-pub(crate) fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result<ExecRunResult> {
+pub(crate) fn exec_run_inner(
+    workspace_root: &Path,
+    opts: ExecRunOpts,
+    cancellation: Option<&AtomicBool>,
+) -> Result<ExecRunResult> {
     if !opts.sandbox {
         if !opts.impure {
             bail!("run({{ sandbox: false }}) requires impure: true");
         }
-        return exec_run_unsandboxed(workspace_root, opts, None, None);
+        return exec_run_unsandboxed(workspace_root, opts, cancellation, None);
     }
 
     let sandbox_root = create_sandbox_root()?;
@@ -666,7 +672,8 @@ pub(crate) fn exec_run_inner(workspace_root: &Path, opts: ExecRunOpts) -> Result
         .spawn()
         .with_context(|| format!("run() command in {}", sandbox_root.display()))?;
 
-    let (status, stdout, stderr) = wait_for_child_output(&mut child, &opts.display, None, None)?;
+    let (status, stdout, stderr) =
+        wait_for_child_output(&mut child, &opts.display, cancellation, None)?;
 
     let exit_code = status.code().unwrap_or(-1);
     if !status.success() {

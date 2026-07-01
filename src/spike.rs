@@ -1314,8 +1314,11 @@ fn register_globals<'js>(
                 let mut run_opts = parse_exec_run_opts(opts, &root)?;
                 run_opts.no_cache = exec_no_cache_run.load(Ordering::SeqCst);
                 let display = run_opts.display.clone();
+                let cancellation = sched.cancellation_flag();
                 let result = sched
-                    .run(parent, display, move || exec_run_inner(&root, run_opts))
+                    .run(parent, display, move || {
+                        exec_run_inner(&root, run_opts, Some(cancellation.as_ref()))
+                    })
                     .await
                     .map_err(|e| rquickjs::Error::new_loading_message("run", format!("{e:#}")))?;
                 let obj = Object::new(ctx)?;
@@ -1365,6 +1368,34 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_task_event", host_task_event)?;
+
+    let scheduler_lane = Arc::clone(&scheduler);
+    let host_js_lane_event = Function::new(
+        ctx.clone(),
+        move |state: String, slot: u32, id: f64, display: Option<String>| -> rquickjs::Result<()> {
+            if let Some(sched) = scheduler_lane.lock().unwrap().clone() {
+                let id = id as u64;
+                let slot = slot as usize;
+                let event = match state.as_str() {
+                    "start" => crate::scheduler::TaskEvent::LaneStarted {
+                        kind: crate::scheduler::LaneKind::Js,
+                        slot,
+                        id,
+                        display: display.unwrap_or_default(),
+                    },
+                    "clear" => crate::scheduler::TaskEvent::LaneCleared {
+                        kind: crate::scheduler::LaneKind::Js,
+                        slot,
+                        id,
+                    },
+                    _ => return Ok(()),
+                };
+                sched.emit(event);
+            }
+            Ok(())
+        },
+    )?;
+    globals.set("__host_js_lane_event", host_js_lane_event)?;
 
     // __host_workspace_mutation(opts) → { stdout, stderr, exitCode, changed_files? }
     // Runs a command directly in the workspace root (not a sandbox). Always impure.
@@ -3240,6 +3271,7 @@ pub async fn execute_goal_live(
     goal: &str,
     selectors: &[String],
     no_cache: bool,
+    js_workers: usize,
 ) -> Result<()> {
     let goal_def = live.workspace.goals.get(goal).ok_or_else(|| {
         let known: Vec<_> = live.workspace.goals.keys().map(String::as_str).collect();
@@ -3279,6 +3311,8 @@ pub async fn execute_goal_live(
     let result = live
         .ctx
         .async_with(async move |ctx| -> rquickjs::Result<()> {
+            let set_js_workers: Function = ctx.globals().get("__imp_set_js_workers")?;
+            set_js_workers.call::<_, ()>((js_workers.max(1),))?;
             let reset: Function = ctx.globals().get("resetMemoState")?;
             reset.call::<_, ()>(())?;
             let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
@@ -5809,6 +5843,145 @@ if (!results[0].stdout.endsWith("a\n") || !results[1].stdout.endsWith("b\n")) {
             .unwrap();
     }
 
+    #[tokio::test]
+    async fn quickjs_host_run_cancels_running_sandbox_child() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker = p.join("canceled-run.marker");
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(&p.join(BUILD_FILE), r#"export const done = true;"#);
+
+        let live = load_workspace(p).await.unwrap();
+        *live.exec_root.lock().unwrap() = Some(p.to_owned());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let scheduler = crate::scheduler::Scheduler::new(1, Arc::clone(&cancellation), tx);
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let cancellation_thread = Arc::clone(&cancellation);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            cancellation_thread.store(true, Ordering::SeqCst);
+        });
+
+        let started = std::time::Instant::now();
+        let result = live
+            .ctx
+            .async_with(async |ctx| -> rquickjs::Result<()> {
+                let promise = Module::evaluate(
+                    ctx.clone(),
+                    "host-run-cancel",
+                    format!(
+                        r#"
+import {{ run }} from "imp:core";
+
+await run({{
+    argv: ["sh", "-c", "sleep 5; printf slow > {marker}"],
+    display: "cancel probe",
+    impure: true,
+}});
+"#,
+                        marker = js_string_path(&marker),
+                    ),
+                )?;
+                promise.into_future::<()>().await.catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message("host-run-cancel", format!("{e}"))
+                })?;
+                Ok(())
+            })
+            .await;
+
+        let error = format!("{}", result.unwrap_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "live run cancellation waited for child to finish"
+        );
+        assert!(error.contains("canceled"), "{error}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn quickjs_host_run_cancel_does_not_wait_for_inherited_output_pipes() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker = p.join("escaped-output-pipe.marker");
+        let pid_file = p.join("escaped-output-pipe.pid");
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(&p.join(BUILD_FILE), r#"export const done = true;"#);
+
+        let live = load_workspace(p).await.unwrap();
+        *live.exec_root.lock().unwrap() = Some(p.to_owned());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let scheduler = crate::scheduler::Scheduler::new(1, Arc::clone(&cancellation), tx);
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let cancellation_thread = Arc::clone(&cancellation);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            cancellation_thread.store(true, Ordering::SeqCst);
+        });
+
+        let started = std::time::Instant::now();
+        let result = live
+            .ctx
+            .async_with(async |ctx| -> rquickjs::Result<()> {
+                let promise = Module::evaluate(
+                    ctx.clone(),
+                    "host-run-cancel-inherited-pipe",
+                    format!(
+                        r#"
+import {{ run }} from "imp:core";
+
+await run({{
+    argv: [
+        "sh",
+        "-c",
+        "(setsid sh -c 'sleep 5; printf escaped > \"$MARKER\"' & echo $! > \"$PID_FILE\"); sleep 10",
+    ],
+    env: {{
+        MARKER: "{marker}",
+        PID_FILE: "{pid_file}",
+    }},
+    display: "cancel inherited pipe probe",
+    impure: true,
+}});
+"#,
+                        marker = js_string_path(&marker),
+                        pid_file = js_string_path(&pid_file),
+                    ),
+                )?;
+                promise.into_future::<()>().await.catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message(
+                        "host-run-cancel-inherited-pipe",
+                        format!("{e}"),
+                    )
+                })?;
+                Ok(())
+            })
+            .await;
+
+        if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+            let group = format!("-{}", pid.trim());
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", "--", group.as_str()])
+                .status();
+        }
+
+        let error = format!("{}", result.unwrap_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "cancellation waited for an escaped process holding output pipes"
+        );
+        assert!(error.contains("canceled"), "{error}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!marker.exists());
+    }
+
     // Two memoized roots that share a memoized dependency whose body awaits a
     // real run(). The shared memo is in-flight (suspended on run()) when the
     // second root reaches it. This must resolve to the same result, not be
@@ -5900,7 +6073,7 @@ export const build = product("root-nesting-test", "build", async function do_bui
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned(), "lib".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false)
+        execute_goal_live(&live, p, "build", &selectors, false, 1)
             .await
             .unwrap();
 
@@ -5981,7 +6154,7 @@ export const build = product("promise-all-context-test", "build", async function
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false)
+        execute_goal_live(&live, p, "build", &selectors, false, 1)
             .await
             .unwrap();
 
@@ -6052,7 +6225,7 @@ export const build = product("sequential-sibling-context-test", "build", async f
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false)
+        execute_goal_live(&live, p, "build", &selectors, false, 1)
             .await
             .unwrap();
 
@@ -6116,7 +6289,7 @@ export const build = product("concurrent-root-test", "build", async function bui
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["a".to_owned(), "b".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false)
+        execute_goal_live(&live, p, "build", &selectors, false, 1)
             .await
             .unwrap();
 
@@ -6151,6 +6324,137 @@ export const build = product("concurrent-root-test", "build", async function bui
             max_active, 2,
             "selected roots should submit both run jobs before either completes"
         );
+    }
+
+    #[tokio::test]
+    async fn live_goal_js_lane_events_use_configured_worker_slots() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product } from "imp:core";
+
+export const a = target({ kind: "js-lane-slot-test" });
+export const b = target({ kind: "js-lane-slot-test" });
+
+export const build = product("js-lane-slot-test", "build", async function build(handle) {
+    await Promise.resolve();
+    return handle.label.name;
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let selectors = vec!["a".to_owned(), "b".to_owned()];
+        execute_goal_live(&live, p, "build", &selectors, false, 2)
+            .await
+            .unwrap();
+
+        let mut slots = BTreeSet::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::scheduler::TaskEvent::LaneStarted {
+                kind: crate::scheduler::LaneKind::Js,
+                slot,
+                display,
+                ..
+            } = event
+            {
+                if display == "build(//:a)" || display == "build(//:b)" {
+                    slots.insert(slot);
+                }
+            }
+        }
+
+        assert_eq!(slots, BTreeSet::from([0, 1]));
+    }
+
+    #[tokio::test]
+    async fn live_goal_js_lane_events_do_not_exceed_worker_count() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, memo, run } from "imp:core";
+
+export const app = target({ kind: "js-lane-bound-test" });
+
+const child = memo(async function child(name) {
+    await run({
+        argv: ["sh", "-c", "true"],
+        display: `run ${name}`,
+        impure: true,
+    });
+});
+
+export const build = product("js-lane-bound-test", "build", async function build() {
+    await Promise.all([child("a"), child("b"), child("c")]);
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            3,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let selectors = vec!["app".to_owned()];
+        execute_goal_live(&live, p, "build", &selectors, false, 1)
+            .await
+            .unwrap();
+
+        let mut active = BTreeSet::new();
+        let mut saw_js_lane = false;
+        let mut saw_memo_running = false;
+        for event in std::iter::from_fn(|| rx.try_recv().ok()) {
+            match event {
+                crate::scheduler::TaskEvent::Running { detail: None, .. } => {
+                    saw_memo_running = true;
+                }
+                crate::scheduler::TaskEvent::LaneStarted {
+                    kind: crate::scheduler::LaneKind::Js,
+                    slot,
+                    id,
+                    ..
+                } => {
+                    saw_js_lane = true;
+                    assert_eq!(slot, 0);
+                    active.insert((slot, id));
+                    assert!(
+                        active.len() <= 1,
+                        "active JS lanes exceeded configured worker count"
+                    );
+                }
+                crate::scheduler::TaskEvent::LaneCleared {
+                    kind: crate::scheduler::LaneKind::Js,
+                    slot,
+                    id,
+                } => {
+                    active.remove(&(slot, id));
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_js_lane, "expected JS lane events");
+        assert!(saw_memo_running, "expected memo lifecycle events");
     }
 
     #[tokio::test]
@@ -6193,7 +6497,7 @@ export const build = product("interleaved-root-context-test", "build", async fun
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["a".to_owned(), "b".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false)
+        execute_goal_live(&live, p, "build", &selectors, false, 1)
             .await
             .unwrap();
 
@@ -6270,7 +6574,7 @@ export const build = product("deferred-run-context-test", "build", async functio
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false)
+        execute_goal_live(&live, p, "build", &selectors, false, 1)
             .await
             .unwrap();
 
@@ -6341,7 +6645,7 @@ export const build = product("live-cache-test", "build", async function build() 
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, true)
+        execute_goal_live(&live, p, "build", &selectors, true, 1)
             .await
             .unwrap();
         assert_eq!(
@@ -6350,13 +6654,13 @@ export const build = product("live-cache-test", "build", async function build() 
         );
         std::fs::remove_file(p.join("build/live.txt")).unwrap();
 
-        execute_goal_live(&live, p, "build", &selectors, false)
+        execute_goal_live(&live, p, "build", &selectors, false, 1)
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "rr");
         std::fs::remove_file(p.join("build/live.txt")).unwrap();
 
-        execute_goal_live(&live, p, "build", &selectors, false)
+        execute_goal_live(&live, p, "build", &selectors, false, 1)
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "rr");
@@ -6366,7 +6670,7 @@ export const build = product("live-cache-test", "build", async function build() 
         );
         std::fs::remove_file(p.join("build/live.txt")).unwrap();
 
-        execute_goal_live(&live, p, "build", &selectors, true)
+        execute_goal_live(&live, p, "build", &selectors, true, 1)
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "rrr");

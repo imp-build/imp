@@ -32,6 +32,12 @@ pub enum TaskOutcome {
     Canceled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneKind {
+    Js,
+    Sandbox,
+}
+
 /// One transition in the task tree. A node goes `Pending` → `Running` → `Done`;
 /// the renderer creates it under `parent` on `Pending` and removes it on `Done`.
 #[derive(Debug, Clone)]
@@ -49,6 +55,17 @@ pub enum TaskEvent {
     Done {
         id: u64,
         outcome: TaskOutcome,
+    },
+    LaneStarted {
+        kind: LaneKind,
+        slot: usize,
+        id: u64,
+        display: String,
+    },
+    LaneCleared {
+        kind: LaneKind,
+        slot: usize,
+        id: u64,
     },
 }
 
@@ -100,6 +117,10 @@ impl Scheduler {
         self.outstanding.load(Ordering::SeqCst)
     }
 
+    pub fn cancellation_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancellation)
+    }
+
     /// Wait until `outstanding` next changes. Used by the deadlock watchdog.
     pub async fn wait_for_activity(&self) {
         self.activity.notified().await;
@@ -134,7 +155,7 @@ impl Scheduler {
         let _ = self.events.send(TaskEvent::Pending {
             id,
             parent,
-            display,
+            display: display.clone(),
         });
 
         let permit = self
@@ -153,12 +174,23 @@ impl Scheduler {
         }
 
         let slot = self.slots.lock().unwrap().pop().unwrap_or(0);
+        let _ = self.events.send(TaskEvent::LaneStarted {
+            kind: LaneKind::Sandbox,
+            slot,
+            id,
+            display: display.clone(),
+        });
         let _ = self.events.send(TaskEvent::Running {
             id,
             detail: Some(format!("slot {slot}")),
         });
 
         let result = tokio::task::spawn_blocking(f).await;
+        let _ = self.events.send(TaskEvent::LaneCleared {
+            kind: LaneKind::Sandbox,
+            slot,
+            id,
+        });
         self.slots.lock().unwrap().push(slot);
         drop(permit);
 

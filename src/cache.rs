@@ -391,7 +391,9 @@ fn cached_file_digest(path: &Path, meta: &std::fs::Metadata) -> Result<String> {
         .unwrap_or(0);
     let key = (path.to_path_buf(), mtime, meta.len());
     {
-        let mut guard = FILE_DIGEST_CACHE.lock().expect("file digest cache poisoned");
+        let mut guard = FILE_DIGEST_CACHE
+            .lock()
+            .expect("file digest cache poisoned");
         if let Some(hit) = guard.get_or_insert_with(HashMap::new).get(&key) {
             return Ok(hit.clone());
         }
