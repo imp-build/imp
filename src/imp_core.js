@@ -464,21 +464,169 @@ function _stable_digest(args) {
 }
 
 let _memo_table = new Map();
-let _memo_call_stack = [];
-let _memo_call_stack_set = new Set();
 let _memo_deps = [];
 let _memo_trace = [];
 let _key_display = new Map();  // key_string → "fnName(arg, ...)"
 let _key_product_call = new Map();  // key_string → {target_id, product_name} for product calls
 let _introspect_mode = false;
 
-// Task-tree tracking. Each memo evaluation is a node with a numeric id; the
-// node currently executing is _current_owner_node, captured explicitly at each
-// call site and re-entered when an instrumented await (a sub-memo, run(), etc.)
-// resolves — the JS analogue of tracing's per-poll span enter. See the memo
-// wrapper and run() for the restore points.
-let _current_owner_node = null;
+// Task-tree tracking. Each memo evaluation is a node with a numeric id. The
+// active owner and call stack are stored in an async context, and the embedded
+// QuickJS promise hook calls the __imp_promise_context_* globals below to
+// restore that context around promise jobs. That keeps concurrent Promise.all
+// branches from overwriting each other's owner/stack state.
+let _memo_context_counter = 0;
+let _current_memo_context_id = 0;
+let _memo_contexts = new Map([[0, { owner: null, stack: [], stackSet: new Set() }]]);
+let _active_memo_context_ids = new Set();
+let _promise_contexts = new WeakMap();
+let _promise_context_stack = [];
+let _promise_job_context_stack = [];
+let _promise_context_override = null;
+let _promise_context_override_stack = [];
 let _memo_node_counter = 0;
+
+function _clone_context(ctx) {
+    return {
+        owner: ctx.owner,
+        stack: ctx.stack.slice(),
+        stackSet: new Set(ctx.stackSet),
+    };
+}
+
+function _current_context() {
+    let ctx = _memo_contexts.get(_current_memo_context_id);
+    if (ctx === undefined) {
+        ctx = { owner: null, stack: [], stackSet: new Set() };
+        _memo_contexts.set(_current_memo_context_id, ctx);
+    }
+    return ctx;
+}
+
+function _single_active_context_id() {
+    let only = null;
+    for (const contextId of _active_memo_context_ids) {
+        if (only !== null) return null;
+        only = contextId;
+    }
+    return only;
+}
+
+function _effective_context_entry(useSingleActive = false) {
+    const ctx = _current_context();
+    if (ctx.owner !== null || ctx.stack.length > 0) {
+        return { id: _current_memo_context_id, ctx };
+    }
+    const activeContextId = useSingleActive ? _single_active_context_id() : null;
+    if (activeContextId !== null) {
+        return { id: activeContextId, ctx: _memo_contexts.get(activeContextId) || ctx };
+    }
+    return { id: _current_memo_context_id, ctx };
+}
+
+function _effective_context(useSingleActive = false) {
+    return _effective_context_entry(useSingleActive).ctx;
+}
+
+function _fork_context(owner, baseContext = _effective_context()) {
+    const id = ++_memo_context_counter;
+    const ctx = _clone_context(baseContext);
+    ctx.owner = owner;
+    _memo_contexts.set(id, ctx);
+    _active_memo_context_ids.add(id);
+    return id;
+}
+
+function _with_context(contextId, fn) {
+    const prev = _current_memo_context_id;
+    _current_memo_context_id = contextId;
+    try {
+        return fn();
+    } finally {
+        _current_memo_context_id = prev;
+    }
+}
+
+function _is_object_key(value) {
+    return (typeof value === "object" && value !== null) || typeof value === "function";
+}
+
+function _contextual_thenable(promise, contextId) {
+    const nativePromise = Promise.resolve(promise);
+    if (_is_object_key(nativePromise)) {
+        _promise_contexts.set(nativePromise, contextId);
+    }
+    const wrap = (callback) => {
+        if (typeof callback !== "function") return callback;
+        return (value) => {
+            const prevOverride = _promise_context_override;
+            const prevContextId = _current_memo_context_id;
+            _promise_context_override_stack.push(prevOverride);
+            _promise_job_context_stack.push(prevContextId);
+            _promise_context_override = contextId;
+            _current_memo_context_id = contextId;
+            try {
+                return callback(value);
+            } catch (error) {
+                _promise_context_override = _promise_context_override_stack.pop();
+                _current_memo_context_id = _promise_job_context_stack.pop();
+                throw error;
+            }
+        };
+    };
+    return {
+        then(onFulfilled, onRejected) {
+            return _contextual_thenable(
+                nativePromise.then(wrap(onFulfilled), wrap(onRejected)),
+                contextId,
+            );
+        },
+        catch(onRejected) {
+            return this.then(undefined, onRejected);
+        },
+        finally(onFinally) {
+            return _contextual_thenable(
+                nativePromise.finally(typeof onFinally === "function"
+                    ? () => _with_context(contextId, onFinally)
+                    : onFinally),
+                contextId,
+            );
+        },
+    };
+}
+
+globalThis.__imp_promise_context_init = function(promise, parent) {
+    if (!_is_object_key(promise)) return;
+    const parentContext = _is_object_key(parent) && _promise_contexts.has(parent)
+        ? _promise_contexts.get(parent)
+        : null;
+    const contextId =
+        _promise_context_override !== null ? _promise_context_override
+        : _current_memo_context_id !== 0 ? _current_memo_context_id
+        : parentContext !== null && parentContext !== 0 ? parentContext
+        : parentContext !== null ? parentContext
+        : _current_memo_context_id;
+    _promise_contexts.set(promise, contextId);
+};
+
+globalThis.__imp_promise_context_before = function(promise) {
+    _promise_context_stack.push(_current_memo_context_id);
+    if (_is_object_key(promise) && _promise_contexts.has(promise)) {
+        _current_memo_context_id = _promise_contexts.get(promise);
+    }
+};
+
+globalThis.__imp_promise_context_after = function() {
+    if (_promise_job_context_stack.length > 0) {
+        _current_memo_context_id = _promise_job_context_stack.pop();
+    }
+    if (_promise_context_stack.length > 0) {
+        _current_memo_context_id = _promise_context_stack.pop();
+    }
+    if (_promise_context_override_stack.length > 0) {
+        _promise_context_override = _promise_context_override_stack.pop();
+    }
+};
 
 function _emit_task(state, id, parent, label) {
     if (typeof globalThis.__host_task_event === "function") {
@@ -487,8 +635,9 @@ function _emit_task(state, id, parent, label) {
 }
 
 function _active_memo_key() {
-    if (_memo_call_stack.length === 0) return null;
-    return _memo_call_stack[_memo_call_stack.length - 1];
+    const stack = _effective_context().stack;
+    if (stack.length === 0) return null;
+    return stack[stack.length - 1];
 }
 
 function _trace_effect(entry) {
@@ -502,8 +651,9 @@ function _memo_label(key_string) {
 }
 
 function _memo_cycle_message(key_string) {
-    const start = _memo_call_stack.indexOf(key_string);
-    const cycle = (start >= 0 ? _memo_call_stack.slice(start) : _memo_call_stack.slice())
+    const stack = _effective_context().stack;
+    const start = stack.indexOf(key_string);
+    const cycle = (start >= 0 ? stack.slice(start) : stack.slice())
         .concat([key_string]);
     const lines = [
         "memo cycle detected:",
@@ -529,7 +679,7 @@ function _memo_eval(key_string, owner, label, thunk) {
     // synchronously, before its promise existed: a genuine cycle. (An await
     // between the calls would have registered the promise above, so only true
     // synchronous recursion reaches here.)
-    if (_memo_call_stack_set.has(key_string)) {
+    if (_effective_context().stackSet.has(key_string)) {
         throw new Error(_memo_cycle_message(key_string));
     }
     _memo_trace.push({ event: "miss", key: key_string });
@@ -549,19 +699,24 @@ function _memo_eval(key_string, owner, label, thunk) {
 }
 
 function _push_call(key_string) {
-    if (_memo_call_stack.length > 0) {
+    const ctx = _effective_context();
+    if (ctx.stack.length > 0) {
         _memo_deps.push({
-            caller: _memo_call_stack[_memo_call_stack.length - 1],
+            caller: ctx.stack[ctx.stack.length - 1],
             callee: key_string,
         });
     }
-    _memo_call_stack.push(key_string);
-    _memo_call_stack_set.add(key_string);
+    ctx.stack.push(key_string);
+    ctx.stackSet.add(key_string);
 }
 
 function _pop_call(key_string) {
-    _memo_call_stack.pop();
-    _memo_call_stack_set.delete(key_string);
+    const ctx = _current_context();
+    ctx.stack.pop();
+    ctx.stackSet.delete(key_string);
+    if (_current_memo_context_id !== 0) {
+        _active_memo_context_ids.delete(_current_memo_context_id);
+    }
 }
 
 /**
@@ -603,7 +758,7 @@ export function memo(fn) {
         }
         return JSON.stringify(arg);
     }
-    return async function memoized(...args) {
+    return function memoized(...args) {
         const key_string = JSON.stringify({
             fn_id,
             args_digest: _stable_digest(args),
@@ -621,26 +776,31 @@ export function memo(fn) {
             }
         }
         const label = _key_display.get(key_string) || key_string;
-        // Capture the caller (parent) synchronously at the call site.
-        const owner = _current_owner_node;
-        try {
-            return await _memo_eval(key_string, owner, label, (nodeId) => (async () => {
+        const callerContext = _effective_context_entry(true);
+        const callerContextId = callerContext.id;
+        const owner = callerContext.ctx.owner;
+        return _contextual_thenable(_memo_eval(key_string, owner, label, (nodeId) => {
+            const childContextId = _fork_context(nodeId, callerContext.ctx);
+            return _with_context(childContextId, () => {
                 _emit_task("running", nodeId, owner, label);
                 _push_call(key_string);
-                const prevOwner = _current_owner_node;
-                _current_owner_node = nodeId;
+                let promise;
                 try {
-                    return await fn(...args);
-                } finally {
-                    _current_owner_node = prevOwner;
+                    promise = Promise.resolve(fn(...args));
+                } catch (e) {
                     _pop_call(key_string);
+                    throw e;
                 }
-            })());
-        } finally {
-            // Re-enter the caller's owner as this memo settles, so the caller's
-            // continuation resumes under the correct parent.
-            _current_owner_node = owner;
-        }
+                if (_is_object_key(promise)) {
+                    _promise_contexts.set(promise, childContextId);
+                }
+                promise.then(
+                    () => _with_context(childContextId, () => _pop_call(key_string)),
+                    () => _with_context(childContextId, () => _pop_call(key_string)),
+                );
+                return promise;
+            });
+        }), callerContextId);
     };
 }
 
@@ -651,13 +811,19 @@ export function memo(fn) {
  */
 export function resetMemoState() {
     _memo_table = new Map();
-    _memo_call_stack = [];
-    _memo_call_stack_set = new Set();
     _memo_deps = [];
     _memo_trace = [];
     _key_display = new Map();
     _key_product_call = new Map();
-    _current_owner_node = null;
+    _memo_context_counter = 0;
+    _current_memo_context_id = 0;
+    _memo_contexts = new Map([[0, { owner: null, stack: [], stackSet: new Set() }]]);
+    _active_memo_context_ids = new Set();
+    _promise_contexts = new WeakMap();
+    _promise_context_stack = [];
+    _promise_job_context_stack = [];
+    _promise_context_override = null;
+    _promise_context_override_stack = [];
     _memo_node_counter = 0;
 }
 
@@ -793,7 +959,7 @@ export function read_file(path) {
  * Content is computed at plan-evaluation time; the write happens at execution time.
  * @param {{ path: string, content: string, inputs?: any[], display?: string }} opts
  */
-export async function write_file(opts) {
+export function write_file(opts) {
     const inputs = _materialise_inputs(opts.inputs);
     const effect = {
         event: "effect",
@@ -812,7 +978,14 @@ export async function write_file(opts) {
     return { written: opts.path };
 }
 
-export async function run(opts) {
+function _trace_effect_in_context(entry, ctx) {
+    const stack = ctx.stack;
+    if (stack.length > 0) entry.owner = stack[stack.length - 1];
+    _memo_trace.push(entry);
+}
+
+export function run(opts) {
+    const contextEntry = _effective_context_entry(true);
     const inputs = _materialise_inputs(opts.inputs);
     const outputs = opts.outputs ?? [];
     const effect = {
@@ -830,58 +1003,50 @@ export async function run(opts) {
     };
     if (_introspect_mode) {
         effect.dry_run = true;
-        _trace_effect(effect);
+        _trace_effect_in_context(effect, contextEntry.ctx);
         return { exitCode: 0, stdout: "", stderr: "" };
     }
-    _trace_effect(effect);
-    // Instrumented await: the job nests under the owning memo (__owner), and we
-    // re-enter that owner when the job settles so the caller resumes correctly.
-    const owner = _current_owner_node;
-    try {
-        return await __host_run({
-            argv: opts.argv,
-            display: opts.display,
-            env: opts.env,
-            inputs,
-            outputs,
-            tools: opts.tools,
-            impure: opts.impure,
-            forceCache: opts.forceCache,
-            sandbox: opts.sandbox,
-            __owner: owner,
-        });
-    } finally {
-        _current_owner_node = owner;
-    }
+    _trace_effect_in_context(effect, contextEntry.ctx);
+    const contextId = contextEntry.id;
+    const owner = contextEntry.ctx.owner;
+    return _contextual_thenable(__host_run({
+        argv: opts.argv,
+        display: opts.display,
+        env: opts.env,
+        inputs,
+        outputs,
+        tools: opts.tools,
+        impure: opts.impure,
+        forceCache: opts.forceCache,
+        sandbox: opts.sandbox,
+        __owner: owner,
+    }), contextId);
 }
 
-export async function group(items) {
+export function group(items) {
     if (!Array.isArray(items)) {
         throw new Error("group(items) requires an array");
     }
-    _trace_effect({ event: "effect", kind: "group", count: items.length });
-    const owner = _current_owner_node;
-    try {
-        return await Promise.all(items);
-    } finally {
-        _current_owner_node = owner;
-    }
+    const contextEntry = _effective_context_entry(true);
+    _trace_effect_in_context({ event: "effect", kind: "group", count: items.length }, contextEntry.ctx);
+    return _contextual_thenable(Promise.all(items), contextEntry.id);
 }
 
-export async function workspace_mutation(opts) {
+export function workspace_mutation(opts) {
+    const contextEntry = _effective_context_entry(true);
     const trace_entry = { event: "effect", kind: "workspace_mutation", display: opts.display ?? (opts.argv && opts.argv[0]) };
-    _trace_effect(trace_entry);
-    const owner = _current_owner_node;
-    let result;
-    try {
-        result = await __host_workspace_mutation({ ...opts, __owner: owner });
-    } finally {
-        _current_owner_node = owner;
-    }
-    if (result.changed_files !== undefined) {
-        trace_entry.changed_files = result.changed_files;
-    }
-    return result;
+    _trace_effect_in_context(trace_entry, contextEntry.ctx);
+    const contextId = contextEntry.id;
+    const owner = contextEntry.ctx.owner;
+    return _contextual_thenable(
+        __host_workspace_mutation({ ...opts, __owner: owner }).then((result) => {
+            if (result.changed_files !== undefined) {
+                trace_entry.changed_files = result.changed_files;
+            }
+            return result;
+        }),
+        contextId,
+    );
 }
 
 // Handle registry: maps numeric js_id → enriched handle for product function dispatch.

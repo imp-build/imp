@@ -10,6 +10,5 @@
 
 ### Helpful notes:
 
-- Use `odin run/build .` to build in unoptimized mode, without debug info. Add `-debug` for debug info. For optimized builds, see Makefile.
-- The CLI options use single dash, lowercase letters.
 - Planned builds write task/CAS cache data under `XDG_CACHE_HOME/imp`, falling back to `$HOME/.cache/imp` and then `/tmp/imp/cache`. In sandboxed runs where `$HOME` is read-only, set `XDG_CACHE_HOME` to a writable location such as `/tmp/imp-cache`.
+- If formatting changes unrelated files; do not go around trying to undo - just liberally format to avoid that happening in the first place.

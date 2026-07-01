@@ -24,8 +24,9 @@ use crate::toolchain;
 use anyhow::{bail, Context, Result};
 use regex::Regex;
 use rquickjs::{
-    function::Async, promise::MaybePromise, Array, AsyncContext as JsContext,
-    AsyncRuntime as Runtime, CatchResultExt, Ctx, Filter, Function, Module, Object, Value,
+    function::Async, promise::MaybePromise, promise::PromiseHookType, Array,
+    AsyncContext as JsContext, AsyncRuntime as Runtime, CatchResultExt, Ctx, Filter, Function,
+    Module, Object, Value,
 };
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -361,6 +362,28 @@ pub async fn load_workspace_with_host_log(
     let ctx = JsContext::full(&rt)
         .await
         .context("create QuickJS context")?;
+    rt.set_promise_hook(Some(Box::new(|ctx, hook_type, promise, parent| {
+        let globals = ctx.globals();
+        match hook_type {
+            PromiseHookType::Init => {
+                if let Ok(function) = globals.get::<_, Function>("__imp_promise_context_init") {
+                    let _ = function.call::<_, ()>((promise, parent));
+                }
+            }
+            PromiseHookType::Before => {
+                if let Ok(function) = globals.get::<_, Function>("__imp_promise_context_before") {
+                    let _ = function.call::<_, ()>((promise,));
+                }
+            }
+            PromiseHookType::After => {
+                if let Ok(function) = globals.get::<_, Function>("__imp_promise_context_after") {
+                    let _ = function.call::<_, ()>(());
+                }
+            }
+            PromiseHookType::Resolve => {}
+        }
+    })))
+    .await;
 
     // ----- Register host globals -----
     {
@@ -2940,11 +2963,18 @@ pub async fn introspect_product(
                 // Call the product function with the enriched target handle.
                 let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
                 let handle: Object = resolve_fn.call((js_id,))?;
+                let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
 
                 let product_fn: Function = ctx.globals().get(product_fn_name.as_str())?;
-                let result: MaybePromise = product_fn.call((handle,)).catch(&ctx).map_err(|e| {
+                let result_value: Value = product_fn.call((handle,)).catch(&ctx).map_err(|e| {
                     rquickjs::Error::new_loading_message("introspect", format!("{e}"))
                 })?;
+                let result: MaybePromise = promise_resolve
+                    .call((result_value,))
+                    .catch(&ctx)
+                    .map_err(|e| {
+                        rquickjs::Error::new_loading_message("introspect", format!("{e}"))
+                    })?;
                 result.into_future::<()>().await.catch(&ctx).map_err(|e| {
                     rquickjs::Error::new_loading_message("introspect", format!("{e}"))
                 })?;
@@ -3163,10 +3193,15 @@ pub async fn evaluate_product_json(
 
             let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
             let handle: Object = resolve_fn.call((target.js_id,))?;
+            let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
 
             let product_fn: Function = ctx.globals().get(product_fn_name.as_str())?;
-            let result: MaybePromise = product_fn
+            let result_value: Value = product_fn
                 .call((handle,))
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("product", format!("{e}")))?;
+            let result: MaybePromise = promise_resolve
+                .call((result_value,))
                 .catch(&ctx)
                 .map_err(|e| rquickjs::Error::new_loading_message("product", format!("{e}")))?;
             let value: Value = result
@@ -3247,20 +3282,24 @@ pub async fn execute_goal_live(
             let reset: Function = ctx.globals().get("resetMemoState")?;
             reset.call::<_, ()>(())?;
             let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
+            let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
 
-            // Start every root, then await them all: calling a product returns a
-            // pending promise, and awaiting drives the shared JS event loop, so
-            // all roots' jobs progress together regardless of await order.
             let mut promises = Vec::with_capacity(calls.len());
             for (js_id, fn_name, label) in &calls {
                 let handle: Object = resolve_fn.call((*js_id,))?;
                 let product_fn: Function = ctx.globals().get(fn_name.as_str())?;
-                let promise: MaybePromise =
-                    product_fn.call((handle,)).catch(&ctx).map_err(|e| {
+                let result_value: Value = product_fn.call((handle,)).catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message("execute", format!("{label}: {e}"))
+                })?;
+                let promise: MaybePromise = promise_resolve
+                    .call((result_value,))
+                    .catch(&ctx)
+                    .map_err(|e| {
                         rquickjs::Error::new_loading_message("execute", format!("{label}: {e}"))
                     })?;
-                promises.push((label.clone(), promise));
+                promises.push((label, promise));
             }
+
             for (label, promise) in promises {
                 promise
                     .into_future::<Value>()
@@ -3291,10 +3330,15 @@ async fn evaluate_product_function_json(
             let handle = Object::new(ctx.clone())?;
             let attrs = Object::new(ctx.clone())?;
             handle.set("attrs", attrs)?;
+            let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
 
             let product_fn: Function = ctx.globals().get(product_fn_name)?;
-            let result: MaybePromise = product_fn
+            let result_value: Value = product_fn
                 .call((handle,))
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("product", format!("{e}")))?;
+            let result: MaybePromise = promise_resolve
+                .call((result_value,))
                 .catch(&ctx)
                 .map_err(|e| rquickjs::Error::new_loading_message("product", format!("{e}")))?;
             let value: Value = result
@@ -5817,6 +5861,369 @@ if (a !== "S" || b !== "S") {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_goal_nests_selected_dependencies_under_first_caller() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, run } from "imp:core";
+
+export const lib = target({ kind: "root-nesting-test" });
+export const app = target({ kind: "root-nesting-test", attrs: { dep: lib } });
+
+export const build = product("root-nesting-test", "build", async function do_build(handle) {
+    if (handle.attrs.dep) {
+        await build(handle.attrs.dep);
+    }
+    await run({
+        argv: ["sh", "-c", "true"],
+        display: `run ${handle.label.address}`,
+        impure: true,
+    });
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            2,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let selectors = vec!["app".to_owned(), "lib".to_owned()];
+        execute_goal_live(&live, p, "build", &selectors, false)
+            .await
+            .unwrap();
+
+        let mut memo_ids = BTreeMap::new();
+        let mut memo_parents = BTreeMap::new();
+        let mut run_parents = BTreeMap::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::scheduler::TaskEvent::Pending {
+                id,
+                parent,
+                display,
+            } = event
+            {
+                if display.starts_with("do_build(//:") {
+                    memo_ids.insert(display.clone(), id);
+                    memo_parents.insert(display, parent);
+                } else if display.starts_with("run //:") {
+                    run_parents.insert(display, parent);
+                }
+            }
+        }
+        assert_eq!(memo_parents.len(), 2);
+        assert_eq!(memo_parents["do_build(//:app)"], None);
+        assert_eq!(
+            memo_parents["do_build(//:lib)"],
+            Some(memo_ids["do_build(//:app)"])
+        );
+        assert_eq!(run_parents.len(), 2);
+        assert_eq!(
+            run_parents["run //:app"],
+            Some(memo_ids["do_build(//:app)"])
+        );
+        assert_eq!(
+            run_parents["run //:lib"],
+            Some(memo_ids["do_build(//:lib)"])
+        );
+    }
+
+    #[tokio::test]
+    async fn promise_all_fanout_restores_parent_context_after_await() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, memo, run } from "imp:core";
+
+export const app = target({ kind: "promise-all-context-test" });
+
+const child = memo(async function child(name) {
+    await run({
+        argv: ["sh", "-c", "true"],
+        display: `child ${name}`,
+        impure: true,
+    });
+});
+
+export const build = product("promise-all-context-test", "build", async function build() {
+    await Promise.all([child("a"), child("b")]);
+    await run({
+        argv: ["sh", "-c", "true"],
+        display: "after fanout",
+        impure: true,
+    });
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            4,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let selectors = vec!["app".to_owned()];
+        execute_goal_live(&live, p, "build", &selectors, false)
+            .await
+            .unwrap();
+
+        let mut memo_ids = BTreeMap::new();
+        let mut memo_parents = BTreeMap::new();
+        let mut run_parents = BTreeMap::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::scheduler::TaskEvent::Pending {
+                id,
+                parent,
+                display,
+            } = event
+            {
+                if display.starts_with("build(") || display.starts_with("child(") {
+                    memo_ids.insert(display.clone(), id);
+                    memo_parents.insert(display, parent);
+                } else if display == "after fanout" || display == "child a" || display == "child b"
+                {
+                    run_parents.insert(display, parent);
+                }
+            }
+        }
+
+        let root_id = memo_ids["build(//:app)"];
+        assert_eq!(memo_parents["build(//:app)"], None);
+        assert_eq!(memo_parents["child(\"a\")"], Some(root_id));
+        assert_eq!(memo_parents["child(\"b\")"], Some(root_id));
+        assert_eq!(run_parents["child a"], Some(memo_ids["child(\"a\")"]));
+        assert_eq!(run_parents["child b"], Some(memo_ids["child(\"b\")"]));
+        assert_eq!(run_parents["after fanout"], Some(root_id));
+    }
+
+    #[tokio::test]
+    async fn sequential_sibling_awaits_do_not_inherit_previous_child_context() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, memo, run } from "imp:core";
+
+export const app = target({ kind: "sequential-sibling-context-test" });
+
+const child = memo(async function child(name) {
+    await run({
+        argv: ["sh", "-c", "true"],
+        display: `child ${name}`,
+        impure: true,
+    });
+});
+
+export const build = product("sequential-sibling-context-test", "build", async function build() {
+    await child("a");
+    await child("b");
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            2,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let selectors = vec!["app".to_owned()];
+        execute_goal_live(&live, p, "build", &selectors, false)
+            .await
+            .unwrap();
+
+        let mut memo_ids = BTreeMap::new();
+        let mut memo_parents = BTreeMap::new();
+        let mut run_parents = BTreeMap::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::scheduler::TaskEvent::Pending {
+                id,
+                parent,
+                display,
+            } = event
+            {
+                if display.starts_with("build(") || display.starts_with("child(") {
+                    memo_ids.insert(display.clone(), id);
+                    memo_parents.insert(display, parent);
+                } else if display == "child a" || display == "child b" {
+                    run_parents.insert(display, parent);
+                }
+            }
+        }
+
+        let root_id = memo_ids["build(//:app)"];
+        assert_eq!(memo_parents["child(\"a\")"], Some(root_id));
+        assert_eq!(memo_parents["child(\"b\")"], Some(root_id));
+        assert_eq!(run_parents["child a"], Some(memo_ids["child(\"a\")"]));
+        assert_eq!(run_parents["child b"], Some(memo_ids["child(\"b\")"]));
+    }
+
+    #[tokio::test]
+    async fn live_goal_starts_selected_roots_concurrently() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, run } from "imp:core";
+
+export const a = target({ kind: "concurrent-root-test" });
+export const b = target({ kind: "concurrent-root-test" });
+
+export const build = product("concurrent-root-test", "build", async function build(handle) {
+    await run({
+        argv: ["sh", "-c", "sleep 0.2"],
+        display: `run ${handle.label.name}`,
+        impure: true,
+    });
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            2,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let selectors = vec!["a".to_owned(), "b".to_owned()];
+        execute_goal_live(&live, p, "build", &selectors, false)
+            .await
+            .unwrap();
+
+        let mut job_ids = BTreeSet::new();
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::scheduler::TaskEvent::Pending { id, display, .. } = &event {
+                if display == "run a" || display == "run b" {
+                    job_ids.insert(*id);
+                }
+            }
+            events.push(event);
+        }
+
+        let mut active = BTreeSet::new();
+        let mut max_active = 0;
+        for event in events {
+            match event {
+                crate::scheduler::TaskEvent::Running { id, .. } if job_ids.contains(&id) => {
+                    active.insert(id);
+                    max_active = max_active.max(active.len());
+                }
+                crate::scheduler::TaskEvent::Done { id, .. } if job_ids.contains(&id) => {
+                    active.remove(&id);
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(job_ids.len(), 2);
+        assert_eq!(
+            max_active, 2,
+            "selected roots should submit both run jobs before either completes"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_roots_keep_run_ownership_after_interleaved_awaits() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, run } from "imp:core";
+
+export const a = target({ kind: "interleaved-root-context-test" });
+export const b = target({ kind: "interleaved-root-context-test" });
+
+export const build = product("interleaved-root-context-test", "build", async function build(handle) {
+    const name = handle.label.name;
+    await run({
+        argv: ["sh", "-c", name === "a" ? "sleep 0.05" : "sleep 0.01"],
+        display: `pre ${name}`,
+        impure: true,
+    });
+    await run({
+        argv: ["sh", "-c", "true"],
+        display: `post ${name}`,
+        impure: true,
+    });
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            2,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let selectors = vec!["a".to_owned(), "b".to_owned()];
+        execute_goal_live(&live, p, "build", &selectors, false)
+            .await
+            .unwrap();
+
+        let mut memo_ids = BTreeMap::new();
+        let mut run_parents = BTreeMap::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::scheduler::TaskEvent::Pending {
+                id,
+                parent,
+                display,
+            } = event
+            {
+                if display.starts_with("build(") {
+                    memo_ids.insert(display, id);
+                } else if display == "pre a"
+                    || display == "pre b"
+                    || display == "post a"
+                    || display == "post b"
+                {
+                    run_parents.insert(display, parent);
+                }
+            }
+        }
+
+        let a_id = memo_ids["build(//:a)"];
+        let b_id = memo_ids["build(//:b)"];
+        assert_eq!(run_parents["pre a"], Some(a_id));
+        assert_eq!(run_parents["post a"], Some(a_id));
+        assert_eq!(run_parents["pre b"], Some(b_id));
+        assert_eq!(run_parents["post b"], Some(b_id));
     }
 
     #[tokio::test]
