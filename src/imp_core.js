@@ -553,7 +553,7 @@ function _is_object_key(value) {
 
 function _contextual_thenable(promise, contextId) {
     const nativePromise = Promise.resolve(promise);
-    if (_is_object_key(nativePromise)) {
+    if (_is_object_key(nativePromise) && !_promise_contexts.has(nativePromise)) {
         _promise_contexts.set(nativePromise, contextId);
     }
     const wrap = (callback) => {
