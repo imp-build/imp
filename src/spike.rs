@@ -6227,6 +6227,80 @@ export const build = product("interleaved-root-context-test", "build", async fun
     }
 
     #[tokio::test]
+    async fn deferred_run_promises_have_correct_parent_after_interleaved_await() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, run } from "imp:core";
+
+export const app = target({ kind: "deferred-run-context-test" });
+
+export const build = product("deferred-run-context-test", "build", async function build() {
+    const p1 = run({
+        argv: ["sh", "-c", "sleep 0.02"],
+        display: "deferred short",
+        impure: true,
+    });
+    const p2 = run({
+        argv: ["sh", "-c", "sleep 0.05"],
+        display: "deferred long",
+        impure: true,
+    });
+    await run({
+        argv: ["sh", "-c", "true"],
+        display: "interstitial",
+        impure: true,
+    });
+    await Promise.all([p1, p2]);
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            2,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let selectors = vec!["app".to_owned()];
+        execute_goal_live(&live, p, "build", &selectors, false)
+            .await
+            .unwrap();
+
+        let mut memo_ids = BTreeMap::new();
+        let mut run_parents = BTreeMap::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::scheduler::TaskEvent::Pending {
+                id,
+                parent,
+                display,
+            } = event
+            {
+                if display.starts_with("build(") {
+                    memo_ids.insert(display, id);
+                } else if display == "deferred short"
+                    || display == "deferred long"
+                    || display == "interstitial"
+                {
+                    run_parents.insert(display, parent);
+                }
+            }
+        }
+
+        let root_id = memo_ids["build(//:app)"];
+        assert_eq!(run_parents["deferred short"], Some(root_id));
+        assert_eq!(run_parents["deferred long"], Some(root_id));
+        assert_eq!(run_parents["interstitial"], Some(root_id));
+    }
+
+    #[tokio::test]
     async fn live_goal_no_cache_bypasses_run_task_cache() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();

@@ -453,6 +453,17 @@ async fn cmd_build_planned(
         // can attach; a node is removed from the tree when it is done.
         let mut items: std::collections::HashMap<u64, (prodash::tree::Item, String)> =
             std::collections::HashMap::new();
+        // Child → parent lookup: when a child completes we check whether the
+        // parent was deferred and can now be removed.
+        let mut parent_of: std::collections::HashMap<u64, u64> =
+            std::collections::HashMap::new();
+        // Parent → list of active (incomplete) children.
+        let mut children_of: std::collections::HashMap<u64, Vec<u64>> =
+            std::collections::HashMap::new();
+        // Parents whose Done event arrived before all their children completed.
+        // They are kept as structural parents until the last child catches up.
+        let mut done_parents: std::collections::HashSet<u64> =
+            std::collections::HashSet::new();
         while let Some(event) = events.recv().await {
             match event {
                 TaskEvent::Pending {
@@ -461,7 +472,13 @@ async fn cmd_build_planned(
                     display,
                 } => {
                     let item = match parent.and_then(|p| items.get_mut(&p)) {
-                        Some((parent_item, _)) => parent_item.add_child(display.clone()),
+                        Some((parent_item, _)) => {
+                            if let Some(parent_id) = parent {
+                                parent_of.insert(id, parent_id);
+                                children_of.entry(parent_id).or_default().push(id);
+                            }
+                            parent_item.add_child(display.clone())
+                        }
                         None => root.add_child(display.clone()),
                     };
                     ui::init_task(&item);
@@ -475,13 +492,49 @@ async fn cmd_build_planned(
                     }
                 }
                 TaskEvent::Done { id, outcome } => {
-                    if let Some((mut item, display)) = items.remove(&id) {
-                        match outcome {
-                            // Success: drop silently so the node just disappears,
-                            // rather than flooding the log with bare "done" lines.
-                            TaskOutcome::Ok => drop(item),
-                            TaskOutcome::Err(error) => item.fail(format!("{display}: {error}")),
-                            TaskOutcome::Canceled => item.fail(format!("{display}: canceled")),
+                    let was_child = parent_of.remove(&id);
+                    let has_pending_children = children_of.contains_key(&id);
+
+                    if has_pending_children && matches!(outcome, TaskOutcome::Ok) {
+                        // Success but children still running — keep item as a
+                        // structural parent so new children can still attach.
+                        done_parents.insert(id);
+                    } else {
+                        // No children or error — remove from the tree.
+                        if let Some((mut item, display)) = items.remove(&id) {
+                            match outcome {
+                                // Success: drop silently so the node just
+                                // disappears, rather than flooding the log with
+                                // bare "done" lines.
+                                TaskOutcome::Ok => drop(item),
+                                TaskOutcome::Err(error) => {
+                                    item.fail(format!("{display}: {error}"))
+                                }
+                                TaskOutcome::Canceled => {
+                                    item.fail(format!("{display}: canceled"))
+                                }
+                            }
+                        }
+                        children_of.remove(&id);
+                        done_parents.remove(&id);
+                    }
+
+                    // If this completed node was a child, notify its parent.
+                    if let Some(parent_id) = was_child {
+                        if let Some(children) = children_of.get_mut(&parent_id) {
+                            children.retain(|c| *c != id);
+                            if children.is_empty() {
+                                children_of.remove(&parent_id);
+                                // Parent was deferred and now all children are
+                                // done — safe to remove.
+                                if done_parents.remove(&parent_id) {
+                                    if let Some((mut parent_item, _)) =
+                                        items.remove(&parent_id)
+                                    {
+                                        drop(parent_item);
+                                    }
+                                }
+                            }
                         }
                     }
                 }

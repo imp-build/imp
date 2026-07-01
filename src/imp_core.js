@@ -517,9 +517,11 @@ function _effective_context_entry(useSingleActive = false) {
     if (ctx.owner !== null || ctx.stack.length > 0) {
         return { id: _current_memo_context_id, ctx };
     }
-    const activeContextId = useSingleActive ? _single_active_context_id() : null;
-    if (activeContextId !== null) {
-        return { id: activeContextId, ctx: _memo_contexts.get(activeContextId) || ctx };
+    if (useSingleActive && _current_memo_context_id === 0) {
+        const activeContextId = _single_active_context_id();
+        if (activeContextId !== null) {
+            return { id: activeContextId, ctx: _memo_contexts.get(activeContextId) || ctx };
+        }
     }
     return { id: _current_memo_context_id, ctx };
 }
