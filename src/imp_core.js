@@ -502,14 +502,21 @@ function _memo_cycle_message(key_string) {
 }
 
 function _memo_eval(key_string, thunk) {
-    // Cycle check BEFORE table check: a key in the call stack means it is
-    // currently being evaluated in this call chain.
-    if (_memo_call_stack_set.has(key_string)) {
-        throw new Error(_memo_cycle_message(key_string));
-    }
+    // Table check BEFORE stack check. Once a memo suspends at its first real
+    // await, its promise is registered here while its frame is still on the
+    // call stack. A concurrent branch (e.g. two roots sharing a dependency)
+    // that reaches the same in-flight memo must receive that pending promise —
+    // this is normal fan-out, not a cycle.
     if (_memo_table.has(key_string)) {
         _memo_trace.push({ event: "hit", key: key_string });
         return _memo_table.get(key_string);
+    }
+    // On the call stack but not yet registered ⇒ the thunk re-entered itself
+    // synchronously, before its promise existed: a genuine cycle. (An await
+    // between the calls would have registered the promise above, so only true
+    // synchronous recursion reaches here.)
+    if (_memo_call_stack_set.has(key_string)) {
+        throw new Error(_memo_cycle_message(key_string));
     }
     _memo_trace.push({ event: "miss", key: key_string });
     // Call thunk() synchronously so _push_call runs before the first await,

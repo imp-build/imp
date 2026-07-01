@@ -5701,6 +5701,58 @@ if (!results[0].stdout.endsWith("a\n") || !results[1].stdout.endsWith("b\n")) {
             .unwrap();
     }
 
+    // Two memoized roots that share a memoized dependency whose body awaits a
+    // real run(). The shared memo is in-flight (suspended on run()) when the
+    // second root reaches it. This must resolve to the same result, not be
+    // mistaken for a cycle — the regression that surfaced when live execution
+    // replaced introspect mode's synchronous run().
+    #[tokio::test]
+    async fn concurrent_roots_share_an_in_flight_memo_without_a_false_cycle() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(&p.join(BUILD_FILE), r#"export const done = true;"#);
+
+        let live = load_workspace(p).await.unwrap();
+        *live.exec_root.lock().unwrap() = Some(p.to_owned());
+        let (scheduler, _events) = crate::scheduler::Scheduler::new(
+            4,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        live.ctx
+            .async_with(async |ctx| -> rquickjs::Result<()> {
+                let promise = Module::evaluate(
+                    ctx.clone(),
+                    "shared-inflight-memo",
+                    r#"
+import { memo, run } from "imp:core";
+
+const shared = memo(async function shared() {
+    // sleep keeps the memo suspended so the second root reaches it in-flight
+    await run({ argv: ["sh", "-c", "sleep 0.1; printf s"], impure: true });
+    return "S";
+});
+const rootA = memo(async function rootA() { return await shared(); });
+const rootB = memo(async function rootB() { return await shared(); });
+
+const [a, b] = await Promise.all([rootA(), rootB()]);
+if (a !== "S" || b !== "S") {
+    throw new Error(`unexpected: ${a}/${b}`);
+}
+"#,
+                )?;
+                promise.into_future::<()>().await.catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message("shared-inflight-memo", format!("{e}"))
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn product_registration_creates_dispatchable_product_task() {
         let root = tempfile::tempdir().unwrap();
