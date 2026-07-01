@@ -135,6 +135,9 @@ enum Cmd {
         /// Maximum number of ready planned tasks to execute concurrently
         #[arg(long, default_value_t = 1)]
         jobs: usize,
+        /// Number of concurrent JS worker slots for live evaluation
+        #[arg(long, default_value_t = 1)]
+        js_workers: usize,
         /// Run actions without reading or writing the planned task cache
         #[arg(long)]
         no_cache: bool,
@@ -235,9 +238,10 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
         Cmd::Build {
             selectors,
             jobs,
+            js_workers,
             no_cache,
         } => {
-            return cmd_build_planned(selectors, *jobs, *no_cache, Arc::clone(&cancellation), tree)
+            return cmd_build_planned(selectors, *jobs, *js_workers, *no_cache, Arc::clone(&cancellation), tree)
                 .await;
         }
         Cmd::Explain { product } => {
@@ -421,6 +425,7 @@ async fn cmd_plan(
 async fn cmd_build_planned(
     selectors: &[String],
     jobs: usize,
+    js_workers: usize,
     no_cache: bool,
     cancellation: Arc<AtomicBool>,
     tree: &Tree,
@@ -439,103 +444,94 @@ async fn cmd_build_planned(
         anyhow::bail!("execution canceled");
     }
 
-    // Install a scheduler and render its single task-event stream into a nested
-    // tree, so there is one source of truth for what is running, where, and
-    // under which parent.
+    // Install a scheduler and render its single task-event stream into a flat
+    // list of worker slots. Each slot corresponds to one concurrent execution
+    // unit (sandbox worker or JS evaluation). No parent/child nesting.
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel::<scheduler::TaskEvent>();
     let scheduler = scheduler::Scheduler::new(jobs, Arc::clone(&cancellation), tx);
     *workspace.scheduler.lock().unwrap() = Some(Arc::clone(&scheduler));
 
     let root = tree.root_handle();
+    let total_slots = js_workers + jobs;
     let render = tokio::spawn(async move {
         use scheduler::{TaskEvent, TaskOutcome};
-        // node id → (progress item, display). Parents are kept alive so children
-        // can attach; a node is removed from the tree when it is done.
-        let mut items: std::collections::HashMap<u64, (prodash::tree::Item, String)> =
+
+        // Pre-create one progress item per slot. Slots 0..js_workers are JS
+        // workers; slots js_workers..total are sandbox workers.
+        struct SlotState {
+            item: prodash::tree::Item,
+            task_id: Option<u64>,
+        }
+
+        let mut slots: Vec<SlotState> = (0..total_slots)
+            .map(|i| {
+                let label = if i < js_workers {
+                    format!("JS {i}")
+                } else {
+                    format!("SB {}", i - js_workers)
+                };
+                let item = root.add_child(label);
+                ui::init_task(&item);
+                SlotState { item, task_id: None }
+            })
+            .collect();
+
+        let mut task_to_slot: std::collections::HashMap<u64, usize> =
             std::collections::HashMap::new();
-        // Child → parent lookup: when a child completes we check whether the
-        // parent was deferred and can now be removed.
-        let mut parent_of: std::collections::HashMap<u64, u64> =
+        // Display names arrive in Pending before the task occupies a slot in
+        // Running; stash them here until the slot is known.
+        let mut pending_displays: std::collections::HashMap<u64, String> =
             std::collections::HashMap::new();
-        // Parent → list of active (incomplete) children.
-        let mut children_of: std::collections::HashMap<u64, Vec<u64>> =
-            std::collections::HashMap::new();
-        // Parents whose Done event arrived before all their children completed.
-        // They are kept as structural parents until the last child catches up.
-        let mut done_parents: std::collections::HashSet<u64> =
-            std::collections::HashSet::new();
+
         while let Some(event) = events.recv().await {
             match event {
-                TaskEvent::Pending {
-                    id,
-                    parent,
-                    display,
-                } => {
-                    let item = match parent.and_then(|p| items.get_mut(&p)) {
-                        Some((parent_item, _)) => {
-                            if let Some(parent_id) = parent {
-                                parent_of.insert(id, parent_id);
-                                children_of.entry(parent_id).or_default().push(id);
-                            }
-                            parent_item.add_child(display.clone())
-                        }
-                        None => root.add_child(display.clone()),
-                    };
-                    ui::init_task(&item);
-                    items.insert(id, (item, display));
+                TaskEvent::Pending { id, display, .. } => {
+                    pending_displays.insert(id, display);
                 }
                 TaskEvent::Running { id, detail } => {
-                    if let Some((item, display)) = items.get_mut(&id) {
-                        if let Some(detail) = detail {
-                            item.set_name(format!("{display} [{detail}]"));
-                        }
+                    let display = pending_displays.remove(&id).unwrap_or_default();
+
+                    // Determine which display slot this task occupies.
+                    let slot = if let Some(ref d) = detail {
+                        // Sandbox job: parse the scheduler slot from "slot N".
+                        let n = d.trim_start_matches("slot ").parse::<usize>().unwrap_or(0);
+                        js_workers + n
+                    } else {
+                        // JS memo: find a free JS slot.
+                        (0..js_workers)
+                            .find(|&i| slots[i].task_id.is_none())
+                            .unwrap_or(0)
+                    };
+                    // Free the previous occupant of this slot, if any.
+                    if let Some(prev) = slots[slot].task_id {
+                        task_to_slot.remove(&prev);
                     }
+                    slots[slot].item.set_name(display.clone());
+                    slots[slot].task_id = Some(id);
+                    task_to_slot.insert(id, slot);
                 }
                 TaskEvent::Done { id, outcome } => {
-                    let was_child = parent_of.remove(&id);
-                    let has_pending_children = children_of.contains_key(&id);
-
-                    if has_pending_children && matches!(outcome, TaskOutcome::Ok) {
-                        // Success but children still running — keep item as a
-                        // structural parent so new children can still attach.
-                        done_parents.insert(id);
-                    } else {
-                        // No children or error — remove from the tree.
-                        if let Some((mut item, display)) = items.remove(&id) {
-                            match outcome {
-                                // Success: drop silently so the node just
-                                // disappears, rather than flooding the log with
-                                // bare "done" lines.
-                                TaskOutcome::Ok => drop(item),
-                                TaskOutcome::Err(error) => {
-                                    item.fail(format!("{display}: {error}"))
-                                }
-                                TaskOutcome::Canceled => {
-                                    item.fail(format!("{display}: canceled"))
-                                }
+                    pending_displays.remove(&id);
+                    if let Some(&slot) = task_to_slot.get(&id) {
+                        let s = &mut slots[slot];
+                        s.task_id = None;
+                        // Reset the slot to its idle label.
+                        let idle = if slot < js_workers {
+                            format!("JS {slot}")
+                        } else {
+                            format!("SB {}", slot - js_workers)
+                        };
+                        s.item.set_name(idle);
+                        match outcome {
+                            TaskOutcome::Ok => {}
+                            TaskOutcome::Err(error) => {
+                                s.item.fail(error);
+                            }
+                            TaskOutcome::Canceled => {
+                                s.item.fail("canceled".to_owned());
                             }
                         }
-                        children_of.remove(&id);
-                        done_parents.remove(&id);
-                    }
-
-                    // If this completed node was a child, notify its parent.
-                    if let Some(parent_id) = was_child {
-                        if let Some(children) = children_of.get_mut(&parent_id) {
-                            children.retain(|c| *c != id);
-                            if children.is_empty() {
-                                children_of.remove(&parent_id);
-                                // Parent was deferred and now all children are
-                                // done — safe to remove.
-                                if done_parents.remove(&parent_id) {
-                                    if let Some((mut parent_item, _)) =
-                                        items.remove(&parent_id)
-                                    {
-                                        drop(parent_item);
-                                    }
-                                }
-                            }
-                        }
+                        task_to_slot.remove(&id);
                     }
                 }
             }
