@@ -128,20 +128,33 @@ enum Cmd {
         /// Optional generator target selectors; defaults to all registered generate-build products
         selectors: Vec<String>,
     },
-    /// Build planned target selectors; defaults to the workspace default build roots
-    Build {
-        /// Target selectors, e.g. //:app or //:app#odin-package
-        selectors: Vec<String>,
-        /// Maximum number of ready planned tasks to execute concurrently
-        #[arg(long, default_value_t = 1)]
-        jobs: usize,
-        /// Number of concurrent JS worker slots for live evaluation
-        #[arg(long, default_value_t = 1)]
-        js_workers: usize,
-        /// Run actions without reading or writing the planned task cache
-        #[arg(long)]
-        no_cache: bool,
-    },
+    /// Build the selected targets; defaults to the workspace default build roots
+    Build(GoalArgs),
+    /// Run tests for the selected targets
+    Test(GoalArgs),
+    /// Format the selected targets
+    Fmt(GoalArgs),
+    /// Lint the selected targets
+    Lint(GoalArgs),
+    /// Package the selected targets
+    Package(GoalArgs),
+    /// Run the selected targets
+    Run(GoalArgs),
+}
+
+#[derive(clap::Args)]
+struct GoalArgs {
+    /// Target selectors, e.g. //:app or //:app#odin-package
+    selectors: Vec<String>,
+    /// Maximum number of ready tasks to execute concurrently
+    #[arg(long, default_value_t = 1)]
+    jobs: usize,
+    /// Number of concurrent JS worker slots for live evaluation
+    #[arg(long, default_value_t = 1)]
+    js_workers: usize,
+    /// Run actions without reading or writing the task cache
+    #[arg(long)]
+    no_cache: bool,
 }
 
 #[derive(Subcommand)]
@@ -235,21 +248,23 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
         Cmd::Cache { command } => {
             return cmd_cache(command, tree).await;
         }
-        Cmd::Build {
-            selectors,
-            jobs,
-            js_workers,
-            no_cache,
-        } => {
-            return cmd_build_planned(
-                selectors,
-                *jobs,
-                *js_workers,
-                *no_cache,
-                Arc::clone(&cancellation),
-                tree,
-            )
-            .await;
+        Cmd::Build(args) => {
+            return cmd_execute_goal("build", args, Arc::clone(&cancellation), tree).await;
+        }
+        Cmd::Test(args) => {
+            return cmd_execute_goal("test", args, Arc::clone(&cancellation), tree).await;
+        }
+        Cmd::Fmt(args) => {
+            return cmd_execute_goal("fmt", args, Arc::clone(&cancellation), tree).await;
+        }
+        Cmd::Lint(args) => {
+            return cmd_execute_goal("lint", args, Arc::clone(&cancellation), tree).await;
+        }
+        Cmd::Package(args) => {
+            return cmd_execute_goal("package", args, Arc::clone(&cancellation), tree).await;
+        }
+        Cmd::Run(args) => {
+            return cmd_execute_goal("run", args, Arc::clone(&cancellation), tree).await;
         }
         Cmd::Explain { product } => {
             return cmd_explain(product, tree).await;
@@ -350,7 +365,12 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
         Cmd::Actions { .. } => unreachable!("handled before environment setup"),
         Cmd::GenerateBuild { .. } => unreachable!("handled before environment setup"),
         Cmd::CodegenRegister { .. } => unreachable!("handled before environment setup"),
-        Cmd::Build { .. } => unreachable!("handled before environment setup"),
+        Cmd::Build(_)
+        | Cmd::Test(_)
+        | Cmd::Fmt(_)
+        | Cmd::Lint(_)
+        | Cmd::Package(_)
+        | Cmd::Run(_) => unreachable!("handled before environment setup"),
     }
 }
 
@@ -429,15 +449,20 @@ async fn cmd_plan(
     Ok(())
 }
 
-async fn cmd_build_planned(
-    selectors: &[String],
-    jobs: usize,
-    js_workers: usize,
-    no_cache: bool,
+async fn cmd_execute_goal(
+    goal: &str,
+    args: &GoalArgs,
     cancellation: Arc<AtomicBool>,
     tree: &Tree,
 ) -> Result<()> {
-    let js_workers = js_workers.max(1);
+    let GoalArgs {
+        selectors,
+        jobs,
+        js_workers,
+        no_cache,
+    } = args;
+    let (jobs, no_cache) = (*jobs, *no_cache);
+    let js_workers = (*js_workers).max(1);
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let workspace = {
@@ -454,14 +479,14 @@ async fn cmd_build_planned(
     // Resolve selectors into concrete root targets so we know the total count
     // upfront, before the scheduler or renderer starts.
     let total_targets = {
-        let goal_def = workspace.workspace.goals.get("build").ok_or_else(|| {
+        let goal_def = workspace.workspace.goals.get(goal).ok_or_else(|| {
             let known: Vec<&str> = workspace
                 .workspace
                 .goals
                 .keys()
                 .map(String::as_str)
                 .collect();
-            anyhow::anyhow!("no 'build' goal; registered goals: {}", known.join(", "))
+            anyhow::anyhow!("no '{goal}' goal; registered goals: {}", known.join(", "))
         })?;
         let roots = spike::select_roots(&workspace.workspace, goal_def, selectors)?;
         roots.len()
@@ -475,6 +500,7 @@ async fn cmd_build_planned(
     *workspace.scheduler.lock().unwrap() = Some(Arc::clone(&scheduler));
 
     let root = tree.root_handle();
+    let goal_label = format!("execute {goal}");
     let render = tokio::spawn(async move {
         use scheduler::{LaneKind, TaskEvent, TaskOutcome};
 
@@ -489,7 +515,7 @@ async fn cmd_build_planned(
         };
 
         // ── tree structure ──────────────────────────────────────────────
-        // execute build (0/N targets, progress bar)
+        // execute <goal> (0/N targets, progress bar)
         //   ├─ js tasks (done/total memos, progress bar) — if js_workers > 0
         //   │   ├─<memo name>  ← JS 0, shown when active
         //   │   └─<memo name>  ← JS 1, shown when active
@@ -497,13 +523,13 @@ async fn cmd_build_planned(
         //   └─ run: <desc>     ← SB 1, shown when active
         // Idle workers are hidden (name set to " ").
 
-        let mut progress = root.add_child("execute build");
+        let mut progress = root.add_child(goal_label.clone());
         if store.total > 0 {
             ui::init_counted_task(&progress, store.total);
             progress.set_name(format!("0/{} targets", store.total));
         } else {
             ui::init_timed_task(&progress);
-            progress.set_name("execute build".to_owned());
+            progress.set_name(goal_label);
         }
 
         let mut js_progress = {
@@ -611,7 +637,7 @@ async fn cmd_build_planned(
                 TaskEvent::Done { id, outcome } => {
                     pending_displays.remove(&id);
 
-                    // Track root-task (target) completion on the build bar.
+                    // Track root-task (target) completion on the goal bar.
                     if store.total > 0 && root_tasks.contains(&id) {
                         root_tasks.remove(&id);
                         match &outcome {
@@ -687,7 +713,7 @@ async fn cmd_build_planned(
         }
     });
 
-    // Drive the build, with a deadlock watchdog: a genuine async dependency
+    // Drive the goal, with a deadlock watchdog: a genuine async dependency
     // cycle (which QuickJS gives us no way to detect precisely) surfaces as the
     // scheduler staying fully idle while the evaluation is unfinished. Report it
     // instead of hanging.
@@ -695,7 +721,7 @@ async fn cmd_build_planned(
     let drive = spike::execute_goal_live(
         &workspace,
         &workspace_root,
-        "build",
+        goal,
         selectors,
         no_cache,
         js_workers,
@@ -720,7 +746,7 @@ async fn cmd_build_planned(
         biased;
         r = drive => r,
         _ = watchdog => Err(anyhow::anyhow!(
-            "build stalled with no runnable work for {STALL_GRACE:?} — likely a dependency cycle"
+            "{goal} stalled with no runnable work for {STALL_GRACE:?} — likely a dependency cycle"
         )),
     };
 
