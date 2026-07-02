@@ -1558,10 +1558,14 @@ fn parse_exec_run_opts<'js>(
     let impure = opts.get::<_, Option<bool>>("impure")?.unwrap_or(false);
     let force_cache = opts.get::<_, Option<bool>>("forceCache")?.unwrap_or(false);
     let sandbox = opts.get::<_, Option<bool>>("sandbox")?.unwrap_or(true);
+    let config_digest = opts
+        .get::<_, Option<String>>("configDigest")?
+        .unwrap_or_default();
     Ok(ExecRunOpts {
         argv,
         display,
         env,
+        config_digest,
         inputs,
         outputs,
         tools,
@@ -6724,6 +6728,66 @@ export const build = product("live-cache-test", "build", async function build() 
             std::fs::read_to_string(p.join("build/live.txt")).unwrap(),
             "payload"
         );
+    }
+
+    #[tokio::test]
+    async fn live_config_digest_change_invalidates_run_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker = p.join("runs.txt");
+        let command = format!(
+            "printf r >> '{}' && mkdir -p build && printf payload > build/cfg.txt",
+            marker.display()
+        );
+        let command_js = command.replace('\\', "\\\\").replace('"', "\\\"");
+
+        write_file(
+            &p.join(BUILD_FILE),
+            &format!(
+                r#"
+import {{ target, product, run, output }} from "imp:core";
+
+export const app = target({{ kind: "config-cache-test" }});
+
+export const build = product("config-cache-test", "build", async function build() {{
+    return run({{
+        argv: ["sh", "-c", "{command_js}"],
+        outputs: [output("build/cfg.txt")],
+        display: "config cache action",
+    }});
+}});
+"#
+            ),
+        );
+
+        let selectors = vec!["app".to_owned()];
+        let mut runs = Vec::new();
+        // Same config twice (second must hit), then a changed config value
+        // (must invalidate even though argv/inputs are unchanged).
+        for mode in [1, 1, 2] {
+            write_file(
+                &p.join(WORKSPACE_FILE),
+                &format!(
+                    r#"
+import {{ configure }} from "imp:core";
+configure("cache_test", {{ mode: {mode} }});
+"#
+                ),
+            );
+            let live = load_workspace(p).await.unwrap();
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let scheduler = crate::scheduler::Scheduler::new(
+                1,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                tx,
+            );
+            *live.scheduler.lock().unwrap() = Some(scheduler);
+            execute_goal_live(&live, p, "build", &selectors, false, 1)
+                .await
+                .unwrap();
+            runs.push(std::fs::read_to_string(&marker).unwrap());
+        }
+        assert_eq!(runs, ["r", "r", "rr"]);
     }
 
     #[tokio::test]

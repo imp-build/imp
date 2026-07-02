@@ -591,6 +591,7 @@ fn run_unsandboxed_task(
         argv: task.action.argv.clone(),
         display: task.action.display.clone(),
         env: task.action.env.clone(),
+        config_digest: String::new(),
         inputs: task
             .inputs
             .iter()
@@ -742,7 +743,6 @@ fn run_local_task(
             task_key: cache.task_key.clone(),
             action_digest: cache.action_digest.clone(),
             input_digests: cache.input_digests.clone(),
-            dependency_keys: cache.dependency_keys.clone(),
             named_caches: cache.named_caches.clone(),
             outputs,
         };

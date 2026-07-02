@@ -1215,16 +1215,11 @@ Before this fix, several items specified in the design were absent from the
 argv construction, `group([...])` exists for aggregate products, and target handles
 now expose `handle.label.address` and `handle.label.name`.
 
-## Gap 8: `config_digest` is always empty
+## ~~Gap 8: `config_digest` is always empty~~ ✓ Fixed
 
-The memo key is built as:
-
-```js
-{ fn_id, args_digest, config_digest: "" }
-```
-
-No configuration wiring exists yet. Memo results cannot be invalidated by build
-configuration changes (e.g. debug vs. release).
+**Resolved:** memo keys fold `__host_configuration_digest()` into the key, and
+`run()` passes the same digest to the host so it is hashed into the task cache
+key (`exec_run_inner` action digest) alongside the merged passthrough env.
 
 ## ~~Gap 9: Parallel execution blocked for product functions~~ ✓ Fixed
 
@@ -1251,6 +1246,12 @@ Currently only the dirty-workspace snapshot (`workspace_mutation` + `watch`) is
 implemented. The other three are absent.
 
 ## Other concerns
+
+**Tools are cache-keyed by spec, not content**: the task cache key hashes a
+tool's spec (name/cache/key/path), not the tool's bytes. A tool swapped in
+place under the same key would wrongly hit. The planned path's
+`fingerprint_tools` hashed content but was planned-only; content
+fingerprinting for the live path is future work.
 
 **Toolchain acquisition is synchronous**: `acquireOdinToolchain` runs
 download+extract synchronously on the JS thread, blocking the entire QuickJS runtime.

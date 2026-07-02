@@ -1118,6 +1118,7 @@ export function run(opts) {
         argv: opts.argv,
         display: opts.display,
         env: opts.env,
+        configDigest: __host_configuration_digest(),
         inputs,
         outputs,
         tools: opts.tools,

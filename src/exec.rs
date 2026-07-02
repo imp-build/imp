@@ -308,6 +308,7 @@ pub(crate) struct ExecRunOpts {
     pub(crate) argv: Vec<String>,
     pub(crate) display: String,
     pub(crate) env: BTreeMap<String, String>,
+    pub(crate) config_digest: String,
     pub(crate) inputs: Vec<ExecIoSpec>,
     pub(crate) outputs: Vec<ExecIoSpec>,
     pub(crate) tools: Vec<ExecToolSpec>,
@@ -440,9 +441,9 @@ fn resolve_tool_bin_dir(tool_root: &Path, bin_dir: &str) -> Result<PathBuf> {
 
 /// Host environment variables allowed through the sandbox scrub. Anything not
 /// listed here (and not synthesized below) is removed before a task runs, so
-/// undeclared ambient state cannot silently affect a build. For planned tasks
-/// these are snapshotted into the (hashed) action env at plan time, so a change
-/// to one of them invalidates the task cache.
+/// undeclared ambient state cannot silently affect a build. The snapshot is
+/// hashed into the action digest, so a change to one of these invalidates the
+/// task cache.
 pub(crate) const PASSTHROUGH_ENV_VARS: &[&str] = &[
     "PATH",
     "USER",
@@ -459,9 +460,9 @@ pub(crate) const PASSTHROUGH_ENV_VARS: &[&str] = &[
 /// Prefixes of host environment variables allowed through (locale family).
 pub(crate) const PASSTHROUGH_ENV_PREFIXES: &[&str] = &["LC_"];
 
-/// Snapshot the allowlisted host environment. Used at plan time to fold ambient
-/// state that genuinely affects output into the hashed action env, and by the
-/// uncached `run()` paths at exec time.
+/// Snapshot the allowlisted host environment. Folded into the hashed action
+/// digest so ambient state that genuinely affects output keys the cache, and
+/// reused as the base env for execution.
 pub(crate) fn passthrough_env_snapshot() -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for (key, value) in std::env::vars() {
@@ -486,8 +487,8 @@ pub(crate) fn sandbox_home_tmp(sandbox_root: &Path) -> Result<(PathBuf, PathBuf)
     Ok((home, tmp))
 }
 
-/// Ensure a scrubbed env still has a PATH. Planned tasks carry PATH in their
-/// hashed action env; ad-hoc/uncached tasks fall back to the host PATH so bare
+/// Ensure a scrubbed env still has a PATH. Sandboxed tasks carry PATH in their
+/// hashed base env; ad-hoc/uncached tasks fall back to the host PATH so bare
 /// commands like `sh` still resolve after `env_clear`.
 pub(crate) fn ensure_path(env: &mut BTreeMap<String, String>) {
     if env.contains_key("PATH") {
@@ -516,6 +517,22 @@ pub(crate) fn sandbox_command_env(
     let joined = std::env::join_paths(entries).context("join tool PATH entries")?;
     command_env.insert("PATH".to_owned(), joined.to_string_lossy().into_owned());
     Ok(command_env)
+}
+
+/// Digest of everything about a `run()` action other than its staged inputs
+/// and declared outputs: argv, the merged env it will execute with, the
+/// workspace configuration digest, display, and tool specs.
+pub(crate) fn live_action_digest(
+    opts: &ExecRunOpts,
+    base_env: &BTreeMap<String, String>,
+) -> Result<String> {
+    digest_json(&serde_json::json!({
+        "argv": opts.argv,
+        "env": base_env,
+        "config_digest": opts.config_digest,
+        "display": opts.display,
+        "tools": opts.tools,
+    }))
 }
 
 pub(crate) fn exec_run_inner(
@@ -574,13 +591,14 @@ pub(crate) fn exec_run_inner(
         });
     }
 
-    // Compute action digest.
-    let action_digest = digest_json(&serde_json::json!({
-        "argv": opts.argv,
-        "env": opts.env,
-        "display": opts.display,
-        "tools": opts.tools,
-    }))?;
+    // Compute action digest. The env is the merged map the command will run
+    // with (declared env over the allowlisted host snapshot), so ambient
+    // changes to passthrough vars invalidate the cache. Per-sandbox
+    // HOME/TMPDIR and tool PATH entries are added after digesting — their
+    // paths are nondeterministic and must not be keyed.
+    let mut base_env = passthrough_env_snapshot();
+    base_env.extend(opts.env.clone());
+    let action_digest = live_action_digest(&opts, &base_env)?;
 
     // Compute task key.
     let out_specs: Vec<serde_json::Value> = opts
@@ -626,7 +644,6 @@ pub(crate) fn exec_run_inner(
             task_key,
             action_digest,
             input_digests,
-            dependency_keys: vec![],
             named_caches: vec![],
             outputs,
         };
@@ -650,8 +667,6 @@ pub(crate) fn exec_run_inner(
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("run() argv must not be empty"))?;
 
-    let mut base_env = passthrough_env_snapshot();
-    base_env.extend(opts.env.clone());
     let mut command_env = sandbox_command_env(&base_env, &tool_path_entries)?;
     let (home_dir, tmp_dir) = sandbox_home_tmp(&sandbox_root)?;
     command_env.insert("HOME".to_owned(), home_dir.to_string_lossy().into_owned());
@@ -743,7 +758,6 @@ pub(crate) fn exec_run_inner(
             task_key,
             action_digest,
             input_digests,
-            dependency_keys: vec![],
             named_caches: vec![],
             outputs: cached_outputs,
         };
@@ -852,4 +866,58 @@ fn direct_tool_path_entries(tools: &[ExecToolSpec]) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(path_entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest_opts(env: &[(&str, &str)], config_digest: &str) -> ExecRunOpts {
+        ExecRunOpts {
+            argv: vec!["sh".to_owned(), "-c".to_owned(), "true".to_owned()],
+            display: "digest test".to_owned(),
+            env: env
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            config_digest: config_digest.to_owned(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            tools: Vec::new(),
+            impure: false,
+            force_cache: false,
+            sandbox: true,
+            no_cache: false,
+        }
+    }
+
+    fn env_map(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn action_digest_keys_passthrough_env() {
+        // The merged base env (declared env over the allowlisted host
+        // snapshot) is part of the action digest, so an ambient change to a
+        // passthrough var like TZ or PATH must produce a different key.
+        let opts = digest_opts(&[], "cfg");
+        let a = live_action_digest(&opts, &env_map(&[("TZ", "UTC")])).unwrap();
+        let b = live_action_digest(&opts, &env_map(&[("TZ", "UTC")])).unwrap();
+        let c = live_action_digest(&opts, &env_map(&[("TZ", "America/New_York")])).unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn action_digest_keys_config_digest() {
+        let base_env = env_map(&[("PATH", "/usr/bin")]);
+        let a = live_action_digest(&digest_opts(&[], "cfg-1"), &base_env).unwrap();
+        let b = live_action_digest(&digest_opts(&[], "cfg-1"), &base_env).unwrap();
+        let c = live_action_digest(&digest_opts(&[], "cfg-2"), &base_env).unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
 }

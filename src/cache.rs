@@ -13,7 +13,7 @@ use walkdir::WalkDir;
 use crate::exec::ExecToolSpec;
 use crate::spike::{Artifact, NamedCache, Plan, Task};
 
-pub(crate) const TASK_CACHE_VERSION: u32 = 3;
+pub(crate) const TASK_CACHE_VERSION: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // Cache types
@@ -79,7 +79,6 @@ pub(crate) struct TaskCacheRecord {
     pub(crate) task_key: String,
     pub(crate) action_digest: String,
     pub(crate) input_digests: Vec<CacheInputDigest>,
-    pub(crate) dependency_keys: Vec<(String, String)>,
     pub(crate) named_caches: Vec<NamedCacheBinding>,
     pub(crate) outputs: Vec<CachedArtifact>,
 }
@@ -180,7 +179,6 @@ pub(crate) fn materialize_embedded_output_task(
             task_key: cache.task_key.clone(),
             action_digest: cache.action_digest.clone(),
             input_digests: cache.input_digests.clone(),
-            dependency_keys: cache.dependency_keys.clone(),
             named_caches: cache.named_caches.clone(),
             outputs,
         };
@@ -204,7 +202,6 @@ pub(crate) fn materialize_task_outputs_without_record(
         task_key: cache.task_key.clone(),
         action_digest: cache.action_digest.clone(),
         input_digests: cache.input_digests.clone(),
-        dependency_keys: cache.dependency_keys.clone(),
         named_caches: cache.named_caches.clone(),
         outputs,
     };
