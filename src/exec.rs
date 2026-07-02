@@ -406,7 +406,7 @@ pub(crate) fn materialize_tools_into_sandbox(
     Ok(path_entries)
 }
 
-fn validate_tool_name(name: &str) -> Result<()> {
+pub(crate) fn validate_tool_name(name: &str) -> Result<()> {
     if name.is_empty()
         || !name
             .chars()

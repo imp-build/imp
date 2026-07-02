@@ -1184,6 +1184,26 @@ fn register_globals<'js>(
     )?;
     globals.set("__host_which", host_which)?;
 
+    // __host_native_tool_artifact(name) → tool-root directory path; throws if
+    // name isn't found on PATH.
+    let host_native_tool_artifact = Function::new(
+        ctx.clone(),
+        move |name: String| -> rquickjs::Result<String> {
+            let resolved = which_executable(&name).ok_or_else(|| {
+                rquickjs::Error::new_loading_message(
+                    "nativeTool",
+                    format!("no '{name}' executable found on PATH"),
+                )
+            })?;
+            let root = crate::cache::ensure_native_tool_artifact(&name, Path::new(&resolved))
+                .map_err(|e| {
+                    rquickjs::Error::new_loading_message("nativeTool", format!("{e:#}"))
+                })?;
+            Ok(root.to_string_lossy().into_owned())
+        },
+    )?;
+    globals.set("__host_native_tool_artifact", host_native_tool_artifact)?;
+
     // __host_read_file(path) → string
     let exec_root_rf = Arc::clone(&exec_root);
     let wc_rf = workspace_root.clone();

@@ -1048,6 +1048,12 @@ export function which(name) {
     return result ?? null;
 }
 
+export function nativeToolArtifact(name) {
+    const result = __host_native_tool_artifact(name);
+    _trace_effect({ event: "effect", kind: "nativeToolArtifact", name, result });
+    return result;
+}
+
 export function read_file(path) {
     const result = __host_read_file(path);
     _trace_effect({ event: "effect", kind: "read_file", path });

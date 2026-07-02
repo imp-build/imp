@@ -144,6 +144,29 @@ pub(crate) fn cache_root() -> Result<PathBuf> {
     bail!("no cache root candidates available")
 }
 
+/// Ensure `<cache_root>/native-tools/<name>/<name>` is a symlink to `resolved`,
+/// creating or repairing it if missing/stale. Returns the tool-root directory.
+/// Bypasses cachePut (see copy_dir_into in spike.rs) because that path
+/// dereferences symlinks into real-byte copies; run()'s tool materialization
+/// is expected to symlink the tool root wholesale, so the artifact itself
+/// must already be the symlink, not a copy.
+pub(crate) fn ensure_native_tool_artifact(name: &str, resolved: &Path) -> Result<PathBuf> {
+    crate::exec::validate_tool_name(name)?;
+    let root = cache_root()?.join("native-tools").join(name);
+    std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
+    let link = root.join(name);
+    if std::fs::read_link(&link).ok().as_deref() != Some(resolved) {
+        let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(resolved, &link)
+            .with_context(|| format!("symlink {} -> {}", link.display(), resolved.display()))?;
+        #[cfg(not(unix))]
+        std::fs::copy(resolved, &link)
+            .with_context(|| format!("copy {} -> {}", resolved.display(), link.display()))?;
+    }
+    Ok(root)
+}
+
 pub(crate) fn workspace_cache_id(workspace_root: &Path) -> String {
     digest_bytes(workspace_root.to_string_lossy().as_bytes())
 }
