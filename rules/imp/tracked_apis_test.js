@@ -1,5 +1,5 @@
-import { describe, expect, test } from "//rules/imp/test";
-import { env, which, glob, paths, read_file, run, getMemoTrace, resetMemoState, memo, setIntrospectMode, workspace_mutation, configure, configuration } from "imp:core";
+import { describe, expect, test, withFakeRun } from "//rules/imp/test";
+import { env, which, glob, paths, read_file, run, getMemoTrace, resetMemoState, memo, workspace_mutation, configure, configuration } from "imp:core";
 
 describe("tracked runtime APIs", () => {
 
@@ -129,16 +129,16 @@ test("read_file reads a file written by run", async () => {
     expect(content.trim()).toBe("tracked");
 });
 
-test("setIntrospectMode: run() returns exitCode 0 without executing", async () => {
+test("withFakeRun: run() resolves without executing and still traces", async () => {
     resetMemoState();
-    setIntrospectMode(true);
-    const result = await run({ argv: ["sh", "-c", "exit 99"], display: "should-not-run" });
-    setIntrospectMode(false);
+    const realHostRun = globalThis.__host_run;
+    const result = await withFakeRun(() =>
+        run({ argv: ["sh", "-c", "exit 99"], display: "should-not-run" }));
     expect(result.exitCode).toBe(0);
+    expect(globalThis.__host_run).toBe(realHostRun);
     const { trace } = getMemoTrace();
     const effects = trace.filter(t => t.event === "effect" && t.kind === "run");
     expect(effects.length).toBe(1);
-    expect(effects[0].dry_run).toBe(true);
     expect(effects[0].display).toBe("should-not-run");
 });
 

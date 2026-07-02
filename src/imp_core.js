@@ -1059,30 +1059,6 @@ export function read_file(path) {
     return result;
 }
 
-/**
- * Write file content to a workspace path as a cacheable execution task.
- * Content is computed at plan-evaluation time; the write happens at execution time.
- * @param {{ path: string, content: string, inputs?: any[], display?: string }} opts
- */
-export function write_file(opts) {
-    const inputs = _materialise_inputs(opts.inputs);
-    const effect = {
-        event: "effect",
-        kind: "write_file",
-        display: opts.display ?? `write ${opts.path}`,
-        path: opts.path,
-        content: opts.content,
-        inputs,
-    };
-    if (_introspect_mode) {
-        effect.dry_run = true;
-        _trace_effect(effect);
-        return { written: opts.path };
-    }
-    _trace_effect(effect);
-    return { written: opts.path };
-}
-
 function _trace_effect_in_context(entry, ctx) {
     const stack = ctx.stack;
     if (stack.length > 0) entry.owner = stack[stack.length - 1];

@@ -1,4 +1,4 @@
-import { target, isIntrospectMode, product, run, workspaceFiles } from "imp:core";
+import { target, product, run, workspaceFiles } from "imp:core";
 
 const suites = [];
 const tests = [];
@@ -124,6 +124,21 @@ export function test(name, fn) {
 
 export const it = test;
 
+/**
+ * Run a test body with `__host_run` stubbed out, so `run()` calls resolve
+ * without executing anything. Effects are still traced (tracing happens
+ * before the host bridge), so `getMemoTrace()` assertions work unchanged.
+ */
+export async function withFakeRun(fn) {
+    const real = globalThis.__host_run;
+    globalThis.__host_run = async () => ({ stdout: "", stderr: "", exitCode: 0 });
+    try {
+        return await fn();
+    } finally {
+        globalThis.__host_run = real;
+    }
+}
+
 async function runRegisteredTests({ from = 0, label = "tests" } = {}) {
     const selected = tests.slice(from);
     if (selected.length === 0) {
@@ -151,14 +166,6 @@ async function runRegisteredTests({ from = 0, label = "tests" } = {}) {
 }
 
 export const test_product = product("rules-test", "test", async function test_product(handle) {
-    if (isIntrospectMode()) {
-        return run({
-            argv: ["sh", "-c", "true"],
-            display: `test JS rules ${handle.attrs.root}`,
-            impure: true,
-        });
-    }
-
     const testModules = handle.attrs.tests
         .split(",")
         .map((testModule) => testModule.trim())

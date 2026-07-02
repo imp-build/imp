@@ -11,7 +11,6 @@ import {
 	product,
 	registerBuildRule,
 	run,
-	write_file,
 	sourcesField,
 	logDebug,
 	configuration,
@@ -815,10 +814,17 @@ export const odinGenRun = product("odin-gen", "odin-source", async function odin
     if (handle.attrs.generator) {
         const mod = await import(handle.attrs.generator);
         const content = await mod.generate({ srcs: handle.attrs.srcs });
-        return write_file({
-            path: outPath,
-            content,
-            inputs: [inputFiles],
+        // Content rides in argv so it keys the task cache; no shell
+        // interpolation touches it (same pattern as vs.js writeJsonFile).
+        return run({
+            argv: [
+                "sh", "-c",
+                'mkdir -p "$(dirname "$1")" && printf %s "$2" > "$1"',
+                "odin-gen-write",
+                output_path(outPath),
+                content,
+            ],
+            outputs: [output(outPath)],
             display: `generate ${outPath}`,
         });
     }
