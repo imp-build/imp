@@ -120,10 +120,10 @@ export function namedCache(opts) {
  *
  * @param {object} opts
  * @param {string} opts.name Goal name, e.g. "test" or "fmt".
- * @param {string} [opts.productPolicy="default"] Product to request from each
- *   selected target. Use "default" to request each target's default product
- *   (first non-"sources" rule), or a product name to request that specific
- *   product (targets lacking a rule for it are skipped).
+ * @param {string} [opts.productPolicy] Product to request from each selected
+ *   target. Defaults to the product named after the goal itself (goals map
+ *   uniformly onto products: build → "build", fmt → "fmt", …). Targets whose
+ *   kind lacks the product are skipped during selector-less selection.
  * @returns {void}
  */
 export function goal(opts) {

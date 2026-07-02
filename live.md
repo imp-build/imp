@@ -36,15 +36,25 @@ stays; work is discovered by fan-out, not pre-planned.
   no selectors → `//:default` if present, else every target with a product for
   the goal; Named-policy goals skip kinds without that product.
 
-## Stage 1 — Wire all goals live
+## Stage 1 — Wire all goals live ✅ DONE (commit f01aaa1)
 
-- `src/main.rs`: add subcommands `Test | Fmt | Lint | Package | Run` mirroring
-  `Build` (`:131-144`; same fields: selectors, `--jobs`, `--js-workers`,
-  `--no-cache`) matching the six goals in `HostState::default()` (`spike.rs:242-247`).
-- Rename `cmd_build_planned` (`main.rs:432`) → `cmd_execute_goal(goal, ...)`;
-  replace hardcoded `"build"` (`:457`, `:698`) with the param; UI label
-  `format!("execute {goal}")` (`:500`). Fix stale "planned" doc/help text.
-- Default selectors: existing `select_roots` semantics for every goal, no changes.
+- Done via a shared `#[derive(clap::Args)] struct GoalArgs` (selectors, `--jobs`,
+  `--js-workers`, `--no-cache`); enum variants `Build(GoalArgs) | Test | Fmt |
+  Lint | Package | Run` all dispatch to `cmd_execute_goal(goal, ...)` (renamed
+  from `cmd_build_planned`). Goal name threaded through goal lookup, UI labels,
+  watchdog error, and `execute_goal_live`. Stale "planned" help text fixed.
+- Verified: `cargo build`/`cargo test` green; `fmt` (2/2 targets), `lint`,
+  `build //:vs //:generated_stamp` (×2, second run clean), and `test` on each
+  `rules_test` target individually all pass through the new wiring.
+- **Selector syntax note**: `matches_selector` (`spike.rs:2189`) accepts full
+  addresses (`//rules/odin:rules_test`), bare names, or `:name` suffix — NOT
+  package prefixes. The verification commands below originally used
+  `test //rules/odin`, which does not match anything.
+- The imp repo's own root `BUILD.js` had broken demo targets (`//:cmake` with
+  a nonexistent `CMakeLists.txt` entrypoint; `//:joltphysics` whose `**/*.h`/
+  `**/*.cpp` glob swept the repo's own `target/` rquickjs artifacts into
+  sandboxes; `//:jodin` depending on cmake). Removed — end-to-end goal testing
+  happens in `../ottar` instead.
 
 ## Stage 2 — Harden the live cache key (before test ports so they assert against it)
 
@@ -153,6 +163,16 @@ Keep the 30s stall watchdog (`main.rs:694-725`); JS memo layer already throws
 precise in-JS cycle errors. Cheap improvement: include the outstanding
 `pending_displays` task labels (`main.rs:582`) in the watchdog error message.
 
+**Stage 1 finding — hang after root-task failure (observed live, pre-existing):**
+when a root task fails (e.g. a `run()` exits nonzero), the error is printed but
+`execute_goal_live` never resolves and the process hangs indefinitely. The
+watchdog does not fire — the scheduler apparently still counts the failed lane
+as outstanding, so `scheduler.outstanding() == 0` is never true. Worse, SIGTERM
+only sets the cancellation flag (`install_termination_signal_flag`), which the
+stalled state never checks, so `timeout`/`kill` need SIGKILL. Fixing failure
+propagation on the live path should be treated as the core of this stage, not
+just the watchdog message.
+
 ## Stage 7 — Cleanup
 
 - `BUILD.js:15` stamp text "planned executor ran" → neutral.
@@ -170,14 +190,47 @@ code, so the big deletion lands on a validated live path.
 export XDG_CACHE_HOME=/tmp/imp-cache   # sandboxed runs: $HOME may be read-only
 cargo build && cargo test
 cargo run -- build                        # live build, then again → cache hits
-cargo run -- test //rules/odin //rules/imp //rules/c/cmake   # JS rule tests via new goal wiring
+# NOTE: package-prefix selectors don't match; use full addresses. Run these
+# separately — multiple rules_test roots in one invocation corrupt each other
+# (shared JS memo state; see follow-ups).
+cargo run -- test //rules/odin:rules_test
+cargo run -- test //rules/imp:rules_test
+cargo run -- test //rules/c/cmake:rules_test
 cargo run -- fmt
 cargo run -- build --no-cache
-cargo run -- build //:vs#vs               # run()-based file generation still works
+cargo run -- build //:vs#build            # run()-based file generation still works
 ```
 
 ## Surfaced separately (not in scope)
 
-- `default_product_for_kind` (`spike.rs:2179-2187`) picks the first registered
-  non-sources/collection/test product in BTreeMap order — which product `build`
-  picks for a multi-product kind is alphabetical luck. Design smell to discuss.
+- ~~`default_product_for_kind` picks the first registered product in BTreeMap
+  order — alphabetical luck.~~ **Resolved 2026-07-02**: this bit for real once
+  fmt/format-check products were registered for odin-package (`build` silently
+  dispatched fmt in ottar — "built 1 target", no binary, reformatted sources).
+  Fixed by making goals map uniformly onto product names: build-goal products
+  register as `"build"` (odinBuild, cmakeLib, vs, bundle, stamp, odinGen), the
+  `Default` goal policy is deleted, and `Goal.product` is just a name. Explicit
+  selectors changed: `//:app#odin-package` → `//:app#build`.
+
+## Follow-up tasks (from Stage 1 verification, 2026-07-02)
+
+1. **Live path hangs after a root-task failure** (details under Stage 6): a
+   failed task leaves the process wedged — no error propagation, watchdog never
+   fires, SIGTERM ignored (cancellation flag set but never honored in that
+   state), only SIGKILL works. Verified identical on pre-Stage-1 HEAD, so it's
+   not a regression — but it makes every goal command unusable on failure.
+   Highest-priority fix; fold into Stage 6 (or do sooner).
+2. **`rules_test` targets cannot share one invocation**: each passes alone, but
+   `test //rules/odin:rules_test //rules/imp:rules_test` fails with a bogus
+   "memo cycle detected / repeated key" — suites call `resetMemoState()` in the
+   shared JS context and corrupt concurrently-evaluating roots. Bare
+   `imp test` (which selects all three) hits this too. Address alongside the
+   Stage 3/5 test rework — either isolate per-root JS contexts for rules-test
+   or stop the suites from resetting global memo state.
+3. **Selector UX**: package-prefix selectors (`//rules/odin`) silently match
+   nothing and error; consider supporting package prefixes or improving the
+   error message in `matches_selector` (`spike.rs:2189`).
+4. Repo-root `BUILD.js` demo targets were removed (broken; see Stage 1 notes).
+   If the repo should keep a self-contained end-to-end example, add one with
+   real sources (e.g. a minimal CMakeLists + .cpp under a subdirectory-scoped
+   glob) rather than root-level `**/*` globs that sweep `target/`.

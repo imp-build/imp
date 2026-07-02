@@ -1,6 +1,6 @@
 import { target, product, run, output, output_path } from "imp:core";
 
-export const file = product("stamp-file", "file", async function file(handle) {
+export const file = product("stamp-file", "build", async function file(handle) {
     return run({
         argv: [
             "sh",

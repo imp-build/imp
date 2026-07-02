@@ -651,7 +651,7 @@ function empty_package_error(handle, path) {
  * @param {object} handle Target handle returned by odinPackage().
  * @returns {Promise<object>} Run result.
  */
-export const odinBuild = product("odin-package", "odin-package",
+export const odinBuild = product("odin-package", "build",
     async function odinBuild(handle) {
         const toolchainHandle = handle.attrs.toolchain;
         const odinToolSpec = toolchainHandle
@@ -807,7 +807,7 @@ export const gen_input_sources = memo(async function gen_input_sources(handle) {
     return glob({ root: ".", include: handle.attrs.srcs || [], exclude: [outPath] });
 });
 
-export const odinGenRun = product("odin-gen", "odin-source", async function odinGenRun(handle) {
+export const odinGenRun = product("odin-gen", "build", async function odinGenRun(handle) {
     const inputFiles = await gen_input_sources(handle);
     const outPath = declared_path(handle, handle.attrs.out);
 

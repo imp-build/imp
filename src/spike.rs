@@ -114,16 +114,10 @@ pub struct PlatformDef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Goal {
     pub name: String,
-    pub product_policy: GoalProductPolicy,
-}
-
-/// How a goal selects a product from each matching target.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GoalProductPolicy {
-    /// Use the target's default product (first non-`"sources"` rule).
-    Default,
-    /// Request this specific product; targets lacking a rule for it are skipped.
-    Named(String),
+    /// Product requested from each selected target. Goals map uniformly onto
+    /// products (build → "build", fmt → "fmt", …); targets whose kind lacks
+    /// the product are skipped during selector-less selection.
+    pub product: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -180,19 +174,12 @@ struct HostState {
 impl Default for HostState {
     fn default() -> Self {
         let mut goals = BTreeMap::new();
-        for (name, policy) in [
-            ("build", GoalProductPolicy::Default),
-            ("test", GoalProductPolicy::Named("test".to_owned())),
-            ("fmt", GoalProductPolicy::Named("fmt".to_owned())),
-            ("lint", GoalProductPolicy::Named("lint".to_owned())),
-            ("package", GoalProductPolicy::Named("package".to_owned())),
-            ("run", GoalProductPolicy::Named("run".to_owned())),
-        ] {
+        for name in ["build", "test", "fmt", "lint", "package", "run"] {
             goals.insert(
                 name.to_owned(),
                 Goal {
                     name: name.to_owned(),
-                    product_policy: policy,
+                    product: name.to_owned(),
                 },
             );
         }
@@ -759,24 +746,22 @@ fn register_globals<'js>(
             if name.is_empty() {
                 return Err(action_spec_error("goal name must not be empty".to_owned()));
             }
-            let product_policy = {
+            let product = {
                 let s: String = policy_val.get().map_err(|_| {
                     action_spec_error("goal productPolicy must be a string".to_owned())
                 })?;
+                // "default" requests the product named after the goal itself.
                 if s == "default" {
-                    GoalProductPolicy::Default
+                    name.clone()
                 } else {
-                    GoalProductPolicy::Named(s)
+                    s
                 }
             };
             let mut hs = state_g.lock().unwrap();
             if !hs.goals.contains_key(&name) {
                 hs.goals.insert(
                     name.clone(),
-                    Goal {
-                        name,
-                        product_policy,
-                    },
+                    Goal { name, product },
                 );
             }
             Ok(())
@@ -1993,30 +1978,8 @@ pub(crate) fn select_roots<'a>(
 /// Return the product a goal would request for a given target kind, or `None`
 /// if the goal has nothing to produce for that kind.
 fn goal_product_for_kind(workspace: &Workspace, goal: &Goal, kind: &str) -> Option<String> {
-    match &goal.product_policy {
-        GoalProductPolicy::Default => {
-            default_product_for_kind(workspace, kind).map(|s| s.to_owned())
-        }
-        GoalProductPolicy::Named(p) => {
-            let key = (kind.to_owned(), p.clone());
-            if workspace.products.contains_key(&key) {
-                Some(p.clone())
-            } else {
-                None
-            }
-        }
-    }
-}
-
-/// Infer the default product for a target kind from target attrs or registered products.
-fn default_product_for_kind<'a>(workspace: &'a Workspace, kind: &str) -> Option<&'a str> {
-    for ((k, p), _) in &workspace.products {
-        if k == kind && !matches!(p.as_str(), "sources" | "collection" | "test") {
-            return Some(p.as_str());
-        }
-    }
-
-    Option::None
+    let key = (kind.to_owned(), goal.product.clone());
+    workspace.products.contains_key(&key).then(|| goal.product.clone())
 }
 
 fn matches_selector(target: &Target, selector: &str) -> bool {
@@ -2228,8 +2191,12 @@ pub fn format_products(workspace: &Workspace, w: &mut String) -> std::fmt::Resul
         writeln!(w, "  (none)")?;
     } else {
         for kind in &kinds {
-            let default_prod = default_product_for_kind(workspace, kind).unwrap_or("<none>");
-            writeln!(w, "  - {kind} (default product: {default_prod})")?;
+            let build_prod = workspace
+                .products
+                .contains_key(&((*kind).to_owned(), "build".to_owned()))
+                .then_some("build")
+                .unwrap_or("<none>");
+            writeln!(w, "  - {kind} (build product: {build_prod})")?;
         }
     }
     writeln!(w)?;
@@ -2988,7 +2955,7 @@ export const sources = memo(async function sources(handle) {
     return glob({ root: ".", include: handle.attrs.sources || [] });
 });
 
-export const native_link_library = product("cmake-lib", "native-link-library", async function native_link_library(handle) {
+export const native_link_library = product("cmake-lib", "build", async function native_link_library(handle) {
     const inputs = [];
     for (const dep of handle.attrs.deps || []) {
         if (dep.kind === "cpp-sources") inputs.push(await sources(dep));
@@ -3011,7 +2978,7 @@ export const sources = memo(async function sources(handle) {
     return glob({ root: ".", include: handle.attrs.sources || [] });
 });
 
-export const odin_package = product("odin-package", "odin-package", async function odin_package(handle) {
+export const odin_package = product("odin-package", "build", async function odin_package(handle) {
     const srcs = await sources(handle);
     return run({ argv: ["sh", "-c", "true"], inputs: [srcs], display: "odin build", impure: true });
 });
@@ -3028,7 +2995,7 @@ export const sources = memo(async function sources(handle) {
     return glob({ root: ".", include: handle.attrs.sources || [] });
 });
 
-export const bundle = product("asset", "bundle", async function bundle(handle) {
+export const bundle = product("asset", "build", async function bundle(handle) {
     const srcs = await sources(handle);
     return run({ argv: ["sh", "-c", "true"], inputs: [srcs], display: `bundle ${handle.attrs.sources.join(",")}`, impure: true });
 });
@@ -3225,10 +3192,10 @@ export const app = target({ kind: "sample" });
         // Products registered by workspace.js imports.
         assert!(workspace
             .products
-            .contains_key(&("odin-package".into(), "odin-package".into())));
+            .contains_key(&("odin-package".into(), "build".into())));
         assert!(workspace
             .products
-            .contains_key(&("asset".into(), "bundle".into())));
+            .contains_key(&("asset".into(), "build".into())));
 
         // Targets declared by BUILD.js files.
         assert!(workspace
@@ -3260,7 +3227,7 @@ export const actionName = "external build {address}";
 import { target, product, run } from "imp:core";
 import { actionName } from "//rules/external/helper";
 
-export const external_product = product("external", "external-product", async function external_product(handle) {
+export const external_product = product("external", "build", async function external_product(handle) {
     return run({ argv: ["sh", "-c", "true"], display: actionName.replace("{address}", handle.label.address), impure: true });
 });
 
@@ -3294,7 +3261,7 @@ export const app = externalThing("app");
         let workspace = load_workspace(p).await.unwrap();
         assert!(workspace
             .products
-            .contains_key(&("external".into(), "external-product".into())));
+            .contains_key(&("external".into(), "build".into())));
         assert_eq!(
             workspace.targets["//:app"].attrs["name"].as_str().unwrap(),
             "app"
@@ -3306,7 +3273,7 @@ export const app = externalThing("app");
         let roots = select_roots(&workspace.workspace, goal_def, &["app".into()]).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].0.address, "//:app");
-        assert_eq!(roots[0].1, "external-product");
+        assert_eq!(roots[0].1, "build");
         run_goal_live(&workspace, p, "build", &["app".into()])
             .await
             .unwrap();
@@ -3347,7 +3314,7 @@ export const configured_flags = memo(async function configured_flags(handle) {
     return Object.entries(config.flags || {}).map(([name, value]) => `--${name}=${value}`);
 });
 
-export const configured_product = product("configured", "configured-product", async function configured_product(handle) {
+export const configured_product = product("configured", "build", async function configured_product(handle) {
     const srcs = await sources(handle);
     const flags = await configured_flags(handle);
     return run({ argv: ["sh", "-c", "true"], inputs: [srcs], display: `configured ${flags.join(" ")}`, impure: true });
@@ -3383,7 +3350,7 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
         let roots = select_roots(&workspace.workspace, goal_def, &[]).unwrap();
         assert!(roots
             .iter()
-            .any(|(t, product)| t.address == "//:pkg" && product == "configured-product"));
+            .any(|(t, product)| t.address == "//:pkg" && product == "build"));
     }
 
     #[tokio::test]
@@ -3395,7 +3362,7 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
             select_roots(&workspace.workspace, goal_def, &["//assets:ui".into()]).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].0.address, "//assets:ui");
-        assert_eq!(roots[0].1, "bundle");
+        assert_eq!(roots[0].1, "build");
         run_goal_live(&workspace, root.path(), "build", &["//assets:ui".into()])
             .await
             .unwrap();
@@ -3479,7 +3446,7 @@ import { namedCache, output, product, run, target } from "imp:core";
 
 namedCache({ name: "test-tools" });
 
-export const file = product("tool-user", "file", async function file(handle) {
+export const file = product("tool-user", "build", async function file(handle) {
     return run({
         argv: ["hello-tool"],
         tools: [{
@@ -3674,10 +3641,10 @@ export const ignored = missing;
         let mut out = String::new();
         format_products(&workspace, &mut out).unwrap();
         assert!(out.contains("Target Kinds:"));
-        assert!(out.contains("  - odin-package (default product: odin-package)"));
+        assert!(out.contains("  - odin-package (build product: build)"));
         assert!(out.contains("Products:"));
         assert!(out.contains("  odin-package:"));
-        assert!(out.contains("    - odin-package"));
+        assert!(out.contains("    - build"));
     }
 
     #[tokio::test]

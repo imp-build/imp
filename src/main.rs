@@ -100,7 +100,7 @@ enum Cmd {
 
 #[derive(clap::Args)]
 struct GoalArgs {
-    /// Target selectors, e.g. //:app or //:app#odin-package
+    /// Target selectors, e.g. //:app or //:app#build
     selectors: Vec<String>,
     /// Maximum number of ready tasks to execute concurrently
     #[arg(long, default_value_t = 1)]

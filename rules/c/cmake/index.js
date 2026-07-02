@@ -65,7 +65,7 @@ function declared_path(handle, path = ".") {
 // Memo/product functions for C/CMake targets
 // ---------------------------------------------------------------------------
 
-export const tool = product("cmake-toolchain", "tool", async function tool(handle) {
+export const tool = product("cmake-toolchain", "build", async function tool(handle) {
     acquireCmakeToolchain(handle.attrs.version);
     return { name: "cmake", version: handle.attrs.version };
 });
@@ -75,7 +75,7 @@ export const sources = memo(async function sources(handle) {
     return glob({ root, include: handle.attrs.srcs || DEFAULT_CPP_SRCS });
 });
 
-export const native_link_library = product("cmake-lib", "native-link-library", async function native_link_library(handle) {
+export const native_link_library = product("cmake-lib", "build", async function native_link_library(handle) {
     const srcPath = declared_path(handle, handle.attrs.src || ".");
     const buildDirPath = handle.attrs.buildDir || `build/${srcPath === "." ? "cmake" : srcPath}`;
     const cmakeArgs = handle.attrs.cmakeArgs || [];

@@ -4,7 +4,7 @@
 // odin-package target, in Debug and Release variants:
 //   .vs/launch.vs.json, .vs/tasks.vs.json, .vscode/launch.json, .vscode/tasks.json
 //
-// Invoke as a product: `imp build //:<vs-target>#vs`.
+// Invoke as a product: `imp build //:<vs-target>#build`.
 
 import { target, product, run, output, output_path, workspaceTargets, platformInfo } from "imp:core";
 
@@ -46,7 +46,7 @@ function writeJsonFile(path, value) {
     });
 }
 
-export const vs = product("vs-workspace", "vs", async function vs(handle) {
+export const vs = product("vs-workspace", "build", async function vs(handle) {
     const isWindows = platformInfo().os === "windows";
     const debuggerType = isWindows ? "cppvsdbg" : "lldb-dap";
 
@@ -59,7 +59,7 @@ export const vs = product("vs-workspace", "vs", async function vs(handle) {
         const name = targetName(entry.address);
         const outRel = outputPath(entry, name);
         const outWin = windowsOutput(outRel);
-        const buildSelector = `${entry.address}#odin-package`;
+        const buildSelector = `${entry.address}#build`;
 
         for (const mode of MODES) {
             const label = `${name} (${mode})`;
