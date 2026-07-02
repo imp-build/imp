@@ -1,8 +1,7 @@
 //! QuickJS runtime integration for workspace loading and live product evaluation.
 //!
-//! The task graph model and executor still live in `spike`; this module is the
-//! public home for the embedded JavaScript runtime APIs while that larger file
-//! is split down further.
+//! This module is the public home for the embedded JavaScript runtime APIs
+//! while the larger `spike` module is split down further.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -143,6 +142,5 @@ impl std::ops::Deref for LiveWorkspace {
 
 #[allow(unused_imports)]
 pub use crate::spike::{
-    evaluate_product_json, generate_build_files, introspect_product, load_workspace,
-    load_workspace_with_host_log, IntrospectResult,
+    evaluate_product_json, generate_build_files, load_workspace, load_workspace_with_host_log,
 };

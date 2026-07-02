@@ -468,7 +468,6 @@ let _memo_deps = [];
 let _memo_trace = [];
 let _key_display = new Map();  // key_string → "fnName(arg, ...)"
 let _key_product_call = new Map();  // key_string → {target_id, product_name} for product calls
-let _introspect_mode = false;
 
 // Task-tree tracking. Each memo evaluation is a node with a numeric id. The
 // active owner and call stack are stored in an async context, and the embedded
@@ -833,8 +832,8 @@ function _pop_call(key_string, contextId) {
  * Register a memoized build function as a CLI-dispatchable product.
  *
  * Calling `product(kind, name, fn)` is equivalent to `memo(fn)` plus
- * registering the result so that `imp build --planned //:target#name`
- * dispatches to it when the target's kind matches.
+ * registering the result so that goal execution (e.g. `imp build
+ * //:target#name`) dispatches to it when the target's kind matches.
  *
  * @param {string} kind Target kind, e.g. "odin-package".
  * @param {string} name Product name, e.g. "executable".
@@ -944,10 +943,6 @@ export function getMemoTrace() {
         key_product_calls: Object.fromEntries(_key_product_call),
     };
 }
-
-/** Enable or disable introspect mode. When enabled, run() captures intent instead of executing. */
-export function setIntrospectMode(v) { _introspect_mode = v; }
-export function isIntrospectMode() { return _introspect_mode; }
 
 // ---------------------------------------------------------------------------
 // Tracked runtime APIs (Phase 3)
@@ -1082,11 +1077,6 @@ export function run(opts) {
         forceCache: opts.forceCache === true,
         sandbox: opts.sandbox !== false,
     };
-    if (_introspect_mode) {
-        effect.dry_run = true;
-        _trace_effect_in_context(effect, contextEntry.ctx);
-        return { exitCode: 0, stdout: "", stderr: "" };
-    }
     _trace_effect_in_context(effect, contextEntry.ctx);
     const contextId = contextEntry.id;
     const owner = contextEntry.ctx.owner;
@@ -1134,10 +1124,9 @@ export function workspace_mutation(opts) {
 // Handle registry: maps numeric js_id → enriched handle for product function dispatch.
 globalThis.__imp_handle_by_id = new Map();
 globalThis.__imp_resolve_handle = function(id) { return globalThis.__imp_handle_by_id.get(id); };
-// Expose introspection helpers as globals so Rust can call them without module imports.
+// Expose memo-state helpers as globals so Rust can call them without module imports.
 globalThis.resetMemoState = resetMemoState;
 globalThis.getMemoTrace = getMemoTrace;
-globalThis.setIntrospectMode = setIntrospectMode;
 
 function _fmt(...args) {
     return args.map(a => typeof a === "string" ? a : JSON.stringify(a, null, 2)).join(" ");

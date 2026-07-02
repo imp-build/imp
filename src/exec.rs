@@ -920,4 +920,220 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
+
+    fn run_opts(argv: &[&str], inputs: &[&str], outputs: &[&str]) -> ExecRunOpts {
+        let spec = |paths: &[&str]| {
+            paths
+                .iter()
+                .map(|p| ExecIoSpec {
+                    path: (*p).to_owned(),
+                    kind: "file".to_owned(),
+                })
+                .collect()
+        };
+        ExecRunOpts {
+            argv: argv.iter().map(|a| (*a).to_owned()).collect(),
+            display: "exec test".to_owned(),
+            env: BTreeMap::new(),
+            config_digest: String::new(),
+            inputs: spec(inputs),
+            outputs: spec(outputs),
+            tools: Vec::new(),
+            impure: false,
+            force_cache: false,
+            sandbox: true,
+            no_cache: false,
+        }
+    }
+
+    fn marker_count(marker: &std::path::Path) -> usize {
+        std::fs::read_to_string(marker).map(|s| s.len()).unwrap_or(0)
+    }
+
+    #[test]
+    fn exec_run_unchanged_rerun_hits_task_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker = p.join("runs.txt");
+        let cmd = format!(
+            "printf r >> '{}' && mkdir -p build && printf payload > build/out.txt",
+            marker.display()
+        );
+        let opts = || run_opts(&["sh", "-c", &cmd], &[], &["build/out.txt"]);
+
+        exec_run_inner(p, opts(), None).unwrap();
+        assert_eq!(marker_count(&marker), 1);
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
+            "payload"
+        );
+
+        std::fs::remove_file(p.join("build/out.txt")).unwrap();
+        exec_run_inner(p, opts(), None).unwrap();
+        assert_eq!(marker_count(&marker), 1, "second run must be a cache hit");
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
+            "payload",
+            "cache hit must rematerialize declared outputs"
+        );
+    }
+
+    #[test]
+    fn exec_run_input_edit_invalidates_and_pipeline_chains() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let m1 = p.join("m1.txt");
+        let m2 = p.join("m2.txt");
+        std::fs::write(p.join("src.txt"), "one").unwrap();
+
+        let cmd1 = format!(
+            "printf r >> '{}' && mkdir -p build && cp src.txt build/mid.txt",
+            m1.display()
+        );
+        let cmd2 = format!(
+            "printf r >> '{}' && mkdir -p build && cp build/mid.txt build/out.txt",
+            m2.display()
+        );
+        let stage1 = || run_opts(&["sh", "-c", &cmd1], &["src.txt"], &["build/mid.txt"]);
+        let stage2 = || run_opts(&["sh", "-c", &cmd2], &["build/mid.txt"], &["build/out.txt"]);
+
+        exec_run_inner(p, stage1(), None).unwrap();
+        exec_run_inner(p, stage2(), None).unwrap();
+        assert_eq!((marker_count(&m1), marker_count(&m2)), (1, 1));
+        assert_eq!(std::fs::read_to_string(p.join("build/out.txt")).unwrap(), "one");
+
+        // Unchanged rerun: both stages hit.
+        exec_run_inner(p, stage1(), None).unwrap();
+        exec_run_inner(p, stage2(), None).unwrap();
+        assert_eq!((marker_count(&m1), marker_count(&m2)), (1, 1));
+
+        // Editing the upstream source invalidates both stages through content
+        // digests: stage1 reruns, its new output changes stage2's input digest.
+        std::fs::write(p.join("src.txt"), "two").unwrap();
+        exec_run_inner(p, stage1(), None).unwrap();
+        exec_run_inner(p, stage2(), None).unwrap();
+        assert_eq!((marker_count(&m1), marker_count(&m2)), (2, 2));
+        assert_eq!(std::fs::read_to_string(p.join("build/out.txt")).unwrap(), "two");
+    }
+
+    #[test]
+    fn exec_run_impure_is_not_cached() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker = p.join("runs.txt");
+        let cmd = format!(
+            "printf r >> '{}' && mkdir -p build && printf x > build/out.txt",
+            marker.display()
+        );
+        let opts = || {
+            let mut o = run_opts(&["sh", "-c", &cmd], &[], &["build/out.txt"]);
+            o.impure = true;
+            o
+        };
+        exec_run_inner(p, opts(), None).unwrap();
+        exec_run_inner(p, opts(), None).unwrap();
+        assert_eq!(marker_count(&marker), 2, "impure runs must not be cached");
+    }
+
+    #[test]
+    fn exec_run_force_cache_overrides_impure() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker = p.join("runs.txt");
+        let cmd = format!(
+            "printf r >> '{}' && mkdir -p build && printf x > build/out.txt",
+            marker.display()
+        );
+        let opts = || {
+            let mut o = run_opts(&["sh", "-c", &cmd], &[], &["build/out.txt"]);
+            o.impure = true;
+            o.force_cache = true;
+            o
+        };
+        exec_run_inner(p, opts(), None).unwrap();
+        exec_run_inner(p, opts(), None).unwrap();
+        assert_eq!(marker_count(&marker), 1, "force_cache must cache impure runs");
+    }
+
+    #[test]
+    fn exec_run_missing_declared_output_bails() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let err = match exec_run_inner(
+            p,
+            run_opts(&["sh", "-c", "true"], &[], &["build/never.txt"]),
+            None,
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("missing declared output must fail"),
+        };
+        assert!(err.contains("was not created"), "got: {err}");
+    }
+
+    #[test]
+    fn exec_run_stages_declared_inputs_and_omits_undeclared() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join("declared.txt"), "d").unwrap();
+        std::fs::write(p.join("undeclared.txt"), "u").unwrap();
+        let cmd = "flags=''; [ -f declared.txt ] && flags=\"${flags}A\"; [ -f undeclared.txt ] && flags=\"${flags}B\"; mkdir -p build && printf %s \"$flags\" > build/flags.txt";
+        let mut opts = run_opts(&["sh", "-c", cmd], &["declared.txt"], &["build/flags.txt"]);
+        opts.no_cache = true;
+        exec_run_inner(p, opts, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/flags.txt")).unwrap(),
+            "A",
+            "declared inputs must be staged, undeclared files must be absent"
+        );
+    }
+
+    #[test]
+    fn exec_run_scrubs_non_allowlisted_host_env() {
+        // Not on the passthrough allowlist, so it neither reaches the task nor
+        // perturbs other tests' cache keys.
+        std::env::set_var("IMP_TEST_LEAK_EXEC", "leaked");
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let cmd = "mkdir -p build && printf %s \"${IMP_TEST_LEAK_EXEC:-}\" > build/out.txt";
+        let mut opts = run_opts(&["sh", "-c", cmd], &[], &["build/out.txt"]);
+        opts.no_cache = true;
+        let result = exec_run_inner(p, opts, None);
+        std::env::remove_var("IMP_TEST_LEAK_EXEC");
+        result.unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("build/out.txt")).unwrap(), "");
+    }
+
+    #[test]
+    fn exec_run_materializes_directory_outputs() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker = p.join("runs.txt");
+        let cmd = format!(
+            "printf r >> '{}' && mkdir -p build/dir/nested && printf a > build/dir/a.txt && printf b > build/dir/nested/b.txt",
+            marker.display()
+        );
+        let opts = || {
+            let mut o = run_opts(&["sh", "-c", &cmd], &[], &[]);
+            o.outputs = vec![ExecIoSpec {
+                path: "build/dir".to_owned(),
+                kind: "directory".to_owned(),
+            }];
+            o
+        };
+        exec_run_inner(p, opts(), None).unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("build/dir/a.txt")).unwrap(), "a");
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/dir/nested/b.txt")).unwrap(),
+            "b"
+        );
+
+        // Cache hit rematerializes the directory tree.
+        std::fs::remove_dir_all(p.join("build/dir")).unwrap();
+        exec_run_inner(p, opts(), None).unwrap();
+        assert_eq!(marker_count(&marker), 1);
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/dir/nested/b.txt")).unwrap(),
+            "b"
+        );
+    }
 }
