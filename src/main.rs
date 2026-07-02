@@ -341,6 +341,15 @@ async fn cmd_execute_goal(
 
     let root = tree.root_handle();
     let goal_label = format!("execute {goal}");
+    // Labels of Pending-but-not-Done tasks, shared with the watchdog so a
+    // stall report can say what is stuck.
+    let pending_labels: Arc<std::sync::Mutex<std::collections::HashMap<u64, String>>> =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let render_labels = Arc::clone(&pending_labels);
+    // Explicit render shutdown: in-flight product evaluations abandoned inside
+    // the JS runtime after a failure keep scheduler handles (and thus the event
+    // channel) alive forever, so waiting for channel closure would hang.
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let render = tokio::spawn(async move {
         use scheduler::{LaneKind, TaskEvent, TaskOutcome};
 
@@ -445,14 +454,19 @@ async fn cmd_execute_goal(
             std::collections::HashMap::new();
         let mut sandbox_task_to_slot: std::collections::HashMap<u64, usize> =
             std::collections::HashMap::new();
-        let mut pending_displays: std::collections::HashMap<u64, String> =
-            std::collections::HashMap::new();
         let mut root_tasks: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let mut is_js_memo: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let mut total_js: usize = 0;
         let mut done_js: usize = 0;
 
-        while let Some(event) = events.recv().await {
+        loop {
+            let event = tokio::select! {
+                ev = events.recv() => match ev {
+                    Some(ev) => ev,
+                    None => break,
+                },
+                _ = &mut shutdown_rx => break,
+            };
             match event {
                 TaskEvent::Pending {
                     id,
@@ -463,7 +477,7 @@ async fn cmd_execute_goal(
                     if parent.is_none() {
                         root_tasks.insert(id);
                     }
-                    pending_displays.insert(id, display);
+                    render_labels.lock().unwrap().insert(id, display);
                 }
                 TaskEvent::Running { id, detail } => {
                     if detail.is_none() {
@@ -475,7 +489,7 @@ async fn cmd_execute_goal(
                     }
                 }
                 TaskEvent::Done { id, outcome } => {
-                    pending_displays.remove(&id);
+                    render_labels.lock().unwrap().remove(&id);
 
                     // Track root-task (target) completion on the goal bar.
                     if store.total > 0 && root_tasks.contains(&id) {
@@ -585,15 +599,32 @@ async fn cmd_execute_goal(
     let result = tokio::select! {
         biased;
         r = drive => r,
-        _ = watchdog => Err(anyhow::anyhow!(
-            "{goal} stalled with no runnable work for {STALL_GRACE:?} — likely a dependency cycle"
-        )),
+        _ = watchdog => {
+            let mut stuck: Vec<String> =
+                pending_labels.lock().unwrap().values().cloned().collect();
+            stuck.sort();
+            let detail = if stuck.is_empty() {
+                String::new()
+            } else {
+                format!("; outstanding tasks: {}", stuck.join(", "))
+            };
+            Err(anyhow::anyhow!(
+                "{goal} stalled with no runnable work for {STALL_GRACE:?} — likely a dependency cycle{detail}"
+            ))
+        }
     };
 
-    // Drop every scheduler handle so the event stream closes and the renderer
-    // task finishes.
+    // On failure, cancel in-flight work so sandbox children terminate instead
+    // of being orphaned by the abandoned JS evaluation. The brief sleep lets
+    // blocking workers (which poll the flag every ~20ms) observe it and kill
+    // their children before the process exits.
+    if result.is_err() {
+        cancellation.store(true, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
     *workspace.scheduler.lock().unwrap() = None;
     drop(scheduler);
+    let _ = shutdown_tx.send(());
     let _ = render.await;
 
     result

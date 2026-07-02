@@ -157,21 +157,30 @@ change invalidates.
 `live_goal_*`, `promise_all_fanout_*`, `sequential_sibling_*`, `deferred_run_*`),
 workspace/loader/format tests.
 
-## Stage 6 — Cycle/stall behavior
+## Stage 6 — Cycle/stall behavior ✅ DONE
 
-Keep the 30s stall watchdog (`main.rs:694-725`); JS memo layer already throws
-precise in-JS cycle errors. Cheap improvement: include the outstanding
-`pending_displays` task labels (`main.rs:582`) in the watchdog error message.
+Root cause of the hang-after-failure (diagnosed, was NOT failure propagation —
+`execute_goal_live` resolves errors fine): when the drive future returns an
+error, sibling product evaluations are abandoned inside the QuickJS runtime.
+Their `scheduler.run` futures are never polled again, so their `Arc<Scheduler>`
+clones (each holding an events sender) never drop, the events channel never
+closes, and `render.await` in `cmd_execute_goal` blocked forever.
 
-**Stage 1 finding — hang after root-task failure (observed live, pre-existing):**
-when a root task fails (e.g. a `run()` exits nonzero), the error is printed but
-`execute_goal_live` never resolves and the process hangs indefinitely. The
-watchdog does not fire — the scheduler apparently still counts the failed lane
-as outstanding, so `scheduler.outstanding() == 0` is never true. Worse, SIGTERM
-only sets the cancellation flag (`install_termination_signal_flag`), which the
-stalled state never checks, so `timeout`/`kill` need SIGKILL. Fixing failure
-propagation on the live path should be treated as the core of this stage, not
-just the watchdog message.
+Fixes (all in `src/main.rs` `cmd_execute_goal`):
+- Render task shuts down via an explicit oneshot signal instead of waiting for
+  event-channel closure.
+- On failure, the cancellation flag is set and a 300ms grace window lets the
+  blocking workers (which poll the flag every ~20ms) kill their sandbox
+  children — no orphaned processes.
+- Watchdog error now lists the outstanding task labels (shared pending-labels
+  map between render and watchdog): "…likely a dependency cycle; outstanding
+  tasks: build(//:stuck)".
+
+Verified: failing task among slow siblings → exit 1 in ~1.3s, zero orphans;
+SIGTERM during a healthy run → clean "canceled" exit in ~300ms; genuine await
+deadlock → watchdog fires at 30s naming the stuck task. Two regression tests
+added (`live_goal_failure_propagates_instead_of_hanging`,
+`live_goal_shared_failing_memo_propagates_to_all_roots`).
 
 ## Stage 7 — Cleanup
 
@@ -214,12 +223,9 @@ cargo run -- build //:vs#build            # run()-based file generation still wo
 
 ## Follow-up tasks (from Stage 1 verification, 2026-07-02)
 
-1. **Live path hangs after a root-task failure** (details under Stage 6): a
-   failed task leaves the process wedged — no error propagation, watchdog never
-   fires, SIGTERM ignored (cancellation flag set but never honored in that
-   state), only SIGKILL works. Verified identical on pre-Stage-1 HEAD, so it's
-   not a regression — but it makes every goal command unusable on failure.
-   Highest-priority fix; fold into Stage 6 (or do sooner).
+1. ~~**Live path hangs after a root-task failure**~~ **Fixed in Stage 6** —
+   see the Stage 6 section for the actual root cause (abandoned in-flight
+   futures kept the render event channel open; not a failure-propagation bug).
 2. **`rules_test` targets cannot share one invocation**: each passes alone, but
    `test //rules/odin:rules_test //rules/imp:rules_test` fails with a bogus
    "memo cycle detected / repeated key" — suites call `resetMemoState()` in the

@@ -4266,6 +4266,97 @@ export const build = product("sequential-sibling-context-test", "build", async f
     }
 
     #[tokio::test]
+    async fn live_goal_failure_propagates_instead_of_hanging() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, run } from "imp:core";
+
+export const app = target({ kind: "fail-test" });
+
+export const build = product("fail-test", "build", async function build() {
+    return run({ argv: ["sh", "-c", "echo boom >&2; exit 3"], display: "failing action", impure: true });
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            execute_goal_live(&live, p, "build", &["app".to_owned()], false, 1),
+        )
+        .await
+        .expect("execute_goal_live must resolve when a root task fails");
+        let err = result.expect_err("failed task must propagate an error").to_string();
+        assert!(err.contains("failing action") || err.contains("exit code 3"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn live_goal_shared_failing_memo_propagates_to_all_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, run, memo, output } from "imp:core";
+
+export const a = target({ kind: "shared-fail-test", attrs: { name: "a" } });
+export const b = target({ kind: "shared-fail-test", attrs: { name: "b" } });
+
+const failing = memo(async function failing() {
+    return run({
+        argv: ["sh", "-c", "echo boom >&2; exit 3"],
+        outputs: [output("build/never.txt")],
+        display: "shared failing action",
+    });
+});
+
+export const build = product("shared-fail-test", "build", async function build(handle) {
+    await failing();
+    return run({ argv: ["sh", "-c", "true"], display: `after ${handle.attrs.name}`, impure: true });
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            execute_goal_live(
+                &live,
+                p,
+                "build",
+                &["a".to_owned(), "b".to_owned()],
+                false,
+                2,
+            ),
+        )
+        .await
+        .expect("execute_goal_live must resolve when a shared memo fails");
+        let err = result.expect_err("failed shared memo must propagate").to_string();
+        assert!(err.contains("shared failing action") || err.contains("exit code 3"), "got: {err}");
+    }
+
+    #[tokio::test]
     async fn live_goal_starts_selected_roots_concurrently() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
