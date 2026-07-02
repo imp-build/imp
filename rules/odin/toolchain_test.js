@@ -8,6 +8,7 @@ import {
     odinArtifactName,
     odinCacheKey,
     odinDownloadUrl,
+    olsTriple,
 } from "//rules/odin/toolchain";
 
 function fakeHost(plat = { os: "linux", arch: "x86_64" }) {
@@ -128,5 +129,56 @@ test("describes the named-cache-backed odin tool", () => {
     expect(tool.cache).toBe("odin-toolchains");
     expect(tool.key).toBe("dev-2026-03/linux-x86_64");
     expect(tool.binDirs.join(",")).toBe(".");
+});
+
+test("maps platforms to OLS release triples", () => {
+    expect(olsTriple({ os: "linux", arch: "x86_64" })).toBe("x86_64-unknown-linux-gnu");
+    expect(olsTriple({ os: "linux", arch: "aarch64" })).toBe("arm64-unknown-linux-gnu");
+    expect(olsTriple({ os: "macos", arch: "aarch64" })).toBe("arm64-darwin");
+    expect(olsTriple({ os: "windows", arch: "x86_64" })).toBe("x86_64-pc-windows-msvc");
+    expect(() => olsTriple({ os: "freebsd", arch: "x86_64" })).toThrow();
+});
+
+test("installs a missing odinfmt from the OLS release zip", () => {
+    const host = fakeHost();
+    const api = createOdinToolchainApi(host);
+
+    const dir = api.acquireOdinfmt("dev-2026-03");
+
+    expect(dir).toBe("/cache/odinfmt-toolchains/dev-2026-03/linux-x86_64");
+    expect(
+        host.calls.some((call) => call[0] === "download"
+            && call[1] === "https://github.com/DanielGavin/ols/releases/download/dev-2026-03/ols-x86_64-unknown-linux-gnu.zip"),
+    ).toBe(true);
+    expect(
+        host.calls.some((call) => call[0] === "extract" && call[3] === "zip"),
+    ).toBe(true);
+    expect(
+        host.calls.some((call) => call[0] === "cachePut" && call[1] === "odinfmt-toolchains"),
+    ).toBe(true);
+});
+
+test("describes the named-cache-backed odinfmt tool", () => {
+    const host = fakeHost();
+    const api = createOdinToolchainApi(host);
+
+    api.odinToolchain("dev-2026-03", { default: true });
+    const { tool, command } = api.odinfmtTool();
+
+    expect(tool.kind).toBe("tool");
+    expect(tool.name).toBe("odinfmt");
+    expect(tool.cache).toBe("odinfmt-toolchains");
+    expect(tool.key).toBe("dev-2026-03/linux-x86_64");
+    expect(tool.binDirs.join(",")).toBe(".");
+    expect(command).toBe("odinfmt-x86_64-unknown-linux-gnu");
+});
+
+test("suffixes the odinfmt command with .exe on windows", () => {
+    const host = fakeHost({ os: "windows", arch: "x86_64" });
+    const api = createOdinToolchainApi(host);
+
+    api.odinToolchain("dev-2026-03", { default: true });
+
+    expect(api.odinfmtTool().command).toBe("odinfmt-x86_64-pc-windows-msvc.exe");
 });
 });

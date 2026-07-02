@@ -1,17 +1,12 @@
-// Migration target for src/commands/fmt.rs
+// Odin formatting is implemented as products in the Odin rule set, not as a
+// standalone workflow goal:
 //
-// The legacy Rust command walked all Odin files in the workspace and ran
-// `odinfmt -w` on each, grouped by directory.
-// This should become a goal that invokes odinfmt via exec() on each odin-package target.
+//   - `fmt` product (odin-package, odin-test-package) runs `odinfmt -w` over a
+//     package's own sources in the sandbox and writes the formatted files back.
+//     The built-in `fmt` goal (GoalProductPolicy::Named("fmt")) dispatches to it,
+//     so `imp fmt` works with no extra wiring.
+//   - `format-check` product formats in the sandbox and diffs against the input,
+//     failing without mutating the tree. Reachable via `//:<pkg>#format-check`.
 //
-// Intended shape:
-//
-//   import { goal } from "imp:core";
-//   import { odinfmt } from "//rules/odin";
-//
-//   export default async function () {
-//     // TODO: define a fmt goal that runs odinfmt on all odin-package sources
-//     // goal("fmt", { ... });
-//   }
-
-// TODO: implement
+// See rules/odin/index.js (products) and rules/odin/toolchain.js (odinfmtTool).
+// This replaces the legacy Rust command in src/commands/fmt.rs.

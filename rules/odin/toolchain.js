@@ -1,6 +1,32 @@
 import { target, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 
 const ODIN_TOOLCHAIN_CACHE = "odin-toolchains";
+const ODINFMT_CACHE = "odinfmt-toolchains";
+
+// odinfmt ships inside the OLS release zips, whose tags track Odin's monthly dev
+// versions, so it is pinned to the same version as the Odin toolchain. The
+// artifact triples differ from Odin's os/arch naming (see osMap/archMap).
+const olsTripleMap = {
+    "linux/x86_64": "x86_64-unknown-linux-gnu",
+    "linux/aarch64": "arm64-unknown-linux-gnu",
+    "macos/x86_64": "x86_64-darwin",
+    "macos/aarch64": "arm64-darwin",
+    "windows/x86_64": "x86_64-pc-windows-msvc",
+};
+
+/**
+ * Return the OLS release triple for a platform.
+ *
+ * @param {{ os: string, arch: string }} plat
+ * @returns {string}
+ */
+export function olsTriple(plat) {
+    const triple = olsTripleMap[`${plat.os}/${plat.arch}`];
+    if (!triple) {
+        throw new Error(`no odinfmt build for ${plat.os}/${plat.arch}`);
+    }
+    return triple;
+}
 
 const defaultHost = {
     namedCache,
@@ -77,6 +103,7 @@ export function createOdinToolchainApi(host = defaultHost) {
 
     function declareToolchain(version, opts = {}) {
         host.namedCache({ name: ODIN_TOOLCHAIN_CACHE });
+        host.namedCache({ name: ODINFMT_CACHE });
 
         const toolchain = target({
             kind: "odin-toolchain",
@@ -141,6 +168,43 @@ export function createOdinToolchainApi(host = defaultHost) {
         };
     }
 
+    function acquireOdinfmt(version) {
+        const plat = host.platformInfo();
+        const triple = olsTriple(plat);
+        const key = `${version}/${plat.os}-${plat.arch}`;
+
+        if (host.cacheHas(ODINFMT_CACHE, key)) {
+            return host.cacheGet(ODINFMT_CACHE, key);
+        }
+
+        const url = `https://github.com/DanielGavin/ols/releases/download/${version}/ols-${triple}.zip`;
+        const archive = host.download(url);
+        const staging = `/tmp/imp-odinfmt-${version}-${plat.arch}`;
+        host.extract(archive, staging, { format: "zip" });
+
+        host.cachePut(ODINFMT_CACHE, key, staging);
+        return host.cacheGet(ODINFMT_CACHE, key);
+    }
+
+    function odinfmtTool(version) {
+        const resolved = resolveVersion(version);
+        acquireOdinfmt(resolved);
+        const plat = host.platformInfo();
+        const triple = olsTriple(plat);
+        return {
+            tool: {
+                kind: "tool",
+                name: "odinfmt",
+                cache: ODINFMT_CACHE,
+                key: `${resolved}/${plat.os}-${plat.arch}`,
+                binDirs: ["."],
+            },
+            // The OLS zip stores the binary under its triple-suffixed name at the
+            // archive root; invoke it by that name (JS has no rename primitive).
+            command: `odinfmt-${triple}${plat.os === "windows" ? ".exe" : ""}`,
+        };
+    }
+
     function currentDefaultVersion() {
         return defaultVersion;
     }
@@ -155,6 +219,8 @@ export function createOdinToolchainApi(host = defaultHost) {
         resolveOdinToolchainVersion: resolveVersion,
         odinBin: bin,
         odinTool: tool,
+        acquireOdinfmt,
+        odinfmtTool,
         defaultOdinToolchainVersion: currentDefaultVersion,
         defaultOdinToolchain: currentDefaultToolchain,
     };
@@ -212,6 +278,27 @@ export function odinBin(version) {
  */
 export function odinTool(version) {
     return defaultApi.odinTool(version);
+}
+
+/**
+ * Return a named-cache-backed odinfmt tool descriptor plus the on-disk binary
+ * name to invoke it with. Downloads and caches the OLS release on first use.
+ *
+ * @param {string} [version]
+ * @returns {{ tool: object, command: string }}
+ */
+export function odinfmtTool(version) {
+    return defaultApi.odinfmtTool(version);
+}
+
+/**
+ * Acquire (download and cache) odinfmt for a version and return its cache path.
+ *
+ * @param {string} version
+ * @returns {string}
+ */
+export function acquireOdinfmt(version) {
+    return defaultApi.acquireOdinfmt(version);
 }
 
 /**
