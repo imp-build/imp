@@ -56,7 +56,7 @@ stays; work is discovered by fan-out, not pre-planned.
   sandboxes; `//:jodin` depending on cmake). Removed — end-to-end goal testing
   happens in `../ottar` instead.
 
-## Stage 2 — Harden the live cache key (before test ports so they assert against it)
+## Stage 2 — Harden the live cache key ✅ DONE (commit 865f660)
 
 In `exec_run_inner` (`src/exec.rs:521`):
 - **Config digest**: JS `run()` adds `configDigest: __host_configuration_digest()`
@@ -71,7 +71,7 @@ In `exec_run_inner` (`src/exec.rs:521`):
 - Note in ROADMAP (don't do): tools are hashed by spec, not content
   (`fingerprint_tools` was planned-only).
 
-## Stage 3 — Remove write_file; JS test strategy
+## Stage 3 — Remove write_file; JS test strategy ✅ DONE (commit f8b0e1b)
 
 - `rules/odin/index.js` `odinGenRun` generator branch (`:815-824`): replace with
   the gen.js/vs.js printf pattern:
@@ -96,7 +96,7 @@ In `exec_run_inner` (`src/exec.rs:521`):
 - `rules/imp/test/index.js:153-159`: delete the `isIntrospectMode()` early-return
   and import (test product always runs tests).
 
-## Stage 4 — Delete the planned core
+## Stage 4 — Delete the planned core ✅ DONE (commit 2522b69, Stage 5 folded in)
 
 - `src/main.rs`: delete `Cmd::Plan`, `Cmd::Cache`/`CacheCmd`, `Cmd::Explain`,
   `Cmd::Actions`; handlers `cmd_plan`, `cmd_cache`, `cmd_cache_explain`,
@@ -125,7 +125,7 @@ In `exec_run_inner` (`src/exec.rs:521`):
   `isIntrospectMode` (`:948-950`), the introspect branch in `run()` (`:1109-1113`),
   `globalThis.setIntrospectMode` (`:1163`); fix `product()` docstring (`:836`).
 
-## Stage 5 — Rust test disposition (`spike.rs` mod tests)
+## Stage 5 — Rust test disposition (`spike.rs` mod tests) ✅ DONE (in 2522b69)
 
 **Delete** (planned-graph semantics only): `dry_run_executor_*`,
 `parallel_executor_*` (4), `executor_cancels_running_task_from_external_flag`
@@ -157,7 +157,7 @@ change invalidates.
 `live_goal_*`, `promise_all_fanout_*`, `sequential_sibling_*`, `deferred_run_*`),
 workspace/loader/format tests.
 
-## Stage 6 — Cycle/stall behavior ✅ DONE
+## Stage 6 — Cycle/stall behavior ✅ DONE (commit 15a95a3)
 
 Root cause of the hang-after-failure (diagnosed, was NOT failure propagation —
 `execute_goal_live` resolves errors fine): when the drive future returns an
@@ -182,7 +182,7 @@ deadlock → watchdog fires at 30s naming the stuck task. Two regression tests
 added (`live_goal_failure_propagates_instead_of_hanging`,
 `live_goal_shared_failing_memo_propagates_to_all_roots`).
 
-## Stage 7 — Cleanup
+## Stage 7 — Cleanup ✅ DONE
 
 - `BUILD.js:15` stamp text "planned executor ran" → neutral.
 - Delete untracked `plan.json` / `plan.dot`.

@@ -1261,7 +1261,7 @@ fn register_globals<'js>(
     // __host_task_event(state, id, parent, display)
     // Lets the JS memo layer report memo nodes onto the same task-event stream
     // the scheduler uses, so both live in one tree. No-op without a scheduler
-    // (introspection and non-live callers).
+    // (e.g. plain workspace loading).
     let scheduler_ev = Arc::clone(&scheduler);
     let host_task_event = Function::new(
         ctx.clone(),
@@ -2217,7 +2217,7 @@ pub fn format_products(workspace: &Workspace, w: &mut String) -> std::fmt::Resul
 }
 
 // ---------------------------------------------------------------------------
-// Graph introspection (Phase 10)
+// BUILD.js generation
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]

@@ -2,7 +2,7 @@
 //
 // The legacy Rust command supported build modes (debug, quick, release, shipping, msan, asan),
 // direct Odin compilation, jodin (JoltPhysics) integration, and a check command.
-// This should become a goal that invokes the planned build system for the appropriate targets.
+// This should become a goal that invokes the build system for the appropriate targets.
 //
 // Intended shape:
 //

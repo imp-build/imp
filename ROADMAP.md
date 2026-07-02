@@ -959,6 +959,14 @@ If user asks for executable:
 
 ## Phase 10: Add graph introspection
 
+> **Superseded (2026-07):** the planned-graph introspection commands (`plan`,
+> `explain`, `actions`, `cache explain`) were built and later deleted together
+> with the planned execution path — the workflow is live-only now (products fan
+> out via async/await; `run()` executes immediately). Introspection remains a
+> real need, but it must be rebuilt against live trace data (`getMemoTrace()`
+> is still recorded unconditionally). The sketches below are kept for that
+> future design.
+
 This model needs strong debugging.
 
 Commands:
@@ -1176,6 +1184,9 @@ traced `run()` effects into executable action nodes, and wires memo/action depen
 edges into the rendered plan and DOT graph. `explain` and `actions` use the same memo
 trace data.
 
+*(Update 2026-07: `plan_live`, `explain`, and `actions` were subsequently deleted
+with the whole planned path; see the Phase 10 note.)*
+
 ## ~~Gap 6: Two separate execution models~~ ✓ Fixed
 
 Before this fix, `rule()` tasks were executed by `run_local_task` → `prepare_sandbox` → `copy_artifact_into_sandbox`.
@@ -1192,7 +1203,9 @@ old model and should be retired once products cover all cases.
 tracks registered products rather than rules, `Task` no longer carries `exec_fn` or
 `is_product`, and the old `exec(target, ctx)` helpers (`ctx.output`, `ctx.tool`,
 `ctx.inSandbox`, `depOutputs`) are gone. Product-created actions are represented as
-normal planned tasks and execute through the action executor.
+normal planned tasks and execute through the action executor. *(Update 2026-07:
+the planned task graph and action executor were themselves removed; `run()` now
+executes immediately through the scheduler on the live path.)*
 
 ## ~~Gap 7: Missing `run()` surface area~~ ✓ Fixed
 
@@ -1246,6 +1259,13 @@ Currently only the dirty-workspace snapshot (`workspace_mutation` + `watch`) is
 implemented. The other three are absent.
 
 ## Other concerns
+
+**No sanctioned way to write workspace files from rules**: `write_file` was
+removed (it silently no-oped on the live path). Rules that need to emit files
+use the cacheable `run()`+printf pattern (see `writeJsonFile` in
+`rules/workflows/vs.js`). The intended long-term replacement is a side-effecting
+write API restricted to top-level product dispatchers, so arbitrary memoized
+helpers cannot mutate the workspace.
 
 **Tools are cache-keyed by spec, not content**: the task cache key hashes a
 tool's spec (name/cache/key/path), not the tool's bytes. A tool swapped in
