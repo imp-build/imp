@@ -199,9 +199,9 @@ code, so the big deletion lands on a validated live path.
 export XDG_CACHE_HOME=/tmp/imp-cache   # sandboxed runs: $HOME may be read-only
 cargo build && cargo test
 cargo run -- build                        # live build, then again → cache hits
-# NOTE: package-prefix selectors don't match; use full addresses. Run these
-# separately — multiple rules_test roots in one invocation corrupt each other
-# (shared JS memo state; see follow-ups).
+# NOTE: package-prefix selectors don't match; use full addresses. (These can
+# also run together — bare `imp test` — since rules tests moved to sandboxed
+# subprocesses, 2026-07-03.)
 cargo run -- test //rules/odin:rules_test
 cargo run -- test //rules/imp:rules_test
 cargo run -- test //rules/c/cmake:rules_test
@@ -226,13 +226,12 @@ cargo run -- build //:vs#build            # run()-based file generation still wo
 1. ~~**Live path hangs after a root-task failure**~~ **Fixed in Stage 6** —
    see the Stage 6 section for the actual root cause (abandoned in-flight
    futures kept the render event channel open; not a failure-propagation bug).
-2. **`rules_test` targets cannot share one invocation**: each passes alone, but
-   `test //rules/odin:rules_test //rules/imp:rules_test` fails with a bogus
-   "memo cycle detected / repeated key" — suites call `resetMemoState()` in the
-   shared JS context and corrupt concurrently-evaluating roots. Bare
-   `imp test` (which selects all three) hits this too. Address alongside the
-   Stage 3/5 test rework — either isolate per-root JS contexts for rules-test
-   or stop the suites from resetting global memo state.
+2. ~~**`rules_test` targets cannot share one invocation**~~ **Fixed 2026-07-03**
+   — each rules-test target now runs as an `imp rules-test` subprocess inside
+   a task sandbox (rules tree + `imp.workspace.js` staged, host cache shared
+   via `IMP_CACHE_DIR`), so suites get a fresh runtime each and bare
+   `imp test` passes. Per-test `resetMemoState()` moved into the harness; the
+   vestigial Rust-side resets were deleted.
 3. **Selector UX**: package-prefix selectors (`//rules/odin`) silently match
    nothing and error; consider supporting package prefixes or improving the
    error message in `matches_selector` (`spike.rs:2189`).

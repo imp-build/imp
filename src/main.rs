@@ -96,6 +96,13 @@ enum Cmd {
     Package(GoalArgs),
     /// Run the selected targets
     Run(GoalArgs),
+    /// Import JS rule-test modules and run their registered tests. Invoked by
+    /// the rules-test product inside a task sandbox; not for direct use.
+    #[command(hide = true)]
+    RulesTest {
+        /// Workspace-rooted test modules, e.g. //rules/odin/index_test
+        modules: Vec<String>,
+    },
 }
 
 #[derive(clap::Args)]
@@ -183,6 +190,9 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
         }
         Cmd::Run(args) => {
             return cmd_execute_goal("run", args, Arc::clone(&cancellation), tree).await;
+        }
+        Cmd::RulesTest { modules } => {
+            return cmd_rules_test(modules, Arc::clone(&cancellation), tree).await;
         }
         Cmd::GenerateBuild { check, selectors } => {
             return cmd_generate_build(*check, selectors, tree).await;
@@ -278,7 +288,8 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
         | Cmd::Fmt(_)
         | Cmd::Lint(_)
         | Cmd::Package(_)
-        | Cmd::Run(_) => unreachable!("handled before environment setup"),
+        | Cmd::Run(_)
+        | Cmd::RulesTest { .. } => unreachable!("handled before environment setup"),
     }
 }
 
@@ -289,20 +300,65 @@ async fn load_workspace_with_messages(
     runtime::load_workspace_with_host_log(workspace_root, tree.log_sink()).await
 }
 
+/// What to drive on the live evaluation path: a goal over selected targets, or
+/// a JS rule-test suite (the hidden `rules-test` subcommand, invoked by the
+/// rules-test product inside a task sandbox).
+#[derive(Clone, Copy)]
+enum LiveInvocation<'a> {
+    Goal {
+        goal: &'a str,
+        selectors: &'a [String],
+    },
+    RulesTests {
+        modules: &'a [String],
+    },
+}
+
 async fn cmd_execute_goal(
     goal: &str,
     args: &GoalArgs,
     cancellation: Arc<AtomicBool>,
     tree: &Tree,
 ) -> Result<()> {
-    let GoalArgs {
-        selectors,
-        jobs,
-        js_workers,
-        no_cache,
-    } = args;
-    let (jobs, no_cache) = (*jobs, *no_cache);
-    let js_workers = (*js_workers).max(1);
+    cmd_execute_live(
+        LiveInvocation::Goal {
+            goal,
+            selectors: &args.selectors,
+        },
+        args.jobs,
+        args.js_workers,
+        args.no_cache,
+        cancellation,
+        tree,
+    )
+    .await
+}
+
+async fn cmd_rules_test(
+    modules: &[String],
+    cancellation: Arc<AtomicBool>,
+    tree: &Tree,
+) -> Result<()> {
+    cmd_execute_live(
+        LiveInvocation::RulesTests { modules },
+        1,
+        1,
+        false,
+        cancellation,
+        tree,
+    )
+    .await
+}
+
+async fn cmd_execute_live(
+    invocation: LiveInvocation<'_>,
+    jobs: usize,
+    js_workers: usize,
+    no_cache: bool,
+    cancellation: Arc<AtomicBool>,
+    tree: &Tree,
+) -> Result<()> {
+    let js_workers = js_workers.max(1);
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let workspace = {
@@ -317,19 +373,23 @@ async fn cmd_execute_goal(
     }
 
     // Resolve selectors into concrete root targets so we know the total count
-    // upfront, before the scheduler or renderer starts.
-    let total_targets = {
-        let goal_def = workspace.workspace.goals.get(goal).ok_or_else(|| {
-            let known: Vec<&str> = workspace
-                .workspace
-                .goals
-                .keys()
-                .map(String::as_str)
-                .collect();
-            anyhow::anyhow!("no '{goal}' goal; registered goals: {}", known.join(", "))
-        })?;
-        let roots = spike::select_roots(&workspace.workspace, goal_def, selectors)?;
-        roots.len()
+    // upfront, before the scheduler or renderer starts. Rule-test runs have no
+    // target roots; they render as a single timed task.
+    let total_targets = match invocation {
+        LiveInvocation::Goal { goal, selectors } => {
+            let goal_def = workspace.workspace.goals.get(goal).ok_or_else(|| {
+                let known: Vec<&str> = workspace
+                    .workspace
+                    .goals
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                anyhow::anyhow!("no '{goal}' goal; registered goals: {}", known.join(", "))
+            })?;
+            let roots = spike::select_roots(&workspace.workspace, goal_def, selectors)?;
+            roots.len()
+        }
+        LiveInvocation::RulesTests { .. } => 0,
     };
 
     // Install a scheduler and render its single task-event stream into a flat
@@ -340,7 +400,11 @@ async fn cmd_execute_goal(
     *workspace.scheduler.lock().unwrap() = Some(Arc::clone(&scheduler));
 
     let root = tree.root_handle();
-    let goal_label = format!("execute {goal}");
+    let what = match invocation {
+        LiveInvocation::Goal { goal, .. } => goal.to_owned(),
+        LiveInvocation::RulesTests { .. } => "rules-test".to_owned(),
+    };
+    let goal_label = format!("execute {what}");
     // Labels of Pending-but-not-Done tasks, shared with the watchdog so a
     // stall report can say what is stuck.
     let pending_labels: Arc<std::sync::Mutex<std::collections::HashMap<u64, String>>> =
@@ -572,14 +636,24 @@ async fn cmd_execute_goal(
     // scheduler staying fully idle while the evaluation is unfinished. Report it
     // instead of hanging.
     const STALL_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
-    let drive = spike::execute_goal_live(
-        &workspace,
-        &workspace_root,
-        goal,
-        selectors,
-        no_cache,
-        js_workers,
-    );
+    let drive = async {
+        match invocation {
+            LiveInvocation::Goal { goal, selectors } => {
+                spike::execute_goal_live(
+                    &workspace,
+                    &workspace_root,
+                    goal,
+                    selectors,
+                    no_cache,
+                    js_workers,
+                )
+                .await
+            }
+            LiveInvocation::RulesTests { modules } => {
+                spike::run_rules_tests_live(&workspace, &workspace_root, modules, js_workers).await
+            }
+        }
+    };
     let watchdog = async {
         loop {
             if scheduler.outstanding() == 0 {
@@ -609,7 +683,7 @@ async fn cmd_execute_goal(
                 format!("; outstanding tasks: {}", stuck.join(", "))
             };
             Err(anyhow::anyhow!(
-                "{goal} stalled with no runnable work for {STALL_GRACE:?} — likely a dependency cycle{detail}"
+                "{what} stalled with no runnable work for {STALL_GRACE:?} — likely a dependency cycle{detail}"
             ))
         }
     };

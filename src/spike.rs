@@ -1247,7 +1247,10 @@ fn register_globals<'js>(
                         exec_run_inner(&root, run_opts, Some(cancellation.as_ref()))
                     })
                     .await
-                    .map_err(|e| rquickjs::Error::new_loading_message("run", format!("{e:#}")))?;
+                    // Throw a real JS Exception: message lives in a JS string
+                    // property, so captured task output survives intact —
+                    // printf-style error constructors truncate at ~256 bytes.
+                    .map_err(|e| rquickjs::Exception::throw_message(&ctx, &format!("{e:#}")))?;
                 let obj = Object::new(ctx)?;
                 obj.set("stdout", result.stdout)?;
                 obj.set("stderr", result.stderr)?;
@@ -1431,6 +1434,13 @@ fn register_globals<'js>(
     // Expose the current executable path so JS rules can invoke imp as a generator.
     if let Ok(exe) = std::env::current_exe() {
         globals.set("__imp_self_bin", exe.to_string_lossy().into_owned())?;
+    }
+
+    // Expose the resolved cache root so JS rules can hand it to nested imp
+    // invocations (via IMP_CACHE_DIR) — sandboxed subprocesses see a pinned
+    // HOME and would otherwise re-download named-cache contents.
+    if let Ok(cache_dir) = crate::cache::cache_root() {
+        globals.set("__imp_cache_dir", cache_dir.to_string_lossy().into_owned())?;
     }
 
     Ok(())
@@ -2254,9 +2264,6 @@ pub async fn evaluate_product_json(
 
     live.ctx
         .async_with(async |ctx| -> rquickjs::Result<serde_json::Value> {
-            let reset: Function = ctx.globals().get("resetMemoState")?;
-            reset.call::<_, ()>(())?;
-
             let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
             let handle: Object = resolve_fn.call((target.js_id,))?;
             let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
@@ -2348,8 +2355,6 @@ pub async fn execute_goal_live(
         .async_with(async move |ctx| -> rquickjs::Result<()> {
             let set_js_workers: Function = ctx.globals().get("__imp_set_js_workers")?;
             set_js_workers.call::<_, ()>((js_workers.max(1),))?;
-            let reset: Function = ctx.globals().get("resetMemoState")?;
-            reset.call::<_, ()>(())?;
             let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
             let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
 
@@ -2386,6 +2391,51 @@ pub async fn execute_goal_live(
     result
 }
 
+/// Import the given JS test modules and run their registered tests via the
+/// `//rules/imp/test` harness. Backs the hidden `rules-test` subcommand,
+/// which the rules-test product invokes inside a task sandbox.
+///
+/// The caller must have installed a scheduler (and this sets `exec_root`).
+pub async fn run_rules_tests_live(
+    live: &LiveWorkspace,
+    workspace_root: &Path,
+    modules: &[String],
+    js_workers: usize,
+) -> Result<()> {
+    *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
+    let modules_json = serde_json::to_string(modules).context("serialize test module list")?;
+    let script = format!(
+        r#"(async () => {{
+    const harness = await import("//rules/imp/test");
+    await harness.runTestModules({modules_json});
+}})()"#
+    );
+
+    live.ctx
+        .async_with(async move |ctx| -> rquickjs::Result<()> {
+            let set_js_workers: Function = ctx.globals().get("__imp_set_js_workers")?;
+            set_js_workers.call::<_, ()>((js_workers.max(1),))?;
+            let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
+
+            let result_value: Value = ctx
+                .eval(script.as_bytes())
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("rules-test", format!("{e}")))?;
+            let promise: MaybePromise = promise_resolve
+                .call((result_value,))
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("rules-test", format!("{e}")))?;
+            promise
+                .into_future::<Value>()
+                .await
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("rules-test", format!("{e}")))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("rules tests failed: {e}"))
+}
+
 async fn evaluate_product_function_json(
     live: &LiveWorkspace,
     product_fn_name: &str,
@@ -2393,9 +2443,6 @@ async fn evaluate_product_function_json(
 ) -> Result<serde_json::Value> {
     live.ctx
         .async_with(async |ctx| -> rquickjs::Result<serde_json::Value> {
-            let reset: Function = ctx.globals().get("resetMemoState")?;
-            reset.call::<_, ()>(())?;
-
             let handle = Object::new(ctx.clone())?;
             let attrs = Object::new(ctx.clone())?;
             handle.set("attrs", attrs)?;
@@ -2922,6 +2969,19 @@ mod tests {
     use super::*;
     use crate::cache::named_cache_key_path;
     use crate::exec::{report_process_line, spawn_output_reader, ProcessLine, ProcessStream};
+
+    /// Clear runtime-global memo state so a repeated goal invocation on the
+    /// same LiveWorkspace re-evaluates its product functions. Production runs
+    /// one goal per process and never needs this.
+    async fn reset_js_memo_state(live: &LiveWorkspace) {
+        live.ctx
+            .async_with(async |ctx| -> rquickjs::Result<()> {
+                let reset: Function = ctx.globals().get("resetMemoState")?;
+                reset.call::<_, ()>(())
+            })
+            .await
+            .unwrap();
+    }
 
     async fn run_goal_live(
         live: &LiveWorkspace,
@@ -4801,12 +4861,14 @@ export const build = product("live-cache-test", "build", async function build() 
         );
         std::fs::remove_file(p.join("build/live.txt")).unwrap();
 
+        reset_js_memo_state(&live).await;
         execute_goal_live(&live, p, "build", &selectors, false, 1)
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "rr");
         std::fs::remove_file(p.join("build/live.txt")).unwrap();
 
+        reset_js_memo_state(&live).await;
         execute_goal_live(&live, p, "build", &selectors, false, 1)
             .await
             .unwrap();
@@ -4817,6 +4879,7 @@ export const build = product("live-cache-test", "build", async function build() 
         );
         std::fs::remove_file(p.join("build/live.txt")).unwrap();
 
+        reset_js_memo_state(&live).await;
         execute_goal_live(&live, p, "build", &selectors, true, 1)
             .await
             .unwrap();

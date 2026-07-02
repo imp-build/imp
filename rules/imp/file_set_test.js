@@ -1,5 +1,5 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { glob, paths, file_set, memo, getMemoTrace, resetMemoState } from "imp:core";
+import { glob, paths, file_set, memo, getMemoTrace } from "imp:core";
 
 describe("FileSet", () => {
 
@@ -11,14 +11,12 @@ test("glob() returns a FileSet descriptor, not paths", async () => {
 });
 
 test("glob() records no effect entry on its own", async () => {
-    resetMemoState();
     glob({ root: "rules/imp", include: ["*.js"] });
     const { trace } = getMemoTrace();
     expect(trace.filter(t => t.event === "effect").length).toBe(0);
 });
 
 test("paths(glob(...)) returns a non-empty string array", async () => {
-    resetMemoState();
     const result = paths(glob({ root: "rules/imp", include: ["*.js"] }));
     expect(Array.isArray(result)).toBe(true);
     expect(result.length > 0).toBe(true);
@@ -26,13 +24,11 @@ test("paths(glob(...)) returns a non-empty string array", async () => {
 });
 
 test("paths(glob(...)) supports double-star patterns", async () => {
-    resetMemoState();
     const result = paths(glob({ root: "rules", include: ["**/*_test.js"] }));
     expect(result).toContain("rules/imp/file_set_test.js");
 });
 
 test("paths(glob(...)) result is sorted", async () => {
-    resetMemoState();
     const result = paths(glob({ root: "rules/imp", include: ["*.js"] }));
     const sorted = result.slice().sort();
     expect(result).toEqual(sorted);
@@ -100,7 +96,6 @@ test("file_set.union() throws if given a non-FileSet value", async () => {
 });
 
 test("memo wrapping paths(glob(...)) deduplicates correctly", async () => {
-    resetMemoState();
     let calls = 0;
     const fn_ = memo(async function scan() {
         calls++;

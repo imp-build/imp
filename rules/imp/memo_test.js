@@ -4,7 +4,6 @@ import { memo, resetMemoState, getMemoTrace } from "imp:core";
 describe("memo", () => {
 
 test("calls the underlying function once for identical args", async () => {
-    resetMemoState();
     let calls = 0;
     const fn = memo(async function double(x) { calls++; return x * 2; });
 
@@ -17,7 +16,6 @@ test("calls the underlying function once for identical args", async () => {
 });
 
 test("calls the underlying function again for different args", async () => {
-    resetMemoState();
     let calls = 0;
     const fn = memo(async function double(x) { calls++; return x * 2; });
 
@@ -30,7 +28,6 @@ test("calls the underlying function again for different args", async () => {
 });
 
 test("wrapping the same function reference twice shares the cache", async () => {
-    resetMemoState();
     let calls = 0;
     async function add(x) { calls++; return x + 1; }
     const fa = memo(add);
@@ -43,7 +40,6 @@ test("wrapping the same function reference twice shares the cache", async () => 
 });
 
 test("distinct function references have independent caches", async () => {
-    resetMemoState();
     let callsA = 0, callsB = 0;
     const fa = memo(async function f(x) { callsA++; return x; });
     const fb = memo(async function f(x) { callsB++; return x; });
@@ -56,7 +52,6 @@ test("distinct function references have independent caches", async () => {
 });
 
 test("detects direct self-call cycle", async () => {
-    resetMemoState();
     let memoized;
     memoized = memo(async function self() {
         return await memoized();
@@ -73,7 +68,6 @@ test("detects direct self-call cycle", async () => {
 });
 
 test("detects indirect cycle between two memos", async () => {
-    resetMemoState();
     let a, b;
     a = memo(async function a() { return await b(); });
     b = memo(async function b() { return await a(); });
@@ -89,7 +83,6 @@ test("detects indirect cycle between two memos", async () => {
 });
 
 test("records hit and miss events in trace", async () => {
-    resetMemoState();
     const fn = memo(async function inc(x) { return x + 1; });
 
     await fn(5);
@@ -104,7 +97,6 @@ test("records hit and miss events in trace", async () => {
 });
 
 test("records dependency edges between nested memo calls", async () => {
-    resetMemoState();
     const inner = memo(async function inner(x) { return x + 1; });
     const outer = memo(async function outer(x) { return await inner(x); });
 
@@ -117,7 +109,6 @@ test("records dependency edges between nested memo calls", async () => {
 });
 
 test("resetMemoState clears the memo table", async () => {
-    resetMemoState();
     let calls = 0;
     const fn = memo(async function counter() { calls++; return 42; });
 
@@ -129,7 +120,6 @@ test("resetMemoState clears the memo table", async () => {
 });
 
 test("handles multiple args", async () => {
-    resetMemoState();
     let calls = 0;
     const fn = memo(async function add(a, b) { calls++; return a + b; });
 
@@ -144,7 +134,6 @@ test("handles multiple args", async () => {
 });
 
 test("handles no args", async () => {
-    resetMemoState();
     let calls = 0;
     const fn = memo(async function noargs() { calls++; return 99; });
 

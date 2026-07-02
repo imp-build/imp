@@ -1271,7 +1271,10 @@ helpers cannot mutate the workspace.
 tool's spec (name/cache/key/path), not the tool's bytes. A tool swapped in
 place under the same key would wrongly hit. The planned path's
 `fingerprint_tools` hashed content but was planned-only; content
-fingerprinting for the live path is future work.
+fingerprinting for the live path is future work. This also keeps the
+rules-test tasks (`rules/imp/test/index.js`) `impure`: they invoke the imp
+binary itself, and the cache key cannot see its content — once host-binary
+fingerprinting exists they can be cached.
 
 **Toolchain acquisition is synchronous**: `acquireOdinToolchain` runs
 download+extract synchronously on the JS thread, blocking the entire QuickJS runtime.

@@ -1,4 +1,4 @@
-import { target, product, run, workspaceFiles } from "imp:core";
+import { target, product, run, glob, workspaceFiles, resetMemoState } from "imp:core";
 
 const suites = [];
 const tests = [];
@@ -148,6 +148,7 @@ async function runRegisteredTests({ from = 0, label = "tests" } = {}) {
     const failures = [];
     for (const entry of selected) {
         try {
+            resetMemoState();
             await entry.fn();
         } catch (error) {
             failures.push({
@@ -165,20 +166,37 @@ async function runRegisteredTests({ from = 0, label = "tests" } = {}) {
     }
 }
 
+/**
+ * Import each test module and run the tests it registers. Entry point for the
+ * hidden `imp rules-test` subcommand.
+ */
+export async function runTestModules(modules) {
+    const firstTest = tests.length;
+    for (const testModule of modules) {
+        await import(testModule);
+    }
+    await runRegisteredTests({ from: firstTest, label: modules.join(", ") });
+}
+
+// Each rules-test target runs in its own imp subprocess inside the task
+// sandbox: tests share runtime-global memo state, so suites must not share a
+// runtime with each other or with the invoking workspace evaluation. Impure
+// because the cache key cannot see the host binary's content yet (see ROADMAP
+// tool fingerprinting gap).
 export const test_product = product("rules-test", "test", async function test_product(handle) {
     const testModules = handle.attrs.tests
         .split(",")
         .map((testModule) => testModule.trim())
         .filter((testModule) => testModule.length > 0);
-    const firstTest = tests.length;
 
-    for (const testModule of testModules) {
-        await import(testModule);
-    }
-
-    await runRegisteredTests({ from: firstTest, label: handle.attrs.root });
     return run({
-        argv: ["sh", "-c", "true"],
+        argv: [globalThis.__imp_self_bin, "rules-test", ...testModules],
+        // Tests glob example sources and resources, not just modules — stage
+        // the whole rules tree.
+        inputs: [glob({ include: ["rules/**/*", "imp.workspace.js"] })],
+        // Share the host cache so toolchain named-cache lookups hit instead of
+        // re-downloading into the sandbox's pinned HOME.
+        env: { IMP_CACHE_DIR: globalThis.__imp_cache_dir },
         display: `test JS rules ${handle.attrs.root}`,
         impure: true,
     });

@@ -119,6 +119,9 @@ pub(crate) fn create_sandbox_root() -> Result<PathBuf> {
 
 pub(crate) fn cache_root() -> Result<PathBuf> {
     let mut candidates = Vec::new();
+    if let Some(dir) = std::env::var_os("IMP_CACHE_DIR") {
+        candidates.push(PathBuf::from(dir));
+    }
     if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
         candidates.push(PathBuf::from(cache).join("imp"));
     }

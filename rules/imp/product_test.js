@@ -1,10 +1,9 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { memo, product, resetMemoState } from "imp:core";
+import { memo, product } from "imp:core";
 
 describe("product", () => {
 
 test("returns a callable memoized function", async () => {
-    resetMemoState();
     let calls = 0;
     const fn = product("test-kind", "test-product", async function compute(x) {
         calls++;
@@ -20,7 +19,6 @@ test("returns a callable memoized function", async () => {
 });
 
 test("different args produce different results", async () => {
-    resetMemoState();
     let calls = 0;
     const fn = product("test-kind", "other-product", async function compute2(x) {
         calls++;
@@ -36,7 +34,6 @@ test("different args produce different results", async () => {
 });
 
 test("product and memo of the same function have independent caches", async () => {
-    resetMemoState();
     let calls = 0;
     async function shared(x) { calls++; return x; }
 

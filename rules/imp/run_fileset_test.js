@@ -1,17 +1,15 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { glob, file_set, run, output, paths, getMemoTrace, resetMemoState } from "imp:core";
+import { glob, file_set, run, output, paths, getMemoTrace } from "imp:core";
 
 describe("run() with FileSet inputs", () => {
 
 test("run accepts a glob FileSet in inputs", async () => {
-    resetMemoState();
     const srcs = glob({ root: "rules/imp", include: ["tracked_apis_test.js"] });
     const result = await run({ argv: ["sh", "-c", "true"], inputs: [srcs], impure: true });
     expect(result.exitCode).toBe(0);
 });
 
 test("run copies glob files into sandbox", async () => {
-    resetMemoState();
     const srcs = glob({ root: "rules/imp", include: ["tracked_apis_test.js"] });
     const result = await run({
         argv: ["sh", "-c", "test -f rules/imp/tracked_apis_test.js"],
@@ -22,7 +20,6 @@ test("run copies glob files into sandbox", async () => {
 });
 
 test("run accepts a literal FileSet in inputs", async () => {
-    resetMemoState();
     const srcs = file_set.literal(["rules/imp/tracked_apis_test.js"]);
     const result = await run({
         argv: ["sh", "-c", "test -f rules/imp/tracked_apis_test.js"],
@@ -33,7 +30,6 @@ test("run accepts a literal FileSet in inputs", async () => {
 });
 
 test("run accepts a union FileSet in inputs", async () => {
-    resetMemoState();
     const a = glob({ root: "rules/imp", include: ["memo_test.js"] });
     const b = glob({ root: "rules/imp", include: ["product_test.js"] });
     const result = await run({
@@ -45,13 +41,11 @@ test("run accepts a union FileSet in inputs", async () => {
 });
 
 test("run accepts empty inputs array", async () => {
-    resetMemoState();
     const result = await run({ argv: ["sh", "-c", "true"], inputs: [], impure: true });
     expect(result.exitCode).toBe(0);
 });
 
 test("run accepts mixed FileSet and plain spec in inputs", async () => {
-    resetMemoState();
     const srcs = glob({ root: "rules/imp", include: ["memo_test.js"] });
     const plain = { kind: "file", path: "rules/imp/product_test.js" };
     const result = await run({
@@ -63,7 +57,6 @@ test("run accepts mixed FileSet and plain spec in inputs", async () => {
 });
 
 test("materialising a FileSet input records a paths effect entry", async () => {
-    resetMemoState();
     const srcs = glob({ root: "rules/imp", include: ["memo_test.js"] });
     await run({ argv: ["sh", "-c", "true"], inputs: [srcs], impure: true });
     const { trace } = getMemoTrace();

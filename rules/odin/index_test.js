@@ -33,7 +33,6 @@ import {
     gatherTransitiveClosure,
     glob,
     paths,
-    resetMemoState,
     getMemoTrace,
     configure,
 } from "imp:core";
@@ -165,7 +164,6 @@ test("resources(app) includes resource deps from transitive Odin deps", async ()
 });
 
 test("odinBuild declares resource package files as sandbox inputs", async () => {
-    resetMemoState();
     await withFakeRun(async () => {
         const fonts = resourcePackage({ path: "rules/odin", srcs: ["toolchain.js"] });
         const app = odinPackage({ srcs: ["rules/odin/index.js"], toolchain: "dev-2026-04", output: "build/odin/target", deps: [fonts] });
@@ -177,7 +175,6 @@ test("odinBuild declares resource package files as sandbox inputs", async () => 
 });
 
 test("repeated sources() calls are memoized", async () => {
-    resetMemoState();
     const pkg = odinPackage({ srcs: ["**/*.odin"], toolchain: "dev-2026-04" });
     const a = await sources(pkg);
     const b = await sources(pkg);
@@ -262,7 +259,6 @@ test("collection_dirs(pkg) returns non-root collection directories once", async 
 });
 
 test("odinBuild materializes collection directories before invoking Odin", async () => {
-    resetMemoState();
     configure("odin", null);
     configure("odin", { collections: { root: ".", lib: "library" } });
     try {
@@ -284,7 +280,6 @@ test("odinBuild materializes collection directories before invoking Odin", async
 });
 
 test("odinBuild uses library build mode when package has no main entrypoint", async () => {
-    resetMemoState();
     configure("odin", null);
     try {
         await withFakeRun(async () => {
@@ -301,7 +296,6 @@ test("odinBuild uses library build mode when package has no main entrypoint", as
 });
 
 test("odinBuild rejects packages with no source files after excludes", async () => {
-    resetMemoState();
     configure("odin", null);
     const pkg = odinPackage({ path: "rules/odin", srcs: ["missing*.odin"], toolchain: "dev-2026-04" });
     let message = "";
@@ -315,7 +309,6 @@ test("odinBuild rejects packages with no source files after excludes", async () 
 });
 
 test("odinBuild uses the single source directory when it differs from target path", async () => {
-    resetMemoState();
     configure("odin", null);
     try {
         await withFakeRun(async () => {
@@ -332,7 +325,6 @@ test("odinBuild uses the single source directory when it differs from target pat
 });
 
 test("odinBuild does not use library build mode when package has a main entrypoint", async () => {
-    resetMemoState();
     configure("odin", null);
     try {
         await withFakeRun(async () => {
@@ -356,7 +348,6 @@ test("odinTestPackage declares an Odin test target", () => {
 });
 
 test("odinTest runs odin test with package sources", async () => {
-    resetMemoState();
     configure("odin", null);
     try {
         await withFakeRun(async () => {
