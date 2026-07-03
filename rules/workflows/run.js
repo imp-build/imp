@@ -8,13 +8,14 @@
 // executes the resulting binary directly against the real workspace
 // (sandbox: false, impure: true) — only for packages with a main entrypoint.
 //
-// The pre-flight callback below runs once per invocation, before any
-// per-target dispatch, so a multi-target selection is rejected with exactly
-// one error instead of one per target (which is what happened when this
-// check lived inside odinRun itself, since each selected target gets its
-// own dispatch task).
+// The callback below fully owns the goal: it validates the selection first,
+// rejecting a multi-target run with exactly one error naming every offender
+// (instead of one error per target, which is what happened when this check
+// lived inside odinRun itself, since each selected target got its own
+// dispatch task) — then dispatches to the selected target's product itself,
+// since a goal callback replaces native per-target dispatch entirely.
 
-import { goal } from "imp:core";
+import { dispatchSelection, goal } from "imp:core";
 
 export function requireSingleOdinPackage(selection) {
     const targets = selection.filter(t => t.kind === "odin-package");
@@ -23,4 +24,9 @@ export function requireSingleOdinPackage(selection) {
     }
 }
 
-goal("run", requireSingleOdinPackage);
+export async function runGoal(selection) {
+    requireSingleOdinPackage(selection);
+    await dispatchSelection(selection);
+}
+
+goal("run", runGoal);

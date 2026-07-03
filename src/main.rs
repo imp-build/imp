@@ -395,10 +395,9 @@ async fn cmd_execute_live(
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let workspace = {
-        let mut p = tree.add_child("load workspace");
+        let start = std::time::Instant::now();
         let ws = load_workspace_with_messages(&workspace_root, tree).await?;
-        p.done("workspace loaded");
-        ws
+        log::info!("loaded workspace in {:.2}s", start.elapsed().as_secs_f64());
     };
     let js_workers = effective_js_workers(&workspace.workspace, js_workers)?;
 

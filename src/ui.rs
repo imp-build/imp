@@ -13,7 +13,7 @@ impl Tree {
         // Raw `add_child` (no `init_task`): this is a message log, not a
         // stepped task. Created once here so the workspace log sink is shared
         // across every command rather than re-created on each load.
-        let log_item = root.add_child("workspace logs");
+        let log_item = root.add_child("");
         let log_sink = HostLogSink::prodash(log_item);
         Self { root, log_sink }
     }
@@ -38,6 +38,10 @@ impl Tree {
 
     fn downgrade(&self) -> std::sync::Weak<prodash::tree::Root> {
         Arc::downgrade(&self.root)
+    }
+
+    pub(crate) fn message(&self, format: String) -> _ {
+        todo!()
     }
 }
 

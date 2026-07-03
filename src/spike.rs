@@ -2373,6 +2373,13 @@ pub async fn evaluate_product_json(
 /// work — and work fanned out with `group()`/`Promise.all` inside a product —
 /// runs concurrently, bounded by the scheduler.
 ///
+/// If the goal has a registered callback (`goal(name, fn)`), that callback
+/// fully owns the goal: it is invoked once with the selection and, on
+/// success, the native per-target dispatch loop below is skipped entirely
+/// rather than also running — the callback is responsible for calling
+/// `dispatchSelection()` (or its own dispatch logic) itself. Goals without a
+/// callback keep the native per-target dispatch loop unchanged.
+///
 /// The caller must have installed a scheduler (and this sets `exec_root`).
 pub async fn execute_goal_live(
     live: &LiveWorkspace,
@@ -2390,28 +2397,33 @@ pub async fn execute_goal_live(
         )
     })?;
     let roots = select_roots(&live.workspace, goal_def, selectors)?;
+    let goal_callback_name = live.workspace.goal_callbacks.get(goal).cloned();
 
     // Resolve owned (js_id, product fn name, label) triples so nothing borrows
-    // the workspace across the JS await below.
-    let mut calls = Vec::with_capacity(roots.len());
-    for (target, product) in &roots {
-        let product_fn_name = live
-            .workspace
-            .products
-            .get(&(target.kind.clone(), product.clone()))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no product '{product}' for kind '{}' (target '{})'",
-                    target.kind,
-                    target.address
-                )
-            })?
-            .clone();
-        calls.push((
-            target.js_id,
-            product_fn_name,
-            format!("{}#{}", target.address, product),
-        ));
+    // the workspace across the JS await below. Only needed when there's no
+    // callback — a registered callback skips this native dispatch entirely.
+    let mut calls = Vec::new();
+    if goal_callback_name.is_none() {
+        calls.reserve(roots.len());
+        for (target, product) in &roots {
+            let product_fn_name = live
+                .workspace
+                .products
+                .get(&(target.kind.clone(), product.clone()))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no product '{product}' for kind '{}' (target '{})'",
+                        target.kind,
+                        target.address
+                    )
+                })?
+                .clone();
+            calls.push((
+                target.js_id,
+                product_fn_name,
+                format!("{}#{}", target.address, product),
+            ));
+        }
     }
 
     let selection: Vec<serde_json::Value> = roots
@@ -2427,7 +2439,6 @@ pub async fn execute_goal_live(
         .collect();
     let selection_json =
         serde_json::to_string(&selection).context("serialize goal selection")?;
-    let goal_callback_name = live.workspace.goal_callbacks.get(goal).cloned();
 
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
     live.exec_no_cache.store(no_cache, Ordering::SeqCst);
@@ -2470,6 +2481,10 @@ pub async fn execute_goal_live(
                         format!("goal '{goal_owned}' callback: {e}"),
                     )
                 })?;
+                // The callback owns the goal entirely on success — the native
+                // per-target dispatch loop below never runs for a goal with a
+                // registered callback (see doc comment above).
+                return Ok(());
             }
 
             let mut promises = Vec::with_capacity(calls.len());
@@ -4790,7 +4805,7 @@ export const build = product("callback-test", "custom-goal", async function buil
     }
 
     #[tokio::test]
-    async fn goal_callback_success_still_runs_per_target_dispatch() {
+    async fn goal_callback_success_skips_native_dispatch() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
 
@@ -4830,7 +4845,10 @@ export const build = product("callback-test", "custom-goal", async function buil
         execute_goal_live(&live, p, "custom-goal", &["a".to_owned()], false, 1)
             .await
             .unwrap();
-        assert_eq!(std::fs::read_to_string(p.join("ran-a.txt")).unwrap(), "ran");
+        assert!(
+            !p.join("ran-a.txt").exists(),
+            "a successful callback must fully own the goal; native per-target dispatch must not also run"
+        );
     }
 
     #[tokio::test]

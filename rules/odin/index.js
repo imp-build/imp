@@ -18,6 +18,7 @@ import {
 	targetAddress,
 	targetRef,
 	workspaceTargets,
+	logInfo,
 } from "imp:core";
 
 import {
@@ -718,7 +719,7 @@ export const odinTest = product("odin-test-package", "test",
             throw new Error(empty_package_error(handle, packagePath));
         }
         const path = analysis.packagePath;
-        return run({
+        let outcome = run({
             argv: [
                 "sh",
                 "-c",
@@ -734,6 +735,9 @@ export const odinTest = product("odin-test-package", "test",
             impure: true,
             display: `odin test ${path}`,
         });
+		logInfo(`Test finished: ${path}`);
+		return outcome;
+
     }
 );
 

@@ -112,8 +112,8 @@ export function namedCache(opts) {
 }
 
 /**
- * Register a goal, optionally with a callback that runs once per invocation
- * before any per-target product dispatch.
+ * Register a goal, optionally with a callback that fully owns the goal
+ * invocation.
  *
  * The built-in "build" goal is pre-registered. Extensions may register
  * additional goals. Duplicate goal names are silently ignored
@@ -124,11 +124,15 @@ export function namedCache(opts) {
  *
  * @param {string} name Goal name, e.g. "test" or "fmt".
  * @param {(selection: Array<{id: number, address: string, kind: string, product: string}>) => (void | Promise<void>)} [fn]
- *   Optional. Runs once per goal invocation, before per-target dispatch,
- *   receiving the resolved selection for this invocation. Throwing (or
- *   rejecting) aborts the whole invocation with that one error and skips
- *   per-target dispatch entirely — no product function for any target
- *   runs. If omitted, per-target dispatch always proceeds as today.
+ *   Optional. When provided, this callback is fully responsible for the goal
+ *   invocation — it receives the resolved selection and native per-target
+ *   product dispatch is skipped entirely, even on success. Call
+ *   `dispatchSelection(selection)` from within `fn` to reproduce the default
+ *   per-target dispatch (invoke each selected target's registered product
+ *   function and await all of them). Throwing (or rejecting) aborts the
+ *   whole invocation with that one error. If `fn` is omitted, the host
+ *   dispatches every selected target's product function itself, exactly as
+ *   before.
  * @returns {void}
  */
 export function goal(name, fn) {
@@ -420,6 +424,45 @@ export function selectedTargets(kind = undefined) {
 }
 
 /**
+ * Run the default per-target dispatch for a selection: for each entry, look
+ * up its registered product (by kind + product name), resolve its target
+ * handle, and invoke the product function. All calls are started before any
+ * is awaited (fan-out), then awaited in selection order — the first
+ * rejection aborts immediately, labeled with its target's address#product,
+ * mirroring the host's native per-target dispatch that this replaces for a
+ * goal with a registered callback.
+ *
+ * Intended to be called from (or passed directly as) a goal's callback, e.g.
+ * `goal("test", dispatchSelection)`.
+ *
+ * @param {Array<{id: number, address: string, kind: string, product: string}>} selection
+ * @returns {Promise<void>}
+ */
+export async function dispatchSelection(selection) {
+    // Resolve every entry's product fn up front, before invoking any of
+    // them, so a missing product fails fast without partially dispatching.
+    const resolved = selection.map((entry) => {
+        const fn = _products_by_kind_name.get(`${entry.kind}:${entry.product}`);
+        if (fn === undefined) {
+            throw new Error(`no product '${entry.product}' for kind '${entry.kind}' (target '${entry.address}')`);
+        }
+        return {
+            label: `${entry.address}#${entry.product}`,
+            fn,
+            handle: globalThis.__imp_resolve_handle(entry.id),
+        };
+    });
+    const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));
+    for (const { label, promise } of calls) {
+        try {
+            await promise;
+        } catch (e) {
+            throw new Error(`${label}: ${e && e.message ? e.message : e}`);
+        }
+    }
+}
+
+/**
  * Collect all targets of a given kind reachable from a handle (depth-first, deduped).
  *
  * @param {object} handle Root target handle.
@@ -485,6 +528,7 @@ const _memo_fn_ids = new WeakMap();
 let _memo_fn_counter = 0;
 const _fn_id_names = new Map();  // fn_id → fn.name; persists across resetMemoState
 const _product_fn_info = new Map();  // fn_id → product_name; persists across resetMemoState
+const _products_by_kind_name = new Map();  // "kind:name" → memoized fn; persists across resetMemoState
 
 function _stable_function_id(fn) {
     let id = _memo_fn_ids.get(fn);
@@ -889,6 +933,7 @@ export function product(kind, name, fn) {
     const memoized = memo(fn);
     __host_product(kind, name, memoized);
     _product_fn_info.set(_stable_function_id(fn), name);
+    _products_by_kind_name.set(`${kind}:${name}`, memoized);
     return memoized;
 }
 

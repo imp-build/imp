@@ -4,7 +4,16 @@
 // explicitly so it's documented here rather than relying solely on the Rust
 // default; goal registration is first-registration-wins, so this is a no-op
 // today and stays correct if that default is ever dropped.
+//
+// Unlike "run", "test" has no single-target restriction — every selected
+// target's registered test product runs. The callback below just delegates
+// to the default per-target dispatch, since a goal callback replaces native
+// dispatch entirely rather than running alongside it.
 
-import { goal } from "imp:core";
+import { dispatchSelection, goal } from "imp:core";
 
-goal("test");
+export function testGoal(selection) {
+    return dispatchSelection(selection);
+}
+
+goal("test", testGoal);
