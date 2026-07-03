@@ -112,22 +112,36 @@ export function namedCache(opts) {
 }
 
 /**
- * Register a goal and its product-selection policy.
+ * Register a goal, optionally with a callback that runs once per invocation
+ * before any per-target product dispatch.
  *
- * The built-in "build" goal is pre-registered with productPolicy "default".
- * Extensions may register additional goals. Duplicate goal names are silently
- * ignored (first registration wins).
+ * The built-in "build" goal is pre-registered. Extensions may register
+ * additional goals. Duplicate goal names are silently ignored
+ * (first-registration-wins). A goal's product is always the product named
+ * after the goal itself (goals map uniformly onto products: build →
+ * "build", fmt → "fmt", …); targets whose kind lacks that product are
+ * skipped during selector-less selection.
  *
- * @param {object} opts
- * @param {string} opts.name Goal name, e.g. "test" or "fmt".
- * @param {string} [opts.productPolicy] Product to request from each selected
- *   target. Defaults to the product named after the goal itself (goals map
- *   uniformly onto products: build → "build", fmt → "fmt", …). Targets whose
- *   kind lacks the product are skipped during selector-less selection.
+ * @param {string} name Goal name, e.g. "test" or "fmt".
+ * @param {(selection: Array<{id: number, address: string, kind: string, product: string}>) => (void | Promise<void>)} [fn]
+ *   Optional. Runs once per goal invocation, before per-target dispatch,
+ *   receiving the resolved selection for this invocation. Throwing (or
+ *   rejecting) aborts the whole invocation with that one error and skips
+ *   per-target dispatch entirely — no product function for any target
+ *   runs. If omitted, per-target dispatch always proceeds as today.
  * @returns {void}
  */
-export function goal(opts) {
-    __host_goal(opts.name, opts.productPolicy !== undefined ? opts.productPolicy : "default");
+export function goal(name, fn) {
+    if (typeof name !== "string" || name === "") {
+        throw new Error("goal(name, fn?) requires a non-empty string name");
+    }
+    __host_goal(name, "default");
+    if (fn !== undefined) {
+        if (typeof fn !== "function") {
+            throw new Error("goal(name, fn?) expects fn to be a function when provided");
+        }
+        __host_goal_callback(name, fn);
+    }
 }
 
 /**

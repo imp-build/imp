@@ -34,6 +34,14 @@ import {
     cmake_resources,
 } from "//rules/c/cmake";
 
+// Registers the "run" goal's single-target pre-flight callback
+// (rules/workflows/run.js). Imported here — not just from this repo's own
+// imp.workspace.js — so odinRun's safety guard is always wired up for any
+// consumer that imports //rules/odin, regardless of whether they also
+// happen to import the workflows layer. Side-effect only; nothing exported
+// from it is used in this file.
+import "//rules/workflows/run";
+
 export {
     acquireOdinToolchain,
     createOdinToolchainApi,
@@ -675,7 +683,7 @@ export const odinBuild = product("odin-package", "build",
             argv: [
                 "sh",
                 "-c",
-                "out=$1; pkg=$2; dir_count=$3; shift 3; mkdir -p \"$(dirname \"$out\")\"; while [ \"$dir_count\" -gt 0 ]; do mkdir -p \"$1\"; shift; dir_count=$((dir_count - 1)); done; odin build \"$pkg\" \"-out:$out\" \"$@\"",
+                "out=$1; pkg=$2; dir_count=$3; shift 3; mkdir -p \"$(dirname \"$out\")\"; while [ \"$dir_count\" -gt 0 ]; do mkdir -p \"$1\"; shift; dir_count=$((dir_count - 1)); done; odin build \"$pkg\" \"-out:$out\" \"-debug\" \"$@\"",
                 "odin-build",
                 output_path(out),
                 path,
@@ -728,6 +736,42 @@ export const odinTest = product("odin-test-package", "test",
         });
     }
 );
+
+/**
+ * Build and execute an Odin package's binary directly against the real
+ * workspace (not sandboxed) — the package must have a main entrypoint. The
+ * "run" goal's pre-flight callback (rules/workflows/run.js) rejects
+ * multi-target selections before this ever runs, so it doesn't need to
+ * check that itself.
+ *
+ * @param {object} handle Target handle returned by odinPackage().
+ * @returns {Promise<object>} Run result.
+ */
+export const odinRun = product("odin-package", "run", async function odinRun(handle) {
+    const analysis = await odinPackageAnalysis(handle);
+    if (!analysis.hasMainEntrypoint) {
+        const path = declared_path(handle, handle.attrs.path || ".");
+        throw new Error(`${path} has no main entrypoint; only executable odin-package targets can be run`);
+    }
+    const buildResult = await odinBuild(handle);
+    return run({
+        argv: [buildResult.outputPath],
+        sandbox: false,
+        impure: true,
+        display: `run ${buildResult.outputPath}`,
+    });
+});
+
+// Stubs: no lint/package implementation exists yet for Odin packages. These
+// throw rather than silently succeeding, so `imp lint`/`imp package`
+// fail loudly instead of looking like they ran and passed.
+export const odinLintStub = product("odin-package", "lint", async function odinLintStub(handle) {
+    throw new Error(`lint is not yet implemented for Odin packages (${declared_path(handle, handle.attrs.path || ".")})`);
+});
+
+export const odinPackageStub = product("odin-package", "package", async function odinPackageStub(handle) {
+    throw new Error(`package is not yet implemented for Odin packages (${declared_path(handle, handle.attrs.path || ".")})`);
+});
 
 // ---------------------------------------------------------------------------
 // Odin source generation

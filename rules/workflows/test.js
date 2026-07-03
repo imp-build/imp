@@ -1,19 +1,10 @@
-// Migration target for src/commands/test.rs
-//
-// The legacy Rust command built jodin, compiled all test packages with
-// -build-mode:test, ran each binary, and reported pass/fail counts.
-// Also supported integration tests (test_main target) and kcov coverage.
-//
-// Intended shape:
-//
-//   import { goal } from "imp:core";
-//
-//   export default async function () {
-//     // TODO: define test and integration-test goals that build odin-package
-//     //       targets in test mode and run their output binaries
-//     // goal("test", { ... });
-//     // goal("test:integration", { ... });
-//     // goal("coverage", { ... });
-//   }
+// The "test" goal is seeded by default in HostState::default() (src/spike.rs),
+// but its real products live elsewhere: odin-test-package (rules/odin/index.js),
+// rules-test (rules/imp/test/index.js). This file just declares the goal
+// explicitly so it's documented here rather than relying solely on the Rust
+// default; goal registration is first-registration-wins, so this is a no-op
+// today and stays correct if that default is ever dropped.
 
-// TODO: implement
+import { goal } from "imp:core";
+
+goal("test");

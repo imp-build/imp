@@ -133,6 +133,10 @@ pub struct Workspace {
     pub goals: BTreeMap<String, Goal>,
     #[allow(dead_code)]
     pub platforms: BTreeMap<String, PlatformDef>,
+    /// Goal name -> global function name for an optional pre-flight
+    /// callback registered via `goal(name, fn)`. Invoked once per goal
+    /// invocation, before any per-target product dispatch.
+    pub goal_callbacks: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +173,7 @@ struct HostState {
     goals: BTreeMap<String, Goal>,
     platforms: BTreeMap<String, PlatformDef>,
     id_to_address: BTreeMap<u32, String>,
+    goal_callbacks: BTreeMap<String, String>,
 }
 
 impl Default for HostState {
@@ -205,6 +210,7 @@ impl Default for HostState {
             goals,
             platforms,
             id_to_address: BTreeMap::new(),
+            goal_callbacks: BTreeMap::new(),
         }
     }
 }
@@ -451,6 +457,7 @@ pub async fn load_workspace_with_host_log(
             workspace_config: hs.workspace_config.clone(),
             owned_files,
             named_caches: hs.named_caches.clone(),
+            goal_callbacks: hs.goal_callbacks.clone(),
             goals: hs.goals.clone(),
             platforms: hs.platforms.clone(),
         };
@@ -681,6 +688,28 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_product", host_product)?;
+
+    // ------------------------------------------------------------------
+    // __host_goal_callback(name, fn) — registers an optional pre-flight
+    // callback for a goal, invoked once per invocation before any
+    // per-target product dispatch (see execute_goal_live).
+    // ------------------------------------------------------------------
+    let state_gc = Arc::clone(&state);
+    let host_goal_callback = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, name: String, fn_val: Value<'js>| -> rquickjs::Result<()> {
+            let exec_name = {
+                let mut hs = state_gc.lock().unwrap();
+                let n = format!("__imp_exec_{}", hs.next_exec);
+                hs.next_exec += 1;
+                n
+            };
+            ctx.globals().set(exec_name.as_str(), fn_val)?;
+            state_gc.lock().unwrap().goal_callbacks.insert(name, exec_name);
+            Ok(())
+        },
+    )?;
+    globals.set("__host_goal_callback", host_goal_callback)?;
 
     let state_br = Arc::clone(&state);
     let host_register_build_rule = Function::new(
@@ -2403,11 +2432,15 @@ pub async fn execute_goal_live(
             })
         })
         .collect();
+    let selection_json =
+        serde_json::to_string(&selection).context("serialize goal selection")?;
+    let goal_callback_name = live.workspace.goal_callbacks.get(goal).cloned();
 
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
     live.exec_no_cache.store(no_cache, Ordering::SeqCst);
     *live.selected_roots.lock().unwrap() = Some(selection);
 
+    let goal_owned = goal.to_owned();
     let result = live
         .ctx
         .async_with(async move |ctx| -> rquickjs::Result<()> {
@@ -2415,6 +2448,36 @@ pub async fn execute_goal_live(
             set_js_workers.call::<_, ()>((js_workers.max(1),))?;
             let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
             let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
+
+            if let Some(callback_fn_name) = goal_callback_name {
+                let json_parse: Function = ctx.eval("(s) => JSON.parse(s)")?;
+                let selection_value: Value = json_parse.call((selection_json.as_str(),))?;
+                let callback_fn: Function = ctx.globals().get(callback_fn_name.as_str())?;
+                let result_value: Value = callback_fn
+                    .call((selection_value,))
+                    .catch(&ctx)
+                    .map_err(|e| {
+                        rquickjs::Error::new_loading_message(
+                            "execute",
+                            format!("goal '{goal_owned}' callback: {e}"),
+                        )
+                    })?;
+                let promise: MaybePromise = promise_resolve
+                    .call((result_value,))
+                    .catch(&ctx)
+                    .map_err(|e| {
+                        rquickjs::Error::new_loading_message(
+                            "execute",
+                            format!("goal '{goal_owned}' callback: {e}"),
+                        )
+                    })?;
+                promise.into_future::<Value>().await.catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message(
+                        "execute",
+                        format!("goal '{goal_owned}' callback: {e}"),
+                    )
+                })?;
+            }
 
             let mut promises = Vec::with_capacity(calls.len());
             for (js_id, fn_name, label) in &calls {
@@ -4671,6 +4734,150 @@ export const build = product("selected-targets-reset-test", "build", async funct
             live.selected_roots.lock().unwrap().is_none(),
             "selected_roots must be reset once goal execution completes"
         );
+    }
+
+    #[tokio::test]
+    async fn goal_callback_rejection_blocks_all_per_target_dispatch() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, run, output, goal } from "imp:core";
+
+goal("custom-goal", (selection) => {
+    if (selection.length > 1) {
+        throw new Error(`too many: ${selection.map((t) => t.address).join(",")}`);
+    }
+});
+
+export const a = target({ kind: "callback-test" });
+export const b = target({ kind: "callback-test" });
+
+export const build = product("callback-test", "custom-goal", async function build(handle) {
+    await run({
+        argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", "ran", `ran-${handle.label.name}.txt`],
+        outputs: [output(`ran-${handle.label.name}.txt`)],
+        display: `ran ${handle.label.name}`,
+    });
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let err = execute_goal_live(
+            &live,
+            p,
+            "custom-goal",
+            &["a".to_owned(), "b".to_owned()],
+            false,
+            1,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("too many"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !p.join("ran-a.txt").exists(),
+            "callback rejection must block per-target dispatch entirely"
+        );
+        assert!(!p.join("ran-b.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn goal_callback_success_still_runs_per_target_dispatch() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, run, output, goal } from "imp:core";
+
+goal("custom-goal", (selection) => {
+    if (selection.length > 1) {
+        throw new Error(`too many: ${selection.map((t) => t.address).join(",")}`);
+    }
+});
+
+export const a = target({ kind: "callback-test" });
+
+export const build = product("callback-test", "custom-goal", async function build(handle) {
+    await run({
+        argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", "ran", `ran-${handle.label.name}.txt`],
+        outputs: [output(`ran-${handle.label.name}.txt`)],
+        display: `ran ${handle.label.name}`,
+    });
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        execute_goal_live(&live, p, "custom-goal", &["a".to_owned()], false, 1)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("ran-a.txt")).unwrap(), "ran");
+    }
+
+    #[tokio::test]
+    async fn goal_with_no_callback_dispatches_normally() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, run, output, goal } from "imp:core";
+
+goal("plain-goal");
+
+export const a = target({ kind: "plain-goal-test" });
+
+export const build = product("plain-goal-test", "plain-goal", async function build(handle) {
+    await run({
+        argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", "ran", `ran-${handle.label.name}.txt`],
+        outputs: [output(`ran-${handle.label.name}.txt`)],
+        display: `ran ${handle.label.name}`,
+    });
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        execute_goal_live(&live, p, "plain-goal", &["a".to_owned()], false, 1)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("ran-a.txt")).unwrap(), "ran");
     }
 
     #[tokio::test]

@@ -3,6 +3,11 @@
 import "//rules/c/cmake";
 import "//rules/gen";
 import "//rules/odin";
+import "//rules/workflows/build";
 import "//rules/workflows/fmt";
+import "//rules/workflows/lint";
+import "//rules/workflows/package";
+import "//rules/workflows/run";
+import "//rules/workflows/test";
 import "//rules/workflows/vs";
 import "//rules/imp/test";

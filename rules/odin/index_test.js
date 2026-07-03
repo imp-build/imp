@@ -23,6 +23,9 @@ import {
     tool,
     odinBuild,
     odinTest,
+    odinRun,
+    odinLintStub,
+    odinPackageStub,
     default_output_path,
     odin_output_path,
 } from "//rules/odin";
@@ -318,6 +321,57 @@ test("odinBuild's return value is enriched with outputPath", async () => {
     } finally {
         configure("odin", null);
     }
+});
+
+test("odinRun builds then executes the binary unsandboxed, reusing odinBuild's outputPath", async () => {
+    configure("odin", null);
+    try {
+        await withFakeRun(async () => {
+            const pkg = odinPackage({ path: "rules/odin/example", toolchainVersion: "dev-2026-04", output: "build/odin/target" });
+            await odinRun(pkg);
+            const { trace } = getMemoTrace();
+            const buildEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display.startsWith("odin build"));
+            const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display.startsWith("run "));
+            expect(runEffect.sandbox).toBe(false);
+            expect(runEffect.impure).toBe(true);
+            expect(runEffect.argv).toEqual([buildEffect.outputs[0].path]);
+        });
+    } finally {
+        configure("odin", null);
+    }
+});
+
+test("odinRun rejects packages with no main entrypoint", async () => {
+    configure("odin", null);
+    let message = "";
+    try {
+        const lib = odinPackage({ srcs: ["rules/odin/index.js"], toolchain: "dev-2026-04", output: "build/odin/target" });
+        await odinRun(lib);
+    } catch (error) {
+        message = error && error.message ? error.message : String(error);
+    } finally {
+        configure("odin", null);
+    }
+    expect(message).toContain("no main entrypoint");
+});
+
+test("odinLintStub and odinPackageStub throw not-yet-implemented errors", async () => {
+    const pkg = odinPackage({ path: "rules/odin/example", toolchainVersion: "dev-2026-04", output: "build/odin/target" });
+    let lintMessage = "";
+    try {
+        await odinLintStub(pkg);
+    } catch (error) {
+        lintMessage = error && error.message ? error.message : String(error);
+    }
+    expect(lintMessage).toContain("not yet implemented");
+
+    let packageMessage = "";
+    try {
+        await odinPackageStub(pkg);
+    } catch (error) {
+        packageMessage = error && error.message ? error.message : String(error);
+    }
+    expect(packageMessage).toContain("not yet implemented");
 });
 
 test("odinBuild rejects packages with no source files after excludes", async () => {

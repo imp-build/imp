@@ -5,7 +5,7 @@
 // verifies they're already formatted without mutating the tree, reachable via
 // `//:<pkg>#format-check`.
 //
-// `goal({ name: "fmt" })` declares the "fmt" goal explicitly so `imp fmt`
+// `goal("fmt")` declares the "fmt" goal explicitly so `imp fmt`
 // is documented here rather than relying solely on the host's built-in
 // default (HostState::default(), src/spike.rs); goal registration is
 // first-registration-wins, so this is a no-op if the host already seeded it,
@@ -13,7 +13,7 @@
 import { odinFmt, odinFormatCheck } from "//rules/odin/fmt";
 import { goal, product } from "imp:core";
 
-goal({ name: "fmt" });
+goal("fmt");
 
 export const odinPackageFmt = product("odin-package", "fmt", odinFmt);
 export const odinTestPackageFmt = product("odin-test-package", "fmt", odinFmt);

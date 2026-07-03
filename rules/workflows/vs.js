@@ -16,7 +16,7 @@
 import { target, goal, product, run, output, output_path, workspaceTargets, platformInfo } from "imp:core";
 import { default_output_path, odin_output_path, odinPackageAnalysis } from "//rules/odin";
 
-goal({ name: "vs" });
+goal("vs");
 
 const MODES = ["Debug", "Release"];
 

@@ -1,18 +1,11 @@
-// Migration target for src/commands/build.rs
-//
-// The legacy Rust command supported build modes (debug, quick, release, shipping, msan, asan),
-// direct Odin compilation, jodin (JoltPhysics) integration, and a check command.
-// This should become a goal that invokes the build system for the appropriate targets.
-//
-// Intended shape:
-//
-//   import { goal, platform } from "imp:core";
-//
-//   export default async function () {
-//     // TODO: define build goals for each mode, delegating to odin-package targets
-//     // goal("build", { ... });
-//     // goal("build:release", { ... });
-//     // goal("check", { ... });
-//   }
+// The "build" goal is seeded by default in HostState::default() (src/spike.rs),
+// but its real products live elsewhere: odin-package (rules/odin/index.js),
+// cmake-lib/cmake-toolchain (rules/c/cmake/index.js), asset (rules/asset.js),
+// stamp-file (rules/gen.js), odin-gen (rules/odin/index.js). This file just
+// declares the goal explicitly so it's documented here rather than relying
+// solely on the Rust default; goal registration is first-registration-wins,
+// so this is a no-op today and stays correct if that default is ever dropped.
 
-// TODO: implement
+import { goal } from "imp:core";
+
+goal("build");
