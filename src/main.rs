@@ -113,8 +113,8 @@ struct GoalArgs {
     #[arg(long, default_value_t = 1)]
     jobs: usize,
     /// Number of concurrent JS worker slots for live evaluation
-    #[arg(long, default_value_t = 1)]
-    js_workers: usize,
+    #[arg(long)]
+    js_workers: Option<usize>,
     /// Run actions without reading or writing the task cache
     #[arg(long)]
     no_cache: bool,
@@ -300,6 +300,29 @@ async fn load_workspace_with_messages(
     runtime::load_workspace_with_host_log(workspace_root, tree.log_sink()).await
 }
 
+fn effective_js_workers(workspace: &spike::Workspace, cli_value: Option<usize>) -> Result<usize> {
+    if let Some(value) = cli_value {
+        return Ok(value.max(1));
+    }
+
+    let Some(value) = workspace
+        .workspace_config
+        .get("imp")
+        .and_then(|config| config.get("jsWorkers"))
+    else {
+        return Ok(1);
+    };
+
+    let Some(count) = value.as_u64() else {
+        anyhow::bail!("configure(\"imp\", {{ jsWorkers }}) must use a positive integer");
+    };
+    if count == 0 {
+        anyhow::bail!("configure(\"imp\", {{ jsWorkers }}) must use a positive integer");
+    }
+    usize::try_from(count)
+        .map_err(|_| anyhow::anyhow!("configure(\"imp\", {{ jsWorkers }}) is too large"))
+}
+
 /// What to drive on the live evaluation path: a goal over selected targets, or
 /// a JS rule-test suite (the hidden `rules-test` subcommand, invoked by the
 /// rules-test product inside a task sandbox).
@@ -342,7 +365,7 @@ async fn cmd_rules_test(
     cmd_execute_live(
         LiveInvocation::RulesTests { modules },
         1,
-        1,
+        None,
         false,
         cancellation,
         tree,
@@ -353,12 +376,11 @@ async fn cmd_rules_test(
 async fn cmd_execute_live(
     invocation: LiveInvocation<'_>,
     jobs: usize,
-    js_workers: usize,
+    js_workers: Option<usize>,
     no_cache: bool,
     cancellation: Arc<AtomicBool>,
     tree: &Tree,
 ) -> Result<()> {
-    let js_workers = js_workers.max(1);
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let workspace = {
@@ -367,6 +389,7 @@ async fn cmd_execute_live(
         p.done("workspace loaded");
         ws
     };
+    let js_workers = effective_js_workers(&workspace.workspace, js_workers)?;
 
     if cancellation.load(Ordering::SeqCst) {
         anyhow::bail!("execution canceled");
@@ -857,3 +880,116 @@ async fn cmd_env_check(_env: &Env, check_cross: bool, tree: &Tree) -> Result<()>
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    fn workspace_with_imp_config(config: serde_json::Value) -> spike::Workspace {
+        let mut workspace = spike::Workspace::default();
+        workspace
+            .workspace_config
+            .insert("imp".to_owned(), config);
+        workspace
+    }
+
+    fn write_file(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn effective_js_workers_defaults_to_one() {
+        let workspace = spike::Workspace::default();
+        assert_eq!(effective_js_workers(&workspace, None).unwrap(), 1);
+    }
+
+    #[test]
+    fn effective_js_workers_uses_workspace_config() {
+        let workspace = workspace_with_imp_config(json!({ "jsWorkers": 3 }));
+        assert_eq!(effective_js_workers(&workspace, None).unwrap(), 3);
+    }
+
+    #[test]
+    fn effective_js_workers_cli_overrides_workspace_config() {
+        let workspace = workspace_with_imp_config(json!({ "jsWorkers": 3 }));
+        assert_eq!(effective_js_workers(&workspace, Some(1)).unwrap(), 1);
+    }
+
+    #[test]
+    fn effective_js_workers_rejects_invalid_workspace_config() {
+        for value in [json!(0), json!(-1), json!(1.5), json!("2"), json!(true)] {
+            let workspace = workspace_with_imp_config(json!({ "jsWorkers": value }));
+            let error = effective_js_workers(&workspace, None).unwrap_err();
+            assert!(
+                error.to_string().contains("positive integer"),
+                "unexpected error: {error:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_js_workers_config_feeds_live_js_lanes() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(
+            &p.join(spike::WORKSPACE_FILE),
+            r#"
+import { configure } from "imp:core";
+
+configure("imp", { jsWorkers: 2 });
+"#,
+        );
+        write_file(
+            &p.join(spike::BUILD_FILE),
+            r#"
+import { target, product } from "imp:core";
+
+export const a = target({ kind: "workspace-js-workers-test" });
+export const b = target({ kind: "workspace-js-workers-test" });
+
+export const build = product("workspace-js-workers-test", "build", async function build(handle) {
+    await Promise.resolve();
+    return handle.label.name;
+});
+"#,
+        );
+
+        let live = spike::load_workspace(p).await.unwrap();
+        let js_workers = effective_js_workers(&live.workspace, None).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let selectors = vec!["a".to_owned(), "b".to_owned()];
+        spike::execute_goal_live(&live, p, "build", &selectors, false, js_workers)
+            .await
+            .unwrap();
+
+        let mut slots = BTreeSet::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::scheduler::TaskEvent::LaneStarted {
+                kind: crate::scheduler::LaneKind::Js,
+                slot,
+                display,
+                ..
+            } = event
+            {
+                if display == "build(//:a)" || display == "build(//:b)" {
+                    slots.insert(slot);
+                }
+            }
+        }
+
+        assert_eq!(slots, BTreeSet::from([0, 1]));
+    }
+}
