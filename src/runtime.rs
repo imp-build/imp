@@ -119,6 +119,12 @@ pub struct LiveWorkspace {
     /// Scheduler that live `run()` calls submit to. Installed for the duration
     /// of an execution and cleared afterward; `None` outside execution context.
     pub(crate) scheduler: Arc<Mutex<Option<Arc<Scheduler>>>>,
+    /// Targets resolved by `select_roots` for the goal currently executing,
+    /// queryable from JS as `selectedTargets()`. Set for the duration of
+    /// `execute_goal_live` and reset to `None` afterward — unlike `exec_root`,
+    /// this must not go stale, since it's readable from other live-execution
+    /// paths that share this `LiveWorkspace` (e.g. rules-test evaluation).
+    pub(crate) selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
 }
 
 impl std::fmt::Debug for LiveWorkspace {
@@ -129,6 +135,7 @@ impl std::fmt::Debug for LiveWorkspace {
             .field("ctx", &"AsyncContext { .. }")
             .field("exec_root", &"Arc<Mutex<..>>")
             .field("exec_no_cache", &"Arc<AtomicBool>")
+            .field("selected_roots", &"Arc<Mutex<..>>")
             .finish()
     }
 }

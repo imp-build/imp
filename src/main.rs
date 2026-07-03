@@ -96,6 +96,13 @@ enum Cmd {
     Package(GoalArgs),
     /// Run the selected targets
     Run(GoalArgs),
+    /// Run any registered goal by name, e.g. `imp goal vs //:target`
+    Goal {
+        /// Goal name, e.g. "vs", "build", "fmt"
+        name: String,
+        #[command(flatten)]
+        args: GoalArgs,
+    },
     /// Import JS rule-test modules and run their registered tests. Invoked by
     /// the rules-test product inside a task sandbox; not for direct use.
     #[command(hide = true)]
@@ -190,6 +197,9 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
         }
         Cmd::Run(args) => {
             return cmd_execute_goal("run", args, Arc::clone(&cancellation), tree).await;
+        }
+        Cmd::Goal { name, args } => {
+            return cmd_execute_goal(name, args, Arc::clone(&cancellation), tree).await;
         }
         Cmd::RulesTest { modules } => {
             return cmd_rules_test(modules, Arc::clone(&cancellation), tree).await;
@@ -289,6 +299,7 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
         | Cmd::Lint(_)
         | Cmd::Package(_)
         | Cmd::Run(_)
+        | Cmd::Goal { .. }
         | Cmd::RulesTest { .. } => unreachable!("handled before environment setup"),
     }
 }
@@ -929,6 +940,19 @@ mod tests {
                 error.to_string().contains("positive integer"),
                 "unexpected error: {error:#}"
             );
+        }
+    }
+
+    #[test]
+    fn goal_subcommand_parses_name_and_selectors() {
+        let cli = Cli::parse_from(["imp", "goal", "vs", "//:pkg", "--jobs", "2"]);
+        match cli.command {
+            Cmd::Goal { name, args } => {
+                assert_eq!(name, "vs");
+                assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
+                assert_eq!(args.jobs, 2);
+            }
+            _ => panic!("expected Cmd::Goal"),
         }
     }
 

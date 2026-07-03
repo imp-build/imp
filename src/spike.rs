@@ -274,6 +274,7 @@ pub async fn load_workspace_with_host_log(
     let exec_no_cache = Arc::new(AtomicBool::new(false));
     let scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>> =
         Arc::new(Mutex::new(None));
+    let selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(None));
 
     // ----- QuickJS runtime + context -----
     let rt = Runtime::new().context("create QuickJS runtime")?;
@@ -327,6 +328,7 @@ pub async fn load_workspace_with_host_log(
                 Arc::clone(&exec_root),
                 Arc::clone(&exec_no_cache),
                 Arc::clone(&scheduler),
+                Arc::clone(&selected_roots),
                 host_log.clone(),
             )
         })
@@ -469,6 +471,7 @@ pub async fn load_workspace_with_host_log(
         exec_root,
         exec_no_cache,
         scheduler,
+        selected_roots,
     })
 }
 
@@ -593,6 +596,7 @@ fn register_globals<'js>(
     exec_root: Arc<Mutex<Option<PathBuf>>>,
     exec_no_cache: Arc<AtomicBool>,
     scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>>,
+    selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
     host_log: HostLogSink,
 ) -> rquickjs::Result<()> {
     let globals = ctx.globals();
@@ -1146,6 +1150,27 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_workspace_targets", host_workspace_targets)?;
+
+    // ------------------------------------------------------------------
+    // __host_selected_targets() → JSON [{ id, address, kind, product }]
+    // Errors if called outside of goal execution (selected_roots is None).
+    // ------------------------------------------------------------------
+    let selected_roots_st = Arc::clone(&selected_roots);
+    let host_selected_targets = Function::new(
+        ctx.clone(),
+        move || -> rquickjs::Result<String> {
+            let guard = selected_roots_st.lock().unwrap();
+            let selection = guard.as_ref().ok_or_else(|| {
+                action_spec_error(
+                    "selectedTargets() may only be called during goal execution".to_owned(),
+                )
+            })?;
+            serde_json::to_string(selection).map_err(|e| {
+                rquickjs::Error::new_loading_message("selectedTargets", e.to_string())
+            })
+        },
+    )?;
+    globals.set("__host_selected_targets", host_selected_targets)?;
 
     // ------------------------------------------------------------------
     // Tracked runtime APIs (Phase 3)
@@ -2367,8 +2392,21 @@ pub async fn execute_goal_live(
         ));
     }
 
+    let selection: Vec<serde_json::Value> = roots
+        .iter()
+        .map(|(target, product)| {
+            serde_json::json!({
+                "id": target.js_id,
+                "address": target.address,
+                "kind": target.kind,
+                "product": product,
+            })
+        })
+        .collect();
+
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
     live.exec_no_cache.store(no_cache, Ordering::SeqCst);
+    *live.selected_roots.lock().unwrap() = Some(selection);
 
     let result = live
         .ctx
@@ -2408,6 +2446,7 @@ pub async fn execute_goal_live(
         .await
         .map_err(|e| anyhow::anyhow!("execute goal '{goal}' failed: {e}"));
     live.exec_no_cache.store(false, Ordering::SeqCst);
+    *live.selected_roots.lock().unwrap() = None;
     result
 }
 
@@ -4504,6 +4543,133 @@ export const build = product("concurrent-root-test", "build", async function bui
         assert_eq!(
             max_active, 2,
             "selected roots should submit both run jobs before either completes"
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_targets_reflects_cli_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, run, output, selectedTargets } from "imp:core";
+
+export const a = target({ kind: "selected-targets-test" });
+export const b = target({ kind: "selected-targets-test" });
+
+export const build = product("selected-targets-test", "build", async function build(handle) {
+    const addresses = selectedTargets("selected-targets-test").map((t) => t.address).sort().join(",");
+    await run({
+        argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", addresses, `selection-${handle.label.name}.txt`],
+        outputs: [output(`selection-${handle.label.name}.txt`)],
+        display: `selection for ${handle.label.name}`,
+    });
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler.clone());
+
+        // Explicit selector: only the selected target sees itself.
+        execute_goal_live(&live, p, "build", &["a".to_owned()], false, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("selection-a.txt")).unwrap(),
+            "//:a"
+        );
+
+        // Empty selectors: every target with a product for this goal is selected.
+        reset_js_memo_state(&live).await;
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+        execute_goal_live(&live, p, "build", &[], false, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("selection-a.txt")).unwrap(),
+            "//:a,//:b"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.join("selection-b.txt")).unwrap(),
+            "//:a,//:b"
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_targets_errors_outside_goal_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, selectedTargets } from "imp:core";
+
+export const a = target({ kind: "selected-targets-outside-test" });
+
+export const check = product("selected-targets-outside-test", "check", async function check(handle) {
+    return selectedTargets();
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let err = evaluate_product_json(&live, "//:a", "check")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("selectedTargets() may only be called during goal execution"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_targets_cleared_after_goal_execution_completes() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product } from "imp:core";
+
+export const a = target({ kind: "selected-targets-reset-test" });
+
+export const build = product("selected-targets-reset-test", "build", async function build(handle) {
+    return {};
+});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        assert!(live.selected_roots.lock().unwrap().is_none());
+        execute_goal_live(&live, p, "build", &["a".to_owned()], false, 1)
+            .await
+            .unwrap();
+        assert!(
+            live.selected_roots.lock().unwrap().is_none(),
+            "selected_roots must be reset once goal execution completes"
         );
     }
 

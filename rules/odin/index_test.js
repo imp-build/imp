@@ -23,6 +23,8 @@ import {
     tool,
     odinBuild,
     odinTest,
+    default_output_path,
+    odin_output_path,
 } from "//rules/odin";
 import {
     resourcePackage,
@@ -289,6 +291,29 @@ test("odinBuild uses library build mode when package has no main entrypoint", as
             const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build rules/odin");
             expect(runEffect.argv).toContain("-build-mode:lib");
             expect(runEffect.outputs).toEqual([{ kind: "file", path: "build/odin/target.a" }]);
+        });
+    } finally {
+        configure("odin", null);
+    }
+});
+
+test("default_output_path(handle) derives build/odin/<name> from the handle's label", () => {
+    const fakeHandle = { label: { name: "hello" } };
+    expect(default_output_path(fakeHandle)).toBe("build/odin/hello");
+});
+
+test("odin_output_path appends .a for library build mode, leaves binaries alone", () => {
+    expect(odin_output_path("build/odin/target", { hasMainEntrypoint: true })).toBe("build/odin/target");
+    expect(odin_output_path("build/odin/target", { hasMainEntrypoint: false })).toBe("build/odin/target.a");
+});
+
+test("odinBuild's return value is enriched with outputPath", async () => {
+    configure("odin", null);
+    try {
+        await withFakeRun(async () => {
+            const lib = odinPackage({ srcs: ["rules/odin/index.js"], toolchain: "dev-2026-04", output: "build/odin/target" });
+            const result = await odinBuild(lib);
+            expect(result.outputPath).toBe("build/odin/target.a");
         });
     } finally {
         configure("odin", null);

@@ -375,6 +375,37 @@ export function workspaceTargets(kind = undefined) {
 }
 
 /**
+ * List the targets actually selected for the goal currently executing — the
+ * CLI-resolved roots for this invocation, as opposed to workspaceTargets(),
+ * which always returns every matching target in the whole workspace
+ * regardless of what was selected on the command line.
+ *
+ * Only callable from within a product function while a goal is executing
+ * (e.g. `imp goal vs //:pkg`); throws if called outside that context (e.g.
+ * from generate-build product evaluation or a rules-test module).
+ *
+ * @param {string} [kind] Optional target kind filter.
+ * @returns {Array<{ id: number, address: string, kind: string, product: string, handle: object }>}
+ */
+export function selectedTargets(kind = undefined) {
+    if (kind !== undefined && typeof kind !== "string") {
+        throw new Error("selectedTargets(kind?) expects kind to be a string when provided");
+    }
+    const all = JSON.parse(__host_selected_targets());
+    const targets = kind === undefined ? all : all.filter((t) => t.kind === kind);
+    _trace_effect({ event: "effect", kind: "selectedTargets", target_kind: kind ?? null, count: targets.length });
+    return targets.map((target) => ({
+        ...target,
+        handle: globalThis.__imp_resolve_handle(target.id) || {
+            __imp: true,
+            __id: target.id,
+            kind: target.kind,
+            attrs: {},
+        },
+    }));
+}
+
+/**
  * Collect all targets of a given kind reachable from a handle (depth-first, deduped).
  *
  * @param {object} handle Root target handle.

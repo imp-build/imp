@@ -139,6 +139,24 @@ export async function withFakeRun(fn) {
     }
 }
 
+/**
+ * Run a test body with `__host_selected_targets` stubbed to return `list`,
+ * so `selectedTargets()` works inside a test even though tests run outside
+ * of `execute_goal_live` (where the real binding always errors).
+ *
+ * @param {Array<{ id: number, address: string, kind: string, product: string }>} list
+ * @param {() => Promise<any>} fn
+ */
+export async function withFakeSelectedTargets(list, fn) {
+    const real = globalThis.__host_selected_targets;
+    globalThis.__host_selected_targets = () => JSON.stringify(list);
+    try {
+        return await fn();
+    } finally {
+        globalThis.__host_selected_targets = real;
+    }
+}
+
 async function runRegisteredTests({ from = 0, label = "tests" } = {}) {
     const selected = tests.slice(from);
     if (selected.length === 0) {

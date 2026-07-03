@@ -4,21 +4,25 @@
 // odin-package target, in Debug and Release variants:
 //   .vs/launch.vs.json, .vs/tasks.vs.json, .vscode/launch.json, .vscode/tasks.json
 //
-// Invoke as a product: `imp build //:<vs-target>#build`.
+// Its own "vs" goal, not "build" — emitting IDE config isn't building
+// anything. Invoke as `imp goal vs //:<vs-target>`.
+//
+// Output paths are computed with the same pure helpers odinBuild
+// (rules/odin/index.js) uses internally — imported, not duplicated — so
+// they can't drift from what a real build actually produces. Only
+// odinPackageAnalysis's static source scan runs here; no run()/build is
+// ever triggered by this goal.
 
-import { target, product, run, output, output_path, workspaceTargets, platformInfo } from "imp:core";
+import { target, goal, product, run, output, output_path, workspaceTargets, platformInfo } from "imp:core";
+import { default_output_path, odin_output_path, odinPackageAnalysis } from "//rules/odin";
+
+goal({ name: "vs" });
 
 const MODES = ["Debug", "Release"];
 
 function targetName(address) {
     const colon = address.lastIndexOf(":");
     return colon >= 0 ? address.slice(colon + 1) : address;
-}
-
-// Executable output path for an odin-package target (matches odinBuild's
-// default_output_path); honours an explicit `output` attr when set.
-function outputPath(entry, name) {
-    return entry.attrs && entry.attrs.output ? entry.attrs.output : `build/odin/${name}`;
 }
 
 function windowsOutput(outRel) {
@@ -46,7 +50,7 @@ function writeJsonFile(path, value) {
     });
 }
 
-export const vs = product("vs-workspace", "build", async function vs(handle) {
+export const vs = product("vs-workspace", "vs", async function vs(handle) {
     const isWindows = platformInfo().os === "windows";
     const debuggerType = isWindows ? "cppvsdbg" : "lldb-dap";
 
@@ -57,7 +61,9 @@ export const vs = product("vs-workspace", "build", async function vs(handle) {
 
     for (const entry of workspaceTargets("odin-package")) {
         const name = targetName(entry.address);
-        const outRel = outputPath(entry, name);
+        const analysis = await odinPackageAnalysis(entry.handle);
+        const out = entry.attrs.output || default_output_path(entry.handle);
+        const outRel = odin_output_path(out, analysis);
         const outWin = windowsOutput(outRel);
         const buildSelector = `${entry.address}#build`;
 
