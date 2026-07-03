@@ -36,12 +36,10 @@ test("resolving twice only performs one underlying lookup", async () => {
 
 test("the resolved tool is reachable via PATH even with an empty base PATH", async () => {
     const spec = await nativeToolSpec(sh_tool);
-    // impure: true bypasses caching so stdout is always captured
     const result = await run({
         argv: ["sh", "-c", "echo hi"],
         tools: [spec],
         env: { PATH: "" },
-        impure: true,
         display: "nativeTool smoke test",
     });
     expect(result.exitCode).toBe(0);

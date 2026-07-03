@@ -83,8 +83,7 @@ test("paths(glob(...)) records a paths effect entry in memo trace", async () => 
 });
 
 test("run executes a command and returns exitCode 0", async () => {
-    // impure: true bypasses caching so stdout is always captured
-    const result = await run({ argv: ["sh", "-c", "echo hello"], impure: true });
+    const result = await run({ argv: ["sh", "-c", "echo hello"] });
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe("hello");
 });

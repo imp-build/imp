@@ -4837,7 +4837,7 @@ export const build = product("deferred-run-context-test", "build", async functio
         let p = root.path();
         let marker = p.join("runs.txt");
         let command = format!(
-            "printf r >> '{}' && mkdir -p build && printf payload > build/live.txt",
+            "printf r >> '{}' && printf live-stdout && printf live-stderr >&2 && mkdir -p build && printf payload > build/live.txt",
             marker.display()
         );
         let command_js = command.replace('\\', "\\\\").replace('"', "\\\"");
@@ -4852,11 +4852,18 @@ import {{ target, product, run, output }} from "imp:core";
 export const app = target({{ kind: "live-cache-test" }});
 
 export const build = product("live-cache-test", "build", async function build() {{
-    return run({{
+    const result = await run({{
         argv: ["sh", "-c", "{command_js}"],
         outputs: [output("build/live.txt")],
         display: "live cache action",
     }});
+    if (result.stdout !== "live-stdout\n") {{
+        throw new Error(`unexpected stdout: ${{result.stdout}}`);
+    }}
+    if (result.stderr !== "live-stderr\n") {{
+        throw new Error(`unexpected stderr: ${{result.stderr}}`);
+    }}
+    return result;
 }});
 "#
             ),

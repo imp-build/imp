@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use walkdir::WalkDir;
 
 
-pub(crate) const TASK_CACHE_VERSION: u32 = 4;
+pub(crate) const TASK_CACHE_VERSION: u32 = 5;
 
 // ---------------------------------------------------------------------------
 // Cache types
@@ -51,6 +51,8 @@ pub(crate) struct TaskCacheRecord {
     pub(crate) action_digest: String,
     pub(crate) input_digests: Vec<CacheInputDigest>,
     pub(crate) named_caches: Vec<NamedCacheBinding>,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
     pub(crate) outputs: Vec<CachedArtifact>,
 }
 
@@ -484,4 +486,3 @@ pub(crate) fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Cache explain (public API)
 // ---------------------------------------------------------------------------
-

@@ -616,7 +616,7 @@ pub(crate) fn exec_run_inner(
     // Check cache.
     let cacheable = !opts.impure || opts.force_cache;
     let record_path = task_record_path(&task_key)?;
-    let cached_outputs_opt: Option<Vec<CachedArtifact>> = if cacheable && !opts.no_cache {
+    let cached_record_opt: Option<TaskCacheRecord> = if cacheable && !opts.no_cache {
         match std::fs::read_to_string(&record_path) {
             Ok(encoded) => {
                 let record: TaskCacheRecord =
@@ -624,7 +624,7 @@ pub(crate) fn exec_run_inner(
                         format!("parse exec cache record {}", record_path.display())
                     })?;
                 match cached_outputs_present(&record) {
-                    Ok(()) => Some(record.outputs),
+                    Ok(()) => Some(record),
                     Err(_) => None,
                 }
             }
@@ -637,20 +637,11 @@ pub(crate) fn exec_run_inner(
         None
     };
 
-    if let Some(outputs) = cached_outputs_opt {
-        let record = TaskCacheRecord {
-            version: TASK_CACHE_VERSION,
-            task_id: task_key.clone(),
-            task_key,
-            action_digest,
-            input_digests,
-            named_caches: vec![],
-            outputs,
-        };
+    if let Some(record) = cached_record_opt {
         materialize_cached_outputs(&record, workspace_root)?;
         return Ok(ExecRunResult {
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: record.stdout,
+            stderr: record.stderr,
             exit_code: 0,
         });
     }
@@ -759,6 +750,8 @@ pub(crate) fn exec_run_inner(
             action_digest,
             input_digests,
             named_caches: vec![],
+            stdout: stdout.clone(),
+            stderr: stderr.clone(),
             outputs: cached_outputs,
         };
         if !opts.no_cache {
@@ -956,21 +949,25 @@ mod tests {
         let p = root.path();
         let marker = p.join("runs.txt");
         let cmd = format!(
-            "printf r >> '{}' && mkdir -p build && printf payload > build/out.txt",
+            "printf r >> '{}' && printf stdout-line && printf stderr-line >&2 && mkdir -p build && printf payload > build/out.txt",
             marker.display()
         );
         let opts = || run_opts(&["sh", "-c", &cmd], &[], &["build/out.txt"]);
 
-        exec_run_inner(p, opts(), None).unwrap();
+        let first = exec_run_inner(p, opts(), None).unwrap();
         assert_eq!(marker_count(&marker), 1);
+        assert_eq!(first.stdout, "stdout-line\n");
+        assert_eq!(first.stderr, "stderr-line\n");
         assert_eq!(
             std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
             "payload"
         );
 
         std::fs::remove_file(p.join("build/out.txt")).unwrap();
-        exec_run_inner(p, opts(), None).unwrap();
+        let second = exec_run_inner(p, opts(), None).unwrap();
         assert_eq!(marker_count(&marker), 1, "second run must be a cache hit");
+        assert_eq!(second.stdout, "stdout-line\n");
+        assert_eq!(second.stderr, "stderr-line\n");
         assert_eq!(
             std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
             "payload",
