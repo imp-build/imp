@@ -307,7 +307,7 @@ pub(crate) struct ExecRunResult {
 pub(crate) struct ExecRunOpts {
     pub(crate) argv: Vec<String>,
     pub(crate) display: String,
-    pub(crate) env: BTreeMap<String, String>,
+    pub(crate) env: Vec<String>,
     pub(crate) config_digest: String,
     pub(crate) inputs: Vec<ExecIoSpec>,
     pub(crate) outputs: Vec<ExecIoSpec>,
@@ -439,11 +439,12 @@ fn resolve_tool_bin_dir(tool_root: &Path, bin_dir: &str) -> Result<PathBuf> {
     Ok(tool_root.join(relative))
 }
 
-/// Host environment variables allowed through the sandbox scrub. Anything not
-/// listed here (and not synthesized below) is removed before a task runs, so
-/// undeclared ambient state cannot silently affect a build. The snapshot is
-/// hashed into the action digest, so a change to one of these invalidates the
-/// task cache.
+/// Host environment variables allowed through the sandbox scrub for every
+/// `run()` invocation. Anything not listed here (and not synthesized below,
+/// or requested per-run via `ExecRunOpts::env` / `run({ env: [...] })`, see
+/// `resolve_env`) is removed before a task runs, so undeclared ambient state
+/// cannot silently affect a build. The snapshot is hashed into the action
+/// digest, so a change to one of these invalidates the task cache.
 pub(crate) const PASSTHROUGH_ENV_VARS: &[&str] = &[
     "PATH",
     "USER",
@@ -475,6 +476,33 @@ pub(crate) fn passthrough_env_snapshot() -> BTreeMap<String, String> {
         }
     }
     out
+}
+
+/// Resolve a `run({ env: [...] })` entry list. Each entry is either a bare
+/// name (e.g. "DISPLAY") — forwarded with its current host value if the host
+/// has it set, silently omitted otherwise — or a "KEY=VALUE" pair —
+/// forwarded with that literal value regardless of host state. Unlike
+/// PASSTHROUGH_ENV_VARS this list is supplied per `run()` call, not global,
+/// but is folded into the base env identically so it is hashed into the
+/// action digest, and it wins over the global allowlist snapshot.
+pub(crate) fn resolve_env(entries: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for entry in entries {
+        if let Some((key, value)) = entry.split_once('=') {
+            if key.is_empty() {
+                bail!("run() env entry '{entry}' has an empty key before '='");
+            }
+            out.insert(key.to_owned(), value.to_owned());
+        } else {
+            if entry.is_empty() {
+                bail!("run() env entry must not be empty");
+            }
+            if let Some(value) = std::env::var_os(entry) {
+                out.insert(entry.clone(), value.to_string_lossy().into_owned());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Create and return per-sandbox HOME and TMPDIR directories. Pinning these
@@ -597,7 +625,7 @@ pub(crate) fn exec_run_inner(
     // HOME/TMPDIR and tool PATH entries are added after digesting — their
     // paths are nondeterministic and must not be keyed.
     let mut base_env = passthrough_env_snapshot();
-    base_env.extend(opts.env.clone());
+    base_env.extend(resolve_env(&opts.env)?);
     let action_digest = live_action_digest(&opts, &base_env)?;
 
     // Compute task key.
@@ -797,7 +825,7 @@ pub(crate) fn exec_run_unsandboxed(
             base_env.insert(var.to_owned(), value.to_string_lossy().into_owned());
         }
     }
-    base_env.extend(opts.env.clone());
+    base_env.extend(resolve_env(&opts.env)?);
     let mut command_env = sandbox_command_env(&base_env, &tool_path_entries)?;
     ensure_path(&mut command_env);
     let mut command = Command::new(program);
@@ -869,10 +897,7 @@ mod tests {
         ExecRunOpts {
             argv: vec!["sh".to_owned(), "-c".to_owned(), "true".to_owned()],
             display: "digest test".to_owned(),
-            env: env
-                .iter()
-                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-                .collect(),
+            env: env.iter().map(|(k, v)| format!("{k}={v}")).collect(),
             config_digest: config_digest.to_owned(),
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -927,7 +952,7 @@ mod tests {
         ExecRunOpts {
             argv: argv.iter().map(|a| (*a).to_owned()).collect(),
             display: "exec test".to_owned(),
-            env: BTreeMap::new(),
+            env: Vec::new(),
             config_digest: String::new(),
             inputs: spec(inputs),
             outputs: spec(outputs),
@@ -1098,6 +1123,129 @@ mod tests {
         std::env::remove_var("IMP_TEST_LEAK_EXEC");
         result.unwrap();
         assert_eq!(std::fs::read_to_string(p.join("build/out.txt")).unwrap(), "");
+    }
+
+    #[test]
+    fn resolve_env_forwards_set_host_var() {
+        std::env::set_var("IMP_TEST_PT_SET", "hi");
+        let result = resolve_env(&["IMP_TEST_PT_SET".to_owned()]);
+        std::env::remove_var("IMP_TEST_PT_SET");
+        assert_eq!(
+            result.unwrap().get("IMP_TEST_PT_SET"),
+            Some(&"hi".to_owned())
+        );
+    }
+
+    #[test]
+    fn resolve_env_omits_unset_host_var() {
+        std::env::remove_var("IMP_TEST_PT_UNSET");
+        let result = resolve_env(&["IMP_TEST_PT_UNSET".to_owned()]).unwrap();
+        assert!(!result.contains_key("IMP_TEST_PT_UNSET"));
+    }
+
+    #[test]
+    fn resolve_env_forces_key_value_entry() {
+        std::env::remove_var("COUNT");
+        let result = resolve_env(&["COUNT=10".to_owned()]).unwrap();
+        assert_eq!(result.get("COUNT"), Some(&"10".to_owned()));
+    }
+
+    #[test]
+    fn resolve_env_rejects_malformed_entry() {
+        assert!(resolve_env(&["".to_owned()]).is_err());
+        assert!(resolve_env(&["=VALUE".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn exec_run_forwards_env_bare_name_when_host_set() {
+        std::env::set_var("IMP_TEST_PT_E2E", "leaked-on-purpose");
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let cmd = "mkdir -p build && printf %s \"${IMP_TEST_PT_E2E:-}\" > build/out.txt";
+        let mut opts = run_opts(&["sh", "-c", cmd], &[], &["build/out.txt"]);
+        opts.env = vec!["IMP_TEST_PT_E2E".to_owned()];
+        opts.no_cache = true;
+        let result = exec_run_inner(p, opts, None);
+        std::env::remove_var("IMP_TEST_PT_E2E");
+        result.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
+            "leaked-on-purpose"
+        );
+    }
+
+    #[test]
+    fn exec_run_omits_env_bare_name_when_host_unset() {
+        std::env::remove_var("IMP_TEST_PT_E2E_UNSET");
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let cmd = "mkdir -p build && printf %s \"${IMP_TEST_PT_E2E_UNSET:-}\" > build/out.txt";
+        let mut opts = run_opts(&["sh", "-c", cmd], &[], &["build/out.txt"]);
+        opts.env = vec!["IMP_TEST_PT_E2E_UNSET".to_owned()];
+        opts.no_cache = true;
+        exec_run_inner(p, opts, None).unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("build/out.txt")).unwrap(), "");
+    }
+
+    #[test]
+    fn exec_run_env_forced_value_ignores_host_state() {
+        std::env::set_var("FORCED", "host-value");
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let cmd = "mkdir -p build && printf %s \"${FORCED:-}\" > build/out.txt";
+        let mut opts = run_opts(&["sh", "-c", cmd], &[], &["build/out.txt"]);
+        opts.env = vec!["FORCED=fixed-value".to_owned()];
+        opts.no_cache = true;
+        let result = exec_run_inner(p, opts, None);
+        std::env::remove_var("FORCED");
+        result.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
+            "fixed-value"
+        );
+    }
+
+    #[test]
+    fn exec_run_env_forced_value_overrides_same_named_passthrough() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let cmd = "mkdir -p build && printf %s \"${SAME:-}\" > build/out.txt";
+        let mut opts = run_opts(&["sh", "-c", cmd], &[], &["build/out.txt"]);
+        // Later entries win: bare passthrough first, forced value after.
+        opts.env = vec!["SAME".to_owned(), "SAME=from-forced".to_owned()];
+        opts.no_cache = true;
+        exec_run_inner(p, opts, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
+            "from-forced"
+        );
+    }
+
+    #[test]
+    fn exec_run_env_rerun_invalidates_on_host_value_change() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker = p.join("runs.txt");
+        let cmd = format!("printf r >> '{}' && mkdir -p build && printf x > build/out.txt", marker.display());
+        let opts = || {
+            let mut o = run_opts(&["sh", "-c", &cmd], &[], &["build/out.txt"]);
+            o.env = vec!["IMP_TEST_PT_DIGEST".to_owned()];
+            o
+        };
+
+        std::env::set_var("IMP_TEST_PT_DIGEST", "1");
+        exec_run_inner(p, opts(), None).unwrap();
+        assert_eq!(marker_count(&marker), 1);
+
+        std::env::set_var("IMP_TEST_PT_DIGEST", "2");
+        let result = exec_run_inner(p, opts(), None);
+        std::env::remove_var("IMP_TEST_PT_DIGEST");
+        result.unwrap();
+        assert_eq!(
+            marker_count(&marker),
+            2,
+            "changing a passed-through host var must invalidate the cache"
+        );
     }
 
     #[test]

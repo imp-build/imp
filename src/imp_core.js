@@ -1120,7 +1120,7 @@ export function run(opts) {
         kind: "run",
         display: opts.display ?? (opts.argv && opts.argv[0]),
         argv: opts.argv ?? [],
-        env: opts.env ?? {},
+        env: opts.env ?? [],
         inputs,
         outputs,
         tools: opts.tools ?? [],

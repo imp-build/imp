@@ -214,7 +214,7 @@ export const test_product = product("rules-test", "test", async function test_pr
         inputs: [glob({ include: ["rules/**/*", "imp.workspace.js"] })],
         // Share the host cache so toolchain named-cache lookups hit instead of
         // re-downloading into the sandbox's pinned HOME.
-        env: { IMP_CACHE_DIR: globalThis.__imp_cache_dir },
+        env: [`IMP_CACHE_DIR=${globalThis.__imp_cache_dir}`],
         display: `test JS rules ${handle.attrs.root}`,
         impure: true,
     });

@@ -39,7 +39,7 @@ test("the resolved tool is reachable via PATH even with an empty base PATH", asy
     const result = await run({
         argv: ["sh", "-c", "echo hi"],
         tools: [spec],
-        env: { PATH: "" },
+        env: ["PATH="],
         display: "nativeTool smoke test",
     });
     expect(result.exitCode).toBe(0);

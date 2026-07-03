@@ -1545,14 +1545,7 @@ fn parse_exec_run_opts<'js>(
     let argv: Vec<String> = opts.get("argv")?;
     let display: Option<String> = opts.get("display")?;
     let display = display.unwrap_or_else(|| argv.join(" "));
-    let env_obj: Option<Object<'js>> = opts.get("env")?;
-    let mut env = BTreeMap::new();
-    if let Some(e) = env_obj {
-        for entry in e.own_props::<String, String>(Filter::default()) {
-            let (k, v) = entry?;
-            env.insert(k, v);
-        }
-    }
+    let env: Vec<String> = opts.get::<_, Option<Vec<String>>>("env")?.unwrap_or_default();
     let inputs = parse_io_specs(
         opts.get::<_, Option<Vec<Object>>>("inputs")?
             .unwrap_or_default(),
@@ -4135,10 +4128,10 @@ await run({{
         "-c",
         "(setsid sh -c 'sleep 5; printf escaped > \"$MARKER\"' & echo $! > \"$PID_FILE\"); sleep 10",
     ],
-    env: {{
-        MARKER: "{marker}",
-        PID_FILE: "{pid_file}",
-    }},
+    env: [
+        "MARKER={marker}",
+        "PID_FILE={pid_file}",
+    ],
     display: "cancel inherited pipe probe",
     impure: true,
 }});
