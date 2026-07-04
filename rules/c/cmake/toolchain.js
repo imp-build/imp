@@ -1,14 +1,62 @@
-import { target, namedCache, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { target, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 
 const CMAKE_TOOLCHAIN_CACHE = "cmake-toolchains";
 
 const defaultHost = {
     namedCache,
+    run,
+    output,
+    output_path,
+    nativeTool,
+    nativeToolSpec,
     platformInfo,
     cachePut,
     cacheGet,
     cacheHas,
 };
+
+// CMake's Windows release archives use "arm64" rather than the "aarch64"
+// naming used elsewhere in this project (and by CMake's own Linux archives).
+const archNameByOs = {
+    linux: { x86_64: "x86_64", aarch64: "aarch64" },
+    windows: { x86_64: "x86_64", aarch64: "arm64" },
+};
+
+function requireSupportedPlatform(plat) {
+    const archNames = archNameByOs[plat.os];
+    if (!archNames) {
+        throw new Error(`unsupported CMake toolchain OS: ${plat.os}`);
+    }
+    if (!archNames[plat.arch]) {
+        throw new Error(`unsupported CMake toolchain architecture: ${plat.arch}`);
+    }
+}
+
+/**
+ * Return the CMake release artifact filename for a version and platform.
+ *
+ * @param {string} version
+ * @param {{ os: string, arch: string }} plat
+ * @returns {string}
+ */
+export function cmakeArtifactName(version, plat) {
+    requireSupportedPlatform(plat);
+    const arch = archNameByOs[plat.os][plat.arch];
+    const ext = plat.os === "windows" ? "zip" : "tar.gz";
+    return `cmake-${version}-${plat.os}-${arch}.${ext}`;
+}
+
+/**
+ * Return the CMake release download URL for a version and platform.
+ *
+ * @param {string} version
+ * @param {{ os: string, arch: string }} plat
+ * @returns {string}
+ */
+export function cmakeDownloadUrl(version, plat) {
+    return `https://github.com/Kitware/CMake/releases/download/v${version}/${cmakeArtifactName(version, plat)}`;
+}
 
 /**
  * Return the named-cache key for a CMake toolchain version and platform.
@@ -28,12 +76,24 @@ export function cmakeCacheKey(version, plat) {
  * @param {object} [host]
  * @returns {object}
  */
+// Bare coreutils used by the download/extract scripts below. The sandbox is
+// fully hermetic — even `mkdir`/`dirname`/`tar` must be declared tools, not
+// resolved from an ambient or fixed-base PATH.
+const CORE_TOOL_NAMES = ["curl", "mkdir", "dirname", "tar", "gzip"];
+
 export function createCmakeToolchainApi(host = defaultHost) {
     let defaultVersion = null;
     let defaultToolchain = null;
+    // Declared lazily, once, the first time a toolchain is declared — target()
+    // addresses are only assigned at workspace-load time, so this must happen
+    // at BUILD.js top level rather than inside acquireToolchain() at execution time.
+    let coreToolHandles = null;
 
     function declareToolchain(version, opts = {}) {
         host.namedCache({ name: CMAKE_TOOLCHAIN_CACHE });
+        if (!coreToolHandles) {
+            coreToolHandles = CORE_TOOL_NAMES.map((name) => host.nativeTool(name));
+        }
 
         const toolchain = target({
             kind: "cmake-toolchain",
@@ -56,15 +116,45 @@ export function createCmakeToolchainApi(host = defaultHost) {
         return host.cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
     }
 
-    function acquireToolchain(version) {
+    async function acquireToolchain(version) {
         const plat = host.platformInfo();
         const key = cmakeCacheKey(version, plat);
 
         if (host.cacheHas(CMAKE_TOOLCHAIN_CACHE, key)) {
             return host.cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
         }
+        if (!coreToolHandles) {
+            throw new Error("no CMake toolchain declared via cmakeToolchain(); nothing to acquire");
+        }
 
-        throw new Error(`CMake toolchain ${version} is not installed in ${CMAKE_TOOLCHAIN_CACHE}/${key}`);
+        const coreTools = await Promise.all(coreToolHandles.map((handle) => host.nativeToolSpec(handle)));
+
+        const artifact = cmakeArtifactName(version, plat);
+        const url = cmakeDownloadUrl(version, plat);
+        const downloadPath = `.imp/cmake-downloads/${key}/${artifact}`;
+        const extractPath = `.imp/cmake-toolchains/${key}`;
+
+        await host.run({
+            argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-cmake", downloadPath, url],
+            tools: coreTools,
+            outputs: [host.output(host.output_path(downloadPath))],
+            display: `download cmake ${version} (${plat.os}/${plat.arch})`,
+        });
+
+        await host.run({
+            argv: ["sh", "-c", 'mkdir -p "$2" && tar -xf "$1" -C "$2" --strip-components=1', "extract-cmake", downloadPath, extractPath],
+            tools: coreTools,
+            inputs: [{ kind: "file", path: downloadPath }],
+            outputs: [
+                host.output(host.output_path(extractPath), {
+                    kind: "directory",
+                    namedCache: { name: CMAKE_TOOLCHAIN_CACHE, key },
+                }),
+            ],
+            display: `extract cmake ${version} (${plat.os}/${plat.arch})`,
+        });
+
+        return host.cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
     }
 
     function resolveVersion(version) {
@@ -74,20 +164,22 @@ export function createCmakeToolchainApi(host = defaultHost) {
         return defaultVersion;
     }
 
-    function bin(version) {
+    async function bin(version) {
         const resolved = resolveVersion(version);
         if (!resolved) {
             return "cmake";
         }
-        return `${acquireToolchain(resolved)}/bin/cmake`;
+        const dir = await acquireToolchain(resolved);
+        const exe = host.platformInfo().os === "windows" ? "cmake.exe" : "cmake";
+        return `${dir}/bin/${exe}`;
     }
 
-    function tool(version) {
+    async function tool(version) {
         const resolved = resolveVersion(version);
         if (!resolved) {
             throw new Error("no CMake toolchain version specified and no default set");
         }
-        acquireToolchain(resolved);
+        await acquireToolchain(resolved);
         const plat = host.platformInfo();
         return {
             kind: "tool",
@@ -144,10 +236,11 @@ export function installCmakeToolchain(version, source) {
 }
 
 /**
- * Acquire an installed CMake toolchain from the named cache.
+ * Acquire a CMake toolchain, downloading and caching it if not already
+ * installed in the named cache.
  *
  * @param {string} version
- * @returns {string} Local path to the toolchain root.
+ * @returns {Promise<string>} Local path to the toolchain root.
  */
 export function acquireCmakeToolchain(version) {
     return defaultApi.acquireCmakeToolchain(version);
@@ -168,7 +261,7 @@ export function resolveCmakeToolchainVersion(version) {
  * no CMake toolchain default has been declared.
  *
  * @param {string} [version]
- * @returns {string}
+ * @returns {Promise<string>}
  */
 export function cmakeBin(version) {
     return defaultApi.cmakeBin(version);
@@ -178,7 +271,7 @@ export function cmakeBin(version) {
  * Return a named-cache-backed CMake tool descriptor for sandbox execution.
  *
  * @param {string} [version]
- * @returns {object}
+ * @returns {Promise<object>}
  */
 export function cmakeTool(version) {
     return defaultApi.cmakeTool(version);

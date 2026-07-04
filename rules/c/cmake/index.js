@@ -66,7 +66,7 @@ function declared_path(handle, path = ".") {
 // ---------------------------------------------------------------------------
 
 export const tool = product("cmake-toolchain", "build", async function tool(handle) {
-    acquireCmakeToolchain(handle.attrs.version);
+    await acquireCmakeToolchain(handle.attrs.version);
     return { name: "cmake", version: handle.attrs.version };
 });
 
@@ -100,7 +100,7 @@ export const native_link_library = product("cmake-lib", "build", async function 
     if (handle.attrs.toolchain) {
         return run({
             argv: ["sh", "-c", script, "cmake-build", srcPath, buildDirPath, ...cmakeArgs],
-            tools: [cmakeTool(handle.attrs.toolchain)],
+            tools: [await cmakeTool(handle.attrs.toolchain)],
             inputs: [inputFiles, ...dirInputs],
             outputs: [...outputDecls, ...stagedOutputDecls],
             display: `cmake build ${srcPath}`,

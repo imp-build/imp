@@ -1116,7 +1116,11 @@ function _materialise_inputs(inputs) {
 }
 
 export function output(path, opts) {
-    return { kind: (opts && opts.kind) || "file", path };
+    return {
+        kind: (opts && opts.kind) || "file",
+        path,
+        ...(opts && opts.namedCache ? { namedCache: opts.namedCache } : {}),
+    };
 }
 
 export function output_path(path) {

@@ -101,9 +101,32 @@ pub fn host_extract(
             }
         }
         "zip" => {
-            let status = extract_zip(archive, dest, strip_components)?;
-            if !status.success() {
-                bail!("unzip extraction of {} failed", archive.display());
+            if strip_components == 0 {
+                let status = extract_zip_raw(archive, dest)?;
+                if !status.success() {
+                    bail!("unzip extraction of {} failed", archive.display());
+                }
+            } else {
+                let tmp = dest.with_file_name(format!(
+                    "{}-ziptmp-{}",
+                    dest.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "extract".to_owned()),
+                    std::process::id()
+                ));
+                let _ = std::fs::remove_dir_all(&tmp);
+                std::fs::create_dir_all(&tmp)
+                    .with_context(|| format!("create zip staging dir {}", tmp.display()))?;
+
+                let status = extract_zip_raw(archive, &tmp)?;
+                if !status.success() {
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    bail!("unzip extraction of {} failed", archive.display());
+                }
+
+                let result = strip_zip_components(&tmp, dest, strip_components, archive);
+                let _ = std::fs::remove_dir_all(&tmp);
+                result?;
             }
         }
         other => bail!("unsupported archive format: {other}"),
@@ -112,12 +135,36 @@ pub fn host_extract(
     Ok(())
 }
 
-#[cfg(not(windows))]
-fn extract_zip(
-    archive: &Path,
+/// Descend `strip_components` levels of single-entry directories from `root`,
+/// then move the remaining contents into `dest`. Mirrors tar's
+/// `--strip-components` for zip archives, which have no native equivalent.
+fn strip_zip_components(
+    root: &Path,
     dest: &Path,
-    _strip_components: u32,
-) -> Result<std::process::ExitStatus> {
+    strip_components: u32,
+    archive: &Path,
+) -> Result<()> {
+    let mut current = root.to_path_buf();
+    for _ in 0..strip_components {
+        let mut entries: Vec<_> = std::fs::read_dir(&current)?.filter_map(|e| e.ok()).collect();
+        if entries.len() != 1 || !entries[0].path().is_dir() {
+            bail!(
+                "cannot strip {strip_components} path component(s) from {}: expected a single top-level directory",
+                archive.display()
+            );
+        }
+        current = entries.remove(0).path();
+    }
+
+    for child in std::fs::read_dir(&current)? {
+        let child = child?;
+        std::fs::rename(child.path(), dest.join(child.file_name()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn extract_zip_raw(archive: &Path, dest: &Path) -> Result<std::process::ExitStatus> {
     std::process::Command::new("unzip")
         .args([
             "-qo",
@@ -130,11 +177,7 @@ fn extract_zip(
 }
 
 #[cfg(windows)]
-fn extract_zip(
-    archive: &Path,
-    dest: &Path,
-    _strip_components: u32,
-) -> Result<std::process::ExitStatus> {
+fn extract_zip_raw(archive: &Path, dest: &Path) -> Result<std::process::ExitStatus> {
     std::process::Command::new("tar.exe")
         .args([
             "-xf",

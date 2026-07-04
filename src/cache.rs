@@ -29,6 +29,8 @@ pub(crate) struct CacheDirectoryEntry {
     pub(crate) path: String,
     pub(crate) digest: String,
     pub(crate) bytes: u64,
+    #[serde(default)]
+    pub(crate) mode: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +43,17 @@ pub(crate) struct CachedArtifact {
     pub(crate) bytes: Option<u64>,
     pub(crate) mode: Option<u32>,
     pub(crate) files: Vec<CacheDirectoryEntry>,
+    /// When set, this output is also materialized into a named cache slot
+    /// (in addition to its normal workspace-relative path), from CAS content —
+    /// so it's replayed correctly on both fresh runs and task-cache hits.
+    #[serde(default)]
+    pub(crate) named_cache: Option<OutputNamedCache>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OutputNamedCache {
+    pub(crate) name: String,
+    pub(crate) key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,6 +271,7 @@ pub(crate) fn directory_entries(path: &Path) -> Result<Vec<CacheDirectoryEntry>>
             path: relative,
             digest,
             bytes,
+            mode: file_mode(entry.path())?,
         });
     }
     entries.sort_by(|a, b| a.path.cmp(&b.path));
@@ -364,6 +378,37 @@ pub(crate) fn materialize_cached_outputs(
     Ok(())
 }
 
+/// Materialize any outputs bound to a named cache slot (via `output({ namedCache })`)
+/// from their CAS content. Runs after both fresh executions and task-cache hits, so a
+/// named cache wiped between runs is transparently repopulated.
+pub(crate) fn materialize_named_caches(record: &TaskCacheRecord, workspace_root: &Path) -> Result<()> {
+    for output in &record.outputs {
+        let Some(named_cache) = &output.named_cache else {
+            continue;
+        };
+        let destination = named_cache_key_path(workspace_root, &named_cache.name, &named_cache.key)?;
+        match output.kind.as_str() {
+            "directory" => materialize_cached_directory(output, &destination)?,
+            "file" | "manifest" => {
+                std::fs::create_dir_all(&destination)
+                    .with_context(|| format!("create {}", destination.display()))?;
+                let file_name = output
+                    .path
+                    .as_deref()
+                    .and_then(|p| Path::new(p).file_name())
+                    .ok_or_else(|| anyhow::anyhow!("{} has no file name", output.artifact_id))?;
+                let source = cas_blob_path(&output.digest)?;
+                publish_file_atomically(&source, &destination.join(file_name))?;
+            }
+            other => bail!(
+                "{} cannot be bound to a named cache: unsupported kind {other}",
+                output.artifact_id
+            ),
+        }
+    }
+    Ok(())
+}
+
 fn materialize_cached_directory(output: &CachedArtifact, destination: &Path) -> Result<()> {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
@@ -374,7 +419,9 @@ fn materialize_cached_directory(output: &CachedArtifact, destination: &Path) -> 
     for file in &output.files {
         let relative = artifact_relative_path(&file.path)?;
         let source = cas_blob_path(&file.digest)?;
-        copy_file(&source, &temp.join(relative))?;
+        let dest = temp.join(relative);
+        copy_file(&source, &dest)?;
+        restore_file_mode(&dest, file.mode)?;
     }
     remove_path_if_exists(destination)?;
     std::fs::rename(&temp, destination).with_context(|| {

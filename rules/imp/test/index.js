@@ -196,11 +196,14 @@ export async function runTestModules(modules) {
     await runRegisteredTests({ from: firstTest, label: modules.join(", ") });
 }
 
-// Each rules-test target runs in its own imp subprocess inside the task
-// sandbox: tests share runtime-global memo state, so suites must not share a
-// runtime with each other or with the invoking workspace evaluation. Impure
-// because the cache key cannot see the host binary's content yet (see ROADMAP
-// tool fingerprinting gap).
+// Each rules-test target runs in its own imp subprocess: tests share
+// runtime-global memo state, so suites must not share a runtime with each
+// other or with the invoking workspace evaluation. Unsandboxed (and impure,
+// since the cache key cannot see the host binary's content yet — see ROADMAP
+// tool fingerprinting gap) because suites like native_tool_test/
+// tracked_apis_test deliberately probe real host state (`which`, `env`,
+// ambient PATH) — the point of those tests is to exercise the real
+// environment, not a hermetic one.
 export const test_product = product("rules-test", "test", async function test_product(handle) {
     const testModules = handle.attrs.tests
         .split(",")
@@ -216,6 +219,7 @@ export const test_product = product("rules-test", "test", async function test_pr
         // re-downloading into the sandbox's pinned HOME.
         env: [`IMP_CACHE_DIR=${globalThis.__imp_cache_dir}`],
         display: `test JS rules ${handle.attrs.root}`,
+        sandbox: false,
         impure: true,
     });
 });

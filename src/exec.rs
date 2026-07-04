@@ -18,8 +18,9 @@ use std::os::unix::process::CommandExt;
 
 use crate::cache::{
     artifact_relative_path, cached_outputs_present, copy_directory, copy_file, create_sandbox_root,
-    digest_json, directory_entries, file_mode, materialize_cached_outputs, named_cache_key_path,
-    store_file_blob, task_record_path, write_task_cache_record, CacheInputDigest, CachedArtifact,
+    digest_json, directory_entries, file_mode, materialize_cached_outputs, materialize_named_caches,
+    named_cache_key_path, store_file_blob, task_record_path, write_task_cache_record,
+    CacheInputDigest, CachedArtifact,
     TaskCacheRecord, TASK_CACHE_VERSION,
 };
 
@@ -290,6 +291,7 @@ pub(crate) struct ExecRunOpts {
 pub(crate) struct ExecIoSpec {
     pub(crate) path: String,
     pub(crate) kind: String,
+    pub(crate) named_cache: Option<crate::cache::OutputNamedCache>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,7 +312,18 @@ pub(crate) fn parse_io_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Ve
         };
         let kind: Option<String> = val.get("kind")?;
         let kind = kind.unwrap_or_else(|| "file".to_owned());
-        specs.push(ExecIoSpec { path, kind });
+        let named_cache = match val.get::<_, Option<Object>>("namedCache")? {
+            Some(nc) => Some(crate::cache::OutputNamedCache {
+                name: nc.get("name")?,
+                key: nc.get("key")?,
+            }),
+            None => None,
+        };
+        specs.push(ExecIoSpec {
+            path,
+            kind,
+            named_cache,
+        });
     }
     Ok(specs)
 }
@@ -415,7 +428,6 @@ fn resolve_tool_bin_dir(tool_root: &Path, bin_dir: &str) -> Result<PathBuf> {
 /// cannot silently affect a build. The snapshot is hashed into the action
 /// digest, so a change to one of these invalidates the task cache.
 pub(crate) const PASSTHROUGH_ENV_VARS: &[&str] = &[
-    "PATH",
     "USER",
     "LOGNAME",
     "SHELL",
@@ -484,18 +496,37 @@ pub(crate) fn sandbox_home_tmp(sandbox_root: &Path) -> Result<(PathBuf, PathBuf)
     Ok((home, tmp))
 }
 
-/// Ensure a scrubbed env still has a PATH. Sandboxed tasks carry PATH in their
-/// hashed base env; ad-hoc/uncached tasks fall back to the host PATH so bare
-/// commands like `sh` still resolve after `env_clear`.
-pub(crate) fn ensure_path(env: &mut BTreeMap<String, String>) {
-    if env.contains_key("PATH") {
-        return;
+/// Absolute, fixed locations for the one binary the sandbox resolves
+/// implicitly: the system shell backing bare `sh` in argv[0]. Found once by
+/// checking known absolute paths — never a `PATH` search — so it stays
+/// independent of ambient host state. Every other command (`tar`, `mkdir`,
+/// `cmake`, a compiler, ...) must be declared via `run({ tools: [...] })` so
+/// it's tracked as a real dependency and keyed into the cache, rather than
+/// silently resolved from whatever happens to be installed on the host.
+#[cfg(not(windows))]
+const BUILTIN_SHELL_CANDIDATES: &[&str] = &["/bin/sh", "/usr/bin/sh"];
+#[cfg(windows)]
+const BUILTIN_SHELL_CANDIDATES: &[&str] = &[];
+
+/// Resolve `program` to the binary that should actually be spawned. Only
+/// `sh` is special-cased (see `BUILTIN_SHELL_CANDIDATES`); everything else is
+/// used as-is, so it must already be an absolute path (from a declared tool
+/// or an explicit argument) — there is no PATH search fallback.
+pub(crate) fn resolve_program(program: &str) -> Result<PathBuf> {
+    if program != "sh" {
+        return Ok(PathBuf::from(program));
     }
-    if let Some(path) = std::env::var_os("PATH") {
-        env.insert("PATH".to_owned(), path.to_string_lossy().into_owned());
+    for candidate in BUILTIN_SHELL_CANDIDATES {
+        if Path::new(candidate).is_file() {
+            return Ok(PathBuf::from(candidate));
+        }
     }
+    bail!("no built-in system shell found for bare `sh` (checked {BUILTIN_SHELL_CANDIDATES:?})")
 }
 
+/// Sandboxed runs never fall back to a host or fixed base PATH: PATH is
+/// composed strictly from declared `tools`' resolved bin dirs, so an
+/// undeclared command cannot silently resolve.
 pub(crate) fn sandbox_command_env(
     env: &BTreeMap<String, String>,
     tool_path_entries: &[PathBuf],
@@ -508,8 +539,6 @@ pub(crate) fn sandbox_command_env(
     let mut entries = tool_path_entries.to_vec();
     if let Some(existing) = env.get("PATH") {
         entries.extend(std::env::split_paths(existing));
-    } else if let Some(existing) = std::env::var_os("PATH") {
-        entries.extend(std::env::split_paths(&existing));
     }
     let joined = std::env::join_paths(entries).context("join tool PATH entries")?;
     command_env.insert("PATH".to_owned(), joined.to_string_lossy().into_owned());
@@ -636,6 +665,7 @@ pub(crate) fn exec_run_inner(
 
     if let Some(record) = cached_record_opt {
         materialize_cached_outputs(&record, workspace_root)?;
+        materialize_named_caches(&record, workspace_root)?;
         return Ok(ExecRunResult {
             stdout: record.stdout,
             stderr: record.stderr,
@@ -659,8 +689,8 @@ pub(crate) fn exec_run_inner(
     let (home_dir, tmp_dir) = sandbox_home_tmp(&sandbox_root)?;
     command_env.insert("HOME".to_owned(), home_dir.to_string_lossy().into_owned());
     command_env.insert("TMPDIR".to_owned(), tmp_dir.to_string_lossy().into_owned());
-    ensure_path(&mut command_env);
-    let mut command = Command::new(program);
+    let resolved_program = resolve_program(program)?;
+    let mut command = Command::new(&resolved_program);
     command
         .args(args)
         .current_dir(&sandbox_root)
@@ -712,6 +742,7 @@ pub(crate) fn exec_run_inner(
                     bytes: Some(bytes),
                     mode: file_mode(&sandbox_path)?,
                     files: Vec::new(),
+                    named_cache: output.named_cache.clone(),
                 });
             }
             "directory" => {
@@ -732,6 +763,7 @@ pub(crate) fn exec_run_inner(
                     bytes: None,
                     mode: None,
                     files,
+                    named_cache: output.named_cache.clone(),
                 });
             }
             other => bail!("run() output {} has unsupported kind {other}", output.path),
@@ -755,6 +787,7 @@ pub(crate) fn exec_run_inner(
             write_task_cache_record(&record)?;
         }
         materialize_cached_outputs(&record, workspace_root)?;
+        materialize_named_caches(&record, workspace_root)?;
     }
 
     Ok(ExecRunResult {
@@ -784,10 +817,11 @@ pub(crate) fn exec_run_unsandboxed(
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("run() argv must not be empty"))?;
 
-    // Unsandboxed tasks are impure and run in the workspace, so HOME/TMPDIR pass
-    // through from the host rather than being pinned to a sandbox. We still scrub
-    // everything outside the allowlist to keep behaviour consistent with sandboxed
-    // execution.
+    // Unsandboxed tasks require `impure: true` — an explicit, per-call opt-out
+    // of hermeticity — so unlike the sandboxed path, ambient host PATH is
+    // still inherited here for undeclared commands (e.g. a user-supplied
+    // generator command in `odinGenRun`). HOME/TMPDIR pass through from the
+    // host rather than being pinned to a sandbox for the same reason.
     let mut base_env = passthrough_env_snapshot();
     for var in ["HOME", "TMPDIR"] {
         if let Some(value) = std::env::var_os(var) {
@@ -796,8 +830,13 @@ pub(crate) fn exec_run_unsandboxed(
     }
     base_env.extend(resolve_env(&opts.env)?);
     let mut command_env = sandbox_command_env(&base_env, &tool_path_entries)?;
-    ensure_path(&mut command_env);
-    let mut command = Command::new(program);
+    if !command_env.contains_key("PATH") {
+        if let Some(path) = std::env::var_os("PATH") {
+            command_env.insert("PATH".to_owned(), path.to_string_lossy().into_owned());
+        }
+    }
+    let resolved_program = resolve_program(program)?;
+    let mut command = Command::new(&resolved_program);
     command
         .args(args)
         .current_dir(workspace_root)
@@ -915,6 +954,7 @@ mod tests {
                 .map(|p| ExecIoSpec {
                     path: (*p).to_owned(),
                     kind: "file".to_owned(),
+                    named_cache: None,
                 })
                 .collect()
         };
@@ -1231,6 +1271,7 @@ mod tests {
             o.outputs = vec![ExecIoSpec {
                 path: "build/dir".to_owned(),
                 kind: "directory".to_owned(),
+                named_cache: None,
             }];
             o
         };
