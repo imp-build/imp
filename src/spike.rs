@@ -2063,6 +2063,7 @@ fn matches_selector(target: &Target, selector: &str) -> bool {
     target.address == selector
         || target.address.strip_prefix("//:") == Some(selector)
         || target.address.ends_with(&format!(":{selector}"))
+        || (!selector.starts_with("//") && target.address == format!("//{selector}"))
 }
 
 
@@ -3769,7 +3770,14 @@ export const ignored = missing;
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].address, "//library/jodin:jodin");
 
+        // A selector with a package path but no leading "//" should resolve
+        // the same as its "//"-prefixed form.
+        let sel = select_targets(&workspace, &["library/jodin:jodin".to_owned()]).unwrap();
+        assert_eq!(sel.len(), 1);
+        assert_eq!(sel[0].address, "//library/jodin:jodin");
+
         assert!(select_targets(&workspace, &["nonexistent".to_owned()]).is_err());
+        assert!(select_targets(&workspace, &["other:jodin".to_owned()]).is_err());
     }
 
     #[tokio::test]
