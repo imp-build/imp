@@ -6,6 +6,7 @@ mod exec;
 mod loader;
 mod runtime;
 mod scheduler;
+mod selector;
 mod spike;
 mod toolchain;
 mod ui;
@@ -453,7 +454,7 @@ async fn cmd_execute_live(
                     .collect();
                 anyhow::anyhow!("no '{goal}' goal; registered goals: {}", known.join(", "))
             })?;
-            let roots = spike::select_roots(&workspace.workspace, goal_def, selectors)?;
+            let roots = selector::select_roots(&workspace.workspace, goal_def, selectors)?;
             roots.len()
         }
         LiveInvocation::RulesTests { .. } => 0,
@@ -820,7 +821,7 @@ async fn cmd_generate_build(check: bool, selectors: &[String], tree: &Tree) -> R
 
 async fn cmd_targets(selectors: &[String], tree: &Tree) -> Result<()> {
     workspace_cmd!(tree, |workspace, out| {
-        let targets = spike::select_targets(&workspace, selectors)?;
+        let targets = selector::select_targets(&workspace, selectors)?;
         spike::format_targets(&targets, &mut out)?;
     })
 }
