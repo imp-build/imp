@@ -31,7 +31,10 @@ type Tree = ui::Tree;
 #[derive(Parser)]
 #[command(
     name = "imp",
-    about = "Build system for the Odin game engine project"
+    about = "Build system for the Odin game engine project",
+    long_about = "Build system for the Odin game engine project.\n\n\
+Run a managed toolchain binary directly with `imp @TOOL <args>` (e.g. `imp @odin build foo.odin -out:foo`); \
+args are passed through verbatim, no `--` needed. Known tools: odin, odinfmt, kcov."
 )]
 struct Cli {
     /// Use WSL cross-compilation environment (Linux → Windows)
@@ -133,9 +136,37 @@ struct GoalArgs {
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if let Some(name) = args.get(1).and_then(|a| a.to_str()).and_then(|a| a.strip_prefix('@')) {
+        std::process::exit(run_tool(name, &args[2..]));
+    }
+
     if let Err(e) = run().await {
         eprintln!("error: {e:#}");
         std::process::exit(1);
+    }
+}
+
+/// Run a managed toolchain binary directly, passing all remaining args through
+/// verbatim: `imp @odin build foo.odin -out:foo`. Bypasses clap entirely so
+/// the tool's own flags never need a `--` separator.
+fn run_tool(name: &str, args: &[std::ffi::OsString]) -> i32 {
+    let bin = match name {
+        "odin" => workspace::odin_bin(),
+        "odinfmt" => workspace::odinfmt_bin(),
+        "kcov" => workspace::kcov_bin(),
+        other => {
+            eprintln!("error: unknown tool '@{other}'; known tools: odin, odinfmt, kcov");
+            return 1;
+        }
+    };
+
+    match std::process::Command::new(&bin).args(args).status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("error: failed to run {}: {e:#}", bin.display());
+            1
+        }
     }
 }
 
