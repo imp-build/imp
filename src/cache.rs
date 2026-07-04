@@ -31,6 +31,11 @@ pub(crate) struct CacheDirectoryEntry {
     pub(crate) bytes: u64,
     #[serde(default)]
     pub(crate) mode: Option<u32>,
+    /// Set instead of `digest`/`bytes`/`mode` for a symlink entry — its
+    /// (possibly relative) link target, restored verbatim on materialization
+    /// rather than treating it as a regular file to content-address.
+    #[serde(default)]
+    pub(crate) symlink_target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,7 +261,8 @@ pub(crate) fn directory_entries(path: &Path) -> Result<Vec<CacheDirectoryEntry>>
     let mut entries = Vec::new();
     for entry in WalkDir::new(path) {
         let entry = entry.with_context(|| format!("walk {}", path.display()))?;
-        if !entry.file_type().is_file() {
+        let is_symlink = entry.file_type().is_symlink();
+        if !entry.file_type().is_file() && !is_symlink {
             continue;
         }
         let relative = entry
@@ -266,12 +272,25 @@ pub(crate) fn directory_entries(path: &Path) -> Result<Vec<CacheDirectoryEntry>>
         let relative = relative
             .to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/");
+        if is_symlink {
+            let target = std::fs::read_link(entry.path())
+                .with_context(|| format!("read symlink {}", entry.path().display()))?;
+            entries.push(CacheDirectoryEntry {
+                path: relative,
+                digest: String::new(),
+                bytes: 0,
+                mode: None,
+                symlink_target: Some(target.to_string_lossy().into_owned()),
+            });
+            continue;
+        }
         let (digest, bytes) = store_file_blob(entry.path(), "directory-entry")?;
         entries.push(CacheDirectoryEntry {
             path: relative,
             digest,
             bytes,
             mode: file_mode(entry.path())?,
+            symlink_target: None,
         });
     }
     entries.sort_by(|a, b| a.path.cmp(&b.path));
@@ -418,8 +437,12 @@ fn materialize_cached_directory(output: &CachedArtifact, destination: &Path) -> 
     std::fs::create_dir_all(&temp).with_context(|| format!("create {}", temp.display()))?;
     for file in &output.files {
         let relative = artifact_relative_path(&file.path)?;
-        let source = cas_blob_path(&file.digest)?;
         let dest = temp.join(relative);
+        if let Some(target) = &file.symlink_target {
+            create_symlink(target, &dest)?;
+            continue;
+        }
+        let source = cas_blob_path(&file.digest)?;
         copy_file(&source, &dest)?;
         restore_file_mode(&dest, file.mode)?;
     }
@@ -460,6 +483,20 @@ fn publish_file_atomically(source: &Path, destination: &Path) -> Result<()> {
         )
     })?;
     Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn create_symlink(target: &str, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    std::os::unix::fs::symlink(target, dest)
+        .with_context(|| format!("symlink {} -> {}", dest.display(), target))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn create_symlink(_target: &str, _dest: &Path) -> Result<()> {
+    bail!("directory outputs containing symlinks are not supported on this platform")
 }
 
 #[cfg(unix)]
@@ -533,3 +570,39 @@ pub(crate) fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Cache explain (public API)
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_entries_round_trips_a_symlink() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("real"), b"hello").unwrap();
+        std::os::unix::fs::symlink("real", source.path().join("link")).unwrap();
+
+        let entries = directory_entries(source.path()).unwrap();
+        let link_entry = entries.iter().find(|e| e.path == "link").unwrap();
+        assert_eq!(link_entry.symlink_target.as_deref(), Some("real"));
+
+        let artifact = CachedArtifact {
+            artifact_id: "test".to_owned(),
+            kind: "directory".to_owned(),
+            path: Some("test".to_owned()),
+            value: None,
+            digest: digest_json(&entries).unwrap(),
+            bytes: None,
+            mode: None,
+            files: entries,
+            named_cache: None,
+        };
+
+        let dest = tempfile::tempdir().unwrap();
+        let destination = dest.path().join("out");
+        materialize_cached_directory(&artifact, &destination).unwrap();
+
+        let restored_target = std::fs::read_link(destination.join("link")).unwrap();
+        assert_eq!(restored_target, Path::new("real"));
+        assert_eq!(std::fs::read_to_string(destination.join("link")).unwrap(), "hello");
+    }
+}

@@ -27,6 +27,8 @@ import {
     resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
 
+import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
+
 import {
     resources as resource_package_sources,
 } from "//rules/asset";
@@ -34,6 +36,16 @@ import {
 import {
     cmake_resources,
 } from "//rules/c/cmake";
+
+import {
+    defaultGccToolchain,
+    gccTool,
+} from "//rules/c/gcc/toolchain";
+
+import {
+    defaultMoldToolchain,
+    moldTool,
+} from "//rules/c/mold/toolchain";
 
 // Registers the "run" goal's single-target pre-flight callback
 // (rules/workflows/run.js). Imported here — not just from this repo's own
@@ -649,6 +661,47 @@ function empty_package_error(handle, path) {
         "odinPackage excludes *_test.odin and test_*.odin by default; use odinTestPackage for package tests, or pass exclude: [] for a package that intentionally builds test files.";
 }
 
+// Odin needs a real gcc toolchain for both roles beyond its own compiler:
+// `-build-mode:lib` uses its bundled binutils `ar`; linking an
+// executable/test binary shells out to a program literally named `clang`,
+// which in turn needs a real linker — explicitly declared as mold (via
+// -linker:mold) rather than left to clang's ambiguous system default.
+// GNU ld/gold/bfd's `-l:<namespec>` falls back to treating a full path as a
+// literal file when it isn't found via -L search dirs (which is why Odin's
+// own -l:<path> flags for local `foreign import` libraries resolve
+// correctly against those), and mold has the same forgiving behavior; LLD
+// does not — and Zig's bundled LLD (via `zig cc`) can't be swapped out for
+// a different linker either, it silently ignores -fuse-ld= — so Zig cannot
+// serve as Odin's linker for packages linking a local .a/.so this way
+// (confirmed empirically, not a documented LLD limitation). gcc's own ar
+// covers the archiver role too, so Zig has no role left in Odin's build at
+// all; it remains in use for CMake (rules/c/cmake), unaffected.
+//
+// Both gcc and mold are downloaded/pinned (rules/c/gcc, rules/c/mold)
+// rather than resolved from ambient PATH — a project using Odin must
+// declare a default gccToolchain() (and moldToolchain(), for executables).
+async function odinScriptTools(handle, { needsDirname, isExecutable }) {
+    const gcc = defaultGccToolchain();
+    if (!gcc) {
+        throw new Error("Odin builds need a declared gccToolchain() default — see //rules/c/gcc");
+    }
+    const base = [
+        await nativeToolSpec(nativeTool("mkdir")),
+        ...(needsDirname ? [await nativeToolSpec(nativeTool("dirname"))] : []),
+    ];
+    if (!isExecutable) {
+        return { tools: [...base, await gccTool(gcc.attrs.version)], flags: [] };
+    }
+    const mold = defaultMoldToolchain();
+    if (!mold) {
+        throw new Error("Odin executable linking needs a declared moldToolchain() default — see //rules/c/mold");
+    }
+    return {
+        tools: [...base, await gccTool(gcc.attrs.version), await moldTool(mold.attrs.version)],
+        flags: ["-linker:mold"],
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Product functions
 // ---------------------------------------------------------------------------
@@ -680,6 +733,7 @@ export const odinBuild = product("odin-package", "build",
         const path = analysis.packagePath;
         const out = handle.attrs.output || default_output_path(handle);
         const declaredOut = odin_output_path(out, analysis);
+        const { tools: scriptTools, flags: linkerFlags } = await odinScriptTools(handle, { needsDirname: true, isExecutable: analysis.hasMainEntrypoint });
         const result = await run({
             argv: [
                 "sh",
@@ -692,8 +746,9 @@ export const odinBuild = product("odin-package", "build",
                 ...collectionDirs,
                 ...flags,
                 ...modeFlags,
+                ...linkerFlags,
             ],
-            tools: [odinToolSpec],
+            tools: [odinToolSpec, ...scriptTools],
             inputs: [srcs, ...genInputs, resourceInputs],
             outputs: [output(declaredOut)],
             display: `odin build ${path}`,
@@ -719,6 +774,7 @@ export const odinTest = product("odin-test-package", "test",
             throw new Error(empty_package_error(handle, packagePath));
         }
         const path = analysis.packagePath;
+        const { tools: scriptTools, flags: linkerFlags } = await odinScriptTools(handle, { needsDirname: false, isExecutable: true });
         let outcome = run({
             argv: [
                 "sh",
@@ -729,8 +785,9 @@ export const odinTest = product("odin-test-package", "test",
                 String(collectionDirs.length),
                 ...collectionDirs,
                 ...flags,
+                ...linkerFlags,
             ],
-            tools: [odinToolSpec],
+            tools: [odinToolSpec, ...scriptTools],
             inputs: [srcs, ...genInputs, resourceInputs],
             impure: true,
             display: `odin test ${path}`,
@@ -982,6 +1039,7 @@ export function odinPackage({ srcs = undefined, exclude = undefined, path = ".",
     const toolchainHandle = toolchain && toolchain.__imp ? toolchain
                           : (typeof toolchain === "string" ? null : defaultOdinToolchain());
     const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
+
     const normalizedDeps = normalize_deps(deps);
 
 	// If sources are not specified, default to all .odin files in the package path.
@@ -1033,6 +1091,7 @@ export function odinTestPackage({ srcs = undefined, exclude = undefined, path = 
     const toolchainHandle = toolchain && toolchain.__imp ? toolchain
                           : (typeof toolchain === "string" ? null : defaultOdinToolchain());
     const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
+
     const normalizedDeps = normalize_deps(deps);
 
     srcs = package_srcs({ srcs });

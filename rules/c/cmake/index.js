@@ -6,6 +6,11 @@ import {
     cmakeTool,
     defaultCmakeToolchain,
 } from "//rules/c/cmake/toolchain";
+import {
+    zigTool,
+    zigCMakeArgs,
+    defaultZigToolchain,
+} from "//rules/c/zig/toolchain";
 
 export {
     acquireCmakeToolchain,
@@ -98,21 +103,30 @@ export const native_link_library = product("cmake-lib", "build", async function 
     const stageScript = stageCmds.length > 0 ? " && " + stageCmds.join(" && ") : "";
     const script = `src=$1; bdir=$2; shift 2; mkdir -p "$bdir" && cmake -S "$src" -B "$bdir" "$@" && cmake --build "$bdir" -j10${stageScript}`;
 
-    if (handle.attrs.toolchain) {
-        return run({
-            argv: ["sh", "-c", script, "cmake-build", srcPath, buildDirPath, ...cmakeArgs],
-            tools: [await cmakeTool(handle.attrs.toolchain)],
-            inputs: [inputFiles, ...dirInputs],
-            outputs: [...outputDecls, ...stagedOutputDecls],
-            display: `cmake build ${srcPath}`,
-        });
-    }
+    // No pinned toolchain declared — still need a resolved cmake so the
+    // hermetic sandbox can find it (bare "cmake" has no PATH entry
+    // otherwise).
+    const cmakeToolSpec = handle.attrs.toolchain
+        ? await cmakeTool(handle.attrs.toolchain)
+        : await nativeToolSpec(nativeTool("cmake"));
+    const compilerTools = handle.attrs.compiler ? [await zigTool(handle.attrs.compiler)] : [];
+    const compilerArgs = handle.attrs.compiler ? await zigCMakeArgs(handle.attrs.compiler) : [];
+    // The script itself shells out to mkdir (always) and cp (only when
+    // staging outputs); cmake's default "Unix Makefiles" generator also
+    // shells out to `make` to actually build, and (when a Zig compiler is
+    // wired in) the generated zigar/zigranlib wrapper scripts shell out to
+    // `dirname` — all need declaring, same as any other command in the
+    // fully hermetic sandbox.
+    const scriptTools = [
+        await nativeToolSpec(nativeTool("mkdir")),
+        await nativeToolSpec(nativeTool("make")),
+        ...(stageOutputs.length > 0 ? [await nativeToolSpec(nativeTool("cp"))] : []),
+        ...(handle.attrs.compiler ? [await nativeToolSpec(nativeTool("dirname"))] : []),
+    ];
+
     return run({
-        argv: ["sh", "-c", script, "cmake-build", srcPath, buildDirPath, ...cmakeArgs],
-        // No pinned toolchain declared — still need a resolved cmake so the
-        // hermetic sandbox can find it (bare "cmake" has no PATH entry
-        // otherwise).
-        tools: [await nativeToolSpec(nativeTool("cmake"))],
+        argv: ["sh", "-c", script, "cmake-build", srcPath, buildDirPath, ...compilerArgs, ...cmakeArgs],
+        tools: [cmakeToolSpec, ...compilerTools, ...scriptTools],
         inputs: [inputFiles, ...dirInputs],
         outputs: [...outputDecls, ...stagedOutputDecls],
         display: `cmake build ${srcPath}`,
@@ -147,15 +161,24 @@ export function cmakeLib({
     outputs = [],
     stageOutputs = [],
     toolchain,
+    compiler,
     deps = [],
 }) {
     const explicitToolchainTarget = toolchain && toolchain.__imp === true ? toolchain : null;
     const explicitVersion = toolchain && toolchain.__imp !== true ? toolchain : null;
     const toolchainTarget = explicitToolchainTarget || (!explicitVersion ? defaultCmakeToolchain() : null);
     const toolchainVersion = explicitVersion || (toolchainTarget && toolchainTarget.attrs?.version);
-    const allDeps = toolchainTarget
-        ? [{ target: toolchainTarget, mode: "tool" }, ...deps]
-        : deps;
+
+    const explicitCompilerTarget = compiler && compiler.__imp === true ? compiler : null;
+    const explicitCompilerVersion = compiler && compiler.__imp !== true ? compiler : null;
+    const compilerTarget = explicitCompilerTarget || (!explicitCompilerVersion ? defaultZigToolchain() : null);
+    const compilerVersion = explicitCompilerVersion || (compilerTarget && compilerTarget.attrs?.version);
+
+    const allDeps = [
+        ...(toolchainTarget ? [{ target: toolchainTarget, mode: "tool" }] : []),
+        ...(compilerTarget ? [{ target: compilerTarget, mode: "tool" }] : []),
+        ...deps,
+    ];
 
     return target({
         kind: "cmake-lib",
@@ -169,6 +192,8 @@ export function cmakeLib({
             ...(buildDir ? { buildDir } : {}),
             ...(toolchainVersion ? { toolchain: toolchainVersion } : {}),
             ...(toolchainTarget ? { toolchainTarget } : {}),
+            ...(compilerVersion ? { compiler: compilerVersion } : {}),
+            ...(compilerTarget ? { compilerTarget } : {}),
             ...(allDeps.length ? { deps: allDeps.map(dep => dep.target || dep) } : {}),
         },
         deps: allDeps,

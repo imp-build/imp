@@ -820,10 +820,23 @@ pub(crate) fn exec_run_unsandboxed(
     // Unsandboxed tasks require `impure: true` — an explicit, per-call opt-out
     // of hermeticity — so unlike the sandboxed path, ambient host PATH is
     // still inherited here for undeclared commands (e.g. a user-supplied
-    // generator command in `odinGenRun`). HOME/TMPDIR pass through from the
-    // host rather than being pinned to a sandbox for the same reason.
+    // generator command in `odinGenRun`). HOME/TMPDIR, and desktop session
+    // variables (needed by odinRun to launch a real GUI/audio-producing
+    // binary against the real display), pass through from the host rather
+    // than being pinned to a sandbox for the same reason. Not added to the
+    // shared PASSTHROUGH_ENV_VARS list/passthrough_env_snapshot(), since
+    // that's also used by the hermetic sandboxed path.
     let mut base_env = passthrough_env_snapshot();
-    for var in ["HOME", "TMPDIR"] {
+    for var in [
+        "HOME",
+        "TMPDIR",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "XAUTHORITY",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "PULSE_SERVER",
+    ] {
         if let Some(value) = std::env::var_os(var) {
             base_env.insert(var.to_owned(), value.to_string_lossy().into_owned());
         }

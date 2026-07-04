@@ -32,6 +32,16 @@ import {
 import {
     resourcePackage,
 } from "//rules/asset";
+import { gccToolchain } from "//rules/c/gcc/toolchain";
+import { moldToolchain } from "//rules/c/mold/toolchain";
+
+// odinBuild/odinTest's build/link path always needs a declared default
+// gcc(+mold) toolchain (see odinScriptTools() in //rules/odin) — declare
+// them once, up front, for every test in this file that actually exercises
+// that path (via withFakeRun, which only stubs run()'s execution, not the
+// tool-resolution code that runs before it).
+gccToolchain("2025.08-1", { default: true });
+moldToolchain("2.41.0", { default: true });
 import {
     target,
     hydrateTarget,

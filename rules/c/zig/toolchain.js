@@ -90,13 +90,18 @@ function wrapperContent(plat, zigExe, subcommand) {
  * CMAKE_AR/CMAKE_RANLIB must each be a single executable — unlike
  * CMAKE_<LANG>_COMPILER, there is no "extra arg" mechanism for them).
  *
+ * Also includes generically-named `clang`/`ar` wrappers (unix) or
+ * `clang.bat`/`ar.bat` (windows) alongside the zig-prefixed ones — for
+ * callers (e.g. Odin) that invoke a hardcoded program name rather than
+ * accepting a configurable compiler/archiver path.
+ *
  * @param {{ os: string }} plat
- * @returns {{ ar: string, ranlib: string }}
+ * @returns {{ ar: string, ranlib: string, clang: string, genericAr: string }}
  */
 function wrapperNames(plat) {
     return plat.os === "windows"
-        ? { ar: "zigar.bat", ranlib: "zigranlib.bat" }
-        : { ar: "zigar", ranlib: "zigranlib" };
+        ? { ar: "zigar.bat", ranlib: "zigranlib.bat", clang: "clang.bat", genericAr: "ar.bat" }
+        : { ar: "zigar", ranlib: "zigranlib", clang: "clang", genericAr: "ar" };
 }
 
 /**
@@ -159,14 +164,27 @@ export function createZigToolchainApi(host = defaultHost) {
         const downloadPath = `.imp/zig-downloads/${key}/${artifact}`;
         const extractPath = `.imp/zig-toolchains/${key}`;
         const zigExe = plat.os === "windows" ? "zig.exe" : "zig";
-        const { ar, ranlib } = wrapperNames(plat);
-        const arContent = wrapperContent(plat, zigExe, "ar");
-        const ranlibContent = wrapperContent(plat, zigExe, "ranlib");
-        // Wrapper content rides in argv (positional $3.../$4...) so it keys
-        // the task cache without any shell interpolation touching it, same
-        // pattern as odinGenRun's generated-file writes.
-        const chmod = plat.os === "windows" ? "" : ' && chmod +x "$2/$4" && chmod +x "$2/$6"';
-        const extractScript = `mkdir -p "$2" && tar -xf "$1" -C "$2" --strip-components=1 && printf %s "$3" > "$2/$4" && printf %s "$5" > "$2/$6"${chmod}`;
+        const { ar, ranlib, clang, genericAr } = wrapperNames(plat);
+        // Wrapper content rides in argv (positional $N) so it keys the task
+        // cache without any shell interpolation touching it, same pattern as
+        // odinGenRun's generated-file writes. Each wrapper is a
+        // (content, filename) positional pair after $1 (downloadPath)/$2
+        // (extractPath).
+        const wrappers = [
+            [wrapperContent(plat, zigExe, "ar"), ar],
+            [wrapperContent(plat, zigExe, "ranlib"), ranlib],
+            [wrapperContent(plat, zigExe, "cc"), clang],
+            [wrapperContent(plat, zigExe, "ar"), genericAr],
+        ];
+        const wrapperArgs = wrappers.flat();
+        // Shell positional params past $9 need brace syntax ($10, not $10
+        // which parses as ${1}0).
+        const pos = (n) => (n >= 10 ? `\${${n}}` : `$${n}`);
+        const writeCmds = wrappers.map((_, i) => `printf %s "${pos(3 + i * 2)}" > "$2/${pos(4 + i * 2)}"`);
+        const chmodCmd = plat.os === "windows"
+            ? ""
+            : ` && ${wrappers.map((_, i) => `chmod +x "$2/${pos(4 + i * 2)}"`).join(" && ")}`;
+        const extractScript = `mkdir -p "$2" && tar -xf "$1" -C "$2" --strip-components=1 && ${writeCmds.join(" && ")}${chmodCmd}`;
 
         await host.run({
             argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-zig", downloadPath, url],
@@ -176,7 +194,7 @@ export function createZigToolchainApi(host = defaultHost) {
         });
 
         await host.run({
-            argv: ["sh", "-c", extractScript, "extract-zig", downloadPath, extractPath, arContent, ar, ranlibContent, ranlib],
+            argv: ["sh", "-c", extractScript, "extract-zig", downloadPath, extractPath, ...wrapperArgs],
             tools: coreTools,
             inputs: [{ kind: "file", path: downloadPath }],
             outputs: [
