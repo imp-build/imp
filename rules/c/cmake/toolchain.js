@@ -78,8 +78,12 @@ export function cmakeCacheKey(version, plat) {
  */
 // Bare coreutils used by the download/extract scripts below. The sandbox is
 // fully hermetic — even `mkdir`/`dirname`/`tar` must be declared tools, not
-// resolved from an ambient or fixed-base PATH.
-const CORE_TOOL_NAMES = ["curl", "mkdir", "dirname", "tar", "gzip"];
+// resolved from an ambient or fixed-base PATH. Bare `sh` only auto-resolves
+// on unix (see BUILTIN_SHELL_CANDIDATES in src/exec.rs), so Windows needs
+// `sh` (Git Bash) declared as a tool too.
+function coreToolNames(plat) {
+    return ["curl", "mkdir", "dirname", "tar", "gzip", ...(plat.os === "windows" ? ["sh"] : [])];
+}
 
 export function createCmakeToolchainApi(host = defaultHost) {
     let defaultVersion = null;
@@ -92,7 +96,7 @@ export function createCmakeToolchainApi(host = defaultHost) {
     function declareToolchain(version, opts = {}) {
         host.namedCache({ name: CMAKE_TOOLCHAIN_CACHE });
         if (!coreToolHandles) {
-            coreToolHandles = CORE_TOOL_NAMES.map((name) => host.nativeTool(name));
+            coreToolHandles = coreToolNames(host.platformInfo()).map((name) => host.nativeTool(name));
         }
 
         const toolchain = target({

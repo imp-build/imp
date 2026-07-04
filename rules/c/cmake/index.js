@@ -1,4 +1,5 @@
 import { target, glob, file_set, memo, output, output_path, product, run, targetAddress } from "imp:core";
+import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import {
     acquireCmakeToolchain,
     cmakeBin,
@@ -108,6 +109,10 @@ export const native_link_library = product("cmake-lib", "build", async function 
     }
     return run({
         argv: ["sh", "-c", script, "cmake-build", srcPath, buildDirPath, ...cmakeArgs],
+        // No pinned toolchain declared — still need a resolved cmake so the
+        // hermetic sandbox can find it (bare "cmake" has no PATH entry
+        // otherwise).
+        tools: [await nativeToolSpec(nativeTool("cmake"))],
         inputs: [inputFiles, ...dirInputs],
         outputs: [...outputDecls, ...stagedOutputDecls],
         display: `cmake build ${srcPath}`,
