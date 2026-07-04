@@ -3128,7 +3128,6 @@ mod tests {
         *live.scheduler.lock().unwrap() = Some(scheduler);
         execute_goal_live(live, root, goal, selectors, false, 1).await
     }
-    use std::collections::VecDeque;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc,
@@ -3331,7 +3330,7 @@ export const ui = asset({ srcs: ["**/*.png"] });
     }
 
     #[tokio::test]
-    async fn host_js_logs_are_written_to_prodash_messages() {
+    async fn host_js_logs_are_written_to_the_log_sink() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(p.join(WORKSPACE_FILE).as_path(), "");
@@ -3349,29 +3348,15 @@ export const app = target({ kind: "sample" });
 "#,
         );
 
-        let progress_root = prodash::tree::Root::new();
-        let log_item = progress_root.add_child("workspace logs");
-        let _workspace = load_workspace_with_host_log(p, HostLogSink::prodash(log_item))
-            .await
-            .unwrap();
+        let (sink, lines) = HostLogSink::buffer();
+        let _workspace = load_workspace_with_host_log(p, sink).await.unwrap();
 
-        let mut messages = Vec::new();
-        progress_root.copy_messages(&mut messages);
-        let rendered = messages
-            .iter()
-            .map(|message| {
-                format!(
-                    "{}::{:?}::{}",
-                    message.origin, message.level, message.message
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let rendered = lines.lock().unwrap().join("\n");
 
-        assert!(rendered.contains("workspace logs::Info::[debug] debug message"));
-        assert!(rendered.contains("workspace logs::Info::[info] info message"));
-        assert!(rendered.contains("workspace logs::Info::[warn] warn message"));
-        assert!(rendered.contains("workspace logs::Failure::[error] error message"));
+        assert!(rendered.contains("[debug] debug message"));
+        assert!(rendered.contains("[info] info message"));
+        assert!(rendered.contains("[warn] warn message"));
+        assert!(rendered.contains("[error] error message"));
     }
 
     #[tokio::test]
@@ -3559,37 +3544,26 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
     }
 
     #[test]
-    fn process_output_is_reported_as_recent_prodash_child_rows() {
-        let progress_root = prodash::tree::Root::new();
-        let mut progress = progress_root.add_child("execute task");
-        let mut recent_output = VecDeque::new();
+    fn process_output_is_reported_as_the_lane_bars_message() {
+        let mut progress = indicatif::ProgressBar::hidden();
 
         report_process_line(
             &mut progress,
-            &mut recent_output,
             &ProcessLine {
                 stream: ProcessStream::Stdout,
                 line: "stdout-line".to_owned(),
             },
         );
+        assert_eq!(progress.message(), "out: stdout-line");
+
         report_process_line(
             &mut progress,
-            &mut recent_output,
             &ProcessLine {
                 stream: ProcessStream::Stderr,
                 line: "stderr-line".to_owned(),
             },
         );
-
-        let mut snapshot = Vec::new();
-        progress_root.sorted_snapshot(&mut snapshot);
-
-        assert!(snapshot
-            .iter()
-            .any(|(_, task)| task.name == "out: stdout-line" && task.progress.is_none()));
-        assert!(snapshot
-            .iter()
-            .any(|(_, task)| task.name == "err: stderr-line" && task.progress.is_none()));
+        assert_eq!(progress.message(), "err: stderr-line");
     }
 
     #[test]

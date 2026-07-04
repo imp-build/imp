@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -10,6 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use indicatif::ProgressBar;
 use rquickjs::Object;
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
@@ -21,8 +22,6 @@ use crate::cache::{
     store_file_blob, task_record_path, write_task_cache_record, CacheInputDigest, CachedArtifact,
     TaskCacheRecord, TASK_CACHE_VERSION,
 };
-
-const PROCESS_OUTPUT_VISIBLE_LINES: usize = 5;
 
 // ---------------------------------------------------------------------------
 // Process I/O types and helpers
@@ -94,11 +93,10 @@ fn drain_process_lines(
     receiver: &mpsc::Receiver<ProcessLine>,
     stdout: &mut String,
     stderr: &mut String,
-    mut progress: Option<&mut prodash::tree::Item>,
-    recent_output: &mut VecDeque<prodash::tree::Item>,
+    mut progress: Option<&mut ProgressBar>,
 ) {
     while let Ok(line) = receiver.try_recv() {
-        record_process_line(line, stdout, stderr, progress.as_deref_mut(), recent_output);
+        record_process_line(line, stdout, stderr, progress.as_deref_mut());
     }
 }
 
@@ -106,11 +104,10 @@ fn record_process_line(
     line: ProcessLine,
     stdout: &mut String,
     stderr: &mut String,
-    progress: Option<&mut prodash::tree::Item>,
-    recent_output: &mut VecDeque<prodash::tree::Item>,
+    progress: Option<&mut ProgressBar>,
 ) {
     if let Some(progress) = progress {
-        report_process_line(progress, recent_output, &line);
+        report_process_line(progress, &line);
     }
 
     match line.stream {
@@ -125,11 +122,7 @@ fn record_process_line(
     }
 }
 
-pub(crate) fn report_process_line(
-    progress: &mut prodash::tree::Item,
-    recent_output: &mut VecDeque<prodash::tree::Item>,
-    line: &ProcessLine,
-) {
+pub(crate) fn report_process_line(progress: &mut ProgressBar, line: &ProcessLine) {
     if line.line.trim().is_empty() {
         return;
     }
@@ -137,21 +130,14 @@ pub(crate) fn report_process_line(
         ProcessStream::Stdout => "out",
         ProcessStream::Stderr => "err",
     };
-    recent_output.push_back(progress.add_child(format!("{stream}: {}", line.line)));
-    while recent_output.len() > PROCESS_OUTPUT_VISIBLE_LINES {
-        recent_output.pop_front();
-    }
+    progress.set_message(format!("{stream}: {}", line.line));
 }
 
-pub(crate) fn report_process_failure(
-    progress: Option<&prodash::tree::Item>,
-    stdout: &str,
-    stderr: &str,
-) {
+pub(crate) fn report_process_failure(progress: Option<&ProgressBar>, stdout: &str, stderr: &str) {
     let Some(progress) = progress else {
         return;
     };
-    for line in stderr
+    let lines: Vec<&str> = stderr
         .lines()
         .chain(stdout.lines())
         .filter(|line| !line.trim().is_empty())
@@ -160,9 +146,15 @@ pub(crate) fn report_process_failure(
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
-    {
-        progress.message(prodash::messages::MessageLevel::Failure, line.to_owned());
+        .collect();
+    if lines.is_empty() {
+        return;
     }
+    progress.suspend(|| {
+        for line in lines {
+            eprintln!("{line}");
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -173,7 +165,7 @@ pub(crate) fn wait_for_child_output(
     child: &mut Child,
     display: &str,
     cancellation: Option<&AtomicBool>,
-    mut progress: Option<&mut prodash::tree::Item>,
+    mut progress: Option<&mut ProgressBar>,
 ) -> Result<(ExitStatus, String, String)> {
     let stdout = child
         .stdout
@@ -189,7 +181,6 @@ pub(crate) fn wait_for_child_output(
 
     let mut stdout = String::new();
     let mut stderr = String::new();
-    let mut recent_output = VecDeque::new();
     let status = loop {
         if cancellation
             .map(|cancellation| cancellation.load(Ordering::SeqCst))
@@ -200,22 +191,10 @@ pub(crate) fn wait_for_child_output(
             // processes can inherit stdout/stderr and keep those pipes open
             // after the child process group is gone, which would make Ctrl-C
             // wait for unrelated work instead of returning promptly.
-            drain_process_lines(
-                &receiver,
-                &mut stdout,
-                &mut stderr,
-                progress.as_deref_mut(),
-                &mut recent_output,
-            );
+            drain_process_lines(&receiver, &mut stdout, &mut stderr, progress.as_deref_mut());
             bail!("{display} canceled");
         }
-        drain_process_lines(
-            &receiver,
-            &mut stdout,
-            &mut stderr,
-            progress.as_deref_mut(),
-            &mut recent_output,
-        );
+        drain_process_lines(&receiver, &mut stdout, &mut stderr, progress.as_deref_mut());
         if let Some(status) = child
             .try_wait()
             .with_context(|| format!("wait for {display}"))?
@@ -223,13 +202,9 @@ pub(crate) fn wait_for_child_output(
             break status;
         }
         match receiver.recv_timeout(Duration::from_millis(20)) {
-            Ok(line) => record_process_line(
-                line,
-                &mut stdout,
-                &mut stderr,
-                progress.as_deref_mut(),
-                &mut recent_output,
-            ),
+            Ok(line) => {
+                record_process_line(line, &mut stdout, &mut stderr, progress.as_deref_mut())
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {}
         }
@@ -237,13 +212,7 @@ pub(crate) fn wait_for_child_output(
 
     let _ = stdout_thread.join();
     let _ = stderr_thread.join();
-    drain_process_lines(
-        &receiver,
-        &mut stdout,
-        &mut stderr,
-        progress.as_deref_mut(),
-        &mut recent_output,
-    );
+    drain_process_lines(&receiver, &mut stdout, &mut stderr, progress.as_deref_mut());
     Ok((status, stdout, stderr))
 }
 
@@ -799,7 +768,7 @@ pub(crate) fn exec_run_unsandboxed(
     workspace_root: &Path,
     opts: ExecRunOpts,
     cancellation: Option<&AtomicBool>,
-    mut progress: Option<&mut prodash::tree::Item>,
+    mut progress: Option<&mut ProgressBar>,
 ) -> Result<ExecRunResult> {
     let tool_path_entries = direct_tool_path_entries(&opts.tools)?;
 

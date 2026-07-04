@@ -1,71 +1,50 @@
-use std::sync::Arc;
+use std::time::Duration;
+
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::runtime::HostLogSink;
 
+const TICK_INTERVAL: Duration = Duration::from_millis(200);
+
 pub struct Tree {
-    root: Arc<prodash::tree::Root>,
+    multi: MultiProgress,
     log_sink: HostLogSink,
 }
 
 impl Tree {
     fn new() -> Self {
-        let root = prodash::tree::Root::new();
-        // Raw `add_child` (no `init_task`): this is a message log, not a
-        // stepped task. Created once here so the workspace log sink is shared
-        // across every command rather than re-created on each load.
-        let log_item = root.add_child("");
-        let log_sink = HostLogSink::prodash(log_item);
-        Self { root, log_sink }
+        let multi = MultiProgress::new();
+        let log_sink = HostLogSink::live(multi.clone());
+        Self { multi, log_sink }
     }
 
-    pub fn add_child(&self, name: impl Into<String>) -> prodash::tree::Item {
-        let item = self.root.add_child(name);
+    pub fn add_child(&self, name: impl Into<String>) -> ProgressBar {
+        let item = self.multi.add(ProgressBar::new_spinner());
         init_task(&item);
+        item.set_message(name.into());
         item
     }
 
-    /// Shared sink that routes workspace host logs into the `workspace logs`
-    /// node. Cheap to clone — the destination is behind an `Arc<Mutex<_>>`.
+    /// Shared sink that routes workspace host logs to stderr, synchronized
+    /// with the progress bars via `MultiProgress::suspend`.
     pub fn log_sink(&self) -> HostLogSink {
         self.log_sink.clone()
     }
 
-    /// An owned handle to the progress root, suitable for moving into a spawned
-    /// task (e.g. a scheduler event renderer). Adds children via `add_child`.
-    pub fn root_handle(&self) -> Arc<prodash::tree::Root> {
-        Arc::clone(&self.root)
-    }
-
-    fn downgrade(&self) -> std::sync::Weak<prodash::tree::Root> {
-        Arc::downgrade(&self.root)
-    }
-
-    pub(crate) fn message(&self, format: String) -> _ {
-        todo!()
+    /// An owned handle to the progress renderer, suitable for moving into a
+    /// spawned task (e.g. a scheduler event renderer). Adds bars via `add`.
+    pub fn multi(&self) -> MultiProgress {
+        self.multi.clone()
     }
 }
 
 pub struct Session {
     tree: Tree,
-    render: prodash::render::line::JoinHandle,
 }
 
 impl Session {
     pub fn start() -> Self {
-        let tree = Tree::new();
-
-        let render = prodash::render::line::render(
-            std::io::stderr(),
-            tree.downgrade(),
-            prodash::render::line::Options {
-                throughput: false,
-                initial_delay: Some(std::time::Duration::from_millis(100)),
-                ..prodash::render::line::Options::default()
-            }
-            .auto_configure(prodash::render::line::StreamKind::Stderr),
-        );
-
-        Self { tree, render }
+        Self { tree: Tree::new() }
     }
 
     pub fn tree(&self) -> &Tree {
@@ -73,74 +52,50 @@ impl Session {
     }
 
     pub fn shutdown(self) {
-        self.render.shutdown_and_wait();
+        let _ = self.tree.multi.clear();
     }
 }
 
-/// Renders a millis-since-epoch unit as floating point seconds.
-#[derive(Copy, Clone, Default, Eq, PartialEq, Ord, PartialOrd, Debug)]
-pub struct MillisAsFloatingPointSecs;
-
-use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
-
-pub fn format_workunit_duration_ms(duration: Duration) -> String {
-    format!("{:.2}s", (duration.as_millis() as f64) / 1000.0)
-}
-use prodash::progress::Step;
-use std::fmt;
-impl MillisAsFloatingPointSecs {
-    /// Computes a static Step from the given start time by converting it to "millis-since-epoch".
-    pub fn start_time_to_step(start_time: &SystemTime) -> Step {
-        start_time.duration_since(UNIX_EPOCH).unwrap().as_millis() as usize
-    }
+/// Prints `message` to the terminal scrollback and clears `item`'s line.
+///
+/// One-off setup steps (toolchain install, WSL sync, ...) shouldn't stay
+/// behind as static bar rows once done — every finished step otherwise pushes
+/// the interesting, still-live bars further down, so the on-screen layout
+/// looks different depending on which steps happened to run first.
+pub(crate) fn finish_step(item: &ProgressBar, message: &str) {
+    item.suspend(|| println!("{message}"));
+    item.finish_and_clear();
 }
 
-impl prodash::unit::DisplayValue for MillisAsFloatingPointSecs {
-    fn display_current_value(
-        &self,
-        w: &mut dyn fmt::Write,
-        value: Step,
-        _upper: Option<Step>,
-    ) -> fmt::Result {
-        // Convert back from millis-since-epoch to millis elapsed.
-        let start_time = UNIX_EPOCH + Duration::from_millis(value as u64);
-        let elapsed_ms = start_time.elapsed().unwrap_or_else(|_| Duration::new(0, 0));
-        w.write_str(&format_workunit_duration_ms(elapsed_ms))
-    }
-    fn display_unit(&self, _w: &mut dyn fmt::Write, _value: Step) -> fmt::Result {
-        Ok(())
-    }
-
-    fn dyn_hash(&self, state: &mut dyn std::hash::Hasher) {
-        state.write_u128(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis(),
-        );
-    }
-}
-
-pub(crate) fn init_task(item: &prodash::tree::Item) {
+pub(crate) fn init_task(item: &ProgressBar) {
     init_timed_task(item);
 }
 
-pub(crate) fn init_counted_task(item: &prodash::tree::Item, max: usize) {
-    item.init(Some(max), Some(prodash::unit::label("steps")));
-    item.set(0);
+pub(crate) fn init_counted_task(item: &ProgressBar, max: usize) {
+    item.set_style(counted_style());
+    item.set_length(max as u64);
+    item.set_position(0);
+    item.enable_steady_tick(TICK_INTERVAL);
 }
 
-pub(crate) fn init_idle_task(item: &prodash::tree::Item) {
-    item.init(None, None);
+pub(crate) fn init_idle_task(item: &ProgressBar) {
+    item.set_style(idle_style());
+    item.enable_steady_tick(TICK_INTERVAL);
 }
 
-pub(crate) fn init_timed_task(item: &prodash::tree::Item) {
-    let start_time = SystemTime::now();
-    item.init(
-        None,
-        Some(prodash::unit::dynamic(MillisAsFloatingPointSecs)),
-    );
-    item.set(MillisAsFloatingPointSecs::start_time_to_step(&start_time));
+pub(crate) fn init_timed_task(item: &ProgressBar) {
+    item.set_style(timed_style());
+    item.enable_steady_tick(TICK_INTERVAL);
+}
+
+fn timed_style() -> ProgressStyle {
+    ProgressStyle::with_template("{spinner} {elapsed_precise} {msg}").unwrap()
+}
+
+fn counted_style() -> ProgressStyle {
+    ProgressStyle::with_template("{spinner} [{bar:24.cyan/blue}] {msg}").unwrap()
+}
+
+fn idle_style() -> ProgressStyle {
+    ProgressStyle::with_template("  {msg}").unwrap()
 }

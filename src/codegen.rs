@@ -10,11 +10,11 @@ use crate::env::LocalEnv;
 use crate::workspace;
 
 /// Scan Odin files for generated registration attributes, writing to the default workspace path.
-pub async fn update_module_list(progress: &mut prodash::tree::Item) -> Result<()> {
-    progress.set_name("codegen: scanning modules/components/assets");
+pub async fn update_module_list(progress: &mut indicatif::ProgressBar) -> Result<()> {
+    progress.set_message("codegen: scanning modules/components/assets");
     let out_path = workspace::root_dir().join("ottar/generated_register.odin");
     update_module_list_to(&out_path).await?;
-    progress.set_name(format!("codegen: wrote {}", out_path.display()));
+    progress.set_message(format!("codegen: wrote {}", out_path.display()));
     Ok(())
 }
 

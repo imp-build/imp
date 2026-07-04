@@ -163,11 +163,11 @@ pub fn host_sha256(path: &Path) -> Result<String> {
 // Existing Odin-specific setup (kept for backward compat)
 // ---------------------------------------------------------------------------
 
-pub async fn setup_odin(progress: &mut prodash::tree::Item) -> Result<()> {
+pub async fn setup_odin(progress: &mut indicatif::ProgressBar) -> Result<()> {
     let version = workspace::odin_version();
     let install_dir = workspace::toolchain_dir().join(&version).join("odin");
     if install_dir.is_dir() {
-        progress.set_name(format!("toolchain: odin {version} already installed"));
+        progress.set_message(format!("toolchain: odin {version} already installed"));
         return Ok(());
     }
 
@@ -178,7 +178,7 @@ pub async fn setup_odin(progress: &mut prodash::tree::Item) -> Result<()> {
     let staging = workspace::toolchain_dir().join(&version);
     LocalEnv::new().ensure_paths(&[staging.clone()]).await?;
 
-    progress.set_name(format!(
+    progress.set_message(format!(
         "toolchain: downloading odin {version} ({plat}/{arch})"
     ));
 
@@ -216,17 +216,17 @@ pub async fn setup_odin(progress: &mut prodash::tree::Item) -> Result<()> {
         );
     }
     std::fs::rename(extracted[0].path(), &install_dir)?;
-    progress.set_name(format!("toolchain: odin {version} installed"));
+    progress.set_message(format!("toolchain: odin {version} installed"));
     Ok(())
 }
 
-pub async fn setup_odin_windows(progress: &mut prodash::tree::Item) -> Result<()> {
+pub async fn setup_odin_windows(progress: &mut indicatif::ProgressBar) -> Result<()> {
     let version = workspace::odin_version();
     let install_dir = workspace::toolchain_dir()
         .join(&version)
         .join("odin-windows");
     if install_dir.is_dir() {
-        progress.set_name(format!(
+        progress.set_message(format!(
             "toolchain: odin-windows {version} already installed"
         ));
         return Ok(());
@@ -238,7 +238,7 @@ pub async fn setup_odin_windows(progress: &mut prodash::tree::Item) -> Result<()
     let staging = workspace::toolchain_dir().join(&version);
     LocalEnv::new().ensure_paths(&[staging.clone()]).await?;
 
-    progress.set_name(format!("toolchain: downloading odin-windows {version}"));
+    progress.set_message(format!("toolchain: downloading odin-windows {version}"));
 
     let staging_str = staging.to_string_lossy().into_owned();
 
@@ -292,13 +292,13 @@ pub async fn setup_odin_windows(progress: &mut prodash::tree::Item) -> Result<()
         bail!("expected 'dist' directory in {staging_str} after extraction");
     }
     std::fs::rename(&dist_dir, &install_dir)?;
-    progress.set_name(format!("toolchain: odin-windows {version} installed"));
+    progress.set_message(format!("toolchain: odin-windows {version} installed"));
     Ok(())
 }
 
 // odinfmt is distributed inside the OLS release zips, whose tags track Odin's
 // monthly dev versions, so we pin it to the same `.odin-version`.
-pub async fn setup_odinfmt(progress: &mut prodash::tree::Item) -> Result<()> {
+pub async fn setup_odinfmt(progress: &mut indicatif::ProgressBar) -> Result<()> {
     let version = workspace::odin_version();
     let exe = if cfg!(windows) {
         "odinfmt.exe"
@@ -308,7 +308,7 @@ pub async fn setup_odinfmt(progress: &mut prodash::tree::Item) -> Result<()> {
     let install_dir = workspace::toolchain_dir().join(&version).join("odinfmt");
     let dest = install_dir.join(exe);
     if dest.is_file() {
-        progress.set_name(format!("toolchain: odinfmt {version} already installed"));
+        progress.set_message(format!("toolchain: odinfmt {version} already installed"));
         return Ok(());
     }
 
@@ -321,7 +321,7 @@ pub async fn setup_odinfmt(progress: &mut prodash::tree::Item) -> Result<()> {
         format!("https://github.com/DanielGavin/ols/releases/download/{version}/ols-{triple}.zip");
 
     LocalEnv::new().ensure_paths(&[install_dir.clone()]).await?;
-    progress.set_name(format!(
+    progress.set_message(format!(
         "toolchain: downloading odinfmt {version} ({triple})"
     ));
 
@@ -384,11 +384,11 @@ pub async fn setup_odinfmt(progress: &mut prodash::tree::Item) -> Result<()> {
         std::fs::set_permissions(&dest, perms)?;
     }
 
-    progress.set_name(format!("toolchain: odinfmt {version} installed"));
+    progress.set_message(format!("toolchain: odinfmt {version} installed"));
     Ok(())
 }
 
-pub async fn setup_toolchains(progress: &mut prodash::tree::Item, windows: bool) -> Result<()> {
+pub async fn setup_toolchains(progress: &mut indicatif::ProgressBar, windows: bool) -> Result<()> {
     if cfg!(windows) {
         setup_odin_windows(progress).await?;
     } else {

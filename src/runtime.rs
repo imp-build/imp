@@ -18,9 +18,10 @@ pub struct HostLogSink {
 }
 
 enum HostLogDestination {
-    #[allow(dead_code)]
     Stderr,
-    Prodash(prodash::tree::Item),
+    Live(indicatif::MultiProgress),
+    #[cfg(test)]
+    Buffer(Arc<Mutex<Vec<String>>>),
 }
 
 impl HostLogSink {
@@ -31,10 +32,23 @@ impl HostLogSink {
         }
     }
 
-    pub fn prodash(item: prodash::tree::Item) -> Self {
+    /// Writes straight to stderr, synchronized with `multi`'s progress bars
+    /// via `MultiProgress::suspend` so log lines never tear a bar redraw.
+    pub fn live(multi: indicatif::MultiProgress) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HostLogDestination::Prodash(item))),
+            inner: Arc::new(Mutex::new(HostLogDestination::Live(multi))),
         }
+    }
+
+    /// Captures formatted log lines in memory instead of writing them
+    /// anywhere, so tests can assert on them without touching real stderr.
+    #[cfg(test)]
+    pub fn buffer() -> (Self, Arc<Mutex<Vec<String>>>) {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let sink = Self {
+            inner: Arc::new(Mutex::new(HostLogDestination::Buffer(Arc::clone(&lines)))),
+        };
+        (sink, lines)
     }
 
     pub fn writer(&self, level: impl Into<String>) -> HostLogWriter {
@@ -48,9 +62,11 @@ impl HostLogSink {
     fn log(&self, level: &str, message: &str) {
         let level = level.trim();
         let text = format!("[{level}] {message}");
-        match &mut *self.inner.lock().unwrap() {
+        match &*self.inner.lock().unwrap() {
             HostLogDestination::Stderr => eprintln!("{text}"),
-            HostLogDestination::Prodash(item) => item.message(host_log_message_level(level), text),
+            HostLogDestination::Live(multi) => multi.suspend(|| eprintln!("{text}")),
+            #[cfg(test)]
+            HostLogDestination::Buffer(lines) => lines.lock().unwrap().push(text),
         }
     }
 }
@@ -89,14 +105,6 @@ impl Write for HostLogWriter {
             self.sink.log(&self.level, &line);
         }
         Ok(())
-    }
-}
-
-fn host_log_message_level(level: &str) -> prodash::messages::MessageLevel {
-    match level.to_ascii_lowercase().as_str() {
-        "error" | "failure" | "fail" => prodash::messages::MessageLevel::Failure,
-        "success" | "done" => prodash::messages::MessageLevel::Success,
-        _ => prodash::messages::MessageLevel::Info,
     }
 }
 

@@ -217,16 +217,16 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
     if let Cmd::Setup { windows } = &cli.command {
         let mut p = tree.add_child("setup toolchains");
         toolchain::setup_toolchains(&mut p, *windows).await?;
-        p.done("toolchains ready");
+        ui::finish_step(&p, "toolchains ready");
         return Ok(());
     }
 
     let cross_compile = cli.cross_compile || matches!(cli.command, Cmd::Sync);
 
     if cross_compile {
-        let mut p = tree.add_child("validate WSL environment");
+        let p = tree.add_child("validate WSL environment");
         WslEnv::new().validate().await?;
-        p.done("WSL ok");
+        ui::finish_step(&p, "WSL ok");
     }
 
     {
@@ -243,11 +243,13 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
     {
         let mut p = tree.add_child("check toolchains");
         toolchain::setup_toolchains(&mut p, cross_compile).await?;
+        ui::finish_step(&p, "toolchains ok");
     }
 
     {
         let mut p = tree.add_child("refresh module list");
         codegen::update_module_list(&mut p).await?;
+        ui::finish_step(&p, "module list refreshed");
     }
 
     let mut target_env = if cross_compile {
@@ -260,7 +262,7 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
         if let Env::Wsl(wsl) = &mut target_env {
             let mut p = tree.add_child("sync workspace → Windows");
             wsl.sync(&mut p).await?;
-            p.done("synced");
+            ui::finish_step(&p, "synced");
         }
     }
 
@@ -268,9 +270,9 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
 
     if let Env::Wsl(wsl) = &target_env {
         if wsl.synced {
-            let mut p = tree.add_child("copy artifacts back");
+            let p = tree.add_child("copy artifacts back");
             wsl.copy_artifacts_back().await?;
-            p.done("artifacts copied");
+            ui::finish_step(&p, "artifacts copied");
         }
     }
 
@@ -398,6 +400,7 @@ async fn cmd_execute_live(
         let start = std::time::Instant::now();
         let ws = load_workspace_with_messages(&workspace_root, tree).await?;
         log::info!("loaded workspace in {:.2}s", start.elapsed().as_secs_f64());
+        ws
     };
     let js_workers = effective_js_workers(&workspace.workspace, js_workers)?;
 
@@ -432,7 +435,7 @@ async fn cmd_execute_live(
     let scheduler = scheduler::Scheduler::new(jobs, Arc::clone(&cancellation), tx);
     *workspace.scheduler.lock().unwrap() = Some(Arc::clone(&scheduler));
 
-    let root = tree.root_handle();
+    let multi = tree.multi();
     let what = match invocation {
         LiveInvocation::Goal { goal, .. } => goal.to_owned(),
         LiveInvocation::RulesTests { .. } => "rules-test".to_owned(),
@@ -448,7 +451,16 @@ async fn cmd_execute_live(
     // channel) alive forever, so waiting for channel closure would hang.
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let render = tokio::spawn(async move {
+        use indicatif::ProgressBar;
         use scheduler::{LaneKind, TaskEvent, TaskOutcome};
+
+        // Bars live in a single flat `MultiProgress`; nesting is conveyed only
+        // by insertion order and message indentation below.
+        let add_bar = |name: &str| -> ProgressBar {
+            let item = multi.add(ProgressBar::new_spinner());
+            item.set_message(name.to_owned());
+            item
+        };
 
         // Data store: target count pre-computed from select_roots.
         struct TaskStore {
@@ -469,25 +481,26 @@ async fn cmd_execute_live(
         //   └─ run: <desc>     ← SB 1, shown when active
         // Idle workers are hidden (name set to " ").
 
-        let mut progress = root.add_child(goal_label.clone());
+        let progress = add_bar(&goal_label);
         if store.total > 0 {
             ui::init_counted_task(&progress, store.total);
-            progress.set_name(format!("0/{} targets", store.total));
+            progress.set_message(format!("0/{} targets", store.total));
         } else {
             ui::init_timed_task(&progress);
-            progress.set_name(goal_label);
+            progress.set_message(goal_label);
         }
 
-        let mut js_progress = {
-            let js = progress.add_child("js tasks");
+        let js_progress = {
+            let js = add_bar("  js tasks");
             ui::init_counted_task(&js, 0);
-            js.set_name("js tasks 0/0");
+            js.set_message("  js tasks 0/0");
             js
         };
 
-        // Slot items — created under the appropriate parent.
+        // Slot items — displayed as a flat list; indentation in the message
+        // text conveys the js-tasks/sandbox grouping (no real tree nesting).
         struct SlotState {
-            item: prodash::tree::Item,
+            item: ProgressBar,
             task_id: Option<u64>,
         }
 
@@ -504,7 +517,7 @@ async fn cmd_execute_live(
             if let Some(prev) = state.task_id {
                 task_to_slot.remove(&prev);
             }
-            state.item.set_name(label);
+            state.item.set_message(label);
             ui::init_timed_task(&state.item);
             state.task_id = Some(id);
             task_to_slot.insert(id, slot);
@@ -522,7 +535,7 @@ async fn cmd_execute_live(
             };
             if state.task_id == Some(id) {
                 state.task_id = None;
-                state.item.set_name("<idle>");
+                state.item.set_message("<idle>");
                 ui::init_idle_task(&state.item);
             }
             task_to_slot.remove(&id);
@@ -530,7 +543,7 @@ async fn cmd_execute_live(
 
         let mut js_slots: Vec<SlotState> = Vec::with_capacity(js_workers);
         for _ in 0..js_workers {
-            let item = js_progress.add_child("<idle>");
+            let item = add_bar("    <idle>");
             ui::init_idle_task(&item);
             js_slots.push(SlotState {
                 item,
@@ -539,7 +552,7 @@ async fn cmd_execute_live(
         }
         let mut sandbox_slots: Vec<SlotState> = Vec::with_capacity(jobs);
         for _ in 0..jobs {
-            let item = progress.add_child("<idle>");
+            let item = add_bar("  <idle>");
             ui::init_idle_task(&item);
             sandbox_slots.push(SlotState {
                 item,
@@ -581,8 +594,8 @@ async fn cmd_execute_live(
                         total_js += 1;
                         is_js_memo.insert(id);
                         ui::init_counted_task(&js_progress, total_js);
-                        js_progress.set(done_js);
-                        js_progress.set_name(format!("js tasks {done_js}/{total_js}"));
+                        js_progress.set_position(done_js as u64);
+                        js_progress.set_message(format!("js tasks {done_js}/{total_js}"));
                     }
                 }
                 TaskEvent::Done { id, outcome } => {
@@ -594,18 +607,18 @@ async fn cmd_execute_live(
                         match &outcome {
                             TaskOutcome::Ok => {
                                 store.done += 1;
-                                progress.inc();
+                                progress.inc(1);
                                 progress
-                                    .set_name(format!("{}/{} targets", store.done, store.total));
+                                    .set_message(format!("{}/{} targets", store.done, store.total));
                                 if store.done == store.total {
-                                    progress.done("done");
+                                    progress.finish_with_message("done");
                                 }
                             }
                             TaskOutcome::Err(error) => {
-                                progress.fail(error.clone());
+                                progress.abandon_with_message(error.clone());
                             }
                             TaskOutcome::Canceled => {
-                                progress.fail("canceled".to_owned());
+                                progress.abandon_with_message("canceled".to_owned());
                             }
                         }
                     }
@@ -615,17 +628,17 @@ async fn cmd_execute_live(
                         match &outcome {
                             TaskOutcome::Ok => {
                                 done_js += 1;
-                                js_progress.inc();
-                                js_progress.set_name(format!("js tasks {done_js}/{total_js}"));
+                                js_progress.inc(1);
+                                js_progress.set_message(format!("js tasks {done_js}/{total_js}"));
                                 if done_js == total_js && store.done == store.total {
-                                    js_progress.done("done");
+                                    js_progress.finish_with_message("done");
                                 }
                             }
                             TaskOutcome::Err(error) => {
-                                js_progress.fail(error.clone());
+                                js_progress.abandon_with_message(error.clone());
                             }
                             TaskOutcome::Canceled => {
-                                js_progress.fail("canceled".to_owned());
+                                js_progress.abandon_with_message("canceled".to_owned());
                             }
                         }
                     }
@@ -798,14 +811,17 @@ async fn cmd_rules(tree: &Tree) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 async fn cmd_env_check(_env: &Env, check_cross: bool, tree: &Tree) -> Result<()> {
-    let mut p = tree.add_child("environment diagnostics");
+    let p = tree.add_child("environment diagnostics");
+    // Report lines print above the bars, synchronized via `suspend` so they
+    // never tear a redraw.
+    let info = |line: &str| p.suspend(|| println!("{line}"));
 
     let local = LocalEnv::new();
     let odin_str = workspace::odin_bin().to_string_lossy().into_owned();
     let odinfmt_str = workspace::odinfmt_bin().to_string_lossy().into_owned();
     let kcov_str = workspace::kcov_bin().to_string_lossy().into_owned();
 
-    p.info("=== Build Environment ===");
+    info("=== Build Environment ===");
 
     let odin_status = local
         .execute(&[&odin_str, "version"], None, false)
@@ -818,7 +834,7 @@ async fn cmd_env_check(_env: &Env, check_cross: bool, tree: &Tree) -> Result<()>
             }
         })
         .unwrap_or_else(|_| "✗ not found".to_owned());
-    p.info(format!("  odin      : {odin_status}"));
+    info(&format!("  odin      : {odin_status}"));
 
     let fmt_status: String = local
         .execute(&[&odinfmt_str, "--version"], None, false)
@@ -831,7 +847,7 @@ async fn cmd_env_check(_env: &Env, check_cross: bool, tree: &Tree) -> Result<()>
             }
         })
         .unwrap_or_else(|_| "✗ not found".to_owned());
-    p.info(format!("  odinfmt   : {fmt_status}"));
+    info(&format!("  odinfmt   : {fmt_status}"));
 
     if !cfg!(windows) {
         let kcov_status = local
@@ -845,31 +861,31 @@ async fn cmd_env_check(_env: &Env, check_cross: bool, tree: &Tree) -> Result<()>
                 }
             })
             .unwrap_or_else(|_| "✗ not found (coverage unavailable)".to_owned());
-        p.info(format!("  kcov      : {kcov_status}"));
+        info(&format!("  kcov      : {kcov_status}"));
     } else {
-        p.info("  kcov      : N/A (Windows)");
+        info("  kcov      : N/A (Windows)");
     }
 
     if check_cross {
-        p.info("=== Cross-Compilation ===");
+        info("=== Cross-Compilation ===");
         match WslEnv::new().validate().await {
             Ok(_) => {
-                p.info("  WSL       : ✓ available");
+                info("  WSL       : ✓ available");
                 let rsync_ok = local
                     .execute(&["rsync", "--version"], None, false)
                     .await
                     .map(|(c, _)| c == 0)
                     .unwrap_or(false);
-                p.info(if rsync_ok {
+                info(if rsync_ok {
                     "  rsync     : ✓ available"
                 } else {
                     "  rsync     : ✗ not found"
                 });
-                p.info("  mount     : ✓ accessible");
+                info("  mount     : ✓ accessible");
             }
             Err(e) => {
-                p.info("  Status    : ✗ not ready");
-                p.info(format!("  Error     : {e}"));
+                info("  Status    : ✗ not ready");
+                info(&format!("  Error     : {e}"));
             }
         }
     }
@@ -877,16 +893,16 @@ async fn cmd_env_check(_env: &Env, check_cross: bool, tree: &Tree) -> Result<()>
     let targets = workspace::get_targets()?;
     let tests = workspace::get_test_configs()?;
     let odin_files = workspace::get_odin_files();
-    p.info("=== Workspace ===");
-    p.info(format!("  Odin files    : {}", odin_files.len()));
-    p.info(format!("  Build targets : {}", targets.len()));
-    p.info(format!("  Test packages : {}", tests.len()));
+    info("=== Workspace ===");
+    info(&format!("  Odin files    : {}", odin_files.len()));
+    info(&format!("  Build targets : {}", targets.len()));
+    info(&format!("  Test packages : {}", tests.len()));
     if !targets.is_empty() {
         let names: Vec<_> = targets.iter().map(|t| t.name.as_str()).collect();
-        p.info(format!("  Target list   : {}", names.join(", ")));
+        info(&format!("  Target list   : {}", names.join(", ")));
     }
 
-    p.done("done");
+    p.finish_with_message("done");
     Ok(())
 }
 

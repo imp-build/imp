@@ -124,8 +124,8 @@ impl WslEnv {
     // Workspace sync
     // -----------------------------------------------------------------------
 
-    pub async fn sync(&mut self, progress: &mut prodash::tree::Item) -> Result<()> {
-        progress.set_name("sync: checking workspace state");
+    pub async fn sync(&mut self, progress: &mut indicatif::ProgressBar) -> Result<()> {
+        progress.set_message("sync: checking workspace state");
 
         let workspace_id = self.root_dir.to_string_lossy().into_owned();
         let sentinel = self.windows_workspace.join(".sync_sentinel");
@@ -147,7 +147,7 @@ impl WslEnv {
         .await??;
 
         if need_full_sync {
-            progress.set_name("sync: full sync (workspace state changed)");
+            progress.set_message("sync: full sync (workspace state changed)");
             let sh_cmd = format!("echo '{}' > '{}'", workspace_id, sentinel.display());
             LocalEnv::new()
                 .execute_check(&["sh", "-c", &sh_cmd], None, false)
@@ -172,7 +172,7 @@ impl WslEnv {
         Ok(())
     }
 
-    async fn sync_toolchain(&self, progress: &mut prodash::tree::Item) -> Result<()> {
+    async fn sync_toolchain(&self, progress: &mut indicatif::ProgressBar) -> Result<()> {
         let version = workspace::odin_version();
         let rel = format!(".toolchain/{version}/odin-windows");
         let src = self.root_dir.join(&rel);
@@ -185,7 +185,7 @@ impl WslEnv {
             return Ok(());
         }
 
-        progress.set_name(format!("sync: toolchain {version}"));
+        progress.set_message(format!("sync: toolchain {version}"));
         std::fs::create_dir_all(&dst)?;
         self.rsync(&[
             "-rvz",
@@ -200,8 +200,8 @@ impl WslEnv {
         Ok(())
     }
 
-    async fn sync_content(&self, progress: &mut prodash::tree::Item) -> Result<()> {
-        progress.set_name("sync: content");
+    async fn sync_content(&self, progress: &mut indicatif::ProgressBar) -> Result<()> {
+        progress.set_message("sync: content");
         let src = format!("{}/content/", self.root_dir.display());
         let dst = format!("{}/content/", self.windows_workspace.display());
         self.rsync(&[
@@ -215,8 +215,8 @@ impl WslEnv {
         .await
     }
 
-    async fn sync_sources(&self, progress: &mut prodash::tree::Item) -> Result<()> {
-        progress.set_name("sync: discovering changed sources");
+    async fn sync_sources(&self, progress: &mut indicatif::ProgressBar) -> Result<()> {
+        progress.set_message("sync: discovering changed sources");
         let local = LocalEnv::new();
 
         let (code, output) = local
@@ -311,7 +311,7 @@ impl WslEnv {
             return Ok(());
         }
 
-        progress.set_name(format!(
+        progress.set_message(format!(
             "sync: {} changed, {} deleted",
             to_sync.len(),
             to_delete.len()
