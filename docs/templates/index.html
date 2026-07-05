@@ -1,12 +1,43 @@
 {% extends "base.html" %}
 
+{% block main_class %}site-main--wide{% endblock main_class %}
+
 {% block content %}
-<section class="hero">
-    <h1>{{ section.title }}</h1>
-    <p class="hero__lede">{{ section.description }}</p>
-    <div class="hero__actions">
-        <a class="button button--primary" href="{{ get_url(path="guide/getting-started/") }}">Get started</a>
-        <a class="button" href="{{ get_url(path="reference/js-api/") }}">JS API reference</a>
+<section class="hero hero--home">
+    <div class="hero__intro">
+        <h1>{{ section.title }}</h1>
+        <p class="hero__lede">{{ section.description }}</p>
+        <div class="hero__actions">
+            <a class="button button--primary" href="{{ get_url(path="guide/getting-started/") }}">Get started</a>
+            <a class="button" href="{{ get_url(path="reference/js-api/") }}">JS API reference</a>
+        </div>
+    </div>
+    <div class="hero__sample">
+        <pre class="code-panel"><code><span class="code-panel__comment">// BUILD.js</span>
+import { odinPackage } from "//rules/odin";
+
+export const hello = odinPackage({
+    srcs: ["*.odin"],
+    toolchain: "dev-2026-03",
+});</code></pre>
+        <pre class="code-panel code-panel--terminal"><code><span class="code-panel__prompt">$</span> imp build //:hello
+<span class="code-panel__comment">toolchain dev-2026-03 (cached)</span>
+<span class="code-panel__comment">odin build //:hello</span>
+<span class="code-panel__ok">build succeeded</span> <span class="code-panel__comment">bin/hello</span></code></pre>
+    </div>
+</section>
+<section class="feature-grid">
+    <div class="feature">
+        <h3>Hermetic by default</h3>
+        <p>No ambient PATH, no "works on my machine". Toolchains are downloaded, pinned, and sandboxed.</p>
+    </div>
+    <div class="feature">
+        <h3>Content-addressed caching</h3>
+        <p>Every build step is cached by the content it actually depends on — not timestamps, not guesswork.</p>
+    </div>
+    <div class="feature">
+        <h3>Plain JavaScript</h3>
+        <p>Build graphs are declared in <code>BUILD.js</code>, evaluated inside an embedded runtime — no separate config language to learn.</p>
     </div>
 </section>
 <section class="content-body">

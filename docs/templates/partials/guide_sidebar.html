@@ -1,0 +1,14 @@
+{# Flat page nav for the Guide section: unlike the JS API reference, guide
+   pages aren't grouped into subsections — just one weight-sorted list. The
+   section itself has render = false (no /guide/ index page), so the title
+   links to the first page instead of the section root. #}
+{% set root = get_section(path="guide/_index.md") %}
+{% set first_page = root.pages | first %}
+<nav class="docs-sidebar">
+    <a class="docs-sidebar__title" href="{{ first_page.permalink }}">{{ root.title }}</a>
+    <ul>
+        {% for p in root.pages %}
+        <li><a href="{{ p.permalink }}"{% if current_path is defined and current_path == p.path %} class="is-active"{% endif %}>{{ p.title }}</a></li>
+        {% endfor %}
+    </ul>
+</nav>

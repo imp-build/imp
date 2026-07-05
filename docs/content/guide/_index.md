@@ -1,7 +1,5 @@
 +++
 title = "Guide"
 sort_by = "weight"
-template = "section.html"
+render = false
 +++
-
-Narrative documentation for working with imp: setting up a workspace, declaring targets, and writing build rules.

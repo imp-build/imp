@@ -10,8 +10,7 @@ import {
     languageForDirectory,
     languageSlug,
     categoryForEntry,
-    renderCategoryPage,
-    renderLanguageIndexPage,
+    renderLanguagePage,
     extractApiReference,
 } from "//docs/js_api_extract";
 
@@ -198,35 +197,32 @@ test("untagged entries default to api, since they're exported", () => {
     expect(categoryForEntry({ doc: { category: null } })).toBe("api");
 });
 
-test("renders a category page with Zola frontmatter and a weight", () => {
-    const md = renderCategoryPage({
-        language: "Odin",
-        category: "target",
-        entries: [
+test("renders a language page with frontmatter and category headings in CATEGORY_ORDER", () => {
+    const byCategory = new Map([
+        ["target", [
             {
                 name: "odinPackage",
                 params: "opts",
                 kind: "function",
                 doc: { summary: "Declare an Odin package.", params: [], returns: null },
             },
-        ],
-    });
-    expect(md).toContain('title = "Targets"');
-    expect(md).toContain("weight = 20");
-    expect(md).toContain('language = "Odin"');
+        ]],
+        ["configuration", [
+            { name: "odinToolchain", params: "version", kind: "function", doc: null },
+        ]],
+    ]);
+
+    const md = renderLanguagePage("Odin", byCategory);
+    expect(md).toContain('title = "Odin"');
+    expect(md).toContain("## Configuration");
+    expect(md).toContain("## Targets");
+    expect(md).toContain("### odinToolchain");
     expect(md).toContain("### odinPackage");
     expect(md).toContain("Declare an Odin package.");
+    expect(md.indexOf("## Configuration") < md.indexOf("## Targets")).toBeTruthy();
 });
 
-test("renders a language index page pointing at section.html", () => {
-    const md = renderLanguageIndexPage("Odin");
-    expect(md).toContain('title = "Odin"');
-    expect(md).toContain('sort_by = "weight"');
-    expect(md).toContain('template = "section.html"');
-    expect(md).toContain('language = "Odin"');
-});
-
-test("extractApiReference groups entries by language then category across files", () => {
+test("extractApiReference emits one page per language with all categories inlined as headings", () => {
     const files = [
         {
             sourcePath: "rules/odin/index.js",
@@ -262,14 +258,20 @@ test("extractApiReference groups entries by language then category across files"
     const pages = extractApiReference(files);
     const byPath = new Map(pages.map(p => [p.path, p.markdown]));
 
-    expect(byPath.has("odin/_index.md")).toBe(true);
-    expect(byPath.get("odin/target.md")).toContain("### odinPackage");
-    expect(byPath.get("odin/api.md")).toContain("### odinBuild");
-    expect(byPath.get("odin/configuration.md")).toContain("### odinToolchain");
+    expect(byPath.has("odin.md")).toBe(true);
+    const odin = byPath.get("odin.md");
+    expect(odin).toContain("## Configuration");
+    expect(odin).toContain("### odinToolchain");
+    expect(odin).toContain("## Targets");
+    expect(odin).toContain("### odinPackage");
+    expect(odin).toContain("## API");
+    expect(odin).toContain("### odinBuild");
+    // Configuration comes before Targets, which comes before API.
+    expect(odin.indexOf("## Configuration") < odin.indexOf("## Targets")).toBeTruthy();
+    expect(odin.indexOf("## Targets") < odin.indexOf("## API")).toBeTruthy();
 
-    expect(byPath.has("rules/_index.md")).toBe(true);
+    expect(byPath.has("rules.md")).toBe(true);
     // Untagged entries default to the "api" category.
-    expect(byPath.get("rules/api.md")).toContain("### asset");
-    expect(byPath.has("rules/target.md")).toBe(false);
+    expect(byPath.get("rules.md")).toContain("### asset");
 });
 });

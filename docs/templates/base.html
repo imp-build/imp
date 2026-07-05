@@ -7,10 +7,12 @@
     <link rel="stylesheet" href="{{ get_url(path="style.css") }}">
 </head>
 <body>
+    {% set guide_section = get_section(path="guide/_index.md") %}
+    {% set guide_first_page = guide_section.pages | first %}
     <header class="site-header">
         <nav class="site-nav">
             <a class="site-nav__brand" href="{{ get_url(path="/") }}">imp</a>
-            <a href="{{ get_url(path="guide/") }}">Guide</a>
+            <a href="{{ guide_first_page.permalink }}">Guide</a>
             <a href="{{ get_url(path="reference/js-api/") }}">JS API Reference</a>
         </nav>
     </header>

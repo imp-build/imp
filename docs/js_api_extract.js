@@ -278,48 +278,47 @@ export function categoryForEntry(entry) {
     return "api";
 }
 
-/**
- * Render one category page's Markdown body (no frontmatter): one `###`
- * heading per documented export.
- *
- * @param {object[]} entries
- * @returns {string}
- */
 function renderEntries(entries) {
     return entries.map(renderEntry).join("\n\n");
 }
 
 /**
- * Render a category page (e.g. "Odin" x "Targets") with Zola TOML
- * frontmatter, ordered by CATEGORY_ORDER via a numeric weight.
+ * Render every non-empty category as an `##` heading (in CATEGORY_ORDER),
+ * each followed by its entries' `###` headings.
  *
- * @param {{ language: string, category: string, entries: object[] }} opts
+ * @param {Map<string, object[]>} byCategory
  * @returns {string}
  */
-export function renderCategoryPage({ language, category, entries }) {
-    const weight = (CATEGORY_ORDER.indexOf(category) + 1) * 10;
-    const frontmatter = `+++\ntitle = "${CATEGORY_LABELS[category]}"\nweight = ${weight}\n\n[extra]\nlanguage = "${language}"\n+++\n`;
-    return `${frontmatter}\n${renderEntries(entries)}`;
+function renderCategorySections(byCategory) {
+    const sections = [];
+    for (const category of CATEGORY_ORDER) {
+        const entries = byCategory.get(category);
+        if (!entries || entries.length === 0) continue;
+        sections.push(`## ${CATEGORY_LABELS[category]}\n\n${renderEntries(entries)}`);
+    }
+    return sections.join("\n\n");
 }
 
 /**
- * Render a language's section landing page (e.g. "Odin"): a bare heading:
- * Zola's section.html template lists this section's category pages
- * (Configuration/Targets/API, weight-sorted) when visited directly.
+ * Render a language's single reference page (e.g. "Odin"): Zola TOML
+ * frontmatter plus every category's entries inlined as `##` sections
+ * (Configuration/Targets/API, in that order) — what used to be separate
+ * subpages are now just headings on this one page.
  *
  * @param {string} language
+ * @param {Map<string, object[]>} byCategory
  * @returns {string}
  */
-export function renderLanguageIndexPage(language) {
-    return `+++\ntitle = "${language}"\nsort_by = "weight"\ntemplate = "section.html"\n\n[extra]\nlanguage = "${language}"\n+++\n`;
+export function renderLanguagePage(language, byCategory) {
+    const frontmatter = `+++\ntitle = "${language}"\n+++\n`;
+    return `${frontmatter}\n${renderCategorySections(byCategory)}`;
 }
 
 /**
- * Parse every scanned source file into API reference pages grouped by
- * sidebar language (directory-derived) and then by category
- * (Configuration/Targets/API — see categoryForEntry). Emits one
- * `<language>/_index.md` landing page plus one `<language>/<category>.md`
- * page per non-empty category.
+ * Parse every scanned source file into one API reference page per sidebar
+ * language (directory-derived), each containing all of that language's
+ * categorized entries (Configuration/Targets/API — see categoryForEntry)
+ * inlined as headings.
  *
  * @param {{ sourcePath: string, sourceText: string }[]} files
  * @returns {{ path: string, markdown: string }[]}
@@ -341,14 +340,7 @@ export function extractApiReference(files) {
     for (const language of [...byLanguage.keys()].sort()) {
         const byCategory = byLanguage.get(language);
         const slug = languageSlug(language);
-        let any = false;
-        for (const category of CATEGORY_ORDER) {
-            const entries = byCategory.get(category);
-            if (!entries || entries.length === 0) continue;
-            any = true;
-            pages.push({ path: `${slug}/${category}.md`, markdown: renderCategoryPage({ language, category, entries }) });
-        }
-        if (any) pages.push({ path: `${slug}/_index.md`, markdown: renderLanguageIndexPage(language) });
+        pages.push({ path: `${slug}.md`, markdown: renderLanguagePage(language, byCategory) });
     }
     return pages;
 }
