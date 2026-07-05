@@ -450,6 +450,27 @@ export function selectedTargets(kind = undefined) {
 }
 
 /**
+ * Resolve a single selection entry to its registered product function and
+ * target handle, without invoking it — the per-entry counterpart to
+ * dispatchSelection's resolve step, for goal callbacks that want to drive
+ * their own execution/fan-out instead of delegating to dispatchSelection.
+ *
+ * @param {{id: number, address: string, kind: string, product: string}} entry
+ * @returns {{label: string, fn: function, handle: object}}
+ */
+export function resolveProduct(entry) {
+    const fn = _products_by_kind_name.get(`${entry.kind}:${entry.product}`);
+    if (fn === undefined) {
+        throw new Error(`no product '${entry.product}' for kind '${entry.kind}' (target '${entry.address}')`);
+    }
+    return {
+        label: `${entry.address}#${entry.product}`,
+        fn,
+        handle: globalThis.__imp_resolve_handle(entry.id),
+    };
+}
+
+/**
  * Run the default per-target dispatch for a selection: for each entry, look
  * up its registered product (by kind + product name), resolve its target
  * handle, and invoke the product function. All calls are started before any
@@ -467,17 +488,7 @@ export function selectedTargets(kind = undefined) {
 export async function dispatchSelection(selection) {
     // Resolve every entry's product fn up front, before invoking any of
     // them, so a missing product fails fast without partially dispatching.
-    const resolved = selection.map((entry) => {
-        const fn = _products_by_kind_name.get(`${entry.kind}:${entry.product}`);
-        if (fn === undefined) {
-            throw new Error(`no product '${entry.product}' for kind '${entry.kind}' (target '${entry.address}')`);
-        }
-        return {
-            label: `${entry.address}#${entry.product}`,
-            fn,
-            handle: globalThis.__imp_resolve_handle(entry.id),
-        };
-    });
+    const resolved = selection.map(resolveProduct);
     const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));
     for (const { label, promise } of calls) {
         try {
