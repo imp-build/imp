@@ -14,7 +14,7 @@
             <a href="{{ get_url(path="reference/js-api/") }}">JS API Reference</a>
         </nav>
     </header>
-    <main class="site-main">
+    <main class="site-main {% block main_class %}{% endblock main_class %}">
         {% block content %}{% endblock content %}
     </main>
     <footer class="site-footer">

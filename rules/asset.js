@@ -1,5 +1,5 @@
 import {
-    target,
+    Target,
     glob,
     memo,
     product,
@@ -72,15 +72,23 @@ export const bundle = product("asset", "build", async function bundle(handle) {
 // Target constructors
 // ---------------------------------------------------------------------------
 
+export class Asset extends Target {
+    static kind = "asset";
+    constructor({ srcs }) {
+        super({ kind: Asset.kind, attrs: { sources: srcs } });
+    }
+}
+
 /**
  * Declare an asset target bundling a set of source glob patterns.
  *
+ * @category target
  * @param {object} opts
  * @param {string[]} opts.srcs Source glob patterns, relative to the declaring BUILD.js.
  * @returns {object} The declared target.
  */
 export function asset({ srcs }) {
-    return target({ kind: "asset", attrs: { sources: srcs } });
+    return new Asset({ srcs });
 }
 
 export const resources = memo(async function resources(handle) {
@@ -91,10 +99,33 @@ export const resources = memo(async function resources(handle) {
     });
 });
 
+export class ResourcePackage extends Target {
+    static kind = "resource-package";
+    constructor({ srcs, exclude = [], path = "." }) {
+        if (!Array.isArray(srcs) || srcs.length === 0) {
+            throw new Error("resourcePackage({ srcs }) requires one or more source glob patterns");
+        }
+        super({
+            kind: ResourcePackage.kind,
+            attrs: {
+                path,
+                srcs,
+                ...(exclude.length ? { exclude } : {}),
+            },
+            sources: sourcesField({
+                root: path,
+                include: srcs,
+                exclude,
+            }),
+        });
+    }
+}
+
 /**
  * Declare a resource-package target: a set of files staged at a given path,
  * for bundling into another target's sandbox (e.g. runtime data files).
  *
+ * @category target
  * @param {object} opts
  * @param {string[]} opts.srcs Source glob patterns to include (required, non-empty).
  * @param {string[]} [opts.exclude] Glob patterns to exclude from `srcs`.
@@ -102,20 +133,5 @@ export const resources = memo(async function resources(handle) {
  * @returns {object} The declared target.
  */
 export function resourcePackage({ srcs, exclude = [], path = "." }) {
-    if (!Array.isArray(srcs) || srcs.length === 0) {
-        throw new Error("resourcePackage({ srcs }) requires one or more source glob patterns");
-    }
-    return target({
-        kind: "resource-package",
-        attrs: {
-            path,
-            srcs,
-            ...(exclude.length ? { exclude } : {}),
-        },
-        sources: sourcesField({
-            root: path,
-            include: srcs,
-            exclude,
-        }),
-    });
+    return new ResourcePackage({ srcs, exclude, path });
 }

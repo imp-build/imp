@@ -113,28 +113,17 @@ and no hidden stringly request layer in the rule API.
 
 ## `target`
 
-A target is plain declared data with stable identity.
+A target is declared data with stable identity. `Target` is a real JS base
+class (`src/imp_core.js`), and each rule kind is a subclass — e.g.
+`class OdinPackage extends Target` (`rules/odin/index.js`). This superseded
+an earlier idea sketched in this doc of a generic `Target<TAttrs>` plus a
+`namespace odin { function package(...) }` of typed constructors; the class
+hierarchy was chosen instead so extending the DSL means writing a real
+subclass rather than remembering a `target({kind, attrs})` convention.
 
-```ts
-type Target<TAttrs = unknown> = {
-    __imp: true;
-    label: Label;
-    kind: string;
-    attrs: TAttrs;
-};
-```
-
-Constructor:
-
-```ts
-function target<TAttrs>(opts: {
-    kind: string;
-    attrs: TAttrs;
-}): Target<TAttrs> {
-    // Assign label from export binding / package context.
-    // Store kind + attrs as plain serializable data.
-}
-```
+The `target(opts)` free function still exists as a thin wrapper
+(`new Target(opts)`) for ad hoc/anonymous kinds that don't need a dedicated
+subclass.
 
 ## `memo`
 
@@ -254,94 +243,12 @@ Those remain executor internals. Your current code exposes these through `source
 
 ## Target constructors
 
-```ts
-import {
-    target,
-    memo,
-    product,
-    glob,
-    file_set,
-    run,
-    output,
-    group,
-    paths,
-    workspace_mutation,
-} from "imp:core";
-
-export namespace odin {
-    export type ToolchainAttrs = {
-        version: string;
-    };
-
-    export type CollectionAttrs = {
-        name: string;
-        path: string;
-    };
-
-    export type PackageAttrs = {
-        path: string;
-        srcs: string[];
-        exclude: string[];
-        deps: Target<PackageAttrs>[];
-        collections: Target<CollectionAttrs>[];
-        toolchain: Target<ToolchainAttrs>;
-        default_product: string;
-    };
-
-    export function toolchain(opts: {
-        version?: string;
-    }): Target<ToolchainAttrs> {
-        return target({
-            kind: "odin-toolchain",
-            attrs: {
-                version: opts.version ?? "default",
-            },
-        });
-    }
-
-    export function default_toolchain(): Target<ToolchainAttrs> {
-        return toolchain({
-            version: "default",
-        });
-    }
-
-    export function collection(opts: {
-        name: string;
-        path: string;
-    }): Target<CollectionAttrs> {
-        return target({
-            kind: "odin-collection",
-            attrs: {
-                name: opts.name,
-                path: opts.path,
-            },
-        });
-    }
-
-    export function package(opts: {
-        path?: string;
-        srcs: string[];
-        exclude?: string[];
-        deps?: Target<PackageAttrs>[];
-        collections?: Target<CollectionAttrs>[];
-        toolchain?: Target<ToolchainAttrs>;
-        default_product?: string;
-    }): Target<PackageAttrs> {
-        return target({
-            kind: "odin-package",
-            attrs: {
-                path: opts.path ?? ".",
-                srcs: opts.srcs,
-                exclude: opts.exclude ?? [],
-                deps: opts.deps ?? [],
-                collections: opts.collections ?? [],
-                toolchain: opts.toolchain ?? default_toolchain(),
-                default_product: opts.default_product ?? "executable",
-            },
-        });
-    }
-}
-```
+Implemented as a real class hierarchy rather than the generic
+`Target<TAttrs>` + `namespace odin` sketch this section used to show. See
+`rules/odin/index.js` for `OdinToolchain`, `OdinCollection`, `OdinPackage`,
+etc., each extending `Target` (`src/imp_core.js`), with the existing
+`odinPackage(opts)`-style factory functions kept as thin wrappers
+(`new OdinPackage(opts)`) for backward compatibility.
 
 # Odin memoized functions
 

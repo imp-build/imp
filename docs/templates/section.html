@@ -2,7 +2,25 @@
 
 {% block title %}{{ section.title }} — {{ config.title }}{% endblock title %}
 
+{% block main_class %}{% if section.path is starting_with("/reference/js-api") %}site-main--wide{% endif %}{% endblock main_class %}
+
 {% block content %}
+{% if section.path is starting_with("/reference/js-api") %}
+<div class="js-api-layout">
+    {% include "partials/js_api_sidebar.html" %}
+    <article class="content-body">
+        <h1>{{ section.title }}</h1>
+        {{ section.content | safe }}
+        {% if section.pages %}
+        <ul class="page-list">
+            {% for page in section.pages %}
+            <li><a href="{{ page.permalink }}">{{ page.title }}</a></li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+    </article>
+</div>
+{% else %}
 <article class="content-body">
     <h1>{{ section.title }}</h1>
     {{ section.content | safe }}
@@ -14,4 +32,5 @@
     </ul>
     {% endif %}
 </article>
+{% endif %}
 {% endblock content %}

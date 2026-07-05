@@ -1,4 +1,5 @@
-import { target, product, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Target, product, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+
 import { generateToolLockfile } from "//rules/workflows/lockfiles";
 
 const ODIN_TOOLCHAIN_CACHE = "odin-toolchains";
@@ -91,6 +92,7 @@ export function odinDownloadUrl(version, plat) {
     return `https://github.com/odin-lang/Odin/releases/download/${version}/${odinArtifactName(version, plat)}`;
 }
 
+
 // The platforms Odin publishes a release archive for. osMap × archMap would also
 // admit windows/aarch64, which Odin does not ship — so the lockfile matrix is
 // curated to what actually exists on the releases page.
@@ -111,10 +113,18 @@ export function odinSupportedPlatforms() {
     return ODIN_SUPPORTED_PLATFORMS.map((plat) => ({ ...plat }));
 }
 
+export class OdinToolchain extends Target {
+    static kind = "odin-toolchain";
+    constructor({ version }) {
+        super({ kind: OdinToolchain.kind, attrs: { version } });
+    }
+}
+
 /**
  * Build an Odin toolchain API. Tests can pass a fake host implementation to
  * exercise installation behavior without downloading or extracting archives.
  *
+ * @category configuration
  * @param {object} [host]
  * @returns {object}
  */
@@ -126,10 +136,7 @@ export function createOdinToolchainApi(host = defaultHost) {
         host.namedCache({ name: ODIN_TOOLCHAIN_CACHE });
         host.namedCache({ name: ODINFMT_CACHE });
 
-        const toolchain = target({
-            kind: "odin-toolchain",
-            attrs: { version },
-        });
+        const toolchain = new OdinToolchain({ version });
 
         if (opts.default) {
             defaultVersion = version;
@@ -252,6 +259,7 @@ const defaultApi = createOdinToolchainApi();
 /**
  * Declare an Odin toolchain version and optionally set it as the default.
  *
+ * @category configuration
  * @param {string} version Odin release version (matches .odin-version).
  * @param {object} [opts]
  * @param {boolean} [opts.default=false] Set as the default toolchain.
@@ -264,6 +272,7 @@ export function odinToolchain(version, opts = {}) {
 /**
  * Acquire (download and cache) an Odin toolchain.
  *
+ * @category configuration
  * @param {string} version Odin release version, e.g. "dev-2026-03".
  * @returns {string} Local path to the toolchain root containing the Odin binary.
  */
@@ -274,6 +283,7 @@ export function acquireOdinToolchain(version) {
 /**
  * Resolve an explicit or default Odin toolchain version.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {string}
  */
@@ -284,6 +294,7 @@ export function resolveOdinToolchainVersion(version) {
 /**
  * Return the path to the Odin binary for a toolchain version.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {string}
  */
@@ -294,6 +305,7 @@ export function odinBin(version) {
 /**
  * Return a named-cache-backed Odin tool descriptor for sandbox execution.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {object}
  */
@@ -305,6 +317,7 @@ export function odinTool(version) {
  * Return a named-cache-backed odinfmt tool descriptor plus the on-disk binary
  * name to invoke it with. Downloads and caches the OLS release on first use.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {{ tool: object, command: string }}
  */
@@ -315,6 +328,7 @@ export function odinfmtTool(version) {
 /**
  * Acquire (download and cache) odinfmt for a version and return its cache path.
  *
+ * @category configuration
  * @param {string} version
  * @returns {string}
  */
@@ -325,6 +339,7 @@ export function acquireOdinfmt(version) {
 /**
  * Return the currently configured default Odin toolchain version.
  *
+ * @category configuration
  * @returns {string|null}
  */
 export function defaultOdinToolchainVersion() {
@@ -334,6 +349,7 @@ export function defaultOdinToolchainVersion() {
 /**
  * Return the currently configured default Odin toolchain target handle.
  *
+ * @category configuration
  * @returns {object|null}
  */
 export function defaultOdinToolchain() {

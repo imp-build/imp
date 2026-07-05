@@ -2,9 +2,21 @@
 
 {% block title %}{{ page.title }} — {{ config.title }}{% endblock title %}
 
+{% block main_class %}{% if page.path is starting_with("/reference/js-api/") %}site-main--wide{% endif %}{% endblock main_class %}
+
 {% block content %}
+{% if page.path is starting_with("/reference/js-api/") %}
+<div class="js-api-layout">
+    {% include "partials/js_api_sidebar.html" %}
+    <article class="content-body">
+        <h1>{{ page.title }}</h1>
+        {{ page.content | safe }}
+    </article>
+</div>
+{% else %}
 <article class="content-body">
     <h1>{{ page.title }}</h1>
     {{ page.content | safe }}
 </article>
+{% endif %}
 {% endblock content %}

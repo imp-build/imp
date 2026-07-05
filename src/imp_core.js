@@ -47,8 +47,65 @@ export function sourcesField(opts) {
 }
 
 /**
+ * Base class for all target kinds. Handles host registration, dependency
+ * discovery, and address/label resolution. Rule modules define subclasses
+ * (e.g. `class OdinPackage extends Target`) that compute a `kind` and
+ * `attrs` and pass them to `super(...)`.
+ */
+export class Target {
+    /**
+     * @param {object} opts
+     * @param {string} opts.kind Stable target kind understood by extension rules.
+     * @param {object} [opts.attrs={}] Typed attributes stored on the target. May contain nested
+     *   target handles; those are extracted as dep edges automatically when opts.deps is omitted.
+     * @param {Array<object>} [opts.deps] Explicit dependency list as handles or { target, mode } pairs.
+     *   When omitted, deps are discovered by scanning opts.attrs for target handles.
+     */
+    constructor(opts) {
+        const depIds = [];
+        const depModes = [];
+        const attrs = opts.attrs !== undefined ? opts.attrs : (opts.fields !== undefined ? opts.fields : {});
+        const sources = _normalize_source_fields(opts.sources);
+        if (opts.deps != null) {
+            for (const d of opts.deps) {
+                if (d && d.__imp === true) {
+                    depIds.push(d.__id); depModes.push(null);
+                } else if (d && d.target && d.target.__imp === true) {
+                    depIds.push(d.target.__id);
+                    depModes.push(d.mode != null ? String(d.mode) : null);
+                } else {
+                    throw new Error('dep must be a target handle or { target, mode }, got: ' + JSON.stringify(d));
+                }
+            }
+        } else {
+            const found = [];
+            _collect_dep_handles(attrs, found);
+            for (const h of found) { depIds.push(h.__id); depModes.push(null); }
+        }
+        const id = __host_target(opts.kind, JSON.stringify(_serialize_attrs(attrs)), JSON.stringify(sources), depIds, depModes);
+
+        this.__imp = true;
+        this.__id = id;
+        this.kind = opts.kind;
+        this.attrs = attrs;
+
+        if (globalThis.__imp_handle_by_id) globalThis.__imp_handle_by_id.set(id, this);
+    }
+
+    get label() {
+        const address = targetAddress(this);
+        const colon = address.lastIndexOf(":");
+        return {
+            address,
+            name: colon >= 0 ? address.slice(colon + 1) : address,
+        };
+    }
+}
+
+/**
  * Declare a target and return a target handle.
  *
+ * @category target
  * @param {object} opts
  * @param {string} opts.kind Stable target kind understood by extension rules.
  * @param {object} [opts.attrs={}] Typed attributes stored on the target. May contain nested
@@ -58,41 +115,7 @@ export function sourcesField(opts) {
  * @returns {object} An enriched target handle: { __imp, __id, kind, attrs }.
  */
 export function target(opts) {
-    const depIds = [];
-    const depModes = [];
-    const attrs = opts.attrs !== undefined ? opts.attrs : (opts.fields !== undefined ? opts.fields : {});
-    const sources = _normalize_source_fields(opts.sources);
-    if (opts.deps != null) {
-        for (const d of opts.deps) {
-            if (d && d.__imp === true) {
-                depIds.push(d.__id); depModes.push(null);
-            } else if (d && d.target && d.target.__imp === true) {
-                depIds.push(d.target.__id);
-                depModes.push(d.mode != null ? String(d.mode) : null);
-            } else {
-                throw new Error('dep must be a target handle or { target, mode }, got: ' + JSON.stringify(d));
-            }
-        }
-    } else {
-        const found = [];
-        _collect_dep_handles(attrs, found);
-        for (const h of found) { depIds.push(h.__id); depModes.push(null); }
-    }
-    const id = __host_target(opts.kind, JSON.stringify(_serialize_attrs(attrs)), JSON.stringify(sources), depIds, depModes);
-    const handle = { __imp: true, __id: id, kind: opts.kind, attrs };
-    Object.defineProperty(handle, "label", {
-        enumerable: true,
-        get() {
-            const address = targetAddress(handle);
-            const colon = address.lastIndexOf(":");
-            return {
-                address,
-                name: colon >= 0 ? address.slice(colon + 1) : address,
-            };
-        },
-    });
-    if (globalThis.__imp_handle_by_id) globalThis.__imp_handle_by_id.set(id, handle);
-    return handle;
+    return new Target(opts);
 }
 
 /**
@@ -154,6 +177,7 @@ export function goal(name, fn) {
  * Configuration is evaluated before BUILD.js files when called from
  * imp.workspace.js, and can be read by rule functions via configuration().
  *
+ * @category configuration
  * @param {string} namespace Stable configuration namespace, e.g. "odin".
  * @param {any} value JSON-serializable configuration value.
  * @returns {void}
@@ -172,6 +196,7 @@ export function configure(namespace, value) {
 /**
  * Read workspace configuration for a namespace.
  *
+ * @category configuration
  * @param {string} namespace Stable configuration namespace, e.g. "odin".
  * @param {any} [fallback] Value returned when no namespace config exists.
  * @returns {any}
@@ -192,6 +217,7 @@ export function configuration(namespace, fallback = undefined) {
  * the current machine's OS-arch as the target. Duplicate platform names are
  * silently ignored (first registration wins).
  *
+ * @category configuration
  * @param {object} opts
  * @param {string} opts.name Platform name referenced in action.platform.
  * @param {string} opts.executor Execution backend: "local", "wsl", or "container".

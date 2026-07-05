@@ -1,4 +1,5 @@
-import { target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import { generateToolLockfile } from "//rules/workflows/lockfiles";
 
@@ -82,9 +83,17 @@ export function moldCacheKey(version, plat) {
 // separate `gzip` process to decompress `.tar.gz`.
 const CORE_TOOL_NAMES = ["curl", "mkdir", "dirname", "tar", "gzip"];
 
+export class MoldToolchain extends Target {
+    static kind = "mold-toolchain";
+    constructor({ version }) {
+        super({ kind: MoldToolchain.kind, attrs: { version } });
+    }
+}
+
 /**
  * Build a mold toolchain API. Tests can pass a fake host implementation.
  *
+ * @category configuration
  * @param {object} [host]
  * @returns {object}
  */
@@ -102,10 +111,7 @@ export function createMoldToolchainApi(host = defaultHost) {
             coreToolHandles = CORE_TOOL_NAMES.map((name) => host.nativeTool(name));
         }
 
-        const toolchain = target({
-            kind: "mold-toolchain",
-            attrs: { version },
-        });
+        const toolchain = new MoldToolchain({ version });
 
         if (opts.default) {
             defaultVersion = version;
@@ -225,6 +231,7 @@ const defaultApi = createMoldToolchainApi();
 /**
  * Declare a mold toolchain version and optionally set it as the default.
  *
+ * @category configuration
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
@@ -237,6 +244,7 @@ export function moldToolchain(version, opts = {}) {
 /**
  * Install a local mold toolchain directory into the named cache.
  *
+ * @category configuration
  * @param {string} version
  * @param {string} source Path to the toolchain root.
  * @returns {string|null} Local path to the cached toolchain root.
@@ -249,6 +257,7 @@ export function installMoldToolchain(version, source) {
  * Acquire a mold toolchain, downloading and caching it if not already
  * installed in the named cache.
  *
+ * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
@@ -259,6 +268,7 @@ export function acquireMoldToolchain(version) {
 /**
  * Resolve an explicit or default mold toolchain version.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -269,6 +279,7 @@ export function resolveMoldToolchainVersion(version) {
 /**
  * Return the mold executable path for a toolchain version.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {Promise<string>}
  */
@@ -279,6 +290,7 @@ export function moldBin(version) {
 /**
  * Return a named-cache-backed mold tool descriptor for sandbox execution.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -289,6 +301,7 @@ export function moldTool(version) {
 /**
  * Return the currently configured default mold toolchain version.
  *
+ * @category configuration
  * @returns {string|null}
  */
 export function defaultMoldToolchainVersion() {
@@ -298,6 +311,7 @@ export function defaultMoldToolchainVersion() {
 /**
  * Return the currently configured default mold toolchain target handle.
  *
+ * @category configuration
  * @returns {object|null}
  */
 export function defaultMoldToolchain() {

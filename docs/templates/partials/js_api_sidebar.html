@@ -1,0 +1,20 @@
+{# Language -> Configuration/Targets/Functions nav for the generated JS API
+   reference. Languages are the js-api section's subsections (one per
+   rules/ directory, see docs/js_api_extract.js); each language's pages are
+   already weight-sorted (Configuration, Targets, Functions) by its
+   generated _index.md. #}
+{% set api_root = get_section(path="reference/js-api/_index.md") %}
+<nav class="js-api-sidebar">
+    <a class="js-api-sidebar__title" href="{{ api_root.permalink }}">JS API Reference</a>
+    {% for sub in api_root.subsections | sort %}
+    {% set lang = get_section(path=sub) %}
+    <div class="js-api-sidebar__group">
+        <a class="js-api-sidebar__lang" href="{{ lang.permalink }}">{{ lang.title }}</a>
+        <ul>
+            {% for p in lang.pages %}
+            <li><a href="{{ p.permalink }}"{% if current_path is defined and current_path == p.path %} class="is-active"{% endif %}>{{ p.title }}</a></li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endfor %}
+</nav>

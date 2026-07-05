@@ -1,7 +1,7 @@
 import { target, product, run, output, output_path, glob, paths, read_file } from "imp:core";
 import { rulesTest } from "//rules/imp/test";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { directoryForSourcePath, extractDirectoryDoc } from "//docs/js_api_extract";
+import { extractApiReference } from "//docs/js_api_extract";
 import { zolaToolchain, zolaTool, zolaBin } from "//rules/zola/toolchain";
 
 export const rules_test = rulesTest({ root: "//docs" });
@@ -11,6 +11,7 @@ const SITE_OUT = "generated/docs-site";
 
 const mkdirTool = nativeTool("mkdir");
 const cpTool = nativeTool("cp");
+const dirnameTool = nativeTool("dirname");
 
 zolaToolchain("0.22.1", { default: true });
 
@@ -20,23 +21,13 @@ export const api_reference_build = product("js-api-reference", "build", async fu
     const srcs = glob({
         root: ".",
         include: ["src/imp_core.js", "rules/**/*.js"],
-        exclude: ["rules/**/*_test.js"],
+        exclude: ["**/*_test.js"],
     });
 
-    const byDirectory = new Map();
-    for (const path of paths(srcs).slice().sort()) {
-        const dir = directoryForSourcePath(path);
-        if (!byDirectory.has(dir)) byDirectory.set(dir, []);
-        byDirectory.get(dir).push({ sourcePath: path, sourceText: read_file(path) });
-    }
+    const files = paths(srcs).slice().sort().map(path => ({ sourcePath: path, sourceText: read_file(path) }));
+    const pages = extractApiReference(files).map(({ path, markdown }) => [path, markdown]);
 
-    const pages = [];
-    for (const [dir, files] of byDirectory) {
-        const { slug, markdown } = extractDirectoryDoc(dir, files);
-        if (markdown) pages.push([`${slug}.md`, markdown]);
-    }
-
-    const script = 'out=$1; shift; mkdir -p "$out"; while [ "$#" -gt 0 ]; do name=$1; content=$2; shift 2; printf "%s" "$content" > "$out/$name"; done';
+    const script = 'out=$1; shift; mkdir -p "$out"; while [ "$#" -gt 0 ]; do name=$1; content=$2; shift 2; mkdir -p "$out/$(dirname "$name")"; printf "%s" "$content" > "$out/$name"; done';
     const argv = ["sh", "-c", script, "docs-api-reference", output_path(API_REFERENCE_OUT)];
     for (const [name, content] of pages) {
         argv.push(name, content);
@@ -44,7 +35,7 @@ export const api_reference_build = product("js-api-reference", "build", async fu
 
     return run({
         argv,
-        tools: [await nativeToolSpec(mkdirTool)],
+        tools: [await nativeToolSpec(mkdirTool), await nativeToolSpec(dirnameTool)],
         inputs: [srcs],
         outputs: [output(output_path(API_REFERENCE_OUT), { kind: "directory" })],
         display: "extract JS API reference",

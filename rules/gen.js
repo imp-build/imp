@@ -1,4 +1,4 @@
-import { target, product, run, output, output_path } from "imp:core";
+import { Target, product, run, output, output_path } from "imp:core";
 
 export const file = product("stamp-file", "build", async function file(handle) {
     return run({
@@ -15,9 +15,16 @@ export const file = product("stamp-file", "build", async function file(handle) {
     });
 });
 
+export class StampFile extends Target {
+    static kind = "stamp-file";
+    constructor({ output, text }) {
+        super({
+            kind: StampFile.kind,
+            attrs: { entrypoint: output, sources: text },
+        });
+    }
+}
+
 export function stampFile({ output, text }) {
-    return target({
-        kind: "stamp-file",
-        attrs: { entrypoint: output, sources: text },
-    });
+    return new StampFile({ output, text });
 }

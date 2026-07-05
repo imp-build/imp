@@ -1,4 +1,4 @@
-import { target, product, run, glob, workspaceFiles, resetMemoState } from "imp:core";
+import { Target, product, run, glob, workspaceFiles, resetMemoState } from "imp:core";
 
 const suites = [];
 const tests = [];
@@ -224,24 +224,32 @@ export const test_product = product("rules-test", "test", async function test_pr
     });
 });
 
+export class RulesTest extends Target {
+    static kind = "rules-test";
+    constructor({ root }) {
+        const discoveredTests = workspaceFiles({ root, suffix: "_test.js" });
+        if (discoveredTests.length === 0) {
+            throw new Error(`no JS rule tests found below ${root}`);
+        }
+
+        super({
+            kind: RulesTest.kind,
+            attrs: {
+                root,
+                tests: discoveredTests.join(","),
+            },
+        });
+    }
+}
+
 /**
  * Declare a JS rule-test target for one workspace directory.
  *
+ * @category target
  * @param {object} opts
  * @param {string} opts.root Workspace-rooted directory, e.g. "//rules/odin".
  * @returns {object} Target handle.
  */
 export function rulesTest({ root }) {
-    const discoveredTests = workspaceFiles({ root, suffix: "_test.js" });
-    if (discoveredTests.length === 0) {
-        throw new Error(`no JS rule tests found below ${root}`);
-    }
-
-    return target({
-        kind: "rules-test",
-        attrs: {
-            root,
-            tests: discoveredTests.join(","),
-        },
-    });
+    return new RulesTest({ root });
 }

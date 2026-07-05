@@ -1,4 +1,5 @@
-import { target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import { generateToolLockfile } from "//rules/workflows/lockfiles";
 
@@ -88,9 +89,17 @@ export function zolaCacheKey(version, plat) {
 // `gzip` process to decompress `.tar.gz`.
 const CORE_TOOL_NAMES = ["curl", "mkdir", "dirname", "tar", "gzip"];
 
+export class ZolaToolchain extends Target {
+    static kind = "zola-toolchain";
+    constructor({ version }) {
+        super({ kind: ZolaToolchain.kind, attrs: { version } });
+    }
+}
+
 /**
  * Build a zola toolchain API. Tests can pass a fake host implementation.
  *
+ * @category configuration
  * @param {object} [host]
  * @returns {object}
  */
@@ -108,10 +117,7 @@ export function createZolaToolchainApi(host = defaultHost) {
             coreToolHandles = CORE_TOOL_NAMES.map((name) => host.nativeTool(name));
         }
 
-        const toolchain = target({
-            kind: "zola-toolchain",
-            attrs: { version },
-        });
+        const toolchain = new ZolaToolchain({ version });
 
         if (opts.default) {
             defaultVersion = version;
@@ -232,6 +238,7 @@ const defaultApi = createZolaToolchainApi();
 /**
  * Declare a zola toolchain version and optionally set it as the default.
  *
+ * @category configuration
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
@@ -244,6 +251,7 @@ export function zolaToolchain(version, opts = {}) {
 /**
  * Install a local zola toolchain directory into the named cache.
  *
+ * @category configuration
  * @param {string} version
  * @param {string} source Path to the toolchain root.
  * @returns {string|null} Local path to the cached toolchain root.
@@ -256,6 +264,7 @@ export function installZolaToolchain(version, source) {
  * Acquire a zola toolchain, downloading and caching it if not already
  * installed in the named cache.
  *
+ * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
@@ -266,6 +275,7 @@ export function acquireZolaToolchain(version) {
 /**
  * Resolve an explicit or default zola toolchain version.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -276,6 +286,7 @@ export function resolveZolaToolchainVersion(version) {
 /**
  * Return the zola executable path for a toolchain version.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {Promise<string>}
  */
@@ -286,6 +297,7 @@ export function zolaBin(version) {
 /**
  * Return a named-cache-backed zola tool descriptor for sandbox execution.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -296,6 +308,7 @@ export function zolaTool(version) {
 /**
  * Return the currently configured default zola toolchain version.
  *
+ * @category configuration
  * @returns {string|null}
  */
 export function defaultZolaToolchainVersion() {
@@ -305,6 +318,7 @@ export function defaultZolaToolchainVersion() {
 /**
  * Return the currently configured default zola toolchain target handle.
  *
+ * @category configuration
  * @returns {object|null}
  */
 export function defaultZolaToolchain() {

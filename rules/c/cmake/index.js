@@ -1,4 +1,4 @@
-import { target, glob, file_set, memo, output, output_path, product, run, targetAddress } from "imp:core";
+import { Target, glob, file_set, memo, output, output_path, product, run, targetAddress } from "imp:core";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import {
     acquireCmakeToolchain,
@@ -148,8 +148,66 @@ export const cmake_resources = memo(async function cmake_resources(handle) {
 // Target constructors
 // ---------------------------------------------------------------------------
 
+export class CppSources extends Target {
+    static kind = "cpp-sources";
+    constructor({ srcs }) {
+        super({ kind: CppSources.kind, attrs: { sources: srcs } });
+    }
+}
+
 export function cppSources({ srcs }) {
-    return target({ kind: "cpp-sources", attrs: { sources: srcs } });
+    return new CppSources({ srcs });
+}
+
+export class CmakeLib extends Target {
+    static kind = "cmake-lib";
+    constructor({
+        src = ".",
+        buildDir,
+        srcs,
+        dirs = [],
+        cmakeArgs = [],
+        outputs = [],
+        stageOutputs = [],
+        toolchain,
+        compiler,
+        deps = [],
+    }) {
+        const explicitToolchainTarget = toolchain && toolchain.__imp === true ? toolchain : null;
+        const explicitVersion = toolchain && toolchain.__imp !== true ? toolchain : null;
+        const toolchainTarget = explicitToolchainTarget || (!explicitVersion ? defaultCmakeToolchain() : null);
+        const toolchainVersion = explicitVersion || (toolchainTarget && toolchainTarget.attrs?.version);
+
+        const explicitCompilerTarget = compiler && compiler.__imp === true ? compiler : null;
+        const explicitCompilerVersion = compiler && compiler.__imp !== true ? compiler : null;
+        const compilerTarget = explicitCompilerTarget || (!explicitCompilerVersion ? defaultZigToolchain() : null);
+        const compilerVersion = explicitCompilerVersion || (compilerTarget && compilerTarget.attrs?.version);
+
+        const allDeps = [
+            ...(toolchainTarget ? [{ target: toolchainTarget, mode: "tool" }] : []),
+            ...(compilerTarget ? [{ target: compilerTarget, mode: "tool" }] : []),
+            ...deps,
+        ];
+
+        super({
+            kind: CmakeLib.kind,
+            attrs: {
+                src,    // stored as user-provided; resolved by declared_path in product/memo
+                srcs: srcs || DEFAULT_CPP_SRCS,
+                ...(dirs.length ? { dirs } : {}),
+                cmakeArgs,
+                outputs,
+                ...(stageOutputs.length ? { stageOutputs } : {}),
+                ...(buildDir ? { buildDir } : {}),
+                ...(toolchainVersion ? { toolchain: toolchainVersion } : {}),
+                ...(toolchainTarget ? { toolchainTarget } : {}),
+                ...(compilerVersion ? { compiler: compilerVersion } : {}),
+                ...(compilerTarget ? { compilerTarget } : {}),
+                ...(allDeps.length ? { deps: allDeps.map(dep => dep.target || dep) } : {}),
+            },
+            deps: allDeps,
+        });
+    }
 }
 
 export function cmakeLib({
@@ -164,38 +222,5 @@ export function cmakeLib({
     compiler,
     deps = [],
 }) {
-    const explicitToolchainTarget = toolchain && toolchain.__imp === true ? toolchain : null;
-    const explicitVersion = toolchain && toolchain.__imp !== true ? toolchain : null;
-    const toolchainTarget = explicitToolchainTarget || (!explicitVersion ? defaultCmakeToolchain() : null);
-    const toolchainVersion = explicitVersion || (toolchainTarget && toolchainTarget.attrs?.version);
-
-    const explicitCompilerTarget = compiler && compiler.__imp === true ? compiler : null;
-    const explicitCompilerVersion = compiler && compiler.__imp !== true ? compiler : null;
-    const compilerTarget = explicitCompilerTarget || (!explicitCompilerVersion ? defaultZigToolchain() : null);
-    const compilerVersion = explicitCompilerVersion || (compilerTarget && compilerTarget.attrs?.version);
-
-    const allDeps = [
-        ...(toolchainTarget ? [{ target: toolchainTarget, mode: "tool" }] : []),
-        ...(compilerTarget ? [{ target: compilerTarget, mode: "tool" }] : []),
-        ...deps,
-    ];
-
-    return target({
-        kind: "cmake-lib",
-        attrs: {
-            src,    // stored as user-provided; resolved by declared_path in product/memo
-            srcs: srcs || DEFAULT_CPP_SRCS,
-            ...(dirs.length ? { dirs } : {}),
-            cmakeArgs,
-            outputs,
-            ...(stageOutputs.length ? { stageOutputs } : {}),
-            ...(buildDir ? { buildDir } : {}),
-            ...(toolchainVersion ? { toolchain: toolchainVersion } : {}),
-            ...(toolchainTarget ? { toolchainTarget } : {}),
-            ...(compilerVersion ? { compiler: compilerVersion } : {}),
-            ...(compilerTarget ? { compilerTarget } : {}),
-            ...(allDeps.length ? { deps: allDeps.map(dep => dep.target || dep) } : {}),
-        },
-        deps: allDeps,
-    });
+    return new CmakeLib({ src, buildDir, srcs, dirs, cmakeArgs, outputs, stageOutputs, toolchain, compiler, deps });
 }

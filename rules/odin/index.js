@@ -1,6 +1,6 @@
 import {
 	allUnowned,
-	target,
+	Target,
 	glob,
 	file_set,
 	paths,
@@ -974,6 +974,19 @@ export const generateBuild = product("odin-build-generator", "generate-build",
 // Target constructors
 // ---------------------------------------------------------------------------
 
+export class OdinGen extends Target {
+    static kind = "odin-gen";
+    constructor({ srcs = [], out, cmd, generator, deps = [] }) {
+        if (!out) throw new Error("odinGen requires an 'out' path");
+        if (!generator && (!cmd || cmd.length === 0)) throw new Error("odinGen requires either 'cmd' or 'generator'");
+        super({
+            kind: OdinGen.kind,
+            attrs: { srcs, out, ...(generator ? { generator } : { cmd }) },
+            deps,
+        });
+    }
+}
+
 /**
  * Declare an Odin source generation target.
  *
@@ -981,6 +994,7 @@ export const generateBuild = product("odin-build-generator", "generate-build",
  * Generated files must be excluded from any odinPackage glob that covers the same
  * directory — use the `exclude` option of odinPackage to enforce single ownership.
  *
+ * @category target
  * @param {object} opts
  * @param {string[]} [opts.srcs=[]] Glob patterns for input files (for incremental tracking).
  * @param {string} opts.out Output file path, relative to the declaring BUILD.js directory.
@@ -989,13 +1003,20 @@ export const generateBuild = product("odin-build-generator", "generate-build",
  * @returns {object} Target handle.
  */
 export function odinGen({ srcs = [], out, cmd, generator, deps = [] }) {
-    if (!out) throw new Error("odinGen requires an 'out' path");
-    if (!generator && (!cmd || cmd.length === 0)) throw new Error("odinGen requires either 'cmd' or 'generator'");
-    return target({
-        kind: "odin-gen",
-        attrs: { srcs, out, ...(generator ? { generator } : { cmd }) },
-        deps,
-    });
+    return new OdinGen({ srcs, out, cmd, generator, deps });
+}
+
+export class OdinCollection extends Target {
+    static kind = "odin-collection";
+    constructor({ name, path }) {
+        if (!name || !path) {
+            throw new Error("odinCollection({ name, path }) requires name and path");
+        }
+        super({
+            kind: OdinCollection.kind,
+            attrs: { name, path },
+        });
+    }
 }
 
 /**
@@ -1005,19 +1026,54 @@ export function odinGen({ srcs = [], out, cmd, generator, deps = [] }) {
  *
  * configure("odin", { collections: { lib: "library" } })
  *
+ * @category target
  * @param {object} opts
  * @param {string} opts.name Collection name, e.g. "lib".
  * @param {string} opts.path Workspace-relative collection path, e.g. "library".
  * @returns {object} Target handle.
  */
 export function odinCollection({ name, path }) {
-    if (!name || !path) {
-        throw new Error("odinCollection({ name, path }) requires name and path");
+    return new OdinCollection({ name, path });
+}
+
+export class OdinPackage extends Target {
+    static kind = "odin-package";
+    constructor({ srcs = undefined, exclude = undefined, path = ".", collections = [], toolchain, output, deps = [] }) {
+        const toolchainHandle = toolchain && toolchain.__imp ? toolchain
+                              : (typeof toolchain === "string" ? null : defaultOdinToolchain());
+        const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
+
+        const normalizedDeps = normalize_deps(deps);
+
+        // If sources are not specified, default to all .odin files in the package path.
+        // Empty source lists are not useful for Odin package builds and produce invalid
+        // glob filesets, so treat them like the omitted case.
+        srcs = package_srcs({ srcs });
+
+        if (exclude === undefined) {
+            // exclude test files by default
+            exclude = ["*_test.odin", "test_*.odin"];
+        }
+
+        super({
+            kind: OdinPackage.kind,
+            attrs: {
+                path,
+                srcs,
+                ...(exclude.length ? { exclude } : {}),
+                ...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
+                ...(toolchainVersion ? { toolchainVersion } : {}),
+                ...(output ? { output } : {}),
+                ...(has_collection_config(collections) ? { collections } : {}),
+                ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
+            },
+            sources: sourcesField({
+                root: path,
+                include: srcs,
+                exclude,
+            }),
+        });
     }
-    return target({
-        kind: "odin-collection",
-        attrs: { name, path },
-    });
 }
 
 /**
@@ -1025,6 +1081,7 @@ export function odinCollection({ name, path }) {
  *
  * Sources are discovered lazily at build time via own_sources() / sources().
  *
+ * @category target
  * @param {object} opts
  * @param {string[]} [opts.srcs=[]] Glob patterns matched against paths relative to opts.path.
  * @param {string[]} [opts.exclude=[]] Glob patterns to exclude from matches.
@@ -1036,40 +1093,39 @@ export function odinCollection({ name, path }) {
  * @returns {object} Target handle.
  */
 export function odinPackage({ srcs = undefined, exclude = undefined, path = ".", collections = [], toolchain, output, deps = [] }) {
-    const toolchainHandle = toolchain && toolchain.__imp ? toolchain
-                          : (typeof toolchain === "string" ? null : defaultOdinToolchain());
-    const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
+    return new OdinPackage({ srcs, exclude, path, collections, toolchain, output, deps });
+}
 
-    const normalizedDeps = normalize_deps(deps);
+export class OdinTestPackage extends Target {
+    static kind = "odin-test-package";
+    constructor({ srcs = undefined, exclude = undefined, path = ".", collections = [], toolchain, deps = [] }) {
+        const toolchainHandle = toolchain && toolchain.__imp ? toolchain
+                              : (typeof toolchain === "string" ? null : defaultOdinToolchain());
+        const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
 
-	// If sources are not specified, default to all .odin files in the package path.
-	// Empty source lists are not useful for Odin package builds and produce invalid
-	// glob filesets, so treat them like the omitted case.
-	srcs = package_srcs({ srcs });
+        const normalizedDeps = normalize_deps(deps);
 
-	if (exclude === undefined) {
-		// exclude test files by default
-		exclude = ["*_test.odin", "test_*.odin"];
-	}
+        srcs = package_srcs({ srcs });
+        exclude = exclude || [];
 
-    return target({
-        kind: "odin-package",
-        attrs: {
-            path,
-            srcs,
-            ...(exclude.length ? { exclude } : {}),
-            ...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
-            ...(toolchainVersion ? { toolchainVersion } : {}),
-            ...(output ? { output } : {}),
-            ...(has_collection_config(collections) ? { collections } : {}),
-            ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
-        },
-        sources: sourcesField({
-            root: path,
-            include: srcs,
-            exclude,
-        }),
-    });
+        super({
+            kind: OdinTestPackage.kind,
+            attrs: {
+                path,
+                srcs,
+                ...(exclude.length ? { exclude } : {}),
+                ...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
+                ...(toolchainVersion ? { toolchainVersion } : {}),
+                ...(has_collection_config(collections) ? { collections } : {}),
+                ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
+            },
+            sources: sourcesField({
+                root: path,
+                include: srcs,
+                exclude,
+            }),
+        });
+    }
 }
 
 /**
@@ -1078,6 +1134,7 @@ export function odinPackage({ srcs = undefined, exclude = undefined, path = ".",
  * Test packages participate in the `test` goal and run `odin test`.
  * Unlike odinPackage, they include test files by default.
  *
+ * @category target
  * @param {object} opts
  * @param {string[]} [opts.srcs=[]] Glob patterns matched against paths relative to opts.path.
  * @param {string[]} [opts.exclude=[]] Glob patterns to exclude from matches.
@@ -1088,42 +1145,21 @@ export function odinPackage({ srcs = undefined, exclude = undefined, path = ".",
  * @returns {object} Target handle.
  */
 export function odinTestPackage({ srcs = undefined, exclude = undefined, path = ".", collections = [], toolchain, deps = [] }) {
-    const toolchainHandle = toolchain && toolchain.__imp ? toolchain
-                          : (typeof toolchain === "string" ? null : defaultOdinToolchain());
-    const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
-
-    const normalizedDeps = normalize_deps(deps);
-
-    srcs = package_srcs({ srcs });
-    exclude = exclude || [];
-
-    return target({
-        kind: "odin-test-package",
-        attrs: {
-            path,
-            srcs,
-            ...(exclude.length ? { exclude } : {}),
-            ...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
-            ...(toolchainVersion ? { toolchainVersion } : {}),
-            ...(has_collection_config(collections) ? { collections } : {}),
-            ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
-        },
-        sources: sourcesField({
-            root: path,
-            include: srcs,
-            exclude,
-        }),
-    });
+    return new OdinTestPackage({ srcs, exclude, path, collections, toolchain, deps });
 }
 
 export const odin_test_package = odinTestPackage;
 
-export function odinGenerateBuild({
-    root = ".",
-    exclude = DEFAULT_GENERATE_BUILD_EXCLUDES,
-} = {}) {
-    return target({
-        kind: "odin-build-generator",
-        attrs: { root, exclude },
-    });
+export class OdinGenerateBuild extends Target {
+    static kind = "odin-build-generator";
+    constructor({ root = ".", exclude = DEFAULT_GENERATE_BUILD_EXCLUDES } = {}) {
+        super({
+            kind: OdinGenerateBuild.kind,
+            attrs: { root, exclude },
+        });
+    }
+}
+
+export function odinGenerateBuild({ root = ".", exclude = DEFAULT_GENERATE_BUILD_EXCLUDES } = {}) {
+    return new OdinGenerateBuild({ root, exclude });
 }

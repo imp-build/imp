@@ -7,10 +7,12 @@ import {
     parseDocBlock,
     parseModule,
     directoryForSourcePath,
-    outputSlugForDirectory,
-    fileHeading,
-    renderDirectoryPage,
-    extractDirectoryDoc,
+    languageForDirectory,
+    languageSlug,
+    categoryForEntry,
+    renderCategoryPage,
+    renderLanguageIndexPage,
+    extractApiReference,
 } from "//docs/js_api_extract";
 
 describe("js_api_extract", () => {
@@ -154,76 +156,112 @@ test("derives the directory a source path lives in", () => {
     expect(directoryForSourcePath("rules/asset.js")).toBe("rules");
 });
 
-test("derives output slugs from directories", () => {
-    expect(outputSlugForDirectory("src")).toBe("core");
-    expect(outputSlugForDirectory("rules/c/zig")).toBe("rules-c-zig");
-    expect(outputSlugForDirectory("rules")).toBe("rules");
+test("parses a @category tag", () => {
+    const doc = parseDocBlock(["Declare a thing.", "@category target"]);
+    expect(doc.category).toBe("target");
 });
 
-test("derives capitalized headings from filenames", () => {
-    expect(fileHeading("rules/odin/toolchain.js")).toBe("Toolchain");
-    expect(fileHeading("rules/imp/native_tool.js")).toBe("Native Tool");
-    expect(fileHeading("rules/c/cmake/index.js")).toBe("Index");
+test("leaves category null when no @category tag is present", () => {
+    const doc = parseDocBlock(["Declare a thing."]);
+    expect(doc.category).toBe(null);
 });
 
-test("renders a Markdown page with one heading per file", () => {
-    const md = renderDirectoryPage({
-        title: "rules-asset",
-        sections: [
+test("derives sidebar languages from directories", () => {
+    expect(languageForDirectory("src")).toBe("Core");
+    expect(languageForDirectory("rules")).toBe("Rules");
+    expect(languageForDirectory("rules/odin")).toBe("Odin");
+    expect(languageForDirectory("rules/c/zig")).toBe("C");
+    expect(languageForDirectory("rules/imp/test")).toBe("Imp");
+});
+
+test("derives language slugs", () => {
+    expect(languageSlug("C")).toBe("c");
+    expect(languageSlug("Imp")).toBe("imp");
+});
+
+test("categorizes entries from their @category tag, overriding the default", () => {
+    expect(categoryForEntry({ doc: { category: "target" } })).toBe("target");
+    expect(categoryForEntry({ doc: { category: "configuration" } })).toBe("configuration");
+    expect(categoryForEntry({ doc: { category: "bogus" } })).toBe("api");
+});
+
+test("untagged entries default to api, since they're exported", () => {
+    expect(categoryForEntry({ doc: null })).toBe("api");
+    expect(categoryForEntry({ doc: { category: null } })).toBe("api");
+});
+
+test("renders a category page with Zola frontmatter and a weight", () => {
+    const md = renderCategoryPage({
+        language: "Odin",
+        category: "target",
+        entries: [
             {
-                heading: "Asset",
-                entries: [
-                    {
-                        name: "asset",
-                        params: "{ srcs }",
-                        kind: "function",
-                        doc: { summary: "Declare an asset.", params: [{ type: "string[]", name: "srcs", description: "Globs." }], returns: null },
-                    },
-                ],
-            },
-            {
-                heading: "Gen",
-                entries: [],
+                name: "odinPackage",
+                params: "opts",
+                kind: "function",
+                doc: { summary: "Declare an Odin package.", params: [], returns: null },
             },
         ],
     });
-    expect(md.startsWith('+++\ntitle = "rules-asset"\n+++\n')).toBe(true);
-    expect(md).toContain("## Asset");
-    expect(md).toContain("### asset");
-    expect(md).toContain("Declare an asset.");
-    expect(md).toContain("| srcs | string[] | Globs. |");
-    // Files with zero documentable entries are omitted entirely.
-    expect(md).not.toContain("## Gen");
+    expect(md).toContain('title = "Targets"');
+    expect(md).toContain("weight = 20");
+    expect(md).toContain('language = "Odin"');
+    expect(md).toContain("### odinPackage");
+    expect(md).toContain("Declare an Odin package.");
 });
 
-test("returns null for a page where every file has zero documentable entries", () => {
-    expect(renderDirectoryPage({ title: "empty", sections: [{ heading: "Build", entries: [] }] })).toBe(null);
+test("renders a language index page pointing at section.html", () => {
+    const md = renderLanguageIndexPage("Odin");
+    expect(md).toContain('title = "Odin"');
+    expect(md).toContain('sort_by = "weight"');
+    expect(md).toContain('template = "section.html"');
+    expect(md).toContain('language = "Odin"');
 });
 
-test("extractDirectoryDoc combines parsing and rendering across a directory's files", () => {
+test("extractApiReference groups entries by language then category across files", () => {
     const files = [
         {
             sourcePath: "rules/odin/index.js",
             sourceText: [
                 "/**",
-                " * A documented function.",
-                " * @returns {void}",
+                " * Declare an Odin package.",
+                " * @category target",
                 " */",
-                "export function documented() {}",
+                "export function odinPackage(opts) {}",
+                "",
+                "/**",
+                " * Build the package.",
+                " */",
+                'export const odinBuild = product("odin-package", "build", async function odinBuild(handle) {});',
             ].join("\n"),
         },
         {
             sourcePath: "rules/odin/toolchain.js",
-            sourceText: "export function odinBin(version) {}",
+            sourceText: [
+                "/**",
+                " * Declare an Odin toolchain.",
+                " * @category configuration",
+                " */",
+                "export function odinToolchain(version) {}",
+            ].join("\n"),
+        },
+        {
+            sourcePath: "rules/asset.js",
+            sourceText: "export function asset(opts) {}",
         },
     ];
 
-    const result = extractDirectoryDoc("rules/odin", files);
-    expect(result.slug).toBe("rules-odin");
-    expect(result.entryCount).toBe(2);
-    expect(result.markdown).toContain("## Index");
-    expect(result.markdown).toContain("### documented");
-    expect(result.markdown).toContain("## Toolchain");
-    expect(result.markdown).toContain("### odinBin");
+    const pages = extractApiReference(files);
+    const byPath = new Map(pages.map(p => [p.path, p.markdown]));
+
+    expect(byPath.has("odin/_index.md")).toBe(true);
+    expect(byPath.get("odin/target.md")).toContain("### odinPackage");
+    expect(byPath.get("odin/api.md")).toContain("### odinBuild");
+    expect(byPath.get("odin/configuration.md")).toContain("### odinToolchain");
+
+    expect(byPath.has("rules/_index.md")).toBe(true);
+    // Untagged entries default to the "api" category.
+    expect(byPath.get("rules/api.md")).toContain("### asset");
+    expect(byPath.has("rules/target.md")).toBe(false);
 });
 });

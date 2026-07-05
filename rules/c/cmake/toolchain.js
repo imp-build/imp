@@ -1,4 +1,5 @@
-import { target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import { generateToolLockfile } from "//rules/workflows/lockfiles";
 
@@ -97,6 +98,13 @@ function coreToolNames(plat) {
     return ["curl", "mkdir", "dirname", "tar", "gzip", ...(plat.os === "windows" ? ["sh"] : [])];
 }
 
+export class CmakeToolchain extends Target {
+    static kind = "cmake-toolchain";
+    constructor({ version }) {
+        super({ kind: CmakeToolchain.kind, attrs: { version } });
+    }
+}
+
 export function createCmakeToolchainApi(host = defaultHost) {
     let defaultVersion = null;
     let defaultToolchain = null;
@@ -111,10 +119,7 @@ export function createCmakeToolchainApi(host = defaultHost) {
             coreToolHandles = coreToolNames(host.platformInfo()).map((name) => host.nativeTool(name));
         }
 
-        const toolchain = target({
-            kind: "cmake-toolchain",
-            attrs: { version },
-        });
+        const toolchain = new CmakeToolchain({ version });
 
         if (opts.default) {
             defaultVersion = version;
@@ -231,6 +236,7 @@ const defaultApi = createCmakeToolchainApi();
 /**
  * Declare a CMake toolchain version and optionally set it as the default.
  *
+ * @category configuration
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
@@ -243,6 +249,7 @@ export function cmakeToolchain(version, opts = {}) {
 /**
  * Install a local CMake toolchain directory into the named cache.
  *
+ * @category configuration
  * @param {string} version
  * @param {string} source Path to the toolchain root.
  * @returns {string|null} Local path to the cached toolchain root.
@@ -255,6 +262,7 @@ export function installCmakeToolchain(version, source) {
  * Acquire a CMake toolchain, downloading and caching it if not already
  * installed in the named cache.
  *
+ * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
@@ -265,6 +273,7 @@ export function acquireCmakeToolchain(version) {
 /**
  * Resolve an explicit or default CMake toolchain version.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -276,6 +285,7 @@ export function resolveCmakeToolchainVersion(version) {
  * Return the CMake executable for a toolchain version, or system "cmake" when
  * no CMake toolchain default has been declared.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {Promise<string>}
  */
@@ -286,6 +296,7 @@ export function cmakeBin(version) {
 /**
  * Return a named-cache-backed CMake tool descriptor for sandbox execution.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -296,6 +307,7 @@ export function cmakeTool(version) {
 /**
  * Return the currently configured default CMake toolchain version.
  *
+ * @category configuration
  * @returns {string|null}
  */
 export function defaultCmakeToolchainVersion() {
@@ -305,6 +317,7 @@ export function defaultCmakeToolchainVersion() {
 /**
  * Return the currently configured default CMake toolchain target handle.
  *
+ * @category configuration
  * @returns {object|null}
  */
 export function defaultCmakeToolchain() {

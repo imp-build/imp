@@ -8,6 +8,19 @@ const EXPORT_FUNCTION_RE = /^export function (\w+)\s*\(([^)]*)\)/;
 const EXPORT_BINDING_RE = /^export const (\w+)\s*=\s*(?:memo|product)\(/;
 const PARAM_TAG_RE = /^@param\s+(?:\{([^}]*)\}\s+)?(\S+)\s*(.*)$/;
 const RETURNS_TAG_RE = /^@returns?\s+(?:\{([^}]*)\})?\s*(.*)$/;
+const CATEGORY_TAG_RE = /^@category\s+(\S+)/;
+
+// Sidebar/page grouping below "language". Order here is display order.
+// Entries with no explicit @category tag default to "api": they're
+// exported, so they're presumably meant to be used by other code. Whether a
+// given export is genuinely needed is a source-level question (should it be
+// exported at all?), not something this extractor infers.
+const CATEGORY_LABELS = {
+    configuration: "Configuration",
+    target: "Targets",
+    api: "API",
+};
+const CATEGORY_ORDER = ["configuration", "target", "api"];
 
 function stripCommentMarker(line) {
     return line.replace(/^\*\s?/, "");
@@ -19,12 +32,13 @@ function stripCommentMarker(line) {
  * leading `*` markers).
  *
  * @param {string[]} lines
- * @returns {{ summary: string, params: {type: string, name: string, description: string}[], returns: {type: string, description: string}|null }}
+ * @returns {{ summary: string, params: {type: string, name: string, description: string}[], returns: {type: string, description: string}|null, category: string|null }}
  */
 export function parseDocBlock(lines) {
     const summaryLines = [];
     const params = [];
     let returns = null;
+    let category = null;
 
     for (const raw of lines) {
         const line = raw.trim();
@@ -42,12 +56,18 @@ export function parseDocBlock(lines) {
             continue;
         }
 
+        const categoryMatch = line.match(CATEGORY_TAG_RE);
+        if (categoryMatch) {
+            category = categoryMatch[1];
+            continue;
+        }
+
         if (line.startsWith("@")) continue;
 
         summaryLines.push(line);
     }
 
-    return { summary: summaryLines.join(" "), params, returns };
+    return { summary: summaryLines.join(" "), params, returns, category };
 }
 
 /**
@@ -183,74 +203,122 @@ export function directoryForSourcePath(sourcePath) {
 }
 
 /**
- * Turn a source directory (e.g. "rules/c/zig", "rules", "src") into a flat
- * output slug used both as the generated page's filename and as a stable
- * title, e.g. "rules-c-zig", "rules", "core". "src" is special-cased to
- * "core" since it holds only imp_core.js today.
+ * Derive the sidebar "language" a source directory belongs to, e.g.
+ * "rules/c/zig" -> "C", "rules/odin" -> "Odin", "rules/imp/test" ->
+ * "Imp", "rules" -> "Rules", "src" -> "Core". This is directory-derived,
+ * not content-derived: everything under one top-level rules/ subdirectory
+ * (or its own nested subdirectories) shares one language group, regardless
+ * of what that code actually does.
  *
  * @param {string} dirPath
  * @returns {string}
  */
-export function outputSlugForDirectory(dirPath) {
-    if (dirPath === "src") return "core";
-    return dirPath.replace(/\//g, "-");
+export function languageForDirectory(dirPath) {
+    if (dirPath === "src") return "Core";
+    if (dirPath === "rules") return "Rules";
+    const rest = dirPath.startsWith("rules/") ? dirPath.slice("rules/".length) : dirPath;
+    const first = rest.split("/")[0];
+    return first.charAt(0).toUpperCase() + first.slice(1);
 }
 
 /**
- * Turn a source path's filename into a capitalized heading, e.g.
- * "rules/odin/toolchain.js" -> "Toolchain", "rules/imp/native_tool.js" ->
- * "Native Tool".
+ * Turn a language name into its output-path/slug form, e.g. "C" -> "c",
+ * "Imp" -> "imp".
  *
- * @param {string} sourcePath
+ * @param {string} language
  * @returns {string}
  */
-export function fileHeading(sourcePath) {
-    const base = sourcePath.slice(sourcePath.lastIndexOf("/") + 1).replace(/\.js$/, "");
-    return base
-        .split(/[_-]+/)
-        .filter(Boolean)
-        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-        .join(" ");
-}
-
-function renderSection({ heading, entries }) {
-    const lines = [`## ${heading}`, "", ...entries.map(renderEntry)];
-    return lines.join("\n");
+export function languageSlug(language) {
+    return language.toLowerCase();
 }
 
 /**
- * Render a Markdown reference page (with Zola TOML frontmatter) for a
- * directory's files, one `##` heading per file, one `###` heading per
- * documented export beneath it. Files with zero documentable exports are
- * omitted; if every file in the directory has none, returns null so callers
- * can skip emitting an empty page.
+ * Resolve an entry's sidebar category. An explicit JSDoc `@category` tag
+ * always wins; otherwise an entry defaults to "api" since it's exported and
+ * therefore presumably meant to be used by other code. (Whether a given
+ * export genuinely needs to be exported is a source-level cleanup question,
+ * not something this extractor tries to infer.)
  *
- * @param {{ title: string, sections: {heading: string, entries: object[]}[] }} opts
- * @returns {string|null}
+ * @param {{ doc: object|null }} entry
+ * @returns {string}
  */
-export function renderDirectoryPage({ title, sections }) {
-    const nonEmpty = sections.filter(s => s.entries.length > 0);
-    if (nonEmpty.length === 0) return null;
-
-    const frontmatter = `+++\ntitle = "${title}"\n+++\n`;
-    const body = nonEmpty.map(renderSection).join("\n\n");
-    return `${frontmatter}\n${body}`;
+export function categoryForEntry(entry) {
+    const tag = entry.doc && entry.doc.category;
+    if (tag && CATEGORY_LABELS[tag]) return tag;
+    return "api";
 }
 
 /**
- * Parse and render the Markdown reference page for one directory's files.
+ * Render one category page's Markdown body (no frontmatter): one `###`
+ * heading per documented export.
  *
- * @param {string} dirPath
+ * @param {object[]} entries
+ * @returns {string}
+ */
+function renderEntries(entries) {
+    return entries.map(renderEntry).join("\n\n");
+}
+
+/**
+ * Render a category page (e.g. "Odin" x "Targets") with Zola TOML
+ * frontmatter, ordered by CATEGORY_ORDER via a numeric weight.
+ *
+ * @param {{ language: string, category: string, entries: object[] }} opts
+ * @returns {string}
+ */
+export function renderCategoryPage({ language, category, entries }) {
+    const weight = (CATEGORY_ORDER.indexOf(category) + 1) * 10;
+    const frontmatter = `+++\ntitle = "${CATEGORY_LABELS[category]}"\nweight = ${weight}\n\n[extra]\nlanguage = "${language}"\n+++\n`;
+    return `${frontmatter}\n${renderEntries(entries)}`;
+}
+
+/**
+ * Render a language's section landing page (e.g. "Odin"): a bare heading:
+ * Zola's section.html template lists this section's category pages
+ * (Configuration/Targets/API, weight-sorted) when visited directly.
+ *
+ * @param {string} language
+ * @returns {string}
+ */
+export function renderLanguageIndexPage(language) {
+    return `+++\ntitle = "${language}"\nsort_by = "weight"\ntemplate = "section.html"\n\n[extra]\nlanguage = "${language}"\n+++\n`;
+}
+
+/**
+ * Parse every scanned source file into API reference pages grouped by
+ * sidebar language (directory-derived) and then by category
+ * (Configuration/Targets/API — see categoryForEntry). Emits one
+ * `<language>/_index.md` landing page plus one `<language>/<category>.md`
+ * page per non-empty category.
+ *
  * @param {{ sourcePath: string, sourceText: string }[]} files
- * @returns {{ slug: string, markdown: string|null, entryCount: number }}
+ * @returns {{ path: string, markdown: string }[]}
  */
-export function extractDirectoryDoc(dirPath, files) {
-    const sections = files.map(({ sourcePath, sourceText }) => ({
-        heading: fileHeading(sourcePath),
-        entries: parseModule(sourceText),
-    }));
-    const slug = outputSlugForDirectory(dirPath);
-    const markdown = renderDirectoryPage({ title: slug, sections });
-    const entryCount = sections.reduce((n, s) => n + s.entries.length, 0);
-    return { slug, markdown, entryCount };
+export function extractApiReference(files) {
+    const byLanguage = new Map();
+    for (const { sourcePath, sourceText } of files) {
+        const language = languageForDirectory(directoryForSourcePath(sourcePath));
+        if (!byLanguage.has(language)) byLanguage.set(language, new Map());
+        const byCategory = byLanguage.get(language);
+        for (const entry of parseModule(sourceText)) {
+            const category = categoryForEntry(entry);
+            if (!byCategory.has(category)) byCategory.set(category, []);
+            byCategory.get(category).push(entry);
+        }
+    }
+
+    const pages = [];
+    for (const language of [...byLanguage.keys()].sort()) {
+        const byCategory = byLanguage.get(language);
+        const slug = languageSlug(language);
+        let any = false;
+        for (const category of CATEGORY_ORDER) {
+            const entries = byCategory.get(category);
+            if (!entries || entries.length === 0) continue;
+            any = true;
+            pages.push({ path: `${slug}/${category}.md`, markdown: renderCategoryPage({ language, category, entries }) });
+        }
+        if (any) pages.push({ path: `${slug}/_index.md`, markdown: renderLanguageIndexPage(language) });
+    }
+    return pages;
 }

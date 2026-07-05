@@ -1,4 +1,5 @@
-import { target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import { generateToolLockfile } from "//rules/workflows/lockfiles";
 
@@ -88,9 +89,17 @@ export function gccCacheKey(version, plat) {
 // separate `xz` process to decompress `.tar.xz`.
 const CORE_TOOL_NAMES = ["curl", "mkdir", "dirname", "tar", "xz", "chmod"];
 
+export class GccToolchain extends Target {
+    static kind = "gcc-toolchain";
+    constructor({ version }) {
+        super({ kind: GccToolchain.kind, attrs: { version } });
+    }
+}
+
 /**
  * Build a gcc toolchain API. Tests can pass a fake host implementation.
  *
+ * @category configuration
  * @param {object} [host]
  * @returns {object}
  */
@@ -108,10 +117,7 @@ export function createGccToolchainApi(host = defaultHost) {
             coreToolHandles = CORE_TOOL_NAMES.map((name) => host.nativeTool(name));
         }
 
-        const toolchain = target({
-            kind: "gcc-toolchain",
-            attrs: { version },
-        });
+        const toolchain = new GccToolchain({ version });
 
         if (opts.default) {
             defaultVersion = version;
@@ -250,6 +256,7 @@ const defaultApi = createGccToolchainApi();
 /**
  * Declare a gcc toolchain version and optionally set it as the default.
  *
+ * @category configuration
  * @param {string} version Bootlin toolchain release version, e.g. "2025.08-1".
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
@@ -262,6 +269,7 @@ export function gccToolchain(version, opts = {}) {
 /**
  * Install a local gcc toolchain directory into the named cache.
  *
+ * @category configuration
  * @param {string} version
  * @param {string} source Path to the toolchain root.
  * @returns {string|null} Local path to the cached toolchain root.
@@ -274,6 +282,7 @@ export function installGccToolchain(version, source) {
  * Acquire a gcc toolchain, downloading and caching it if not already
  * installed in the named cache.
  *
+ * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
@@ -284,6 +293,7 @@ export function acquireGccToolchain(version) {
 /**
  * Resolve an explicit or default gcc toolchain version.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -294,6 +304,7 @@ export function resolveGccToolchainVersion(version) {
 /**
  * Return the gcc executable path for a toolchain version.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {Promise<string>}
  */
@@ -306,6 +317,7 @@ export function gccBin(version) {
  * Its bin/ directory also contains a `clang` wrapper script (Odin invokes a
  * program literally named "clang" to link) that execs the real gcc binary.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -316,6 +328,7 @@ export function gccTool(version) {
 /**
  * Return the currently configured default gcc toolchain version.
  *
+ * @category configuration
  * @returns {string|null}
  */
 export function defaultGccToolchainVersion() {
@@ -325,6 +338,7 @@ export function defaultGccToolchainVersion() {
 /**
  * Return the currently configured default gcc toolchain target handle.
  *
+ * @category configuration
  * @returns {object|null}
  */
 export function defaultGccToolchain() {

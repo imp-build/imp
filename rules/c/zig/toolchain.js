@@ -1,4 +1,5 @@
-import { target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import { generateToolLockfile } from "//rules/workflows/lockfiles";
 
@@ -124,10 +125,18 @@ function wrapperNames(plat) {
         : { ar: "zigar", ranlib: "zigranlib", clang: "clang", genericAr: "ar" };
 }
 
+export class ZigToolchain extends Target {
+    static kind = "zig-toolchain";
+    constructor({ version }) {
+        super({ kind: ZigToolchain.kind, attrs: { version } });
+    }
+}
+
 /**
  * Build a Zig toolchain API. Tests can pass a fake host implementation, and
  * the install/acquire path can grow here without touching CMake integration.
  *
+ * @category configuration
  * @param {object} [host]
  * @returns {object}
  */
@@ -145,10 +154,7 @@ export function createZigToolchainApi(host = defaultHost) {
             coreToolHandles = coreToolNames(host.platformInfo()).map((name) => host.nativeTool(name));
         }
 
-        const toolchain = target({
-            kind: "zig-toolchain",
-            attrs: { version },
-        });
+        const toolchain = new ZigToolchain({ version });
 
         if (opts.default) {
             defaultVersion = version;
@@ -333,6 +339,7 @@ const defaultApi = createZigToolchainApi();
 /**
  * Declare a Zig toolchain version and optionally set it as the default.
  *
+ * @category configuration
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
@@ -345,6 +352,7 @@ export function zigToolchain(version, opts = {}) {
 /**
  * Install a local Zig toolchain directory into the named cache.
  *
+ * @category configuration
  * @param {string} version
  * @param {string} source Path to the toolchain root.
  * @returns {string|null} Local path to the cached toolchain root.
@@ -357,6 +365,7 @@ export function installZigToolchain(version, source) {
  * Acquire a Zig toolchain, downloading and caching it if not already
  * installed in the named cache.
  *
+ * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
@@ -367,6 +376,7 @@ export function acquireZigToolchain(version) {
 /**
  * Resolve an explicit or default Zig toolchain version.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -377,6 +387,7 @@ export function resolveZigToolchainVersion(version) {
 /**
  * Return the zig executable path for a toolchain version.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {Promise<string>}
  */
@@ -387,6 +398,7 @@ export function zigBin(version) {
 /**
  * Return a named-cache-backed Zig tool descriptor for sandbox execution.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -398,6 +410,7 @@ export function zigTool(version) {
  * Return the CMake -D flags to configure this Zig toolchain as the C/C++
  * compiler and archiver.
  *
+ * @category configuration
  * @param {string} [version]
  * @returns {Promise<string[]>}
  */
@@ -408,6 +421,7 @@ export function zigCMakeArgs(version) {
 /**
  * Return the currently configured default Zig toolchain version.
  *
+ * @category configuration
  * @returns {string|null}
  */
 export function defaultZigToolchainVersion() {
@@ -417,6 +431,7 @@ export function defaultZigToolchainVersion() {
 /**
  * Return the currently configured default Zig toolchain target handle.
  *
+ * @category configuration
  * @returns {object|null}
  */
 export function defaultZigToolchain() {

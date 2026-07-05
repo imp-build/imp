@@ -1,4 +1,11 @@
-import { target, product, nativeToolArtifact } from "imp:core";
+import { Target, product, nativeToolArtifact } from "imp:core";
+
+export class NativeTool extends Target {
+    static kind = "native-tool";
+    constructor(name) {
+        super({ kind: NativeTool.kind, attrs: { name } });
+    }
+}
 
 /**
  * Declare a native-tool target: resolves `name` from the host PATH and
@@ -7,11 +14,12 @@ import { target, product, nativeToolArtifact } from "imp:core";
  * workspace-load time); call nativeToolSpec(handle) from a product body to
  * get the resolved descriptor.
  *
+ * @category target
  * @param {string} name Executable name to look up on PATH, e.g. "cmake".
  * @returns {object} Target handle.
  */
 export function nativeTool(name) {
-    return target({ kind: "native-tool", attrs: { name } });
+    return new NativeTool(name);
 }
 
 /**

@@ -13,7 +13,7 @@
 // odinPackageAnalysis's static source scan runs here; no run()/build is
 // ever triggered by this goal.
 
-import { target, goal, product, run, output, output_path, workspaceTargets, platformInfo } from "imp:core";
+import { Target, goal, product, run, output, output_path, workspaceTargets, platformInfo } from "imp:core";
 import { default_output_path, odin_output_path, odinPackageAnalysis } from "//rules/odin";
 
 goal("vs");
@@ -124,11 +124,19 @@ export const vs = product("vs-workspace", "vs", async function vs(handle) {
     return { generated: Object.keys(files) };
 });
 
+export class VsWorkspace extends Target {
+    static kind = "vs-workspace";
+    constructor() {
+        super({ kind: VsWorkspace.kind, attrs: {} });
+    }
+}
+
 /**
  * Declare a target that generates VS/VS Code IDE configuration for the workspace.
  *
+ * @category target
  * @returns {object} Target handle of kind "vs-workspace".
  */
 export function vsWorkspace() {
-    return target({ kind: "vs-workspace", attrs: {} });
+    return new VsWorkspace();
 }
