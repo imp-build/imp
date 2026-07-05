@@ -6,9 +6,34 @@
 
 const EXPORT_FUNCTION_RE = /^export function (\w+)\s*\(([^)]*)\)/;
 const EXPORT_BINDING_RE = /^export const (\w+)\s*=\s*(?:memo|product)\(/;
-const PARAM_TAG_RE = /^@param\s+(?:\{([^}]*)\}\s+)?(\S+)\s*(.*)$/;
-const RETURNS_TAG_RE = /^@returns?\s+(?:\{([^}]*)\})?\s*(.*)$/;
+const PARAM_TAG_RE = /^@param\b\s*(.*)$/;
+const RETURNS_TAG_RE = /^@returns?\b\s*(.*)$/;
 const CATEGORY_TAG_RE = /^@category\s+(\S+)/;
+
+/**
+ * Split a `{Type}` prefix off the remainder of a @param/@returns tag,
+ * respecting brace nesting so object-literal types like
+ * `{{ os: string, arch: string }}` aren't cut off at their first `}`.
+ * Returns `{ type: null, rest: text }` unchanged if there's no leading `{`
+ * or the braces never balance.
+ *
+ * @param {string} text
+ * @returns {{ type: string|null, rest: string }}
+ */
+function splitLeadingBraceType(text) {
+    if (!text.startsWith("{")) return { type: null, rest: text };
+    let depth = 0;
+    for (let i = 0; i < text.length; i++) {
+        if (text[i] === "{") depth++;
+        else if (text[i] === "}") {
+            depth--;
+            if (depth === 0) {
+                return { type: text.slice(1, i), rest: text.slice(i + 1).trimStart() };
+            }
+        }
+    }
+    return { type: null, rest: text };
+}
 
 // Sidebar/page grouping below "language". Order here is display order.
 // Entries with no explicit @category tag default to "api": they're
@@ -46,13 +71,18 @@ export function parseDocBlock(lines) {
 
         const paramMatch = line.match(PARAM_TAG_RE);
         if (paramMatch) {
-            params.push({ type: paramMatch[1] || "", name: paramMatch[2], description: paramMatch[3] || "" });
+            const { type, rest } = splitLeadingBraceType(paramMatch[1]);
+            const spaceIdx = rest.indexOf(" ");
+            const name = spaceIdx === -1 ? rest : rest.slice(0, spaceIdx);
+            const description = spaceIdx === -1 ? "" : rest.slice(spaceIdx + 1).trim();
+            params.push({ type: type || "", name, description });
             continue;
         }
 
         const returnsMatch = line.match(RETURNS_TAG_RE);
         if (returnsMatch) {
-            returns = { type: returnsMatch[1] || "", description: returnsMatch[2] || "" };
+            const { type, rest } = splitLeadingBraceType(returnsMatch[1]);
+            returns = { type: type || "", description: rest.trim() };
             continue;
         }
 

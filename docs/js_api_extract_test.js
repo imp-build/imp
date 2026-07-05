@@ -33,6 +33,14 @@ test("parses a @param/@returns doc block", () => {
     expect(doc.returns.description).toBe("The wrapped thing.");
 });
 
+test("parses a @param with a nested-brace object-literal type", () => {
+    const doc = parseDocBlock(["@param {{ os: string, arch: string }} plat"]);
+    expect(doc.params.length).toBe(1);
+    expect(doc.params[0].type).toBe("{ os: string, arch: string }");
+    expect(doc.params[0].name).toBe("plat");
+    expect(doc.params[0].description).toBe("");
+});
+
 test("parses a @returns tag with a type but no trailing description", () => {
     const doc = parseDocBlock(["@returns {function}"]);
     expect(doc.returns.type).toBe("function");
