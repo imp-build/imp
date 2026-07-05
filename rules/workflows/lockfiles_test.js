@@ -6,6 +6,7 @@ import { gccSupportedPlatforms } from "//rules/c/gcc/toolchain";
 import { moldSupportedPlatforms } from "//rules/c/mold/toolchain";
 import { zigSupportedPlatforms } from "//rules/c/zig/toolchain";
 import { zolaSupportedPlatforms } from "//rules/zola/toolchain";
+import { rustSupportedPlatforms } from "//rules/rust/toolchain";
 
 // Records every download/sha256 and captures the run() that writes the lockfile,
 // so a lockfile can be generated without touching the network or the sandbox.
@@ -134,6 +135,16 @@ test("zig: linux + windows, x86_64+aarch64", () => {
 
 test("zola: linux/macos x86_64+aarch64, windows x86_64", () => {
     expect(zolaSupportedPlatforms()).toEqual([
+        { os: "linux", arch: "x86_64" },
+        { os: "linux", arch: "aarch64" },
+        { os: "macos", arch: "x86_64" },
+        { os: "macos", arch: "aarch64" },
+        { os: "windows", arch: "x86_64" },
+    ]);
+});
+
+test("rust: linux/macos x86_64+aarch64, windows x86_64", () => {
+    expect(rustSupportedPlatforms()).toEqual([
         { os: "linux", arch: "x86_64" },
         { os: "linux", arch: "aarch64" },
         { os: "macos", arch: "x86_64" },
