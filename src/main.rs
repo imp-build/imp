@@ -129,6 +129,10 @@ struct GoalArgs {
     /// Run actions without reading or writing the task cache
     #[arg(long)]
     no_cache: bool,
+    /// When to delete per-run sandboxes: never, on-failure (keep only failed
+    /// sandboxes for debugging, the default), or always (keep every sandbox)
+    #[arg(long, value_enum, default_value_t = exec::SandboxRetention::default())]
+    keep_sandbox: exec::SandboxRetention,
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +400,7 @@ async fn cmd_execute_goal(
         args.jobs,
         args.js_workers,
         args.no_cache,
+        args.keep_sandbox,
         cancellation,
         tree,
     )
@@ -412,6 +417,7 @@ async fn cmd_rules_test(
         1,
         None,
         false,
+        exec::SandboxRetention::default(),
         cancellation,
         tree,
     )
@@ -423,6 +429,7 @@ async fn cmd_execute_live(
     jobs: usize,
     js_workers: Option<usize>,
     no_cache: bool,
+    sandbox_retention: exec::SandboxRetention,
     cancellation: Arc<AtomicBool>,
     tree: &Tree,
 ) -> Result<()> {
@@ -708,6 +715,12 @@ async fn cmd_execute_live(
             }
         }
     });
+
+    // Sandbox retention is a process-wide policy read by live `run()` calls; set
+    // it on the workspace before driving (mirrors how no_cache is threaded).
+    workspace
+        .exec_sandbox_retention
+        .store(sandbox_retention.as_u8(), Ordering::SeqCst);
 
     // Drive the goal, with a deadlock watchdog: a genuine async dependency
     // cycle (which QuickJS gives us no way to detect precisely) surfaces as the

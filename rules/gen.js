@@ -5,7 +5,7 @@ export const file = product("stamp-file", "build", async function file(handle) {
         argv: [
             "sh",
             "-c",
-            "mkdir -p \"$(dirname \"$1\")\" && printf '%s\\n' \"$2\" > \"$1\"",
+            "printf '%s\\n' \"$2\" > \"$1\"",
             "imp-stamp",
             output_path(handle.attrs.entrypoint),
             handle.attrs.sources,

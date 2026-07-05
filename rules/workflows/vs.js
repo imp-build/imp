@@ -40,7 +40,7 @@ function writeJsonFile(path, value) {
         argv: [
             "sh",
             "-c",
-            'mkdir -p "$(dirname "$1")" && printf %s "$2" > "$1"',
+            'printf %s "$2" > "$1"',
             "vs-write",
             output_path(path),
             pretty(value),

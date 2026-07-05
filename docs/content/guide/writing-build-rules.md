@@ -15,7 +15,7 @@ export function stampFile({ output, text }) {
 
 export const file = product("stamp-file", "build", async function file(handle) {
     return run({
-        argv: ["sh", "-c", "mkdir -p \"$(dirname \"$1\")\" && printf '%s\\n' \"$2\" > \"$1\"",
+        argv: ["sh", "-c", "printf '%s\\n' \"$2\" > \"$1\"",
             "imp-stamp", output_path(handle.attrs.entrypoint), handle.attrs.sources],
         outputs: [output(handle.attrs.entrypoint)],
         display: `write ${handle.attrs.entrypoint}`,
@@ -23,4 +23,4 @@ export const file = product("stamp-file", "build", async function file(handle) {
 });
 ```
 
-Every real subprocess runs through `run()`, hermetically sandboxed and cached by the content-addressed digest of its declared inputs, tools, and configuration. See the [JS API reference](../../reference/js-api/) for the full DSL surface.
+Every real subprocess runs through `run()`, hermetically sandboxed and cached by the content-addressed digest of its declared inputs, tools, and configuration. The parent directories of declared `outputs` (and directory outputs themselves) are created in the sandbox before the command runs, so scripts don't need to `mkdir` them. See the [JS API reference](../../reference/js-api/) for the full DSL surface.

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
     Arc, Mutex,
 };
 
@@ -279,6 +279,8 @@ pub async fn load_workspace_with_host_log(
     let module_mounts: Arc<Mutex<Vec<ModuleMount>>> = Arc::new(Mutex::new(Vec::new()));
     let exec_root: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
     let exec_no_cache = Arc::new(AtomicBool::new(false));
+    let exec_sandbox_retention =
+        Arc::new(AtomicU8::new(crate::exec::SandboxRetention::default().as_u8()));
     let scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>> =
         Arc::new(Mutex::new(None));
     let selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(None));
@@ -334,6 +336,7 @@ pub async fn load_workspace_with_host_log(
                 mounts_clone,
                 Arc::clone(&exec_root),
                 Arc::clone(&exec_no_cache),
+                Arc::clone(&exec_sandbox_retention),
                 Arc::clone(&scheduler),
                 Arc::clone(&selected_roots),
                 host_log.clone(),
@@ -478,6 +481,7 @@ pub async fn load_workspace_with_host_log(
         ctx,
         exec_root,
         exec_no_cache,
+        exec_sandbox_retention,
         scheduler,
         selected_roots,
     })
@@ -603,6 +607,7 @@ fn register_globals<'js>(
     module_mounts: Arc<Mutex<Vec<ModuleMount>>>,
     exec_root: Arc<Mutex<Option<PathBuf>>>,
     exec_no_cache: Arc<AtomicBool>,
+    exec_sandbox_retention: Arc<AtomicU8>,
     scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>>,
     selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
     host_log: HostLogSink,
@@ -1291,12 +1296,14 @@ fn register_globals<'js>(
     // blocking worker and reports the job on the shared event stream.
     let exec_root_run = Arc::clone(&exec_root);
     let exec_no_cache_run = Arc::clone(&exec_no_cache);
+    let exec_sandbox_retention_run = Arc::clone(&exec_sandbox_retention);
     let scheduler_run = Arc::clone(&scheduler);
     let host_run = Function::new(
         ctx.clone(),
         Async(move |ctx: Ctx<'js>, opts: Object<'js>| {
             let exec_root_run = Arc::clone(&exec_root_run);
             let exec_no_cache_run = Arc::clone(&exec_no_cache_run);
+            let exec_sandbox_retention_run = Arc::clone(&exec_sandbox_retention_run);
             let scheduler_run = Arc::clone(&scheduler_run);
             async move {
                 let root = exec_root_run.lock().unwrap().clone().ok_or_else(|| {
@@ -1315,6 +1322,9 @@ fn register_globals<'js>(
                 let parent: Option<u64> = opts.get::<_, Option<f64>>("__owner")?.map(|n| n as u64);
                 let mut run_opts = parse_exec_run_opts(opts, &root)?;
                 run_opts.no_cache = exec_no_cache_run.load(Ordering::SeqCst);
+                run_opts.sandbox_retention = crate::exec::SandboxRetention::from_u8(
+                    exec_sandbox_retention_run.load(Ordering::SeqCst),
+                );
                 let display = run_opts.display.clone();
                 let cancellation = sched.cancellation_flag();
                 let result = sched
@@ -1578,6 +1588,8 @@ fn parse_exec_run_opts<'js>(
         force_cache,
         sandbox,
         no_cache: false,
+        // Overridden per invocation in the host_run closure (like no_cache).
+        sandbox_retention: crate::exec::SandboxRetention::default(),
     })
 }
 
@@ -2415,6 +2427,8 @@ pub async fn execute_goal_live(
         .await
         .map_err(|e| anyhow::anyhow!("execute goal '{goal}' failed: {e}"));
     live.exec_no_cache.store(false, Ordering::SeqCst);
+    live.exec_sandbox_retention
+        .store(crate::exec::SandboxRetention::default().as_u8(), Ordering::SeqCst);
     *live.selected_roots.lock().unwrap() = None;
     result
 }

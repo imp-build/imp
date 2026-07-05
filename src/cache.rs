@@ -110,10 +110,19 @@ pub(crate) fn named_cache_key_path(
 // CAS and task cache functions
 // ---------------------------------------------------------------------------
 
+/// Base directory under which per-run sandbox roots are created. Defaults to
+/// `/tmp/imp`; `IMP_SANDBOX_DIR` overrides it (mirroring `IMP_CACHE_DIR`)
+/// so tests can point sandboxes at an isolated, inspectable location.
+pub(crate) fn sandbox_base_dir() -> PathBuf {
+    std::env::var_os("IMP_SANDBOX_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp/imp"))
+}
+
 pub(crate) fn create_sandbox_root() -> Result<PathBuf> {
     static SANDBOX_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    let base = PathBuf::from("/tmp/imp");
+    let base = sandbox_base_dir();
     std::fs::create_dir_all(&base).with_context(|| format!("create {}", base.display()))?;
     for _ in 0..100 {
         let unique = format!(

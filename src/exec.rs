@@ -286,6 +286,81 @@ pub(crate) struct ExecRunOpts {
     pub(crate) force_cache: bool,
     pub(crate) sandbox: bool,
     pub(crate) no_cache: bool,
+    pub(crate) sandbox_retention: SandboxRetention,
+}
+
+/// When a per-run sandbox root is deleted. Sandboxes are ephemeral by default;
+/// keeping them around is only useful for post-mortem debugging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub(crate) enum SandboxRetention {
+    /// Always delete the sandbox, even after a failed command.
+    Never,
+    /// Delete on success; keep the sandbox when the command failed.
+    #[default]
+    OnFailure,
+    /// Never delete — retain every sandbox for inspection.
+    Always,
+}
+
+impl SandboxRetention {
+    pub(crate) fn as_u8(self) -> u8 {
+        match self {
+            SandboxRetention::Never => 0,
+            SandboxRetention::OnFailure => 1,
+            SandboxRetention::Always => 2,
+        }
+    }
+
+    pub(crate) fn from_u8(value: u8) -> Self {
+        match value {
+            0 => SandboxRetention::Never,
+            2 => SandboxRetention::Always,
+            _ => SandboxRetention::OnFailure,
+        }
+    }
+}
+
+/// RAII guard that removes a sandbox root on drop unless the configured
+/// retention policy says to keep it. `succeeded` is flipped to `true` right
+/// before a successful return so the guard covers every exit path — normal
+/// return, `bail!`, and panics — uniformly.
+pub(crate) struct SandboxGuard {
+    root: PathBuf,
+    retention: SandboxRetention,
+    succeeded: bool,
+}
+
+impl SandboxGuard {
+    fn new(root: PathBuf, retention: SandboxRetention) -> Self {
+        Self {
+            root,
+            retention,
+            succeeded: false,
+        }
+    }
+
+    fn succeed(&mut self) {
+        self.succeeded = true;
+    }
+}
+
+impl Drop for SandboxGuard {
+    fn drop(&mut self) {
+        let keep = match self.retention {
+            SandboxRetention::Never => false,
+            SandboxRetention::OnFailure => !self.succeeded,
+            SandboxRetention::Always => true,
+        };
+        if keep {
+            eprintln!("keeping sandbox {}", self.root.display());
+            return;
+        }
+        if let Err(error) = std::fs::remove_dir_all(&self.root) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("failed to remove sandbox {}: {error}", self.root.display());
+            }
+        }
+    }
 }
 
 pub(crate) struct ExecIoSpec {
@@ -573,37 +648,20 @@ pub(crate) fn exec_run_inner(
         return exec_run_unsandboxed(workspace_root, opts, cancellation, None);
     }
 
-    let sandbox_root = create_sandbox_root()?;
-    let tool_path_entries = materialize_tools_into_sandbox(&opts.tools, &sandbox_root)?;
-
-    // Copy inputs into sandbox.
-    for input in &opts.inputs {
-        let relative = artifact_relative_path(&input.path)?;
-        let source = workspace_root.join(&relative);
-        let sandbox_path = sandbox_root.join(&relative);
-        if let Some(parent) = sandbox_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
-        }
-        match input.kind.as_str() {
-            "file" | "manifest" => copy_file(&source, &sandbox_path)?,
-            "directory" => copy_directory(&source, &sandbox_path)?,
-            other => bail!("run() input {} has unsupported kind {other}", input.path),
-        }
-    }
-
-    // Compute input digests.
+    // Compute input digests directly from the workspace sources. Doing this
+    // before any sandbox exists lets a cache hit return without materializing a
+    // sandbox at all — the sandbox is only built on a cache miss (below).
     let mut input_digests = Vec::new();
     for input in &opts.inputs {
         let relative = artifact_relative_path(&input.path)?;
-        let sandbox_path = sandbox_root.join(&relative);
+        let source = workspace_root.join(&relative);
         let (digest, kind) = match input.kind.as_str() {
             "file" | "manifest" => {
-                let (d, _) = store_file_blob(&sandbox_path, &input.kind)?;
+                let (d, _) = store_file_blob(&source, &input.kind)?;
                 (d, input.kind.clone())
             }
             "directory" => {
-                let entries = directory_entries(&sandbox_path)?;
+                let entries = directory_entries(&source)?;
                 (digest_json(&entries)?, "directory".to_owned())
             }
             other => bail!("run() input {} has unsupported kind {other}", input.path),
@@ -673,7 +731,41 @@ pub(crate) fn exec_run_inner(
         });
     }
 
-    // Cache miss — run the command.
+    // Cache miss — build the sandbox and run the command. The guard removes the
+    // sandbox on drop (per the retention policy), covering every exit path below.
+    let sandbox_root = create_sandbox_root()?;
+    let mut sandbox_guard = SandboxGuard::new(sandbox_root.clone(), opts.sandbox_retention);
+    let tool_path_entries = materialize_tools_into_sandbox(&opts.tools, &sandbox_root)?;
+
+    // Copy inputs into the sandbox (copy_file/copy_directory create parents).
+    for input in &opts.inputs {
+        let relative = artifact_relative_path(&input.path)?;
+        let source = workspace_root.join(&relative);
+        let sandbox_path = sandbox_root.join(&relative);
+        match input.kind.as_str() {
+            "file" | "manifest" => copy_file(&source, &sandbox_path)?,
+            "directory" => copy_directory(&source, &sandbox_path)?,
+            other => bail!("run() input {} has unsupported kind {other}", input.path),
+        }
+    }
+
+    // Pre-create the directories named by declared outputs so rule scripts don't
+    // need to `mkdir` them: the parent dir for file/manifest outputs, and the
+    // directory itself for directory outputs.
+    for output in &opts.outputs {
+        let relative = artifact_relative_path(&output.path)?;
+        let sandbox_path = sandbox_root.join(&relative);
+        let dir = match output.kind.as_str() {
+            "file" | "manifest" => sandbox_path.parent().map(Path::to_path_buf),
+            "directory" => Some(sandbox_path),
+            other => bail!("run() output {} has unsupported kind {other}", output.path),
+        };
+        if let Some(dir) = dir {
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("create output dir {}", dir.display()))?;
+        }
+    }
+
     let _cmd_display = if opts.display.is_empty() {
         opts.argv.join(" ")
     } else {
@@ -789,6 +881,9 @@ pub(crate) fn exec_run_inner(
         materialize_cached_outputs(&record, workspace_root)?;
         materialize_named_caches(&record, workspace_root)?;
     }
+
+    // Command and output ingestion succeeded — let the guard delete the sandbox.
+    sandbox_guard.succeed();
 
     Ok(ExecRunResult {
         stdout,
@@ -927,6 +1022,7 @@ mod tests {
             force_cache: false,
             sandbox: true,
             no_cache: false,
+            sandbox_retention: SandboxRetention::default(),
         }
     }
 
@@ -983,6 +1079,7 @@ mod tests {
             force_cache: false,
             sandbox: true,
             no_cache: false,
+            sandbox_retention: SandboxRetention::default(),
         }
     }
 
@@ -1303,5 +1400,88 @@ mod tests {
             std::fs::read_to_string(p.join("build/dir/nested/b.txt")).unwrap(),
             "b"
         );
+    }
+
+    #[test]
+    fn exec_run_precreates_nested_output_dir_without_mkdir() {
+        // The script writes to a nested path and a directory output without any
+        // `mkdir`: the engine must pre-create both from the declared outputs.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let cmd = "printf x > build/nested/out.txt && printf y > build/dir/inner.txt";
+        let mut opts = run_opts(&["sh", "-c", cmd], &[], &["build/nested/out.txt"]);
+        opts.outputs.push(ExecIoSpec {
+            path: "build/dir".to_owned(),
+            kind: "directory".to_owned(),
+            named_cache: None,
+        });
+        opts.no_cache = true;
+
+        exec_run_inner(p, opts, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/nested/out.txt")).unwrap(),
+            "x"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/dir/inner.txt")).unwrap(),
+            "y"
+        );
+    }
+
+    fn guard_sandbox_dir() -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let sandbox = root.path().join("sandbox-test");
+        std::fs::create_dir(&sandbox).unwrap();
+        (root, sandbox)
+    }
+
+    #[test]
+    fn sandbox_guard_deletes_on_success() {
+        let (_root, sandbox) = guard_sandbox_dir();
+        {
+            let mut guard = SandboxGuard::new(sandbox.clone(), SandboxRetention::OnFailure);
+            guard.succeed();
+        }
+        assert!(!sandbox.exists(), "successful OnFailure run must delete sandbox");
+    }
+
+    #[test]
+    fn sandbox_guard_keeps_failure_by_default() {
+        let (_root, sandbox) = guard_sandbox_dir();
+        {
+            // Not marked succeeded — simulates a failed command.
+            let _guard = SandboxGuard::new(sandbox.clone(), SandboxRetention::OnFailure);
+        }
+        assert!(sandbox.exists(), "failed OnFailure run must keep sandbox");
+    }
+
+    #[test]
+    fn sandbox_guard_never_deletes_even_on_failure() {
+        let (_root, sandbox) = guard_sandbox_dir();
+        {
+            let _guard = SandboxGuard::new(sandbox.clone(), SandboxRetention::Never);
+        }
+        assert!(!sandbox.exists(), "Never retention must always delete");
+    }
+
+    #[test]
+    fn sandbox_guard_always_keeps_even_on_success() {
+        let (_root, sandbox) = guard_sandbox_dir();
+        {
+            let mut guard = SandboxGuard::new(sandbox.clone(), SandboxRetention::Always);
+            guard.succeed();
+        }
+        assert!(sandbox.exists(), "Always retention must keep the sandbox");
+    }
+
+    #[test]
+    fn sandbox_retention_u8_roundtrips() {
+        for r in [
+            SandboxRetention::Never,
+            SandboxRetention::OnFailure,
+            SandboxRetention::Always,
+        ] {
+            assert_eq!(SandboxRetention::from_u8(r.as_u8()), r);
+        }
     }
 }

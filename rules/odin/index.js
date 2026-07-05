@@ -855,7 +855,7 @@ export const odinGenRun = product("odin-gen", "build", async function odinGenRun
         return run({
             argv: [
                 "sh", "-c",
-                'mkdir -p "$(dirname "$1")" && printf %s "$2" > "$1"',
+                'printf %s "$2" > "$1"',
                 "odin-gen-write",
                 output_path(outPath),
                 content,
