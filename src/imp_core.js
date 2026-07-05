@@ -506,6 +506,17 @@ export function workspaceMount(opts) {
     __host_workspace_mount(opts.prefix, opts.path);
 }
 
+/**
+ * Register a JS export as the implementation of a target-constructor rule
+ * name, so codegen'd BUILD.js files can reference the rule by name without
+ * knowing which module defines it.
+ *
+ * @param {object} opts
+ * @param {string} opts.rule Rule name as referenced by generated BUILD.js files.
+ * @param {string} opts.importFrom Module specifier to import the rule from.
+ * @param {string} [opts.importName] Export name to import, if different from `rule`.
+ * @returns {void}
+ */
 export function registerBuildRule(opts) {
     if (!opts || typeof opts.rule !== "string" || typeof opts.importFrom !== "string") {
         throw new Error("registerBuildRule({ rule, importFrom, importName? }) requires rule and importFrom");
@@ -513,6 +524,13 @@ export function registerBuildRule(opts) {
     __host_register_build_rule(opts.rule, opts.importFrom, opts.importName || opts.rule);
 }
 
+/**
+ * Construct a lazy reference to another target by workspace address, for use
+ * in attrs before the referenced target has necessarily been declared.
+ *
+ * @param {string} address Workspace target address, e.g. "//lib:foo".
+ * @returns {object} An opaque target-reference value.
+ */
 export function targetRef(address) {
     if (typeof address !== "string" || !address.startsWith("//")) {
         throw new Error("targetRef(address) requires a workspace target address");
@@ -910,14 +928,6 @@ function _pop_call(key_string, contextId) {
 }
 
 /**
- * Wrap an async function so repeated calls with identical arguments return the
- * cached result. Cycles in the call graph are detected and thrown as errors.
- * Call getMemoTrace() for hit/miss events and dependency edges.
- *
- * @param {function} fn Named async function to memoize.
- * @returns {function}
- */
-/**
  * Register a memoized build function as a CLI-dispatchable product.
  *
  * Calling `product(kind, name, fn)` is equivalent to `memo(fn)` plus
@@ -937,6 +947,14 @@ export function product(kind, name, fn) {
     return memoized;
 }
 
+/**
+ * Wrap an async function so repeated calls with identical arguments return the
+ * cached result. Cycles in the call graph are detected and thrown as errors.
+ * Call getMemoTrace() for hit/miss events and dependency edges.
+ *
+ * @param {function} fn Named async function to memoize.
+ * @returns {function}
+ */
 export function memo(fn) {
     const fn_id = _stable_function_id(fn);
     function display_arg(arg) {

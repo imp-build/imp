@@ -1,0 +1,17 @@
+# base_url is a root-relative placeholder for now — deployment (subdomain vs.
+# sub-path embedding) is out of scope for this pass. Templates use Zola's
+# get_url()/base_url helpers exclusively, so switching to e.g. "/docs" for
+# sub-path embedding later needs no template/content changes.
+base_url = "/"
+
+title = "imp"
+description = "A hermetic, content-addressed build system."
+
+compile_sass = false
+build_search_index = false
+
+[markdown.highlighting]
+style = "inline"
+theme = "Dracula"
+
+[extra]

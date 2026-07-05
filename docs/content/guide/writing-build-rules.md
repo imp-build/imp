@@ -1,0 +1,26 @@
++++
+title = "Writing build rules"
+weight = 2
+template = "page.html"
++++
+
+A rule module pairs a **target constructor** (a plain function returning `target({ kind, attrs })`) with a **product** — a memoized async function registered against that target kind and a goal name, e.g. `"build"`:
+
+```js
+import { target, product, run, output, output_path } from "imp:core";
+
+export function stampFile({ output, text }) {
+    return target({ kind: "stamp-file", attrs: { entrypoint: output, sources: text } });
+}
+
+export const file = product("stamp-file", "build", async function file(handle) {
+    return run({
+        argv: ["sh", "-c", "mkdir -p \"$(dirname \"$1\")\" && printf '%s\\n' \"$2\" > \"$1\"",
+            "imp-stamp", output_path(handle.attrs.entrypoint), handle.attrs.sources],
+        outputs: [output(handle.attrs.entrypoint)],
+        display: `write ${handle.attrs.entrypoint}`,
+    });
+});
+```
+
+Every real subprocess runs through `run()`, hermetically sandboxed and cached by the content-addressed digest of its declared inputs, tools, and configuration. See the [JS API reference](../../reference/js-api/) for the full DSL surface.
