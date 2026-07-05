@@ -1235,7 +1235,7 @@ export function run(opts) {
     _trace_effect_in_context(effect, contextEntry.ctx);
     const contextId = contextEntry.id;
     const owner = contextEntry.ctx.owner;
-    return _contextual_thenable(__host_run({
+    const promise = __host_run({
         argv: opts.argv,
         display: opts.display,
         env: opts.env,
@@ -1247,7 +1247,11 @@ export function run(opts) {
         forceCache: opts.forceCache,
         sandbox: opts.sandbox,
         __owner: owner,
-    }), contextId);
+    }).then((result) => ({
+        ...result,
+        outputs,
+    }));
+    return _contextual_thenable(promise, contextId);
 }
 
 export function group(items) {

@@ -1,5 +1,5 @@
 import { describe, expect, test, withFakeRun } from "//rules/imp/test";
-import { env, which, glob, paths, read_file, run, getMemoTrace, memo, workspace_mutation, configure, configuration } from "imp:core";
+import { env, which, glob, paths, read_file, run, output, getMemoTrace, memo, workspace_mutation, configure, configuration } from "imp:core";
 
 describe("tracked runtime APIs", () => {
 
@@ -117,8 +117,13 @@ test("read_file reads a file written by run", async () => {
 test("withFakeRun: run() resolves without executing and still traces", async () => {
     const realHostRun = globalThis.__host_run;
     const result = await withFakeRun(() =>
-        run({ argv: ["sh", "-c", "exit 99"], display: "should-not-run" }));
+        run({
+            argv: ["sh", "-c", "exit 99"],
+            display: "should-not-run",
+            outputs: [output("fake/out.txt")],
+        }));
     expect(result.exitCode).toBe(0);
+    expect(result.outputs).toEqual([{ kind: "file", path: "fake/out.txt" }]);
     expect(globalThis.__host_run).toBe(realHostRun);
     const { trace } = getMemoTrace();
     const effects = trace.filter(t => t.event === "effect" && t.kind === "run");

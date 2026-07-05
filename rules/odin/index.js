@@ -55,6 +55,10 @@ import {
 // from it is used in this file.
 import "//rules/workflows/run";
 
+// Registers the "build" goal's artifact summary callback for consumers that
+// import Odin build rules without importing the workflows layer explicitly.
+import "//rules/workflows/build";
+
 export {
     acquireOdinToolchain,
     createOdinToolchainApi,

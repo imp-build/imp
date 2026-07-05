@@ -12,6 +12,10 @@ import {
     defaultZigToolchain,
 } from "//rules/c/zig/toolchain";
 
+// Registers the "build" goal's artifact summary callback for consumers that
+// import CMake build rules without importing the workflows layer explicitly.
+import "//rules/workflows/build";
+
 export {
     acquireCmakeToolchain,
     cmakeBin,
