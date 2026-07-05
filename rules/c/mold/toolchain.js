@@ -1,5 +1,6 @@
-import { target, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
+import { generateToolLockfile } from "//rules/workflows/lockfiles";
 
 const MOLD_TOOLCHAIN_CACHE = "mold-toolchains";
 
@@ -47,6 +48,21 @@ export function moldArtifactName(version, plat) {
  */
 export function moldDownloadUrl(version, plat) {
     return `https://github.com/rui314/mold/releases/download/v${version}/${moldArtifactName(version, plat)}`;
+}
+
+// mold ships prebuilt Linux binaries only (see requireSupportedPlatform).
+const MOLD_SUPPORTED_PLATFORMS = [
+    { os: "linux", arch: "x86_64" },
+    { os: "linux", arch: "aarch64" },
+];
+
+/**
+ * Return the platforms mold publishes release archives for.
+ *
+ * @returns {Array<{ os: string, arch: string }>}
+ */
+export function moldSupportedPlatforms() {
+    return MOLD_SUPPORTED_PLATFORMS.map((plat) => ({ ...plat }));
 }
 
 /**
@@ -287,3 +303,12 @@ export function defaultMoldToolchainVersion() {
 export function defaultMoldToolchain() {
     return defaultApi.defaultMoldToolchain();
 }
+
+product("mold-toolchain", "gen-lockfiles", (handle) =>
+    generateToolLockfile({
+        handle,
+        name: "mold",
+        platforms: moldSupportedPlatforms(),
+        downloadUrl: moldDownloadUrl,
+        artifactName: moldArtifactName,
+    }));

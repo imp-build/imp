@@ -6,6 +6,7 @@ import "//rules/odin";
 import "//rules/workflows/build";
 import "//rules/workflows/fmt";
 import "//rules/workflows/lint";
+import "//rules/workflows/lockfiles";
 import "//rules/workflows/package";
 import "//rules/workflows/run";
 import "//rules/workflows/test";

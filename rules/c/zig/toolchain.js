@@ -1,5 +1,6 @@
-import { target, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
+import { generateToolLockfile } from "//rules/workflows/lockfiles";
 
 const ZIG_TOOLCHAIN_CACHE = "zig-toolchains";
 
@@ -47,6 +48,25 @@ export function zigArtifactName(version, plat) {
  */
 export function zigDownloadUrl(version, plat) {
     return `https://ziglang.org/download/${version}/${zigArtifactName(version, plat)}`;
+}
+
+// The platforms this module acquires Zig for (see requireSupportedPlatform):
+// Linux and Windows on x86_64/aarch64. Zig ships macOS too, but that isn't
+// wired here, so it stays out of the lockfile matrix.
+const ZIG_SUPPORTED_PLATFORMS = [
+    { os: "linux", arch: "x86_64" },
+    { os: "linux", arch: "aarch64" },
+    { os: "windows", arch: "x86_64" },
+    { os: "windows", arch: "aarch64" },
+];
+
+/**
+ * Return the platforms this module resolves Zig release archives for.
+ *
+ * @returns {Array<{ os: string, arch: string }>}
+ */
+export function zigSupportedPlatforms() {
+    return ZIG_SUPPORTED_PLATFORMS.map((plat) => ({ ...plat }));
 }
 
 /**
@@ -402,3 +422,12 @@ export function defaultZigToolchainVersion() {
 export function defaultZigToolchain() {
     return defaultApi.defaultZigToolchain();
 }
+
+product("zig-toolchain", "gen-lockfiles", (handle) =>
+    generateToolLockfile({
+        handle,
+        name: "zig",
+        platforms: zigSupportedPlatforms(),
+        downloadUrl: zigDownloadUrl,
+        artifactName: zigArtifactName,
+    }));

@@ -1,5 +1,6 @@
-import { target, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
+import { generateToolLockfile } from "//rules/workflows/lockfiles";
 
 const CMAKE_TOOLCHAIN_CACHE = "cmake-toolchains";
 
@@ -56,6 +57,17 @@ export function cmakeArtifactName(version, plat) {
  */
 export function cmakeDownloadUrl(version, plat) {
     return `https://github.com/Kitware/CMake/releases/download/v${version}/${cmakeArtifactName(version, plat)}`;
+}
+
+/**
+ * Return the platforms CMake publishes release archives for, derived from the
+ * os/arch matrix this module already supports.
+ *
+ * @returns {Array<{ os: string, arch: string }>}
+ */
+export function cmakeSupportedPlatforms() {
+    return Object.entries(archNameByOs).flatMap(([os, archNames]) =>
+        Object.keys(archNames).map((arch) => ({ os, arch })));
 }
 
 /**
@@ -298,3 +310,12 @@ export function defaultCmakeToolchainVersion() {
 export function defaultCmakeToolchain() {
     return defaultApi.defaultCmakeToolchain();
 }
+
+product("cmake-toolchain", "gen-lockfiles", (handle) =>
+    generateToolLockfile({
+        handle,
+        name: "cmake",
+        platforms: cmakeSupportedPlatforms(),
+        downloadUrl: cmakeDownloadUrl,
+        artifactName: cmakeArtifactName,
+    }));

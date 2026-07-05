@@ -1,5 +1,6 @@
-import { target, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
+import { generateToolLockfile } from "//rules/workflows/lockfiles";
 
 const ZOLA_TOOLCHAIN_CACHE = "zola-toolchains";
 
@@ -55,6 +56,19 @@ export function zolaArtifactName(version, plat) {
  */
 export function zolaDownloadUrl(version, plat) {
     return `https://github.com/getzola/zola/releases/download/v${version}/${zolaArtifactName(version, plat)}`;
+}
+
+/**
+ * Return the platforms zola publishes release archives for, derived from the
+ * module's TARGET_TRIPLES map (keyed "os-arch").
+ *
+ * @returns {Array<{ os: string, arch: string }>}
+ */
+export function zolaSupportedPlatforms() {
+    return Object.keys(TARGET_TRIPLES).map((key) => {
+        const sep = key.indexOf("-");
+        return { os: key.slice(0, sep), arch: key.slice(sep + 1) };
+    });
 }
 
 /**
@@ -296,3 +310,12 @@ export function defaultZolaToolchainVersion() {
 export function defaultZolaToolchain() {
     return defaultApi.defaultZolaToolchain();
 }
+
+product("zola-toolchain", "gen-lockfiles", (handle) =>
+    generateToolLockfile({
+        handle,
+        name: "zola",
+        platforms: zolaSupportedPlatforms(),
+        downloadUrl: zolaDownloadUrl,
+        artifactName: zolaArtifactName,
+    }));

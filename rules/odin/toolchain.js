@@ -1,4 +1,5 @@
-import { target, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { target, product, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { generateToolLockfile } from "//rules/workflows/lockfiles";
 
 const ODIN_TOOLCHAIN_CACHE = "odin-toolchains";
 const ODINFMT_CACHE = "odinfmt-toolchains";
@@ -88,6 +89,26 @@ export function odinArtifactName(version, plat) {
  */
 export function odinDownloadUrl(version, plat) {
     return `https://github.com/odin-lang/Odin/releases/download/${version}/${odinArtifactName(version, plat)}`;
+}
+
+// The platforms Odin publishes a release archive for. osMap × archMap would also
+// admit windows/aarch64, which Odin does not ship — so the lockfile matrix is
+// curated to what actually exists on the releases page.
+const ODIN_SUPPORTED_PLATFORMS = [
+    { os: "linux", arch: "x86_64" },
+    { os: "linux", arch: "aarch64" },
+    { os: "macos", arch: "x86_64" },
+    { os: "macos", arch: "aarch64" },
+    { os: "windows", arch: "x86_64" },
+];
+
+/**
+ * Return the platforms Odin publishes release archives for.
+ *
+ * @returns {Array<{ os: string, arch: string }>}
+ */
+export function odinSupportedPlatforms() {
+    return ODIN_SUPPORTED_PLATFORMS.map((plat) => ({ ...plat }));
 }
 
 /**
@@ -318,3 +339,12 @@ export function defaultOdinToolchainVersion() {
 export function defaultOdinToolchain() {
     return defaultApi.defaultOdinToolchain();
 }
+
+product("odin-toolchain", "gen-lockfiles", (handle) =>
+    generateToolLockfile({
+        handle,
+        name: "odin",
+        platforms: odinSupportedPlatforms(),
+        downloadUrl: odinDownloadUrl,
+        artifactName: odinArtifactName,
+    }));
