@@ -4,6 +4,7 @@ mod commands;
 mod env;
 mod exec;
 mod loader;
+mod logging;
 mod runtime;
 mod scheduler;
 mod selector;
@@ -142,7 +143,11 @@ struct GoalArgs {
 #[tokio::main]
 async fn main() {
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    if let Some(name) = args.get(1).and_then(|a| a.to_str()).and_then(|a| a.strip_prefix('@')) {
+    if let Some(name) = args
+        .get(1)
+        .and_then(|a| a.to_str())
+        .and_then(|a| a.strip_prefix('@'))
+    {
         std::process::exit(run_tool(name, &args[2..]));
     }
 
@@ -344,9 +349,9 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
 
 async fn load_workspace_with_messages(
     workspace_root: &std::path::Path,
-    tree: &Tree,
+    _tree: &Tree,
 ) -> Result<runtime::LiveWorkspace> {
-    runtime::load_workspace_with_host_log(workspace_root, tree.log_sink()).await
+    runtime::load_workspace(workspace_root).await
 }
 
 fn effective_js_workers(workspace: &spike::Workspace, cli_value: Option<usize>) -> Result<usize> {

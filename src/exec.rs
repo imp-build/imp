@@ -18,10 +18,9 @@ use std::os::unix::process::CommandExt;
 
 use crate::cache::{
     artifact_relative_path, cached_outputs_present, copy_directory, copy_file, create_sandbox_root,
-    digest_json, directory_entries, file_mode, materialize_cached_outputs, materialize_named_caches,
-    named_cache_key_path, store_file_blob, task_record_path, write_task_cache_record,
-    CacheInputDigest, CachedArtifact,
-    TaskCacheRecord, TASK_CACHE_VERSION,
+    digest_json, directory_entries, file_mode, materialize_cached_outputs,
+    materialize_named_caches, named_cache_key_path, store_file_blob, task_record_path,
+    write_task_cache_record, CacheInputDigest, CachedArtifact, TaskCacheRecord, TASK_CACHE_VERSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -1084,7 +1083,9 @@ mod tests {
     }
 
     fn marker_count(marker: &std::path::Path) -> usize {
-        std::fs::read_to_string(marker).map(|s| s.len()).unwrap_or(0)
+        std::fs::read_to_string(marker)
+            .map(|s| s.len())
+            .unwrap_or(0)
     }
 
     #[test]
@@ -1141,7 +1142,10 @@ mod tests {
         exec_run_inner(p, stage1(), None).unwrap();
         exec_run_inner(p, stage2(), None).unwrap();
         assert_eq!((marker_count(&m1), marker_count(&m2)), (1, 1));
-        assert_eq!(std::fs::read_to_string(p.join("build/out.txt")).unwrap(), "one");
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
+            "one"
+        );
 
         // Unchanged rerun: both stages hit.
         exec_run_inner(p, stage1(), None).unwrap();
@@ -1154,7 +1158,10 @@ mod tests {
         exec_run_inner(p, stage1(), None).unwrap();
         exec_run_inner(p, stage2(), None).unwrap();
         assert_eq!((marker_count(&m1), marker_count(&m2)), (2, 2));
-        assert_eq!(std::fs::read_to_string(p.join("build/out.txt")).unwrap(), "two");
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
+            "two"
+        );
     }
 
     #[test]
@@ -1193,7 +1200,11 @@ mod tests {
         };
         exec_run_inner(p, opts(), None).unwrap();
         exec_run_inner(p, opts(), None).unwrap();
-        assert_eq!(marker_count(&marker), 1, "force_cache must cache impure runs");
+        assert_eq!(
+            marker_count(&marker),
+            1,
+            "force_cache must cache impure runs"
+        );
     }
 
     #[test]
@@ -1241,7 +1252,10 @@ mod tests {
         let result = exec_run_inner(p, opts, None);
         std::env::remove_var("IMP_TEST_LEAK_EXEC");
         result.unwrap();
-        assert_eq!(std::fs::read_to_string(p.join("build/out.txt")).unwrap(), "");
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
+            ""
+        );
     }
 
     #[test]
@@ -1303,7 +1317,10 @@ mod tests {
         opts.env = vec!["IMP_TEST_PT_E2E_UNSET".to_owned()];
         opts.no_cache = true;
         exec_run_inner(p, opts, None).unwrap();
-        assert_eq!(std::fs::read_to_string(p.join("build/out.txt")).unwrap(), "");
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
+            ""
+        );
     }
 
     #[test]
@@ -1345,7 +1362,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         let marker = p.join("runs.txt");
-        let cmd = format!("printf r >> '{}' && mkdir -p build && printf x > build/out.txt", marker.display());
+        let cmd = format!(
+            "printf r >> '{}' && mkdir -p build && printf x > build/out.txt",
+            marker.display()
+        );
         let opts = || {
             let mut o = run_opts(&["sh", "-c", &cmd], &[], &["build/out.txt"]);
             o.env = vec!["IMP_TEST_PT_DIGEST".to_owned()];
@@ -1386,7 +1406,10 @@ mod tests {
             o
         };
         exec_run_inner(p, opts(), None).unwrap();
-        assert_eq!(std::fs::read_to_string(p.join("build/dir/a.txt")).unwrap(), "a");
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/dir/a.txt")).unwrap(),
+            "a"
+        );
         assert_eq!(
             std::fs::read_to_string(p.join("build/dir/nested/b.txt")).unwrap(),
             "b"
@@ -1442,7 +1465,10 @@ mod tests {
             let mut guard = SandboxGuard::new(sandbox.clone(), SandboxRetention::OnFailure);
             guard.succeed();
         }
-        assert!(!sandbox.exists(), "successful OnFailure run must delete sandbox");
+        assert!(
+            !sandbox.exists(),
+            "successful OnFailure run must delete sandbox"
+        );
     }
 
     #[test]

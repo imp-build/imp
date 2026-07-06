@@ -8,7 +8,6 @@ use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use walkdir::WalkDir;
 
-
 pub(crate) const TASK_CACHE_VERSION: u32 = 5;
 
 // ---------------------------------------------------------------------------
@@ -409,12 +408,16 @@ pub(crate) fn materialize_cached_outputs(
 /// Materialize any outputs bound to a named cache slot (via `output({ namedCache })`)
 /// from their CAS content. Runs after both fresh executions and task-cache hits, so a
 /// named cache wiped between runs is transparently repopulated.
-pub(crate) fn materialize_named_caches(record: &TaskCacheRecord, workspace_root: &Path) -> Result<()> {
+pub(crate) fn materialize_named_caches(
+    record: &TaskCacheRecord,
+    workspace_root: &Path,
+) -> Result<()> {
     for output in &record.outputs {
         let Some(named_cache) = &output.named_cache else {
             continue;
         };
-        let destination = named_cache_key_path(workspace_root, &named_cache.name, &named_cache.key)?;
+        let destination =
+            named_cache_key_path(workspace_root, &named_cache.name, &named_cache.key)?;
         match output.kind.as_str() {
             "directory" => materialize_cached_directory(output, &destination)?,
             "file" | "manifest" => {
@@ -612,6 +615,9 @@ mod tests {
 
         let restored_target = std::fs::read_link(destination.join("link")).unwrap();
         assert_eq!(restored_target, Path::new("real"));
-        assert_eq!(std::fs::read_to_string(destination.join("link")).unwrap(), "hello");
+        assert_eq!(
+            std::fs::read_to_string(destination.join("link")).unwrap(),
+            "hello"
+        );
     }
 }

@@ -3,7 +3,6 @@
 //! This module is the public home for the embedded JavaScript runtime APIs
 //! while the larger `spike` module is split down further.
 
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicU8},
@@ -14,102 +13,6 @@ use rquickjs::{AsyncContext as JsContext, AsyncRuntime as Runtime};
 
 use crate::scheduler::Scheduler;
 use crate::spike::Workspace;
-
-#[derive(Clone)]
-pub struct HostLogSink {
-    inner: Arc<Mutex<HostLogDestination>>,
-}
-
-enum HostLogDestination {
-    Stderr,
-    Live(indicatif::MultiProgress),
-    #[cfg(test)]
-    Buffer(Arc<Mutex<Vec<String>>>),
-}
-
-impl HostLogSink {
-    #[allow(dead_code)]
-    pub fn stderr() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(HostLogDestination::Stderr)),
-        }
-    }
-
-    /// Writes straight to stderr, synchronized with `multi`'s progress bars
-    /// via `MultiProgress::suspend` so log lines never tear a bar redraw.
-    pub fn live(multi: indicatif::MultiProgress) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(HostLogDestination::Live(multi))),
-        }
-    }
-
-    /// Captures formatted log lines in memory instead of writing them
-    /// anywhere, so tests can assert on them without touching real stderr.
-    #[cfg(test)]
-    pub fn buffer() -> (Self, Arc<Mutex<Vec<String>>>) {
-        let lines = Arc::new(Mutex::new(Vec::new()));
-        let sink = Self {
-            inner: Arc::new(Mutex::new(HostLogDestination::Buffer(Arc::clone(&lines)))),
-        };
-        (sink, lines)
-    }
-
-    pub fn writer(&self, level: impl Into<String>) -> HostLogWriter {
-        HostLogWriter {
-            sink: self.clone(),
-            level: level.into(),
-            buffer: String::new(),
-        }
-    }
-
-    fn log(&self, level: &str, message: &str) {
-        let level = level.trim();
-        let text = format!("[{level}] {message}");
-        match &*self.inner.lock().unwrap() {
-            HostLogDestination::Stderr => eprintln!("{text}"),
-            HostLogDestination::Live(multi) => multi.suspend(|| eprintln!("{text}")),
-            #[cfg(test)]
-            HostLogDestination::Buffer(lines) => lines.lock().unwrap().push(text),
-        }
-    }
-}
-
-pub struct HostLogWriter {
-    sink: HostLogSink,
-    level: String,
-    buffer: String,
-}
-
-impl HostLogWriter {
-    fn emit_complete_lines(&mut self) {
-        while let Some(newline) = self.buffer.find('\n') {
-            let mut line = self.buffer.drain(..=newline).collect::<String>();
-            if line.ends_with('\n') {
-                line.pop();
-            }
-            if line.ends_with('\r') {
-                line.pop();
-            }
-            self.sink.log(&self.level, &line);
-        }
-    }
-}
-
-impl Write for HostLogWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.buffer.push_str(&String::from_utf8_lossy(buf));
-        self.emit_complete_lines();
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        if !self.buffer.is_empty() {
-            let line = std::mem::take(&mut self.buffer);
-            self.sink.log(&self.level, &line);
-        }
-        Ok(())
-    }
-}
 
 /// A loaded workspace with a live QuickJS runtime.
 ///
@@ -164,6 +67,4 @@ impl std::ops::Deref for LiveWorkspace {
 }
 
 #[allow(unused_imports)]
-pub use crate::spike::{
-    evaluate_product_json, generate_build_files, load_workspace, load_workspace_with_host_log,
-};
+pub use crate::spike::{evaluate_product_json, generate_build_files, load_workspace};

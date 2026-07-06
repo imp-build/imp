@@ -2,20 +2,17 @@ use std::time::Duration;
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-use crate::runtime::HostLogSink;
-
 const TICK_INTERVAL: Duration = Duration::from_millis(200);
 
 pub struct Tree {
     multi: MultiProgress,
-    log_sink: HostLogSink,
 }
 
 impl Tree {
     fn new() -> Self {
         let multi = MultiProgress::new();
-        let log_sink = HostLogSink::live(multi.clone());
-        Self { multi, log_sink }
+        crate::logging::init_live(multi.clone());
+        Self { multi }
     }
 
     pub fn add_child(&self, name: impl Into<String>) -> ProgressBar {
@@ -23,12 +20,6 @@ impl Tree {
         init_task(&item);
         item.set_message(name.into());
         item
-    }
-
-    /// Shared sink that routes workspace host logs to stderr, synchronized
-    /// with the progress bars via `MultiProgress::suspend`.
-    pub fn log_sink(&self) -> HostLogSink {
-        self.log_sink.clone()
     }
 
     /// An owned handle to the progress renderer, suitable for moving into a

@@ -74,7 +74,10 @@ pub(crate) fn select_roots<'a>(
 /// if the goal has nothing to produce for that kind.
 fn goal_product_for_kind(workspace: &Workspace, goal: &Goal, kind: &str) -> Option<String> {
     let key = (kind.to_owned(), goal.product.clone());
-    workspace.products.contains_key(&key).then(|| goal.product.clone())
+    workspace
+        .products
+        .contains_key(&key)
+        .then(|| goal.product.clone())
 }
 
 fn matches_selector(target: &Target, selector: &str) -> bool {

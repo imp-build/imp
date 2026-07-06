@@ -146,7 +146,9 @@ fn strip_zip_components(
 ) -> Result<()> {
     let mut current = root.to_path_buf();
     for _ in 0..strip_components {
-        let mut entries: Vec<_> = std::fs::read_dir(&current)?.filter_map(|e| e.ok()).collect();
+        let mut entries: Vec<_> = std::fs::read_dir(&current)?
+            .filter_map(|e| e.ok())
+            .collect();
         if entries.len() != 1 || !entries[0].path().is_dir() {
             bail!(
                 "cannot strip {strip_components} path component(s) from {}: expected a single top-level directory",

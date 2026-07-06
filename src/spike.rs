@@ -6,7 +6,6 @@
 //! DAG without executing it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU8, Ordering},
@@ -19,7 +18,7 @@ use crate::loader::{
     resolve_workspace_module, validate_workspace_module_path, ModuleKind, ModuleMount, ImpLoader,
     ImpResolver,
 };
-use crate::runtime::{HostLogSink, LiveWorkspace};
+use crate::runtime::LiveWorkspace;
 use crate::selector::{select_roots, select_targets};
 use crate::toolchain;
 use anyhow::{bail, Context, Result};
@@ -264,13 +263,8 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
 /// `exec` functions can be invoked during task execution.
 #[allow(dead_code)]
 pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
-    load_workspace_with_host_log(root, HostLogSink::stderr()).await
-}
+    crate::logging::ensure_installed();
 
-pub async fn load_workspace_with_host_log(
-    root: &Path,
-    host_log: HostLogSink,
-) -> Result<LiveWorkspace> {
     let root = root
         .canonicalize()
         .with_context(|| format!("canonicalize workspace root {}", root.display()))?;
@@ -279,8 +273,9 @@ pub async fn load_workspace_with_host_log(
     let module_mounts: Arc<Mutex<Vec<ModuleMount>>> = Arc::new(Mutex::new(Vec::new()));
     let exec_root: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
     let exec_no_cache = Arc::new(AtomicBool::new(false));
-    let exec_sandbox_retention =
-        Arc::new(AtomicU8::new(crate::exec::SandboxRetention::default().as_u8()));
+    let exec_sandbox_retention = Arc::new(AtomicU8::new(
+        crate::exec::SandboxRetention::default().as_u8(),
+    ));
     let scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>> =
         Arc::new(Mutex::new(None));
     let selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(None));
@@ -339,7 +334,6 @@ pub async fn load_workspace_with_host_log(
                 Arc::clone(&exec_sandbox_retention),
                 Arc::clone(&scheduler),
                 Arc::clone(&selected_roots),
-                host_log.clone(),
             )
         })
         .await
@@ -610,7 +604,6 @@ fn register_globals<'js>(
     exec_sandbox_retention: Arc<AtomicU8>,
     scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>>,
     selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
-    host_log: HostLogSink,
 ) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
@@ -711,7 +704,11 @@ fn register_globals<'js>(
                 n
             };
             ctx.globals().set(exec_name.as_str(), fn_val)?;
-            state_gc.lock().unwrap().goal_callbacks.insert(name, exec_name);
+            state_gc
+                .lock()
+                .unwrap()
+                .goal_callbacks
+                .insert(name, exec_name);
             Ok(())
         },
     )?;
@@ -798,10 +795,7 @@ fn register_globals<'js>(
             };
             let mut hs = state_g.lock().unwrap();
             if !hs.goals.contains_key(&name) {
-                hs.goals.insert(
-                    name.clone(),
-                    Goal { name, product },
-                );
+                hs.goals.insert(name.clone(), Goal { name, product });
             }
             Ok(())
         },
@@ -1191,20 +1185,16 @@ fn register_globals<'js>(
     // Errors if called outside of goal execution (selected_roots is None).
     // ------------------------------------------------------------------
     let selected_roots_st = Arc::clone(&selected_roots);
-    let host_selected_targets = Function::new(
-        ctx.clone(),
-        move || -> rquickjs::Result<String> {
-            let guard = selected_roots_st.lock().unwrap();
-            let selection = guard.as_ref().ok_or_else(|| {
-                action_spec_error(
-                    "selectedTargets() may only be called during goal execution".to_owned(),
-                )
-            })?;
-            serde_json::to_string(selection).map_err(|e| {
-                rquickjs::Error::new_loading_message("selectedTargets", e.to_string())
-            })
-        },
-    )?;
+    let host_selected_targets = Function::new(ctx.clone(), move || -> rquickjs::Result<String> {
+        let guard = selected_roots_st.lock().unwrap();
+        let selection = guard.as_ref().ok_or_else(|| {
+            action_spec_error(
+                "selectedTargets() may only be called during goal execution".to_owned(),
+            )
+        })?;
+        serde_json::to_string(selection)
+            .map_err(|e| rquickjs::Error::new_loading_message("selectedTargets", e.to_string()))
+    })?;
     globals.set("__host_selected_targets", host_selected_targets)?;
 
     // ------------------------------------------------------------------
@@ -1503,14 +1493,18 @@ fn register_globals<'js>(
     // ------------------------------------------------------------------
     // __host_log(level, message)
     // ------------------------------------------------------------------
-    let host_log_sink = host_log.clone();
     let host_log = Function::new(
         ctx.clone(),
         move |_ctx: Ctx<'js>, level: String, message: String| -> rquickjs::Result<()> {
-            let mut writer = host_log_sink.writer(level);
-            writeln!(&mut writer, "{message}").map_err(|e| {
-                rquickjs::Error::new_loading_message("log", format!("write log message: {e}"))
-            })?;
+            let level = match level.trim().to_ascii_lowercase().as_str() {
+                "trace" => log::Level::Trace,
+                "debug" => log::Level::Debug,
+                "info" => log::Level::Info,
+                "warn" | "warning" => log::Level::Warn,
+                "error" => log::Level::Error,
+                _ => log::Level::Info,
+            };
+            log::log!(target: "imp::js", level, "{message}");
             Ok(())
         },
     )?;
@@ -1525,7 +1519,10 @@ fn register_globals<'js>(
     // invocations (via IMP_CACHE_DIR) — sandboxed subprocesses see a pinned
     // HOME and would otherwise re-download named-cache contents.
     if let Ok(cache_dir) = crate::cache::cache_root() {
-        globals.set("__imp_cache_dir", cache_dir.to_string_lossy().into_owned())?;
+        globals.set(
+            "__imp_cache_dir",
+            cache_dir.to_string_lossy().into_owned(),
+        )?;
     }
 
     Ok(())
@@ -1556,7 +1553,9 @@ fn parse_exec_run_opts<'js>(
     let argv: Vec<String> = opts.get("argv")?;
     let display: Option<String> = opts.get("display")?;
     let display = display.unwrap_or_else(|| argv.join(" "));
-    let env: Vec<String> = opts.get::<_, Option<Vec<String>>>("env")?.unwrap_or_default();
+    let env: Vec<String> = opts
+        .get::<_, Option<Vec<String>>>("env")?
+        .unwrap_or_default();
     let inputs = parse_io_specs(
         opts.get::<_, Option<Vec<Object>>>("inputs")?
             .unwrap_or_default(),
@@ -2347,8 +2346,7 @@ pub async fn execute_goal_live(
             })
         })
         .collect();
-    let selection_json =
-        serde_json::to_string(&selection).context("serialize goal selection")?;
+    let selection_json = serde_json::to_string(&selection).context("serialize goal selection")?;
 
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
     live.exec_no_cache.store(no_cache, Ordering::SeqCst);
@@ -2385,12 +2383,16 @@ pub async fn execute_goal_live(
                             format!("goal '{goal_owned}' callback: {e}"),
                         )
                     })?;
-                promise.into_future::<Value>().await.catch(&ctx).map_err(|e| {
-                    rquickjs::Error::new_loading_message(
-                        "execute",
-                        format!("goal '{goal_owned}' callback: {e}"),
-                    )
-                })?;
+                promise
+                    .into_future::<Value>()
+                    .await
+                    .catch(&ctx)
+                    .map_err(|e| {
+                        rquickjs::Error::new_loading_message(
+                            "execute",
+                            format!("goal '{goal_owned}' callback: {e}"),
+                        )
+                    })?;
                 // The callback owns the goal entirely on success — the native
                 // per-target dispatch loop below never runs for a goal with a
                 // registered callback (see doc comment above).
@@ -2427,8 +2429,10 @@ pub async fn execute_goal_live(
         .await
         .map_err(|e| anyhow::anyhow!("execute goal '{goal}' failed: {e}"));
     live.exec_no_cache.store(false, Ordering::SeqCst);
-    live.exec_sandbox_retention
-        .store(crate::exec::SandboxRetention::default().as_u8(), Ordering::SeqCst);
+    live.exec_sandbox_retention.store(
+        crate::exec::SandboxRetention::default().as_u8(),
+        Ordering::SeqCst,
+    );
     *live.selected_roots.lock().unwrap() = None;
     result
 }
@@ -3242,7 +3246,7 @@ export const ui = asset({ srcs: ["**/*.png"] });
     }
 
     #[tokio::test]
-    async fn host_js_logs_are_written_to_the_log_sink() {
+    async fn host_js_logs_are_written_through_the_log_crate() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(p.join(WORKSPACE_FILE).as_path(), "");
@@ -3260,8 +3264,8 @@ export const app = target({ kind: "sample" });
 "#,
         );
 
-        let (sink, lines) = HostLogSink::buffer();
-        let _workspace = load_workspace_with_host_log(p, sink).await.unwrap();
+        let lines = crate::logging::capture();
+        let _workspace = load_workspace(p).await.unwrap();
 
         let rendered = lines.lock().unwrap().join("\n");
 
@@ -3445,8 +3449,7 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
         let root = fixture();
         let workspace = load_workspace(root.path()).await.unwrap();
         let goal_def = workspace.workspace.goals.get("build").unwrap();
-        let roots =
-            select_roots(&workspace.workspace, goal_def, &["//assets:ui".into()]).unwrap();
+        let roots = select_roots(&workspace.workspace, goal_def, &["//assets:ui".into()]).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].0.address, "//assets:ui");
         assert_eq!(roots[0].1, "build");
@@ -4381,8 +4384,13 @@ export const build = product("fail-test", "build", async function build() {
         )
         .await
         .expect("execute_goal_live must resolve when a root task fails");
-        let err = result.expect_err("failed task must propagate an error").to_string();
-        assert!(err.contains("failing action") || err.contains("exit code 3"), "got: {err}");
+        let err = result
+            .expect_err("failed task must propagate an error")
+            .to_string();
+        assert!(
+            err.contains("failing action") || err.contains("exit code 3"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -4435,8 +4443,13 @@ export const build = product("shared-fail-test", "build", async function build(h
         )
         .await
         .expect("execute_goal_live must resolve when a shared memo fails");
-        let err = result.expect_err("failed shared memo must propagate").to_string();
-        assert!(err.contains("shared failing action") || err.contains("exit code 3"), "got: {err}");
+        let err = result
+            .expect_err("failed shared memo must propagate")
+            .to_string();
+        assert!(
+            err.contains("shared failing action") || err.contains("exit code 3"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -5285,8 +5298,7 @@ export const report = product("test-pkg", "report", async function report(handle
         // An explicit #product selector resolves to that product, and the goal
         // dispatches to it live.
         let goal_def = live.workspace.goals.get("build").unwrap();
-        let roots =
-            select_roots(&live.workspace, goal_def, &["//:pkg#report".to_owned()]).unwrap();
+        let roots = select_roots(&live.workspace, goal_def, &["//:pkg#report".to_owned()]).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].0.address, "//:pkg");
         assert_eq!(roots[0].1, "report");
@@ -5316,15 +5328,18 @@ export const check = product("kind-a", "check", async function check(handle) {})
 
         // //:pkg#check should select the "check" product explicitly.
         let goal_def = live.workspace.goals.get("build").unwrap();
-        let roots =
-            select_roots(&live.workspace, goal_def, &["//:pkg#check".to_owned()]).unwrap();
+        let roots = select_roots(&live.workspace, goal_def, &["//:pkg#check".to_owned()]).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].1, "check");
 
         // An unknown product in the selector should fail.
-        let err = select_roots(&live.workspace, goal_def, &["//:pkg#nonexistent".to_owned()])
-            .unwrap_err()
-            .to_string();
+        let err = select_roots(
+            &live.workspace,
+            goal_def,
+            &["//:pkg#nonexistent".to_owned()],
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
             err.contains("no product 'nonexistent'"),
             "expected product-not-found error, got: {err}"
