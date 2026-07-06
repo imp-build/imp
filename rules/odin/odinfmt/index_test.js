@@ -7,7 +7,7 @@ import {
 import {
     odinFmt,
     odinFormatCheck,
-} from "//rules/odin/fmt";
+} from "//rules/odin/odinfmt";
 import {
     odinPackage,
 } from "//rules/odin";

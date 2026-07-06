@@ -195,22 +195,22 @@ async fn resolve_workspace_odin_tool(name: &str) -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("read current directory")?;
     let workspace_root = spike::find_workspace_root(&cwd)?;
     let live = runtime::load_workspace(&workspace_root).await?;
-    let function_name = match name {
-        "odin" => "odinBin",
-        "odinfmt" => "odinfmtBin",
+    let (module_name, function_name) = match name {
+        "odin" => ("//rules/odin", "odinBin"),
+        "odinfmt" => ("//rules/odin/odinfmt/toolchain", "odinfmtBin"),
         _ => unreachable!("caller validates direct Odin tool names"),
     };
 
     let path =
         live.ctx
             .async_with(async |ctx| -> rquickjs::Result<String> {
-                let promise = Module::import(&ctx, "//rules/odin")
+                let promise = Module::import(&ctx, module_name)
                     .catch(&ctx)
                     .map_err(|e| {
-                        rquickjs::Error::new_loading_message("//rules/odin", format!("{e}"))
+                        rquickjs::Error::new_loading_message(module_name, format!("{e}"))
                     })?;
                 let namespace: Object = promise.into_future().await.catch(&ctx).map_err(|e| {
-                    rquickjs::Error::new_loading_message("//rules/odin", format!("{e}"))
+                    rquickjs::Error::new_loading_message(module_name, format!("{e}"))
                 })?;
                 let resolver: Function = namespace.get(function_name)?;
                 let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;

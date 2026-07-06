@@ -67,7 +67,6 @@ export {
     odinBin,
     odinCacheKey,
     odinDownloadUrl,
-    odinfmtBin,
     odinToolchain,
     odinTool,
     resolveOdinToolchainVersion,

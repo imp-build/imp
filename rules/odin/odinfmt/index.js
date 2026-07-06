@@ -1,10 +1,11 @@
 // Odin formatting mechanics: runs odinfmt over a package's own sources inside
 // the sandbox, either writing formatted files back (odinFmt) or diffing
-// against the staged input without mutating the tree (odinFormatCheck).
+// against the staged input without mutating the tree.
 // Exposed to the build graph as products by //rules/workflows/fmt.
 
 import { own_sources, declared_path } from "//rules/odin";
-import { odinfmtTool, resolveOdinToolchainVersion } from "//rules/odin/toolchain";
+import { resolveOdinToolchainVersion } from "//rules/odin/toolchain";
+import { odinfmtTool } from "//rules/odin/odinfmt/toolchain";
 import { paths, output, run } from "imp:core";
 
 function odinfmt_version(handle) {

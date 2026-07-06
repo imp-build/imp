@@ -3,32 +3,6 @@ import { Target, product, namedCache, download, extract, platformInfo, cachePut,
 import { generateToolLockfile } from "//rules/workflows/lockfiles";
 
 const ODIN_TOOLCHAIN_CACHE = "odin-toolchains";
-const ODINFMT_CACHE = "odinfmt-toolchains";
-
-// odinfmt ships inside the OLS release zips, whose tags track Odin's monthly dev
-// versions, so it is pinned to the same version as the Odin toolchain. The
-// artifact triples differ from Odin's os/arch naming (see osMap/archMap).
-const olsTripleMap = {
-    "linux/x86_64": "x86_64-unknown-linux-gnu",
-    "linux/aarch64": "arm64-unknown-linux-gnu",
-    "macos/x86_64": "x86_64-darwin",
-    "macos/aarch64": "arm64-darwin",
-    "windows/x86_64": "x86_64-pc-windows-msvc",
-};
-
-/**
- * Return the OLS release triple for a platform.
- *
- * @param {{ os: string, arch: string }} plat
- * @returns {string}
- */
-export function olsTriple(plat) {
-    const triple = olsTripleMap[`${plat.os}/${plat.arch}`];
-    if (!triple) {
-        throw new Error(`no odinfmt build for ${plat.os}/${plat.arch}`);
-    }
-    return triple;
-}
 
 const osMap = { linux: "linux", macos: "macos", windows: "windows" };
 const archMap = { x86_64: "amd64", aarch64: "arm64" };
@@ -129,7 +103,6 @@ export function __resetOdinToolchainStateForTest() {
  */
 export function odinToolchain(version, opts = {}) {
     namedCache({ name: ODIN_TOOLCHAIN_CACHE });
-    namedCache({ name: ODINFMT_CACHE });
 
     const toolchain = new OdinToolchain({ version });
 
@@ -217,73 +190,6 @@ export function odinTool(version) {
         key: odinCacheKey(resolved, plat),
         binDirs: ["."],
     };
-}
-
-/**
- * Return a named-cache-backed odinfmt tool descriptor plus the on-disk binary
- * name to invoke it with. Downloads and caches the OLS release on first use.
- *
- * @category configuration
- * @param {string} [version]
- * @returns {{ tool: object, command: string }}
- */
-export function odinfmtTool(version) {
-    const resolved = resolveOdinToolchainVersion(version);
-    acquireOdinfmt(resolved);
-    const plat = platformInfo();
-    const triple = olsTriple(plat);
-    return {
-        tool: {
-            kind: "tool",
-            name: "odinfmt",
-            cache: ODINFMT_CACHE,
-            key: `${resolved}/${plat.os}-${plat.arch}`,
-            binDirs: ["."],
-        },
-        // The OLS zip stores the binary under its triple-suffixed name at the
-        // archive root; invoke it by that name (JS has no rename primitive).
-        command: `odinfmt-${triple}${plat.os === "windows" ? ".exe" : ""}`,
-    };
-}
-
-/**
- * Return the path to the odinfmt binary for an Odin toolchain version.
- *
- * @category configuration
- * @param {string} [version]
- * @returns {string}
- */
-export function odinfmtBin(version) {
-    const resolved = resolveOdinToolchainVersion(version);
-    const dir = acquireOdinfmt(resolved);
-    const plat = platformInfo();
-    const triple = olsTriple(plat);
-    return `${dir}/odinfmt-${triple}${plat.os === "windows" ? ".exe" : ""}`;
-}
-
-/**
- * Acquire (download and cache) odinfmt for a version and return its cache path.
- *
- * @category configuration
- * @param {string} version
- * @returns {string}
- */
-export function acquireOdinfmt(version) {
-    const plat = platformInfo();
-    const triple = olsTriple(plat);
-    const key = `${version}/${plat.os}-${plat.arch}`;
-
-    if (cacheHas(ODINFMT_CACHE, key)) {
-        return cacheGet(ODINFMT_CACHE, key);
-    }
-
-    const url = `https://github.com/DanielGavin/ols/releases/download/${version}/ols-${triple}.zip`;
-    const archive = download(url);
-    const staging = `/tmp/imp-odinfmt-${version}-${plat.arch}`;
-    extract(archive, staging, { format: "zip" });
-
-    cachePut(ODINFMT_CACHE, key, staging);
-    return cacheGet(ODINFMT_CACHE, key);
 }
 
 /**
