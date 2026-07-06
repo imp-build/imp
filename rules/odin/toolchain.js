@@ -220,3 +220,5 @@ product("odin-toolchain", "gen-lockfiles", (handle) =>
         downloadUrl: odinDownloadUrl,
         artifactName: odinArtifactName,
     }));
+
+product("odin-toolchain", "toolchain", (handle) => odinBin(handle.attrs.version));

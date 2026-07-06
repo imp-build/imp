@@ -1,4 +1,4 @@
-import { namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Target, product, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 
 import { resolveOdinToolchainVersion } from "//rules/odin/toolchain";
 
@@ -105,3 +105,24 @@ export function acquireOdinfmt(version) {
     cachePut(ODINFMT_CACHE, key, staging);
     return cacheGet(ODINFMT_CACHE, key);
 }
+
+export class OdinfmtToolchain extends Target {
+    static kind = "odinfmt-toolchain";
+    constructor({ version }) {
+        super({ kind: OdinfmtToolchain.kind, attrs: { version: version ?? null } });
+    }
+}
+
+/**
+ * Declare an odinfmt toolchain, pinned to an Odin toolchain version. Omit
+ * `version` to track the workspace's default Odin toolchain version.
+ *
+ * @category configuration
+ * @param {string} [version]
+ * @returns {object} Target handle for this odinfmt toolchain.
+ */
+export function odinfmtToolchain(version) {
+    return new OdinfmtToolchain({ version });
+}
+
+product("odinfmt-toolchain", "toolchain", (handle) => odinfmtBin(handle.attrs.version));

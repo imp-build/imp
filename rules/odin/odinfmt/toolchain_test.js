@@ -12,7 +12,9 @@ import {
     acquireOdinfmt,
     odinfmtBin,
     odinfmtTool,
+    odinfmtToolchain,
     olsTriple,
+    OdinfmtToolchain,
 } from "//rules/odin/odinfmt/toolchain";
 
 function withOdinHost(platOrFn, maybeFn) {
@@ -90,6 +92,24 @@ test("suffixes the odinfmt command with .exe on windows", () => {
         odinToolchain("dev-2026-03", { default: true });
 
         expect(odinfmtTool().command).toBe("odinfmt-x86_64-pc-windows-msvc.exe");
+    });
+});
+
+test("odinfmtToolchain() declares a toolchain-shaped target", () => {
+    return withOdinHost(() => {
+        const handle = odinfmtToolchain();
+
+        expect(handle instanceof OdinfmtToolchain).toBe(true);
+        expect(handle.kind).toBe("odinfmt-toolchain");
+        expect(handle.attrs.version).toBe(null);
+    });
+});
+
+test("odinfmtToolchain(version) records the explicit version", () => {
+    return withOdinHost(() => {
+        const handle = odinfmtToolchain("dev-2026-04");
+
+        expect(handle.attrs.version).toBe("dev-2026-04");
     });
 });
 

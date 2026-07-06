@@ -37,7 +37,8 @@ type Tree = ui::Tree;
     about = "Build system for the Odin game engine project",
     long_about = "Build system for the Odin game engine project.\n\n\
 Run a managed toolchain binary directly with `imp @TOOL <args>` (e.g. `imp @odin build foo.odin -out:foo`); \
-args are passed through verbatim, no `--` needed. Known tools: odin, odinfmt, kcov."
+args are passed through verbatim, no `--` needed. TOOL is any toolchain-shaped \
+top-level export in imp.workspace.js (e.g. odin, odinfmt), plus the built-in kcov."
 )]
 struct Cli {
     /// Use WSL cross-compilation environment (Linux → Windows)
@@ -170,12 +171,8 @@ async fn main() {
 /// the tool's own flags never need a `--` separator.
 async fn run_tool(name: &str, args: &[std::ffi::OsString]) -> Result<i32> {
     let bin = match name {
-        "odin" | "odinfmt" => resolve_workspace_odin_tool(name).await?,
         "kcov" => workspace::kcov_bin(),
-        other => {
-            eprintln!("error: unknown tool '@{other}'; known tools: odin, odinfmt, kcov");
-            return Ok(1);
-        }
+        other => resolve_workspace_tool_bin(other).await?,
     };
 
     Ok(run_direct_tool_command(&bin, args))
@@ -191,43 +188,53 @@ fn run_direct_tool_command(bin: &std::path::Path, args: &[std::ffi::OsString]) -
     }
 }
 
-async fn resolve_workspace_odin_tool(name: &str) -> Result<PathBuf> {
+/// Resolve `@name` to an absolute binary path via the workspace's own
+/// declarations: `name` must be a top-level `export const <name> = ...` in
+/// `imp.workspace.js` whose target kind has a registered `"toolchain"`
+/// product (see `product(kind, "toolchain", fn)` in the toolchain rule
+/// modules, and `invokeToolchainProduct` in `imp_core.js`). No per-tool
+/// Rust code is required to add a new `@tool`.
+async fn resolve_workspace_tool_bin(name: &str) -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("read current directory")?;
     let workspace_root = spike::find_workspace_root(&cwd)?;
     let live = runtime::load_workspace(&workspace_root).await?;
-    let (module_name, function_name) = match name {
-        "odin" => ("//rules/odin", "odinBin"),
-        "odinfmt" => ("//rules/odin/odinfmt/toolchain", "odinfmtBin"),
-        _ => unreachable!("caller validates direct Odin tool names"),
-    };
 
-    let path =
-        live.ctx
-            .async_with(async |ctx| -> rquickjs::Result<String> {
-                let promise = Module::import(&ctx, module_name)
-                    .catch(&ctx)
-                    .map_err(|e| {
-                        rquickjs::Error::new_loading_message(module_name, format!("{e}"))
-                    })?;
-                let namespace: Object = promise.into_future().await.catch(&ctx).map_err(|e| {
-                    rquickjs::Error::new_loading_message(module_name, format!("{e}"))
-                })?;
-                let resolver: Function = namespace.get(function_name)?;
-                let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
-                let value: Value = resolver.call(()).catch(&ctx).map_err(|e| {
-                    rquickjs::Error::new_loading_message(function_name, format!("{e}"))
-                })?;
-                let result: MaybePromise =
-                    promise_resolve.call((value,)).catch(&ctx).map_err(|e| {
-                        rquickjs::Error::new_loading_message(function_name, format!("{e}"))
-                    })?;
-                let value: Value = result.into_future().await.catch(&ctx).map_err(|e| {
-                    rquickjs::Error::new_loading_message(function_name, format!("{e}"))
-                })?;
-                String::from_js(&ctx, value)
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("resolve @{name} from workspace Odin toolchain: {e}"))?;
+    let js_id = live
+        .workspace
+        .targets
+        .get(&format!("//:{name}"))
+        .map(|target| target.js_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown tool '@{name}'; declare `export const {name} = ...Toolchain(...)` \
+                 in imp.workspace.js, or use one of the built-in tools (kcov)"
+            )
+        })?;
+
+    let path = live
+        .ctx
+        .async_with(async |ctx| -> rquickjs::Result<String> {
+            let promise = Module::import(&ctx, "imp:core").catch(&ctx).map_err(|e| {
+                rquickjs::Error::new_loading_message("imp:core", format!("{e}"))
+            })?;
+            let core_ns: Object = promise.into_future().await.catch(&ctx).map_err(|e| {
+                rquickjs::Error::new_loading_message("imp:core", format!("{e}"))
+            })?;
+            let invoke: Function = core_ns.get("invokeToolchainProduct")?;
+            let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
+            let value: Value = invoke.call((js_id,)).catch(&ctx).map_err(|e| {
+                rquickjs::Error::new_loading_message("invokeToolchainProduct", format!("{e}"))
+            })?;
+            let result: MaybePromise = promise_resolve.call((value,)).catch(&ctx).map_err(|e| {
+                rquickjs::Error::new_loading_message("invokeToolchainProduct", format!("{e}"))
+            })?;
+            let value: Value = result.into_future().await.catch(&ctx).map_err(|e| {
+                rquickjs::Error::new_loading_message("invokeToolchainProduct", format!("{e}"))
+            })?;
+            String::from_js(&ctx, value)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve @{name} from workspace: {e}"))?;
 
     Ok(PathBuf::from(path))
 }

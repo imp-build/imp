@@ -3,6 +3,7 @@
 import "//rules/c/cmake";
 import "//rules/gen";
 import { odinToolchain } from "//rules/odin";
+import { odinfmtToolchain } from "//rules/odin/odinfmt/toolchain";
 import "//rules/rust/toolchain";
 import "//rules/workflows/build";
 import "//rules/workflows/fmt";
@@ -14,4 +15,5 @@ import "//rules/workflows/test";
 import "//rules/workflows/vs";
 import "//rules/imp/test";
 
-odinToolchain("dev-2026-03", { default: true });
+export const odin = odinToolchain("dev-2026-03", { default: true });
+export const odinfmt = odinfmtToolchain();

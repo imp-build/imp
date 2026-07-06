@@ -340,28 +340,39 @@ pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
         .map_err(|e| anyhow::anyhow!("register QuickJS globals: {e}"))?;
     }
 
-    // ----- Evaluate imp.workspace.js if present -----
+    // ----- Evaluate imp.workspace.js if present, and collect its named
+    // exports the same way BUILD.js exports are collected below: a
+    // toolchain-shaped `export const odin = odinToolchain(...)` binding
+    // becomes a top-level target address `//:odin`, discoverable like any
+    // other workspace target. -----
+    let mut named_exports: Vec<(String, u32)> = Vec::new(); // (address, pending_id)
     let workspace_js = root.join(WORKSPACE_FILE);
     if workspace_js.is_file() {
         let source = std::fs::read_to_string(&workspace_js)
             .with_context(|| format!("read {}", workspace_js.display()))?;
-        ctx.async_with(async |ctx| -> Result<()> {
-            let module = Module::declare(ctx.clone(), WORKSPACE_FILE, source)
-                .catch(&ctx)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let (_, promise) = module
-                .eval()
-                .catch(&ctx)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            promise
-                .into_future::<rquickjs::Value>()
-                .await
-                .catch(&ctx)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            Ok(())
-        })
-        .await
-        .with_context(|| format!("evaluate {}", workspace_js.display()))?;
+        let exports = ctx
+            .async_with(async |ctx| -> Result<Vec<(String, u32)>> {
+                let module = Module::declare(ctx.clone(), WORKSPACE_FILE, source)
+                    .catch(&ctx)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let (module, promise) = module
+                    .eval()
+                    .catch(&ctx)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                promise
+                    .into_future::<rquickjs::Value>()
+                    .await
+                    .catch(&ctx)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let ns = module.namespace().catch(&ctx).map_err(|e| anyhow::anyhow!("{e}"))?;
+                collect_imp_exports(&ns)
+            })
+            .await
+            .with_context(|| format!("evaluate {}", workspace_js.display()))?;
+
+        for (name, id) in exports {
+            named_exports.push((format!("//:{name}"), id));
+        }
     }
 
     // ----- Collect BUILD.js files -----
@@ -387,8 +398,6 @@ pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
     // We use dynamic `import()` so that QuickJS handles caching: if a BUILD.js
     // was already loaded (because another BUILD.js imported it), we get the
     // cached namespace without re-evaluating.
-    let mut named_exports: Vec<(String, u32)> = Vec::new(); // (address, pending_id)
-
     for build_file in &build_files {
         let scope = scope_for(&root, build_file)?;
         let module_name = build_module_name_for(&root, build_file, &scope)?;
@@ -404,19 +413,7 @@ pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
                     .await
                     .catch(&ctx)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-                let mut result = Vec::new();
-                for entry in ns.own_props::<String, Value>(Filter::default()) {
-                    let (key, val) = entry.map_err(|e| anyhow::anyhow!("{e}"))?;
-                    if let Some(obj) = val.as_object() {
-                        if let Ok(true) = obj.get::<_, bool>("__imp") {
-                            if let Ok(id) = obj.get::<_, u32>("__id") {
-                                result.push((key, id));
-                            }
-                        }
-                    }
-                }
-                Ok(result)
+                collect_imp_exports(&ns)
             })
             .await
             .with_context(|| format!("process {}", build_file.display()))?;
@@ -479,6 +476,25 @@ pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
         scheduler,
         selected_roots,
     })
+}
+
+/// Walk a module namespace object's own properties and return `(export_name,
+/// js_id)` for every export that is a target handle (`{ __imp: true, __id }`).
+/// Shared by workspace-file and BUILD.js export scanning so both assign
+/// addresses from export names the same way.
+fn collect_imp_exports(ns: &Object) -> Result<Vec<(String, u32)>> {
+    let mut result = Vec::new();
+    for entry in ns.own_props::<String, Value>(Filter::default()) {
+        let (key, val) = entry.map_err(|e| anyhow::anyhow!("{e}"))?;
+        if let Some(obj) = val.as_object() {
+            if let Ok(true) = obj.get::<_, bool>("__imp") {
+                if let Ok(id) = obj.get::<_, u32>("__id") {
+                    result.push((key, id));
+                }
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn materialize_pending_target(
@@ -3596,6 +3612,33 @@ export const app = pkg();
 
         let workspace = load_workspace(p).await.unwrap();
         assert!(workspace.targets.contains_key("//:app"));
+    }
+
+    #[tokio::test]
+    async fn workspace_file_exports_become_top_level_workspace_targets() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { target } from "imp:core";
+export const odin = target({ kind: "odin-toolchain", attrs: { version: "dev-2026-03" } });
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target } from "imp:core";
+export const app = target({ kind: "app", attrs: {} });
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        let odin = workspace
+            .targets
+            .get("//:odin")
+            .expect("workspace.js export //:odin");
+        assert_eq!(odin.kind, "odin-toolchain");
     }
 
     #[tokio::test]

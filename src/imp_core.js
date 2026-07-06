@@ -471,6 +471,28 @@ export function resolveProduct(entry) {
 }
 
 /**
+ * Resolve a live target handle by id and invoke its kind's registered
+ * "toolchain" product, e.g. for `imp @odin ...` direct tool dispatch: the
+ * handle's kind determines which registered resolver (if any) turns it into
+ * an absolute binary path. Throws if the kind has no "toolchain" product
+ * registered, i.e. the handle isn't toolchain-shaped.
+ *
+ * @param {number} id Target handle id, as returned by workspaceTargets()/__host_target.
+ * @returns {string|Promise<string>} Absolute path to the toolchain's binary.
+ */
+export function invokeToolchainProduct(id) {
+    const handle = globalThis.__imp_resolve_handle(id);
+    if (!handle) {
+        throw new Error(`no live handle for target id ${id}`);
+    }
+    const fn = _products_by_kind_name.get(`${handle.kind}:toolchain`);
+    if (fn === undefined) {
+        throw new Error(`target kind '${handle.kind}' has no 'toolchain' product (not toolchain-shaped)`);
+    }
+    return fn(handle);
+}
+
+/**
  * Run the default per-target dispatch for a selection: for each entry, look
  * up its registered product (by kind + product name), resolve its target
  * handle, and invoke the product function. All calls are started before any
