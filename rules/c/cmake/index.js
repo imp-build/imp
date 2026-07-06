@@ -22,7 +22,6 @@ export {
     cmakeCacheKey,
     cmakeTool,
     cmakeToolchain,
-    createCmakeToolchainApi,
     defaultCmakeToolchain,
     defaultCmakeToolchainVersion,
     installCmakeToolchain,

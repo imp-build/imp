@@ -157,6 +157,17 @@ test("leaves undocumented exports with a null doc", () => {
     expect(entries[0].doc).toBe(null);
 });
 
+test("skips internal double-underscore exports", () => {
+    const entries = parseModule([
+        "/** Test-only reset hook. */",
+        "export function __resetForTest() {}",
+        "",
+        "export function publicApi() {}",
+    ].join("\n"));
+    expect(entries.length).toBe(1);
+    expect(entries[0].name).toBe("publicApi");
+});
+
 test("derives the directory a source path lives in", () => {
     expect(directoryForSourcePath("src/imp_core.js")).toBe("src");
     expect(directoryForSourcePath("rules/c/zig/toolchain.js")).toBe("rules/c/zig");

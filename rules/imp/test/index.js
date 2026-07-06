@@ -157,6 +157,105 @@ export async function withFakeSelectedTargets(list, fn) {
     }
 }
 
+/**
+ * Run a test body with toolchain host bridge calls stubbed. This is for
+ * testing rule-layer toolchain declaration/acquisition logic without network,
+ * archive extraction, or real native-tool resolution.
+ */
+export async function withFakeToolchainHost(platOrFn, maybeFn) {
+    const plat = typeof platOrFn === "function" ? { os: "linux", arch: "x86_64" } : platOrFn;
+    const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;
+    const calls = [];
+    const runs = [];
+    const cache = new Map();
+
+    const originals = {
+        target: globalThis.__host_target,
+        namedCache: globalThis.__host_named_cache,
+        platformInfo: globalThis.__host_platform_info,
+        cacheHas: globalThis.__host_cache_has,
+        cacheGet: globalThis.__host_cache_get,
+        cachePut: globalThis.__host_cache_put,
+        download: globalThis.__host_download,
+        extract: globalThis.__host_extract,
+        run: globalThis.__host_run,
+        nativeToolArtifact: globalThis.__host_native_tool_artifact,
+    };
+
+    const host = {
+        calls,
+        runs,
+        install(name, key, path) {
+            cache.set(`${name}/${key}`, path);
+        },
+        clearCalls() {
+            calls.length = 0;
+        },
+    };
+
+    globalThis.__host_target = (kind, attrsJson, sourcesJson, depIds, depModes) => {
+        if (kind === "native-tool") {
+            const attrs = JSON.parse(attrsJson);
+            calls.push(["nativeTool", attrs.name]);
+        }
+        return originals.target(kind, attrsJson, sourcesJson, depIds, depModes);
+    };
+    globalThis.__host_named_cache = (name) => {
+        calls.push(["namedCache", name]);
+    };
+    globalThis.__host_platform_info = () => {
+        calls.push(["platformInfo"]);
+        return JSON.stringify(plat);
+    };
+    globalThis.__host_cache_has = (name, key) => {
+        calls.push(["cacheHas", name, key]);
+        return cache.has(`${name}/${key}`);
+    };
+    globalThis.__host_cache_get = (name, key) => {
+        calls.push(["cacheGet", name, key]);
+        return cache.get(`${name}/${key}`) || null;
+    };
+    globalThis.__host_cache_put = (name, key, source) => {
+        calls.push(["cachePut", name, key, source]);
+        cache.set(`${name}/${key}`, `/cache/${name}/${key}`);
+    };
+    globalThis.__host_download = (url) => {
+        calls.push(["download", url]);
+        return "/downloads/odin-release";
+    };
+    globalThis.__host_extract = (archive, dest, format, stripComponents) => {
+        calls.push(["extract", archive, dest, format, stripComponents]);
+    };
+    globalThis.__host_native_tool_artifact = (name) => {
+        calls.push(["nativeToolSpec", name]);
+        return `/tools/${name}`;
+    };
+    globalThis.__host_run = async (opts) => {
+        runs.push(opts);
+        for (const out of opts.outputs || []) {
+            if (out.namedCache) {
+                cache.set(`${out.namedCache.name}/${out.namedCache.key}`, `/cache/${out.namedCache.name}/${out.namedCache.key}`);
+            }
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+    };
+
+    try {
+        return await fn(host);
+    } finally {
+        globalThis.__host_target = originals.target;
+        globalThis.__host_named_cache = originals.namedCache;
+        globalThis.__host_platform_info = originals.platformInfo;
+        globalThis.__host_cache_has = originals.cacheHas;
+        globalThis.__host_cache_get = originals.cacheGet;
+        globalThis.__host_cache_put = originals.cachePut;
+        globalThis.__host_download = originals.download;
+        globalThis.__host_extract = originals.extract;
+        globalThis.__host_run = originals.run;
+        globalThis.__host_native_tool_artifact = originals.nativeToolArtifact;
+    }
+}
+
 async function runRegisteredTests({ from = 0, label = "tests" } = {}) {
     const selected = tests.slice(from);
     if (selected.length === 0) {

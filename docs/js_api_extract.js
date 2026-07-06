@@ -155,6 +155,10 @@ export function parseModule(sourceText) {
 
         const fnMatch = trimmed.match(EXPORT_FUNCTION_RE);
         if (fnMatch) {
+            if (fnMatch[1].startsWith("__")) {
+                pendingDocLines = null;
+                continue;
+            }
             entries.push({
                 name: fnMatch[1],
                 params: fnMatch[2],
@@ -167,6 +171,10 @@ export function parseModule(sourceText) {
 
         const bindMatch = trimmed.match(EXPORT_BINDING_RE);
         if (bindMatch) {
+            if (bindMatch[1].startsWith("__")) {
+                pendingDocLines = null;
+                continue;
+            }
             entries.push({
                 name: bindMatch[1],
                 params: "",

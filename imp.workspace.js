@@ -2,7 +2,7 @@
 // before any BUILD.js is evaluated.
 import "//rules/c/cmake";
 import "//rules/gen";
-import "//rules/odin";
+import { odinToolchain } from "//rules/odin";
 import "//rules/rust/toolchain";
 import "//rules/workflows/build";
 import "//rules/workflows/fmt";
@@ -13,3 +13,5 @@ import "//rules/workflows/run";
 import "//rules/workflows/test";
 import "//rules/workflows/vs";
 import "//rules/imp/test";
+
+odinToolchain("dev-2026-03", { default: true });

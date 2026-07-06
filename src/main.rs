@@ -21,6 +21,7 @@ use std::sync::{
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use rquickjs::{promise::MaybePromise, CatchResultExt, FromJs, Function, Module, Object, Value};
 
 use env::{Env, LocalEnv, WslEnv};
 
@@ -148,7 +149,14 @@ async fn main() {
         .and_then(|a| a.to_str())
         .and_then(|a| a.strip_prefix('@'))
     {
-        std::process::exit(run_tool(name, &args[2..]));
+        let code = match run_tool(name, &args[2..]).await {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                1
+            }
+        };
+        std::process::exit(code);
     }
 
     if let Err(e) = run().await {
@@ -160,17 +168,20 @@ async fn main() {
 /// Run a managed toolchain binary directly, passing all remaining args through
 /// verbatim: `imp @odin build foo.odin -out:foo`. Bypasses clap entirely so
 /// the tool's own flags never need a `--` separator.
-fn run_tool(name: &str, args: &[std::ffi::OsString]) -> i32 {
+async fn run_tool(name: &str, args: &[std::ffi::OsString]) -> Result<i32> {
     let bin = match name {
-        "odin" => workspace::odin_bin(),
-        "odinfmt" => workspace::odinfmt_bin(),
+        "odin" | "odinfmt" => resolve_workspace_odin_tool(name).await?,
         "kcov" => workspace::kcov_bin(),
         other => {
             eprintln!("error: unknown tool '@{other}'; known tools: odin, odinfmt, kcov");
-            return 1;
+            return Ok(1);
         }
     };
 
+    Ok(run_direct_tool_command(&bin, args))
+}
+
+fn run_direct_tool_command(bin: &std::path::Path, args: &[std::ffi::OsString]) -> i32 {
     match std::process::Command::new(&bin).args(args).status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
@@ -178,6 +189,47 @@ fn run_tool(name: &str, args: &[std::ffi::OsString]) -> i32 {
             1
         }
     }
+}
+
+async fn resolve_workspace_odin_tool(name: &str) -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("read current directory")?;
+    let workspace_root = spike::find_workspace_root(&cwd)?;
+    let live = runtime::load_workspace(&workspace_root).await?;
+    let function_name = match name {
+        "odin" => "odinBin",
+        "odinfmt" => "odinfmtBin",
+        _ => unreachable!("caller validates direct Odin tool names"),
+    };
+
+    let path =
+        live.ctx
+            .async_with(async |ctx| -> rquickjs::Result<String> {
+                let promise = Module::import(&ctx, "//rules/odin")
+                    .catch(&ctx)
+                    .map_err(|e| {
+                        rquickjs::Error::new_loading_message("//rules/odin", format!("{e}"))
+                    })?;
+                let namespace: Object = promise.into_future().await.catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message("//rules/odin", format!("{e}"))
+                })?;
+                let resolver: Function = namespace.get(function_name)?;
+                let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
+                let value: Value = resolver.call(()).catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message(function_name, format!("{e}"))
+                })?;
+                let result: MaybePromise =
+                    promise_resolve.call((value,)).catch(&ctx).map_err(|e| {
+                        rquickjs::Error::new_loading_message(function_name, format!("{e}"))
+                    })?;
+                let value: Value = result.into_future().await.catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message(function_name, format!("{e}"))
+                })?;
+                String::from_js(&ctx, value)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("resolve @{name} from workspace Odin toolchain: {e}"))?;
+
+    Ok(PathBuf::from(path))
 }
 
 async fn run() -> Result<()> {

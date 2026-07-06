@@ -30,16 +30,6 @@ export function olsTriple(plat) {
     return triple;
 }
 
-const defaultHost = {
-    namedCache,
-    download,
-    extract,
-    platformInfo,
-    cachePut,
-    cacheGet,
-    cacheHas,
-};
-
 const osMap = { linux: "linux", macos: "macos", windows: "windows" };
 const archMap = { x86_64: "amd64", aarch64: "arm64" };
 
@@ -120,141 +110,13 @@ export class OdinToolchain extends Target {
     }
 }
 
-/**
- * Build an Odin toolchain API. Tests can pass a fake host implementation to
- * exercise installation behavior without downloading or extracting archives.
- *
- * @category configuration
- * @param {object} [host]
- * @returns {object}
- */
-export function createOdinToolchainApi(host = defaultHost) {
-    let defaultVersion = null;
-    let defaultToolchain = null;
+let defaultVersion = null;
+let defaultToolchain = null;
 
-    function declareToolchain(version, opts = {}) {
-        host.namedCache({ name: ODIN_TOOLCHAIN_CACHE });
-        host.namedCache({ name: ODINFMT_CACHE });
-
-        const toolchain = new OdinToolchain({ version });
-
-        if (opts.default) {
-            defaultVersion = version;
-            defaultToolchain = toolchain;
-        }
-
-        return toolchain;
-    }
-
-    function acquireToolchain(version) {
-        const plat = host.platformInfo();
-        const key = odinCacheKey(version, plat);
-
-        if (host.cacheHas(ODIN_TOOLCHAIN_CACHE, key)) {
-            return host.cacheGet(ODIN_TOOLCHAIN_CACHE, key);
-        }
-
-        const artifact = odinArtifactName(version, plat);
-        const archive = host.download(odinDownloadUrl(version, plat));
-        const staging = stagingPath(version, plat);
-        host.extract(archive, staging, {
-            format: artifact.endsWith(".zip") ? "zip" : "tar.gz",
-            strip_components: 1,
-        });
-
-        host.cachePut(ODIN_TOOLCHAIN_CACHE, key, staging);
-        return host.cacheGet(ODIN_TOOLCHAIN_CACHE, key);
-    }
-
-    function resolveVersion(version) {
-        if (version) {
-            return version;
-        }
-        if (defaultVersion) {
-            return defaultVersion;
-        }
-        throw new Error("no Odin toolchain version specified and no default set");
-    }
-
-    function bin(version) {
-        const resolved = resolveVersion(version);
-        const dir = acquireToolchain(resolved);
-        const exe = host.platformInfo().os === "windows" ? "odin.exe" : "odin";
-        return `${dir}/${exe}`;
-    }
-
-    function tool(version) {
-        const resolved = resolveVersion(version);
-        acquireToolchain(resolved);
-        const plat = host.platformInfo();
-        return {
-            kind: "tool",
-            name: "odin",
-            cache: ODIN_TOOLCHAIN_CACHE,
-            key: odinCacheKey(resolved, plat),
-            binDirs: ["."],
-        };
-    }
-
-    function acquireOdinfmt(version) {
-        const plat = host.platformInfo();
-        const triple = olsTriple(plat);
-        const key = `${version}/${plat.os}-${plat.arch}`;
-
-        if (host.cacheHas(ODINFMT_CACHE, key)) {
-            return host.cacheGet(ODINFMT_CACHE, key);
-        }
-
-        const url = `https://github.com/DanielGavin/ols/releases/download/${version}/ols-${triple}.zip`;
-        const archive = host.download(url);
-        const staging = `/tmp/imp-odinfmt-${version}-${plat.arch}`;
-        host.extract(archive, staging, { format: "zip" });
-
-        host.cachePut(ODINFMT_CACHE, key, staging);
-        return host.cacheGet(ODINFMT_CACHE, key);
-    }
-
-    function odinfmtTool(version) {
-        const resolved = resolveVersion(version);
-        acquireOdinfmt(resolved);
-        const plat = host.platformInfo();
-        const triple = olsTriple(plat);
-        return {
-            tool: {
-                kind: "tool",
-                name: "odinfmt",
-                cache: ODINFMT_CACHE,
-                key: `${resolved}/${plat.os}-${plat.arch}`,
-                binDirs: ["."],
-            },
-            // The OLS zip stores the binary under its triple-suffixed name at the
-            // archive root; invoke it by that name (JS has no rename primitive).
-            command: `odinfmt-${triple}${plat.os === "windows" ? ".exe" : ""}`,
-        };
-    }
-
-    function currentDefaultVersion() {
-        return defaultVersion;
-    }
-
-    function currentDefaultToolchain() {
-        return defaultToolchain;
-    }
-
-    return {
-        odinToolchain: declareToolchain,
-        acquireOdinToolchain: acquireToolchain,
-        resolveOdinToolchainVersion: resolveVersion,
-        odinBin: bin,
-        odinTool: tool,
-        acquireOdinfmt,
-        odinfmtTool,
-        defaultOdinToolchainVersion: currentDefaultVersion,
-        defaultOdinToolchain: currentDefaultToolchain,
-    };
+export function __resetOdinToolchainStateForTest() {
+    defaultVersion = null;
+    defaultToolchain = null;
 }
-
-const defaultApi = createOdinToolchainApi();
 
 /**
  * Declare an Odin toolchain version and optionally set it as the default.
@@ -266,7 +128,17 @@ const defaultApi = createOdinToolchainApi();
  * @returns {object} Target handle for this Odin toolchain.
  */
 export function odinToolchain(version, opts = {}) {
-    return defaultApi.odinToolchain(version, opts);
+    namedCache({ name: ODIN_TOOLCHAIN_CACHE });
+    namedCache({ name: ODINFMT_CACHE });
+
+    const toolchain = new OdinToolchain({ version });
+
+    if (opts.default) {
+        defaultVersion = version;
+        defaultToolchain = toolchain;
+    }
+
+    return toolchain;
 }
 
 /**
@@ -277,7 +149,23 @@ export function odinToolchain(version, opts = {}) {
  * @returns {string} Local path to the toolchain root containing the Odin binary.
  */
 export function acquireOdinToolchain(version) {
-    return defaultApi.acquireOdinToolchain(version);
+    const plat = platformInfo();
+    const key = odinCacheKey(version, plat);
+
+    if (cacheHas(ODIN_TOOLCHAIN_CACHE, key)) {
+        return cacheGet(ODIN_TOOLCHAIN_CACHE, key);
+    }
+
+    const artifact = odinArtifactName(version, plat);
+    const archive = download(odinDownloadUrl(version, plat));
+    const staging = stagingPath(version, plat);
+    extract(archive, staging, {
+        format: artifact.endsWith(".zip") ? "zip" : "tar.gz",
+        strip_components: 1,
+    });
+
+    cachePut(ODIN_TOOLCHAIN_CACHE, key, staging);
+    return cacheGet(ODIN_TOOLCHAIN_CACHE, key);
 }
 
 /**
@@ -288,7 +176,13 @@ export function acquireOdinToolchain(version) {
  * @returns {string}
  */
 export function resolveOdinToolchainVersion(version) {
-    return defaultApi.resolveOdinToolchainVersion(version);
+    if (version) {
+        return version;
+    }
+    if (defaultVersion) {
+        return defaultVersion;
+    }
+    throw new Error("no Odin toolchain version specified and no default set");
 }
 
 /**
@@ -299,7 +193,10 @@ export function resolveOdinToolchainVersion(version) {
  * @returns {string}
  */
 export function odinBin(version) {
-    return defaultApi.odinBin(version);
+    const resolved = resolveOdinToolchainVersion(version);
+    const dir = acquireOdinToolchain(resolved);
+    const exe = platformInfo().os === "windows" ? "odin.exe" : "odin";
+    return `${dir}/${exe}`;
 }
 
 /**
@@ -310,7 +207,16 @@ export function odinBin(version) {
  * @returns {object}
  */
 export function odinTool(version) {
-    return defaultApi.odinTool(version);
+    const resolved = resolveOdinToolchainVersion(version);
+    acquireOdinToolchain(resolved);
+    const plat = platformInfo();
+    return {
+        kind: "tool",
+        name: "odin",
+        cache: ODIN_TOOLCHAIN_CACHE,
+        key: odinCacheKey(resolved, plat),
+        binDirs: ["."],
+    };
 }
 
 /**
@@ -322,7 +228,37 @@ export function odinTool(version) {
  * @returns {{ tool: object, command: string }}
  */
 export function odinfmtTool(version) {
-    return defaultApi.odinfmtTool(version);
+    const resolved = resolveOdinToolchainVersion(version);
+    acquireOdinfmt(resolved);
+    const plat = platformInfo();
+    const triple = olsTriple(plat);
+    return {
+        tool: {
+            kind: "tool",
+            name: "odinfmt",
+            cache: ODINFMT_CACHE,
+            key: `${resolved}/${plat.os}-${plat.arch}`,
+            binDirs: ["."],
+        },
+        // The OLS zip stores the binary under its triple-suffixed name at the
+        // archive root; invoke it by that name (JS has no rename primitive).
+        command: `odinfmt-${triple}${plat.os === "windows" ? ".exe" : ""}`,
+    };
+}
+
+/**
+ * Return the path to the odinfmt binary for an Odin toolchain version.
+ *
+ * @category configuration
+ * @param {string} [version]
+ * @returns {string}
+ */
+export function odinfmtBin(version) {
+    const resolved = resolveOdinToolchainVersion(version);
+    const dir = acquireOdinfmt(resolved);
+    const plat = platformInfo();
+    const triple = olsTriple(plat);
+    return `${dir}/odinfmt-${triple}${plat.os === "windows" ? ".exe" : ""}`;
 }
 
 /**
@@ -333,7 +269,21 @@ export function odinfmtTool(version) {
  * @returns {string}
  */
 export function acquireOdinfmt(version) {
-    return defaultApi.acquireOdinfmt(version);
+    const plat = platformInfo();
+    const triple = olsTriple(plat);
+    const key = `${version}/${plat.os}-${plat.arch}`;
+
+    if (cacheHas(ODINFMT_CACHE, key)) {
+        return cacheGet(ODINFMT_CACHE, key);
+    }
+
+    const url = `https://github.com/DanielGavin/ols/releases/download/${version}/ols-${triple}.zip`;
+    const archive = download(url);
+    const staging = `/tmp/imp-odinfmt-${version}-${plat.arch}`;
+    extract(archive, staging, { format: "zip" });
+
+    cachePut(ODINFMT_CACHE, key, staging);
+    return cacheGet(ODINFMT_CACHE, key);
 }
 
 /**
@@ -343,7 +293,7 @@ export function acquireOdinfmt(version) {
  * @returns {string|null}
  */
 export function defaultOdinToolchainVersion() {
-    return defaultApi.defaultOdinToolchainVersion();
+    return defaultVersion;
 }
 
 /**
@@ -353,7 +303,7 @@ export function defaultOdinToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultOdinToolchain() {
-    return defaultApi.defaultOdinToolchain();
+    return defaultToolchain;
 }
 
 product("odin-toolchain", "gen-lockfiles", (handle) =>

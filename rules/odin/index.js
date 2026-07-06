@@ -61,13 +61,13 @@ import "//rules/workflows/build";
 
 export {
     acquireOdinToolchain,
-    createOdinToolchainApi,
     defaultOdinToolchain,
     defaultOdinToolchainVersion,
     odinArtifactName,
     odinBin,
     odinCacheKey,
     odinDownloadUrl,
+    odinfmtBin,
     odinToolchain,
     odinTool,
     resolveOdinToolchainVersion,

@@ -5,19 +5,6 @@ import { generateToolLockfile } from "//rules/workflows/lockfiles";
 
 const ZOLA_TOOLCHAIN_CACHE = "zola-toolchains";
 
-const defaultHost = {
-    namedCache,
-    run,
-    output,
-    output_path,
-    nativeTool,
-    nativeToolSpec,
-    platformInfo,
-    cachePut,
-    cacheGet,
-    cacheHas,
-};
-
 // Zola publishes prebuilt binaries for these targets; see
 // https://github.com/getzola/zola/releases.
 const TARGET_TRIPLES = {
@@ -96,144 +83,18 @@ export class ZolaToolchain extends Target {
     }
 }
 
-/**
- * Build a zola toolchain API. Tests can pass a fake host implementation.
- *
- * @category configuration
- * @param {object} [host]
- * @returns {object}
- */
-export function createZolaToolchainApi(host = defaultHost) {
-    let defaultVersion = null;
-    let defaultToolchain = null;
-    // Declared lazily, once, the first time a toolchain is declared — target()
-    // addresses are only assigned at workspace-load time, so this must happen
-    // at BUILD.js top level rather than inside acquireToolchain() at execution time.
-    let coreToolHandles = null;
+let defaultVersion = null;
+let defaultToolchain = null;
+// Declared lazily, once, the first time a toolchain is declared — target()
+// addresses are only assigned at workspace-load time, so this must happen
+// at BUILD.js top level rather than inside acquireToolchain() at execution time.
+let coreToolHandles = null;
 
-    function declareToolchain(version, opts = {}) {
-        host.namedCache({ name: ZOLA_TOOLCHAIN_CACHE });
-        if (!coreToolHandles) {
-            coreToolHandles = CORE_TOOL_NAMES.map((name) => host.nativeTool(name));
-        }
-
-        const toolchain = new ZolaToolchain({ version });
-
-        if (opts.default) {
-            defaultVersion = version;
-            defaultToolchain = toolchain;
-        }
-
-        return toolchain;
-    }
-
-    function installToolchain(version, source) {
-        host.namedCache({ name: ZOLA_TOOLCHAIN_CACHE });
-        const plat = host.platformInfo();
-        const key = zolaCacheKey(version, plat);
-        host.cachePut(ZOLA_TOOLCHAIN_CACHE, key, source);
-        return host.cacheGet(ZOLA_TOOLCHAIN_CACHE, key);
-    }
-
-    async function acquireToolchain(version) {
-        const plat = host.platformInfo();
-        const key = zolaCacheKey(version, plat);
-
-        if (host.cacheHas(ZOLA_TOOLCHAIN_CACHE, key)) {
-            return host.cacheGet(ZOLA_TOOLCHAIN_CACHE, key);
-        }
-        if (!coreToolHandles) {
-            throw new Error("no zola toolchain declared via zolaToolchain(); nothing to acquire");
-        }
-
-        const coreTools = await Promise.all(coreToolHandles.map((handle) => host.nativeToolSpec(handle)));
-
-        const artifact = zolaArtifactName(version, plat);
-        const url = zolaDownloadUrl(version, plat);
-        const downloadPath = `.imp/zola-downloads/${key}/${artifact}`;
-        const extractPath = `.imp/zola-toolchains/${key}`;
-
-        await host.run({
-            argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-zola", downloadPath, url],
-            tools: coreTools,
-            outputs: [host.output(host.output_path(downloadPath))],
-            display: `download zola ${version} (${plat.os}/${plat.arch})`,
-        });
-
-        // Zola's release tarball ships the `zola` binary at the archive root
-        // (no wrapping directory), so no --strip-components is needed.
-        await host.run({
-            argv: ["sh", "-c", 'mkdir -p "$2" && tar -xf "$1" -C "$2"', "extract-zola", downloadPath, extractPath],
-            tools: coreTools,
-            inputs: [{ kind: "file", path: downloadPath }],
-            outputs: [
-                host.output(host.output_path(extractPath), {
-                    kind: "directory",
-                    namedCache: { name: ZOLA_TOOLCHAIN_CACHE, key },
-                }),
-            ],
-            display: `extract zola ${version} (${plat.os}/${plat.arch})`,
-        });
-
-        return host.cacheGet(ZOLA_TOOLCHAIN_CACHE, key);
-    }
-
-    function resolveVersion(version) {
-        if (version) {
-            return version;
-        }
-        return defaultVersion;
-    }
-
-    function requireVersion(version) {
-        const resolved = resolveVersion(version);
-        if (!resolved) {
-            throw new Error("no zola toolchain version specified and no default set");
-        }
-        return resolved;
-    }
-
-    async function bin(version) {
-        const resolved = requireVersion(version);
-        const dir = await acquireToolchain(resolved);
-        const plat = host.platformInfo();
-        return plat.os === "windows" ? `${dir}/zola.exe` : `${dir}/zola`;
-    }
-
-    async function tool(version) {
-        const resolved = requireVersion(version);
-        await acquireToolchain(resolved);
-        const plat = host.platformInfo();
-        return {
-            kind: "tool",
-            name: "zola",
-            cache: ZOLA_TOOLCHAIN_CACHE,
-            key: zolaCacheKey(resolved, plat),
-            binDirs: ["."],
-        };
-    }
-
-    function currentDefaultVersion() {
-        return defaultVersion;
-    }
-
-    function currentDefaultToolchain() {
-        return defaultToolchain;
-    }
-
-    return {
-        zolaToolchain: declareToolchain,
-        installZolaToolchain: installToolchain,
-        acquireZolaToolchain: acquireToolchain,
-        resolveZolaToolchainVersion: resolveVersion,
-        zolaBin: bin,
-        zolaTool: tool,
-        defaultZolaToolchainVersion: currentDefaultVersion,
-        defaultZolaToolchain: currentDefaultToolchain,
-    };
+export function __resetZolaToolchainStateForTest() {
+    defaultVersion = null;
+    defaultToolchain = null;
+    coreToolHandles = null;
 }
-
-const defaultApi = createZolaToolchainApi();
 
 /**
  * Declare a zola toolchain version and optionally set it as the default.
@@ -245,7 +106,19 @@ const defaultApi = createZolaToolchainApi();
  * @returns {object} Target handle for this zola toolchain.
  */
 export function zolaToolchain(version, opts = {}) {
-    return defaultApi.zolaToolchain(version, opts);
+    namedCache({ name: ZOLA_TOOLCHAIN_CACHE });
+    if (!coreToolHandles) {
+        coreToolHandles = CORE_TOOL_NAMES.map((name) => nativeTool(name));
+    }
+
+    const toolchain = new ZolaToolchain({ version });
+
+    if (opts.default) {
+        defaultVersion = version;
+        defaultToolchain = toolchain;
+    }
+
+    return toolchain;
 }
 
 /**
@@ -257,7 +130,11 @@ export function zolaToolchain(version, opts = {}) {
  * @returns {string|null} Local path to the cached toolchain root.
  */
 export function installZolaToolchain(version, source) {
-    return defaultApi.installZolaToolchain(version, source);
+    namedCache({ name: ZOLA_TOOLCHAIN_CACHE });
+    const plat = platformInfo();
+    const key = zolaCacheKey(version, plat);
+    cachePut(ZOLA_TOOLCHAIN_CACHE, key, source);
+    return cacheGet(ZOLA_TOOLCHAIN_CACHE, key);
 }
 
 /**
@@ -268,8 +145,47 @@ export function installZolaToolchain(version, source) {
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
-export function acquireZolaToolchain(version) {
-    return defaultApi.acquireZolaToolchain(version);
+export async function acquireZolaToolchain(version) {
+    const plat = platformInfo();
+    const key = zolaCacheKey(version, plat);
+
+    if (cacheHas(ZOLA_TOOLCHAIN_CACHE, key)) {
+        return cacheGet(ZOLA_TOOLCHAIN_CACHE, key);
+    }
+    if (!coreToolHandles) {
+        throw new Error("no zola toolchain declared via zolaToolchain(); nothing to acquire");
+    }
+
+    const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
+
+    const artifact = zolaArtifactName(version, plat);
+    const url = zolaDownloadUrl(version, plat);
+    const downloadPath = `.imp/zola-downloads/${key}/${artifact}`;
+    const extractPath = `.imp/zola-toolchains/${key}`;
+
+    await run({
+        argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-zola", downloadPath, url],
+        tools: coreTools,
+        outputs: [output(output_path(downloadPath))],
+        display: `download zola ${version} (${plat.os}/${plat.arch})`,
+    });
+
+    // Zola's release tarball ships the `zola` binary at the archive root
+    // (no wrapping directory), so no --strip-components is needed.
+    await run({
+        argv: ["sh", "-c", 'mkdir -p "$2" && tar -xf "$1" -C "$2"', "extract-zola", downloadPath, extractPath],
+        tools: coreTools,
+        inputs: [{ kind: "file", path: downloadPath }],
+        outputs: [
+            output(output_path(extractPath), {
+                kind: "directory",
+                namedCache: { name: ZOLA_TOOLCHAIN_CACHE, key },
+            }),
+        ],
+        display: `extract zola ${version} (${plat.os}/${plat.arch})`,
+    });
+
+    return cacheGet(ZOLA_TOOLCHAIN_CACHE, key);
 }
 
 /**
@@ -280,7 +196,10 @@ export function acquireZolaToolchain(version) {
  * @returns {string|null}
  */
 export function resolveZolaToolchainVersion(version) {
-    return defaultApi.resolveZolaToolchainVersion(version);
+    if (version) {
+        return version;
+    }
+    return defaultVersion;
 }
 
 /**
@@ -290,8 +209,14 @@ export function resolveZolaToolchainVersion(version) {
  * @param {string} [version]
  * @returns {Promise<string>}
  */
-export function zolaBin(version) {
-    return defaultApi.zolaBin(version);
+export async function zolaBin(version) {
+    const resolved = resolveZolaToolchainVersion(version);
+    if (!resolved) {
+        throw new Error("no zola toolchain version specified and no default set");
+    }
+    const dir = await acquireZolaToolchain(resolved);
+    const plat = platformInfo();
+    return plat.os === "windows" ? `${dir}/zola.exe` : `${dir}/zola`;
 }
 
 /**
@@ -301,8 +226,20 @@ export function zolaBin(version) {
  * @param {string} [version]
  * @returns {Promise<object>}
  */
-export function zolaTool(version) {
-    return defaultApi.zolaTool(version);
+export async function zolaTool(version) {
+    const resolved = resolveZolaToolchainVersion(version);
+    if (!resolved) {
+        throw new Error("no zola toolchain version specified and no default set");
+    }
+    await acquireZolaToolchain(resolved);
+    const plat = platformInfo();
+    return {
+        kind: "tool",
+        name: "zola",
+        cache: ZOLA_TOOLCHAIN_CACHE,
+        key: zolaCacheKey(resolved, plat),
+        binDirs: ["."],
+    };
 }
 
 /**
@@ -312,7 +249,7 @@ export function zolaTool(version) {
  * @returns {string|null}
  */
 export function defaultZolaToolchainVersion() {
-    return defaultApi.defaultZolaToolchainVersion();
+    return defaultVersion;
 }
 
 /**
@@ -322,7 +259,7 @@ export function defaultZolaToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultZolaToolchain() {
-    return defaultApi.defaultZolaToolchain();
+    return defaultToolchain;
 }
 
 product("zola-toolchain", "gen-lockfiles", (handle) =>
