@@ -1,6 +1,6 @@
 +++
 title = "Writing build rules"
-weight = 2
+weight = 3
 template = "page.html"
 +++
 
