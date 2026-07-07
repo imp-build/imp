@@ -43,6 +43,10 @@ pub struct LiveWorkspace {
     /// this must not go stale, since it's readable from other live-execution
     /// paths that share this `LiveWorkspace` (e.g. rules-test evaluation).
     pub(crate) selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
+    /// Flags resolved for the goal currently executing, queryable from JS as
+    /// `goalFlags()`. Set for the duration of `execute_goal_live` and reset to
+    /// `None` afterward, mirroring `selected_roots`.
+    pub(crate) goal_flags: Arc<Mutex<Option<serde_json::Value>>>,
 }
 
 impl std::fmt::Debug for LiveWorkspace {
@@ -55,6 +59,7 @@ impl std::fmt::Debug for LiveWorkspace {
             .field("exec_no_cache", &"Arc<AtomicBool>")
             .field("exec_sandbox_retention", &"Arc<AtomicU8>")
             .field("selected_roots", &"Arc<Mutex<..>>")
+            .field("goal_flags", &"Arc<Mutex<..>>")
             .finish()
     }
 }

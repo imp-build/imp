@@ -111,6 +111,15 @@ pub struct PlatformDef {
     pub target: String,
 }
 
+/// A boolean flag a goal declares for itself via `goal(name, fn, { flags })`,
+/// turned into a real CLI flag (e.g. `--check`) once the goal's declaring
+/// module has been evaluated. v1 scope: presence-based booleans defaulting to
+/// `false`; extend if a value-carrying flag is ever needed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalFlagDef {
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Goal {
     pub name: String,
@@ -118,6 +127,8 @@ pub struct Goal {
     /// products (build → "build", fmt → "fmt", …); targets whose kind lacks
     /// the product are skipped during selector-less selection.
     pub product: String,
+    /// Flags declared for this goal, keyed by flag name (e.g. "check").
+    pub flags: BTreeMap<String, GoalFlagDef>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -185,6 +196,7 @@ impl Default for HostState {
                 Goal {
                     name: name.to_owned(),
                     product: name.to_owned(),
+                    flags: BTreeMap::new(),
                 },
             );
         }
@@ -279,6 +291,7 @@ pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
     let scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>> =
         Arc::new(Mutex::new(None));
     let selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(None));
+    let goal_flags: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
 
     // ----- QuickJS runtime + context -----
     let rt = Runtime::new().context("create QuickJS runtime")?;
@@ -334,6 +347,7 @@ pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
                 Arc::clone(&exec_sandbox_retention),
                 Arc::clone(&scheduler),
                 Arc::clone(&selected_roots),
+                Arc::clone(&goal_flags),
             )
         })
         .await
@@ -475,6 +489,7 @@ pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
         exec_sandbox_retention,
         scheduler,
         selected_roots,
+        goal_flags,
     })
 }
 
@@ -620,6 +635,7 @@ fn register_globals<'js>(
     exec_sandbox_retention: Arc<AtomicU8>,
     scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>>,
     selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
+    goal_flags: Arc<Mutex<Option<serde_json::Value>>>,
 ) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
@@ -789,12 +805,16 @@ fn register_globals<'js>(
     globals.set("__host_named_cache", host_named_cache)?;
 
     // ------------------------------------------------------------------
-    // __host_goal(name, productPolicy)
+    // __host_goal(name, productPolicy, flagsJson)
+    // flagsJson: JSON object of { flagName: { description?: string } },
+    // merged into the goal's declared flags regardless of whether the goal
+    // itself is a fresh registration (flags are additive/idempotent, unlike
+    // the first-registration-wins `product` field).
     // ------------------------------------------------------------------
     let state_g = Arc::clone(&state);
     let host_goal = Function::new(
         ctx.clone(),
-        move |name: String, policy_val: Value| -> rquickjs::Result<()> {
+        move |name: String, policy_val: Value, flags_json: String| -> rquickjs::Result<()> {
             if name.is_empty() {
                 return Err(action_spec_error("goal name must not be empty".to_owned()));
             }
@@ -809,9 +829,37 @@ fn register_globals<'js>(
                     s
                 }
             };
+            let declared_flags: BTreeMap<String, serde_json::Value> =
+                serde_json::from_str(&flags_json).map_err(|e| {
+                    action_spec_error(format!("goal flags must be a JSON object: {e}"))
+                })?;
             let mut hs = state_g.lock().unwrap();
-            if !hs.goals.contains_key(&name) {
-                hs.goals.insert(name.clone(), Goal { name, product });
+            match hs.goals.get_mut(&name) {
+                Some(goal) => {
+                    for (flag_name, def) in declared_flags {
+                        goal.flags.entry(flag_name).or_insert(GoalFlagDef {
+                            description: def
+                                .get("description")
+                                .and_then(|d| d.as_str())
+                                .map(str::to_owned),
+                        });
+                    }
+                }
+                None => {
+                    let flags = declared_flags
+                        .into_iter()
+                        .map(|(flag_name, def)| {
+                            let flag = GoalFlagDef {
+                                description: def
+                                    .get("description")
+                                    .and_then(|d| d.as_str())
+                                    .map(str::to_owned),
+                            };
+                            (flag_name, flag)
+                        })
+                        .collect();
+                    hs.goals.insert(name.clone(), Goal { name, product, flags });
+                }
             }
             Ok(())
         },
@@ -1212,6 +1260,25 @@ fn register_globals<'js>(
             .map_err(|e| rquickjs::Error::new_loading_message("selectedTargets", e.to_string()))
     })?;
     globals.set("__host_selected_targets", host_selected_targets)?;
+
+    // ------------------------------------------------------------------
+    // __host_current_goal_flags() → JSON object of resolved goal flags
+    // Errors if called outside of goal execution (goal_flags is None).
+    // ------------------------------------------------------------------
+    let goal_flags_gf = Arc::clone(&goal_flags);
+    let host_current_goal_flags =
+        Function::new(ctx.clone(), move || -> rquickjs::Result<String> {
+            let guard = goal_flags_gf.lock().unwrap();
+            let flags = guard.as_ref().ok_or_else(|| {
+                action_spec_error(
+                    "goalFlags() may only be called during goal execution".to_owned(),
+                )
+            })?;
+            serde_json::to_string(flags).map_err(|e| {
+                rquickjs::Error::new_loading_message("goalFlags", e.to_string())
+            })
+        })?;
+    globals.set("__host_current_goal_flags", host_current_goal_flags)?;
 
     // ------------------------------------------------------------------
     // Tracked runtime APIs (Phase 3)
@@ -2313,6 +2380,7 @@ pub async fn execute_goal_live(
     selectors: &[String],
     no_cache: bool,
     js_workers: usize,
+    flags: serde_json::Value,
 ) -> Result<()> {
     let goal_def = live.workspace.goals.get(goal).ok_or_else(|| {
         let known: Vec<_> = live.workspace.goals.keys().map(String::as_str).collect();
@@ -2367,6 +2435,7 @@ pub async fn execute_goal_live(
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
     live.exec_no_cache.store(no_cache, Ordering::SeqCst);
     *live.selected_roots.lock().unwrap() = Some(selection);
+    *live.goal_flags.lock().unwrap() = Some(flags);
 
     let goal_owned = goal.to_owned();
     let result = live
@@ -2450,6 +2519,7 @@ pub async fn execute_goal_live(
         Ordering::SeqCst,
     );
     *live.selected_roots.lock().unwrap() = None;
+    *live.goal_flags.lock().unwrap() = None;
     result
 }
 
@@ -3058,7 +3128,7 @@ mod tests {
             tx,
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
-        execute_goal_live(live, root, goal, selectors, false, 1).await
+        execute_goal_live(live, root, goal, selectors, false, 1, serde_json::json!({})).await
     }
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -4212,7 +4282,7 @@ export const build = product("root-nesting-test", "build", async function do_bui
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned(), "lib".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1)
+        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
             .await
             .unwrap();
 
@@ -4293,7 +4363,7 @@ export const build = product("promise-all-context-test", "build", async function
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1)
+        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
             .await
             .unwrap();
 
@@ -4364,7 +4434,7 @@ export const build = product("sequential-sibling-context-test", "build", async f
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1)
+        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
             .await
             .unwrap();
 
@@ -4423,7 +4493,7 @@ export const build = product("fail-test", "build", async function build() {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(20),
-            execute_goal_live(&live, p, "build", &["app".to_owned()], false, 1),
+            execute_goal_live(&live, p, "build", &["app".to_owned()], false, 1, serde_json::json!({})),
         )
         .await
         .expect("execute_goal_live must resolve when a root task fails");
@@ -4482,6 +4552,7 @@ export const build = product("shared-fail-test", "build", async function build(h
                 &["a".to_owned(), "b".to_owned()],
                 false,
                 2,
+                serde_json::json!({}),
             ),
         )
         .await
@@ -4529,7 +4600,7 @@ export const build = product("concurrent-root-test", "build", async function bui
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["a".to_owned(), "b".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1)
+        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
             .await
             .unwrap();
 
@@ -4601,7 +4672,7 @@ export const build = product("selected-targets-test", "build", async function bu
         *live.scheduler.lock().unwrap() = Some(scheduler.clone());
 
         // Explicit selector: only the selected target sees itself.
-        execute_goal_live(&live, p, "build", &["a".to_owned()], false, 1)
+        execute_goal_live(&live, p, "build", &["a".to_owned()], false, 1, serde_json::json!({}))
             .await
             .unwrap();
         assert_eq!(
@@ -4612,7 +4683,7 @@ export const build = product("selected-targets-test", "build", async function bu
         // Empty selectors: every target with a product for this goal is selected.
         reset_js_memo_state(&live).await;
         *live.scheduler.lock().unwrap() = Some(scheduler);
-        execute_goal_live(&live, p, "build", &[], false, 1)
+        execute_goal_live(&live, p, "build", &[], false, 1, serde_json::json!({}))
             .await
             .unwrap();
         assert_eq!(
@@ -4684,7 +4755,7 @@ export const build = product("selected-targets-reset-test", "build", async funct
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         assert!(live.selected_roots.lock().unwrap().is_none());
-        execute_goal_live(&live, p, "build", &["a".to_owned()], false, 1)
+        execute_goal_live(&live, p, "build", &["a".to_owned()], false, 1, serde_json::json!({}))
             .await
             .unwrap();
         assert!(
@@ -4739,6 +4810,7 @@ export const build = product("callback-test", "custom-goal", async function buil
             &["a".to_owned(), "b".to_owned()],
             false,
             1,
+            serde_json::json!({}),
         )
         .await
         .unwrap_err();
@@ -4791,7 +4863,7 @@ export const build = product("callback-test", "custom-goal", async function buil
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
-        execute_goal_live(&live, p, "custom-goal", &["a".to_owned()], false, 1)
+        execute_goal_live(&live, p, "custom-goal", &["a".to_owned()], false, 1, serde_json::json!({}))
             .await
             .unwrap();
         assert!(
@@ -4834,7 +4906,7 @@ export const build = product("plain-goal-test", "plain-goal", async function bui
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
-        execute_goal_live(&live, p, "plain-goal", &["a".to_owned()], false, 1)
+        execute_goal_live(&live, p, "plain-goal", &["a".to_owned()], false, 1, serde_json::json!({}))
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(p.join("ran-a.txt")).unwrap(), "ran");
@@ -4871,7 +4943,7 @@ export const build = product("js-lane-slot-test", "build", async function build(
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["a".to_owned(), "b".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 2)
+        execute_goal_live(&live, p, "build", &selectors, false, 2, serde_json::json!({}))
             .await
             .unwrap();
 
@@ -4930,7 +5002,7 @@ export const build = product("js-lane-bound-test", "build", async function build
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1)
+        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
             .await
             .unwrap();
 
@@ -5012,7 +5084,7 @@ export const build = product("single-js-worker-inflight-test", "build", async fu
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1)
+        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
             .await
             .unwrap();
     }
@@ -5057,7 +5129,7 @@ export const build = product("interleaved-root-context-test", "build", async fun
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["a".to_owned(), "b".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1)
+        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
             .await
             .unwrap();
 
@@ -5134,7 +5206,7 @@ export const build = product("deferred-run-context-test", "build", async functio
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1)
+        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
             .await
             .unwrap();
 
@@ -5212,7 +5284,7 @@ export const build = product("live-cache-test", "build", async function build() 
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, true, 1)
+        execute_goal_live(&live, p, "build", &selectors, true, 1, serde_json::json!({}))
             .await
             .unwrap();
         assert_eq!(
@@ -5222,14 +5294,14 @@ export const build = product("live-cache-test", "build", async function build() 
         std::fs::remove_file(p.join("build/live.txt")).unwrap();
 
         reset_js_memo_state(&live).await;
-        execute_goal_live(&live, p, "build", &selectors, false, 1)
+        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "rr");
         std::fs::remove_file(p.join("build/live.txt")).unwrap();
 
         reset_js_memo_state(&live).await;
-        execute_goal_live(&live, p, "build", &selectors, false, 1)
+        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "rr");
@@ -5240,7 +5312,7 @@ export const build = product("live-cache-test", "build", async function build() 
         std::fs::remove_file(p.join("build/live.txt")).unwrap();
 
         reset_js_memo_state(&live).await;
-        execute_goal_live(&live, p, "build", &selectors, true, 1)
+        execute_goal_live(&live, p, "build", &selectors, true, 1, serde_json::json!({}))
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "rrr");
@@ -5302,7 +5374,7 @@ configure("cache_test", {{ mode: {mode} }});
                 tx,
             );
             *live.scheduler.lock().unwrap() = Some(scheduler);
-            execute_goal_live(&live, p, "build", &selectors, false, 1)
+            execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
                 .await
                 .unwrap();
             runs.push(std::fs::read_to_string(&marker).unwrap());

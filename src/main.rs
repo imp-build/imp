@@ -20,7 +20,7 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Arg, ArgAction, Args, Command, FromArgMatches, Parser, Subcommand};
 use rquickjs::{promise::MaybePromise, CatchResultExt, FromJs, Function, Module, Object, Value};
 
 use env::{Env, LocalEnv, WslEnv};
@@ -92,23 +92,30 @@ enum Cmd {
         selectors: Vec<String>,
     },
     /// Build the selected targets; defaults to the workspace default build roots
-    Build(GoalArgs),
+    #[command(disable_help_flag = true)]
+    Build(RawGoalArgs),
     /// Run tests for the selected targets
-    Test(GoalArgs),
+    #[command(disable_help_flag = true)]
+    Test(RawGoalArgs),
     /// Format the selected targets
-    Fmt(GoalArgs),
+    #[command(disable_help_flag = true)]
+    Fmt(RawGoalArgs),
     /// Lint the selected targets
-    Lint(GoalArgs),
+    #[command(disable_help_flag = true)]
+    Lint(RawGoalArgs),
     /// Package the selected targets
-    Package(GoalArgs),
+    #[command(disable_help_flag = true)]
+    Package(RawGoalArgs),
     /// Run the selected targets
-    Run(GoalArgs),
+    #[command(disable_help_flag = true)]
+    Run(RawGoalArgs),
     /// Run any registered goal by name, e.g. `imp goal vs //:target`
+    #[command(disable_help_flag = true)]
     Goal {
         /// Goal name, e.g. "vs", "build", "fmt"
         name: String,
         #[command(flatten)]
-        args: GoalArgs,
+        args: RawGoalArgs,
     },
     /// Import JS rule-test modules and run their registered tests. Invoked by
     /// the rules-test product inside a task sandbox; not for direct use.
@@ -136,6 +143,44 @@ struct GoalArgs {
     /// sandboxes for debugging, the default), or always (keep every sandbox)
     #[arg(long, value_enum, default_value_t = exec::SandboxRetention::default())]
     keep_sandbox: exec::SandboxRetention,
+}
+
+/// Opaque capture of a goal subcommand's argv tail. Goal-declared flags (e.g.
+/// `fmt`'s `--check`) aren't known until the workspace/JS loads, so this
+/// phase can't validate them yet — it just vacuums up everything after the
+/// goal name. `parse_goal_args` re-parses this, after workspace load, against
+/// a `Command` built from `GoalArgs` plus that goal's declared flags.
+#[derive(clap::Args)]
+struct RawGoalArgs {
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    raw: Vec<String>,
+}
+
+/// Build a clap `Command` for `goal` from the static `GoalArgs` fields plus
+/// its declared boolean flags, and parse `raw` against it. A parse failure
+/// (including `--help`/`-h`) prints clap's normal formatted output and exits
+/// the process, exactly like a top-level clap parse failure would.
+fn parse_goal_args(
+    goal: &str,
+    flag_defs: &std::collections::BTreeMap<String, spike::GoalFlagDef>,
+    raw: &[String],
+) -> clap::ArgMatches {
+    let mut cmd = Command::new(goal.to_owned());
+    cmd = GoalArgs::augment_args(cmd);
+    for (name, def) in flag_defs {
+        let mut arg = Arg::new(name.clone())
+            .long(name.clone())
+            .action(ArgAction::SetTrue);
+        if let Some(description) = &def.description {
+            arg = arg.help(description.clone());
+        }
+        cmd = cmd.arg(arg);
+    }
+    let argv = std::iter::once(goal.to_owned()).chain(raw.iter().cloned());
+    match cmd.try_get_matches_from(argv) {
+        Ok(matches) => matches,
+        Err(e) => e.exit(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -281,25 +326,25 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
             return cmd_rules(tree).await;
         }
         Cmd::Build(args) => {
-            return cmd_execute_goal("build", args, Arc::clone(&cancellation), tree).await;
+            return cmd_execute_goal("build", &args.raw, Arc::clone(&cancellation), tree).await;
         }
         Cmd::Test(args) => {
-            return cmd_execute_goal("test", args, Arc::clone(&cancellation), tree).await;
+            return cmd_execute_goal("test", &args.raw, Arc::clone(&cancellation), tree).await;
         }
         Cmd::Fmt(args) => {
-            return cmd_execute_goal("fmt", args, Arc::clone(&cancellation), tree).await;
+            return cmd_execute_goal("fmt", &args.raw, Arc::clone(&cancellation), tree).await;
         }
         Cmd::Lint(args) => {
-            return cmd_execute_goal("lint", args, Arc::clone(&cancellation), tree).await;
+            return cmd_execute_goal("lint", &args.raw, Arc::clone(&cancellation), tree).await;
         }
         Cmd::Package(args) => {
-            return cmd_execute_goal("package", args, Arc::clone(&cancellation), tree).await;
+            return cmd_execute_goal("package", &args.raw, Arc::clone(&cancellation), tree).await;
         }
         Cmd::Run(args) => {
-            return cmd_execute_goal("run", args, Arc::clone(&cancellation), tree).await;
+            return cmd_execute_goal("run", &args.raw, Arc::clone(&cancellation), tree).await;
         }
         Cmd::Goal { name, args } => {
-            return cmd_execute_goal(name, args, Arc::clone(&cancellation), tree).await;
+            return cmd_execute_goal(name, &args.raw, Arc::clone(&cancellation), tree).await;
         }
         Cmd::RulesTest { modules } => {
             return cmd_rules_test(modules, Arc::clone(&cancellation), tree).await;
@@ -439,36 +484,23 @@ fn effective_js_workers(workspace: &spike::Workspace, cli_value: Option<usize>) 
 /// What to drive on the live evaluation path: a goal over selected targets, or
 /// a JS rule-test suite (the hidden `rules-test` subcommand, invoked by the
 /// rules-test product inside a task sandbox).
+///
+/// `Goal`'s args are the raw, unvalidated argv tail from phase 1 (see
+/// `RawGoalArgs`) — `cmd_execute_live` re-parses them into selectors/flags
+/// once the workspace (and the goal's declared flags) has loaded.
 #[derive(Clone, Copy)]
 enum LiveInvocation<'a> {
-    Goal {
-        goal: &'a str,
-        selectors: &'a [String],
-    },
-    RulesTests {
-        modules: &'a [String],
-    },
+    Goal { goal: &'a str, raw: &'a [String] },
+    RulesTests { modules: &'a [String] },
 }
 
 async fn cmd_execute_goal(
     goal: &str,
-    args: &GoalArgs,
+    raw: &[String],
     cancellation: Arc<AtomicBool>,
     tree: &Tree,
 ) -> Result<()> {
-    cmd_execute_live(
-        LiveInvocation::Goal {
-            goal,
-            selectors: &args.selectors,
-        },
-        args.jobs,
-        args.js_workers,
-        args.no_cache,
-        args.keep_sandbox,
-        cancellation,
-        tree,
-    )
-    .await
+    cmd_execute_live(LiveInvocation::Goal { goal, raw }, cancellation, tree).await
 }
 
 async fn cmd_rules_test(
@@ -476,24 +508,11 @@ async fn cmd_rules_test(
     cancellation: Arc<AtomicBool>,
     tree: &Tree,
 ) -> Result<()> {
-    cmd_execute_live(
-        LiveInvocation::RulesTests { modules },
-        1,
-        None,
-        false,
-        exec::SandboxRetention::default(),
-        cancellation,
-        tree,
-    )
-    .await
+    cmd_execute_live(LiveInvocation::RulesTests { modules }, cancellation, tree).await
 }
 
 async fn cmd_execute_live(
     invocation: LiveInvocation<'_>,
-    jobs: usize,
-    js_workers: Option<usize>,
-    no_cache: bool,
-    sandbox_retention: exec::SandboxRetention,
     cancellation: Arc<AtomicBool>,
     tree: &Tree,
 ) -> Result<()> {
@@ -505,17 +524,21 @@ async fn cmd_execute_live(
         log::info!("loaded workspace in {:.2}s", start.elapsed().as_secs_f64());
         ws
     };
-    let js_workers = effective_js_workers(&workspace.workspace, js_workers)?;
 
-    if cancellation.load(Ordering::SeqCst) {
-        anyhow::bail!("execution canceled");
-    }
-
-    // Resolve selectors into concrete root targets so we know the total count
-    // upfront, before the scheduler or renderer starts. Rule-test runs have no
-    // target roots; they render as a single timed task.
-    let total_targets = match invocation {
-        LiveInvocation::Goal { goal, selectors } => {
+    // Phase 2 of goal-subcommand parsing: the workspace has now loaded, so any
+    // goal-declared flags (e.g. fmt's --check) are known. Re-parse the raw
+    // argv tail captured in phase 1 (RawGoalArgs) for real, with full
+    // validation and --help. Rule-test runs bypass this entirely — they carry
+    // no CLI args of their own.
+    let (selectors, jobs, js_workers_cli, no_cache, sandbox_retention, goal_flags): (
+        Vec<String>,
+        usize,
+        Option<usize>,
+        bool,
+        exec::SandboxRetention,
+        serde_json::Value,
+    ) = match invocation {
+        LiveInvocation::Goal { goal, raw } => {
             let goal_def = workspace.workspace.goals.get(goal).ok_or_else(|| {
                 let known: Vec<&str> = workspace
                     .workspace
@@ -525,7 +548,44 @@ async fn cmd_execute_live(
                     .collect();
                 anyhow::anyhow!("no '{goal}' goal; registered goals: {}", known.join(", "))
             })?;
-            let roots = selector::select_roots(&workspace.workspace, goal_def, selectors)?;
+            let matches = parse_goal_args(goal, &goal_def.flags, raw);
+            let args =
+                GoalArgs::from_arg_matches(&matches).context("parse goal arguments")?;
+            let mut flags = serde_json::Map::new();
+            for name in goal_def.flags.keys() {
+                flags.insert(name.clone(), serde_json::Value::Bool(matches.get_flag(name)));
+            }
+            (
+                args.selectors,
+                args.jobs,
+                args.js_workers,
+                args.no_cache,
+                args.keep_sandbox,
+                serde_json::Value::Object(flags),
+            )
+        }
+        LiveInvocation::RulesTests { .. } => (
+            Vec::new(),
+            1,
+            None,
+            false,
+            exec::SandboxRetention::default(),
+            serde_json::json!({}),
+        ),
+    };
+    let js_workers = effective_js_workers(&workspace.workspace, js_workers_cli)?;
+
+    if cancellation.load(Ordering::SeqCst) {
+        anyhow::bail!("execution canceled");
+    }
+
+    // Resolve selectors into concrete root targets so we know the total count
+    // upfront, before the scheduler or renderer starts. Rule-test runs have no
+    // target roots; they render as a single timed task.
+    let total_targets = match invocation {
+        LiveInvocation::Goal { goal, .. } => {
+            let goal_def = workspace.workspace.goals.get(goal).expect("validated above");
+            let roots = selector::select_roots(&workspace.workspace, goal_def, &selectors)?;
             roots.len()
         }
         LiveInvocation::RulesTests { .. } => 0,
@@ -793,14 +853,15 @@ async fn cmd_execute_live(
     const STALL_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
     let drive = async {
         match invocation {
-            LiveInvocation::Goal { goal, selectors } => {
+            LiveInvocation::Goal { goal, .. } => {
                 spike::execute_goal_live(
                     &workspace,
                     &workspace_root,
                     goal,
-                    selectors,
+                    &selectors,
                     no_cache,
                     js_workers,
+                    goal_flags.clone(),
                 )
                 .await
             }
@@ -1068,16 +1129,50 @@ mod tests {
     }
 
     #[test]
-    fn goal_subcommand_parses_name_and_selectors() {
+    fn goal_subcommand_captures_raw_argv_tail() {
+        // Phase 1 (top-level Cli::parse()) can't validate goal-specific flags
+        // yet — the workspace/JS hasn't loaded — so it just captures
+        // everything after the goal name verbatim.
         let cli = Cli::parse_from(["imp", "goal", "vs", "//:pkg", "--jobs", "2"]);
         match cli.command {
             Cmd::Goal { name, args } => {
                 assert_eq!(name, "vs");
-                assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
-                assert_eq!(args.jobs, 2);
+                assert_eq!(
+                    args.raw,
+                    vec!["//:pkg".to_owned(), "--jobs".to_owned(), "2".to_owned()]
+                );
             }
             _ => panic!("expected Cmd::Goal"),
         }
+    }
+
+    #[test]
+    fn parse_goal_args_resolves_static_fields_and_declared_flags() {
+        let raw = vec!["//:pkg".to_owned(), "--jobs".to_owned(), "2".to_owned()];
+        let flag_defs = std::collections::BTreeMap::from([(
+            "check".to_owned(),
+            spike::GoalFlagDef {
+                description: Some("Verify without writing".to_owned()),
+            },
+        )]);
+        let matches = parse_goal_args("fmt", &flag_defs, &raw);
+        let args = GoalArgs::from_arg_matches(&matches).unwrap();
+        assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
+        assert_eq!(args.jobs, 2);
+        assert!(!matches.get_flag("check"));
+    }
+
+    #[test]
+    fn parse_goal_args_reads_declared_boolean_flag() {
+        let raw = vec!["--check".to_owned(), "//:pkg".to_owned()];
+        let flag_defs = std::collections::BTreeMap::from([(
+            "check".to_owned(),
+            spike::GoalFlagDef { description: None },
+        )]);
+        let matches = parse_goal_args("fmt", &flag_defs, &raw);
+        let args = GoalArgs::from_arg_matches(&matches).unwrap();
+        assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
+        assert!(matches.get_flag("check"));
     }
 
     #[tokio::test]
@@ -1119,9 +1214,17 @@ export const build = product("workspace-js-workers-test", "build", async functio
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["a".to_owned(), "b".to_owned()];
-        spike::execute_goal_live(&live, p, "build", &selectors, false, js_workers)
-            .await
-            .unwrap();
+        spike::execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            false,
+            js_workers,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
 
         let mut slots = BTreeSet::new();
         while let Ok(event) = rx.try_recv() {

@@ -156,19 +156,40 @@ export function namedCache(opts) {
  *   whole invocation with that one error. If `fn` is omitted, the host
  *   dispatches every selected target's product function itself, exactly as
  *   before.
+ * @param {object} [opts]
+ * @param {Record<string, {description?: string}>} [opts.flags] Boolean flags
+ *   this goal accepts on the CLI (e.g. `{ check: { description: "..." } }`
+ *   becomes `--check`). Read back during goal execution via `goalFlags()`.
+ *   Declaring a flag more than once (e.g. across re-evaluated modules) is
+ *   idempotent, unlike the goal's callback/product, which is
+ *   first-registration-wins.
  * @returns {void}
  */
-export function goal(name, fn) {
+export function goal(name, fn, opts) {
     if (typeof name !== "string" || name === "") {
-        throw new Error("goal(name, fn?) requires a non-empty string name");
+        throw new Error("goal(name, fn?, opts?) requires a non-empty string name");
     }
-    __host_goal(name, "default");
+    const flags = opts && opts.flags ? opts.flags : {};
+    __host_goal(name, "default", JSON.stringify(flags));
     if (fn !== undefined) {
         if (typeof fn !== "function") {
-            throw new Error("goal(name, fn?) expects fn to be a function when provided");
+            throw new Error("goal(name, fn?, opts?) expects fn to be a function when provided");
         }
         __host_goal_callback(name, fn);
     }
+}
+
+/**
+ * Read the flags resolved for the goal currently executing (declared via
+ * `goal(name, fn, { flags })`), e.g. `{ check: true }`.
+ *
+ * Only callable from within a goal callback or product function while a goal
+ * is executing; throws if called outside that context.
+ *
+ * @returns {Record<string, boolean>}
+ */
+export function goalFlags() {
+    return JSON.parse(__host_current_goal_flags());
 }
 
 /**

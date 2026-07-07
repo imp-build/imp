@@ -2,18 +2,32 @@
 //
 // Wires Odin's fmt mechanics (//rules/odin/odinfmt) into the build graph as
 // products: `fmt` reformats a package's own sources in place, `format-check`
-// verifies they're already formatted without mutating the tree, reachable via
-// `//:<pkg>#format-check`.
+// verifies they're already formatted without mutating the tree. `imp fmt
+// --check` runs the check variant; `format-check` also stays reachable
+// directly via `//:<pkg>#format-check` for scripting.
 //
-// `goal("fmt")` declares the "fmt" goal explicitly so `imp fmt`
-// is documented here rather than relying solely on the host's built-in
-// default (HostState::default(), src/spike.rs); goal registration is
-// first-registration-wins, so this is a no-op if the host already seeded it,
-// and stays correct if that default is ever dropped.
+// The "fmt" goal is declared with a callback so `--check` can pick a
+// different product (`format-check` instead of `fmt`) per selected target,
+// via the general goal-flags mechanism (`goalFlags()`) plus the existing
+// dispatchSelection/resolveProduct machinery — see imp_core.js.
 import { odinFmt, odinFormatCheck } from "//rules/odin/odinfmt";
-import { goal, product } from "imp:core";
+import { goal, product, dispatchSelection, goalFlags } from "imp:core";
 
-goal("fmt");
+goal(
+    "fmt",
+    (selection) => {
+        const { check } = goalFlags();
+        const targets = check
+            ? selection.map((entry) => ({ ...entry, product: "format-check" }))
+            : selection;
+        return dispatchSelection(targets);
+    },
+    {
+        flags: {
+            check: { description: "Verify formatting without writing changes" },
+        },
+    },
+);
 
 export const odinPackageFmt = product("odin-package", "fmt", odinFmt);
 export const odinTestPackageFmt = product("odin-test-package", "fmt", odinFmt);
