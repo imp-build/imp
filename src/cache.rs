@@ -8,34 +8,11 @@ use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use walkdir::WalkDir;
 
-pub(crate) const TASK_CACHE_VERSION: u32 = 5;
+pub(crate) const TASK_CACHE_VERSION: u32 = 6;
 
 // ---------------------------------------------------------------------------
 // Cache types
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CacheInputDigest {
-    pub artifact_id: String,
-    pub kind: String,
-    pub path: Option<String>,
-    pub value: Option<String>,
-    pub digest: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CacheDirectoryEntry {
-    pub(crate) path: String,
-    pub(crate) digest: String,
-    pub(crate) bytes: u64,
-    #[serde(default)]
-    pub(crate) mode: Option<u32>,
-    /// Set instead of `digest`/`bytes`/`mode` for a symlink entry — its
-    /// (possibly relative) link target, restored verbatim on materialization
-    /// rather than treating it as a regular file to content-address.
-    #[serde(default)]
-    pub(crate) symlink_target: Option<String>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CachedArtifact {
@@ -46,7 +23,11 @@ pub(crate) struct CachedArtifact {
     pub(crate) digest: String,
     pub(crate) bytes: Option<u64>,
     pub(crate) mode: Option<u32>,
-    pub(crate) files: Vec<CacheDirectoryEntry>,
+    /// For `kind: "directory"` outputs: the digest of the root `DigestNode` for
+    /// this directory's tree (see `crate::digest`), used to materialize/verify it
+    /// without walking a flat file list. `None` for every other kind.
+    #[serde(default)]
+    pub(crate) tree_digest: Option<String>,
     /// When set, this output is also materialized into a named cache slot
     /// (in addition to its normal workspace-relative path), from CAS content —
     /// so it's replayed correctly on both fresh runs and task-cache hits.
@@ -66,7 +47,13 @@ pub(crate) struct TaskCacheRecord {
     pub(crate) task_id: String,
     pub(crate) task_key: String,
     pub(crate) action_digest: String,
-    pub(crate) input_digests: Vec<CacheInputDigest>,
+    /// Root digest of the merged tree over every declared input (see
+    /// `crate::digest::merge_digests`) — replaces a flat per-file digest list.
+    pub(crate) input_digest: String,
+    /// Root digest of the merged tree over everything this task produced, so a
+    /// later `run({inputs})` can reference it directly (as a `{kind:"digest"}`
+    /// entry) without round-tripping through the workspace.
+    pub(crate) output_digest: String,
     pub(crate) named_caches: Vec<NamedCacheBinding>,
     pub(crate) stdout: String,
     pub(crate) stderr: String,
@@ -265,46 +252,6 @@ pub(crate) fn store_file_blob(path: &Path, kind: &str) -> Result<(String, u64)> 
     Ok((store_blob(&bytes, kind)?, size))
 }
 
-pub(crate) fn directory_entries(path: &Path) -> Result<Vec<CacheDirectoryEntry>> {
-    let mut entries = Vec::new();
-    for entry in WalkDir::new(path) {
-        let entry = entry.with_context(|| format!("walk {}", path.display()))?;
-        let is_symlink = entry.file_type().is_symlink();
-        if !entry.file_type().is_file() && !is_symlink {
-            continue;
-        }
-        let relative = entry
-            .path()
-            .strip_prefix(path)
-            .with_context(|| format!("strip {} from {}", path.display(), entry.path().display()))?;
-        let relative = relative
-            .to_string_lossy()
-            .replace(std::path::MAIN_SEPARATOR, "/");
-        if is_symlink {
-            let target = std::fs::read_link(entry.path())
-                .with_context(|| format!("read symlink {}", entry.path().display()))?;
-            entries.push(CacheDirectoryEntry {
-                path: relative,
-                digest: String::new(),
-                bytes: 0,
-                mode: None,
-                symlink_target: Some(target.to_string_lossy().into_owned()),
-            });
-            continue;
-        }
-        let (digest, bytes) = store_file_blob(entry.path(), "directory-entry")?;
-        entries.push(CacheDirectoryEntry {
-            path: relative,
-            digest,
-            bytes,
-            mode: file_mode(entry.path())?,
-            symlink_target: None,
-        });
-    }
-    entries.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(entries)
-}
-
 pub(crate) fn artifact_relative_path(path: &str) -> Result<PathBuf> {
     let path = Path::new(path);
     if path.is_absolute() {
@@ -345,15 +292,21 @@ pub(crate) fn cached_outputs_present(record: &TaskCacheRecord) -> Result<()> {
                 }
             }
             "directory" => {
-                for file in &output.files {
-                    let path = cas_blob_path(&file.digest)?;
-                    if !path.is_file() {
-                        bail!(
-                            "{} cached directory blob {} is missing",
-                            output.artifact_id,
-                            path.display()
-                        );
-                    }
+                // Only the root of the tree is checked here — a cheap, constant-cost
+                // check regardless of how many files the directory contains. A blob
+                // missing deeper in the tree surfaces as an error at materialization
+                // time instead of here; this trades a slightly later failure for
+                // avoiding an O(files) walk on every cache lookup.
+                let tree_digest = output.tree_digest.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("{} is a directory output with no tree_digest", output.artifact_id)
+                })?;
+                let path = cas_blob_path(tree_digest)?;
+                if !path.is_file() {
+                    bail!(
+                        "{} cached directory tree {} is missing",
+                        output.artifact_id,
+                        path.display()
+                    );
                 }
             }
             "value" => {}
@@ -440,24 +393,23 @@ pub(crate) fn materialize_named_caches(
     Ok(())
 }
 
+/// Materialize a `kind: "directory"` output's tree into the workspace (or a named
+/// cache slot). Always copies — never hardlinks — since a file landing in the
+/// workspace may be edited by a user or tool afterward, which would silently
+/// corrupt the shared CAS blob if it were linked instead of copied.
 fn materialize_cached_directory(output: &CachedArtifact, destination: &Path) -> Result<()> {
+    let tree_digest = output
+        .tree_digest
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("{} is a directory output with no tree_digest", output.artifact_id))?;
+    let tree = crate::digest::DigestTrie::load(tree_digest)?;
+
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let temp = temp_sibling_path(destination, "tmp-dir");
     remove_path_if_exists(&temp)?;
-    std::fs::create_dir_all(&temp).with_context(|| format!("create {}", temp.display()))?;
-    for file in &output.files {
-        let relative = artifact_relative_path(&file.path)?;
-        let dest = temp.join(relative);
-        if let Some(target) = &file.symlink_target {
-            create_symlink(target, &dest)?;
-            continue;
-        }
-        let source = cas_blob_path(&file.digest)?;
-        copy_file(&source, &dest)?;
-        restore_file_mode(&dest, file.mode)?;
-    }
+    crate::digest::materialize_trie(&tree, &temp, false)?;
     remove_path_if_exists(destination)?;
     std::fs::rename(&temp, destination).with_context(|| {
         format!(
@@ -588,24 +540,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn directory_entries_round_trips_a_symlink() {
+    fn materialize_cached_directory_round_trips_a_symlink() {
         let source = tempfile::tempdir().unwrap();
         std::fs::write(source.path().join("real"), b"hello").unwrap();
         std::os::unix::fs::symlink("real", source.path().join("link")).unwrap();
 
-        let entries = directory_entries(source.path()).unwrap();
-        let link_entry = entries.iter().find(|e| e.path == "link").unwrap();
-        assert_eq!(link_entry.symlink_target.as_deref(), Some("real"));
+        let digest = crate::digest::capture_directory(source.path()).unwrap();
 
         let artifact = CachedArtifact {
             artifact_id: "test".to_owned(),
             kind: "directory".to_owned(),
             path: Some("test".to_owned()),
             value: None,
-            digest: digest_json(&entries).unwrap(),
+            digest: digest.digest().to_owned(),
             bytes: None,
             mode: None,
-            files: entries,
+            tree_digest: Some(digest.digest().to_owned()),
             named_cache: None,
         };
 

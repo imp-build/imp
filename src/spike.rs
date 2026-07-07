@@ -1296,12 +1296,59 @@ fn register_globals<'js>(
                 .map_err(|e| rquickjs::Error::new_loading_message("glob", e.to_string()))?;
             let exclude: Vec<String> = serde_json::from_str(&exclude_json)
                 .map_err(|e| rquickjs::Error::new_loading_message("glob", e.to_string()))?;
-            workspace_glob_files(&wc, &root, &include, &exclude)
-                .and_then(|f| serde_json::to_string(&f).context("encode glob results"))
+            // Greedily captures the matched files into CAS as it walks (see
+            // `workspace_glob_files_captured`), returning both the plain file list
+            // (for `paths()`/display) and a digest handle (for `run()` inputs and
+            // `file_set.union()` merging) — JS never sees the tree itself, just this
+            // opaque hex-string fingerprint.
+            workspace_glob_files_captured(&wc, &root, &include, &exclude)
+                .and_then(|r| {
+                    serde_json::to_string(&serde_json::json!({
+                        "files": r.files,
+                        "digest": r.digest.digest(),
+                    }))
+                    .context("encode glob results")
+                })
                 .map_err(|e| rquickjs::Error::new_loading_message("glob", format!("{e:#}")))
         },
     )?;
     globals.set("__host_glob", host_glob)?;
+
+    // __host_merge_digests(digestsJson) → merged digest string
+    let host_merge_digests = Function::new(
+        ctx.clone(),
+        move |digests_json: String| -> rquickjs::Result<String> {
+            let digests: Vec<String> = serde_json::from_str(&digests_json).map_err(|e| {
+                rquickjs::Error::new_loading_message("mergeDigests", e.to_string())
+            })?;
+            let trees = digests
+                .into_iter()
+                .map(crate::digest::DirectoryDigest::from_digest)
+                .collect();
+            crate::digest::merge_digests(trees)
+                .map(|merged| merged.digest().to_owned())
+                .map_err(|e| rquickjs::Error::new_loading_message("mergeDigests", format!("{e:#}")))
+        },
+    )?;
+    globals.set("__host_merge_digests", host_merge_digests)?;
+
+    // __host_capture_paths(pathsJson) → digest string
+    // Content-addresses an explicit, already-known-good list of workspace-relative
+    // paths into CAS (used by `file_set.literal()`, which — unlike `glob()` — has
+    // no root/include/exclude to re-walk).
+    let wc = workspace_root.clone();
+    let host_capture_paths = Function::new(
+        ctx.clone(),
+        move |paths_json: String| -> rquickjs::Result<String> {
+            let paths: Vec<String> = serde_json::from_str(&paths_json).map_err(|e| {
+                rquickjs::Error::new_loading_message("capturePaths", e.to_string())
+            })?;
+            crate::digest::capture_paths(&wc, &paths)
+                .map(|digest| digest.digest().to_owned())
+                .map_err(|e| rquickjs::Error::new_loading_message("capturePaths", format!("{e:#}")))
+        },
+    )?;
+    globals.set("__host_capture_paths", host_capture_paths)?;
 
     // __host_env(name) → string | null
     let host_env = Function::new(
@@ -1413,6 +1460,7 @@ fn register_globals<'js>(
                 obj.set("stdout", result.stdout)?;
                 obj.set("stderr", result.stderr)?;
                 obj.set("exitCode", result.exit_code)?;
+                obj.set("outputDigest", result.output_digest)?;
                 Ok::<Object<'js>, rquickjs::Error>(obj)
             }
         }),
@@ -1812,6 +1860,27 @@ pub(crate) fn workspace_glob_files(
     }
     files.sort();
     Ok(files)
+}
+
+/// A glob's matched file list plus a `Digest` capturing those exact files' content
+/// into CAS as they're matched — the greedy-capture counterpart of
+/// `workspace_glob_files`. Used wherever the caller may go on to feed the result
+/// into `run()` (which needs content, not just names), not by callers that only
+/// need the path list (target ownership, unowned-file checks).
+pub(crate) struct GlobResult {
+    pub(crate) files: Vec<String>,
+    pub(crate) digest: crate::digest::DirectoryDigest,
+}
+
+pub(crate) fn workspace_glob_files_captured(
+    workspace_root: &Path,
+    root: &str,
+    include: &[String],
+    exclude: &[String],
+) -> Result<GlobResult> {
+    let files = workspace_glob_files(workspace_root, root, include, exclude)?;
+    let digest = crate::digest::capture_paths(workspace_root, &files)?;
+    Ok(GlobResult { files, digest })
 }
 
 fn matching_workspace_source_paths(

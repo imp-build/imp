@@ -1149,37 +1149,54 @@ export function glob(opts) {
 // FileSet — lazy file collection (Phase 4)
 // ---------------------------------------------------------------------------
 
+// Evaluates a FileSet to { files, digest }. `digest` is an opaque hex-string CAS
+// handle (never a serialized tree) that composes uniformly across glob/union/
+// literal — union merges child digests server-side rather than deriving one from
+// the flattened path list. Memoized onto the FileSet object itself: root/include/
+// exclude (or a literal path list) are immutable inputs, so repeat evaluation
+// (e.g. paths() followed by using the same FileSet in run({inputs})) is free.
 function _eval_fileset(fs) {
     if (!fs || fs.__fileset !== true) throw new Error("paths() requires a FileSet");
+    if (fs.__digest !== undefined) {
+        return { files: fs.__files, digest: fs.__digest };
+    }
+    let result;
     if (fs.kind === "glob") {
-        return JSON.parse(__host_glob(
+        const parsed = JSON.parse(__host_glob(
             fs.root,
             JSON.stringify(fs.include),
             JSON.stringify(fs.exclude),
         ));
-    }
-    if (fs.kind === "union") {
+        result = { files: parsed.files, digest: parsed.digest };
+    } else if (fs.kind === "union") {
         const seen = new Set();
         const all = [];
+        const digests = [];
         for (const s of fs.sets) {
-            for (const p of _eval_fileset(s)) {
+            const evaluated = _eval_fileset(s);
+            digests.push(evaluated.digest);
+            for (const p of evaluated.files) {
                 if (!seen.has(p)) { seen.add(p); all.push(p); }
             }
         }
         all.sort();
-        return all;
+        result = { files: all, digest: __host_merge_digests(JSON.stringify(digests)) };
+    } else if (fs.kind === "literal") {
+        const sortedPaths = fs.paths.slice().sort();
+        result = { files: sortedPaths, digest: __host_capture_paths(JSON.stringify(sortedPaths)) };
+    } else {
+        throw new Error("paths(): unsupported FileSet kind: " + fs.kind);
     }
-    if (fs.kind === "literal") {
-        return fs.paths.slice().sort();
-    }
-    throw new Error("paths(): unsupported FileSet kind: " + fs.kind);
+    fs.__files = result.files;
+    fs.__digest = result.digest;
+    return result;
 }
 
 export function paths(fileset) {
     if (!fileset || fileset.__fileset !== true) {
         throw new Error("paths() requires a FileSet value");
     }
-    const result = _eval_fileset(fileset);
+    const result = _eval_fileset(fileset).files;
     _trace_effect({ event: "effect", kind: "paths", fileset_kind: fileset.kind, count: result.length });
     return result;
 }
@@ -1197,15 +1214,17 @@ export const file_set = {
     },
 };
 
-// Expand any FileSet objects in an inputs array to flat {kind, path}[] specs.
-// Plain {kind, path} objects are passed through unchanged.
+// Reduce any FileSet objects in an inputs array to a single {kind:"digest"} entry
+// each (its already-merged tree digest, staged directly from CAS — see exec.rs),
+// rather than one {kind:"file"} entry per matched file. Plain {kind, path} objects
+// (e.g. from output(), or a prior run()'s outputDigest wrapped as {kind:"digest"})
+// are passed through unchanged.
 function _materialise_inputs(inputs) {
     const result = [];
     for (const input of (inputs || [])) {
         if (input && input.__fileset === true) {
-            for (const p of paths(input)) {
-                result.push({ kind: "file", path: p });
-            }
+            const { digest } = _eval_fileset(input);
+            result.push({ kind: "digest", digest });
         } else if (input != null) {
             result.push(input);
         }

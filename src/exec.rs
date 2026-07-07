@@ -17,11 +17,12 @@ use serde::{Deserialize, Serialize};
 use std::os::unix::process::CommandExt;
 
 use crate::cache::{
-    artifact_relative_path, cached_outputs_present, copy_directory, copy_file, create_sandbox_root,
-    digest_json, directory_entries, file_mode, materialize_cached_outputs,
-    materialize_named_caches, named_cache_key_path, store_file_blob, task_record_path,
-    write_task_cache_record, CacheInputDigest, CachedArtifact, TaskCacheRecord, TASK_CACHE_VERSION,
+    artifact_relative_path, cached_outputs_present, copy_directory, create_sandbox_root,
+    digest_json, file_mode, materialize_cached_outputs, materialize_named_caches,
+    named_cache_key_path, store_file_blob, task_record_path, write_task_cache_record,
+    CachedArtifact, TaskCacheRecord, TASK_CACHE_VERSION,
 };
+use crate::digest::{capture_directory, merge_digests, nest_directory, nest_file, DirectoryDigest};
 
 // ---------------------------------------------------------------------------
 // Process I/O types and helpers
@@ -288,6 +289,11 @@ pub(crate) struct ExecRunResult {
     pub(crate) stdout: String,
     pub(crate) stderr: String,
     pub(crate) exit_code: i32,
+    /// Root digest of the merged tree over everything this run produced (`None`
+    /// for the unsandboxed path, which doesn't capture outputs into CAS). Lets a
+    /// rule thread this run's output straight into a later `run({inputs})` call
+    /// as a `{kind:"digest"}` entry, without materializing to the workspace first.
+    pub(crate) output_digest: Option<String>,
 }
 
 pub(crate) struct ExecRunOpts {
@@ -380,8 +386,14 @@ impl Drop for SandboxGuard {
 }
 
 pub(crate) struct ExecIoSpec {
-    pub(crate) path: String,
+    /// Present for every kind except `"digest"`, where the pre-merged tree
+    /// carries its own paths and this is meaningless.
+    pub(crate) path: Option<String>,
     pub(crate) kind: String,
+    /// Present only for `"digest"` inputs — a digest handle (e.g. from a
+    /// `file_set.union()` evaluation or a prior `run()`'s output) to merge
+    /// directly into the sandbox's input tree.
+    pub(crate) digest: Option<String>,
     pub(crate) named_cache: Option<crate::cache::OutputNamedCache>,
 }
 
@@ -397,12 +409,16 @@ pub struct ExecToolSpec {
 pub(crate) fn parse_io_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Vec<ExecIoSpec>> {
     let mut specs = Vec::new();
     for val in vals {
-        let path: Option<String> = val.get("path")?;
-        let Some(path) = path else {
-            continue;
-        };
         let kind: Option<String> = val.get("kind")?;
         let kind = kind.unwrap_or_else(|| "file".to_owned());
+        let path: Option<String> = val.get("path")?;
+        let digest: Option<String> = val.get("digest")?;
+        // Every kind but "digest" is identified by a path; a "digest" entry
+        // (a pre-merged FileSet or a chained run() output) carries its own tree
+        // and has no single path, so it's the one kind allowed through without one.
+        if kind != "digest" && path.is_none() {
+            continue;
+        }
         let named_cache = match val.get::<_, Option<Object>>("namedCache")? {
             Some(nc) => Some(crate::cache::OutputNamedCache {
                 name: nc.get("name")?,
@@ -413,6 +429,7 @@ pub(crate) fn parse_io_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Ve
         specs.push(ExecIoSpec {
             path,
             kind,
+            digest,
             named_cache,
         });
     }
@@ -664,32 +681,47 @@ pub(crate) fn exec_run_inner(
         return exec_run_unsandboxed(workspace_root, opts, cancellation, None);
     }
 
-    // Compute input digests directly from the workspace sources. Doing this
-    // before any sandbox exists lets a cache hit return without materializing a
-    // sandbox at all — the sandbox is only built on a cache miss (below).
-    let mut input_digests = Vec::new();
+    // Resolve each declared input to a DirectoryDigest, greedily content-addressing
+    // workspace files/directories into CAS as they're captured, then merge them
+    // all into one tree. Doing this before any sandbox exists lets a cache hit
+    // return without materializing a sandbox at all — the sandbox is only built
+    // (and staged directly from this tree) on a cache miss, below.
+    let mut input_trees = Vec::with_capacity(opts.inputs.len());
     for input in &opts.inputs {
-        let relative = artifact_relative_path(&input.path)?;
-        let source = workspace_root.join(&relative);
-        let (digest, kind) = match input.kind.as_str() {
+        let tree = match input.kind.as_str() {
+            "digest" => {
+                let digest = input.digest.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("run() digest input is missing its digest")
+                })?;
+                DirectoryDigest::from_digest(digest.clone())
+            }
             "file" | "manifest" => {
-                let (d, _) = store_file_blob(&source, &input.kind)?;
-                (d, input.kind.clone())
+                let path = input
+                    .path
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("run() {} input is missing its path", input.kind))?;
+                let relative = artifact_relative_path(path)?;
+                let source = workspace_root.join(&relative);
+                let (digest, size) = store_file_blob(&source, &input.kind)?;
+                let mode = file_mode(&source)?;
+                nest_file(path, digest, size, mode)?
             }
             "directory" => {
-                let entries = directory_entries(&source)?;
-                (digest_json(&entries)?, "directory".to_owned())
+                let path = input
+                    .path
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("run() directory input is missing its path"))?;
+                let relative = artifact_relative_path(path)?;
+                let source = workspace_root.join(&relative);
+                let captured = capture_directory(&source)?;
+                nest_directory(path, &captured)?
             }
-            other => bail!("run() input {} has unsupported kind {other}", input.path),
+            other => bail!("run() input {:?} has unsupported kind {other}", input.path),
         };
-        input_digests.push(CacheInputDigest {
-            artifact_id: input.path.clone(),
-            kind,
-            path: Some(input.path.clone()),
-            value: None,
-            digest,
-        });
+        input_trees.push(tree);
     }
+    let merged_input_digest = merge_digests(input_trees)?;
+    let input_digest = merged_input_digest.digest().to_owned();
 
     // Compute action digest. The env is the merged map the command will run
     // with (declared env over the allowlisted host snapshot), so ambient
@@ -709,7 +741,7 @@ pub(crate) fn exec_run_inner(
     let task_key = digest_json(&serde_json::json!({
         "version": TASK_CACHE_VERSION,
         "action_digest": action_digest,
-        "input_digests": input_digests,
+        "input_digest": input_digest,
         "outputs": out_specs,
     }))?;
 
@@ -744,6 +776,7 @@ pub(crate) fn exec_run_inner(
             stdout: record.stdout,
             stderr: record.stderr,
             exit_code: 0,
+            output_digest: Some(record.output_digest),
         });
     }
 
@@ -753,28 +786,31 @@ pub(crate) fn exec_run_inner(
     let mut sandbox_guard = SandboxGuard::new(sandbox_root.clone(), opts.sandbox_retention);
     let tool_path_entries = materialize_tools_into_sandbox(&opts.tools, &sandbox_root)?;
 
-    // Copy inputs into the sandbox (copy_file/copy_directory create parents).
-    for input in &opts.inputs {
-        let relative = artifact_relative_path(&input.path)?;
-        let source = workspace_root.join(&relative);
-        let sandbox_path = sandbox_root.join(&relative);
-        match input.kind.as_str() {
-            "file" | "manifest" => copy_file(&source, &sandbox_path)?,
-            "directory" => copy_directory(&source, &sandbox_path)?,
-            other => bail!("run() input {} has unsupported kind {other}", input.path),
-        }
-    }
+    // Stage inputs directly from CAS (hardlinked where possible) using the tree
+    // merged above — avoids re-touching the workspace and the duplicate I/O of
+    // hashing a file just to immediately re-copy its bytes.
+    //
+    // NB: hardlinked sandbox files alias the shared CAS blob; a task that mutates
+    // its inputs in place would corrupt that blob for every other consumer.
+    // Sandboxes are treated as disposable/short-lived, so this is accepted for
+    // now — worth revisiting (read-only CAS blobs, or copying for tools known to
+    // mutate inputs in place) if it ever bites in practice.
+    crate::digest::materialize_trie(merged_input_digest.tree()?, &sandbox_root, true)?;
 
     // Pre-create the directories named by declared outputs so rule scripts don't
     // need to `mkdir` them: the parent dir for file/manifest outputs, and the
     // directory itself for directory outputs.
     for output in &opts.outputs {
-        let relative = artifact_relative_path(&output.path)?;
+        let path = output
+            .path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("run() output is missing its path"))?;
+        let relative = artifact_relative_path(path)?;
         let sandbox_path = sandbox_root.join(&relative);
         let dir = match output.kind.as_str() {
             "file" | "manifest" => sandbox_path.parent().map(Path::to_path_buf),
             "directory" => Some(sandbox_path),
-            other => bail!("run() output {} has unsupported kind {other}", output.path),
+            other => bail!("run() output {path} has unsupported kind {other}"),
         };
         if let Some(dir) = dir {
             std::fs::create_dir_all(&dir)
@@ -827,56 +863,61 @@ pub(crate) fn exec_run_inner(
         );
     }
 
-    // Ingest outputs into CAS.
+    // Ingest outputs into CAS, and build both per-output cache records and one
+    // merged digest across everything this task produced — the latter lets a
+    // later run() feed this task's output straight into its own inputs (as a
+    // {kind:"digest"} entry) without round-tripping through the workspace.
     let mut cached_outputs = Vec::new();
+    let mut output_trees = Vec::new();
     for output in &opts.outputs {
-        let relative = artifact_relative_path(&output.path)?;
+        let path = output
+            .path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("run() output is missing its path"))?;
+        let relative = artifact_relative_path(path)?;
         let sandbox_path = sandbox_root.join(&relative);
         match output.kind.as_str() {
             "file" | "manifest" => {
                 if !sandbox_path.is_file() {
-                    bail!(
-                        "run() output {} was not created as a file in sandbox",
-                        output.path
-                    );
+                    bail!("run() output {path} was not created as a file in sandbox");
                 }
                 let (digest, bytes) = store_file_blob(&sandbox_path, &output.kind)?;
+                let mode = file_mode(&sandbox_path)?;
+                output_trees.push(nest_file(path, digest.clone(), bytes, mode)?);
                 cached_outputs.push(CachedArtifact {
-                    artifact_id: output.path.clone(),
+                    artifact_id: path.clone(),
                     kind: output.kind.clone(),
-                    path: Some(output.path.clone()),
+                    path: Some(path.clone()),
                     value: None,
                     digest,
                     bytes: Some(bytes),
-                    mode: file_mode(&sandbox_path)?,
-                    files: Vec::new(),
+                    mode,
+                    tree_digest: None,
                     named_cache: output.named_cache.clone(),
                 });
             }
             "directory" => {
                 if !sandbox_path.is_dir() {
-                    bail!(
-                        "run() output {} was not created as a directory in sandbox",
-                        output.path
-                    );
+                    bail!("run() output {path} was not created as a directory in sandbox");
                 }
-                let files = directory_entries(&sandbox_path)?;
-                let digest = digest_json(&files)?;
+                let captured = capture_directory(&sandbox_path)?;
+                output_trees.push(nest_directory(path, &captured)?);
                 cached_outputs.push(CachedArtifact {
-                    artifact_id: output.path.clone(),
+                    artifact_id: path.clone(),
                     kind: output.kind.clone(),
-                    path: Some(output.path.clone()),
+                    path: Some(path.clone()),
                     value: None,
-                    digest,
+                    digest: captured.digest().to_owned(),
                     bytes: None,
                     mode: None,
-                    files,
+                    tree_digest: Some(captured.digest().to_owned()),
                     named_cache: output.named_cache.clone(),
                 });
             }
-            other => bail!("run() output {} has unsupported kind {other}", output.path),
+            other => bail!("run() output {path} has unsupported kind {other}"),
         }
     }
+    let output_digest = merge_digests(output_trees)?.digest().to_owned();
 
     // Cache record and materialize.
     if cacheable {
@@ -885,7 +926,8 @@ pub(crate) fn exec_run_inner(
             task_id: task_key.clone(),
             task_key,
             action_digest,
-            input_digests,
+            input_digest,
+            output_digest: output_digest.clone(),
             named_caches: vec![],
             stdout: stdout.clone(),
             stderr: stderr.clone(),
@@ -905,6 +947,7 @@ pub(crate) fn exec_run_inner(
         stdout,
         stderr,
         exit_code,
+        output_digest: Some(output_digest),
     })
 }
 
@@ -1000,6 +1043,7 @@ pub(crate) fn exec_run_unsandboxed(
         stdout,
         stderr,
         exit_code,
+        output_digest: None,
     })
 }
 
@@ -1077,8 +1121,9 @@ mod tests {
             paths
                 .iter()
                 .map(|p| ExecIoSpec {
-                    path: (*p).to_owned(),
+                    path: Some((*p).to_owned()),
                     kind: "file".to_owned(),
+                    digest: None,
                     named_cache: None,
                 })
                 .collect()
@@ -1209,6 +1254,51 @@ mod tests {
     }
 
     #[test]
+    fn exec_run_output_digest_chains_directly_into_a_later_run_without_workspace_round_trip() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join("src.txt"), "chained").unwrap();
+
+        let mut stage1 = run_opts(
+            &["sh", "-c", "mkdir -p build && cp src.txt build/mid.txt"],
+            &["src.txt"],
+            &["build/mid.txt"],
+        );
+        stage1.no_cache = true;
+        let result1 = exec_run_inner(p, stage1, None).unwrap();
+        let output_digest = result1
+            .output_digest
+            .expect("sandboxed run must report an output digest");
+
+        // Remove the intermediate file from the workspace entirely — stage2 must
+        // still succeed by staging straight from the digest, not by re-reading it.
+        std::fs::remove_dir_all(p.join("build")).unwrap();
+
+        let mut stage2 = ExecRunOpts {
+            argv: vec!["sh".to_owned(), "-c".to_owned(), "cat build/mid.txt".to_owned()],
+            display: "exec test".to_owned(),
+            env: Vec::new(),
+            config_digest: String::new(),
+            inputs: vec![ExecIoSpec {
+                path: None,
+                kind: "digest".to_owned(),
+                digest: Some(output_digest),
+                named_cache: None,
+            }],
+            outputs: Vec::new(),
+            tools: Vec::new(),
+            impure: false,
+            force_cache: false,
+            sandbox: true,
+            no_cache: true,
+            sandbox_retention: SandboxRetention::default(),
+        };
+        stage2.no_cache = true;
+        let result2 = exec_run_inner(p, stage2, None).unwrap();
+        assert_eq!(result2.stdout.trim_end(), "chained");
+    }
+
+    #[test]
     fn exec_run_impure_is_not_cached() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
@@ -1281,6 +1371,38 @@ mod tests {
             "A",
             "declared inputs must be staged, undeclared files must be absent"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn exec_run_stages_inputs_as_hardlinks_from_cas() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join("declared.txt"), "d").unwrap();
+        // A sandbox-retention of Always keeps the sandbox around so its content
+        // can be inspected after the run completes.
+        let marker = p.join("sandbox-path.txt");
+        let cmd = format!("pwd > '{}'", marker.display());
+        let mut opts = run_opts(&["sh", "-c", &cmd], &["declared.txt"], &[]);
+        opts.no_cache = true;
+        opts.sandbox_retention = SandboxRetention::Always;
+        exec_run_inner(p, opts, None).unwrap();
+
+        let sandbox_root = std::fs::read_to_string(&marker).unwrap();
+        let sandbox_root = sandbox_root.trim();
+        let staged = std::path::Path::new(sandbox_root).join("declared.txt");
+        let (digest, _) = store_file_blob(&p.join("declared.txt"), "file").unwrap();
+        let blob_path = crate::cache::cas_blob_path(&digest).unwrap();
+        let blob_ino = std::fs::metadata(&blob_path).unwrap().ino();
+        let staged_ino = std::fs::metadata(&staged).unwrap().ino();
+        assert_eq!(
+            blob_ino, staged_ino,
+            "declared input should be hardlinked from its CAS blob into the sandbox, not copied"
+        );
+
+        std::fs::remove_dir_all(sandbox_root).ok();
     }
 
     #[test]
@@ -1443,8 +1565,9 @@ mod tests {
         let opts = || {
             let mut o = run_opts(&["sh", "-c", &cmd], &[], &[]);
             o.outputs = vec![ExecIoSpec {
-                path: "build/dir".to_owned(),
+                path: Some("build/dir".to_owned()),
                 kind: "directory".to_owned(),
+                digest: None,
                 named_cache: None,
             }];
             o
@@ -1478,8 +1601,9 @@ mod tests {
         let cmd = "printf x > build/nested/out.txt && printf y > build/dir/inner.txt";
         let mut opts = run_opts(&["sh", "-c", cmd], &[], &["build/nested/out.txt"]);
         opts.outputs.push(ExecIoSpec {
-            path: "build/dir".to_owned(),
+            path: Some("build/dir".to_owned()),
             kind: "directory".to_owned(),
+            digest: None,
             named_cache: None,
         });
         opts.no_cache = true;
