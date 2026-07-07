@@ -10,6 +10,7 @@ import {
     defaultZigToolchain,
     defaultZigToolchainVersion,
     installZigToolchain,
+    zigArtifactName,
     zigCacheKey,
     zigBin,
     zigCMakeArgs,
@@ -123,7 +124,9 @@ test("downloads and extracts a toolchain via a sandboxed curl+tar run() (linux)"
 
         const [download, extract] = host.runs;
         expect(download.argv[0]).toBe("sh");
-        expect(download.argv.some((arg) => arg.includes("zig-x86_64-linux-0.13.0.tar.xz"))).toBe(true);
+        // 0.13.0 predates the 0.14.1 filename-order switch, so it's
+        // zig-<os>-<arch>-..., not zig-<arch>-<os>-....
+        expect(download.argv.some((arg) => arg.includes("zig-linux-x86_64-0.13.0.tar.xz"))).toBe(true);
         expect(download.tools[0].name).toBe("curl");
         // Linux tar.xz decompression needs a separate xz process; Windows sh
         // isn't needed on this platform.
@@ -147,7 +150,7 @@ test("downloads and extracts a toolchain on windows with .bat wrappers and a dec
         await acquireZigToolchain("0.13.0");
 
         const [download, extract] = host.runs;
-        expect(download.argv.some((arg) => arg.includes("zig-x86_64-windows-0.13.0.zip"))).toBe(true);
+        expect(download.argv.some((arg) => arg.includes("zig-windows-x86_64-0.13.0.zip"))).toBe(true);
         expect(download.tools.some((t) => t.name === "sh")).toBe(true);
         expect(download.tools.some((t) => t.name === "xz")).toBe(false);
 
@@ -172,6 +175,21 @@ test("describes the CMake -D flags for a linux toolchain", async () => {
             "-DCMAKE_RANLIB=.imp/tools/zig/zigranlib",
         ]);
     });
+});
+
+test("uses legacy os-then-arch artifact naming through 0.14.0", () => {
+    expect(zigArtifactName("0.13.0", { os: "linux", arch: "x86_64" })).toBe("zig-linux-x86_64-0.13.0.tar.xz");
+    expect(zigArtifactName("0.14.0", { os: "windows", arch: "x86_64" })).toBe("zig-windows-x86_64-0.14.0.zip");
+});
+
+test("uses current arch-then-os artifact naming from 0.14.1 onward", () => {
+    expect(zigArtifactName("0.14.1", { os: "linux", arch: "x86_64" })).toBe("zig-x86_64-linux-0.14.1.tar.xz");
+    expect(zigArtifactName("0.16.0", { os: "windows", arch: "aarch64" })).toBe("zig-aarch64-windows-0.16.0.zip");
+});
+
+test("treats non-numeric versions (dev builds) as current naming", () => {
+    expect(zigArtifactName("0.17.0-dev.1267+300116b02", { os: "linux", arch: "x86_64" }))
+        .toBe("zig-x86_64-linux-0.17.0-dev.1267+300116b02.tar.xz");
 });
 
 test("describes the CMake -D flags for a windows toolchain", async () => {

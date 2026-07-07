@@ -14,6 +14,18 @@ function requireSupportedPlatform(plat) {
     }
 }
 
+// Zig release archives were named zig-<os>-<arch>-<version> through 0.14.0,
+// then switched to zig-<arch>-<os>-<version> starting with 0.14.1. Anything
+// that doesn't parse as a plain x.y.z release (e.g. a "master"/dev build
+// string) is treated as current-naming.
+function usesLegacyArtifactOrder(version) {
+    const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+    if (!match) return false;
+    const [, major, minor, patch] = match.map(Number);
+    if (major !== 0) return false;
+    return minor < 14 || (minor === 14 && patch === 0);
+}
+
 /**
  * Return the Zig release artifact filename for a version and platform.
  *
@@ -24,7 +36,10 @@ function requireSupportedPlatform(plat) {
 export function zigArtifactName(version, plat) {
     requireSupportedPlatform(plat);
     const ext = plat.os === "windows" ? "zip" : "tar.xz";
-    return `zig-${plat.arch}-${plat.os}-${version}.${ext}`;
+    const [first, second] = usesLegacyArtifactOrder(version)
+        ? [plat.os, plat.arch]
+        : [plat.arch, plat.os];
+    return `zig-${first}-${second}-${version}.${ext}`;
 }
 
 /**

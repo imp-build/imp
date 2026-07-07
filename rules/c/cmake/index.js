@@ -32,7 +32,7 @@ export {
 // Path helpers (same pattern as rules/odin/index.js)
 // ---------------------------------------------------------------------------
 
-const DEFAULT_CPP_SRCS = ["CMakeLists.txt", "**/*.cpp", "**/*.h"];
+const DEFAULT_CPP_SRCS = ["CMakeLists.txt", "**/*.c", "**/*.cpp", "**/*.h"];
 
 function normalize_workspace_path(path) {
     const parts = [];
@@ -84,16 +84,35 @@ export const sources = memo(async function sources(handle) {
     return glob({ root, include: handle.attrs.srcs || DEFAULT_CPP_SRCS });
 });
 
-export const native_link_library = product("cmake-lib", "build", async function native_link_library(handle) {
+// Shared path/toolchain/input resolution for both the "build" and "test"
+// products below — factors out everything that doesn't depend on whether
+// we're building or (re-)running ctest.
+async function resolveCmakeSetup(handle) {
     const srcPath = declared_path(handle, handle.attrs.src || ".");
     const buildDirPath = handle.attrs.buildDir || `build/${srcPath === "." ? "cmake" : srcPath}`;
     const cmakeArgs = handle.attrs.cmakeArgs || [];
-    const stageOutputs = handle.attrs.stageOutputs || [];
     const inputFiles = await sources(handle);
     const dirInputs = (handle.attrs.dirs || []).map(d => ({
         kind: "directory",
         path: declared_path(handle, d),
     }));
+
+    // No pinned toolchain declared — still need a resolved cmake so the
+    // hermetic sandbox can find it (bare "cmake" has no PATH entry
+    // otherwise).
+    const cmakeToolSpec = handle.attrs.toolchain
+        ? await cmakeTool(handle.attrs.toolchain)
+        : await nativeToolSpec(nativeTool("cmake"));
+    const compilerTools = handle.attrs.compiler ? [await zigTool(handle.attrs.compiler)] : [];
+    const compilerArgs = handle.attrs.compiler ? await zigCMakeArgs(handle.attrs.compiler) : [];
+
+    return { srcPath, buildDirPath, cmakeArgs, inputFiles, dirInputs, cmakeToolSpec, compilerTools, compilerArgs };
+}
+
+export const native_link_library = product("cmake-lib", "build", async function native_link_library(handle) {
+    const { srcPath, buildDirPath, cmakeArgs, inputFiles, dirInputs, cmakeToolSpec, compilerTools, compilerArgs } =
+        await resolveCmakeSetup(handle);
+    const stageOutputs = handle.attrs.stageOutputs || [];
 
     const outputDecls = (handle.attrs.outputs || []).map(name =>
         output(output_path(`${srcPath}/${name}`))
@@ -106,14 +125,6 @@ export const native_link_library = product("cmake-lib", "build", async function 
     const stageScript = stageCmds.length > 0 ? " && " + stageCmds.join(" && ") : "";
     const script = `src=$1; bdir=$2; shift 2; mkdir -p "$bdir" && cmake -S "$src" -B "$bdir" "$@" && cmake --build "$bdir" -j10${stageScript}`;
 
-    // No pinned toolchain declared — still need a resolved cmake so the
-    // hermetic sandbox can find it (bare "cmake" has no PATH entry
-    // otherwise).
-    const cmakeToolSpec = handle.attrs.toolchain
-        ? await cmakeTool(handle.attrs.toolchain)
-        : await nativeToolSpec(nativeTool("cmake"));
-    const compilerTools = handle.attrs.compiler ? [await zigTool(handle.attrs.compiler)] : [];
-    const compilerArgs = handle.attrs.compiler ? await zigCMakeArgs(handle.attrs.compiler) : [];
     // The script itself shells out to mkdir (always) and cp (only when
     // staging outputs); cmake's default "Unix Makefiles" generator also
     // shells out to `make` to actually build, and (when a Zig compiler is
@@ -134,6 +145,56 @@ export const native_link_library = product("cmake-lib", "build", async function 
         outputs: [...outputDecls, ...stagedOutputDecls],
         materialize: true,
         display: `cmake build ${srcPath}`,
+    });
+});
+
+// Runs the project's ctest suite. Framework-agnostic by construction: CMake's
+// `add_test()` is how Unity, Catch2, GoogleTest, and doctest all register
+// tests, so ctest itself is the generic runner — no per-framework detection
+// needed here.
+//
+// Self-contained (configure + build + ctest in one run()), rather than
+// reusing native_link_library's build directory: each run() call executes in
+// a fresh sandbox populated only from declared inputs, and only declared
+// outputs survive it, so a second run() call can't see the first one's
+// undeclared build artifacts without wiring the whole build directory as a
+// shared directory output/input. Just redoing the (incremental, cmake-cached)
+// configure+build here — same tradeoff cargoTest makes by rerunning
+// `cargo test` rather than reusing cargoBuild's outputs.
+export const ctest = product("cmake-lib", "test", async function ctest(handle) {
+    const { srcPath, buildDirPath, cmakeArgs, inputFiles, dirInputs, cmakeToolSpec, compilerTools, compilerArgs } =
+        await resolveCmakeSetup(handle);
+    const ctestArgs = handle.attrs.ctestArgs || [];
+    const configureArgCount = compilerArgs.length + cmakeArgs.length;
+
+    // ncmake tells the script where the configure-time args end and the
+    // ctest-invocation args begin within the flattened positional list.
+    const script = 'src=$1; bdir=$2; ncmake=$3; shift 3; ' +
+        'i=0; cmake_args=; while [ "$i" -lt "$ncmake" ]; do cmake_args="$cmake_args $1"; shift; i=$((i+1)); done; ' +
+        'mkdir -p "$bdir" && cmake -S "$src" -B "$bdir" $cmake_args && cmake --build "$bdir" -j10 && ctest --test-dir "$bdir" "$@"';
+
+    const scriptTools = [
+        await nativeToolSpec(nativeTool("mkdir")),
+        await nativeToolSpec(nativeTool("make")),
+        await nativeToolSpec(nativeTool("ctest")),
+        ...(handle.attrs.compiler ? [await nativeToolSpec(nativeTool("dirname"))] : []),
+    ];
+
+    // No outputs/materialize: test binaries aren't user-addressable
+    // artifacts. impure: true so a re-run always executes the suite rather
+    // than replaying a cached pass/fail from the task cache — same choice
+    // cargoTest/odinTest make.
+    return run({
+        argv: [
+            "sh", "-c", script, "cmake-test",
+            srcPath, buildDirPath, String(configureArgCount),
+            ...compilerArgs, ...cmakeArgs,
+            ...ctestArgs,
+        ],
+        tools: [cmakeToolSpec, ...compilerTools, ...scriptTools],
+        inputs: [inputFiles, ...dirInputs],
+        impure: true,
+        display: `ctest ${srcPath}`,
     });
 });
 
@@ -171,6 +232,7 @@ export class CmakeLib extends Target {
         srcs,
         dirs = [],
         cmakeArgs = [],
+        ctestArgs = [],
         outputs = [],
         stageOutputs = [],
         toolchain,
@@ -200,6 +262,7 @@ export class CmakeLib extends Target {
                 srcs: srcs || DEFAULT_CPP_SRCS,
                 ...(dirs.length ? { dirs } : {}),
                 cmakeArgs,
+                ...(ctestArgs.length ? { ctestArgs } : {}),
                 outputs,
                 ...(stageOutputs.length ? { stageOutputs } : {}),
                 ...(buildDir ? { buildDir } : {}),
@@ -220,11 +283,14 @@ export function cmakeLib({
     srcs,
     dirs = [],
     cmakeArgs = [],
+    ctestArgs = [],
     outputs = [],
     stageOutputs = [],
     toolchain,
     compiler,
     deps = [],
 }) {
-    return new CmakeLib({ src, buildDir, srcs, dirs, cmakeArgs, outputs, stageOutputs, toolchain, compiler, deps });
+    return new CmakeLib({
+        src, buildDir, srcs, dirs, cmakeArgs, ctestArgs, outputs, stageOutputs, toolchain, compiler, deps,
+    });
 }
