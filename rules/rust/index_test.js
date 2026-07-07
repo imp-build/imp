@@ -2,6 +2,7 @@ import { describe, expect, test, withFakeToolchainHost } from "//rules/imp/test"
 import {
     cargoBuild,
     cargoPackage,
+    cargoTest,
     declared_path,
 } from "//rules/rust";
 import {
@@ -101,6 +102,55 @@ test("cargoBuild passes --release and uses the release output dir", async () => 
         expect(result.outputPaths[0].endsWith("/release/hello")).toBe(true);
         const buildRun = host.runs[host.runs.length - 1];
         expect(buildRun.argv).toContain("--release");
+    });
+});
+
+test("cargoTest throws without a declared gcc toolchain default", async () => {
+    await withRustHost(async () => {
+        rustToolchain("1.93.0", { default: true });
+        const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
+
+        let message = null;
+        try {
+            await cargoTest(pkg);
+        } catch (error) {
+            message = error.message;
+        }
+        expect(message).toContain("gccToolchain() default");
+    });
+});
+
+test("cargoTest invokes cargo test with the manifest path, target dir, and toolchain env", async () => {
+    await withRustHost(async (host) => {
+        rustToolchain("1.93.0", { default: true });
+        gccToolchain("2025.08-1", { default: true });
+        const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
+
+        await cargoTest(pkg);
+
+        const path = declared_path(pkg, pkg.attrs.path);
+        const testRun = host.runs[host.runs.length - 1];
+        expect(testRun.argv[0]).toBe("sh");
+        expect(testRun.argv[2]).toContain("cargo test");
+        expect(testRun.argv).toContain(`${path}/Cargo.toml`);
+        expect(testRun.env).toContain("RUSTUP_HOME=.imp/tools/rustup-home");
+        expect(testRun.env).toContain("CARGO_HOME=.imp/tools/cargo-home");
+        expect(testRun.argv[2]).toContain("-C linker=clang");
+        expect(testRun.impure).toBe(true);
+        expect(testRun.outputs).toEqual([]);
+    });
+});
+
+test("cargoTest passes through extra testArgs", async () => {
+    await withRustHost(async (host) => {
+        rustToolchain("1.93.0", { default: true });
+        gccToolchain("2025.08-1", { default: true });
+        const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example", testArgs: ["--", "--nocapture"] });
+
+        await cargoTest(pkg);
+
+        const testRun = host.runs[host.runs.length - 1];
+        expect(testRun.argv).toContain("--nocapture");
     });
 });
 

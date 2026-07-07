@@ -173,13 +173,56 @@ export const cargoBuild = product("cargo-package", "build",
     }
 );
 
+/**
+ * Run a Cargo binary crate's tests.
+ *
+ * Unlike Odin (which compiles a separate odin-test-package target excluding
+ * test files from its regular build), Cargo compiles test code from the same
+ * crate/manifest — `sources()` already globs the whole crate, tests
+ * included — so this reuses the cargo-package target directly rather than
+ * needing a distinct test target kind.
+ *
+ * @param {object} handle Target handle returned by cargoPackage().
+ * @returns {Promise<object>} Run result from `cargo test`.
+ */
+export const cargoTest = product("cargo-package", "test",
+    async function cargoTest(handle) {
+        const toolSpec = await rustTool(rust_toolchain_version(handle));
+        const linkerTools = await rustLinkerTools();
+
+        const path = declared_path(handle, handle.attrs.path || ".");
+        const srcs = await sources(handle);
+        const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
+
+        const script = 'manifest=$1; target_dir=$2; shift 2; ' +
+            'RUSTFLAGS="-C linker=clang" cargo test --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
+
+        // No outputs/materialize: test binaries aren't user-addressable
+        // artifacts. impure: true so a re-run always executes the tests
+        // rather than replaying a cached pass/fail from the task cache —
+        // same choice Odin's odinTest makes.
+        return run({
+            argv: [
+                "sh", "-c", script, "cargo-test",
+                `${path}/Cargo.toml`, buildDir,
+                ...handle.attrs.testArgs,
+            ],
+            tools: [...toolSpec.tools, ...linkerTools],
+            env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`],
+            inputs: [srcs],
+            impure: true,
+            display: `cargo test ${path}`,
+        });
+    }
+);
+
 // ---------------------------------------------------------------------------
 // Target constructor
 // ---------------------------------------------------------------------------
 
 export class CargoPackage extends Target {
     static kind = "cargo-package";
-    constructor({ path = ".", bin, release = false, toolchain, cargoArgs = [] }) {
+    constructor({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [] }) {
         if (!bin) {
             throw new Error("cargoPackage requires 'bin' (the binary name(s) cargo produces)");
         }
@@ -199,6 +242,7 @@ export class CargoPackage extends Target {
                 bins,
                 release,
                 cargoArgs,
+                testArgs,
                 ...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
                 ...(toolchainVersion ? { toolchainVersion } : {}),
             },
@@ -223,8 +267,9 @@ export class CargoPackage extends Target {
  * @param {boolean} [opts.release=false] Build with `cargo build --release`.
  * @param {object|string} [opts.toolchain] Rust toolchain target handle or version string.
  * @param {string[]} [opts.cargoArgs=[]] Extra arguments appended to `cargo build`.
+ * @param {string[]} [opts.testArgs=[]] Extra arguments appended to `cargo test`.
  * @returns {object} Target handle.
  */
-export function cargoPackage({ path = ".", bin, release = false, toolchain, cargoArgs = [] }) {
-    return new CargoPackage({ path, bin, release, toolchain, cargoArgs });
+export function cargoPackage({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [] }) {
+    return new CargoPackage({ path, bin, release, toolchain, cargoArgs, testArgs });
 }
