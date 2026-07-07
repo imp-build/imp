@@ -15,6 +15,7 @@
 // single formatter failing to compile shouldn't hide the report for every
 // other target.
 import { odinFmt, odinFormatCheck } from "//rules/odin/odinfmt";
+import { cargoFmt, cargoFormatCheck } from "//rules/rust/fmt";
 import { goal, product, resolveProduct, goalFlags, logInfo } from "imp:core";
 
 export async function fmtGoal(selection) {
@@ -70,3 +71,6 @@ export const odinPackageFmt = product("odin-package", "fmt", odinFmt);
 export const odinTestPackageFmt = product("odin-test-package", "fmt", odinFmt);
 export const odinPackageFormatCheck = product("odin-package", "format-check", odinFormatCheck);
 export const odinTestPackageFormatCheck = product("odin-test-package", "format-check", odinFormatCheck);
+
+export const cargoPackageFmt = product("cargo-package", "fmt", cargoFmt);
+export const cargoPackageFormatCheck = product("cargo-package", "format-check", cargoFormatCheck);

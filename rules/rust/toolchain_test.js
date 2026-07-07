@@ -126,7 +126,7 @@ test("describes the two-cache tool with RUSTUP_HOME/CARGO_HOME mount paths", asy
         expect(rustup.cache).toBe("rustup-home");
         expect(rustup.binDirs).toEqual(["toolchains/1.79.0-x86_64-unknown-linux-gnu/bin"]);
         expect(cargo.cache).toBe("cargo-home");
-        expect(cargo.binDirs).toEqual([]);
+        expect(cargo.binDirs).toEqual(["bin"]);
         expect(tool.rustupHome).toBe(".imp/tools/rustup-home");
         expect(tool.cargoHome).toBe(".imp/tools/cargo-home");
         expect(tool.toolchainId).toBe("1.79.0-x86_64-unknown-linux-gnu");

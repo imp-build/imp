@@ -225,8 +225,11 @@ export async function acquireRustToolchain(version) {
     // rustup writes into RUSTUP_HOME/CARGO_HOME, which we point at the two
     // output dirs via $PWD (run() env can't expand $PWD, so this lives in
     // the script). A single run commits both directories to their caches.
+    // Profile "default" (not "minimal") is required so rustfmt is present —
+    // the fmt/format-check products (rules/rust/fmt.js) shell out to
+    // `cargo fmt`, which "minimal" doesn't install.
     const chmodStep = plat.os === "windows" ? "" : 'chmod +x "$1"; ';
-    const installScript = `set -e; ${chmodStep}export RUSTUP_HOME="$PWD/$2" CARGO_HOME="$PWD/$3"; "$1" -y --no-modify-path --profile minimal --default-toolchain "$4"`;
+    const installScript = `set -e; ${chmodStep}export RUSTUP_HOME="$PWD/$2" CARGO_HOME="$PWD/$3"; "$1" -y --no-modify-path --profile default --default-toolchain "$4"`;
 
     await run({
         argv: ["sh", "-c", installScript, "install-rust", rustupInitPath, rustupHomeDir, cargoHomeDir, version],
@@ -293,7 +296,11 @@ export async function rustTool(version) {
     return {
         tools: [
             { kind: "tool", name: RUSTUP_HOME_CACHE, cache: RUSTUP_HOME_CACHE, key, binDirs: [`toolchains/${id}/bin`] },
-            { kind: "tool", name: CARGO_HOME_CACHE, cache: CARGO_HOME_CACHE, key, binDirs: [] },
+            // CARGO_HOME/bin holds the cargo-subcommand proxies rustup
+            // installs for components like rustfmt (cargo-fmt) and clippy
+            // (cargo-clippy) — cargo finds `cargo-<sub>` via PATH, so this
+            // must be on it too, not just the toolchain's own bin dir.
+            { kind: "tool", name: CARGO_HOME_CACHE, cache: CARGO_HOME_CACHE, key, binDirs: ["bin"] },
         ],
         rustupHome: `.imp/tools/${RUSTUP_HOME_CACHE}`,
         cargoHome: `.imp/tools/${CARGO_HOME_CACHE}`,
