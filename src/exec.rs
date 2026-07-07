@@ -46,19 +46,39 @@ pub(crate) fn spawn_output_reader<R: Read + Send + 'static>(
     thread::spawn(move || {
         let mut pending = Vec::new();
         let mut buf = [0u8; 4096];
+        // Tracks whether the previous byte was `\r`, so a following `\n` is
+        // treated as the second half of the same CRLF terminator rather than
+        // a second, spurious blank line.
+        let mut last_was_cr = false;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
-                    send_process_output_line(stream, &mut pending, &sender);
+                    // A trailing partial line with no terminator is flushed;
+                    // a stream that ended exactly on a terminator must not
+                    // synthesize an extra blank line here (already sent below).
+                    if !pending.is_empty() {
+                        send_process_output_line(stream, &mut pending, &sender);
+                    }
                     break;
                 }
                 Ok(n) => {
-                    for byte in &buf[..n] {
-                        match *byte {
-                            b'\n' | b'\r' => {
-                                send_process_output_line(stream, &mut pending, &sender);
+                    for &byte in &buf[..n] {
+                        match byte {
+                            b'\n' if last_was_cr => {
+                                last_was_cr = false;
                             }
-                            byte => pending.push(byte),
+                            b'\n' | b'\r' => {
+                                // Always send on a real line terminator, even
+                                // with empty `pending` — that's a blank line,
+                                // not "no line" — so blank lines round-trip
+                                // through captured stdout/stderr.
+                                send_process_output_line(stream, &mut pending, &sender);
+                                last_was_cr = byte == b'\r';
+                            }
+                            byte => {
+                                pending.push(byte);
+                                last_was_cr = false;
+                            }
                         }
                     }
                 }
@@ -79,9 +99,6 @@ fn send_process_output_line(
     pending: &mut Vec<u8>,
     sender: &mpsc::Sender<ProcessLine>,
 ) {
-    if pending.is_empty() {
-        return;
-    }
     let line = String::from_utf8_lossy(pending).into_owned();
     pending.clear();
     sender
@@ -1086,6 +1103,33 @@ mod tests {
         std::fs::read_to_string(marker)
             .map(|s| s.len())
             .unwrap_or(0)
+    }
+
+    #[test]
+    fn exec_run_captures_blank_lines_in_stdout() {
+        // Regression test: the process-output reader used to drop any line
+        // with nothing pending (an empty `pending` buffer at a line
+        // terminator), silently collapsing blank lines out of captured
+        // stdout/stderr — e.g. a formatter's stdout losing every blank line
+        // between declarations, corrupting any comparison against the real
+        // file.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let opts = run_opts(&["sh", "-c", "printf 'a\\n\\nb\\n\\n\\nc\\n'"], &[], &[]);
+        let result = exec_run_inner(p, opts, None).unwrap();
+        assert_eq!(result.stdout, "a\n\nb\n\n\nc\n");
+    }
+
+    #[test]
+    fn exec_run_treats_crlf_as_a_single_line_terminator() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let opts = run_opts(&["sh", "-c", "printf 'a\\r\\nb\\r\\n\\r\\nc\\r\\n'"], &[], &[]);
+        let result = exec_run_inner(p, opts, None).unwrap();
+        // `\r\n` must not be read as two terminators (which would double
+        // every line, including manufacturing a spurious blank line where
+        // there wasn't one) — the CR is swallowed by the LF that follows it.
+        assert_eq!(result.stdout, "a\nb\n\nc\n");
     }
 
     #[test]
