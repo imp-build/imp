@@ -15,8 +15,8 @@ use std::sync::{
 use crate::cache::{artifact_relative_path, digest_json, named_cache_key_path, store_file_blob};
 use crate::exec::{exec_run_inner, parse_io_specs, parse_tool_specs, ExecRunOpts};
 use crate::loader::{
-    resolve_workspace_module, validate_workspace_module_path, ModuleKind, ModuleMount, ImpLoader,
-    ImpResolver,
+    resolve_workspace_module, validate_workspace_module_path, ModuleKind, ModuleSource,
+    RulesSource, ImpLoader, ImpResolver,
 };
 use crate::runtime::LiveWorkspace;
 use crate::selector::{select_roots, select_targets};
@@ -275,6 +275,17 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
 /// `exec` functions can be invoked during task execution.
 #[allow(dead_code)]
 pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
+    load_workspace_with_rules(root, RulesSource::from_env()).await
+}
+
+/// Like [`load_workspace`], but with an explicit [`RulesSource`] instead of
+/// reading `IMP_RULES_DIR` from the process environment — lets tests
+/// exercise the built-in-rules fallback without mutating global state.
+#[allow(dead_code)]
+pub(crate) async fn load_workspace_with_rules(
+    root: &Path,
+    rules_source: RulesSource,
+) -> Result<LiveWorkspace> {
     crate::logging::ensure_installed();
 
     let root = root
@@ -282,7 +293,6 @@ pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
         .with_context(|| format!("canonicalize workspace root {}", root.display()))?;
 
     let state: Arc<Mutex<HostState>> = Arc::new(Mutex::new(HostState::default()));
-    let module_mounts: Arc<Mutex<Vec<ModuleMount>>> = Arc::new(Mutex::new(Vec::new()));
     let exec_root: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
     let exec_no_cache = Arc::new(AtomicBool::new(false));
     let exec_sandbox_retention = Arc::new(AtomicU8::new(
@@ -298,11 +308,11 @@ pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
     rt.set_loader(
         ImpResolver {
             workspace_root: root.clone(),
-            module_mounts: Arc::clone(&module_mounts),
+            rules_source: rules_source.clone(),
         },
         ImpLoader {
             workspace_root: root.clone(),
-            module_mounts: Arc::clone(&module_mounts),
+            rules_source: rules_source.clone(),
         },
     )
     .await;
@@ -335,13 +345,11 @@ pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
     // ----- Register host globals -----
     {
         let state_clone = Arc::clone(&state);
-        let mounts_clone = Arc::clone(&module_mounts);
         ctx.with(|ctx| -> rquickjs::Result<()> {
             register_globals(
                 ctx,
                 state_clone,
                 root.clone(),
-                mounts_clone,
                 Arc::clone(&exec_root),
                 Arc::clone(&exec_no_cache),
                 Arc::clone(&exec_sandbox_retention),
@@ -629,7 +637,6 @@ fn register_globals<'js>(
     ctx: Ctx<'js>,
     state: Arc<Mutex<HostState>>,
     workspace_root: PathBuf,
-    module_mounts: Arc<Mutex<Vec<ModuleMount>>>,
     exec_root: Arc<Mutex<Option<PathBuf>>>,
     exec_no_cache: Arc<AtomicBool>,
     exec_sandbox_retention: Arc<AtomicU8>,
@@ -1133,37 +1140,6 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_all_unowned", host_all_unowned)?;
-
-    // ------------------------------------------------------------------
-    // __host_workspace_mount(prefix, path)
-    // ------------------------------------------------------------------
-    let wc = workspace_root.clone();
-    let host_workspace_mount = Function::new(
-        ctx.clone(),
-        move |prefix: String, path: String| -> rquickjs::Result<()> {
-            let mount = module_mount_from_args(&wc, &prefix, &path)?;
-            let mut mounts = module_mounts.lock().unwrap();
-            if let Some(existing) = mounts
-                .iter()
-                .find(|existing| existing.prefix == mount.prefix)
-            {
-                if existing.root == mount.root {
-                    return Ok(());
-                }
-                return Err(rquickjs::Error::new_loading_message(
-                    "workspaceMount",
-                    format!(
-                        "module prefix '{}' is already mounted at {}",
-                        existing.prefix,
-                        existing.root.display()
-                    ),
-                ));
-            }
-            mounts.push(mount);
-            Ok(())
-        },
-    )?;
-    globals.set("__host_workspace_mount", host_workspace_mount)?;
 
     // ------------------------------------------------------------------
     // __host_hydrate_target(id) → JSON { kind, fields, deps: [{handle, mode}] }
@@ -1779,51 +1755,6 @@ fn parse_exec_run_opts<'js>(
         // Overridden per invocation in the host_run closure (like no_cache).
         sandbox_retention: crate::exec::SandboxRetention::default(),
     })
-}
-
-fn module_mount_from_args(
-    workspace_root: &Path,
-    prefix: &str,
-    path: &str,
-) -> rquickjs::Result<ModuleMount> {
-    let prefix = normalize_mount_prefix(prefix)
-        .map_err(|message| rquickjs::Error::new_loading_message("workspaceMount", message))?;
-    let source = Path::new(path);
-    let source = if source.is_absolute() {
-        source.to_owned()
-    } else {
-        workspace_root.join(source)
-    };
-    let root = source.canonicalize().map_err(|e| {
-        rquickjs::Error::new_loading_message(
-            "workspaceMount",
-            format!("canonicalize mount path {}: {e}", source.display()),
-        )
-    })?;
-    if !root.is_dir() {
-        return Err(rquickjs::Error::new_loading_message(
-            "workspaceMount",
-            format!("mount path {} is not a directory", root.display()),
-        ));
-    }
-    Ok(ModuleMount { prefix, root })
-}
-
-fn normalize_mount_prefix(prefix: &str) -> std::result::Result<String, String> {
-    if !prefix.starts_with("//") {
-        return Err(format!(
-            "workspace mount prefix '{prefix}' must start with //"
-        ));
-    }
-    let normalized = prefix.trim_end_matches('/');
-    if normalized.len() <= 2 {
-        return Err("workspace mount prefix must name a non-root prefix".to_owned());
-    }
-    let rel = normalized
-        .strip_prefix("//")
-        .expect("checked prefix starts with //");
-    validate_workspace_module_path(normalized, rel)?;
-    Ok(normalized.to_owned())
 }
 
 fn workspace_files(workspace_root: &Path, root: &str, suffix: &str) -> Result<Vec<String>> {
@@ -3176,8 +3107,11 @@ fn scope_for(root: &Path, build_file: &Path) -> Result<String> {
 }
 
 fn build_module_name_for(root: &Path, build_file: &Path, scope: &str) -> Result<String> {
-    if resolve_workspace_module(root, scope)
-        .map(|resolution| resolution.kind == ModuleKind::Build && resolution.path == build_file)
+    if resolve_workspace_module(root, &RulesSource::Embedded, scope)
+        .map(|resolution| {
+            resolution.kind == ModuleKind::Build
+                && matches!(resolution.source, ModuleSource::File(ref path) if path == build_file)
+        })
         .unwrap_or(false)
     {
         return Ok(scope.to_owned());
@@ -3514,20 +3448,24 @@ export const app = target({ kind: "sample" });
     }
 
     #[tokio::test]
-    async fn workspace_can_mount_external_rule_packages() {
+    async fn workspace_falls_back_to_dev_rules_dir_for_builtin_rules() {
+        // `//rules/...` isn't found under the workspace root itself, so it
+        // falls back to imp's built-in rules — RulesSource::Dev here
+        // stands in for IMP_RULES_DIR, letting the test exercise the
+        // fallback without touching process environment state.
         let root = tempfile::tempdir().unwrap();
-        let external = tempfile::tempdir().unwrap();
+        let dev_rules = tempfile::tempdir().unwrap();
         let p = root.path();
-        let external_rules = external.path().join("rules");
+        let dev_rules_dir = dev_rules.path().join("rules");
 
         write_file(
-            &external_rules.join("external/helper.js"),
+            &dev_rules_dir.join("external/helper.js"),
             r#"
 export const actionName = "external build {address}";
 "#,
         );
         write_file(
-            &external_rules.join("external/index.js"),
+            &dev_rules_dir.join("external/index.js"),
             r#"
 import { target, product, run } from "imp:core";
 import { actionName } from "//rules/external/helper";
@@ -3544,15 +3482,7 @@ export function externalThing(name) {
 
         write_file(
             &p.join(WORKSPACE_FILE),
-            &format!(
-                r#"
-import {{ workspaceMount }} from "imp:core";
-
-workspaceMount({{ prefix: "//rules", path: "{rules}" }});
-await import("//rules/external");
-"#,
-                rules = js_string_path(&external_rules),
-            ),
+            r#"await import("//rules/external");"#,
         );
         write_file(
             &p.join(BUILD_FILE),
@@ -3563,7 +3493,9 @@ export const app = externalThing("app");
 "#,
         );
 
-        let workspace = load_workspace(p).await.unwrap();
+        let workspace = load_workspace_with_rules(p, RulesSource::Dev(dev_rules_dir))
+            .await
+            .unwrap();
         assert!(workspace
             .products
             .contains_key(&("external".into(), "build".into())));
@@ -3572,8 +3504,8 @@ export const app = externalThing("app");
             "app"
         );
 
-        // Root selection resolves through the mounted rule's product, and the
-        // product function evaluates live through the mount.
+        // Root selection resolves through the fallback rule's product, and
+        // the product function evaluates live from the dev rules dir.
         let goal_def = workspace.workspace.goals.get("build").unwrap();
         let roots = select_roots(&workspace.workspace, goal_def, &["app".into()]).unwrap();
         assert_eq!(roots.len(), 1);
@@ -3582,6 +3514,46 @@ export const app = externalThing("app");
         run_goal_live(&workspace, p, "build", &["app".into()])
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn workspace_prefers_on_disk_rules_over_the_dev_fallback() {
+        // A project that vendors its own `rules/` directory should win over
+        // the fallback — the fallback only kicks in when nothing is found
+        // under the workspace root.
+        let root = tempfile::tempdir().unwrap();
+        let dev_rules = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(
+            &p.join("rules/local.js"),
+            r#"export const marker = "local";"#,
+        );
+        write_file(
+            &dev_rules.path().join("rules/local.js"),
+            r#"export const marker = "dev-fallback";"#,
+        );
+        write_file(&p.join(WORKSPACE_FILE), "");
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target } from "imp:core";
+import { marker } from "//rules/local";
+
+export const app = target({ kind: "asset", attrs: { marker } });
+"#,
+        );
+
+        let workspace =
+            load_workspace_with_rules(p, RulesSource::Dev(dev_rules.path().join("rules")))
+                .await
+                .unwrap();
+        assert_eq!(
+            workspace.targets["//:app"].attrs["marker"]
+                .as_str()
+                .unwrap(),
+            "local"
+        );
     }
 
     #[tokio::test]

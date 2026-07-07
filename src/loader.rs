@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
+use include_dir::{include_dir, Dir};
 use rquickjs::{
     loader::{ImportAttributes, Loader, Resolver},
     Ctx, Module,
@@ -11,24 +11,47 @@ use crate::spike::{BUILD_FILE, WORKSPACE_FILE};
 /// The built-in `imp:core` module exposed to every plugin and BUILD file.
 pub(crate) const CORE_JS: &str = include_str!("imp_core.js");
 
+/// imp's own rule library (rules/**), compiled into the binary so an
+/// installed imp works outside a checkout of this repo. `RulesSource::Dev`
+/// bypasses this in favor of a live on-disk directory (see below).
+static EMBEDDED_RULES: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/rules");
+
+/// Environment variable that, when set, points `//rules/...` at a live
+/// on-disk directory instead of the compiled-in copy — for developing
+/// against a checked-out copy of imp's rules from an external project.
+pub(crate) const RULES_DIR_ENV: &str = "IMP_RULES_DIR";
+
 // ---------------------------------------------------------------------------
 // QuickJS module resolver / loader
 // ---------------------------------------------------------------------------
 
 pub(crate) struct ImpResolver {
     pub(crate) workspace_root: PathBuf,
-    pub(crate) module_mounts: Arc<Mutex<Vec<ModuleMount>>>,
+    pub(crate) rules_source: RulesSource,
 }
 
 pub(crate) struct ImpLoader {
     pub(crate) workspace_root: PathBuf,
-    pub(crate) module_mounts: Arc<Mutex<Vec<ModuleMount>>>,
+    pub(crate) rules_source: RulesSource,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ModuleMount {
-    pub(crate) prefix: String,
-    pub(crate) root: PathBuf,
+/// Where imp's built-in `//rules/...` modules come from. Only consulted
+/// as a fallback when a `//rules/...` specifier isn't found under the
+/// workspace root itself (e.g. a project vendoring/overriding its own copy).
+#[derive(Debug, Clone)]
+pub(crate) enum RulesSource {
+    Embedded,
+    Dev(PathBuf),
+}
+
+impl RulesSource {
+    pub(crate) fn from_env() -> Self {
+        match std::env::var_os(RULES_DIR_ENV) {
+            Some(value) if !value.is_empty() => RulesSource::Dev(PathBuf::from(value)),
+            _ => RulesSource::Embedded,
+        }
+    }
 }
 
 impl Resolver for ImpResolver {
@@ -44,39 +67,34 @@ impl Resolver for ImpResolver {
         }
 
         if name.starts_with("imp:") {
-            let mounts = self.module_mounts.lock().unwrap();
             return Err(rquickjs::Error::new_resolving_message(
                 base,
                 name,
                 format!(
                     "unknown built-in module '{name}' while importing from {}",
-                    module_location_with_mounts(&self.workspace_root, &mounts, base)
+                    module_location(&self.workspace_root, &self.rules_source, base)
                 ),
             ));
         }
 
         if name.starts_with("//") {
-            let mounts = self.module_mounts.lock().unwrap();
-            let resolution =
-                resolve_workspace_module_with_mounts(&self.workspace_root, &mounts, name).map_err(
-                    |message| {
-                        rquickjs::Error::new_resolving_message(
-                            base,
-                            name,
-                            format!(
-                                "{message} while importing from {}",
-                                module_location_with_mounts(&self.workspace_root, &mounts, base)
-                            ),
-                        )
-                    },
-                )?;
+            let resolution = resolve_workspace_module(&self.workspace_root, &self.rules_source, name)
+                .map_err(|message| {
+                    rquickjs::Error::new_resolving_message(
+                        base,
+                        name,
+                        format!(
+                            "{message} while importing from {}",
+                            module_location(&self.workspace_root, &self.rules_source, base)
+                        ),
+                    )
+                })?;
             return Ok(resolution.name);
         }
 
         if name.starts_with('.') {
-            let mounts = self.module_mounts.lock().unwrap();
-            let importer = module_location_with_mounts(&self.workspace_root, &mounts, base);
-            let message = if module_kind_with_mounts(&self.workspace_root, &mounts, base)
+            let importer = module_location(&self.workspace_root, &self.rules_source, base);
+            let message = if module_kind(&self.workspace_root, &self.rules_source, base)
                 == ModuleKind::Build
             {
                 format!(
@@ -95,10 +113,7 @@ impl Resolver for ImpResolver {
             name,
             format!(
                 "module specifier '{name}' is unsupported while importing from {}; use //... or imp:*",
-                {
-                    let mounts = self.module_mounts.lock().unwrap();
-                    module_location_with_mounts(&self.workspace_root, &mounts, base)
-                }
+                module_location(&self.workspace_root, &self.rules_source, base)
             ),
         ))
     }
@@ -116,17 +131,17 @@ impl Loader for ImpLoader {
         }
 
         if name.starts_with("//") {
-            let resolution = {
-                let mounts = self.module_mounts.lock().unwrap();
-                resolve_workspace_module_with_mounts(&self.workspace_root, &mounts, name)
-                    .map_err(|message| rquickjs::Error::new_loading_message(name, message))?
+            let resolution = resolve_workspace_module(&self.workspace_root, &self.rules_source, name)
+                .map_err(|message| rquickjs::Error::new_loading_message(name, message))?;
+            let source = match resolution.source {
+                ModuleSource::File(path) => std::fs::read_to_string(&path).map_err(|e| {
+                    rquickjs::Error::new_loading_message(
+                        name,
+                        format!("read {}: {e}", path.display()),
+                    )
+                })?,
+                ModuleSource::Embedded(contents) => contents.to_owned(),
             };
-            let source = std::fs::read_to_string(&resolution.path).map_err(|e| {
-                rquickjs::Error::new_loading_message(
-                    name,
-                    format!("read {}: {e}", resolution.path.display()),
-                )
-            })?;
             return Module::declare(ctx.clone(), name, source);
         }
 
@@ -143,22 +158,21 @@ pub(crate) enum ModuleKind {
     Unknown,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum ModuleSource {
+    File(PathBuf),
+    Embedded(&'static str),
+}
+
 pub(crate) struct WorkspaceModuleResolution {
     pub(crate) name: String,
-    pub(crate) path: PathBuf,
+    pub(crate) source: ModuleSource,
     pub(crate) kind: ModuleKind,
 }
 
 pub(crate) fn resolve_workspace_module(
     root: &Path,
-    name: &str,
-) -> std::result::Result<WorkspaceModuleResolution, String> {
-    resolve_workspace_module_with_mounts(root, &[], name)
-}
-
-pub(crate) fn resolve_workspace_module_with_mounts(
-    root: &Path,
-    mounts: &[ModuleMount],
+    rules: &RulesSource,
     name: &str,
 ) -> std::result::Result<WorkspaceModuleResolution, String> {
     let rel = name
@@ -166,11 +180,18 @@ pub(crate) fn resolve_workspace_module_with_mounts(
         .ok_or_else(|| format!("workspace module '{name}' must start with //"))?;
     validate_workspace_module_path(name, rel)?;
 
-    if let Some((mount, mounted_rel)) = matching_mount(mounts, name) {
-        return resolve_workspace_module_in_root(&mount.root, name, &mounted_rel);
+    match resolve_workspace_module_in_root(root, name, rel) {
+        Ok(resolution) => Ok(resolution),
+        Err(root_err) => {
+            if rel == "rules" || rel.starts_with("rules/") {
+                let builtin_rel = rel.strip_prefix("rules").unwrap().trim_start_matches('/');
+                resolve_builtin_rules_module(rules, name, builtin_rel)
+                    .map_err(|rules_err| format!("{root_err}; {rules_err}"))
+            } else {
+                Err(root_err)
+            }
+        }
     }
-
-    resolve_workspace_module_in_root(root, name, rel)
 }
 
 fn resolve_workspace_module_in_root(
@@ -186,7 +207,7 @@ fn resolve_workspace_module_in_root(
         if build_path.is_file() {
             return Ok(WorkspaceModuleResolution {
                 name: name.to_owned(),
-                path: build_path,
+                source: ModuleSource::File(build_path),
                 kind: ModuleKind::Build,
             });
         }
@@ -197,7 +218,7 @@ fn resolve_workspace_module_in_root(
             if build_path.is_file() {
                 return Ok(WorkspaceModuleResolution {
                     name: name.to_owned(),
-                    path: build_path,
+                    source: ModuleSource::File(build_path),
                     kind: ModuleKind::Build,
                 });
             }
@@ -208,7 +229,7 @@ fn resolve_workspace_module_in_root(
         if js_path.is_file() {
             return Ok(WorkspaceModuleResolution {
                 name: name.to_owned(),
-                path: js_path,
+                source: ModuleSource::File(js_path),
                 kind: ModuleKind::Extension,
             });
         }
@@ -218,7 +239,7 @@ fn resolve_workspace_module_in_root(
         if index_path.is_file() {
             return Ok(WorkspaceModuleResolution {
                 name: name.to_owned(),
-                path: index_path,
+                source: ModuleSource::File(index_path),
                 kind: ModuleKind::Extension,
             });
         }
@@ -228,7 +249,7 @@ fn resolve_workspace_module_in_root(
         if build_path.is_file() {
             return Ok(WorkspaceModuleResolution {
                 name: name.to_owned(),
-                path: build_path,
+                source: ModuleSource::File(build_path),
                 kind: ModuleKind::Build,
             });
         }
@@ -244,17 +265,63 @@ fn resolve_workspace_module_in_root(
     ))
 }
 
-fn matching_mount<'a>(mounts: &'a [ModuleMount], name: &str) -> Option<(&'a ModuleMount, String)> {
-    let mount = mounts
-        .iter()
-        .filter(|mount| name == mount.prefix || name.starts_with(&format!("{}/", mount.prefix)))
-        .max_by_key(|mount| mount.prefix.len())?;
-    let mounted_rel = name
-        .strip_prefix(&mount.prefix)
-        .unwrap_or("")
-        .strip_prefix('/')
-        .unwrap_or("");
-    Some((mount, mounted_rel.to_owned()))
+/// Resolves `//rules/<rel>` (where `rel` has the leading `rules/` already
+/// stripped) against imp's built-in rule library: a live on-disk
+/// directory in dev mode, or the compiled-in copy otherwise.
+fn resolve_builtin_rules_module(
+    rules: &RulesSource,
+    name: &str,
+    rel: &str,
+) -> std::result::Result<WorkspaceModuleResolution, String> {
+    match rules {
+        RulesSource::Dev(dir) => resolve_workspace_module_in_root(dir, name, rel),
+        RulesSource::Embedded => resolve_embedded_rules_module(name, rel),
+    }
+}
+
+fn resolve_embedded_rules_module(
+    name: &str,
+    rel: &str,
+) -> std::result::Result<WorkspaceModuleResolution, String> {
+    let mut tried = Vec::new();
+
+    let js_path = format!("{rel}.js");
+    tried.push(js_path.clone());
+    if let Some(file) = EMBEDDED_RULES.get_file(&js_path) {
+        return embedded_module(name, file, ModuleKind::Extension);
+    }
+
+    let index_path = format!("{rel}/index.js");
+    tried.push(index_path.clone());
+    if let Some(file) = EMBEDDED_RULES.get_file(&index_path) {
+        return embedded_module(name, file, ModuleKind::Extension);
+    }
+
+    let build_path = format!("{rel}/{BUILD_FILE}");
+    tried.push(build_path.clone());
+    if let Some(file) = EMBEDDED_RULES.get_file(&build_path) {
+        return embedded_module(name, file, ModuleKind::Build);
+    }
+
+    Err(format!(
+        "cannot resolve built-in rules module '{name}'; tried embedded rules/{}",
+        tried.join(", embedded rules/")
+    ))
+}
+
+fn embedded_module(
+    name: &str,
+    file: &'static include_dir::File<'static>,
+    kind: ModuleKind,
+) -> std::result::Result<WorkspaceModuleResolution, String> {
+    let contents = file
+        .contents_utf8()
+        .ok_or_else(|| format!("embedded rules file '{}' is not valid UTF-8", file.path().display()))?;
+    Ok(WorkspaceModuleResolution {
+        name: name.to_owned(),
+        source: ModuleSource::Embedded(contents),
+        kind,
+    })
 }
 
 pub(crate) fn validate_workspace_module_path(
@@ -278,17 +345,13 @@ pub(crate) fn validate_workspace_module_path(
     Ok(())
 }
 
-pub(crate) fn module_kind_with_mounts(
-    root: &Path,
-    mounts: &[ModuleMount],
-    name: &str,
-) -> ModuleKind {
+pub(crate) fn module_kind(root: &Path, rules: &RulesSource, name: &str) -> ModuleKind {
     if name == "imp:core" {
         ModuleKind::BuiltIn
     } else if name == WORKSPACE_FILE {
         ModuleKind::Workspace
     } else if name.starts_with("//") {
-        resolve_workspace_module_with_mounts(root, mounts, name)
+        resolve_workspace_module(root, rules, name)
             .map(|resolution| resolution.kind)
             .unwrap_or(ModuleKind::Unknown)
     } else {
@@ -296,11 +359,7 @@ pub(crate) fn module_kind_with_mounts(
     }
 }
 
-pub(crate) fn module_location_with_mounts(
-    root: &Path,
-    mounts: &[ModuleMount],
-    name: &str,
-) -> String {
+pub(crate) fn module_location(root: &Path, rules: &RulesSource, name: &str) -> String {
     if name == "imp:core" {
         return "built-in imp:core".to_owned();
     }
@@ -308,8 +367,11 @@ pub(crate) fn module_location_with_mounts(
         return root.join(WORKSPACE_FILE).display().to_string();
     }
     if name.starts_with("//") {
-        if let Ok(resolution) = resolve_workspace_module_with_mounts(root, mounts, name) {
-            return resolution.path.display().to_string();
+        if let Ok(resolution) = resolve_workspace_module(root, rules, name) {
+            return match resolution.source {
+                ModuleSource::File(path) => path.display().to_string(),
+                ModuleSource::Embedded(_) => format!("<embedded {}>", &name[2..]),
+            };
         }
     }
     name.to_owned()

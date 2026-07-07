@@ -536,27 +536,6 @@ export function gatherTransitiveClosure(handle, kind) {
 }
 
 /**
- * Mount an external directory into the workspace module namespace.
- *
- * Static imports are resolved before a workspace module body runs, so mount
- * first, then use dynamic import:
- *
- *   workspaceMount({ prefix: "//rules", path: "../imp/rules" });
- *   await import("//rules/odin");
- *
- * @param {object} opts
- * @param {string} opts.prefix Workspace module prefix, e.g. "//rules".
- * @param {string} opts.path Directory containing modules for that prefix.
- * @returns {void}
- */
-export function workspaceMount(opts) {
-    if (!opts || typeof opts.prefix !== "string" || typeof opts.path !== "string") {
-        throw new Error("workspaceMount({ prefix, path }) requires prefix and path strings");
-    }
-    __host_workspace_mount(opts.prefix, opts.path);
-}
-
-/**
  * Register a JS export as the implementation of a target-constructor rule
  * name, so codegen'd BUILD.js files can reference the rule by name without
  * knowing which module defines it.
