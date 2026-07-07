@@ -140,6 +140,26 @@ export async function withFakeRun(fn) {
 }
 
 /**
+ * Run a test body with `__host_diff_digests` stubbed out, so `diffDigests()`
+ * returns a fixed, caller-provided set of changes regardless of the (fake or
+ * real) digests it's called with — for tests that fake `run()` (so there's no
+ * real output digest to diff against) but still want to exercise the
+ * diff-driven branch of a product.
+ *
+ * @param {Array<{type: "added"|"removed"|"modified", path: string}>} changes
+ * @param {() => Promise<any>} fn
+ */
+export async function withFakeDiff(changes, fn) {
+    const real = globalThis.__host_diff_digests;
+    globalThis.__host_diff_digests = () => JSON.stringify(changes);
+    try {
+        return await fn();
+    } finally {
+        globalThis.__host_diff_digests = real;
+    }
+}
+
+/**
  * Run a test body with `__host_selected_targets` stubbed to return `list`,
  * so `selectedTargets()` works inside a test even though tests run outside
  * of `execute_goal_live` (where the real binding always errors).

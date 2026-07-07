@@ -121,6 +121,7 @@ test("withFakeRun: run() resolves without executing and still traces", async () 
             argv: ["sh", "-c", "exit 99"],
             display: "should-not-run",
             outputs: [output("fake/out.txt")],
+            materialize: true,
         }));
     expect(result.exitCode).toBe(0);
     expect(result.outputs).toEqual([{ kind: "file", path: "fake/out.txt" }]);

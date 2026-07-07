@@ -15,7 +15,7 @@
 // dispatch task) — then dispatches to the selected target's product itself,
 // since a goal callback replaces native per-target dispatch entirely.
 
-import { dispatchSelection, goal } from "imp:core";
+import { goal, resolveProduct } from "imp:core";
 
 export function requireSingleOdinPackage(selection) {
     const targets = selection.filter(t => t.kind === "odin-package");
@@ -26,7 +26,15 @@ export function requireSingleOdinPackage(selection) {
 
 export async function runGoal(selection) {
     requireSingleOdinPackage(selection);
-    await dispatchSelection(selection);
+    const resolved = selection.map(resolveProduct);
+    const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));
+    for (const { label, promise } of calls) {
+        try {
+            await promise;
+        } catch (e) {
+            throw new Error(`${label}: ${e && e.message ? e.message : e}`);
+        }
+    }
 }
 
 goal("run", runGoal);

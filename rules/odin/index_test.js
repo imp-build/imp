@@ -50,7 +50,16 @@ import {
     paths,
     getMemoTrace,
     configure,
+    pathsInDigest,
 } from "imp:core";
+
+// A run() input FileSet gets collapsed into an opaque {kind:"digest", digest}
+// entry (merge_digests, commit 827bd09) rather than one {kind:"file", path}
+// entry per matched file, so "was this path fed into the sandbox" has to walk
+// the digest's contents instead of comparing a bare `.path` field.
+function inputsIncludePath(inputs, path) {
+    return inputs.some((input) => input.kind === "digest" && pathsInDigest(input.digest).includes(path));
+}
 
 describe("Odin rules", () => {
 test("uses the default Odin toolchain target", () => {
@@ -185,7 +194,7 @@ test("odinBuild declares resource package files as sandbox inputs", async () => 
         await odinBuild(app);
         const { trace } = getMemoTrace();
         const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build rules/odin");
-        expect(runEffect.inputs.some(input => input.path === "rules/odin/toolchain.js")).toBe(true);
+        expect(inputsIncludePath(runEffect.inputs, "rules/odin/toolchain.js")).toBe(true);
     });
 });
 
@@ -406,7 +415,7 @@ test("odinBuild uses the single source directory when it differs from target pat
             const { trace } = getMemoTrace();
             const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build rules/odin/example");
             expect(runEffect.argv).toContain("rules/odin/example");
-            expect(runEffect.inputs.some(input => input.path === "rules/odin/example/main.odin")).toBe(true);
+            expect(inputsIncludePath(runEffect.inputs, "rules/odin/example/main.odin")).toBe(true);
         });
     } finally {
         configure("odin", null);
@@ -446,7 +455,7 @@ test("odinTest runs odin test with package sources", async () => {
             const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin test rules/odin/example");
             expect(runEffect.argv).toContain("rules/odin/example");
             expect(runEffect.argv[2]).toContain("odin test");
-            expect(runEffect.inputs.some(input => input.path === "rules/odin/example/main.odin")).toBe(true);
+            expect(inputsIncludePath(runEffect.inputs, "rules/odin/example/main.odin")).toBe(true);
             expect(runEffect.impure).toBe(true);
         });
     } finally {

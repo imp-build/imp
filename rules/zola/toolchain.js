@@ -167,6 +167,7 @@ export async function acquireZolaToolchain(version) {
         argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-zola", downloadPath, url],
         tools: coreTools,
         outputs: [output(output_path(downloadPath))],
+        materialize: true,
         display: `download zola ${version} (${plat.os}/${plat.arch})`,
     });
 
@@ -182,6 +183,7 @@ export async function acquireZolaToolchain(version) {
                 namedCache: { name: ZOLA_TOOLCHAIN_CACHE, key },
             }),
         ],
+        materialize: true,
         display: `extract zola ${version} (${plat.os}/${plat.arch})`,
     });
 

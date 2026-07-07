@@ -46,6 +46,7 @@ function writeJsonFile(path, value) {
             pretty(value),
         ],
         outputs: [output(path)],
+        materialize: true,
         display: `write ${path}`,
     });
 }

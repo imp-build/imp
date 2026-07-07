@@ -233,6 +233,7 @@ export async function acquireZigToolchain(version) {
         argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-zig", downloadPath, url],
         tools: coreTools,
         outputs: [output(output_path(downloadPath))],
+        materialize: true,
         display: `download zig ${version} (${plat.os}/${plat.arch})`,
     });
 
@@ -246,6 +247,7 @@ export async function acquireZigToolchain(version) {
                 namedCache: { name: ZIG_TOOLCHAIN_CACHE, key },
             }),
         ],
+        materialize: true,
         display: `extract zig ${version} (${plat.os}/${plat.arch})`,
     });
 

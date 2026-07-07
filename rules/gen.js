@@ -11,6 +11,7 @@ export const file = product("stamp-file", "build", async function file(handle) {
             handle.attrs.sources,
         ],
         outputs: [output(handle.attrs.entrypoint)],
+        materialize: true,
         display: `write ${handle.attrs.entrypoint}`,
     });
 });

@@ -7,8 +7,8 @@
 // so this is a no-op today and stays correct if that default is ever dropped.
 //
 // The callback resolves each selected target's product itself via
-// resolveProduct rather than delegating to dispatchSelection, so it drives
-// its own fan-out/await loop directly.
+// resolveProduct, driving its own fan-out/await loop directly (the same
+// pattern run.js/test.js/fmt.js use).
 
 import { goal, logInfo, resolveProduct } from "imp:core";
 

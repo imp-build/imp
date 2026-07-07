@@ -169,6 +169,7 @@ export async function acquireMoldToolchain(version) {
         argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-mold", downloadPath, url],
         tools: coreTools,
         outputs: [output(output_path(downloadPath))],
+        materialize: true,
         display: `download mold ${version} (${plat.os}/${plat.arch})`,
     });
 
@@ -184,6 +185,7 @@ export async function acquireMoldToolchain(version) {
                 namedCache: { name: MOLD_TOOLCHAIN_CACHE, key },
             }),
         ],
+        materialize: true,
         display: `extract mold ${version} (${plat.os}/${plat.arch})`,
     });
 

@@ -176,6 +176,7 @@ export async function acquireCmakeToolchain(version) {
         argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-cmake", downloadPath, url],
         tools: coreTools,
         outputs: [output(output_path(downloadPath))],
+        materialize: true,
         display: `download cmake ${version} (${plat.os}/${plat.arch})`,
     });
 
@@ -189,6 +190,7 @@ export async function acquireCmakeToolchain(version) {
                 namedCache: { name: CMAKE_TOOLCHAIN_CACHE, key },
             }),
         ],
+        materialize: true,
         display: `extract cmake ${version} (${plat.os}/${plat.arch})`,
     });
 

@@ -754,6 +754,7 @@ export const odinBuild = product("odin-package", "build",
             tools: [odinToolSpec, ...scriptTools],
             inputs: [srcs, ...genInputs, resourceInputs],
             outputs: [output(declaredOut)],
+            materialize: true,
             display: `odin build ${path}`,
         });
         return { ...result, outputPath: declaredOut };
@@ -864,6 +865,7 @@ export const odinGenRun = product("odin-gen", "build", async function odinGenRun
                 content,
             ],
             outputs: [output(outPath)],
+            materialize: true,
             display: `generate ${outPath}`,
         });
     }
@@ -872,6 +874,7 @@ export const odinGenRun = product("odin-gen", "build", async function odinGenRun
         argv: [...handle.attrs.cmd, outPath],
         inputs: [inputFiles],
         outputs: [output(outPath)],
+        materialize: true,
         sandbox: false,
         impure: true,
         display: `generate ${outPath}`,

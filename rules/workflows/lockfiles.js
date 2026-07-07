@@ -34,6 +34,7 @@ function writeJsonFile(host, path, value) {
             `${JSON.stringify(value, null, 2)}\n`,
         ],
         outputs: [host.output(path)],
+        materialize: true,
         display: `write ${path}`,
     });
 }

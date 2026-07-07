@@ -1332,6 +1332,59 @@ fn register_globals<'js>(
     )?;
     globals.set("__host_merge_digests", host_merge_digests)?;
 
+    // __host_diff_digests(beforeDigest, afterDigest) → JSON string of
+    // [{type: "added"|"removed"|"modified", path}, ...]
+    let host_diff_digests = Function::new(
+        ctx.clone(),
+        move |before: String, after: String| -> rquickjs::Result<String> {
+            let before = crate::digest::DirectoryDigest::from_digest(before);
+            let after = crate::digest::DirectoryDigest::from_digest(after);
+            let changes = crate::digest::diff_digests(&before, &after)
+                .map_err(|e| rquickjs::Error::new_loading_message("diffDigests", format!("{e:#}")))?;
+            let json: Vec<serde_json::Value> = changes
+                .into_iter()
+                .map(|change| {
+                    let (kind, path) = match change {
+                        crate::digest::PathChange::Added(p) => ("added", p),
+                        crate::digest::PathChange::Removed(p) => ("removed", p),
+                        crate::digest::PathChange::Modified(p) => ("modified", p),
+                    };
+                    serde_json::json!({ "type": kind, "path": path })
+                })
+                .collect();
+            serde_json::to_string(&json).map_err(|e| {
+                rquickjs::Error::new_loading_message("diffDigests", e.to_string())
+            })
+        },
+    )?;
+    globals.set("__host_diff_digests", host_diff_digests)?;
+
+    // __host_digest_paths(digest) → JSON string[] of every file path in the tree
+    let host_digest_paths = Function::new(
+        ctx.clone(),
+        move |digest: String| -> rquickjs::Result<String> {
+            let digest = crate::digest::DirectoryDigest::from_digest(digest);
+            let paths = crate::digest::list_files_in_digest(&digest)
+                .map_err(|e| rquickjs::Error::new_loading_message("digestPaths", format!("{e:#}")))?;
+            serde_json::to_string(&paths)
+                .map_err(|e| rquickjs::Error::new_loading_message("digestPaths", e.to_string()))
+        },
+    )?;
+    globals.set("__host_digest_paths", host_digest_paths)?;
+
+    // __host_digest_read_file(digest, path) → string, the digest-backed
+    // analog of __host_read_file for a real workspace path.
+    let host_digest_read_file = Function::new(
+        ctx.clone(),
+        move |digest: String, path: String| -> rquickjs::Result<String> {
+            let digest = crate::digest::DirectoryDigest::from_digest(digest);
+            crate::digest::read_file_in_digest(&digest, &path).map_err(|e| {
+                rquickjs::Error::new_loading_message("digestReadFile", format!("{e:#}"))
+            })
+        },
+    )?;
+    globals.set("__host_digest_read_file", host_digest_read_file)?;
+
     // __host_capture_paths(pathsJson) → digest string
     // Content-addresses an explicit, already-known-good list of workspace-relative
     // paths into CAS (used by `file_set.literal()`, which — unlike `glob()` — has
@@ -1703,6 +1756,10 @@ fn parse_exec_run_opts<'js>(
     let impure = opts.get::<_, Option<bool>>("impure")?.unwrap_or(false);
     let force_cache = opts.get::<_, Option<bool>>("forceCache")?.unwrap_or(false);
     let sandbox = opts.get::<_, Option<bool>>("sandbox")?.unwrap_or(true);
+    // Enforcement of "must be explicit when outputs are declared" lives in
+    // imp_core.js's run() wrapper; this default is only a fallback for
+    // callers that reach __host_run without going through it.
+    let materialize = opts.get::<_, Option<bool>>("materialize")?.unwrap_or(true);
     let config_digest = opts
         .get::<_, Option<String>>("configDigest")?
         .unwrap_or_default();
@@ -1717,6 +1774,7 @@ fn parse_exec_run_opts<'js>(
         impure,
         force_cache,
         sandbox,
+        materialize,
         no_cache: false,
         // Overridden per invocation in the host_run closure (like no_cache).
         sandbox_retention: crate::exec::SandboxRetention::default(),
@@ -2437,9 +2495,10 @@ pub async fn evaluate_product_json(
 /// If the goal has a registered callback (`goal(name, fn)`), that callback
 /// fully owns the goal: it is invoked once with the selection and, on
 /// success, the native per-target dispatch loop below is skipped entirely
-/// rather than also running — the callback is responsible for calling
-/// `dispatchSelection()` (or its own dispatch logic) itself. Goals without a
-/// callback keep the native per-target dispatch loop unchanged.
+/// rather than also running — the callback is responsible for its own
+/// dispatch logic (typically `resolveProduct()` plus its own fan-out/await
+/// loop). Goals without a callback keep the native per-target dispatch loop
+/// unchanged.
 ///
 /// The caller must have installed a scheduler (and this sets `exec_root`).
 pub async fn execute_goal_live(
@@ -3690,6 +3749,7 @@ export const file = product("tool-user", "build", async function file(handle) {
             binDirs: ["bin"],
         }],
         outputs: [output("out.txt")],
+        materialize: true,
         display: "hello tool",
     });
 });
@@ -4592,6 +4652,7 @@ const failing = memo(async function failing() {
     return run({
         argv: ["sh", "-c", "echo boom >&2; exit 3"],
         outputs: [output("build/never.txt")],
+        materialize: true,
         display: "shared failing action",
     });
 });
@@ -4725,6 +4786,7 @@ export const build = product("selected-targets-test", "build", async function bu
     await run({
         argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", addresses, `selection-${handle.label.name}.txt`],
         outputs: [output(`selection-${handle.label.name}.txt`)],
+        materialize: true,
         display: `selection for ${handle.label.name}`,
     });
 });
@@ -4857,6 +4919,7 @@ export const build = product("callback-test", "custom-goal", async function buil
     await run({
         argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", "ran", `ran-${handle.label.name}.txt`],
         outputs: [output(`ran-${handle.label.name}.txt`)],
+        materialize: true,
         display: `ran ${handle.label.name}`,
     });
 });
@@ -4917,6 +4980,7 @@ export const build = product("callback-test", "custom-goal", async function buil
     await run({
         argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", "ran", `ran-${handle.label.name}.txt`],
         outputs: [output(`ran-${handle.label.name}.txt`)],
+        materialize: true,
         display: `ran ${handle.label.name}`,
     });
 });
@@ -4960,6 +5024,7 @@ export const build = product("plain-goal-test", "plain-goal", async function bui
     await run({
         argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", "ran", `ran-${handle.label.name}.txt`],
         outputs: [output(`ran-${handle.label.name}.txt`)],
+        materialize: true,
         display: `ran ${handle.label.name}`,
     });
 });
@@ -5329,6 +5394,7 @@ export const build = product("live-cache-test", "build", async function build() 
     const result = await run({{
         argv: ["sh", "-c", "{command_js}"],
         outputs: [output("build/live.txt")],
+        materialize: true,
         display: "live cache action",
     }});
     if (result.stdout !== "live-stdout\n") {{
@@ -5414,6 +5480,7 @@ export const build = product("config-cache-test", "build", async function build(
     return run({{
         argv: ["sh", "-c", "{command_js}"],
         outputs: [output("build/cfg.txt")],
+        materialize: true,
         display: "config cache action",
     }});
 }});

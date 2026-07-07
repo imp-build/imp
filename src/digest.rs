@@ -235,6 +235,178 @@ pub(crate) fn merge_digests(digests: Vec<DirectoryDigest>) -> Result<DirectoryDi
     DirectoryDigest::from_trie(merged)
 }
 
+// ---------------------------------------------------------------------------
+// Inspect — list files in a tree, read a single file's content by path
+// ---------------------------------------------------------------------------
+
+/// Recursively list every file/symlink path within a tree, in sorted order.
+/// Directories are walked but not themselves listed.
+pub(crate) fn list_files(trie: &DigestTrie) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    list_files_helper("", trie, &mut paths)?;
+    Ok(paths)
+}
+
+fn list_files_helper(parent: &str, trie: &DigestTrie, out: &mut Vec<String>) -> Result<()> {
+    for entry in trie.entries() {
+        let path = if parent.is_empty() {
+            entry.name().to_owned()
+        } else {
+            format!("{parent}/{}", entry.name())
+        };
+        match entry {
+            Entry::File(_) | Entry::Symlink(_) => out.push(path),
+            Entry::Directory(d) => {
+                let child = DigestTrie::load(&d.digest)?;
+                list_files_helper(&path, &child, out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read a single file's content out of a tree by its relative path — the
+/// digest-backed analog of reading a real file off disk.
+pub(crate) fn read_file_from_trie(trie: &DigestTrie, path: &str) -> Result<String> {
+    let components: Vec<&str> = path.split('/').collect();
+    let (name, parents) = components
+        .split_last()
+        .context("path must not be empty")?;
+
+    let mut current = trie.clone();
+    for part in parents {
+        let entry = current
+            .entries()
+            .iter()
+            .find(|e| e.name() == *part)
+            .with_context(|| format!("path '{path}' not found in digest (missing directory '{part}')"))?;
+        match entry {
+            Entry::Directory(d) => current = DigestTrie::load(&d.digest)?,
+            _ => bail!("path '{path}' not found in digest ('{part}' is not a directory)"),
+        }
+    }
+
+    let entry = current
+        .entries()
+        .iter()
+        .find(|e| e.name() == *name)
+        .with_context(|| format!("path '{path}' not found in digest"))?;
+    match entry {
+        Entry::File(f) => {
+            let blob_path = cas_blob_path(&f.digest)?;
+            std::fs::read_to_string(&blob_path)
+                .with_context(|| format!("read digest file blob for '{path}'"))
+        }
+        _ => bail!("path '{path}' in digest is not a file"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Diff — structural comparison between two trees
+// ---------------------------------------------------------------------------
+
+/// A single path-level difference between a "before" and "after" tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PathChange {
+    Added(String),
+    Removed(String),
+    Modified(String),
+}
+
+impl PathChange {
+    pub(crate) fn path(&self) -> &str {
+        match self {
+            PathChange::Added(p) | PathChange::Removed(p) | PathChange::Modified(p) => p,
+        }
+    }
+}
+
+/// Structurally diff two trees, mirroring `merge_helper`'s per-level walk but
+/// comparing instead of unioning. Short-circuits whenever two subtrees already
+/// share a digest, so an unchanged directory is never walked.
+pub(crate) fn diff(before: &DigestTrie, after: &DigestTrie) -> Result<Vec<PathChange>> {
+    diff_helper("", before, after)
+}
+
+/// Convenience wrapper over `diff` for already-digest-only inputs: resolves
+/// each to a tree (loading from CAS as needed), then diffs them.
+pub(crate) fn diff_digests(before: &DirectoryDigest, after: &DirectoryDigest) -> Result<Vec<PathChange>> {
+    diff(before.tree()?, after.tree()?)
+}
+
+/// Convenience wrapper over `list_files` for a `DirectoryDigest`.
+pub(crate) fn list_files_in_digest(digest: &DirectoryDigest) -> Result<Vec<String>> {
+    list_files(digest.tree()?)
+}
+
+/// Convenience wrapper over `read_file_from_trie` for a `DirectoryDigest`.
+pub(crate) fn read_file_in_digest(digest: &DirectoryDigest, path: &str) -> Result<String> {
+    read_file_from_trie(digest.tree()?, path)
+}
+
+fn diff_helper(parent: &str, before: &DigestTrie, after: &DigestTrie) -> Result<Vec<PathChange>> {
+    let mut before_by_name: BTreeMap<&str, &Entry> =
+        before.entries().iter().map(|e| (e.name(), e)).collect();
+    let mut changes = Vec::new();
+
+    for after_entry in after.entries() {
+        let path = if parent.is_empty() {
+            after_entry.name().to_owned()
+        } else {
+            format!("{parent}/{}", after_entry.name())
+        };
+        match before_by_name.remove(after_entry.name()) {
+            None => changes.push(PathChange::Added(path)),
+            Some(before_entry) => {
+                changes.extend(diff_entry(&path, before_entry, after_entry)?);
+            }
+        }
+    }
+    // Whatever's left in `before_by_name` didn't appear in `after`.
+    let mut removed: Vec<&str> = before_by_name.into_keys().collect();
+    removed.sort_unstable();
+    for name in removed {
+        let path = if parent.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{parent}/{name}")
+        };
+        changes.push(PathChange::Removed(path));
+    }
+    Ok(changes)
+}
+
+fn diff_entry(path: &str, before: &Entry, after: &Entry) -> Result<Vec<PathChange>> {
+    match (before, after) {
+        (Entry::File(b), Entry::File(a)) => {
+            if b.digest == a.digest {
+                Ok(Vec::new())
+            } else {
+                Ok(vec![PathChange::Modified(path.to_owned())])
+            }
+        }
+        (Entry::Symlink(b), Entry::Symlink(a)) => {
+            if b.target == a.target {
+                Ok(Vec::new())
+            } else {
+                Ok(vec![PathChange::Modified(path.to_owned())])
+            }
+        }
+        (Entry::Directory(b), Entry::Directory(a)) => {
+            if b.digest == a.digest {
+                Ok(Vec::new())
+            } else {
+                let before_tree = DigestTrie::load(&b.digest)?;
+                let after_tree = DigestTrie::load(&a.digest)?;
+                diff_helper(path, &before_tree, &after_tree)
+            }
+        }
+        // Same name, different kind (file vs. directory vs. symlink): treat
+        // as a wholesale replacement rather than trying to diff across kinds.
+        _ => Ok(vec![PathChange::Modified(path.to_owned())]),
+    }
+}
+
 /// Wrap a single file, already stored in CAS, under `relative_path` — e.g. storing
 /// `digest` at `"a/b/c.txt"` produces a one-file tree `a/b/c.txt`. Used to fold a
 /// plain `{kind:"file"}` input/output into the same merged-tree representation as
@@ -631,6 +803,106 @@ mod tests {
             }
             other => panic!("expected a directory entry, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn diff_identical_trees_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("a.txt"), "same");
+        write(&src.join("nested").join("b.txt"), "also same");
+
+        let before = capture_directory(&src).unwrap();
+        let after = capture_directory(&src).unwrap();
+
+        let changes = diff_digests(&before, &after).unwrap();
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn diff_detects_modified_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_a = dir.path().join("a");
+        write(&src_a.join("f.txt"), "before");
+        let src_b = dir.path().join("b");
+        write(&src_b.join("f.txt"), "after");
+
+        let before = capture_directory(&src_a).unwrap();
+        let after = capture_directory(&src_b).unwrap();
+
+        let changes = diff_digests(&before, &after).unwrap();
+        assert_eq!(changes, vec![PathChange::Modified("f.txt".to_string())]);
+    }
+
+    #[test]
+    fn diff_detects_added_and_removed_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_a = dir.path().join("a");
+        write(&src_a.join("only_before.txt"), "x");
+        let src_b = dir.path().join("b");
+        write(&src_b.join("only_after.txt"), "y");
+
+        let before = capture_directory(&src_a).unwrap();
+        let after = capture_directory(&src_b).unwrap();
+
+        let mut changes = diff_digests(&before, &after).unwrap();
+        changes.sort_by(|a, b| a.path().cmp(b.path()));
+        assert_eq!(
+            changes,
+            vec![
+                PathChange::Added("only_after.txt".to_string()),
+                PathChange::Removed("only_before.txt".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_prefixes_nested_directory_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_a = dir.path().join("a");
+        write(&src_a.join("nested").join("f.txt"), "before");
+        let src_b = dir.path().join("b");
+        write(&src_b.join("nested").join("f.txt"), "after");
+
+        let before = capture_directory(&src_a).unwrap();
+        let after = capture_directory(&src_b).unwrap();
+
+        let changes = diff_digests(&before, &after).unwrap();
+        assert_eq!(changes, vec![PathChange::Modified("nested/f.txt".to_string())]);
+    }
+
+    #[test]
+    fn list_files_in_digest_lists_nested_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("a.txt"), "a");
+        write(&src.join("nested").join("b.txt"), "b");
+
+        let digest = capture_directory(&src).unwrap();
+        let mut files = list_files_in_digest(&digest).unwrap();
+        files.sort();
+        assert_eq!(files, vec!["a.txt".to_string(), "nested/b.txt".to_string()]);
+    }
+
+    #[test]
+    fn read_file_in_digest_reads_nested_file_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("nested").join("b.txt"), "hello from nested");
+
+        let digest = capture_directory(&src).unwrap();
+        let content = read_file_in_digest(&digest, "nested/b.txt").unwrap();
+        assert_eq!(content, "hello from nested");
+    }
+
+    #[test]
+    fn read_file_in_digest_errors_on_missing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("a.txt"), "a");
+
+        let digest = capture_directory(&src).unwrap();
+        assert!(read_file_in_digest(&digest, "missing.txt").is_err());
     }
 
     #[test]

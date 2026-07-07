@@ -149,13 +149,13 @@ export function namedCache(opts) {
  * @param {(selection: Array<{id: number, address: string, kind: string, product: string}>) => (void | Promise<void>)} [fn]
  *   Optional. When provided, this callback is fully responsible for the goal
  *   invocation — it receives the resolved selection and native per-target
- *   product dispatch is skipped entirely, even on success. Call
- *   `dispatchSelection(selection)` from within `fn` to reproduce the default
- *   per-target dispatch (invoke each selected target's registered product
- *   function and await all of them). Throwing (or rejecting) aborts the
- *   whole invocation with that one error. If `fn` is omitted, the host
- *   dispatches every selected target's product function itself, exactly as
- *   before.
+ *   product dispatch is skipped entirely, even on success. Use
+ *   `resolveProduct(entry)` from within `fn` to look up each selected
+ *   target's registered product function and drive your own resolve/fan-out/
+ *   await loop (see build.js/run.js/test.js/fmt.js for the pattern).
+ *   Throwing (or rejecting) aborts the whole invocation with that one error.
+ *   If `fn` is omitted, the host dispatches every selected target's product
+ *   function itself, exactly as before.
  * @param {object} [opts]
  * @param {Record<string, {description?: string}>} [opts.flags] Boolean flags
  *   this goal accepts on the CLI (e.g. `{ check: { description: "..." } }`
@@ -472,9 +472,8 @@ export function selectedTargets(kind = undefined) {
 
 /**
  * Resolve a single selection entry to its registered product function and
- * target handle, without invoking it — the per-entry counterpart to
- * dispatchSelection's resolve step, for goal callbacks that want to drive
- * their own execution/fan-out instead of delegating to dispatchSelection.
+ * target handle, without invoking it — for goal callbacks that drive their
+ * own resolve/fan-out/await loop (see build.js/run.js/test.js/fmt.js).
  *
  * @param {{id: number, address: string, kind: string, product: string}} entry
  * @returns {{label: string, fn: function, handle: object}}
@@ -511,35 +510,6 @@ export function invokeToolchainProduct(id) {
         throw new Error(`target kind '${handle.kind}' has no 'toolchain' product (not toolchain-shaped)`);
     }
     return fn(handle);
-}
-
-/**
- * Run the default per-target dispatch for a selection: for each entry, look
- * up its registered product (by kind + product name), resolve its target
- * handle, and invoke the product function. All calls are started before any
- * is awaited (fan-out), then awaited in selection order — the first
- * rejection aborts immediately, labeled with its target's address#product,
- * mirroring the host's native per-target dispatch that this replaces for a
- * goal with a registered callback.
- *
- * Intended to be called from (or passed directly as) a goal's callback, e.g.
- * `goal("test", dispatchSelection)`.
- *
- * @param {Array<{id: number, address: string, kind: string, product: string}>} selection
- * @returns {Promise<void>}
- */
-export async function dispatchSelection(selection) {
-    // Resolve every entry's product fn up front, before invoking any of
-    // them, so a missing product fails fast without partially dispatching.
-    const resolved = selection.map(resolveProduct);
-    const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));
-    for (const { label, promise } of calls) {
-        try {
-            await promise;
-        } catch (e) {
-            throw new Error(`${label}: ${e && e.message ? e.message : e}`);
-        }
-    }
 }
 
 /**
@@ -1201,6 +1171,58 @@ export function paths(fileset) {
     return result;
 }
 
+/**
+ * The merged tree digest backing a FileSet, e.g. to diff against a later
+ * run()'s outputDigest via diffDigests() — the digest is already computed
+ * and cached by _eval_fileset, this just exposes it.
+ *
+ * @param {object} fileset A FileSet value (e.g. from own_sources()).
+ * @returns {string} Digest string.
+ */
+export function digestOf(fileset) {
+    if (!fileset || fileset.__fileset !== true) {
+        throw new Error("digestOf() requires a FileSet value");
+    }
+    return _eval_fileset(fileset).digest;
+}
+
+/**
+ * Structurally diff two digests (e.g. a FileSet's digest before a run()
+ * against that run()'s outputDigest after), without needing either tree
+ * materialized on disk.
+ *
+ * @param {string} before Digest string.
+ * @param {string} after Digest string.
+ * @returns {Array<{type: "added"|"removed"|"modified", path: string}>}
+ */
+export function diffDigests(before, after) {
+    return JSON.parse(__host_diff_digests(before, after));
+}
+
+/**
+ * List every file path within a digest's tree, e.g. to inspect what a
+ * run()'s outputDigest or a FileSet's digest (via digestOf()) actually
+ * contains, without materializing it to disk.
+ *
+ * @param {string} digest Digest string.
+ * @returns {string[]}
+ */
+export function pathsInDigest(digest) {
+    return JSON.parse(__host_digest_paths(digest));
+}
+
+/**
+ * Read a single file's content out of a digest's tree by its relative path —
+ * the digest-backed analog of read_file() for the real workspace.
+ *
+ * @param {string} digest Digest string.
+ * @param {string} path Relative path within the tree.
+ * @returns {string}
+ */
+export function readFileInDigest(digest, path) {
+    return __host_digest_read_file(digest, path);
+}
+
 export const file_set = {
     union(...sets) {
         for (const s of sets) {
@@ -1281,6 +1303,12 @@ export function run(opts) {
     const contextEntry = _effective_context_entry(true);
     const inputs = _materialise_inputs(opts.inputs);
     const outputs = opts.outputs ?? [];
+    if (outputs.length > 0 && opts.materialize !== true && opts.materialize !== false) {
+        throw new Error(
+            "run(): materialize must be explicitly set (true or false) when outputs are declared",
+        );
+    }
+    const materialize = opts.materialize ?? true;
     const effect = {
         event: "effect",
         kind: "run",
@@ -1293,6 +1321,7 @@ export function run(opts) {
         impure: opts.impure === true,
         forceCache: opts.forceCache === true,
         sandbox: opts.sandbox !== false,
+        materialize,
     };
     _trace_effect_in_context(effect, contextEntry.ctx);
     const contextId = contextEntry.id;
@@ -1308,6 +1337,7 @@ export function run(opts) {
         impure: opts.impure,
         forceCache: opts.forceCache,
         sandbox: opts.sandbox,
+        materialize,
         __owner: owner,
     }).then((result) => ({
         ...result,

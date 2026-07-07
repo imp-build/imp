@@ -132,6 +132,7 @@ export const native_link_library = product("cmake-lib", "build", async function 
         tools: [cmakeToolSpec, ...compilerTools, ...scriptTools],
         inputs: [inputFiles, ...dirInputs],
         outputs: [...outputDecls, ...stagedOutputDecls],
+        materialize: true,
         display: `cmake build ${srcPath}`,
     });
 });

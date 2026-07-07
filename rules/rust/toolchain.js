@@ -218,6 +218,7 @@ export async function acquireRustToolchain(version) {
         argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-rustup-init", rustupInitPath, url],
         tools: coreTools,
         outputs: [output(output_path(rustupInitPath))],
+        materialize: true,
         display: `download rustup-init ${RUSTUP_VERSION} (${plat.os}/${plat.arch})`,
     });
 
@@ -241,6 +242,7 @@ export async function acquireRustToolchain(version) {
                 namedCache: { name: CARGO_HOME_CACHE, key },
             }),
         ],
+        materialize: true,
         display: `install rust ${version} (${plat.os}/${plat.arch})`,
     });
 

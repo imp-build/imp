@@ -309,6 +309,15 @@ pub(crate) struct ExecRunOpts {
     pub(crate) sandbox: bool,
     pub(crate) no_cache: bool,
     pub(crate) sandbox_retention: SandboxRetention,
+    /// Whether declared outputs get copied back into the real workspace.
+    /// Output capture into CAS and the `output_digest`/cache record happen
+    /// either way — this only gates the workspace-copy step, so a caller can
+    /// get a digest to compare or feed into a later `run({inputs})` without
+    /// mutating the tree. Required at the JS `run()` boundary whenever
+    /// `outputs` is non-empty (see `imp_core.js`); defaults to `true` here
+    /// only as a defense-in-depth fallback for callers that bypass that JS
+    /// validation.
+    pub(crate) materialize: bool,
 }
 
 /// When a per-run sandbox root is deleted. Sandboxes are ephemeral by default;
@@ -770,8 +779,10 @@ pub(crate) fn exec_run_inner(
     };
 
     if let Some(record) = cached_record_opt {
-        materialize_cached_outputs(&record, workspace_root)?;
-        materialize_named_caches(&record, workspace_root)?;
+        if opts.materialize {
+            materialize_cached_outputs(&record, workspace_root)?;
+            materialize_named_caches(&record, workspace_root)?;
+        }
         return Ok(ExecRunResult {
             stdout: record.stdout,
             stderr: record.stderr,
@@ -936,8 +947,10 @@ pub(crate) fn exec_run_inner(
         if !opts.no_cache {
             write_task_cache_record(&record)?;
         }
-        materialize_cached_outputs(&record, workspace_root)?;
-        materialize_named_caches(&record, workspace_root)?;
+        if opts.materialize {
+            materialize_cached_outputs(&record, workspace_root)?;
+            materialize_named_caches(&record, workspace_root)?;
+        }
     }
 
     // Command and output ingestion succeeded — let the guard delete the sandbox.
@@ -1081,6 +1094,7 @@ mod tests {
             impure: false,
             force_cache: false,
             sandbox: true,
+            materialize: true,
             no_cache: false,
             sandbox_retention: SandboxRetention::default(),
         }
@@ -1139,6 +1153,7 @@ mod tests {
             impure: false,
             force_cache: false,
             sandbox: true,
+            materialize: true,
             no_cache: false,
             sandbox_retention: SandboxRetention::default(),
         }
@@ -1206,6 +1221,38 @@ mod tests {
             std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
             "payload",
             "cache hit must rematerialize declared outputs"
+        );
+    }
+
+    #[test]
+    fn exec_run_materialize_false_populates_cas_but_not_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let mut opts = run_opts(
+            &["sh", "-c", "mkdir -p build && printf payload > build/out.txt"],
+            &[],
+            &["build/out.txt"],
+        );
+        opts.materialize = false;
+
+        let result = exec_run_inner(p, opts, None).unwrap();
+        assert!(!p.join("build/out.txt").exists(), "materialize: false must not write to the workspace");
+        let output_digest = result.output_digest.expect("run must still report an output digest");
+
+        // A later materialize: true run of the exact same task must hit cache
+        // (task_key doesn't depend on materialize) and copy from CAS.
+        let mut second_opts = run_opts(
+            &["sh", "-c", "mkdir -p build && printf payload > build/out.txt"],
+            &[],
+            &["build/out.txt"],
+        );
+        second_opts.materialize = true;
+        let second = exec_run_inner(p, second_opts, None).unwrap();
+        assert_eq!(second.output_digest.unwrap(), output_digest);
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
+            "payload",
+            "materialize: true must copy the (already cached) output into the workspace"
         );
     }
 
@@ -1290,6 +1337,7 @@ mod tests {
             impure: false,
             force_cache: false,
             sandbox: true,
+            materialize: true,
             no_cache: true,
             sandbox_retention: SandboxRetention::default(),
         };

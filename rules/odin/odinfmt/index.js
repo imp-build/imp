@@ -1,12 +1,17 @@
-// Odin formatting mechanics: runs odinfmt over a package's own sources inside
-// the sandbox, either writing formatted files back (odinFmt) or diffing
-// against the staged input without mutating the tree.
+// Odin formatting mechanics: runs odinfmt -w over a package's own sources
+// inside the sandbox and compares the resulting output digest against the
+// pre-run digest of the same files, rather than scraping stdout — odinfmt has
+// no dry-run/check mode, and shelling out to a sandboxed `diff` isn't an
+// option (undeclared host binaries aren't visible on the sandbox's hermetic
+// PATH; see resolve_program/sandbox_command_env in src/exec.rs). `odinFmt`
+// and `odinFormatCheck` share the same run, differing only in whether the
+// result is materialized back into the workspace.
 // Exposed to the build graph as products by //rules/workflows/fmt.
 
 import { own_sources, declared_path } from "//rules/odin";
 import { resolveOdinToolchainVersion } from "//rules/odin/toolchain";
 import { odinfmtTool } from "//rules/odin/odinfmt/toolchain";
-import { paths, output, run, read_file } from "imp:core";
+import { paths, output, run, digestOf, diffDigests } from "imp:core";
 
 function odinfmt_version(handle) {
     const toolchainHandle = handle.attrs.toolchain;
@@ -15,18 +20,21 @@ function odinfmt_version(handle) {
         : resolveOdinToolchainVersion(handle.attrs.toolchainVersion);
 }
 
-// Reformat a package's own sources in place. Runs odinfmt -w on each file inside
-// the sandbox and declares the same paths as outputs, so the formatted files are
-// materialized back into the workspace. Only the package's own sources are
-// touched; dependencies are formatted by their own targets.
-export async function odinFmt(handle) {
+// Runs odinfmt -w over a package's own sources inside the sandbox, and
+// returns the set of files whose content actually changed (by digest, not by
+// timestamp/existence). When `materialize` is true (the `fmt` product), the
+// formatted files are copied back into the real workspace; when false (the
+// `format-check` product), the sandboxed result is captured into CAS and
+// diffed, but the workspace is left untouched.
+async function runOdinFmt(handle, { materialize }) {
     const srcs = await own_sources(handle);
     const files = paths(srcs);
     if (files.length === 0) {
-        return { formatted: 0 };
+        return { total: 0, changed: [] };
     }
+    const before = digestOf(srcs);
     const { tool, command } = odinfmtTool(odinfmt_version(handle));
-    await run({
+    const result = await run({
         argv: [
             "sh",
             "-c",
@@ -37,45 +45,26 @@ export async function odinFmt(handle) {
         tools: [tool],
         inputs: [srcs],
         outputs: files.map(f => output(f)),
-        display: `odinfmt ${declared_path(handle, handle.attrs.path || ".")}`,
+        materialize,
+        display: `odinfmt ${materialize ? "" : "--check "}${declared_path(handle, handle.attrs.path || ".")}`,
     });
-    return { formatted: files.length };
+    const changes = diffDigests(before, result.outputDigest);
+    return { total: files.length, changed: changes.map((c) => c.path) };
 }
 
-// Verify a package's own sources are already formatted, without writing or
-// diffing anything. odinfmt has no built-in check/dry-run mode: printing to
-// stdout (rather than -w, which writes the formatted bytes to disk) is the
-// only way to get the formatted result without mutating the file, so each
-// file is compared against its real on-disk content in JS instead of via a
-// sandboxed `cp`+`diff` (those aren't declared tools, and per the sandbox's
-// hermetic PATH — see resolve_program/sandbox_command_env in src/exec.rs —
-// undeclared host binaries silently aren't found there). Reports only which
-// files would change, not the actual diff.
+// Reformat a package's own sources in place. Only the package's own sources
+// are touched; dependencies are formatted by their own targets.
+export async function odinFmt(handle) {
+    const { changed } = await runOdinFmt(handle, { materialize: true });
+    return { formatted: changed.length };
+}
+
+// Verify a package's own sources are already formatted, without writing
+// anything back to the workspace. Does not throw on its own — the fmt goal
+// callback (rules/workflows/fmt.js) decides whether unformatted files are a
+// failure, so every selected target gets checked and reported before any
+// error is raised.
 export async function odinFormatCheck(handle) {
-    const srcs = await own_sources(handle);
-    const files = paths(srcs);
-    if (files.length === 0) {
-        return { checked: 0 };
-    }
-    const { tool, command } = odinfmtTool(odinfmt_version(handle));
-    const checked = await Promise.all(
-        files.map(async (file) => {
-            const { stdout } = await run({
-                argv: ["sh", "-c", `${command} "$1"`, "odinfmt-check", file],
-                tools: [tool],
-                inputs: [srcs],
-                display: `odinfmt --check ${file}`,
-            });
-            // Printing to stdout appends one trailing newline for terminal
-            // display that -w's direct write wouldn't produce; strip it
-            // before comparing against the real file.
-            const formatted = stdout.endsWith("\n") ? stdout.slice(0, -1) : stdout;
-            return formatted === read_file(file) ? null : file;
-        }),
-    );
-    const unformatted = checked.filter((file) => file !== null);
-    if (unformatted.length > 0) {
-        throw new Error(`not formatted: ${unformatted.join(", ")}`);
-    }
-    return { checked: files.length };
+    const { total, changed } = await runOdinFmt(handle, { materialize: false });
+    return { checked: total, unformatted: changed };
 }

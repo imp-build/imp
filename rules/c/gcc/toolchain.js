@@ -187,6 +187,7 @@ export async function acquireGccToolchain(version) {
         argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-gcc", downloadPath, url],
         tools: coreTools,
         outputs: [output(output_path(downloadPath))],
+        materialize: true,
         display: `download gcc ${version} (${plat.os}/${plat.arch})`,
     });
 
@@ -200,6 +201,7 @@ export async function acquireGccToolchain(version) {
                 namedCache: { name: GCC_TOOLCHAIN_CACHE, key },
             }),
         ],
+        materialize: true,
         display: `extract gcc ${version} (${plat.os}/${plat.arch})`,
     });
 
