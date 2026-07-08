@@ -30,6 +30,12 @@ import {
 // import Rust build rules without importing the workflows layer explicitly.
 import "//rules/workflows/build_workflow";
 
+// Registers the rust_test fan-out (expandCargoTests + rust_test's build/test
+// products) for consumers that import Rust build rules without importing
+// //rules/rust/test explicitly — same reasoning as the build_workflow import
+// above. Side-effect only; nothing exported from it is used in this file.
+import "//rules/rust/test";
+
 export {
     acquireRustToolchain,
     defaultRustToolchain,
@@ -122,7 +128,7 @@ export function rust_toolchain_version(handle) {
 // Windows has no pinned toolchain to plug into this abstraction (the Bootlin
 // gcc archive is Linux-only) — it always uses the host's own MinGW gcc,
 // discovered via PATH, regardless of any declared rustToolchain/linkDriver.
-async function rustLinkerTools(toolchainHandle) {
+export async function rustLinkerTools(toolchainHandle) {
     if (platformInfo().os === "windows") {
         return {
             tools: [await nativeToolSpec(nativeTool("gcc"))],
