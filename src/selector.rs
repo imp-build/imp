@@ -11,15 +11,21 @@ use anyhow::{bail, Result};
 
 pub(crate) fn select_roots<'a>(
     workspace: &'a Workspace,
+    dynamic: &'a BTreeMap<String, Target>,
     goal: &Goal,
     selectors: &[String],
 ) -> Result<Vec<(&'a Target, String)>> {
+    let all_targets = || workspace.targets.values().chain(dynamic.values());
     let mut selected: BTreeMap<&str, (&Target, String)> = BTreeMap::new();
     if selectors.is_empty() {
         // If the workspace exports a `//:default` target, it acts as the
         // implicit root for selector-less invocations. Otherwise every target
         // that has a product for the current goal is selected.
-        if let Some(default_target) = workspace.targets.get("//:default") {
+        if let Some(default_target) = workspace
+            .targets
+            .get("//:default")
+            .or_else(|| dynamic.get("//:default"))
+        {
             let product =
                 goal_product_for_kind(workspace, goal, &default_target.kind).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -30,7 +36,7 @@ pub(crate) fn select_roots<'a>(
                 })?;
             selected.insert(default_target.address.as_str(), (default_target, product));
         } else {
-            for target in workspace.targets.values() {
+            for target in all_targets() {
                 if let Some(product) = goal_product_for_kind(workspace, goal, &target.kind) {
                     selected.insert(target.address.as_str(), (target, product));
                 }
@@ -43,9 +49,7 @@ pub(crate) fn select_roots<'a>(
                 Some((t, p)) => (t, Some(p)),
                 None => (selector.as_str(), None),
             };
-            let matches: Vec<_> = workspace
-                .targets
-                .values()
+            let matches: Vec<_> = all_targets()
                 .filter(|t| matches_selector(t, target_sel))
                 .collect();
             if matches.is_empty() {

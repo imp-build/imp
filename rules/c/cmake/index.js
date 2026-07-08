@@ -1,4 +1,4 @@
-import { Target, glob, file_set, memo, output, output_path, product, readFileInDigest, run, targetAddress } from "imp:core";
+import { Target, expand, glob, file_set, memo, output, output_path, pathsInDigest, product, readFileInDigest, registerTarget, run, targetAddress } from "imp:core";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import {
     acquireCmakeToolchain,
@@ -15,12 +15,14 @@ import {
 } from "//rules/c/zig/toolchain";
 import {
     extractCopyDestinations,
+    listNamedCmakeTargets,
     parseNinja,
     reachableEdges,
     rebasePath,
     resolveEdgeCommand,
     sandboxRootFromWorkdir,
 } from "//rules/c/cmake/ninja_graph";
+import { parseCTestTestfile } from "//rules/c/cmake/ctest_testfile";
 
 // Registers the "build" goal's artifact summary callback for consumers that
 // import CMake build rules without importing the workflows layer explicitly.
@@ -210,10 +212,10 @@ async function configureNinjaGraph(handle, setup) {
 
     const readAt = path => readFileInDigest(configureResult.outputDigest, `${buildDirPath}/${path}`);
     const buildNinjaText = readAt("build.ninja");
-    const { rules, edges, topVars } = parseNinja(buildNinjaText, readAt);
+    const { rules, edges, topVars, targetTypes } = parseNinja(buildNinjaText, readAt);
     const sandboxRoot = sandboxRootFromWorkdir(topVars.cmake_ninja_workdir, buildDirPath);
 
-    return { rules, edges, topVars, sandboxRoot };
+    return { rules, edges, topVars, targetTypes, sandboxRoot, outputDigest: configureResult.outputDigest };
 }
 
 // Replays every build edge reachable from `targetNames` (e.g. "all") as its
@@ -419,7 +421,11 @@ async function replayReachableGraph(handle, setup, graph, targetNames) {
     }
 }
 
-export const native_link_library = product("cmake-lib", "build", async function native_link_library(handle) {
+// Shared "build" implementation for every kind expandCmakeProject can mint
+// (cc_library, cc_binary, cc_test) as well as the original hand-declared
+// cmake-lib — identical regardless of kind, since a target's kind only ever
+// affects which products get *dispatched*, never what building one means.
+async function buildCppArtifact(handle) {
     const setup = await resolveCmakeSetup(handle);
     const { srcPath, buildDirPath } = setup;
     const stageOutputs = handle.attrs.stageOutputs || [];
@@ -434,17 +440,25 @@ export const native_link_library = product("cmake-lib", "build", async function 
     // its plain buildDirPath location. The graph replay's extractCopyDestinations
     // handling ensures that side effect is actually captured back to the
     // real workspace now that it isn't one big monolithic sandboxed build.
+    //
+    // A target minted by `expandCmakeProject` sets `outputsInBuildDir`
+    // instead: its `outputs` are exactly the ninja-graph-relative paths
+    // `replayReachableGraph` already materialized under buildDirPath, with
+    // no user-declared srcPath staging to speak of — declare them from
+    // there directly rather than assuming a srcPath copy that never happens.
+    const outputsInBuildDir = Boolean(handle.attrs.outputsInBuildDir);
+    const outputBase = outputsInBuildDir ? buildDirPath : srcPath;
     const outputDecls = (handle.attrs.outputs || []).map(name =>
-        output(output_path(`${srcPath}/${name}`))
+        output(output_path(`${outputBase}/${name}`))
     );
     const stagedOutputDecls = stageOutputs.map(({ to }) => output(output_path(to)));
 
-    const stageCmds = stageOutputs.map(({ from, to }) =>
+    const stageCmds = outputsInBuildDir ? [] : stageOutputs.map(({ from, to }) =>
         `mkdir -p "$(dirname '${to}')" && cp '${srcPath}/${from}' '${to}'`
     );
     const script = stageCmds.length > 0 ? stageCmds.join(" && ") : ":";
     const scriptTools = [
-        ...(stageOutputs.length > 0 ? [
+        ...(stageCmds.length > 0 ? [
             await nativeToolSpec(nativeTool("mkdir")),
             await nativeToolSpec(nativeTool("cp")),
             await nativeToolSpec(nativeTool("dirname")),
@@ -456,7 +470,7 @@ export const native_link_library = product("cmake-lib", "build", async function 
     // cmakeLib rooted at its own BUILD.js directory, and a bare "." isn't
     // a valid directory-input path (it has no real path components once
     // normalized).
-    const srcFileInputs = [
+    const srcFileInputs = outputsInBuildDir ? [] : [
         ...(handle.attrs.outputs || []).map(name => ({ kind: "file", path: `${srcPath}/${name}` })),
         ...stageOutputs.map(({ from }) => ({ kind: "file", path: `${srcPath}/${from}` })),
     ];
@@ -469,21 +483,40 @@ export const native_link_library = product("cmake-lib", "build", async function 
         materialize: true,
         display: `cmake stage ${srcPath}`,
     });
-});
+}
+
+export const native_link_library = product("cmake-lib", "build", buildCppArtifact);
+product("cc_library", "build", buildCppArtifact);
+product("cc_binary", "build", buildCppArtifact);
+product("cc_test", "build", buildCppArtifact);
+
+// Regex-escapes and `-R`-joins a set of correlated CTest test names, scoping
+// a cc_test target's own "test" product to just its case(s) instead of the
+// whole suite. Absent for cmake-lib/manually-declared targets (and for
+// cc_test targets outside the (b) exceptions correlation can't cover),
+// leaving ctest's own default (run everything) unchanged.
+function ctestNameFilterArgs(testNames) {
+    if (!testNames || testNames.length === 0) return [];
+    const pattern = testNames.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+    return ["-R", `^(${pattern})$`];
+}
 
 // Runs the project's ctest suite. Framework-agnostic by construction: CMake's
 // `add_test()` is how Unity, Catch2, GoogleTest, and doctest all register
 // tests, so ctest itself is the generic runner — no per-framework detection
 // needed here.
 //
-// Builds via the same per-edge graph replay as native_link_library (so an
+// Builds via the same per-edge graph replay as buildCppArtifact (so an
 // unchanged source file's compile edge is a cache hit instead of the whole
 // suite rebuilding), then runs ctest itself as one final impure step against
-// the resulting build directory.
-export const ctest = product("cmake-lib", "test", async function ctest(handle) {
+// the resulting build directory. Scoped to just `handle.attrs.testNames`
+// when present (a cc_test target correlated to specific CTest case(s) by
+// expandCmakeProject) — unscoped (whole suite) otherwise, matching the
+// existing cmake-lib behavior.
+async function runCTest(handle) {
     const setup = await resolveCmakeSetup(handle);
     const { srcPath, buildDirPath } = setup;
-    const ctestArgs = handle.attrs.ctestArgs || [];
+    const ctestArgs = [...(handle.attrs.ctestArgs || []), ...ctestNameFilterArgs(handle.attrs.testNames)];
 
     const graph = await configureNinjaGraph(handle, setup);
     await replayReachableGraph(handle, setup, graph, ["all"]);
@@ -515,7 +548,10 @@ export const ctest = product("cmake-lib", "test", async function ctest(handle) {
         impure: true,
         display: `ctest ${srcPath}`,
     });
-});
+}
+
+export const ctest = product("cmake-lib", "test", runCTest);
+product("cc_test", "test", runCTest);
 
 // Returns link artifacts at their staged locations as a resource file set for
 // odin package sandboxing. Also ensures the cmake build is a plan prerequisite.
@@ -526,6 +562,107 @@ export const cmake_resources = memo(async function cmake_resources(handle) {
         .filter(({ from }) => /\.(so|dll|lib|dylib)$/.test(from))
         .map(({ to }) => to);
     return file_set.literal(linkFiles);
+});
+
+// Lazily expands a CmakeLib into one separately-addressable, separately-
+// selectable imp target per real CMake target it declares (a
+// CMakeLists.txt's own `add_library`/`add_executable`), instead of only ever
+// exposing the coarse "all" target the hand-written CmakeLib itself models.
+// Runs at most once per invocation, only for CmakeLib targets actually
+// reachable from the current goal's selection (see `ensure_expanded` in
+// spike.rs) — `configureNinjaGraph`'s `cmake configure` step is itself a
+// normal content-keyed task-cache entry, so this doesn't reconfigure on
+// every build once a project is unchanged.
+//
+// Each minted child gets `outputsInBuildDir: true` since `t.outputs` names
+// files relative to buildDirPath (as recorded in build.ninja), not srcPath
+// like a hand-written CmakeLib's `outputs` normally does — the artifact is
+// already sitting there after replayReachableGraph's own per-edge
+// materialize:true, so buildCppArtifact declares it from buildDirPath
+// directly instead of staging a srcPath copy that never happens for these.
+//
+// Each child's own `kind` reflects its real CMake target type instead of
+// uniformly reusing "cmake-lib" — STATIC_LIBRARY/SHARED_LIBRARY/
+// MODULE_LIBRARY become "cc_library", a plain EXECUTABLE becomes
+// "cc_binary", and an EXECUTABLE correlateCTestEntries can tie to one or
+// more CTestTestfile.cmake add_test() cases becomes "cc_test" — mirroring
+// Bazel's cc_test, which is simultaneously buildable and runnable-as-a-test
+// (both a "build" and a "test" product are registered for it below).
+const CMAKE_TYPE_TO_KIND = {
+    STATIC_LIBRARY: "cc_library",
+    SHARED_LIBRARY: "cc_library",
+    MODULE_LIBRARY: "cc_library",
+    // EXECUTABLE deliberately absent: it's "cc_binary" by default, or
+    // "cc_test" when correlated to an add_test() case below.
+};
+
+function basename(path) {
+    const idx = path.lastIndexOf("/");
+    return idx === -1 ? path : path.slice(idx + 1);
+}
+
+// Correlates CTestTestfile.cmake's add_test() entries back to the
+// EXECUTABLE targets discovered by listNamedCmakeTargets, by comparing
+// basenames: a test's command is either a fully resolved absolute path
+// (rebasePath strips the configure sandbox root the same way build.ninja's
+// own paths need it stripped) or a bare, unresolved token relying on
+// ctest's cwd = buildDirPath to find it — both forms reduce to the plain
+// executable filename once rebased. Returns executable-output-basename ->
+// correlated test name(s); a test whose command doesn't match any
+// discovered executable is silently uncorrelated (see plan notes — still
+// exercised by the parent's own unscoped ctest run, just not its own target).
+function correlateCTestEntries(graph, buildDirPath) {
+    const testsByBasename = new Map();
+    const ctestFilePath = `${buildDirPath}/CTestTestfile.cmake`;
+    if (!pathsInDigest(graph.outputDigest).includes(ctestFilePath)) return testsByBasename;
+
+    const ctestText = readFileInDigest(graph.outputDigest, ctestFilePath);
+    for (const test of parseCTestTestfile(ctestText)) {
+        const commandPath = test.command[0];
+        if (!commandPath) continue;
+        const key = basename(rebasePath(commandPath, graph.sandboxRoot));
+        if (!testsByBasename.has(key)) testsByBasename.set(key, []);
+        testsByBasename.get(key).push(test.name);
+    }
+    return testsByBasename;
+}
+
+export const expandCmakeProject = expand("cmake-lib", async function expandCmakeProject(handle) {
+    const setup = await resolveCmakeSetup(handle);
+    const graph = await configureNinjaGraph(handle, setup);
+    const parentAddress = safe_target_address(handle);
+    const scope = parentAddress ? parentAddress.split(":")[0] : "//";
+    const testsByBasename = correlateCTestEntries(graph, setup.buildDirPath);
+
+    for (const cmakeTarget of listNamedCmakeTargets(graph)) {
+        const matchedTestNames = new Set();
+        if (cmakeTarget.type === "EXECUTABLE") {
+            for (const candidate of [cmakeTarget.name, ...cmakeTarget.outputs]) {
+                for (const name of testsByBasename.get(basename(candidate)) || []) {
+                    matchedTestNames.add(name);
+                }
+            }
+        }
+        const testNames = Array.from(matchedTestNames);
+        const kind = testNames.length > 0 ? "cc_test" : (CMAKE_TYPE_TO_KIND[cmakeTarget.type] || "cc_binary");
+
+        registerTarget(
+            new CmakeLib({
+                src: handle.attrs.src,
+                buildDir: handle.attrs.buildDir,
+                srcs: handle.attrs.srcs,
+                dirs: handle.attrs.dirs,
+                cmakeArgs: handle.attrs.cmakeArgs,
+                toolchain: handle.attrs.toolchainTarget || handle.attrs.toolchain,
+                compiler: handle.attrs.compilerTarget || handle.attrs.compiler,
+                outputs: cmakeTarget.outputs,
+                outputsInBuildDir: true,
+                kind,
+                testNames,
+            }),
+            `${scope}:${cmakeTarget.name}`,
+        );
+    }
 });
 
 // ---------------------------------------------------------------------------
@@ -554,9 +691,12 @@ export class CmakeLib extends Target {
         ctestArgs = [],
         outputs = [],
         stageOutputs = [],
+        outputsInBuildDir = false,
         toolchain,
         compiler,
         deps = [],
+        kind = CmakeLib.kind,
+        testNames = [],
     }) {
         const explicitToolchainTarget = toolchain && toolchain.__imp === true ? toolchain : null;
         const explicitVersion = toolchain && toolchain.__imp !== true ? toolchain : null;
@@ -575,7 +715,7 @@ export class CmakeLib extends Target {
         ];
 
         super({
-            kind: CmakeLib.kind,
+            kind,
             attrs: {
                 src,    // stored as user-provided; resolved by declared_path in product/memo
                 srcs: srcs || DEFAULT_CPP_SRCS,
@@ -584,6 +724,8 @@ export class CmakeLib extends Target {
                 ...(ctestArgs.length ? { ctestArgs } : {}),
                 outputs,
                 ...(stageOutputs.length ? { stageOutputs } : {}),
+                ...(outputsInBuildDir ? { outputsInBuildDir } : {}),
+                ...(testNames.length ? { testNames } : {}),
                 ...(buildDir ? { buildDir } : {}),
                 ...(toolchainVersion ? { toolchain: toolchainVersion } : {}),
                 ...(toolchainTarget ? { toolchainTarget } : {}),

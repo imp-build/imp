@@ -18,33 +18,50 @@ function splitOnce(s, sep) {
     return idx === -1 ? [s, ""] : [s.slice(0, idx), s.slice(idx + sep.length)];
 }
 
+// Comment line CMake's Ninja generator emits directly above a target's own
+// object/link edges — the only reliable, machine-readable source of a
+// target's real CMake type (STATIC_LIBRARY/SHARED_LIBRARY/MODULE_LIBRARY/
+// EXECUTABLE/OBJECT_LIBRARY/INTERFACE_LIBRARY/UTILITY). Confirmed against a
+// real `cmake -G Ninja` run: e.g. "# Link build statements for
+// SHARED_LIBRARY target mylib" / "# Object build statements for EXECUTABLE
+// target mytest".
+const TARGET_TYPE_COMMENT_RE = /^#\s*(?:Object|Link) build statements for (\S+) target (.+)$/;
+
 // Parses `mainText` (normally build.ninja's content) plus any files it
 // `include`s, resolved via the synchronous `readInclude(path)` callback (so
 // this works identically against real CAS-backed reads and plain string
-// fixtures in tests). Returns { rules, edges, topVars }.
+// fixtures in tests). Returns { rules, edges, topVars, targetTypes }.
 export function parseNinja(mainText, readInclude) {
     const rules = {};
     const edges = [];
     const topVars = {};
-    parseInto(mainText, rules, edges, topVars, readInclude);
-    return { rules, edges, topVars };
+    const targetTypes = {};
+    parseInto(mainText, rules, edges, topVars, targetTypes, readInclude);
+    return { rules, edges, topVars, targetTypes };
 }
 
-function parseInto(text, rules, edges, topVars, readInclude) {
+function parseInto(text, rules, edges, topVars, targetTypes, readInclude) {
     const lines = text.split("\n");
     let i = 0;
     while (i < lines.length) {
         const line = lines[i];
         const stripped = line.trim();
 
-        if (stripped.length === 0 || stripped.startsWith("#")) {
+        if (stripped.length === 0) {
+            i += 1;
+            continue;
+        }
+
+        if (stripped.startsWith("#")) {
+            const match = TARGET_TYPE_COMMENT_RE.exec(stripped);
+            if (match) targetTypes[match[2]] = match[1];
             i += 1;
             continue;
         }
 
         if (stripped.startsWith("include ")) {
             const incPath = stripped.slice("include ".length).trim();
-            parseInto(readInclude(incPath), rules, edges, topVars, readInclude);
+            parseInto(readInclude(incPath), rules, edges, topVars, targetTypes, readInclude);
             i += 1;
             continue;
         }
@@ -282,6 +299,64 @@ export function joinAndNormalize(baseDir, relativePath) {
 // as an extra thing this edge's run() needs to materialize, alongside its
 // normal ninja-modeled outputs.
 const CMAKE_COPY_RE = /\bcmake\s+-E\s+copy(?:_if_different)?\s+(\S+)\s+(\S+)/g;
+
+// CMake's Ninja generator stamps every target's own scratch directory,
+// `CMakeFiles/<name>.dir/`, into that target's compile/link edges' variables
+// (OBJECT_DIR, DEP_FILE, TARGET_COMPILE_PDB, ...) — reliable even when there
+// is no separate top-level phony alias for the name (an executable whose
+// output filename already equals its target name gets no `build <name>:
+// phony ...` alias at all; only a library whose real output differs, e.g.
+// `libmylib.so` for target `mylib`, needs one). Scanning for that directory
+// stamp instead of relying on phony aliases finds every real target name
+// CMake knows about, regardless of which shape its edges take.
+//
+// Filtered to just the names that reach at least one real (non-phony,
+// has-a-command) edge, so bookkeeping-only markers never surface here.
+const TARGET_DIR_RE = /CMakeFiles\/([^/]+)\.dir\//;
+
+// Only these CMake target types have a single well-defined build artifact
+// worth exposing as its own imp target. OBJECT_LIBRARY (no link step of
+// its own), INTERFACE_LIBRARY (no build output at all), UTILITY (custom
+// targets — arbitrary, no reliable single output), and anything
+// unrecognized are left unexpanded; they're still built as part of the
+// parent's own "all" replay whenever something depends on them.
+const REAL_TARGET_TYPES = new Set(["STATIC_LIBRARY", "SHARED_LIBRARY", "MODULE_LIBRARY", "EXECUTABLE"]);
+
+export function listNamedCmakeTargets(graph) {
+    const { rules, edges, targetTypes } = graph;
+    const names = new Set();
+    for (const edge of edges) {
+        for (const value of Object.values(edge.vars)) {
+            const match = TARGET_DIR_RE.exec(value);
+            if (match) names.add(match[1]);
+        }
+    }
+
+    const named = [];
+    for (const name of names) {
+        const type = targetTypes[name];
+        if (!REAL_TARGET_TYPES.has(type)) continue;
+        const reached = reachableEdges(edges, [name]).filter(
+            (e) => e.rule !== "phony" && rules[e.rule] && rules[e.rule].command,
+        );
+        if (reached.length === 0) continue;
+        // Only the final product(s): outputs consumed as another reached
+        // edge's own input (e.g. an intermediate .o file feeding the link
+        // edge) are internal build byproducts, not the target's own result.
+        const consumed = new Set(
+            reached.flatMap((e) => [...e.inputs, ...e.implicitInputs, ...e.orderOnly]),
+        );
+        const outputs = Array.from(
+            new Set(
+                reached
+                    .flatMap((e) => [...e.outputs, ...e.implicitOutputs])
+                    .filter((p) => !consumed.has(p)),
+            ),
+        );
+        named.push({ name, outputs, type });
+    }
+    return named;
+}
 
 export function extractCopyDestinations(command, buildDirPath) {
     const destinations = new Set();

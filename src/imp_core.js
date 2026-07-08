@@ -977,6 +977,45 @@ export function product(kind, name, fn) {
 }
 
 /**
+ * Register a lazy target expander for a target kind: a rule can run a
+ * discovery step (e.g. `cmake configure`) and mint additional, separately
+ * addressable targets via `registerTarget()`, instead of flattening
+ * everything it discovers into one target's attrs.
+ *
+ * Unlike `product()`, an expander isn't tied to a CLI-dispatchable name — the
+ * engine invokes it lazily, at most once per invocation, for any
+ * statically-declared target of this `kind` that's reachable from the
+ * current goal's selection (see `ensure_expanded` in spike.rs).
+ *
+ * @param {string} kind Target kind, e.g. "cmake-lib".
+ * @param {function} fn Async function taking the expanding target's handle;
+ *   calls `registerTarget()` for each target it discovers.
+ * @returns {function} The same function, wrapped in memo().
+ */
+export function expand(kind, fn) {
+    const memoized = memo(fn);
+    __host_register_expander(kind, memoized);
+    return memoized;
+}
+
+/**
+ * Give a target handle constructed inside an `expand()` callback an
+ * explicit, stable address, making it addressable/selectable like any other
+ * workspace target (e.g. `//third_party/mylib:sqlite3`).
+ *
+ * @param {object} handle A `Target` handle (as returned by `new Target(...)`).
+ * @param {string} address Full target address, e.g. `//path/to/pkg:name`.
+ * @returns {object} The same handle, for chaining.
+ */
+export function registerTarget(handle, address) {
+    if (!handle || handle.__imp !== true) {
+        throw new Error("registerTarget(handle, address) expects a Target handle");
+    }
+    __host_register_dynamic_target(handle.__id, address);
+    return handle;
+}
+
+/**
  * Wrap an async function so repeated calls with identical arguments return the
  * cached result. Cycles in the call graph are detected and thrown as errors.
  * Call getMemoTrace() for hit/miss events and dependency edges.

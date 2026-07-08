@@ -1,6 +1,7 @@
 import { describe, expect, test } from "//rules/imp/test";
 import {
     expandVar,
+    listNamedCmakeTargets,
     parseNinja,
     reachableEdges,
     rebaseAbsolutePaths,
@@ -59,22 +60,26 @@ include CMakeFiles/rules.ninja
 
 cmake_ninja_workdir = ${SANDBOX_ROOT}/build/
 
+# Object build statements for STATIC_LIBRARY target core
 build CMakeFiles/core.dir/src/core.c.o: C_COMPILER__core_unscanned_ ${SANDBOX_ROOT}/src/core.c
   DEP_FILE = CMakeFiles/core.dir/src/core.c.o.d
   INCLUDES = -I${SANDBOX_ROOT}/src
   OBJECT_DIR = CMakeFiles/core.dir
 
+# Link build statements for STATIC_LIBRARY target core
 build libcore.a: C_STATIC_LIBRARY_LINKER__core_ CMakeFiles/core.dir/src/core.c.o
   TARGET_FILE = libcore.a
   OBJECT_DIR = CMakeFiles/core.dir
   PRE_LINK = :
   POST_BUILD = :
 
+# Object build statements for EXECUTABLE target app
 build CMakeFiles/app.dir/src/main.c.o: C_COMPILER__app_unscanned_ ${SANDBOX_ROOT}/src/main.c
   DEP_FILE = CMakeFiles/app.dir/src/main.c.o.d
   INCLUDES = -I${SANDBOX_ROOT}/src
   OBJECT_DIR = CMakeFiles/app.dir
 
+# Link build statements for EXECUTABLE target app
 build app: C_EXECUTABLE_LINKER__app_ CMakeFiles/app.dir/src/main.c.o | libcore.a
   TARGET_FILE = app
   LINK_LIBRARIES = libcore.a
@@ -270,5 +275,25 @@ describe("ninja_graph command resolution", () => {
 
         expect(command).toBe(": && cmake -E rm -f libcore.a && ar qc libcore.a  CMakeFiles/core.dir/src/core.c.o && ranlib libcore.a && :");
         expect(toolNames.sort()).toEqual(["ar", "cmake", "ranlib"]);
+    });
+});
+
+describe("ninja_graph target classification", () => {
+    test("captures each target's real CMake type from its own comment", () => {
+        const { targetTypes } = parseNinja(BUILD_NINJA, readInclude);
+        expect(targetTypes.core).toBe("STATIC_LIBRARY");
+        expect(targetTypes.app).toBe("EXECUTABLE");
+    });
+
+    test("listNamedCmakeTargets finds real targets by name and type, skipping bookkeeping", () => {
+        const graph = parseNinja(BUILD_NINJA, readInclude);
+        const named = listNamedCmakeTargets(graph);
+        const byName = Object.fromEntries(named.map((t) => [t.name, t]));
+
+        expect(Object.keys(byName).sort()).toEqual(["app", "core"]);
+        expect(byName.core.type).toBe("STATIC_LIBRARY");
+        expect(byName.core.outputs).toEqual(["libcore.a"]);
+        expect(byName.app.type).toBe("EXECUTABLE");
+        expect(byName.app.outputs).toEqual(["app"]);
     });
 });

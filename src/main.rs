@@ -583,11 +583,22 @@ async fn cmd_execute_live(
     // Resolve selectors into concrete root targets so we know the total count
     // upfront, before the scheduler or renderer starts. Rule-test runs have no
     // target roots; they render as a single timed task.
+    //
+    // This only ever resolves against the statically-known workspace — a
+    // selector naming a target that only exists after a rule's lazy
+    // expansion (e.g. a CMake sub-target) won't match here yet. Rather than
+    // fail the whole invocation before expansion gets a chance to run, fall
+    // back to a rough placeholder count; `execute_goal_live` re-resolves
+    // selectors for real (after expansion) and is the actual source of truth
+    // for both the target list and any "no target matches" error.
     let total_targets = match invocation {
         LiveInvocation::Goal { goal, .. } => {
             let goal_def = workspace.workspace.goals.get(goal).expect("validated above");
-            let roots = selector::select_roots(&workspace.workspace, goal_def, &selectors)?;
-            roots.len()
+            let no_dynamic = std::collections::BTreeMap::new();
+            match selector::select_roots(&workspace.workspace, &no_dynamic, goal_def, &selectors) {
+                Ok(roots) => roots.len(),
+                Err(_) => selectors.len().max(1),
+            }
         }
         LiveInvocation::RulesTests { .. } => 0,
     };

@@ -148,6 +148,12 @@ pub struct Workspace {
     /// callback registered via `goal(name, fn)`. Invoked once per goal
     /// invocation, before any per-target product dispatch.
     pub goal_callbacks: BTreeMap<String, String>,
+    /// Target kind -> global function name for an expander registered via
+    /// `expand(kind, fn)`. Invoked lazily, once per invocation, for any
+    /// statically-known target of this kind that's reachable from the
+    /// current goal's selection, so it can mint additional addressable
+    /// targets (see `ensure_expanded`).
+    pub expanders: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,7 +178,7 @@ pub struct NamedCache {
 // Internal host state
 // ---------------------------------------------------------------------------
 
-struct HostState {
+pub(crate) struct HostState {
     next_id: u32,
     next_exec: u32,
     pending: BTreeMap<u32, PendingTarget>,
@@ -185,6 +191,10 @@ struct HostState {
     platforms: BTreeMap<String, PlatformDef>,
     id_to_address: BTreeMap<u32, String>,
     goal_callbacks: BTreeMap<String, String>,
+    expanders: BTreeMap<String, String>,
+    /// `(pending id, address)` pairs appended by `__host_register_dynamic_target`
+    /// as a rule's expander mints new targets. Drained by `ensure_expanded`.
+    dynamic_registrations: Vec<(u32, String)>,
 }
 
 impl Default for HostState {
@@ -223,6 +233,8 @@ impl Default for HostState {
             platforms,
             id_to_address: BTreeMap::new(),
             goal_callbacks: BTreeMap::new(),
+            expanders: BTreeMap::new(),
+            dynamic_registrations: Vec::new(),
         }
     }
 }
@@ -475,6 +487,7 @@ pub(crate) async fn load_workspace_with_rules(
             owned_files,
             named_caches: hs.named_caches.clone(),
             goal_callbacks: hs.goal_callbacks.clone(),
+            expanders: hs.expanders.clone(),
             goals: hs.goals.clone(),
             platforms: hs.platforms.clone(),
         };
@@ -498,6 +511,8 @@ pub(crate) async fn load_workspace_with_rules(
         scheduler,
         selected_roots,
         goal_flags,
+        host_state: state,
+        dynamic_targets: Arc::new(Mutex::new(BTreeMap::new())),
     })
 }
 
@@ -574,6 +589,133 @@ fn materialize_pending_target(
         },
     );
     Ok(address)
+}
+
+/// Look up a target by address in either the static workspace or the
+/// session-scoped dynamic overlay.
+fn lookup_dynamic_or_static(live: &LiveWorkspace, address: &str) -> Option<Target> {
+    if let Some(target) = live.workspace.targets.get(address) {
+        return Some(target.clone());
+    }
+    live.dynamic_targets.lock().unwrap().get(address).cloned()
+}
+
+/// Lazily invoke registered expanders (`expand(kind, fn)` in JS) for any
+/// target reachable from `root_addresses` whose kind has one, materializing
+/// whatever targets they register via `registerTarget()` into
+/// `live.dynamic_targets`. A no-op walk when no rule has called `expand()`.
+///
+/// Idempotent per invocation: a target is only ever passed to its kind's
+/// expander once (including targets minted by expansion itself, which are
+/// marked already-expanded on arrival so an expander never re-triggers on
+/// its own output).
+async fn ensure_expanded(live: &LiveWorkspace, root_addresses: &[String]) -> Result<()> {
+    if live.workspace.expanders.is_empty() {
+        return Ok(());
+    }
+
+    let mut expanded: BTreeSet<String> = BTreeSet::new();
+    let mut frontier: Vec<String> = root_addresses.to_vec();
+
+    loop {
+        // Transitive closure of static+dynamic deps reachable from the frontier.
+        let mut reachable: BTreeSet<String> = BTreeSet::new();
+        let mut stack = frontier.clone();
+        while let Some(address) = stack.pop() {
+            if !reachable.insert(address.clone()) {
+                continue;
+            }
+            if let Some(target) = lookup_dynamic_or_static(live, &address) {
+                for dep in &target.dependencies {
+                    stack.push(dep.address.clone());
+                }
+            }
+        }
+
+        let to_expand: Vec<Target> = reachable
+            .into_iter()
+            .filter(|address| !expanded.contains(address))
+            .filter_map(|address| lookup_dynamic_or_static(live, &address))
+            .filter(|target| live.workspace.expanders.contains_key(&target.kind))
+            .collect();
+
+        if to_expand.is_empty() {
+            break;
+        }
+
+        for target in &to_expand {
+            expanded.insert(target.address.clone());
+            let exec_name = live.workspace.expanders[&target.kind].clone();
+            let address = target.address.clone();
+            let js_id = target.js_id;
+
+            live.ctx
+                .async_with(async |ctx| -> rquickjs::Result<()> {
+                    let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
+                    let handle: Object = resolve_fn.call((js_id,))?;
+                    let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
+                    let expander_fn: Function = ctx.globals().get(exec_name.as_str())?;
+                    let result_value: Value =
+                        expander_fn.call((handle,)).catch(&ctx).map_err(|e| {
+                            rquickjs::Error::new_loading_message("expand", format!("{e}"))
+                        })?;
+                    let promise: MaybePromise = promise_resolve
+                        .call((result_value,))
+                        .catch(&ctx)
+                        .map_err(|e| {
+                            rquickjs::Error::new_loading_message("expand", format!("{e}"))
+                        })?;
+                    promise
+                        .into_future::<Value>()
+                        .await
+                        .catch(&ctx)
+                        .map_err(|e| {
+                            rquickjs::Error::new_loading_message("expand", format!("{e}"))
+                        })?;
+                    Ok(())
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("expand '{address}' failed: {e}"))?;
+        }
+
+        // Drain whatever the expanders just registered and materialize them
+        // into the dynamic overlay, reusing the same resolution logic used
+        // at workspace-load time.
+        let registrations: Vec<(u32, String)> = {
+            let mut hs = live.host_state.lock().unwrap();
+            std::mem::take(&mut hs.dynamic_registrations)
+        };
+
+        {
+            let hs = live.host_state.lock().unwrap();
+            let mut id_to_address = hs.id_to_address.clone();
+            let mut dynamic = live.dynamic_targets.lock().unwrap();
+            let mut visiting = BTreeSet::new();
+            for (id, address) in &registrations {
+                materialize_pending_target(
+                    &hs,
+                    &mut id_to_address,
+                    &mut dynamic,
+                    &mut visiting,
+                    *id,
+                    address.clone(),
+                )?;
+            }
+            drop(dynamic);
+            drop(hs);
+            live.host_state.lock().unwrap().id_to_address = id_to_address;
+        }
+
+        // Newly-minted targets are themselves already-expanded (an expander
+        // never re-triggers on its own output) but may declare deps on other
+        // expandable kinds — re-walk from their addresses.
+        for (_, address) in &registrations {
+            expanded.insert(address.clone());
+        }
+        frontier = registrations.into_iter().map(|(_, address)| address).collect();
+    }
+
+    Ok(())
 }
 
 fn compute_owned_files(
@@ -752,6 +894,74 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_goal_callback", host_goal_callback)?;
+
+    // ------------------------------------------------------------------
+    // __host_register_expander(kind, fn) — registers a lazy target
+    // expander for a target kind, invoked by `ensure_expanded` for any
+    // statically-known target of that kind reachable from the current
+    // goal's selection (see `expand()` in imp_core.js).
+    // ------------------------------------------------------------------
+    let state_exp = Arc::clone(&state);
+    let host_register_expander = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, kind: String, fn_val: Value<'js>| -> rquickjs::Result<()> {
+            let exec_name = {
+                let mut hs = state_exp.lock().unwrap();
+                let n = format!("__imp_exec_{}", hs.next_exec);
+                hs.next_exec += 1;
+                n
+            };
+            ctx.globals().set(exec_name.as_str(), fn_val)?;
+            state_exp.lock().unwrap().expanders.insert(kind, exec_name);
+            Ok(())
+        },
+    )?;
+    globals.set("__host_register_expander", host_register_expander)?;
+
+    // ------------------------------------------------------------------
+    // __host_register_dynamic_target(id, address) — called by
+    // `registerTarget()` to give a pending target (constructed live, inside
+    // an expander) an explicit, stable address. Queued for `ensure_expanded`
+    // to materialize after the expander's promise resolves.
+    // ------------------------------------------------------------------
+    let state_reg = Arc::clone(&state);
+    let host_register_dynamic_target = Function::new(
+        ctx.clone(),
+        move |id: u32, address: String| -> rquickjs::Result<()> {
+            let mut hs = state_reg.lock().unwrap();
+            if !hs.pending.contains_key(&id) {
+                return Err(rquickjs::Error::new_loading_message(
+                    "registerTarget",
+                    format!("no pending target for id {id}"),
+                ));
+            }
+            match hs.id_to_address.get(&id) {
+                Some(existing) if existing == &address => return Ok(()),
+                Some(existing) => {
+                    return Err(rquickjs::Error::new_loading_message(
+                        "registerTarget",
+                        format!(
+                            "target id {id} already registered as '{existing}', cannot re-register as '{address}'"
+                        ),
+                    ))
+                }
+                None => {}
+            }
+            if hs.id_to_address.values().any(|a| a == &address) {
+                return Err(rquickjs::Error::new_loading_message(
+                    "registerTarget",
+                    format!("address '{address}' is already claimed by another target"),
+                ));
+            }
+            hs.id_to_address.insert(id, address.clone());
+            hs.dynamic_registrations.push((id, address));
+            Ok(())
+        },
+    )?;
+    globals.set(
+        "__host_register_dynamic_target",
+        host_register_dynamic_target,
+    )?;
 
     let state_br = Arc::clone(&state);
     let host_register_build_rule = Function::new(
@@ -2361,10 +2571,29 @@ pub async fn evaluate_product_json(
     target_addr: &str,
     product_name: &str,
 ) -> Result<serde_json::Value> {
-    let target = live
-        .workspace
-        .targets
-        .get(target_addr)
+    let already_known = live.workspace.targets.contains_key(target_addr)
+        || live
+            .dynamic_targets
+            .lock()
+            .unwrap()
+            .contains_key(target_addr);
+    if already_known {
+        ensure_expanded(live, &[target_addr.to_owned()]).await?;
+    } else {
+        // Unknown target — it may only exist after a rule's lazy expansion
+        // (e.g. a CMake sub-target). Expand every statically-declared target
+        // whose kind can produce more targets, then retry the lookup below.
+        let seeds: Vec<String> = live
+            .workspace
+            .targets
+            .values()
+            .filter(|t| live.workspace.expanders.contains_key(&t.kind))
+            .map(|t| t.address.clone())
+            .collect();
+        ensure_expanded(live, &seeds).await?;
+    }
+
+    let target = lookup_dynamic_or_static(live, target_addr)
         .ok_or_else(|| anyhow::anyhow!("no target '{target_addr}' in workspace"))?;
 
     let product_fn_name = live
@@ -2448,7 +2677,37 @@ pub async fn execute_goal_live(
             known.join(", ")
         )
     })?;
-    let roots = select_roots(&live.workspace, goal_def, selectors)?;
+
+    // `ensure_expanded` may invoke a rule's expander, which can call `run()`
+    // — that requires an execution context (exec_root + scheduler), so it's
+    // installed before expansion runs rather than only around dispatch below.
+    // The caller is required to have installed a scheduler already.
+    *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
+    live.exec_no_cache.store(no_cache, Ordering::SeqCst);
+
+    // Resolve selectors against the statically-known workspace first, to
+    // find the roots that should seed lazy expansion (the common case:
+    // selecting an existing target, or a selector-less default build). If a
+    // selector doesn't match anything statically known, it may name a target
+    // that only exists after expansion (e.g. a CMake sub-target) — fall back
+    // to expanding every statically-declared target whose kind can produce
+    // more targets, then retry selector resolution below.
+    let empty_dynamic: BTreeMap<String, Target> = BTreeMap::new();
+    let seed_addresses: Vec<String> =
+        match select_roots(&live.workspace, &empty_dynamic, goal_def, selectors) {
+            Ok(roots) => roots.iter().map(|(t, _)| t.address.clone()).collect(),
+            Err(_) => live
+                .workspace
+                .targets
+                .values()
+                .filter(|t| live.workspace.expanders.contains_key(&t.kind))
+                .map(|t| t.address.clone())
+                .collect(),
+        };
+    ensure_expanded(live, &seed_addresses).await?;
+
+    let dynamic_snapshot: BTreeMap<String, Target> = live.dynamic_targets.lock().unwrap().clone();
+    let roots = select_roots(&live.workspace, &dynamic_snapshot, goal_def, selectors)?;
     let goal_callback_name = live.workspace.goal_callbacks.get(goal).cloned();
 
     // Resolve owned (js_id, product fn name, label) triples so nothing borrows
@@ -2491,8 +2750,6 @@ pub async fn execute_goal_live(
         .collect();
     let selection_json = serde_json::to_string(&selection).context("serialize goal selection")?;
 
-    *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
-    live.exec_no_cache.store(no_cache, Ordering::SeqCst);
     *live.selected_roots.lock().unwrap() = Some(selection);
     *live.goal_flags.lock().unwrap() = Some(flags);
 
@@ -3507,7 +3764,8 @@ export const app = externalThing("app");
         // Root selection resolves through the fallback rule's product, and
         // the product function evaluates live from the dev rules dir.
         let goal_def = workspace.workspace.goals.get("build").unwrap();
-        let roots = select_roots(&workspace.workspace, goal_def, &["app".into()]).unwrap();
+        let no_dynamic_1: BTreeMap<String, Target> = BTreeMap::new();
+        let roots = select_roots(&workspace.workspace, &no_dynamic_1, goal_def, &["app".into()]).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].0.address, "//:app");
         assert_eq!(roots[0].1, "build");
@@ -3624,10 +3882,61 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
             .await
             .unwrap();
         let goal_def = workspace.workspace.goals.get("build").unwrap();
-        let roots = select_roots(&workspace.workspace, goal_def, &[]).unwrap();
+        let no_dynamic_2: BTreeMap<String, Target> = BTreeMap::new();
+        let roots = select_roots(&workspace.workspace, &no_dynamic_2, goal_def, &[]).unwrap();
         assert!(roots
             .iter()
             .any(|(t, product)| t.address == "//:pkg" && product == "build"));
+    }
+
+    #[tokio::test]
+    async fn expand_registers_a_lazily_materialized_dynamic_target() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(p.join(WORKSPACE_FILE).as_path(), "");
+        write_file(
+            p.join(BUILD_FILE).as_path(),
+            r#"
+import { target, expand, registerTarget, product, run } from "imp:core";
+
+export const build = product("expandable", "build", async function build(handle) {
+    return run({ argv: ["sh", "-c", "true"], display: "build", impure: true });
+});
+
+export const expandChildren = expand("expandable", async function expandChildren(handle) {
+    registerTarget(target({ kind: "expandable", attrs: {} }), "//:child");
+});
+
+export const parent = target({ kind: "expandable", attrs: {} });
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        assert!(workspace.workspace.expanders.contains_key("expandable"));
+        // Not yet materialized anywhere — only known once expansion runs.
+        assert!(!workspace.workspace.targets.contains_key("//:child"));
+
+        // Selecting the not-yet-existing child by address triggers the
+        // fallback-expand-then-retry path a real CLI invocation goes
+        // through (see execute_goal_live).
+        run_goal_live(&workspace, p, "build", &["//:child".into()])
+            .await
+            .unwrap();
+
+        let dynamic_snapshot = workspace.dynamic_targets.lock().unwrap().clone();
+        assert!(dynamic_snapshot.contains_key("//:child"));
+
+        let goal_def = workspace.workspace.goals.get("build").unwrap();
+        let roots = select_roots(
+            &workspace.workspace,
+            &dynamic_snapshot,
+            goal_def,
+            &["//:child".into()],
+        )
+        .unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].0.address, "//:child");
+        assert_eq!(roots[0].1, "build");
     }
 
     #[tokio::test]
@@ -3635,7 +3944,8 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
         let root = fixture();
         let workspace = load_workspace(root.path()).await.unwrap();
         let goal_def = workspace.workspace.goals.get("build").unwrap();
-        let roots = select_roots(&workspace.workspace, goal_def, &["//assets:ui".into()]).unwrap();
+        let no_dynamic_3: BTreeMap<String, Target> = BTreeMap::new();
+        let roots = select_roots(&workspace.workspace, &no_dynamic_3, goal_def, &["//assets:ui".into()]).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].0.address, "//assets:ui");
         assert_eq!(roots[0].1, "build");
@@ -5521,7 +5831,8 @@ export const report = product("test-pkg", "report", async function report(handle
         // An explicit #product selector resolves to that product, and the goal
         // dispatches to it live.
         let goal_def = live.workspace.goals.get("build").unwrap();
-        let roots = select_roots(&live.workspace, goal_def, &["//:pkg#report".to_owned()]).unwrap();
+        let no_dynamic_4: BTreeMap<String, Target> = BTreeMap::new();
+        let roots = select_roots(&live.workspace, &no_dynamic_4, goal_def, &["//:pkg#report".to_owned()]).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].0.address, "//:pkg");
         assert_eq!(roots[0].1, "report");
@@ -5551,13 +5862,15 @@ export const check = product("kind-a", "check", async function check(handle) {})
 
         // //:pkg#check should select the "check" product explicitly.
         let goal_def = live.workspace.goals.get("build").unwrap();
-        let roots = select_roots(&live.workspace, goal_def, &["//:pkg#check".to_owned()]).unwrap();
+        let no_dynamic_5: BTreeMap<String, Target> = BTreeMap::new();
+        let roots = select_roots(&live.workspace, &no_dynamic_5, goal_def, &["//:pkg#check".to_owned()]).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].1, "check");
 
         // An unknown product in the selector should fail.
         let err = select_roots(
             &live.workspace,
+            &BTreeMap::new(),
             goal_def,
             &["//:pkg#nonexistent".to_owned()],
         )

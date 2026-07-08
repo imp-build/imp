@@ -3,6 +3,7 @@
 //! This module is the public home for the embedded JavaScript runtime APIs
 //! while the larger `spike` module is split down further.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicU8},
@@ -12,7 +13,7 @@ use std::sync::{
 use rquickjs::{AsyncContext as JsContext, AsyncRuntime as Runtime};
 
 use crate::scheduler::Scheduler;
-use crate::spike::Workspace;
+use crate::spike::{HostState, Target, Workspace};
 
 /// A loaded workspace with a live QuickJS runtime.
 ///
@@ -47,6 +48,14 @@ pub struct LiveWorkspace {
     /// `goalFlags()`. Set for the duration of `execute_goal_live` and reset to
     /// `None` afterward, mirroring `selected_roots`.
     pub(crate) goal_flags: Arc<Mutex<Option<serde_json::Value>>>,
+    /// The same host state used during workspace load, retained so
+    /// `ensure_expanded` can invoke expanders live and materialize the
+    /// pending targets they register via `registerTarget()`.
+    pub(crate) host_state: Arc<Mutex<HostState>>,
+    /// Session-scoped overlay of targets materialized by lazy expansion.
+    /// Reset at the start of each `execute_goal_live`/`evaluate_product_json`
+    /// invocation; merged with `workspace.targets` at selector-resolution time.
+    pub(crate) dynamic_targets: Arc<Mutex<BTreeMap<String, Target>>>,
 }
 
 impl std::fmt::Debug for LiveWorkspace {
@@ -60,6 +69,8 @@ impl std::fmt::Debug for LiveWorkspace {
             .field("exec_sandbox_retention", &"Arc<AtomicU8>")
             .field("selected_roots", &"Arc<Mutex<..>>")
             .field("goal_flags", &"Arc<Mutex<..>>")
+            .field("host_state", &"Arc<Mutex<..>>")
+            .field("dynamic_targets", &"Arc<Mutex<..>>")
             .finish()
     }
 }
