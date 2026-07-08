@@ -79,6 +79,11 @@ test("throws when no version is given and no default is set", async () => {
 test("installs and acquires a toolchain from the named cache", async () => {
     await withZigHost(async (host) => {
         const key = zigCacheKey("0.13.0", { os: "linux", arch: "x86_64" });
+        // zigToolchain() is what normally sets up coreToolHandles;
+        // installZigToolchain() alone (a manual/offline seeding path) only
+        // ever populates ZIG_TOOLCHAIN_CACHE, so acquireZigToolchain still
+        // needs a prior toolchain declaration to acquire from at all.
+        zigToolchain("0.13.0");
 
         expect(
             installZigToolchain("0.13.0", "/tmp/zig-0.13.0"),
@@ -86,6 +91,9 @@ test("installs and acquires a toolchain from the named cache", async () => {
         expect(
             host.calls.some((call) => call[0] === "cachePut" && call[1] === "zig-toolchains" && call[2] === key && call[3] === "/tmp/zig-0.13.0"),
         ).toBe(true);
+        // Build cache already warm too (e.g. backfilled by a prior real
+        // acquire), so nothing left for acquireZigToolchain to seed.
+        host.install("zig-build-cache", key, "/tmp/zig-build-cache-0.13.0");
 
         expect(
             await acquireZigToolchain("0.13.0"),
@@ -93,7 +101,7 @@ test("installs and acquires a toolchain from the named cache", async () => {
         expect(
             await zigBin("0.13.0"),
         ).toBe("/cache/zig-toolchains/0.13.0/linux-x86_64/zig");
-        // Already cached, so no download/extract run() should have happened.
+        // Both caches already warm, so no run() should have happened.
         expect(host.runs.length).toBe(0);
     });
 });
@@ -120,9 +128,10 @@ test("downloads and extracts a toolchain via a sandboxed curl+tar run() (linux)"
         const path = await acquireZigToolchain("0.13.0");
 
         expect(path).toBe("/cache/zig-toolchains/0.13.0/linux-x86_64");
-        expect(host.runs.length).toBe(2);
+        // download, extract, and the zig-build-cache prewarm.
+        expect(host.runs.length).toBe(3);
 
-        const [download, extract] = host.runs;
+        const [download, extract, prewarm] = host.runs;
         expect(download.argv[0]).toBe("sh");
         // 0.13.0 predates the 0.14.1 filename-order switch, so it's
         // zig-<os>-<arch>-..., not zig-<arch>-<os>-....
@@ -139,6 +148,11 @@ test("downloads and extracts a toolchain via a sandboxed curl+tar run() (linux)"
         expect(extract.argv.some((arg) => typeof arg === "string" && arg.includes("#!/bin/sh"))).toBe(true);
         expect(extract.outputs[0].namedCache.name).toBe("zig-toolchains");
         expect(extract.outputs[0].namedCache.key).toBe(key);
+
+        expect(prewarm.argv[0]).toBe("sh");
+        expect(prewarm.tools.some((t) => t.name === "zig")).toBe(true);
+        expect(prewarm.outputs[0].namedCache.name).toBe("zig-build-cache");
+        expect(prewarm.outputs[0].namedCache.key).toBe(key);
 
         expect(host.calls.some((call) => call[0] === "nativeTool" && call[1] === "curl")).toBe(true);
     });

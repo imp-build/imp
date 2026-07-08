@@ -8,6 +8,8 @@ import {
 } from "//rules/c/cmake/toolchain";
 import {
     zigTool,
+    zigBuildCacheTool,
+    zigGlobalCacheEnv,
     zigCMakeArgs,
     defaultZigToolchain,
 } from "//rules/c/zig/toolchain";
@@ -107,6 +109,25 @@ const headerSources = memo(async function headerSources(handle) {
     return glob({ root, include: ["**/*.h", "**/*.hh", "**/*.hpp", "**/*.hxx"] });
 });
 
+// compilerEnv's values (e.g. ZIG_GLOBAL_CACHE_DIR) are relative to the
+// sandbox root (that's where their "tool" mount lands — see
+// zigBuildCacheTool), but plain env vars are interpreted by whatever
+// consumes them relative to *their own* cwd at the moment they read it, not
+// relative to wherever the value was originally set — so a relative value
+// silently breaks (creating a fresh, throwaway, unshared directory instead
+// of hitting the real mount) the instant anything invoked downstream
+// changes its cwd, which both this rule's own `cd buildDirPath` (edge
+// replay) and CMake's internal compiler-detection probe do. Every call site
+// must capture `imp_sandbox_root="$(pwd)"` at the very start of its
+// script, before any cd happens, then splice these export statements in
+// right after — see configureNinjaGraph and executeEdge below.
+function zigEnvExportStmts(compilerEnv) {
+    return compilerEnv.map((entry) => {
+        const eq = entry.indexOf("=");
+        return `export ${entry.slice(0, eq)}="$imp_sandbox_root/${entry.slice(eq + 1)}"`;
+    });
+}
+
 // Shared path/toolchain/input resolution for both the "build" and "test"
 // products below — factors out everything that doesn't depend on whether
 // we're building or (re-)running ctest.
@@ -126,10 +147,22 @@ async function resolveCmakeSetup(handle) {
     const cmakeToolSpec = handle.attrs.toolchain
         ? await cmakeTool(handle.attrs.toolchain)
         : await nativeToolSpec(nativeTool("cmake"));
-    const compilerTools = handle.attrs.compiler ? [await zigTool(handle.attrs.compiler)] : [];
+    // zigBuildCacheTool/zigGlobalCacheEnv pair a mounted, shared, named-
+    // cache directory with the env var pointing Zig at it — see
+    // ZIG_BUILD_CACHE's doc comment in rules/c/zig/toolchain.js for why
+    // sharing this across sandboxes is both safe (content-addressed by what
+    // Zig is compiling, never by sandbox identity) and necessary (without
+    // it, every sandbox re-pays Zig's own compiler-rt build and bakes a
+    // fresh ephemeral sandbox path into it, which -ffile-prefix-map alone
+    // can't reach since it's not part of the translation unit we ask Zig to
+    // compile).
+    const compilerTools = handle.attrs.compiler
+        ? [await zigTool(handle.attrs.compiler), await zigBuildCacheTool(handle.attrs.compiler)]
+        : [];
     const compilerArgs = handle.attrs.compiler ? await zigCMakeArgs(handle.attrs.compiler) : [];
+    const compilerEnv = handle.attrs.compiler ? zigGlobalCacheEnv() : [];
 
-    return { srcPath, buildDirPath, cmakeArgs, inputFiles, dirInputs, cmakeToolSpec, compilerTools, compilerArgs };
+    return { srcPath, buildDirPath, cmakeArgs, inputFiles, dirInputs, cmakeToolSpec, compilerTools, compilerArgs, compilerEnv };
 }
 
 // Configures the project with CMake's Ninja generator (needs no `ninja`
@@ -140,9 +173,22 @@ async function resolveCmakeSetup(handle) {
 // (inputs: sources + dirs), so an unchanged project skips reconfiguring
 // entirely rather than paying for it on every build/test.
 async function configureNinjaGraph(handle, setup) {
-    const { srcPath, buildDirPath, cmakeArgs, inputFiles, dirInputs, cmakeToolSpec, compilerTools, compilerArgs } = setup;
+    const { srcPath, buildDirPath, cmakeArgs, inputFiles, dirInputs, cmakeToolSpec, compilerTools, compilerArgs, compilerEnv } = setup;
 
-    const script = 'src=$1; bdir=$2; shift 2; mkdir -p "$bdir" && cmake -S "$src" -B "$bdir" -G Ninja "$@"';
+    // Can't pass compilerEnv via run()'s own `env:` — CMake's own
+    // compiler-detection probe (CMakeFiles/<ver>/CompilerIdC/) invokes the
+    // compiler from a *subdirectory* it creates itself, and a relative env
+    // value like ZIG_GLOBAL_CACHE_DIR gets reinterpreted relative to
+    // whatever cwd the compiler actually runs from — silently creating a
+    // fresh, throwaway cache under CompilerIdC/ instead of hitting the real
+    // mount (see zigEnvExportStmts' doc comment). $(pwd) here is the sandbox
+    // root (this script never cd's before it runs), so exporting an
+    // absolute path up front keeps it correct no matter what cwd CMake's own
+    // internal probes use.
+    const envPreamble = compilerEnv.length > 0
+        ? `imp_sandbox_root="$(pwd)" && ${zigEnvExportStmts(compilerEnv).join(" && ")} && `
+        : "";
+    const script = `src=$1; bdir=$2; shift 2; ${envPreamble}mkdir -p "$bdir" && cmake -S "$src" -B "$bdir" -G Ninja "$@"`;
     const configureTools = [
         await nativeToolSpec(nativeTool("mkdir")),
         // CMake's Ninja generator needs a real `ninja` (or ninja-compatible)
@@ -179,7 +225,7 @@ async function configureNinjaGraph(handle, setup) {
 // on-disk build-directory locations, same as a plain `cmake --build` would
 // leave behind.
 async function replayReachableGraph(handle, setup, graph, targetNames) {
-    const { buildDirPath, cmakeToolSpec, compilerTools, dirInputs } = setup;
+    const { buildDirPath, cmakeToolSpec, compilerTools, compilerEnv, dirInputs } = setup;
     const { rules, edges, topVars, sandboxRoot } = graph;
     // Always available on PATH for every edge, matching exactly what
     // configure itself used — needed for tool names that only resolve
@@ -320,7 +366,40 @@ async function replayReachableGraph(handle, setup, graph, targetNames) {
         // Ninja always executes edges with cwd = the build directory (see
         // resolveEdgeCommand's doc comment) — resolved.command's paths are
         // already rebased on that assumption, so replicate it here.
-        const cdCommand = `cd '${buildDirPath}' && ${resolved.command}`;
+        //
+        // Each replayed edge runs inside its own freshly-minted, randomly
+        // rooted sandbox (see src/cache.rs's create_sandbox_root), so a
+        // compile edge's cwd — and therefore the absolute path GCC/Clang
+        // record as DW_AT_comp_dir in debug info — differs on every single
+        // invocation even when nothing about the source changed. The whole
+        // sandbox root (captured via $(pwd) *before* the cd, since it's
+        // unknown until the edge actually runs) is remapped to a fixed,
+        // canonical path, making the emitted debug info — and thus the
+        // object/link output — identical across sandboxes. This alone
+        // doesn't cover a toolchain that lazily builds and caches its own
+        // runtime bits under the sandbox root too (e.g. Zig compiling
+        // compiler-rt/libstd into "$HOME/.cache/zig/..." on first use, which
+        // bakes that same ephemeral root into *their* debug info) — see
+        // compilerEnv/ZIG_BUILD_CACHE in rules/c/zig/toolchain.js, which
+        // pins that cache to a stable, shared, named-cache mount instead.
+        //
+        // compilerEnv (e.g. ZIG_GLOBAL_CACHE_DIR) points at a tool mounted
+        // at the *sandbox root* (".imp/tools/..."), so it can't be passed
+        // via run()'s own `env:` — that's a plain relative-path string set
+        // once at process spawn, before this script's `cd` runs, and would
+        // resolve relative to buildDirPath instead once the command
+        // actually executes. `export`ing it here, after capturing the root
+        // but before the `cd`, keeps it correct for every command in the
+        // resolved edge (including chained POST_BUILD steps) regardless of
+        // cwd.
+        const needsSandboxRoot = isCompileEdge || compilerEnv.length > 0;
+        const preamble = needsSandboxRoot
+            ? [`imp_sandbox_root="$(pwd)"`, ...zigEnvExportStmts(compilerEnv)].join(" && ")
+            : "";
+        const prefixMapSuffix = isCompileEdge ? ` -ffile-prefix-map="$imp_sandbox_root"=/imp-src` : "";
+        const cdCommand = preamble
+            ? `${preamble} && cd '${buildDirPath}' && ${resolved.command}${prefixMapSuffix}`
+            : `cd '${buildDirPath}' && ${resolved.command}`;
         return run({
             argv: ["sh", "-c", cdCommand],
             tools: edgeTools,

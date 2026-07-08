@@ -4,6 +4,25 @@ import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import { generateToolLockfile } from "//rules/workflows/lockfiles";
 
 const ZIG_TOOLCHAIN_CACHE = "zig-toolchains";
+// Zig lazily JIT-compiles its own runtime support code (compiler-rt, libc
+// start files, std for the `zig cc`/`zig c++` frontend) into
+// $ZIG_GLOBAL_CACHE_DIR on first use per (version, target, flags) — content-
+// addressed by what it's compiling, never by *our* source, so sharing it
+// across sandboxes can only make builds faster or byte-identical, never
+// wrong (verified: a real source change still forces a real recompile, and
+// concurrent writers are safe — Zig's cache uses lock files). Left at its
+// default ($HOME/.cache/zig), it instead rides the per-sandbox HOME every
+// run() gets (see src/exec.rs's sandbox_home_tmp) — freshly empty each time
+// — so every build both re-pays the ~12s compiler-rt build *and* bakes a
+// different ephemeral sandbox path into that runtime code's own debug info,
+// which is exactly the kind of non-reproducibility -ffile-prefix-map alone
+// can't fix (it only covers paths in the translation unit imp itself asks
+// Zig to compile, not Zig's own internal one-time builds). Pinning this to a
+// named cache — the same mechanism CARGO_HOME already uses for cargo's own
+// registry/build cache — makes it a stable, symlinked, real directory that's
+// mounted (not copied) into every sandbox, so it's both reproducible and
+// reused.
+const ZIG_BUILD_CACHE = "zig-build-cache";
 
 function requireSupportedPlatform(plat) {
     if (plat.os !== "linux" && plat.os !== "windows") {
@@ -166,6 +185,7 @@ function requireVersion(version) {
  */
 export function zigToolchain(version, opts = {}) {
     namedCache({ name: ZIG_TOOLCHAIN_CACHE });
+    namedCache({ name: ZIG_BUILD_CACHE });
     if (!coreToolHandles) {
         coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
     }
@@ -208,7 +228,13 @@ export async function acquireZigToolchain(version) {
     const plat = platformInfo();
     const key = zigCacheKey(version, plat);
 
-    if (cacheHas(ZIG_TOOLCHAIN_CACHE, key)) {
+    // Both caches must be present, not just the toolchain download — mirrors
+    // acquireRustToolchain's RUSTUP_HOME_CACHE/CARGO_HOME_CACHE pairing, and
+    // means a toolchain seeded via installZigToolchain() (which only ever
+    // populates ZIG_TOOLCHAIN_CACHE) still gets ZIG_BUILD_CACHE backfilled
+    // by the prewarm step below on first real use, rather than leaving
+    // zigBuildCacheTool() pointed at a directory that was never created.
+    if (cacheHas(ZIG_TOOLCHAIN_CACHE, key) && cacheHas(ZIG_BUILD_CACHE, key)) {
         return cacheGet(ZIG_TOOLCHAIN_CACHE, key);
     }
     if (!coreToolHandles) {
@@ -217,54 +243,92 @@ export async function acquireZigToolchain(version) {
 
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
-    const artifact = zigArtifactName(version, plat);
-    const url = zigDownloadUrl(version, plat);
-    const downloadPath = `.imp/zig-downloads/${key}/${artifact}`;
-    const extractPath = `.imp/zig-toolchains/${key}`;
-    const zigExe = plat.os === "windows" ? "zig.exe" : "zig";
-    const { ar, ranlib, clang, genericAr } = wrapperNames(plat);
-    // Wrapper content rides in argv (positional $N) so it keys the task
-    // cache without any shell interpolation touching it, same pattern as
-    // odinGenRun's generated-file writes. Each wrapper is a
-    // (content, filename) positional pair after $1 (downloadPath)/$2
-    // (extractPath).
-    const wrappers = [
-        [wrapperContent(plat, zigExe, "ar"), ar],
-        [wrapperContent(plat, zigExe, "ranlib"), ranlib],
-        [wrapperContent(plat, zigExe, "cc"), clang],
-        [wrapperContent(plat, zigExe, "ar"), genericAr],
-    ];
-    const wrapperArgs = wrappers.flat();
-    // Shell positional params past $9 need brace syntax ($10, not $10
-    // which parses as ${1}0).
-    const pos = (n) => (n >= 10 ? `\${${n}}` : `$${n}`);
-    const writeCmds = wrappers.map((_, i) => `printf %s "${pos(3 + i * 2)}" > "$2/${pos(4 + i * 2)}"`);
-    const chmodCmd = plat.os === "windows"
-        ? ""
-        : ` && ${wrappers.map((_, i) => `chmod +x "$2/${pos(4 + i * 2)}"`).join(" && ")}`;
-    const extractScript = `mkdir -p "$2" && tar -xf "$1" -C "$2" --strip-components=1 && ${writeCmds.join(" && ")}${chmodCmd}`;
+    if (!cacheHas(ZIG_TOOLCHAIN_CACHE, key)) {
+        const artifact = zigArtifactName(version, plat);
+        const url = zigDownloadUrl(version, plat);
+        const downloadPath = `.imp/zig-downloads/${key}/${artifact}`;
+        const extractPath = `.imp/zig-toolchains/${key}`;
+        const zigExe = plat.os === "windows" ? "zig.exe" : "zig";
+        const { ar, ranlib, clang, genericAr } = wrapperNames(plat);
+        // Wrapper content rides in argv (positional $N) so it keys the task
+        // cache without any shell interpolation touching it, same pattern as
+        // odinGenRun's generated-file writes. Each wrapper is a
+        // (content, filename) positional pair after $1 (downloadPath)/$2
+        // (extractPath).
+        const wrappers = [
+            [wrapperContent(plat, zigExe, "ar"), ar],
+            [wrapperContent(plat, zigExe, "ranlib"), ranlib],
+            [wrapperContent(plat, zigExe, "cc"), clang],
+            [wrapperContent(plat, zigExe, "ar"), genericAr],
+        ];
+        const wrapperArgs = wrappers.flat();
+        // Shell positional params past $9 need brace syntax ($10, not $10
+        // which parses as ${1}0).
+        const pos = (n) => (n >= 10 ? `\${${n}}` : `$${n}`);
+        const writeCmds = wrappers.map((_, i) => `printf %s "${pos(3 + i * 2)}" > "$2/${pos(4 + i * 2)}"`);
+        const chmodCmd = plat.os === "windows"
+            ? ""
+            : ` && ${wrappers.map((_, i) => `chmod +x "$2/${pos(4 + i * 2)}"`).join(" && ")}`;
+        const extractScript = `mkdir -p "$2" && tar -xf "$1" -C "$2" --strip-components=1 && ${writeCmds.join(" && ")}${chmodCmd}`;
 
-    await run({
-        argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-zig", downloadPath, url],
-        tools: coreTools,
-        outputs: [output(output_path(downloadPath))],
-        materialize: true,
-        display: `download zig ${version} (${plat.os}/${plat.arch})`,
-    });
+        await run({
+            argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-zig", downloadPath, url],
+            tools: coreTools,
+            outputs: [output(output_path(downloadPath))],
+            materialize: true,
+            display: `download zig ${version} (${plat.os}/${plat.arch})`,
+        });
 
-    await run({
-        argv: ["sh", "-c", extractScript, "extract-zig", downloadPath, extractPath, ...wrapperArgs],
-        tools: coreTools,
-        inputs: [{ kind: "file", path: downloadPath }],
-        outputs: [
-            output(output_path(extractPath), {
-                kind: "directory",
-                namedCache: { name: ZIG_TOOLCHAIN_CACHE, key },
-            }),
-        ],
-        materialize: true,
-        display: `extract zig ${version} (${plat.os}/${plat.arch})`,
-    });
+        await run({
+            argv: ["sh", "-c", extractScript, "extract-zig", downloadPath, extractPath, ...wrapperArgs],
+            tools: coreTools,
+            inputs: [{ kind: "file", path: downloadPath }],
+            outputs: [
+                output(output_path(extractPath), {
+                    kind: "directory",
+                    namedCache: { name: ZIG_TOOLCHAIN_CACHE, key },
+                }),
+            ],
+            materialize: true,
+            display: `extract zig ${version} (${plat.os}/${plat.arch})`,
+        });
+    }
+
+    // Seed ZIG_BUILD_CACHE with a real, populated directory: a "tool" mount
+    // (see zigBuildCacheTool below) requires its named-cache path to already
+    // exist as a directory (materialize_tools_into_sandbox in src/exec.rs
+    // bails otherwise), and this repo's own real cmakeLib usage always
+    // compiles with `-g -shared -fPIC`, so link a throwaway shared library
+    // with those exact flags to force Zig to build and cache compiler-rt/
+    // libc-start objects right now — turning the ~12s first-ever cost every
+    // zig-cc build would otherwise separately pay (once per sandbox, since
+    // sandboxes don't share state) into a one-time toolchain-acquisition
+    // cost instead. Guarded independently of the early cacheHas() return
+    // above so upgrading an existing zig-toolchains cache that predates this
+    // still backfills zig-build-cache.
+    if (!cacheHas(ZIG_BUILD_CACHE, key)) {
+        const zigToolForPrewarm = { kind: "tool", name: "zig", cache: ZIG_TOOLCHAIN_CACHE, key, binDirs: ["."] };
+        const buildCacheSeedDir = `.imp/zig-build-cache/${key}`;
+        const prewarmSrcPath = `.imp/zig-build-cache-prewarm/${key}/prewarm.c`;
+        const prewarmScript = 'srcfile=$1; cachedir=$2; body=$3; ' +
+            'mkdir -p "$(dirname "$srcfile")" "$cachedir" && ' +
+            'printf %s "$body" > "$srcfile" && ' +
+            'ZIG_GLOBAL_CACHE_DIR="$cachedir" zig cc -g -shared -fPIC -o "$(dirname "$srcfile")/prewarm.out" "$srcfile"';
+        const prewarmBody = "int imp_zig_build_cache_prewarm(int a, int b) { return a + b; }\n";
+
+        await run({
+            argv: ["sh", "-c", prewarmScript, "zig-build-cache-prewarm", prewarmSrcPath, buildCacheSeedDir, prewarmBody],
+            tools: [...coreTools, zigToolForPrewarm],
+            outputs: [
+                output(output_path(buildCacheSeedDir), {
+                    kind: "directory",
+                    namedCache: { name: ZIG_BUILD_CACHE, key },
+                }),
+            ],
+            materialize: true,
+            display: `prewarm zig build cache ${version} (${plat.os}/${plat.arch})`,
+        });
+    }
 
     return cacheGet(ZIG_TOOLCHAIN_CACHE, key);
 }
@@ -315,6 +379,42 @@ export async function zigTool(version) {
         key: zigCacheKey(resolved, plat),
         binDirs: ["."],
     };
+}
+
+/**
+ * Return a named-cache-backed tool descriptor mounting Zig's own runtime
+ * build cache (compiler-rt, libc start objects, etc. — see ZIG_BUILD_CACHE's
+ * doc comment) at a stable path, shared read-write across every sandbox for
+ * this Zig version/platform. Not put on PATH (binDirs empty) — pair with
+ * zigGlobalCacheEnv() to point $ZIG_GLOBAL_CACHE_DIR at its mount path.
+ *
+ * @category configuration
+ * @param {string} [version]
+ * @returns {Promise<object>}
+ */
+export async function zigBuildCacheTool(version) {
+    const resolved = requireVersion(version);
+    await acquireZigToolchain(resolved);
+    const plat = platformInfo();
+    return {
+        kind: "tool",
+        name: ZIG_BUILD_CACHE,
+        cache: ZIG_BUILD_CACHE,
+        key: zigCacheKey(resolved, plat),
+        binDirs: [],
+    };
+}
+
+/**
+ * Return the `run()` env entries pointing Zig at its shared build-cache tool
+ * mount (see zigBuildCacheTool). Any run() using this must also include that
+ * tool, or the path won't exist in the sandbox.
+ *
+ * @category configuration
+ * @returns {string[]}
+ */
+export function zigGlobalCacheEnv() {
+    return [`ZIG_GLOBAL_CACHE_DIR=.imp/tools/${ZIG_BUILD_CACHE}`];
 }
 
 /**
