@@ -38,6 +38,7 @@ export const api_reference_build = product("js-api-reference", "build", async fu
         tools: [await nativeToolSpec(mkdirTool), await nativeToolSpec(dirnameTool)],
         inputs: [srcs],
         outputs: [output(output_path(API_REFERENCE_OUT), { kind: "directory" })],
+        materialize: true,
         display: "extract JS API reference",
     });
 });
@@ -69,6 +70,7 @@ export const site_build = product("zola-site", "build", async function site_buil
         tools: [await nativeToolSpec(mkdirTool), await nativeToolSpec(cpTool), zolaToolSpec],
         inputs: [handWritten, { kind: "directory", path: output_path(API_REFERENCE_OUT) }],
         outputs: [output(output_path(SITE_OUT), { kind: "directory" })],
+        materialize: true,
         display: "build docs site with zola",
     });
 });
