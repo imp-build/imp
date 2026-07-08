@@ -430,8 +430,8 @@ pub(crate) fn parse_io_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Ve
         }
         let named_cache = match val.get::<_, Option<Object>>("namedCache")? {
             Some(nc) => Some(crate::cache::OutputNamedCache {
-                name: nc.get("name")?,
-                key: nc.get("key")?,
+                name: nc.get::<_, String>("name")?,
+                key: nc.get::<_, String>("key")?,
             }),
             None => None,
         };
@@ -623,7 +623,13 @@ pub(crate) fn sandbox_home_tmp(sandbox_root: &Path) -> Result<(PathBuf, PathBuf)
 #[cfg(not(windows))]
 const BUILTIN_SHELL_CANDIDATES: &[&str] = &["/bin/sh", "/usr/bin/sh"];
 #[cfg(windows)]
-const BUILTIN_SHELL_CANDIDATES: &[&str] = &[];
+const BUILTIN_SHELL_CANDIDATES: &[&str] = &[
+    r"C:\Program Files\Git\bin\sh.exe",
+    r"C:\Program Files\Git\usr\bin\sh.exe",
+    r"C:\Program Files (x86)\Git\bin\sh.exe",
+    r"C:\Program Files (x86)\Git\usr\bin\sh.exe",
+    r"C:\msys64\usr\bin\sh.exe",
+];
 
 /// Resolve `program` to the binary that should actually be spawned. Only
 /// `sh` is special-cased (see `BUILTIN_SHELL_CANDIDATES`); everything else is
@@ -697,36 +703,35 @@ pub(crate) fn exec_run_inner(
     // (and staged directly from this tree) on a cache miss, below.
     let mut input_trees = Vec::with_capacity(opts.inputs.len());
     for input in &opts.inputs {
-        let tree = match input.kind.as_str() {
-            "digest" => {
-                let digest = input.digest.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("run() digest input is missing its digest")
-                })?;
-                DirectoryDigest::from_digest(digest.clone())
-            }
-            "file" | "manifest" => {
-                let path = input
-                    .path
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("run() {} input is missing its path", input.kind))?;
-                let relative = artifact_relative_path(path)?;
-                let source = workspace_root.join(&relative);
-                let (digest, size) = store_file_blob(&source, &input.kind)?;
-                let mode = file_mode(&source)?;
-                nest_file(path, digest, size, mode)?
-            }
-            "directory" => {
-                let path = input
-                    .path
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("run() directory input is missing its path"))?;
-                let relative = artifact_relative_path(path)?;
-                let source = workspace_root.join(&relative);
-                let captured = capture_directory(&source)?;
-                nest_directory(path, &captured)?
-            }
-            other => bail!("run() input {:?} has unsupported kind {other}", input.path),
-        };
+        let tree =
+            match input.kind.as_str() {
+                "digest" => {
+                    let digest = input.digest.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("run() digest input is missing its digest")
+                    })?;
+                    DirectoryDigest::from_digest(digest.clone())
+                }
+                "file" | "manifest" => {
+                    let path = input.path.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("run() {} input is missing its path", input.kind)
+                    })?;
+                    let relative = artifact_relative_path(path)?;
+                    let source = workspace_root.join(&relative);
+                    let (digest, size) = store_file_blob(&source, &input.kind)?;
+                    let mode = file_mode(&source)?;
+                    nest_file(path, digest, size, mode)?
+                }
+                "directory" => {
+                    let path = input.path.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("run() directory input is missing its path")
+                    })?;
+                    let relative = artifact_relative_path(path)?;
+                    let source = workspace_root.join(&relative);
+                    let captured = capture_directory(&source)?;
+                    nest_directory(path, &captured)?
+                }
+                other => bail!("run() input {:?} has unsupported kind {other}", input.path),
+            };
         input_trees.push(tree);
     }
     let merged_input_digest = merge_digests(input_trees)?;
@@ -1184,7 +1189,11 @@ mod tests {
     fn exec_run_treats_crlf_as_a_single_line_terminator() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
-        let opts = run_opts(&["sh", "-c", "printf 'a\\r\\nb\\r\\n\\r\\nc\\r\\n'"], &[], &[]);
+        let opts = run_opts(
+            &["sh", "-c", "printf 'a\\r\\nb\\r\\n\\r\\nc\\r\\n'"],
+            &[],
+            &[],
+        );
         let result = exec_run_inner(p, opts, None).unwrap();
         // `\r\n` must not be read as two terminators (which would double
         // every line, including manufacturing a spurious blank line where
@@ -1229,20 +1238,33 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         let mut opts = run_opts(
-            &["sh", "-c", "mkdir -p build && printf payload > build/out.txt"],
+            &[
+                "sh",
+                "-c",
+                "mkdir -p build && printf payload > build/out.txt",
+            ],
             &[],
             &["build/out.txt"],
         );
         opts.materialize = false;
 
         let result = exec_run_inner(p, opts, None).unwrap();
-        assert!(!p.join("build/out.txt").exists(), "materialize: false must not write to the workspace");
-        let output_digest = result.output_digest.expect("run must still report an output digest");
+        assert!(
+            !p.join("build/out.txt").exists(),
+            "materialize: false must not write to the workspace"
+        );
+        let output_digest = result
+            .output_digest
+            .expect("run must still report an output digest");
 
         // A later materialize: true run of the exact same task must hit cache
         // (task_key doesn't depend on materialize) and copy from CAS.
         let mut second_opts = run_opts(
-            &["sh", "-c", "mkdir -p build && printf payload > build/out.txt"],
+            &[
+                "sh",
+                "-c",
+                "mkdir -p build && printf payload > build/out.txt",
+            ],
             &[],
             &["build/out.txt"],
         );
@@ -1322,7 +1344,11 @@ mod tests {
         std::fs::remove_dir_all(p.join("build")).unwrap();
 
         let mut stage2 = ExecRunOpts {
-            argv: vec!["sh".to_owned(), "-c".to_owned(), "cat build/mid.txt".to_owned()],
+            argv: vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "cat build/mid.txt".to_owned(),
+            ],
             display: "exec test".to_owned(),
             env: Vec::new(),
             config_digest: String::new(),

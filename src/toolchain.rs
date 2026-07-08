@@ -193,15 +193,8 @@ fn extract_zip_raw(archive: &Path, dest: &Path) -> Result<std::process::ExitStat
 
 /// Compute SHA-256 hex digest of a file.
 pub fn host_sha256(path: &Path) -> Result<String> {
-    let output = std::process::Command::new("sha256sum")
-        .arg(path)
-        .output()
-        .with_context(|| format!("spawn sha256sum for {}", path.display()))?;
-    if !output.status.success() {
-        bail!("sha256sum failed for {}", path.display());
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.split_whitespace().next().unwrap_or("").to_owned())
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
 }
 
 // ---------------------------------------------------------------------------

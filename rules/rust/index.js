@@ -109,21 +109,25 @@ export function rust_toolchain_version(handle) {
         : resolveRustToolchainVersion(handle.attrs.toolchainVersion);
 }
 
-// cargo/rustc need a real C linker in the hermetic sandbox — rustc shells
-// out to a program literally named "cc" by default. Reuse the gcc toolchain
-// Odin already relies on for the same reason (rules/odin/index.js's
-// odinScriptTools): its tool descriptor exposes a "clang"-named wrapper
-// script on PATH that execs the real (prefixed) gcc binary, so pointing
-// rustc's linker at "clang" sidesteps needing a "cc" alias of our own. That
-// wrapper script itself shells out to `dirname` (`$(dirname "$0")`), so
-// dirname must also be declared — same requirement odinScriptTools has for
-// the same wrapper.
+// cargo/rustc need a real C linker in the hermetic sandbox. Linux reuses the
+// pinned Bootlin gcc toolchain Odin already relies on and points rustc at its
+// "clang" wrapper. Windows uses the host MinGW gcc discovered via PATH; the
+// Bootlin archive is Linux-only and cannot provide a native Windows linker.
 async function rustLinkerTools() {
+    if (platformInfo().os === "windows") {
+        return {
+            tools: [await nativeToolSpec(nativeTool("gcc"))],
+            rustflags: "-C linker=gcc",
+        };
+    }
     const gcc = defaultGccToolchain();
     if (!gcc) {
         throw new Error("cargo builds need a declared gccToolchain() default — see //rules/c/gcc");
     }
-    return [await nativeToolSpec(nativeTool("dirname")), await gccTool(gcc.attrs.version)];
+    return {
+        tools: [await nativeToolSpec(nativeTool("dirname")), await gccTool(gcc.attrs.version)],
+        rustflags: "-C linker=clang",
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +144,7 @@ async function rustLinkerTools() {
 export const cargoBuild = product("cargo-package", "build",
     async function cargoBuild(handle) {
         const toolSpec = await rustTool(rust_toolchain_version(handle));
-        const linkerTools = await rustLinkerTools();
+        const linker = await rustLinkerTools();
 
         const path = declared_path(handle, handle.attrs.path || ".");
         const srcs = await sources(handle);
@@ -151,17 +155,17 @@ export const cargoBuild = product("cargo-package", "build",
         const exeSuffix = plat.os === "windows" ? ".exe" : "";
         const outPaths = handle.attrs.bins.map((name) => `${buildDir}/${profile}/${name}${exeSuffix}`);
 
-        const script = 'manifest=$1; target_dir=$2; shift 2; ' +
-            'RUSTFLAGS="-C linker=clang" cargo build --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
+        const script = 'manifest=$1; target_dir=$2; rustflags=$3; shift 3; ' +
+            'RUSTFLAGS="$rustflags" cargo build --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
 
         const result = await run({
             argv: [
                 "sh", "-c", script, "cargo-build",
-                `${path}/Cargo.toml`, buildDir,
+                `${path}/Cargo.toml`, buildDir, linker.rustflags,
                 ...(handle.attrs.release ? ["--release"] : []),
                 ...handle.attrs.cargoArgs,
             ],
-            tools: [...toolSpec.tools, ...linkerTools],
+            tools: [...toolSpec.tools, ...linker.tools],
             env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`],
             inputs: [srcs],
             outputs: outPaths.map((p) => output(output_path(p))),
@@ -188,14 +192,14 @@ export const cargoBuild = product("cargo-package", "build",
 export const cargoTest = product("cargo-package", "test",
     async function cargoTest(handle) {
         const toolSpec = await rustTool(rust_toolchain_version(handle));
-        const linkerTools = await rustLinkerTools();
+        const linker = await rustLinkerTools();
 
         const path = declared_path(handle, handle.attrs.path || ".");
         const srcs = await sources(handle);
         const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 
-        const script = 'manifest=$1; target_dir=$2; shift 2; ' +
-            'RUSTFLAGS="-C linker=clang" cargo test --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
+        const script = 'manifest=$1; target_dir=$2; rustflags=$3; shift 3; ' +
+            'RUSTFLAGS="$rustflags" cargo test --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
 
         // No outputs/materialize: test binaries aren't user-addressable
         // artifacts. impure: true so a re-run always executes the tests
@@ -204,10 +208,10 @@ export const cargoTest = product("cargo-package", "test",
         return run({
             argv: [
                 "sh", "-c", script, "cargo-test",
-                `${path}/Cargo.toml`, buildDir,
+                `${path}/Cargo.toml`, buildDir, linker.rustflags,
                 ...handle.attrs.testArgs,
             ],
-            tools: [...toolSpec.tools, ...linkerTools],
+            tools: [...toolSpec.tools, ...linker.tools],
             env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`],
             inputs: [srcs],
             impure: true,

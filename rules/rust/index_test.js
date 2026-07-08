@@ -14,10 +14,11 @@ import {
     gccToolchain,
 } from "//rules/c/gcc/toolchain";
 
-function withRustHost(fn) {
+function withRustHost(platOrFn, maybeFn) {
     const run = async (host) => {
         __resetRustToolchainStateForTest();
         __resetGccToolchainStateForTest();
+        const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;
         try {
             return await fn(host);
         } finally {
@@ -25,7 +26,9 @@ function withRustHost(fn) {
             __resetGccToolchainStateForTest();
         }
     };
-    return withFakeToolchainHost(run);
+    return typeof platOrFn === "function"
+        ? withFakeToolchainHost(run)
+        : withFakeToolchainHost(platOrFn, run);
 }
 
 describe("rust rules", () => {
@@ -85,7 +88,8 @@ test("cargoBuild invokes cargo with the manifest path, target dir, and toolchain
         expect(buildRun.argv).toContain(`${path}/Cargo.toml`);
         expect(buildRun.env).toContain("RUSTUP_HOME=.imp/tools/rustup-home");
         expect(buildRun.env).toContain("CARGO_HOME=.imp/tools/cargo-home");
-        expect(buildRun.argv[2]).toContain("-C linker=clang");
+        expect(buildRun.argv[2]).toContain("RUSTFLAGS=\"$rustflags\"");
+        expect(buildRun.argv).toContain("-C linker=clang");
         expect(result.outputPaths.length).toBe(1);
         expect(result.outputPaths[0].endsWith("/debug/hello")).toBe(true);
     });
@@ -102,6 +106,18 @@ test("cargoBuild passes --release and uses the release output dir", async () => 
         expect(result.outputPaths[0].endsWith("/release/hello")).toBe(true);
         const buildRun = host.runs[host.runs.length - 1];
         expect(buildRun.argv).toContain("--release");
+    });
+});
+test("cargoBuild uses native gcc as the linker on windows", async () => {
+    await withRustHost({ os: "windows", arch: "x86_64" }, async (host) => {
+        rustToolchain("1.93.0", { default: true });
+        const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
+
+        await cargoBuild(pkg);
+
+        const buildRun = host.runs[host.runs.length - 1];
+        expect(buildRun.argv).toContain("-C linker=gcc");
+        expect(host.calls.some((call) => call[0] === "nativeTool" && call[1] === "gcc")).toBe(true);
     });
 });
 
@@ -135,7 +151,8 @@ test("cargoTest invokes cargo test with the manifest path, target dir, and toolc
         expect(testRun.argv).toContain(`${path}/Cargo.toml`);
         expect(testRun.env).toContain("RUSTUP_HOME=.imp/tools/rustup-home");
         expect(testRun.env).toContain("CARGO_HOME=.imp/tools/cargo-home");
-        expect(testRun.argv[2]).toContain("-C linker=clang");
+        expect(testRun.argv[2]).toContain("RUSTFLAGS=\"$rustflags\"");
+        expect(testRun.argv).toContain("-C linker=clang");
         expect(testRun.impure).toBe(true);
         expect(testRun.outputs).toEqual([]);
     });

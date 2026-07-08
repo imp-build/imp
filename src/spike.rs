@@ -398,7 +398,10 @@ pub(crate) async fn load_workspace_with_rules(
                     .await
                     .catch(&ctx)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-                let ns = module.namespace().catch(&ctx).map_err(|e| anyhow::anyhow!("{e}"))?;
+                let ns = module
+                    .namespace()
+                    .catch(&ctx)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
                 collect_imp_exports(&ns)
             })
             .await
@@ -1075,7 +1078,14 @@ fn register_globals<'js>(
                             (flag_name, flag)
                         })
                         .collect();
-                    hs.goals.insert(name.clone(), Goal { name, product, flags });
+                    hs.goals.insert(
+                        name.clone(),
+                        Goal {
+                            name,
+                            product,
+                            flags,
+                        },
+                    );
                 }
             }
             Ok(())
@@ -1456,13 +1466,10 @@ fn register_globals<'js>(
         Function::new(ctx.clone(), move || -> rquickjs::Result<String> {
             let guard = goal_flags_gf.lock().unwrap();
             let flags = guard.as_ref().ok_or_else(|| {
-                action_spec_error(
-                    "goalFlags() may only be called during goal execution".to_owned(),
-                )
+                action_spec_error("goalFlags() may only be called during goal execution".to_owned())
             })?;
-            serde_json::to_string(flags).map_err(|e| {
-                rquickjs::Error::new_loading_message("goalFlags", e.to_string())
-            })
+            serde_json::to_string(flags)
+                .map_err(|e| rquickjs::Error::new_loading_message("goalFlags", e.to_string()))
         })?;
     globals.set("__host_current_goal_flags", host_current_goal_flags)?;
 
@@ -1504,9 +1511,8 @@ fn register_globals<'js>(
     let host_merge_digests = Function::new(
         ctx.clone(),
         move |digests_json: String| -> rquickjs::Result<String> {
-            let digests: Vec<String> = serde_json::from_str(&digests_json).map_err(|e| {
-                rquickjs::Error::new_loading_message("mergeDigests", e.to_string())
-            })?;
+            let digests: Vec<String> = serde_json::from_str(&digests_json)
+                .map_err(|e| rquickjs::Error::new_loading_message("mergeDigests", e.to_string()))?;
             let trees = digests
                 .into_iter()
                 .map(crate::digest::DirectoryDigest::from_digest)
@@ -1525,8 +1531,9 @@ fn register_globals<'js>(
         move |before: String, after: String| -> rquickjs::Result<String> {
             let before = crate::digest::DirectoryDigest::from_digest(before);
             let after = crate::digest::DirectoryDigest::from_digest(after);
-            let changes = crate::digest::diff_digests(&before, &after)
-                .map_err(|e| rquickjs::Error::new_loading_message("diffDigests", format!("{e:#}")))?;
+            let changes = crate::digest::diff_digests(&before, &after).map_err(|e| {
+                rquickjs::Error::new_loading_message("diffDigests", format!("{e:#}"))
+            })?;
             let json: Vec<serde_json::Value> = changes
                 .into_iter()
                 .map(|change| {
@@ -1538,9 +1545,8 @@ fn register_globals<'js>(
                     serde_json::json!({ "type": kind, "path": path })
                 })
                 .collect();
-            serde_json::to_string(&json).map_err(|e| {
-                rquickjs::Error::new_loading_message("diffDigests", e.to_string())
-            })
+            serde_json::to_string(&json)
+                .map_err(|e| rquickjs::Error::new_loading_message("diffDigests", e.to_string()))
         },
     )?;
     globals.set("__host_diff_digests", host_diff_digests)?;
@@ -1550,8 +1556,9 @@ fn register_globals<'js>(
         ctx.clone(),
         move |digest: String| -> rquickjs::Result<String> {
             let digest = crate::digest::DirectoryDigest::from_digest(digest);
-            let paths = crate::digest::list_files_in_digest(&digest)
-                .map_err(|e| rquickjs::Error::new_loading_message("digestPaths", format!("{e:#}")))?;
+            let paths = crate::digest::list_files_in_digest(&digest).map_err(|e| {
+                rquickjs::Error::new_loading_message("digestPaths", format!("{e:#}"))
+            })?;
             serde_json::to_string(&paths)
                 .map_err(|e| rquickjs::Error::new_loading_message("digestPaths", e.to_string()))
         },
@@ -1579,9 +1586,8 @@ fn register_globals<'js>(
     let host_capture_paths = Function::new(
         ctx.clone(),
         move |paths_json: String| -> rquickjs::Result<String> {
-            let paths: Vec<String> = serde_json::from_str(&paths_json).map_err(|e| {
-                rquickjs::Error::new_loading_message("capturePaths", e.to_string())
-            })?;
+            let paths: Vec<String> = serde_json::from_str(&paths_json)
+                .map_err(|e| rquickjs::Error::new_loading_message("capturePaths", e.to_string()))?;
             crate::digest::capture_paths(&wc, &paths)
                 .map(|digest| digest.digest().to_owned())
                 .map_err(|e| rquickjs::Error::new_loading_message("capturePaths", format!("{e:#}")))
@@ -1899,8 +1905,14 @@ fn register_globals<'js>(
 }
 
 fn which_executable(name: &str) -> Option<String> {
-    let path_var = std::env::var("PATH").ok()?;
-    for dir in std::env::split_paths(&path_var) {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+
+    #[cfg(windows)]
+    dirs.extend(windows_tool_search_dirs());
+
+    for dir in dirs {
         let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate.to_string_lossy().into_owned());
@@ -1914,6 +1926,21 @@ fn which_executable(name: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(windows)]
+fn windows_tool_search_dirs() -> Vec<PathBuf> {
+    [
+        r"C:\Program Files\Git\bin",
+        r"C:\Program Files\Git\usr\bin",
+        r"C:\Program Files (x86)\Git\bin",
+        r"C:\Program Files (x86)\Git\usr\bin",
+        r"C:\msys64\usr\bin",
+        r"C:\msys64\mingw64\bin",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect()
 }
 
 fn parse_exec_run_opts<'js>(
@@ -3418,8 +3445,8 @@ fn parse_dependency(scope: &str, value: &str) -> Result<Dependency> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::named_cache_key_path;
     use crate::exec::{report_process_line, spawn_output_reader, ProcessLine, ProcessStream};
+    use sha2::{Digest, Sha256};
 
     /// Clear runtime-global memo state so a repeated goal invocation on the
     /// same LiveWorkspace re-evaluates its product functions. Production runs
@@ -3818,7 +3845,10 @@ export const app = target({ kind: "asset", attrs: { marker } });
     async fn workspace_root_is_discovered_from_a_nested_directory() {
         let root = fixture();
         let nested = root.path().join("library/jodin");
-        assert_eq!(find_workspace_root(&nested).unwrap(), root.path());
+        assert_eq!(
+            find_workspace_root(&nested).unwrap(),
+            root.path().canonicalize().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -4000,7 +4030,8 @@ export const parent = target({ kind: "expandable", attrs: {} });
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
 
-        let tool_dir = named_cache_key_path(p, "test-tools", "v1/linux-x86_64").unwrap();
+        let tool_dir =
+            crate::cache::named_cache_key_path(p, "test-tools", "v1/linux-x86_64").unwrap();
         std::fs::create_dir_all(tool_dir.join("bin")).unwrap();
         let tool_bin = tool_dir.join("bin/hello-tool");
         std::fs::write(&tool_bin, "#!/bin/sh\nprintf from-tool > out.txt\n").unwrap();
@@ -4186,13 +4217,14 @@ export const ignored = missing;
         );
 
         let error = format!("{:#}", load_workspace(p).await.unwrap_err());
+        let normalized = error.replace('\\', "/");
         assert!(
-            error.contains("cannot resolve workspace module '//rules/missing'"),
+            normalized.contains("cannot resolve workspace module '//rules/missing'"),
             "{error}"
         );
-        assert!(error.contains("rules/missing.js"), "{error}");
-        assert!(error.contains("rules/missing/BUILD.js"), "{error}");
-        assert!(error.contains(BUILD_FILE), "{error}");
+        assert!(normalized.contains("rules/missing.js"), "{error}");
+        assert!(normalized.contains("rules/missing/index.js"), "{error}");
+        assert!(normalized.contains(BUILD_FILE), "{error}");
     }
 
     #[tokio::test]
@@ -4286,18 +4318,10 @@ export const ok = 1;
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
 
-        // Write a known file and compute its sha256sum externally.
+        // Write a known file and compute its expected digest locally.
         let test_file = p.join("data.bin");
         std::fs::write(&test_file, b"hello world\n").unwrap();
-        let expected = std::process::Command::new("sha256sum")
-            .arg(&test_file)
-            .output()
-            .unwrap();
-        let expected_hex = String::from_utf8_lossy(&expected.stdout)
-            .split_whitespace()
-            .next()
-            .unwrap()
-            .to_owned();
+        let expected_hex = format!("{:x}", Sha256::digest(b"hello world\n"));
 
         write_file(
             &p.join(WORKSPACE_FILE),
@@ -4390,16 +4414,18 @@ export const ok = 1;
 
         let extract_dir = p.join("extracted");
 
+        let archive_js = serde_json::to_string(&archive.to_string_lossy().to_string()).unwrap();
+        let dest_js = serde_json::to_string(&extract_dir.to_string_lossy().to_string()).unwrap();
         write_file(
             &p.join(WORKSPACE_FILE),
             &format!(
                 r#"
 import {{ extract }} from "imp:core";
-extract("{archive}", "{dest}", {{ format: "tar.gz", strip_components: 0 }});
+extract({archive}, {dest}, {{ format: "tar.gz", strip_components: 0 }});
 export const ok = 1;
 "#,
-                archive = archive.to_string_lossy(),
-                dest = extract_dir.to_string_lossy(),
+                archive = archive_js,
+                dest = dest_js,
             ),
         );
         write_file(&p.join(BUILD_FILE), "export const done = 1;\n");
@@ -4693,9 +4719,17 @@ export const build = product("root-nesting-test", "build", async function do_bui
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned(), "lib".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
 
         let mut memo_ids = BTreeMap::new();
         let mut memo_parents = BTreeMap::new();
@@ -4774,9 +4808,17 @@ export const build = product("promise-all-context-test", "build", async function
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
 
         let mut memo_ids = BTreeMap::new();
         let mut memo_parents = BTreeMap::new();
@@ -4845,9 +4887,17 @@ export const build = product("sequential-sibling-context-test", "build", async f
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
 
         let mut memo_ids = BTreeMap::new();
         let mut memo_parents = BTreeMap::new();
@@ -4904,7 +4954,15 @@ export const build = product("fail-test", "build", async function build() {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(20),
-            execute_goal_live(&live, p, "build", &["app".to_owned()], false, 1, serde_json::json!({})),
+            execute_goal_live(
+                &live,
+                p,
+                "build",
+                &["app".to_owned()],
+                false,
+                1,
+                serde_json::json!({}),
+            ),
         )
         .await
         .expect("execute_goal_live must resolve when a root task fails");
@@ -5012,9 +5070,17 @@ export const build = product("concurrent-root-test", "build", async function bui
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["a".to_owned(), "b".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
 
         let mut job_ids = BTreeSet::new();
         let mut events = Vec::new();
@@ -5085,9 +5151,17 @@ export const build = product("selected-targets-test", "build", async function bu
         *live.scheduler.lock().unwrap() = Some(scheduler.clone());
 
         // Explicit selector: only the selected target sees itself.
-        execute_goal_live(&live, p, "build", &["a".to_owned()], false, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &["a".to_owned()],
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(p.join("selection-a.txt")).unwrap(),
             "//:a"
@@ -5168,9 +5242,17 @@ export const build = product("selected-targets-reset-test", "build", async funct
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         assert!(live.selected_roots.lock().unwrap().is_none());
-        execute_goal_live(&live, p, "build", &["a".to_owned()], false, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &["a".to_owned()],
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
         assert!(
             live.selected_roots.lock().unwrap().is_none(),
             "selected_roots must be reset once goal execution completes"
@@ -5278,9 +5360,17 @@ export const build = product("callback-test", "custom-goal", async function buil
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
-        execute_goal_live(&live, p, "custom-goal", &["a".to_owned()], false, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "custom-goal",
+            &["a".to_owned()],
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
         assert!(
             !p.join("ran-a.txt").exists(),
             "a successful callback must fully own the goal; native per-target dispatch must not also run"
@@ -5322,9 +5412,17 @@ export const build = product("plain-goal-test", "plain-goal", async function bui
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
-        execute_goal_live(&live, p, "plain-goal", &["a".to_owned()], false, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "plain-goal",
+            &["a".to_owned()],
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
         assert_eq!(std::fs::read_to_string(p.join("ran-a.txt")).unwrap(), "ran");
     }
 
@@ -5359,9 +5457,17 @@ export const build = product("js-lane-slot-test", "build", async function build(
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["a".to_owned(), "b".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 2, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            false,
+            2,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
 
         let mut slots = BTreeSet::new();
         while let Ok(event) = rx.try_recv() {
@@ -5418,9 +5524,17 @@ export const build = product("js-lane-bound-test", "build", async function build
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
 
         let mut active = BTreeSet::new();
         let mut saw_js_lane = false;
@@ -5500,9 +5614,17 @@ export const build = product("single-js-worker-inflight-test", "build", async fu
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -5545,9 +5667,17 @@ export const build = product("interleaved-root-context-test", "build", async fun
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["a".to_owned(), "b".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
 
         let mut memo_ids = BTreeMap::new();
         let mut run_parents = BTreeMap::new();
@@ -5622,9 +5752,17 @@ export const build = product("deferred-run-context-test", "build", async functio
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
 
         let mut memo_ids = BTreeMap::new();
         let mut run_parents = BTreeMap::new();
@@ -5701,9 +5839,17 @@ export const build = product("live-cache-test", "build", async function build() 
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let selectors = vec!["app".to_owned()];
-        execute_goal_live(&live, p, "build", &selectors, true, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            true,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(p.join("build/live.txt")).unwrap(),
             "payload"
@@ -5711,16 +5857,32 @@ export const build = product("live-cache-test", "build", async function build() 
         std::fs::remove_file(p.join("build/live.txt")).unwrap();
 
         reset_js_memo_state(&live).await;
-        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "rr");
         std::fs::remove_file(p.join("build/live.txt")).unwrap();
 
         reset_js_memo_state(&live).await;
-        execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "rr");
         assert_eq!(
             std::fs::read_to_string(p.join("build/live.txt")).unwrap(),
@@ -5729,9 +5891,17 @@ export const build = product("live-cache-test", "build", async function build() 
         std::fs::remove_file(p.join("build/live.txt")).unwrap();
 
         reset_js_memo_state(&live).await;
-        execute_goal_live(&live, p, "build", &selectors, true, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            true,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "rrr");
         assert_eq!(
             std::fs::read_to_string(p.join("build/live.txt")).unwrap(),
@@ -5792,9 +5962,17 @@ configure("cache_test", {{ mode: {mode} }});
                 tx,
             );
             *live.scheduler.lock().unwrap() = Some(scheduler);
-            execute_goal_live(&live, p, "build", &selectors, false, 1, serde_json::json!({}))
-                .await
-                .unwrap();
+            execute_goal_live(
+                &live,
+                p,
+                "build",
+                &selectors,
+                false,
+                1,
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
             runs.push(std::fs::read_to_string(&marker).unwrap());
         }
         assert_eq!(runs, ["r", "r", "rr"]);

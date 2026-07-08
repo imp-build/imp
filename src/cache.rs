@@ -169,7 +169,7 @@ pub(crate) fn ensure_native_tool_artifact(name: &str, resolved: &Path) -> Result
     crate::exec::validate_tool_name(name)?;
     let root = cache_root()?.join("native-tools").join(name);
     std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
-    let link = root.join(name);
+    let link = root.join(native_tool_artifact_filename(name, resolved));
     if std::fs::read_link(&link).ok().as_deref() != Some(resolved) {
         let _ = std::fs::remove_file(&link);
         #[cfg(unix)]
@@ -180,6 +180,20 @@ pub(crate) fn ensure_native_tool_artifact(name: &str, resolved: &Path) -> Result
             .with_context(|| format!("copy {} -> {}", resolved.display(), link.display()))?;
     }
     Ok(root)
+}
+
+#[cfg(windows)]
+fn native_tool_artifact_filename(name: &str, resolved: &Path) -> String {
+    resolved
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| format!("{name}.{ext}"))
+        .unwrap_or_else(|| name.to_owned())
+}
+
+#[cfg(not(windows))]
+fn native_tool_artifact_filename(name: &str, _resolved: &Path) -> String {
+    name.to_owned()
 }
 
 pub(crate) fn workspace_cache_id(workspace_root: &Path) -> String {
@@ -298,7 +312,10 @@ pub(crate) fn cached_outputs_present(record: &TaskCacheRecord) -> Result<()> {
                 // time instead of here; this trades a slightly later failure for
                 // avoiding an O(files) walk on every cache lookup.
                 let tree_digest = output.tree_digest.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("{} is a directory output with no tree_digest", output.artifact_id)
+                    anyhow::anyhow!(
+                        "{} is a directory output with no tree_digest",
+                        output.artifact_id
+                    )
                 })?;
                 let path = cas_blob_path(tree_digest)?;
                 if !path.is_file() {
@@ -398,10 +415,12 @@ pub(crate) fn materialize_named_caches(
 /// workspace may be edited by a user or tool afterward, which would silently
 /// corrupt the shared CAS blob if it were linked instead of copied.
 fn materialize_cached_directory(output: &CachedArtifact, destination: &Path) -> Result<()> {
-    let tree_digest = output
-        .tree_digest
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("{} is a directory output with no tree_digest", output.artifact_id))?;
+    let tree_digest = output.tree_digest.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} is a directory output with no tree_digest",
+            output.artifact_id
+        )
+    })?;
     let tree = crate::digest::DigestTrie::load(tree_digest)?;
 
     if let Some(parent) = destination.parent() {
@@ -537,9 +556,11 @@ pub(crate) fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
     #[test]
+    #[cfg(unix)]
     fn materialize_cached_directory_round_trips_a_symlink() {
         let source = tempfile::tempdir().unwrap();
         std::fs::write(source.path().join("real"), b"hello").unwrap();
