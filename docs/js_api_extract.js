@@ -1,11 +1,12 @@
 // Pure-JS extraction of JSDoc comments from the imp JS DSL surface
 // (src/imp_core.js + rules/**/*.js), turned into Zola-ingestible Markdown
-// pages. No host bridge is used here — read_file() is called by the caller
-// (docs/BUILD.js's docsApiReference product) so this module stays a plain,
+// pages. No host bridge is used here: read_file() is called by the caller
+// (docs/BUILD.js's api_reference_build product) so this module stays a plain,
 // easily unit-testable string-in/string-out parser.
 
 const EXPORT_FUNCTION_RE = /^export function (\w+)\s*\(([^)]*)\)/;
-const EXPORT_BINDING_RE = /^export const (\w+)\s*=\s*(?:memo|product)\(/;
+const EXPORT_CLASS_RE = /^export class (\w+)\b/;
+const EXPORT_CONST_RE = /^export const (\w+)\s*=/;
 const PARAM_TAG_RE = /^@param\b\s*(.*)$/;
 const RETURNS_TAG_RE = /^@returns?\b\s*(.*)$/;
 const CATEGORY_TAG_RE = /^@category\s+(\S+)/;
@@ -35,17 +36,13 @@ function splitLeadingBraceType(text) {
     return { type: null, rest: text };
 }
 
-// Sidebar/page grouping below "language". Order here is display order.
-// Entries with no explicit @category tag default to "api": they're
-// exported, so they're presumably meant to be used by other code. Whether a
-// given export is genuinely needed is a source-level question (should it be
-// exported at all?), not something this extractor infers.
 const CATEGORY_LABELS = {
     configuration: "Configuration",
     target: "Targets",
     api: "API",
 };
 const CATEGORY_ORDER = ["configuration", "target", "api"];
+const USER_API_CATEGORIES = ["configuration", "target"];
 
 function stripCommentMarker(line) {
     return line.replace(/^\*\s?/, "");
@@ -101,15 +98,15 @@ export function parseDocBlock(lines) {
 }
 
 /**
- * Scan a JS source file's text and extract one entry per documentable
- * export: `export function name(...)` declarations and `export const name =
- * product(...)`/`memo(...)` bindings. Each entry carries the nearest
- * preceding contiguous JSDoc block as its doc comment, if any — blank
- * lines don't break contiguity, but any other intervening code line does
- * (so a comment can't accidentally attach to a later, unrelated export).
+ * Scan a JS source file's text and extract one entry per local export:
+ * `export function`, `export class`, and `export const` declarations. Each
+ * entry carries the nearest preceding contiguous JSDoc block as its doc
+ * comment, if any: blank lines don't break contiguity, but any other
+ * intervening code line does (so a comment can't accidentally attach to a
+ * later, unrelated export).
  *
  * @param {string} sourceText
- * @returns {{ name: string, params: string, kind: "function"|"binding", doc: object|null }[]}
+ * @returns {{ name: string, params: string, kind: "function"|"class"|"const", doc: object|null }[]}
  */
 export function parseModule(sourceText) {
     const lines = sourceText.split("\n");
@@ -153,6 +150,22 @@ export function parseModule(sourceText) {
             continue;
         }
 
+        const classMatch = trimmed.match(EXPORT_CLASS_RE);
+        if (classMatch) {
+            if (classMatch[1].startsWith("__")) {
+                pendingDocLines = null;
+                continue;
+            }
+            entries.push({
+                name: classMatch[1],
+                params: "",
+                kind: "class",
+                doc: pendingDocLines ? parseDocBlock(pendingDocLines) : null,
+            });
+            pendingDocLines = null;
+            continue;
+        }
+
         const fnMatch = trimmed.match(EXPORT_FUNCTION_RE);
         if (fnMatch) {
             if (fnMatch[1].startsWith("__")) {
@@ -169,16 +182,16 @@ export function parseModule(sourceText) {
             continue;
         }
 
-        const bindMatch = trimmed.match(EXPORT_BINDING_RE);
-        if (bindMatch) {
-            if (bindMatch[1].startsWith("__")) {
+        const constMatch = trimmed.match(EXPORT_CONST_RE);
+        if (constMatch) {
+            if (constMatch[1].startsWith("__")) {
                 pendingDocLines = null;
                 continue;
             }
             entries.push({
-                name: bindMatch[1],
+                name: constMatch[1],
                 params: "",
-                kind: "binding",
+                kind: "const",
                 doc: pendingDocLines ? parseDocBlock(pendingDocLines) : null,
             });
             pendingDocLines = null;
@@ -198,7 +211,13 @@ function renderEntry(entry) {
     lines.push(`### ${entry.name}`);
     lines.push("");
     lines.push("```js");
-    lines.push(entry.kind === "function" ? `${entry.name}(${entry.params})` : entry.name);
+    if (entry.kind === "function") {
+        lines.push(`${entry.name}(${entry.params})`);
+    } else if (entry.kind === "class") {
+        lines.push(`class ${entry.name}`);
+    } else {
+        lines.push(`const ${entry.name}`);
+    }
     lines.push("```");
     lines.push("");
 
@@ -286,6 +305,17 @@ export function categoryForEntry(entry) {
     return "api";
 }
 
+/**
+ * Return true if an entry belongs in the curated user-facing API reference.
+ *
+ * @param {{ doc: object|null }} entry
+ * @returns {boolean}
+ */
+export function isUserApiEntry(entry) {
+    const tag = entry.doc && entry.doc.category;
+    return USER_API_CATEGORIES.includes(tag);
+}
+
 function renderEntries(entries) {
     return entries.map(renderEntry).join("\n\n");
 }
@@ -323,21 +353,58 @@ export function renderLanguagePage(language, byCategory) {
 }
 
 /**
- * Parse every scanned source file into one API reference page per sidebar
- * language (directory-derived), each containing all of that language's
- * categorized entries (Configuration/Targets/API — see categoryForEntry)
- * inlined as headings.
+ * Turn a JS source path into a flat Zola page path. Keeping the source path in
+ * the title preserves the module identity while the flat slug keeps the
+ * existing section sidebar simple.
+ *
+ * @param {string} sourcePath
+ * @returns {string}
+ */
+export function modulePagePath(sourcePath) {
+    return `${sourcePath.replace(/\.js$/, "").replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "")}.md`;
+}
+
+function renderModulePage(sourcePath, entries) {
+    const frontmatter = `+++\ntitle = "${sourcePath}"\n+++\n`;
+    return `${frontmatter}\n${renderEntries(entries)}`;
+}
+
+/**
+ * Parse every scanned source file into exhaustive code-reference pages: one
+ * page per module, including every local export and marking missing JSDoc.
  *
  * @param {{ sourcePath: string, sourceText: string }[]} files
  * @returns {{ path: string, markdown: string }[]}
  */
-export function extractApiReference(files) {
+export function extractCodeReference(files) {
+    const pages = [];
+    for (const { sourcePath, sourceText } of files.slice().sort((a, b) => a.sourcePath.localeCompare(b.sourcePath))) {
+        const entries = parseModule(sourceText);
+        if (entries.length === 0) continue;
+        pages.push({
+            path: modulePagePath(sourcePath),
+            markdown: renderModulePage(sourcePath, entries),
+        });
+    }
+    return pages;
+}
+
+/**
+ * Parse every scanned source file into one curated user API reference page per
+ * sidebar language (directory-derived). Only entries tagged
+ * `@category target` or `@category configuration` are included.
+ *
+ * @param {{ sourcePath: string, sourceText: string }[]} files
+ * @returns {{ path: string, markdown: string }[]}
+ */
+export function extractUserApiReference(files) {
     const byLanguage = new Map();
     for (const { sourcePath, sourceText } of files) {
-        const language = languageForDirectory(directoryForSourcePath(sourcePath));
-        if (!byLanguage.has(language)) byLanguage.set(language, new Map());
-        const byCategory = byLanguage.get(language);
         for (const entry of parseModule(sourceText)) {
+            if (!isUserApiEntry(entry)) continue;
+            const language = languageForDirectory(directoryForSourcePath(sourcePath));
+            if (!byLanguage.has(language)) byLanguage.set(language, new Map());
+            const byCategory = byLanguage.get(language);
             const category = categoryForEntry(entry);
             if (!byCategory.has(category)) byCategory.set(category, []);
             byCategory.get(category).push(entry);
@@ -351,4 +418,14 @@ export function extractApiReference(files) {
         pages.push({ path: `${slug}.md`, markdown: renderLanguagePage(language, byCategory) });
     }
     return pages;
+}
+
+/**
+ * Backwards-compatible name for the exhaustive JS code reference.
+ *
+ * @param {{ sourcePath: string, sourceText: string }[]} files
+ * @returns {{ path: string, markdown: string }[]}
+ */
+export function extractApiReference(files) {
+    return extractCodeReference(files);
 }

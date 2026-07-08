@@ -1,8 +1,13 @@
-{# Flat nav for the JS API reference: one page per language/subsystem (one
-   per rules/ directory, see docs/js_api_extract.js), each page inlining its
-   own Configuration/Targets/API sections as headings rather than separate
-   subpages. #}
+{# Flat nav for generated JS reference sections. #}
+{% if current_path is defined and current_path is starting_with("/reference/user-api") %}
+{% set api_root = get_section(path="reference/user-api/_index.md") %}
+{% elif page is defined and page.path is starting_with("/reference/user-api") %}
+{% set api_root = get_section(path="reference/user-api/_index.md") %}
+{% elif section is defined and section.path is starting_with("/reference/user-api") %}
+{% set api_root = get_section(path="reference/user-api/_index.md") %}
+{% else %}
 {% set api_root = get_section(path="reference/js-api/_index.md") %}
+{% endif %}
 <nav class="docs-sidebar">
     <a class="docs-sidebar__title" href="{{ api_root.permalink }}">{{ api_root.title }}</a>
     <ul>

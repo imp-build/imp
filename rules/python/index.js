@@ -219,6 +219,19 @@ export class PythonApp extends Target {
     }
 }
 
+/**
+ * Declare a Python application packaged as a PEX file.
+ *
+ * @category target
+ * @param {object} opts
+ * @param {string} [opts.src="."] Workspace-relative Python project directory.
+ * @param {string} [opts.entryPoint] PEX entry point.
+ * @param {object|string} [opts.uvVersion] uv toolchain target handle or version string.
+ * @param {object|string} [opts.pexVersion] PEX toolchain target handle or version string.
+ * @param {string[]} [opts.extraPexArgs=[]] Extra arguments appended to PEX.
+ * @param {Array} [opts.deps=[]] Additional dependencies.
+ * @returns {object} Target handle.
+ */
 export function pythonApp({ src, entryPoint, uvVersion, pexVersion, extraPexArgs, deps }) {
     return new PythonApp({ src, entryPoint, uvVersion, pexVersion, extraPexArgs, deps });
 }

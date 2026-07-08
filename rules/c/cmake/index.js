@@ -676,6 +676,14 @@ export class CppSources extends Target {
     }
 }
 
+/**
+ * Declare a target that owns C/C++ source files.
+ *
+ * @category target
+ * @param {object} opts
+ * @param {string[]} opts.srcs Source glob patterns.
+ * @returns {object} Target handle.
+ */
 export function cppSources({ srcs }) {
     return new CppSources({ srcs });
 }
@@ -738,6 +746,24 @@ export class CmakeLib extends Target {
     }
 }
 
+/**
+ * Declare a CMake-backed native library, binary, or test target.
+ *
+ * @category target
+ * @param {object} opts
+ * @param {string} [opts.src="."] Workspace-relative CMake source directory.
+ * @param {string} [opts.buildDir] Workspace-relative build directory.
+ * @param {string[]} [opts.srcs] Source glob patterns staged for CMake.
+ * @param {string[]} [opts.dirs=[]] Additional directories staged for CMake.
+ * @param {string[]} [opts.cmakeArgs=[]] Extra arguments passed to CMake configure.
+ * @param {string[]} [opts.ctestArgs=[]] Extra arguments passed to ctest.
+ * @param {string[]} [opts.outputs=[]] Output paths produced by the CMake build.
+ * @param {string[]} [opts.stageOutputs=[]] Output paths to stage from the build directory.
+ * @param {object|string} [opts.toolchain] CMake toolchain target handle or version string.
+ * @param {object|string} [opts.compiler] Compiler toolchain target handle or version string.
+ * @param {Array} [opts.deps=[]] Additional dependencies.
+ * @returns {object} Target handle.
+ */
 export function cmakeLib({
     src = ".",
     buildDir,

@@ -26,6 +26,15 @@ export class StampFile extends Target {
     }
 }
 
+/**
+ * Declare a target that writes fixed text to an output file.
+ *
+ * @category target
+ * @param {object} opts
+ * @param {string} opts.output Workspace-relative output path.
+ * @param {string} opts.text Text to write.
+ * @returns {object} Target handle.
+ */
 export function stampFile({ output, text }) {
     return new StampFile({ output, text });
 }

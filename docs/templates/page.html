@@ -2,10 +2,10 @@
 
 {% block title %}{{ page.title }} — {{ config.title }}{% endblock title %}
 
-{% block main_class %}{% if page.path is starting_with("/reference/js-api/") or page.path is starting_with("/guide/") %}site-main--wide{% endif %}{% endblock main_class %}
+{% block main_class %}{% if page.path is starting_with("/reference/js-api/") or page.path is starting_with("/reference/user-api/") or page.path is starting_with("/guide/") %}site-main--wide{% endif %}{% endblock main_class %}
 
 {% block content %}
-{% if page.path is starting_with("/reference/js-api/") %}
+{% if page.path is starting_with("/reference/js-api/") or page.path is starting_with("/reference/user-api/") %}
 <div class="docs-layout">
     {% include "partials/js_api_sidebar.html" %}
     <article class="content-body">

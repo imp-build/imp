@@ -10,8 +10,12 @@ import {
     languageForDirectory,
     languageSlug,
     categoryForEntry,
+    isUserApiEntry,
+    modulePagePath,
     renderLanguagePage,
     extractApiReference,
+    extractCodeReference,
+    extractUserApiReference,
 } from "//docs/js_api_extract";
 
 describe("js_api_extract", () => {
@@ -147,8 +151,27 @@ test("captures export const bindings assigned to product()/memo()", () => {
     const entries = parseModule(src);
     expect(entries.length).toBe(1);
     expect(entries[0].name).toBe("bundle");
-    expect(entries[0].kind).toBe("binding");
+    expect(entries[0].kind).toBe("const");
     expect(entries[0].doc.summary).toBe("Build the thing.");
+});
+
+test("captures exported classes and ordinary const bindings for code docs", () => {
+    const entries = parseModule([
+        "/** A target class. */",
+        "export class Thing extends Target {",
+        "}",
+        "",
+        "/** A constant. */",
+        "export const VALUE = 1;",
+    ].join("\n"));
+
+    expect(entries.length).toBe(2);
+    expect(entries[0].name).toBe("Thing");
+    expect(entries[0].kind).toBe("class");
+    expect(entries[0].doc.summary).toBe("A target class.");
+    expect(entries[1].name).toBe("VALUE");
+    expect(entries[1].kind).toBe("const");
+    expect(entries[1].doc.summary).toBe("A constant.");
 });
 
 test("leaves undocumented exports with a null doc", () => {
@@ -208,6 +231,13 @@ test("untagged entries default to api, since they're exported", () => {
     expect(categoryForEntry({ doc: { category: null } })).toBe("api");
 });
 
+test("user API entries are explicitly target or configuration tagged", () => {
+    expect(isUserApiEntry({ doc: { category: "target" } })).toBe(true);
+    expect(isUserApiEntry({ doc: { category: "configuration" } })).toBe(true);
+    expect(isUserApiEntry({ doc: { category: "api" } })).toBe(false);
+    expect(isUserApiEntry({ doc: null })).toBe(false);
+});
+
 test("renders a language page with frontmatter and category headings in CATEGORY_ORDER", () => {
     const byCategory = new Map([
         ["target", [
@@ -233,7 +263,39 @@ test("renders a language page with frontmatter and category headings in CATEGORY
     expect(md.indexOf("## Configuration") < md.indexOf("## Targets")).toBeTruthy();
 });
 
-test("extractApiReference emits one page per language with all categories inlined as headings", () => {
+test("modulePagePath creates flat deterministic page paths", () => {
+    expect(modulePagePath("src/imp_core.js")).toBe("src-imp-core.md");
+    expect(modulePagePath("rules/odin/toolchain.js")).toBe("rules-odin-toolchain.md");
+});
+
+test("extractCodeReference emits one page per source module with every export", () => {
+    const pages = extractCodeReference([
+        {
+            sourcePath: "rules/odin/index.js",
+            sourceText: [
+                "/**",
+                " * Declare an Odin package.",
+                " * @category target",
+                " */",
+                "export function odinPackage(opts) {}",
+                "",
+                'export const odinBuild = product("odin-package", "build", async function odinBuild(handle) {});',
+                "",
+                "export class OdinPackage extends Target {}",
+            ].join("\n"),
+        },
+    ]);
+
+    expect(pages.length).toBe(1);
+    expect(pages[0].path).toBe("rules-odin-index.md");
+    expect(pages[0].markdown).toContain('title = "rules/odin/index.js"');
+    expect(pages[0].markdown).toContain("### odinPackage");
+    expect(pages[0].markdown).toContain("### odinBuild");
+    expect(pages[0].markdown).toContain("_Undocumented._");
+    expect(pages[0].markdown).toContain("### OdinPackage");
+});
+
+test("extractUserApiReference emits curated language pages for target/configuration entries only", () => {
     const files = [
         {
             sourcePath: "rules/odin/index.js",
@@ -266,7 +328,7 @@ test("extractApiReference emits one page per language with all categories inline
         },
     ];
 
-    const pages = extractApiReference(files);
+    const pages = extractUserApiReference(files);
     const byPath = new Map(pages.map(p => [p.path, p.markdown]));
 
     expect(byPath.has("odin.md")).toBe(true);
@@ -275,14 +337,24 @@ test("extractApiReference emits one page per language with all categories inline
     expect(odin).toContain("### odinToolchain");
     expect(odin).toContain("## Targets");
     expect(odin).toContain("### odinPackage");
-    expect(odin).toContain("## API");
-    expect(odin).toContain("### odinBuild");
+    expect(odin).not.toContain("## API");
+    expect(odin).not.toContain("### odinBuild");
     // Configuration comes before Targets, which comes before API.
     expect(odin.indexOf("## Configuration") < odin.indexOf("## Targets")).toBeTruthy();
-    expect(odin.indexOf("## Targets") < odin.indexOf("## API")).toBeTruthy();
 
-    expect(byPath.has("rules.md")).toBe(true);
-    // Untagged entries default to the "api" category.
-    expect(byPath.get("rules.md")).toContain("### asset");
+    expect(byPath.has("rules.md")).toBe(false);
+});
+
+test("extractApiReference is the exhaustive code-reference compatibility wrapper", () => {
+    const pages = extractApiReference([
+        {
+            sourcePath: "rules/asset.js",
+            sourceText: "export function asset(opts) {}",
+        },
+    ]);
+
+    expect(pages.length).toBe(1);
+    expect(pages[0].path).toBe("rules-asset.md");
+    expect(pages[0].markdown).toContain("### asset");
 });
 });

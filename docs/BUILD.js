@@ -1,12 +1,12 @@
 import { target, product, run, output, output_path, glob, paths, read_file } from "imp:core";
 import { rulesTest } from "//rules/imp/test";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { extractApiReference } from "//docs/js_api_extract";
+import { extractCodeReference, extractUserApiReference } from "//docs/js_api_extract";
 import { zolaToolchain, zolaTool, zolaBin } from "//rules/zola/toolchain";
 
 export const rules_test = rulesTest({ root: "//docs" });
 
-const API_REFERENCE_OUT = "generated/docs-js-api-reference";
+const API_REFERENCE_OUT = "generated/docs-api-reference";
 const SITE_OUT = "generated/docs-site";
 
 const mkdirTool = nativeTool("mkdir");
@@ -25,7 +25,10 @@ export const api_reference_build = product("js-api-reference", "build", async fu
     });
 
     const files = paths(srcs).slice().sort().map(path => ({ sourcePath: path, sourceText: read_file(path) }));
-    const pages = extractApiReference(files).map(({ path, markdown }) => [path, markdown]);
+    const pages = [
+        ...extractCodeReference(files).map(({ path, markdown }) => [`js-api/${path}`, markdown]),
+        ...extractUserApiReference(files).map(({ path, markdown }) => [`user-api/${path}`, markdown]),
+    ];
 
     const script = 'out=$1; shift; mkdir -p "$out"; while [ "$#" -gt 0 ]; do name=$1; content=$2; shift 2; mkdir -p "$out/$(dirname "$name")"; printf "%s" "$content" > "$out/$name"; done';
     const argv = ["sh", "-c", script, "docs-api-reference", output_path(API_REFERENCE_OUT)];
@@ -56,12 +59,13 @@ export const site_build = product("zola-site", "build", async function site_buil
 
     const script = [
         "root=$1; apiref=$2",
-        'mkdir -p "$root/content/reference/js-api" "$root/templates" "$root/static"',
+        'mkdir -p "$root/content/reference/js-api" "$root/content/reference/user-api" "$root/templates" "$root/static"',
         'cp docs/config.toml "$root/config.toml"',
         'cp -r docs/content/. "$root/content/"',
         'cp -r docs/templates/. "$root/templates/"',
         'cp -r docs/static/. "$root/static/"',
-        'cp -r "$apiref/." "$root/content/reference/js-api/"',
+        'cp -r "$apiref/js-api/." "$root/content/reference/js-api/"',
+        'cp -r "$apiref/user-api/." "$root/content/reference/user-api/"',
         'zola --root "$root" build --output-dir "$root/public"',
     ].join(" && ");
 

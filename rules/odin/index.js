@@ -1165,6 +1165,15 @@ export class OdinGenerateBuild extends Target {
     }
 }
 
+/**
+ * Declare an Odin BUILD.js generation scanner target.
+ *
+ * @category target
+ * @param {object} [opts]
+ * @param {string} [opts.root="."] Workspace-relative directory to scan.
+ * @param {string[]} [opts.exclude] Glob patterns excluded from scanning.
+ * @returns {object} Target handle.
+ */
 export function odinGenerateBuild({ root = ".", exclude = DEFAULT_GENERATE_BUILD_EXCLUDES } = {}) {
     return new OdinGenerateBuild({ root, exclude });
 }
