@@ -57,7 +57,7 @@ import "//rules/workflows/run";
 
 // Registers the "build" goal's artifact summary callback for consumers that
 // import Odin build rules without importing the workflows layer explicitly.
-import "//rules/workflows/build";
+import "//rules/workflows/build_workflow";
 
 export {
     acquireOdinToolchain,

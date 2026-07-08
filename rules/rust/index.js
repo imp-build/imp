@@ -28,7 +28,7 @@ import {
 
 // Registers the "build" goal's artifact summary callback for consumers that
 // import Rust build rules without importing the workflows layer explicitly.
-import "//rules/workflows/build";
+import "//rules/workflows/build_workflow";
 
 export {
     acquireRustToolchain,

@@ -6,7 +6,7 @@ import "//rules/gen";
 import { odinToolchain } from "//rules/odin";
 import { odinfmtToolchain } from "//rules/odin/odinfmt/toolchain";
 import { rustToolchain } from "//rules/rust";
-import "//rules/workflows/build";
+import "//rules/workflows/build_workflow";
 import "//rules/workflows/fmt";
 import "//rules/workflows/lint";
 import "//rules/workflows/lockfiles";

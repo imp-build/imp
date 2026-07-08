@@ -9,7 +9,7 @@ import {
 } from "imp:core";
 import {
     buildGoal,
-} from "//rules/workflows/build";
+} from "//rules/workflows/build_workflow";
 
 async function withFakeLog(fn) {
     const real = globalThis.__host_log;
