@@ -7,6 +7,7 @@ import {
     paths,
     platformInfo,
     product,
+    productFor,
     run,
     sourcesField,
     targetAddress,
@@ -23,7 +24,6 @@ import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 
 import {
     defaultGccToolchain,
-    gccTool,
 } from "//rules/c/gcc/toolchain";
 
 // Registers the "build" goal's artifact summary callback for consumers that
@@ -109,25 +109,38 @@ export function rust_toolchain_version(handle) {
         : resolveRustToolchainVersion(handle.attrs.toolchainVersion);
 }
 
-// cargo/rustc need a real C linker in the hermetic sandbox. Linux reuses the
-// pinned Bootlin gcc toolchain Odin already relies on and points rustc at its
-// "clang" wrapper. Windows uses the host MinGW gcc discovered via PATH; the
-// Bootlin archive is Linux-only and cannot provide a native Windows linker.
-async function rustLinkerTools() {
+// cargo/rustc need a real C link driver in the hermetic sandbox — rustc
+// shells out to a program literally named "cc" by default. Reuse the gcc
+// toolchain Odin already relies on for the same reason (rules/odin/index.js's
+// odinScriptTools): its "rust-link-driver" product exposes a "clang"-named
+// wrapper script on PATH that execs the real (prefixed) gcc binary, so
+// pointing rustc's linker at "clang" sidesteps needing a "cc" alias of our
+// own. A workspace can additionally opt into a faster backend linker (e.g.
+// mold) via rustToolchain({ linker: moldToolchain() }); by default no extra
+// -fuse-ld= flag is added.
+//
+// Windows has no pinned toolchain to plug into this abstraction (the Bootlin
+// gcc archive is Linux-only) — it always uses the host's own MinGW gcc,
+// discovered via PATH, regardless of any declared rustToolchain/linkDriver.
+async function rustLinkerTools(toolchainHandle) {
     if (platformInfo().os === "windows") {
         return {
             tools: [await nativeToolSpec(nativeTool("gcc"))],
             rustflags: "-C linker=gcc",
         };
     }
-    const gcc = defaultGccToolchain();
-    if (!gcc) {
-        throw new Error("cargo builds need a declared gccToolchain() default — see //rules/c/gcc");
+    const linkDriverHandle = (toolchainHandle && toolchainHandle.attrs.linkDriver) || defaultGccToolchain();
+    if (!linkDriverHandle) {
+        throw new Error("cargo builds need a declared gccToolchain() default, or a rustToolchain({ linkDriver }) — see //rules/c/gcc");
     }
-    return {
-        tools: [await nativeToolSpec(nativeTool("dirname")), await gccTool(gcc.attrs.version)],
-        rustflags: "-C linker=clang",
-    };
+    const linkDriver = await productFor(linkDriverHandle, "rust-link-driver");
+
+    const linkerHandle = toolchainHandle && toolchainHandle.attrs.linker;
+    const linker = linkerHandle ? await productFor(linkerHandle, "rust-linker") : null;
+
+    const tools = [...(await linkDriver.tools()), ...(linker ? await linker.tools() : [])];
+    const rustflags = [...(await linkDriver.rustflags()), ...(linker ? await linker.rustflags() : [])].join(" ");
+    return { tools, rustflags };
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +157,8 @@ async function rustLinkerTools() {
 export const cargoBuild = product("cargo-package", "build",
     async function cargoBuild(handle) {
         const toolSpec = await rustTool(rust_toolchain_version(handle));
-        const linker = await rustLinkerTools();
+        const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+        const { tools: linkerTools, rustflags } = await rustLinkerTools(toolchainHandle);
 
         const path = declared_path(handle, handle.attrs.path || ".");
         const srcs = await sources(handle);
@@ -161,11 +175,11 @@ export const cargoBuild = product("cargo-package", "build",
         const result = await run({
             argv: [
                 "sh", "-c", script, "cargo-build",
-                `${path}/Cargo.toml`, buildDir, linker.rustflags,
+                `${path}/Cargo.toml`, buildDir, rustflags,
                 ...(handle.attrs.release ? ["--release"] : []),
                 ...handle.attrs.cargoArgs,
             ],
-            tools: [...toolSpec.tools, ...linker.tools],
+            tools: [...toolSpec.tools, ...linkerTools],
             env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`],
             inputs: [srcs],
             outputs: outPaths.map((p) => output(output_path(p))),
@@ -192,7 +206,8 @@ export const cargoBuild = product("cargo-package", "build",
 export const cargoTest = product("cargo-package", "test",
     async function cargoTest(handle) {
         const toolSpec = await rustTool(rust_toolchain_version(handle));
-        const linker = await rustLinkerTools();
+        const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+        const { tools: linkerTools, rustflags } = await rustLinkerTools(toolchainHandle);
 
         const path = declared_path(handle, handle.attrs.path || ".");
         const srcs = await sources(handle);
@@ -208,10 +223,10 @@ export const cargoTest = product("cargo-package", "test",
         return run({
             argv: [
                 "sh", "-c", script, "cargo-test",
-                `${path}/Cargo.toml`, buildDir, linker.rustflags,
+                `${path}/Cargo.toml`, buildDir, rustflags,
                 ...handle.attrs.testArgs,
             ],
-            tools: [...toolSpec.tools, ...linker.tools],
+            tools: [...toolSpec.tools, ...linkerTools],
             env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`],
             inputs: [srcs],
             impure: true,

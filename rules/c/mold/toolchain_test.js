@@ -1,3 +1,4 @@
+import { productFor } from "imp:core";
 import {
     describe,
     expect,
@@ -131,6 +132,34 @@ test("downloads and extracts a toolchain via a sandboxed curl+tar run()", async 
         expect(extract.outputs[0].namedCache.key).toBe(key);
 
         expect(host.calls.some((call) => call[0] === "nativeTool" && call[1] === "curl")).toBe(true);
+    });
+});
+
+test("registers an odin-linker product exposing -linker:mold and a mold tool", async () => {
+    await withMoldHost(async () => {
+        installMoldToolchain("2.41.0", "/tmp/mold-2.41.0");
+        const toolchain = moldToolchain("2.41.0");
+
+        const linker = await productFor(toolchain, "odin-linker");
+
+        expect(await linker.flags()).toEqual(["-linker:mold"]);
+        const tools = await linker.tools();
+        expect(tools.length).toBe(1);
+        expect(tools[0].name).toBe("mold");
+    });
+});
+
+test("registers a rust-linker product exposing -fuse-ld=mold and a mold tool", async () => {
+    await withMoldHost(async () => {
+        installMoldToolchain("2.41.0", "/tmp/mold-2.41.0");
+        const toolchain = moldToolchain("2.41.0");
+
+        const linker = await productFor(toolchain, "rust-linker");
+
+        expect(await linker.rustflags()).toEqual(["-C", "link-arg=-fuse-ld=mold"]);
+        const tools = await linker.tools();
+        expect(tools.length).toBe(1);
+        expect(tools[0].name).toBe("mold");
     });
 });
 });

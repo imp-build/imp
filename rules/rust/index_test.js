@@ -13,17 +13,23 @@ import {
     __resetGccToolchainStateForTest,
     gccToolchain,
 } from "//rules/c/gcc/toolchain";
+import {
+    __resetMoldToolchainStateForTest,
+    moldToolchain,
+} from "//rules/c/mold/toolchain";
 
 function withRustHost(platOrFn, maybeFn) {
     const run = async (host) => {
         __resetRustToolchainStateForTest();
         __resetGccToolchainStateForTest();
+        __resetMoldToolchainStateForTest();
         const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;
         try {
             return await fn(host);
         } finally {
             __resetRustToolchainStateForTest();
             __resetGccToolchainStateForTest();
+            __resetMoldToolchainStateForTest();
         }
     };
     return typeof platOrFn === "function"
@@ -168,6 +174,36 @@ test("cargoTest passes through extra testArgs", async () => {
 
         const testRun = host.runs[host.runs.length - 1];
         expect(testRun.argv).toContain("--nocapture");
+    });
+});
+
+test("cargoBuild adds mold backend flags and tool when the toolchain configures a linker", async () => {
+    await withRustHost(async (host) => {
+        gccToolchain("2025.08-1", { default: true });
+        const mold = moldToolchain("2.41.0");
+        const toolchain = rustToolchain("1.93.0", { default: true, linker: mold });
+        const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
+        expect(pkg.attrs.toolchain).toBe(toolchain);
+
+        await cargoBuild(pkg);
+
+        const buildRun = host.runs[host.runs.length - 1];
+        expect(buildRun.argv).toContain("-C linker=clang -C link-arg=-fuse-ld=mold");
+        expect(buildRun.tools.some((t) => t.name === "mold")).toBe(true);
+    });
+});
+
+test("cargoBuild honors an explicit non-default linkDriver over defaultGccToolchain()", async () => {
+    await withRustHost(async (host) => {
+        gccToolchain("2025.08-1", { default: true });
+        const explicitGcc = gccToolchain("2024.02-1");
+        rustToolchain("1.93.0", { default: true, linkDriver: explicitGcc });
+        const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
+
+        await cargoBuild(pkg);
+
+        const buildRun = host.runs[host.runs.length - 1];
+        expect(buildRun.tools.some((t) => t.key && t.key.startsWith("2024.02-1/"))).toBe(true);
     });
 });
 

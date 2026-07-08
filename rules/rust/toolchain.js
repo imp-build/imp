@@ -146,6 +146,12 @@ function requireVersion(version) {
  * @param {string} version Exact Rust version, e.g. "1.79.0" (channels rejected).
  * @param {object} [opts]
  * @param {boolean} [opts.default=false] Set as the default toolchain.
+ * @param {object} [opts.linkDriver] C link driver toolchain handle (e.g.
+ *   gccToolchain()) registering a "rust-link-driver" product. Falls back to
+ *   defaultGccToolchain() if omitted.
+ * @param {object} [opts.linker] Linker toolchain handle (e.g. moldToolchain())
+ *   registering a "rust-linker" product. No extra backend flag is added if
+ *   omitted.
  * @returns {object} Target handle for this Rust toolchain.
  */
 export function rustToolchain(version, opts = {}) {
@@ -157,7 +163,11 @@ export function rustToolchain(version, opts = {}) {
 
     const toolchain = target({
         kind: "rust-toolchain",
-        attrs: { version },
+        attrs: {
+            version,
+            ...(opts.linkDriver ? { linkDriver: opts.linkDriver } : {}),
+            ...(opts.linker ? { linker: opts.linker } : {}),
+        },
     });
 
     if (opts.default) {

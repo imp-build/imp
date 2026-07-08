@@ -35,13 +35,14 @@ import {
 import { gccToolchain } from "//rules/c/gcc/toolchain";
 import { moldToolchain } from "//rules/c/mold/toolchain";
 
-// odinBuild/odinTest's build/link path always needs a declared default
-// gcc(+mold) toolchain (see odinScriptTools() in //rules/odin) — declare
-// them once, up front, for every test in this file that actually exercises
-// that path (via withFakeRun, which only stubs run()'s execution, not the
-// tool-resolution code that runs before it).
+// odinBuild/odinTest's build/link path always needs a declared default gcc
+// toolchain (see odinScriptTools() in //rules/odin) — declare it once, up
+// front, for every test in this file that actually exercises that path (via
+// withFakeRun, which only stubs run()'s execution, not the tool-resolution
+// code that runs before it). mold is opt-in (not required) — declared here
+// only so tests below can exercise odinToolchain({ linker: mold }).
 gccToolchain("2025.08-1", { default: true });
-moldToolchain("2.41.0", { default: true });
+const moldForTests = moldToolchain("2.41.0");
 import {
     target,
     hydrateTarget,
@@ -432,6 +433,40 @@ test("odinBuild does not use library build mode when package has a main entrypoi
             const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build rules/odin/example");
             expect(runEffect.argv).not.toContain("-build-mode:lib");
             expect(runEffect.outputs).toEqual([{ kind: "file", path: "build/odin/target" }]);
+        });
+    } finally {
+        configure("odin", null);
+    }
+});
+
+test("odinBuild links without an explicit linker override (no mold flag/tool)", async () => {
+    configure("odin", null);
+    try {
+        await withFakeRun(async () => {
+            const toolchain = odinToolchain("dev-2026-06", {});
+            const app = odinPackage({ path: "rules/odin/example", toolchain, output: "build/odin/target" });
+            await odinBuild(app);
+            const { trace } = getMemoTrace();
+            const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build rules/odin/example");
+            expect(runEffect.argv).not.toContain("-linker:mold");
+            expect(runEffect.tools.some((t) => t.name === "mold")).toBe(false);
+        });
+    } finally {
+        configure("odin", null);
+    }
+});
+
+test("odinBuild uses -linker:mold and a mold tool when the toolchain configures a linker", async () => {
+    configure("odin", null);
+    try {
+        await withFakeRun(async () => {
+            const toolchain = odinToolchain("dev-2026-06", { linker: moldForTests });
+            const app = odinPackage({ path: "rules/odin/example", toolchain, output: "build/odin/target" });
+            await odinBuild(app);
+            const { trace } = getMemoTrace();
+            const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build rules/odin/example");
+            expect(runEffect.argv).toContain("-linker:mold");
+            expect(runEffect.tools.some((t) => t.name === "mold")).toBe(true);
         });
     } finally {
         configure("odin", null);

@@ -267,3 +267,50 @@ product("mold-toolchain", "gen-lockfiles", (handle) =>
         downloadUrl: moldDownloadUrl,
         artifactName: moldArtifactName,
     }));
+
+/**
+ * Adapter exposing a mold toolchain as Odin's `-linker:mold` linker role.
+ * Registered as the "odin-linker" product for the "mold-toolchain" kind so
+ * odinScriptTools() (rules/odin/index.js) can resolve it dynamically via
+ * productFor(handle, "odin-linker") instead of a hardcoded default lookup.
+ */
+export class OdinMoldLinker {
+    constructor(handle) {
+        this.handle = handle;
+    }
+
+    /** @returns {Promise<object[]>} run({ tools }) entries this linker needs. */
+    async tools() {
+        return [await moldTool(this.handle.attrs.version)];
+    }
+
+    /** @returns {Promise<string[]>} Odin CLI flags selecting this linker. */
+    async flags() {
+        return ["-linker:mold"];
+    }
+}
+
+product("mold-toolchain", "odin-linker", (handle) => new OdinMoldLinker(handle));
+
+/**
+ * Adapter exposing a mold toolchain as Rust/rustc's backend linker via
+ * `-fuse-ld=mold`, layered on whatever C link driver rustc uses (see
+ * RustGccLinkDriver in //rules/c/gcc/toolchain). Registered as the
+ * "rust-linker" product for the "mold-toolchain" kind.
+ */
+export class RustMoldLinker {
+    constructor(handle) {
+        this.handle = handle;
+    }
+
+    async tools() {
+        return [await moldTool(this.handle.attrs.version)];
+    }
+
+    /** @returns {Promise<string[]>} paired rustc -C flags enabling mold. */
+    async rustflags() {
+        return ["-C", "link-arg=-fuse-ld=mold"];
+    }
+}
+
+product("mold-toolchain", "rust-linker", (handle) => new RustMoldLinker(handle));

@@ -9,6 +9,7 @@ import {
 	output,
 	output_path,
 	product,
+	productFor,
 	registerBuildRule,
 	run,
 	sourcesField,
@@ -41,11 +42,6 @@ import {
     defaultGccToolchain,
     gccTool,
 } from "//rules/c/gcc/toolchain";
-
-import {
-    defaultMoldToolchain,
-    moldTool,
-} from "//rules/c/mold/toolchain";
 
 // Registers the "run" goal's single-target pre-flight callback
 // (rules/workflows/run.js). Imported here — not just from this repo's own
@@ -667,22 +663,23 @@ function empty_package_error(handle, path) {
 // Odin needs a real gcc toolchain for both roles beyond its own compiler:
 // `-build-mode:lib` uses its bundled binutils `ar`; linking an
 // executable/test binary shells out to a program literally named `clang`,
-// which in turn needs a real linker — explicitly declared as mold (via
-// -linker:mold) rather than left to clang's ambiguous system default.
-// GNU ld/gold/bfd's `-l:<namespec>` falls back to treating a full path as a
-// literal file when it isn't found via -L search dirs (which is why Odin's
-// own -l:<path> flags for local `foreign import` libraries resolve
-// correctly against those), and mold has the same forgiving behavior; LLD
-// does not — and Zig's bundled LLD (via `zig cc`) can't be swapped out for
-// a different linker either, it silently ignores -fuse-ld= — so Zig cannot
-// serve as Odin's linker for packages linking a local .a/.so this way
-// (confirmed empirically, not a documented LLD limitation). gcc's own ar
-// covers the archiver role too, so Zig has no role left in Odin's build at
-// all; it remains in use for CMake (rules/c/cmake), unaffected.
+// which in turn needs a real linker. By default no `-linker:` flag is
+// passed, so clang's own default (gcc's bundled GNU ld/bfd) is used — its
+// `-l:<namespec>` falls back to treating a full path as a literal file when
+// it isn't found via -L search dirs (which is why Odin's own -l:<path>
+// flags for local `foreign import` libraries resolve correctly against
+// those). A workspace can opt into a faster linker (e.g. mold, which has
+// the same forgiving behavior) via odinToolchain({ linker: moldToolchain() }).
+// LLD lacks this forgiving behavior — and Zig's bundled LLD (via `zig cc`)
+// can't be swapped out for a different linker either, it silently ignores
+// -fuse-ld= — so Zig cannot serve as Odin's linker for packages linking a
+// local .a/.so this way (confirmed empirically, not a documented LLD
+// limitation). gcc's own ar covers the archiver role too, so Zig has no
+// role left in Odin's build at all; it remains in use for CMake
+// (rules/c/cmake), unaffected.
 //
-// Both gcc and mold are downloaded/pinned (rules/c/gcc, rules/c/mold)
-// rather than resolved from ambient PATH — a project using Odin must
-// declare a default gccToolchain() (and moldToolchain(), for executables).
+// gcc is downloaded/pinned (rules/c/gcc) rather than resolved from ambient
+// PATH — a project using Odin must declare a default gccToolchain().
 async function odinScriptTools(handle, { needsDirname, isExecutable }) {
     const gcc = defaultGccToolchain();
     if (!gcc) {
@@ -695,13 +692,15 @@ async function odinScriptTools(handle, { needsDirname, isExecutable }) {
     if (!isExecutable) {
         return { tools: [...base, await gccTool(gcc.attrs.version)], flags: [] };
     }
-    const mold = defaultMoldToolchain();
-    if (!mold) {
-        throw new Error("Odin executable linking needs a declared moldToolchain() default — see //rules/c/mold");
+    const toolchainHandle = handle.attrs.toolchain || defaultOdinToolchain();
+    const linkerHandle = toolchainHandle && toolchainHandle.attrs.linker;
+    if (!linkerHandle) {
+        return { tools: [...base, await gccTool(gcc.attrs.version)], flags: [] };
     }
+    const linker = await productFor(linkerHandle, "odin-linker");
     return {
-        tools: [...base, await gccTool(gcc.attrs.version), await moldTool(mold.attrs.version)],
-        flags: ["-linker:mold"],
+        tools: [...base, await gccTool(gcc.attrs.version), ...(await linker.tools())],
+        flags: await linker.flags(),
     };
 }
 

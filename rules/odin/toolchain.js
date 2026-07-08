@@ -79,8 +79,8 @@ export function odinSupportedPlatforms() {
 
 export class OdinToolchain extends Target {
     static kind = "odin-toolchain";
-    constructor({ version }) {
-        super({ kind: OdinToolchain.kind, attrs: { version } });
+    constructor({ version, linker }) {
+        super({ kind: OdinToolchain.kind, attrs: { version, ...(linker ? { linker } : {}) } });
     }
 }
 
@@ -99,12 +99,15 @@ export function __resetOdinToolchainStateForTest() {
  * @param {string} version Odin release version (matches .odin-version).
  * @param {object} [opts]
  * @param {boolean} [opts.default=false] Set as the default toolchain.
+ * @param {object} [opts.linker] Linker toolchain handle (e.g. moldToolchain())
+ *   registering an "odin-linker" product. If omitted, Odin links with
+ *   whatever `ld` the gcc toolchain's clang wrapper selects by default.
  * @returns {object} Target handle for this Odin toolchain.
  */
 export function odinToolchain(version, opts = {}) {
     namedCache({ name: ODIN_TOOLCHAIN_CACHE });
 
-    const toolchain = new OdinToolchain({ version });
+    const toolchain = new OdinToolchain({ version, linker: opts.linker });
 
     if (opts.default) {
         defaultVersion = version;

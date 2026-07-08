@@ -1,3 +1,4 @@
+import { productFor } from "imp:core";
 import {
     describe,
     expect,
@@ -135,6 +136,20 @@ test("downloads and extracts a toolchain via a sandboxed curl+tar run(), writing
         expect(extract.outputs[0].namedCache.key).toBe(key);
 
         expect(host.calls.some((call) => call[0] === "nativeTool" && call[1] === "curl")).toBe(true);
+    });
+});
+
+test("registers a rust-link-driver product exposing -C linker=clang and gcc/dirname tools", async () => {
+    await withGccHost(async () => {
+        installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
+        const toolchain = gccToolchain("2025.08-1");
+
+        const linkDriver = await productFor(toolchain, "rust-link-driver");
+
+        expect(await linkDriver.rustflags()).toEqual(["-C", "linker=clang"]);
+        const tools = await linkDriver.tools();
+        expect(tools.some((t) => t.name === "dirname")).toBe(true);
+        expect(tools.some((t) => t.name === "gcc-toolchain")).toBe(true);
     });
 });
 });

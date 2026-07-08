@@ -491,6 +491,29 @@ export function resolveProduct(entry) {
 }
 
 /**
+ * Look up and invoke the product registered under an arbitrary role `name`
+ * for a target handle's kind, e.g. productFor(moldHandle, "odin-linker").
+ * Generalizes the fixed-name "toolchain" lookup invokeToolchainProduct() uses
+ * for `imp @tool` dispatch to any role name, so rule code can dynamically
+ * resolve a capability (linker, link driver, ...) off a handle without
+ * statically importing every module that might supply it.
+ *
+ * @param {object} handle Target handle whose kind determines which product resolves.
+ * @param {string} name Product/role name, e.g. "odin-linker", "rust-linker".
+ * @returns {*} Whatever the registered product function returns (often a Promise).
+ */
+export function productFor(handle, name) {
+    if (!handle || handle.__imp !== true) {
+        throw new Error(`productFor(handle, "${name}") expects a target handle`);
+    }
+    const fn = _products_by_kind_name.get(`${handle.kind}:${name}`);
+    if (fn === undefined) {
+        throw new Error(`target kind '${handle.kind}' has no '${name}' product registered`);
+    }
+    return fn(handle);
+}
+
+/**
  * Resolve a live target handle by id and invoke its kind's registered
  * "toolchain" product, e.g. for `imp @odin ...` direct tool dispatch: the
  * handle's kind determines which registered resolver (if any) turns it into
@@ -505,11 +528,10 @@ export function invokeToolchainProduct(id) {
     if (!handle) {
         throw new Error(`no live handle for target id ${id}`);
     }
-    const fn = _products_by_kind_name.get(`${handle.kind}:toolchain`);
-    if (fn === undefined) {
+    if (!_products_by_kind_name.has(`${handle.kind}:toolchain`)) {
         throw new Error(`target kind '${handle.kind}' has no 'toolchain' product (not toolchain-shaped)`);
     }
-    return fn(handle);
+    return productFor(handle, "toolchain");
 }
 
 /**

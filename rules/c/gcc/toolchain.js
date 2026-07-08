@@ -286,3 +286,29 @@ product("gcc-toolchain", "gen-lockfiles", (handle) =>
         downloadUrl: gccDownloadUrl,
         artifactName: gccArtifactName,
     }));
+
+/**
+ * Adapter exposing a gcc toolchain as Rust/rustc's C link driver — the
+ * program rustc shells out to as its linker driver. Reuses the same
+ * "clang"-named wrapper script Odin uses for the same reason (see gccTool()
+ * docs above). Registered as the "rust-link-driver" product for the
+ * "gcc-toolchain" kind so rustLinkerTools() (rules/rust/index.js) can
+ * resolve it dynamically via productFor(handle, "rust-link-driver") — this
+ * module never imports anything Rust-specific.
+ */
+export class RustGccLinkDriver {
+    constructor(handle) {
+        this.handle = handle;
+    }
+
+    async tools() {
+        return [await nativeToolSpec(nativeTool("dirname")), await gccTool(this.handle.attrs.version)];
+    }
+
+    /** @returns {Promise<string[]>} paired rustc -C flags selecting this link driver. */
+    async rustflags() {
+        return ["-C", "linker=clang"];
+    }
+}
+
+product("gcc-toolchain", "rust-link-driver", (handle) => new RustGccLinkDriver(handle));
