@@ -150,6 +150,7 @@ test("registers a rust-link-driver product exposing -C linker=clang and gcc/dirn
         const tools = await linkDriver.tools();
         expect(tools.some((t) => t.name === "dirname")).toBe(true);
         expect(tools.some((t) => t.name === "gcc-toolchain")).toBe(true);
+        expect(await linkDriver.env()).toEqual(["CC=clang"]);
     });
 });
 });

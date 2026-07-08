@@ -1,6 +1,8 @@
 import {
     Target,
+    file_set,
     glob,
+    hydrateTarget,
     memo,
     output,
     output_path,
@@ -26,6 +28,10 @@ import {
     defaultGccToolchain,
 } from "//rules/c/gcc/toolchain";
 
+import {
+    resources as resource_package_sources,
+} from "//rules/asset";
+
 // Registers the "build" goal's artifact summary callback for consumers that
 // import Rust build rules without importing the workflows layer explicitly.
 import "//rules/workflows/build_workflow";
@@ -35,6 +41,10 @@ import "//rules/workflows/build_workflow";
 // //rules/rust/test explicitly — same reasoning as the build_workflow import
 // above. Side-effect only; nothing exported from it is used in this file.
 import "//rules/rust/test";
+
+// Registers the "generate-build" product (auto-declaring cargoPackage()
+// targets for unowned Cargo.toml files) for the same reason.
+import "//rules/rust/generate_build";
 
 export {
     acquireRustToolchain,
@@ -108,6 +118,21 @@ export const sources = memo(async function sources(handle) {
     return glob({ root, include: ["Cargo.toml", "Cargo.lock", "**/*.rs"], exclude: ["target/**"] });
 });
 
+// FileSet of a cargoPackage's declared resource-package deps (see
+// //rules/asset's resourcePackage) — same pattern rules/odin/index.js's
+// `resources` uses, minus the transitive-package-dep recursion (a
+// cargoPackage has no notion of depending on another cargoPackage the way
+// an odinPackage depends on other odin-package targets; Cargo itself owns
+// crate-to-crate deps via Cargo.toml/the registry).
+export const resources = memo(async function resources(handle) {
+    const sets = (hydrateTarget(handle).deps || [])
+        .map(dep => dep.handle)
+        .filter(dep => dep && dep.kind === "resource-package");
+    if (sets.length === 0) return file_set.literal([]);
+    const resolved = await Promise.all(sets.map(resource_package_sources));
+    return resolved.length === 1 ? resolved[0] : file_set.union(...resolved);
+});
+
 export function rust_toolchain_version(handle) {
     const toolchainHandle = handle.attrs.toolchain;
     return toolchainHandle
@@ -133,6 +158,7 @@ export async function rustLinkerTools(toolchainHandle) {
         return {
             tools: [await nativeToolSpec(nativeTool("gcc"))],
             rustflags: "-C linker=gcc",
+            env: [],
         };
     }
     const linkDriverHandle = (toolchainHandle && toolchainHandle.attrs.linkDriver) || defaultGccToolchain();
@@ -146,7 +172,8 @@ export async function rustLinkerTools(toolchainHandle) {
 
     const tools = [...(await linkDriver.tools()), ...(linker ? await linker.tools() : [])];
     const rustflags = [...(await linkDriver.rustflags()), ...(linker ? await linker.rustflags() : [])].join(" ");
-    return { tools, rustflags };
+    const env = await linkDriver.env();
+    return { tools, rustflags, env };
 }
 
 // ---------------------------------------------------------------------------
@@ -164,10 +191,11 @@ export const cargoBuild = product("cargo-package", "build",
     async function cargoBuild(handle) {
         const toolSpec = await rustTool(rust_toolchain_version(handle));
         const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-        const { tools: linkerTools, rustflags } = await rustLinkerTools(toolchainHandle);
+        const { tools: linkerTools, rustflags, env: linkerEnv } = await rustLinkerTools(toolchainHandle);
 
         const path = declared_path(handle, handle.attrs.path || ".");
         const srcs = await sources(handle);
+        const resourceInputs = await resources(handle);
 
         const profile = handle.attrs.release ? "release" : "debug";
         const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
@@ -186,8 +214,8 @@ export const cargoBuild = product("cargo-package", "build",
                 ...handle.attrs.cargoArgs,
             ],
             tools: [...toolSpec.tools, ...linkerTools],
-            env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`],
-            inputs: [srcs],
+            env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`, ...linkerEnv],
+            inputs: [srcs, resourceInputs],
             outputs: outPaths.map((p) => output(output_path(p))),
             materialize: true,
             display: `cargo build ${path}`,
@@ -213,10 +241,11 @@ export const cargoTest = product("cargo-package", "test",
     async function cargoTest(handle) {
         const toolSpec = await rustTool(rust_toolchain_version(handle));
         const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-        const { tools: linkerTools, rustflags } = await rustLinkerTools(toolchainHandle);
+        const { tools: linkerTools, rustflags, env: linkerEnv } = await rustLinkerTools(toolchainHandle);
 
         const path = declared_path(handle, handle.attrs.path || ".");
         const srcs = await sources(handle);
+        const resourceInputs = await resources(handle);
         const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 
         const script = 'manifest=$1; target_dir=$2; rustflags=$3; shift 3; ' +
@@ -233,8 +262,8 @@ export const cargoTest = product("cargo-package", "test",
                 ...handle.attrs.testArgs,
             ],
             tools: [...toolSpec.tools, ...linkerTools],
-            env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`],
-            inputs: [srcs],
+            env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`, ...linkerEnv],
+            inputs: [srcs, resourceInputs],
             impure: true,
             display: `cargo test ${path}`,
         });
@@ -245,9 +274,15 @@ export const cargoTest = product("cargo-package", "test",
 // Target constructor
 // ---------------------------------------------------------------------------
 
+export function normalize_deps(deps) {
+    return deps
+        .map(d => (d && d.__imp ? d : (d && d.target ? d.target : null)))
+        .filter(Boolean);
+}
+
 export class CargoPackage extends Target {
     static kind = "cargo-package";
-    constructor({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [] }) {
+    constructor({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [], deps = [] }) {
         if (!bin) {
             throw new Error("cargoPackage requires 'bin' (the binary name(s) cargo produces)");
         }
@@ -260,6 +295,12 @@ export class CargoPackage extends Target {
                               : (typeof toolchain === "string" ? null : defaultRustToolchain());
         const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
 
+        const normalizedDeps = normalize_deps(deps);
+        const allDeps = [
+            ...(toolchainHandle ? [{ target: toolchainHandle }] : []),
+            ...normalizedDeps.map(target => ({ target })),
+        ];
+
         super({
             kind: CargoPackage.kind,
             attrs: {
@@ -270,12 +311,14 @@ export class CargoPackage extends Target {
                 testArgs,
                 ...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
                 ...(toolchainVersion ? { toolchainVersion } : {}),
+                ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
             },
             sources: sourcesField({
                 root: path,
                 include: ["Cargo.toml", "Cargo.lock", "**/*.rs"],
                 exclude: ["target/**"],
             }),
+            deps: allDeps,
         });
     }
 }
@@ -293,8 +336,9 @@ export class CargoPackage extends Target {
  * @param {object|string} [opts.toolchain] Rust toolchain target handle or version string.
  * @param {string[]} [opts.cargoArgs=[]] Extra arguments appended to `cargo build`.
  * @param {string[]} [opts.testArgs=[]] Extra arguments appended to `cargo test`.
+ * @param {Array<object>} [opts.deps=[]] Extra deps, e.g. a resourcePackage() (see //rules/asset) providing non-.rs files an `include_str!`/`include_bytes!` needs.
  * @returns {object} Target handle.
  */
-export function cargoPackage({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [] }) {
-    return new CargoPackage({ path, bin, release, toolchain, cargoArgs, testArgs });
+export function cargoPackage({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [], deps = [] }) {
+    return new CargoPackage({ path, bin, release, toolchain, cargoArgs, testArgs, deps });
 }

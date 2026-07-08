@@ -309,6 +309,16 @@ export class RustGccLinkDriver {
     async rustflags() {
         return ["-C", "linker=clang"];
     }
+
+    /**
+     * @returns {Promise<string[]>} extra env vars so cc-rs-driven build
+     * scripts (e.g. a dependency bundling and compiling its own C sources)
+     * can find a real C compiler too, instead of only rustc's own linker
+     * knowing about the "clang"-named wrapper via rustflags() above.
+     */
+    async env() {
+        return ["CC=clang"];
+    }
 }
 
 product("gcc-toolchain", "rust-link-driver", (handle) => new RustGccLinkDriver(handle));

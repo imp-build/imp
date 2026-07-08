@@ -1,10 +1,13 @@
+import { paths, pathsInDigest } from "imp:core";
 import { describe, expect, test, withFakeToolchainHost } from "//rules/imp/test";
 import {
     cargoBuild,
     cargoPackage,
     cargoTest,
     declared_path,
+    resources,
 } from "//rules/rust";
+import { resourcePackage } from "//rules/asset";
 import {
     __resetRustToolchainStateForTest,
     rustToolchain,
@@ -95,6 +98,7 @@ test("cargoBuild invokes cargo with the manifest path, target dir, and toolchain
         expect(buildRun.env).toContain("RUSTUP_HOME=.imp/tools/rustup-home");
         expect(buildRun.env).toContain("CARGO_HOME=.imp/tools/cargo-home");
         expect(buildRun.argv[2]).toContain("RUSTFLAGS=\"$rustflags\"");
+        expect(buildRun.env).toContain("CC=clang");
         expect(buildRun.argv).toContain("-C linker=clang");
         expect(result.outputPaths.length).toBe(1);
         expect(result.outputPaths[0].endsWith("/debug/hello")).toBe(true);
@@ -158,6 +162,7 @@ test("cargoTest invokes cargo test with the manifest path, target dir, and toolc
         expect(testRun.env).toContain("RUSTUP_HOME=.imp/tools/rustup-home");
         expect(testRun.env).toContain("CARGO_HOME=.imp/tools/cargo-home");
         expect(testRun.argv[2]).toContain("RUSTFLAGS=\"$rustflags\"");
+        expect(testRun.env).toContain("CC=clang");
         expect(testRun.argv).toContain("-C linker=clang");
         expect(testRun.impure).toBe(true);
         expect(testRun.outputs).toEqual([]);
@@ -218,6 +223,38 @@ test("cargoBuild builds one output path per bin", async () => {
         expect(result.outputPaths.length).toBe(2);
         expect(result.outputPaths[0].endsWith("/debug/hello")).toBe(true);
         expect(result.outputPaths[1].endsWith("/debug/world")).toBe(true);
+    });
+});
+
+test("resources(pkg) is empty without a resource-package dep", async () => {
+    const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
+    expect(paths(await resources(pkg))).toEqual([]);
+});
+
+test("resources(pkg) with a resource-package dep includes its files", async () => {
+    const assets = resourcePackage({ path: "rules/rust", srcs: ["toolchain.js"] });
+    const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example", deps: [assets] });
+    const result = paths(await resources(pkg));
+    expect(result).toContain("rules/rust/toolchain.js");
+});
+
+test("cargoBuild declares resource-package files as sandbox inputs", async () => {
+    await withRustHost(async (host) => {
+        rustToolchain("1.93.0", { default: true });
+        gccToolchain("2025.08-1", { default: true });
+        const assets = resourcePackage({ path: "rules/rust", srcs: ["toolchain.js"] });
+        const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example", deps: [assets] });
+
+        await cargoBuild(pkg);
+
+        const buildRun = host.runs[host.runs.length - 1];
+        // Glob-derived inputs are collapsed into a single {kind:"digest"}
+        // entry per merged glob rather than one {kind:"file", path} entry
+        // per match (see rules/odin/index_test.js's inputsIncludePath), so
+        // "was this path fed into the sandbox" has to walk the digest.
+        const includesPath = buildRun.inputs.some((input) =>
+            input.kind === "digest" && pathsInDigest(input.digest).includes("rules/rust/toolchain.js"));
+        expect(includesPath).toBe(true);
     });
 });
 

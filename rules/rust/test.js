@@ -27,6 +27,8 @@ import {
 import {
     declared_path,
     defaultRustToolchain,
+    normalize_deps,
+    resources,
     rust_toolchain_version,
     rustLinkerTools,
     sources,
@@ -55,10 +57,11 @@ function safe_target_address(handle) {
 async function buildTestBinaries(handle) {
     const toolSpec = await rustTool(rust_toolchain_version(handle));
     const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-    const { tools: linkerTools, rustflags } = await rustLinkerTools(toolchainHandle);
+    const { tools: linkerTools, rustflags, env: linkerEnv } = await rustLinkerTools(toolchainHandle);
 
     const path = declared_path(handle, handle.attrs.path || ".");
     const srcs = await sources(handle);
+    const resourceInputs = await resources(handle);
     const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 
     const script = 'manifest=$1; target_dir=$2; rustflags=$3; shift 3; ' +
@@ -67,8 +70,8 @@ async function buildTestBinaries(handle) {
     const result = await run({
         argv: ["sh", "-c", script, "cargo-test-build", `${path}/Cargo.toml`, buildDir, rustflags],
         tools: [...toolSpec.tools, ...linkerTools],
-        env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`],
-        inputs: [srcs],
+        env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`, ...linkerEnv],
+        inputs: [srcs, resourceInputs],
         outputs: [output(output_path(buildDir), { kind: "directory" })],
         materialize: true,
         display: `cargo test --no-run ${path}`,
@@ -107,7 +110,13 @@ export function parseTestBinaries(stdout, buildDir) {
 
 export class RustTest extends Target {
     static kind = "rust_test";
-    constructor({ path = ".", buildDir, toolchain, toolchainVersion, executable, testArgs = [] }) {
+    constructor({ path = ".", buildDir, toolchain, toolchainVersion, executable, testArgs = [], deps = [] }) {
+        // Forwards the parent cargoPackage's own resource-package deps (see
+        // //rules/asset) so resources(handle) resolves the same way for a
+        // fanned-out rust_test as it does for the parent — the whole crate
+        // (this test binary included) is recompiled from the same sources,
+        // so it needs the same extra files.
+        const normalizedDeps = normalize_deps(deps);
         super({
             kind: RustTest.kind,
             attrs: {
@@ -117,7 +126,12 @@ export class RustTest extends Target {
                 testArgs,
                 ...(toolchain ? { toolchain } : {}),
                 ...(toolchainVersion ? { toolchainVersion } : {}),
+                ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
             },
+            deps: [
+                ...(toolchain ? [{ target: toolchain }] : []),
+                ...normalizedDeps.map(target => ({ target })),
+            ],
         });
     }
 }
@@ -175,6 +189,7 @@ export const expandCargoTests = expand("cargo-package", async function expandCar
                 toolchainVersion: handle.attrs.toolchainVersion,
                 executable: bin.executable,
                 testArgs: [],
+                deps: handle.attrs.deps || [],
             }),
             `${scope}:${parentName}_tests_${bin.name}`,
         );
