@@ -200,11 +200,16 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
         extract: globalThis.__host_extract,
         run: globalThis.__host_run,
         nativeToolArtifact: globalThis.__host_native_tool_artifact,
+        workerStart: globalThis.__host_worker_start,
+        workerGet: globalThis.__host_worker_get,
     };
+
+    const workers = new Map();
 
     const host = {
         calls,
         runs,
+        workers,
         install(name, key, path) {
             cache.set(`${name}/${key}`, path);
         },
@@ -259,6 +264,21 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
         }
         return { stdout: "", stderr: "", exitCode: 0 };
     };
+    globalThis.__host_worker_start = async (name, opts) => {
+        calls.push(["workerStart", name, opts]);
+        const handle = workers.get(name) || {
+            homeDir: `/workers/${name}/home`,
+            tmpDir: `/workers/${name}/tmp`,
+            port: 40000,
+        };
+        workers.set(name, handle);
+        return JSON.stringify(handle);
+    };
+    globalThis.__host_worker_get = (name) => {
+        calls.push(["workerGet", name]);
+        const handle = workers.get(name);
+        return handle ? JSON.stringify(handle) : null;
+    };
 
     try {
         return await fn(host);
@@ -273,6 +293,8 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
         globalThis.__host_extract = originals.extract;
         globalThis.__host_run = originals.run;
         globalThis.__host_native_tool_artifact = originals.nativeToolArtifact;
+        globalThis.__host_worker_start = originals.workerStart;
+        globalThis.__host_worker_get = originals.workerGet;
     }
 }
 

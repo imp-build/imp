@@ -170,10 +170,70 @@ export async function rustLinkerTools(toolchainHandle) {
     const linkerHandle = toolchainHandle && toolchainHandle.attrs.linker;
     const linker = linkerHandle ? await productFor(linkerHandle, "rust-linker") : null;
 
+    const sccacheActive = !!(toolchainHandle && toolchainHandle.attrs.sccache);
     const tools = [...(await linkDriver.tools()), ...(linker ? await linker.tools() : [])];
     const rustflags = [...(await linkDriver.rustflags()), ...(linker ? await linker.rustflags() : [])].join(" ");
-    const env = await linkDriver.env();
+    const env = await linkDriver.env(sccacheActive);
     return { tools, rustflags, env };
+}
+
+// Optional rustc build-caching layer (e.g. sccache, //rules/rust/sccache),
+// wired independently of the linker abstraction above since it wraps rustc
+// itself rather than the link step. Opt in via
+// rustToolchain({ sccache: sccacheToolchain() }); no-ops otherwise.
+export async function rustBuildCacheTools(toolchainHandle) {
+    const sccacheHandle = toolchainHandle && toolchainHandle.attrs.sccache;
+    if (!sccacheHandle) {
+        return { tools: [], env: [] };
+    }
+    const wrapper = await productFor(sccacheHandle, "rust-build-cache");
+    return {
+        tools: await wrapper.tools(),
+        env: await wrapper.env(),
+    };
+}
+
+// Resolve RUSTUP_HOME/CARGO_HOME/PATH for invoking cargo/rustc.
+//
+// Normally these are sandbox-relative "tool" mount aliases (toolSpec.tools +
+// toolSpec.rustupHome/cargoHome) — reproducible and explicitly tracked as
+// build inputs, per the sandbox's usual hermeticity model.
+//
+// When sccache is wrapping rustc, that per-sandbox aliasing itself becomes a
+// bug: sccache's long-lived server caches detected "compiler info" keyed by
+// the *canonicalized* exe path (resolving the sandbox symlink down to the
+// same real, stable toolchain directory every time — see
+// mozilla/sccache's src/server.rs `compiler_info()`), but the *literal*
+// (uncanonicalized) exe path embedded in that cached entry — the one
+// actually used to spawn the compiler on a cache miss — is whichever
+// sandbox's path happened to be seen first. Once that first sandbox is torn
+// down, every later build sharing the same server fails with "No such file
+// or directory" trying to invoke a compiler at a path that no longer
+// exists, even though the exact same toolchain is trivially reachable via
+// the *current* sandbox's own (different) symlink.
+//
+// The fix is to make the literal exe path identical across every sandbox in
+// the first place: when sccache is active, resolve cargo/rustc through the
+// real, absolute, stable named-cache directory (toolSpec.rustupHomeAbs/
+// cargoHomeAbs) instead of the sandbox-relative alias, and skip mounting
+// the sandbox "tool" copies at all — mirroring the same real-path-over-
+// sandbox-mount tradeoff already made for sccache's own data directory (see
+// sccacheDataDir() in //rules/rust/sccache/toolchain).
+export function rustToolEnv(toolSpec, sccacheActive) {
+    if (!sccacheActive) {
+        return {
+            tools: toolSpec.tools,
+            env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`],
+        };
+    }
+    return {
+        tools: [],
+        env: [
+            `RUSTUP_HOME=${toolSpec.rustupHomeAbs}`,
+            `CARGO_HOME=${toolSpec.cargoHomeAbs}`,
+            `PATH=${toolSpec.rustupHomeAbs}/toolchains/${toolSpec.toolchainId}/bin:${toolSpec.cargoHomeAbs}/bin`,
+        ],
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +252,8 @@ export const cargoBuild = product("cargo-package", "build",
         const toolSpec = await rustTool(rust_toolchain_version(handle));
         const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
         const { tools: linkerTools, rustflags, env: linkerEnv } = await rustLinkerTools(toolchainHandle);
+        const { tools: cacheTools, env: cacheEnv } = await rustBuildCacheTools(toolchainHandle);
+        const { tools: rustTools, env: rustEnv } = rustToolEnv(toolSpec, !!(toolchainHandle && toolchainHandle.attrs.sccache));
 
         const path = declared_path(handle, handle.attrs.path || ".");
         const srcs = await sources(handle);
@@ -213,8 +275,8 @@ export const cargoBuild = product("cargo-package", "build",
                 ...(handle.attrs.release ? ["--release"] : []),
                 ...handle.attrs.cargoArgs,
             ],
-            tools: [...toolSpec.tools, ...linkerTools],
-            env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`, ...linkerEnv],
+            tools: [...rustTools, ...linkerTools, ...cacheTools],
+            env: [...rustEnv, ...linkerEnv, ...cacheEnv],
             inputs: [srcs, resourceInputs],
             outputs: outPaths.map((p) => output(output_path(p))),
             materialize: true,
@@ -242,6 +304,8 @@ export const cargoTest = product("cargo-package", "test",
         const toolSpec = await rustTool(rust_toolchain_version(handle));
         const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
         const { tools: linkerTools, rustflags, env: linkerEnv } = await rustLinkerTools(toolchainHandle);
+        const { tools: cacheTools, env: cacheEnv } = await rustBuildCacheTools(toolchainHandle);
+        const { tools: rustTools, env: rustEnv } = rustToolEnv(toolSpec, !!(toolchainHandle && toolchainHandle.attrs.sccache));
 
         const path = declared_path(handle, handle.attrs.path || ".");
         const srcs = await sources(handle);
@@ -261,8 +325,8 @@ export const cargoTest = product("cargo-package", "test",
                 `${path}/Cargo.toml`, buildDir, rustflags,
                 ...handle.attrs.testArgs,
             ],
-            tools: [...toolSpec.tools, ...linkerTools],
-            env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`, ...linkerEnv],
+            tools: [...rustTools, ...linkerTools, ...cacheTools],
+            env: [...rustEnv, ...linkerEnv, ...cacheEnv],
             inputs: [srcs, resourceInputs],
             impure: true,
             display: `cargo test ${path}`,

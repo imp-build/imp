@@ -56,6 +56,10 @@ pub struct LiveWorkspace {
     /// Reset at the start of each `execute_goal_live`/`evaluate_product_json`
     /// invocation; merged with `workspace.targets` at selector-resolution time.
     pub(crate) dynamic_targets: Arc<Mutex<BTreeMap<String, Target>>>,
+    /// Named, host-spawned persistent worker processes (e.g. a build-cache
+    /// daemon like sccache), reused across `run()` calls within this one
+    /// `imp` process invocation. See `crate::worker`.
+    pub(crate) workers: crate::worker::WorkerRegistry,
 }
 
 impl std::fmt::Debug for LiveWorkspace {
@@ -71,6 +75,7 @@ impl std::fmt::Debug for LiveWorkspace {
             .field("goal_flags", &"Arc<Mutex<..>>")
             .field("host_state", &"Arc<Mutex<..>>")
             .field("dynamic_targets", &"Arc<Mutex<..>>")
+            .field("workers", &"Arc<Mutex<..>>")
             .finish()
     }
 }

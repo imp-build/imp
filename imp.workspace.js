@@ -7,6 +7,7 @@ import "//rules/gen";
 import { odinToolchain } from "//rules/odin";
 import { odinfmtToolchain } from "//rules/odin/odinfmt/toolchain";
 import { rustToolchain } from "//rules/rust";
+import { sccacheToolchain } from "//rules/rust/sccache/toolchain";
 import "//rules/workflows/build_workflow";
 import "//rules/workflows/fmt";
 import "//rules/workflows/lint";
@@ -23,6 +24,11 @@ export const gcc = gccToolchain("2025.08-1", { default: true });
 export const mold = moldToolchain("2.41.0");
 export const odin = odinToolchain("dev-2026-03", { default: true, linker: mold });
 export const odinfmt = odinfmtToolchain();
+// sccache wraps rustc with a content-keyed compiler cache backed by a
+// host-managed persistent worker (see src/worker.rs) — sidesteps cargo's own
+// mtime-based incremental compilation, which imp's fresh-per-sandbox
+// builds otherwise always defeat.
+export const sccache = sccacheToolchain("0.10.0", { default: true });
 // Rust binaries link via cargo/rustc, which shell out to a C link driver;
 // see rules/rust/index.js's rustLinkerTools for why this reuses gcc.
-export const rust = rustToolchain("1.93.0", { default: true, linkDriver: gcc, linker: mold });
+export const rust = rustToolchain("1.93.0", { default: true, linkDriver: gcc, linker: mold, sccache });

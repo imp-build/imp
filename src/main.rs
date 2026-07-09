@@ -12,6 +12,7 @@ mod selector;
 mod spike;
 mod toolchain;
 mod ui;
+mod worker;
 mod workspace;
 
 use std::path::PathBuf;

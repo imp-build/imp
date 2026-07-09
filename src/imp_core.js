@@ -323,6 +323,52 @@ export function cacheHas(name, key) {
 }
 
 /**
+ * Start a named, host-managed persistent worker process (e.g. a build-cache
+ * daemon like sccache), or return its existing handle if one is already
+ * running. Idempotent and safe to call from multiple concurrent run()s for
+ * the same name: the host spawns it at most once and every caller gets the
+ * same handle.
+ *
+ * Unlike run(), this process is not sandboxed and outlives any single
+ * run() — it's meant for sidecars that need to survive across many builds,
+ * not for build steps themselves.
+ *
+ * @param {string} name Worker name, scoped to this workspace.
+ * @param {object} opts
+ * @param {string[]} opts.argv Command that starts the worker (must exit once
+ *   the worker is up, e.g. a `--start-server`-style daemonizing command).
+ * @param {string[]} [opts.env] Extra "KEY=VALUE" environment entries for both
+ *   the start command and the health check.
+ * @param {string[]} [opts.healthCheckArgv] Command that exits 0 once the
+ *   worker is ready to use; also used to detect a since-died worker on reuse.
+ * @returns {Promise<{homeDir: string, tmpDir: string, port: number}>}
+ *   `homeDir`/`tmpDir` are stable directories (not sandbox-scoped) the worker
+ *   was started with; `port` is a TCP port deterministically derived from
+ *   (workspace, name), handed to the worker as `IMP_WORKER_PORT`, for
+ *   sidecars that need a private, collision-free port to listen on.
+ */
+export async function workerStart(name, opts) {
+    const json = await __host_worker_start(name, {
+        argv: opts.argv,
+        env: opts.env ?? [],
+        healthCheckArgv: opts.healthCheckArgv ?? [],
+    });
+    return JSON.parse(json);
+}
+
+/**
+ * Look up a named worker's handle without spawning it.
+ *
+ * @param {string} name Worker name.
+ * @returns {{homeDir: string, tmpDir: string, port: number}|null} `null` if
+ *   it has never been started (or never successfully so) this invocation.
+ */
+export function workerGet(name) {
+    const json = __host_worker_get(name);
+    return json ? JSON.parse(json) : null;
+}
+
+/**
  * List workspace files below a workspace-rooted directory.
  *
  * Returned paths are module specifiers without the trailing `.js`, so they can

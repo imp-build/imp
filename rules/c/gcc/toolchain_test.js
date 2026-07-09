@@ -153,4 +153,19 @@ test("registers a rust-link-driver product exposing -C linker=clang and gcc/dirn
         expect(await linkDriver.env()).toEqual(["CC=clang"]);
     });
 });
+
+test("rust-link-driver's env() resolves CC to a stable absolute path when sccache is active", async () => {
+    await withGccHost(async () => {
+        installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
+        const toolchain = gccToolchain("2025.08-1");
+
+        const linkDriver = await productFor(toolchain, "rust-link-driver");
+
+        expect(await linkDriver.env(true)).toEqual(["CC=/cache/gcc-toolchains/2025.08-1/linux-x86_64/bin/clang"]);
+        // Still mounts gcc-toolchain/dirname as sandbox tools: rustc's own
+        // link step resolves "clang" via PATH regardless of CC/sccache.
+        const tools = await linkDriver.tools();
+        expect(tools.some((t) => t.name === "gcc-toolchain")).toBe(true);
+    });
+});
 });

@@ -314,6 +314,7 @@ pub(crate) async fn load_workspace_with_rules(
         Arc::new(Mutex::new(None));
     let selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(None));
     let goal_flags: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let workers = crate::worker::new_worker_registry();
 
     // ----- QuickJS runtime + context -----
     let rt = Runtime::new().context("create QuickJS runtime")?;
@@ -368,6 +369,7 @@ pub(crate) async fn load_workspace_with_rules(
                 Arc::clone(&scheduler),
                 Arc::clone(&selected_roots),
                 Arc::clone(&goal_flags),
+                Arc::clone(&workers),
             )
         })
         .await
@@ -516,6 +518,7 @@ pub(crate) async fn load_workspace_with_rules(
         goal_flags,
         host_state: state,
         dynamic_targets: Arc::new(Mutex::new(BTreeMap::new())),
+        workers,
     })
 }
 
@@ -788,6 +791,7 @@ fn register_globals<'js>(
     scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>>,
     selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
     goal_flags: Arc<Mutex<Option<serde_json::Value>>>,
+    workers: crate::worker::WorkerRegistry,
 ) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
@@ -1278,6 +1282,71 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_cache_has", host_cache_has)?;
+
+    // ------------------------------------------------------------------
+    // __host_worker_start(name, { argv, env, healthCheckArgv }) → JSON string
+    //   { homeDir, tmpDir, port }
+    // __host_worker_get(name) → JSON string | null
+    //
+    // Named, host-spawned persistent worker processes (e.g. sccache's
+    // compiler-cache daemon) that outlive individual run() sandboxes. See
+    // crate::worker for the lifecycle rationale.
+    // ------------------------------------------------------------------
+    let wc_worker_start = workspace_root.clone();
+    let workers_start = Arc::clone(&workers);
+    let host_worker_start = Function::new(
+        ctx.clone(),
+        Async(move |ctx: Ctx<'js>, name: String, opts: Object<'js>| {
+            let wc = wc_worker_start.clone();
+            let workers = Arc::clone(&workers_start);
+            async move {
+                let argv: Vec<String> = opts.get("argv")?;
+                let env_pairs: Vec<String> = opts.get::<_, Option<Vec<String>>>("env")?.unwrap_or_default();
+                let mut env = Vec::with_capacity(env_pairs.len());
+                for entry in env_pairs {
+                    let (key, value) = entry.split_once('=').ok_or_else(|| {
+                        rquickjs::Exception::throw_message(
+                            &ctx,
+                            &format!("worker env entry '{entry}' is missing '='"),
+                        )
+                    })?;
+                    env.push((key.to_owned(), value.to_owned()));
+                }
+                let health_check_argv: Vec<String> = opts
+                    .get::<_, Option<Vec<String>>>("healthCheckArgv")?
+                    .unwrap_or_default();
+                let spec = crate::worker::WorkerSpec {
+                    argv,
+                    env,
+                    health_check_argv,
+                };
+                let handle = crate::worker::worker_start(&workers, &wc, &name, spec)
+                    .await
+                    .map_err(|e| rquickjs::Exception::throw_message(&ctx, &format!("{e:#}")))?;
+                serde_json::to_string(&handle).map_err(|e| {
+                    rquickjs::Exception::throw_message(&ctx, &format!("encode worker handle: {e}"))
+                })
+            }
+        }),
+    )?;
+    globals.set("__host_worker_start", host_worker_start)?;
+
+    let workers_get = Arc::clone(&workers);
+    let host_worker_get = Function::new(
+        ctx.clone(),
+        move |name: String| -> rquickjs::Result<Option<String>> {
+            match crate::worker::worker_get(&workers_get, &name) {
+                Some(handle) => {
+                    let json = serde_json::to_string(&handle).map_err(|e| {
+                        rquickjs::Error::new_loading_message("workerGet", format!("{e}"))
+                    })?;
+                    Ok(Some(json))
+                }
+                None => Ok(None),
+            }
+        },
+    )?;
+    globals.set("__host_worker_get", host_worker_get)?;
 
     // ------------------------------------------------------------------
     // __host_workspace_files(root, suffix) → JSON string ["//path/module"]

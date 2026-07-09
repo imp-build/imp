@@ -30,7 +30,9 @@ import {
     normalize_deps,
     resources,
     rust_toolchain_version,
+    rustBuildCacheTools,
     rustLinkerTools,
+    rustToolEnv,
     sources,
 } from "//rules/rust";
 
@@ -58,6 +60,8 @@ async function buildTestBinaries(handle) {
     const toolSpec = await rustTool(rust_toolchain_version(handle));
     const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
     const { tools: linkerTools, rustflags, env: linkerEnv } = await rustLinkerTools(toolchainHandle);
+    const { tools: cacheTools, env: cacheEnv } = await rustBuildCacheTools(toolchainHandle);
+    const { tools: rustTools, env: rustEnv } = rustToolEnv(toolSpec, !!(toolchainHandle && toolchainHandle.attrs.sccache));
 
     const path = declared_path(handle, handle.attrs.path || ".");
     const srcs = await sources(handle);
@@ -69,8 +73,8 @@ async function buildTestBinaries(handle) {
 
     const result = await run({
         argv: ["sh", "-c", script, "cargo-test-build", `${path}/Cargo.toml`, buildDir, rustflags],
-        tools: [...toolSpec.tools, ...linkerTools],
-        env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`, ...linkerEnv],
+        tools: [...rustTools, ...linkerTools, ...cacheTools],
+        env: [...rustEnv, ...linkerEnv, ...cacheEnv],
         inputs: [srcs, resourceInputs],
         outputs: [output(output_path(buildDir), { kind: "directory" })],
         materialize: true,

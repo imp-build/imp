@@ -302,6 +302,10 @@ export class RustGccLinkDriver {
     }
 
     async tools() {
+        // Always mounted, even when sccache is active: rustc still resolves
+        // "clang" via PATH itself for the *link* step (its own direct
+        // subprocess spawn, not something sccache wraps/caches), regardless
+        // of what CC is set to below.
         return [await nativeToolSpec(nativeTool("dirname")), await gccTool(this.handle.attrs.version)];
     }
 
@@ -311,12 +315,25 @@ export class RustGccLinkDriver {
     }
 
     /**
+     * @param {boolean} [sccacheActive] When cc-rs-driven build scripts (e.g.
+     *   a dependency bundling and compiling its own C sources) see
+     *   RUSTC_WRAPPER=sccache, they invoke `sccache clang ...` directly —
+     *   sccache then treats "clang" as its own detected/cached compiler
+     *   identity, hitting the exact same sandbox-symlink-vs-canonicalized-
+     *   path bug documented on rustToolEnv() in //rules/rust, but for the C
+     *   compiler instead of rustc. Resolving CC to the real, absolute,
+     *   stable toolchain path (bypassing the sandbox "tool" mount, hence no
+     *   `tools()` entry either) keeps that literal path identical across
+     *   every sandbox when sccache is active.
      * @returns {Promise<string[]>} extra env vars so cc-rs-driven build
-     * scripts (e.g. a dependency bundling and compiling its own C sources)
-     * can find a real C compiler too, instead of only rustc's own linker
-     * knowing about the "clang"-named wrapper via rustflags() above.
+     * scripts can find a real C compiler too, instead of only rustc's own
+     * linker knowing about the "clang"-named wrapper via rustflags() above.
      */
-    async env() {
+    async env(sccacheActive) {
+        if (sccacheActive) {
+            const dir = await acquireGccToolchain(this.handle.attrs.version);
+            return [`CC=${dir}/bin/clang`];
+        }
         return ["CC=clang"];
     }
 }

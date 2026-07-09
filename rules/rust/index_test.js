@@ -6,6 +6,7 @@ import {
     cargoTest,
     declared_path,
     resources,
+    rustToolEnv,
 } from "//rules/rust";
 import { resourcePackage } from "//rules/asset";
 import {
@@ -20,12 +21,18 @@ import {
     __resetMoldToolchainStateForTest,
     moldToolchain,
 } from "//rules/c/mold/toolchain";
+import {
+    __resetSccacheToolchainStateForTest,
+    installSccacheToolchain,
+    sccacheToolchain,
+} from "//rules/rust/sccache/toolchain";
 
 function withRustHost(platOrFn, maybeFn) {
     const run = async (host) => {
         __resetRustToolchainStateForTest();
         __resetGccToolchainStateForTest();
         __resetMoldToolchainStateForTest();
+        __resetSccacheToolchainStateForTest();
         const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;
         try {
             return await fn(host);
@@ -33,6 +40,7 @@ function withRustHost(platOrFn, maybeFn) {
             __resetRustToolchainStateForTest();
             __resetGccToolchainStateForTest();
             __resetMoldToolchainStateForTest();
+            __resetSccacheToolchainStateForTest();
         }
     };
     return typeof platOrFn === "function"
@@ -223,6 +231,70 @@ test("cargoBuild builds one output path per bin", async () => {
         expect(result.outputPaths.length).toBe(2);
         expect(result.outputPaths[0].endsWith("/debug/hello")).toBe(true);
         expect(result.outputPaths[1].endsWith("/debug/world")).toBe(true);
+    });
+});
+
+test("cargoBuild wires RUSTC_WRAPPER/SCCACHE_DIR when the toolchain configures sccache", async () => {
+    await withRustHost(async (host) => {
+        gccToolchain("2025.08-1", { default: true });
+        installSccacheToolchain("0.10.0", "/tmp/sccache-0.10.0");
+        const sccache = sccacheToolchain("0.10.0");
+        rustToolchain("1.93.0", { default: true, sccache });
+        const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
+
+        await cargoBuild(pkg);
+
+        const buildRun = host.runs[host.runs.length - 1];
+        expect(buildRun.env).toContain("RUSTC_WRAPPER=sccache");
+        expect(buildRun.env.some((e) => e.startsWith("SCCACHE_DIR="))).toBe(true);
+        expect(buildRun.tools.some((t) => t.name === "sccache")).toBe(true);
+        expect(host.calls.some((call) => call[0] === "workerStart" && call[1] === "sccache")).toBe(true);
+        // RUSTUP_HOME/CARGO_HOME must be real, stable absolute paths (not
+        // sandbox-relative "tool" mount aliases) when sccache is active —
+        // see rustToolEnv()'s doc comment for why.
+        expect(buildRun.env.some((e) => e.startsWith("RUSTUP_HOME=/cache/"))).toBe(true);
+        expect(buildRun.env.some((e) => e.startsWith("CARGO_HOME=/cache/"))).toBe(true);
+        expect(buildRun.tools.some((t) => t.name === "rustup-home" || t.name === "cargo-home")).toBe(false);
+    });
+});
+
+test("rustToolEnv uses sandbox-relative tool mounts without sccache, and absolute paths with it", () => {
+    const toolSpec = {
+        tools: [{ kind: "tool", name: "rustup-home" }, { kind: "tool", name: "cargo-home" }],
+        rustupHome: ".imp/tools/rustup-home",
+        cargoHome: ".imp/tools/cargo-home",
+        rustupHomeAbs: "/cache/rustup-home/1.93.0/linux-x86_64",
+        cargoHomeAbs: "/cache/cargo-home/1.93.0/linux-x86_64",
+        toolchainId: "1.93.0-x86_64-unknown-linux-gnu",
+    };
+
+    const plain = rustToolEnv(toolSpec, false);
+    expect(plain.tools).toEqual(toolSpec.tools);
+    expect(plain.env).toEqual([
+        "RUSTUP_HOME=.imp/tools/rustup-home",
+        "CARGO_HOME=.imp/tools/cargo-home",
+    ]);
+
+    const withSccache = rustToolEnv(toolSpec, true);
+    expect(withSccache.tools).toEqual([]);
+    expect(withSccache.env).toEqual([
+        "RUSTUP_HOME=/cache/rustup-home/1.93.0/linux-x86_64",
+        "CARGO_HOME=/cache/cargo-home/1.93.0/linux-x86_64",
+        "PATH=/cache/rustup-home/1.93.0/linux-x86_64/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin:/cache/cargo-home/1.93.0/linux-x86_64/bin",
+    ]);
+});
+
+test("cargoBuild has no sccache env/tools without an opted-in toolchain", async () => {
+    await withRustHost(async (host) => {
+        rustToolchain("1.93.0", { default: true });
+        gccToolchain("2025.08-1", { default: true });
+        const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
+
+        await cargoBuild(pkg);
+
+        const buildRun = host.runs[host.runs.length - 1];
+        expect(buildRun.env.some((e) => e.startsWith("RUSTC_WRAPPER="))).toBe(false);
+        expect(buildRun.tools.some((t) => t.name === "sccache")).toBe(false);
     });
 });
 

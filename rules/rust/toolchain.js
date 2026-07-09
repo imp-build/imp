@@ -153,6 +153,11 @@ function requireVersion(version) {
  * @param {object} [opts.linker] Linker toolchain handle (e.g. moldToolchain())
  *   registering a "rust-linker" product. No extra backend flag is added if
  *   omitted.
+ * @param {object} [opts.sccache] sccache toolchain handle (e.g.
+ *   sccacheToolchain(), see //rules/rust/sccache) registering a
+ *   "rust-build-cache" product. Wraps rustc with sccache and points it at a
+ *   persistent on-disk object cache; no build caching beyond cargo's own
+ *   (mtime-defeated, sandbox-fresh) incremental state is added if omitted.
  * @returns {object} Target handle for this Rust toolchain.
  */
 export function rustToolchain(version, opts = {}) {
@@ -168,6 +173,7 @@ export function rustToolchain(version, opts = {}) {
             version,
             ...(opts.linkDriver ? { linkDriver: opts.linkDriver } : {}),
             ...(opts.linker ? { linker: opts.linker } : {}),
+            ...(opts.sccache ? { sccache: opts.sccache } : {}),
         },
     });
 
@@ -320,6 +326,13 @@ export async function rustTool(version) {
         ],
         rustupHome: `.imp/tools/${RUSTUP_HOME_CACHE}`,
         cargoHome: `.imp/tools/${CARGO_HOME_CACHE}`,
+        // Real, absolute, stable on-disk paths for the same two named
+        // caches — bypassing the sandbox "tool" mount above. Only needed
+        // when sccache is wrapping rustc: see rustToolEnv() in
+        // //rules/rust for why the literal (not just canonically-equal)
+        // rustc exe path must stay identical across sandboxes in that case.
+        rustupHomeAbs: cacheGet(RUSTUP_HOME_CACHE, key),
+        cargoHomeAbs: cacheGet(CARGO_HOME_CACHE, key),
         toolchainId: id,
     };
 }
