@@ -10,9 +10,11 @@ import {
     productFor,
     run,
     targetAddress,
+    writeWorkspace,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
+import { distPathFor } from "//rules/workflows/package";
 
 import { craneTool } from "//rules/oci/toolchain";
 import { craneAuthTools, declareOciStorage, OCI_STORAGE_CACHE, ociStorageKey } from "//rules/oci/storage";
@@ -173,6 +175,64 @@ export const ociPullBuild = product("oci-pull", "build", async function ociPullB
     });
 
     return { ociLayoutPath: cacheGet(OCI_STORAGE_CACHE, key), digest };
+});
+
+// Tar an existing OCI-layout directory (produced by ociPullBuild — `crane
+// pull --format=oci`, confirmed empirically to write a real OCI-layout
+// directory: oci-layout, index.json, blobs/) into a self-contained
+// "oci-archive": the format skopeo and podman document for `podman load`, a
+// tar of an OCI Image Layout directory rooted at the tar's top level.
+// crane's CLI has no local-layout→tarball conversion command of its own
+// (crane push requires a registry destination; crane pull's
+// --format=oci→tarball path only applies when pulling from a registry), so
+// plain deterministic tar is the correct, and only, tool here.
+async function packageOciLayoutAsTar(handle, digest) {
+    const slug = target_output_slug(handle);
+    const dir = `.imp/oci-package/${slug}`;
+    const key = ociStorageKey(digest);
+
+    // The pulled OCI-layout directory lives in the oci-storage named cache,
+    // outside the workspace — run()'s ordinary {kind:"directory"} inputs must
+    // be workspace-relative, so it can't be declared that way. Mount it the
+    // same way toolchains do (craneTool(), RUSTUP_HOME, etc. — the
+    // ".imp/tools/<name>" convention used throughout rules/): as a `tools:`
+    // entry keyed by its named cache, symlinked into the sandbox at a fixed,
+    // deterministic path this script can address directly.
+    const layoutMountName = "oci-layout";
+    const layoutPath = `.imp/tools/${layoutMountName}`;
+    const tools = [
+        await nativeToolSpec(nativeTool("mkdir")),
+        await nativeToolSpec(nativeTool("tar")),
+        { kind: "tool", name: layoutMountName, cache: OCI_STORAGE_CACHE, key, binDirs: ["."] },
+    ];
+
+    const script = 'out=$1; layout=$2; mkdir -p "$out" && ' +
+        'tar --sort=name --mtime="@0" --owner=0 --group=0 --numeric-owner -C "$layout" -cf "$out/image.tar" .';
+
+    const result = await run({
+        argv: ["sh", "-c", script, "oci-package-tar", output_path(dir), layoutPath],
+        tools,
+        outputs: [output(output_path(dir), { kind: "directory" })],
+        materialize: false,
+        display: `package ${slug} as OCI archive tar`,
+    });
+
+    const dist = distPathFor(handle);
+    writeWorkspace(dist, result.outputDigest, { from: dir });
+    return { tarPath: `${dist}/image.tar` };
+}
+
+/**
+ * Package an ociPull() target: writes the pulled image's OCI-layout
+ * directory out as a `dist/.../image.tar` oci-archive tarball, loadable via
+ * `podman load` / `docker load`.
+ *
+ * @param {object} handle Target handle returned by ociPull().
+ * @returns {Promise<{ tarPath: string }>}
+ */
+export const ociPullPackage = product("oci-pull", "package", async function ociPullPackage(handle) {
+    const { digest } = await ociPullBuild(handle);
+    return packageOciLayoutAsTar(handle, digest);
 });
 
 // ---------------------------------------------------------------------------
@@ -382,6 +442,29 @@ export const ociBuildBuild = product("oci-build", "build", async function ociBui
     const digest = digestResult.stdout.trim();
 
     return { ociLayoutPath: builtDir, digest };
+});
+
+// Stub, not a real implementation — see the empirical findings above
+// ociBuildBuild's `hasConfig`/`crane mutate` block (unchanged, pre-existing):
+// crane 0.20.6's `append --base` and `mutate` both always resolve their
+// image argument as a registry reference, never a local tarball or
+// OCI-layout directory (verified by hand against the pinned crane binary,
+// not assumed from docs). So base-chaining an ociBuild() onto another local
+// ociPull()/ociBuild(), and setting entrypoint/cmd/env/labels/user/workdir,
+// don't actually work today regardless of flags — that needs either a real
+// local registry to push/pull through, or hand-editing the OCI layout's
+// index.json/manifest/config blobs ourselves. Tracked as a follow-up, not
+// solved here; this product fails loudly rather than silently running
+// commands that error out confusingly (matches odinPackageStub,
+// rules/odin/index.js).
+export const ociBuildPackage = product("oci-build", "package", async function ociBuildPackage() {
+    throw new Error(
+        "ociBuild()'s package product is not yet implemented — crane 0.20.6's " +
+        "`append --base`/`mutate` only operate on images already in a registry, " +
+        "not local builds, so packaging a locally-built image needs a different " +
+        "implementation (hand-editing the OCI layout, or a local registry) that " +
+        "hasn't been built yet. ociPull() targets can be packaged today."
+    );
 });
 
 // ---------------------------------------------------------------------------
