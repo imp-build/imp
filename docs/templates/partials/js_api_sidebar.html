@@ -1,18 +1,23 @@
-{# Flat nav for generated JS reference sections. #}
-{% if current_path is defined and current_path is starting_with("/reference/user-api") %}
-{% set api_root = get_section(path="reference/user-api/_index.md") %}
-{% elif page is defined and page.path is starting_with("/reference/user-api") %}
+{# Nested nav tree for generated JS reference sections: mirrors the source
+   directory structure, collapsed except for the branch containing the
+   current page/section. Callers must `{% import "partials/nav_macros.html"
+   as nav %}` before including this partial - Tera resolves macro
+   namespaces against the top-level template, not the included one. #}
+{% if page is defined and page.path is starting_with("/reference/user-api") %}
 {% set api_root = get_section(path="reference/user-api/_index.md") %}
 {% elif section is defined and section.path is starting_with("/reference/user-api") %}
 {% set api_root = get_section(path="reference/user-api/_index.md") %}
 {% else %}
 {% set api_root = get_section(path="reference/js-api/_index.md") %}
 {% endif %}
+{% if page is defined %}
+{% set current_relpath = page.relative_path %}
+{% set active_set = page.ancestors %}
+{% else %}
+{% set current_relpath = section.relative_path %}
+{% set active_set = section.ancestors | concat(with=[section.relative_path]) %}
+{% endif %}
 <nav class="docs-sidebar">
     <a class="docs-sidebar__title" href="{{ api_root.permalink }}">{{ api_root.title }}</a>
-    <ul>
-        {% for p in api_root.pages %}
-        <li><a href="{{ p.permalink }}"{% if current_path is defined and current_path == p.path %} class="is-active"{% endif %}>{{ p.title }}</a></li>
-        {% endfor %}
-    </ul>
+    {{ nav::top_tree(section=api_root, active_set=active_set, current_relpath=current_relpath) }}
 </nav>

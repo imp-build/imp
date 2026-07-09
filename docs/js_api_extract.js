@@ -290,6 +290,94 @@ export function languageSlug(language) {
 }
 
 /**
+ * Turn a source directory into the full chain of doc-tree path segments it
+ * belongs under, e.g. "rules/c/cmake" -> ["c", "cmake"], "rules/imp/test"
+ * -> ["imp", "test"], "rules" -> ["rules"], "src" -> ["core"]. Unlike
+ * `languageForDirectory`, nesting below the first segment is preserved
+ * rather than collapsed, so the generated doc tree mirrors the source tree.
+ *
+ * @param {string} dirPath
+ * @returns {string[]}
+ */
+export function sectionSegments(dirPath) {
+    if (dirPath === "src") return ["core"];
+    if (dirPath === "rules") return ["rules"];
+    const rest = dirPath.startsWith("rules/") ? dirPath.slice("rules/".length) : dirPath;
+    return rest.split("/");
+}
+
+/**
+ * Fixed display order for the "core" (build-system/meta) top-level doc-tree
+ * groups; everything else falls into the catch-all "languages" group,
+ * ordered alphabetically. Used to assign `weight`/`extra.group` front matter
+ * to top-level section pages so the sidebar can render two headings without
+ * hardcoding the language list (new `rules/<toolchain>` directories default
+ * into "languages" automatically).
+ */
+const TOP_LEVEL_CORE_ORDER = ["core", "workflows", "rules", "imp"];
+
+/**
+ * Build a nested page tree from a flat list of leaves keyed by doc-tree path
+ * segments. A segment path is a "branch" if some other leaf's segments sit
+ * strictly beneath it; branches get a synthetic `_index.md` (titled from
+ * their last segment, using the `section.html` template, with the branch's
+ * own leaf content - if any - inlined as its body) so directories that mix
+ * direct content with subdirectories (e.g. `rules/c/*.js` alongside
+ * `rules/c/cmake/`) still render one coherent section page. Leaves that
+ * aren't also branches are emitted as-is at `segments.join("/") + ".md"`,
+ * unless `forceTopLevelSections` is set, in which case every top-level
+ * (depth-1) node always becomes a branch - even a single-file one - so the
+ * sidebar can treat the whole top level uniformly as sections, each tagged
+ * with a `weight` and `extra.group` ("core" or "languages") per
+ * `TOP_LEVEL_CORE_ORDER`.
+ *
+ * @param {{ segments: string[], markdown: string }[]} leaves
+ * @param {{ forceTopLevelSections?: boolean }} [options]
+ * @returns {{ path: string, markdown: string }[]}
+ */
+function buildPageTree(leaves, { forceTopLevelSections = false } = {}) {
+    const byKey = new Map(leaves.map(leaf => [leaf.segments.join("/"), leaf]));
+    const branchKeys = new Set();
+    for (const leaf of leaves) {
+        for (let i = 1; i < leaf.segments.length; i++) {
+            branchKeys.add(leaf.segments.slice(0, i).join("/"));
+        }
+        if (forceTopLevelSections) branchKeys.add(leaf.segments[0]);
+    }
+
+    let topLevelOrder = null;
+    if (forceTopLevelSections) {
+        const topSlugs = new Set([...byKey.keys(), ...branchKeys].filter(key => !key.includes("/")));
+        const core = TOP_LEVEL_CORE_ORDER.filter(slug => topSlugs.has(slug));
+        const rest = [...topSlugs].filter(slug => !TOP_LEVEL_CORE_ORDER.includes(slug)).sort();
+        topLevelOrder = new Map([...core, ...rest].map((slug, i) => [slug, { weight: i, group: core.includes(slug) ? "core" : "languages" }]));
+    }
+
+    const pages = [];
+    for (const key of new Set([...byKey.keys(), ...branchKeys])) {
+        const leaf = byKey.get(key);
+        if (branchKeys.has(key)) {
+            const segments = key.split("/");
+            const title = segments[segments.length - 1];
+            const titleCased = title.charAt(0).toUpperCase() + title.slice(1);
+            let frontmatter = `+++\ntitle = "${titleCased}"\ntemplate = "section.html"\n`;
+            const topLevelMeta = topLevelOrder && topLevelOrder.get(key);
+            if (topLevelMeta) {
+                // Zola's `Section` doesn't expose front matter `weight` to
+                // templates, so the sidebar sorts on `extra.weight` instead.
+                frontmatter += `extra = { group = "${topLevelMeta.group}", weight = ${topLevelMeta.weight} }\n`;
+            }
+            frontmatter += "+++\n";
+            const body = leaf ? leaf.markdown.replace(/^\+\+\+\n[\s\S]*?\n\+\+\+\n/, "") : "";
+            pages.push({ path: `${key}/_index.md`, markdown: `${frontmatter}${body}` });
+        } else {
+            pages.push({ path: `${key}.md`, markdown: leaf.markdown });
+        }
+    }
+    return pages;
+}
+
+/**
  * Resolve an entry's sidebar category. An explicit JSDoc `@category` tag
  * always wins; otherwise an entry defaults to "api" since it's exported and
  * therefore presumably meant to be used by other code. (Whether a given
@@ -353,15 +441,16 @@ export function renderLanguagePage(language, byCategory) {
 }
 
 /**
- * Turn a JS source path into a flat Zola page path. Keeping the source path in
- * the title preserves the module identity while the flat slug keeps the
- * existing section sidebar simple.
+ * Turn a JS source path into its doc-tree page segments, mirroring the
+ * source directory nesting, e.g. "rules/c/cmake/toolchain.js" ->
+ * ["c", "cmake", "toolchain"], "src/imp_core.js" -> ["core", "imp_core"].
  *
  * @param {string} sourcePath
- * @returns {string}
+ * @returns {string[]}
  */
-export function modulePagePath(sourcePath) {
-    return `${sourcePath.replace(/\.js$/, "").replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "")}.md`;
+export function modulePageSegments(sourcePath) {
+    const basename = sourcePath.slice(sourcePath.lastIndexOf("/") + 1).replace(/\.js$/, "").toLowerCase();
+    return [...sectionSegments(directoryForSourcePath(sourcePath)), basename];
 }
 
 function renderModulePage(sourcePath, entries) {
@@ -371,53 +460,63 @@ function renderModulePage(sourcePath, entries) {
 
 /**
  * Parse every scanned source file into exhaustive code-reference pages: one
- * page per module, including every local export and marking missing JSDoc.
+ * page per module (nested to mirror its source directory), including every
+ * local export and marking missing JSDoc. Directories are represented as
+ * real sections (see `buildPageTree`) so the generated tree matches the
+ * `rules/` tree it was extracted from. A module named `index.js` documents
+ * its directory itself rather than getting its own page: Zola rejects a
+ * literal `index.md` living alongside that directory's `_index.md`, and
+ * semantically an `index.js`'s exports *are* what that directory exposes.
  *
  * @param {{ sourcePath: string, sourceText: string }[]} files
  * @returns {{ path: string, markdown: string }[]}
  */
 export function extractCodeReference(files) {
-    const pages = [];
+    const leaves = [];
     for (const { sourcePath, sourceText } of files.slice().sort((a, b) => a.sourcePath.localeCompare(b.sourcePath))) {
         const entries = parseModule(sourceText);
         if (entries.length === 0) continue;
-        pages.push({
-            path: modulePagePath(sourcePath),
-            markdown: renderModulePage(sourcePath, entries),
-        });
+        let segments = modulePageSegments(sourcePath);
+        if (segments[segments.length - 1] === "index" && segments.length > 1) {
+            segments = segments.slice(0, -1);
+        }
+        leaves.push({ segments, markdown: renderModulePage(sourcePath, entries) });
     }
-    return pages;
+    return buildPageTree(leaves, { forceTopLevelSections: true });
 }
 
 /**
- * Parse every scanned source file into one curated user API reference page per
- * sidebar language (directory-derived). Only entries tagged
- * `@category target` or `@category configuration` are included.
+ * Parse every scanned source file into one curated user API reference page
+ * per source directory (nested to mirror that directory's place in the
+ * `rules/` tree). Only entries tagged `@category target` or
+ * `@category configuration` are included.
  *
  * @param {{ sourcePath: string, sourceText: string }[]} files
  * @returns {{ path: string, markdown: string }[]}
  */
 export function extractUserApiReference(files) {
-    const byLanguage = new Map();
+    const byPath = new Map();
     for (const { sourcePath, sourceText } of files) {
         for (const entry of parseModule(sourceText)) {
             if (!isUserApiEntry(entry)) continue;
-            const language = languageForDirectory(directoryForSourcePath(sourcePath));
-            if (!byLanguage.has(language)) byLanguage.set(language, new Map());
-            const byCategory = byLanguage.get(language);
+            const segments = sectionSegments(directoryForSourcePath(sourcePath));
+            const key = segments.join("/");
+            if (!byPath.has(key)) byPath.set(key, { segments, byCategory: new Map() });
+            const byCategory = byPath.get(key).byCategory;
             const category = categoryForEntry(entry);
             if (!byCategory.has(category)) byCategory.set(category, []);
             byCategory.get(category).push(entry);
         }
     }
 
-    const pages = [];
-    for (const language of [...byLanguage.keys()].sort()) {
-        const byCategory = byLanguage.get(language);
-        const slug = languageSlug(language);
-        pages.push({ path: `${slug}.md`, markdown: renderLanguagePage(language, byCategory) });
+    const leaves = [];
+    for (const key of [...byPath.keys()].sort()) {
+        const { segments, byCategory } = byPath.get(key);
+        const language = segments[segments.length - 1];
+        const titleCased = language.charAt(0).toUpperCase() + language.slice(1);
+        leaves.push({ segments, markdown: renderLanguagePage(titleCased, byCategory) });
     }
-    return pages;
+    return buildPageTree(leaves, { forceTopLevelSections: true });
 }
 
 /**

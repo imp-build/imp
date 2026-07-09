@@ -1,0 +1,55 @@
+{# Nav tree for the generated JS reference sections, mirroring source
+   directory structure. `top_tree` renders the root: every top-level node is
+   always a section (see `forceTopLevelSections` in js_api_extract.js) tagged
+   with `extra.weight`/`extra.group` (Zola doesn't expose front matter
+   `weight` on `Section` to templates, so it's nested under `extra` instead),
+   so it's split into "Core"/"Languages" headings, sorted by weight
+   (Core-then-Workflows-then-alphabetical within Core; alphabetical within
+   Languages). `tree` handles everything below that: collapsed except for
+   the branch containing the current page. #}
+
+{% macro top_tree(section, active_set, current_relpath) %}
+{% set_global __subs = [] %}
+{% for sub_path in section.subsections %}
+{% set_global __subs = __subs | concat(with=[get_section(path=sub_path)]) %}
+{% endfor %}
+{% set sorted = __subs | sort(attribute="extra.weight") %}
+{% set_global __prev_group = "" %}
+{% for sub in sorted %}
+{% if sub.extra.group != __prev_group %}
+{% if not loop.first %}</ul></div>{% endif %}
+<div class="docs-sidebar__section">
+    <span class="docs-sidebar__heading">{{ sub.extra.group | capitalize }}</span>
+    <ul>
+        {% set_global __prev_group = sub.extra.group %}
+        {% endif %}
+        <li class="docs-sidebar__group">
+            <a href="{{ sub.permalink }}" class="docs-sidebar__lang{% if sub.relative_path == current_relpath %} is-active{% endif %}">{{ sub.title }}</a>
+            {% if active_set is containing(sub.relative_path) %}
+            {{ nav::tree(section=sub, active_set=active_set, current_relpath=current_relpath) }}
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+</div>
+{% endmacro top_tree %}
+
+{% macro tree(section, active_set, current_relpath) %}
+{% set_global __subs2 = [] %}
+{% for sub_path in section.subsections %}
+{% set_global __subs2 = __subs2 | concat(with=[get_section(path=sub_path)]) %}
+{% endfor %}
+<ul>
+    {% for page in section.pages | sort(attribute="title") %}
+    <li><a href="{{ page.permalink }}"{% if page.relative_path == current_relpath %} class="is-active"{% endif %}>{{ page.title }}</a></li>
+    {% endfor %}
+    {% for sub in __subs2 | sort(attribute="title") %}
+    <li>
+        <a href="{{ sub.permalink }}"{% if sub.relative_path == current_relpath %} class="is-active"{% endif %}>{{ sub.title }}</a>
+        {% if active_set is containing(sub.relative_path) %}
+        {{ nav::tree(section=sub, active_set=active_set, current_relpath=current_relpath) }}
+        {% endif %}
+    </li>
+    {% endfor %}
+</ul>
+{% endmacro tree %}

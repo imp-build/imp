@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "partials/nav_macros.html" as nav %}
 
 {% block title %}{{ section.title }} — {{ config.title }}{% endblock title %}
 
@@ -11,9 +12,16 @@
     <article class="content-body">
         <h1>{{ section.title }}</h1>
         {{ section.content | safe }}
-        {% if section.pages %}
+        {% if section.subsections or section.pages %}
+        {% set_global __subs3 = [] %}
+        {% for sub_path in section.subsections %}
+        {% set_global __subs3 = __subs3 | concat(with=[get_section(path=sub_path)]) %}
+        {% endfor %}
         <ul class="page-list">
-            {% for page in section.pages %}
+            {% for sub in __subs3 | sort(attribute="title") %}
+            <li><a href="{{ sub.permalink }}">{{ sub.title }}</a></li>
+            {% endfor %}
+            {% for page in section.pages | sort(attribute="title") %}
             <li><a href="{{ page.permalink }}">{{ page.title }}</a></li>
             {% endfor %}
         </ul>

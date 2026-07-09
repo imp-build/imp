@@ -9,9 +9,10 @@ import {
     directoryForSourcePath,
     languageForDirectory,
     languageSlug,
+    sectionSegments,
     categoryForEntry,
     isUserApiEntry,
-    modulePagePath,
+    modulePageSegments,
     renderLanguagePage,
     extractApiReference,
     extractCodeReference,
@@ -220,6 +221,14 @@ test("derives language slugs", () => {
     expect(languageSlug("Imp")).toBe("imp");
 });
 
+test("derives full doc-tree section segments from a directory, preserving nesting", () => {
+    expect(sectionSegments("src")).toEqual(["core"]);
+    expect(sectionSegments("rules")).toEqual(["rules"]);
+    expect(sectionSegments("rules/odin")).toEqual(["odin"]);
+    expect(sectionSegments("rules/c/zig")).toEqual(["c", "zig"]);
+    expect(sectionSegments("rules/imp/test")).toEqual(["imp", "test"]);
+});
+
 test("categorizes entries from their @category tag, overriding the default", () => {
     expect(categoryForEntry({ doc: { category: "target" } })).toBe("target");
     expect(categoryForEntry({ doc: { category: "configuration" } })).toBe("configuration");
@@ -263,15 +272,16 @@ test("renders a language page with frontmatter and category headings in CATEGORY
     expect(md.indexOf("## Configuration") < md.indexOf("## Targets")).toBeTruthy();
 });
 
-test("modulePagePath creates flat deterministic page paths", () => {
-    expect(modulePagePath("src/imp_core.js")).toBe("src-imp-core.md");
-    expect(modulePagePath("rules/odin/toolchain.js")).toBe("rules-odin-toolchain.md");
+test("modulePageSegments mirrors the source directory nesting", () => {
+    expect(modulePageSegments("src/imp_core.js")).toEqual(["core", "imp_core"]);
+    expect(modulePageSegments("rules/odin/toolchain.js")).toEqual(["odin", "toolchain"]);
+    expect(modulePageSegments("rules/c/cmake/toolchain.js")).toEqual(["c", "cmake", "toolchain"]);
 });
 
-test("extractCodeReference emits one page per source module with every export", () => {
+test("extractCodeReference emits one page per source module, nested to mirror its directory", () => {
     const pages = extractCodeReference([
         {
-            sourcePath: "rules/odin/index.js",
+            sourcePath: "rules/odin/toolchain.js",
             sourceText: [
                 "/**",
                 " * Declare an Odin package.",
@@ -286,13 +296,53 @@ test("extractCodeReference emits one page per source module with every export", 
         },
     ]);
 
-    expect(pages.length).toBe(1);
-    expect(pages[0].path).toBe("rules-odin-index.md");
-    expect(pages[0].markdown).toContain('title = "rules/odin/index.js"');
-    expect(pages[0].markdown).toContain("### odinPackage");
-    expect(pages[0].markdown).toContain("### odinBuild");
-    expect(pages[0].markdown).toContain("_Undocumented._");
-    expect(pages[0].markdown).toContain("### OdinPackage");
+    const byPath = new Map(pages.map(p => [p.path, p.markdown]));
+    expect(byPath.has("odin/toolchain.md")).toBe(true);
+    const page = byPath.get("odin/toolchain.md");
+    expect(page).toContain('title = "rules/odin/toolchain.js"');
+    expect(page).toContain("### odinPackage");
+    expect(page).toContain("### odinBuild");
+    expect(page).toContain("_Undocumented._");
+    expect(page).toContain("### OdinPackage");
+});
+
+test("extractCodeReference folds an index.js module into its own directory's page instead of a colliding index.md", () => {
+    const soleFile = extractCodeReference([
+        { sourcePath: "rules/oci/index.js", sourceText: "export function ociImage(opts) {}" },
+    ]);
+    expect(soleFile.length).toBe(1);
+    expect(soleFile[0].path).toBe("oci/_index.md");
+    expect(soleFile[0].markdown).toContain("### ociImage");
+
+    const withSiblings = extractCodeReference([
+        { sourcePath: "rules/c/index.js", sourceText: "export function cLibrary(opts) {}" },
+        { sourcePath: "rules/c/gcc/toolchain.js", sourceText: "export function gccToolchain() {}" },
+    ]);
+    const byPath = new Map(withSiblings.map(p => [p.path, p.markdown]));
+    expect(byPath.has("c/index.md")).toBe(false);
+    expect(byPath.has("c/_index.md")).toBe(true);
+    expect(byPath.get("c/_index.md")).toContain("### cLibrary");
+    expect(byPath.has("c/gcc/toolchain.md")).toBe(true);
+});
+
+test("extractCodeReference emits a branch _index.md when a directory has more than one module", () => {
+    const pages = extractCodeReference([
+        {
+            sourcePath: "rules/c/cmake/toolchain.js",
+            sourceText: "export function cmakeToolchain() {}",
+        },
+        {
+            sourcePath: "rules/c/mold/toolchain.js",
+            sourceText: "export function moldToolchain() {}",
+        },
+    ]);
+    const byPath = new Map(pages.map(p => [p.path, p.markdown]));
+
+    expect(byPath.has("c/cmake/toolchain.md")).toBe(true);
+    expect(byPath.has("c/mold/toolchain.md")).toBe(true);
+    expect(byPath.has("c/_index.md")).toBe(true);
+    expect(byPath.get("c/_index.md")).toContain('title = "C"');
+    expect(byPath.get("c/_index.md")).toContain('template = "section.html"');
 });
 
 test("extractUserApiReference emits curated language pages for target/configuration entries only", () => {
@@ -331,8 +381,8 @@ test("extractUserApiReference emits curated language pages for target/configurat
     const pages = extractUserApiReference(files);
     const byPath = new Map(pages.map(p => [p.path, p.markdown]));
 
-    expect(byPath.has("odin.md")).toBe(true);
-    const odin = byPath.get("odin.md");
+    expect(byPath.has("odin/_index.md")).toBe(true);
+    const odin = byPath.get("odin/_index.md");
     expect(odin).toContain("## Configuration");
     expect(odin).toContain("### odinToolchain");
     expect(odin).toContain("## Targets");
@@ -345,6 +395,74 @@ test("extractUserApiReference emits curated language pages for target/configurat
     expect(byPath.has("rules.md")).toBe(false);
 });
 
+test("extractUserApiReference nests subdirectories as subcategories instead of folding them into their parent", () => {
+    const files = [
+        {
+            sourcePath: "rules/c/cmake/toolchain.js",
+            sourceText: [
+                "/**",
+                " * Declare a CMake toolchain.",
+                " * @category configuration",
+                " */",
+                "export function cmakeToolchain(version) {}",
+            ].join("\n"),
+        },
+        {
+            sourcePath: "rules/c/mold/toolchain.js",
+            sourceText: [
+                "/**",
+                " * Declare a Mold linker toolchain.",
+                " * @category configuration",
+                " */",
+                "export function moldToolchain(version) {}",
+            ].join("\n"),
+        },
+    ];
+
+    const pages = extractUserApiReference(files);
+    const byPath = new Map(pages.map(p => [p.path, p.markdown]));
+
+    expect(byPath.has("c/cmake.md")).toBe(true);
+    expect(byPath.has("c/mold.md")).toBe(true);
+    expect(byPath.get("c/cmake.md")).toContain("### cmakeToolchain");
+    expect(byPath.get("c/cmake.md")).not.toContain("### moldToolchain");
+    expect(byPath.get("c/mold.md")).toContain("### moldToolchain");
+    expect(byPath.has("c.md")).toBe(false);
+    expect(byPath.has("c/_index.md")).toBe(true);
+});
+
+test("extractUserApiReference tags every top-level section with a weight and core/languages group, core first", () => {
+    const files = [
+        { sourcePath: "rules/imp/native_tool.js", sourceText: "/** @category configuration */\nexport function impTool() {}" },
+        { sourcePath: "rules/workflows/fmt.js", sourceText: "/** @category target */\nexport function fmtWorkflow() {}" },
+        { sourcePath: "rules/odin/index.js", sourceText: "/** @category target */\nexport function odinPackage() {}" },
+        { sourcePath: "rules/c/index.js", sourceText: "/** @category target */\nexport function cLibrary() {}" },
+    ];
+
+    const pages = extractUserApiReference(files);
+    const byPath = new Map(pages.map(p => [p.path, p.markdown]));
+
+    // imp and workflows are top-level with only one directory each, so
+    // they'd normally stay flat pages - forced into sections here so every
+    // top-level entry is uniformly weight/group-taggable.
+    expect(byPath.has("workflows/_index.md")).toBe(true);
+    expect(byPath.has("imp/_index.md")).toBe(true);
+
+    const weightOf = path => Number(byPath.get(path).match(/weight = (\d+)/)[1]);
+    const groupOf = path => byPath.get(path).match(/group = "(\w+)"/)[1];
+
+    expect(groupOf("workflows/_index.md")).toBe("core");
+    expect(groupOf("imp/_index.md")).toBe("core");
+    expect(groupOf("odin/_index.md")).toBe("languages");
+    expect(groupOf("c/_index.md")).toBe("languages");
+
+    // Workflows comes right after Core in TOP_LEVEL_CORE_ORDER; Core itself
+    // isn't present here, so Workflows gets weight 0.
+    expect(weightOf("workflows/_index.md") < weightOf("imp/_index.md")).toBeTruthy();
+    expect(weightOf("imp/_index.md") < weightOf("c/_index.md")).toBeTruthy();
+    expect(weightOf("imp/_index.md") < weightOf("odin/_index.md")).toBeTruthy();
+});
+
 test("extractApiReference is the exhaustive code-reference compatibility wrapper", () => {
     const pages = extractApiReference([
         {
@@ -352,9 +470,9 @@ test("extractApiReference is the exhaustive code-reference compatibility wrapper
             sourceText: "export function asset(opts) {}",
         },
     ]);
+    const byPath = new Map(pages.map(p => [p.path, p.markdown]));
 
-    expect(pages.length).toBe(1);
-    expect(pages[0].path).toBe("rules-asset.md");
-    expect(pages[0].markdown).toContain("### asset");
+    expect(byPath.has("rules/asset.md")).toBe(true);
+    expect(byPath.get("rules/asset.md")).toContain("### asset");
 });
 });
