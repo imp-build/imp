@@ -182,8 +182,8 @@ export async function acquireGccToolchain(version) {
         [`#!/bin/sh\nexec "$(dirname "$0")/${arExe}" "$@"\n`, "ar"],
     ];
     const wrapperArgs = wrappers.flat();
-    const writeCmds = wrappers.map((_, i) => `printf %s "$${3 + i * 2}" > "$2/bin/$${4 + i * 2}"`);
-    const chmodCmds = wrappers.map((_, i) => `chmod +x "$2/bin/$${4 + i * 2}"`);
+    const writeCmds = wrappers.map((_, i) => `printf %s "\${${3 + i * 2}}" > "$2/bin/\${${4 + i * 2}}"`);
+    const chmodCmds = wrappers.map((_, i) => `chmod +x "$2/bin/\${${4 + i * 2}}"`);
     const extractScript = `mkdir -p "$2" && tar -xf "$1" -C "$2" --strip-components=1 && ${writeCmds.join(" && ")} && ${chmodCmds.join(" && ")}`;
 
     await run({
