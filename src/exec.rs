@@ -784,6 +784,13 @@ pub(crate) fn exec_run_inner(
     };
 
     if let Some(record) = cached_record_opt {
+        if opts.materialize && !opts.outputs.is_empty() {
+            eprintln!(
+                "warning: run() materialize:true for '{}' — writes directly to the workspace; \
+                 prefer materialize:false and a package() product for dist output",
+                opts.display
+            );
+        }
         if opts.materialize {
             materialize_cached_outputs(&record, workspace_root)?;
             materialize_named_caches(&record, workspace_root)?;
@@ -951,6 +958,13 @@ pub(crate) fn exec_run_inner(
         };
         if !opts.no_cache {
             write_task_cache_record(&record)?;
+        }
+        if opts.materialize && !opts.outputs.is_empty() {
+            eprintln!(
+                "warning: run() materialize:true for '{}' — writes directly to the workspace; \
+                 prefer materialize:false and a package() product for dist output",
+                opts.display
+            );
         }
         if opts.materialize {
             materialize_cached_outputs(&record, workspace_root)?;

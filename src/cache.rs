@@ -440,6 +440,38 @@ fn materialize_cached_directory(output: &CachedArtifact, destination: &Path) -> 
     Ok(())
 }
 
+/// Materialize an arbitrary digest (optionally narrowed to a subtree via
+/// `from`) directly into the workspace at `destination`, bypassing `run()`
+/// entirely — no sandbox, no cache record, no process spawn. This is the
+/// primitive behind `writeWorkspace()`, used by `package` products to publish
+/// a final digest under `dist/` without going through the `materialize:true`
+/// path (and its warning). Always copies, never hardlinks, for the same
+/// reason as `materialize_cached_directory`.
+pub(crate) fn write_workspace(digest: &str, from: Option<&str>, destination: &Path) -> Result<()> {
+    let root = crate::digest::DirectoryDigest::from_digest(digest.to_string());
+    let tree = root.tree()?;
+    let tree = match from {
+        Some(path) => crate::digest::subtree_from_trie(tree, path)?,
+        None => root.clone(),
+    };
+
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let temp = temp_sibling_path(destination, "tmp-dir");
+    remove_path_if_exists(&temp)?;
+    crate::digest::materialize_trie(tree.tree()?, &temp, false)?;
+    remove_path_if_exists(destination)?;
+    std::fs::rename(&temp, destination).with_context(|| {
+        format!(
+            "publish {} to {}",
+            temp.display(),
+            destination.display()
+        )
+    })?;
+    Ok(())
+}
+
 pub(crate) fn remove_path_if_exists(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path)
@@ -590,5 +622,37 @@ mod tests {
             std::fs::read_to_string(destination.join("link")).unwrap(),
             "hello"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_workspace_narrows_to_subtree() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source.path().join("out").join("nested")).unwrap();
+        std::fs::write(source.path().join("out").join("nested").join("f.txt"), b"content").unwrap();
+
+        let digest = crate::digest::capture_directory(source.path()).unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        let destination = dest.path().join("published");
+        write_workspace(digest.digest(), Some("out"), &destination).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(destination.join("nested").join("f.txt")).unwrap(),
+            "content"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_workspace_errors_on_missing_subtree() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("a.txt"), b"a").unwrap();
+
+        let digest = crate::digest::capture_directory(source.path()).unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        let destination = dest.path().join("published");
+        assert!(write_workspace(digest.digest(), Some("missing"), &destination).is_err());
     }
 }

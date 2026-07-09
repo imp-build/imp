@@ -1309,6 +1309,26 @@ export function readFileInDigest(digest, path) {
     return __host_digest_read_file(digest, path);
 }
 
+/**
+ * Materialize `digest` (optionally narrowed to the subtree at `opts.from`)
+ * directly into the workspace at `path` — no sandbox, no cache record, no
+ * process spawn. This is the one blessed way for a `package` product to
+ * publish a final digest under dist/, bypassing run()'s materialize:true
+ * path (and its warning) entirely.
+ *
+ * @param {string} path Workspace-relative destination path.
+ * @param {string} digest Digest string (e.g. a run()'s outputDigest).
+ * @param {object} [opts]
+ * @param {string} [opts.from] Subtree path within `digest` to write, stripping
+ *   its prefix — e.g. a run() output's declared output_path.
+ * @returns {void}
+ */
+export function writeWorkspace(path, digest, opts) {
+    const contextEntry = _effective_context_entry(true);
+    _trace_effect_in_context({ event: "effect", kind: "write_workspace", path }, contextEntry.ctx);
+    return __host_write_workspace(path, digest, (opts && opts.from) ?? null);
+}
+
 export const file_set = {
     union(...sets) {
         for (const s of sets) {

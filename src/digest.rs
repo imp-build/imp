@@ -326,6 +326,28 @@ pub(crate) fn read_file_from_trie(trie: &DigestTrie, path: &str) -> Result<Strin
     }
 }
 
+/// Return the directory node at `path` within `trie` as its own
+/// `DirectoryDigest`, stripped of the path prefix it was nested under — e.g.
+/// pulling a single `run()` output's tree (nested under its declared output
+/// path, see `nest_directory`) back out as a standalone tree rooted at that
+/// output's content, suitable for `write_workspace` to land at an unrelated
+/// destination path.
+pub(crate) fn subtree_from_trie(trie: &DigestTrie, path: &str) -> Result<DirectoryDigest> {
+    let mut current = trie.clone();
+    for part in path.split('/').filter(|p| !p.is_empty()) {
+        let entry = current
+            .entries()
+            .iter()
+            .find(|e| e.name() == part)
+            .with_context(|| format!("path '{path}' not found in digest (missing '{part}')"))?;
+        match entry {
+            Entry::Directory(d) => current = DigestTrie::load(&d.digest)?,
+            _ => bail!("path '{path}' not found in digest ('{part}' is not a directory)"),
+        }
+    }
+    DirectoryDigest::from_trie(current)
+}
+
 // ---------------------------------------------------------------------------
 // Diff — structural comparison between two trees
 // ---------------------------------------------------------------------------
@@ -986,5 +1008,31 @@ mod tests {
             let target = std::fs::read_link(destination.join("nested").join("link.txt")).unwrap();
             assert_eq!(target, Path::new("real.txt"));
         }
+    }
+
+    #[test]
+    fn subtree_from_trie_strips_the_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("out").join("nested").join("f.txt"), "content");
+
+        let digest = capture_directory(&src).unwrap();
+        let sub = subtree_from_trie(digest.tree().unwrap(), "out").unwrap();
+
+        assert_eq!(
+            read_file_from_trie(sub.tree().unwrap(), "nested/f.txt").unwrap(),
+            "content"
+        );
+        assert!(read_file_from_trie(digest.tree().unwrap(), "nested/f.txt").is_err());
+    }
+
+    #[test]
+    fn subtree_from_trie_errors_on_missing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("a.txt"), "a");
+
+        let digest = capture_directory(&src).unwrap();
+        assert!(subtree_from_trie(digest.tree().unwrap(), "missing").is_err());
     }
 }

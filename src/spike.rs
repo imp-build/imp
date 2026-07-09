@@ -1668,6 +1668,25 @@ fn register_globals<'js>(
     )?;
     globals.set("__host_capture_paths", host_capture_paths)?;
 
+    // __host_write_workspace(path, digest, from) → null
+    // Materializes `digest` (optionally narrowed to the subtree at `from`)
+    // directly into the workspace at `path` — no sandbox, no cache record, no
+    // process spawn. Backs `writeWorkspace()`, the one blessed way for a
+    // `package` product to publish a final digest under dist/.
+    let wc = workspace_root.clone();
+    let host_write_workspace = Function::new(
+        ctx.clone(),
+        move |path: String, digest: String, from: Option<String>| -> rquickjs::Result<()> {
+            let relative = artifact_relative_path(&path)
+                .map_err(|e| rquickjs::Error::new_loading_message("writeWorkspace", format!("{e:#}")))?;
+            let destination = wc.join(&relative);
+            crate::cache::write_workspace(&digest, from.as_deref(), &destination).map_err(|e| {
+                rquickjs::Error::new_loading_message("writeWorkspace", format!("{e:#}"))
+            })
+        },
+    )?;
+    globals.set("__host_write_workspace", host_write_workspace)?;
+
     // __host_env(name) → string | null
     let host_env = Function::new(
         ctx.clone(),
