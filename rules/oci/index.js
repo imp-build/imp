@@ -177,41 +177,49 @@ export const ociPullBuild = product("oci-pull", "build", async function ociPullB
     return { ociLayoutPath: cacheGet(OCI_STORAGE_CACHE, key), digest };
 });
 
-// Tar an existing OCI-layout directory (produced by ociPullBuild — `crane
-// pull --format=oci`, confirmed empirically to write a real OCI-layout
-// directory: oci-layout, index.json, blobs/) into a self-contained
-// "oci-archive": the format skopeo and podman document for `podman load`, a
-// tar of an OCI Image Layout directory rooted at the tar's top level.
-// crane's CLI has no local-layout→tarball conversion command of its own
-// (crane push requires a registry destination; crane pull's
-// --format=oci→tarball path only applies when pulling from a registry), so
-// plain deterministic tar is the correct, and only, tool here.
-async function packageOciLayoutAsTar(handle, digest) {
+// An OCI-layout directory referenced by another rule may live outside the
+// workspace (an ociPull()'s oci-storage named-cache entry — an absolute
+// path) or inside it (an ociBuild()'s materialize:true run() output —
+// workspace-relative). Only the former needs the `.imp/tools/<name>`
+// named-cache-mount idiom already used throughout rules/ (craneTool(),
+// RUSTUP_HOME, etc.) — a `tools:` entry keyed by cache+digest, symlinked
+// into the sandbox at a fixed, deterministic path a script can address
+// directly. The latter is already a plain, declarable {kind:"directory"}
+// input.
+function mountOciLayout(name, layoutPath, digest) {
+    if (layoutPath.startsWith("/")) {
+        const key = ociStorageKey(digest);
+        return {
+            tools: [{ kind: "tool", name, cache: OCI_STORAGE_CACHE, key, binDirs: ["."] }],
+            inputs: [],
+            mountedPath: `.imp/tools/${name}`,
+        };
+    }
+    return { tools: [], inputs: [{ kind: "directory", path: layoutPath }], mountedPath: layoutPath };
+}
+
+// Tar an existing OCI-layout directory (produced by ociPullBuild/
+// ociBuildBuild) into a self-contained "oci-archive": the format skopeo and
+// podman document for `podman load`, a tar of an OCI Image Layout directory
+// rooted at the tar's top level. crane's CLI has no local-layout→tarball
+// conversion command of its own (crane push requires a registry
+// destination; crane pull's --format=oci→tarball path only applies when
+// pulling from a registry), so plain deterministic tar is the correct, and
+// only, tool here.
+async function packageOciLayoutAsTar(handle, layoutPath, digest) {
     const slug = target_output_slug(handle);
     const dir = `.imp/oci-package/${slug}`;
-    const key = ociStorageKey(digest);
+    const mount = mountOciLayout("oci-layout", layoutPath, digest);
 
-    // The pulled OCI-layout directory lives in the oci-storage named cache,
-    // outside the workspace — run()'s ordinary {kind:"directory"} inputs must
-    // be workspace-relative, so it can't be declared that way. Mount it the
-    // same way toolchains do (craneTool(), RUSTUP_HOME, etc. — the
-    // ".imp/tools/<name>" convention used throughout rules/): as a `tools:`
-    // entry keyed by its named cache, symlinked into the sandbox at a fixed,
-    // deterministic path this script can address directly.
-    const layoutMountName = "oci-layout";
-    const layoutPath = `.imp/tools/${layoutMountName}`;
-    const tools = [
-        await nativeToolSpec(nativeTool("mkdir")),
-        await nativeToolSpec(nativeTool("tar")),
-        { kind: "tool", name: layoutMountName, cache: OCI_STORAGE_CACHE, key, binDirs: ["."] },
-    ];
+    const tools = [await nativeToolSpec(nativeTool("mkdir")), await nativeToolSpec(nativeTool("tar")), ...mount.tools];
 
     const script = 'out=$1; layout=$2; mkdir -p "$out" && ' +
         'tar --sort=name --mtime="@0" --owner=0 --group=0 --numeric-owner -C "$layout" -cf "$out/image.tar" .';
 
     const result = await run({
-        argv: ["sh", "-c", script, "oci-package-tar", output_path(dir), layoutPath],
+        argv: ["sh", "-c", script, "oci-package-tar", output_path(dir), mount.mountedPath],
         tools,
+        inputs: mount.inputs,
         outputs: [output(output_path(dir), { kind: "directory" })],
         materialize: false,
         display: `package ${slug} as OCI archive tar`,
@@ -231,14 +239,14 @@ async function packageOciLayoutAsTar(handle, digest) {
  * @returns {Promise<{ tarPath: string }>}
  */
 export const ociPullPackage = product("oci-pull", "package", async function ociPullPackage(handle) {
-    const { digest } = await ociPullBuild(handle);
-    return packageOciLayoutAsTar(handle, digest);
+    const { ociLayoutPath, digest } = await ociPullBuild(handle);
+    return packageOciLayoutAsTar(handle, ociLayoutPath, digest);
 });
 
 // ---------------------------------------------------------------------------
-// oci-build: compose an image from a base plus deterministic file layers,
-// purely declaratively (crane append + crane mutate) — no Dockerfile, no
-// commands executed inside a container.
+// oci-build: compose an image from a base plus deterministic file layers, by
+// hand-assembling the OCI layout (see COMPOSE_OCI_IMAGE_SCRIPT below) — no
+// Dockerfile, no commands executed inside a container, no crane.
 // ---------------------------------------------------------------------------
 
 // One layer's staging + tar step. Deterministic tar flags are load-bearing:
@@ -337,8 +345,9 @@ export class OciBuild extends Target {
 
 /**
  * Declare an OCI image build target: composes `base` plus `layers` into a
- * new image purely declaratively (`crane append` for layers, `crane mutate`
- * for config) — no Dockerfile, no commands executed inside a container.
+ * new image by hand-assembling its OCI layout (layer blobs, config blob,
+ * manifest blob, index.json) — no Dockerfile, no commands executed inside a
+ * container.
  *
  * @category target
  * @param {object} opts
@@ -358,11 +367,88 @@ export function ociBuild({ path = ".", base, layers = [], entrypoint, cmd, env =
     return new OciBuild({ path, base, layers, entrypoint, cmd, env, labels, user, workdir });
 }
 
+// Assembles an OCI-layout directory by hand: no crane. `crane append --base`
+// and `crane mutate` were confirmed (empirically, against the pinned 0.20.6
+// binary) to always resolve their image argument as a registry reference —
+// neither has any local-tarball/local-directory mode — so composing a local
+// image from a local base is fundamentally impossible through crane's CLI.
+// An OCI layout is just four kinds of file, all sha256-content-addressed
+// under blobs/sha256/<hex>: oci-layout (static), layer blobs (the tars
+// already built by buildLayerTarball), a config blob (JSON: platform,
+// entrypoint/cmd/env/labels/user/workdir, rootfs.diff_ids, history), and a
+// manifest blob (JSON: pointers to config + layers) referenced by
+// index.json. Every piece jq/sha256sum/tar can produce directly, and
+// deterministically (fixed key order via `jq -S`, no wall-clock timestamps).
+//
+// Layers are stored uncompressed (mediaType ".tar", not ".tar+gzip") so a
+// layer's blob digest and its rootfs diffID are the same sha256sum call —
+// gzip would need its own reproducibility fighting (embedded mtime/OS byte)
+// for no benefit here, since these are locally-composed layers, not
+// registry-transferred ones where bandwidth matters.
+const COMPOSE_OCI_IMAGE_SCRIPT = [
+    'out=$1; base=$2; os=$3; arch=$4; entrypoint=$5; cmd=$6; envList=$7; labels=$8; user=$9; workdir=${10}',
+    "shift 10",
+    'mkdir -p "$out/blobs/sha256"',
+    'if [ -n "$base" ]; then',
+    '    cp -r "$base/." "$out/"',
+    '    manifest_digest=$(jq -r ".manifests[0].digest" "$out/index.json" | cut -d: -f2)',
+    '    manifest_path="$out/blobs/sha256/$manifest_digest"',
+    '    config_digest=$(jq -r ".config.digest" "$manifest_path" | cut -d: -f2)',
+    '    config_json=$(cat "$out/blobs/sha256/$config_digest")',
+    '    layers_json=$(jq -c ".layers" "$manifest_path")',
+    "else",
+    '    echo \'{"imageLayoutVersion":"1.0.0"}\' > "$out/oci-layout"',
+    '    config_json=$(jq -n -c --arg os "$os" --arg arch "$arch" \'{architecture:$arch,os:$os,config:{},rootfs:{type:"layers",diff_ids:[]},history:[]}\')',
+    "    layers_json='[]'",
+    "fi",
+    'for tarball in "$@"; do',
+    '    digest=$(sha256sum "$tarball" | cut -d" " -f1)',
+    '    size=$(wc -c < "$tarball")',
+    '    cp "$tarball" "$out/blobs/sha256/$digest"',
+    '    config_json=$(printf "%s" "$config_json" | jq -c --arg d "sha256:$digest" \'',
+    '        .rootfs.diff_ids += [$d]',
+    '        | .history += [{"created":"1970-01-01T00:00:00Z","created_by":"imp oci-build"}]',
+    "    ')",
+    '    layers_json=$(printf "%s" "$layers_json" | jq -c --arg d "sha256:$digest" --argjson size "$size" \'',
+    '        . + [{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":$d,"size":$size}]',
+    "    ')",
+    "done",
+    'config_json=$(printf "%s" "$config_json" | jq -c \\',
+    '    --argjson entrypoint "$entrypoint" --argjson cmd "$cmd" --argjson envList "$envList" \\',
+    '    --argjson labels "$labels" --arg user "$user" --arg workdir "$workdir" \'',
+    '    (if ($entrypoint | length) > 0 then .config.Entrypoint = $entrypoint else . end)',
+    "    | (if (\$cmd | length) > 0 then .config.Cmd = \$cmd else . end)",
+    "    | (if (\$envList | length) > 0 then",
+    "        .config.Env = ((((.config.Env // []) | map(split(\"=\")) | map({(.[0]): (.[1:] | join(\"=\"))}) | add // {})",
+    '            * ($envList | map(split("=")) | map({(.[0]): (.[1:] | join("="))}) | add))',
+    '            | to_entries | map("\\(.key)=\\(.value)"))',
+    "      else . end)",
+    "    | (if (\$labels | length) > 0 then .config.Labels = ((.config.Labels // {}) * \$labels) else . end)",
+    '    | (if $user != "" then .config.User = $user else . end)',
+    '    | (if $workdir != "" then .config.WorkingDir = $workdir else . end)',
+    "')",
+    'config_json=$(printf "%s" "$config_json" | jq -S -c .)',
+    'config_digest=$(printf "%s" "$config_json" | sha256sum | cut -d" " -f1)',
+    'printf "%s" "$config_json" > "$out/blobs/sha256/$config_digest"',
+    'config_size=$(printf "%s" "$config_json" | wc -c)',
+    'manifest_json=$(jq -n -c --arg cd "sha256:$config_digest" --argjson cs "$config_size" --argjson layers "$layers_json" \'',
+    '    {schemaVersion:2,mediaType:"application/vnd.oci.image.manifest.v1+json",',
+    '     config:{mediaType:"application/vnd.oci.image.config.v1+json",digest:$cd,size:$cs},layers:$layers}',
+    "' | jq -S -c .)",
+    'manifest_digest=$(printf "%s" "$manifest_json" | sha256sum | cut -d" " -f1)',
+    'printf "%s" "$manifest_json" > "$out/blobs/sha256/$manifest_digest"',
+    'manifest_size=$(printf "%s" "$manifest_json" | wc -c)',
+    'index_json=$(jq -n -c --arg md "sha256:$manifest_digest" --argjson ms "$manifest_size" --arg os "$os" --arg arch "$arch" \'',
+    '    {schemaVersion:2,mediaType:"application/vnd.oci.image.index.v1+json",',
+    '     manifests:[{mediaType:"application/vnd.oci.image.manifest.v1+json",digest:$md,size:$ms,platform:{architecture:$arch,os:$os}}]}',
+    "' | jq -S -c .)",
+    'printf "%s" "$index_json" > "$out/index.json"',
+    'printf "sha256:%s" "$manifest_digest"',
+].join("\n");
+
 export const ociBuildBuild = product("oci-build", "build", async function ociBuildBuild(handle) {
     declareOciStorage();
-    const craneToolSpec = await craneTool();
     const stageTools = [
-        craneToolSpec,
         await nativeToolSpec(nativeTool("mkdir")),
         await nativeToolSpec(nativeTool("dirname")),
         await nativeToolSpec(nativeTool("cp")),
@@ -370,9 +456,11 @@ export const ociBuildBuild = product("oci-build", "build", async function ociBui
     ];
 
     let baseLayoutPath = null;
+    let baseDigest = null;
     if (!handle.attrs.baseIsScratch) {
         const baseResult = await productFor(handle.attrs.base, "build");
         baseLayoutPath = baseResult.ociLayoutPath;
+        baseDigest = baseResult.digest;
     }
 
     const packageRoot = declared_path(handle, handle.attrs.path || ".");
@@ -384,87 +472,62 @@ export const ociBuildBuild = product("oci-build", "build", async function ociBui
     const slug = target_output_slug(handle);
     const builtDir = `.imp/oci-build/${slug}/image`;
 
-    const appendArgs = [
-        "crane", "append",
-        ...(baseLayoutPath ? ["-f", baseLayoutPath] : []),
-        ...layerTarballs.flatMap((tar) => ["--new_layer", tar]),
-        "--output", output_path(builtDir),
+    const mount = baseLayoutPath ? mountOciLayout("oci-base", baseLayoutPath, baseDigest) : { tools: [], inputs: [], mountedPath: "" };
+
+    // No explicit platform option yet (ociBuild() has none) — hardcoded to
+    // linux/amd64 for this first pass, same slot the multi-arch comment on
+    // OciBuild's constructor already earmarks for a future `platforms` list.
+    const os = "linux";
+    const arch = "amd64";
+    const envList = Object.entries(handle.attrs.env || {}).map(([k, v]) => `${k}=${v}`);
+
+    const composeArgs = [
+        "sh", "-c", COMPOSE_OCI_IMAGE_SCRIPT, "oci-compose",
+        output_path(builtDir),
+        mount.mountedPath,
+        os, arch,
+        JSON.stringify(handle.attrs.entrypoint || []),
+        JSON.stringify(handle.attrs.cmd || []),
+        JSON.stringify(envList),
+        JSON.stringify(handle.attrs.labels || {}),
+        handle.attrs.user || "",
+        handle.attrs.workdir || "",
+        ...layerTarballs,
     ];
-    await run({
-        argv: appendArgs,
-        tools: [craneToolSpec],
+
+    const result = await run({
+        argv: composeArgs,
+        tools: [
+            await nativeToolSpec(nativeTool("jq")),
+            await nativeToolSpec(nativeTool("sha256sum")),
+            await nativeToolSpec(nativeTool("cp")),
+            await nativeToolSpec(nativeTool("mkdir")),
+            ...mount.tools,
+        ],
         inputs: [
             ...layerTarballs.map((tar) => ({ kind: "file", path: tar })),
-            ...(baseLayoutPath ? [{ kind: "directory", path: baseLayoutPath }] : []),
+            ...mount.inputs,
         ],
         outputs: [output(output_path(builtDir), { kind: "directory" })],
         materialize: true,
-        display: `build ${slug}`,
+        display: `compose ${slug}`,
     });
 
-    const hasConfig = handle.attrs.entrypoint || handle.attrs.cmd
-        || (handle.attrs.env && Object.keys(handle.attrs.env).length)
-        || (handle.attrs.labels && Object.keys(handle.attrs.labels).length)
-        || handle.attrs.user || handle.attrs.workdir;
-
-    if (hasConfig) {
-        // NOTE: crane mutate's --entrypoint/--cmd flag value format (comma-
-        // joined list vs. repeated flag) needs a one-time live check against
-        // the pinned crane version before this is trusted blindly in tests.
-        const mutateArgs = [
-            "crane", "mutate", output_path(builtDir),
-            "--output", output_path(builtDir),
-            ...(handle.attrs.entrypoint ? ["--entrypoint", handle.attrs.entrypoint.join(",")] : []),
-            ...(handle.attrs.cmd ? ["--cmd", handle.attrs.cmd.join(",")] : []),
-            ...Object.entries(handle.attrs.env || {}).flatMap(([k, v]) => ["--env", `${k}=${v}`]),
-            ...Object.entries(handle.attrs.labels || {}).flatMap(([k, v]) => ["--label", `${k}=${v}`]),
-            ...(handle.attrs.user ? ["--user", handle.attrs.user] : []),
-            ...(handle.attrs.workdir ? ["--workdir", handle.attrs.workdir] : []),
-        ];
-        await run({
-            argv: mutateArgs,
-            tools: [craneToolSpec],
-            inputs: [{ kind: "directory", path: builtDir }],
-            outputs: [output(output_path(builtDir), { kind: "directory" })],
-            materialize: true,
-            display: `configure ${slug}`,
-        });
-    }
-
-    // Local digest resolution — reads the OCI-layout dir directly, no
-    // network, safe to treat as ordinary cacheable work.
-    const digestResult = await run({
-        argv: ["crane", "digest", builtDir],
-        tools: [craneToolSpec],
-        inputs: [{ kind: "directory", path: builtDir }],
-        display: `digest ${slug}`,
-    });
-    const digest = digestResult.stdout.trim();
-
+    const digest = result.stdout.trim();
     return { ociLayoutPath: builtDir, digest };
 });
 
-// Stub, not a real implementation — see the empirical findings above
-// ociBuildBuild's `hasConfig`/`crane mutate` block (unchanged, pre-existing):
-// crane 0.20.6's `append --base` and `mutate` both always resolve their
-// image argument as a registry reference, never a local tarball or
-// OCI-layout directory (verified by hand against the pinned crane binary,
-// not assumed from docs). So base-chaining an ociBuild() onto another local
-// ociPull()/ociBuild(), and setting entrypoint/cmd/env/labels/user/workdir,
-// don't actually work today regardless of flags — that needs either a real
-// local registry to push/pull through, or hand-editing the OCI layout's
-// index.json/manifest/config blobs ourselves. Tracked as a follow-up, not
-// solved here; this product fails loudly rather than silently running
-// commands that error out confusingly (matches odinPackageStub,
-// rules/odin/index.js).
-export const ociBuildPackage = product("oci-build", "package", async function ociBuildPackage() {
-    throw new Error(
-        "ociBuild()'s package product is not yet implemented — crane 0.20.6's " +
-        "`append --base`/`mutate` only operate on images already in a registry, " +
-        "not local builds, so packaging a locally-built image needs a different " +
-        "implementation (hand-editing the OCI layout, or a local registry) that " +
-        "hasn't been built yet. ociPull() targets can be packaged today."
-    );
+/**
+ * Package an ociBuild() target: writes the composed image's OCI-layout
+ * directory out as a `dist/.../image.tar` oci-archive tarball, loadable via
+ * `podman load` / `docker load`.
+ *
+ * @param {object} handle Target handle returned by ociBuild().
+ * @returns {Promise<{ tarPath: string }>}
+ */
+export const ociBuildPackage = product("oci-build", "package", async function ociBuildPackage(handle) {
+    const { ociLayoutPath, digest } = await ociBuildBuild(handle);
+    return packageOciLayoutAsTar(handle, ociLayoutPath, digest);
 });
 
 // ---------------------------------------------------------------------------

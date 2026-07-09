@@ -114,8 +114,8 @@ test("ociBuild requires at least one layer", () => {
     expect(() => ociBuild({ base: "scratch", layers: [] })).toThrow("requires one or more 'layers'");
 });
 
-test("ociBuild stages deterministic layer tarballs and appends onto its base", async () => {
-    await withOciHost(withCraneStdout([["crane digest", DIGEST_B]], async (host) => {
+test("ociBuild stages deterministic layer tarballs and composes onto its base", async () => {
+    await withOciHost(withCraneStdout([["oci-compose", DIGEST_B]], async (host) => {
         const base = ociPull({ repo: "docker.io/library/alpine", digest: DIGEST_A });
         const target = ociBuild({
             base,
@@ -124,9 +124,9 @@ test("ociBuild stages deterministic layer tarballs and appends onto its base", a
         const result = await ociBuildBuild(target);
 
         expect(result.digest).toBe(DIGEST_B);
-        // pull (base) + stage-layer-tar + crane-append + crane-digest; no
-        // crane-mutate since no config attrs were given.
-        expect(host.runs.length).toBe(4);
+        // pull (base) + stage-layer-tar + compose; no crane involved in
+        // composing the layout itself.
+        expect(host.runs.length).toBe(3);
 
         const stageRun = host.runs[1];
         expect(stageRun.argv[0]).toBe("sh");
@@ -134,42 +134,35 @@ test("ociBuild stages deterministic layer tarballs and appends onto its base", a
         expect(stageRun.argv.some((arg) => typeof arg === "string" && arg.includes("--numeric-owner"))).toBe(true);
         expect(stageRun.argv).toContain("rules/oci/toolchain.js");
 
-        const appendRun = host.runs[2];
-        expect(appendRun.argv[0]).toBe("crane");
-        expect(appendRun.argv[1]).toBe("append");
-        expect(appendRun.argv).toContain("-f");
-        expect(appendRun.argv).toContain("--new_layer");
-
-        const digestRun = host.runs[3];
-        expect(digestRun.argv[0]).toBe("crane");
-        expect(digestRun.argv[1]).toBe("digest");
+        const composeRun = host.runs[2];
+        expect(composeRun.argv[0]).toBe("sh");
+        expect(composeRun.argv[3]).toBe("oci-compose");
+        // base is an ociPull() result — lives in the oci-storage named cache
+        // outside the workspace, so it's mounted via the tools: idiom rather
+        // than a plain {kind:"directory"} input.
+        expect(composeRun.tools.some((t) => t.name === "oci-base")).toBe(true);
     }));
 });
 
-test("ociBuild from scratch omits -f and applies crane mutate when config attrs are given", async () => {
-    await withOciHost(withCraneStdout([["crane digest", DIGEST_B]], async (host) => {
+test("ociBuild from scratch composes directly with config attrs baked into the layout", async () => {
+    await withOciHost(withCraneStdout([["oci-compose", DIGEST_B]], async (host) => {
         const target = ociBuild({
             base: "scratch",
             layers: [{ srcs: ["rules/oci/toolchain.js"], path: "/app" }],
             entrypoint: ["/app/run"],
             env: { FOO: "bar" },
         });
-        await ociBuildBuild(target);
+        const result = await ociBuildBuild(target);
 
-        // stage-layer-tar + crane-append + crane-mutate + crane-digest.
-        expect(host.runs.length).toBe(4);
+        expect(result.digest).toBe(DIGEST_B);
+        // stage-layer-tar + compose; no base to pull, no crane at all.
+        expect(host.runs.length).toBe(2);
 
-        const appendRun = host.runs[1];
-        expect(appendRun.argv).toContain("append");
-        expect(appendRun.argv).not.toContain("-f");
-
-        const mutateRun = host.runs[2];
-        expect(mutateRun.argv[0]).toBe("crane");
-        expect(mutateRun.argv[1]).toBe("mutate");
-        expect(mutateRun.argv).toContain("--entrypoint");
-        expect(mutateRun.argv).toContain("/app/run");
-        expect(mutateRun.argv).toContain("--env");
-        expect(mutateRun.argv).toContain("FOO=bar");
+        const composeRun = host.runs[1];
+        expect(composeRun.argv[3]).toBe("oci-compose");
+        expect(composeRun.argv).toContain(JSON.stringify(["/app/run"]));
+        expect(composeRun.argv).toContain(JSON.stringify(["FOO=bar"]));
+        expect(composeRun.tools.some((t) => t.name === "oci-base")).toBe(false);
     }));
 });
 
