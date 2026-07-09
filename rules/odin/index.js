@@ -20,7 +20,10 @@ import {
 	targetRef,
 	workspaceTargets,
 	logInfo,
+	writeWorkspace,
 } from "imp:core";
+
+import { distPathFor } from "//rules/workflows/package";
 
 import {
     defaultOdinToolchain,
@@ -179,12 +182,13 @@ async function collect_source_sets(handle, seen) {
  * Return a FileSet of all resource-package dep files reachable from an Odin package.
  *
  * @param {object} handle Target handle returned by odinPackage().
- * @returns {Promise<object>} FileSet descriptor.
+ * @returns {Promise<Array>} A list of run()-inputs entries — FileSets
+ * (resource-package deps, real workspace files) and/or `{kind:"digest"}`
+ * objects (cmake-lib deps, whose build output is never materialized) — to
+ * be spread directly into a run()'s own `inputs` array.
  */
 export const resources = memo(async function resources(handle) {
-    const sets = await collect_resource_sets(handle, new Set());
-    if (sets.length === 0) return file_set.literal([]);
-    return sets.length === 1 ? sets[0] : file_set.union(...sets);
+    return collect_resource_sets(handle, new Set());
 });
 
 async function collect_resource_sets(handle, seen) {
@@ -751,9 +755,9 @@ export const odinBuild = product("odin-package", "build",
                 ...linkerFlags,
             ],
             tools: [odinToolSpec, ...scriptTools],
-            inputs: [srcs, ...genInputs, resourceInputs],
+            inputs: [srcs, ...genInputs, ...resourceInputs],
             outputs: [output(declaredOut)],
-            materialize: true,
+            materialize: false,
             display: `odin build ${path}`,
         });
         return { ...result, outputPath: declaredOut };
@@ -791,7 +795,7 @@ export const odinTest = product("odin-test-package", "test",
                 ...linkerFlags,
             ],
             tools: [odinToolSpec, ...scriptTools],
-            inputs: [srcs, ...genInputs, resourceInputs],
+            inputs: [srcs, ...genInputs, ...resourceInputs],
             impure: true,
             display: `odin test ${path}`,
         });
@@ -818,6 +822,12 @@ export const odinRun = product("odin-package", "run", async function odinRun(han
         throw new Error(`${path} has no main entrypoint; only executable odin-package targets can be run`);
     }
     const buildResult = await odinBuild(handle);
+    // odinBuild is materialize:false (sandboxed/cached only); this goal rule
+    // (`run` — rules/workflows/run.js) is one of the sanctioned exceptions
+    // allowed to write outside dist/, since executing unsandboxed against
+    // the real workspace genuinely needs the binary physically on disk.
+    const outDir = buildResult.outputPath.slice(0, buildResult.outputPath.lastIndexOf("/"));
+    writeWorkspace(outDir, buildResult.outputDigest, { from: outDir });
     return run({
         argv: [buildResult.outputPath],
         sandbox: false,
@@ -833,8 +843,11 @@ export const odinLintStub = product("odin-package", "lint", async function odinL
     throw new Error(`lint is not yet implemented for Odin packages (${declared_path(handle, handle.attrs.path || ".")})`);
 });
 
-export const odinPackageStub = product("odin-package", "package", async function odinPackageStub(handle) {
-    throw new Error(`package is not yet implemented for Odin packages (${declared_path(handle, handle.attrs.path || ".")})`);
+export const odinDistPackage = product("odin-package", "package", async function odinDistPackage(handle) {
+    const buildResult = await odinBuild(handle);
+    const outDir = buildResult.outputPath.slice(0, buildResult.outputPath.lastIndexOf("/"));
+    writeWorkspace(distPathFor(handle), buildResult.outputDigest, { from: outDir });
+    return buildResult;
 });
 
 // ---------------------------------------------------------------------------

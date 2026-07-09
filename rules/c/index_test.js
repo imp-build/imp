@@ -2,6 +2,7 @@ import {
     describe,
     expect,
     test,
+    withFakeMergeDigests,
     withFakeToolchainHost,
 } from "//rules/imp/test";
 import { getMemoTrace } from "imp:core";
@@ -69,18 +70,20 @@ test("has_c_main_entrypoint detects a real main declaration", () => {
 
 test("raw ccLibrary build compiles and archives with a declared C/C++ toolchain", async () => {
     await withGccHost(async (host) => {
-        installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
-        const gcc = gccToolchain("2025.08-1", { default: true });
-        const lib = ccLibrary({ path: "rules/c/cmake/example", srcs: ["hello.c"], toolchain: gcc, output: "build/c/testlib.a" });
+        await withFakeMergeDigests(async () => {
+            installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
+            const gcc = gccToolchain("2025.08-1", { default: true });
+            const lib = ccLibrary({ path: "rules/c/cmake/example", srcs: ["hello.c"], toolchain: gcc, output: "build/c/testlib.a" });
 
-        const result = await ccBuild(lib);
+            const result = await ccBuild(lib);
 
-        expect(result.outputPath).toBe("build/c/testlib.a");
-        expect(host.runs.length).toBe(2);
-        expect(host.runs[0].display).toContain("cc compile");
-        expect(host.runs[1].display).toContain("cc archive");
-        const { trace } = getMemoTrace();
-        expect(trace.some(t => t.event === "effect" && t.kind === "run" && t.display.includes("cc compile"))).toBe(true);
+            expect(result.outputPath).toBe("build/c/testlib.a");
+            expect(host.runs.length).toBe(2);
+            expect(host.runs[0].display).toContain("cc compile");
+            expect(host.runs[1].display).toContain("cc archive");
+            const { trace } = getMemoTrace();
+            expect(trace.some(t => t.event === "effect" && t.kind === "run" && t.display.includes("cc compile"))).toBe(true);
+        });
     });
 });
 

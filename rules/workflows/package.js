@@ -11,17 +11,15 @@
 // of each rule hand-picking a dist/ path. See docs/BUILD.js's site_package
 // for the reference implementation.
 //
-// odin-package has a stub product (odinPackageStub, rules/odin/index.js)
-// that throws "not yet implemented" rather than silently succeeding —
-// imp package fails loudly for odin-package targets. The legacy Rust
-// command (src/commands/package.rs, no longer wired into the binary) built
-// a content pak, copied game binaries and license files into a per-platform
-// dist/ directory, and zipped the result. Platforms and version were CLI
-// arguments.
-//
-// TODO: define the actual packaging products, composing the content-pack
-// and binary build products into a distributable zip, e.g.:
-//   product("<some-kind>", "package", async (handle) => { ... });
+// odin-package's package product (odinDistPackage, rules/odin/index.js)
+// publishes the built binary/archive straight to dist/ via distPathFor(),
+// same shape as docs' site_package. The legacy Rust command
+// (src/commands/package.rs, no longer wired into the binary) built a
+// content pak, copied game binaries and license files into a per-platform
+// dist/ directory, and zipped the result, with platform/version as CLI
+// arguments — a richer packaging story (content-pack + binary composed into
+// a distributable zip) than odinDistPackage's plain binary publish, and
+// still a TODO if that's needed again.
 
 import { goal, targetAddress } from "imp:core";
 

@@ -3,6 +3,7 @@ import {
     cacheGet,
     cacheHas,
     glob,
+    mergeDigests,
     output,
     output_path,
     paths,
@@ -179,23 +180,24 @@ export const ociPullBuild = product("oci-pull", "build", async function ociPullB
 
 // An OCI-layout directory referenced by another rule may live outside the
 // workspace (an ociPull()'s oci-storage named-cache entry — an absolute
-// path) or inside it (an ociBuild()'s materialize:true run() output —
-// workspace-relative). Only the former needs the `.imp/tools/<name>`
-// named-cache-mount idiom already used throughout rules/ (craneTool(),
-// RUSTUP_HOME, etc.) — a `tools:` entry keyed by cache+digest, symlinked
-// into the sandbox at a fixed, deterministic path a script can address
-// directly. The latter is already a plain, declarable {kind:"directory"}
-// input.
-function mountOciLayout(name, layoutPath, digest) {
+// path) or come from this same invocation's own build graph (an
+// ociBuild()'s materialize:false run() output — workspace-relative). The
+// former needs the `.imp/tools/<name>` named-cache-mount idiom already
+// used throughout rules/ (craneTool(), RUSTUP_HOME, etc.) — a `tools:` entry
+// keyed by cache+manifestDigest, symlinked into the sandbox at a fixed,
+// deterministic path a script can address directly. The latter is mounted
+// via its CAS tree digest (treeDigest) rather than a physical
+// {kind:"directory"} input, since it's never actually materialized on disk.
+function mountOciLayout(name, layoutPath, manifestDigest, treeDigest) {
     if (layoutPath.startsWith("/")) {
-        const key = ociStorageKey(digest);
+        const key = ociStorageKey(manifestDigest);
         return {
             tools: [{ kind: "tool", name, cache: OCI_STORAGE_CACHE, key, binDirs: ["."] }],
             inputs: [],
             mountedPath: `.imp/tools/${name}`,
         };
     }
-    return { tools: [], inputs: [{ kind: "directory", path: layoutPath }], mountedPath: layoutPath };
+    return { tools: [], inputs: [{ kind: "digest", digest: treeDigest }], mountedPath: layoutPath };
 }
 
 // Tar an existing OCI-layout directory (produced by ociPullBuild/
@@ -206,10 +208,10 @@ function mountOciLayout(name, layoutPath, digest) {
 // destination; crane pull's --format=oci→tarball path only applies when
 // pulling from a registry), so plain deterministic tar is the correct, and
 // only, tool here.
-async function packageOciLayoutAsTar(handle, layoutPath, digest) {
+async function packageOciLayoutAsTar(handle, layoutPath, manifestDigest, treeDigest) {
     const slug = target_output_slug(handle);
     const dir = `.imp/oci-package/${slug}`;
-    const mount = mountOciLayout("oci-layout", layoutPath, digest);
+    const mount = mountOciLayout("oci-layout", layoutPath, manifestDigest, treeDigest);
 
     const tools = [await nativeToolSpec(nativeTool("mkdir")), await nativeToolSpec(nativeTool("tar")), ...mount.tools];
 
@@ -240,7 +242,7 @@ async function packageOciLayoutAsTar(handle, layoutPath, digest) {
  */
 export const ociPullPackage = product("oci-pull", "package", async function ociPullPackage(handle) {
     const { ociLayoutPath, digest } = await ociPullBuild(handle);
-    return packageOciLayoutAsTar(handle, ociLayoutPath, digest);
+    return packageOciLayoutAsTar(handle, ociLayoutPath, digest, null);
 });
 
 // ---------------------------------------------------------------------------
@@ -293,16 +295,16 @@ async function buildLayerTarball(handle, packageRoot, layerSpec, index, tools) {
         'done; ' +
         'tar --sort=name --mtime="@0" --owner="$uid" --group="$gid" --numeric-owner -C "$stage" -cf "$tarPath" .';
 
-    await run({
+    const result = await run({
         argv: ["sh", "-c", script, "oci-layer-tar", stageDir, tarPath, destPrefix, rootPrefix, mode, uid, gid, ...files],
         tools,
         inputs: [fileSet],
         outputs: [output(output_path(tarPath))],
-        materialize: true,
+        materialize: false,
         display: `stage OCI layer ${index} (${layerSpec.path})`,
     });
 
-    return tarPath;
+    return { tarPath, digest: result.outputDigest };
 }
 
 export class OciBuild extends Target {
@@ -456,11 +458,13 @@ export const ociBuildBuild = product("oci-build", "build", async function ociBui
     ];
 
     let baseLayoutPath = null;
-    let baseDigest = null;
+    let baseManifestDigest = null;
+    let baseTreeDigest = null;
     if (!handle.attrs.baseIsScratch) {
         const baseResult = await productFor(handle.attrs.base, "build");
         baseLayoutPath = baseResult.ociLayoutPath;
-        baseDigest = baseResult.digest;
+        baseManifestDigest = baseResult.digest;
+        baseTreeDigest = baseResult.outputDigest;
     }
 
     const packageRoot = declared_path(handle, handle.attrs.path || ".");
@@ -468,11 +472,15 @@ export const ociBuildBuild = product("oci-build", "build", async function ociBui
     for (let i = 0; i < handle.attrs.layers.length; i++) {
         layerTarballs.push(await buildLayerTarball(handle, packageRoot, handle.attrs.layers[i], i, stageTools));
     }
+    const layerDigests = layerTarballs.map((l) => l.digest).filter((d) => d != null);
+    const layerTreeDigest = layerDigests.length > 0 ? mergeDigests(layerDigests) : null;
 
     const slug = target_output_slug(handle);
     const builtDir = `.imp/oci-build/${slug}/image`;
 
-    const mount = baseLayoutPath ? mountOciLayout("oci-base", baseLayoutPath, baseDigest) : { tools: [], inputs: [], mountedPath: "" };
+    const mount = baseLayoutPath
+        ? mountOciLayout("oci-base", baseLayoutPath, baseManifestDigest, baseTreeDigest)
+        : { tools: [], inputs: [], mountedPath: "" };
 
     // No explicit platform option yet (ociBuild() has none) — hardcoded to
     // linux/amd64 for this first pass, same slot the multi-arch comment on
@@ -492,7 +500,7 @@ export const ociBuildBuild = product("oci-build", "build", async function ociBui
         JSON.stringify(handle.attrs.labels || {}),
         handle.attrs.user || "",
         handle.attrs.workdir || "",
-        ...layerTarballs,
+        ...layerTarballs.map((l) => l.tarPath),
     ];
 
     const result = await run({
@@ -505,16 +513,16 @@ export const ociBuildBuild = product("oci-build", "build", async function ociBui
             ...mount.tools,
         ],
         inputs: [
-            ...layerTarballs.map((tar) => ({ kind: "file", path: tar })),
+            ...(layerTreeDigest ? [{ kind: "digest", digest: layerTreeDigest }] : []),
             ...mount.inputs,
         ],
         outputs: [output(output_path(builtDir), { kind: "directory" })],
-        materialize: true,
+        materialize: false,
         display: `compose ${slug}`,
     });
 
     const digest = result.stdout.trim();
-    return { ociLayoutPath: builtDir, digest };
+    return { ociLayoutPath: builtDir, digest, outputDigest: result.outputDigest };
 });
 
 /**
@@ -526,8 +534,8 @@ export const ociBuildBuild = product("oci-build", "build", async function ociBui
  * @returns {Promise<{ tarPath: string }>}
  */
 export const ociBuildPackage = product("oci-build", "package", async function ociBuildPackage(handle) {
-    const { ociLayoutPath, digest } = await ociBuildBuild(handle);
-    return packageOciLayoutAsTar(handle, ociLayoutPath, digest);
+    const { ociLayoutPath, digest, outputDigest } = await ociBuildBuild(handle);
+    return packageOciLayoutAsTar(handle, ociLayoutPath, digest, outputDigest);
 });
 
 // ---------------------------------------------------------------------------
@@ -566,19 +574,23 @@ export function ociPush({ image, repo, tag }) {
 }
 
 export const ociPushBuild = product("oci-push", "build", async function ociPushBuild(handle) {
-    const { ociLayoutPath } = await productFor(handle.attrs.image, "build");
+    const { ociLayoutPath, digest, outputDigest } = await productFor(handle.attrs.image, "build");
     const craneToolSpec = await craneTool();
     const registry = registryHost(handle.attrs.repo);
     const { tools: authTools, env: authEnv } = await craneAuthTools(registry);
     const ref = `${handle.attrs.repo}:${handle.attrs.tag}`;
+    // Same "layout may live outside or inside the workspace" split as
+    // packageOciLayoutAsTar — an oci-build image is never materialized, so
+    // it's mounted via its CAS tree digest rather than a physical directory.
+    const mount = mountOciLayout("oci-push-image", ociLayoutPath, digest, outputDigest);
 
     // Network side effect — must always re-run, never replay from the task
     // cache.
     return run({
-        argv: ["crane", "push", ociLayoutPath, ref],
-        tools: [craneToolSpec, ...authTools],
+        argv: ["crane", "push", mount.mountedPath, ref],
+        tools: [craneToolSpec, ...authTools, ...mount.tools],
         env: authEnv,
-        inputs: [{ kind: "directory", path: ociLayoutPath }],
+        inputs: mount.inputs,
         impure: true,
         display: `push ${ref}`,
     });

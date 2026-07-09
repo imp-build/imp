@@ -3,6 +3,7 @@ import {
     expect,
     test,
     withFakeRun,
+    withFakeWriteWorkspace,
 } from "//rules/imp/test";
 import {
     odinCollection,
@@ -25,7 +26,6 @@ import {
     odinTest,
     odinRun,
     odinLintStub,
-    odinPackageStub,
     default_output_path,
     odin_output_path,
 } from "//rules/odin";
@@ -169,7 +169,10 @@ test("sources(app) with a dep includes transitive files", async () => {
 test("resources(app) with a resource dep includes resource files", async () => {
     const fonts = resourcePackage({ path: "rules/odin", srcs: ["toolchain.js"] });
     const app = odinPackage({ srcs: ["rules/odin/index.js"], toolchain: "dev-2026-04", deps: [fonts] });
-    const result = paths(await odinResources(app));
+    // resources() returns a list of run()-inputs entries (FileSets and/or
+    // {kind:"digest"} objects) rather than a single FileSet, so flatten the
+    // FileSet entries' own paths() to check for the expected file.
+    const result = (await odinResources(app)).flatMap(paths);
     expect(result).toContain("rules/odin/toolchain.js");
 });
 
@@ -184,7 +187,7 @@ test("resources(app) includes resource deps from transitive Odin deps", async ()
     const fonts = resourcePackage({ path: "rules/odin", srcs: ["toolchain.js"] });
     const lib = odinPackage({ srcs: ["rules/odin/index.js"], toolchain: "dev-2026-04", deps: [fonts] });
     const app = odinPackage({ srcs: ["rules/odin/index_test.js"], toolchain: "dev-2026-04", deps: [lib] });
-    const result = paths(await odinResources(app));
+    const result = (await odinResources(app)).flatMap(paths);
     expect(result).toContain("rules/odin/toolchain.js");
 });
 
@@ -347,14 +350,16 @@ test("odinRun builds then executes the binary unsandboxed, reusing odinBuild's o
     configure("odin", null);
     try {
         await withFakeRun(async () => {
-            const pkg = odinPackage({ path: "rules/odin/example", toolchainVersion: "dev-2026-04", output: "build/odin/target" });
-            await odinRun(pkg);
-            const { trace } = getMemoTrace();
-            const buildEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display.startsWith("odin build"));
-            const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display.startsWith("run "));
-            expect(runEffect.sandbox).toBe(false);
-            expect(runEffect.impure).toBe(true);
-            expect(runEffect.argv).toEqual([buildEffect.outputs[0].path]);
+            await withFakeWriteWorkspace(async () => {
+                const pkg = odinPackage({ path: "rules/odin/example", toolchainVersion: "dev-2026-04", output: "build/odin/target" });
+                await odinRun(pkg);
+                const { trace } = getMemoTrace();
+                const buildEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display.startsWith("odin build"));
+                const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display.startsWith("run "));
+                expect(runEffect.sandbox).toBe(false);
+                expect(runEffect.impure).toBe(true);
+                expect(runEffect.argv).toEqual([buildEffect.outputs[0].path]);
+            });
         });
     } finally {
         configure("odin", null);
@@ -375,7 +380,7 @@ test("odinRun rejects packages with no main entrypoint", async () => {
     expect(message).toContain("no main entrypoint");
 });
 
-test("odinLintStub and odinPackageStub throw not-yet-implemented errors", async () => {
+test("odinLintStub throws a not-yet-implemented error", async () => {
     const pkg = odinPackage({ path: "rules/odin/example", toolchainVersion: "dev-2026-04", output: "build/odin/target" });
     let lintMessage = "";
     try {
@@ -384,15 +389,12 @@ test("odinLintStub and odinPackageStub throw not-yet-implemented errors", async 
         lintMessage = error && error.message ? error.message : String(error);
     }
     expect(lintMessage).toContain("not yet implemented");
-
-    let packageMessage = "";
-    try {
-        await odinPackageStub(pkg);
-    } catch (error) {
-        packageMessage = error && error.message ? error.message : String(error);
-    }
-    expect(packageMessage).toContain("not yet implemented");
 });
+
+// odinDistPackage's dist/ path comes from distPathFor(handle), which resolves
+// a target's real workspace address — unavailable for a target constructed
+// directly in a unit test (only BUILD.js-loaded targets get one), so its
+// end-to-end behavior is covered by `imp package` rather than here.
 
 test("odinBuild rejects packages with no source files after excludes", async () => {
     configure("odin", null);

@@ -160,6 +160,49 @@ export async function withFakeDiff(changes, fn) {
 }
 
 /**
+ * Run a test body with `__host_merge_digests` stubbed out, so `mergeDigests()`
+ * resolves without touching CAS — for tests that fake `run()` (so there's no
+ * real per-step digest to merge) but still want to exercise a digest-chained
+ * build step. Returns the first input digest (or "" if none) rather than a
+ * genuinely merged tree, since no real content backs it in a faked-run test.
+ *
+ * @param {() => Promise<any>} fn
+ */
+export async function withFakeMergeDigests(fn) {
+    const real = globalThis.__host_merge_digests;
+    globalThis.__host_merge_digests = (digestsJson) => {
+        const digests = JSON.parse(digestsJson);
+        return digests.length > 0 ? digests[0] : "";
+    };
+    try {
+        return await fn();
+    } finally {
+        globalThis.__host_merge_digests = real;
+    }
+}
+
+/**
+ * Run a test body with `__host_write_workspace` stubbed out, recording each
+ * call instead of materializing a real digest — for tests that fake `run()`
+ * (so there's no real output digest to publish) but still want to exercise a
+ * `package` product's `writeWorkspace()` call.
+ *
+ * @param {(calls: Array<{path: string, digest: string, from: string|null}>) => Promise<any>} fn
+ */
+export async function withFakeWriteWorkspace(fn) {
+    const real = globalThis.__host_write_workspace;
+    const calls = [];
+    globalThis.__host_write_workspace = (path, digest, from) => {
+        calls.push({ path, digest, from });
+    };
+    try {
+        return await fn(calls);
+    } finally {
+        globalThis.__host_write_workspace = real;
+    }
+}
+
+/**
  * Run a test body with `__host_selected_targets` stubbed to return `list`,
  * so `selectedTargets()` works inside a test even though tests run outside
  * of `execute_goal_live` (where the real binding always errors).

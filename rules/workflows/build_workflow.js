@@ -9,53 +9,29 @@
 // The callback resolves each selected target's product itself via
 // resolveProduct, driving its own fan-out/await loop directly (the same
 // pattern run.js/test.js/fmt.js use).
+//
+// `build` is cache-only: it builds and warms the task cache, but (now that
+// every build product is materialize:false) never leaves files in the
+// workspace — so it reports a plain count rather than the on-disk artifact
+// paths it used to print. Getting real files out of a target is `package`'s
+// job (writeWorkspace to dist/), the only goal that still writes.
 
 import { goal, logInfo, resolveProduct } from "imp:core";
-
-function resultOutputs(result) {
-    return result && Array.isArray(result.outputs) ? result.outputs : [];
-}
-
-function outputPath(output) {
-    if (typeof output === "string") return output;
-    return output && typeof output.path === "string" ? output.path : null;
-}
-
-export function formatBuildArtifactSummary(artifacts) {
-    const lines = ["Build artifacts:"];
-    for (const artifact of artifacts) {
-        lines.push(`- ${artifact.label}`);
-        for (const path of artifact.paths) {
-            lines.push(`  -> ${path}`);
-        }
-    }
-    return lines.join("\n");
-}
 
 export async function buildGoal(selection) {
     const resolved = selection.map(resolveProduct);
     const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));
-    const artifacts = [];
+    let count = 0;
     for (const { label, promise } of calls) {
-        let result;
         try {
-            result = await promise;
+            await promise;
         } catch (e) {
             throw new Error(`${label}: ${e && e.message ? e.message : e}`);
         }
-        const paths = resultOutputs(result)
-            .map(outputPath)
-            .filter((path) => path !== null);
-        if (paths.length === 0) {
-            throw new Error(`${label}: build product did not declare any output artifacts`);
-        }
-        artifacts.push({
-            label,
-            paths,
-        });
+        count++;
     }
-    if (artifacts.length > 0) {
-        logInfo(formatBuildArtifactSummary(artifacts));
+    if (count > 0) {
+        logInfo(`Built ${count} target${count === 1 ? "" : "s"}`);
     }
 }
 

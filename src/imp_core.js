@@ -1329,6 +1329,21 @@ export function writeWorkspace(path, digest, opts) {
     return __host_write_workspace(path, digest, (opts && opts.from) ?? null);
 }
 
+/**
+ * Merge multiple digests (each already a directory tree — e.g. several
+ * run() outputs, each nested under its own declared output path) into one
+ * combined tree digest. The digest-chaining analog of file_set.union() for
+ * run() outputs rather than glob results — lets a later run() take
+ * `{ kind: "digest", digest }` as an input instead of depending on an
+ * earlier step's output being physically materialized in the workspace.
+ *
+ * @param {string[]} digests
+ * @returns {string} Merged digest string.
+ */
+export function mergeDigests(digests) {
+    return __host_merge_digests(JSON.stringify(digests));
+}
+
 export const file_set = {
     union(...sets) {
         for (const s of sets) {

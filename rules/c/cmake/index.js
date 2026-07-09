@@ -1,4 +1,5 @@
-import { Target, expand, glob, file_set, memo, output, output_path, pathsInDigest, product, readFileInDigest, registerTarget, run, sourcesField, targetAddress } from "imp:core";
+import { Target, expand, glob, file_set, memo, mergeDigests, output, output_path, pathsInDigest, product, readFileInDigest, registerTarget, run, sourcesField, targetAddress, writeWorkspace } from "imp:core";
+import { distPathFor } from "//rules/workflows/package";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import {
     acquireCmakeToolchain,
@@ -220,7 +221,7 @@ async function configureNinjaGraph(handle, setup) {
         tools: [cmakeToolSpec, ...compilerTools, ...configureTools],
         inputs: [inputFiles, ...dirInputs],
         outputs: [output(output_path(buildDirPath), { kind: "directory" })],
-        materialize: true,
+        materialize: false,
         display: `cmake configure ${srcPath}`,
     });
 
@@ -235,11 +236,17 @@ async function configureNinjaGraph(handle, setup) {
 // Replays every build edge reachable from `targetNames` (e.g. "all") as its
 // own run() call, so an unchanged source file's compile edge is a
 // task-cache hit and gets skipped instead of the whole project rebuilding
-// as one atomic unit — the graph-lift this file exists for. Each edge
-// materializes its output(s) into the real buildDirPath, so downstream
-// edges (and the caller, once this returns) find them at their normal
-// on-disk build-directory locations, same as a plain `cmake --build` would
-// leave behind.
+// as one atomic unit — the graph-lift this file exists for. Each edge is
+// materialize:false; instead of relying on physical on-disk presence,
+// dependency ordering is enforced by topological waves (as before) *and* by
+// threading a running merged CAS digest (`accumulatedDigest`, seeded from
+// configure's own output) through each wave — every edge in wave N receives
+// everything produced by waves 0..N-1 (plus configure) as a single
+// `{kind:"digest"}` input, so it sees dependency-produced files at their
+// normal build-directory-relative paths without them ever having been
+// materialized into the real workspace. Returns the final accumulated
+// digest, covering everything the replay produced (the digest-chained
+// analog of "the build directory, fully built").
 async function replayReachableGraph(handle, setup, graph, targetNames) {
     const { buildDirPath, cmakeToolSpec, compilerTools, compilerEnv, dirInputs } = setup;
     const { rules, edges, topVars, sandboxRoot } = graph;
@@ -259,29 +266,18 @@ async function replayReachableGraph(handle, setup, graph, targetNames) {
     ];
     const baseToolNames = new Set(baseTools.map(t => t.name));
 
-    // The full walk (including phony/bookkeeping edges) is needed to
-    // classify dependency paths correctly below — a phony edge's "output"
-    // (e.g. CMake's internal order-only markers like
-    // "cmake_object_order_depends_target_core") isn't a real file, but it's
-    // also not a leaf input; it must be skipped entirely rather than
-    // mistaken for either. Only the non-phony, has-a-command subset is
-    // actually replayed as run() calls.
+    // The full walk (including phony/bookkeeping edges) is needed for
+    // topological leveling below — only the non-phony, has-a-command subset
+    // is actually replayed as run() calls.
     const allReached = reachableEdges(edges, targetNames);
-    const nonExecutableOutputs = new Set(
-        allReached
-            .filter(edge => edge.rule === "phony" || !rules[edge.rule] || !rules[edge.rule].command)
-            .flatMap(edge => [...edge.outputs, ...edge.implicitOutputs]),
-    );
     const reached = allReached.filter(edge => edge.rule !== "phony" && rules[edge.rule] && rules[edge.rule].command);
     const headerFiles = await headerSources(handle);
 
-    // A dependency-produced input (depEdgeInputs below) references another
-    // edge's materialized output as a plain workspace path, not a digest
-    // chained from that edge's own run() result — so nothing enforces
-    // ordering automatically. Edges must run in topological waves: an
-    // edge's dependencies (other *replayed* edges producing one of its
-    // inputs) have to finish materializing before it starts, but edges
-    // with no such dependency on each other are safe to run concurrently.
+    // Edges must still run in topological waves — even though dependency
+    // *content* now flows through accumulatedDigest rather than physical
+    // paths, a wave can't start until every edge whose output it might read
+    // has actually finished (and been merged in). Edges with no such
+    // dependency on each other are safe to run concurrently within a wave.
     //
     // Dependencies can chain *through* phony/order-only markers (e.g.
     // CMake's "cmake_object_order_depends_target_X" edges) rather than
@@ -317,9 +313,9 @@ async function replayReachableGraph(handle, setup, graph, targetNames) {
         (waves[level] || (waves[level] = [])).push(edge);
     }
 
-    async function executeEdge(edge) {
+    async function executeEdge(edge, inputDigest) {
         const resolved = resolveEdgeCommand(edge, rules, topVars, sandboxRoot, buildDirPath);
-        if (!resolved) return;
+        if (!resolved) return null;
 
         // resolved.toolNames only ever contains names rewritten from a
         // genuine absolute host path (e.g. "/usr/bin/ar") — imp's own
@@ -334,27 +330,16 @@ async function replayReachableGraph(handle, setup, graph, targetNames) {
             edgeTools.push(await nativeToolSpec(nativeTool(name)));
         }
 
-        const depEdgeInputs = [];
+        // Real external source files (CMake canonicalizes CMAKE_SOURCE_DIR
+        // references to absolute paths) still need their own physical
+        // input — everything else this edge depends on (earlier edges'
+        // outputs, or configure-time-generated files like a precompiled
+        // header shim) rides in via `inputDigest` instead.
         const leafInputs = [];
         for (const dep of [...edge.inputs, ...edge.implicitInputs, ...edge.orderOnly]) {
             const isAbsolute = Boolean(sandboxRoot) && dep.startsWith(sandboxRoot + "/");
             if (isAbsolute) {
-                // A real external source file (CMake canonicalizes
-                // CMAKE_SOURCE_DIR references to absolute paths).
                 leafInputs.push({ kind: "file", path: rebasePath(dep, sandboxRoot) });
-            } else if (nonExecutableOutputs.has(dep)) {
-                // Phony/bookkeeping marker — not a real file. Topological
-                // wave ordering already satisfies whatever it was ordering.
-                continue;
-            } else {
-                // Build-dir-relative: either produced by an earlier
-                // replayed edge (materialized at this same path — the wave
-                // ordering above guarantees it already ran), or generated
-                // directly by CMake at configure time (e.g. a
-                // precompiled-header shim like cmake_pch.hxx) and already
-                // written to disk by configure's own materialize:true —
-                // either way it's a plain file sitting at buildDirPath.
-                depEdgeInputs.push({ kind: "file", path: `${buildDirPath}/${dep}` });
             }
         }
 
@@ -375,8 +360,8 @@ async function replayReachableGraph(handle, setup, graph, targetNames) {
         // this edge's resolved command text. Without declaring its
         // destination as an output too, the file would be created inside
         // this edge's own ephemeral sandbox and then discarded when the
-        // sandbox is torn down, instead of materializing to the real
-        // workspace like the old single-run() build always did for free.
+        // sandbox is torn down, instead of flowing into accumulatedDigest
+        // like the old single-run() build always materialized it for free.
         const copyOutputs = extractCopyDestinations(resolved.command, buildDirPath);
 
         // Ninja always executes edges with cwd = the build directory (see
@@ -416,23 +401,30 @@ async function replayReachableGraph(handle, setup, graph, targetNames) {
         const cdCommand = preamble
             ? `${preamble} && cd '${buildDirPath}' && ${resolved.command}${prefixMapSuffix}`
             : `cd '${buildDirPath}' && ${resolved.command}`;
-        return run({
+        const result = await run({
             argv: ["sh", "-c", cdCommand],
             tools: edgeTools,
-            inputs: [...leafInputs, ...depEdgeInputs, ...(isCompileEdge ? [headerFiles, ...dirInputs] : [])],
+            inputs: [...leafInputs, { kind: "digest", digest: inputDigest }, ...(isCompileEdge ? [headerFiles, ...dirInputs] : [])],
             outputs: [
                 ...outputPaths.map(p => output(output_path(`${buildDirPath}/${p}`))),
                 ...copyOutputs.map(p => output(output_path(p))),
             ],
-            materialize: true,
+            materialize: false,
             display: `cmake edge ${outputPaths[0] || edge.rule}`,
         });
+        return result.outputDigest;
     }
 
+    let accumulatedDigest = graph.outputDigest;
     for (const wave of waves) {
         if (!wave) continue;
-        await Promise.all(wave.map(executeEdge));
+        const digests = await Promise.all(wave.map(edge => executeEdge(edge, accumulatedDigest)));
+        const newDigests = digests.filter(d => d != null);
+        if (newDigests.length > 0) {
+            accumulatedDigest = mergeDigests([accumulatedDigest, ...newDigests]);
+        }
     }
+    return accumulatedDigest;
 }
 
 function replayTargetNames(handle) {
@@ -450,7 +442,7 @@ export async function buildCmakeArtifact(handle) {
     const stageOutputs = handle.attrs.stageOutputs || [];
 
     const graph = await configureNinjaGraph(handle, setup);
-    await replayReachableGraph(handle, setup, graph, replayTargetNames(handle));
+    const replayDigest = await replayReachableGraph(handle, setup, graph, replayTargetNames(handle));
 
     // outputs/stageOutputs name files relative to srcPath, matching how
     // this attr has always worked — many real CMakeLists.txt files (e.g.
@@ -484,27 +476,42 @@ export async function buildCmakeArtifact(handle) {
         ] : []),
     ];
 
-    // Mount the specific files staging reads, rather than the whole
-    // srcPath directory — srcPath is "." for the (very common) case of a
-    // cmakeLib rooted at its own BUILD.js directory, and a bare "." isn't
-    // a valid directory-input path (it has no real path components once
-    // normalized).
-    const srcFileInputs = outputsInBuildDir ? [] : [
-        ...(handle.attrs.outputs || []).map(name => ({ kind: "file", path: `${srcPath}/${name}` })),
-        ...stageOutputs.map(({ from }) => ({ kind: "file", path: `${srcPath}/${from}` })),
-    ];
-
-    return run({
+    // Everything this step needs — buildDirPath's own contents plus any
+    // copyOutputs-produced srcPath files the replay staged — already lives
+    // in replayDigest; nothing here is read as a physical path anymore.
+    const result = await run({
         argv: ["sh", "-c", script, "cmake-stage"],
         tools: scriptTools,
-        inputs: [...srcFileInputs, { kind: "directory", path: buildDirPath }],
+        inputs: [{ kind: "digest", digest: replayDigest }],
         outputs: [...outputDecls, ...stagedOutputDecls],
-        materialize: true,
+        materialize: false,
         display: `cmake stage ${srcPath}`,
     });
+    return { ...result, outputBase, hasStageOutputs: stageOutputs.length > 0 };
 }
 
 export const native_link_library = product("cmake-lib", "build", buildCmakeArtifact);
+
+/**
+ * Package a cmake-built artifact to dist/. Only supports the common case
+ * where `handle.attrs.outputs` all share `outputBase` as their directory —
+ * a target using `stageOutputs` to scatter files across arbitrary `to`
+ * paths has no single directory to publish from, so it isn't supported yet.
+ *
+ * @param {object} handle Target handle (cmake-lib, or a cc_library/cc_binary/
+ *   cc_test using the cmake backend).
+ * @returns {Promise<object>} buildCmakeArtifact's result.
+ */
+export async function packageCmakeArtifact(handle) {
+    const result = await buildCmakeArtifact(handle);
+    if (result.hasStageOutputs) {
+        throw new Error("package is not yet implemented for cmake targets using stageOutputs (their outputs may not share a common directory)");
+    }
+    writeWorkspace(distPathFor(handle), result.outputDigest, { from: result.outputBase });
+    return result;
+}
+
+export const cmakeLibPackage = product("cmake-lib", "package", packageCmakeArtifact);
 
 // Regex-escapes and `-R`-joins a set of correlated CTest test names, scoping
 // a cc_test target's own "test" product to just its case(s) instead of the
@@ -535,7 +542,7 @@ export async function runCTest(handle) {
     const ctestArgs = [...(handle.attrs.ctestArgs || []), ...ctestNameFilterArgs(handle.attrs.testNames)];
 
     const graph = await configureNinjaGraph(handle, setup);
-    await replayReachableGraph(handle, setup, graph, replayTargetNames(handle));
+    const replayDigest = await replayReachableGraph(handle, setup, graph, replayTargetNames(handle));
 
     // CTestTestfile.cmake (generated at configure time) bakes in the
     // *configure* sandbox's absolute root as each test's executable path —
@@ -560,7 +567,7 @@ export async function runCTest(handle) {
             await nativeToolSpec(nativeTool("find")),
             await nativeToolSpec(nativeTool("sed")),
         ],
-        inputs: [{ kind: "directory", path: buildDirPath }],
+        inputs: [{ kind: "digest", digest: replayDigest }],
         impure: true,
         display: `ctest ${srcPath}`,
     });
@@ -570,23 +577,32 @@ export const ctest = product("cmake-lib", "test", runCTest);
 
 // Returns link artifacts at their staged locations as a resource file set for
 // odin package sandboxing. Also ensures the cmake build is a plan prerequisite.
+// Returns a `{kind:"digest"}` run()-inputs entry covering the build's whole
+// result (never materialized, so odin's own sandboxed build reads the
+// staged .so/.dylib/etc. files straight from this digest rather than a
+// physical path) — not a FileSet, since the files it names were never
+// captured from the real workspace.
 export const cmake_resources = memo(async function cmake_resources(handle) {
-    await native_link_library(handle);
-    const stageOutputs = handle.attrs.stageOutputs || [];
-    const linkFiles = stageOutputs
-        .filter(({ from }) => /\.(so|dll|lib|dylib)$/.test(from))
-        .map(({ to }) => to);
-    return file_set.literal(linkFiles);
+    const result = await native_link_library(handle);
+    return { kind: "digest", digest: result.outputDigest };
 });
 
+// Returns `{ paths, digest }` — same contract as rules/c/index.js's
+// cc_link_artifacts, so a raw cc_binary/cc_library can depend on a
+// cmake-backed library uniformly. `digest` is buildCmakeArtifact's own
+// outputDigest (already known from its run() result); cmake's own build
+// still materializes to real paths for now (its digest-chaining migration is
+// a separate, later pass), but exposing the digest here lets *callers*
+// (raw cc_binary linking against a cmake-backed cc_library) stop depending
+// on physical presence.
 export const cmake_link_artifacts = memo(async function cmake_link_artifacts(handle) {
-    await buildCmakeArtifact(handle);
+    const result = await buildCmakeArtifact(handle);
     const setup = await resolveCmakeSetup(handle);
     const outputBase = handle.attrs.outputsInBuildDir ? setup.buildDirPath : setup.srcPath;
     const linkFiles = (handle.attrs.outputs || [])
         .filter(name => /\.(a|so|dll|lib|dylib)$/.test(name))
         .map(name => `${outputBase}/${name}`);
-    return file_set.literal(linkFiles);
+    return { paths: linkFiles, digest: result.outputDigest };
 });
 
 // Lazily expands a CmakeLib into one separately-addressable, separately-

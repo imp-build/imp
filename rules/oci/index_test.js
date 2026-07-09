@@ -180,7 +180,11 @@ test("ociPush resolves its image's build product and pushes impurely", async () 
         await ociPushBuild(target);
 
         const pushRun = host.runs[host.runs.length - 1];
-        expect(pushRun.argv).toEqual(["crane", "push", "/cache/oci-storage/sha256/" + "a".repeat(64), "ghcr.io/org/app:v1"]);
+        // The pulled image lives in the oci-storage named cache outside the
+        // workspace, so it's mounted via the same tools: idiom as oci-base
+        // (mountOciLayout) rather than passed as a raw absolute path.
+        expect(pushRun.argv).toEqual(["crane", "push", ".imp/tools/oci-push-image", "ghcr.io/org/app:v1"]);
+        expect(pushRun.tools.some((t) => t.name === "oci-push-image")).toBe(true);
         expect(pushRun.impure).toBe(true);
     });
 });

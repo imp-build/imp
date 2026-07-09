@@ -77,7 +77,7 @@ async function buildTestBinaries(handle) {
         env: [...rustEnv, ...linkerEnv, ...cacheEnv],
         inputs: [srcs, resourceInputs],
         outputs: [output(output_path(buildDir), { kind: "directory" })],
-        materialize: true,
+        materialize: false,
         display: `cargo test --no-run ${path}`,
     });
 
@@ -141,8 +141,8 @@ export class RustTest extends Target {
 }
 
 export const rustTestBuild = product("rust_test", "build", async function rustTestBuild(handle) {
-    await buildTestBinaries(handle);
-    return { outputPath: handle.attrs.executable };
+    const { result } = await buildTestBinaries(handle);
+    return { outputPath: handle.attrs.executable, outputDigest: result.outputDigest };
 });
 
 // No outputs/materialize on this final step: test results aren't
@@ -155,10 +155,10 @@ export const rustTestBuild = product("rust_test", "build", async function rustTe
 // its own imp target, its own sandbox), not thread-level concurrency
 // within a single binary.
 export const rustTestRun = product("rust_test", "test", async function rustTestRun(handle) {
-    await rustTestBuild(handle);
+    const { outputDigest } = await rustTestBuild(handle);
     return run({
         argv: [handle.attrs.executable, "--test-threads=1", ...handle.attrs.testArgs],
-        inputs: [{ kind: "directory", path: handle.attrs.buildDir }],
+        inputs: [{ kind: "digest", digest: outputDigest }],
         impure: true,
         display: `cargo test binary ${handle.attrs.executable}`,
     });

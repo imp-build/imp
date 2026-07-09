@@ -1,4 +1,5 @@
-import { Target, glob, memo, output, output_path, product, registerBuildRule, run, targetAddress } from "imp:core";
+import { Target, glob, memo, output, output_path, product, registerBuildRule, run, targetAddress, writeWorkspace } from "imp:core";
+import { distPathFor } from "//rules/workflows/package";
 
 import {
     defaultUvToolchain,
@@ -169,14 +170,22 @@ export const python_app_build = product("python-app", "build", async function py
         'uv sync --project "$src" --frozen --no-progress && ' +
         '"$venv/bin/python" "$pex" "$@"';
 
-    return run({
+    const result = await run({
         argv: ["sh", "-c", script, "python-app-build", srcPath, venvPath, `${venvPath}/bin/python`, ".imp/tools/pex/pex", ...pexArgs],
         tools: [uvToolSpec, pexToolSpec, uvCacheToolSpec, pexRootToolSpec],
         inputs: [inputFiles],
         outputs: [output(output_path(pexOutPath))],
-        materialize: true,
+        materialize: false,
         display: `python-app build ${srcPath}`,
     });
+    return { ...result, pexOutPath };
+});
+
+export const python_app_package = product("python-app", "package", async function python_app_package(handle) {
+    const result = await python_app_build(handle);
+    const pexOutDir = result.pexOutPath.slice(0, result.pexOutPath.lastIndexOf("/"));
+    writeWorkspace(distPathFor(handle), result.outputDigest, { from: pexOutDir });
+    return result;
 });
 
 // ---------------------------------------------------------------------------

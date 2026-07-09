@@ -30,18 +30,18 @@ async function withFakeLog(fn) {
 
 describe("build workflow", () => {
 
-test("buildGoal logs each target to artifact path mapping after successful builds", async () => {
+test("buildGoal logs a plain count after successful builds, not artifact paths", async () => {
     product("build-workflow-artifact-a", "build", async () => ({
         stdout: "hello\nworld\n",
         stderr: "",
         exitCode: 0,
-        outputs: [{ kind: "file", path: "dist/app.txt" }],
+        outputs: [{ kind: "file", path: "build/app.txt" }],
     }));
     product("build-workflow-artifact-b", "build", async () => ({
         stdout: "",
         stderr: "",
         exitCode: 0,
-        outputs: [{ kind: "directory", path: "dist/assets" }],
+        outputs: [{ kind: "directory", path: "build/assets" }],
     }));
     const a = target({ kind: "build-workflow-artifact-a" });
     const b = target({ kind: "build-workflow-artifact-b" });
@@ -54,37 +54,30 @@ test("buildGoal logs each target to artifact path mapping after successful build
 
         expect(logs.length).toBe(1);
         expect(logs[0].level).toBe("info");
-        expect(logs[0].message).toContain("Build artifacts:");
-        expect(logs[0].message).toContain("//:a#build");
-        expect(logs[0].message).toContain("-> dist/app.txt");
-        expect(logs[0].message).toContain("//:b#build");
-        expect(logs[0].message).toContain("-> dist/assets");
+        expect(logs[0].message).toBe("Built 2 targets");
+        expect(logs[0].message).not.toContain("build/app.txt");
         expect(logs[0].message).not.toContain("hello");
-        expect(logs[0].message).not.toContain("world");
         expect(logs[0].message).not.toContain("stdout");
     });
 });
 
-test("buildGoal fails when a build product declares no output artifacts", async () => {
-    product("build-workflow-no-artifacts", "build", async () => ({
-        stdout: "nothing built\n",
-        stderr: "",
-        exitCode: 0,
-        outputs: [],
-    }));
-    const broken = target({ kind: "build-workflow-no-artifacts" });
+test("buildGoal fails with the target label when a build product throws", async () => {
+    product("build-workflow-broken", "build", async () => {
+        throw new Error("boom");
+    });
+    const broken = target({ kind: "build-workflow-broken" });
 
     let message = "";
     try {
         await buildGoal([
-            { id: broken.__id, address: "//:broken", kind: "build-workflow-no-artifacts", product: "build" },
+            { id: broken.__id, address: "//:broken", kind: "build-workflow-broken", product: "build" },
         ]);
     } catch (error) {
         message = error.message;
     }
 
     expect(message).toContain("//:broken#build");
-    expect(message).toContain("did not declare any output artifacts");
+    expect(message).toContain("boom");
 });
 
 });

@@ -4,6 +4,7 @@ import {
     file_set,
     glob,
     memo,
+    mergeDigests,
     output,
     output_path,
     paths,
@@ -15,7 +16,10 @@ import {
     sourcesField,
     targetAddress,
     workspaceTargets,
+    writeWorkspace,
 } from "imp:core";
+
+import { distPathFor } from "//rules/workflows/package";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import {
@@ -437,45 +441,62 @@ async function ccToolchainFor(handle) {
     return productFor(toolchain, "cc-toolchain");
 }
 
+// Compiles each source to its own object file, sandboxed and cached
+// (materialize:false) rather than writing straight into the workspace — the
+// per-object outputDigest is merged (via mergeDigests) into one tree digest
+// covering every compiled object, so buildRawLibrary/buildRawBinary can pass
+// that single merged digest as a `{kind:"digest"}` input to their own run()
+// (staged at each object's original declared path) instead of depending on
+// the objects being physically present on disk.
 async function compileRawObjects(handle, toolchain) {
     const sourcePaths = paths(await own_sources(handle));
     const headerInputs = await headers(handle);
     const tools = await toolchain.tools();
     const env = toolchain.env();
     const objects = [];
+    const digests = [];
 
     for (const source of sourcePaths) {
         const obj = object_path_for(handle, source);
-        objects.push({ source, object: obj });
         const compiler = toolchain.compiler(source);
         const args = [...compiler, "-c", source, "-o", obj, ...(handle.attrs.copts || [])];
         const script = `mkdir -p "$(dirname "$1")" && shift && "$@"`;
-        await run({
+        const result = await run({
             argv: ["sh", "-c", script, "cc-compile", obj, ...args],
             tools,
             env,
             inputs: [{ kind: "file", path: source }, headerInputs],
             outputs: [output(output_path(obj))],
-            materialize: true,
+            materialize: false,
             display: `cc compile ${source}`,
         });
+        objects.push({ source, object: obj });
+        digests.push(result.outputDigest);
     }
 
-    return objects;
+    return { objects, digest: digests.length > 0 ? mergeDigests(digests) : null };
 }
 
+// Returns `{ paths, digest }`: the dependency's final link artifact's
+// workspace-relative path(s) (used as argv filenames — a linker still needs
+// real names, even for sandbox-staged, never-materialized files) and its CAS
+// digest (already known from the dependency's own run() result — no
+// filesystem capture needed, unlike a FileSet, which would require the
+// artifact to already be materialized on disk).
 export const cc_link_artifacts = memo(async function cc_link_artifacts(handle) {
     if (handle.attrs.backend === "cmake") {
         const cmake = await import("//rules/c/cmake");
         return cmake.cmake_link_artifacts(handle);
     }
     const result = await ccBuild(handle);
-    return file_set.literal(result && result.outputPath ? [result.outputPath] : []);
+    return result && result.outputPath
+        ? { paths: [result.outputPath], digest: result.outputDigest }
+        : { paths: [], digest: null };
 });
 
 async function buildRawLibrary(handle) {
     const toolchain = await ccToolchainFor(handle);
-    const objects = await compileRawObjects(handle, toolchain);
+    const { objects, digest } = await compileRawObjects(handle, toolchain);
     const outPath = handle.attrs.output || default_output_path(handle, ".a");
     const tools = await toolchain.tools();
     const env = toolchain.env();
@@ -486,27 +507,31 @@ async function buildRawLibrary(handle) {
         argv: ["sh", "-c", script, "cc-archive", outPath],
         tools,
         env,
-        inputs: objectPaths.map(path => ({ kind: "file", path })),
+        inputs: digest ? [{ kind: "digest", digest }] : [],
         outputs: [output(output_path(outPath))],
-        materialize: true,
+        materialize: false,
         display: `cc archive ${outPath}`,
     });
     result.outputPath = outPath;
     return result;
 }
 
+// Merges every `cc_library` dep's `{paths, digest}` into one combined
+// `{paths, digest}` — the digest-chained analog of the old file_set.union()
+// over each dep's materialized archive.
 async function depLinkArtifacts(handle) {
-    const sets = [];
+    const artifacts = [];
     for (const dep of (handle.attrs.deps || []).filter(h => h && h.kind === "cc_library")) {
-        sets.push(await cc_link_artifacts(dep));
+        artifacts.push(await cc_link_artifacts(dep));
     }
-    if (sets.length === 0) return file_set.literal([]);
-    return sets.length === 1 ? sets[0] : file_set.union(...sets);
+    const allPaths = artifacts.flatMap(a => a.paths);
+    const digests = artifacts.map(a => a.digest).filter(d => d != null);
+    return { paths: allPaths, digest: digests.length > 0 ? mergeDigests(digests) : null };
 }
 
 async function buildRawBinary(handle) {
     const toolchain = await ccToolchainFor(handle);
-    const objects = await compileRawObjects(handle, toolchain);
+    const { objects, digest } = await compileRawObjects(handle, toolchain);
     const linkInputs = await depLinkArtifacts(handle);
     const outPath = handle.attrs.output || default_output_path(handle, "");
     const tools = await toolchain.tools();
@@ -515,15 +540,18 @@ async function buildRawBinary(handle) {
     const needsCxx = sourcePaths.some(is_cxx_source);
     const linker = toolchain.linker(needsCxx);
     const objectPaths = objects.map(obj => obj.object);
-    const linkPaths = paths(linkInputs);
+    const linkPaths = linkInputs.paths;
     const script = `mkdir -p "$(dirname "$1")" && ${linker.map(shell_quote).join(" ")} -o "$1" ${objectPaths.map(shell_quote).join(" ")} ${linkPaths.map(shell_quote).join(" ")} ${(handle.attrs.linkopts || []).map(shell_quote).join(" ")}`;
     const result = await run({
         argv: ["sh", "-c", script, "cc-link", outPath],
         tools,
         env,
-        inputs: [...objectPaths.map(path => ({ kind: "file", path })), linkInputs],
+        inputs: [
+            ...(digest ? [{ kind: "digest", digest }] : []),
+            ...(linkInputs.digest ? [{ kind: "digest", digest: linkInputs.digest }] : []),
+        ],
         outputs: [output(output_path(outPath))],
-        materialize: true,
+        materialize: false,
         display: `cc link ${outPath}`,
     });
     result.outputPath = outPath;
@@ -552,6 +580,26 @@ product("cc_test", "build", async function ccTestBuild(handle) {
         return cmake.buildCmakeArtifact(handle);
     }
     return buildRawBinary(handle);
+});
+
+export const ccLibraryPackage = product("cc_library", "package", async function ccLibraryPackage(handle) {
+    if (handle.attrs.backend === "cmake") {
+        const cmake = await import("//rules/c/cmake");
+        return cmake.packageCmakeArtifact(handle);
+    }
+    const result = await buildRawLibrary(handle);
+    writeWorkspace(distPathFor(handle), result.outputDigest, { from: dirname(result.outputPath) });
+    return result;
+});
+
+product("cc_binary", "package", async function ccBinaryPackage(handle) {
+    if (handle.attrs.backend === "cmake") {
+        const cmake = await import("//rules/c/cmake");
+        return cmake.packageCmakeArtifact(handle);
+    }
+    const result = await buildRawBinary(handle);
+    writeWorkspace(distPathFor(handle), result.outputDigest, { from: dirname(result.outputPath) });
+    return result;
 });
 
 product("cc_test", "test", async function ccTestRun(handle) {

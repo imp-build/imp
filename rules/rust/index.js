@@ -13,7 +13,10 @@ import {
     run,
     sourcesField,
     targetAddress,
+    writeWorkspace,
 } from "imp:core";
+
+import { distPathFor } from "//rules/workflows/package";
 
 import {
     defaultRustToolchain,
@@ -279,13 +282,19 @@ export const cargoBuild = product("cargo-package", "build",
             env: [...rustEnv, ...linkerEnv, ...cacheEnv],
             inputs: [srcs, resourceInputs],
             outputs: outPaths.map((p) => output(output_path(p))),
-            materialize: true,
+            materialize: false,
             display: `cargo build ${path}`,
         });
 
-        return { ...result, outputPaths: outPaths };
+        return { ...result, outputPaths: outPaths, buildDir };
     }
 );
+
+export const cargoDistPackage = product("cargo-package", "package", async function cargoDistPackage(handle) {
+    const result = await cargoBuild(handle);
+    writeWorkspace(distPathFor(handle), result.outputDigest, { from: result.buildDir });
+    return result;
+});
 
 /**
  * Run a Cargo binary crate's tests.
