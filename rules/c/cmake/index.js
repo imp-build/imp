@@ -1,4 +1,4 @@
-import { Target, expand, glob, file_set, memo, output, output_path, pathsInDigest, product, readFileInDigest, registerTarget, run, targetAddress } from "imp:core";
+import { Target, expand, glob, file_set, memo, output, output_path, pathsInDigest, product, readFileInDigest, registerTarget, run, sourcesField, targetAddress } from "imp:core";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import {
     acquireCmakeToolchain,
@@ -24,6 +24,10 @@ import {
 } from "//rules/c/cmake/ninja_graph";
 import { parseCTestTestfile } from "//rules/c/cmake/ctest_testfile";
 
+// Registers generic cc_library/cc_binary build dispatch and generated-build
+// metadata. CMake remains a backend that can mint generic C/C++ targets.
+import "//rules/c";
+
 // Registers the "build" goal's artifact summary callback for consumers that
 // import CMake build rules without importing the workflows layer explicitly.
 import "//rules/workflows/build_workflow";
@@ -44,7 +48,17 @@ export {
 // Path helpers (same pattern as rules/odin/index.js)
 // ---------------------------------------------------------------------------
 
-const DEFAULT_CPP_SRCS = ["CMakeLists.txt", "**/*.c", "**/*.cpp", "**/*.h"];
+const DEFAULT_CPP_SRCS = [
+    "CMakeLists.txt",
+    "**/*.c",
+    "**/*.cc",
+    "**/*.cpp",
+    "**/*.cxx",
+    "**/*.h",
+    "**/*.hh",
+    "**/*.hpp",
+    "**/*.hxx",
+];
 
 function normalize_workspace_path(path) {
     const parts = [];
@@ -421,17 +435,22 @@ async function replayReachableGraph(handle, setup, graph, targetNames) {
     }
 }
 
+function replayTargetNames(handle) {
+    const outputs = handle.attrs.outputs || [];
+    return handle.attrs.outputsInBuildDir && outputs.length > 0 ? outputs : ["all"];
+}
+
 // Shared "build" implementation for every kind expandCmakeProject can mint
 // (cc_library, cc_binary, cc_test) as well as the original hand-declared
 // cmake-lib — identical regardless of kind, since a target's kind only ever
 // affects which products get *dispatched*, never what building one means.
-async function buildCppArtifact(handle) {
+export async function buildCmakeArtifact(handle) {
     const setup = await resolveCmakeSetup(handle);
     const { srcPath, buildDirPath } = setup;
     const stageOutputs = handle.attrs.stageOutputs || [];
 
     const graph = await configureNinjaGraph(handle, setup);
-    await replayReachableGraph(handle, setup, graph, ["all"]);
+    await replayReachableGraph(handle, setup, graph, replayTargetNames(handle));
 
     // outputs/stageOutputs name files relative to srcPath, matching how
     // this attr has always worked — many real CMakeLists.txt files (e.g.
@@ -485,10 +504,7 @@ async function buildCppArtifact(handle) {
     });
 }
 
-export const native_link_library = product("cmake-lib", "build", buildCppArtifact);
-product("cc_library", "build", buildCppArtifact);
-product("cc_binary", "build", buildCppArtifact);
-product("cc_test", "build", buildCppArtifact);
+export const native_link_library = product("cmake-lib", "build", buildCmakeArtifact);
 
 // Regex-escapes and `-R`-joins a set of correlated CTest test names, scoping
 // a cc_test target's own "test" product to just its case(s) instead of the
@@ -513,13 +529,13 @@ function ctestNameFilterArgs(testNames) {
 // when present (a cc_test target correlated to specific CTest case(s) by
 // expandCmakeProject) — unscoped (whole suite) otherwise, matching the
 // existing cmake-lib behavior.
-async function runCTest(handle) {
+export async function runCTest(handle) {
     const setup = await resolveCmakeSetup(handle);
     const { srcPath, buildDirPath } = setup;
     const ctestArgs = [...(handle.attrs.ctestArgs || []), ...ctestNameFilterArgs(handle.attrs.testNames)];
 
     const graph = await configureNinjaGraph(handle, setup);
-    await replayReachableGraph(handle, setup, graph, ["all"]);
+    await replayReachableGraph(handle, setup, graph, replayTargetNames(handle));
 
     // CTestTestfile.cmake (generated at configure time) bakes in the
     // *configure* sandbox's absolute root as each test's executable path —
@@ -551,7 +567,6 @@ async function runCTest(handle) {
 }
 
 export const ctest = product("cmake-lib", "test", runCTest);
-product("cc_test", "test", runCTest);
 
 // Returns link artifacts at their staged locations as a resource file set for
 // odin package sandboxing. Also ensures the cmake build is a plan prerequisite.
@@ -561,6 +576,16 @@ export const cmake_resources = memo(async function cmake_resources(handle) {
     const linkFiles = stageOutputs
         .filter(({ from }) => /\.(so|dll|lib|dylib)$/.test(from))
         .map(({ to }) => to);
+    return file_set.literal(linkFiles);
+});
+
+export const cmake_link_artifacts = memo(async function cmake_link_artifacts(handle) {
+    await buildCmakeArtifact(handle);
+    const setup = await resolveCmakeSetup(handle);
+    const outputBase = handle.attrs.outputsInBuildDir ? setup.buildDirPath : setup.srcPath;
+    const linkFiles = (handle.attrs.outputs || [])
+        .filter(name => /\.(a|so|dll|lib|dylib)$/.test(name))
+        .map(name => `${outputBase}/${name}`);
     return file_set.literal(linkFiles);
 });
 
@@ -672,7 +697,15 @@ export const expandCmakeProject = expand("cmake-lib", async function expandCmake
 export class CppSources extends Target {
     static kind = "cpp-sources";
     constructor({ srcs }) {
-        super({ kind: CppSources.kind, attrs: { sources: srcs } });
+        super({
+            kind: CppSources.kind,
+            attrs: { sources: srcs },
+            sources: sourcesField({
+                root: ".",
+                include: srcs,
+                exclude: [],
+            }),
+        });
     }
 }
 
@@ -727,6 +760,7 @@ export class CmakeLib extends Target {
             attrs: {
                 src,    // stored as user-provided; resolved by declared_path in product/memo
                 srcs: srcs || DEFAULT_CPP_SRCS,
+                ...(kind !== CmakeLib.kind ? { backend: "cmake" } : {}),
                 ...(dirs.length ? { dirs } : {}),
                 cmakeArgs,
                 ...(ctestArgs.length ? { ctestArgs } : {}),
@@ -741,6 +775,18 @@ export class CmakeLib extends Target {
                 ...(compilerTarget ? { compilerTarget } : {}),
                 ...(allDeps.length ? { deps: allDeps.map(dep => dep.target || dep) } : {}),
             },
+            sources: [
+                sourcesField({
+                    root: src,
+                    include: srcs || DEFAULT_CPP_SRCS,
+                    exclude: [],
+                }),
+                ...dirs.map(dir => sourcesField({
+                    root: dir,
+                    include: ["**/*"],
+                    exclude: [],
+                })),
+            ],
             deps: allDeps,
         });
     }

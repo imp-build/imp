@@ -171,11 +171,14 @@ export async function acquireGccToolchain(version) {
     const downloadPath = `.imp/gcc-downloads/${key}/${artifact}`;
     const extractPath = `.imp/gcc-toolchains/${key}`;
     const gccExe = `${GCC_EXE_PREFIX[plat.arch]}-gcc`;
+    const gxxExe = `${GCC_EXE_PREFIX[plat.arch]}-g++`;
     const arExe = `${BINUTILS_PREFIX[plat.arch]}-ar`;
     // Bootlin's own gcc binary is a `toolchain-wrapper` that's argv[0]-
     // sensitive; wrapper scripts that exec the real binary keep its own name.
     const wrappers = [
         [`#!/bin/sh\nexec "$(dirname "$0")/${gccExe}" "$@"\n`, "clang"],
+        [`#!/bin/sh\nexec "$(dirname "$0")/${gccExe}" "$@"\n`, "cc"],
+        [`#!/bin/sh\nexec "$(dirname "$0")/${gxxExe}" "$@"\n`, "c++"],
         [`#!/bin/sh\nexec "$(dirname "$0")/${arExe}" "$@"\n`, "ar"],
     ];
     const wrapperArgs = wrappers.flat();

@@ -16,7 +16,10 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::cache::{cas_blob_path, copy_file, create_symlink, file_mode, restore_file_mode, store_blob, store_file_blob};
+use crate::cache::{
+    cas_blob_path, copy_file, create_symlink, file_mode, restore_file_mode, store_blob,
+    store_file_blob,
+};
 
 // ---------------------------------------------------------------------------
 // In-memory tree types
@@ -59,11 +62,23 @@ impl Entry {
 
     fn from_node_entry(entry: DigestNodeEntry) -> Entry {
         match entry {
-            DigestNodeEntry::File { name, digest, size, mode } => {
-                Entry::File(FileEntry { name, digest, size, mode })
+            DigestNodeEntry::File {
+                name,
+                digest,
+                size,
+                mode,
+            } => Entry::File(FileEntry {
+                name,
+                digest,
+                size,
+                mode,
+            }),
+            DigestNodeEntry::Directory { name, digest } => {
+                Entry::Directory(DirEntry { name, digest })
             }
-            DigestNodeEntry::Directory { name, digest } => Entry::Directory(DirEntry { name, digest }),
-            DigestNodeEntry::Symlink { name, target } => Entry::Symlink(SymlinkEntry { name, target }),
+            DigestNodeEntry::Symlink { name, target } => {
+                Entry::Symlink(SymlinkEntry { name, target })
+            }
         }
     }
 }
@@ -129,7 +144,11 @@ impl DigestTrie {
             std::fs::read(&path).with_context(|| format!("read digest node {}", path.display()))?;
         let node: DigestNode = serde_json::from_slice(&bytes)
             .with_context(|| format!("parse digest node {}", path.display()))?;
-        let entries: Vec<Entry> = node.entries.into_iter().map(Entry::from_node_entry).collect();
+        let entries: Vec<Entry> = node
+            .entries
+            .into_iter()
+            .map(Entry::from_node_entry)
+            .collect();
         Ok(DigestTrie(Arc::from(entries)))
     }
 }
@@ -184,7 +203,10 @@ impl DirectoryDigest {
     }
 
     pub(crate) fn from_digest(digest: String) -> Self {
-        Self { digest, tree: OnceLock::new() }
+        Self {
+            digest,
+            tree: OnceLock::new(),
+        }
     }
 
     pub(crate) fn digest(&self) -> &str {
@@ -206,7 +228,10 @@ impl Clone for DirectoryDigest {
         if let Some(tree) = self.tree.get() {
             let _ = cell.set(tree.clone());
         }
-        Self { digest: self.digest.clone(), tree: cell }
+        Self {
+            digest: self.digest.clone(),
+            tree: cell,
+        }
     }
 }
 
@@ -269,9 +294,7 @@ fn list_files_helper(parent: &str, trie: &DigestTrie, out: &mut Vec<String>) -> 
 /// digest-backed analog of reading a real file off disk.
 pub(crate) fn read_file_from_trie(trie: &DigestTrie, path: &str) -> Result<String> {
     let components: Vec<&str> = path.split('/').collect();
-    let (name, parents) = components
-        .split_last()
-        .context("path must not be empty")?;
+    let (name, parents) = components.split_last().context("path must not be empty")?;
 
     let mut current = trie.clone();
     for part in parents {
@@ -279,7 +302,9 @@ pub(crate) fn read_file_from_trie(trie: &DigestTrie, path: &str) -> Result<Strin
             .entries()
             .iter()
             .find(|e| e.name() == *part)
-            .with_context(|| format!("path '{path}' not found in digest (missing directory '{part}')"))?;
+            .with_context(|| {
+                format!("path '{path}' not found in digest (missing directory '{part}')")
+            })?;
         match entry {
             Entry::Directory(d) => current = DigestTrie::load(&d.digest)?,
             _ => bail!("path '{path}' not found in digest ('{part}' is not a directory)"),
@@ -330,7 +355,10 @@ pub(crate) fn diff(before: &DigestTrie, after: &DigestTrie) -> Result<Vec<PathCh
 
 /// Convenience wrapper over `diff` for already-digest-only inputs: resolves
 /// each to a tree (loading from CAS as needed), then diffs them.
-pub(crate) fn diff_digests(before: &DirectoryDigest, after: &DirectoryDigest) -> Result<Vec<PathChange>> {
+pub(crate) fn diff_digests(
+    before: &DirectoryDigest,
+    after: &DirectoryDigest,
+) -> Result<Vec<PathChange>> {
     diff(before.tree()?, after.tree()?)
 }
 
@@ -432,7 +460,10 @@ pub(crate) fn nest_file(
 
 /// Wrap an already-captured directory tree under `relative_path` — the directory
 /// analog of `nest_file`.
-pub(crate) fn nest_directory(relative_path: &str, inner: &DirectoryDigest) -> Result<DirectoryDigest> {
+pub(crate) fn nest_directory(
+    relative_path: &str,
+    inner: &DirectoryDigest,
+) -> Result<DirectoryDigest> {
     let components: Vec<&str> = relative_path.split('/').collect();
     let (name, parents) = components
         .split_last()
@@ -470,7 +501,10 @@ fn merge_helper(parent: &str, mut trees: Vec<DigestTrie>) -> Result<DigestTrie> 
     let mut by_name: BTreeMap<String, Vec<Entry>> = BTreeMap::new();
     for tree in trees {
         for entry in tree.entries().iter().cloned() {
-            by_name.entry(entry.name().to_owned()).or_default().push(entry);
+            by_name
+                .entry(entry.name().to_owned())
+                .or_default()
+                .push(entry);
         }
     }
 
@@ -514,11 +548,15 @@ fn merge_group(path: &str, name: String, group: Vec<Entry>) -> Result<Entry> {
             for entry in group {
                 match entry {
                     Entry::Directory(d) => dirs.push(d),
-                    _ => bail!("merge conflict at '{path}': a file/symlink collides with a directory"),
+                    _ => bail!(
+                        "merge conflict at '{path}': a file/symlink collides with a directory"
+                    ),
                 }
             }
             if dirs.iter().all(|d| d.digest == dirs[0].digest) {
-                return Ok(Entry::Directory(dirs.into_iter().next().expect("non-empty group")));
+                return Ok(Entry::Directory(
+                    dirs.into_iter().next().expect("non-empty group"),
+                ));
             }
             let mut subtrees = Vec::with_capacity(dirs.len());
             for dir in &dirs {
@@ -572,7 +610,12 @@ fn capture_directory_trie(dir: &Path) -> Result<DigestTrie> {
         } else if file_type.is_file() {
             let (digest, size) = store_file_blob(&path, "digest-file")?;
             let mode = file_mode(&path)?;
-            entries.push(Entry::File(FileEntry { name, digest, size, mode }));
+            entries.push(Entry::File(FileEntry {
+                name,
+                digest,
+                size,
+                mode,
+            }));
         }
     }
 
@@ -639,7 +682,9 @@ fn insert_path(
         .or_insert_with(|| BuildNode::Dir(BTreeMap::new()));
     match entry {
         BuildNode::Dir(children) => insert_path(children, rest, absolute, metadata)?,
-        _ => bail!("path component '{first}' is both a file and a directory across the given paths"),
+        _ => {
+            bail!("path component '{first}' is both a file and a directory across the given paths")
+        }
     }
     Ok(())
 }
@@ -680,7 +725,11 @@ fn build_trie_from_nodes(nodes: BTreeMap<String, BuildNode>) -> Result<DigestTri
 /// a hardlinked workspace file that a user or tool later edits in place would
 /// silently corrupt the shared CAS blob. Workspace materialization must always
 /// copy (`link_files: false`).
-pub(crate) fn materialize_trie(trie: &DigestTrie, destination: &Path, link_files: bool) -> Result<()> {
+pub(crate) fn materialize_trie(
+    trie: &DigestTrie,
+    destination: &Path,
+    link_files: bool,
+) -> Result<()> {
     std::fs::create_dir_all(destination)
         .with_context(|| format!("create {}", destination.display()))?;
     for entry in trie.entries() {
@@ -740,7 +789,13 @@ mod tests {
         let b = capture_directory(&src_b).unwrap();
         let merged = merge_digests(vec![a, b]).unwrap();
 
-        let names: Vec<&str> = merged.tree().unwrap().entries().iter().map(Entry::name).collect();
+        let names: Vec<&str> = merged
+            .tree()
+            .unwrap()
+            .entries()
+            .iter()
+            .map(Entry::name)
+            .collect();
         assert_eq!(names, vec!["one.txt", "two.txt"]);
     }
 
@@ -868,7 +923,10 @@ mod tests {
         let after = capture_directory(&src_b).unwrap();
 
         let changes = diff_digests(&before, &after).unwrap();
-        assert_eq!(changes, vec![PathChange::Modified("nested/f.txt".to_string())]);
+        assert_eq!(
+            changes,
+            vec![PathChange::Modified("nested/f.txt".to_string())]
+        );
     }
 
     #[test]

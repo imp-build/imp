@@ -261,12 +261,13 @@ async fn resolve_workspace_tool_bin(name: &str) -> Result<PathBuf> {
     let path = live
         .ctx
         .async_with(async |ctx| -> rquickjs::Result<String> {
-            let promise = Module::import(&ctx, "imp:core").catch(&ctx).map_err(|e| {
-                rquickjs::Error::new_loading_message("imp:core", format!("{e}"))
-            })?;
-            let core_ns: Object = promise.into_future().await.catch(&ctx).map_err(|e| {
-                rquickjs::Error::new_loading_message("imp:core", format!("{e}"))
-            })?;
+            let promise = Module::import(&ctx, "imp:core")
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("imp:core", format!("{e}")))?;
+            let core_ns: Object =
+                promise.into_future().await.catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message("imp:core", format!("{e}"))
+                })?;
             let invoke: Function = core_ns.get("invokeToolchainProduct")?;
             let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
             let value: Value = invoke.call((js_id,)).catch(&ctx).map_err(|e| {
@@ -551,11 +552,13 @@ async fn cmd_execute_live(
                 anyhow::anyhow!("no '{goal}' goal; registered goals: {}", known.join(", "))
             })?;
             let matches = parse_goal_args(goal, &goal_def.flags, raw);
-            let args =
-                GoalArgs::from_arg_matches(&matches).context("parse goal arguments")?;
+            let args = GoalArgs::from_arg_matches(&matches).context("parse goal arguments")?;
             let mut flags = serde_json::Map::new();
             for name in goal_def.flags.keys() {
-                flags.insert(name.clone(), serde_json::Value::Bool(matches.get_flag(name)));
+                flags.insert(
+                    name.clone(),
+                    serde_json::Value::Bool(matches.get_flag(name)),
+                );
             }
             (
                 args.selectors,
@@ -594,7 +597,11 @@ async fn cmd_execute_live(
     // for both the target list and any "no target matches" error.
     let total_targets = match invocation {
         LiveInvocation::Goal { goal, .. } => {
-            let goal_def = workspace.workspace.goals.get(goal).expect("validated above");
+            let goal_def = workspace
+                .workspace
+                .goals
+                .get(goal)
+                .expect("validated above");
             let no_dynamic = std::collections::BTreeMap::new();
             match selector::select_roots(&workspace.workspace, &no_dynamic, goal_def, &selectors) {
                 Ok(roots) => roots.len(),

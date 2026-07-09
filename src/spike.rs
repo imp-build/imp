@@ -659,7 +659,8 @@ async fn ensure_expanded(live: &LiveWorkspace, root_addresses: &[String]) -> Res
                 .async_with(async |ctx| -> rquickjs::Result<()> {
                     let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
                     let handle: Object = resolve_fn.call((js_id,))?;
-                    let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
+                    let promise_resolve: Function =
+                        ctx.eval("(value) => Promise.resolve(value)")?;
                     let expander_fn: Function = ctx.globals().get(exec_name.as_str())?;
                     let result_value: Value =
                         expander_fn.call((handle,)).catch(&ctx).map_err(|e| {
@@ -669,8 +670,8 @@ async fn ensure_expanded(live: &LiveWorkspace, root_addresses: &[String]) -> Res
                         .call((result_value,))
                         .catch(&ctx)
                         .map_err(|e| {
-                            rquickjs::Error::new_loading_message("expand", format!("{e}"))
-                        })?;
+                        rquickjs::Error::new_loading_message("expand", format!("{e}"))
+                    })?;
                     promise
                         .into_future::<Value>()
                         .await
@@ -718,7 +719,10 @@ async fn ensure_expanded(live: &LiveWorkspace, root_addresses: &[String]) -> Res
         for (_, address) in &registrations {
             expanded.insert(address.clone());
         }
-        frontier = registrations.into_iter().map(|(_, address)| address).collect();
+        frontier = registrations
+            .into_iter()
+            .map(|(_, address)| address)
+            .collect();
     }
 
     Ok(())
@@ -3861,7 +3865,13 @@ export const app = externalThing("app");
         // the product function evaluates live from the dev rules dir.
         let goal_def = workspace.workspace.goals.get("build").unwrap();
         let no_dynamic_1: BTreeMap<String, Target> = BTreeMap::new();
-        let roots = select_roots(&workspace.workspace, &no_dynamic_1, goal_def, &["app".into()]).unwrap();
+        let roots = select_roots(
+            &workspace.workspace,
+            &no_dynamic_1,
+            goal_def,
+            &["app".into()],
+        )
+        .unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].0.address, "//:app");
         assert_eq!(roots[0].1, "build");
@@ -4044,7 +4054,13 @@ export const parent = target({ kind: "expandable", attrs: {} });
         let workspace = load_workspace(root.path()).await.unwrap();
         let goal_def = workspace.workspace.goals.get("build").unwrap();
         let no_dynamic_3: BTreeMap<String, Target> = BTreeMap::new();
-        let roots = select_roots(&workspace.workspace, &no_dynamic_3, goal_def, &["//assets:ui".into()]).unwrap();
+        let roots = select_roots(
+            &workspace.workspace,
+            &no_dynamic_3,
+            goal_def,
+            &["//assets:ui".into()],
+        )
+        .unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].0.address, "//assets:ui");
         assert_eq!(roots[0].1, "build");
@@ -6079,7 +6095,13 @@ export const report = product("test-pkg", "report", async function report(handle
         // dispatches to it live.
         let goal_def = live.workspace.goals.get("build").unwrap();
         let no_dynamic_4: BTreeMap<String, Target> = BTreeMap::new();
-        let roots = select_roots(&live.workspace, &no_dynamic_4, goal_def, &["//:pkg#report".to_owned()]).unwrap();
+        let roots = select_roots(
+            &live.workspace,
+            &no_dynamic_4,
+            goal_def,
+            &["//:pkg#report".to_owned()],
+        )
+        .unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].0.address, "//:pkg");
         assert_eq!(roots[0].1, "report");
@@ -6110,7 +6132,13 @@ export const check = product("kind-a", "check", async function check(handle) {})
         // //:pkg#check should select the "check" product explicitly.
         let goal_def = live.workspace.goals.get("build").unwrap();
         let no_dynamic_5: BTreeMap<String, Target> = BTreeMap::new();
-        let roots = select_roots(&live.workspace, &no_dynamic_5, goal_def, &["//:pkg#check".to_owned()]).unwrap();
+        let roots = select_roots(
+            &live.workspace,
+            &no_dynamic_5,
+            goal_def,
+            &["//:pkg#check".to_owned()],
+        )
+        .unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].1, "check");
 
@@ -6308,6 +6336,98 @@ export const spall = odinPackage({ srcs: ["*.odin"] });
         assert_eq!(report.changed_files, vec!["app/BUILD.js".to_owned()]);
         let spall_build = std::fs::read_to_string(p.join("library/spall/BUILD.js")).unwrap();
         assert_eq!(spall_build.matches("export const spall").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn generate_build_creates_cmake_and_raw_cc_targets() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/c";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+export const done = true;
+"#,
+        );
+        write_file(
+            &p.join("cmake_app/CMakeLists.txt"),
+            r#"
+cmake_minimum_required(VERSION 3.20)
+project(cmake_app C)
+add_executable(cmake_app main.c)
+"#,
+        );
+        write_file(
+            &p.join("cmake_app/main.c"),
+            "int main(void) { return 0; }\n",
+        );
+        write_file(&p.join("raw_app/main.c"), "int main(void) { return 0; }\n");
+        write_file(
+            &p.join("raw_lib/lib.c"),
+            "int answer(void) { return 42; }\n",
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let report = generate_build_files(&live, p, &[], false).await.unwrap();
+        assert_eq!(
+            report.changed_files,
+            vec![
+                "cmake_app/BUILD.js".to_owned(),
+                "raw_app/BUILD.js".to_owned(),
+                "raw_lib/BUILD.js".to_owned(),
+            ]
+        );
+
+        let cmake_build = std::fs::read_to_string(p.join("cmake_app/BUILD.js")).unwrap();
+        assert!(cmake_build.contains(r#"import { cmakeLib } from "//rules/c/cmake";"#));
+        assert!(cmake_build.contains("export const cmake_app_cmake = cmakeLib({});"));
+
+        let app_build = std::fs::read_to_string(p.join("raw_app/BUILD.js")).unwrap();
+        assert!(app_build.contains(r#"import { ccBinary } from "//rules/c";"#));
+        assert!(app_build.contains("export const raw_app = ccBinary({});"));
+
+        let lib_build = std::fs::read_to_string(p.join("raw_lib/BUILD.js")).unwrap();
+        assert!(lib_build.contains(r#"import { ccLibrary } from "//rules/c";"#));
+        assert!(lib_build.contains("export const raw_lib = ccLibrary({});"));
+    }
+
+    #[tokio::test]
+    async fn generate_build_skips_existing_cmake_owned_cc_files() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/c/cmake";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+export const done = true;
+"#,
+        );
+        write_file(
+            &p.join("cmake_app/BUILD.js"),
+            r#"
+import { cmakeLib } from "//rules/c/cmake";
+
+export const cmake_app = cmakeLib({});
+"#,
+        );
+        write_file(
+            &p.join("cmake_app/CMakeLists.txt"),
+            r#"
+cmake_minimum_required(VERSION 3.20)
+project(cmake_app C)
+add_executable(cmake_app main.c)
+"#,
+        );
+        write_file(
+            &p.join("cmake_app/main.c"),
+            "int main(void) { return 0; }\n",
+        );
+        write_file(&p.join("raw_app/main.c"), "int main(void) { return 0; }\n");
+
+        let live = load_workspace(p).await.unwrap();
+        assert!(live.workspace.owned_files.contains("cmake_app/main.c"));
+        let report = generate_build_files(&live, p, &[], false).await.unwrap();
+        assert_eq!(report.changed_files, vec!["raw_app/BUILD.js".to_owned()]);
     }
 
     #[tokio::test]

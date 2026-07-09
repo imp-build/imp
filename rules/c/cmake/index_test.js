@@ -4,6 +4,7 @@ import {
     test,
 } from "//rules/imp/test";
 import {
+    CmakeLib,
     cmakeLib,
     cmakeToolchain,
 } from "//rules/c/cmake";
@@ -33,6 +34,20 @@ test("keeps explicit string versions dependency-free", () => {
     expect(lib.attrs.toolchain).toBe("3.32.0");
     expect(lib.attrs.toolchainTarget ?? null).toBe(null);
     expect(lib.attrs.deps ? lib.attrs.deps.length : 0).toBe(0);
+});
+
+test("expanded CMake cc targets are selected by output artifacts", () => {
+    const lib = new CmakeLib({
+        kind: "cc_library",
+        outputs: ["libhf.a"],
+        outputsInBuildDir: true,
+        deps: [],
+    });
+
+    expect(lib.kind).toBe("cc_library");
+    expect(lib.attrs.backend).toBe("cmake");
+    expect(lib.attrs.outputs).toEqual(["libhf.a"]);
+    expect(lib.attrs.outputsInBuildDir).toBe(true);
 });
 
 // The following compiler-only tests run before "uses the default CMake

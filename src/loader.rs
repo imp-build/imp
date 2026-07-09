@@ -14,8 +14,7 @@ pub(crate) const CORE_JS: &str = include_str!("imp_core.js");
 /// imp's own rule library (rules/**), compiled into the binary so an
 /// installed imp works outside a checkout of this repo. `RulesSource::Dev`
 /// bypasses this in favor of a live on-disk directory (see below).
-static EMBEDDED_RULES: Dir<'static> =
-    include_dir!("$CARGO_MANIFEST_DIR/rules");
+static EMBEDDED_RULES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/rules");
 
 /// Environment variable that, when set, points `//rules/...` at a live
 /// on-disk directory instead of the compiled-in copy — for developing
@@ -78,17 +77,19 @@ impl Resolver for ImpResolver {
         }
 
         if name.starts_with("//") {
-            let resolution = resolve_workspace_module(&self.workspace_root, &self.rules_source, name)
-                .map_err(|message| {
-                    rquickjs::Error::new_resolving_message(
-                        base,
-                        name,
-                        format!(
-                            "{message} while importing from {}",
-                            module_location(&self.workspace_root, &self.rules_source, base)
-                        ),
-                    )
-                })?;
+            let resolution =
+                resolve_workspace_module(&self.workspace_root, &self.rules_source, name).map_err(
+                    |message| {
+                        rquickjs::Error::new_resolving_message(
+                            base,
+                            name,
+                            format!(
+                                "{message} while importing from {}",
+                                module_location(&self.workspace_root, &self.rules_source, base)
+                            ),
+                        )
+                    },
+                )?;
             return Ok(resolution.name);
         }
 
@@ -131,8 +132,9 @@ impl Loader for ImpLoader {
         }
 
         if name.starts_with("//") {
-            let resolution = resolve_workspace_module(&self.workspace_root, &self.rules_source, name)
-                .map_err(|message| rquickjs::Error::new_loading_message(name, message))?;
+            let resolution =
+                resolve_workspace_module(&self.workspace_root, &self.rules_source, name)
+                    .map_err(|message| rquickjs::Error::new_loading_message(name, message))?;
             let source = match resolution.source {
                 ModuleSource::File(path) => std::fs::read_to_string(&path).map_err(|e| {
                     rquickjs::Error::new_loading_message(
@@ -314,9 +316,12 @@ fn embedded_module(
     file: &'static include_dir::File<'static>,
     kind: ModuleKind,
 ) -> std::result::Result<WorkspaceModuleResolution, String> {
-    let contents = file
-        .contents_utf8()
-        .ok_or_else(|| format!("embedded rules file '{}' is not valid UTF-8", file.path().display()))?;
+    let contents = file.contents_utf8().ok_or_else(|| {
+        format!(
+            "embedded rules file '{}' is not valid UTF-8",
+            file.path().display()
+        )
+    })?;
     Ok(WorkspaceModuleResolution {
         name: name.to_owned(),
         source: ModuleSource::Embedded(contents),
