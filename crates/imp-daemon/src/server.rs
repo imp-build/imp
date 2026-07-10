@@ -41,7 +41,7 @@ impl proto::execution_server::Execution for ExecutionServer {
         });
         Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
-    async fn cache_dir_get(&self, r:Request<proto::CacheDirRequest>)->Result<Response<proto::CacheDirResponse>,Status>{let x=r.into_inner();Ok(Response::new(proto::CacheDirResponse{present:self.service.cache_dir_get(&x.workspace_id,&x.name,&x.key).map_err(err)?.is_some(),path:String::new()}))}
+    async fn cache_dir_get(&self, r:Request<proto::CacheDirRequest>)->Result<Response<proto::CacheDirResponse>,Status>{let x=r.into_inner();let path=self.service.cache_dir_get(&x.workspace_id,&x.name,&x.key).map_err(err)?;Ok(Response::new(proto::CacheDirResponse{present:path.is_some(),path:path.map(|p|p.to_string_lossy().into_owned()).unwrap_or_default()}))}
     async fn cache_dir_has(&self, r:Request<proto::CacheDirRequest>)->Result<Response<proto::CacheDirResponse>,Status>{let x=r.into_inner();Ok(Response::new(proto::CacheDirResponse{present:self.service.cache_dir_has(&x.workspace_id,&x.name,&x.key).map_err(err)?,path:String::new()}))}
     async fn cache_dir_put(&self, r:Request<proto::CacheDirRequest>)->Result<Response<proto::Empty>,Status>{let x=r.into_inner();self.service.cache_dir_put(&x.workspace_id,&x.name,&x.key,&std::path::PathBuf::from(x.source)).map_err(err)?;Ok(Response::new(proto::Empty{}))}
     async fn fetch_url(&self,r:Request<proto::FetchRequest>)->Result<Response<proto::PathResponse>,Status>{Ok(Response::new(proto::PathResponse{path:self.service.fetch_url(&r.into_inner().url).map_err(err)?.to_string_lossy().into_owned()}))}

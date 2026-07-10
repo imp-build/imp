@@ -198,4 +198,4 @@ export const expandCargoTests = expand("cargo-package", async function expandCar
             `${scope}:${parentName}_tests_${bin.name}`,
         );
     }
-});
+}, { goals: ["test"] });

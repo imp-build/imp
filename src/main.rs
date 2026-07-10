@@ -135,7 +135,11 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
-enum DaemonCmd { Serve, Status, Stop }
+enum DaemonCmd {
+    Serve,
+    Status,
+    Stop,
+}
 
 #[derive(clap::Args)]
 struct GoalArgs {
@@ -304,8 +308,21 @@ async fn run() -> Result<()> {
     if let Cmd::Daemon { command } = &cli.command {
         match command {
             DaemonCmd::Serve => return imp_daemon::lifecycle::serve().await,
-            DaemonCmd::Status => { println!("{}", if imp_daemon::lifecycle::status() { "running" } else { "stopped" }); return Ok(()); }
-            DaemonCmd::Stop => { imp_daemon::client::RemoteExecutionService::shutdown_existing()?; return Ok(()); }
+            DaemonCmd::Status => {
+                println!(
+                    "{}",
+                    if imp_daemon::lifecycle::status() {
+                        "running"
+                    } else {
+                        "stopped"
+                    }
+                );
+                return Ok(());
+            }
+            DaemonCmd::Stop => {
+                imp_daemon::client::RemoteExecutionService::shutdown_existing()?;
+                return Ok(());
+            }
         }
     }
     let cancellation = install_termination_signal_flag()?;
@@ -605,33 +622,6 @@ async fn cmd_execute_live(
         anyhow::bail!("execution canceled");
     }
 
-    // Resolve selectors into concrete root targets so we know the total count
-    // upfront, before the scheduler or renderer starts. Rule-test runs have no
-    // target roots; they render as a single timed task.
-    //
-    // This only ever resolves against the statically-known workspace — a
-    // selector naming a target that only exists after a rule's lazy
-    // expansion (e.g. a CMake sub-target) won't match here yet. Rather than
-    // fail the whole invocation before expansion gets a chance to run, fall
-    // back to a rough placeholder count; `execute_goal_live` re-resolves
-    // selectors for real (after expansion) and is the actual source of truth
-    // for both the target list and any "no target matches" error.
-    let total_targets = match invocation {
-        LiveInvocation::Goal { goal, .. } => {
-            let goal_def = workspace
-                .workspace
-                .goals
-                .get(goal)
-                .expect("validated above");
-            let no_dynamic = std::collections::BTreeMap::new();
-            match selector::select_roots(&workspace.workspace, &no_dynamic, goal_def, &selectors) {
-                Ok(roots) => roots.len(),
-                Err(_) => selectors.len().max(1),
-            }
-        }
-        LiveInvocation::RulesTests { .. } => 0,
-    };
-
     // Install a scheduler and render its single task-event stream into a flat
     // list of worker slots. Each slot corresponds to one concurrent execution
     // unit (sandbox worker or JS evaluation). No parent/child nesting.
@@ -653,10 +643,10 @@ async fn cmd_execute_live(
     // Explicit render shutdown: in-flight product evaluations abandoned inside
     // the JS runtime after a failure keep scheduler handles (and thus the event
     // channel) alive forever, so waiting for channel closure would hang.
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     let render = tokio::spawn(async move {
         use indicatif::ProgressBar;
-        use scheduler::{LaneKind, TaskEvent, TaskOutcome};
+        use scheduler::{LaneKind, TaskEvent, TaskKind, TaskOutcome};
 
         // Bars live in a single flat `MultiProgress`; nesting is conveyed only
         // by insertion order and message indentation below.
@@ -666,18 +656,14 @@ async fn cmd_execute_live(
             item
         };
 
-        // Data store: target count pre-computed from select_roots.
-        struct TaskStore {
+        struct SandboxStore {
             total: usize,
             done: usize,
         }
-        let mut store = TaskStore {
-            total: total_targets,
-            done: 0,
-        };
+        let mut sandboxes = SandboxStore { total: 0, done: 0 };
 
         // ── tree structure ──────────────────────────────────────────────
-        // execute <goal> (0/N targets, progress bar)
+        // execute <goal> (0/N sandboxes, progress bar)
         //   ├─ js tasks (done/total memos, progress bar) — if js_workers > 0
         //   │   ├─<memo name>  ← JS 0, shown when active
         //   │   └─<memo name>  ← JS 1, shown when active
@@ -686,13 +672,8 @@ async fn cmd_execute_live(
         // Idle workers are hidden (name set to " ").
 
         let progress = add_bar(&goal_label);
-        if store.total > 0 {
-            ui::init_counted_task(&progress, store.total);
-            progress.set_message(format!("0/{} targets", store.total));
-        } else {
-            ui::init_timed_task(&progress);
-            progress.set_message(goal_label);
-        }
+        ui::init_counted_task(&progress, 0);
+        progress.set_message("0/0 sandboxes");
 
         let js_progress = {
             let js = add_bar("  js tasks");
@@ -768,10 +749,11 @@ async fn cmd_execute_live(
             std::collections::HashMap::new();
         let mut sandbox_task_to_slot: std::collections::HashMap<u64, usize> =
             std::collections::HashMap::new();
-        let mut root_tasks: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut sandbox_tasks: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let mut is_js_memo: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let mut total_js: usize = 0;
         let mut done_js: usize = 0;
+        let mut completion: Option<Result<(), String>> = None;
 
         loop {
             let event = tokio::select! {
@@ -779,17 +761,23 @@ async fn cmd_execute_live(
                     Some(ev) => ev,
                     None => break,
                 },
-                _ = &mut shutdown_rx => break,
+                signal = &mut shutdown_rx => {
+                    completion = signal.ok();
+                    break;
+                },
             };
             match event {
                 TaskEvent::Pending {
-                    id,
-                    parent,
-                    display,
-                    ..
+                    id, display, kind, ..
                 } => {
-                    if parent.is_none() {
-                        root_tasks.insert(id);
+                    if kind == TaskKind::Sandbox {
+                        sandbox_tasks.insert(id);
+                        sandboxes.total += 1;
+                        progress.set_length(sandboxes.total as u64);
+                        progress.set_message(format!(
+                            "{}/{} sandboxes",
+                            sandboxes.done, sandboxes.total
+                        ));
                     }
                     render_labels.lock().unwrap().insert(id, display);
                 }
@@ -805,26 +793,15 @@ async fn cmd_execute_live(
                 TaskEvent::Done { id, outcome } => {
                     render_labels.lock().unwrap().remove(&id);
 
-                    // Track root-task (target) completion on the goal bar.
-                    if store.total > 0 && root_tasks.contains(&id) {
-                        root_tasks.remove(&id);
-                        match &outcome {
-                            TaskOutcome::Ok => {
-                                store.done += 1;
-                                progress.inc(1);
-                                progress
-                                    .set_message(format!("{}/{} targets", store.done, store.total));
-                                if store.done == store.total {
-                                    progress.finish_with_message("done");
-                                }
-                            }
-                            TaskOutcome::Err(error) => {
-                                progress.abandon_with_message(error.clone());
-                            }
-                            TaskOutcome::Canceled => {
-                                progress.abandon_with_message("canceled".to_owned());
-                            }
-                        }
+                    // Cache hits never acquire a lane, but they still count as
+                    // completed sandbox tasks because they were queued here.
+                    if sandbox_tasks.remove(&id) {
+                        sandboxes.done += 1;
+                        progress.set_position(sandboxes.done as u64);
+                        progress.set_message(format!(
+                            "{}/{} sandboxes",
+                            sandboxes.done, sandboxes.total
+                        ));
                     }
 
                     // Track JS memo completion on the js-tasks bar.
@@ -834,9 +811,6 @@ async fn cmd_execute_live(
                                 done_js += 1;
                                 js_progress.inc(1);
                                 js_progress.set_message(format!("js tasks {done_js}/{total_js}"));
-                                if done_js == total_js && store.done == store.total {
-                                    js_progress.finish_with_message("done");
-                                }
                             }
                             TaskOutcome::Err(error) => {
                                 js_progress.abandon_with_message(error.clone());
@@ -877,6 +851,23 @@ async fn cmd_execute_live(
                         clear_lane(&mut sandbox_slots, &mut sandbox_task_to_slot, slot, id)
                     }
                 },
+            }
+        }
+
+        match completion {
+            Some(Ok(())) => {
+                progress.finish_with_message("done");
+                if done_js == total_js {
+                    js_progress.finish_with_message("done");
+                }
+            }
+            Some(Err(error)) => {
+                progress.abandon_with_message(error.clone());
+                js_progress.abandon_with_message(error);
+            }
+            None => {
+                progress.abandon_with_message("canceled".to_owned());
+                js_progress.abandon_with_message("canceled".to_owned());
             }
         }
     });
@@ -955,7 +946,11 @@ async fn cmd_execute_live(
     }
     *workspace.scheduler.lock().unwrap() = None;
     drop(scheduler);
-    let _ = shutdown_tx.send(());
+    let shutdown_result = result
+        .as_ref()
+        .map(|_| ())
+        .map_err(|error| format!("{error:#}"));
+    let _ = shutdown_tx.send(shutdown_result);
     let _ = render.await;
 
     result

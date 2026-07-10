@@ -12,10 +12,6 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use imp_store::cache::{artifact_relative_path, digest_json, store_file_blob, workspace_cache_id};
-use imp_exec_api::{ExecAction, ExecRunOpts, ExecutionService, SandboxRetention, WorkerSpec};
-use imp_execution::service::LocalExecutionService;
-use imp_daemon::client::RemoteExecutionService;
 use crate::exec_bridge::{parse_io_specs, parse_tool_specs};
 use crate::loader::{
     resolve_workspace_module, validate_workspace_module_path, ModuleKind, ModuleSource,
@@ -32,6 +28,12 @@ use rquickjs::{
 };
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
+use imp_daemon::client::RemoteExecutionService;
+use imp_exec_api::{ExecAction, ExecRunOpts, ExecutionService, SandboxRetention, WorkerSpec};
+use imp_execution::service::LocalExecutionService;
+use imp_store::cache::{
+    artifact_relative_path, digest_json, store_file_blob, workspace_cache_id,
+};
 
 pub(crate) const WORKSPACE_FILE: &str = "imp.workspace.js";
 pub(crate) const BUILD_FILE: &str = "BUILD.js";
@@ -157,12 +159,15 @@ pub struct Workspace {
     /// callback registered via `goal(name, fn)`. Invoked once per goal
     /// invocation, before any per-target product dispatch.
     pub goal_callbacks: BTreeMap<String, String>,
-    /// Target kind -> global function name for an expander registered via
-    /// `expand(kind, fn)`. Invoked lazily, once per invocation, for any
-    /// statically-known target of this kind that's reachable from the
-    /// current goal's selection, so it can mint additional addressable
-    /// targets (see `ensure_expanded`).
-    pub expanders: BTreeMap<String, String>,
+    /// Target kind -> expander registered via `expand(kind, fn, opts)`. An
+    /// expander may optionally be scoped to the goals that need it.
+    pub expanders: BTreeMap<String, Expander>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Expander {
+    pub exec_name: String,
+    pub goals: Option<BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,7 +205,7 @@ pub(crate) struct HostState {
     platforms: BTreeMap<String, PlatformDef>,
     id_to_address: BTreeMap<u32, String>,
     goal_callbacks: BTreeMap<String, String>,
-    expanders: BTreeMap<String, String>,
+    expanders: BTreeMap<String, Expander>,
     /// `(pending id, address)` pairs appended by `__host_register_dynamic_target`
     /// as a rule's expander mints new targets. Drained by `ensure_expanded`.
     dynamic_registrations: Vec<(u32, String)>,
@@ -316,9 +321,7 @@ pub(crate) async fn load_workspace_with_rules(
     let state: Arc<Mutex<HostState>> = Arc::new(Mutex::new(HostState::default()));
     let exec_root: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
     let exec_no_cache = Arc::new(AtomicBool::new(false));
-    let exec_sandbox_retention = Arc::new(AtomicU8::new(
-        SandboxRetention::default().as_u8(),
-    ));
+    let exec_sandbox_retention = Arc::new(AtomicU8::new(SandboxRetention::default().as_u8()));
     let scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>> =
         Arc::new(Mutex::new(None));
     let selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(None));
@@ -624,7 +627,11 @@ fn lookup_dynamic_or_static(live: &LiveWorkspace, address: &str) -> Option<Targe
 /// expander once (including targets minted by expansion itself, which are
 /// marked already-expanded on arrival so an expander never re-triggers on
 /// its own output).
-async fn ensure_expanded(live: &LiveWorkspace, root_addresses: &[String]) -> Result<()> {
+async fn ensure_expanded(
+    live: &LiveWorkspace,
+    root_addresses: &[String],
+    goal: Option<&str>,
+) -> Result<()> {
     if live.workspace.expanders.is_empty() {
         return Ok(());
     }
@@ -651,7 +658,17 @@ async fn ensure_expanded(live: &LiveWorkspace, root_addresses: &[String]) -> Res
             .into_iter()
             .filter(|address| !expanded.contains(address))
             .filter_map(|address| lookup_dynamic_or_static(live, &address))
-            .filter(|target| live.workspace.expanders.contains_key(&target.kind))
+            .filter(|target| {
+                live.workspace
+                    .expanders
+                    .get(&target.kind)
+                    .is_some_and(|expander| {
+                        expander
+                            .goals
+                            .as_ref()
+                            .map_or(true, |goals| goal.is_some_and(|name| goals.contains(name)))
+                    })
+            })
             .collect();
 
         if to_expand.is_empty() {
@@ -660,7 +677,7 @@ async fn ensure_expanded(live: &LiveWorkspace, root_addresses: &[String]) -> Res
 
         for target in &to_expand {
             expanded.insert(target.address.clone());
-            let exec_name = live.workspace.expanders[&target.kind].clone();
+            let exec_name = live.workspace.expanders[&target.kind].exec_name.clone();
             let address = target.address.clone();
             let js_id = target.js_id;
 
@@ -916,7 +933,7 @@ fn register_globals<'js>(
     globals.set("__host_goal_callback", host_goal_callback)?;
 
     // ------------------------------------------------------------------
-    // __host_register_expander(kind, fn) — registers a lazy target
+    // __host_register_expander(kind, fn, goals) — registers a lazy target
     // expander for a target kind, invoked by `ensure_expanded` for any
     // statically-known target of that kind reachable from the current
     // goal's selection (see `expand()` in imp_core.js).
@@ -924,7 +941,11 @@ fn register_globals<'js>(
     let state_exp = Arc::clone(&state);
     let host_register_expander = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>, kind: String, fn_val: Value<'js>| -> rquickjs::Result<()> {
+        move |ctx: Ctx<'js>,
+              kind: String,
+              fn_val: Value<'js>,
+              goals: Option<Vec<String>>|
+              -> rquickjs::Result<()> {
             let exec_name = {
                 let mut hs = state_exp.lock().unwrap();
                 let n = format!("__imp_exec_{}", hs.next_exec);
@@ -932,7 +953,13 @@ fn register_globals<'js>(
                 n
             };
             ctx.globals().set(exec_name.as_str(), fn_val)?;
-            state_exp.lock().unwrap().expanders.insert(kind, exec_name);
+            state_exp.lock().unwrap().expanders.insert(
+                kind,
+                Expander {
+                    exec_name,
+                    goals: goals.map(|values| values.into_iter().collect()),
+                },
+            );
             Ok(())
         },
     )?;
@@ -1200,12 +1227,15 @@ fn register_globals<'js>(
     // __host_download(url) → path string
     // ------------------------------------------------------------------
     let service_download = Arc::clone(&service);
-    let host_download = Function::new(ctx.clone(), move |url: String| -> rquickjs::Result<String> {
-        let path = service_download
-            .fetch_url(&url)
-            .map_err(|e| rquickjs::Error::new_loading_message("download", format!("{e:#}")))?;
-        Ok(path.to_string_lossy().into_owned())
-    })?;
+    let host_download = Function::new(
+        ctx.clone(),
+        move |url: String| -> rquickjs::Result<String> {
+            let path = service_download
+                .fetch_url(&url)
+                .map_err(|e| rquickjs::Error::new_loading_message("download", format!("{e:#}")))?;
+            Ok(path.to_string_lossy().into_owned())
+        },
+    )?;
     globals.set("__host_download", host_download)?;
 
     // ------------------------------------------------------------------
@@ -1240,11 +1270,14 @@ fn register_globals<'js>(
     // __host_sha256(path) → hex string
     // ------------------------------------------------------------------
     let service_sha256 = Arc::clone(&service);
-    let host_sha256 = Function::new(ctx.clone(), move |path: String| -> rquickjs::Result<String> {
-        service_sha256
-            .file_sha256(Path::new(&path))
-            .map_err(|e| rquickjs::Error::new_loading_message("sha256", format!("{e:#}")))
-    })?;
+    let host_sha256 = Function::new(
+        ctx.clone(),
+        move |path: String| -> rquickjs::Result<String> {
+            service_sha256
+                .file_sha256(Path::new(&path))
+                .map_err(|e| rquickjs::Error::new_loading_message("sha256", format!("{e:#}")))
+        },
+    )?;
     globals.set("__host_sha256", host_sha256)?;
 
     // ------------------------------------------------------------------
@@ -1307,7 +1340,9 @@ fn register_globals<'js>(
             let service = Arc::clone(&service_worker_start);
             async move {
                 let argv: Vec<String> = opts.get("argv")?;
-                let env_pairs: Vec<String> = opts.get::<_, Option<Vec<String>>>("env")?.unwrap_or_default();
+                let env_pairs: Vec<String> = opts
+                    .get::<_, Option<Vec<String>>>("env")?
+                    .unwrap_or_default();
                 let mut env = Vec::with_capacity(env_pairs.len());
                 for entry in env_pairs {
                     let (key, value) = entry.split_once('=').ok_or_else(|| {
@@ -1683,12 +1718,13 @@ fn register_globals<'js>(
     let host_write_workspace = Function::new(
         ctx.clone(),
         move |path: String, digest: String, from: Option<String>| -> rquickjs::Result<()> {
-            let relative = artifact_relative_path(&path)
-                .map_err(|e| rquickjs::Error::new_loading_message("writeWorkspace", format!("{e:#}")))?;
-            let destination = wc.join(&relative);
-            imp_store::cache::write_workspace(&digest, from.as_deref(), &destination).map_err(|e| {
+            let relative = artifact_relative_path(&path).map_err(|e| {
                 rquickjs::Error::new_loading_message("writeWorkspace", format!("{e:#}"))
-            })
+            })?;
+            let destination = wc.join(&relative);
+            imp_store::cache::write_workspace(&digest, from.as_deref(), &destination).map_err(
+                |e| rquickjs::Error::new_loading_message("writeWorkspace", format!("{e:#}")),
+            )
         },
     )?;
     globals.set("__host_write_workspace", host_write_workspace)?;
@@ -1789,64 +1825,78 @@ fn register_globals<'js>(
                 let parent: Option<u64> = opts.get::<_, Option<f64>>("__owner")?.map(|n| n as u64);
                 let mut run_opts = parse_exec_run_opts(opts, &root)?;
                 run_opts.no_cache = exec_no_cache_run.load(Ordering::SeqCst);
-                run_opts.sandbox_retention = SandboxRetention::from_u8(
-                    exec_sandbox_retention_run.load(Ordering::SeqCst),
-                );
+                run_opts.sandbox_retention =
+                    SandboxRetention::from_u8(exec_sandbox_retention_run.load(Ordering::SeqCst));
                 let display = run_opts.display.clone();
                 let cancellation = sched.cancellation_flag();
                 let workspace_id = workspace_cache_id(&root);
                 let result = sched
-                    .run(parent, display, move |run_context| {
-                        if !run_opts.sandbox {
-                            if !run_opts.impure {
-                                anyhow::bail!("run({{ sandbox: false }}) requires impure: true");
+                    .run(
+                        parent,
+                        display,
+                        crate::scheduler::TaskKind::Sandbox,
+                        move |run_context| {
+                            if !run_opts.sandbox {
+                                if !run_opts.impure {
+                                    anyhow::bail!(
+                                        "run({{ sandbox: false }}) requires impure: true"
+                                    );
+                                }
+                                run_context.started();
+                                return imp_execution::exec::exec_run_unsandboxed(
+                                    &root,
+                                    run_opts,
+                                    Some(cancellation.as_ref()),
+                                    None,
+                                )
+                                .map(|result| {
+                                    imp_exec_api::ExecOutcome {
+                                        stdout: result.stdout,
+                                        stderr: result.stderr,
+                                        exit_code: result.exit_code,
+                                        output_digest: result.output_digest.unwrap_or_default(),
+                                        outputs: Vec::new(),
+                                    }
+                                });
                             }
-                            run_context.started();
-                            return imp_execution::exec::exec_run_unsandboxed(
+                            let input_digest = imp_execution::staging::resolve_input_digest(
                                 &root,
-                                run_opts,
+                                &run_opts.inputs,
+                            )?;
+                            let env = imp_execution::staging::resolve_base_env(&run_opts.env)?;
+                            let materialize = run_opts.materialize;
+                            let action = ExecAction {
+                                argv: run_opts.argv,
+                                display: run_opts.display,
+                                env,
+                                config_digest: run_opts.config_digest,
+                                input_digest,
+                                outputs: run_opts.outputs,
+                                tools: run_opts.tools,
+                                impure: run_opts.impure,
+                                force_cache: run_opts.force_cache,
+                                no_cache: run_opts.no_cache,
+                                sandbox_retention: run_opts.sandbox_retention,
+                            };
+                            let result = service.execute_with_start(
+                                &workspace_id,
+                                action,
                                 Some(cancellation.as_ref()),
-                                None,
-                            )
-                            .map(|result| imp_exec_api::ExecOutcome {
-                                stdout: result.stdout,
-                                stderr: result.stderr,
-                                exit_code: result.exit_code,
-                                output_digest: result.output_digest.unwrap_or_default(),
-                                outputs: Vec::new(),
-                            });
-                        }
-                        let input_digest = imp_execution::staging::resolve_input_digest(
-                            &root,
-                            &run_opts.inputs,
-                        )?;
-                        let env = imp_execution::staging::resolve_base_env(&run_opts.env)?;
-                        let materialize = run_opts.materialize;
-                        let action = ExecAction {
-                            argv: run_opts.argv,
-                            display: run_opts.display,
-                            env,
-                            config_digest: run_opts.config_digest,
-                            input_digest,
-                            outputs: run_opts.outputs,
-                            tools: run_opts.tools,
-                            impure: run_opts.impure,
-                            force_cache: run_opts.force_cache,
-                            no_cache: run_opts.no_cache,
-                            sandbox_retention: run_opts.sandbox_retention,
-                        };
-                        let result = service.execute_with_start(
-                            &workspace_id,
-                            action,
-                            Some(cancellation.as_ref()),
-                            &|| run_context.started(),
-                        )?;
-                        if materialize {
-                            imp_execution::staging::materialize_outputs(&result.outputs, &root)?;
-                        }
-                        imp_execution::staging::materialize_named_caches(&result.outputs, &workspace_id)?;
-                        Ok(result)
-                    })
+                                &|| run_context.started(),
+                            )?;
+                            if materialize {
+                                imp_execution::staging::materialize_outputs(
+                                    &result.outputs,
+                                    &root,
+                                )?;
+                            }
+                            imp_execution::staging::materialize_named_caches(
+                                &result.outputs,
+                                &workspace_id,
+                            )?;
+                            Ok(result)
+                        },
+                    )
                     .await
                     // Throw a real JS Exception: message lives in a JS string
                     // property, so captured task output survives intact —
@@ -1882,6 +1932,7 @@ fn register_globals<'js>(
                         id,
                         parent: parent.map(|n| n as u64),
                         display: display.unwrap_or_default(),
+                        kind: crate::scheduler::TaskKind::Memo,
                     },
                     "running" => crate::scheduler::TaskEvent::Running { id, detail: None },
                     "done" => crate::scheduler::TaskEvent::Done {
@@ -1959,41 +2010,46 @@ fn register_globals<'js>(
                 let parent: Option<u64> = opts.get::<_, Option<f64>>("__owner")?.map(|n| n as u64);
                 let watch: Option<Vec<String>> = opts.get("watch")?;
                 let (stdout, stderr, exit_code, changed_files) = sched
-                    .run(parent, display.clone(), move |run_context| -> Result<_> {
-                        let pre = watch
-                            .as_deref()
-                            .map(|patterns| {
-                                snapshot_watched_files(&root, patterns)
-                                    .with_context(|| "pre-snapshot")
-                            })
-                            .transpose()?;
+                    .run(
+                        parent,
+                        display.clone(),
+                        crate::scheduler::TaskKind::Workspace,
+                        move |run_context| -> Result<_> {
+                            let pre = watch
+                                .as_deref()
+                                .map(|patterns| {
+                                    snapshot_watched_files(&root, patterns)
+                                        .with_context(|| "pre-snapshot")
+                                })
+                                .transpose()?;
 
-                        let (program, args) = argv
-                            .split_first()
-                            .ok_or_else(|| anyhow::anyhow!("argv must not be empty"))?;
-                        run_context.started();
-                        let output = std::process::Command::new(program)
-                            .args(args)
-                            .current_dir(&root)
-                            .output()
-                            .with_context(|| format!("spawn {display}"))?;
+                            let (program, args) = argv
+                                .split_first()
+                                .ok_or_else(|| anyhow::anyhow!("argv must not be empty"))?;
+                            run_context.started();
+                            let output = std::process::Command::new(program)
+                                .args(args)
+                                .current_dir(&root)
+                                .output()
+                                .with_context(|| format!("spawn {display}"))?;
 
-                        let changed_files = if let Some(pre_snap) = pre {
-                            let watch = watch.as_deref().unwrap_or_default();
-                            let post_snap = snapshot_watched_files(&root, watch)
-                                .with_context(|| "post-snapshot")?;
-                            Some(diff_snapshots(&pre_snap, &post_snap))
-                        } else {
-                            None
-                        };
+                            let changed_files = if let Some(pre_snap) = pre {
+                                let watch = watch.as_deref().unwrap_or_default();
+                                let post_snap = snapshot_watched_files(&root, watch)
+                                    .with_context(|| "post-snapshot")?;
+                                Some(diff_snapshots(&pre_snap, &post_snap))
+                            } else {
+                                None
+                            };
 
-                        Ok((
-                            String::from_utf8_lossy(&output.stdout).to_string(),
-                            String::from_utf8_lossy(&output.stderr).to_string(),
-                            output.status.code().unwrap_or(-1),
-                            changed_files,
-                        ))
-                    })
+                            Ok((
+                                String::from_utf8_lossy(&output.stdout).to_string(),
+                                String::from_utf8_lossy(&output.stderr).to_string(),
+                                output.status.code().unwrap_or(-1),
+                                changed_files,
+                            ))
+                        },
+                    )
                     .await
                     .map_err(|e| {
                         rquickjs::Error::new_loading_message("workspace_mutation", format!("{e:#}"))
@@ -2741,7 +2797,7 @@ pub async fn evaluate_product_json(
             .unwrap()
             .contains_key(target_addr);
     if already_known {
-        ensure_expanded(live, &[target_addr.to_owned()]).await?;
+        ensure_expanded(live, &[target_addr.to_owned()], None).await?;
     } else {
         // Unknown target — it may only exist after a rule's lazy expansion
         // (e.g. a CMake sub-target). Expand every statically-declared target
@@ -2753,7 +2809,7 @@ pub async fn evaluate_product_json(
             .filter(|t| live.workspace.expanders.contains_key(&t.kind))
             .map(|t| t.address.clone())
             .collect();
-        ensure_expanded(live, &seeds).await?;
+        ensure_expanded(live, &seeds, None).await?;
     }
 
     let target = lookup_dynamic_or_static(live, target_addr)
@@ -2867,7 +2923,7 @@ pub async fn execute_goal_live(
                 .map(|t| t.address.clone())
                 .collect(),
         };
-    ensure_expanded(live, &seed_addresses).await?;
+    ensure_expanded(live, &seed_addresses, Some(goal)).await?;
 
     let dynamic_snapshot: BTreeMap<String, Target> = live.dynamic_targets.lock().unwrap().clone();
     let roots = select_roots(&live.workspace, &dynamic_snapshot, goal_def, selectors)?;
@@ -2993,10 +3049,8 @@ pub async fn execute_goal_live(
         .await
         .map_err(|e| anyhow::anyhow!("execute goal '{goal}' failed: {e}"));
     live.exec_no_cache.store(false, Ordering::SeqCst);
-    live.exec_sandbox_retention.store(
-        SandboxRetention::default().as_u8(),
-        Ordering::SeqCst,
-    );
+    live.exec_sandbox_retention
+        .store(SandboxRetention::default().as_u8(), Ordering::SeqCst);
     *live.selected_roots.lock().unwrap() = None;
     *live.goal_flags.lock().unwrap() = None;
     result
@@ -3581,8 +3635,10 @@ fn parse_dependency(scope: &str, value: &str) -> Result<Dependency> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imp_execution::exec::{report_process_line, spawn_output_reader, ProcessLine, ProcessStream};
     use sha2::{Digest, Sha256};
+    use imp_execution::exec::{
+        report_process_line, spawn_output_reader, ProcessLine, ProcessStream,
+    };
 
     /// Clear runtime-global memo state so a repeated goal invocation on the
     /// same LiveWorkspace re-evaluates its product functions. Production runs
@@ -4887,6 +4943,7 @@ export const build = product("root-nesting-test", "build", async function do_bui
                 id,
                 parent,
                 display,
+                ..
             } = event
             {
                 if display.starts_with("do_build(//:") {
@@ -4976,6 +5033,7 @@ export const build = product("promise-all-context-test", "build", async function
                 id,
                 parent,
                 display,
+                ..
             } = event
             {
                 if display.starts_with("build(") || display.starts_with("child(") {
@@ -5055,6 +5113,7 @@ export const build = product("sequential-sibling-context-test", "build", async f
                 id,
                 parent,
                 display,
+                ..
             } = event
             {
                 if display.starts_with("build(") || display.starts_with("child(") {
@@ -5834,6 +5893,7 @@ export const build = product("interleaved-root-context-test", "build", async fun
                 id,
                 parent,
                 display,
+                ..
             } = event
             {
                 if display.starts_with("build(") {
@@ -5919,6 +5979,7 @@ export const build = product("deferred-run-context-test", "build", async functio
                 id,
                 parent,
                 display,
+                ..
             } = event
             {
                 if display.starts_with("build(") {

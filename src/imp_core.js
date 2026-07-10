@@ -1053,16 +1053,19 @@ export function product(kind, name, fn) {
  * Unlike `product()`, an expander isn't tied to a CLI-dispatchable name — the
  * engine invokes it lazily, at most once per invocation, for any
  * statically-declared target of this `kind` that's reachable from the
- * current goal's selection (see `ensure_expanded` in spike.rs).
+ * current goal's selection (see `ensure_expanded` in spike.rs). An optional
+ * `{ goals: ["test", ...] }` scope limits expansion to those goals.
  *
  * @param {string} kind Target kind, e.g. "cmake-lib".
  * @param {function} fn Async function taking the expanding target's handle;
  *   calls `registerTarget()` for each target it discovers.
+ * @param {object} [opts] Optional goal scope for expanders that are only
+ *   needed by a particular graph traversal, such as test-binary discovery.
  * @returns {function} The same function, wrapped in memo().
  */
-export function expand(kind, fn) {
+export function expand(kind, fn, opts = {}) {
     const memoized = memo(fn);
-    __host_register_expander(kind, memoized);
+    __host_register_expander(kind, memoized, opts.goals ?? null);
     return memoized;
 }
 

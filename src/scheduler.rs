@@ -38,6 +38,13 @@ pub enum LaneKind {
     Sandbox,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskKind {
+    Memo,
+    Sandbox,
+    Workspace,
+}
+
 /// One transition in the task tree. A node goes `Pending` → `Running` → `Done`;
 /// the renderer creates it under `parent` on `Pending` and removes it on `Done`.
 #[derive(Debug, Clone)]
@@ -46,6 +53,7 @@ pub enum TaskEvent {
         id: u64,
         parent: Option<u64>,
         display: String,
+        kind: TaskKind,
     },
     Running {
         id: u64,
@@ -187,13 +195,14 @@ impl Scheduler {
     }
 
     /// Submit a blocking unit of work owned by memo node `parent`. Emits
-    /// `Pending` immediately, waits for a free slot, then runs `f` on a
-    /// blocking worker. The job calls [`RunContext::started`] when it has
-    /// crossed its actual work boundary; cache-only jobs never need to call it.
+    /// `Pending` immediately, then runs `f` on a blocking worker. The job calls
+    /// [`RunContext::started`] when it has crossed its actual work boundary;
+    /// cache-only jobs never need to call it.
     pub async fn run<T, F>(
         &self,
         parent: Option<u64>,
         display: impl Into<String>,
+        kind: TaskKind,
         f: F,
     ) -> Result<T>
     where
@@ -207,6 +216,7 @@ impl Scheduler {
             id,
             parent,
             display: display.clone(),
+            kind,
         });
 
         if self.cancellation.load(Ordering::SeqCst) {
@@ -253,5 +263,38 @@ impl Scheduler {
             Ok(inner) => inner,
             Err(join) => bail!("scheduler worker panicked: {join}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Scheduler, TaskEvent, TaskKind};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn cache_only_sandbox_job_is_classified_without_starting_a_lane() {
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = Scheduler::new(1, Arc::new(AtomicBool::new(false)), tx);
+
+        scheduler
+            .run(None, "cached command", TaskKind::Sandbox, |_context| Ok(()))
+            .await
+            .unwrap();
+
+        let collected: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(matches!(
+            collected.first(),
+            Some(TaskEvent::Pending {
+                kind: TaskKind::Sandbox,
+                ..
+            })
+        ));
+        assert!(collected
+            .iter()
+            .all(|event| !matches!(event, TaskEvent::LaneStarted { .. })));
+        assert!(collected
+            .iter()
+            .any(|event| matches!(event, TaskEvent::Done { .. })));
     }
 }
