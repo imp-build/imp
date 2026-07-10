@@ -32,31 +32,15 @@ use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use tokio::sync::OnceCell;
 
-use crate::cache::workspace_cache_id;
+use imp_store::cache::workspace_cache_id;
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct WorkerHandle {
-    pub(crate) home_dir: PathBuf,
-    pub(crate) tmp_dir: PathBuf,
-    /// A TCP port deterministically derived from (workspace, name), handed to
-    /// the spawned process as `IMP_WORKER_PORT` and returned to the caller,
-    /// so a client and its worker agree on an address without depending on
-    /// any sandbox-scoped rendezvous file. Not every worker needs this, but
-    /// it's cheap to always provide.
-    pub(crate) port: u16,
-}
+pub use imp_exec_api::{WorkerHandle, WorkerSpec};
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct WorkerSpec {
-    pub(crate) argv: Vec<String>,
-    pub(crate) env: Vec<(String, String)>,
-    pub(crate) health_check_argv: Vec<String>,
-}
 
-pub(crate) type WorkerRegistry = Arc<Mutex<HashMap<String, Arc<OnceCell<WorkerHandle>>>>>;
 
-pub(crate) fn new_worker_registry() -> WorkerRegistry {
+pub type WorkerRegistry = Arc<Mutex<HashMap<String, Arc<OnceCell<WorkerHandle>>>>>;
+
+pub fn new_worker_registry() -> WorkerRegistry {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
@@ -78,7 +62,7 @@ fn worker_port(workspace_root: &Path, name: &str) -> u16 {
 // truncated hash, to stay well under the limit.
 fn worker_dirs(workspace_root: &Path, name: &str) -> Result<(PathBuf, PathBuf)> {
     let short_id = &workspace_cache_id(workspace_root)[..16];
-    let root = crate::cache::sandbox_base_dir()
+    let root = imp_store::cache::sandbox_base_dir()
         .join("workers")
         .join(short_id)
         .join(name);
@@ -184,7 +168,7 @@ async fn spawn_and_health_check(
 /// in-flight spawn rather than racing to start it twice. If a previously
 /// started worker is found to be unhealthy (e.g. it self-terminated on an
 /// idle timeout), it is evicted and respawned once.
-pub(crate) async fn worker_start(
+pub async fn worker_start(
     registry: &WorkerRegistry,
     workspace_root: &Path,
     name: &str,
@@ -222,6 +206,6 @@ pub(crate) async fn worker_start(
 
 /// Look up a worker's handle without spawning it. Returns `None` if it has
 /// never been started (or never successfully so) during this process.
-pub(crate) fn worker_get(registry: &WorkerRegistry, name: &str) -> Option<WorkerHandle> {
+pub fn worker_get(registry: &WorkerRegistry, name: &str) -> Option<WorkerHandle> {
     registry.lock().unwrap().get(name)?.get().cloned()
 }

@@ -1,0 +1,24 @@
+[package]
+name = "imp-execution"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Enables clap derives on CLI-facing enums (SandboxRetention); default-off so
+# non-CLI consumers (e.g. a future daemon) don't link clap.
+clap = ["imp-exec-api/clap"]
+
+[dependencies]
+async-trait.workspace = true
+imp-store = { path = "../imp-store" }
+imp-exec-api = { path = "../imp-exec-api" }
+anyhow.workspace = true
+indicatif.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

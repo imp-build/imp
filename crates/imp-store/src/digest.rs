@@ -26,14 +26,14 @@ use crate::cache::{
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-pub(crate) enum Entry {
+pub enum Entry {
     File(FileEntry),
     Directory(DirEntry),
     Symlink(SymlinkEntry),
 }
 
 impl Entry {
-    pub(crate) fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         match self {
             Entry::File(f) => &f.name,
             Entry::Directory(d) => &d.name,
@@ -84,35 +84,35 @@ impl Entry {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct FileEntry {
-    pub(crate) name: String,
-    pub(crate) digest: String,
-    pub(crate) size: u64,
-    pub(crate) mode: Option<u32>,
+pub struct FileEntry {
+    pub name: String,
+    pub digest: String,
+    pub size: u64,
+    pub mode: Option<u32>,
 }
 
 /// A subdirectory entry. `digest` identifies that child's own `DigestNode` blob in
 /// CAS; the child tree is only loaded on demand (see `DigestTrie::load`), so merging
 /// or walking a tree never eagerly pulls in subtrees it doesn't need to inspect.
 #[derive(Debug, Clone)]
-pub(crate) struct DirEntry {
-    pub(crate) name: String,
-    pub(crate) digest: String,
+pub struct DirEntry {
+    pub name: String,
+    pub digest: String,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SymlinkEntry {
-    pub(crate) name: String,
-    pub(crate) target: String,
+pub struct SymlinkEntry {
+    pub name: String,
+    pub target: String,
 }
 
 /// A single directory level: a sorted-by-name list of entries. Cheap to clone (an
 /// `Arc` bump) since trees are shared structurally across merges.
 #[derive(Debug, Clone)]
-pub(crate) struct DigestTrie(Arc<[Entry]>);
+pub struct DigestTrie(Arc<[Entry]>);
 
 impl DigestTrie {
-    pub(crate) fn entries(&self) -> &[Entry] {
+    pub fn entries(&self) -> &[Entry] {
         &self.0
     }
 
@@ -129,7 +129,7 @@ impl DigestTrie {
     /// Serialize this level's entry list and store it as a CAS blob (a no-op if the
     /// content already exists), returning its digest. Idempotent — safe to call
     /// repeatedly on the same tree.
-    pub(crate) fn compute_and_store(&self) -> Result<String> {
+    pub fn compute_and_store(&self) -> Result<String> {
         let node = self.to_node();
         let bytes = serde_json::to_vec(&node).context("serialize digest node")?;
         store_blob(&bytes, "digest-node")
@@ -138,7 +138,7 @@ impl DigestTrie {
     /// Load a directory level from CAS by digest. Does not recurse into child
     /// directories — those are loaded lazily, only when something actually walks
     /// into them (merge, materialize, etc.).
-    pub(crate) fn load(digest: &str) -> Result<DigestTrie> {
+    pub fn load(digest: &str) -> Result<DigestTrie> {
         let path = cas_blob_path(digest)?;
         let bytes =
             std::fs::read(&path).with_context(|| format!("read digest node {}", path.display()))?;
@@ -189,31 +189,31 @@ enum DigestNodeEntry {
 /// locally (e.g. by `capture_paths`) already knows its own structure, while a digest
 /// that arrived from a stored cache record must be fetched from CAS before anything
 /// can walk or merge it.
-pub(crate) struct DirectoryDigest {
+pub struct DirectoryDigest {
     digest: String,
     tree: OnceLock<DigestTrie>,
 }
 
 impl DirectoryDigest {
-    pub(crate) fn from_trie(trie: DigestTrie) -> Result<Self> {
+    pub fn from_trie(trie: DigestTrie) -> Result<Self> {
         let digest = trie.compute_and_store()?;
         let cell = OnceLock::new();
         let _ = cell.set(trie);
         Ok(Self { digest, tree: cell })
     }
 
-    pub(crate) fn from_digest(digest: String) -> Self {
+    pub fn from_digest(digest: String) -> Self {
         Self {
             digest,
             tree: OnceLock::new(),
         }
     }
 
-    pub(crate) fn digest(&self) -> &str {
+    pub fn digest(&self) -> &str {
         &self.digest
     }
 
-    pub(crate) fn tree(&self) -> Result<&DigestTrie> {
+    pub fn tree(&self) -> Result<&DigestTrie> {
         if self.tree.get().is_none() {
             let loaded = DigestTrie::load(&self.digest)?;
             let _ = self.tree.set(loaded);
@@ -245,13 +245,13 @@ impl Clone for DirectoryDigest {
 /// recursing further; a file/symlink with the same content/target does the same).
 /// Same-named entries that actually differ (different file content, different
 /// symlink target, a file colliding with a directory, ...) are a hard error.
-pub(crate) fn merge(trees: Vec<DigestTrie>) -> Result<DigestTrie> {
+pub fn merge(trees: Vec<DigestTrie>) -> Result<DigestTrie> {
     merge_helper("", trees)
 }
 
 /// Convenience wrapper over `merge` for already-digest-only inputs: resolves each to
 /// a tree (loading from CAS as needed), merges, and stores the result.
-pub(crate) fn merge_digests(digests: Vec<DirectoryDigest>) -> Result<DirectoryDigest> {
+pub fn merge_digests(digests: Vec<DirectoryDigest>) -> Result<DirectoryDigest> {
     let mut trees = Vec::with_capacity(digests.len());
     for digest in &digests {
         trees.push(digest.tree()?.clone());
@@ -266,7 +266,7 @@ pub(crate) fn merge_digests(digests: Vec<DirectoryDigest>) -> Result<DirectoryDi
 
 /// Recursively list every file/symlink path within a tree, in sorted order.
 /// Directories are walked but not themselves listed.
-pub(crate) fn list_files(trie: &DigestTrie) -> Result<Vec<String>> {
+pub fn list_files(trie: &DigestTrie) -> Result<Vec<String>> {
     let mut paths = Vec::new();
     list_files_helper("", trie, &mut paths)?;
     Ok(paths)
@@ -292,7 +292,7 @@ fn list_files_helper(parent: &str, trie: &DigestTrie, out: &mut Vec<String>) -> 
 
 /// Read a single file's content out of a tree by its relative path — the
 /// digest-backed analog of reading a real file off disk.
-pub(crate) fn read_file_from_trie(trie: &DigestTrie, path: &str) -> Result<String> {
+pub fn read_file_from_trie(trie: &DigestTrie, path: &str) -> Result<String> {
     let components: Vec<&str> = path.split('/').collect();
     let (name, parents) = components.split_last().context("path must not be empty")?;
 
@@ -328,7 +328,7 @@ pub(crate) fn read_file_from_trie(trie: &DigestTrie, path: &str) -> Result<Strin
 
 /// Whatever sits at a resolved path within a digest tree — a directory
 /// (further walkable) or a leaf (file/symlink), returned by `resolve_in_trie`.
-pub(crate) enum ResolvedEntry {
+pub enum ResolvedEntry {
     Directory(DirectoryDigest),
     File { digest: String, mode: Option<u32> },
     Symlink { target: String },
@@ -342,7 +342,7 @@ pub(crate) enum ResolvedEntry {
 /// captured/published as a whole, which would be unsafe for outputs that sit
 /// alongside unrelated hand-written files (e.g. a generated header next to
 /// hand-written ones in the same directory).
-pub(crate) fn resolve_in_trie(trie: &DigestTrie, path: &str) -> Result<ResolvedEntry> {
+pub fn resolve_in_trie(trie: &DigestTrie, path: &str) -> Result<ResolvedEntry> {
     let mut current = trie.clone();
     let mut parts = path.split('/').filter(|p| !p.is_empty()).peekable();
     while let Some(part) = parts.next() {
@@ -381,14 +381,14 @@ pub(crate) fn resolve_in_trie(trie: &DigestTrie, path: &str) -> Result<ResolvedE
 
 /// A single path-level difference between a "before" and "after" tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PathChange {
+pub enum PathChange {
     Added(String),
     Removed(String),
     Modified(String),
 }
 
 impl PathChange {
-    pub(crate) fn path(&self) -> &str {
+    pub fn path(&self) -> &str {
         match self {
             PathChange::Added(p) | PathChange::Removed(p) | PathChange::Modified(p) => p,
         }
@@ -398,13 +398,13 @@ impl PathChange {
 /// Structurally diff two trees, mirroring `merge_helper`'s per-level walk but
 /// comparing instead of unioning. Short-circuits whenever two subtrees already
 /// share a digest, so an unchanged directory is never walked.
-pub(crate) fn diff(before: &DigestTrie, after: &DigestTrie) -> Result<Vec<PathChange>> {
+pub fn diff(before: &DigestTrie, after: &DigestTrie) -> Result<Vec<PathChange>> {
     diff_helper("", before, after)
 }
 
 /// Convenience wrapper over `diff` for already-digest-only inputs: resolves
 /// each to a tree (loading from CAS as needed), then diffs them.
-pub(crate) fn diff_digests(
+pub fn diff_digests(
     before: &DirectoryDigest,
     after: &DirectoryDigest,
 ) -> Result<Vec<PathChange>> {
@@ -412,12 +412,12 @@ pub(crate) fn diff_digests(
 }
 
 /// Convenience wrapper over `list_files` for a `DirectoryDigest`.
-pub(crate) fn list_files_in_digest(digest: &DirectoryDigest) -> Result<Vec<String>> {
+pub fn list_files_in_digest(digest: &DirectoryDigest) -> Result<Vec<String>> {
     list_files(digest.tree()?)
 }
 
 /// Convenience wrapper over `read_file_from_trie` for a `DirectoryDigest`.
-pub(crate) fn read_file_in_digest(digest: &DirectoryDigest, path: &str) -> Result<String> {
+pub fn read_file_in_digest(digest: &DirectoryDigest, path: &str) -> Result<String> {
     read_file_from_trie(digest.tree()?, path)
 }
 
@@ -488,7 +488,7 @@ fn diff_entry(path: &str, before: &Entry, after: &Entry) -> Result<Vec<PathChang
 /// `digest` at `"a/b/c.txt"` produces a one-file tree `a/b/c.txt`. Used to fold a
 /// plain `{kind:"file"}` input/output into the same merged-tree representation as
 /// everything else, so it composes uniformly with `merge_digests`.
-pub(crate) fn nest_file(
+pub fn nest_file(
     relative_path: &str,
     digest: String,
     size: u64,
@@ -509,7 +509,7 @@ pub(crate) fn nest_file(
 
 /// Wrap an already-captured directory tree under `relative_path` — the directory
 /// analog of `nest_file`.
-pub(crate) fn nest_directory(
+pub fn nest_directory(
     relative_path: &str,
     inner: &DirectoryDigest,
 ) -> Result<DirectoryDigest> {
@@ -626,7 +626,7 @@ fn merge_group(path: &str, name: String, group: Vec<Entry>) -> Result<Entry> {
 /// CAS, building the corresponding tree bottom-up (each level's `DigestNode` is
 /// stored as it's completed). This is the direct analog of Pants capturing a
 /// directory into its `Store`.
-pub(crate) fn capture_directory(root: &Path) -> Result<DirectoryDigest> {
+pub fn capture_directory(root: &Path) -> Result<DirectoryDigest> {
     let trie = capture_directory_trie(root)?;
     DirectoryDigest::from_trie(trie)
 }
@@ -688,7 +688,7 @@ enum BuildNode {
 /// callers use this to snapshot a "before" state for paths that may not have
 /// been generated yet (e.g. a codegen output on its first run), and a missing
 /// path should just diff as `Added` once it appears, not fail the capture.
-pub(crate) fn capture_paths(workspace_root: &Path, paths: &[String]) -> Result<DirectoryDigest> {
+pub fn capture_paths(workspace_root: &Path, paths: &[String]) -> Result<DirectoryDigest> {
     let mut root: BTreeMap<String, BuildNode> = BTreeMap::new();
     for relative in paths {
         let absolute = workspace_root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -784,7 +784,7 @@ fn build_trie_from_nodes(nodes: BTreeMap<String, BuildNode>) -> Result<DigestTri
 /// a hardlinked workspace file that a user or tool later edits in place would
 /// silently corrupt the shared CAS blob. Workspace materialization must always
 /// copy (`link_files: false`).
-pub(crate) fn materialize_trie(
+pub fn materialize_trie(
     trie: &DigestTrie,
     destination: &Path,
     link_files: bool,

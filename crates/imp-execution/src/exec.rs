@@ -11,35 +11,35 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use indicatif::ProgressBar;
-use rquickjs::Object;
-use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use crate::cache::{
-    artifact_relative_path, cached_outputs_present, copy_directory, create_sandbox_root,
-    digest_json, file_mode, materialize_cached_outputs, materialize_named_caches,
-    named_cache_key_path, store_file_blob, task_record_path, write_task_cache_record,
-    CachedArtifact, TaskCacheRecord, TASK_CACHE_VERSION,
+use imp_store::cache::{
+    artifact_relative_path, cached_outputs_present, create_sandbox_root, digest_json, file_mode,
+    materialize_cached_outputs, materialize_named_caches, store_file_blob, task_record_path,
+    validate_tool_name, write_task_cache_record, CachedArtifact, TaskCacheRecord,
+    TASK_CACHE_VERSION,
 };
-use crate::digest::{capture_directory, merge_digests, nest_directory, nest_file, DirectoryDigest};
+use imp_store::digest::{capture_directory, merge_digests, nest_directory, nest_file, DirectoryDigest};
+
+pub use imp_exec_api::{ExecIoSpec, ExecRunOpts, ExecRunResult, ExecToolSpec, SandboxRetention};
 
 // ---------------------------------------------------------------------------
 // Process I/O types and helpers
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
-pub(crate) enum ProcessStream {
+pub enum ProcessStream {
     Stdout,
     Stderr,
 }
 
-pub(crate) struct ProcessLine {
-    pub(crate) stream: ProcessStream,
-    pub(crate) line: String,
+pub struct ProcessLine {
+    pub stream: ProcessStream,
+    pub line: String,
 }
 
-pub(crate) fn spawn_output_reader<R: Read + Send + 'static>(
+pub fn spawn_output_reader<R: Read + Send + 'static>(
     mut reader: R,
     stream: ProcessStream,
     sender: mpsc::Sender<ProcessLine>,
@@ -140,7 +140,7 @@ fn record_process_line(
     }
 }
 
-pub(crate) fn report_process_line(progress: &mut ProgressBar, line: &ProcessLine) {
+pub fn report_process_line(progress: &mut ProgressBar, line: &ProcessLine) {
     if line.line.trim().is_empty() {
         return;
     }
@@ -151,7 +151,7 @@ pub(crate) fn report_process_line(progress: &mut ProgressBar, line: &ProcessLine
     progress.set_message(format!("{stream}: {}", line.line));
 }
 
-pub(crate) fn report_process_failure(progress: Option<&ProgressBar>, stdout: &str, stderr: &str) {
+pub fn report_process_failure(progress: Option<&ProgressBar>, stdout: &str, stderr: &str) {
     let Some(progress) = progress else {
         return;
     };
@@ -179,7 +179,7 @@ pub(crate) fn report_process_failure(progress: Option<&ProgressBar>, stdout: &st
 // Child process lifecycle
 // ---------------------------------------------------------------------------
 
-pub(crate) fn wait_for_child_output(
+pub fn wait_for_child_output(
     child: &mut Child,
     display: &str,
     cancellation: Option<&AtomicBool>,
@@ -284,78 +284,14 @@ fn signal_child_process_group(child: &Child, signal: &str) -> bool {
 // JS run() API — exec context for rule exec() functions
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize)]
-pub(crate) struct ExecRunResult {
-    pub(crate) stdout: String,
-    pub(crate) stderr: String,
-    pub(crate) exit_code: i32,
-    /// Root digest of the merged tree over everything this run produced (`None`
-    /// for the unsandboxed path, which doesn't capture outputs into CAS). Lets a
-    /// rule thread this run's output straight into a later `run({inputs})` call
-    /// as a `{kind:"digest"}` entry, without materializing to the workspace first.
-    pub(crate) output_digest: Option<String>,
-}
 
-pub(crate) struct ExecRunOpts {
-    pub(crate) argv: Vec<String>,
-    pub(crate) display: String,
-    pub(crate) env: Vec<String>,
-    pub(crate) config_digest: String,
-    pub(crate) inputs: Vec<ExecIoSpec>,
-    pub(crate) outputs: Vec<ExecIoSpec>,
-    pub(crate) tools: Vec<ExecToolSpec>,
-    pub(crate) impure: bool,
-    pub(crate) force_cache: bool,
-    pub(crate) sandbox: bool,
-    pub(crate) no_cache: bool,
-    pub(crate) sandbox_retention: SandboxRetention,
-    /// Whether declared outputs get copied back into the real workspace.
-    /// Output capture into CAS and the `output_digest`/cache record happen
-    /// either way — this only gates the workspace-copy step, so a caller can
-    /// get a digest to compare or feed into a later `run({inputs})` without
-    /// mutating the tree. Required at the JS `run()` boundary whenever
-    /// `outputs` is non-empty (see `imp_core.js`); defaults to `true` here
-    /// only as a defense-in-depth fallback for callers that bypass that JS
-    /// validation.
-    pub(crate) materialize: bool,
-}
 
-/// When a per-run sandbox root is deleted. Sandboxes are ephemeral by default;
-/// keeping them around is only useful for post-mortem debugging.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
-pub(crate) enum SandboxRetention {
-    /// Always delete the sandbox, even after a failed command.
-    Never,
-    /// Delete on success; keep the sandbox when the command failed.
-    #[default]
-    OnFailure,
-    /// Never delete — retain every sandbox for inspection.
-    Always,
-}
-
-impl SandboxRetention {
-    pub(crate) fn as_u8(self) -> u8 {
-        match self {
-            SandboxRetention::Never => 0,
-            SandboxRetention::OnFailure => 1,
-            SandboxRetention::Always => 2,
-        }
-    }
-
-    pub(crate) fn from_u8(value: u8) -> Self {
-        match value {
-            0 => SandboxRetention::Never,
-            2 => SandboxRetention::Always,
-            _ => SandboxRetention::OnFailure,
-        }
-    }
-}
 
 /// RAII guard that removes a sandbox root on drop unless the configured
 /// retention policy says to keep it. `succeeded` is flipped to `true` right
 /// before a successful return so the guard covers every exit path — normal
 /// return, `bail!`, and panics — uniformly.
-pub(crate) struct SandboxGuard {
+pub struct SandboxGuard {
     root: PathBuf,
     retention: SandboxRetention,
     succeeded: bool,
@@ -394,88 +330,10 @@ impl Drop for SandboxGuard {
     }
 }
 
-pub(crate) struct ExecIoSpec {
-    /// Present for every kind except `"digest"`, where the pre-merged tree
-    /// carries its own paths and this is meaningless.
-    pub(crate) path: Option<String>,
-    pub(crate) kind: String,
-    /// Present only for `"digest"` inputs — a digest handle (e.g. from a
-    /// `file_set.union()` evaluation or a prior `run()`'s output) to merge
-    /// directly into the sandbox's input tree.
-    pub(crate) digest: Option<String>,
-    pub(crate) named_cache: Option<crate::cache::OutputNamedCache>,
-}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecToolSpec {
-    pub name: String,
-    pub cache: String,
-    pub key: String,
-    pub path: PathBuf,
-    pub bin_dirs: Vec<String>,
-}
 
-pub(crate) fn parse_io_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Vec<ExecIoSpec>> {
-    let mut specs = Vec::new();
-    for val in vals {
-        let kind: Option<String> = val.get("kind")?;
-        let kind = kind.unwrap_or_else(|| "file".to_owned());
-        let path: Option<String> = val.get("path")?;
-        let digest: Option<String> = val.get("digest")?;
-        // Every kind but "digest" is identified by a path; a "digest" entry
-        // (a pre-merged FileSet or a chained run() output) carries its own tree
-        // and has no single path, so it's the one kind allowed through without one.
-        if kind != "digest" && path.is_none() {
-            continue;
-        }
-        let named_cache = match val.get::<_, Option<Object>>("namedCache")? {
-            Some(nc) => Some(crate::cache::OutputNamedCache {
-                name: nc.get::<_, String>("name")?,
-                key: nc.get::<_, String>("key")?,
-            }),
-            None => None,
-        };
-        specs.push(ExecIoSpec {
-            path,
-            kind,
-            digest,
-            named_cache,
-        });
-    }
-    Ok(specs)
-}
 
-pub(crate) fn parse_tool_specs<'js>(
-    vals: Vec<Object<'js>>,
-    workspace_root: &Path,
-) -> rquickjs::Result<Vec<ExecToolSpec>> {
-    let mut specs = Vec::new();
-    for val in vals {
-        let name: Option<String> = val.get("name")?;
-        let Some(name) = name else {
-            continue;
-        };
-        let cache: String = val.get("cache")?;
-        let key: String = val.get("key")?;
-        let path: Option<String> = val.get("path")?;
-        let path = match path {
-            Some(p) => PathBuf::from(p),
-            None => named_cache_key_path(workspace_root, &cache, &key)
-                .map_err(|e| rquickjs::Error::new_loading_message("tool", format!("{e:#}")))?,
-        };
-        let bin_dirs: Option<Vec<String>> = val.get("binDirs")?;
-        specs.push(ExecToolSpec {
-            name,
-            cache,
-            key,
-            path,
-            bin_dirs: bin_dirs.unwrap_or_else(|| vec!["bin".to_owned()]),
-        });
-    }
-    Ok(specs)
-}
-
-pub(crate) fn materialize_tools_into_sandbox(
+pub fn materialize_tools_into_sandbox(
     tools: &[ExecToolSpec],
     sandbox_root: &Path,
 ) -> Result<Vec<PathBuf>> {
@@ -503,17 +361,6 @@ pub(crate) fn materialize_tools_into_sandbox(
     }
 
     Ok(path_entries)
-}
-
-pub(crate) fn validate_tool_name(name: &str) -> Result<()> {
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-    {
-        bail!("tool name '{name}' must contain only ASCII letters, digits, '-', '_' or '.'");
-    }
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -544,7 +391,7 @@ fn resolve_tool_bin_dir(tool_root: &Path, bin_dir: &str) -> Result<PathBuf> {
 /// `resolve_env`) is removed before a task runs, so undeclared ambient state
 /// cannot silently affect a build. The snapshot is hashed into the action
 /// digest, so a change to one of these invalidates the task cache.
-pub(crate) const PASSTHROUGH_ENV_VARS: &[&str] = &[
+pub const PASSTHROUGH_ENV_VARS: &[&str] = &[
     "USER",
     "LOGNAME",
     "SHELL",
@@ -557,12 +404,12 @@ pub(crate) const PASSTHROUGH_ENV_VARS: &[&str] = &[
 ];
 
 /// Prefixes of host environment variables allowed through (locale family).
-pub(crate) const PASSTHROUGH_ENV_PREFIXES: &[&str] = &["LC_"];
+pub const PASSTHROUGH_ENV_PREFIXES: &[&str] = &["LC_"];
 
 /// Snapshot the allowlisted host environment. Folded into the hashed action
 /// digest so ambient state that genuinely affects output keys the cache, and
 /// reused as the base env for execution.
-pub(crate) fn passthrough_env_snapshot() -> BTreeMap<String, String> {
+pub fn passthrough_env_snapshot() -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for (key, value) in std::env::vars() {
         let allowed = PASSTHROUGH_ENV_VARS.contains(&key.as_str())
@@ -583,7 +430,7 @@ pub(crate) fn passthrough_env_snapshot() -> BTreeMap<String, String> {
 /// PASSTHROUGH_ENV_VARS this list is supplied per `run()` call, not global,
 /// but is folded into the base env identically so it is hashed into the
 /// action digest, and it wins over the global allowlist snapshot.
-pub(crate) fn resolve_env(entries: &[String]) -> Result<BTreeMap<String, String>> {
+pub fn resolve_env(entries: &[String]) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     for entry in entries {
         if let Some((key, value)) = entry.split_once('=') {
@@ -605,7 +452,7 @@ pub(crate) fn resolve_env(entries: &[String]) -> Result<BTreeMap<String, String>
 
 /// Create and return per-sandbox HOME and TMPDIR directories. Pinning these
 /// inside the sandbox stops tasks from reading or writing the real home/tmp.
-pub(crate) fn sandbox_home_tmp(sandbox_root: &Path) -> Result<(PathBuf, PathBuf)> {
+pub fn sandbox_home_tmp(sandbox_root: &Path) -> Result<(PathBuf, PathBuf)> {
     let home = sandbox_root.join(".imp").join("home");
     let tmp = sandbox_root.join(".imp").join("tmp");
     std::fs::create_dir_all(&home).with_context(|| format!("create {}", home.display()))?;
@@ -635,7 +482,7 @@ const BUILTIN_SHELL_CANDIDATES: &[&str] = &[
 /// `sh` is special-cased (see `BUILTIN_SHELL_CANDIDATES`); everything else is
 /// used as-is, so it must already be an absolute path (from a declared tool
 /// or an explicit argument) — there is no PATH search fallback.
-pub(crate) fn resolve_program(program: &str) -> Result<PathBuf> {
+pub fn resolve_program(program: &str) -> Result<PathBuf> {
     if program != "sh" {
         return Ok(PathBuf::from(program));
     }
@@ -650,7 +497,7 @@ pub(crate) fn resolve_program(program: &str) -> Result<PathBuf> {
 /// Sandboxed runs never fall back to a host or fixed base PATH: PATH is
 /// composed strictly from declared `tools`' resolved bin dirs, so an
 /// undeclared command cannot silently resolve.
-pub(crate) fn sandbox_command_env(
+pub fn sandbox_command_env(
     env: &BTreeMap<String, String>,
     tool_path_entries: &[PathBuf],
 ) -> Result<BTreeMap<String, String>> {
@@ -671,7 +518,7 @@ pub(crate) fn sandbox_command_env(
 /// Digest of everything about a `run()` action other than its staged inputs
 /// and declared outputs: argv, the merged env it will execute with, the
 /// workspace configuration digest, display, and tool specs.
-pub(crate) fn live_action_digest(
+pub fn live_action_digest(
     opts: &ExecRunOpts,
     base_env: &BTreeMap<String, String>,
 ) -> Result<String> {
@@ -684,7 +531,7 @@ pub(crate) fn live_action_digest(
     }))
 }
 
-pub(crate) fn exec_run_inner(
+pub fn exec_run_inner(
     workspace_root: &Path,
     opts: ExecRunOpts,
     cancellation: Option<&AtomicBool>,
@@ -818,7 +665,7 @@ pub(crate) fn exec_run_inner(
     // Sandboxes are treated as disposable/short-lived, so this is accepted for
     // now — worth revisiting (read-only CAS blobs, or copying for tools known to
     // mutate inputs in place) if it ever bites in practice.
-    crate::digest::materialize_trie(merged_input_digest.tree()?, &sandbox_root, true)?;
+    imp_store::digest::materialize_trie(merged_input_digest.tree()?, &sandbox_root, true)?;
 
     // Pre-create the directories named by declared outputs so rule scripts don't
     // need to `mkdir` them: the parent dir for file/manifest outputs, and the
@@ -983,7 +830,7 @@ pub(crate) fn exec_run_inner(
     })
 }
 
-pub(crate) fn exec_run_unsandboxed(
+pub fn exec_run_unsandboxed(
     workspace_root: &Path,
     opts: ExecRunOpts,
     cancellation: Option<&AtomicBool>,
@@ -1100,6 +947,7 @@ fn direct_tool_path_entries(tools: &[ExecToolSpec]) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use imp_store::cache::named_cache_key_path;
 
     fn digest_opts(env: &[(&str, &str)], config_digest: &str) -> ExecRunOpts {
         ExecRunOpts {
@@ -1315,7 +1163,7 @@ mod tests {
             path: Some("out".to_owned()),
             kind: "directory".to_owned(),
             digest: None,
-            named_cache: Some(crate::cache::OutputNamedCache {
+            named_cache: Some(imp_store::cache::OutputNamedCache {
                 name: "test-toolchains".to_owned(),
                 key: "v1/linux-x86_64".to_owned(),
             }),
@@ -1528,7 +1376,7 @@ mod tests {
         let sandbox_root = sandbox_root.trim();
         let staged = std::path::Path::new(sandbox_root).join("declared.txt");
         let (digest, _) = store_file_blob(&p.join("declared.txt"), "file").unwrap();
-        let blob_path = crate::cache::cas_blob_path(&digest).unwrap();
+        let blob_path = imp_store::cache::cas_blob_path(&digest).unwrap();
         let blob_ino = std::fs::metadata(&blob_path).unwrap().ino();
         let staged_ino = std::fs::metadata(&staged).unwrap().ino();
         assert_eq!(

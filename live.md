@@ -197,7 +197,7 @@ code, so the big deletion lands on a validated live path.
 
 ```sh
 export XDG_CACHE_HOME=/tmp/imp-cache   # sandboxed runs: $HOME may be read-only
-cargo build && cargo test
+cargo build && cargo test --workspace
 cargo run -- build                        # live build, then again → cache hits
 # NOTE: package-prefix selectors don't match; use full addresses. (These can
 # also run together — bare `imp test` — since rules tests moved to sandboxed

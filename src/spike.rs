@@ -12,15 +12,16 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use crate::cache::{artifact_relative_path, digest_json, named_cache_key_path, store_file_blob};
-use crate::exec::{exec_run_inner, parse_io_specs, parse_tool_specs, ExecRunOpts};
+use imp_store::cache::{artifact_relative_path, digest_json, store_file_blob};
+use imp_exec_api::{ExecRunOpts, ExecutionService, SandboxRetention, WorkerSpec};
+use imp_execution::service::LocalExecutionService;
+use crate::exec_bridge::{parse_io_specs, parse_tool_specs};
 use crate::loader::{
     resolve_workspace_module, validate_workspace_module_path, ModuleKind, ModuleSource,
     RulesSource, ImpLoader, ImpResolver,
 };
 use crate::runtime::LiveWorkspace;
 use crate::selector::{select_roots, select_targets};
-use crate::toolchain;
 use anyhow::{bail, Context, Result};
 use regex::Regex;
 use rquickjs::{
@@ -308,13 +309,13 @@ pub(crate) async fn load_workspace_with_rules(
     let exec_root: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
     let exec_no_cache = Arc::new(AtomicBool::new(false));
     let exec_sandbox_retention = Arc::new(AtomicU8::new(
-        crate::exec::SandboxRetention::default().as_u8(),
+        SandboxRetention::default().as_u8(),
     ));
     let scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>> =
         Arc::new(Mutex::new(None));
     let selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(None));
     let goal_flags: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
-    let workers = crate::worker::new_worker_registry();
+    let service: Arc<dyn ExecutionService> = Arc::new(LocalExecutionService::new());
 
     // ----- QuickJS runtime + context -----
     let rt = Runtime::new().context("create QuickJS runtime")?;
@@ -369,7 +370,7 @@ pub(crate) async fn load_workspace_with_rules(
                 Arc::clone(&scheduler),
                 Arc::clone(&selected_roots),
                 Arc::clone(&goal_flags),
-                Arc::clone(&workers),
+                Arc::clone(&service),
             )
         })
         .await
@@ -518,7 +519,7 @@ pub(crate) async fn load_workspace_with_rules(
         goal_flags,
         host_state: state,
         dynamic_targets: Arc::new(Mutex::new(BTreeMap::new())),
-        workers,
+        service,
     })
 }
 
@@ -795,7 +796,7 @@ fn register_globals<'js>(
     scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>>,
     selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
     goal_flags: Arc<Mutex<Option<serde_json::Value>>>,
-    workers: crate::worker::WorkerRegistry,
+    service: Arc<dyn ExecutionService>,
 ) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
@@ -1190,8 +1191,10 @@ fn register_globals<'js>(
     // ------------------------------------------------------------------
     // __host_download(url) → path string
     // ------------------------------------------------------------------
-    let host_download = Function::new(ctx.clone(), |url: String| -> rquickjs::Result<String> {
-        let path = toolchain::host_download(&url)
+    let service_download = Arc::clone(&service);
+    let host_download = Function::new(ctx.clone(), move |url: String| -> rquickjs::Result<String> {
+        let path = service_download
+            .fetch_url(&url)
             .map_err(|e| rquickjs::Error::new_loading_message("download", format!("{e:#}")))?;
         Ok(path.to_string_lossy().into_owned())
     })?;
@@ -1200,10 +1203,12 @@ fn register_globals<'js>(
     // ------------------------------------------------------------------
     // __host_extract(archive, dest, format, strip_components)
     // ------------------------------------------------------------------
+    let service_extract = Arc::clone(&service);
     let host_extract = Function::new(
         ctx.clone(),
-        |archive: String, dest: String, format: String, strip: u32| -> rquickjs::Result<()> {
-            toolchain::host_extract(Path::new(&archive), Path::new(&dest), &format, strip)
+        move |archive: String, dest: String, format: String, strip: u32| -> rquickjs::Result<()> {
+            service_extract
+                .extract_archive(Path::new(&archive), Path::new(&dest), &format, strip)
                 .map_err(|e| rquickjs::Error::new_loading_message("extract", format!("{e:#}")))?;
             Ok(())
         },
@@ -1213,9 +1218,12 @@ fn register_globals<'js>(
     // ------------------------------------------------------------------
     // __host_platform() → JSON string { "os": "...", "arch": "..." }
     // ------------------------------------------------------------------
-    let host_platform_fn = Function::new(ctx.clone(), || -> rquickjs::Result<String> {
-        let (os, arch) = toolchain::host_detect_platform()
+    let service_platform = Arc::clone(&service);
+    let host_platform_fn = Function::new(ctx.clone(), move || -> rquickjs::Result<String> {
+        let caps = service_platform
+            .capabilities()
             .map_err(|e| rquickjs::Error::new_loading_message("platform", format!("{e:#}")))?;
+        let (os, arch) = (caps.os, caps.arch);
         Ok(format!(r#"{{"os":"{os}","arch":"{arch}"}}"#))
     })?;
     globals.set("__host_platform_info", host_platform_fn)?;
@@ -1223,8 +1231,10 @@ fn register_globals<'js>(
     // ------------------------------------------------------------------
     // __host_sha256(path) → hex string
     // ------------------------------------------------------------------
-    let host_sha256 = Function::new(ctx.clone(), |path: String| -> rquickjs::Result<String> {
-        toolchain::host_sha256(Path::new(&path))
+    let service_sha256 = Arc::clone(&service);
+    let host_sha256 = Function::new(ctx.clone(), move |path: String| -> rquickjs::Result<String> {
+        service_sha256
+            .file_sha256(Path::new(&path))
             .map_err(|e| rquickjs::Error::new_loading_message("sha256", format!("{e:#}")))
     })?;
     globals.set("__host_sha256", host_sha256)?;
@@ -1235,54 +1245,38 @@ fn register_globals<'js>(
     // __host_cache_has(name, key) → bool
     // ------------------------------------------------------------------
     let wc = workspace_root.clone();
+    let service_cache_put = Arc::clone(&service);
     let host_cache_put = Function::new(
         ctx.clone(),
         move |name: String, key: String, source: String| -> rquickjs::Result<()> {
-            let target = named_cache_key_path(&wc, &name, &key)
-                .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("{e:#}")))?;
-            std::fs::create_dir_all(&target).map_err(|e| {
-                rquickjs::Error::new_loading_message("cache", format!("create {target:?}: {e}"))
-            })?;
-            let src = Path::new(&source);
-            if src.is_dir() {
-                copy_dir_into(src, &target).map_err(|e| {
-                    rquickjs::Error::new_loading_message("cache", format!("copy dir {source}: {e}"))
-                })?;
-            } else {
-                let file_name = src.file_name().ok_or_else(|| {
-                    rquickjs::Error::new_loading_message(
-                        "cache",
-                        "source has no filename".to_owned(),
-                    )
-                })?;
-                std::fs::copy(src, target.join(file_name)).map_err(|e| {
-                    rquickjs::Error::new_loading_message("cache", format!("copy {source}: {e}"))
-                })?;
-            }
-            Ok(())
+            service_cache_put
+                .cache_dir_put(&wc, &name, &key, Path::new(&source))
+                .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("{e:#}")))
         },
     )?;
     globals.set("__host_cache_put", host_cache_put)?;
 
     let wc = workspace_root.clone();
+    let service_cache_get = Arc::clone(&service);
     let host_cache_get = Function::new(
         ctx.clone(),
         move |name: String, key: String| -> rquickjs::Result<Option<String>> {
-            match named_cache_key_path(&wc, &name, &key) {
-                Ok(p) if p.is_dir() => Ok(Some(p.to_string_lossy().into_owned())),
-                _ => Ok(None),
-            }
+            let path = service_cache_get
+                .cache_dir_get(&wc, &name, &key)
+                .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("{e:#}")))?;
+            Ok(path.map(|p| p.to_string_lossy().into_owned()))
         },
     )?;
     globals.set("__host_cache_get", host_cache_get)?;
 
     let wc = workspace_root.clone();
+    let service_cache_has = Arc::clone(&service);
     let host_cache_has = Function::new(
         ctx.clone(),
         move |name: String, key: String| -> rquickjs::Result<bool> {
-            Ok(named_cache_key_path(&wc, &name, &key)
-                .map(|p| p.is_dir())
-                .unwrap_or(false))
+            service_cache_has
+                .cache_dir_has(&wc, &name, &key)
+                .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("{e:#}")))
         },
     )?;
     globals.set("__host_cache_has", host_cache_has)?;
@@ -1297,12 +1291,12 @@ fn register_globals<'js>(
     // crate::worker for the lifecycle rationale.
     // ------------------------------------------------------------------
     let wc_worker_start = workspace_root.clone();
-    let workers_start = Arc::clone(&workers);
+    let service_worker_start = Arc::clone(&service);
     let host_worker_start = Function::new(
         ctx.clone(),
         Async(move |ctx: Ctx<'js>, name: String, opts: Object<'js>| {
             let wc = wc_worker_start.clone();
-            let workers = Arc::clone(&workers_start);
+            let service = Arc::clone(&service_worker_start);
             async move {
                 let argv: Vec<String> = opts.get("argv")?;
                 let env_pairs: Vec<String> = opts.get::<_, Option<Vec<String>>>("env")?.unwrap_or_default();
@@ -1319,12 +1313,13 @@ fn register_globals<'js>(
                 let health_check_argv: Vec<String> = opts
                     .get::<_, Option<Vec<String>>>("healthCheckArgv")?
                     .unwrap_or_default();
-                let spec = crate::worker::WorkerSpec {
+                let spec = WorkerSpec {
                     argv,
                     env,
                     health_check_argv,
                 };
-                let handle = crate::worker::worker_start(&workers, &wc, &name, spec)
+                let handle = service
+                    .worker_start(&wc, &name, spec)
                     .await
                     .map_err(|e| rquickjs::Exception::throw_message(&ctx, &format!("{e:#}")))?;
                 serde_json::to_string(&handle).map_err(|e| {
@@ -1335,11 +1330,14 @@ fn register_globals<'js>(
     )?;
     globals.set("__host_worker_start", host_worker_start)?;
 
-    let workers_get = Arc::clone(&workers);
+    let service_worker_get = Arc::clone(&service);
     let host_worker_get = Function::new(
         ctx.clone(),
         move |name: String| -> rquickjs::Result<Option<String>> {
-            match crate::worker::worker_get(&workers_get, &name) {
+            let handle = service_worker_get
+                .worker_get(&name)
+                .map_err(|e| rquickjs::Error::new_loading_message("workerGet", format!("{e:#}")))?;
+            match handle {
                 Some(handle) => {
                     let json = serde_json::to_string(&handle).map_err(|e| {
                         rquickjs::Error::new_loading_message("workerGet", format!("{e}"))
@@ -1588,9 +1586,9 @@ fn register_globals<'js>(
                 .map_err(|e| rquickjs::Error::new_loading_message("mergeDigests", e.to_string()))?;
             let trees = digests
                 .into_iter()
-                .map(crate::digest::DirectoryDigest::from_digest)
+                .map(imp_store::digest::DirectoryDigest::from_digest)
                 .collect();
-            crate::digest::merge_digests(trees)
+            imp_store::digest::merge_digests(trees)
                 .map(|merged| merged.digest().to_owned())
                 .map_err(|e| rquickjs::Error::new_loading_message("mergeDigests", format!("{e:#}")))
         },
@@ -1602,18 +1600,18 @@ fn register_globals<'js>(
     let host_diff_digests = Function::new(
         ctx.clone(),
         move |before: String, after: String| -> rquickjs::Result<String> {
-            let before = crate::digest::DirectoryDigest::from_digest(before);
-            let after = crate::digest::DirectoryDigest::from_digest(after);
-            let changes = crate::digest::diff_digests(&before, &after).map_err(|e| {
+            let before = imp_store::digest::DirectoryDigest::from_digest(before);
+            let after = imp_store::digest::DirectoryDigest::from_digest(after);
+            let changes = imp_store::digest::diff_digests(&before, &after).map_err(|e| {
                 rquickjs::Error::new_loading_message("diffDigests", format!("{e:#}"))
             })?;
             let json: Vec<serde_json::Value> = changes
                 .into_iter()
                 .map(|change| {
                     let (kind, path) = match change {
-                        crate::digest::PathChange::Added(p) => ("added", p),
-                        crate::digest::PathChange::Removed(p) => ("removed", p),
-                        crate::digest::PathChange::Modified(p) => ("modified", p),
+                        imp_store::digest::PathChange::Added(p) => ("added", p),
+                        imp_store::digest::PathChange::Removed(p) => ("removed", p),
+                        imp_store::digest::PathChange::Modified(p) => ("modified", p),
                     };
                     serde_json::json!({ "type": kind, "path": path })
                 })
@@ -1628,8 +1626,8 @@ fn register_globals<'js>(
     let host_digest_paths = Function::new(
         ctx.clone(),
         move |digest: String| -> rquickjs::Result<String> {
-            let digest = crate::digest::DirectoryDigest::from_digest(digest);
-            let paths = crate::digest::list_files_in_digest(&digest).map_err(|e| {
+            let digest = imp_store::digest::DirectoryDigest::from_digest(digest);
+            let paths = imp_store::digest::list_files_in_digest(&digest).map_err(|e| {
                 rquickjs::Error::new_loading_message("digestPaths", format!("{e:#}"))
             })?;
             serde_json::to_string(&paths)
@@ -1643,8 +1641,8 @@ fn register_globals<'js>(
     let host_digest_read_file = Function::new(
         ctx.clone(),
         move |digest: String, path: String| -> rquickjs::Result<String> {
-            let digest = crate::digest::DirectoryDigest::from_digest(digest);
-            crate::digest::read_file_in_digest(&digest, &path).map_err(|e| {
+            let digest = imp_store::digest::DirectoryDigest::from_digest(digest);
+            imp_store::digest::read_file_in_digest(&digest, &path).map_err(|e| {
                 rquickjs::Error::new_loading_message("digestReadFile", format!("{e:#}"))
             })
         },
@@ -1661,7 +1659,7 @@ fn register_globals<'js>(
         move |paths_json: String| -> rquickjs::Result<String> {
             let paths: Vec<String> = serde_json::from_str(&paths_json)
                 .map_err(|e| rquickjs::Error::new_loading_message("capturePaths", e.to_string()))?;
-            crate::digest::capture_paths(&wc, &paths)
+            imp_store::digest::capture_paths(&wc, &paths)
                 .map(|digest| digest.digest().to_owned())
                 .map_err(|e| rquickjs::Error::new_loading_message("capturePaths", format!("{e:#}")))
         },
@@ -1680,7 +1678,7 @@ fn register_globals<'js>(
             let relative = artifact_relative_path(&path)
                 .map_err(|e| rquickjs::Error::new_loading_message("writeWorkspace", format!("{e:#}")))?;
             let destination = wc.join(&relative);
-            crate::cache::write_workspace(&digest, from.as_deref(), &destination).map_err(|e| {
+            imp_store::cache::write_workspace(&digest, from.as_deref(), &destination).map_err(|e| {
                 rquickjs::Error::new_loading_message("writeWorkspace", format!("{e:#}"))
             })
         },
@@ -1703,6 +1701,7 @@ fn register_globals<'js>(
 
     // __host_native_tool_artifact(name) → tool-root directory path; throws if
     // name isn't found on PATH.
+    let service_native_tool = Arc::clone(&service);
     let host_native_tool_artifact = Function::new(
         ctx.clone(),
         move |name: String| -> rquickjs::Result<String> {
@@ -1712,7 +1711,8 @@ fn register_globals<'js>(
                     format!("no '{name}' executable found on PATH"),
                 )
             })?;
-            let root = crate::cache::ensure_native_tool_artifact(&name, Path::new(&resolved))
+            let root = service_native_tool
+                .register_native_tool(&name, Path::new(&resolved))
                 .map_err(|e| {
                     rquickjs::Error::new_loading_message("nativeTool", format!("{e:#}"))
                 })?;
@@ -1755,6 +1755,7 @@ fn register_globals<'js>(
     let exec_no_cache_run = Arc::clone(&exec_no_cache);
     let exec_sandbox_retention_run = Arc::clone(&exec_sandbox_retention);
     let scheduler_run = Arc::clone(&scheduler);
+    let service_run = Arc::clone(&service);
     let host_run = Function::new(
         ctx.clone(),
         Async(move |ctx: Ctx<'js>, opts: Object<'js>| {
@@ -1762,6 +1763,7 @@ fn register_globals<'js>(
             let exec_no_cache_run = Arc::clone(&exec_no_cache_run);
             let exec_sandbox_retention_run = Arc::clone(&exec_sandbox_retention_run);
             let scheduler_run = Arc::clone(&scheduler_run);
+            let service = Arc::clone(&service_run);
             async move {
                 let root = exec_root_run.lock().unwrap().clone().ok_or_else(|| {
                     rquickjs::Error::new_loading_message(
@@ -1779,14 +1781,14 @@ fn register_globals<'js>(
                 let parent: Option<u64> = opts.get::<_, Option<f64>>("__owner")?.map(|n| n as u64);
                 let mut run_opts = parse_exec_run_opts(opts, &root)?;
                 run_opts.no_cache = exec_no_cache_run.load(Ordering::SeqCst);
-                run_opts.sandbox_retention = crate::exec::SandboxRetention::from_u8(
+                run_opts.sandbox_retention = SandboxRetention::from_u8(
                     exec_sandbox_retention_run.load(Ordering::SeqCst),
                 );
                 let display = run_opts.display.clone();
                 let cancellation = sched.cancellation_flag();
                 let result = sched
                     .run(parent, display, move || {
-                        exec_run_inner(&root, run_opts, Some(cancellation.as_ref()))
+                        service.execute(&root, run_opts, Some(cancellation.as_ref()))
                     })
                     .await
                     // Throw a real JS Exception: message lives in a JS string
@@ -1986,7 +1988,7 @@ fn register_globals<'js>(
     // Expose the resolved cache root so JS rules can hand it to nested imp
     // invocations (via IMP_CACHE_DIR) — sandboxed subprocesses see a pinned
     // HOME and would otherwise re-download named-cache contents.
-    if let Ok(cache_dir) = crate::cache::cache_root() {
+    if let Ok(cache_dir) = imp_store::cache::cache_root() {
         globals.set(
             "__imp_cache_dir",
             cache_dir.to_string_lossy().into_owned(),
@@ -2082,7 +2084,7 @@ fn parse_exec_run_opts<'js>(
         materialize,
         no_cache: false,
         // Overridden per invocation in the host_run closure (like no_cache).
-        sandbox_retention: crate::exec::SandboxRetention::default(),
+        sandbox_retention: SandboxRetention::default(),
     })
 }
 
@@ -2187,7 +2189,7 @@ pub(crate) fn workspace_glob_files(
 /// need the path list (target ownership, unowned-file checks).
 pub(crate) struct GlobResult {
     pub(crate) files: Vec<String>,
-    pub(crate) digest: crate::digest::DirectoryDigest,
+    pub(crate) digest: imp_store::digest::DirectoryDigest,
 }
 
 pub(crate) fn workspace_glob_files_captured(
@@ -2197,7 +2199,7 @@ pub(crate) fn workspace_glob_files_captured(
     exclude: &[String],
 ) -> Result<GlobResult> {
     let files = workspace_glob_files(workspace_root, root, include, exclude)?;
-    let digest = crate::digest::capture_paths(workspace_root, &files)?;
+    let digest = imp_store::digest::capture_paths(workspace_root, &files)?;
     Ok(GlobResult { files, digest })
 }
 
@@ -2398,22 +2400,6 @@ pub(crate) fn workspace_relative_directory(path: &str) -> Result<PathBuf> {
 
 /// Recursively copy the contents of `src` into `dst` (which already exists as a
 /// directory). Unlike `std::fs::rename` this works across mount boundaries.
-fn copy_dir_into(src: &Path, dst: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
-        let entry = entry?;
-        let target = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            std::fs::create_dir_all(&target)?;
-            copy_dir_into(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(&entry.path(), &target).with_context(|| {
-                format!("copy {} -> {}", entry.path().display(), target.display())
-            })?;
-        }
-    }
-    Ok(())
-}
-
 fn named_cache_from_name(name: &str) -> rquickjs::Result<NamedCache> {
     if name.is_empty() {
         return Err(action_spec_error(
@@ -2950,7 +2936,7 @@ pub async fn execute_goal_live(
         .map_err(|e| anyhow::anyhow!("execute goal '{goal}' failed: {e}"));
     live.exec_no_cache.store(false, Ordering::SeqCst);
     live.exec_sandbox_retention.store(
-        crate::exec::SandboxRetention::default().as_u8(),
+        SandboxRetention::default().as_u8(),
         Ordering::SeqCst,
     );
     *live.selected_roots.lock().unwrap() = None;
@@ -3537,7 +3523,7 @@ fn parse_dependency(scope: &str, value: &str) -> Result<Dependency> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::exec::{report_process_line, spawn_output_reader, ProcessLine, ProcessStream};
+    use imp_execution::exec::{report_process_line, spawn_output_reader, ProcessLine, ProcessStream};
     use sha2::{Digest, Sha256};
 
     /// Clear runtime-global memo state so a repeated goal invocation on the
@@ -4135,7 +4121,7 @@ export const parent = target({ kind: "expandable", attrs: {} });
         let p = root.path();
 
         let tool_dir =
-            crate::cache::named_cache_key_path(p, "test-tools", "v1/linux-x86_64").unwrap();
+            imp_store::cache::named_cache_key_path(p, "test-tools", "v1/linux-x86_64").unwrap();
         std::fs::create_dir_all(tool_dir.join("bin")).unwrap();
         let tool_bin = tool_dir.join("bin/hello-tool");
         std::fs::write(&tool_bin, "#!/bin/sh\nprintf from-tool > out.txt\n").unwrap();

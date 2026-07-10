@@ -8,56 +8,56 @@ use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use walkdir::WalkDir;
 
-pub(crate) const TASK_CACHE_VERSION: u32 = 6;
+pub const TASK_CACHE_VERSION: u32 = 6;
 
 // ---------------------------------------------------------------------------
 // Cache types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CachedArtifact {
-    pub(crate) artifact_id: String,
-    pub(crate) kind: String,
-    pub(crate) path: Option<String>,
-    pub(crate) value: Option<String>,
-    pub(crate) digest: String,
-    pub(crate) bytes: Option<u64>,
-    pub(crate) mode: Option<u32>,
+pub struct CachedArtifact {
+    pub artifact_id: String,
+    pub kind: String,
+    pub path: Option<String>,
+    pub value: Option<String>,
+    pub digest: String,
+    pub bytes: Option<u64>,
+    pub mode: Option<u32>,
     /// For `kind: "directory"` outputs: the digest of the root `DigestNode` for
     /// this directory's tree (see `crate::digest`), used to materialize/verify it
     /// without walking a flat file list. `None` for every other kind.
     #[serde(default)]
-    pub(crate) tree_digest: Option<String>,
+    pub tree_digest: Option<String>,
     /// When set, this output is also materialized into a named cache slot
     /// (in addition to its normal workspace-relative path), from CAS content —
     /// so it's replayed correctly on both fresh runs and task-cache hits.
     #[serde(default)]
-    pub(crate) named_cache: Option<OutputNamedCache>,
+    pub named_cache: Option<OutputNamedCache>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct OutputNamedCache {
-    pub(crate) name: String,
-    pub(crate) key: String,
+pub struct OutputNamedCache {
+    pub name: String,
+    pub key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TaskCacheRecord {
-    pub(crate) version: u32,
-    pub(crate) task_id: String,
-    pub(crate) task_key: String,
-    pub(crate) action_digest: String,
+pub struct TaskCacheRecord {
+    pub version: u32,
+    pub task_id: String,
+    pub task_key: String,
+    pub action_digest: String,
     /// Root digest of the merged tree over every declared input (see
     /// `crate::digest::merge_digests`) — replaces a flat per-file digest list.
-    pub(crate) input_digest: String,
+    pub input_digest: String,
     /// Root digest of the merged tree over everything this task produced, so a
     /// later `run({inputs})` can reference it directly (as a `{kind:"digest"}`
     /// entry) without round-tripping through the workspace.
-    pub(crate) output_digest: String,
-    pub(crate) named_caches: Vec<NamedCacheBinding>,
-    pub(crate) stdout: String,
-    pub(crate) stderr: String,
-    pub(crate) outputs: Vec<CachedArtifact>,
+    pub output_digest: String,
+    pub named_caches: Vec<NamedCacheBinding>,
+    pub stdout: String,
+    pub stderr: String,
+    pub outputs: Vec<CachedArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,7 +71,7 @@ pub struct NamedCacheBinding {
 // Named cache key path
 // ---------------------------------------------------------------------------
 
-pub(crate) fn named_cache_key_path(
+pub fn named_cache_key_path(
     workspace_root: &Path,
     name: &str,
     key: &str,
@@ -99,13 +99,13 @@ pub(crate) fn named_cache_key_path(
 /// Base directory under which per-run sandbox roots are created. Defaults to
 /// `/tmp/imp`; `IMP_SANDBOX_DIR` overrides it (mirroring `IMP_CACHE_DIR`)
 /// so tests can point sandboxes at an isolated, inspectable location.
-pub(crate) fn sandbox_base_dir() -> PathBuf {
+pub fn sandbox_base_dir() -> PathBuf {
     std::env::var_os("IMP_SANDBOX_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp/imp"))
 }
 
-pub(crate) fn create_sandbox_root() -> Result<PathBuf> {
+pub fn create_sandbox_root() -> Result<PathBuf> {
     static SANDBOX_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let base = sandbox_base_dir();
@@ -132,7 +132,7 @@ pub(crate) fn create_sandbox_root() -> Result<PathBuf> {
     bail!("failed to create unique sandbox under {}", base.display())
 }
 
-pub(crate) fn cache_root() -> Result<PathBuf> {
+pub fn cache_root() -> Result<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(dir) = std::env::var_os("IMP_CACHE_DIR") {
         candidates.push(PathBuf::from(dir));
@@ -159,14 +159,28 @@ pub(crate) fn cache_root() -> Result<PathBuf> {
     bail!("no cache root candidates available")
 }
 
+/// Validate a tool name for use as a path component under the cache's
+/// native-tools/tool roots. Shared by exec's tool materialization and the
+/// native-tool artifact registration below.
+pub fn validate_tool_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        bail!("tool name '{name}' must contain only ASCII letters, digits, '-', '_' or '.'");
+    }
+    Ok(())
+}
+
 /// Ensure `<cache_root>/native-tools/<name>/<name>` is a symlink to `resolved`,
 /// creating or repairing it if missing/stale. Returns the tool-root directory.
 /// Bypasses cachePut (see copy_dir_into in spike.rs) because that path
 /// dereferences symlinks into real-byte copies; run()'s tool materialization
 /// is expected to symlink the tool root wholesale, so the artifact itself
 /// must already be the symlink, not a copy.
-pub(crate) fn ensure_native_tool_artifact(name: &str, resolved: &Path) -> Result<PathBuf> {
-    crate::exec::validate_tool_name(name)?;
+pub fn ensure_native_tool_artifact(name: &str, resolved: &Path) -> Result<PathBuf> {
+    validate_tool_name(name)?;
     let root = cache_root()?.join("native-tools").join(name);
     std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
     let link = root.join(native_tool_artifact_filename(name, resolved));
@@ -196,11 +210,11 @@ fn native_tool_artifact_filename(name: &str, _resolved: &Path) -> String {
     name.to_owned()
 }
 
-pub(crate) fn workspace_cache_id(workspace_root: &Path) -> String {
+pub fn workspace_cache_id(workspace_root: &Path) -> String {
     digest_bytes(workspace_root.to_string_lossy().as_bytes())
 }
 
-pub(crate) fn cas_blob_path(digest: &str) -> Result<PathBuf> {
+pub fn cas_blob_path(digest: &str) -> Result<PathBuf> {
     Ok(cache_root()?.join("cas").join("blobs").join(digest))
 }
 
@@ -211,15 +225,15 @@ fn cas_meta_path(digest: &str) -> Result<PathBuf> {
         .join(format!("{digest}.json")))
 }
 
-pub(crate) fn task_record_path(task_key: &str) -> Result<PathBuf> {
+pub fn task_record_path(task_key: &str) -> Result<PathBuf> {
     Ok(cache_root()?.join("tasks").join(format!("{task_key}.json")))
 }
 
-pub(crate) fn digest_bytes(bytes: &[u8]) -> String {
+pub fn digest_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-pub(crate) fn digest_json<T: Serialize>(value: &T) -> Result<String> {
+pub fn digest_json<T: Serialize>(value: &T) -> Result<String> {
     let encoded = serde_json::to_vec(value).context("serialize digest input")?;
     Ok(digest_bytes(&encoded))
 }
@@ -228,7 +242,7 @@ pub(crate) fn digest_json<T: Serialize>(value: &T) -> Result<String> {
 // Tool fingerprints
 // ---------------------------------------------------------------------------
 
-pub(crate) fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
+pub fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
     let digest = digest_bytes(bytes);
     let blob_path = cas_blob_path(&digest)?;
     if !blob_path.is_file() {
@@ -260,13 +274,13 @@ pub(crate) fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
     Ok(digest)
 }
 
-pub(crate) fn store_file_blob(path: &Path, kind: &str) -> Result<(String, u64)> {
+pub fn store_file_blob(path: &Path, kind: &str) -> Result<(String, u64)> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let size = bytes.len() as u64;
     Ok((store_blob(&bytes, kind)?, size))
 }
 
-pub(crate) fn artifact_relative_path(path: &str) -> Result<PathBuf> {
+pub fn artifact_relative_path(path: &str) -> Result<PathBuf> {
     let path = Path::new(path);
     if path.is_absolute() {
         bail!(
@@ -292,7 +306,7 @@ pub(crate) fn artifact_relative_path(path: &str) -> Result<PathBuf> {
     Ok(relative)
 }
 
-pub(crate) fn cached_outputs_present(record: &TaskCacheRecord) -> Result<()> {
+pub fn cached_outputs_present(record: &TaskCacheRecord) -> Result<()> {
     for output in &record.outputs {
         match output.kind.as_str() {
             "file" | "manifest" => {
@@ -336,7 +350,7 @@ pub(crate) fn cached_outputs_present(record: &TaskCacheRecord) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn write_task_cache_record(record: &TaskCacheRecord) -> Result<()> {
+pub fn write_task_cache_record(record: &TaskCacheRecord) -> Result<()> {
     let path = task_record_path(&record.task_key)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
@@ -349,7 +363,7 @@ pub(crate) fn write_task_cache_record(record: &TaskCacheRecord) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn materialize_cached_outputs(
+pub fn materialize_cached_outputs(
     record: &TaskCacheRecord,
     workspace_root: &Path,
 ) -> Result<()> {
@@ -378,7 +392,7 @@ pub(crate) fn materialize_cached_outputs(
 /// Materialize any outputs bound to a named cache slot (via `output({ namedCache })`)
 /// from their CAS content. Runs after both fresh executions and task-cache hits, so a
 /// named cache wiped between runs is transparently repopulated.
-pub(crate) fn materialize_named_caches(
+pub fn materialize_named_caches(
     record: &TaskCacheRecord,
     workspace_root: &Path,
 ) -> Result<()> {
@@ -450,7 +464,7 @@ fn materialize_cached_directory(output: &CachedArtifact, destination: &Path) -> 
 /// of every file it contains, so publishing one file out of it needs no more
 /// capture work than publishing the whole subtree. Always copies, never
 /// hardlinks, for the same reason as `materialize_cached_directory`.
-pub(crate) fn write_workspace(digest: &str, from: Option<&str>, destination: &Path) -> Result<()> {
+pub fn write_workspace(digest: &str, from: Option<&str>, destination: &Path) -> Result<()> {
     let root = crate::digest::DirectoryDigest::from_digest(digest.to_string());
     let resolved = match from {
         Some(path) => crate::digest::resolve_in_trie(root.tree()?, path)?,
@@ -484,7 +498,7 @@ pub(crate) fn write_workspace(digest: &str, from: Option<&str>, destination: &Pa
     Ok(())
 }
 
-pub(crate) fn remove_path_if_exists(path: &Path) -> Result<()> {
+pub fn remove_path_if_exists(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path)
             .with_context(|| format!("remove directory {}", path.display())),
@@ -513,7 +527,7 @@ fn publish_file_atomically(source: &Path, destination: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-pub(crate) fn create_symlink(target: &str, dest: &Path) -> Result<()> {
+pub fn create_symlink(target: &str, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -522,22 +536,22 @@ pub(crate) fn create_symlink(target: &str, dest: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn create_symlink(_target: &str, _dest: &Path) -> Result<()> {
+pub fn create_symlink(_target: &str, _dest: &Path) -> Result<()> {
     bail!("directory outputs containing symlinks are not supported on this platform")
 }
 
 #[cfg(unix)]
-pub(crate) fn file_mode(path: &Path) -> Result<Option<u32>> {
+pub fn file_mode(path: &Path) -> Result<Option<u32>> {
     Ok(Some(std::fs::metadata(path)?.permissions().mode() & 0o7777))
 }
 
 #[cfg(not(unix))]
-pub(crate) fn file_mode(_path: &Path) -> Result<Option<u32>> {
+pub fn file_mode(_path: &Path) -> Result<Option<u32>> {
     Ok(None)
 }
 
 #[cfg(unix)]
-pub(crate) fn restore_file_mode(path: &Path, mode: Option<u32>) -> Result<()> {
+pub fn restore_file_mode(path: &Path, mode: Option<u32>) -> Result<()> {
     let Some(mode) = mode else {
         return Ok(());
     };
@@ -548,11 +562,11 @@ pub(crate) fn restore_file_mode(path: &Path, mode: Option<u32>) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn restore_file_mode(_path: &Path, _mode: Option<u32>) -> Result<()> {
+pub fn restore_file_mode(_path: &Path, _mode: Option<u32>) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn temp_sibling_path(destination: &Path, suffix: &str) -> PathBuf {
+pub fn temp_sibling_path(destination: &Path, suffix: &str) -> PathBuf {
     let file_name = destination
         .file_name()
         .and_then(|name| name.to_str())
@@ -568,7 +582,7 @@ pub(crate) fn temp_sibling_path(destination: &Path, suffix: &str) -> PathBuf {
     destination.with_file_name(temp_name)
 }
 
-pub(crate) fn copy_file(source: &Path, destination: &Path) -> Result<()> {
+pub fn copy_file(source: &Path, destination: &Path) -> Result<()> {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -577,7 +591,7 @@ pub(crate) fn copy_file(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
+pub fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
     for entry in WalkDir::new(source) {
         let entry = entry.with_context(|| format!("walk {}", source.display()))?;
         let relative = entry.path().strip_prefix(source).with_context(|| {

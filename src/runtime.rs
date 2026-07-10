@@ -32,7 +32,7 @@ pub struct LiveWorkspace {
     /// the duration of live execution.
     pub(crate) exec_no_cache: Arc<AtomicBool>,
     /// Sandbox retention policy for live `run()` execution, encoded as a
-    /// [`crate::exec::SandboxRetention`] via `as_u8`/`from_u8`. Set by command
+    /// [`imp_exec_api::SandboxRetention`] via `as_u8`/`from_u8`. Set by command
     /// entry points for the duration of live execution.
     pub(crate) exec_sandbox_retention: Arc<AtomicU8>,
     /// Scheduler that live `run()` calls submit to. Installed for the duration
@@ -56,10 +56,13 @@ pub struct LiveWorkspace {
     /// Reset at the start of each `execute_goal_live`/`evaluate_product_json`
     /// invocation; merged with `workspace.targets` at selector-resolution time.
     pub(crate) dynamic_targets: Arc<Mutex<BTreeMap<String, Target>>>,
-    /// Named, host-spawned persistent worker processes (e.g. a build-cache
-    /// daemon like sccache), reused across `run()` calls within this one
-    /// `imp` process invocation. See `crate::worker`.
-    pub(crate) workers: crate::worker::WorkerRegistry,
+    /// The execution service live `run()`/worker/toolchain host functions go
+    /// through — the in-process local executor today, a daemon client later.
+    /// Owns the persistent-worker registry and all other live execution
+    /// state. Held here so it lives exactly as long as the JS runtime that
+    /// captured it.
+    #[allow(dead_code)]
+    pub(crate) service: std::sync::Arc<dyn imp_exec_api::ExecutionService>,
 }
 
 impl std::fmt::Debug for LiveWorkspace {
@@ -75,7 +78,7 @@ impl std::fmt::Debug for LiveWorkspace {
             .field("goal_flags", &"Arc<Mutex<..>>")
             .field("host_state", &"Arc<Mutex<..>>")
             .field("dynamic_targets", &"Arc<Mutex<..>>")
-            .field("workers", &"Arc<Mutex<..>>")
+            .field("service", &"Arc<dyn ExecutionService>")
             .finish()
     }
 }

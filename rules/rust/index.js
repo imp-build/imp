@@ -113,12 +113,13 @@ export const rust_file_sources = memo(async function rust_file_sources(handle) {
     return glob({ root, include: ["**/*.rs"], exclude: ["target/**"] });
 });
 
-// Everything cargo build needs to see: manifest, lockfile (if present), and
-// sources. Multi-crate workspaces (a workspace-root Cargo.lock shared across
-// members) aren't supported yet — cargoPackage assumes a self-contained crate.
+// Everything cargo build needs to see: manifests, lockfile (if present), and
+// sources. `**/Cargo.toml` picks up workspace-member manifests (crates/*/
+// Cargo.toml) alongside the root manifest, so both self-contained crates and
+// cargo workspaces work.
 export const sources = memo(async function sources(handle) {
     const root = declared_path(handle, handle.attrs.path || ".");
-    return glob({ root, include: ["Cargo.toml", "Cargo.lock", "**/*.rs"], exclude: ["target/**"] });
+    return glob({ root, include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"], exclude: ["target/**"] });
 });
 
 // FileSet of a cargoPackage's declared resource-package deps (see
@@ -321,8 +322,10 @@ export const cargoTest = product("cargo-package", "test",
         const resourceInputs = await resources(handle);
         const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 
+        // --workspace so member-crate tests run too when the manifest is a
+        // workspace root; on a plain single crate it's a no-op.
         const script = 'manifest=$1; target_dir=$2; rustflags=$3; shift 3; ' +
-            'RUSTFLAGS="$rustflags" cargo test --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
+            'RUSTFLAGS="$rustflags" cargo test --manifest-path "$manifest" --target-dir "$target_dir" --workspace "$@"';
 
         // No outputs/materialize: test binaries aren't user-addressable
         // artifacts. impure: true so a re-run always executes the tests
@@ -388,7 +391,7 @@ export class CargoPackage extends Target {
             },
             sources: sourcesField({
                 root: path,
-                include: ["Cargo.toml", "Cargo.lock", "**/*.rs"],
+                include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
                 exclude: ["target/**"],
             }),
             deps: allDeps,
@@ -397,9 +400,10 @@ export class CargoPackage extends Target {
 }
 
 /**
- * Declare a Cargo binary crate target. Library crates and multi-crate
- * workspaces aren't supported yet — declare one cargoPackage per
- * self-contained binary crate.
+ * Declare a Cargo binary crate target. The path may be a self-contained
+ * crate or a cargo workspace root (member manifests are globbed via
+ * `**\/Cargo.toml`); library-only crates aren't targets — declare one
+ * cargoPackage per binary-producing manifest.
  *
  * @category target
  * @param {object} opts

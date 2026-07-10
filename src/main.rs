@@ -1,9 +1,7 @@
-mod cache;
 mod codegen;
 mod commands;
-mod digest;
 mod env;
-mod exec;
+mod exec_bridge;
 mod loader;
 mod logging;
 mod runtime;
@@ -12,7 +10,6 @@ mod selector;
 mod spike;
 mod toolchain;
 mod ui;
-mod worker;
 mod workspace;
 
 use std::path::PathBuf;
@@ -143,8 +140,8 @@ struct GoalArgs {
     no_cache: bool,
     /// When to delete per-run sandboxes: never, on-failure (keep only failed
     /// sandboxes for debugging, the default), or always (keep every sandbox)
-    #[arg(long, value_enum, default_value_t = exec::SandboxRetention::default())]
-    keep_sandbox: exec::SandboxRetention,
+    #[arg(long, value_enum, default_value_t = imp_execution::exec::SandboxRetention::default())]
+    keep_sandbox: imp_execution::exec::SandboxRetention,
 }
 
 /// Opaque capture of a goal subcommand's argv tail. Goal-declared flags (e.g.
@@ -538,7 +535,7 @@ async fn cmd_execute_live(
         usize,
         Option<usize>,
         bool,
-        exec::SandboxRetention,
+        imp_execution::exec::SandboxRetention,
         serde_json::Value,
     ) = match invocation {
         LiveInvocation::Goal { goal, raw } => {
@@ -574,7 +571,7 @@ async fn cmd_execute_live(
             1,
             None,
             false,
-            exec::SandboxRetention::default(),
+            imp_execution::exec::SandboxRetention::default(),
             serde_json::json!({}),
         ),
     };
