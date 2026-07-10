@@ -23,7 +23,7 @@
 //! respawns.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -32,7 +32,6 @@ use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use tokio::sync::OnceCell;
 
-use imp_store::cache::workspace_cache_id;
 
 pub use imp_exec_api::{WorkerHandle, WorkerSpec};
 
@@ -44,9 +43,9 @@ pub fn new_worker_registry() -> WorkerRegistry {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-fn worker_port(workspace_root: &Path, name: &str) -> u16 {
+fn worker_port_by_id(workspace_id: &str, name: &str) -> u16 {
     let mut hasher = Sha256::new();
-    hasher.update(workspace_cache_id(workspace_root).as_bytes());
+    hasher.update(workspace_id.as_bytes());
     hasher.update(b":");
     hasher.update(name.as_bytes());
     let digest = hasher.finalize();
@@ -60,8 +59,8 @@ fn worker_port(workspace_root: &Path, name: &str) -> u16 {
 // `$HOME/.cache`-style cache_root() blows past that. Uses the same short,
 // fixed `/tmp/imp` base as sandbox roots (`sandbox_base_dir`), plus a
 // truncated hash, to stay well under the limit.
-fn worker_dirs(workspace_root: &Path, name: &str) -> Result<(PathBuf, PathBuf)> {
-    let short_id = &workspace_cache_id(workspace_root)[..16];
+fn worker_dirs_by_id(workspace_id: &str, name: &str) -> Result<(PathBuf, PathBuf)> {
+    let short_id = &workspace_id[..16];
     let root = imp_store::cache::sandbox_base_dir()
         .join("workers")
         .join(short_id)
@@ -113,15 +112,15 @@ fn is_healthy(handle: &WorkerHandle, spec: &WorkerSpec) -> bool {
 }
 
 async fn spawn_and_health_check(
-    workspace_root: &Path,
+    workspace_id: &str,
     name: &str,
     spec: &WorkerSpec,
 ) -> Result<WorkerHandle> {
     if spec.argv.is_empty() {
         bail!("worker '{name}' has an empty start argv");
     }
-    let (home_dir, tmp_dir) = worker_dirs(workspace_root, name)?;
-    let port = worker_port(workspace_root, name);
+    let (home_dir, tmp_dir) = worker_dirs_by_id(workspace_id, name)?;
+    let port = worker_port_by_id(workspace_id, name);
     let handle = WorkerHandle {
         home_dir,
         tmp_dir,
@@ -170,7 +169,7 @@ async fn spawn_and_health_check(
 /// idle timeout), it is evicted and respawned once.
 pub async fn worker_start(
     registry: &WorkerRegistry,
-    workspace_root: &Path,
+    workspace_id: &str,
     name: &str,
     spec: WorkerSpec,
 ) -> Result<WorkerHandle> {
@@ -185,7 +184,7 @@ pub async fn worker_start(
         };
         let result = cell
             .get_or_try_init(|| async {
-                spawn_and_health_check(workspace_root, name, &spec)
+                spawn_and_health_check(workspace_id, name, &spec)
                     .await
                     .map_err(|error| format!("{error:#}"))
             })

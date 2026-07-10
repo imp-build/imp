@@ -22,7 +22,68 @@ use imp_store::cache::{
 };
 use imp_store::digest::{capture_directory, merge_digests, nest_directory, nest_file, DirectoryDigest};
 
-pub use imp_exec_api::{ExecIoSpec, ExecRunOpts, ExecRunResult, ExecToolSpec, SandboxRetention};
+pub use imp_exec_api::{ExecAction, ExecIoSpec, ExecRunOpts, ExecRunResult, ExecToolSpec, SandboxRetention};
+
+/// Execute a frontend-staged action. The compatibility implementation below
+/// reuses the mature sandbox runner with a digest-only input and disabled
+/// workspace materialization; all filesystem paths used for staging are
+/// therefore inside the executor sandbox or shared CAS.
+pub fn exec_run_hermetic(
+    _workspace_id: &str,
+    action: ExecAction,
+    cancellation: Option<&AtomicBool>,
+) -> Result<imp_exec_api::ExecOutcome> {
+    let env = action
+        .env
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    let output_key: Vec<serde_json::Value> = action.outputs.iter().map(|o| {
+        serde_json::json!({"path": o.path, "kind": o.kind})
+    }).collect();
+    let legacy = ExecRunOpts {
+        argv: action.argv.clone(),
+        display: action.display.clone(),
+        env,
+        config_digest: action.config_digest.clone(),
+        inputs: vec![ExecIoSpec {
+            path: None,
+            kind: "digest".to_owned(),
+            digest: Some(action.input_digest.clone()),
+            named_cache: None,
+        }],
+        outputs: action.outputs,
+        tools: action.tools,
+        impure: action.impure,
+        force_cache: action.force_cache,
+        sandbox: true,
+        no_cache: action.no_cache,
+        sandbox_retention: action.sandbox_retention,
+        materialize: false,
+    };
+    let action_digest = live_action_digest(&legacy, &action.env)?;
+    let result = exec_run_inner(Path::new("/"), legacy, cancellation)
+        .with_context(|| format!("hermetic executor action for workspace {_workspace_id}"))?;
+    let task_key = imp_store::cache::digest_json(&serde_json::json!({
+        "version": TASK_CACHE_VERSION,
+        "action_digest": action_digest,
+        "input_digest": action.input_digest,
+        "outputs": output_key,
+    }))?;
+    let outputs = if !result.outputs.is_empty() { result.outputs.clone() } else { imp_store::cache::task_record_path(&task_key)
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<TaskCacheRecord>(&text).ok())
+        .map(|record| record.outputs)
+        .unwrap_or_default() };
+    Ok(imp_exec_api::ExecOutcome {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exit_code: result.exit_code,
+        output_digest: result.output_digest.unwrap_or_default(),
+        outputs,
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Process I/O types and helpers
@@ -647,6 +708,7 @@ pub fn exec_run_inner(
             stderr: record.stderr,
             exit_code: 0,
             output_digest: Some(record.output_digest),
+            outputs: record.outputs,
         });
     }
 
@@ -704,6 +766,7 @@ pub fn exec_run_inner(
     command_env.insert("HOME".to_owned(), home_dir.to_string_lossy().into_owned());
     command_env.insert("TMPDIR".to_owned(), tmp_dir.to_string_lossy().into_owned());
     let resolved_program = resolve_program(program)?;
+    add_executable_library_path(&mut command_env, &resolved_program, &sandbox_root);
     let mut command = Command::new(&resolved_program);
     command
         .args(args)
@@ -801,7 +864,7 @@ pub fn exec_run_inner(
             named_caches: vec![],
             stdout: stdout.clone(),
             stderr: stderr.clone(),
-            outputs: cached_outputs,
+            outputs: cached_outputs.clone(),
         };
         if !opts.no_cache {
             write_task_cache_record(&record)?;
@@ -827,7 +890,45 @@ pub fn exec_run_inner(
         stderr,
         exit_code,
         output_digest: Some(output_digest),
+        outputs: cached_outputs,
     })
+}
+
+/// Native binaries commonly place private shared libraries beside the
+/// executable (for example an Odin-built executable and `libjolt_odin.so`).
+/// Sandboxes intentionally scrub the host loader path, so make that staged
+/// executable directory visible to the platform loader without importing any
+/// host paths.
+fn add_executable_library_path(
+    command_env: &mut BTreeMap<String, String>,
+    program: &Path,
+    sandbox_root: &Path,
+) {
+    #[cfg(unix)]
+    {
+        let program_path = if program.is_absolute() {
+            program.to_owned()
+        } else {
+            sandbox_root.join(program)
+        };
+        let Some(directory) = program_path.parent() else { return };
+        let key = if cfg!(target_os = "macos") {
+            "DYLD_LIBRARY_PATH"
+        } else {
+            "LD_LIBRARY_PATH"
+        };
+        let mut paths = vec![directory.to_owned()];
+        if let Some(existing) = command_env.get(key) {
+            paths.extend(std::env::split_paths(existing));
+        }
+        if let Ok(joined) = std::env::join_paths(paths) {
+            command_env.insert(key.to_owned(), joined.to_string_lossy().into_owned());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (command_env, program, sandbox_root);
+    }
 }
 
 pub fn exec_run_unsandboxed(
@@ -923,6 +1024,7 @@ pub fn exec_run_unsandboxed(
         stderr,
         exit_code,
         output_digest: None,
+        outputs: Vec::new(),
     })
 }
 

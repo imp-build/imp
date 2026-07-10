@@ -24,6 +24,13 @@ rquickjs     = { version = "0.12", features = ["loader", "futures", "macro"] }
 signal-hook  = "0.4"
 log          = "0.4"
 include_dir  = "0.7"
+tonic        = "0.12"
+prost        = "0.13"
+tonic-build  = "0.12"
+protox       = "0.7"
+tokio-stream = { version = "0.1", features = ["net"] }
+hyper-util   = { version = "0.1", features = ["tokio"] }
+tower        = "0.5"
 
 [package]
 name = "imp"
@@ -38,6 +45,7 @@ path = "src/main.rs"
 imp-store = { path = "crates/imp-store" }
 imp-exec-api = { path = "crates/imp-exec-api" }
 imp-execution = { path = "crates/imp-execution", features = ["clap"] }
+imp-daemon = { path = "crates/imp-daemon" }
 tokio.workspace = true
 clap.workspace = true
 indicatif.workspace = true

@@ -6,3 +6,4 @@ pub mod exec;
 pub mod service;
 pub mod fetch;
 pub mod worker;
+pub mod staging;

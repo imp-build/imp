@@ -739,6 +739,7 @@ export const odinBuild = product("odin-package", "build",
         const path = analysis.packagePath;
         const out = handle.attrs.output || default_output_path(handle);
         const declaredOut = odin_output_path(out, analysis);
+        const outputDir = out.slice(0, out.lastIndexOf("/"));
         const { tools: scriptTools, flags: linkerFlags } = await odinScriptTools(handle, { needsDirname: true, isExecutable: analysis.hasMainEntrypoint });
         const result = await run({
             argv: [
@@ -756,7 +757,10 @@ export const odinBuild = product("odin-package", "build",
             ],
             tools: [odinToolSpec, ...scriptTools],
             inputs: [srcs, ...genInputs, ...resourceInputs],
-            outputs: [output(declaredOut)],
+            // Keep the executable as the first artifact for callers that use
+            // outputPath, and also capture the complete output directory so
+            // runtime siblings such as libjolt_odin.so travel with it.
+            outputs: [output(declaredOut), output(outputDir, { kind: "directory" })],
             materialize: false,
             display: `odin build ${path}`,
         });

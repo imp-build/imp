@@ -76,9 +76,17 @@ pub fn named_cache_key_path(
     name: &str,
     key: &str,
 ) -> Result<PathBuf> {
+    named_cache_key_path_by_id(&workspace_cache_id(workspace_root), name, key)
+}
+
+pub fn named_cache_key_path_by_id(
+    workspace_id: &str,
+    name: &str,
+    key: &str,
+) -> Result<PathBuf> {
     let root = cache_root()?
         .join("named")
-        .join(workspace_cache_id(workspace_root))
+        .join(workspace_id)
         .join(name)
         .join(key);
     Ok(root)
@@ -367,7 +375,14 @@ pub fn materialize_cached_outputs(
     record: &TaskCacheRecord,
     workspace_root: &Path,
 ) -> Result<()> {
-    for output in &record.outputs {
+    materialize_cached_artifacts(&record.outputs, workspace_root)
+}
+
+pub fn materialize_cached_artifacts(
+    outputs: &[CachedArtifact],
+    workspace_root: &Path,
+) -> Result<()> {
+    for output in outputs {
         let Some(path) = &output.path else {
             continue;
         };
@@ -396,12 +411,18 @@ pub fn materialize_named_caches(
     record: &TaskCacheRecord,
     workspace_root: &Path,
 ) -> Result<()> {
-    for output in &record.outputs {
+    materialize_named_cache_artifacts(&record.outputs, &workspace_cache_id(workspace_root))
+}
+
+pub fn materialize_named_cache_artifacts(
+    outputs: &[CachedArtifact],
+    workspace_id: &str,
+) -> Result<()> {
+    for output in outputs {
         let Some(named_cache) = &output.named_cache else {
             continue;
         };
-        let destination =
-            named_cache_key_path(workspace_root, &named_cache.name, &named_cache.key)?;
+        let destination = named_cache_key_path_by_id(workspace_id, &named_cache.name, &named_cache.key)?;
         match output.kind.as_str() {
             "directory" => materialize_cached_directory(output, &destination)?,
             "file" | "manifest" => {

@@ -25,6 +25,7 @@
 //! - Digests are bare hex strings (as in `imp-store`); the REv2
 //!   `Digest{hash,size_bytes}` pair appears with the proto conversion.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
@@ -92,6 +93,23 @@ pub struct ExecRunOpts {
     pub materialize: bool,
 }
 
+/// Hermetic action sent to an execution service. Input capture and output
+/// materialization are frontend responsibilities; the executor receives only
+/// content-addressed input and fully resolved environment state.
+pub struct ExecAction {
+    pub argv: Vec<String>,
+    pub display: String,
+    pub env: BTreeMap<String, String>,
+    pub config_digest: String,
+    pub input_digest: String,
+    pub outputs: Vec<ExecIoSpec>,
+    pub tools: Vec<ExecToolSpec>,
+    pub impure: bool,
+    pub force_cache: bool,
+    pub no_cache: bool,
+    pub sandbox_retention: SandboxRetention,
+}
+
 /// When a per-run sandbox root is deleted. Sandboxes are ephemeral by default;
 /// keeping them around is only useful for post-mortem debugging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -135,6 +153,16 @@ pub struct ExecRunResult {
     /// rule thread this run's output straight into a later `run({inputs})` call
     /// as a `{kind:"digest"}` entry, without materializing to the workspace first.
     pub output_digest: Option<String>,
+    pub outputs: Vec<imp_store::cache::CachedArtifact>,
+}
+
+#[derive(Serialize)]
+pub struct ExecOutcome {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub output_digest: String,
+    pub outputs: Vec<imp_store::cache::CachedArtifact>,
 }
 
 // ---------------------------------------------------------------------------
@@ -190,20 +218,20 @@ pub trait ExecutionService: Send + Sync {
     /// Run one action (or replay it from the action/task cache).
     fn execute(
         &self,
-        workspace_root: &Path,
-        opts: ExecRunOpts,
+        workspace_id: &str,
+        action: ExecAction,
         cancellation: Option<&AtomicBool>,
-    ) -> Result<ExecRunResult>;
+    ) -> Result<ExecOutcome>;
 
     /// Persistent named cache directories keyed by (name, key) — Bazel/Pants
     /// style append-only caches (toolchain installs, compiler caches).
-    fn cache_dir_get(&self, workspace_root: &Path, name: &str, key: &str)
+    fn cache_dir_get(&self, workspace_id: &str, name: &str, key: &str)
         -> Result<Option<PathBuf>>;
-    fn cache_dir_has(&self, workspace_root: &Path, name: &str, key: &str) -> Result<bool>;
+    fn cache_dir_has(&self, workspace_id: &str, name: &str, key: &str) -> Result<bool>;
     /// Copy `source` (file or directory) into the cache slot for (name, key).
     fn cache_dir_put(
         &self,
-        workspace_root: &Path,
+        workspace_id: &str,
         name: &str,
         key: &str,
         source: &Path,
@@ -229,7 +257,7 @@ pub trait ExecutionService: Send + Sync {
     /// Start (or join) a persistent named worker process.
     async fn worker_start(
         &self,
-        workspace_root: &Path,
+        workspace_id: &str,
         name: &str,
         spec: WorkerSpec,
     ) -> Result<WorkerHandle>;

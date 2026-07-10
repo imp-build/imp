@@ -46,6 +46,9 @@ struct Cli {
     /// Skip syncing workspace to target environment
     #[arg(long, global = true)]
     no_sync: bool,
+    /// Route sandboxed execution through the local daemon.
+    #[arg(long, global = true)]
+    daemon: bool,
     #[command(subcommand)]
     command: Cmd,
 }
@@ -123,7 +126,16 @@ enum Cmd {
         /// Workspace-rooted test modules, e.g. //rules/odin/index_test
         modules: Vec<String>,
     },
+    /// Run or inspect the local execution daemon.
+    #[command(hide = true)]
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCmd,
+    },
 }
+
+#[derive(Subcommand)]
+enum DaemonCmd { Serve, Status, Stop }
 
 #[derive(clap::Args)]
 struct GoalArgs {
@@ -286,6 +298,16 @@ async fn resolve_workspace_tool_bin(name: &str) -> Result<PathBuf> {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+    if cli.daemon {
+        std::env::set_var("IMP_DAEMON", "1");
+    }
+    if let Cmd::Daemon { command } = &cli.command {
+        match command {
+            DaemonCmd::Serve => return imp_daemon::lifecycle::serve().await,
+            DaemonCmd::Status => { println!("{}", if imp_daemon::lifecycle::status() { "running" } else { "stopped" }); return Ok(()); }
+            DaemonCmd::Stop => { imp_daemon::client::RemoteExecutionService::shutdown_existing()?; return Ok(()); }
+        }
+    }
     let cancellation = install_termination_signal_flag()?;
 
     let ui = ui::Session::start();
@@ -349,6 +371,7 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
         Cmd::RulesTest { modules } => {
             return cmd_rules_test(modules, Arc::clone(&cancellation), tree).await;
         }
+        Cmd::Daemon { .. } => unreachable!("daemon handled before UI setup"),
         Cmd::GenerateBuild { check, selectors } => {
             return cmd_generate_build(*check, selectors, tree).await;
         }
@@ -447,7 +470,8 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
         | Cmd::Package(_)
         | Cmd::Run(_)
         | Cmd::Goal { .. }
-        | Cmd::RulesTest { .. } => unreachable!("handled before environment setup"),
+        | Cmd::RulesTest { .. }
+        | Cmd::Daemon { .. } => unreachable!("handled before environment setup"),
     }
 }
 

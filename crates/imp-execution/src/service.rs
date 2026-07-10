@@ -9,11 +9,11 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 use imp_exec_api::{
-    Capabilities, ExecRunOpts, ExecRunResult, ExecutionService, WorkerHandle, WorkerSpec,
+    Capabilities, ExecAction, ExecOutcome, ExecutionService, WorkerHandle, WorkerSpec,
 };
-use imp_store::cache::named_cache_key_path;
+use imp_store::cache::named_cache_key_path_by_id;
 
-use crate::exec::exec_run_inner;
+use crate::exec::exec_run_hermetic;
 use crate::fetch;
 use crate::worker::{new_worker_registry, WorkerRegistry};
 
@@ -46,39 +46,39 @@ impl Default for LocalExecutionService {
 impl ExecutionService for LocalExecutionService {
     fn execute(
         &self,
-        workspace_root: &Path,
-        opts: ExecRunOpts,
+        workspace_id: &str,
+        action: ExecAction,
         cancellation: Option<&AtomicBool>,
-    ) -> Result<ExecRunResult> {
-        exec_run_inner(workspace_root, opts, cancellation)
+    ) -> Result<ExecOutcome> {
+        exec_run_hermetic(workspace_id, action, cancellation)
     }
 
     fn cache_dir_get(
         &self,
-        workspace_root: &Path,
+        workspace_id: &str,
         name: &str,
         key: &str,
     ) -> Result<Option<PathBuf>> {
-        match named_cache_key_path(workspace_root, name, key) {
+        match named_cache_key_path_by_id(workspace_id, name, key) {
             Ok(p) if p.is_dir() => Ok(Some(p)),
             _ => Ok(None),
         }
     }
 
-    fn cache_dir_has(&self, workspace_root: &Path, name: &str, key: &str) -> Result<bool> {
-        Ok(named_cache_key_path(workspace_root, name, key)
+    fn cache_dir_has(&self, workspace_id: &str, name: &str, key: &str) -> Result<bool> {
+        Ok(named_cache_key_path_by_id(workspace_id, name, key)
             .map(|p| p.is_dir())
             .unwrap_or(false))
     }
 
     fn cache_dir_put(
         &self,
-        workspace_root: &Path,
+        workspace_id: &str,
         name: &str,
         key: &str,
         source: &Path,
     ) -> Result<()> {
-        let target = named_cache_key_path(workspace_root, name, key)?;
+        let target = named_cache_key_path_by_id(workspace_id, name, key)?;
         std::fs::create_dir_all(&target)
             .with_context(|| format!("create {}", target.display()))?;
         if source.is_dir() {
@@ -118,11 +118,11 @@ impl ExecutionService for LocalExecutionService {
 
     async fn worker_start(
         &self,
-        workspace_root: &Path,
+        workspace_id: &str,
         name: &str,
         spec: WorkerSpec,
     ) -> Result<WorkerHandle> {
-        crate::worker::worker_start(&self.workers, workspace_root, name, spec).await
+        crate::worker::worker_start(&self.workers, workspace_id, name, spec).await
     }
 
     fn worker_get(&self, name: &str) -> Result<Option<WorkerHandle>> {
@@ -162,18 +162,19 @@ mod tests {
         // everything else without touching process-global env.
         let workspace = tempfile::tempdir().unwrap();
         let root = workspace.path();
+        let workspace_id = imp_store::cache::workspace_cache_id(root);
         let service = LocalExecutionService::new();
-        assert!(!service.cache_dir_has(root, "svc-test", "k1").unwrap());
-        assert!(service.cache_dir_get(root, "svc-test", "k1").unwrap().is_none());
+        assert!(!service.cache_dir_has(&workspace_id, "svc-test", "k1").unwrap());
+        assert!(service.cache_dir_get(&workspace_id, "svc-test", "k1").unwrap().is_none());
 
         let src = tempfile::tempdir().unwrap();
         std::fs::write(src.path().join("tool.txt"), b"hello").unwrap();
         service
-            .cache_dir_put(root, "svc-test", "k1", src.path())
+            .cache_dir_put(&workspace_id, "svc-test", "k1", src.path())
             .unwrap();
 
-        assert!(service.cache_dir_has(root, "svc-test", "k1").unwrap());
-        let slot = service.cache_dir_get(root, "svc-test", "k1").unwrap().unwrap();
+        assert!(service.cache_dir_has(&workspace_id, "svc-test", "k1").unwrap());
+        let slot = service.cache_dir_get(&workspace_id, "svc-test", "k1").unwrap().unwrap();
         assert_eq!(std::fs::read(slot.join("tool.txt")).unwrap(), b"hello");
     }
 

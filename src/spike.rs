@@ -12,9 +12,10 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use imp_store::cache::{artifact_relative_path, digest_json, store_file_blob};
-use imp_exec_api::{ExecRunOpts, ExecutionService, SandboxRetention, WorkerSpec};
+use imp_store::cache::{artifact_relative_path, digest_json, store_file_blob, workspace_cache_id};
+use imp_exec_api::{ExecAction, ExecRunOpts, ExecutionService, SandboxRetention, WorkerSpec};
 use imp_execution::service::LocalExecutionService;
+use imp_daemon::client::RemoteExecutionService;
 use crate::exec_bridge::{parse_io_specs, parse_tool_specs};
 use crate::loader::{
     resolve_workspace_module, validate_workspace_module_path, ModuleKind, ModuleSource,
@@ -34,6 +35,13 @@ use walkdir::WalkDir;
 
 pub(crate) const WORKSPACE_FILE: &str = "imp.workspace.js";
 pub(crate) const BUILD_FILE: &str = "BUILD.js";
+
+fn make_execution_service() -> Result<Arc<dyn ExecutionService>> {
+    if std::env::var("IMP_DAEMON").ok().as_deref() == Some("1") {
+        return Ok(Arc::new(RemoteExecutionService::connect()?));
+    }
+    Ok(Arc::new(LocalExecutionService::new()))
+}
 
 // ---------------------------------------------------------------------------
 // Public data types
@@ -315,7 +323,7 @@ pub(crate) async fn load_workspace_with_rules(
         Arc::new(Mutex::new(None));
     let selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(None));
     let goal_flags: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
-    let service: Arc<dyn ExecutionService> = Arc::new(LocalExecutionService::new());
+    let service: Arc<dyn ExecutionService> = make_execution_service()?;
 
     // ----- QuickJS runtime + context -----
     let rt = Runtime::new().context("create QuickJS runtime")?;
@@ -1250,7 +1258,7 @@ fn register_globals<'js>(
         ctx.clone(),
         move |name: String, key: String, source: String| -> rquickjs::Result<()> {
             service_cache_put
-                .cache_dir_put(&wc, &name, &key, Path::new(&source))
+                .cache_dir_put(&workspace_cache_id(&wc), &name, &key, Path::new(&source))
                 .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("{e:#}")))
         },
     )?;
@@ -1262,7 +1270,7 @@ fn register_globals<'js>(
         ctx.clone(),
         move |name: String, key: String| -> rquickjs::Result<Option<String>> {
             let path = service_cache_get
-                .cache_dir_get(&wc, &name, &key)
+                .cache_dir_get(&workspace_cache_id(&wc), &name, &key)
                 .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("{e:#}")))?;
             Ok(path.map(|p| p.to_string_lossy().into_owned()))
         },
@@ -1275,7 +1283,7 @@ fn register_globals<'js>(
         ctx.clone(),
         move |name: String, key: String| -> rquickjs::Result<bool> {
             service_cache_has
-                .cache_dir_has(&wc, &name, &key)
+                .cache_dir_has(&workspace_cache_id(&wc), &name, &key)
                 .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("{e:#}")))
         },
     )?;
@@ -1319,7 +1327,7 @@ fn register_globals<'js>(
                     health_check_argv,
                 };
                 let handle = service
-                    .worker_start(&wc, &name, spec)
+                    .worker_start(&workspace_cache_id(&wc), &name, spec)
                     .await
                     .map_err(|e| rquickjs::Exception::throw_message(&ctx, &format!("{e:#}")))?;
                 serde_json::to_string(&handle).map_err(|e| {
@@ -1786,9 +1794,52 @@ fn register_globals<'js>(
                 );
                 let display = run_opts.display.clone();
                 let cancellation = sched.cancellation_flag();
+                let workspace_id = workspace_cache_id(&root);
                 let result = sched
                     .run(parent, display, move || {
-                        service.execute(&root, run_opts, Some(cancellation.as_ref()))
+                        if !run_opts.sandbox {
+                            if !run_opts.impure {
+                                anyhow::bail!("run({{ sandbox: false }}) requires impure: true");
+                            }
+                            return imp_execution::exec::exec_run_unsandboxed(
+                                &root,
+                                run_opts,
+                                Some(cancellation.as_ref()),
+                                None,
+                            )
+                            .map(|result| imp_exec_api::ExecOutcome {
+                                stdout: result.stdout,
+                                stderr: result.stderr,
+                                exit_code: result.exit_code,
+                                output_digest: result.output_digest.unwrap_or_default(),
+                                outputs: Vec::new(),
+                            });
+                        }
+                        let input_digest = imp_execution::staging::resolve_input_digest(
+                            &root,
+                            &run_opts.inputs,
+                        )?;
+                        let env = imp_execution::staging::resolve_base_env(&run_opts.env)?;
+                        let materialize = run_opts.materialize;
+                        let action = ExecAction {
+                            argv: run_opts.argv,
+                            display: run_opts.display,
+                            env,
+                            config_digest: run_opts.config_digest,
+                            input_digest,
+                            outputs: run_opts.outputs,
+                            tools: run_opts.tools,
+                            impure: run_opts.impure,
+                            force_cache: run_opts.force_cache,
+                            no_cache: run_opts.no_cache,
+                            sandbox_retention: run_opts.sandbox_retention,
+                        };
+                        let result = service.execute(&workspace_id, action, Some(cancellation.as_ref()))?;
+                        if materialize {
+                            imp_execution::staging::materialize_outputs(&result.outputs, &root)?;
+                        }
+                        imp_execution::staging::materialize_named_caches(&result.outputs, &workspace_id)?;
+                        Ok(result)
                     })
                     .await
                     // Throw a real JS Exception: message lives in a JS string
