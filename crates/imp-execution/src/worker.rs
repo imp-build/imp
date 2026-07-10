@@ -32,10 +32,7 @@ use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use tokio::sync::OnceCell;
 
-
 pub use imp_exec_api::{WorkerHandle, WorkerSpec};
-
-
 
 pub type WorkerRegistry = Arc<Mutex<HashMap<String, Arc<OnceCell<WorkerHandle>>>>>;
 
@@ -97,9 +94,7 @@ fn run_with_worker_env(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    command
-        .output()
-        .with_context(|| format!("spawn {program}"))
+    command.output().with_context(|| format!("spawn {program}"))
 }
 
 fn is_healthy(handle: &WorkerHandle, spec: &WorkerSpec) -> bool {

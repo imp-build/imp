@@ -372,7 +372,9 @@ pub fn resolve_in_trie(trie: &DigestTrie, path: &str) -> Result<ResolvedEntry> {
         }
     }
     // Empty path (root) resolves to the directory itself.
-    Ok(ResolvedEntry::Directory(DirectoryDigest::from_trie(current)?))
+    Ok(ResolvedEntry::Directory(DirectoryDigest::from_trie(
+        current,
+    )?))
 }
 
 // ---------------------------------------------------------------------------
@@ -404,10 +406,7 @@ pub fn diff(before: &DigestTrie, after: &DigestTrie) -> Result<Vec<PathChange>> 
 
 /// Convenience wrapper over `diff` for already-digest-only inputs: resolves
 /// each to a tree (loading from CAS as needed), then diffs them.
-pub fn diff_digests(
-    before: &DirectoryDigest,
-    after: &DirectoryDigest,
-) -> Result<Vec<PathChange>> {
+pub fn diff_digests(before: &DirectoryDigest, after: &DirectoryDigest) -> Result<Vec<PathChange>> {
     diff(before.tree()?, after.tree()?)
 }
 
@@ -509,10 +508,7 @@ pub fn nest_file(
 
 /// Wrap an already-captured directory tree under `relative_path` — the directory
 /// analog of `nest_file`.
-pub fn nest_directory(
-    relative_path: &str,
-    inner: &DirectoryDigest,
-) -> Result<DirectoryDigest> {
+pub fn nest_directory(relative_path: &str, inner: &DirectoryDigest) -> Result<DirectoryDigest> {
     let components: Vec<&str> = relative_path.split('/').collect();
     let (name, parents) = components
         .split_last()
@@ -784,11 +780,7 @@ fn build_trie_from_nodes(nodes: BTreeMap<String, BuildNode>) -> Result<DigestTri
 /// a hardlinked workspace file that a user or tool later edits in place would
 /// silently corrupt the shared CAS blob. Workspace materialization must always
 /// copy (`link_files: false`).
-pub fn materialize_trie(
-    trie: &DigestTrie,
-    destination: &Path,
-    link_files: bool,
-) -> Result<()> {
+pub fn materialize_trie(trie: &DigestTrie, destination: &Path, link_files: bool) -> Result<()> {
     std::fs::create_dir_all(destination)
         .with_context(|| format!("create {}", destination.display()))?;
     for entry in trie.entries() {

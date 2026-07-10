@@ -239,17 +239,11 @@ pub trait ExecutionService: Send + Sync {
 
     /// Persistent named cache directories keyed by (name, key) — Bazel/Pants
     /// style append-only caches (toolchain installs, compiler caches).
-    fn cache_dir_get(&self, workspace_id: &str, name: &str, key: &str)
-        -> Result<Option<PathBuf>>;
+    fn cache_dir_get(&self, workspace_id: &str, name: &str, key: &str) -> Result<Option<PathBuf>>;
     fn cache_dir_has(&self, workspace_id: &str, name: &str, key: &str) -> Result<bool>;
     /// Copy `source` (file or directory) into the cache slot for (name, key).
-    fn cache_dir_put(
-        &self,
-        workspace_id: &str,
-        name: &str,
-        key: &str,
-        source: &Path,
-    ) -> Result<()>;
+    fn cache_dir_put(&self, workspace_id: &str, name: &str, key: &str, source: &Path)
+        -> Result<()>;
 
     /// Download a URL to a local file, content-cached by URL (≈ Remote Asset
     /// API `Fetch`).

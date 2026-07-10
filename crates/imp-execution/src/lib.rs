@@ -3,7 +3,7 @@
 //! (`fetch`). Consumes the CAS/digest layer from `imp-store`; knows nothing
 //! about the JS rule graph.
 pub mod exec;
-pub mod service;
 pub mod fetch;
-pub mod worker;
+pub mod service;
 pub mod staging;
+pub mod worker;

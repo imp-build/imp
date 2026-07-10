@@ -71,19 +71,11 @@ pub struct NamedCacheBinding {
 // Named cache key path
 // ---------------------------------------------------------------------------
 
-pub fn named_cache_key_path(
-    workspace_root: &Path,
-    name: &str,
-    key: &str,
-) -> Result<PathBuf> {
+pub fn named_cache_key_path(workspace_root: &Path, name: &str, key: &str) -> Result<PathBuf> {
     named_cache_key_path_by_id(&workspace_cache_id(workspace_root), name, key)
 }
 
-pub fn named_cache_key_path_by_id(
-    workspace_id: &str,
-    name: &str,
-    key: &str,
-) -> Result<PathBuf> {
+pub fn named_cache_key_path_by_id(workspace_id: &str, name: &str, key: &str) -> Result<PathBuf> {
     let root = cache_root()?
         .join("named")
         .join(workspace_id)
@@ -371,10 +363,7 @@ pub fn write_task_cache_record(record: &TaskCacheRecord) -> Result<()> {
     Ok(())
 }
 
-pub fn materialize_cached_outputs(
-    record: &TaskCacheRecord,
-    workspace_root: &Path,
-) -> Result<()> {
+pub fn materialize_cached_outputs(record: &TaskCacheRecord, workspace_root: &Path) -> Result<()> {
     materialize_cached_artifacts(&record.outputs, workspace_root)
 }
 
@@ -407,10 +396,7 @@ pub fn materialize_cached_artifacts(
 /// Materialize any outputs bound to a named cache slot (via `output({ namedCache })`)
 /// from their CAS content. Runs after both fresh executions and task-cache hits, so a
 /// named cache wiped between runs is transparently repopulated.
-pub fn materialize_named_caches(
-    record: &TaskCacheRecord,
-    workspace_root: &Path,
-) -> Result<()> {
+pub fn materialize_named_caches(record: &TaskCacheRecord, workspace_root: &Path) -> Result<()> {
     materialize_named_cache_artifacts(&record.outputs, &workspace_cache_id(workspace_root))
 }
 
@@ -422,7 +408,8 @@ pub fn materialize_named_cache_artifacts(
         let Some(named_cache) = &output.named_cache else {
             continue;
         };
-        let destination = named_cache_key_path_by_id(workspace_id, &named_cache.name, &named_cache.key)?;
+        let destination =
+            named_cache_key_path_by_id(workspace_id, &named_cache.name, &named_cache.key)?;
         match output.kind.as_str() {
             "directory" => materialize_cached_directory(output, &destination)?,
             "file" | "manifest" => {
@@ -676,7 +663,11 @@ mod tests {
     fn write_workspace_narrows_to_subtree() {
         let source = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(source.path().join("out").join("nested")).unwrap();
-        std::fs::write(source.path().join("out").join("nested").join("f.txt"), b"content").unwrap();
+        std::fs::write(
+            source.path().join("out").join("nested").join("f.txt"),
+            b"content",
+        )
+        .unwrap();
 
         let digest = crate::digest::capture_directory(source.path()).unwrap();
 
@@ -714,7 +705,11 @@ mod tests {
 
         let dest = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dest.path().join("src")).unwrap();
-        std::fs::write(dest.path().join("src").join("handwritten.h"), b"handwritten").unwrap();
+        std::fs::write(
+            dest.path().join("src").join("handwritten.h"),
+            b"handwritten",
+        )
+        .unwrap();
         let destination = dest.path().join("src").join("gen.h");
 
         write_workspace(digest.digest(), Some("out/gen.h"), &destination).unwrap();
@@ -741,6 +736,9 @@ mod tests {
 
         write_workspace(digest.digest(), Some("gen.h"), &destination).unwrap();
 
-        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "new content");
+        assert_eq!(
+            std::fs::read_to_string(&destination).unwrap(),
+            "new content"
+        );
     }
 }

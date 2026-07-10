@@ -20,9 +20,13 @@ use imp_store::cache::{
     validate_tool_name, write_task_cache_record, CachedArtifact, TaskCacheRecord,
     TASK_CACHE_VERSION,
 };
-use imp_store::digest::{capture_directory, merge_digests, nest_directory, nest_file, DirectoryDigest};
+use imp_store::digest::{
+    capture_directory, merge_digests, nest_directory, nest_file, DirectoryDigest,
+};
 
-pub use imp_exec_api::{ExecAction, ExecIoSpec, ExecRunOpts, ExecRunResult, ExecToolSpec, SandboxRetention};
+pub use imp_exec_api::{
+    ExecAction, ExecIoSpec, ExecRunOpts, ExecRunResult, ExecToolSpec, SandboxRetention,
+};
 
 /// Execute a frontend-staged action. The compatibility implementation below
 /// reuses the mature sandbox runner with a digest-only input and disabled
@@ -47,9 +51,11 @@ pub fn exec_run_hermetic_with_start(
         .iter()
         .map(|(key, value)| format!("{key}={value}"))
         .collect();
-    let output_key: Vec<serde_json::Value> = action.outputs.iter().map(|o| {
-        serde_json::json!({"path": o.path, "kind": o.kind})
-    }).collect();
+    let output_key: Vec<serde_json::Value> = action
+        .outputs
+        .iter()
+        .map(|o| serde_json::json!({"path": o.path, "kind": o.kind}))
+        .collect();
     let legacy = ExecRunOpts {
         argv: action.argv.clone(),
         display: action.display.clone(),
@@ -79,12 +85,16 @@ pub fn exec_run_hermetic_with_start(
         "input_digest": action.input_digest,
         "outputs": output_key,
     }))?;
-    let outputs = if !result.outputs.is_empty() { result.outputs.clone() } else { imp_store::cache::task_record_path(&task_key)
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|text| serde_json::from_str::<TaskCacheRecord>(&text).ok())
-        .map(|record| record.outputs)
-        .unwrap_or_default() };
+    let outputs = if !result.outputs.is_empty() {
+        result.outputs.clone()
+    } else {
+        imp_store::cache::task_record_path(&task_key)
+            .ok()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| serde_json::from_str::<TaskCacheRecord>(&text).ok())
+            .map(|record| record.outputs)
+            .unwrap_or_default()
+    };
     Ok(imp_exec_api::ExecOutcome {
         stdout: result.stdout,
         stderr: result.stderr,
@@ -354,9 +364,6 @@ fn signal_child_process_group(child: &Child, signal: &str) -> bool {
 // JS run() API — exec context for rule exec() functions
 // ---------------------------------------------------------------------------
 
-
-
-
 /// RAII guard that removes a sandbox root on drop unless the configured
 /// retention policy says to keep it. `succeeded` is flipped to `true` right
 /// before a successful return so the guard covers every exit path — normal
@@ -399,9 +406,6 @@ impl Drop for SandboxGuard {
         }
     }
 }
-
-
-
 
 pub fn materialize_tools_into_sandbox(
     tools: &[ExecToolSpec],
@@ -932,7 +936,9 @@ fn add_executable_library_path(
         } else {
             sandbox_root.join(program)
         };
-        let Some(directory) = program_path.parent() else { return };
+        let Some(directory) = program_path.parent() else {
+            return;
+        };
         let key = if cfg!(target_os = "macos") {
             "DYLD_LIBRARY_PATH"
         } else {

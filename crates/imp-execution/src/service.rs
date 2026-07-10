@@ -63,12 +63,7 @@ impl ExecutionService for LocalExecutionService {
         exec_run_hermetic_with_start(workspace_id, action, cancellation, started)
     }
 
-    fn cache_dir_get(
-        &self,
-        workspace_id: &str,
-        name: &str,
-        key: &str,
-    ) -> Result<Option<PathBuf>> {
+    fn cache_dir_get(&self, workspace_id: &str, name: &str, key: &str) -> Result<Option<PathBuf>> {
         match named_cache_key_path_by_id(workspace_id, name, key) {
             Ok(p) if p.is_dir() => Ok(Some(p)),
             _ => Ok(None),
@@ -89,8 +84,7 @@ impl ExecutionService for LocalExecutionService {
         source: &Path,
     ) -> Result<()> {
         let target = named_cache_key_path_by_id(workspace_id, name, key)?;
-        std::fs::create_dir_all(&target)
-            .with_context(|| format!("create {}", target.display()))?;
+        std::fs::create_dir_all(&target).with_context(|| format!("create {}", target.display()))?;
         if source.is_dir() {
             copy_dir_into(source, &target)
                 .with_context(|| format!("copy dir {}", source.display()))?;
@@ -174,8 +168,13 @@ mod tests {
         let root = workspace.path();
         let workspace_id = imp_store::cache::workspace_cache_id(root);
         let service = LocalExecutionService::new();
-        assert!(!service.cache_dir_has(&workspace_id, "svc-test", "k1").unwrap());
-        assert!(service.cache_dir_get(&workspace_id, "svc-test", "k1").unwrap().is_none());
+        assert!(!service
+            .cache_dir_has(&workspace_id, "svc-test", "k1")
+            .unwrap());
+        assert!(service
+            .cache_dir_get(&workspace_id, "svc-test", "k1")
+            .unwrap()
+            .is_none());
 
         let src = tempfile::tempdir().unwrap();
         std::fs::write(src.path().join("tool.txt"), b"hello").unwrap();
@@ -183,8 +182,13 @@ mod tests {
             .cache_dir_put(&workspace_id, "svc-test", "k1", src.path())
             .unwrap();
 
-        assert!(service.cache_dir_has(&workspace_id, "svc-test", "k1").unwrap());
-        let slot = service.cache_dir_get(&workspace_id, "svc-test", "k1").unwrap().unwrap();
+        assert!(service
+            .cache_dir_has(&workspace_id, "svc-test", "k1")
+            .unwrap());
+        let slot = service
+            .cache_dir_get(&workspace_id, "svc-test", "k1")
+            .unwrap()
+            .unwrap();
         assert_eq!(std::fs::read(slot.join("tool.txt")).unwrap(), b"hello");
     }
 
