@@ -440,35 +440,47 @@ fn materialize_cached_directory(output: &CachedArtifact, destination: &Path) -> 
     Ok(())
 }
 
-/// Materialize an arbitrary digest (optionally narrowed to a subtree via
-/// `from`) directly into the workspace at `destination`, bypassing `run()`
-/// entirely — no sandbox, no cache record, no process spawn. This is the
-/// primitive behind `writeWorkspace()`, used by `package` products to publish
-/// a final digest under `dist/` without going through the `materialize:true`
-/// path (and its warning). Always copies, never hardlinks, for the same
-/// reason as `materialize_cached_directory`.
+/// Materialize an arbitrary digest (optionally narrowed via `from`) directly
+/// into the workspace at `destination`, bypassing `run()` entirely — no
+/// sandbox, no cache record, no process spawn. This is the primitive behind
+/// `writeWorkspace()`. `from` may resolve to a directory (published wholesale
+/// under `destination`, as used by `package` products publishing to `dist/`)
+/// or to an individual file/symlink (published at exactly `destination`,
+/// leaving any sibling paths untouched) — a digest already knows the content
+/// of every file it contains, so publishing one file out of it needs no more
+/// capture work than publishing the whole subtree. Always copies, never
+/// hardlinks, for the same reason as `materialize_cached_directory`.
 pub(crate) fn write_workspace(digest: &str, from: Option<&str>, destination: &Path) -> Result<()> {
     let root = crate::digest::DirectoryDigest::from_digest(digest.to_string());
-    let tree = root.tree()?;
-    let tree = match from {
-        Some(path) => crate::digest::subtree_from_trie(tree, path)?,
-        None => root.clone(),
+    let resolved = match from {
+        Some(path) => crate::digest::resolve_in_trie(root.tree()?, path)?,
+        None => crate::digest::ResolvedEntry::Directory(root),
     };
 
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    match resolved {
+        crate::digest::ResolvedEntry::Directory(dir) => {
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            let temp = temp_sibling_path(destination, "tmp-dir");
+            remove_path_if_exists(&temp)?;
+            crate::digest::materialize_trie(dir.tree()?, &temp, false)?;
+            remove_path_if_exists(destination)?;
+            std::fs::rename(&temp, destination).with_context(|| {
+                format!("publish {} to {}", temp.display(), destination.display())
+            })?;
+        }
+        crate::digest::ResolvedEntry::File { digest, mode } => {
+            let source = cas_blob_path(&digest)?;
+            publish_file_atomically(&source, destination)?;
+            restore_file_mode(destination, mode)?;
+        }
+        crate::digest::ResolvedEntry::Symlink { target } => {
+            remove_path_if_exists(destination)?;
+            create_symlink(&target, destination)?;
+        }
     }
-    let temp = temp_sibling_path(destination, "tmp-dir");
-    remove_path_if_exists(&temp)?;
-    crate::digest::materialize_trie(tree.tree()?, &temp, false)?;
-    remove_path_if_exists(destination)?;
-    std::fs::rename(&temp, destination).with_context(|| {
-        format!(
-            "publish {} to {}",
-            temp.display(),
-            destination.display()
-        )
-    })?;
     Ok(())
 }
 
@@ -654,5 +666,46 @@ mod tests {
         let dest = tempfile::tempdir().unwrap();
         let destination = dest.path().join("published");
         assert!(write_workspace(digest.digest(), Some("missing"), &destination).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_workspace_publishes_a_single_file_without_touching_siblings() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source.path().join("out")).unwrap();
+        std::fs::write(source.path().join("out").join("gen.h"), b"generated").unwrap();
+
+        let digest = crate::digest::capture_directory(source.path()).unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dest.path().join("src")).unwrap();
+        std::fs::write(dest.path().join("src").join("handwritten.h"), b"handwritten").unwrap();
+        let destination = dest.path().join("src").join("gen.h");
+
+        write_workspace(digest.digest(), Some("out/gen.h"), &destination).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "generated");
+        // The sibling file that was never part of the published digest must
+        // survive untouched — publishing one file must not wipe its directory.
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("src").join("handwritten.h")).unwrap(),
+            "handwritten"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_workspace_overwrites_an_existing_file_at_the_destination() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("gen.h"), b"new content").unwrap();
+        let digest = crate::digest::capture_directory(source.path()).unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        let destination = dest.path().join("gen.h");
+        std::fs::write(&destination, b"stale content").unwrap();
+
+        write_workspace(digest.digest(), Some("gen.h"), &destination).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "new content");
     }
 }

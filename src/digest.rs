@@ -326,26 +326,53 @@ pub(crate) fn read_file_from_trie(trie: &DigestTrie, path: &str) -> Result<Strin
     }
 }
 
-/// Return the directory node at `path` within `trie` as its own
-/// `DirectoryDigest`, stripped of the path prefix it was nested under — e.g.
-/// pulling a single `run()` output's tree (nested under its declared output
-/// path, see `nest_directory`) back out as a standalone tree rooted at that
-/// output's content, suitable for `write_workspace` to land at an unrelated
-/// destination path.
-pub(crate) fn subtree_from_trie(trie: &DigestTrie, path: &str) -> Result<DirectoryDigest> {
+/// Whatever sits at a resolved path within a digest tree — a directory
+/// (further walkable) or a leaf (file/symlink), returned by `resolve_in_trie`.
+pub(crate) enum ResolvedEntry {
+    Directory(DirectoryDigest),
+    File { digest: String, mode: Option<u32> },
+    Symlink { target: String },
+}
+
+/// Resolve `path` within `trie` to whichever entry sits there. All but the
+/// last path component must be directories; the last component may be any
+/// entry kind. Used by `write_workspace` so a single declared `run()` file
+/// output (nested under its full output path, see `nest_file`) can be
+/// published individually — without requiring its containing directory to be
+/// captured/published as a whole, which would be unsafe for outputs that sit
+/// alongside unrelated hand-written files (e.g. a generated header next to
+/// hand-written ones in the same directory).
+pub(crate) fn resolve_in_trie(trie: &DigestTrie, path: &str) -> Result<ResolvedEntry> {
     let mut current = trie.clone();
-    for part in path.split('/').filter(|p| !p.is_empty()) {
+    let mut parts = path.split('/').filter(|p| !p.is_empty()).peekable();
+    while let Some(part) = parts.next() {
         let entry = current
             .entries()
             .iter()
             .find(|e| e.name() == part)
             .with_context(|| format!("path '{path}' not found in digest (missing '{part}')"))?;
-        match entry {
-            Entry::Directory(d) => current = DigestTrie::load(&d.digest)?,
-            _ => bail!("path '{path}' not found in digest ('{part}' is not a directory)"),
+        if parts.peek().is_some() {
+            match entry {
+                Entry::Directory(d) => current = DigestTrie::load(&d.digest)?,
+                _ => bail!("path '{path}' not found in digest ('{part}' is not a directory)"),
+            }
+        } else {
+            return Ok(match entry {
+                Entry::Directory(d) => {
+                    ResolvedEntry::Directory(DirectoryDigest::from_digest(d.digest.clone()))
+                }
+                Entry::File(f) => ResolvedEntry::File {
+                    digest: f.digest.clone(),
+                    mode: f.mode,
+                },
+                Entry::Symlink(s) => ResolvedEntry::Symlink {
+                    target: s.target.clone(),
+                },
+            });
         }
     }
-    DirectoryDigest::from_trie(current)
+    // Empty path (root) resolves to the directory itself.
+    Ok(ResolvedEntry::Directory(DirectoryDigest::from_trie(current)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -656,12 +683,22 @@ enum BuildNode {
 /// paths (e.g. glob matches) rather than a blanket directory walk — the direct
 /// analog of Pants' `PathGlobs` capture, since glob results are typically a
 /// scattered subset of files rather than one clean subtree.
+///
+/// Paths that don't exist on disk are silently omitted rather than erroring —
+/// callers use this to snapshot a "before" state for paths that may not have
+/// been generated yet (e.g. a codegen output on its first run), and a missing
+/// path should just diff as `Added` once it appears, not fail the capture.
 pub(crate) fn capture_paths(workspace_root: &Path, paths: &[String]) -> Result<DirectoryDigest> {
     let mut root: BTreeMap<String, BuildNode> = BTreeMap::new();
     for relative in paths {
         let absolute = workspace_root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
-        let metadata = std::fs::symlink_metadata(&absolute)
-            .with_context(|| format!("stat {}", absolute.display()))?;
+        let metadata = match std::fs::symlink_metadata(&absolute) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("stat {}", absolute.display()));
+            }
+        };
         let components: Vec<&str> = relative.split('/').collect();
         insert_path(&mut root, &components, &absolute, &metadata)?;
     }
@@ -883,6 +920,49 @@ mod tests {
     }
 
     #[test]
+    fn capture_paths_omits_missing_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("present.txt"), "here");
+
+        let paths = vec!["present.txt".to_string(), "missing.txt".to_string()];
+        let captured = capture_paths(dir.path(), &paths).unwrap();
+
+        let names: Vec<&str> = captured
+            .tree()
+            .unwrap()
+            .entries()
+            .iter()
+            .map(Entry::name)
+            .collect();
+        assert_eq!(names, vec!["present.txt"]);
+    }
+
+    #[test]
+    fn capture_paths_all_missing_is_empty_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = vec!["missing.txt".to_string()];
+        let captured = capture_paths(dir.path(), &paths).unwrap();
+        assert!(captured.tree().unwrap().entries().is_empty());
+    }
+
+    #[test]
+    fn capture_paths_missing_then_present_diffs_as_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = vec!["gen.txt".to_string()];
+
+        let before = capture_paths(dir.path(), &paths).unwrap();
+        write(&dir.path().join("gen.txt"), "generated");
+        let after = capture_paths(dir.path(), &paths).unwrap();
+
+        let changes = diff_digests(&before, &after).unwrap();
+        assert_eq!(changes.len(), 1);
+        match &changes[0] {
+            PathChange::Added(path) => assert_eq!(path, "gen.txt"),
+            other => panic!("expected Added, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn diff_identical_trees_is_empty() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
@@ -1011,13 +1091,16 @@ mod tests {
     }
 
     #[test]
-    fn subtree_from_trie_strips_the_prefix() {
+    fn resolve_in_trie_strips_the_prefix_for_a_directory() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         write(&src.join("out").join("nested").join("f.txt"), "content");
 
         let digest = capture_directory(&src).unwrap();
-        let sub = subtree_from_trie(digest.tree().unwrap(), "out").unwrap();
+        let sub = match resolve_in_trie(digest.tree().unwrap(), "out").unwrap() {
+            ResolvedEntry::Directory(dir) => dir,
+            _ => panic!("expected a directory"),
+        };
 
         assert_eq!(
             read_file_from_trie(sub.tree().unwrap(), "nested/f.txt").unwrap(),
@@ -1027,12 +1110,43 @@ mod tests {
     }
 
     #[test]
-    fn subtree_from_trie_errors_on_missing_path() {
+    fn resolve_in_trie_errors_on_missing_path() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         write(&src.join("a.txt"), "a");
 
         let digest = capture_directory(&src).unwrap();
-        assert!(subtree_from_trie(digest.tree().unwrap(), "missing").is_err());
+        assert!(resolve_in_trie(digest.tree().unwrap(), "missing").is_err());
+    }
+
+    #[test]
+    fn resolve_in_trie_resolves_a_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("out").join("gen.h"), "generated content");
+
+        let digest = capture_directory(&src).unwrap();
+        match resolve_in_trie(digest.tree().unwrap(), "out/gen.h").unwrap() {
+            ResolvedEntry::File {
+                digest: file_digest,
+                ..
+            } => {
+                assert_eq!(
+                    std::fs::read_to_string(cas_blob_path(&file_digest).unwrap()).unwrap(),
+                    "generated content"
+                );
+            }
+            _ => panic!("expected a file"),
+        }
+    }
+
+    #[test]
+    fn resolve_in_trie_errors_when_a_middle_component_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("a.txt"), "a");
+
+        let digest = capture_directory(&src).unwrap();
+        assert!(resolve_in_trie(digest.tree().unwrap(), "a.txt/nested").is_err());
     }
 }

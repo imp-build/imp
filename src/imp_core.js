@@ -1310,17 +1310,23 @@ export function readFileInDigest(digest, path) {
 }
 
 /**
- * Materialize `digest` (optionally narrowed to the subtree at `opts.from`)
+ * Materialize `digest` (optionally narrowed to the entry at `opts.from`)
  * directly into the workspace at `path` — no sandbox, no cache record, no
  * process spawn. This is the one blessed way for a `package` product to
  * publish a final digest under dist/, bypassing run()'s materialize:true
  * path (and its warning) entirely.
  *
+ * `opts.from` may resolve to a directory (published wholesale at `path`,
+ * replacing whatever was there — the dist/ package pattern) or to an
+ * individual file/symlink (published at exactly `path`, leaving sibling
+ * paths untouched — e.g. publishing one declared `run()` file output next to
+ * hand-written files in the same directory).
+ *
  * @param {string} path Workspace-relative destination path.
  * @param {string} digest Digest string (e.g. a run()'s outputDigest).
  * @param {object} [opts]
- * @param {string} [opts.from] Subtree path within `digest` to write, stripping
- *   its prefix — e.g. a run() output's declared output_path.
+ * @param {string} [opts.from] Path within `digest` to write, stripping its
+ *   prefix — e.g. a run() output's declared output_path.
  * @returns {void}
  */
 export function writeWorkspace(path, digest, opts) {
