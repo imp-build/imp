@@ -1,29 +1,67 @@
 #!/usr/bin/env python3
-"""Generates .github/workflows/docs.yml from structured step data.
+"""Generates .github/workflows/docs.yml from structured job/step data.
 
 A small, stdlib-only stand-in for the codegen->workspace pattern this repo's
 imp supports via generatedFiles()/writeWorkspace() — see //ci:docs_workflow
-in ci/BUILD.js. `imp generate //ci:docs_workflow --check` fails the build if
-this script's output ever drifts from the committed workflow file.
+in ci/BUILD.js. `imp goal generate //ci:docs_workflow --check` fails the
+build if this script's output ever drifts from the committed workflow file.
+
+Jobs chain: `build` compiles the imp binary once and uploads it as an
+artifact; `check`, `package`, and `deploy` download that artifact and run it
+"installed" instead of each doing their own cargo build/run.
 """
 import sys
 
 SITE_TARGET = "//docs:site"
+SITE_CHECK_TARGET = "//ci:docs_workflow"
 SITE_ARTIFACT_PATH = "dist/docs/site/public"
 RUST_TOOLCHAIN = "stable"
+IMP_ARTIFACT = "imp-linux"
+MAIN_PUSH_ONLY = "github.ref == 'refs/heads/main' && github.event_name == 'push'"
+
+DOWNLOAD_IMP_STEPS = [
+    {"name": "Download imp binary", "uses": "actions/download-artifact@v4", "with": {"name": IMP_ARTIFACT, "path": "."}},
+    {"name": "Make imp executable", "run": "chmod +x imp"},
+]
 
 BUILD_STEPS = [
     {"uses": "actions/checkout@v4"},
     {"uses": f"dtolnay/rust-toolchain@{RUST_TOOLCHAIN}"},
     {"uses": "Swatinem/rust-cache@v2"},
     {"name": "Build imp", "run": "cargo build --release"},
-    {"name": "Package docs site", "run": f"./target/release/imp package {SITE_TARGET}"},
+    {"name": "Upload imp binary", "uses": "actions/upload-artifact@v4", "with": {"name": IMP_ARTIFACT, "path": "target/release/imp"}},
+]
+
+CHECK_STEPS = [
+    {"uses": "actions/checkout@v4"},
+    *DOWNLOAD_IMP_STEPS,
+    {"name": "Check generated files", "run": f"./imp goal generate {SITE_CHECK_TARGET} --check"},
+]
+
+PACKAGE_STEPS = [
+    {"uses": "actions/checkout@v4"},
+    *DOWNLOAD_IMP_STEPS,
+    {"name": "Package docs site", "run": f"./imp package {SITE_TARGET}"},
     {"uses": "actions/configure-pages@v5"},
     {"uses": "actions/upload-pages-artifact@v3", "with": {"path": SITE_ARTIFACT_PATH}},
 ]
 
 DEPLOY_STEPS = [
     {"name": "Deploy", "id": "deploy", "uses": "actions/deploy-pages@v4"},
+]
+
+JOBS = [
+    {"id": "build", "runs_on": "ubuntu-latest", "steps": BUILD_STEPS},
+    {"id": "check", "needs": "build", "runs_on": "ubuntu-latest", "steps": CHECK_STEPS},
+    {"id": "package", "needs": "build", "runs_on": "ubuntu-latest", "if": MAIN_PUSH_ONLY, "steps": PACKAGE_STEPS},
+    {
+        "id": "deploy",
+        "needs": "package",
+        "runs_on": "ubuntu-latest",
+        "if": MAIN_PUSH_ONLY,
+        "environment": {"name": "github-pages", "url": "${{ steps.deploy.outputs.page_url }}"},
+        "steps": DEPLOY_STEPS,
+    },
 ]
 
 
@@ -52,6 +90,22 @@ def render_steps(steps, indent):
     return "\n\n".join("\n".join(render_step(s, indent)) for s in steps)
 
 
+def render_job(job):
+    lines = [f"  {job['id']}:"]
+    if "needs" in job:
+        lines.append(f"    needs: {job['needs']}")
+    if "if" in job:
+        lines.append(f"    if: {job['if']}")
+    lines.append(f"    runs-on: {job['runs_on']}")
+    if "environment" in job:
+        lines.append("    environment:")
+        for k, v in job["environment"].items():
+            lines.append(f"      {k}: {v}")
+    lines.append("    steps:")
+    lines.append(render_steps(job["steps"], 6))
+    return "\n".join(lines)
+
+
 def render_workflow():
     lines = [
         "name: Deploy docs",
@@ -59,6 +113,7 @@ def render_workflow():
         "on:",
         "  push:",
         "    branches: [main]",
+        "  pull_request:",
         "  workflow_dispatch:",
         "",
         "permissions:",
@@ -71,19 +126,7 @@ def render_workflow():
         "  cancel-in-progress: false",
         "",
         "jobs:",
-        "  build:",
-        "    runs-on: ubuntu-latest",
-        "    steps:",
-        render_steps(BUILD_STEPS, 6),
-        "",
-        "  deploy:",
-        "    needs: build",
-        "    runs-on: ubuntu-latest",
-        "    environment:",
-        "      name: github-pages",
-        "      url: ${{ steps.deploy.outputs.page_url }}",
-        "    steps:",
-        render_steps(DEPLOY_STEPS, 6),
+        "\n\n".join(render_job(job) for job in JOBS),
     ]
     return "\n".join(lines) + "\n"
 

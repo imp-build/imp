@@ -3,6 +3,7 @@ name: Deploy docs
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -27,8 +28,48 @@ jobs:
       - name: Build imp
         run: cargo build --release
 
+      - name: Upload imp binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: imp-linux
+          path: target/release/imp
+
+  check:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download imp binary
+        uses: actions/download-artifact@v4
+        with:
+          name: imp-linux
+          path: .
+
+      - name: Make imp executable
+        run: chmod +x imp
+
+      - name: Check generated files
+        run: ./imp goal generate //ci:docs_workflow --check
+
+  package:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download imp binary
+        uses: actions/download-artifact@v4
+        with:
+          name: imp-linux
+          path: .
+
+      - name: Make imp executable
+        run: chmod +x imp
+
       - name: Package docs site
-        run: ./target/release/imp package //docs:site
+        run: ./imp package //docs:site
 
       - uses: actions/configure-pages@v5
 
@@ -37,7 +78,8 @@ jobs:
           path: dist/docs/site/public
 
   deploy:
-    needs: build
+    needs: package
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
