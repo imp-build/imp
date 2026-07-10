@@ -33,6 +33,15 @@ pub fn exec_run_hermetic(
     action: ExecAction,
     cancellation: Option<&AtomicBool>,
 ) -> Result<imp_exec_api::ExecOutcome> {
+    exec_run_hermetic_with_start(_workspace_id, action, cancellation, &|| {})
+}
+
+pub fn exec_run_hermetic_with_start(
+    _workspace_id: &str,
+    action: ExecAction,
+    cancellation: Option<&AtomicBool>,
+    started: &dyn Fn(),
+) -> Result<imp_exec_api::ExecOutcome> {
     let env = action
         .env
         .iter()
@@ -62,7 +71,7 @@ pub fn exec_run_hermetic(
         materialize: false,
     };
     let action_digest = live_action_digest(&legacy, &action.env)?;
-    let result = exec_run_inner(Path::new("/"), legacy, cancellation)
+    let result = exec_run_inner_with_start(Path::new("/"), legacy, cancellation, Some(started))
         .with_context(|| format!("hermetic executor action for workspace {_workspace_id}"))?;
     let task_key = imp_store::cache::digest_json(&serde_json::json!({
         "version": TASK_CACHE_VERSION,
@@ -597,6 +606,15 @@ pub fn exec_run_inner(
     opts: ExecRunOpts,
     cancellation: Option<&AtomicBool>,
 ) -> Result<ExecRunResult> {
+    exec_run_inner_with_start(workspace_root, opts, cancellation, None)
+}
+
+fn exec_run_inner_with_start(
+    workspace_root: &Path,
+    opts: ExecRunOpts,
+    cancellation: Option<&AtomicBool>,
+    started: Option<&dyn Fn()>,
+) -> Result<ExecRunResult> {
     if !opts.sandbox {
         if !opts.impure {
             bail!("run({{ sandbox: false }}) requires impure: true");
@@ -778,6 +796,9 @@ pub fn exec_run_inner(
     #[cfg(unix)]
     command.process_group(0);
 
+    if let Some(started) = started {
+        started();
+    }
     let mut child = command
         .spawn()
         .with_context(|| format!("run() command in {}", sandbox_root.display()))?;

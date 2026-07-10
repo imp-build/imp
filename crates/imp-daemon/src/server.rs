@@ -13,7 +13,32 @@ impl proto::execution_server::Execution for ExecutionServer {
     type ExecuteStream = std::pin::Pin<Box<dyn Stream<Item=Result<proto::ExecuteEvent, Status>> + Send>>;
     async fn execute(&self, request: Request<proto::ExecuteRequest>) -> Result<Response<Self::ExecuteStream>, Status> {
         let req=request.into_inner(); let action=convert::action_from_proto(req.action.ok_or_else(||Status::invalid_argument("missing action"))?).map_err(|e|Status::invalid_argument(e.to_string()))?; let svc=Arc::clone(&self.service); let (tx,rx)=tokio::sync::mpsc::channel(2);
-        tokio::task::spawn_blocking(move || { let _=tx.blocking_send(Ok(proto::ExecuteEvent { event:Some(proto::execute_event::Event::Started(proto::Started { display:action.display.clone() })) })); let result=svc.execute(&req.workspace_id, action, None); let event=match result { Ok(o)=>proto::ExecuteEvent { event:Some(proto::execute_event::Event::Finished(proto::Finished { result:Some(proto::finished::Result::Outcome(convert::outcome_to_proto(o))) })) }, Err(e)=>proto::ExecuteEvent { event:Some(proto::execute_event::Event::Finished(proto::Finished { result:Some(proto::finished::Result::Failure(proto::Failure { message:format!("{e:#}") })) })) } }; let _=tx.blocking_send(Ok(event)); });
+        tokio::task::spawn_blocking(move || {
+            let display = action.display.clone();
+            let started = || {
+                let _ = tx.blocking_send(Ok(proto::ExecuteEvent {
+                    event: Some(proto::execute_event::Event::Started(proto::Started {
+                        display: display.clone(),
+                    })),
+                }));
+            };
+            let result = svc.execute_with_start(&req.workspace_id, action, None, &started);
+            let event = match result {
+                Ok(o) => proto::ExecuteEvent {
+                    event: Some(proto::execute_event::Event::Finished(proto::Finished {
+                        result: Some(proto::finished::Result::Outcome(convert::outcome_to_proto(o))),
+                    })),
+                },
+                Err(e) => proto::ExecuteEvent {
+                    event: Some(proto::execute_event::Event::Finished(proto::Finished {
+                        result: Some(proto::finished::Result::Failure(proto::Failure {
+                            message: format!("{e:#}"),
+                        })),
+                    })),
+                },
+            };
+            let _ = tx.blocking_send(Ok(event));
+        });
         Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
     async fn cache_dir_get(&self, r:Request<proto::CacheDirRequest>)->Result<Response<proto::CacheDirResponse>,Status>{let x=r.into_inner();Ok(Response::new(proto::CacheDirResponse{present:self.service.cache_dir_get(&x.workspace_id,&x.name,&x.key).map_err(err)?.is_some(),path:String::new()}))}

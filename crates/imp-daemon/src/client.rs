@@ -84,8 +84,11 @@ impl Drop for RemoteExecutionService {
 #[async_trait::async_trait]
 impl ExecutionService for RemoteExecutionService {
     fn execute(&self, workspace_id:&str, action:ExecAction, _cancellation:Option<&AtomicBool>)->Result<ExecOutcome>{
+        self.execute_with_start(workspace_id, action, _cancellation, &|| {})
+    }
+    fn execute_with_start(&self, workspace_id:&str, action:ExecAction, _cancellation:Option<&AtomicBool>, started:&dyn Fn())->Result<ExecOutcome>{
         let mut c=self.client()?; let req=proto::ExecuteRequest{workspace_id:workspace_id.to_owned(),action:Some(convert::action_to_proto(action))}; let mut stream=self.block_on_external(|rt| Ok(rt.block_on(c.execute(Request::new(req)))?.into_inner()))?;
-        loop { match self.block_on_external(|rt| Ok(rt.block_on(stream.message())?))? { Some(e)=>if let Some(proto::execute_event::Event::Finished(f))=e.event { return match f.result { Some(proto::finished::Result::Outcome(o))=>Ok(convert::outcome_from_proto(o)), Some(proto::finished::Result::Failure(f))=>bail!("{}",f.message), None=>bail!("daemon returned empty result") }; }, None=>bail!("daemon closed execution stream") } }
+        loop { match self.block_on_external(|rt| Ok(rt.block_on(stream.message())?))? { Some(e)=>match e.event { Some(proto::execute_event::Event::Started(_))=>started(), Some(proto::execute_event::Event::Finished(f))=>return match f.result { Some(proto::finished::Result::Outcome(o))=>Ok(convert::outcome_from_proto(o)), Some(proto::finished::Result::Failure(f))=>bail!("{}",f.message), None=>bail!("daemon returned empty result") }, None=>{} }, None=>bail!("daemon closed execution stream") } }
     }
     fn cache_dir_get(&self,w:&str,n:&str,k:&str)->Result<Option<PathBuf>>{let mut c=self.client()?;let x=self.block_on_external(|rt| Ok(rt.block_on(c.cache_dir_get(Request::new(proto::CacheDirRequest{workspace_id:w.into(),name:n.into(),key:k.into(),source:String::new()})))?.into_inner()))?;Ok(if x.present{Some(x.path.into())}else{None})}
     fn cache_dir_has(&self,w:&str,n:&str,k:&str)->Result<bool>{let mut c=self.client()?;Ok(self.block_on_external(|rt| Ok(rt.block_on(c.cache_dir_has(Request::new(proto::CacheDirRequest{workspace_id:w.into(),name:n.into(),key:k.into(),source:String::new()})))?.into_inner().present))?)}

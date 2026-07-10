@@ -1796,11 +1796,12 @@ fn register_globals<'js>(
                 let cancellation = sched.cancellation_flag();
                 let workspace_id = workspace_cache_id(&root);
                 let result = sched
-                    .run(parent, display, move || {
+                    .run(parent, display, move |run_context| {
                         if !run_opts.sandbox {
                             if !run_opts.impure {
                                 anyhow::bail!("run({{ sandbox: false }}) requires impure: true");
                             }
+                            run_context.started();
                             return imp_execution::exec::exec_run_unsandboxed(
                                 &root,
                                 run_opts,
@@ -1834,7 +1835,12 @@ fn register_globals<'js>(
                             no_cache: run_opts.no_cache,
                             sandbox_retention: run_opts.sandbox_retention,
                         };
-                        let result = service.execute(&workspace_id, action, Some(cancellation.as_ref()))?;
+                        let result = service.execute_with_start(
+                            &workspace_id,
+                            action,
+                            Some(cancellation.as_ref()),
+                            &|| run_context.started(),
+                        )?;
                         if materialize {
                             imp_execution::staging::materialize_outputs(&result.outputs, &root)?;
                         }
@@ -1953,7 +1959,7 @@ fn register_globals<'js>(
                 let parent: Option<u64> = opts.get::<_, Option<f64>>("__owner")?.map(|n| n as u64);
                 let watch: Option<Vec<String>> = opts.get("watch")?;
                 let (stdout, stderr, exit_code, changed_files) = sched
-                    .run(parent, display.clone(), move || -> Result<_> {
+                    .run(parent, display.clone(), move |run_context| -> Result<_> {
                         let pre = watch
                             .as_deref()
                             .map(|patterns| {
@@ -1965,6 +1971,7 @@ fn register_globals<'js>(
                         let (program, args) = argv
                             .split_first()
                             .ok_or_else(|| anyhow::anyhow!("argv must not be empty"))?;
+                        run_context.started();
                         let output = std::process::Command::new(program)
                             .args(args)
                             .current_dir(&root)

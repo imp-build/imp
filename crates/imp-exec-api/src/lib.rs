@@ -223,6 +223,20 @@ pub trait ExecutionService: Send + Sync {
         cancellation: Option<&AtomicBool>,
     ) -> Result<ExecOutcome>;
 
+    /// Execute while notifying the caller when the action has crossed the
+    /// process-start boundary. Implementations may leave the callback unused
+    /// for transports that do not expose that lifecycle event yet.
+    fn execute_with_start(
+        &self,
+        workspace_id: &str,
+        action: ExecAction,
+        cancellation: Option<&AtomicBool>,
+        started: &dyn Fn(),
+    ) -> Result<ExecOutcome> {
+        let _ = started;
+        self.execute(workspace_id, action, cancellation)
+    }
+
     /// Persistent named cache directories keyed by (name, key) — Bazel/Pants
     /// style append-only caches (toolchain installs, compiler caches).
     fn cache_dir_get(&self, workspace_id: &str, name: &str, key: &str)

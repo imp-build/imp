@@ -72,10 +72,10 @@ pub enum TaskEvent {
 /// Bounded, observable `spawn_blocking` executor. Cloneable via `Arc`.
 pub struct Scheduler {
     /// Bounds concurrent jobs to `jobs`.
-    permits: Semaphore,
+    permits: Arc<Semaphore>,
     /// Stable slot ids in `[0, jobs)` handed to running jobs so the UI can show
     /// a fixed set of lanes. A permit is always held before a slot is taken.
-    slots: Mutex<Vec<usize>>,
+    slots: Arc<Mutex<Vec<usize>>>,
     events: UnboundedSender<TaskEvent>,
     next_job: AtomicU64,
     /// Jobs submitted but not yet finished (queued or running). The watchdog
@@ -84,6 +84,56 @@ pub struct Scheduler {
     /// Pulsed whenever `outstanding` changes, so the watchdog can wait cheaply.
     activity: Notify,
     cancellation: Arc<AtomicBool>,
+}
+
+/// Handle given to a scheduled job so it can announce that it actually
+/// started doing work. Reserving a scheduler slot is not sufficient: a job
+/// may be satisfied entirely by the execution cache.
+pub struct RunContext {
+    events: UnboundedSender<TaskEvent>,
+    id: u64,
+    display: String,
+    permits: Arc<Semaphore>,
+    slots: Arc<Mutex<Vec<usize>>>,
+    state: Arc<RunState>,
+}
+
+struct RunState {
+    slot: Mutex<Option<usize>>,
+    permit: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
+}
+
+impl RunContext {
+    pub fn started(&self) {
+        let mut slot = self.state.slot.lock().unwrap();
+        if slot.is_some() {
+            return;
+        }
+        let permit = loop {
+            match self.permits.clone().try_acquire_owned() {
+                Ok(permit) => break permit,
+                Err(tokio::sync::TryAcquireError::NoPermits) => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(tokio::sync::TryAcquireError::Closed) => {
+                    panic!("scheduler semaphore closed")
+                }
+            }
+        };
+        let assigned = self.slots.lock().unwrap().pop().unwrap_or(0);
+        *slot = Some(assigned);
+        *self.state.permit.lock().unwrap() = Some(permit);
+        let _ = self.events.send(TaskEvent::LaneStarted {
+            kind: LaneKind::Sandbox,
+            slot: assigned,
+            id: self.id,
+            display: self.display.clone(),
+        });
+        let _ = self.events.send(TaskEvent::Running {
+            id: self.id,
+            detail: Some(format!("slot {assigned}")),
+        });
+    }
 }
 
 impl Scheduler {
@@ -96,8 +146,8 @@ impl Scheduler {
     ) -> Arc<Self> {
         let jobs = jobs.max(1);
         Arc::new(Self {
-            permits: Semaphore::new(jobs),
-            slots: Mutex::new((0..jobs).collect()),
+            permits: Arc::new(Semaphore::new(jobs)),
+            slots: Arc::new(Mutex::new((0..jobs).collect())),
             events,
             next_job: AtomicU64::new(0),
             outstanding: AtomicUsize::new(0),
@@ -137,8 +187,9 @@ impl Scheduler {
     }
 
     /// Submit a blocking unit of work owned by memo node `parent`. Emits
-    /// `Pending` immediately, waits for a free slot, then emits `Running`/`Done`
-    /// around running `f` on a blocking worker. Returns whatever `f` returns.
+    /// `Pending` immediately, waits for a free slot, then runs `f` on a
+    /// blocking worker. The job calls [`RunContext::started`] when it has
+    /// crossed its actual work boundary; cache-only jobs never need to call it.
     pub async fn run<T, F>(
         &self,
         parent: Option<u64>,
@@ -146,7 +197,7 @@ impl Scheduler {
         f: F,
     ) -> Result<T>
     where
-        F: FnOnce() -> Result<T> + Send + 'static,
+        F: FnOnce(RunContext) -> Result<T> + Send + 'static,
         T: Send + 'static,
     {
         let display = display.into();
@@ -158,12 +209,6 @@ impl Scheduler {
             display: display.clone(),
         });
 
-        let permit = self
-            .permits
-            .acquire()
-            .await
-            .expect("scheduler semaphore closed");
-
         if self.cancellation.load(Ordering::SeqCst) {
             let _ = self.events.send(TaskEvent::Done {
                 id,
@@ -173,26 +218,28 @@ impl Scheduler {
             bail!("canceled before execution");
         }
 
-        let slot = self.slots.lock().unwrap().pop().unwrap_or(0);
-        let _ = self.events.send(TaskEvent::LaneStarted {
-            kind: LaneKind::Sandbox,
-            slot,
+        let state = Arc::new(RunState {
+            slot: Mutex::new(None),
+            permit: Mutex::new(None),
+        });
+        let context = RunContext {
+            events: self.events.clone(),
             id,
             display: display.clone(),
-        });
-        let _ = self.events.send(TaskEvent::Running {
-            id,
-            detail: Some(format!("slot {slot}")),
-        });
-
-        let result = tokio::task::spawn_blocking(f).await;
-        let _ = self.events.send(TaskEvent::LaneCleared {
-            kind: LaneKind::Sandbox,
-            slot,
-            id,
-        });
-        self.slots.lock().unwrap().push(slot);
-        drop(permit);
+            permits: Arc::clone(&self.permits),
+            slots: Arc::clone(&self.slots),
+            state: Arc::clone(&state),
+        };
+        let result = tokio::task::spawn_blocking(move || f(context)).await;
+        if let Some(slot) = state.slot.lock().unwrap().take() {
+            let _ = self.events.send(TaskEvent::LaneCleared {
+                kind: LaneKind::Sandbox,
+                slot,
+                id,
+            });
+            self.slots.lock().unwrap().push(slot);
+            drop(state.permit.lock().unwrap().take());
+        }
 
         let outcome = match &result {
             Ok(Ok(_)) => TaskOutcome::Ok,

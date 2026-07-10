@@ -13,7 +13,7 @@ use imp_exec_api::{
 };
 use imp_store::cache::named_cache_key_path_by_id;
 
-use crate::exec::exec_run_hermetic;
+use crate::exec::{exec_run_hermetic, exec_run_hermetic_with_start};
 use crate::fetch;
 use crate::worker::{new_worker_registry, WorkerRegistry};
 
@@ -51,6 +51,16 @@ impl ExecutionService for LocalExecutionService {
         cancellation: Option<&AtomicBool>,
     ) -> Result<ExecOutcome> {
         exec_run_hermetic(workspace_id, action, cancellation)
+    }
+
+    fn execute_with_start(
+        &self,
+        workspace_id: &str,
+        action: ExecAction,
+        cancellation: Option<&AtomicBool>,
+        started: &dyn Fn(),
+    ) -> Result<ExecOutcome> {
+        exec_run_hermetic_with_start(workspace_id, action, cancellation, started)
     }
 
     fn cache_dir_get(
