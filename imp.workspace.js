@@ -10,6 +10,7 @@ import { rustToolchain } from "//rules/rust";
 import { sccacheToolchain } from "//rules/rust/sccache/toolchain";
 import "//rules/workflows/build_workflow";
 import "//rules/workflows/fmt";
+import "//rules/workflows/generate";
 import "//rules/workflows/lint";
 import "//rules/workflows/lockfiles";
 import "//rules/workflows/package";
