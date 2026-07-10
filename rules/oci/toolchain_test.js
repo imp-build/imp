@@ -127,7 +127,7 @@ test("describes the named-cache-backed crane tool", async () => {
     });
 });
 
-test("downloads and extracts a toolchain via a sandboxed curl+tar run()", async () => {
+test("installs a toolchain via a single sandboxed curl|tar run()", async () => {
     await withCraneHost(async (host) => {
         const key = craneCacheKey("0.20.6", { os: "linux", arch: "x86_64" });
 
@@ -135,17 +135,15 @@ test("downloads and extracts a toolchain via a sandboxed curl+tar run()", async 
         const path = await acquireCraneToolchain("0.20.6");
 
         expect(path).toBe("/cache/crane-toolchains/0.20.6/linux-x86_64");
-        expect(host.runs.length).toBe(2);
+        expect(host.runs.length).toBe(1);
 
-        const [download, extract] = host.runs;
-        expect(download.argv[0]).toBe("sh");
-        expect(download.argv.some((arg) => arg.includes("go-containerregistry_Linux_x86_64.tar.gz"))).toBe(true);
-        expect(download.tools[0].name).toBe("curl");
-        expect(download.tools.some((t) => t.name === "gzip")).toBe(true);
-
-        expect(extract.argv[0]).toBe("sh");
-        expect(extract.outputs[0].namedCache.name).toBe("crane-toolchains");
-        expect(extract.outputs[0].namedCache.key).toBe(key);
+        const [install] = host.runs;
+        expect(install.argv[0]).toBe("sh");
+        expect(install.argv.some((arg) => arg.includes("go-containerregistry_Linux_x86_64.tar.gz"))).toBe(true);
+        expect(install.tools[0].name).toBe("curl");
+        expect(install.tools.some((t) => t.name === "gzip")).toBe(true);
+        expect(install.outputs[0].namedCache.name).toBe("crane-toolchains");
+        expect(install.outputs[0].namedCache.key).toBe(key);
 
         expect(host.calls.some((call) => call[0] === "nativeTool" && call[1] === "curl")).toBe(true);
     });

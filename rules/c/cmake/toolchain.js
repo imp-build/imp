@@ -76,13 +76,13 @@ export function cmakeCacheKey(version, plat) {
  * @param {object} [host]
  * @returns {object}
  */
-// Bare coreutils used by the download/extract scripts below. The sandbox is
-// fully hermetic — even `mkdir`/`dirname`/`tar` must be declared tools, not
-// resolved from an ambient or fixed-base PATH. Bare `sh` only auto-resolves
-// on unix (see BUILTIN_SHELL_CANDIDATES in src/exec.rs), so Windows needs
-// `sh` (Git Bash) declared as a tool too.
+// Bare coreutils used by the install script below. The sandbox is fully
+// hermetic — even `mkdir`/`tar` must be declared tools, not resolved from an
+// ambient or fixed-base PATH. Bare `sh` only auto-resolves on unix (see
+// BUILTIN_SHELL_CANDIDATES in src/exec.rs), so Windows needs `sh` (Git Bash)
+// declared as a tool too.
 function coreToolNames(plat) {
-    return ["curl", "mkdir", "dirname", "tar", "gzip", ...(plat.os === "windows" ? ["sh"] : [])];
+    return ["curl", "mkdir", "tar", "gzip", ...(plat.os === "windows" ? ["sh"] : [])];
 }
 
 export class CmakeToolchain extends Target {
@@ -167,31 +167,24 @@ export async function acquireCmakeToolchain(version) {
 
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
-    const artifact = cmakeArtifactName(version, plat);
     const url = cmakeDownloadUrl(version, plat);
-    const downloadPath = `.imp/cmake-downloads/${key}/${artifact}`;
     const extractPath = `.imp/cmake-toolchains/${key}`;
+    // tar can't sniff compression from a pipe, so -z (gzip) must be explicit
+    // on the tar.gz (unix) release; the windows .zip release isn't a filter
+    // format, so plain -xf works.
+    const tarFlags = plat.os === "windows" ? "-xf" : "-xzf";
 
     await run({
-        argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-cmake", downloadPath, url],
+        argv: ["sh", "-c", `mkdir -p "$2" && curl -fSL "$1" | tar ${tarFlags} - -C "$2" --strip-components=1`, "install-cmake", url, extractPath],
         tools: coreTools,
-        outputs: [output(output_path(downloadPath))],
-        materialize: true,
-        display: `download cmake ${version} (${plat.os}/${plat.arch})`,
-    });
-
-    await run({
-        argv: ["sh", "-c", 'mkdir -p "$2" && tar -xf "$1" -C "$2" --strip-components=1', "extract-cmake", downloadPath, extractPath],
-        tools: coreTools,
-        inputs: [{ kind: "file", path: downloadPath }],
         outputs: [
             output(output_path(extractPath), {
                 kind: "directory",
                 namedCache: { name: CMAKE_TOOLCHAIN_CACHE, key },
             }),
         ],
-        materialize: true,
-        display: `extract cmake ${version} (${plat.os}/${plat.arch})`,
+        materialize: false,
+        display: `install cmake ${version} (${plat.os}/${plat.arch})`,
     });
 
     return cacheGet(CMAKE_TOOLCHAIN_CACHE, key);

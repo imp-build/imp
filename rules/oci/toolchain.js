@@ -82,11 +82,11 @@ export function craneCacheKey(version, plat) {
     return `${version}/${plat.os}-${plat.arch}`;
 }
 
-// Bare coreutils used by the download/extract scripts below. The sandbox is
-// fully hermetic — even `mkdir`/`tar` must be declared tools, not resolved
-// from an ambient or fixed-base PATH. GNU tar shells out to a separate
-// `gzip` process to decompress `.tar.gz`.
-const CORE_TOOL_NAMES = ["curl", "mkdir", "dirname", "tar", "gzip"];
+// Bare coreutils used by the install script below. The sandbox is fully
+// hermetic — even `mkdir`/`tar` must be declared tools, not resolved from an
+// ambient or fixed-base PATH. GNU tar shells out to a separate `gzip`
+// process to decompress `.tar.gz`.
+const CORE_TOOL_NAMES = ["curl", "mkdir", "tar", "gzip"];
 
 export class CraneToolchain extends Target {
     static kind = "crane-toolchain";
@@ -170,33 +170,23 @@ export async function acquireCraneToolchain(version) {
 
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
-    const artifact = craneArtifactName(version, plat);
     const url = craneDownloadUrl(version, plat);
-    const downloadPath = `.imp/crane-downloads/${key}/${artifact}`;
     const extractPath = `.imp/crane-toolchains/${key}`;
 
-    await run({
-        argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-crane", downloadPath, url],
-        tools: coreTools,
-        outputs: [output(output_path(downloadPath))],
-        materialize: true,
-        display: `download crane ${version} (${plat.os}/${plat.arch})`,
-    });
-
     // crane's release tarball ships crane/gcrane/krane at the archive root
-    // (no wrapping directory), so no --strip-components is needed.
+    // (no wrapping directory), so no --strip-components is needed. tar
+    // can't sniff compression from a pipe, so -z (gzip) must be explicit.
     await run({
-        argv: ["sh", "-c", 'mkdir -p "$2" && tar -xf "$1" -C "$2"', "extract-crane", downloadPath, extractPath],
+        argv: ["sh", "-c", 'mkdir -p "$2" && curl -fSL "$1" | tar -xzf - -C "$2"', "install-crane", url, extractPath],
         tools: coreTools,
-        inputs: [{ kind: "file", path: downloadPath }],
         outputs: [
             output(output_path(extractPath), {
                 kind: "directory",
                 namedCache: { name: CRANE_TOOLCHAIN_CACHE, key },
             }),
         ],
-        materialize: true,
-        display: `extract crane ${version} (${plat.os}/${plat.arch})`,
+        materialize: false,
+        display: `install crane ${version} (${plat.os}/${plat.arch})`,
     });
 
     return cacheGet(CRANE_TOOLCHAIN_CACHE, key);

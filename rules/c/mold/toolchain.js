@@ -64,11 +64,11 @@ export function moldCacheKey(version, plat) {
     return `${version}/${plat.os}-${plat.arch}`;
 }
 
-// Bare coreutils used by the download/extract scripts below. The sandbox is
-// fully hermetic — even `mkdir`/`dirname`/`tar` must be declared tools, not
-// resolved from an ambient or fixed-base PATH. GNU tar shells out to a
-// separate `gzip` process to decompress `.tar.gz`.
-const CORE_TOOL_NAMES = ["curl", "mkdir", "dirname", "tar", "gzip"];
+// Bare coreutils used by the install script below. The sandbox is fully
+// hermetic — even `mkdir`/`tar` must be declared tools, not resolved from an
+// ambient or fixed-base PATH. GNU tar shells out to a separate `gzip`
+// process to decompress `.tar.gz`.
+const CORE_TOOL_NAMES = ["curl", "mkdir", "tar", "gzip"];
 
 export class MoldToolchain extends Target {
     static kind = "mold-toolchain";
@@ -160,33 +160,23 @@ export async function acquireMoldToolchain(version) {
 
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
-    const artifact = moldArtifactName(version, plat);
     const url = moldDownloadUrl(version, plat);
-    const downloadPath = `.imp/mold-downloads/${key}/${artifact}`;
     const extractPath = `.imp/mold-toolchains/${key}`;
 
-    await run({
-        argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-mold", downloadPath, url],
-        tools: coreTools,
-        outputs: [output(output_path(downloadPath))],
-        materialize: true,
-        display: `download mold ${version} (${plat.os}/${plat.arch})`,
-    });
-
     // mold's release tarball already ships bin/mold and bin/ld.mold
-    // (the name clang's -fuse-ld=mold looks for) — no wrapper needed.
+    // (the name clang's -fuse-ld=mold looks for) — no wrapper needed. tar
+    // can't sniff compression from a pipe, so -z (gzip) must be explicit.
     await run({
-        argv: ["sh", "-c", 'mkdir -p "$2" && tar -xf "$1" -C "$2" --strip-components=1', "extract-mold", downloadPath, extractPath],
+        argv: ["sh", "-c", 'mkdir -p "$2" && curl -fSL "$1" | tar -xzf - -C "$2" --strip-components=1', "install-mold", url, extractPath],
         tools: coreTools,
-        inputs: [{ kind: "file", path: downloadPath }],
         outputs: [
             output(output_path(extractPath), {
                 kind: "directory",
                 namedCache: { name: MOLD_TOOLCHAIN_CACHE, key },
             }),
         ],
-        materialize: true,
-        display: `extract mold ${version} (${plat.os}/${plat.arch})`,
+        materialize: false,
+        display: `install mold ${version} (${plat.os}/${plat.arch})`,
     });
 
     return cacheGet(MOLD_TOOLCHAIN_CACHE, key);

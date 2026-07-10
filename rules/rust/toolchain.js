@@ -103,15 +103,15 @@ export function rustSupportedPlatforms() {
     });
 }
 
-// Bare coreutils the download/install scripts need. The sandbox is fully
-// hermetic — even mkdir/dirname/chmod must be declared tools, not resolved from
-// an ambient PATH. rustup-init does its own HTTPS (using the sandbox's
-// passed-through SSL_CERT_* env), so no tar/gzip is needed. Bare `sh` only
-// auto-resolves on unix, so windows declares it explicitly.
+// Bare coreutils the install script needs. The sandbox is fully hermetic —
+// even chmod must be declared a tool, not resolved from an ambient PATH.
+// rustup-init does its own HTTPS (using the sandbox's passed-through
+// SSL_CERT_* env), so no tar/gzip is needed. Bare `sh` only auto-resolves on
+// unix, so windows declares it explicitly.
 function coreToolNames(plat) {
     return plat.os === "windows"
-        ? ["curl", "mkdir", "dirname", "sh"]
-        : ["curl", "mkdir", "dirname", "chmod"];
+        ? ["curl", "sh"]
+        : ["curl", "chmod"];
 }
 
 let defaultVersion = null;
@@ -227,33 +227,25 @@ export async function acquireRustToolchain(version) {
 
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
-    const artifact = rustArtifactName(version, plat);
     const url = rustDownloadUrl(version, plat);
-    const rustupInitPath = `.imp/rust-downloads/${key}/${artifact}`;
     const rustupHomeDir = `.imp/rustup-home/${key}`;
     const cargoHomeDir = `.imp/cargo-home/${key}`;
+    const rustupInitExe = plat.os === "windows" ? "rustup-init.exe" : "rustup-init";
+
+    // rustup-init is downloaded straight to a sandbox-local scratch file
+    // (not a declared output — it's discarded with the sandbox) since only
+    // the resulting RUSTUP_HOME/CARGO_HOME need caching. rustup writes into
+    // them, which we point at via $PWD (run() env can't expand $PWD, so
+    // this lives in the script). Profile "default" (not "minimal") is
+    // required so rustfmt is present — the fmt/format-check products
+    // (rules/rust/fmt.js) shell out to `cargo fmt`, which "minimal" doesn't
+    // install.
+    const chmodStep = plat.os === "windows" ? "" : `chmod +x "${rustupInitExe}"; `;
+    const installScript = `set -e; curl -fSL -o "${rustupInitExe}" "$1"; ${chmodStep}export RUSTUP_HOME="$PWD/$2" CARGO_HOME="$PWD/$3"; ./"${rustupInitExe}" -y --no-modify-path --profile default --default-toolchain "$4"`;
 
     await run({
-        argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-rustup-init", rustupInitPath, url],
+        argv: ["sh", "-c", installScript, "install-rust", url, rustupHomeDir, cargoHomeDir, version],
         tools: coreTools,
-        outputs: [output(output_path(rustupInitPath))],
-        materialize: true,
-        display: `download rustup-init ${RUSTUP_VERSION} (${plat.os}/${plat.arch})`,
-    });
-
-    // rustup writes into RUSTUP_HOME/CARGO_HOME, which we point at the two
-    // output dirs via $PWD (run() env can't expand $PWD, so this lives in
-    // the script). A single run commits both directories to their caches.
-    // Profile "default" (not "minimal") is required so rustfmt is present —
-    // the fmt/format-check products (rules/rust/fmt.js) shell out to
-    // `cargo fmt`, which "minimal" doesn't install.
-    const chmodStep = plat.os === "windows" ? "" : 'chmod +x "$1"; ';
-    const installScript = `set -e; ${chmodStep}export RUSTUP_HOME="$PWD/$2" CARGO_HOME="$PWD/$3"; "$1" -y --no-modify-path --profile default --default-toolchain "$4"`;
-
-    await run({
-        argv: ["sh", "-c", installScript, "install-rust", rustupInitPath, rustupHomeDir, cargoHomeDir, version],
-        tools: coreTools,
-        inputs: [{ kind: "file", path: rustupInitPath }],
         outputs: [
             output(output_path(rustupHomeDir), {
                 kind: "directory",
@@ -264,7 +256,7 @@ export async function acquireRustToolchain(version) {
                 namedCache: { name: CARGO_HOME_CACHE, key },
             }),
         ],
-        materialize: true,
+        materialize: false,
         display: `install rust ${version} (${plat.os}/${plat.arch})`,
     });
 

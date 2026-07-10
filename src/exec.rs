@@ -793,8 +793,8 @@ pub(crate) fn exec_run_inner(
         }
         if opts.materialize {
             materialize_cached_outputs(&record, workspace_root)?;
-            materialize_named_caches(&record, workspace_root)?;
         }
+        materialize_named_caches(&record, workspace_root)?;
         return Ok(ExecRunResult {
             stdout: record.stdout,
             stderr: record.stderr,
@@ -968,8 +968,8 @@ pub(crate) fn exec_run_inner(
         }
         if opts.materialize {
             materialize_cached_outputs(&record, workspace_root)?;
-            materialize_named_caches(&record, workspace_root)?;
         }
+        materialize_named_caches(&record, workspace_root)?;
     }
 
     // Command and output ingestion succeeded — let the guard delete the sandbox.
@@ -1290,6 +1290,52 @@ mod tests {
             "payload",
             "materialize: true must copy the (already cached) output into the workspace"
         );
+    }
+
+    #[test]
+    fn exec_run_materialize_false_still_populates_named_cache() {
+        // Named caches live under cache_root(), not the workspace, so
+        // populating one isn't "writing to the workspace" and must not
+        // require materialize: true. Regression test for toolchain
+        // acquisition rules (e.g. rules/c/gcc/toolchain.js) that only set
+        // materialize: true to get their named cache populated, which used
+        // to also leak the same content into the workspace as a side effect.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let mut opts = run_opts(
+            &[
+                "sh",
+                "-c",
+                "mkdir -p out && printf payload > out/toolchain.bin",
+            ],
+            &[],
+            &[],
+        );
+        opts.outputs = vec![ExecIoSpec {
+            path: Some("out".to_owned()),
+            kind: "directory".to_owned(),
+            digest: None,
+            named_cache: Some(crate::cache::OutputNamedCache {
+                name: "test-toolchains".to_owned(),
+                key: "v1/linux-x86_64".to_owned(),
+            }),
+        }];
+        opts.materialize = false;
+
+        exec_run_inner(p, opts, None).unwrap();
+
+        assert!(
+            !p.join("out").exists(),
+            "materialize: false must not write the plain workspace path"
+        );
+
+        let cache_dest = named_cache_key_path(p, "test-toolchains", "v1/linux-x86_64").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(cache_dest.join("toolchain.bin")).unwrap(),
+            "payload",
+            "named cache must be populated even when materialize: false"
+        );
+        let _ = std::fs::remove_dir_all(&cache_dest);
     }
 
     #[test]

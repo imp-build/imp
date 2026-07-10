@@ -244,17 +244,14 @@ export async function acquireZigToolchain(version) {
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
     if (!cacheHas(ZIG_TOOLCHAIN_CACHE, key)) {
-        const artifact = zigArtifactName(version, plat);
         const url = zigDownloadUrl(version, plat);
-        const downloadPath = `.imp/zig-downloads/${key}/${artifact}`;
         const extractPath = `.imp/zig-toolchains/${key}`;
         const zigExe = plat.os === "windows" ? "zig.exe" : "zig";
         const { ar, ranlib, clang, genericAr } = wrapperNames(plat);
         // Wrapper content rides in argv (positional $N) so it keys the task
         // cache without any shell interpolation touching it, same pattern as
         // odinGenRun's generated-file writes. Each wrapper is a
-        // (content, filename) positional pair after $1 (downloadPath)/$2
-        // (extractPath).
+        // (content, filename) positional pair after $1 (url)/$2 (extractPath).
         const wrappers = [
             [wrapperContent(plat, zigExe, "ar"), ar],
             [wrapperContent(plat, zigExe, "ranlib"), ranlib],
@@ -269,28 +266,23 @@ export async function acquireZigToolchain(version) {
         const chmodCmd = plat.os === "windows"
             ? ""
             : ` && ${wrappers.map((_, i) => `chmod +x "$2/${pos(4 + i * 2)}"`).join(" && ")}`;
-        const extractScript = `mkdir -p "$2" && tar -xf "$1" -C "$2" --strip-components=1 && ${writeCmds.join(" && ")}${chmodCmd}`;
+        // tar can't sniff compression from a pipe, so -J (xz) must be
+        // explicit on the tar.xz (unix) release; the windows .zip release
+        // isn't a filter format, so plain -xf works.
+        const tarFlags = plat.os === "windows" ? "-xf" : "-xJf";
+        const installScript = `mkdir -p "$2" && curl -fSL "$1" | tar ${tarFlags} - -C "$2" --strip-components=1 && ${writeCmds.join(" && ")}${chmodCmd}`;
 
         await run({
-            argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-zig", downloadPath, url],
+            argv: ["sh", "-c", installScript, "install-zig", url, extractPath, ...wrapperArgs],
             tools: coreTools,
-            outputs: [output(output_path(downloadPath))],
-            materialize: true,
-            display: `download zig ${version} (${plat.os}/${plat.arch})`,
-        });
-
-        await run({
-            argv: ["sh", "-c", extractScript, "extract-zig", downloadPath, extractPath, ...wrapperArgs],
-            tools: coreTools,
-            inputs: [{ kind: "file", path: downloadPath }],
             outputs: [
                 output(output_path(extractPath), {
                     kind: "directory",
                     namedCache: { name: ZIG_TOOLCHAIN_CACHE, key },
                 }),
             ],
-            materialize: true,
-            display: `extract zig ${version} (${plat.os}/${plat.arch})`,
+            materialize: false,
+            display: `install zig ${version} (${plat.os}/${plat.arch})`,
         });
     }
 
@@ -325,7 +317,7 @@ export async function acquireZigToolchain(version) {
                     namedCache: { name: ZIG_BUILD_CACHE, key },
                 }),
             ],
-            materialize: true,
+            materialize: false,
             display: `prewarm zig build cache ${version} (${plat.os}/${plat.arch})`,
         });
     }

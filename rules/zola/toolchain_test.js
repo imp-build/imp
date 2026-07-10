@@ -127,7 +127,7 @@ test("describes the named-cache-backed zola tool", async () => {
     });
 });
 
-test("downloads and extracts a toolchain via a sandboxed curl+tar run()", async () => {
+test("installs a toolchain via a single sandboxed curl|tar run()", async () => {
     await withZolaHost(async (host) => {
         const key = zolaCacheKey("0.22.1", { os: "linux", arch: "x86_64" });
 
@@ -135,17 +135,15 @@ test("downloads and extracts a toolchain via a sandboxed curl+tar run()", async 
         const path = await acquireZolaToolchain("0.22.1");
 
         expect(path).toBe("/cache/zola-toolchains/0.22.1/linux-x86_64");
-        expect(host.runs.length).toBe(2);
+        expect(host.runs.length).toBe(1);
 
-        const [download, extract] = host.runs;
-        expect(download.argv[0]).toBe("sh");
-        expect(download.argv.some((arg) => arg.includes("zola-v0.22.1-x86_64-unknown-linux-gnu.tar.gz"))).toBe(true);
-        expect(download.tools[0].name).toBe("curl");
-        expect(download.tools.some((t) => t.name === "gzip")).toBe(true);
-
-        expect(extract.argv[0]).toBe("sh");
-        expect(extract.outputs[0].namedCache.name).toBe("zola-toolchains");
-        expect(extract.outputs[0].namedCache.key).toBe(key);
+        const [install] = host.runs;
+        expect(install.argv[0]).toBe("sh");
+        expect(install.argv.some((arg) => arg.includes("zola-v0.22.1-x86_64-unknown-linux-gnu.tar.gz"))).toBe(true);
+        expect(install.tools[0].name).toBe("curl");
+        expect(install.tools.some((t) => t.name === "gzip")).toBe(true);
+        expect(install.outputs[0].namedCache.name).toBe("zola-toolchains");
+        expect(install.outputs[0].namedCache.key).toBe(key);
 
         expect(host.calls.some((call) => call[0] === "nativeTool" && call[1] === "curl")).toBe(true);
     });

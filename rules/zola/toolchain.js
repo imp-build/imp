@@ -70,11 +70,11 @@ export function zolaCacheKey(version, plat) {
     return `${version}/${plat.os}-${plat.arch}`;
 }
 
-// Bare coreutils used by the download/extract scripts below. The sandbox is
-// fully hermetic — even `mkdir`/`tar` must be declared tools, not resolved
-// from an ambient or fixed-base PATH. GNU tar shells out to a separate
-// `gzip` process to decompress `.tar.gz`.
-const CORE_TOOL_NAMES = ["curl", "mkdir", "dirname", "tar", "gzip"];
+// Bare coreutils used by the install script below. The sandbox is fully
+// hermetic — even `mkdir`/`tar` must be declared tools, not resolved from an
+// ambient or fixed-base PATH. GNU tar shells out to a separate `gzip`
+// process to decompress `.tar.gz`.
+const CORE_TOOL_NAMES = ["curl", "mkdir", "tar", "gzip"];
 
 export class ZolaToolchain extends Target {
     static kind = "zola-toolchain";
@@ -158,33 +158,26 @@ export async function acquireZolaToolchain(version) {
 
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
-    const artifact = zolaArtifactName(version, plat);
     const url = zolaDownloadUrl(version, plat);
-    const downloadPath = `.imp/zola-downloads/${key}/${artifact}`;
     const extractPath = `.imp/zola-toolchains/${key}`;
-
-    await run({
-        argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-zola", downloadPath, url],
-        tools: coreTools,
-        outputs: [output(output_path(downloadPath))],
-        materialize: true,
-        display: `download zola ${version} (${plat.os}/${plat.arch})`,
-    });
-
     // Zola's release tarball ships the `zola` binary at the archive root
-    // (no wrapping directory), so no --strip-components is needed.
+    // (no wrapping directory), so no --strip-components is needed. tar
+    // can't sniff compression from a pipe, so -z (gzip) must be explicit on
+    // the tar.gz (unix) release; the windows .zip release isn't a filter
+    // format, so plain -xf works.
+    const tarFlags = plat.os === "windows" ? "-xf" : "-xzf";
+
     await run({
-        argv: ["sh", "-c", 'mkdir -p "$2" && tar -xf "$1" -C "$2"', "extract-zola", downloadPath, extractPath],
+        argv: ["sh", "-c", `mkdir -p "$2" && curl -fSL "$1" | tar ${tarFlags} - -C "$2"`, "install-zola", url, extractPath],
         tools: coreTools,
-        inputs: [{ kind: "file", path: downloadPath }],
         outputs: [
             output(output_path(extractPath), {
                 kind: "directory",
                 namedCache: { name: ZOLA_TOOLCHAIN_CACHE, key },
             }),
         ],
-        materialize: true,
-        display: `extract zola ${version} (${plat.os}/${plat.arch})`,
+        materialize: false,
+        display: `install zola ${version} (${plat.os}/${plat.arch})`,
     });
 
     return cacheGet(ZOLA_TOOLCHAIN_CACHE, key);

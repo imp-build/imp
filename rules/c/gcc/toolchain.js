@@ -70,11 +70,11 @@ export function gccCacheKey(version, plat) {
     return `${version}/${plat.os}-${plat.arch}`;
 }
 
-// Bare coreutils used by the download/extract scripts below. The sandbox is
-// fully hermetic — even `mkdir`/`dirname`/`tar` must be declared tools, not
-// resolved from an ambient or fixed-base PATH. GNU tar shells out to a
-// separate `xz` process to decompress `.tar.xz`.
-const CORE_TOOL_NAMES = ["curl", "mkdir", "dirname", "tar", "xz", "chmod"];
+// Bare coreutils used by the install script below. The sandbox is fully
+// hermetic — even `mkdir`/`tar` must be declared tools, not resolved from an
+// ambient or fixed-base PATH. GNU tar shells out to a separate `xz` process
+// to decompress `.tar.xz`.
+const CORE_TOOL_NAMES = ["curl", "mkdir", "tar", "xz", "chmod"];
 
 export class GccToolchain extends Target {
     static kind = "gcc-toolchain";
@@ -166,9 +166,7 @@ export async function acquireGccToolchain(version) {
 
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
-    const artifact = gccArtifactName(version, plat);
     const url = gccDownloadUrl(version, plat);
-    const downloadPath = `.imp/gcc-downloads/${key}/${artifact}`;
     const extractPath = `.imp/gcc-toolchains/${key}`;
     const gccExe = `${GCC_EXE_PREFIX[plat.arch]}-gcc`;
     const gxxExe = `${GCC_EXE_PREFIX[plat.arch]}-g++`;
@@ -182,30 +180,25 @@ export async function acquireGccToolchain(version) {
         [`#!/bin/sh\nexec "$(dirname "$0")/${arExe}" "$@"\n`, "ar"],
     ];
     const wrapperArgs = wrappers.flat();
+    // $1 = url, $2 = extractPath, $3.. = wrapper (content, filename) pairs.
     const writeCmds = wrappers.map((_, i) => `printf %s "\${${3 + i * 2}}" > "$2/bin/\${${4 + i * 2}}"`);
     const chmodCmds = wrappers.map((_, i) => `chmod +x "$2/bin/\${${4 + i * 2}}"`);
-    const extractScript = `mkdir -p "$2" && tar -xf "$1" -C "$2" --strip-components=1 && ${writeCmds.join(" && ")} && ${chmodCmds.join(" && ")}`;
+    // tar can't sniff compression from a pipe (no filename to inspect), so
+    // -J (xz) must be explicit here even though a file-based `-xf x.tar.xz`
+    // wouldn't need it.
+    const installScript = `mkdir -p "$2" && curl -fSL "$1" | tar -xJf - -C "$2" --strip-components=1 && ${writeCmds.join(" && ")} && ${chmodCmds.join(" && ")}`;
 
     await run({
-        argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-gcc", downloadPath, url],
+        argv: ["sh", "-c", installScript, "install-gcc", url, extractPath, ...wrapperArgs],
         tools: coreTools,
-        outputs: [output(output_path(downloadPath))],
-        materialize: true,
-        display: `download gcc ${version} (${plat.os}/${plat.arch})`,
-    });
-
-    await run({
-        argv: ["sh", "-c", extractScript, "extract-gcc", downloadPath, extractPath, ...wrapperArgs],
-        tools: coreTools,
-        inputs: [{ kind: "file", path: downloadPath }],
         outputs: [
             output(output_path(extractPath), {
                 kind: "directory",
                 namedCache: { name: GCC_TOOLCHAIN_CACHE, key },
             }),
         ],
-        materialize: true,
-        display: `extract gcc ${version} (${plat.os}/${plat.arch})`,
+        materialize: false,
+        display: `install gcc ${version} (${plat.os}/${plat.arch})`,
     });
 
     return cacheGet(GCC_TOOLCHAIN_CACHE, key);

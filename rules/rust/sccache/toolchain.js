@@ -101,10 +101,10 @@ export function sccacheSupportedPlatforms() {
     });
 }
 
-// Bare coreutils used by the download/extract/init scripts below. The
-// sandbox is fully hermetic — even `mkdir`/`dirname`/`tar` must be declared
-// tools, not resolved from an ambient or fixed-base PATH.
-const CORE_TOOL_NAMES = ["curl", "mkdir", "dirname", "tar", "gzip"];
+// Bare coreutils used by the install/init scripts below. The sandbox is
+// fully hermetic — even `mkdir`/`tar` must be declared tools, not resolved
+// from an ambient or fixed-base PATH.
+const CORE_TOOL_NAMES = ["curl", "mkdir", "tar", "gzip"];
 
 export class SccacheToolchain extends Target {
     static kind = "sccache-toolchain";
@@ -197,31 +197,21 @@ export async function acquireSccacheToolchain(version) {
 
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
-    const artifact = sccacheArtifactName(version, plat);
     const url = sccacheDownloadUrl(version, plat);
-    const downloadPath = `.imp/sccache-downloads/${key}/${artifact}`;
     const extractPath = `.imp/sccache-toolchains/${key}`;
 
+    // tar can't sniff compression from a pipe, so -z (gzip) must be explicit.
     await run({
-        argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-sccache", downloadPath, url],
+        argv: ["sh", "-c", 'mkdir -p "$2" && curl -fSL "$1" | tar -xzf - -C "$2" --strip-components=1', "install-sccache", url, extractPath],
         tools: coreTools,
-        outputs: [output(output_path(downloadPath))],
-        materialize: true,
-        display: `download sccache ${version} (${plat.os}/${plat.arch})`,
-    });
-
-    await run({
-        argv: ["sh", "-c", 'mkdir -p "$2" && tar -xf "$1" -C "$2" --strip-components=1', "extract-sccache", downloadPath, extractPath],
-        tools: coreTools,
-        inputs: [{ kind: "file", path: downloadPath }],
         outputs: [
             output(output_path(extractPath), {
                 kind: "directory",
                 namedCache: { name: SCCACHE_TOOLCHAIN_CACHE, key },
             }),
         ],
-        materialize: true,
-        display: `extract sccache ${version} (${plat.os}/${plat.arch})`,
+        materialize: false,
+        display: `install sccache ${version} (${plat.os}/${plat.arch})`,
     });
 
     return cacheGet(SCCACHE_TOOLCHAIN_CACHE, key);
@@ -258,7 +248,7 @@ async function ensureSccacheDataDir() {
                 namedCache: { name: SCCACHE_DATA_CACHE, key },
             }),
         ],
-        materialize: true,
+        materialize: false,
         display: `init sccache data dir (${plat.os}/${plat.arch})`,
     });
 

@@ -120,7 +120,7 @@ test("describes the named-cache-backed zig tool", async () => {
     });
 });
 
-test("downloads and extracts a toolchain via a sandboxed curl+tar run() (linux)", async () => {
+test("installs a toolchain via a single sandboxed curl|tar run() (linux)", async () => {
     await withZigHost(async (host) => {
         const key = zigCacheKey("0.13.0", { os: "linux", arch: "x86_64" });
 
@@ -128,26 +128,25 @@ test("downloads and extracts a toolchain via a sandboxed curl+tar run() (linux)"
         const path = await acquireZigToolchain("0.13.0");
 
         expect(path).toBe("/cache/zig-toolchains/0.13.0/linux-x86_64");
-        // download, extract, and the zig-build-cache prewarm.
-        expect(host.runs.length).toBe(3);
+        // install (download|extract merged) and the zig-build-cache prewarm.
+        expect(host.runs.length).toBe(2);
 
-        const [download, extract, prewarm] = host.runs;
-        expect(download.argv[0]).toBe("sh");
+        const [install, prewarm] = host.runs;
+        expect(install.argv[0]).toBe("sh");
         // 0.13.0 predates the 0.14.1 filename-order switch, so it's
         // zig-<os>-<arch>-..., not zig-<arch>-<os>-....
-        expect(download.argv.some((arg) => arg.includes("zig-linux-x86_64-0.13.0.tar.xz"))).toBe(true);
-        expect(download.tools[0].name).toBe("curl");
+        expect(install.argv.some((arg) => arg.includes("zig-linux-x86_64-0.13.0.tar.xz"))).toBe(true);
+        expect(install.tools[0].name).toBe("curl");
         // Linux tar.xz decompression needs a separate xz process; Windows sh
         // isn't needed on this platform.
-        expect(download.tools.some((t) => t.name === "xz")).toBe(true);
-        expect(download.tools.some((t) => t.name === "sh")).toBe(false);
+        expect(install.tools.some((t) => t.name === "xz")).toBe(true);
+        expect(install.tools.some((t) => t.name === "sh")).toBe(false);
 
-        expect(extract.argv[0]).toBe("sh");
-        expect(extract.argv).toContain("zigar");
-        expect(extract.argv).toContain("zigranlib");
-        expect(extract.argv.some((arg) => typeof arg === "string" && arg.includes("#!/bin/sh"))).toBe(true);
-        expect(extract.outputs[0].namedCache.name).toBe("zig-toolchains");
-        expect(extract.outputs[0].namedCache.key).toBe(key);
+        expect(install.argv).toContain("zigar");
+        expect(install.argv).toContain("zigranlib");
+        expect(install.argv.some((arg) => typeof arg === "string" && arg.includes("#!/bin/sh"))).toBe(true);
+        expect(install.outputs[0].namedCache.name).toBe("zig-toolchains");
+        expect(install.outputs[0].namedCache.key).toBe(key);
 
         expect(prewarm.argv[0]).toBe("sh");
         expect(prewarm.tools.some((t) => t.name === "zig")).toBe(true);
@@ -158,19 +157,19 @@ test("downloads and extracts a toolchain via a sandboxed curl+tar run() (linux)"
     });
 });
 
-test("downloads and extracts a toolchain on windows with .bat wrappers and a declared sh tool", async () => {
+test("installs a toolchain on windows with .bat wrappers and a declared sh tool", async () => {
     await withZigHost({ os: "windows", arch: "x86_64" }, async (host) => {
         zigToolchain("0.13.0", { default: true });
         await acquireZigToolchain("0.13.0");
 
-        const [download, extract] = host.runs;
-        expect(download.argv.some((arg) => arg.includes("zig-windows-x86_64-0.13.0.zip"))).toBe(true);
-        expect(download.tools.some((t) => t.name === "sh")).toBe(true);
-        expect(download.tools.some((t) => t.name === "xz")).toBe(false);
+        const [install] = host.runs;
+        expect(install.argv.some((arg) => arg.includes("zig-windows-x86_64-0.13.0.zip"))).toBe(true);
+        expect(install.tools.some((t) => t.name === "sh")).toBe(true);
+        expect(install.tools.some((t) => t.name === "xz")).toBe(false);
 
-        expect(extract.argv).toContain("zigar.bat");
-        expect(extract.argv).toContain("zigranlib.bat");
-        expect(extract.argv.some((arg) => typeof arg === "string" && arg.includes("@\"%~dp0zig.exe\" ar %*"))).toBe(true);
+        expect(install.argv).toContain("zigar.bat");
+        expect(install.argv).toContain("zigranlib.bat");
+        expect(install.argv.some((arg) => typeof arg === "string" && arg.includes("@\"%~dp0zig.exe\" ar %*"))).toBe(true);
     });
 });
 

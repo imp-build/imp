@@ -111,7 +111,7 @@ test("describes the named-cache-backed gcc tool", async () => {
     });
 });
 
-test("downloads and extracts a toolchain via a sandboxed curl+tar run(), writing a clang wrapper", async () => {
+test("installs a toolchain via a single sandboxed curl|tar run(), writing a clang wrapper", async () => {
     await withGccHost(async (host) => {
         const key = gccCacheKey("2025.08-1", { os: "linux", arch: "x86_64" });
 
@@ -119,21 +119,19 @@ test("downloads and extracts a toolchain via a sandboxed curl+tar run(), writing
         const path = await acquireGccToolchain("2025.08-1");
 
         expect(path).toBe("/cache/gcc-toolchains/2025.08-1/linux-x86_64");
-        expect(host.runs.length).toBe(2);
+        expect(host.runs.length).toBe(1);
 
-        const [download, extract] = host.runs;
-        expect(download.argv[0]).toBe("sh");
-        expect(download.argv.some((arg) => arg.includes("x86-64--glibc--stable-2025.08-1.tar.xz"))).toBe(true);
-        expect(download.tools[0].name).toBe("curl");
-        expect(download.tools.some((t) => t.name === "xz")).toBe(true);
-
-        expect(extract.argv[0]).toBe("sh");
-        expect(extract.argv).toContain("clang");
-        expect(extract.argv).toContain("ar");
-        expect(extract.argv.some((arg) => typeof arg === "string" && arg.includes("#!/bin/sh") && arg.includes("x86_64-linux-gcc"))).toBe(true);
-        expect(extract.argv.some((arg) => typeof arg === "string" && arg.includes("#!/bin/sh") && arg.includes("x86_64-buildroot-linux-gnu-ar"))).toBe(true);
-        expect(extract.outputs[0].namedCache.name).toBe("gcc-toolchains");
-        expect(extract.outputs[0].namedCache.key).toBe(key);
+        const [install] = host.runs;
+        expect(install.argv[0]).toBe("sh");
+        expect(install.argv.some((arg) => arg.includes("x86-64--glibc--stable-2025.08-1.tar.xz"))).toBe(true);
+        expect(install.tools[0].name).toBe("curl");
+        expect(install.tools.some((t) => t.name === "xz")).toBe(true);
+        expect(install.argv).toContain("clang");
+        expect(install.argv).toContain("ar");
+        expect(install.argv.some((arg) => typeof arg === "string" && arg.includes("#!/bin/sh") && arg.includes("x86_64-linux-gcc"))).toBe(true);
+        expect(install.argv.some((arg) => typeof arg === "string" && arg.includes("#!/bin/sh") && arg.includes("x86_64-buildroot-linux-gnu-ar"))).toBe(true);
+        expect(install.outputs[0].namedCache.name).toBe("gcc-toolchains");
+        expect(install.outputs[0].namedCache.key).toBe(key);
 
         expect(host.calls.some((call) => call[0] === "nativeTool" && call[1] === "curl")).toBe(true);
     });
