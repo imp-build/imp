@@ -90,7 +90,6 @@ impl ExecutionService for LocalExecutionService {
         key: &str,
         source: &Path,
     ) -> Result<()> {
-        imp_store::usage::record_named_use(workspace_id, name, key);
         let target = named_cache_key_path_by_id(workspace_id, name, key)?;
         std::fs::create_dir_all(&target).with_context(|| format!("create {}", target.display()))?;
         if source.is_dir() {
@@ -103,6 +102,7 @@ impl ExecutionService for LocalExecutionService {
             std::fs::copy(source, target.join(file_name))
                 .with_context(|| format!("copy {}", source.display()))?;
         }
+        imp_store::usage::record_named_set(workspace_id, name, key, &target);
         Ok(())
     }
 
@@ -202,14 +202,14 @@ mod tests {
         // The put/get above must have left a usage row for GC to consume.
         let db = imp_store::cache::cache_root().unwrap().join("usage.db");
         let conn = rusqlite::Connection::open(db).unwrap();
-        let count: i64 = conn
+        let size: Option<u64> = conn
             .query_row(
-                "SELECT COUNT(*) FROM usage WHERE kind = 'named' AND id = ?1",
+                "SELECT size_bytes FROM usage WHERE kind = 'named' AND id = ?1",
                 [format!("{workspace_id}/svc-test/k1")],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(size, Some(5), "put must have sized the slot (b\"hello\")");
     }
 
     #[test]

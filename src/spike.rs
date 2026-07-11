@@ -832,6 +832,10 @@ fn register_globals<'js>(
 ) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
+    // GC side table: map this checkout's hashed cache namespace back to its
+    // path, so `cache gc` can prune namespaces whose checkout is gone.
+    imp_store::usage::record_workspace(&workspace_cache_id(&workspace_root), &workspace_root);
+
     // ------------------------------------------------------------------
     // __host_target(kind, attrsJson, sourcesJson, depIds, depModes) → u32 (handle id)
     // depIds: Array<number>, depModes: Array<string|null> (parallel arrays)
@@ -1047,10 +1051,14 @@ fn register_globals<'js>(
     // __host_named_cache(name)
     // ------------------------------------------------------------------
     let state_c = Arc::clone(&state);
+    let workspace_id_nc = workspace_cache_id(&workspace_root);
     let host_named_cache = Function::new(
         ctx.clone(),
         move |name: String, shared: Option<bool>| -> rquickjs::Result<()> {
             let cache = named_cache_from_name(&name, shared.unwrap_or(false))?;
+            // GC side table: declarations have their own LRU, so a cache
+            // nothing declares anymore eventually prunes wholesale.
+            imp_store::usage::record_declared_cache(&workspace_id_nc, &cache.name, cache.shared);
             let mut hs = state_c.lock().unwrap();
             if let Some(existing) = hs.named_caches.get(&cache.name) {
                 if existing != &cache {

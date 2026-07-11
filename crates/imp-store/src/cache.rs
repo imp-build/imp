@@ -260,7 +260,11 @@ pub fn digest_json<T: Serialize>(value: &T) -> Result<String> {
 
 pub fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
     let digest = digest_bytes(bytes);
-    crate::usage::record_use(crate::usage::UsageKind::Cas, &digest);
+    crate::usage::record_use_sized(
+        crate::usage::UsageKind::Cas,
+        &digest,
+        Some(bytes.len() as u64),
+    );
     let blob_path = cas_blob_path(&digest)?;
     if !blob_path.is_file() {
         if let Some(parent) = blob_path.parent() {
@@ -372,12 +376,16 @@ pub fn write_task_cache_record(record: &TaskCacheRecord) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
+    let encoded = serde_json::to_vec_pretty(record)?;
     let temp = temp_sibling_path(&path, "tmp-record");
-    std::fs::write(&temp, serde_json::to_vec_pretty(record)?)
-        .with_context(|| format!("write {}", temp.display()))?;
+    std::fs::write(&temp, &encoded).with_context(|| format!("write {}", temp.display()))?;
     std::fs::rename(&temp, &path)
         .with_context(|| format!("publish task cache record {}", path.display()))?;
-    crate::usage::record_use(crate::usage::UsageKind::Task, &record.task_key);
+    crate::usage::record_use_sized(
+        crate::usage::UsageKind::Task,
+        &record.task_key,
+        Some(encoded.len() as u64),
+    );
     Ok(())
 }
 
@@ -396,7 +404,7 @@ pub fn materialize_cached_artifacts(
         let destination = workspace_root.join(artifact_relative_path(path)?);
         match output.kind.as_str() {
             "file" | "manifest" => {
-                crate::usage::record_use(crate::usage::UsageKind::Cas, &output.digest);
+                crate::usage::record_cas_read(&output.digest);
                 let source = cas_blob_path(&output.digest)?;
                 publish_file_atomically(&source, &destination)?;
                 restore_file_mode(&destination, output.mode)?;
@@ -452,6 +460,10 @@ pub fn materialize_named_cache_artifacts(
                 output.artifact_id
             ),
         }
+        // Fresh materialization is the one place a slot's on-disk size is
+        // guaranteed current — record it (the pre-skip record above was
+        // unsized, so this upgrades the row).
+        crate::usage::record_named_set(scope_id, &named_cache.name, &named_cache.key, &destination);
     }
     Ok(())
 }
@@ -518,7 +530,7 @@ pub fn write_workspace(digest: &str, from: Option<&str>, destination: &Path) -> 
             })?;
         }
         crate::digest::ResolvedEntry::File { digest, mode } => {
-            crate::usage::record_use(crate::usage::UsageKind::Cas, &digest);
+            crate::usage::record_cas_read(&digest);
             let source = cas_blob_path(&digest)?;
             publish_file_atomically(&source, destination)?;
             restore_file_mode(destination, mode)?;

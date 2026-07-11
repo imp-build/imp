@@ -132,6 +132,25 @@ enum Cmd {
         #[command(subcommand)]
         command: DaemonCmd,
     },
+    /// Inspect or clean the shared cache root
+    Cache {
+        #[command(subcommand)]
+        command: CacheCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCmd {
+    /// Age out unused cache entries (task records, CAS blobs, named caches).
+    /// Dry run by default: prints what would be deleted.
+    Gc {
+        /// Delete entries not used within this many days
+        #[arg(long, default_value_t = 30)]
+        max_age: u64,
+        /// Actually delete; without this only a summary is printed
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -325,6 +344,14 @@ async fn run() -> Result<()> {
             }
         }
     }
+    // Cache maintenance is pure host-side work over the cache root — no
+    // workspace load, no JS. Declarations reach gc through the side tables
+    // that normal runs maintain (see imp_store::usage).
+    if let Cmd::Cache { command } = &cli.command {
+        match command {
+            CacheCmd::Gc { max_age, apply } => return cmd_cache_gc(*max_age, *apply),
+        }
+    }
     let cancellation = install_termination_signal_flag()?;
 
     let ui = ui::Session::start();
@@ -332,6 +359,61 @@ async fn run() -> Result<()> {
     ui.shutdown();
 
     result
+}
+
+fn cmd_cache_gc(max_age_days: u64, apply: bool) -> Result<()> {
+    let plan = imp_store::gc::plan(std::time::Duration::from_secs(max_age_days * 24 * 60 * 60))?;
+    println!(
+        "cache gc: {} blobs kept live by recent task records",
+        plan.marked_blobs
+    );
+    if plan.is_empty() {
+        println!("nothing to delete (max age {max_age_days} days)");
+        return Ok(());
+    }
+    let verb = if apply { "deleting" } else { "would delete" };
+    for (label, candidates) in plan.categories() {
+        if candidates.is_empty() {
+            continue;
+        }
+        let bytes: u64 = candidates.iter().map(|c| c.size_bytes).sum();
+        println!(
+            "  {verb} {} {label} ({})",
+            candidates.len(),
+            human_bytes(bytes)
+        );
+    }
+    println!("total: {}", human_bytes(plan.total_bytes()));
+    if !apply {
+        println!("dry run — pass --apply to delete");
+        return Ok(());
+    }
+    let outcome = plan.execute();
+    println!(
+        "deleted {} entries, freed {} ({} stale usage rows cleaned)",
+        outcome.deleted,
+        human_bytes(outcome.freed_bytes),
+        outcome.stale_rows_removed
+    );
+    for error in &outcome.errors {
+        eprintln!("warning: {error}");
+    }
+    Ok(())
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 fn install_termination_signal_flag() -> Result<Arc<AtomicBool>> {
@@ -388,7 +470,9 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
         Cmd::RulesTest { modules } => {
             return cmd_rules_test(modules, Arc::clone(&cancellation), tree).await;
         }
-        Cmd::Daemon { .. } => unreachable!("daemon handled before UI setup"),
+        Cmd::Daemon { .. } | Cmd::Cache { .. } => {
+            unreachable!("handled before UI setup")
+        }
         Cmd::GenerateBuild { check, selectors } => {
             let mut raw = selectors.clone();
             if *check {
@@ -492,7 +576,8 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
         | Cmd::Run(_)
         | Cmd::Goal { .. }
         | Cmd::RulesTest { .. }
-        | Cmd::Daemon { .. } => unreachable!("handled before environment setup"),
+        | Cmd::Daemon { .. }
+        | Cmd::Cache { .. } => unreachable!("handled before environment setup"),
     }
 }
 

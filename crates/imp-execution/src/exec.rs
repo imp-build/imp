@@ -720,9 +720,10 @@ fn exec_run_inner_with_start(
                     })?;
                 match cached_outputs_present(&record) {
                     Ok(()) => {
-                        imp_store::usage::record_use(
+                        imp_store::usage::record_use_sized(
                             imp_store::usage::UsageKind::Task,
                             &task_key,
+                            Some(encoded.len() as u64),
                         );
                         Some(record)
                     }

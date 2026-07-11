@@ -139,7 +139,7 @@ impl DigestTrie {
     /// directories — those are loaded lazily, only when something actually walks
     /// into them (merge, materialize, etc.).
     pub fn load(digest: &str) -> Result<DigestTrie> {
-        crate::usage::record_use(crate::usage::UsageKind::Cas, digest);
+        crate::usage::record_cas_read(digest);
         let path = cas_blob_path(digest)?;
         let bytes =
             std::fs::read(&path).with_context(|| format!("read digest node {}", path.display()))?;
@@ -151,6 +151,32 @@ impl DigestTrie {
             .map(Entry::from_node_entry)
             .collect();
         Ok(DigestTrie(Arc::from(entries)))
+    }
+}
+
+/// Call `mark` with every CAS digest reachable from a directory tree root:
+/// the node blobs themselves plus every file digest. Reads node blobs
+/// directly, deliberately without `record_cas_read` — GC's mark phase must
+/// not bump the LRU it is evaluating. Missing or unreadable node blobs are
+/// skipped silently: the tree is then only partially marked, and the record
+/// that owns it will fail at materialization time regardless of GC.
+pub fn tree_reachable_digests(root_digest: &str, mark: &mut impl FnMut(&str)) {
+    mark(root_digest);
+    let Ok(path) = cas_blob_path(root_digest) else {
+        return;
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    let Ok(node) = serde_json::from_slice::<DigestNode>(&bytes) else {
+        return;
+    };
+    for entry in node.entries {
+        match entry {
+            DigestNodeEntry::File { digest, .. } => mark(&digest),
+            DigestNodeEntry::Directory { digest, .. } => tree_reachable_digests(&digest, mark),
+            DigestNodeEntry::Symlink { .. } => {}
+        }
     }
 }
 
@@ -319,7 +345,7 @@ pub fn read_file_from_trie(trie: &DigestTrie, path: &str) -> Result<String> {
         .with_context(|| format!("path '{path}' not found in digest"))?;
     match entry {
         Entry::File(f) => {
-            crate::usage::record_use(crate::usage::UsageKind::Cas, &f.digest);
+            crate::usage::record_cas_read(&f.digest);
             let blob_path = cas_blob_path(&f.digest)?;
             std::fs::read_to_string(&blob_path)
                 .with_context(|| format!("read digest file blob for '{path}'"))
@@ -805,7 +831,7 @@ pub fn materialize_trie(trie: &DigestTrie, destination: &Path, link_files: bool)
 }
 
 fn materialize_file(digest: &str, dest: &Path, link_files: bool) -> Result<()> {
-    crate::usage::record_use(crate::usage::UsageKind::Cas, digest);
+    crate::usage::record_cas_read(digest);
     let source = cas_blob_path(digest)?;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
@@ -1143,5 +1169,29 @@ mod tests {
 
         let digest = capture_directory(&src).unwrap();
         assert!(resolve_in_trie(digest.tree().unwrap(), "a.txt/nested").is_err());
+    }
+
+    #[test]
+    fn tree_reachable_digests_visits_nodes_and_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("top.txt"), "top");
+        write(&src.join("sub").join("inner.txt"), "inner");
+
+        // capture_directory stores every node blob bottom-up, so the walker
+        // can descend from just the root digest.
+        let digest = capture_directory(&src).unwrap();
+        let root = digest.digest().to_owned();
+
+        let mut marked = std::collections::HashSet::new();
+        tree_reachable_digests(&root, &mut |d| {
+            marked.insert(d.to_owned());
+        });
+
+        // Root node + sub node + two file digests, all distinct.
+        assert!(marked.contains(&root));
+        assert!(marked.contains(&crate::cache::digest_bytes(b"top")));
+        assert!(marked.contains(&crate::cache::digest_bytes(b"inner")));
+        assert_eq!(marked.len(), 4);
     }
 }
