@@ -375,6 +375,7 @@ pub(crate) async fn load_workspace_with_rules(
                 ctx,
                 state_clone,
                 root.clone(),
+                rules_source.clone(),
                 Arc::clone(&exec_root),
                 Arc::clone(&exec_no_cache),
                 Arc::clone(&exec_sandbox_retention),
@@ -815,6 +816,7 @@ fn register_globals<'js>(
     ctx: Ctx<'js>,
     state: Arc<Mutex<HostState>>,
     workspace_root: PathBuf,
+    rules_source: RulesSource,
     exec_root: Arc<Mutex<Option<PathBuf>>>,
     exec_no_cache: Arc<AtomicBool>,
     exec_sandbox_retention: Arc<AtomicU8>,
@@ -1826,6 +1828,26 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_read_file", host_read_file)?;
+
+    // __host_read_addressed_file(address) → string | null
+    // Reads a workspace-addressed data file (`//path/to/file`), exact path
+    // only (no .js/index.js candidates): workspace root first, then the
+    // built-in rules tree for `//rules/...` — the same precedence module
+    // imports use, so a checked-in lockfile next to its rule module ships
+    // embedded and a workspace copy at the same address overrides it.
+    // Unlike __host_read_file this never consults exec_root; addresses are
+    // workspace-rooted by definition.
+    let wc_raf = workspace_root.clone();
+    let rules_raf = rules_source.clone();
+    let host_read_addressed_file = Function::new(
+        ctx.clone(),
+        move |address: String| -> rquickjs::Result<Option<String>> {
+            crate::loader::resolve_workspace_file(&wc_raf, &rules_raf, &address).map_err(
+                |message| rquickjs::Error::new_loading_message("readAddressedFile", message),
+            )
+        },
+    )?;
+    globals.set("__host_read_addressed_file", host_read_addressed_file)?;
 
     // __host_run(opts) → { stdout, stderr, exitCode }
     // Submits to the active scheduler, which runs exec_run_inner on a bounded

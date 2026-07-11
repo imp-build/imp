@@ -1444,6 +1444,20 @@ export function read_file(path) {
     return result;
 }
 
+/**
+ * Read a workspace-addressed data file (`//path/to/file`) — workspace root
+ * first, then the built-in rules tree for `//rules/...` addresses, the same
+ * precedence module imports use. Returns null when no source has the file.
+ *
+ * @param {string} address
+ * @returns {string|null}
+ */
+export function readAddressedFile(address) {
+    const result = __host_read_addressed_file(address);
+    _trace_effect({ event: "effect", kind: "read_addressed_file", address });
+    return result ?? null;
+}
+
 function _trace_effect_in_context(entry, ctx) {
     const stack = ctx.stack;
     if (stack.length > 0) entry.owner = stack[stack.length - 1];

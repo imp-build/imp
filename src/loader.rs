@@ -329,6 +329,60 @@ fn embedded_module(
     })
 }
 
+/// Resolve a workspace-addressed data file (e.g.
+/// `//rules/python/ruff-toolchain.lock`) to its contents. Unlike module
+/// resolution, no `.js`/`index.js`/`BUILD.js` candidates are tried — the
+/// address names the file exactly. Precedence mirrors module resolution:
+/// a file under the workspace root wins, with the built-in rules tree as a
+/// fallback for `//rules/...` addresses. Returns `Ok(None)` when no source
+/// has the file.
+pub(crate) fn resolve_workspace_file(
+    root: &Path,
+    rules: &RulesSource,
+    name: &str,
+) -> std::result::Result<Option<String>, String> {
+    let rel = name
+        .strip_prefix("//")
+        .ok_or_else(|| format!("workspace file '{name}' must start with //"))?;
+    validate_workspace_module_path(name, rel)?;
+    if rel.is_empty() {
+        return Err(format!("workspace file '{name}' must name a file"));
+    }
+
+    let workspace_path = root.join(rel);
+    if workspace_path.is_file() {
+        return std::fs::read_to_string(&workspace_path)
+            .map(Some)
+            .map_err(|e| format!("read {}: {e}", workspace_path.display()));
+    }
+
+    if let Some(builtin_rel) = rel.strip_prefix("rules/") {
+        match rules {
+            RulesSource::Dev(dir) => {
+                let dev_path = dir.join(builtin_rel);
+                if dev_path.is_file() {
+                    return std::fs::read_to_string(&dev_path)
+                        .map(Some)
+                        .map_err(|e| format!("read {}: {e}", dev_path.display()));
+                }
+            }
+            RulesSource::Embedded => {
+                if let Some(file) = EMBEDDED_RULES.get_file(builtin_rel) {
+                    let contents = file.contents_utf8().ok_or_else(|| {
+                        format!(
+                            "embedded rules file '{}' is not valid UTF-8",
+                            file.path().display()
+                        )
+                    })?;
+                    return Ok(Some(contents.to_owned()));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 pub(crate) fn validate_workspace_module_path(
     name: &str,
     rel: &str,
@@ -348,6 +402,63 @@ pub(crate) fn validate_workspace_module_path(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_file_wins_over_embedded() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("rules/workflows")).unwrap();
+        std::fs::write(root.path().join("rules/workflows/fmt.js"), "sentinel").unwrap();
+        let contents =
+            resolve_workspace_file(root.path(), &RulesSource::Embedded, "//rules/workflows/fmt.js")
+                .unwrap()
+                .unwrap();
+        assert_eq!(contents, "sentinel");
+    }
+
+    #[test]
+    fn embedded_rules_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let contents =
+            resolve_workspace_file(root.path(), &RulesSource::Embedded, "//rules/workflows/fmt.js")
+                .unwrap()
+                .unwrap();
+        assert!(contents.contains("fmtGoal"));
+    }
+
+    #[test]
+    fn dev_rules_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let dev = tempfile::tempdir().unwrap();
+        std::fs::write(dev.path().join("dev.lock"), "{}").unwrap();
+        let contents = resolve_workspace_file(
+            root.path(),
+            &RulesSource::Dev(dev.path().to_owned()),
+            "//rules/dev.lock",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(contents, "{}");
+    }
+
+    #[test]
+    fn missing_file_is_none_and_traversal_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            resolve_workspace_file(root.path(), &RulesSource::Embedded, "//no/such.lock")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            resolve_workspace_file(root.path(), &RulesSource::Embedded, "//../etc/passwd")
+                .is_err()
+        );
+        assert!(resolve_workspace_file(root.path(), &RulesSource::Embedded, "//").is_err());
+    }
 }
 
 pub(crate) fn module_kind(root: &Path, rules: &RulesSource, name: &str) -> ModuleKind {

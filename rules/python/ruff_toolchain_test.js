@@ -93,8 +93,19 @@ test("installs and acquires a toolchain from the named cache", async () => {
     });
 });
 
-test("downloads and extracts ruff via two sandboxed runs when not cached", async () => {
+test("downloads, verifies, and extracts ruff via two sandboxed runs when not cached", async () => {
     await withRuffHost(async (host) => {
+        host.addFile("//rules/python/ruff-toolchain.lock", JSON.stringify({
+            tool: "ruff-toolchain",
+            version: "0.15.21",
+            artifacts: {
+                "linux/x86_64": {
+                    url: "https://locked.example/ruff-x86_64-unknown-linux-gnu.tar.gz",
+                    artifact: "ruff-x86_64-unknown-linux-gnu.tar.gz",
+                    sha256: "deadbeef",
+                },
+            },
+        }));
         ruffToolchain("0.15.21", { default: true });
         const tool = await ruffTool("0.15.21");
 
@@ -104,8 +115,56 @@ test("downloads and extracts ruff via two sandboxed runs when not cached", async
         expect(host.runs.length).toBe(2);
 
         const [download, extract] = host.runs;
-        expect(download.argv.some((arg) => arg.includes("ruff-x86_64-unknown-linux-gnu.tar.gz"))).toBe(true);
+        // The lock entry pins both the URL and the expected digest.
+        expect(download.argv).toContain("https://locked.example/ruff-x86_64-unknown-linux-gnu.tar.gz");
+        expect(download.argv).toContain("deadbeef");
+        expect(download.argv[2]).toContain("sha256sum -c -");
         expect(extract.argv[2]).toContain("--strip-components=1");
+    });
+});
+
+test("cold acquire without a lockfile fails pointing at gen-lockfiles", async () => {
+    await withRuffHost(async () => {
+        ruffToolchain("0.15.21", { default: true });
+        let message = null;
+        try {
+            await ruffTool("0.15.21");
+        } catch (error) {
+            message = error.message;
+        }
+        expect(message).toContain("no lockfile found");
+        expect(message).toContain("gen-lockfiles");
+    });
+});
+
+test("unverified: true downloads without a sha check", async () => {
+    await withRuffHost(async (host) => {
+        ruffToolchain("0.15.21", { default: true, unverified: true });
+        await ruffTool("0.15.21");
+
+        expect(host.runs.length).toBe(2);
+        const [download] = host.runs;
+        expect(download.argv).toContain(
+            "https://github.com/astral-sh/ruff/releases/download/0.15.21/ruff-x86_64-unknown-linux-gnu.tar.gz",
+        );
+        expect(download.argv[2]).not.toContain("sha256sum");
+    });
+});
+
+test("a custom lockfile address is consulted instead of the bundled one", async () => {
+    await withRuffHost(async (host) => {
+        host.addFile("//locks/ruff.lock", JSON.stringify({
+            tool: "ruff-toolchain",
+            version: "0.15.22",
+            artifacts: {
+                "linux/x86_64": { url: "https://locked.example/ruff.tar.gz", artifact: "ruff.tar.gz", sha256: "cafe" },
+            },
+        }));
+        ruffToolchain("0.15.22", { default: true, lockfile: "//locks/ruff.lock" });
+        await ruffTool("0.15.22");
+
+        expect(host.calls.some((call) => call[0] === "readAddressedFile" && call[1] === "//locks/ruff.lock")).toBe(true);
+        expect(host.runs[0].argv).toContain("cafe");
     });
 });
 

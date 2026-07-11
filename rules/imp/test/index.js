@@ -245,9 +245,11 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
         nativeToolArtifact: globalThis.__host_native_tool_artifact,
         workerStart: globalThis.__host_worker_start,
         workerGet: globalThis.__host_worker_get,
+        readAddressedFile: globalThis.__host_read_addressed_file,
     };
 
     const workers = new Map();
+    const files = new Map();
 
     const host = {
         calls,
@@ -255,6 +257,9 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
         workers,
         install(name, key, path) {
             cache.set(`${name}/${key}`, path);
+        },
+        addFile(address, content) {
+            files.set(address, content);
         },
         clearCalls() {
             calls.length = 0;
@@ -322,6 +327,10 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
         const handle = workers.get(name);
         return handle ? JSON.stringify(handle) : null;
     };
+    globalThis.__host_read_addressed_file = (address) => {
+        calls.push(["readAddressedFile", address]);
+        return files.get(address) ?? null;
+    };
 
     try {
         return await fn(host);
@@ -338,6 +347,7 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
         globalThis.__host_native_tool_artifact = originals.nativeToolArtifact;
         globalThis.__host_worker_start = originals.workerStart;
         globalThis.__host_worker_get = originals.workerGet;
+        globalThis.__host_read_addressed_file = originals.readAddressedFile;
     }
 }
 

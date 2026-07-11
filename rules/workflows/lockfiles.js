@@ -4,9 +4,11 @@
 // A tool lockfile pins, for every platform a toolchain publishes a release for,
 // the download URL, artifact filename, and SHA-256 of that artifact — so an
 // acquire on any machine can be checked against known-good bytes rather than
-// trusting a version string alone. This module only *generates* the lockfile;
-// wiring the acquire paths to verify against it is a deliberate follow-up
-// (see https://github.com/imp-build/imp/issues/3).
+// trusting a version string alone. Acquire paths verify against the lockfile
+// via resolveToolLockfile (rules/imp/lockfile.js); toolchains that pass a
+// `lockfile` address here write to that address (e.g. a lock checked in next
+// to the rule module ships embedded in the binary), the rest keep writing
+// `<name>.lock` at the workspace root until they migrate (imp issue #3).
 //
 // Each toolchain rule module registers its own
 // `product("<x>-toolchain", "gen-lockfiles", ...)` by calling
@@ -16,6 +18,7 @@
 // `imp goal gen-lockfiles //...`.
 
 import { goal, run, output, output_path, download, sha256 } from "imp:core";
+import { lockfileAddressToPath } from "//rules/imp/lockfile";
 
 goal("gen-lockfiles");
 
@@ -49,11 +52,13 @@ function writeJsonFile(host, path, value) {
  * @param {Array<{ os: string, arch: string }>} opts.platforms Published platforms.
  * @param {(version: string, plat: object) => string} opts.downloadUrl
  * @param {(version: string, plat: object) => string} opts.artifactName
+ * @param {string} [opts.lockfile] Lockfile address (`//a/b.lock`); defaults
+ *   to `<name>.lock` at the workspace root.
  * @param {object} [host] Injectable host for tests (download/sha256/run/...).
  * @returns {Promise<object>} The lockfile contents that were written.
  */
 export async function generateToolLockfile(
-    { handle, name, platforms, downloadUrl, artifactName },
+    { handle, name, platforms, downloadUrl, artifactName, lockfile },
     host = defaultHost,
 ) {
     const version = handle.attrs.version;
@@ -67,6 +72,7 @@ export async function generateToolLockfile(
     }
 
     const lock = { tool: name, version, artifacts };
-    await writeJsonFile(host, `${name}.lock`, lock);
+    const path = lockfile ? lockfileAddressToPath(lockfile) : `${name}.lock`;
+    await writeJsonFile(host, path, lock);
     return lock;
 }

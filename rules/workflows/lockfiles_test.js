@@ -90,6 +90,25 @@ test("writes <name>.lock as a cacheable run() with the lock as content", async (
     expect(JSON.parse(write.argv[write.argv.length - 1])).toEqual(lock);
 });
 
+test("writes to the lockfile address when one is given", async () => {
+    const host = fakeHost();
+    const handle = { attrs: { version: "9" } };
+    await generateToolLockfile(
+        {
+            handle,
+            name: "widget",
+            platforms: [{ os: "linux", arch: "x86_64" }],
+            downloadUrl: () => "https://ex/a",
+            artifactName: () => "a.tar",
+            lockfile: "//rules/widgets/widget.lock",
+        },
+        host,
+    );
+
+    expect(host.writes.length).toBe(1);
+    expect(host.writes[0].outputs).toEqual([{ __output: "rules/widgets/widget.lock" }]);
+});
+
 });
 
 describe("toolchain supported-platform matrices", () => {

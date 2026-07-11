@@ -9,6 +9,19 @@ import {
 function withRuffHost(fn) {
     const run = async (host) => {
         __resetRuffToolchainStateForTest();
+        // Cold acquires verify against the lockfile, so the fake host needs
+        // a matching entry for the toolchain the tests declare.
+        host.addFile("//rules/python/ruff-toolchain.lock", JSON.stringify({
+            tool: "ruff-toolchain",
+            version: "0.15.21",
+            artifacts: {
+                "linux/x86_64": {
+                    url: "https://locked.example/ruff.tar.gz",
+                    artifact: "ruff.tar.gz",
+                    sha256: "deadbeef",
+                },
+            },
+        }));
         try {
             return await fn(host);
         } finally {
