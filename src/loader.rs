@@ -413,20 +413,26 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("rules/workflows")).unwrap();
         std::fs::write(root.path().join("rules/workflows/fmt.js"), "sentinel").unwrap();
-        let contents =
-            resolve_workspace_file(root.path(), &RulesSource::Embedded, "//rules/workflows/fmt.js")
-                .unwrap()
-                .unwrap();
+        let contents = resolve_workspace_file(
+            root.path(),
+            &RulesSource::Embedded,
+            "//rules/workflows/fmt.js",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(contents, "sentinel");
     }
 
     #[test]
     fn embedded_rules_fallback() {
         let root = tempfile::tempdir().unwrap();
-        let contents =
-            resolve_workspace_file(root.path(), &RulesSource::Embedded, "//rules/workflows/fmt.js")
-                .unwrap()
-                .unwrap();
+        let contents = resolve_workspace_file(
+            root.path(),
+            &RulesSource::Embedded,
+            "//rules/workflows/fmt.js",
+        )
+        .unwrap()
+        .unwrap();
         assert!(contents.contains("fmtGoal"));
     }
 
@@ -454,8 +460,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            resolve_workspace_file(root.path(), &RulesSource::Embedded, "//../etc/passwd")
-                .is_err()
+            resolve_workspace_file(root.path(), &RulesSource::Embedded, "//../etc/passwd").is_err()
         );
         assert!(resolve_workspace_file(root.path(), &RulesSource::Embedded, "//").is_err());
     }
