@@ -149,6 +149,7 @@ pub struct Workspace {
     pub build_rules: BTreeMap<String, BuildRuleRender>,
     #[allow(dead_code)]
     pub workspace_config: BTreeMap<String, serde_json::Value>,
+    pub config_schemas: BTreeMap<String, serde_json::Value>,
     pub owned_files: BTreeSet<String>,
     #[allow(dead_code)]
     pub named_caches: BTreeMap<String, NamedCache>,
@@ -204,6 +205,7 @@ pub(crate) struct HostState {
     products: BTreeMap<(String, String), String>,
     build_rules: BTreeMap<String, BuildRuleRender>,
     workspace_config: BTreeMap<String, serde_json::Value>,
+    config_schemas: BTreeMap<String, serde_json::Value>,
     owned_files: BTreeSet<String>,
     named_caches: BTreeMap<String, NamedCache>,
     goals: BTreeMap<String, Goal>,
@@ -246,6 +248,7 @@ impl Default for HostState {
             products: BTreeMap::new(),
             build_rules: BTreeMap::new(),
             workspace_config: BTreeMap::new(),
+            config_schemas: BTreeMap::new(),
             owned_files: BTreeSet::new(),
             named_caches: BTreeMap::new(),
             goals,
@@ -406,6 +409,17 @@ pub(crate) async fn load_workspace_with_rules(
             .with_context(|| format!("read {}", workspace_js.display()))?;
         let exports = ctx
             .async_with(async |ctx| -> Result<Vec<(String, u32)>> {
+                // The core module owns the built-in `imp` schema. Import it
+                // eagerly so a workspace may use `export const imp = ...`
+                // without an otherwise-useless core import.
+                let core_promise = Module::import(&ctx, "imp:core")
+                    .catch(&ctx)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                core_promise
+                    .into_future::<Object>()
+                    .await
+                    .catch(&ctx)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
                 let module = Module::declare(ctx.clone(), WORKSPACE_FILE, source)
                     .catch(&ctx)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -422,6 +436,20 @@ pub(crate) async fn load_workspace_with_rules(
                     .namespace()
                     .catch(&ctx)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let schemas = state.lock().unwrap().config_schemas.clone();
+                let config_exports = collect_config_exports(&ctx, &ns, &schemas)?;
+                for (namespace, value_json) in config_exports {
+                    let value: serde_json::Value = serde_json::from_str(&value_json)
+                        .with_context(|| format!("parse config export '{namespace}'"))?;
+                    let schema = schemas.get(&namespace).expect("schema key was matched");
+                    let validated = validate_config_value(schema, &value, &namespace)?;
+                    let mut hs = state.lock().unwrap();
+                    if let Some(existing) = hs.workspace_config.get_mut(&namespace) {
+                        merge_workspace_config(existing, validated);
+                    } else {
+                        hs.workspace_config.insert(namespace, validated);
+                    }
+                }
                 collect_imp_exports(&ns)
             })
             .await
@@ -507,6 +535,7 @@ pub(crate) async fn load_workspace_with_rules(
             products: hs.products.clone(),
             build_rules: hs.build_rules.clone(),
             workspace_config: hs.workspace_config.clone(),
+            config_schemas: hs.config_schemas.clone(),
             owned_files,
             named_caches: hs.named_caches.clone(),
             goal_callbacks: hs.goal_callbacks.clone(),
@@ -557,6 +586,162 @@ fn collect_imp_exports(ns: &Object) -> Result<Vec<(String, u32)>> {
         }
     }
     Ok(result)
+}
+
+fn collect_config_exports<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    ns: &Object<'js>,
+    schemas: &BTreeMap<String, serde_json::Value>,
+) -> Result<Vec<(String, String)>> {
+    let mut result = Vec::new();
+    for entry in ns.own_props::<String, Value>(Filter::default()) {
+        let (key, val) = entry.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let namespace = if schemas.contains_key(&key) {
+            Some(key.clone())
+        } else {
+            key.strip_suffix("Config")
+                .filter(|namespace| schemas.contains_key(*namespace))
+                .map(str::to_owned)
+        };
+        let Some(namespace) = namespace else {
+            continue;
+        };
+        if let Some(obj) = val.as_object() {
+            if obj.get::<_, bool>("__imp").unwrap_or(false) {
+                continue;
+            }
+        }
+        let json = ctx
+            .json_stringify(val)
+            .map_err(|e| anyhow::anyhow!("serialize config export '{key}': {e}"))?
+            .ok_or_else(|| anyhow::anyhow!("config export '{key}' is not JSON-serializable"))?
+            .to_string()
+            .map_err(|e| anyhow::anyhow!("serialize config export '{key}': {e}"))?;
+        result.push((namespace, json));
+    }
+    Ok(result)
+}
+
+fn validate_config_value(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+    path: &str,
+) -> Result<serde_json::Value> {
+    if schema.get("__impField").is_none() {
+        return validate_config_object(schema, value, path);
+    }
+    let kind = schema
+        .get("__impField")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("config schema at '{path}' is missing __impField"))?;
+    match kind {
+        "int" => {
+            if value.as_i64().is_some() || value.as_u64().is_some() {
+                Ok(value.clone())
+            } else {
+                bail!("config '{path}' must be an integer")
+            }
+        }
+        "string" => {
+            if value.is_string() {
+                Ok(value.clone())
+            } else {
+                bail!("config '{path}' must be a string")
+            }
+        }
+        "bool" => {
+            if value.is_boolean() {
+                Ok(value.clone())
+            } else {
+                bail!("config '{path}' must be a boolean")
+            }
+        }
+        "enum" => {
+            let values = schema
+                .get("values")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("config schema at '{path}' has invalid enum values")
+                })?;
+            if values.iter().any(|candidate| candidate == value) {
+                Ok(value.clone())
+            } else {
+                bail!("config '{path}' must be one of {values:?}")
+            }
+        }
+        "object" => {
+            let shape = schema.get("shape").ok_or_else(|| {
+                anyhow::anyhow!("config schema at '{path}' has invalid object shape")
+            })?;
+            validate_config_object(shape, value, path)
+        }
+        "map" => {
+            let input = value
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("config '{path}' must be an object"))?;
+            let key_schema = schema
+                .get("key")
+                .ok_or_else(|| anyhow::anyhow!("config schema at '{path}' has no map key type"))?;
+            let value_schema = schema.get("value").ok_or_else(|| {
+                anyhow::anyhow!("config schema at '{path}' has no map value type")
+            })?;
+            let mut output = serde_json::Map::new();
+            for (key, item) in input {
+                let item_path = format!("{path}.{key}");
+                validate_config_value(
+                    key_schema,
+                    &serde_json::Value::String(key.clone()),
+                    &item_path,
+                )?;
+                output.insert(
+                    key.clone(),
+                    validate_config_value(value_schema, item, &item_path)?,
+                );
+            }
+            Ok(serde_json::Value::Object(output))
+        }
+        other => bail!("config schema at '{path}' has unknown field type '{other}'"),
+    }
+}
+
+fn validate_config_object(
+    shape: &serde_json::Value,
+    value: &serde_json::Value,
+    path: &str,
+) -> Result<serde_json::Value> {
+    let input = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("config '{path}' must be an object"))?;
+    let shape = shape
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("config schema at '{path}' has invalid object shape"))?;
+    for key in input.keys() {
+        if !shape.contains_key(key) {
+            bail!("config '{path}.{key}' is not declared in the schema")
+        }
+    }
+    let mut output = serde_json::Map::new();
+    for (key, field_schema) in shape {
+        let field_path = format!("{path}.{key}");
+        if let Some(field_value) = input.get(key) {
+            output.insert(
+                key.clone(),
+                validate_config_value(field_schema, field_value, &field_path)?,
+            );
+        } else if let Some(default) = field_schema.get("default") {
+            output.insert(
+                key.clone(),
+                validate_config_value(field_schema, default, &field_path)?,
+            );
+        } else if field_schema
+            .get("required")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            bail!("missing required config field '{field_path}'")
+        }
+    }
+    Ok(serde_json::Value::Object(output))
 }
 
 fn materialize_pending_target(
@@ -1178,6 +1363,34 @@ fn register_globals<'js>(
         },
     )?;
     globals.set("__host_configure", host_configure)?;
+
+    // __host_define_config_schema(namespace, schemaJson)
+    let state_schema = Arc::clone(&state);
+    let host_define_config_schema = Function::new(
+        ctx.clone(),
+        move |namespace: String, schema_json: String| -> rquickjs::Result<()> {
+            validate_config_namespace(&namespace)?;
+            let schema: serde_json::Value = serde_json::from_str(&schema_json).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    "defineConfigSchema",
+                    format!("parse schema: {e}"),
+                )
+            })?;
+            if !schema.is_object() {
+                return Err(rquickjs::Error::new_loading_message(
+                    "defineConfigSchema",
+                    "schema must be an object",
+                ));
+            }
+            state_schema
+                .lock()
+                .unwrap()
+                .config_schemas
+                .insert(namespace, schema);
+            Ok(())
+        },
+    )?;
+    globals.set("__host_define_config_schema", host_define_config_schema)?;
 
     let state_cfg = Arc::clone(&state);
     let host_configuration = Function::new(
@@ -4232,6 +4445,82 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
         assert!(roots
             .iter()
             .any(|(t, product)| t.address == "//:pkg" && product == "build"));
+    }
+
+    #[test]
+    fn declarative_config_validation_fills_defaults() {
+        let schema = serde_json::json!({
+            "__impField": "object",
+            "shape": {
+                "mode": { "__impField": "enum", "values": ["debug", "release"], "default": "debug" },
+                "enabled": { "__impField": "bool", "default": true },
+            }
+        });
+        assert_eq!(
+            validate_config_value(&schema, &serde_json::json!({}), "example").unwrap(),
+            serde_json::json!({ "mode": "debug", "enabled": true })
+        );
+    }
+
+    #[test]
+    fn declarative_config_validation_rejects_unknown_and_wrong_types() {
+        let schema = serde_json::json!({
+            "__impField": "object",
+            "shape": { "count": { "__impField": "int" } }
+        });
+        let unknown = validate_config_value(&schema, &serde_json::json!({ "other": 1 }), "example")
+            .unwrap_err();
+        assert!(unknown.to_string().contains("not declared"));
+        let wrong = validate_config_value(&schema, &serde_json::json!({ "count": "1" }), "example")
+            .unwrap_err();
+        assert!(wrong.to_string().contains("must be an integer"));
+    }
+
+    #[test]
+    fn declarative_config_validation_rejects_invalid_enum_and_missing_required() {
+        let schema = serde_json::json!({
+            "__impField": "object",
+            "shape": {
+                "mode": { "__impField": "enum", "values": ["debug", "release"] },
+                "name": { "__impField": "string", "required": true }
+            }
+        });
+        let invalid_enum = validate_config_value(
+            &schema,
+            &serde_json::json!({ "mode": "other", "name": "x" }),
+            "example",
+        )
+        .unwrap_err();
+        assert!(invalid_enum.to_string().contains("must be one of"));
+        let missing =
+            validate_config_value(&schema, &serde_json::json!({ "mode": "debug" }), "example")
+                .unwrap_err();
+        assert!(missing.to_string().contains("missing required"));
+    }
+
+    #[test]
+    fn declarative_config_validation_accepts_maps_and_checks_values() {
+        let schema = serde_json::json!({
+            "__impField": "map",
+            "key": { "__impField": "string" },
+            "value": { "__impField": "string" }
+        });
+        assert_eq!(
+            validate_config_value(
+                &schema,
+                &serde_json::json!({ "lib": "library", "vendor": "vendor/odin" }),
+                "odin.collections"
+            )
+            .unwrap(),
+            serde_json::json!({ "lib": "library", "vendor": "vendor/odin" })
+        );
+        let error = validate_config_value(
+            &schema,
+            &serde_json::json!({ "lib": 42 }),
+            "odin.collections",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("must be a string"));
     }
 
     #[tokio::test]

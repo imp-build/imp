@@ -137,6 +137,11 @@ enum Cmd {
         #[command(subcommand)]
         command: CacheCmd,
     },
+    /// Inspect declarative workspace configuration schemas
+    Config {
+        #[command(subcommand)]
+        command: ConfigCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -150,6 +155,16 @@ enum CacheCmd {
         /// Actually delete; without this only a summary is printed
         #[arg(long)]
         apply: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Print registered configuration schemas
+    Schema {
+        /// Also include the resolved workspace configuration
+        #[arg(long)]
+        effective: bool,
     },
 }
 
@@ -446,6 +461,9 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
         Cmd::Rules => {
             return cmd_rules(tree).await;
         }
+        Cmd::Config { command } => {
+            return cmd_config(command).await;
+        }
         Cmd::Build(args) => {
             return cmd_execute_goal("build", &args.raw, Arc::clone(&cancellation), tree).await;
         }
@@ -577,7 +595,8 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
         | Cmd::Goal { .. }
         | Cmd::RulesTest { .. }
         | Cmd::Daemon { .. }
-        | Cmd::Cache { .. } => unreachable!("handled before environment setup"),
+        | Cmd::Cache { .. }
+        | Cmd::Config { .. } => unreachable!("handled before environment setup"),
     }
 }
 
@@ -593,22 +612,41 @@ fn effective_js_workers(workspace: &spike::Workspace, cli_value: Option<usize>) 
         return Ok(value.max(1));
     }
 
-    let Some(value) = workspace
+    Ok(workspace
         .workspace_config
         .get("imp")
         .and_then(|config| config.get("jsWorkers"))
-    else {
-        return Ok(1);
-    };
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(1))
+}
 
-    let Some(count) = value.as_u64() else {
-        anyhow::bail!("configure(\"imp\", {{ jsWorkers }}) must use a positive integer");
-    };
-    if count == 0 {
-        anyhow::bail!("configure(\"imp\", {{ jsWorkers }}) must use a positive integer");
+async fn cmd_config(command: &ConfigCmd) -> Result<()> {
+    let current_dir = std::env::current_dir().context("determine current directory")?;
+    let workspace_root = spike::find_workspace_root(&current_dir)?;
+    let live = runtime::load_workspace(&workspace_root).await?;
+    match command {
+        ConfigCmd::Schema { effective } => {
+            let schemas: Vec<_> = live
+                .workspace
+                .config_schemas
+                .iter()
+                .map(|(namespace, shape)| serde_json::json!({ "namespace": namespace, "shape": shape }))
+                .collect();
+            if *effective {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "schemas": schemas,
+                        "effective": live.workspace.workspace_config,
+                    }))?
+                );
+            } else {
+                println!("{}", serde_json::to_string_pretty(&schemas)?);
+            }
+        }
     }
-    usize::try_from(count)
-        .map_err(|_| anyhow::anyhow!("configure(\"imp\", {{ jsWorkers }}) is too large"))
+    Ok(())
 }
 
 /// What to drive on the live evaluation path: a goal over selected targets, or
@@ -1217,18 +1255,6 @@ mod tests {
     }
 
     #[test]
-    fn effective_js_workers_rejects_invalid_workspace_config() {
-        for value in [json!(0), json!(-1), json!(1.5), json!("2"), json!(true)] {
-            let workspace = workspace_with_imp_config(json!({ "jsWorkers": value }));
-            let error = effective_js_workers(&workspace, None).unwrap_err();
-            assert!(
-                error.to_string().contains("positive integer"),
-                "unexpected error: {error:#}"
-            );
-        }
-    }
-
-    #[test]
     fn goal_subcommand_captures_raw_argv_tail() {
         // Phase 1 (top-level Cli::parse()) can't validate goal-specific flags
         // yet — the workspace/JS hasn't loaded — so it just captures
@@ -1283,9 +1309,7 @@ mod tests {
         write_file(
             &p.join(spike::WORKSPACE_FILE),
             r#"
-import { configure } from "imp:core";
-
-configure("imp", { jsWorkers: 2 });
+            export const impConfig = { jsWorkers: 2 };
 "#,
         );
         write_file(

@@ -197,10 +197,50 @@ export function goalFlags() {
 }
 
 /**
+ * Builders for declarative workspace configuration schemas.
+ *
+ * @category configuration
+ */
+export const field = {
+    int: (opts = {}) => ({ __impField: "int", ...opts }),
+    string: (opts = {}) => ({ __impField: "string", ...opts }),
+    bool: (opts = {}) => ({ __impField: "bool", ...opts }),
+    enum: (values, opts = {}) => ({ __impField: "enum", values, ...opts }),
+    object: (shape, opts = {}) => ({ __impField: "object", shape, ...opts }),
+    map: (key, value, opts = {}) => ({ __impField: "map", key, value, ...opts }),
+};
+
+/**
+ * Register the typed shape for a workspace configuration namespace.
+ * The owning module must be imported before workspace configuration exports
+ * are evaluated.
+ *
+ * @category configuration
+ * @param {string} namespace Configuration namespace.
+ * @param {object} shape Object containing field descriptors.
+ * @returns {void}
+ */
+export function defineConfigSchema(namespace, shape) {
+    if (typeof namespace !== "string" || namespace.length === 0) {
+        throw new Error("defineConfigSchema(namespace, shape) requires a non-empty namespace");
+    }
+    const encoded = JSON.stringify(_serialize_attrs(shape));
+    if (encoded === undefined) {
+        throw new Error("defineConfigSchema(namespace, shape) requires a JSON-serializable shape");
+    }
+    __host_define_config_schema(namespace, encoded);
+}
+
+defineConfigSchema("imp", { jsWorkers: field.int({ default: 1 }) });
+
+/**
  * Merge JSON-serializable workspace configuration into a namespace.
  *
- * Configuration is evaluated before BUILD.js files when called from
- * imp.workspace.js, and can be read by rule functions via configuration().
+ * For static, known-shape configuration prefer exporting a matching object
+ * from imp.workspace.js; this imperative API remains useful for dynamic and
+ * test-time configuration. Configuration is evaluated before BUILD.js files
+ * when called from imp.workspace.js, and can be read by rule functions via
+ * configuration().
  *
  * @category configuration
  * @param {string} namespace Stable configuration namespace, e.g. "odin".
@@ -220,6 +260,9 @@ export function configure(namespace, value) {
 
 /**
  * Read workspace configuration for a namespace.
+ *
+ * Declarative schemas are validated and defaulted during workspace loading;
+ * this remains the read-side API for both declarative and imperative config.
  *
  * @category configuration
  * @param {string} namespace Stable configuration namespace, e.g. "odin".

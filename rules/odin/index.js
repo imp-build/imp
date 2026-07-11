@@ -1,4 +1,6 @@
 import {
+	field,
+	defineConfigSchema,
 	allUnowned,
 	Target,
 	glob,
@@ -22,6 +24,11 @@ import {
 	logInfo,
 	writeWorkspace,
 } from "imp:core";
+
+// Collection names are dynamic, so this uses a map rather than a closed object.
+defineConfigSchema("odin", {
+    collections: field.map(field.string(), field.string(), { default: {} }),
+});
 
 import { distPathFor } from "//rules/workflows/package";
 
@@ -1046,7 +1053,7 @@ export class OdinCollection extends Target {
  *
  * Prefer workspace config for new code:
  *
- * configure("odin", { collections: { lib: "library" } })
+ * export const odin = { collections: { lib: "library" } }
  *
  * @category target
  * @param {object} opts

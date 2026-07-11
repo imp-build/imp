@@ -14,6 +14,26 @@ import { odinfmtToolchain } from "//rules/odin/odinfmt/toolchain";
 
 export const odin = odinToolchain("dev-2026-03", { default: true });
 export const odinfmt = odinfmtToolchain();
+
+```
+
+Static, known-shape configuration uses an export named after its schema
+namespace. For example, an Odin collections configuration is declared as:
+
+```js
+export const odin = {
+    collections: { lib: "library" },
+};
+```
+
+When the namespace is also used by another workspace export, use the
+`<namespace>Config` form instead:
+
+```js
+export const odin = odinToolchain("dev-2026-03", { default: true });
+export const odinConfig = {
+    collections: { lib: "library" },
+};
 ```
 
 ## Exported declarations are workspace targets
