@@ -4,3 +4,4 @@
 //! paths handed in by callers.
 pub mod cache;
 pub mod digest;
+pub mod usage;

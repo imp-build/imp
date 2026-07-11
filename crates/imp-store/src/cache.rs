@@ -260,6 +260,7 @@ pub fn digest_json<T: Serialize>(value: &T) -> Result<String> {
 
 pub fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
     let digest = digest_bytes(bytes);
+    crate::usage::record_use(crate::usage::UsageKind::Cas, &digest);
     let blob_path = cas_blob_path(&digest)?;
     if !blob_path.is_file() {
         if let Some(parent) = blob_path.parent() {
@@ -376,6 +377,7 @@ pub fn write_task_cache_record(record: &TaskCacheRecord) -> Result<()> {
         .with_context(|| format!("write {}", temp.display()))?;
     std::fs::rename(&temp, &path)
         .with_context(|| format!("publish task cache record {}", path.display()))?;
+    crate::usage::record_use(crate::usage::UsageKind::Task, &record.task_key);
     Ok(())
 }
 
@@ -394,6 +396,7 @@ pub fn materialize_cached_artifacts(
         let destination = workspace_root.join(artifact_relative_path(path)?);
         match output.kind.as_str() {
             "file" | "manifest" => {
+                crate::usage::record_use(crate::usage::UsageKind::Cas, &output.digest);
                 let source = cas_blob_path(&output.digest)?;
                 publish_file_atomically(&source, &destination)?;
                 restore_file_mode(&destination, output.mode)?;
@@ -423,6 +426,7 @@ pub fn materialize_named_cache_artifacts(
         let scope_id = named_cache_scope_id(named_cache.shared, workspace_id);
         let destination =
             named_cache_key_path_by_id(scope_id, &named_cache.name, &named_cache.key)?;
+        crate::usage::record_named_use(scope_id, &named_cache.name, &named_cache.key);
         // Slots are immutable by key and published atomically (temp + rename),
         // so an existing destination is complete — skip the re-copy. This is
         // what makes repeated task-cache hits (and concurrent acquires from
@@ -514,6 +518,7 @@ pub fn write_workspace(digest: &str, from: Option<&str>, destination: &Path) -> 
             })?;
         }
         crate::digest::ResolvedEntry::File { digest, mode } => {
+            crate::usage::record_use(crate::usage::UsageKind::Cas, &digest);
             let source = cas_blob_path(&digest)?;
             publish_file_atomically(&source, destination)?;
             restore_file_mode(destination, mode)?;

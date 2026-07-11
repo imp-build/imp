@@ -139,6 +139,7 @@ impl DigestTrie {
     /// directories — those are loaded lazily, only when something actually walks
     /// into them (merge, materialize, etc.).
     pub fn load(digest: &str) -> Result<DigestTrie> {
+        crate::usage::record_use(crate::usage::UsageKind::Cas, digest);
         let path = cas_blob_path(digest)?;
         let bytes =
             std::fs::read(&path).with_context(|| format!("read digest node {}", path.display()))?;
@@ -318,6 +319,7 @@ pub fn read_file_from_trie(trie: &DigestTrie, path: &str) -> Result<String> {
         .with_context(|| format!("path '{path}' not found in digest"))?;
     match entry {
         Entry::File(f) => {
+            crate::usage::record_use(crate::usage::UsageKind::Cas, &f.digest);
             let blob_path = cas_blob_path(&f.digest)?;
             std::fs::read_to_string(&blob_path)
                 .with_context(|| format!("read digest file blob for '{path}'"))
@@ -803,6 +805,7 @@ pub fn materialize_trie(trie: &DigestTrie, destination: &Path, link_files: bool)
 }
 
 fn materialize_file(digest: &str, dest: &Path, link_files: bool) -> Result<()> {
+    crate::usage::record_use(crate::usage::UsageKind::Cas, digest);
     let source = cas_blob_path(digest)?;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;

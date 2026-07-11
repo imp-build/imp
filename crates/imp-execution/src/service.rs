@@ -65,15 +65,22 @@ impl ExecutionService for LocalExecutionService {
 
     fn cache_dir_get(&self, workspace_id: &str, name: &str, key: &str) -> Result<Option<PathBuf>> {
         match named_cache_key_path_by_id(workspace_id, name, key) {
-            Ok(p) if p.is_dir() => Ok(Some(p)),
+            Ok(p) if p.is_dir() => {
+                imp_store::usage::record_named_use(workspace_id, name, key);
+                Ok(Some(p))
+            }
             _ => Ok(None),
         }
     }
 
     fn cache_dir_has(&self, workspace_id: &str, name: &str, key: &str) -> Result<bool> {
-        Ok(named_cache_key_path_by_id(workspace_id, name, key)
+        let present = named_cache_key_path_by_id(workspace_id, name, key)
             .map(|p| p.is_dir())
-            .unwrap_or(false))
+            .unwrap_or(false);
+        if present {
+            imp_store::usage::record_named_use(workspace_id, name, key);
+        }
+        Ok(present)
     }
 
     fn cache_dir_put(
@@ -83,6 +90,7 @@ impl ExecutionService for LocalExecutionService {
         key: &str,
         source: &Path,
     ) -> Result<()> {
+        imp_store::usage::record_named_use(workspace_id, name, key);
         let target = named_cache_key_path_by_id(workspace_id, name, key)?;
         std::fs::create_dir_all(&target).with_context(|| format!("create {}", target.display()))?;
         if source.is_dir() {
@@ -190,6 +198,18 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(std::fs::read(slot.join("tool.txt")).unwrap(), b"hello");
+
+        // The put/get above must have left a usage row for GC to consume.
+        let db = imp_store::cache::cache_root().unwrap().join("usage.db");
+        let conn = rusqlite::Connection::open(db).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage WHERE kind = 'named' AND id = ?1",
+                [format!("{workspace_id}/svc-test/k1")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

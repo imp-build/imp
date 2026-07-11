@@ -67,6 +67,7 @@ pub(crate) fn parse_tool_specs<'js>(
             None => {
                 let workspace_id = workspace_cache_id(workspace_root);
                 let scope = named_cache_scope_id(shared_caches.contains(&cache), &workspace_id);
+                imp_store::usage::record_named_use(scope, &cache, &key);
                 named_cache_key_path_by_id(scope, &cache, &key)
                     .map_err(|e| rquickjs::Error::new_loading_message("tool", format!("{e:#}")))?
             }

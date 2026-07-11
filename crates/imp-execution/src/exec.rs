@@ -719,7 +719,13 @@ fn exec_run_inner_with_start(
                         format!("parse exec cache record {}", record_path.display())
                     })?;
                 match cached_outputs_present(&record) {
-                    Ok(()) => Some(record),
+                    Ok(()) => {
+                        imp_store::usage::record_use(
+                            imp_store::usage::UsageKind::Task,
+                            &task_key,
+                        );
+                        Some(record)
+                    }
                     Err(_) => None,
                 }
             }

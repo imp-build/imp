@@ -794,6 +794,7 @@ dependencies = [
  "imp-exec-api",
  "imp-store",
  "indicatif",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -807,6 +808,7 @@ name = "imp-store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
