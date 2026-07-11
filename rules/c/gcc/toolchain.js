@@ -114,7 +114,7 @@ function requireVersion(version) {
  * @returns {object} Target handle for this gcc toolchain.
  */
 export function gccToolchain(version, opts = {}) {
-    namedCache({ name: GCC_TOOLCHAIN_CACHE });
+    namedCache({ name: GCC_TOOLCHAIN_CACHE, shared: true });
     if (!coreToolHandles) {
         coreToolHandles = CORE_TOOL_NAMES.map((name) => nativeTool(name));
     }
@@ -138,7 +138,7 @@ export function gccToolchain(version, opts = {}) {
  * @returns {string|null} Local path to the cached toolchain root.
  */
 export function installGccToolchain(version, source) {
-    namedCache({ name: GCC_TOOLCHAIN_CACHE });
+    namedCache({ name: GCC_TOOLCHAIN_CACHE, shared: true });
     const plat = platformInfo();
     const key = gccCacheKey(version, plat);
     cachePut(GCC_TOOLCHAIN_CACHE, key, source);

@@ -184,7 +184,7 @@ function requireVersion(version) {
  * @returns {object} Target handle for this Zig toolchain.
  */
 export function zigToolchain(version, opts = {}) {
-    namedCache({ name: ZIG_TOOLCHAIN_CACHE });
+    namedCache({ name: ZIG_TOOLCHAIN_CACHE, shared: true });
     namedCache({ name: ZIG_BUILD_CACHE });
     if (!coreToolHandles) {
         coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
@@ -209,7 +209,7 @@ export function zigToolchain(version, opts = {}) {
  * @returns {string|null} Local path to the cached toolchain root.
  */
 export function installZigToolchain(version, source) {
-    namedCache({ name: ZIG_TOOLCHAIN_CACHE });
+    namedCache({ name: ZIG_TOOLCHAIN_CACHE, shared: true });
     const plat = platformInfo();
     const key = zigCacheKey(version, plat);
     cachePut(ZIG_TOOLCHAIN_CACHE, key, source);

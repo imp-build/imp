@@ -130,7 +130,7 @@ function requireVersion(version) {
  * @returns {object} Target handle for this ruff toolchain.
  */
 export function ruffToolchain(version, opts = {}) {
-    namedCache({ name: RUFF_TOOLCHAIN_CACHE });
+    namedCache({ name: RUFF_TOOLCHAIN_CACHE, shared: true });
     if (!coreToolHandles) {
         coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
     }
@@ -158,7 +158,7 @@ export function ruffToolchain(version, opts = {}) {
  * @returns {string|null} Local path to the cached toolchain root.
  */
 export function installRuffToolchain(version, source) {
-    namedCache({ name: RUFF_TOOLCHAIN_CACHE });
+    namedCache({ name: RUFF_TOOLCHAIN_CACHE, shared: true });
     const plat = platformInfo();
     const key = ruffCacheKey(version, plat);
     cachePut(RUFF_TOOLCHAIN_CACHE, key, source);

@@ -2,14 +2,18 @@
 //! execution layer's plain-Rust specs. Everything rquickjs-flavored about
 //! run() lives here so the execution crates stay JS-runtime-free.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use rquickjs::Object;
 
 use imp_execution::exec::{ExecIoSpec, ExecToolSpec};
-use imp_store::cache::named_cache_key_path;
+use imp_store::cache::{named_cache_key_path_by_id, named_cache_scope_id, workspace_cache_id};
 
-pub(crate) fn parse_io_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Vec<ExecIoSpec>> {
+pub(crate) fn parse_io_specs<'js>(
+    vals: Vec<Object<'js>>,
+    shared_caches: &HashSet<String>,
+) -> rquickjs::Result<Vec<ExecIoSpec>> {
     let mut specs = Vec::new();
     for val in vals {
         let kind: Option<String> = val.get("kind")?;
@@ -23,10 +27,15 @@ pub(crate) fn parse_io_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Ve
             continue;
         }
         let named_cache = match val.get::<_, Option<Object>>("namedCache")? {
-            Some(nc) => Some(imp_store::cache::OutputNamedCache {
-                name: nc.get::<_, String>("name")?,
-                key: nc.get::<_, String>("key")?,
-            }),
+            Some(nc) => {
+                let name = nc.get::<_, String>("name")?;
+                let shared = shared_caches.contains(&name);
+                Some(imp_store::cache::OutputNamedCache {
+                    name,
+                    key: nc.get::<_, String>("key")?,
+                    shared,
+                })
+            }
             None => None,
         };
         specs.push(ExecIoSpec {
@@ -42,6 +51,7 @@ pub(crate) fn parse_io_specs<'js>(vals: Vec<Object<'js>>) -> rquickjs::Result<Ve
 pub(crate) fn parse_tool_specs<'js>(
     vals: Vec<Object<'js>>,
     workspace_root: &Path,
+    shared_caches: &HashSet<String>,
 ) -> rquickjs::Result<Vec<ExecToolSpec>> {
     let mut specs = Vec::new();
     for val in vals {
@@ -54,8 +64,12 @@ pub(crate) fn parse_tool_specs<'js>(
         let path: Option<String> = val.get("path")?;
         let path = match path {
             Some(p) => PathBuf::from(p),
-            None => named_cache_key_path(workspace_root, &cache, &key)
-                .map_err(|e| rquickjs::Error::new_loading_message("tool", format!("{e:#}")))?,
+            None => {
+                let workspace_id = workspace_cache_id(workspace_root);
+                let scope = named_cache_scope_id(shared_caches.contains(&cache), &workspace_id);
+                named_cache_key_path_by_id(scope, &cache, &key)
+                    .map_err(|e| rquickjs::Error::new_loading_message("tool", format!("{e:#}")))?
+            }
         };
         let bin_dirs: Option<Vec<String>> = val.get("binDirs")?;
         specs.push(ExecToolSpec {

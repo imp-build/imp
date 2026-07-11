@@ -106,7 +106,7 @@ export function __resetZolaToolchainStateForTest() {
  * @returns {object} Target handle for this zola toolchain.
  */
 export function zolaToolchain(version, opts = {}) {
-    namedCache({ name: ZOLA_TOOLCHAIN_CACHE });
+    namedCache({ name: ZOLA_TOOLCHAIN_CACHE, shared: true });
     if (!coreToolHandles) {
         coreToolHandles = CORE_TOOL_NAMES.map((name) => nativeTool(name));
     }
@@ -130,7 +130,7 @@ export function zolaToolchain(version, opts = {}) {
  * @returns {string|null} Local path to the cached toolchain root.
  */
 export function installZolaToolchain(version, source) {
-    namedCache({ name: ZOLA_TOOLCHAIN_CACHE });
+    namedCache({ name: ZOLA_TOOLCHAIN_CACHE, shared: true });
     const plat = platformInfo();
     const key = zolaCacheKey(version, plat);
     cachePut(ZOLA_TOOLCHAIN_CACHE, key, source);

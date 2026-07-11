@@ -15,7 +15,7 @@ const olsTripleMap = {
 };
 
 function declareOdinfmtCache() {
-    namedCache({ name: ODINFMT_CACHE });
+    namedCache({ name: ODINFMT_CACHE, shared: true });
 }
 
 function odinfmtCacheKey(version, plat) {

@@ -128,10 +128,14 @@ export function target(opts) {
  * @param {object} opts
  * @param {string} opts.name Stable cache name, using lowercase ASCII, digits,
  * hyphens, or underscores.
+ * @param {boolean} [opts.shared] Share the cache across workspaces instead of
+ * scoping it to this checkout. Only for immutable, version-keyed content
+ * (toolchains): every workspace resolves the same slot, so nothing may ever
+ * rewrite an existing key in place.
  * @returns {void}
  */
 export function namedCache(opts) {
-    __host_named_cache(opts.name);
+    __host_named_cache(opts.name, opts.shared === true);
 }
 
 /**

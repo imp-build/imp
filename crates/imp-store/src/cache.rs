@@ -39,6 +39,10 @@ pub struct CachedArtifact {
 pub struct OutputNamedCache {
     pub name: String,
     pub key: String,
+    /// Slot lives in the cross-workspace `named/shared/` namespace instead of
+    /// the per-workspace one. See `named_cache_scope_id`.
+    #[serde(default)]
+    pub shared: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +77,18 @@ pub struct NamedCacheBinding {
 
 pub fn named_cache_key_path(workspace_root: &Path, name: &str, key: &str) -> Result<PathBuf> {
     named_cache_key_path_by_id(&workspace_cache_id(workspace_root), name, key)
+}
+
+/// Namespace segment for a named cache slot: shared caches (immutable,
+/// version-keyed toolchains) collapse into a single `shared` namespace so
+/// every checkout resolves the same slot; everything else stays under the
+/// workspace id. "shared" cannot collide with an id — those are 64-hex digests.
+pub fn named_cache_scope_id<'a>(shared: bool, workspace_id: &'a str) -> &'a str {
+    if shared {
+        "shared"
+    } else {
+        workspace_id
+    }
 }
 
 pub fn named_cache_key_path_by_id(workspace_id: &str, name: &str, key: &str) -> Result<PathBuf> {
@@ -404,8 +420,16 @@ pub fn materialize_named_cache_artifacts(
         let Some(named_cache) = &output.named_cache else {
             continue;
         };
+        let scope_id = named_cache_scope_id(named_cache.shared, workspace_id);
         let destination =
-            named_cache_key_path_by_id(workspace_id, &named_cache.name, &named_cache.key)?;
+            named_cache_key_path_by_id(scope_id, &named_cache.name, &named_cache.key)?;
+        // Slots are immutable by key and published atomically (temp + rename),
+        // so an existing destination is complete — skip the re-copy. This is
+        // what makes repeated task-cache hits (and concurrent acquires from
+        // different workspaces on shared slots) cheap and safe.
+        if destination.exists() {
+            continue;
+        }
         match output.kind.as_str() {
             "directory" => materialize_cached_directory(output, &destination)?,
             "file" | "manifest" => {

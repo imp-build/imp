@@ -118,7 +118,7 @@ export function __resetCraneToolchainStateForTest() {
  * @returns {object} Target handle for this crane toolchain.
  */
 export function craneToolchain(version, opts = {}) {
-    namedCache({ name: CRANE_TOOLCHAIN_CACHE });
+    namedCache({ name: CRANE_TOOLCHAIN_CACHE, shared: true });
     if (!coreToolHandles) {
         coreToolHandles = CORE_TOOL_NAMES.map((name) => nativeTool(name));
     }
@@ -142,7 +142,7 @@ export function craneToolchain(version, opts = {}) {
  * @returns {string|null} Local path to the cached toolchain root.
  */
 export function installCraneToolchain(version, source) {
-    namedCache({ name: CRANE_TOOLCHAIN_CACHE });
+    namedCache({ name: CRANE_TOOLCHAIN_CACHE, shared: true });
     const plat = platformInfo();
     const key = craneCacheKey(version, plat);
     cachePut(CRANE_TOOLCHAIN_CACHE, key, source);

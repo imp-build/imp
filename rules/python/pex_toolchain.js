@@ -83,7 +83,7 @@ function requireVersion(version) {
  * @returns {object} Target handle for this pex toolchain.
  */
 export function pexToolchain(version, opts = {}) {
-    namedCache({ name: PEX_TOOLCHAIN_CACHE });
+    namedCache({ name: PEX_TOOLCHAIN_CACHE, shared: true });
     namedCache({ name: PEX_ROOT_CACHE });
     if (!coreToolHandles) {
         coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
@@ -108,7 +108,7 @@ export function pexToolchain(version, opts = {}) {
  * @returns {string|null} Local path to the cached zipapp.
  */
 export function installPexToolchain(version, source) {
-    namedCache({ name: PEX_TOOLCHAIN_CACHE });
+    namedCache({ name: PEX_TOOLCHAIN_CACHE, shared: true });
     const key = pexCacheKey(version);
     cachePut(PEX_TOOLCHAIN_CACHE, key, source);
     return cacheGet(PEX_TOOLCHAIN_CACHE, key);

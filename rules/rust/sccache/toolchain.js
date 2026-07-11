@@ -144,7 +144,7 @@ function requireVersion(version) {
  * @returns {object} Target handle for this sccache toolchain.
  */
 export function sccacheToolchain(version, opts = {}) {
-    namedCache({ name: SCCACHE_TOOLCHAIN_CACHE });
+    namedCache({ name: SCCACHE_TOOLCHAIN_CACHE, shared: true });
     namedCache({ name: SCCACHE_DATA_CACHE });
     if (!coreToolHandles) {
         coreToolHandles = CORE_TOOL_NAMES.map((name) => nativeTool(name));
@@ -169,7 +169,7 @@ export function sccacheToolchain(version, opts = {}) {
  * @returns {string|null} Local path to the cached toolchain root.
  */
 export function installSccacheToolchain(version, source) {
-    namedCache({ name: SCCACHE_TOOLCHAIN_CACHE });
+    namedCache({ name: SCCACHE_TOOLCHAIN_CACHE, shared: true });
     const plat = platformInfo();
     const key = sccacheCacheKey(version, plat);
     cachePut(SCCACHE_TOOLCHAIN_CACHE, key, source);

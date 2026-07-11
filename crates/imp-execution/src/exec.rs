@@ -51,11 +51,7 @@ pub fn exec_run_hermetic_with_start(
         .iter()
         .map(|(key, value)| format!("{key}={value}"))
         .collect();
-    let output_key: Vec<serde_json::Value> = action
-        .outputs
-        .iter()
-        .map(|o| serde_json::json!({"path": o.path, "kind": o.kind}))
-        .collect();
+    let output_key: Vec<serde_json::Value> = action.outputs.iter().map(output_key_spec).collect();
     let legacy = ExecRunOpts {
         argv: action.argv.clone(),
         display: action.display.clone(),
@@ -597,6 +593,20 @@ pub fn sandbox_command_env(
     Ok(command_env)
 }
 
+/// One output's contribution to the task key: path, kind, and the named-cache
+/// binding (if any). Keying the binding means a rule changing where an output
+/// is cached — including its shared/workspace scope — re-runs the action
+/// instead of replaying a record that would materialize into the old slot.
+fn output_key_spec(o: &ExecIoSpec) -> serde_json::Value {
+    serde_json::json!({
+        "path": o.path,
+        "kind": o.kind,
+        "named_cache": o.named_cache.as_ref().map(|nc| {
+            serde_json::json!({ "name": nc.name, "key": nc.key, "shared": nc.shared })
+        }),
+    })
+}
+
 /// Digest of everything about a `run()` action other than its staged inputs
 /// and declared outputs: argv, the merged env it will execute with, the
 /// workspace configuration digest, display, and tool specs.
@@ -686,12 +696,11 @@ fn exec_run_inner_with_start(
     base_env.extend(resolve_env(&opts.env)?);
     let action_digest = live_action_digest(&opts, &base_env)?;
 
-    // Compute task key.
-    let out_specs: Vec<serde_json::Value> = opts
-        .outputs
-        .iter()
-        .map(|o| serde_json::json!({ "path": o.path, "kind": o.kind }))
-        .collect();
+    // Compute task key. The named-cache binding is part of the key: a replayed
+    // record materializes the binding captured at execution time, so a binding
+    // change (name, key, or scope) must force a re-run rather than replaying
+    // into the old slot.
+    let out_specs: Vec<serde_json::Value> = opts.outputs.iter().map(output_key_spec).collect();
     let task_key = digest_json(&serde_json::json!({
         "version": TASK_CACHE_VERSION,
         "action_digest": action_digest,
@@ -1305,6 +1314,7 @@ mod tests {
             named_cache: Some(imp_store::cache::OutputNamedCache {
                 name: "test-toolchains".to_owned(),
                 key: "v1/linux-x86_64".to_owned(),
+                shared: false,
             }),
         }];
         opts.materialize = false;
@@ -1323,6 +1333,65 @@ mod tests {
             "named cache must be populated even when materialize: false"
         );
         let _ = std::fs::remove_dir_all(&cache_dest);
+    }
+
+    #[test]
+    fn shared_named_cache_lands_in_shared_namespace_and_skips_existing() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let opts = || {
+            let mut opts = run_opts(
+                &[
+                    "sh",
+                    "-c",
+                    "mkdir -p out && printf payload > out/toolchain.bin",
+                ],
+                &[],
+                &[],
+            );
+            opts.outputs = vec![ExecIoSpec {
+                path: Some("out".to_owned()),
+                kind: "directory".to_owned(),
+                digest: None,
+                named_cache: Some(imp_store::cache::OutputNamedCache {
+                    name: "test-shared-toolchains".to_owned(),
+                    key: "v1/linux-x86_64".to_owned(),
+                    shared: true,
+                }),
+            }];
+            opts.materialize = false;
+            opts
+        };
+
+        exec_run_inner(p, opts(), None).unwrap();
+
+        let workspace_dest =
+            named_cache_key_path(p, "test-shared-toolchains", "v1/linux-x86_64").unwrap();
+        assert!(
+            !workspace_dest.exists(),
+            "shared slot must not appear under the workspace namespace"
+        );
+        let shared_dest = imp_store::cache::named_cache_key_path_by_id(
+            "shared",
+            "test-shared-toolchains",
+            "v1/linux-x86_64",
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(shared_dest.join("toolchain.bin")).unwrap(),
+            "payload",
+            "shared slot must land under named/shared/"
+        );
+
+        // Slots are immutable by key: a populated destination is left alone,
+        // even when the run replays from the task cache.
+        std::fs::write(shared_dest.join("sentinel"), "keep").unwrap();
+        exec_run_inner(p, opts(), None).unwrap();
+        assert!(
+            shared_dest.join("sentinel").exists(),
+            "existing slot must not be re-materialized over"
+        );
+        let _ = std::fs::remove_dir_all(&shared_dest);
     }
 
     #[test]

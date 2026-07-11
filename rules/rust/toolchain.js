@@ -128,8 +128,8 @@ export function __resetRustToolchainStateForTest() {
 }
 
 function declareBothCaches() {
-    namedCache({ name: RUSTUP_HOME_CACHE });
-    namedCache({ name: CARGO_HOME_CACHE });
+    namedCache({ name: RUSTUP_HOME_CACHE, shared: true });
+    namedCache({ name: CARGO_HOME_CACHE, shared: true });
 }
 
 function requireVersion(version) {

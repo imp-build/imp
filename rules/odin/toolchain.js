@@ -105,7 +105,7 @@ export function __resetOdinToolchainStateForTest() {
  * @returns {object} Target handle for this Odin toolchain.
  */
 export function odinToolchain(version, opts = {}) {
-    namedCache({ name: ODIN_TOOLCHAIN_CACHE });
+    namedCache({ name: ODIN_TOOLCHAIN_CACHE, shared: true });
 
     const toolchain = new OdinToolchain({ version, linker: opts.linker });
 

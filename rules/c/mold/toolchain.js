@@ -108,7 +108,7 @@ function requireVersion(version) {
  * @returns {object} Target handle for this mold toolchain.
  */
 export function moldToolchain(version, opts = {}) {
-    namedCache({ name: MOLD_TOOLCHAIN_CACHE });
+    namedCache({ name: MOLD_TOOLCHAIN_CACHE, shared: true });
     if (!coreToolHandles) {
         coreToolHandles = CORE_TOOL_NAMES.map((name) => nativeTool(name));
     }
@@ -132,7 +132,7 @@ export function moldToolchain(version, opts = {}) {
  * @returns {string|null} Local path to the cached toolchain root.
  */
 export function installMoldToolchain(version, source) {
-    namedCache({ name: MOLD_TOOLCHAIN_CACHE });
+    namedCache({ name: MOLD_TOOLCHAIN_CACHE, shared: true });
     const plat = platformInfo();
     const key = moldCacheKey(version, plat);
     cachePut(MOLD_TOOLCHAIN_CACHE, key, source);

@@ -5,7 +5,7 @@
 //! via `__host_target`.  The Rust engine resolves product requests into a task
 //! DAG without executing it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU8, Ordering},
@@ -32,7 +32,7 @@ use imp_daemon::client::RemoteExecutionService;
 use imp_exec_api::{ExecAction, ExecRunOpts, ExecutionService, SandboxRetention, WorkerSpec};
 use imp_execution::service::LocalExecutionService;
 use imp_store::cache::{
-    artifact_relative_path, digest_json, store_file_blob, workspace_cache_id,
+    artifact_relative_path, digest_json, named_cache_scope_id, store_file_blob, workspace_cache_id,
 };
 
 pub(crate) const WORKSPACE_FILE: &str = "imp.workspace.js";
@@ -186,6 +186,11 @@ pub struct BuildGenerateReport {
 pub struct NamedCache {
     pub name: String,
     pub env_var: String,
+    /// Shared caches live under `named/shared/` instead of the per-workspace
+    /// namespace — for immutable, version-keyed slots (toolchains) that are
+    /// identical across checkouts.
+    #[serde(default)]
+    pub shared: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,9 +1047,10 @@ fn register_globals<'js>(
     // __host_named_cache(name)
     // ------------------------------------------------------------------
     let state_c = Arc::clone(&state);
-    let host_named_cache =
-        Function::new(ctx.clone(), move |name: String| -> rquickjs::Result<()> {
-            let cache = named_cache_from_name(&name)?;
+    let host_named_cache = Function::new(
+        ctx.clone(),
+        move |name: String, shared: Option<bool>| -> rquickjs::Result<()> {
+            let cache = named_cache_from_name(&name, shared.unwrap_or(false))?;
             let mut hs = state_c.lock().unwrap();
             if let Some(existing) = hs.named_caches.get(&cache.name) {
                 if existing != &cache {
@@ -1067,7 +1073,8 @@ fn register_globals<'js>(
             }
             hs.named_caches.insert(cache.name.clone(), cache);
             Ok(())
-        })?;
+        },
+    )?;
     globals.set("__host_named_cache", host_named_cache)?;
 
     // ------------------------------------------------------------------
@@ -1287,38 +1294,54 @@ fn register_globals<'js>(
     // __host_cache_get(name, key) → path | null
     // __host_cache_has(name, key) → bool
     // ------------------------------------------------------------------
+    // Scope resolution: shared caches (per the namedCache() registry) live
+    // under the cross-workspace "shared" namespace, everything else under
+    // this workspace's id.
     let wc = workspace_root.clone();
+    let state_scope = Arc::clone(&state);
+    let cache_scope = move |name: &str| -> String {
+        let workspace_id = workspace_cache_id(&wc);
+        let shared = state_scope
+            .lock()
+            .unwrap()
+            .named_caches
+            .get(name)
+            .is_some_and(|cache| cache.shared);
+        named_cache_scope_id(shared, &workspace_id).to_owned()
+    };
+
+    let scope_put = cache_scope.clone();
     let service_cache_put = Arc::clone(&service);
     let host_cache_put = Function::new(
         ctx.clone(),
         move |name: String, key: String, source: String| -> rquickjs::Result<()> {
             service_cache_put
-                .cache_dir_put(&workspace_cache_id(&wc), &name, &key, Path::new(&source))
+                .cache_dir_put(&scope_put(&name), &name, &key, Path::new(&source))
                 .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("{e:#}")))
         },
     )?;
     globals.set("__host_cache_put", host_cache_put)?;
 
-    let wc = workspace_root.clone();
+    let scope_get = cache_scope.clone();
     let service_cache_get = Arc::clone(&service);
     let host_cache_get = Function::new(
         ctx.clone(),
         move |name: String, key: String| -> rquickjs::Result<Option<String>> {
             let path = service_cache_get
-                .cache_dir_get(&workspace_cache_id(&wc), &name, &key)
+                .cache_dir_get(&scope_get(&name), &name, &key)
                 .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("{e:#}")))?;
             Ok(path.map(|p| p.to_string_lossy().into_owned()))
         },
     )?;
     globals.set("__host_cache_get", host_cache_get)?;
 
-    let wc = workspace_root.clone();
+    let scope_has = cache_scope.clone();
     let service_cache_has = Arc::clone(&service);
     let host_cache_has = Function::new(
         ctx.clone(),
         move |name: String, key: String| -> rquickjs::Result<bool> {
             service_cache_has
-                .cache_dir_has(&workspace_cache_id(&wc), &name, &key)
+                .cache_dir_has(&scope_has(&name), &name, &key)
                 .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("{e:#}")))
         },
     )?;
@@ -1857,6 +1880,7 @@ fn register_globals<'js>(
     let exec_sandbox_retention_run = Arc::clone(&exec_sandbox_retention);
     let scheduler_run = Arc::clone(&scheduler);
     let service_run = Arc::clone(&service);
+    let state_run = Arc::clone(&state);
     let host_run = Function::new(
         ctx.clone(),
         Async(move |ctx: Ctx<'js>, opts: Object<'js>| {
@@ -1865,6 +1889,7 @@ fn register_globals<'js>(
             let exec_sandbox_retention_run = Arc::clone(&exec_sandbox_retention_run);
             let scheduler_run = Arc::clone(&scheduler_run);
             let service = Arc::clone(&service_run);
+            let state_run = Arc::clone(&state_run);
             async move {
                 let root = exec_root_run.lock().unwrap().clone().ok_or_else(|| {
                     rquickjs::Error::new_loading_message(
@@ -1880,7 +1905,8 @@ fn register_globals<'js>(
                 })?;
                 // Owning memo node (if any) so the job nests under it in the UI.
                 let parent: Option<u64> = opts.get::<_, Option<f64>>("__owner")?.map(|n| n as u64);
-                let mut run_opts = parse_exec_run_opts(opts, &root)?;
+                let shared_caches = shared_cache_names(&state_run);
+                let mut run_opts = parse_exec_run_opts(opts, &root, &shared_caches)?;
                 run_opts.no_cache = exec_no_cache_run.load(Ordering::SeqCst);
                 run_opts.sandbox_retention =
                     SandboxRetention::from_u8(exec_sandbox_retention_run.load(Ordering::SeqCst));
@@ -2210,6 +2236,7 @@ fn windows_tool_search_dirs() -> Vec<PathBuf> {
 fn parse_exec_run_opts<'js>(
     opts: Object<'js>,
     workspace_root: &Path,
+    shared_caches: &HashSet<String>,
 ) -> rquickjs::Result<ExecRunOpts> {
     let argv: Vec<String> = opts.get("argv")?;
     let display: Option<String> = opts.get("display")?;
@@ -2220,15 +2247,18 @@ fn parse_exec_run_opts<'js>(
     let inputs = parse_io_specs(
         opts.get::<_, Option<Vec<Object>>>("inputs")?
             .unwrap_or_default(),
+        shared_caches,
     )?;
     let outputs = parse_io_specs(
         opts.get::<_, Option<Vec<Object>>>("outputs")?
             .unwrap_or_default(),
+        shared_caches,
     )?;
     let tools = parse_tool_specs(
         opts.get::<_, Option<Vec<Object>>>("tools")?
             .unwrap_or_default(),
         workspace_root,
+        shared_caches,
     )?;
     let impure = opts.get::<_, Option<bool>>("impure")?.unwrap_or(false);
     let force_cache = opts.get::<_, Option<bool>>("forceCache")?.unwrap_or(false);
@@ -2570,7 +2600,20 @@ pub(crate) fn workspace_relative_directory(path: &str) -> Result<PathBuf> {
 
 /// Recursively copy the contents of `src` into `dst` (which already exists as a
 /// directory). Unlike `std::fs::rename` this works across mount boundaries.
-fn named_cache_from_name(name: &str) -> rquickjs::Result<NamedCache> {
+/// Names of the caches declared `shared: true`, snapshotted for path
+/// resolution outside the registry lock.
+fn shared_cache_names(state: &Arc<Mutex<HostState>>) -> HashSet<String> {
+    state
+        .lock()
+        .unwrap()
+        .named_caches
+        .values()
+        .filter(|cache| cache.shared)
+        .map(|cache| cache.name.clone())
+        .collect()
+}
+
+fn named_cache_from_name(name: &str, shared: bool) -> rquickjs::Result<NamedCache> {
     if name.is_empty() {
         return Err(action_spec_error(
             "named cache name must not be empty".to_owned(),
@@ -2588,6 +2631,7 @@ fn named_cache_from_name(name: &str) -> rquickjs::Result<NamedCache> {
     Ok(NamedCache {
         name: name.to_owned(),
         env_var: format!("IMP_NAMED_CACHE_{env_suffix}"),
+        shared,
     })
 }
 

@@ -26,6 +26,7 @@ pub fn action_to_proto(action: ExecAction) -> proto::ExecAction {
                     .as_ref()
                     .map(|x| x.key.clone())
                     .unwrap_or_default(),
+                named_cache_shared: o.named_cache.as_ref().map(|x| x.shared).unwrap_or_default(),
             })
             .collect(),
         tools: action
@@ -66,6 +67,7 @@ pub fn action_from_proto(p: proto::ExecAction) -> Result<ExecAction> {
                     Some(imp_store::cache::OutputNamedCache {
                         name: o.named_cache_name,
                         key: o.named_cache_key,
+                        shared: o.named_cache_shared,
                     })
                 },
             })
@@ -115,6 +117,7 @@ pub fn outcome_to_proto(outcome: ExecOutcome) -> proto::Outcome {
                     .as_ref()
                     .map(|x| x.key.clone())
                     .unwrap_or_default(),
+                named_cache_shared: o.named_cache.as_ref().map(|x| x.shared).unwrap_or_default(),
             })
             .collect(),
     }
@@ -152,6 +155,7 @@ pub fn outcome_from_proto(o: proto::Outcome) -> ExecOutcome {
                     Some(imp_store::cache::OutputNamedCache {
                         name: x.named_cache_name,
                         key: x.named_cache_key,
+                        shared: x.named_cache_shared,
                     })
                 },
             })

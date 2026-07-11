@@ -115,7 +115,7 @@ export function __resetCmakeToolchainStateForTest() {
  * @returns {object} Target handle for this CMake toolchain.
  */
 export function cmakeToolchain(version, opts = {}) {
-    namedCache({ name: CMAKE_TOOLCHAIN_CACHE });
+    namedCache({ name: CMAKE_TOOLCHAIN_CACHE, shared: true });
     if (!coreToolHandles) {
         coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
     }
@@ -139,7 +139,7 @@ export function cmakeToolchain(version, opts = {}) {
  * @returns {string|null} Local path to the cached toolchain root.
  */
 export function installCmakeToolchain(version, source) {
-    namedCache({ name: CMAKE_TOOLCHAIN_CACHE });
+    namedCache({ name: CMAKE_TOOLCHAIN_CACHE, shared: true });
     const plat = platformInfo();
     const key = cmakeCacheKey(version, plat);
     cachePut(CMAKE_TOOLCHAIN_CACHE, key, source);

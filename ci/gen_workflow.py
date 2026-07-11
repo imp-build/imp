@@ -41,7 +41,7 @@ CACHE_IMP_STEP = {
     "uses": "actions/cache@v4",
     "with": {
         "path": "~/.cache/imp",
-        "key": "imp-toolchains-v2-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}",
+        "key": "imp-toolchains-v3-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}",
     },
 }
 

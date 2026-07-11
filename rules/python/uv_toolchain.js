@@ -131,7 +131,7 @@ function requireVersion(version) {
  * @returns {object} Target handle for this uv toolchain.
  */
 export function uvToolchain(version, opts = {}) {
-    namedCache({ name: UV_TOOLCHAIN_CACHE });
+    namedCache({ name: UV_TOOLCHAIN_CACHE, shared: true });
     namedCache({ name: UV_CACHE_DIR_CACHE });
     if (!coreToolHandles) {
         coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
@@ -156,7 +156,7 @@ export function uvToolchain(version, opts = {}) {
  * @returns {string|null} Local path to the cached toolchain root.
  */
 export function installUvToolchain(version, source) {
-    namedCache({ name: UV_TOOLCHAIN_CACHE });
+    namedCache({ name: UV_TOOLCHAIN_CACHE, shared: true });
     const plat = platformInfo();
     const key = uvCacheKey(version, plat);
     cachePut(UV_TOOLCHAIN_CACHE, key, source);
