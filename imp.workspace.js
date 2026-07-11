@@ -7,6 +7,7 @@ import { moldToolchain } from "//rules/c/mold/toolchain";
 import "//rules/gen";
 import { odinGenerateBuild, odinToolchain } from "//rules/odin";
 import { odinfmtToolchain } from "//rules/odin/odinfmt/toolchain";
+import { ruffToolchain } from "//rules/python/ruff_toolchain";
 import { rustToolchain } from "//rules/rust";
 import { cargoGenerateBuild } from "//rules/rust/generate_build";
 import { sccacheToolchain } from "//rules/rust/sccache/toolchain";
@@ -28,6 +29,7 @@ export const gcc = gccToolchain("2025.08-1", { default: true });
 export const mold = moldToolchain("2.41.0");
 export const odin = odinToolchain("dev-2026-03", { default: true, linker: mold });
 export const odinfmt = odinfmtToolchain();
+export const ruff = ruffToolchain("0.15.21", { default: true });
 // sccache wraps rustc with a content-keyed compiler cache backed by a
 // host-managed persistent worker (see src/worker.rs) — sidesteps cargo's own
 // mtime-based incremental compilation, which imp's fresh-per-sandbox

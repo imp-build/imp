@@ -16,6 +16,7 @@
 // other target.
 import { odinFmt, odinFormatCheck } from "//rules/odin/odinfmt";
 import { cargoFmt, cargoFormatCheck } from "//rules/rust/fmt";
+import { ruffFmt, ruffFormatCheck } from "//rules/python/fmt";
 import { goal, product, resolveProduct, goalFlags, logInfo } from "imp:core";
 
 export async function fmtGoal(selection) {
@@ -74,3 +75,6 @@ export const odinTestPackageFormatCheck = product("odin-test-package", "format-c
 
 export const cargoPackageFmt = product("cargo-package", "fmt", cargoFmt);
 export const cargoPackageFormatCheck = product("cargo-package", "format-check", cargoFormatCheck);
+
+export const pythonAppFmt = product("python-app", "fmt", ruffFmt);
+export const pythonAppFormatCheck = product("python-app", "format-check", ruffFormatCheck);

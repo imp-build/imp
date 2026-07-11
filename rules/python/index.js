@@ -84,7 +84,7 @@ function declaring_directory(handle) {
     return scope.length === 0 ? "." : scope;
 }
 
-function declared_path(handle, path = ".") {
+export function declared_path(handle, path = ".") {
     const base = declaring_directory(handle);
     const local = path || ".";
     if (base === ".") return normalize_workspace_path(local);
@@ -99,6 +99,15 @@ function declared_path(handle, path = ".") {
 const sources = memo(async function sources(handle) {
     const root = declared_path(handle, handle.attrs.src || ".");
     return glob({ root, include: ["pyproject.toml", "uv.lock", "**/*.py"] });
+});
+
+// Just the .py files a formatter rewrites, scoped to this target's own
+// directory — narrower than sources() above, which also pulls in
+// pyproject.toml/uv.lock as build-time sandbox inputs. Same split as
+// rust_file_sources vs sources() in rules/rust/index.js.
+export const python_file_sources = memo(async function python_file_sources(handle) {
+    const root = declared_path(handle, handle.attrs.src || ".");
+    return glob({ root, include: ["**/*.py"] });
 });
 
 // Both uv sync and pex build need $UV_CACHE_DIR/$PEX_ROOT exported as
