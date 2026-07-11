@@ -57,10 +57,3 @@ pub fn materialize_outputs(
 ) -> Result<()> {
     materialize_cached_artifacts(outputs, workspace_root)
 }
-
-pub fn materialize_named_caches(
-    outputs: &[imp_store::cache::CachedArtifact],
-    workspace_id: &str,
-) -> Result<()> {
-    imp_store::cache::materialize_named_cache_artifacts(outputs, workspace_id)
-}

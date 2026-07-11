@@ -1947,10 +1947,9 @@ fn register_globals<'js>(
                                     &root,
                                 )?;
                             }
-                            imp_execution::staging::materialize_named_caches(
-                                &result.outputs,
-                                &workspace_id,
-                            )?;
+                            // Named caches are populated by the executor itself
+                            // (exec_run_hermetic gets workspace_id), including
+                            // repopulation from CAS on task-cache hits.
                             Ok(result)
                         },
                     )

@@ -16,8 +16,8 @@ use std::os::unix::process::CommandExt;
 
 use imp_store::cache::{
     artifact_relative_path, cached_outputs_present, create_sandbox_root, digest_json, file_mode,
-    materialize_cached_outputs, materialize_named_caches, store_file_blob, task_record_path,
-    validate_tool_name, write_task_cache_record, CachedArtifact, TaskCacheRecord,
+    materialize_cached_outputs, materialize_named_cache_artifacts, store_file_blob,
+    task_record_path, validate_tool_name, write_task_cache_record, CachedArtifact, TaskCacheRecord,
     TASK_CACHE_VERSION,
 };
 use imp_store::digest::{
@@ -33,15 +33,15 @@ pub use imp_exec_api::{
 /// workspace materialization; all filesystem paths used for staging are
 /// therefore inside the executor sandbox or shared CAS.
 pub fn exec_run_hermetic(
-    _workspace_id: &str,
+    workspace_id: &str,
     action: ExecAction,
     cancellation: Option<&AtomicBool>,
 ) -> Result<imp_exec_api::ExecOutcome> {
-    exec_run_hermetic_with_start(_workspace_id, action, cancellation, &|| {})
+    exec_run_hermetic_with_start(workspace_id, action, cancellation, &|| {})
 }
 
 pub fn exec_run_hermetic_with_start(
-    _workspace_id: &str,
+    workspace_id: &str,
     action: ExecAction,
     cancellation: Option<&AtomicBool>,
     started: &dyn Fn(),
@@ -77,8 +77,16 @@ pub fn exec_run_hermetic_with_start(
         materialize: false,
     };
     let action_digest = live_action_digest(&legacy, &action.env)?;
-    let result = exec_run_inner_with_start(Path::new("/"), legacy, cancellation, Some(started))
-        .with_context(|| format!("hermetic executor action for workspace {_workspace_id}"))?;
+    // The dummy "/" root is never touched: inputs are digest-staged and
+    // materialize is off. Named caches use the caller's workspace id.
+    let result = exec_run_inner_with_start(
+        Path::new("/"),
+        workspace_id,
+        legacy,
+        cancellation,
+        Some(started),
+    )
+    .with_context(|| format!("hermetic executor action for workspace {workspace_id}"))?;
     let task_key = imp_store::cache::digest_json(&serde_json::json!({
         "version": TASK_CACHE_VERSION,
         "action_digest": action_digest,
@@ -610,11 +618,13 @@ pub fn exec_run_inner(
     opts: ExecRunOpts,
     cancellation: Option<&AtomicBool>,
 ) -> Result<ExecRunResult> {
-    exec_run_inner_with_start(workspace_root, opts, cancellation, None)
+    let workspace_id = imp_store::cache::workspace_cache_id(workspace_root);
+    exec_run_inner_with_start(workspace_root, &workspace_id, opts, cancellation, None)
 }
 
 fn exec_run_inner_with_start(
     workspace_root: &Path,
+    workspace_id: &str,
     opts: ExecRunOpts,
     cancellation: Option<&AtomicBool>,
     started: Option<&dyn Fn()>,
@@ -724,7 +734,7 @@ fn exec_run_inner_with_start(
         if opts.materialize {
             materialize_cached_outputs(&record, workspace_root)?;
         }
-        materialize_named_caches(&record, workspace_root)?;
+        materialize_named_cache_artifacts(&record.outputs, workspace_id)?;
         return Ok(ExecRunResult {
             stdout: record.stdout,
             stderr: record.stderr,
@@ -904,7 +914,7 @@ fn exec_run_inner_with_start(
         if opts.materialize {
             materialize_cached_outputs(&record, workspace_root)?;
         }
-        materialize_named_caches(&record, workspace_root)?;
+        materialize_named_cache_artifacts(&record.outputs, workspace_id)?;
     }
 
     // Command and output ingestion succeeded — let the guard delete the sandbox.

@@ -396,10 +396,6 @@ pub fn materialize_cached_artifacts(
 /// Materialize any outputs bound to a named cache slot (via `output({ namedCache })`)
 /// from their CAS content. Runs after both fresh executions and task-cache hits, so a
 /// named cache wiped between runs is transparently repopulated.
-pub fn materialize_named_caches(record: &TaskCacheRecord, workspace_root: &Path) -> Result<()> {
-    materialize_named_cache_artifacts(&record.outputs, &workspace_cache_id(workspace_root))
-}
-
 pub fn materialize_named_cache_artifacts(
     outputs: &[CachedArtifact],
     workspace_id: &str,
