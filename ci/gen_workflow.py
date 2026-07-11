@@ -36,6 +36,7 @@ CHECK_STEPS = [
     {"uses": "actions/checkout@v4"},
     *DOWNLOAD_IMP_STEPS,
     {"name": "Check generated files", "run": f"./imp goal generate {SITE_CHECK_TARGET} --check"},
+    {"name": "Check formatting", "run": "./imp fmt --check"},
 ]
 
 PACKAGE_STEPS = [

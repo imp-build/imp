@@ -52,6 +52,9 @@ jobs:
       - name: Check generated files
         run: ./imp goal generate //ci:docs_workflow --check
 
+      - name: Check formatting
+        run: ./imp fmt --check
+
   package:
     needs: build
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
