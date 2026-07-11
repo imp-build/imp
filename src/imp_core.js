@@ -199,6 +199,11 @@ export function goalFlags() {
 /**
  * Builders for declarative workspace configuration schemas.
  *
+ * Available descriptors are `field.int`, `field.string`, `field.bool`,
+ * `field.enum(values)`, `field.object(shape)`, and `field.map(key, value)`.
+ * Descriptor options are `default` and `required`; map keys are represented
+ * as JSON object property names.
+ *
  * @category configuration
  */
 export const field = {
@@ -213,7 +218,11 @@ export const field = {
 /**
  * Register the typed shape for a workspace configuration namespace.
  * The owning module must be imported before workspace configuration exports
- * are evaluated.
+ * are evaluated. A workspace may provide either an export named after the
+ * namespace, such as `export const imp = { jsWorkers: 2 }`, or a
+ * collision-free `<namespace>Config` export, such as
+ * `export const odinConfig = { collections: { lib: "library" } }`.
+ * Registered schemas are available through `imp config schema`.
  *
  * @category configuration
  * @param {string} namespace Configuration namespace.
@@ -236,11 +245,11 @@ defineConfigSchema("imp", { jsWorkers: field.int({ default: 1 }) });
 /**
  * Merge JSON-serializable workspace configuration into a namespace.
  *
- * For static, known-shape configuration prefer exporting a matching object
- * from imp.workspace.js; this imperative API remains useful for dynamic and
- * test-time configuration. Configuration is evaluated before BUILD.js files
- * when called from imp.workspace.js, and can be read by rule functions via
- * configuration().
+ * For static, known-shape configuration prefer exporting a matching object or
+ * `<namespace>Config` object from imp.workspace.js; this imperative API
+ * remains useful for dynamic and test-time configuration. Configuration is
+ * evaluated before BUILD.js files when called from imp.workspace.js, and can
+ * be read by rule functions via configuration().
  *
  * @category configuration
  * @param {string} namespace Stable configuration namespace, e.g. "odin".

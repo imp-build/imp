@@ -1051,9 +1051,16 @@ export class OdinCollection extends Target {
 /**
  * Declare an Odin collection namespace mapping.
  *
- * Prefer workspace config for new code:
+ * Workspace-wide collection mappings can be declared with the Odin config
+ * schema:
  *
- * export const odin = { collections: { lib: "library" } }
+ * export const odinConfig = {
+ *     collections: { lib: "library" },
+ * };
+ *
+ * `collections` is a `map[string]string`. Package-local collections may still
+ * use the `collections` option on odinPackage/odinTestPackage, including
+ * target handles and `{ name, path }` entries.
  *
  * @category target
  * @param {object} opts
