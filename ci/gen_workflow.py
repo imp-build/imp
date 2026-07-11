@@ -32,9 +32,23 @@ BUILD_STEPS = [
     {"name": "Upload imp binary", "uses": "actions/upload-artifact@v4", "with": {"name": IMP_ARTIFACT, "path": "target/release/imp"}},
 ]
 
+# Toolchains imp acquires on demand (rust, ruff, odinfmt, ...) land under
+# ~/.cache/imp; without this cache every run pays the full cold acquire
+# (minutes), with it a warm run is ~1s. Keyed on the version pins: the
+# workspace config declares toolchain versions, the lockfiles pin artifacts.
+CACHE_IMP_STEP = {
+    "name": "Cache imp toolchains",
+    "uses": "actions/cache@v4",
+    "with": {
+        "path": "~/.cache/imp",
+        "key": "imp-toolchains-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}",
+    },
+}
+
 CHECK_STEPS = [
     {"uses": "actions/checkout@v4"},
     *DOWNLOAD_IMP_STEPS,
+    CACHE_IMP_STEP,
     {"name": "Check generated files", "run": f"./imp goal generate {SITE_CHECK_TARGET} --check"},
     {"name": "Check formatting", "run": "./imp fmt --check"},
 ]

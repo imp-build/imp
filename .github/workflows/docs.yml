@@ -49,6 +49,12 @@ jobs:
       - name: Make imp executable
         run: chmod +x imp
 
+      - name: Cache imp toolchains
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/imp
+          key: imp-toolchains-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}
+
       - name: Check generated files
         run: ./imp goal generate //ci:docs_workflow --check
 

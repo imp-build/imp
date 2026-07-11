@@ -236,12 +236,12 @@ export async function acquireRustToolchain(version) {
     // (not a declared output — it's discarded with the sandbox) since only
     // the resulting RUSTUP_HOME/CARGO_HOME need caching. rustup writes into
     // them, which we point at via $PWD (run() env can't expand $PWD, so
-    // this lives in the script). Profile "default" (not "minimal") is
-    // required so rustfmt is present — the fmt/format-check products
-    // (rules/rust/fmt.js) shell out to `cargo fmt`, which "minimal" doesn't
-    // install.
+    // this lives in the script). Profile "minimal" plus explicit rustfmt
+    // (for fmt/format-check, rules/rust/fmt.js) and clippy (for lint)
+    // components — "default" would also pull in rust-docs, ~740MB of small
+    // files that dominate cold-acquire time.
     const chmodStep = plat.os === "windows" ? "" : `chmod +x "${rustupInitExe}"; `;
-    const installScript = `set -e; curl -fSL -o "${rustupInitExe}" "$1"; ${chmodStep}export RUSTUP_HOME="$PWD/$2" CARGO_HOME="$PWD/$3"; ./"${rustupInitExe}" -y --no-modify-path --profile default --default-toolchain "$4"`;
+    const installScript = `set -e; curl -fSL -o "${rustupInitExe}" "$1"; ${chmodStep}export RUSTUP_HOME="$PWD/$2" CARGO_HOME="$PWD/$3"; ./"${rustupInitExe}" -y --no-modify-path --profile minimal --component rustfmt --component clippy --default-toolchain "$4"`;
 
     await run({
         argv: ["sh", "-c", installScript, "install-rust", url, rustupHomeDir, cargoHomeDir, version],
