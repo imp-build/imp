@@ -1,0 +1,31 @@
+{
+  "tool": "rust",
+  "version": "1.93.0",
+  "artifacts": {
+    "linux/x86_64": {
+      "url": "https://static.rust-lang.org/rustup/archive/1.27.1/x86_64-unknown-linux-gnu/rustup-init",
+      "artifact": "rustup-init",
+      "sha256": "6aeece6993e902708983b209d04c0d1dbb14ebb405ddb87def578d41f920f56d"
+    },
+    "linux/aarch64": {
+      "url": "https://static.rust-lang.org/rustup/archive/1.27.1/aarch64-unknown-linux-gnu/rustup-init",
+      "artifact": "rustup-init",
+      "sha256": "1cffbf51e63e634c746f741de50649bbbcbd9dbe1de363c9ecef64e278dba2b2"
+    },
+    "macos/x86_64": {
+      "url": "https://static.rust-lang.org/rustup/archive/1.27.1/x86_64-apple-darwin/rustup-init",
+      "artifact": "rustup-init",
+      "sha256": "f547d77c32d50d82b8228899b936bf2b3c72ce0a70fb3b364e7fba8891eba781"
+    },
+    "macos/aarch64": {
+      "url": "https://static.rust-lang.org/rustup/archive/1.27.1/aarch64-apple-darwin/rustup-init",
+      "artifact": "rustup-init",
+      "sha256": "760b18611021deee1a859c345d17200e0087d47f68dfe58278c57abe3a0d3dd0"
+    },
+    "windows/x86_64": {
+      "url": "https://static.rust-lang.org/rustup/archive/1.27.1/x86_64-pc-windows-msvc/rustup-init.exe",
+      "artifact": "rustup-init.exe",
+      "sha256": "193d6c727e18734edbf7303180657e96e9d5a08432002b4e6c5bbe77c60cb3e8"
+    }
+  }
+}

@@ -264,4 +264,5 @@ product("zola-toolchain", "gen-lockfiles", (handle) =>
         platforms: zolaSupportedPlatforms(),
         downloadUrl: zolaDownloadUrl,
         artifactName: zolaArtifactName,
+        lockfile: "//rules/zola/zola.lock",
     }));

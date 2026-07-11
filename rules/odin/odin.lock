@@ -1,0 +1,31 @@
+{
+  "tool": "odin",
+  "version": "dev-2026-03",
+  "artifacts": {
+    "linux/x86_64": {
+      "url": "https://github.com/odin-lang/Odin/releases/download/dev-2026-03/odin-linux-amd64-dev-2026-03.tar.gz",
+      "artifact": "odin-linux-amd64-dev-2026-03.tar.gz",
+      "sha256": "60ff31bfb5807617eaa63d4a516f9d64f45e3cd1f5bba952298353036dbe8464"
+    },
+    "linux/aarch64": {
+      "url": "https://github.com/odin-lang/Odin/releases/download/dev-2026-03/odin-linux-arm64-dev-2026-03.tar.gz",
+      "artifact": "odin-linux-arm64-dev-2026-03.tar.gz",
+      "sha256": "e55b1af2ef87ff7a221a3600e997d5d04616e914d899c0dff0609c7054f4109e"
+    },
+    "macos/x86_64": {
+      "url": "https://github.com/odin-lang/Odin/releases/download/dev-2026-03/odin-macos-amd64-dev-2026-03.tar.gz",
+      "artifact": "odin-macos-amd64-dev-2026-03.tar.gz",
+      "sha256": "3df977cec3bc1de189d6f6a5740d33bd2bcfc39edeb8ad7af5c51cd5d4fd5c4f"
+    },
+    "macos/aarch64": {
+      "url": "https://github.com/odin-lang/Odin/releases/download/dev-2026-03/odin-macos-arm64-dev-2026-03.tar.gz",
+      "artifact": "odin-macos-arm64-dev-2026-03.tar.gz",
+      "sha256": "ff1b7801662ba24aa3fc42cfbd0bcddbd5d560709fba9c71ccfe0cb4cf926d15"
+    },
+    "windows/x86_64": {
+      "url": "https://github.com/odin-lang/Odin/releases/download/dev-2026-03/odin-windows-amd64-dev-2026-03.zip",
+      "artifact": "odin-windows-amd64-dev-2026-03.zip",
+      "sha256": "b3323fd9544b84e2b751b5fc1b02d9b6388fd6948d49689eb3eced6cfe3afe3b"
+    }
+  }
+}

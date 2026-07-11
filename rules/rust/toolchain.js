@@ -356,4 +356,5 @@ product("rust-toolchain", "gen-lockfiles", (handle) =>
         platforms: rustSupportedPlatforms(),
         downloadUrl: rustDownloadUrl,
         artifactName: rustArtifactName,
+        lockfile: "//rules/rust/rust.lock",
     }));

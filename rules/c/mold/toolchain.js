@@ -256,6 +256,7 @@ product("mold-toolchain", "gen-lockfiles", (handle) =>
         platforms: moldSupportedPlatforms(),
         downloadUrl: moldDownloadUrl,
         artifactName: moldArtifactName,
+        lockfile: "//rules/c/mold/mold.lock",
     }));
 
 /**

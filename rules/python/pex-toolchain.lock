@@ -1,0 +1,11 @@
+{
+  "tool": "pex-toolchain",
+  "version": "2.97.1",
+  "artifacts": {
+    "any/any": {
+      "url": "https://github.com/pantsbuild/pex/releases/download/v2.97.1/pex",
+      "artifact": "pex",
+      "sha256": "7aa97828d587883ddacc7cb1bdef71ed101b4d90e694a397a1cceaeac08e80b7"
+    }
+  }
+}

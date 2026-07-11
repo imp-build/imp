@@ -272,4 +272,5 @@ product("cmake-toolchain", "gen-lockfiles", (handle) =>
         platforms: cmakeSupportedPlatforms(),
         downloadUrl: cmakeDownloadUrl,
         artifactName: cmakeArtifactName,
+        lockfile: "//rules/c/cmake/cmake.lock",
     }));

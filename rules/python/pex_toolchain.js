@@ -299,4 +299,5 @@ product("pex-toolchain", "gen-lockfiles", (handle) =>
         platforms: [{ os: "any", arch: "any" }],
         downloadUrl: (version) => pexDownloadUrl(version),
         artifactName: () => "pex",
+        lockfile: "//rules/python/pex-toolchain.lock",
     }));

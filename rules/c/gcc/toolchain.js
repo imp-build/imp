@@ -281,6 +281,7 @@ product("gcc-toolchain", "gen-lockfiles", (handle) =>
         platforms: gccSupportedPlatforms(),
         downloadUrl: gccDownloadUrl,
         artifactName: gccArtifactName,
+        lockfile: "//rules/c/gcc/gcc.lock",
     }));
 
 /**

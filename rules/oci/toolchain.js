@@ -273,4 +273,5 @@ product("crane-toolchain", "gen-lockfiles", (handle) =>
         platforms: craneSupportedPlatforms(),
         downloadUrl: craneDownloadUrl,
         artifactName: craneArtifactName,
+        lockfile: "//rules/oci/crane.lock",
     }));

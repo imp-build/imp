@@ -461,4 +461,5 @@ product("zig-toolchain", "gen-lockfiles", (handle) =>
         platforms: zigSupportedPlatforms(),
         downloadUrl: zigDownloadUrl,
         artifactName: zigArtifactName,
+        lockfile: "//rules/c/zig/zig.lock",
     }));

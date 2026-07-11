@@ -335,6 +335,7 @@ product("sccache-toolchain", "gen-lockfiles", (handle) =>
         platforms: sccacheSupportedPlatforms(),
         downloadUrl: sccacheDownloadUrl,
         artifactName: sccacheArtifactName,
+        lockfile: "//rules/rust/sccache/sccache.lock",
     }));
 
 /**

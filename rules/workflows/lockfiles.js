@@ -5,10 +5,11 @@
 // the download URL, artifact filename, and SHA-256 of that artifact — so an
 // acquire on any machine can be checked against known-good bytes rather than
 // trusting a version string alone. Acquire paths verify against the lockfile
-// via resolveToolLockfile (rules/imp/lockfile.js); toolchains that pass a
-// `lockfile` address here write to that address (e.g. a lock checked in next
-// to the rule module ships embedded in the binary), the rest keep writing
-// `<name>.lock` at the workspace root until they migrate (imp issue #3).
+// via resolveToolLockfile (rules/imp/lockfile.js); every toolchain here
+// passes a `lockfile` address so the lock is checked in next to its rule
+// module and ships embedded in the binary. Omitting `lockfile` falls back to
+// `<name>.lock` at the workspace root — only useful for one-off/test lock
+// generation, not for toolchains meant to ship a pinned lockfile.
 //
 // Each toolchain rule module registers its own
 // `product("<x>-toolchain", "gen-lockfiles", ...)` by calling
@@ -44,7 +45,7 @@ function writeJsonFile(host, path, value) {
 
 /**
  * Download every published artifact for a toolchain and record its integrity
- * hash into `<name>.lock` at the workspace root.
+ * hash into a lockfile, normally at the address given by `opts.lockfile`.
  *
  * @param {object} opts
  * @param {object} opts.handle Toolchain target handle (reads `attrs.version`).

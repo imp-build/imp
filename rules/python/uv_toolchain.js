@@ -358,11 +358,10 @@ export function defaultUvToolchain() {
     return defaultToolchain;
 }
 
-// generateToolLockfile writes "<name>.lock" at the workspace root. Passing
-// name: "uv" here would collide with a real project's own uv.lock (uv's
-// native per-project dependency lock — not ours to name). "uv-toolchain" is
-// used instead, deliberately breaking naming symmetry with zig.lock/
-// cmake.lock, to avoid that collision.
+// Passing name: "uv" here would collide with a real project's own uv.lock
+// (uv's native per-project dependency lock — not ours to name), so
+// "uv-toolchain" is used instead for both the `tool` field and the lockfile
+// stem.
 product("uv-toolchain", "gen-lockfiles", (handle) =>
     generateToolLockfile({
         handle,
@@ -370,4 +369,5 @@ product("uv-toolchain", "gen-lockfiles", (handle) =>
         platforms: uvSupportedPlatforms(),
         downloadUrl: uvDownloadUrl,
         artifactName: uvArtifactName,
+        lockfile: "//rules/python/uv-toolchain.lock",
     }));
