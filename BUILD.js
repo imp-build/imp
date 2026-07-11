@@ -1,5 +1,6 @@
 import { cargoPackage } from "//rules/rust";
 import { resourcePackage } from "//rules/asset";
+import { protoAssets } from "//crates/imp-daemon";
 
 import { stampFile } from "//rules/gen";
 import { vsWorkspace } from "//rules/workflows/vs";
@@ -22,5 +23,5 @@ export const engineAssets = resourcePackage({
 
 export const imp = cargoPackage({
     bin: "imp",
-    deps: [engineAssets],
+    deps: [engineAssets, protoAssets],
 });

@@ -1339,6 +1339,27 @@ export function writeWorkspace(path, digest, opts) {
 }
 
 /**
+ * Render and — unless `opts.check` — write a set of generated BUILD.js file
+ * edits into the real workspace. The JS-callable entry point for the
+ * generate-build renderer (import merging, preserving hand-written exports)
+ * that `registerBuildRule()`-declared rules feed into; never throws on stale
+ * files itself, callers decide what a check failure means.
+ *
+ * @param {object} opts
+ * @param {Record<string, Array<{name: string, rule: string, props?: object}>>} opts.edits
+ *   Map of workspace-relative BUILD.js path → targets to render into it.
+ * @param {boolean} opts.check Compute the diff without writing.
+ * @returns {{changed: string[], checked: string[]}}
+ */
+export function applyBuildEdits({ edits, check }) {
+    const contextEntry = _effective_context_entry(true);
+    if (!check) {
+        _trace_effect_in_context({ event: "effect", kind: "apply_build_edits" }, contextEntry.ctx);
+    }
+    return JSON.parse(__host_apply_build_edits(JSON.stringify(edits), !!check));
+}
+
+/**
  * Merge multiple digests (each already a directory tree — e.g. several
  * run() outputs, each nested under its own declared output path) into one
  * combined tree digest. The digest-chaining analog of file_set.union() for

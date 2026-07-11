@@ -1,5 +1,5 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { cargoGenerateBuild, generateBuild, parse_cargo_package_name } from "//rules/rust/generate_build";
+import { cargoGenerateBuild, generateBuild, package_for_manifest } from "//rules/rust/generate_build";
 
 describe("rust generate-build", () => {
 
@@ -13,37 +13,21 @@ test("cargoGenerateBuild declares a generator target", () => {
     expect(generator.attrs.root).toBe("src");
 });
 
-test("parse_cargo_package_name reads the [package] section's name", () => {
-    const toml = [
-        "[package]",
-        'name = "hello"',
-        'version = "0.1.0"',
-        "",
-        "[dependencies]",
-        'serde = "1"',
-    ].join("\n");
-    expect(parse_cargo_package_name(toml)).toBe("hello");
+test("package_for_manifest matches the package whose manifest_path ends with the given path", () => {
+    const metadata = {
+        workspace_root: "/sandbox/repo",
+        packages: [
+            { name: "imp", manifest_path: "/sandbox/repo/Cargo.toml", targets: [] },
+            { name: "imp-store", manifest_path: "/sandbox/repo/crates/imp-store/Cargo.toml", targets: [] },
+        ],
+    };
+    const pkg = package_for_manifest(metadata, "crates/imp-store/Cargo.toml");
+    expect(pkg.name).toBe("imp-store");
 });
 
-test("parse_cargo_package_name ignores name fields outside [package]", () => {
-    const toml = [
-        "[dependencies]",
-        'name-lookalike = "1"',
-        "",
-        "[[bin]]",
-        'name = "not-the-package-name"',
-    ].join("\n");
-    expect(parse_cargo_package_name(toml)).toBe(null);
-});
-
-test("parse_cargo_package_name stops at the next section header", () => {
-    const toml = [
-        "[package]",
-        'version = "0.1.0"',
-        "[dependencies]",
-        'name = "wrong"',
-    ].join("\n");
-    expect(parse_cargo_package_name(toml)).toBe(null);
+test("package_for_manifest returns null when no package matches", () => {
+    const metadata = { workspace_root: "/sandbox/repo", packages: [] };
+    expect(package_for_manifest(metadata, "crates/missing/Cargo.toml")).toBe(null);
 });
 
 });

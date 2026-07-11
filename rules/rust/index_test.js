@@ -50,8 +50,9 @@ function withRustHost(platOrFn, maybeFn) {
 
 describe("rust rules", () => {
 
-test("cargoPackage requires a bin name", () => {
-    expect(() => cargoPackage({})).toThrow("requires 'bin'");
+test("cargoPackage is valid without a bin name (lib-only package)", () => {
+    const pkg = cargoPackage({});
+    expect(pkg.attrs.bins).toEqual([]);
 });
 
 test("cargoPackage accepts a single bin name or an array", () => {
@@ -73,6 +74,15 @@ test("cargoPackage uses the default Rust toolchain target when none is given", (
         const toolchain = rustToolchain("1.93.0", { default: true });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
         expect(pkg.attrs.toolchain).toBe(toolchain);
+    });
+});
+
+test("cargoBuild no-ops for a lib-only package (no bin)", async () => {
+    await withRustHost(async (host) => {
+        const pkg = cargoPackage({ path: "crates/imp-store" });
+        const result = await cargoBuild(pkg);
+        expect(result.outputPaths).toEqual([]);
+        expect(host.runs.length).toBe(0);
     });
 });
 

@@ -390,7 +390,11 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
         }
         Cmd::Daemon { .. } => unreachable!("daemon handled before UI setup"),
         Cmd::GenerateBuild { check, selectors } => {
-            return cmd_generate_build(*check, selectors, tree).await;
+            let mut raw = selectors.clone();
+            if *check {
+                raw.push("--check".to_owned());
+            }
+            return cmd_execute_goal("generate-build", &raw, Arc::clone(&cancellation), tree).await;
         }
         Cmd::CodegenRegister { output } => {
             return commands::codegen_register::run(output).await;
@@ -966,31 +970,6 @@ macro_rules! workspace_cmd {
         print!("{}", $out);
         Ok(())
     }};
-}
-
-async fn cmd_generate_build(check: bool, selectors: &[String], tree: &Tree) -> Result<()> {
-    let current_dir = std::env::current_dir().context("determine current directory")?;
-    let workspace_root = spike::find_workspace_root(&current_dir)?;
-    let workspace = load_workspace_with_messages(&workspace_root, tree).await?;
-    let report =
-        runtime::generate_build_files(&workspace, &workspace_root, selectors, check).await?;
-    if check {
-        println!(
-            "generated BUILD files are up to date ({} checked)",
-            report.checked_files.len()
-        );
-    } else if report.changed_files.is_empty() {
-        println!(
-            "generated BUILD files are already up to date ({} checked)",
-            report.checked_files.len()
-        );
-    } else {
-        println!("updated generated BUILD files:");
-        for file in report.changed_files {
-            println!("  {file}");
-        }
-    }
-    Ok(())
 }
 
 async fn cmd_targets(selectors: &[String], tree: &Tree) -> Result<()> {

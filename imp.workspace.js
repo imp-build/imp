@@ -1,16 +1,19 @@
 // Workspace root marker. Import plugin modules here to register their rules
 // before any BUILD.js is evaluated.
 import "//rules/c/cmake";
+import { cppGenerateBuild } from "//rules/c";
 import { gccToolchain } from "//rules/c/gcc/toolchain";
 import { moldToolchain } from "//rules/c/mold/toolchain";
 import "//rules/gen";
-import { odinToolchain } from "//rules/odin";
+import { odinGenerateBuild, odinToolchain } from "//rules/odin";
 import { odinfmtToolchain } from "//rules/odin/odinfmt/toolchain";
 import { rustToolchain } from "//rules/rust";
+import { cargoGenerateBuild } from "//rules/rust/generate_build";
 import { sccacheToolchain } from "//rules/rust/sccache/toolchain";
 import "//rules/workflows/build_workflow";
 import "//rules/workflows/fmt";
 import "//rules/workflows/generate";
+import "//rules/workflows/generate_build";
 import "//rules/workflows/lint";
 import "//rules/workflows/lockfiles";
 import "//rules/workflows/package";
@@ -33,3 +36,11 @@ export const sccache = sccacheToolchain("0.10.0", { default: true });
 // Rust binaries link via cargo/rustc, which shell out to a C link driver;
 // see rules/rust/index.js's rustLinkerTools for why this reuses gcc.
 export const rust = rustToolchain("1.93.0", { default: true, linkDriver: gcc, linker: mold, sccache });
+
+// Generator targets for `imp goal generate-build` — one per language rule
+// package, so a selector-less run discovers unowned manifests/directories
+// across the whole workspace by default (see each package's own
+// generate_build.js/index.js for the discovery logic).
+export const cargoBuildGen = cargoGenerateBuild({});
+export const odinBuildGen = odinGenerateBuild({});
+export const cppBuildGen = cppGenerateBuild({});

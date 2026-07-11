@@ -1729,6 +1729,41 @@ fn register_globals<'js>(
     )?;
     globals.set("__host_write_workspace", host_write_workspace)?;
 
+    // __host_apply_build_edits(editsJson, check) → JSON { changed, checked }
+    // Renders and (unless `check`) writes generated BUILD.js edits — the
+    // JS-callable entry point for the same render_raw_build_file/
+    // apply_build_edits pipeline `generate-build` used to reach only via the
+    // bespoke `cmd_generate_build` CLI path. Never bails on stale files
+    // itself; the calling goal (rules/workflows/generate_build.js) decides
+    // what a check failure means, mirroring how fmtGoal/generateGoal own
+    // their own check/throw logic.
+    let wc = workspace_root.clone();
+    let state_abe = Arc::clone(&state);
+    let host_apply_build_edits = Function::new(
+        ctx.clone(),
+        move |edits_json: String, check: bool| -> rquickjs::Result<String> {
+            let edits: BTreeMap<String, BuildFileEdit> = serde_json::from_str(&edits_json)
+                .map_err(|e| {
+                    rquickjs::Error::new_loading_message(
+                        "applyBuildEdits",
+                        format!("parse edits: {e}"),
+                    )
+                })?;
+            let build_rules = state_abe.lock().unwrap().build_rules.clone();
+            let report = apply_build_edits(&wc, &build_rules, edits, check).map_err(|e| {
+                rquickjs::Error::new_loading_message("applyBuildEdits", format!("{e:#}"))
+            })?;
+            serde_json::to_string(&serde_json::json!({
+                "changed": report.changed_files,
+                "checked": report.checked_files,
+            }))
+            .map_err(|e| {
+                rquickjs::Error::new_loading_message("applyBuildEdits", format!("encode: {e}"))
+            })
+        },
+    )?;
+    globals.set("__host_apply_build_edits", host_apply_build_edits)?;
+
     // __host_env(name) → string | null
     let host_env = Function::new(
         ctx.clone(),
@@ -2785,6 +2820,12 @@ struct GeneratedBuildTarget {
 }
 
 /// Evaluate a product and return its JSON-serializable value.
+///
+/// Test-only: production dispatch goes through the golden path
+/// (execute_goal_live/resolveProduct); this and its sibling helpers below
+/// remain as a lighter-weight harness for generate-build product tests that
+/// don't need a full scheduler.
+#[cfg(test)]
 pub async fn evaluate_product_json(
     live: &LiveWorkspace,
     target_addr: &str,
@@ -3101,6 +3142,7 @@ pub async fn run_rules_tests_live(
         .map_err(|e| anyhow::anyhow!("rules tests failed: {e}"))
 }
 
+#[cfg(test)]
 async fn evaluate_product_function_json(
     live: &LiveWorkspace,
     product_fn_name: &str,
@@ -3146,6 +3188,7 @@ async fn evaluate_product_function_json(
 
 type BuildFileEdit = Vec<GeneratedBuildTarget>;
 
+#[cfg(test)]
 pub async fn generate_build_files(
     live: &LiveWorkspace,
     workspace_root: &Path,
@@ -3184,9 +3227,17 @@ pub async fn generate_build_files(
             merge_build_edits(&mut edits, product_edits)?;
         }
     }
-    apply_build_edits(workspace_root, &live.workspace.build_rules, edits, check)
+    let report = apply_build_edits(workspace_root, &live.workspace.build_rules, edits, check)?;
+    if check && !report.changed_files.is_empty() {
+        bail!(
+            "generated BUILD files are out of date: {}",
+            report.changed_files.join(", ")
+        );
+    }
+    Ok(report)
 }
 
+#[cfg(test)]
 fn merge_build_edits(
     merged: &mut BTreeMap<String, BuildFileEdit>,
     incoming: BTreeMap<String, BuildFileEdit>,
@@ -3231,13 +3282,6 @@ fn apply_build_edits(
                     .with_context(|| format!("write {}", destination.display()))?;
             }
         }
-    }
-
-    if check && !changed_files.is_empty() {
-        bail!(
-            "generated BUILD files are out of date: {}",
-            changed_files.join(", ")
-        );
     }
 
     Ok(BuildGenerateReport {

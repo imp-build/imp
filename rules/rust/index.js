@@ -114,11 +114,24 @@ export const rust_file_sources = memo(async function rust_file_sources(handle) {
 });
 
 // Everything cargo build needs to see: manifests, lockfile (if present), and
-// sources. `**/Cargo.toml` picks up workspace-member manifests (crates/*/
-// Cargo.toml) alongside the root manifest, so both self-contained crates and
-// cargo workspaces work.
+// sources.
+//
+// A crate declared with `workspaceMember: true` (set by
+// //rules/rust/generate_build.js when `cargo metadata` reports its
+// workspace_root as an ancestor directory, not itself) globs from the true
+// repo root instead of its own directory: cargo walks up from
+// --manifest-path to find the enclosing `[workspace]`, and — since
+// workspace members here declare real path-dependencies on each other
+// (crates/imp-execution on crates/imp-store, etc.) — needs the whole
+// workspace subtree visible to resolve both the workspace itself and every
+// path dependency. A standalone crate (no `workspaceMember`) must stay
+// scoped to its own directory: including an *unrelated* ancestor
+// `[workspace]` manifest that doesn't list it as a member makes cargo fail
+// with "current package believes it's in a workspace when it's not"
+// (confirmed directly against rules/rust/example, which sits under this
+// repo's own root Cargo.toml but isn't one of its `members`).
 export const sources = memo(async function sources(handle) {
-    const root = declared_path(handle, handle.attrs.path || ".");
+    const root = handle.attrs.workspaceMember ? "." : declared_path(handle, handle.attrs.path || ".");
     return glob({ root, include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"], exclude: ["target/**"] });
 });
 
@@ -253,6 +266,9 @@ export function rustToolEnv(toolSpec, sccacheActive) {
  */
 export const cargoBuild = product("cargo-package", "build",
     async function cargoBuild(handle) {
+        if (handle.attrs.bins.length === 0) {
+            return { outputPaths: [] };
+        }
         const toolSpec = await rustTool(rust_toolchain_version(handle));
         const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
         const { tools: linkerTools, rustflags, env: linkerEnv } = await rustLinkerTools(toolchainHandle);
@@ -293,6 +309,9 @@ export const cargoBuild = product("cargo-package", "build",
 
 export const cargoDistPackage = product("cargo-package", "package", async function cargoDistPackage(handle) {
     const result = await cargoBuild(handle);
+    if (handle.attrs.bins.length === 0) {
+        return result;
+    }
     writeWorkspace(distPathFor(handle), result.outputDigest, { from: result.buildDir });
     return result;
 });
@@ -358,14 +377,8 @@ export function normalize_deps(deps) {
 
 export class CargoPackage extends Target {
     static kind = "cargo-package";
-    constructor({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [], deps = [] }) {
-        if (!bin) {
-            throw new Error("cargoPackage requires 'bin' (the binary name(s) cargo produces)");
-        }
-        const bins = Array.isArray(bin) ? bin : [bin];
-        if (bins.length === 0) {
-            throw new Error("cargoPackage 'bin' must include at least one binary name");
-        }
+    constructor({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [], deps = [], workspaceMember = false }) {
+        const bins = bin ? (Array.isArray(bin) ? bin : [bin]) : [];
 
         const toolchainHandle = toolchain && toolchain.__imp === true ? toolchain
                               : (typeof toolchain === "string" ? null : defaultRustToolchain());
@@ -385,13 +398,19 @@ export class CargoPackage extends Target {
                 release,
                 cargoArgs,
                 testArgs,
+                workspaceMember,
                 ...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
                 ...(toolchainVersion ? { toolchainVersion } : {}),
                 ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
             },
+            // Ownership tracking (compute_owned_files/allUnowned, see
+            // //rules/rust/generate_build) — deliberately narrower than
+            // sources() below: this crate owns only its own manifest and
+            // sources, not sibling workspace members that a workspace-root
+            // build merely needs to *see* to resolve path deps.
             sources: sourcesField({
                 root: path,
-                include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
+                include: ["Cargo.toml", "Cargo.lock", "**/*.rs"],
                 exclude: ["target/**"],
             }),
             deps: allDeps,
@@ -400,22 +419,29 @@ export class CargoPackage extends Target {
 }
 
 /**
- * Declare a Cargo binary crate target. The path may be a self-contained
- * crate or a cargo workspace root (member manifests are globbed via
- * `**\/Cargo.toml`); library-only crates aren't targets — declare one
- * cargoPackage per binary-producing manifest.
+ * Declare a Cargo package target: a self-contained crate, a cargo workspace
+ * root (member manifests are globbed via `**\/Cargo.toml`), or one member of
+ * an outer workspace declared elsewhere (see `workspaceMember`). `bin` is
+ * optional — a lib-only package is a fully valid target for `fmt`/`test`,
+ * just not for `build`/`package`.
  *
  * @category target
  * @param {object} opts
  * @param {string} [opts.path="."] Workspace-relative directory containing Cargo.toml.
- * @param {string|string[]} opts.bin Binary name(s) cargo produces (matches `[[bin]]`/package name in Cargo.toml).
+ * @param {string|string[]} [opts.bin] Binary name(s) cargo produces (matches `[[bin]]`/package name in Cargo.toml). Omit for a lib-only package.
  * @param {boolean} [opts.release=false] Build with `cargo build --release`.
  * @param {object|string} [opts.toolchain] Rust toolchain target handle or version string.
  * @param {string[]} [opts.cargoArgs=[]] Extra arguments appended to `cargo build`.
  * @param {string[]} [opts.testArgs=[]] Extra arguments appended to `cargo test`.
  * @param {Array<object>} [opts.deps=[]] Extra deps, e.g. a resourcePackage() (see //rules/asset) providing non-.rs files an `include_str!`/`include_bytes!` needs.
+ * @param {boolean} [opts.workspaceMember=false] This package is a member of
+ *   a cargo workspace rooted in an ancestor directory (not this one) — build/
+ *   test/fmt sandbox inputs glob from the repo root instead of just `path`,
+ *   so cargo can resolve the enclosing `[workspace]` and any path-deps on
+ *   sibling members. Leave false for a self-contained crate or a workspace
+ *   root itself.
  * @returns {object} Target handle.
  */
-export function cargoPackage({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [], deps = [] }) {
-    return new CargoPackage({ path, bin, release, toolchain, cargoArgs, testArgs, deps });
+export function cargoPackage({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [], deps = [], workspaceMember = false }) {
+    return new CargoPackage({ path, bin, release, toolchain, cargoArgs, testArgs, deps, workspaceMember });
 }

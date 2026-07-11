@@ -90,5 +90,4 @@ impl std::ops::Deref for LiveWorkspace {
     }
 }
 
-#[allow(unused_imports)]
-pub use crate::spike::{evaluate_product_json, generate_build_files, load_workspace};
+pub use crate::spike::load_workspace;

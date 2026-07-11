@@ -1,21 +1,29 @@
 // Auto-generates a cargoPackage() declaration for every unowned Cargo.toml
 // in the workspace, for the `imp generate-build` goal. Mirrors
 // rules/odin/index.js's generateBuild ("odin-build-generator"), but Cargo
-// gives us an authoritative package name straight from the manifest, so
-// there's no dependency-inference machinery to port over: a directory with
-// a Cargo.toml just becomes one `cargoPackage({ bin: <name> })`, named after
-// that package rather than after its directory.
+// gives us authoritative package/target data straight from the toolchain
+// (`cargo metadata`), so there's no dependency-inference machinery to port
+// over: a directory with a Cargo.toml just becomes one `cargoPackage({...})`,
+// named after that package rather than after its directory, with `bin` set
+// only when the package actually has bin-kind cargo targets — a lib-only
+// package (or one with both a lib and one or more bins, see cargoPackage's
+// now-optional `bin`) is represented just as accurately either way.
+//
+// Runs through the golden path (see //rules/workflows/generate_build.js),
+// so run() — needed to shell out to `cargo metadata` — is available.
 
 import {
     Target,
     allUnowned,
+    glob,
     product,
-    read_file,
     registerBuildRule,
+    run,
     workspaceTargets,
 } from "imp:core";
 
 import { declared_path } from "//rules/rust";
+import { rustTool } from "//rules/rust/toolchain";
 
 registerBuildRule({
     rule: "cargoPackage",
@@ -65,24 +73,57 @@ function append_build_target(result, file, target) {
     result[file].push(target);
 }
 
-// Cargo.toml is TOML, but the workspace has no TOML parser anywhere (CMake's
-// rule shells out to real `cmake` instead of parsing CMakeLists.txt) — this
-// hand-scans just far enough to pull `[package].name` out, stopping at the
-// next `[...]` section header so a `name` field belonging to `[dependencies]`
-// or a `[[bin]]` table is never mistaken for the package's own name.
-export function parse_cargo_package_name(text) {
-    let inPackageSection = false;
-    for (const raw of text.split(/\r?\n/)) {
-        const line = raw.trim();
-        if (line.startsWith("[")) {
-            inPackageSection = line === "[package]";
-            continue;
-        }
-        if (!inPackageSection) continue;
-        const match = /^name\s*=\s*"([^"]+)"/.exec(line);
-        if (match) return match[1];
-    }
-    return null;
+// `cargo metadata`'s package list always includes every workspace member
+// (not just the one at `manifestPath`) once `manifestPath` resolves inside a
+// workspace — `--no-deps` only skips the dependency graph, not the member
+// list — so the package for *this* manifest has to be picked out by matching
+// `manifest_path`. The sandboxed run sees an absolute path that never equals
+// the host-side workspace-relative `manifestPath`, so match by suffix
+// instead; every manifest this generator considers includes at least one
+// directory component (bare top-level "Cargo.toml" manifests are always
+// pre-owned by a declared target in practice), so the suffix is unambiguous.
+export function package_for_manifest(metadata, manifestPath) {
+    const suffix = `/${manifestPath}`;
+    return (metadata.packages || []).find((pkg) => pkg.manifest_path.endsWith(suffix)) || null;
+}
+
+function manifest_dir(manifestPath) {
+    const index = manifestPath.lastIndexOf("/");
+    return index < 0 ? "" : manifestPath.slice(0, index);
+}
+
+// True when this package's own manifest directory differs from cargo's
+// resolved workspace root — i.e. it's a member of a workspace rooted in an
+// ancestor directory, not a standalone crate or a workspace root itself. See
+// cargoPackage's `workspaceMember` option (//rules/rust) for why this
+// distinction matters for sandboxed build/test/fmt inputs.
+function is_workspace_member(metadata, pkg) {
+    return manifest_dir(pkg.manifest_path) !== metadata.workspace_root;
+}
+
+// Shells out to the real toolchain rather than hand-parsing TOML (CMake's
+// rule shells out to real `cmake` instead of parsing CMakeLists.txt for the
+// same reason) — this is what needs `run()`, and thus the golden path.
+async function cargoMetadataFor(manifestPath) {
+    const toolSpec = await rustTool();
+    const result = await run({
+        argv: [
+            "sh", "-c", 'cargo metadata --no-deps --format-version=1 --manifest-path "$1"',
+            "cargo-metadata", manifestPath,
+        ],
+        tools: toolSpec.tools,
+        env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`],
+        // Cargo infers implicit lib/bin targets (src/lib.rs, src/main.rs,
+        // src/bin/*.rs) from what's actually on disk, even for `cargo
+        // metadata` — manifests/lockfile alone aren't enough, cargo errors
+        // with "no targets specified" if the source files it expects to
+        // find aren't there, so this needs the same broad glob sources()
+        // uses for a real build, not just the manifests.
+        inputs: [glob({ root: ".", include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"], exclude: DEFAULT_GENERATE_BUILD_EXCLUDES })],
+        materialize: false,
+        display: `cargo metadata ${manifestPath}`,
+    });
+    return JSON.parse(result.stdout);
 }
 
 export const generateBuild = product("cargo-build-generator", "generate-build",
@@ -103,13 +144,22 @@ export const generateBuild = product("cargo-build-generator", "generate-build",
             const dir = dirname(manifestPath);
             if (existingPaths.has(normalize_workspace_path(dir))) continue;
 
-            const name = parse_cargo_package_name(read_file(manifestPath));
-            if (!name) continue;
+            const metadata = await cargoMetadataFor(manifestPath);
+            const pkg = package_for_manifest(metadata, manifestPath);
+            if (!pkg) continue;
+
+            const bins = (pkg.targets || [])
+                .filter((t) => Array.isArray(t.kind) && t.kind.includes("bin"))
+                .map((t) => t.name);
+
+            const props = {};
+            if (bins.length > 0) props.bin = bins.length === 1 ? bins[0] : bins;
+            if (is_workspace_member(metadata, pkg)) props.workspaceMember = true;
 
             append_build_target(result, build_file_for_dir(dir), {
-                name: sanitize_identifier(name),
+                name: sanitize_identifier(pkg.name),
                 rule: "cargoPackage",
-                props: { bin: name },
+                props,
             });
         }
         return result;
