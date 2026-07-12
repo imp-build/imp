@@ -6,7 +6,6 @@ import {
     withFakeWriteWorkspace,
 } from "//rules/imp/test";
 import {
-    odinCollection,
     odinPackage,
     odinTestPackage,
     odinToolchain,
@@ -78,20 +77,14 @@ test("keeps explicit string versions free of toolchain target deps", () => {
     expect(pkg.attrs.toolchain).toBe(undefined);
 });
 
-test("declares collections as namespace mappings", () => {
-    const collection = odinCollection({ name: "lib", path: "library" });
-
-    expect(collection.attrs.name).toBe("lib");
-    expect(collection.attrs.path).toBe("library");
-});
-
 test("packages depend on collection config without collection membership", () => {
-    const root = odinCollection({ name: "root", path: "." });
-    const lib = odinCollection({ name: "lib", path: "library" });
     const pkg = odinPackage({
         srcs: ["**/*.odin"],
         toolchain: "dev-2026-04",
-        collections: [root, lib],
+        collections: [
+            { name: "root", path: "." },
+            { name: "lib", path: "library" },
+        ],
     });
 
     expect((pkg.attrs.collections || []).length).toBe(2);
@@ -238,9 +231,14 @@ test("odinGenerateBuild declares a generator target", () => {
 
 test("collection_flags(pkg) returns flags for all collection deps", async () => {
     configure("odin", null);
-    const root = odinCollection({ name: "root", path: "." });
-    const lib = odinCollection({ name: "lib", path: "library" });
-    const pkg = odinPackage({ srcs: ["**/*.odin"], toolchain: "dev-2026-04", collections: [root, lib] });
+    const pkg = odinPackage({
+        srcs: ["**/*.odin"],
+        toolchain: "dev-2026-04",
+        collections: [
+            { name: "root", path: "." },
+            { name: "lib", path: "library" },
+        ],
+    });
     const flags = await collection_flags(pkg);
     expect(flags).toEqual(["-collection:root=.", "-collection:lib=library"]);
 });

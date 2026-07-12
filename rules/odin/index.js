@@ -1054,43 +1054,6 @@ export function odinGen({ srcs = [], out, cmd, generator, deps = [] }) {
     return new OdinGen({ srcs, out, cmd, generator, deps });
 }
 
-export class OdinCollection extends Target {
-    static kind = "odin-collection";
-    constructor({ name, path }) {
-        if (!name || !path) {
-            throw new Error("odinCollection({ name, path }) requires name and path");
-        }
-        super({
-            kind: OdinCollection.kind,
-            attrs: { name, path },
-        });
-    }
-}
-
-/**
- * Declare an Odin collection namespace mapping.
- *
- * Workspace-wide collection mappings can be declared with the Odin config
- * schema:
- *
- * export const odinConfig = {
- *     collections: { lib: "library" },
- * };
- *
- * `collections` is a `map[string]string`. Package-local collections may still
- * use the `collections` option on odinPackage/odinTestPackage, including
- * target handles and `{ name, path }` entries.
- *
- * @category target
- * @param {object} opts
- * @param {string} opts.name Collection name, e.g. "lib".
- * @param {string} opts.path Workspace-relative collection path, e.g. "library".
- * @returns {object} Target handle.
- */
-export function odinCollection({ name, path }) {
-    return new OdinCollection({ name, path });
-}
-
 export class OdinPackage extends Target {
     static kind = "odin-package";
     constructor({ srcs = undefined, exclude = undefined, path = ".", collections = [], toolchain, output, deps = [] }) {
