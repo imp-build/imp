@@ -10,7 +10,6 @@ import {
     ccBuild,
     ccBinary,
     ccLibrary,
-    cppGenerateBuild,
     has_c_main_entrypoint,
 } from "//rules/c";
 import {
@@ -45,13 +44,6 @@ test("ccBinary declares a generic cc_binary target", () => {
 
     expect(bin.kind).toBe("cc_binary");
     expect(bin.attrs.backend).toBe("raw");
-});
-
-test("cppGenerateBuild declares a generator target", () => {
-    const generator = cppGenerateBuild({ root: "src" });
-
-    expect(generator.kind).toBe("cpp-build-generator");
-    expect(generator.attrs.root).toBe("src");
 });
 
 test("has_c_main_entrypoint ignores comments and strings", () => {

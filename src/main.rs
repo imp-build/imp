@@ -85,12 +85,15 @@ enum Cmd {
         /// Output path for the generated file
         output: PathBuf,
     },
-    /// Generate or check BUILD.js files from declared generator targets
+    /// Generate or check BUILD.js files for unowned sources, per rules
+    /// group's `buildGenerate` config
     GenerateBuild {
         /// Check that generated BUILD.js files are up to date without writing
         #[arg(long)]
         check: bool,
-        /// Optional generator target selectors; defaults to all registered generate-build products
+        /// Accepted for consistency with other goals, but which generators
+        /// run is decided entirely by each rules group's `buildGenerate`
+        /// config flag, not by selectors
         selectors: Vec<String>,
     },
     /// Build the selected targets; defaults to the workspace default build roots

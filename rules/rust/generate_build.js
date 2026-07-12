@@ -13,8 +13,9 @@
 // so run() — needed to shell out to `cargo metadata` — is available.
 
 import {
-    Target,
     allUnowned,
+    defineConfigSchema,
+    field,
     glob,
     product,
     registerBuildRule,
@@ -24,11 +25,24 @@ import {
 
 import { declared_path } from "//rules/rust";
 import { rustTool } from "//rules/rust/toolchain";
+import { registerBuildGenerator } from "//rules/workflows/generate_build";
 
 registerBuildRule({
     rule: "cargoPackage",
     importFrom: "//rules/rust",
 });
+
+/**
+ * Declarative workspace configuration schema for Rust.
+ *
+ * `buildGenerate` enables `imp goal generate-build` for unowned
+ * `Cargo.toml` manifests (off by default).
+ */
+export const rustConfigSchema = {
+    buildGenerate: field.bool({ default: false }),
+};
+
+defineConfigSchema("rust", rustConfigSchema);
 
 // "**/vendor/**" matters here beyond the usual convention: `cargo vendor`
 // writes a full Cargo.toml for every vendored dependency, none of which are
@@ -166,16 +180,4 @@ export const generateBuild = product("cargo-build-generator", "generate-build",
     }
 );
 
-export class CargoGenerateBuild extends Target {
-    static kind = "cargo-build-generator";
-    constructor({ root = ".", exclude = DEFAULT_GENERATE_BUILD_EXCLUDES } = {}) {
-        super({
-            kind: CargoGenerateBuild.kind,
-            attrs: { root, exclude },
-        });
-    }
-}
-
-export function cargoGenerateBuild({ root = ".", exclude = DEFAULT_GENERATE_BUILD_EXCLUDES } = {}) {
-    return new CargoGenerateBuild({ root, exclude });
-}
+registerBuildGenerator({ namespace: "rust", kind: "cargo-build-generator" });

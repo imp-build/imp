@@ -1,16 +1,10 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { cargoGenerateBuild, generateBuild, package_for_manifest } from "//rules/rust/generate_build";
+import { generateBuild, package_for_manifest } from "//rules/rust/generate_build";
 
 describe("rust generate-build", () => {
 
 test("generateBuild product is exported as a function", () => {
     expect(typeof generateBuild).toBe("function");
-});
-
-test("cargoGenerateBuild declares a generator target", () => {
-    const generator = cargoGenerateBuild({ root: "src" });
-    expect(generator.kind).toBe("cargo-build-generator");
-    expect(generator.attrs.root).toBe("src");
 });
 
 test("package_for_manifest matches the package whose manifest_path ends with the given path", () => {

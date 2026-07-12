@@ -39,17 +39,22 @@ import {
  * odinPackage/odinTestPackage instead and may include target handles or
  * `{ name, path }` entries.
  *
+ * `buildGenerate` enables `imp goal generate-build` for unowned `.odin`
+ * files (off by default).
+ *
  */
 export const odinConfigSchema = {
     collections: field.map(field.string(), field.string(), {
         default: {},
         example: { vendor: "//src/odin/vendor" },
     }),
+    buildGenerate: field.bool({ default: false }),
 };
 
 defineConfigSchema("odin", odinConfigSchema);
 
 import { distPathFor } from "//rules/workflows/package";
+import { registerBuildGenerator } from "//rules/workflows/generate_build";
 
 import {
     defaultOdinToolchain,
@@ -1018,6 +1023,8 @@ export const generateBuild = product("odin-build-generator", "generate-build",
     }
 );
 
+registerBuildGenerator({ namespace: "odin", kind: "odin-build-generator" });
+
 // ---------------------------------------------------------------------------
 // Target constructors
 // ---------------------------------------------------------------------------
@@ -1167,26 +1174,3 @@ export function odinTestPackage({ srcs = undefined, exclude = undefined, path = 
 }
 
 export const odin_test_package = odinTestPackage;
-
-export class OdinGenerateBuild extends Target {
-    static kind = "odin-build-generator";
-    constructor({ root = ".", exclude = DEFAULT_GENERATE_BUILD_EXCLUDES } = {}) {
-        super({
-            kind: OdinGenerateBuild.kind,
-            attrs: { root, exclude },
-        });
-    }
-}
-
-/**
- * Declare an Odin BUILD.js generation scanner target.
- *
- * @category target
- * @param {object} [opts]
- * @param {string} [opts.root="."] Workspace-relative directory to scan.
- * @param {string[]} [opts.exclude] Glob patterns excluded from scanning.
- * @returns {object} Target handle.
- */
-export function odinGenerateBuild({ root = ".", exclude = DEFAULT_GENERATE_BUILD_EXCLUDES } = {}) {
-    return new OdinGenerateBuild({ root, exclude });
-}

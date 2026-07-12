@@ -1,6 +1,8 @@
 import {
     Target,
     allUnowned,
+    defineConfigSchema,
+    field,
     file_set,
     glob,
     memo,
@@ -20,6 +22,19 @@ import {
 } from "imp:core";
 
 import { distPathFor } from "//rules/workflows/package";
+import { registerBuildGenerator } from "//rules/workflows/generate_build";
+
+/**
+ * Declarative workspace configuration schema for C/C++.
+ *
+ * `buildGenerate` enables `imp goal generate-build` for unowned
+ * CMakeLists.txt/source files (off by default).
+ */
+export const cConfigSchema = {
+    buildGenerate: field.bool({ default: false }),
+};
+
+defineConfigSchema("c", cConfigSchema);
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import {
@@ -676,25 +691,4 @@ export const generateBuild = product("cpp-build-generator", "generate-build",
     }
 );
 
-export class CppGenerateBuild extends Target {
-    static kind = "cpp-build-generator";
-    constructor({ root = ".", exclude = DEFAULT_GENERATE_BUILD_EXCLUDES } = {}) {
-        super({
-            kind: CppGenerateBuild.kind,
-            attrs: { root, exclude },
-        });
-    }
-}
-
-/**
- * Declare a C/C++ BUILD.js generation scanner target.
- *
- * @category target
- * @param {object} [opts]
- * @param {string} [opts.root="."]
- * @param {string[]} [opts.exclude]
- * @returns {object} Target handle.
- */
-export function cppGenerateBuild({ root = ".", exclude = DEFAULT_GENERATE_BUILD_EXCLUDES } = {}) {
-    return new CppGenerateBuild({ root, exclude });
-}
+registerBuildGenerator({ namespace: "c", kind: "cpp-build-generator" });
