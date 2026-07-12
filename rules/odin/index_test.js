@@ -307,7 +307,10 @@ test("odinBuild uses library build mode when package has no main entrypoint", as
             const { trace } = getMemoTrace();
             const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build rules/odin");
             expect(runEffect.argv).toContain("-build-mode:lib");
-            expect(runEffect.outputs).toEqual([{ kind: "file", path: "build/odin/target.a" }]);
+            expect(runEffect.outputs).toEqual([
+                { kind: "file", path: "build/odin/target.a" },
+                { kind: "directory", path: "build/odin" },
+            ]);
         });
     } finally {
         configure("odin", null);
@@ -450,7 +453,10 @@ test("odinBuild does not use library build mode when package has a main entrypoi
             const { trace } = getMemoTrace();
             const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display === "odin build rules/odin/example");
             expect(runEffect.argv).not.toContain("-build-mode:lib");
-            expect(runEffect.outputs).toEqual([{ kind: "file", path: "build/odin/target" }]);
+            expect(runEffect.outputs).toEqual([
+                { kind: "file", path: "build/odin/target" },
+                { kind: "directory", path: "build/odin" },
+            ]);
         });
     } finally {
         configure("odin", null);
