@@ -25,10 +25,27 @@ import {
 	writeWorkspace,
 } from "imp:core";
 
-// Collection names are dynamic, so this uses a map rather than a closed object.
-defineConfigSchema("odin", {
+/**
+ * Declarative workspace configuration schema for Odin.
+ *
+ * `collections` is a dynamic `map[string]string` from Odin collection names
+ * to workspace-relative paths. For example:
+ *
+ *     export const odinConfig = {
+ *         collections: { lib: "library" },
+ *     };
+ *
+ * Package-local Odin collections use the `collections` option on
+ * odinPackage/odinTestPackage instead and may include target handles or
+ * `{ name, path }` entries.
+ *
+ * @category configuration
+ */
+export const odinConfigSchema = {
     collections: field.map(field.string(), field.string(), { default: {} }),
-});
+};
+
+defineConfigSchema("odin", odinConfigSchema);
 
 import { distPathFor } from "//rules/workflows/package";
 
