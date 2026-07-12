@@ -19,6 +19,12 @@ import {
 // import Python build rules without importing the workflows layer explicitly.
 import "//rules/workflows/build_workflow";
 
+// Registers the "test" product (pythonTest / pytest) for consumers that
+// import Python build rules without importing //rules/python/test explicitly
+// — same reasoning as the build_workflow import above. Side-effect only;
+// nothing exported from it is used in this file.
+import "//rules/python/test";
+
 export {
     acquireUvToolchain,
     defaultUvToolchain,
@@ -50,6 +56,11 @@ export {
 registerBuildRule({
     rule: "pythonApp",
     importFrom: "//rules/python",
+});
+
+registerBuildRule({
+    rule: "pythonTest",
+    importFrom: "//rules/python/test",
 });
 
 // ---------------------------------------------------------------------------
@@ -96,7 +107,7 @@ export function declared_path(handle, path = ".") {
 // Memo/product functions
 // ---------------------------------------------------------------------------
 
-const sources = memo(async function sources(handle) {
+export const sources = memo(async function sources(handle) {
     const root = declared_path(handle, handle.attrs.src || ".");
     return glob({ root, include: ["pyproject.toml", "uv.lock", "**/*.py"] });
 });
@@ -119,7 +130,7 @@ export const python_file_sources = memo(async function python_file_sources(handl
 // this, even though these scripts never `cd` themselves (uv/pex are pointed
 // at project paths explicitly), in case uv or pex ever change directory
 // internally.
-function sandboxRootEnvExports(envEntries) {
+export function sandboxRootEnvExports(envEntries) {
     return envEntries.map((entry) => {
         const eq = entry.indexOf("=");
         return `export ${entry.slice(0, eq)}="$imp_sandbox_root/${entry.slice(eq + 1)}"`;

@@ -1,4 +1,5 @@
 import { pythonApp } from "//rules/python";
+import { pythonTest } from "//rules/python/test";
 import { uvToolchain } from "//rules/python/uv_toolchain";
 import { pexToolchain } from "//rules/python/pex_toolchain";
 
@@ -9,3 +10,5 @@ pexToolchain("2.97.1", { default: true });
 export const hello = pythonApp({
     entryPoint: "hello.__main__",
 });
+
+export const hello_test = pythonTest({});

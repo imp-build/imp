@@ -4,6 +4,9 @@ version = "0.1.0"
 requires-python = ">=3.9"
 dependencies = ["typing_extensions"]
 
+[dependency-groups]
+dev = ["pytest"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
