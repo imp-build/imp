@@ -45,7 +45,6 @@ export function olsTriple(plat) {
  * Return a named-cache-backed odinfmt tool descriptor plus the on-disk binary
  * name to invoke it with. Downloads and caches the OLS release on first use.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {{ tool: object, command: string }}
  */
@@ -70,7 +69,6 @@ export function odinfmtTool(version) {
 /**
  * Return the path to the odinfmt binary for an Odin toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {string}
  */
@@ -83,7 +81,6 @@ export function odinfmtBin(version) {
 /**
  * Acquire (download and cache) odinfmt for a version and return its cache path.
  *
- * @category configuration
  * @param {string} version
  * @returns {string}
  */

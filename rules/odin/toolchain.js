@@ -120,7 +120,6 @@ export function odinToolchain(version, opts = {}) {
 /**
  * Acquire (download and cache) an Odin toolchain.
  *
- * @category configuration
  * @param {string} version Odin release version, e.g. "dev-2026-03".
  * @returns {string} Local path to the toolchain root containing the Odin binary.
  */
@@ -147,7 +146,6 @@ export function acquireOdinToolchain(version) {
 /**
  * Resolve an explicit or default Odin toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {string}
  */
@@ -164,7 +162,6 @@ export function resolveOdinToolchainVersion(version) {
 /**
  * Return the path to the Odin binary for a toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {string}
  */
@@ -178,7 +175,6 @@ export function odinBin(version) {
 /**
  * Return a named-cache-backed Odin tool descriptor for sandbox execution.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {object}
  */
@@ -198,7 +194,6 @@ export function odinTool(version) {
 /**
  * Return the currently configured default Odin toolchain version.
  *
- * @category configuration
  * @returns {string|null}
  */
 export function defaultOdinToolchainVersion() {
@@ -208,7 +203,6 @@ export function defaultOdinToolchainVersion() {
 /**
  * Return the currently configured default Odin toolchain target handle.
  *
- * @category configuration
  * @returns {object|null}
  */
 export function defaultOdinToolchain() {

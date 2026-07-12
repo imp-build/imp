@@ -39,7 +39,6 @@ import {
  * odinPackage/odinTestPackage instead and may include target handles or
  * `{ name, path }` entries.
  *
- * @category configuration
  */
 export const odinConfigSchema = {
     collections: field.map(field.string(), field.string(), {
