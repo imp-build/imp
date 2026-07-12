@@ -51,6 +51,23 @@ test("parses a @returns tag with a type but no trailing description", () => {
     expect(doc.returns.description).toBe("");
 });
 
+test("parses and renders configuration fields", () => {
+    const doc = parseDocBlock([
+        "Odin configuration.",
+        "@configField {map<string,string>} collections Collection name to path.",
+        "@category configuration",
+    ]);
+    expect(doc.configFields).toEqual([
+        { type: "map<string,string>", name: "collections", description: "Collection name to path." },
+    ]);
+    const pages = extractUserApiReference([{
+        sourcePath: "rules/odin/index.js",
+        sourceText: `/**\n * Odin configuration.\n * @configField {map<string,string>} collections Collection name to path.\n * @category configuration\n */\nexport const odinConfigSchema = {};`,
+    }]);
+    expect(pages[0].markdown).toContain("**Configuration options**");
+    expect(pages[0].markdown).toContain("| collections | map<string,string> | Collection name to path. |");
+});
+
 test("attaches the nearest preceding doc comment to export function", () => {
     const src = [
         "/**",

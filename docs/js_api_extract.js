@@ -10,6 +10,7 @@ const EXPORT_CONST_RE = /^export const (\w+)\s*=/;
 const PARAM_TAG_RE = /^@param\b\s*(.*)$/;
 const RETURNS_TAG_RE = /^@returns?\b\s*(.*)$/;
 const CATEGORY_TAG_RE = /^@category\s+(\S+)/;
+const CONFIG_FIELD_TAG_RE = /^@configField\s+(.*)$/;
 
 /**
  * Split a `{Type}` prefix off the remainder of a @param/@returns tag,
@@ -54,11 +55,12 @@ function stripCommentMarker(line) {
  * leading `*` markers).
  *
  * @param {string[]} lines
- * @returns {{ summary: string, params: {type: string, name: string, description: string}[], returns: {type: string, description: string}|null, category: string|null }}
+ * @returns {{ summary: string, params: {type: string, name: string, description: string}[], configFields: {type: string, name: string, description: string}[], returns: {type: string, description: string}|null, category: string|null }}
  */
 export function parseDocBlock(lines) {
     const summaryLines = [];
     const params = [];
+    const configFields = [];
     let returns = null;
     let category = null;
 
@@ -83,6 +85,16 @@ export function parseDocBlock(lines) {
             continue;
         }
 
+        const configFieldMatch = line.match(CONFIG_FIELD_TAG_RE);
+        if (configFieldMatch) {
+            const { type, rest } = splitLeadingBraceType(configFieldMatch[1]);
+            const spaceIdx = rest.indexOf(" ");
+            const name = spaceIdx === -1 ? rest : rest.slice(0, spaceIdx);
+            const description = spaceIdx === -1 ? "" : rest.slice(spaceIdx + 1).trim();
+            configFields.push({ type: type || "", name, description });
+            continue;
+        }
+
         const categoryMatch = line.match(CATEGORY_TAG_RE);
         if (categoryMatch) {
             category = categoryMatch[1];
@@ -94,7 +106,7 @@ export function parseDocBlock(lines) {
         summaryLines.push(line);
     }
 
-    return { summary: summaryLines.join(" "), params, returns, category };
+    return { summary: summaryLines.join(" "), params, configFields, returns, category };
 }
 
 /**
@@ -231,6 +243,16 @@ function renderEntry(entry) {
             lines.push("| --- | --- | --- |");
             for (const p of entry.doc.params) {
                 lines.push(`| ${p.name} | ${p.type} | ${p.description} |`);
+            }
+            lines.push("");
+        }
+        if ((entry.doc.configFields || []).length > 0) {
+            lines.push("**Configuration options**");
+            lines.push("");
+            lines.push("| Option | Type | Description |");
+            lines.push("| --- | --- | --- |");
+            for (const field of entry.doc.configFields || []) {
+                lines.push(`| ${field.name} | ${field.type} | ${field.description} |`);
             }
             lines.push("");
         }
