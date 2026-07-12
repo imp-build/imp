@@ -64,6 +64,9 @@ jobs:
       - name: Lint
         run: ./imp lint
 
+      - name: Test
+        run: ./imp test
+
   package:
     needs: build
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'

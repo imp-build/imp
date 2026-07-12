@@ -52,6 +52,7 @@ CHECK_STEPS = [
     {"name": "Check generated files", "run": f"./imp goal generate {SITE_CHECK_TARGET} --check"},
     {"name": "Check formatting", "run": "./imp fmt --check"},
     {"name": "Lint", "run": "./imp lint"},
+    {"name": "Test", "run": "./imp test"},
 ]
 
 PACKAGE_STEPS = [
