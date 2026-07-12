@@ -487,11 +487,11 @@ pub(crate) fn module_location(root: &Path, rules: &RulesSource, name: &str) -> S
     if name == WORKSPACE_FILE {
         return root.join(WORKSPACE_FILE).display().to_string();
     }
-    if name.starts_with("//") {
+    if let Some(stripped) = name.strip_prefix("//") {
         if let Ok(resolution) = resolve_workspace_module(root, rules, name) {
             return match resolution.source {
                 ModuleSource::File(path) => path.display().to_string(),
-                ModuleSource::Embedded(_) => format!("<embedded {}>", &name[2..]),
+                ModuleSource::Embedded(_) => format!("<embedded {stripped}>"),
             };
         }
     }

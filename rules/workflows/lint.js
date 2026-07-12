@@ -1,13 +1,45 @@
-// The "lint" goal is seeded by default in HostState::default() (src/spike.rs).
-// Declared explicitly here so it's documented; goal registration is
-// first-registration-wins, so this is a no-op today and stays correct if
-// that default is ever dropped.
+// Wires cargo clippy (rules/rust/lint) and ruff check (rules/python/lint)
+// into the build graph as the "lint" product for their target kinds.
 //
-// No legacy Rust predecessor ever existed for this goal. odin-package has a
-// stub product (odinLintStub, rules/odin/index.js) that throws "not yet
-// implemented" rather than silently succeeding — imp lint fails loudly
-// for odin-package targets until real lint checks are implemented.
+// Unlike fmtGoal/testGoal, which fail fast on the first target that throws,
+// lintGoal runs every selected target to completion: cargoClippy/ruffCheck
+// never throw for a tool-reported lint failure (they call run() with
+// allowFailure: true and return { ok, output } instead), so nothing here
+// aborts early. Every target's captured output — ANSI codes intact, since
+// the underlying tools are invoked with forced color — is printed only after
+// every run has finished, followed by a pass/fail summary; the goal then
+// fails if any target was unclean.
+//
+// odin-package keeps its own "lint" product (odinLintStub, rules/odin/index.js)
+// registered directly there — it still throws "not yet implemented" and so
+// still aborts the goal immediately, same as any other product function that
+// throws for a genuine (non-lint) error.
 
-import { goal } from "imp:core";
+import { cargoClippy } from "//rules/rust/lint";
+import { ruffCheck } from "//rules/python/lint";
+import { goal, product, resolveProduct, logInfo } from "imp:core";
 
-goal("lint");
+export async function lintGoal(selection) {
+    const resolved = selection.map(resolveProduct);
+    const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));
+
+    const results = [];
+    for (const { label, promise } of calls) {
+        results.push({ label, ...(await promise) });
+    }
+
+    for (const { label, output } of results) {
+        if (output) logInfo(`${label}:\n${output}`);
+    }
+
+    const failed = results.filter((r) => !r.ok);
+    logInfo(`lint: ${results.length - failed.length}/${results.length} target(s) clean`);
+    if (failed.length > 0) {
+        throw new Error(`lint failed: ${failed.map((r) => r.label).join(", ")}`);
+    }
+}
+
+goal("lint", lintGoal);
+
+export const cargoPackageLint = product("cargo-package", "lint", cargoClippy);
+export const pythonAppLint = product("python-app", "lint", ruffCheck);

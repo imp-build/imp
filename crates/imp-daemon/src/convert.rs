@@ -44,6 +44,7 @@ pub fn action_to_proto(action: ExecAction) -> proto::ExecAction {
         force_cache: action.force_cache,
         no_cache: action.no_cache,
         sandbox_retention: action.sandbox_retention.as_u8() as u32,
+        allow_failure: action.allow_failure,
     }
 }
 
@@ -87,6 +88,7 @@ pub fn action_from_proto(p: proto::ExecAction) -> Result<ExecAction> {
         force_cache: p.force_cache,
         no_cache: p.no_cache,
         sandbox_retention: SandboxRetention::from_u8(p.sandbox_retention as u8),
+        allow_failure: p.allow_failure,
     })
 }
 

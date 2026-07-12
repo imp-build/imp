@@ -28,18 +28,12 @@ pub fn dist_dir() -> PathBuf {
 pub fn coverage_dir() -> PathBuf {
     root_dir().join("coverage")
 }
-pub fn ottar_dir() -> PathBuf {
-    root_dir().join("ottar")
-}
 #[allow(dead_code)]
 pub fn test_main_dir() -> PathBuf {
     root_dir().join("test_main")
 }
 pub fn toolchain_dir() -> PathBuf {
     root_dir().join(".toolchain")
-}
-pub fn jodin_dir() -> PathBuf {
-    root_dir().join("vendor/jodin")
 }
 
 // ---------------------------------------------------------------------------
@@ -59,13 +53,6 @@ pub fn odin_bin() -> PathBuf {
         .join(odin_version())
         .join("odin")
         .join("odin")
-}
-
-pub fn odin_bin_windows() -> PathBuf {
-    toolchain_dir()
-        .join(odin_version())
-        .join("odin-windows")
-        .join("odin.exe")
 }
 
 pub fn odinfmt_bin() -> PathBuf {
@@ -104,14 +91,6 @@ pub fn kcov_bin() -> PathBuf {
 #[derive(Debug, Clone)]
 pub struct Target {
     pub name: String,
-    pub path: PathBuf,
-    pub file: bool,
-    pub options: Vec<String>,
-}
-
-// Per-target extra flags
-fn target_overrides() -> HashMap<String, Vec<String>> {
-    HashMap::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -119,23 +98,7 @@ fn target_overrides() -> HashMap<String, Vec<String>> {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-pub struct TestConfig {
-    pub package: PathBuf,
-    pub options: Vec<String>,
-}
-
-fn test_overrides() -> HashMap<String, Vec<String>> {
-    let mut m = HashMap::new();
-    m.insert(
-        "engine".to_owned(),
-        vec!["-define:ODIN_TEST_THREADS=1".to_owned()],
-    );
-    m.insert(
-        "vfs".to_owned(),
-        vec!["-define:ODIN_TEST_LOG_LEVEL=fatal".to_owned()],
-    );
-    m
-}
+pub struct TestConfig {}
 
 // ---------------------------------------------------------------------------
 // .odin file discovery
@@ -167,7 +130,6 @@ pub fn get_odin_files() -> Vec<PathBuf> {
 
 pub fn get_targets() -> Result<Vec<Target>> {
     let root = root_dir();
-    let overrides = target_overrides();
     let odin_files = get_odin_files();
 
     let mut dir_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
@@ -189,7 +151,6 @@ pub fn get_targets() -> Result<Vec<Target>> {
             .unwrap_or(OsStr::new("unnamed"))
             .to_string_lossy()
             .into_owned();
-        let options = overrides.get(&name).cloned().unwrap_or_default();
 
         if files.len() > 1 {
             for file in files {
@@ -199,20 +160,10 @@ pub fn get_targets() -> Result<Vec<Target>> {
                     .unwrap_or(OsStr::new("unnamed"))
                     .to_string_lossy()
                     .into_owned();
-                targets.push(Target {
-                    name: fname,
-                    path: rel_file,
-                    file: true,
-                    options: options.clone(),
-                });
+                targets.push(Target { name: fname });
             }
         } else {
-            targets.push(Target {
-                name,
-                path: rel_dir,
-                file: false,
-                options,
-            });
+            targets.push(Target { name });
         }
     }
     Ok(targets)
@@ -223,8 +174,6 @@ pub fn get_targets() -> Result<Vec<Target>> {
 // ---------------------------------------------------------------------------
 
 pub fn get_test_configs() -> Result<Vec<TestConfig>> {
-    let root = root_dir();
-    let overrides = test_overrides();
     let odin_files = get_odin_files();
 
     let mut dirs = std::collections::HashSet::new();
@@ -237,21 +186,7 @@ pub fn get_test_configs() -> Result<Vec<TestConfig>> {
         }
     }
 
-    let mut configs = Vec::new();
-    for dir in dirs {
-        let rel = dir.strip_prefix(&root).unwrap_or(&dir).to_owned();
-        let key = rel
-            .file_name()
-            .unwrap_or(OsStr::new(""))
-            .to_string_lossy()
-            .into_owned();
-        let options = overrides.get(&key).cloned().unwrap_or_default();
-        configs.push(TestConfig {
-            package: rel,
-            options,
-        });
-    }
-    Ok(configs)
+    Ok(dirs.into_iter().map(|_| TestConfig {}).collect())
 }
 
 // ---------------------------------------------------------------------------

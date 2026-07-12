@@ -20,7 +20,9 @@ pub async fn setup_odin(progress: &mut indicatif::ProgressBar) -> Result<()> {
     let url = format!("https://github.com/odin-lang/Odin/releases/download/{version}/{artifact}");
 
     let staging = workspace::toolchain_dir().join(&version);
-    LocalEnv::new().ensure_paths(&[staging.clone()]).await?;
+    LocalEnv::new()
+        .ensure_paths(std::slice::from_ref(&staging))
+        .await?;
 
     progress.set_message(format!(
         "toolchain: downloading odin {version} ({plat}/{arch})"
@@ -80,7 +82,9 @@ pub async fn setup_odin_windows(progress: &mut indicatif::ProgressBar) -> Result
     let url = format!("https://github.com/odin-lang/Odin/releases/download/{version}/{artifact}");
 
     let staging = workspace::toolchain_dir().join(&version);
-    LocalEnv::new().ensure_paths(&[staging.clone()]).await?;
+    LocalEnv::new()
+        .ensure_paths(std::slice::from_ref(&staging))
+        .await?;
 
     progress.set_message(format!("toolchain: downloading odin-windows {version}"));
 
@@ -164,7 +168,9 @@ pub async fn setup_odinfmt(progress: &mut indicatif::ProgressBar) -> Result<()> 
     let url =
         format!("https://github.com/DanielGavin/ols/releases/download/{version}/ols-{triple}.zip");
 
-    LocalEnv::new().ensure_paths(&[install_dir.clone()]).await?;
+    LocalEnv::new()
+        .ensure_paths(std::slice::from_ref(&install_dir))
+        .await?;
     progress.set_message(format!(
         "toolchain: downloading odinfmt {version} ({triple})"
     ));

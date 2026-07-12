@@ -1552,6 +1552,7 @@ export function run(opts) {
         impure: opts.impure === true,
         forceCache: opts.forceCache === true,
         sandbox: opts.sandbox !== false,
+        allowFailure: opts.allowFailure === true,
         materialize,
     };
     _trace_effect_in_context(effect, contextEntry.ctx);
@@ -1568,6 +1569,7 @@ export function run(opts) {
         impure: opts.impure,
         forceCache: opts.forceCache,
         sandbox: opts.sandbox,
+        allowFailure: opts.allowFailure,
         materialize,
         __owner: owner,
     }).then((result) => ({

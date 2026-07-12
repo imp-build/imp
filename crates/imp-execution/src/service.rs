@@ -155,7 +155,7 @@ fn copy_dir_into(src: &Path, dst: &Path) -> Result<()> {
             std::fs::create_dir_all(&target)?;
             copy_dir_into(&entry.path(), &target)?;
         } else {
-            std::fs::copy(&entry.path(), &target).with_context(|| {
+            std::fs::copy(entry.path(), &target).with_context(|| {
                 format!("copy {} -> {}", entry.path().display(), target.display())
             })?;
         }

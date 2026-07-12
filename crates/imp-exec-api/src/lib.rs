@@ -82,6 +82,10 @@ pub struct ExecRunOpts {
     pub sandbox: bool,
     pub no_cache: bool,
     pub sandbox_retention: SandboxRetention,
+    /// A nonzero exit is reported via the returned `exit_code` instead of
+    /// failing the run — for callers (like lint tools) where a nonzero exit
+    /// is a normal, structured outcome rather than an infra error.
+    pub allow_failure: bool,
     /// Whether declared outputs get copied back into the real workspace.
     /// Output capture into CAS and the `output_digest`/cache record happen
     /// either way — this only gates the workspace-copy step, so a caller can
@@ -108,6 +112,10 @@ pub struct ExecAction {
     pub force_cache: bool,
     pub no_cache: bool,
     pub sandbox_retention: SandboxRetention,
+    /// A nonzero exit is reported via `ExecOutcome.exit_code` instead of
+    /// failing the action — for callers (like lint tools) where a nonzero
+    /// exit is a normal, structured outcome rather than an infra error.
+    pub allow_failure: bool,
 }
 
 /// When a per-run sandbox root is deleted. Sandboxes are ephemeral by default;

@@ -3,7 +3,7 @@ package imp.exec.v1;
 
 message ExecTool { string name = 1; string cache = 2; string key = 3; string path = 4; repeated string bin_dirs = 5; }
 message ExecOutput { string path = 1; string kind = 2; string named_cache_name = 3; string named_cache_key = 4; bool named_cache_shared = 5; }
-message ExecAction { repeated string argv = 1; string display = 2; map<string,string> env = 3; string config_digest = 4; string input_digest = 5; repeated ExecOutput outputs = 6; repeated ExecTool tools = 7; bool impure = 8; bool force_cache = 9; bool no_cache = 10; uint32 sandbox_retention = 11; }
+message ExecAction { repeated string argv = 1; string display = 2; map<string,string> env = 3; string config_digest = 4; string input_digest = 5; repeated ExecOutput outputs = 6; repeated ExecTool tools = 7; bool impure = 8; bool force_cache = 9; bool no_cache = 10; uint32 sandbox_retention = 11; bool allow_failure = 12; }
 message ExecuteRequest { string workspace_id = 1; ExecAction action = 2; }
 message CachedArtifact { string artifact_id = 1; string kind = 2; string path = 3; string digest = 4; uint64 bytes = 5; uint32 mode = 6; string tree_digest = 7; string named_cache_name = 8; string named_cache_key = 9; bool named_cache_shared = 10; }
 message Started { string display = 1; }

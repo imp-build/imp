@@ -51,6 +51,10 @@ pub enum TaskKind {
 pub enum TaskEvent {
     Pending {
         id: u64,
+        // Not read by the current (flat) live renderer; plumbed through from
+        // JS's memo/effect ownership system for a future tree-shaped
+        // renderer. See main.rs's TaskEvent::Pending match arm.
+        #[allow(dead_code)]
         parent: Option<u64>,
         display: String,
         kind: TaskKind,

@@ -83,7 +83,7 @@ pub fn named_cache_key_path(workspace_root: &Path, name: &str, key: &str) -> Res
 /// version-keyed toolchains) collapse into a single `shared` namespace so
 /// every checkout resolves the same slot; everything else stays under the
 /// workspace id. "shared" cannot collide with an id — those are 64-hex digests.
-pub fn named_cache_scope_id<'a>(shared: bool, workspace_id: &'a str) -> &'a str {
+pub fn named_cache_scope_id(shared: bool, workspace_id: &str) -> &str {
     if shared {
         "shared"
     } else {

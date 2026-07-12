@@ -13,10 +13,6 @@ impl LocalEnv {
         Self
     }
 
-    pub fn is_windows() -> bool {
-        cfg!(target_os = "windows")
-    }
-
     /// Execute a command, returning (exit_code, combined_stdout+stderr).
     /// If `stream_output` is true the output is printed in real time.
     pub async fn execute(

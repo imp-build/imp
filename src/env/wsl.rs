@@ -30,10 +30,6 @@ impl WslEnv {
         }
     }
 
-    pub fn is_windows(&self) -> bool {
-        true
-    }
-
     // -----------------------------------------------------------------------
     // Validation
     // -----------------------------------------------------------------------
@@ -94,30 +90,6 @@ impl WslEnv {
             );
         }
         Ok(output)
-    }
-
-    pub async fn ensure_paths(&self, paths: &[PathBuf]) -> Result<()> {
-        for path in paths {
-            if path.starts_with(&self.root_dir) {
-                let rel = path.strip_prefix(&self.root_dir).unwrap();
-                let win_path = self.windows_workspace.join(rel);
-                let win_str = self.translate_path(&win_path).await?;
-                let ps_cmd = format!("New-Item -ItemType Directory -Force -Path '{win_str}'");
-                let (code, out) = LocalEnv::new()
-                    .execute(
-                        &["powershell.exe", "-NoProfile", "-Command", &ps_cmd],
-                        None,
-                        false,
-                    )
-                    .await?;
-                if code != 0 {
-                    bail!("failed to create dir {win_str}: {out}");
-                }
-            } else {
-                LocalEnv::new().ensure_paths(&[path.clone()]).await?;
-            }
-        }
-        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -266,9 +238,12 @@ impl WslEnv {
         let root_dir = self.root_dir.clone();
         let windows_ws = self.windows_workspace.clone();
 
+        // (relative path, mtime, size, content hash)
+        type SyncedFileEntry = (String, f64, i64, String);
+
         let (to_sync, to_delete, to_update_db_only) = tokio::task::spawn_blocking({
             let source_files = source_files.clone();
-            move || -> Result<(Vec<(String, f64, i64, String)>, Vec<String>, Vec<(String, f64, i64, String)>)> {
+            move || -> Result<(Vec<SyncedFileEntry>, Vec<String>, Vec<SyncedFileEntry>)> {
                 let tracker = FileTracker::open(&db_path)?;
                 let tracked = tracker.get_synced_files()?;
                 let current_set: HashSet<&str> = source_files.iter().map(|s| s.as_str()).collect();
@@ -373,7 +348,9 @@ impl WslEnv {
     pub async fn copy_artifacts_back(&self) -> Result<()> {
         let win_build = self.windows_workspace.join("build");
         let local_build = workspace::build_dir();
-        LocalEnv::new().ensure_paths(&[local_build.clone()]).await?;
+        LocalEnv::new()
+            .ensure_paths(std::slice::from_ref(&local_build))
+            .await?;
 
         let (code, out) = LocalEnv::new()
             .execute(

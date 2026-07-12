@@ -104,9 +104,8 @@ impl RemoteExecutionService {
     }
     fn client(&self) -> Result<proto::execution_client::ExecutionClient<Channel>> {
         self.block_on_external(|rt| {
-            Ok(rt
-                .block_on(self.channel())
-                .map(proto::execution_client::ExecutionClient::new)?)
+            rt.block_on(self.channel())
+                .map(proto::execution_client::ExecutionClient::new)
         })
     }
 
@@ -215,7 +214,7 @@ impl ExecutionService for RemoteExecutionService {
     }
     fn cache_dir_has(&self, w: &str, n: &str, k: &str) -> Result<bool> {
         let mut c = self.client()?;
-        Ok(self.block_on_external(|rt| {
+        self.block_on_external(|rt| {
             Ok(rt
                 .block_on(c.cache_dir_has(Request::new(proto::CacheDirRequest {
                     workspace_id: w.into(),
@@ -225,7 +224,7 @@ impl ExecutionService for RemoteExecutionService {
                 })))?
                 .into_inner()
                 .present)
-        })?)
+        })
     }
     fn cache_dir_put(&self, w: &str, n: &str, k: &str, s: &Path) -> Result<()> {
         let mut c = self.client()?;
@@ -242,13 +241,13 @@ impl ExecutionService for RemoteExecutionService {
     }
     fn fetch_url(&self, u: &str) -> Result<PathBuf> {
         let mut c = self.client()?;
-        Ok(self.block_on_external(|rt| {
+        self.block_on_external(|rt| {
             Ok(rt
                 .block_on(c.fetch_url(Request::new(proto::FetchRequest { url: u.into() })))?
                 .into_inner()
                 .path
                 .into())
-        })?)
+        })
     }
     fn extract_archive(&self, a: &Path, d: &Path, f: &str, s: u32) -> Result<()> {
         let mut c = self.client()?;
@@ -265,18 +264,18 @@ impl ExecutionService for RemoteExecutionService {
     }
     fn file_sha256(&self, p: &Path) -> Result<String> {
         let mut c = self.client()?;
-        Ok(self.block_on_external(|rt| {
+        self.block_on_external(|rt| {
             Ok(rt
                 .block_on(c.file_sha256(Request::new(proto::FileRequest {
                     path: p.to_string_lossy().into_owned(),
                 })))?
                 .into_inner()
                 .digest)
-        })?)
+        })
     }
     fn register_native_tool(&self, n: &str, p: &Path) -> Result<PathBuf> {
         let mut c = self.client()?;
-        Ok(self.block_on_external(|rt| {
+        self.block_on_external(|rt| {
             Ok(rt
                 .block_on(
                     c.register_native_tool(Request::new(proto::NativeToolRequest {
@@ -287,7 +286,7 @@ impl ExecutionService for RemoteExecutionService {
                 .into_inner()
                 .path
                 .into())
-        })?)
+        })
     }
     async fn worker_start(&self, w: &str, n: &str, s: WorkerSpec) -> Result<WorkerHandle> {
         let channel = self.channel().await?;

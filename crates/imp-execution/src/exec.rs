@@ -70,6 +70,7 @@ pub fn exec_run_hermetic_with_start(
         sandbox: true,
         no_cache: action.no_cache,
         sandbox_retention: action.sandbox_retention,
+        allow_failure: action.allow_failure,
         materialize: false,
     };
     let action_digest = live_action_digest(&legacy, &action.env)?;
@@ -314,7 +315,7 @@ pub fn wait_for_child_output(
 
     let _ = stdout_thread.join();
     let _ = stderr_thread.join();
-    drain_process_lines(&receiver, &mut stdout, &mut stderr, progress.as_deref_mut());
+    drain_process_lines(&receiver, &mut stdout, &mut stderr, progress);
     Ok((status, stdout, stderr))
 }
 
@@ -837,7 +838,7 @@ fn exec_run_inner_with_start(
         wait_for_child_output(&mut child, &opts.display, cancellation, None)?;
 
     let exit_code = status.code().unwrap_or(-1);
-    if !status.success() {
+    if !status.success() && !opts.allow_failure {
         bail!(
             "{} failed with exit code {}\nstdout:\n{}\nstderr:\n{}",
             opts.display,
@@ -1059,7 +1060,7 @@ pub fn exec_run_unsandboxed(
     )?;
 
     let exit_code = status.code().unwrap_or(-1);
-    if !status.success() {
+    if !status.success() && !opts.allow_failure {
         if let Some(p) = progress.as_deref() {
             report_process_failure(Some(p), &stdout, &stderr);
         }
@@ -1119,6 +1120,7 @@ mod tests {
             materialize: true,
             no_cache: false,
             sandbox_retention: SandboxRetention::default(),
+            allow_failure: false,
         }
     }
 
@@ -1178,6 +1180,7 @@ mod tests {
             materialize: true,
             no_cache: false,
             sandbox_retention: SandboxRetention::default(),
+            allow_failure: false,
         }
     }
 
@@ -1489,6 +1492,7 @@ mod tests {
             materialize: true,
             no_cache: true,
             sandbox_retention: SandboxRetention::default(),
+            allow_failure: false,
         };
         stage2.no_cache = true;
         let result2 = exec_run_inner(p, stage2, None).unwrap();

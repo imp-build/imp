@@ -146,6 +146,11 @@ pub struct Goal {
 pub struct Workspace {
     pub targets: BTreeMap<String, Target>,
     pub products: BTreeMap<(String, String), String>,
+    // Only read by generate_build_files, a #[cfg(test)]-only integration
+    // harness for apply_build_edits (production reaches that via
+    // HostState.build_rules through the __host_apply_build_edits JS bridge
+    // instead) — so this field is genuinely unread outside test builds.
+    #[allow(dead_code)]
     pub build_rules: BTreeMap<String, BuildRuleRender>,
     #[allow(dead_code)]
     pub workspace_config: BTreeMap<String, serde_json::Value>,
@@ -381,16 +386,18 @@ pub(crate) async fn load_workspace_with_rules(
         ctx.with(|ctx| -> rquickjs::Result<()> {
             register_globals(
                 ctx,
-                state_clone,
-                root.clone(),
-                rules_source.clone(),
-                Arc::clone(&exec_root),
-                Arc::clone(&exec_no_cache),
-                Arc::clone(&exec_sandbox_retention),
-                Arc::clone(&scheduler),
-                Arc::clone(&selected_roots),
-                Arc::clone(&goal_flags),
-                Arc::clone(&service),
+                RegisterGlobalsArgs {
+                    state: state_clone,
+                    workspace_root: root.clone(),
+                    rules_source: rules_source.clone(),
+                    exec_root: Arc::clone(&exec_root),
+                    exec_no_cache: Arc::clone(&exec_no_cache),
+                    exec_sandbox_retention: Arc::clone(&exec_sandbox_retention),
+                    scheduler: Arc::clone(&scheduler),
+                    selected_roots: Arc::clone(&selected_roots),
+                    goal_flags: Arc::clone(&goal_flags),
+                    service: Arc::clone(&service),
+                },
             )
         })
         .await
@@ -857,7 +864,7 @@ async fn ensure_expanded(
                         expander
                             .goals
                             .as_ref()
-                            .map_or(true, |goals| goal.is_some_and(|name| goals.contains(name)))
+                            .is_none_or(|goals| goal.is_some_and(|name| goals.contains(name)))
                     })
             })
             .collect();
@@ -1001,9 +1008,12 @@ pub(crate) fn path_to_workspace_string(path: &Path) -> String {
     }
 }
 
-/// Register host globals on `ctx`.
-fn register_globals<'js>(
-    ctx: Ctx<'js>,
+/// Shared host-side state threaded into every global bridge function
+/// registered by `register_globals` — bundled into one struct so the
+/// registration function itself doesn't need a long positional parameter
+/// list (`ctx` stays separate since its lifetime is tied to the QuickJS
+/// context, not to this bundle's ownership).
+struct RegisterGlobalsArgs {
     state: Arc<Mutex<HostState>>,
     workspace_root: PathBuf,
     rules_source: RulesSource,
@@ -1014,7 +1024,22 @@ fn register_globals<'js>(
     selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
     goal_flags: Arc<Mutex<Option<serde_json::Value>>>,
     service: Arc<dyn ExecutionService>,
-) -> rquickjs::Result<()> {
+}
+
+/// Register host globals on `ctx`.
+fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::Result<()> {
+    let RegisterGlobalsArgs {
+        state,
+        workspace_root,
+        rules_source,
+        exec_root,
+        exec_no_cache,
+        exec_sandbox_retention,
+        scheduler,
+        selected_roots,
+        goal_flags,
+        service,
+    } = args;
     let globals = ctx.globals();
 
     // GC side table: map this checkout's hashed cache namespace back to its
@@ -2193,6 +2218,7 @@ fn register_globals<'js>(
                                 force_cache: run_opts.force_cache,
                                 no_cache: run_opts.no_cache,
                                 sandbox_retention: run_opts.sandbox_retention,
+                                allow_failure: run_opts.allow_failure,
                             };
                             let result = service.execute_with_start(
                                 &workspace_id,
@@ -2428,6 +2454,8 @@ fn register_globals<'js>(
 }
 
 fn which_executable(name: &str) -> Option<String> {
+    // mut is only needed for the dirs.extend() below, which is windows-only.
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect())
         .unwrap_or_default();
@@ -2495,6 +2523,9 @@ fn parse_exec_run_opts<'js>(
     )?;
     let impure = opts.get::<_, Option<bool>>("impure")?.unwrap_or(false);
     let force_cache = opts.get::<_, Option<bool>>("forceCache")?.unwrap_or(false);
+    let allow_failure = opts
+        .get::<_, Option<bool>>("allowFailure")?
+        .unwrap_or(false);
     let sandbox = opts.get::<_, Option<bool>>("sandbox")?.unwrap_or(true);
     // Enforcement of "must be explicit when outputs are declared" lives in
     // imp_core.js's run() wrapper; this default is only a fallback for
@@ -2515,6 +2546,7 @@ fn parse_exec_run_opts<'js>(
         force_cache,
         sandbox,
         materialize,
+        allow_failure,
         no_cache: false,
         // Overridden per invocation in the host_run closure (like no_cache).
         sandbox_retention: SandboxRetention::default(),
@@ -2983,22 +3015,40 @@ pub fn format_dependencies(
 
     for target in targets {
         let mut visited = BTreeSet::new();
-        format_dep_tree(workspace, target, "", true, &mut visited, true, None, w)?;
+        let pos = TreePosition {
+            prefix: String::new(),
+            is_last: true,
+            is_root: true,
+            edge_mode: None,
+        };
+        format_dep_tree(workspace, target, pos, &mut visited, w)?;
     }
     Ok(())
+}
+
+/// Where a target sits in the printed dependency tree — bundled so
+/// `format_dep_tree` doesn't need a long positional parameter list.
+struct TreePosition<'a> {
+    prefix: String,
+    is_last: bool,
+    is_root: bool,
+    edge_mode: Option<&'a DependencyMode>,
 }
 
 fn format_dep_tree(
     workspace: &Workspace,
     target: &Target,
-    prefix: &str,
-    is_last: bool,
+    pos: TreePosition<'_>,
     visited: &mut BTreeSet<String>,
-    is_root: bool,
-    edge_mode: Option<&DependencyMode>,
     w: &mut String,
 ) -> Result<()> {
     use std::fmt::Write;
+    let TreePosition {
+        prefix,
+        is_last,
+        is_root,
+        edge_mode,
+    } = pos;
     let already = visited.contains(&target.address);
 
     let mode_suffix = match edge_mode {
@@ -3040,16 +3090,13 @@ fn format_dep_tree(
     for (i, dep) in target.dependencies.iter().enumerate() {
         let dep_is_last = i == count - 1;
         if let Some(dep_target) = workspace.targets.get(&dep.address) {
-            format_dep_tree(
-                workspace,
-                dep_target,
-                &next_prefix,
-                dep_is_last,
-                visited,
-                false,
-                Some(&dep.mode),
-                w,
-            )?;
+            let dep_pos = TreePosition {
+                prefix: next_prefix.clone(),
+                is_last: dep_is_last,
+                is_root: false,
+                edge_mode: Some(&dep.mode),
+            };
+            format_dep_tree(workspace, dep_target, dep_pos, visited, w)?;
         } else {
             let marker = if dep_is_last {
                 "└── "
@@ -3080,11 +3127,14 @@ pub fn format_products(workspace: &Workspace, w: &mut String) -> std::fmt::Resul
         writeln!(w, "  (none)")?;
     } else {
         for kind in &kinds {
-            let build_prod = workspace
+            let build_prod = if workspace
                 .products
                 .contains_key(&((*kind).to_owned(), "build".to_owned()))
-                .then_some("build")
-                .unwrap_or("<none>");
+            {
+                "build"
+            } else {
+                "<none>"
+            };
             writeln!(w, "  - {kind} (build product: {build_prod})")?;
         }
     }
@@ -3094,7 +3144,7 @@ pub fn format_products(workspace: &Workspace, w: &mut String) -> std::fmt::Resul
         writeln!(w, "  (none)")?;
     } else {
         let mut current_kind: Option<&str> = Option::None;
-        for ((kind, product), _) in &workspace.products {
+        for (kind, product) in workspace.products.keys() {
             if current_kind != Some(kind.as_str()) {
                 current_kind = Some(kind.as_str());
                 writeln!(w, "  {kind}:")?;

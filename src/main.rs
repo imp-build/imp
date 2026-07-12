@@ -276,7 +276,7 @@ async fn run_tool(name: &str, args: &[std::ffi::OsString]) -> Result<i32> {
 }
 
 fn run_direct_tool_command(bin: &std::path::Path, args: &[std::ffi::OsString]) -> i32 {
-    match std::process::Command::new(&bin).args(args).status() {
+    match std::process::Command::new(bin).args(args).status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!("error: failed to run {}: {e:#}", bin.display());
