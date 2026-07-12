@@ -137,11 +137,11 @@ function requireVersion(version) {
 /**
  * Declare an sccache toolchain version and optionally set it as the default.
  *
- * @category configuration
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
  * @returns {object} Target handle for this sccache toolchain.
+ * @category configuration
  */
 export function sccacheToolchain(version, opts = {}) {
     namedCache({ name: SCCACHE_TOOLCHAIN_CACHE, shared: true });
@@ -163,7 +163,6 @@ export function sccacheToolchain(version, opts = {}) {
 /**
  * Install a local sccache toolchain directory into the named cache.
  *
- * @category configuration
  * @param {string} version
  * @param {string} source Path to the toolchain root.
  * @returns {string|null} Local path to the cached toolchain root.
@@ -180,7 +179,6 @@ export function installSccacheToolchain(version, source) {
  * Acquire an sccache toolchain, downloading and caching it if not already
  * installed in the named cache.
  *
- * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
@@ -258,7 +256,6 @@ async function ensureSccacheDataDir() {
 /**
  * Resolve an explicit or default sccache toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -272,7 +269,6 @@ export function resolveSccacheToolchainVersion(version) {
 /**
  * Return a named-cache-backed sccache tool descriptor for sandbox execution.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -311,7 +307,6 @@ export async function sccacheDataDir() {
 /**
  * Return the currently configured default sccache toolchain version.
  *
- * @category configuration
  * @returns {string|null}
  */
 export function defaultSccacheToolchainVersion() {
@@ -321,7 +316,6 @@ export function defaultSccacheToolchainVersion() {
 /**
  * Return the currently configured default sccache toolchain target handle.
  *
- * @category configuration
  * @returns {object|null}
  */
 export function defaultSccacheToolchain() {

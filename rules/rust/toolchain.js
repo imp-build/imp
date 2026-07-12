@@ -143,7 +143,6 @@ function requireVersion(version) {
 /**
  * Declare a Rust toolchain version and optionally set it as the default.
  *
- * @category configuration
  * @param {string} version Exact Rust version, e.g. "1.79.0" (channels rejected).
  * @param {object} [opts]
  * @param {boolean} [opts.default=false] Set as the default toolchain.
@@ -159,6 +158,7 @@ function requireVersion(version) {
  *   persistent on-disk object cache; no build caching beyond cargo's own
  *   (mtime-defeated, sandbox-fresh) incremental state is added if omitted.
  * @returns {object} Target handle for this Rust toolchain.
+ * @category configuration
  */
 export function rustToolchain(version, opts = {}) {
     requirePinnedVersion(version);
@@ -188,7 +188,6 @@ export function rustToolchain(version, opts = {}) {
 /**
  * Seed the rustup-home and cargo-home caches from an already-installed layout.
  *
- * @category configuration
  * @param {string} version
  * @param {{ rustupHome: string, cargoHome: string }} source
  * @returns {{ rustupHome: string|null, cargoHome: string|null }}
@@ -210,7 +209,6 @@ export function installRustToolchain(version, source) {
  * Acquire a Rust toolchain: download rustup-init and run it, installing into
  * the rustup-home and cargo-home named caches.
  *
- * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the RUSTUP_HOME cache root.
  */
@@ -266,7 +264,6 @@ export async function acquireRustToolchain(version) {
 /**
  * Resolve an explicit or default Rust toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -280,7 +277,6 @@ export function resolveRustToolchainVersion(version) {
 /**
  * Return the path to a toolchain binary (default "cargo") for a version.
  *
- * @category configuration
  * @param {string} [version]
  * @param {string} [name="cargo"]
  * @returns {Promise<string>}
@@ -297,7 +293,6 @@ export async function rustBin(version, name = "cargo") {
  * Return the Rust toolchain consume descriptor: the two named-cache tool specs
  * plus the fixed sandbox mount paths for RUSTUP_HOME/CARGO_HOME wiring.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -332,7 +327,6 @@ export async function rustTool(version) {
 /**
  * Return the currently configured default Rust toolchain version.
  *
- * @category configuration
  * @returns {string|null}
  */
 export function defaultRustToolchainVersion() {
@@ -342,7 +336,6 @@ export function defaultRustToolchainVersion() {
 /**
  * Return the currently configured default Rust toolchain target handle.
  *
- * @category configuration
  * @returns {object|null}
  */
 export function defaultRustToolchain() {

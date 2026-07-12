@@ -177,11 +177,11 @@ function requireVersion(version) {
 /**
  * Declare a Zig toolchain version and optionally set it as the default.
  *
- * @category configuration
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
  * @returns {object} Target handle for this Zig toolchain.
+ * @category configuration
  */
 export function zigToolchain(version, opts = {}) {
     namedCache({ name: ZIG_TOOLCHAIN_CACHE, shared: true });
@@ -203,7 +203,6 @@ export function zigToolchain(version, opts = {}) {
 /**
  * Install a local Zig toolchain directory into the named cache.
  *
- * @category configuration
  * @param {string} version
  * @param {string} source Path to the toolchain root.
  * @returns {string|null} Local path to the cached toolchain root.
@@ -220,7 +219,6 @@ export function installZigToolchain(version, source) {
  * Acquire a Zig toolchain, downloading and caching it if not already
  * installed in the named cache.
  *
- * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
@@ -328,7 +326,6 @@ export async function acquireZigToolchain(version) {
 /**
  * Resolve an explicit or default Zig toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -342,7 +339,6 @@ export function resolveZigToolchainVersion(version) {
 /**
  * Return the zig executable path for a toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<string>}
  */
@@ -356,7 +352,6 @@ export async function zigBin(version) {
 /**
  * Return a named-cache-backed Zig tool descriptor for sandbox execution.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -380,7 +375,6 @@ export async function zigTool(version) {
  * this Zig version/platform. Not put on PATH (binDirs empty) — pair with
  * zigGlobalCacheEnv() to point $ZIG_GLOBAL_CACHE_DIR at its mount path.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -402,7 +396,6 @@ export async function zigBuildCacheTool(version) {
  * mount (see zigBuildCacheTool). Any run() using this must also include that
  * tool, or the path won't exist in the sandbox.
  *
- * @category configuration
  * @returns {string[]}
  */
 export function zigGlobalCacheEnv() {
@@ -413,7 +406,6 @@ export function zigGlobalCacheEnv() {
  * Return the CMake -D flags to configure this Zig toolchain as the C/C++
  * compiler and archiver.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<string[]>}
  */
@@ -437,7 +429,6 @@ export async function zigCMakeArgs(version) {
 /**
  * Return the currently configured default Zig toolchain version.
  *
- * @category configuration
  * @returns {string|null}
  */
 export function defaultZigToolchainVersion() {
@@ -447,7 +438,6 @@ export function defaultZigToolchainVersion() {
 /**
  * Return the currently configured default Zig toolchain target handle.
  *
- * @category configuration
  * @returns {object|null}
  */
 export function defaultZigToolchain() {

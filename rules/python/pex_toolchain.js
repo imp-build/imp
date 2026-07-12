@@ -76,11 +76,11 @@ function requireVersion(version) {
 /**
  * Declare a pex toolchain version and optionally set it as the default.
  *
- * @category configuration
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
  * @returns {object} Target handle for this pex toolchain.
+ * @category configuration
  */
 export function pexToolchain(version, opts = {}) {
     namedCache({ name: PEX_TOOLCHAIN_CACHE, shared: true });
@@ -102,7 +102,6 @@ export function pexToolchain(version, opts = {}) {
 /**
  * Install a local pex zipapp into the named cache.
  *
- * @category configuration
  * @param {string} version
  * @param {string} source Path to the pex zipapp file.
  * @returns {string|null} Local path to the cached zipapp.
@@ -118,7 +117,6 @@ export function installPexToolchain(version, source) {
  * Acquire a pex toolchain, downloading and caching it if not already
  * installed in the named cache.
  *
- * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain directory (containing `pex`).
  */
@@ -185,7 +183,6 @@ export async function acquirePexToolchain(version) {
 /**
  * Resolve an explicit or default pex toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -199,7 +196,6 @@ export function resolvePexToolchainVersion(version) {
 /**
  * Return the pex zipapp path for a toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<string>}
  */
@@ -216,7 +212,6 @@ export async function pexBin(version) {
  * interpreter from a synced uv venv (see rules/python/index.js), not via
  * PATH-exec.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -238,7 +233,6 @@ export async function pexTool(version) {
  * on PATH (binDirs empty) — pair with pexRootEnv() to point $PEX_ROOT at its
  * mount path.
  *
- * @category configuration
  * @returns {object}
  */
 export function pexRootTool() {
@@ -260,7 +254,6 @@ export function pexRootTool() {
  * exactly as zigGlobalCacheEnv()'s doc comment in rules/c/zig/toolchain.js
  * explains for ZIG_GLOBAL_CACHE_DIR.
  *
- * @category configuration
  * @returns {string[]}
  */
 export function pexRootEnv() {
@@ -270,7 +263,6 @@ export function pexRootEnv() {
 /**
  * Return the currently configured default pex toolchain version.
  *
- * @category configuration
  * @returns {string|null}
  */
 export function defaultPexToolchainVersion() {
@@ -280,7 +272,6 @@ export function defaultPexToolchainVersion() {
 /**
  * Return the currently configured default pex toolchain target handle.
  *
- * @category configuration
  * @returns {object|null}
  */
 export function defaultPexToolchain() {

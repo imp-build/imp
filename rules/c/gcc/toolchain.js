@@ -107,11 +107,11 @@ function requireVersion(version) {
 /**
  * Declare a gcc toolchain version and optionally set it as the default.
  *
- * @category configuration
  * @param {string} version Bootlin toolchain release version, e.g. "2025.08-1".
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
  * @returns {object} Target handle for this gcc toolchain.
+ * @category configuration
  */
 export function gccToolchain(version, opts = {}) {
     namedCache({ name: GCC_TOOLCHAIN_CACHE, shared: true });
@@ -132,7 +132,6 @@ export function gccToolchain(version, opts = {}) {
 /**
  * Install a local gcc toolchain directory into the named cache.
  *
- * @category configuration
  * @param {string} version
  * @param {string} source Path to the toolchain root.
  * @returns {string|null} Local path to the cached toolchain root.
@@ -149,7 +148,6 @@ export function installGccToolchain(version, source) {
  * Acquire a gcc toolchain, downloading and caching it if not already
  * installed in the named cache.
  *
- * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
@@ -207,7 +205,6 @@ export async function acquireGccToolchain(version) {
 /**
  * Resolve an explicit or default gcc toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -221,7 +218,6 @@ export function resolveGccToolchainVersion(version) {
 /**
  * Return the gcc executable path for a toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<string>}
  */
@@ -237,7 +233,6 @@ export async function gccBin(version) {
  * Its bin/ directory also contains a `clang` wrapper script (Odin invokes a
  * program literally named "clang" to link) that execs the real gcc binary.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -257,7 +252,6 @@ export async function gccTool(version) {
 /**
  * Return the currently configured default gcc toolchain version.
  *
- * @category configuration
  * @returns {string|null}
  */
 export function defaultGccToolchainVersion() {
@@ -267,7 +261,6 @@ export function defaultGccToolchainVersion() {
 /**
  * Return the currently configured default gcc toolchain target handle.
  *
- * @category configuration
  * @returns {object|null}
  */
 export function defaultGccToolchain() {

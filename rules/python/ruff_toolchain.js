@@ -117,7 +117,6 @@ function requireVersion(version) {
 /**
  * Declare a ruff toolchain version and optionally set it as the default.
  *
- * @category configuration
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
@@ -128,6 +127,7 @@ function requireVersion(version) {
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
  * @returns {object} Target handle for this ruff toolchain.
+ * @category configuration
  */
 export function ruffToolchain(version, opts = {}) {
     namedCache({ name: RUFF_TOOLCHAIN_CACHE, shared: true });
@@ -152,7 +152,6 @@ export function ruffToolchain(version, opts = {}) {
 /**
  * Install a local ruff toolchain directory into the named cache.
  *
- * @category configuration
  * @param {string} version
  * @param {string} source Path to the directory containing the `ruff` binary.
  * @returns {string|null} Local path to the cached toolchain root.
@@ -169,7 +168,6 @@ export function installRuffToolchain(version, source) {
  * Acquire a ruff toolchain, downloading and caching it if not already
  * installed in the named cache.
  *
- * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
@@ -249,7 +247,6 @@ export async function acquireRuffToolchain(version) {
 /**
  * Resolve an explicit or default ruff toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -263,7 +260,6 @@ export function resolveRuffToolchainVersion(version) {
 /**
  * Return the ruff executable path for a toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<string>}
  */
@@ -277,7 +273,6 @@ export async function ruffBin(version) {
 /**
  * Return a named-cache-backed ruff tool descriptor for sandbox execution.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -297,7 +292,6 @@ export async function ruffTool(version) {
 /**
  * Return the currently configured default ruff toolchain version.
  *
- * @category configuration
  * @returns {string|null}
  */
 export function defaultRuffToolchainVersion() {
@@ -307,7 +301,6 @@ export function defaultRuffToolchainVersion() {
 /**
  * Return the currently configured default ruff toolchain target handle.
  *
- * @category configuration
  * @returns {object|null}
  */
 export function defaultRuffToolchain() {

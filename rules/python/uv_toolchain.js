@@ -124,11 +124,11 @@ function requireVersion(version) {
 /**
  * Declare a uv toolchain version and optionally set it as the default.
  *
- * @category configuration
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
  * @returns {object} Target handle for this uv toolchain.
+ * @category configuration
  */
 export function uvToolchain(version, opts = {}) {
     namedCache({ name: UV_TOOLCHAIN_CACHE, shared: true });
@@ -150,7 +150,6 @@ export function uvToolchain(version, opts = {}) {
 /**
  * Install a local uv toolchain directory into the named cache.
  *
- * @category configuration
  * @param {string} version
  * @param {string} source Path to the toolchain root.
  * @returns {string|null} Local path to the cached toolchain root.
@@ -167,7 +166,6 @@ export function installUvToolchain(version, source) {
  * Acquire a uv toolchain, downloading and caching it if not already
  * installed in the named cache.
  *
- * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
@@ -246,7 +244,6 @@ export async function acquireUvToolchain(version) {
 /**
  * Resolve an explicit or default uv toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -260,7 +257,6 @@ export function resolveUvToolchainVersion(version) {
 /**
  * Return the uv executable path for a toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<string>}
  */
@@ -274,7 +270,6 @@ export async function uvBin(version) {
 /**
  * Return a named-cache-backed uv tool descriptor for sandbox execution.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -297,7 +292,6 @@ export async function uvTool(version) {
  * put on PATH (binDirs empty) — pair with uvCacheDirEnv() to point
  * $UV_CACHE_DIR at its mount path.
  *
- * @category configuration
  * @returns {object}
  */
 export function uvCacheDirTool() {
@@ -328,7 +322,6 @@ export function uvCacheDirTool() {
  * uv-cache-dir mount rather than its own separate named cache, since it's
  * still uv-managed, content-addressed state safe to share the same way.
  *
- * @category configuration
  * @returns {string[]}
  */
 export function uvCacheDirEnv() {
@@ -341,7 +334,6 @@ export function uvCacheDirEnv() {
 /**
  * Return the currently configured default uv toolchain version.
  *
- * @category configuration
  * @returns {string|null}
  */
 export function defaultUvToolchainVersion() {
@@ -351,7 +343,6 @@ export function defaultUvToolchainVersion() {
 /**
  * Return the currently configured default uv toolchain target handle.
  *
- * @category configuration
  * @returns {object|null}
  */
 export function defaultUvToolchain() {

@@ -108,11 +108,11 @@ export function __resetCmakeToolchainStateForTest() {
 /**
  * Declare a CMake toolchain version and optionally set it as the default.
  *
- * @category configuration
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
  * @returns {object} Target handle for this CMake toolchain.
+ * @category configuration
  */
 export function cmakeToolchain(version, opts = {}) {
     namedCache({ name: CMAKE_TOOLCHAIN_CACHE, shared: true });
@@ -133,7 +133,6 @@ export function cmakeToolchain(version, opts = {}) {
 /**
  * Install a local CMake toolchain directory into the named cache.
  *
- * @category configuration
  * @param {string} version
  * @param {string} source Path to the toolchain root.
  * @returns {string|null} Local path to the cached toolchain root.
@@ -150,7 +149,6 @@ export function installCmakeToolchain(version, source) {
  * Acquire a CMake toolchain, downloading and caching it if not already
  * installed in the named cache.
  *
- * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
@@ -193,7 +191,6 @@ export async function acquireCmakeToolchain(version) {
 /**
  * Resolve an explicit or default CMake toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -208,7 +205,6 @@ export function resolveCmakeToolchainVersion(version) {
  * Return the CMake executable for a toolchain version, or system "cmake" when
  * no CMake toolchain default has been declared.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<string>}
  */
@@ -225,7 +221,6 @@ export async function cmakeBin(version) {
 /**
  * Return a named-cache-backed CMake tool descriptor for sandbox execution.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -248,7 +243,6 @@ export async function cmakeTool(version) {
 /**
  * Return the currently configured default CMake toolchain version.
  *
- * @category configuration
  * @returns {string|null}
  */
 export function defaultCmakeToolchainVersion() {
@@ -258,7 +252,6 @@ export function defaultCmakeToolchainVersion() {
 /**
  * Return the currently configured default CMake toolchain target handle.
  *
- * @category configuration
  * @returns {object|null}
  */
 export function defaultCmakeToolchain() {

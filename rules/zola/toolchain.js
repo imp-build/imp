@@ -99,11 +99,11 @@ export function __resetZolaToolchainStateForTest() {
 /**
  * Declare a zola toolchain version and optionally set it as the default.
  *
- * @category configuration
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
  * @returns {object} Target handle for this zola toolchain.
+ * @category configuration
  */
 export function zolaToolchain(version, opts = {}) {
     namedCache({ name: ZOLA_TOOLCHAIN_CACHE, shared: true });
@@ -124,7 +124,6 @@ export function zolaToolchain(version, opts = {}) {
 /**
  * Install a local zola toolchain directory into the named cache.
  *
- * @category configuration
  * @param {string} version
  * @param {string} source Path to the toolchain root.
  * @returns {string|null} Local path to the cached toolchain root.
@@ -141,7 +140,6 @@ export function installZolaToolchain(version, source) {
  * Acquire a zola toolchain, downloading and caching it if not already
  * installed in the named cache.
  *
- * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
@@ -186,7 +184,6 @@ export async function acquireZolaToolchain(version) {
 /**
  * Resolve an explicit or default zola toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -200,7 +197,6 @@ export function resolveZolaToolchainVersion(version) {
 /**
  * Return the zola executable path for a toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<string>}
  */
@@ -217,7 +213,6 @@ export async function zolaBin(version) {
 /**
  * Return a named-cache-backed zola tool descriptor for sandbox execution.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -240,7 +235,6 @@ export async function zolaTool(version) {
 /**
  * Return the currently configured default zola toolchain version.
  *
- * @category configuration
  * @returns {string|null}
  */
 export function defaultZolaToolchainVersion() {
@@ -250,7 +244,6 @@ export function defaultZolaToolchainVersion() {
 /**
  * Return the currently configured default zola toolchain target handle.
  *
- * @category configuration
  * @returns {object|null}
  */
 export function defaultZolaToolchain() {

@@ -111,11 +111,11 @@ export function __resetCraneToolchainStateForTest() {
 /**
  * Declare a crane toolchain version and optionally set it as the default.
  *
- * @category configuration
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
  * @returns {object} Target handle for this crane toolchain.
+ * @category configuration
  */
 export function craneToolchain(version, opts = {}) {
     namedCache({ name: CRANE_TOOLCHAIN_CACHE, shared: true });
@@ -136,7 +136,6 @@ export function craneToolchain(version, opts = {}) {
 /**
  * Install a local crane toolchain directory into the named cache.
  *
- * @category configuration
  * @param {string} version
  * @param {string} source Path to the toolchain root.
  * @returns {string|null} Local path to the cached toolchain root.
@@ -153,7 +152,6 @@ export function installCraneToolchain(version, source) {
  * Acquire a crane toolchain, downloading and caching it if not already
  * installed in the named cache.
  *
- * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
@@ -195,7 +193,6 @@ export async function acquireCraneToolchain(version) {
 /**
  * Resolve an explicit or default crane toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -209,7 +206,6 @@ export function resolveCraneToolchainVersion(version) {
 /**
  * Return the crane executable path for a toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<string>}
  */
@@ -226,7 +222,6 @@ export async function craneBin(version) {
 /**
  * Return a named-cache-backed crane tool descriptor for sandbox execution.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -249,7 +244,6 @@ export async function craneTool(version) {
 /**
  * Return the currently configured default crane toolchain version.
  *
- * @category configuration
  * @returns {string|null}
  */
 export function defaultCraneToolchainVersion() {
@@ -259,7 +253,6 @@ export function defaultCraneToolchainVersion() {
 /**
  * Return the currently configured default crane toolchain target handle.
  *
- * @category configuration
  * @returns {object|null}
  */
 export function defaultCraneToolchain() {

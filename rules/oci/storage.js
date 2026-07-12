@@ -18,7 +18,6 @@ let declared = false;
  * themselves idempotent, but this avoids the redundant host round-trip in
  * happy path use).
  *
- * @category configuration
  */
 export function declareOciStorage() {
     if (declared) return;
@@ -35,7 +34,6 @@ const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 /**
  * Turn a canonical image digest into an `oci-storage` cache key.
  *
- * @category configuration
  * @param {string} digest A canonical `sha256:<hex>` digest, e.g. as returned
  *   by `crane digest`.
  * @returns {string} `sha256/<hex>` — cachePut/cacheGet treat keys as opaque
@@ -61,7 +59,6 @@ export function ociStorageKey(digest) {
  * real implementation (e.g. a DOCKER_CONFIG-pointed namedCache populated by
  * a future craneLogin()) can slot in here later without touching call sites.
  *
- * @category configuration
  * @param {string} registry Registry host the upcoming run() will talk to.
  * @returns {Promise<{ tools: object[], env: string[] }>}
  */

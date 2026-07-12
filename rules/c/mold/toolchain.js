@@ -101,11 +101,11 @@ function requireVersion(version) {
 /**
  * Declare a mold toolchain version and optionally set it as the default.
  *
- * @category configuration
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
  * @returns {object} Target handle for this mold toolchain.
+ * @category configuration
  */
 export function moldToolchain(version, opts = {}) {
     namedCache({ name: MOLD_TOOLCHAIN_CACHE, shared: true });
@@ -126,7 +126,6 @@ export function moldToolchain(version, opts = {}) {
 /**
  * Install a local mold toolchain directory into the named cache.
  *
- * @category configuration
  * @param {string} version
  * @param {string} source Path to the toolchain root.
  * @returns {string|null} Local path to the cached toolchain root.
@@ -143,7 +142,6 @@ export function installMoldToolchain(version, source) {
  * Acquire a mold toolchain, downloading and caching it if not already
  * installed in the named cache.
  *
- * @category configuration
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
@@ -185,7 +183,6 @@ export async function acquireMoldToolchain(version) {
 /**
  * Resolve an explicit or default mold toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {string|null}
  */
@@ -199,7 +196,6 @@ export function resolveMoldToolchainVersion(version) {
 /**
  * Return the mold executable path for a toolchain version.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<string>}
  */
@@ -212,7 +208,6 @@ export async function moldBin(version) {
 /**
  * Return a named-cache-backed mold tool descriptor for sandbox execution.
  *
- * @category configuration
  * @param {string} [version]
  * @returns {Promise<object>}
  */
@@ -232,7 +227,6 @@ export async function moldTool(version) {
 /**
  * Return the currently configured default mold toolchain version.
  *
- * @category configuration
  * @returns {string|null}
  */
 export function defaultMoldToolchainVersion() {
@@ -242,7 +236,6 @@ export function defaultMoldToolchainVersion() {
 /**
  * Return the currently configured default mold toolchain target handle.
  *
- * @category configuration
  * @returns {object|null}
  */
 export function defaultMoldToolchain() {

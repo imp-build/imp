@@ -36,7 +36,6 @@ class BuildGenerateRoot extends Target {
  * actual fan-out to per-language generators happens via
  * registerBuildGenerator(), independent of this target.
  *
- * @category target
  * @returns {object} Target handle.
  */
 export function buildGenerateRoot(opts = {}) {
@@ -56,7 +55,6 @@ const _registeredGenerators = [];
  * buildGenerate: field.bool({ default: false }) })` plus a workspace config
  * export setting it to true.
  *
- * @category configuration
  * @param {object} opts
  * @param {string} opts.namespace Configuration namespace whose `buildGenerate` field gates this generator.
  * @param {string} opts.kind Target kind the "generate-build" product is registered under.
