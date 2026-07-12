@@ -279,13 +279,26 @@ test("renders a language page with frontmatter and category headings in CATEGORY
         ]],
     ]);
 
-    const md = renderLanguagePage("Odin", byCategory);
+    const md = renderLanguagePage("Odin", byCategory, {
+        odin: {
+            collections: {
+                __impField: "map",
+                key: { __impField: "string" },
+                value: { __impField: "string" },
+                default: {},
+            },
+        },
+    });
     expect(md).toContain('title = "Odin"');
     expect(md).toContain("## Configuration");
     expect(md).toContain("## Targets");
     expect(md).toContain("### odinToolchain");
     expect(md).toContain("### odinPackage");
     expect(md).toContain("Declare an Odin package.");
+    expect(md).toContain("| collections | map<string, string> | `{}` | no |");
+    expect(md).toContain("export const odinConfig = {");
+    expect(md).toContain("    collections: {},");
+    expect(md).not.toContain("### odin configuration schema");
     expect(md.indexOf("## Configuration") < md.indexOf("## Targets")).toBeTruthy();
 });
 

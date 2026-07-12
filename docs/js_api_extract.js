@@ -467,7 +467,7 @@ function renderConfigSchemas(schemas) {
         const fields = schema && typeof schema === "object" ? Object.entries(schema) : [];
         if (fields.length === 0) continue;
         const hasExamples = fields.some(([, descriptor]) => descriptor && Object.prototype.hasOwnProperty.call(descriptor, "example"));
-        const lines = [`### ${namespace} configuration schema`, "", hasExamples
+        const lines = [hasExamples
             ? "| Option | Type | Default | Example | Required |"
             : "| Option | Type | Default | Required |", hasExamples
             ? "| --- | --- | --- | --- | --- |"
@@ -482,7 +482,19 @@ function renderConfigSchemas(schemas) {
                 ? `| ${name} | ${schemaType(descriptor)} | ${defaultValue} | ${exampleValue} | ${required} |`
                 : `| ${name} | ${schemaType(descriptor)} | ${defaultValue} | ${required} |`);
         }
-        sections.push(lines.join("\n"));
+        const defaultFields = fields.filter(([, descriptor]) =>
+            descriptor && Object.prototype.hasOwnProperty.call(descriptor, "default"));
+        const example = [
+            "**Example**",
+            "",
+            "```js",
+            `export const ${namespace}Config = {`,
+            ...defaultFields.map(([name, descriptor]) =>
+                `    ${name}: ${JSON.stringify(descriptor.default)},`),
+            "};",
+            "```",
+        ];
+        sections.push([...lines, "", ...example].join("\n"));
     }
     return sections.join("\n\n");
 }
