@@ -23,7 +23,7 @@ import {
     odinBuild,
     odinTest,
     odinRun,
-    odinLintStub,
+    odinLint,
     default_output_path,
     odin_output_path,
 } from "//rules/odin";
@@ -371,15 +371,40 @@ test("odinRun rejects packages with no main entrypoint", async () => {
     expect(message).toContain("no main entrypoint");
 });
 
-test("odinLintStub throws a not-yet-implemented error", async () => {
-    const pkg = odinPackage({ path: "rules/odin/example", toolchainVersion: "dev-2026-04", output: "build/odin/target" });
-    let lintMessage = "";
+test("odinLint runs odin check -vet against the package", async () => {
+    configure("odin", null);
     try {
-        await odinLintStub(pkg);
-    } catch (error) {
-        lintMessage = error && error.message ? error.message : String(error);
+        await withFakeRun(async () => {
+            const pkg = odinPackage({ path: "rules/odin/example", toolchainVersion: "dev-2026-04" });
+            const result = await odinLint(pkg);
+            expect(result.ok).toBe(true);
+            const { trace } = getMemoTrace();
+            const runEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display.startsWith("odin check"));
+            expect(runEffect.argv[2]).toContain("odin check");
+            expect(runEffect.argv[2]).toContain("-vet");
+            expect(runEffect.allowFailure).toBe(true);
+        });
+    } finally {
+        configure("odin", null);
     }
-    expect(lintMessage).toContain("not yet implemented");
+});
+
+test("odinLint reports a nonzero exit as ok:false instead of throwing", async () => {
+    configure("odin", null);
+    try {
+        const pkg = odinPackage({ path: "rules/odin/example", toolchainVersion: "dev-2026-04" });
+        const originalRun = globalThis.__host_run;
+        globalThis.__host_run = async () => ({ stdout: "", stderr: "declared but not used\n", exitCode: 1 });
+        try {
+            const result = await odinLint(pkg);
+            expect(result.ok).toBe(false);
+            expect(result.output).toContain("declared but not used");
+        } finally {
+            globalThis.__host_run = originalRun;
+        }
+    } finally {
+        configure("odin", null);
+    }
 });
 
 // odinDistPackage's dist/ path comes from distPathFor(handle), which resolves

@@ -871,11 +871,58 @@ export const odinRun = product("odin-package", "run", async function odinRun(han
     });
 });
 
-// Stubs: no lint/package implementation exists yet for Odin packages. These
-// throw rather than silently succeeding, so `imp lint`/`imp package`
-// fail loudly instead of looking like they ran and passed.
-export const odinLintStub = product("odin-package", "lint", async function odinLintStub(handle) {
-    throw new Error(`lint is not yet implemented for Odin packages (${declared_path(handle, handle.attrs.path || ".")})`);
+/**
+ * Lint an Odin package via `odin check -vet` (type-checks the package and
+ * flags unused declarations/imports, variable shadowing, and `using`
+ * statement misuse — no build output is produced). Mirrors cargoClippy /
+ * ruffCheck: reports a structured `{ ok, output }` instead of throwing, so
+ * `imp lint` can run every selected target to completion and print a
+ * summary at the end.
+ *
+ * @param {object} handle Target handle returned by odinPackage().
+ * @returns {Promise<{ok: boolean, output: string}>}
+ */
+export const odinLint = product("odin-package", "lint", async function odinLint(handle) {
+    const toolchainHandle = handle.attrs.toolchain;
+    const odinToolSpec = toolchainHandle
+        ? await tool(toolchainHandle)
+        : odinTool(resolveOdinToolchainVersion(handle.attrs.toolchainVersion));
+    const srcs = await sources(handle);
+    const genInputs = await collect_gen_sets(handle, new Set());
+    const resourceInputs = await resources(handle);
+    const flags = await collection_flags(handle);
+    const collectionDirs = await collection_dirs(handle);
+    const analysis = await odinPackageAnalysis(handle);
+    if (analysis.sourceFiles.length === 0) {
+        const packagePath = declared_path(handle, handle.attrs.path || ".");
+        throw new Error(empty_package_error(handle, packagePath));
+    }
+    const path = analysis.packagePath;
+    // Unlike odinBuild/odinTest, `odin check` never invokes a C
+    // compiler/linker — it only type-checks — so this doesn't go through
+    // odinScriptTools() (which always requires a declared default gcc
+    // toolchain). Only `mkdir` is needed, to materialize collection dirs.
+    const mkdirTool = await nativeToolSpec(nativeTool("mkdir"));
+    const result = await run({
+        argv: [
+            "sh",
+            "-c",
+            "pkg=$1; dir_count=$2; shift 2; while [ \"$dir_count\" -gt 0 ]; do mkdir -p \"$1\"; shift; dir_count=$((dir_count - 1)); done; odin check \"$pkg\" -vet \"$@\"",
+            "odin-check",
+            path,
+            String(collectionDirs.length),
+            ...collectionDirs,
+            ...flags,
+        ],
+        tools: [odinToolSpec, mkdirTool],
+        inputs: [srcs, ...genInputs, ...resourceInputs],
+        allowFailure: true,
+        display: `odin check -vet ${path}`,
+    });
+    return {
+        ok: result.exitCode === 0,
+        output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
+    };
 });
 
 export const odinDistPackage = product("odin-package", "package", async function odinDistPackage(handle) {

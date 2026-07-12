@@ -10,10 +10,9 @@
 // every run has finished, followed by a pass/fail summary; the goal then
 // fails if any target was unclean.
 //
-// odin-package keeps its own "lint" product (odinLintStub, rules/odin/index.js)
-// registered directly there — it still throws "not yet implemented" and so
-// still aborts the goal immediately, same as any other product function that
-// throws for a genuine (non-lint) error.
+// odin-package keeps its own "lint" product (odinLint, rules/odin/index.js)
+// registered directly there — it follows the same allowFailure/{ok, output}
+// contract as cargoClippy/ruffCheck, running `odin check -vet`.
 
 import { cargoClippy } from "//rules/rust/lint";
 import { ruffCheck } from "//rules/python/lint";

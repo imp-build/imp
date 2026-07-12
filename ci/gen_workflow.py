@@ -51,6 +51,7 @@ CHECK_STEPS = [
     CACHE_IMP_STEP,
     {"name": "Check generated files", "run": f"./imp goal generate {SITE_CHECK_TARGET} --check"},
     {"name": "Check formatting", "run": "./imp fmt --check"},
+    {"name": "Lint", "run": "./imp lint"},
 ]
 
 PACKAGE_STEPS = [

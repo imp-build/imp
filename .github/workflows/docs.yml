@@ -61,6 +61,9 @@ jobs:
       - name: Check formatting
         run: ./imp fmt --check
 
+      - name: Lint
+        run: ./imp lint
+
   package:
     needs: build
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
