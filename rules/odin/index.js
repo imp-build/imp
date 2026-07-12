@@ -42,7 +42,10 @@ import {
  * @category configuration
  */
 export const odinConfigSchema = {
-    collections: field.map(field.string(), field.string(), { default: {} }),
+    collections: field.map(field.string(), field.string(), {
+        default: {},
+        example: { vendor: "//src/odin/vendor" },
+    }),
 };
 
 defineConfigSchema("odin", odinConfigSchema);

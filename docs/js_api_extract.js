@@ -437,12 +437,16 @@ function renderEntries(entries) {
  * @param {Map<string, object[]>} byCategory
  * @returns {string}
  */
-function renderCategorySections(byCategory) {
+function renderCategorySections(byCategory, schemas = {}) {
     const sections = [];
     for (const category of CATEGORY_ORDER) {
         const entries = byCategory.get(category);
-        if (!entries || entries.length === 0) continue;
-        sections.push(`## ${CATEGORY_LABELS[category]}\n\n${renderEntries(entries)}`);
+        const schemaSections = category === "configuration" ? renderConfigSchemas(schemas) : "";
+        if ((!entries || entries.length === 0) && !schemaSections) continue;
+        const parts = [];
+        if (schemaSections) parts.push(schemaSections);
+        if (entries && entries.length > 0) parts.push(renderEntries(entries));
+        sections.push(`## ${CATEGORY_LABELS[category]}\n\n${parts.join("\n\n")}`);
     }
     return sections.join("\n\n");
 }
@@ -462,12 +466,21 @@ function renderConfigSchemas(schemas) {
     for (const [namespace, schema] of Object.entries(schemas || {})) {
         const fields = schema && typeof schema === "object" ? Object.entries(schema) : [];
         if (fields.length === 0) continue;
-        const lines = [`### ${namespace} configuration schema`, "", "| Option | Type | Default | Required |", "| --- | --- | --- | --- |"];
+        const hasExamples = fields.some(([, descriptor]) => descriptor && Object.prototype.hasOwnProperty.call(descriptor, "example"));
+        const lines = [`### ${namespace} configuration schema`, "", hasExamples
+            ? "| Option | Type | Default | Example | Required |"
+            : "| Option | Type | Default | Required |", hasExamples
+            ? "| --- | --- | --- | --- | --- |"
+            : "| --- | --- | --- | --- |"];
         for (const [name, descriptor] of fields) {
             const defaultValue = descriptor && Object.prototype.hasOwnProperty.call(descriptor, "default")
                 ? `\`${JSON.stringify(descriptor.default)}\`` : "—";
+            const exampleValue = descriptor && Object.prototype.hasOwnProperty.call(descriptor, "example")
+                ? `\`${JSON.stringify(descriptor.example)}\`` : "—";
             const required = descriptor && descriptor.required === true ? "yes" : "no";
-            lines.push(`| ${name} | ${schemaType(descriptor)} | ${defaultValue} | ${required} |`);
+            lines.push(hasExamples
+                ? `| ${name} | ${schemaType(descriptor)} | ${defaultValue} | ${exampleValue} | ${required} |`
+                : `| ${name} | ${schemaType(descriptor)} | ${defaultValue} | ${required} |`);
         }
         sections.push(lines.join("\n"));
     }
@@ -487,9 +500,7 @@ function renderConfigSchemas(schemas) {
  */
 export function renderLanguagePage(language, byCategory, schemas = {}) {
     const frontmatter = `+++\ntitle = "${language}"\n+++\n`;
-    const categorySections = renderCategorySections(byCategory);
-    const schemaSections = renderConfigSchemas(schemas);
-    return `${frontmatter}\n${categorySections}${schemaSections ? `\n\n## Configuration schemas\n\n${schemaSections}` : ""}`;
+    return `${frontmatter}\n${renderCategorySections(byCategory, schemas)}`;
 }
 
 /**
