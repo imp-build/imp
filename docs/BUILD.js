@@ -1,4 +1,4 @@
-import { target, product, run, output, output_path, glob, paths, read_file, writeWorkspace } from "imp:core";
+import { target, product, run, output, output_path, glob, paths, read_file, writeWorkspace, configurationSchemas } from "imp:core";
 import { rulesTest } from "//rules/imp/test";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import { extractCodeReference, extractUserApiReference } from "//docs/js_api_extract";
@@ -28,7 +28,7 @@ export const api_reference_build = product("js-api-reference", "build", async fu
     const files = paths(srcs).slice().sort().map(path => ({ sourcePath: path, sourceText: read_file(path) }));
     const pages = [
         ...extractCodeReference(files).map(({ path, markdown }) => [`js-api/${path}`, markdown]),
-        ...extractUserApiReference(files).map(({ path, markdown }) => [`user-api/${path}`, markdown]),
+        ...extractUserApiReference(files, configurationSchemas()).map(({ path, markdown }) => [`user-api/${path}`, markdown]),
     ];
 
     const script = 'out=$1; shift; mkdir -p "$out"; while [ "$#" -gt 0 ]; do name=$1; content=$2; shift 2; mkdir -p "$out/$(dirname "$name")"; printf "%s" "$content" > "$out/$name"; done';

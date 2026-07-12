@@ -39,7 +39,6 @@ import {
  * odinPackage/odinTestPackage instead and may include target handles or
  * `{ name, path }` entries.
  *
- * @configField {map<string,string>} collections Dynamic collection name to workspace-relative path mappings. Defaults to `{}`.
  * @category configuration
  */
 export const odinConfigSchema = {

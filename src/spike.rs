@@ -1392,6 +1392,18 @@ fn register_globals<'js>(
     )?;
     globals.set("__host_define_config_schema", host_define_config_schema)?;
 
+    let state_schema = Arc::clone(&state);
+    let host_configuration_schemas = Function::new(
+        ctx.clone(),
+        move || -> rquickjs::Result<String> {
+            let hs = state_schema.lock().unwrap();
+            serde_json::to_string(&hs.config_schemas).map_err(|e| {
+                rquickjs::Error::new_loading_message("configurationSchemas", e.to_string())
+            })
+        },
+    )?;
+    globals.set("__host_configuration_schemas", host_configuration_schemas)?;
+
     let state_cfg = Arc::clone(&state);
     let host_configuration = Function::new(
         ctx.clone(),

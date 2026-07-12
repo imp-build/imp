@@ -288,6 +288,17 @@ export function configuration(namespace, fallback = undefined) {
 }
 
 /**
+ * Read all configuration schemas registered by the loaded rule packages.
+ * Primarily useful to documentation and introspection tooling.
+ *
+ * @category configuration
+ * @returns {object} Schemas keyed by configuration namespace.
+ */
+export function configurationSchemas() {
+    return JSON.parse(__host_configuration_schemas());
+}
+
+/**
  * Register a named platform.
  *
  * The built-in "local" platform is pre-registered with the native executor and

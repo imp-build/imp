@@ -447,6 +447,33 @@ function renderCategorySections(byCategory) {
     return sections.join("\n\n");
 }
 
+function schemaType(schema) {
+    if (!schema || typeof schema !== "object") return "unknown";
+    switch (schema.__impField) {
+    case "enum": return `enum(${(schema.values || []).join(", ")})`;
+    case "object": return "object";
+    case "map": return `map<${schemaType(schema.key)}, ${schemaType(schema.value)}>`;
+    default: return schema.__impField || "unknown";
+    }
+}
+
+function renderConfigSchemas(schemas) {
+    const sections = [];
+    for (const [namespace, schema] of Object.entries(schemas || {})) {
+        const fields = schema && typeof schema === "object" ? Object.entries(schema) : [];
+        if (fields.length === 0) continue;
+        const lines = [`### ${namespace} configuration schema`, "", "| Option | Type | Default | Required |", "| --- | --- | --- | --- |"];
+        for (const [name, descriptor] of fields) {
+            const defaultValue = descriptor && Object.prototype.hasOwnProperty.call(descriptor, "default")
+                ? `\`${JSON.stringify(descriptor.default)}\`` : "—";
+            const required = descriptor && descriptor.required === true ? "yes" : "no";
+            lines.push(`| ${name} | ${schemaType(descriptor)} | ${defaultValue} | ${required} |`);
+        }
+        sections.push(lines.join("\n"));
+    }
+    return sections.join("\n\n");
+}
+
 /**
  * Render a language's single reference page (e.g. "Odin"): Zola TOML
  * frontmatter plus every category's entries inlined as `##` sections
@@ -455,11 +482,14 @@ function renderCategorySections(byCategory) {
  *
  * @param {string} language
  * @param {Map<string, object[]>} byCategory
+ * @param {object} [schemas] Registered schemas keyed by namespace.
  * @returns {string}
  */
-export function renderLanguagePage(language, byCategory) {
+export function renderLanguagePage(language, byCategory, schemas = {}) {
     const frontmatter = `+++\ntitle = "${language}"\n+++\n`;
-    return `${frontmatter}\n${renderCategorySections(byCategory)}`;
+    const categorySections = renderCategorySections(byCategory);
+    const schemaSections = renderConfigSchemas(schemas);
+    return `${frontmatter}\n${categorySections}${schemaSections ? `\n\n## Configuration schemas\n\n${schemaSections}` : ""}`;
 }
 
 /**
@@ -516,7 +546,7 @@ export function extractCodeReference(files) {
  * @param {{ sourcePath: string, sourceText: string }[]} files
  * @returns {{ path: string, markdown: string }[]}
  */
-export function extractUserApiReference(files) {
+export function extractUserApiReference(files, schemas = {}) {
     const byPath = new Map();
     for (const { sourcePath, sourceText } of files) {
         for (const entry of parseModule(sourceText)) {
@@ -536,7 +566,8 @@ export function extractUserApiReference(files) {
         const { segments, byCategory } = byPath.get(key);
         const language = segments[segments.length - 1];
         const titleCased = language.charAt(0).toUpperCase() + language.slice(1);
-        leaves.push({ segments, markdown: renderLanguagePage(titleCased, byCategory) });
+        const pageSchemas = titleCased === "Core" ? { imp: schemas.imp } : { [language]: schemas[language] };
+        leaves.push({ segments, markdown: renderLanguagePage(titleCased, byCategory, pageSchemas) });
     }
     return buildPageTree(leaves, { forceTopLevelSections: true });
 }
