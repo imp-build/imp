@@ -1609,15 +1609,13 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     // __host_file_size(path) → number (bytes; f64-exact for any real artifact)
     // ------------------------------------------------------------------
     let service_file_size = Arc::clone(&service);
-    let host_file_size = Function::new(
-        ctx.clone(),
-        move |path: String| -> rquickjs::Result<f64> {
+    let host_file_size =
+        Function::new(ctx.clone(), move |path: String| -> rquickjs::Result<f64> {
             service_file_size
                 .file_size(Path::new(&path))
                 .map(|n| n as f64)
                 .map_err(|e| rquickjs::Error::new_loading_message("file_size", format!("{e:#}")))
-        },
-    )?;
+        })?;
     globals.set("__host_file_size", host_file_size)?;
 
     // ------------------------------------------------------------------
