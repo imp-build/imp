@@ -562,15 +562,20 @@ export function renderRuleCapabilities(group, capabilities = {}) {
     const lines = [
         "## Available goals",
         "",
-        "| Goal | Tool |",
-        "| --- | --- |",
+        "| Goal | Tool | Product module |",
+        "| --- | --- | --- |",
     ];
     for (const goal of Object.keys(goals).sort()) {
         for (const tool of Object.keys(goals[goal]).sort()) {
+            const details = goals[goal][tool] || {};
             const toolLabel = tool === group
                 ? displayName(tool)
                 : `[${displayName(tool)}](./${tool}/)`;
-            lines.push(`| \`imp ${goal}\` | ${toolLabel} |`);
+            const modules = (details.modules || [])
+                .map(module => module.replace(/\/index\.js$/, "").replace(/\.js$/, ""))
+                .map(module => `\`${module}\``)
+                .join("<br>") || "—";
+            lines.push(`| \`imp ${goal}\` | ${toolLabel} | ${modules} |`);
         }
     }
     return lines.join("\n");

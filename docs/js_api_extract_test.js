@@ -307,17 +307,17 @@ test("renders capabilities by goal and directory-derived tool", () => {
     const md = renderRuleCapabilities("rust", {
         rust: {
             build: {
-                rust: { targetKinds: ["cargo-package"], modules: ["//rules/rust"] },
+                rust: { targetKinds: ["cargo-package"], modules: ["//rules/rust/index.js"] },
             },
             lint: {
-                clippy: { targetKinds: ["cargo-package"], modules: ["//rules/rust/clippy"] },
+                clippy: { targetKinds: ["cargo-package"], modules: ["//rules/rust/clippy/index.js"] },
             },
         },
     });
     expect(md).toContain("## Available goals");
-    expect(md).toContain("| Goal | Tool |");
-    expect(md).toContain("| `imp build` | Rust |");
-    expect(md).toContain("| `imp lint` | [Clippy](./clippy/) |");
+    expect(md).toContain("| Goal | Tool | Product module |");
+    expect(md).toContain("| `imp build` | Rust | `//rules/rust` |");
+    expect(md).toContain("| `imp lint` | [Clippy](./clippy/) | `//rules/rust/clippy` |");
     expect(md).not.toContain("Target kinds");
     expect(md).not.toContain("cargo-package");
 });
