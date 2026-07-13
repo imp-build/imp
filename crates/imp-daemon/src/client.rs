@@ -273,6 +273,17 @@ impl ExecutionService for RemoteExecutionService {
                 .digest)
         })
     }
+    fn file_size(&self, p: &Path) -> Result<u64> {
+        let mut c = self.client()?;
+        self.block_on_external(|rt| {
+            Ok(rt
+                .block_on(c.file_size(Request::new(proto::FileRequest {
+                    path: p.to_string_lossy().into_owned(),
+                })))?
+                .into_inner()
+                .size)
+        })
+    }
     fn register_native_tool(&self, n: &str, p: &Path) -> Result<PathBuf> {
         let mut c = self.client()?;
         self.block_on_external(|rt| {

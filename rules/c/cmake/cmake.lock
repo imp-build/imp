@@ -1,0 +1,31 @@
+{
+  "tool": "cmake",
+  "versions": {
+    "3.31.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v3.31.0/cmake-3.31.0-linux-x86_64.tar.gz",
+        "artifact": "cmake-3.31.0-linux-x86_64.tar.gz",
+        "size": 54987701,
+        "sha256": "0fcb338b4515044f9ac77543550ac92c314c58f6f95aafcac5cd36aa75db6924"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v3.31.0/cmake-3.31.0-linux-aarch64.tar.gz",
+        "artifact": "cmake-3.31.0-linux-aarch64.tar.gz",
+        "size": 56265967,
+        "sha256": "e0f74862734c2d14ef8ac5a71941691531db0bbebee0a9c20a8e96e8a97390f9"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v3.31.0/cmake-3.31.0-windows-x86_64.zip",
+        "artifact": "cmake-3.31.0-windows-x86_64.zip",
+        "size": 46484034,
+        "sha256": "f4b499f71cf44115a1d711d4867da3c6bd2f3f4d7121c213ace979757640385c"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v3.31.0/cmake-3.31.0-windows-arm64.zip",
+        "artifact": "cmake-3.31.0-windows-arm64.zip",
+        "size": 45173910,
+        "sha256": "3bae17886ad47909aadd89e41932a109a8b6a708faef6f28de2d4554c7c08276"
+      }
+    }
+  }
+}

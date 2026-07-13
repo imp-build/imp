@@ -1,7 +1,7 @@
 import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
 
 const UV_TOOLCHAIN_CACHE = "uv-toolchains";
 
@@ -353,12 +353,13 @@ export function defaultUvToolchain() {
 // (uv's native per-project dependency lock — not ours to name), so
 // "uv-toolchain" is used instead for both the `tool` field and the lockfile
 // stem.
+const LOCKFILE_SPEC = {
+    name: "uv-toolchain",
+    platforms: uvSupportedPlatforms(),
+    downloadUrl: uvDownloadUrl,
+    artifactName: uvArtifactName,
+    lockfile: "//rules/python/uv-toolchain.lock",
+};
 product("uv-toolchain", "gen-lockfiles", (handle) =>
-    generateToolLockfile({
-        handle,
-        name: "uv-toolchain",
-        platforms: uvSupportedPlatforms(),
-        downloadUrl: uvDownloadUrl,
-        artifactName: uvArtifactName,
-        lockfile: "//rules/python/uv-toolchain.lock",
-    }));
+    generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
+registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["0.11.16"] });

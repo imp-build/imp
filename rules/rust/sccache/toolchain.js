@@ -19,7 +19,7 @@
 import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas, workerStart } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
 
 const SCCACHE_TOOLCHAIN_CACHE = "sccache-toolchains";
 const SCCACHE_DATA_CACHE = "sccache-data";
@@ -322,15 +322,16 @@ export function defaultSccacheToolchain() {
     return defaultToolchain;
 }
 
+const LOCKFILE_SPEC = {
+    name: "sccache",
+    platforms: sccacheSupportedPlatforms(),
+    downloadUrl: sccacheDownloadUrl,
+    artifactName: sccacheArtifactName,
+    lockfile: "//rules/rust/sccache/sccache.lock",
+};
 product("sccache-toolchain", "gen-lockfiles", (handle) =>
-    generateToolLockfile({
-        handle,
-        name: "sccache",
-        platforms: sccacheSupportedPlatforms(),
-        downloadUrl: sccacheDownloadUrl,
-        artifactName: sccacheArtifactName,
-        lockfile: "//rules/rust/sccache/sccache.lock",
-    }));
+    generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
+registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["0.10.0"] });
 
 /**
  * Adapter exposing an sccache toolchain as Rust's RUSTC_WRAPPER, sharing a

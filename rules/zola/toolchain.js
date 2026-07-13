@@ -1,7 +1,7 @@
 import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
 
 const ZOLA_TOOLCHAIN_CACHE = "zola-toolchains";
 
@@ -250,12 +250,13 @@ export function defaultZolaToolchain() {
     return defaultToolchain;
 }
 
+const LOCKFILE_SPEC = {
+    name: "zola",
+    platforms: zolaSupportedPlatforms(),
+    downloadUrl: zolaDownloadUrl,
+    artifactName: zolaArtifactName,
+    lockfile: "//rules/zola/zola.lock",
+};
 product("zola-toolchain", "gen-lockfiles", (handle) =>
-    generateToolLockfile({
-        handle,
-        name: "zola",
-        platforms: zolaSupportedPlatforms(),
-        downloadUrl: zolaDownloadUrl,
-        artifactName: zolaArtifactName,
-        lockfile: "//rules/zola/zola.lock",
-    }));
+    generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
+registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["0.22.1"] });

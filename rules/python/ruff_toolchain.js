@@ -1,8 +1,8 @@
 import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { resolveToolLockfile, shaCheckedDownloadScript, shaToolName } from "//rules/imp/lockfile";
-import { generateToolLockfile } from "//rules/workflows/lockfiles";
+import { resolveToolLockfile, lockedDownloadArgv, lockedDownloadTools } from "//rules/imp/lockfile";
+import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
 
 const RUFF_TOOLCHAIN_CACHE = "ruff-toolchains";
 // The bundled lockfile ships embedded in the binary (it lives inside
@@ -77,9 +77,8 @@ export function ruffSupportedPlatforms() {
 // coreToolNames in uv_toolchain.js: the sandbox is fully hermetic, so even
 // these must be declared tools, not resolved from an ambient PATH.
 function coreToolNames(plat) {
-    return plat.os === "windows"
-        ? ["curl", "mkdir", "dirname", "tar", "sh", shaToolName(plat)]
-        : ["curl", "mkdir", "dirname", "tar", "gzip", shaToolName(plat)];
+    const extract = plat.os === "windows" ? ["tar"] : ["tar", "gzip"];
+    return [...new Set([...lockedDownloadTools(plat), ...extract])];
 }
 
 export class RuffToolchain extends Target {
@@ -196,9 +195,13 @@ export async function acquireRuffToolchain(version) {
         const downloadPath = `.imp/ruff-downloads/${key}/${artifact}`;
         const extractPath = `.imp/ruff-toolchains/${key}`;
 
-        const downloadArgv = lockEntry
-            ? ["sh", "-c", shaCheckedDownloadScript(plat), "download-ruff", downloadPath, url, lockEntry.sha256]
-            : ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-ruff", downloadPath, url];
+        const downloadArgv = lockedDownloadArgv({
+            plat,
+            lockEntry,
+            url,
+            downloadPath,
+            displayName: "download-ruff",
+        });
         try {
             await run({
                 argv: downloadArgv,
@@ -210,7 +213,7 @@ export async function acquireRuffToolchain(version) {
         } catch (e) {
             if (lockEntry) {
                 throw new Error(
-                    `download of ruff ${version} from ${url} failed transfer or sha256 verification ` +
+                    `download of ruff ${version} from ${url} failed transfer or size/sha256 verification ` +
                     `(expected ${lockEntry.sha256} from ${defaultLockfile}); if you intentionally ` +
                     `changed versions, run \`imp goal gen-lockfiles\`: ${e && e.message ? e.message : e}`,
                 );
@@ -307,12 +310,13 @@ export function defaultRuffToolchain() {
     return defaultToolchain;
 }
 
+const LOCKFILE_SPEC = {
+    name: "ruff-toolchain",
+    platforms: ruffSupportedPlatforms(),
+    downloadUrl: ruffDownloadUrl,
+    artifactName: ruffArtifactName,
+    lockfile: DEFAULT_LOCKFILE,
+};
 product("ruff-toolchain", "gen-lockfiles", (handle) =>
-    generateToolLockfile({
-        handle,
-        name: "ruff-toolchain",
-        platforms: ruffSupportedPlatforms(),
-        downloadUrl: ruffDownloadUrl,
-        artifactName: ruffArtifactName,
-        lockfile: handle.attrs.lockfile ?? DEFAULT_LOCKFILE,
-    }));
+    generateToolLockfile({ handle, ...LOCKFILE_SPEC, lockfile: handle.attrs.lockfile ?? DEFAULT_LOCKFILE }));
+registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["0.15.20", "0.15.21"] });

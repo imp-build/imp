@@ -266,6 +266,8 @@ pub trait ExecutionService: Send + Sync {
     ) -> Result<()>;
     /// SHA-256 hex digest of a file on the executor's filesystem.
     fn file_sha256(&self, path: &Path) -> Result<String>;
+    /// Size in bytes of a file on the executor's filesystem.
+    fn file_size(&self, path: &Path) -> Result<u64>;
     /// Register a host-resolved executable as a symlinked native-tool
     /// artifact usable in `ExecToolSpec.path`.
     fn register_native_tool(&self, name: &str, resolved: &Path) -> Result<PathBuf>;

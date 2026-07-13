@@ -1,7 +1,7 @@
 import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
 
 const GCC_TOOLCHAIN_CACHE = "gcc-toolchains";
 
@@ -267,15 +267,16 @@ export function defaultGccToolchain() {
     return defaultToolchain;
 }
 
+const LOCKFILE_SPEC = {
+    name: "gcc",
+    platforms: gccSupportedPlatforms(),
+    downloadUrl: gccDownloadUrl,
+    artifactName: gccArtifactName,
+    lockfile: "//rules/c/gcc/gcc.lock",
+};
 product("gcc-toolchain", "gen-lockfiles", (handle) =>
-    generateToolLockfile({
-        handle,
-        name: "gcc",
-        platforms: gccSupportedPlatforms(),
-        downloadUrl: gccDownloadUrl,
-        artifactName: gccArtifactName,
-        lockfile: "//rules/c/gcc/gcc.lock",
-    }));
+    generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
+registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["2025.08-1"] });
 
 /**
  * Adapter exposing a gcc toolchain as Rust/rustc's C link driver — the

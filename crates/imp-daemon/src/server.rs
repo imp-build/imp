@@ -141,6 +141,18 @@ impl proto::execution_server::Execution for ExecutionServer {
                 .map_err(err)?,
         }))
     }
+    async fn file_size(
+        &self,
+        r: Request<proto::FileRequest>,
+    ) -> Result<Response<proto::FileSizeResponse>, Status> {
+        let x = r.into_inner();
+        Ok(Response::new(proto::FileSizeResponse {
+            size: self
+                .service
+                .file_size(&std::path::PathBuf::from(x.path))
+                .map_err(err)?,
+        }))
+    }
     async fn register_native_tool(
         &self,
         r: Request<proto::NativeToolRequest>,

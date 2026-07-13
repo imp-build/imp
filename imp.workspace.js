@@ -12,6 +12,7 @@ import { rustToolchain } from "//rules/rust";
 import "//rules/rust/generate_build";
 import { sccacheToolchain } from "//rules/rust/sccache/toolchain";
 import "//rules/workflows/build_workflow";
+import "//rules/workflows/builtin_lockfiles";
 import "//rules/workflows/fmt";
 import "//rules/workflows/generate";
 import { buildGenerateRoot } from "//rules/workflows/generate_build";

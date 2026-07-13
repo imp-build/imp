@@ -18,10 +18,11 @@ message PathResponse { string path = 1; }
 message ExtractRequest { string archive = 1; string dest = 2; string format = 3; uint32 strip_components = 4; }
 message FileRequest { string path = 1; }
 message FileResponse { string digest = 1; }
+message FileSizeResponse { uint64 size = 1; }
 message NativeToolRequest { string name = 1; string path = 2; }
 message WorkerRequest { string workspace_id = 1; string name = 2; repeated string argv = 3; repeated string env = 4; repeated string health_check_argv = 5; }
 message WorkerResponse { string home_dir = 1; string tmp_dir = 2; uint32 port = 3; bool present = 4; }
 message Empty {}
 message Capabilities { uint32 protocol_version = 1; string build_version = 2; string exe_fingerprint = 3; uint32 pid = 4; string os = 5; string arch = 6; }
 
-service Execution { rpc Execute(ExecuteRequest) returns (stream ExecuteEvent); rpc CacheDirGet(CacheDirRequest) returns (CacheDirResponse); rpc CacheDirHas(CacheDirRequest) returns (CacheDirResponse); rpc CacheDirPut(CacheDirRequest) returns (Empty); rpc FetchUrl(FetchRequest) returns (PathResponse); rpc ExtractArchive(ExtractRequest) returns (Empty); rpc FileSha256(FileRequest) returns (FileResponse); rpc RegisterNativeTool(NativeToolRequest) returns (PathResponse); rpc WorkerStart(WorkerRequest) returns (WorkerResponse); rpc WorkerGet(WorkerRequest) returns (WorkerResponse); rpc GetCapabilities(Empty) returns (Capabilities); rpc Shutdown(Empty) returns (Empty); }
+service Execution { rpc Execute(ExecuteRequest) returns (stream ExecuteEvent); rpc CacheDirGet(CacheDirRequest) returns (CacheDirResponse); rpc CacheDirHas(CacheDirRequest) returns (CacheDirResponse); rpc CacheDirPut(CacheDirRequest) returns (Empty); rpc FetchUrl(FetchRequest) returns (PathResponse); rpc ExtractArchive(ExtractRequest) returns (Empty); rpc FileSha256(FileRequest) returns (FileResponse); rpc FileSize(FileRequest) returns (FileSizeResponse); rpc RegisterNativeTool(NativeToolRequest) returns (PathResponse); rpc WorkerStart(WorkerRequest) returns (WorkerResponse); rpc WorkerGet(WorkerRequest) returns (WorkerResponse); rpc GetCapabilities(Empty) returns (Capabilities); rpc Shutdown(Empty) returns (Empty); }

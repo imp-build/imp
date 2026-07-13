@@ -1,6 +1,6 @@
 import { target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
 
 // Rust is installed via rustup, which lays out two env-located state trees:
 // RUSTUP_HOME (rustup itself + installed toolchains) and CARGO_HOME (cargo
@@ -342,12 +342,13 @@ export function defaultRustToolchain() {
     return defaultToolchain;
 }
 
+const LOCKFILE_SPEC = {
+    name: "rust",
+    platforms: rustSupportedPlatforms(),
+    downloadUrl: rustDownloadUrl,
+    artifactName: rustArtifactName,
+    lockfile: "//rules/rust/rust.lock",
+};
 product("rust-toolchain", "gen-lockfiles", (handle) =>
-    generateToolLockfile({
-        handle,
-        name: "rust",
-        platforms: rustSupportedPlatforms(),
-        downloadUrl: rustDownloadUrl,
-        artifactName: rustArtifactName,
-        lockfile: "//rules/rust/rust.lock",
-    }));
+    generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
+registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["1.93.0"] });

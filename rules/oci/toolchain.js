@@ -1,7 +1,7 @@
 import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
 
 const CRANE_TOOLCHAIN_CACHE = "crane-toolchains";
 
@@ -259,12 +259,13 @@ export function defaultCraneToolchain() {
     return defaultToolchain;
 }
 
+const LOCKFILE_SPEC = {
+    name: "crane",
+    platforms: craneSupportedPlatforms(),
+    downloadUrl: craneDownloadUrl,
+    artifactName: craneArtifactName,
+    lockfile: "//rules/oci/crane.lock",
+};
 product("crane-toolchain", "gen-lockfiles", (handle) =>
-    generateToolLockfile({
-        handle,
-        name: "crane",
-        platforms: craneSupportedPlatforms(),
-        downloadUrl: craneDownloadUrl,
-        artifactName: craneArtifactName,
-        lockfile: "//rules/oci/crane.lock",
-    }));
+    generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
+registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["0.20.6"] });

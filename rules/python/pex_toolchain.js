@@ -1,7 +1,7 @@
 import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
 
 const PEX_TOOLCHAIN_CACHE = "pex-toolchains";
 
@@ -283,12 +283,13 @@ export function defaultPexToolchain() {
 // degenerate platform entry; downloadUrl/artifactName below ignore their
 // `plat` argument. This reuses generateToolLockfile unmodified rather than
 // forking it for a single-artifact case.
+const LOCKFILE_SPEC = {
+    name: "pex-toolchain",
+    platforms: [{ os: "any", arch: "any" }],
+    downloadUrl: (version) => pexDownloadUrl(version),
+    artifactName: () => "pex",
+    lockfile: "//rules/python/pex-toolchain.lock",
+};
 product("pex-toolchain", "gen-lockfiles", (handle) =>
-    generateToolLockfile({
-        handle,
-        name: "pex-toolchain",
-        platforms: [{ os: "any", arch: "any" }],
-        downloadUrl: (version) => pexDownloadUrl(version),
-        artifactName: () => "pex",
-        lockfile: "//rules/python/pex-toolchain.lock",
-    }));
+    generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
+registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["2.97.1"] });

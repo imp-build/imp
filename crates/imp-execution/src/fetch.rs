@@ -193,3 +193,10 @@ pub fn host_sha256(path: &Path) -> Result<String> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     Ok(format!("{:x}", Sha256::digest(&bytes)))
 }
+
+/// Size in bytes of a file.
+pub fn host_file_size(path: &Path) -> Result<u64> {
+    Ok(std::fs::metadata(path)
+        .with_context(|| format!("stat {}", path.display()))?
+        .len())
+}

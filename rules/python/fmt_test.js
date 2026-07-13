@@ -13,12 +13,14 @@ function withRuffHost(fn) {
         // a matching entry for the toolchain the tests declare.
         host.addFile("//rules/python/ruff-toolchain.lock", JSON.stringify({
             tool: "ruff-toolchain",
-            version: "0.15.21",
-            artifacts: {
-                "linux/x86_64": {
-                    url: "https://locked.example/ruff.tar.gz",
-                    artifact: "ruff.tar.gz",
-                    sha256: "deadbeef",
+            versions: {
+                "0.15.21": {
+                    "linux/x86_64": {
+                        url: "https://locked.example/ruff.tar.gz",
+                        artifact: "ruff.tar.gz",
+                        size: 12345,
+                        sha256: "deadbeef",
+                    },
                 },
             },
         }));

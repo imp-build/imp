@@ -124,6 +124,10 @@ impl ExecutionService for LocalExecutionService {
         fetch::host_sha256(path)
     }
 
+    fn file_size(&self, path: &Path) -> Result<u64> {
+        fetch::host_file_size(path)
+    }
+
     fn register_native_tool(&self, name: &str, resolved: &Path) -> Result<PathBuf> {
         imp_store::cache::ensure_native_tool_artifact(name, resolved)
     }

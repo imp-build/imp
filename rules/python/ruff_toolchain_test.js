@@ -97,12 +97,14 @@ test("downloads, verifies, and extracts ruff via two sandboxed runs when not cac
     await withRuffHost(async (host) => {
         host.addFile("//rules/python/ruff-toolchain.lock", JSON.stringify({
             tool: "ruff-toolchain",
-            version: "0.15.21",
-            artifacts: {
-                "linux/x86_64": {
-                    url: "https://locked.example/ruff-x86_64-unknown-linux-gnu.tar.gz",
-                    artifact: "ruff-x86_64-unknown-linux-gnu.tar.gz",
-                    sha256: "deadbeef",
+            versions: {
+                "0.15.21": {
+                    "linux/x86_64": {
+                        url: "https://locked.example/ruff-x86_64-unknown-linux-gnu.tar.gz",
+                        artifact: "ruff-x86_64-unknown-linux-gnu.tar.gz",
+                        size: 12345,
+                        sha256: "deadbeef",
+                    },
                 },
             },
         }));
@@ -155,9 +157,10 @@ test("a custom lockfile address is consulted instead of the bundled one", async 
     await withRuffHost(async (host) => {
         host.addFile("//locks/ruff.lock", JSON.stringify({
             tool: "ruff-toolchain",
-            version: "0.15.22",
-            artifacts: {
-                "linux/x86_64": { url: "https://locked.example/ruff.tar.gz", artifact: "ruff.tar.gz", sha256: "cafe" },
+            versions: {
+                "0.15.22": {
+                    "linux/x86_64": { url: "https://locked.example/ruff.tar.gz", artifact: "ruff.tar.gz", size: 99, sha256: "cafe" },
+                },
             },
         }));
         ruffToolchain("0.15.22", { default: true, lockfile: "//locks/ruff.lock" });

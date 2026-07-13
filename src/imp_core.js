@@ -359,6 +359,15 @@ export function sha256(path) {
 }
 
 /**
+ * Size in bytes of a file.
+ * @param {string} path
+ * @returns {number}
+ */
+export function file_size(path) {
+    return __host_file_size(path);
+}
+
+/**
  * Store a file or directory into a named cache under a key.
  * @param {string} name   Cache name (matches a namedCache() declaration).
  * @param {string} key    Sub-key within the cache (e.g. "dev-2026-03/linux-x86_64").

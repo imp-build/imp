@@ -1,7 +1,7 @@
 import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
 
 const MOLD_TOOLCHAIN_CACHE = "mold-toolchains";
 
@@ -242,15 +242,16 @@ export function defaultMoldToolchain() {
     return defaultToolchain;
 }
 
+const LOCKFILE_SPEC = {
+    name: "mold",
+    platforms: moldSupportedPlatforms(),
+    downloadUrl: moldDownloadUrl,
+    artifactName: moldArtifactName,
+    lockfile: "//rules/c/mold/mold.lock",
+};
 product("mold-toolchain", "gen-lockfiles", (handle) =>
-    generateToolLockfile({
-        handle,
-        name: "mold",
-        platforms: moldSupportedPlatforms(),
-        downloadUrl: moldDownloadUrl,
-        artifactName: moldArtifactName,
-        lockfile: "//rules/c/mold/mold.lock",
-    }));
+    generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
+registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["2.41.0"] });
 
 /**
  * Adapter exposing a mold toolchain as Odin's `-linker:mold` linker role.

@@ -2,7 +2,8 @@ import { describe, expect, test, withFakeToolchainHost } from "//rules/imp/test"
 import {
     lockfileAddressToPath,
     resolveToolLockfile,
-    shaCheckedDownloadScript,
+    lockedDownloadArgv,
+    lockedDownloadTools,
     shaToolName,
 } from "//rules/imp/lockfile";
 
@@ -12,12 +13,14 @@ const PLAT = { os: "linux", arch: "x86_64" };
 function lockJson(overrides = {}) {
     return JSON.stringify({
         tool: "ruff-toolchain",
-        version: "0.15.21",
-        artifacts: {
-            "linux/x86_64": {
-                url: "https://example.com/ruff.tar.gz",
-                artifact: "ruff.tar.gz",
-                sha256: "abc123",
+        versions: {
+            "0.15.21": {
+                "linux/x86_64": {
+                    url: "https://example.com/ruff.tar.gz",
+                    artifact: "ruff.tar.gz",
+                    size: 12345,
+                    sha256: "abc123",
+                },
             },
         },
         ...overrides,
@@ -48,6 +51,30 @@ test("resolves a matching lockfile entry", async () => {
         });
         expect(entry.sha256).toBe("abc123");
         expect(entry.url).toBe("https://example.com/ruff.tar.gz");
+        expect(entry.size).toBe(12345);
+    });
+});
+
+test("every locked version stays resolvable (additive downgrade path)", async () => {
+    await withFakeToolchainHost(async (host) => {
+        host.addFile(
+            ADDRESS,
+            JSON.stringify({
+                tool: "ruff-toolchain",
+                versions: {
+                    "0.15.20": {
+                        "linux/x86_64": { url: "https://example.com/old.tar.gz", artifact: "old.tar.gz", size: 1, sha256: "old" },
+                    },
+                    "0.15.21": {
+                        "linux/x86_64": { url: "https://example.com/new.tar.gz", artifact: "new.tar.gz", size: 2, sha256: "new" },
+                    },
+                },
+            }),
+        );
+        const resolve = (version) =>
+            resolveToolLockfile({ address: ADDRESS, tool: "ruff-toolchain", version, plat: PLAT });
+        expect(resolve("0.15.21").sha256).toBe("new");
+        expect(resolve("0.15.20").sha256).toBe("old");
     });
 });
 
@@ -69,9 +96,9 @@ test("missing lockfile throws with a gen-lockfiles pointer", async () => {
     });
 });
 
-test("version mismatch throws", async () => {
+test("tool mismatch throws", async () => {
     await withFakeToolchainHost(async (host) => {
-        host.addFile(ADDRESS, lockJson({ version: "0.15.20" }));
+        host.addFile(ADDRESS, lockJson({ tool: "other-tool" }));
         let message = null;
         try {
             resolveToolLockfile({
@@ -83,7 +110,26 @@ test("version mismatch throws", async () => {
         } catch (error) {
             message = error.message;
         }
-        expect(message).toContain("pins ruff-toolchain 0.15.20");
+        expect(message).toContain("pins other-tool, not ruff-toolchain");
+    });
+});
+
+test("unlocked version throws, listing the locked ones", async () => {
+    await withFakeToolchainHost(async (host) => {
+        host.addFile(ADDRESS, lockJson());
+        let message = null;
+        try {
+            resolveToolLockfile({
+                address: ADDRESS,
+                tool: "ruff-toolchain",
+                version: "0.15.22",
+                plat: PLAT,
+            });
+        } catch (error) {
+            message = error.message;
+        }
+        expect(message).toContain("no entry for ruff-toolchain 0.15.22");
+        expect(message).toContain("locked versions: 0.15.21");
     });
 });
 
@@ -101,7 +147,7 @@ test("missing platform entry throws", async () => {
         } catch (error) {
             message = error.message;
         }
-        expect(message).toContain("no entry for platform macos/aarch64");
+        expect(message).toContain("platform macos/aarch64");
     });
 });
 
@@ -118,13 +164,77 @@ test("unverified downgrades misses to warn-and-null", async () => {
     });
 });
 
-test("selects the sha tool and check command per platform", () => {
+test("selects the sha tool per platform", () => {
     expect(shaToolName({ os: "linux" })).toBe("sha256sum");
     expect(shaToolName({ os: "windows" })).toBe("sha256sum");
     expect(shaToolName({ os: "macos" })).toBe("shasum");
-    expect(shaCheckedDownloadScript({ os: "linux" })).toContain("sha256sum -c -");
-    expect(shaCheckedDownloadScript({ os: "macos" })).toContain("shasum -a 256 -c -");
-    expect(shaCheckedDownloadScript({ os: "linux" })).toContain('curl -fSL -o "$1" "$2"');
+});
+
+test("locked download argv verifies sha256 and size", () => {
+    const argv = lockedDownloadArgv({
+        plat: { os: "linux" },
+        lockEntry: { url: "https://example.com/a.tar.gz", size: 12345, sha256: "abc123" },
+        url: "https://example.com/a.tar.gz",
+        downloadPath: "/dl/a.tar.gz",
+        displayName: "download-a",
+    });
+    expect(argv.slice(0, 2)).toEqual(["sh", "-c"]);
+    const script = argv[2];
+    expect(script).toContain('curl -fSL -o "$1" "$2"');
+    expect(script).toContain("sha256sum -c -");
+    expect(script).toContain("size mismatch");
+    expect(argv.slice(3)).toEqual([
+        "download-a",
+        "/dl/a.tar.gz",
+        "https://example.com/a.tar.gz",
+        "abc123",
+        "12345",
+    ]);
+});
+
+test("locked download argv skips the size check for entries without size", () => {
+    const argv = lockedDownloadArgv({
+        plat: { os: "macos" },
+        lockEntry: { url: "https://example.com/a.tar.gz", sha256: "abc123" },
+        url: "https://example.com/a.tar.gz",
+        downloadPath: "/dl/a.tar.gz",
+        displayName: "download-a",
+    });
+    const script = argv[2];
+    expect(script).toContain("shasum -a 256 -c -");
+    expect(script.includes("size mismatch")).toBe(false);
+    expect(argv.slice(3)).toEqual([
+        "download-a",
+        "/dl/a.tar.gz",
+        "https://example.com/a.tar.gz",
+        "abc123",
+    ]);
+});
+
+test("locked download argv without a lock entry is a plain download", () => {
+    const argv = lockedDownloadArgv({
+        plat: { os: "linux" },
+        lockEntry: null,
+        url: "https://example.com/a.tar.gz",
+        downloadPath: "/dl/a.tar.gz",
+        displayName: "download-a",
+    });
+    const script = argv[2];
+    expect(script).toContain('curl -fSL -o "$1" "$2"');
+    expect(script.includes("sha256sum")).toBe(false);
+    expect(argv.slice(3)).toEqual(["download-a", "/dl/a.tar.gz", "https://example.com/a.tar.gz"]);
+});
+
+test("locked download tool list covers the script per platform", () => {
+    expect(lockedDownloadTools({ os: "linux" })).toEqual([
+        "curl", "mkdir", "dirname", "wc", "sha256sum",
+    ]);
+    expect(lockedDownloadTools({ os: "windows" })).toEqual([
+        "curl", "mkdir", "dirname", "wc", "sha256sum", "sh",
+    ]);
+    expect(lockedDownloadTools({ os: "macos" })).toEqual([
+        "curl", "mkdir", "dirname", "wc", "shasum",
+    ]);
 });
 
 });
