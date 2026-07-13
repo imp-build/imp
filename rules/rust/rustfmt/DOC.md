@@ -1,4 +1,4 @@
-Rustfmt is the formatting implementation for `cargo-package` targets. It runs
+Rustfmt formats targets declared with `cargoPackage()`. It runs
 through `cargo fmt`, using the package's selected managed Rust toolchain and
 the same manifest/workspace view as its other Cargo products.
 

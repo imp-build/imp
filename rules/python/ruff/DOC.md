@@ -1,4 +1,4 @@
-Ruff owns both formatting and linting for `python-app` targets. The tool
+Ruff formats and lints targets declared with `pythonApp()`. The tool
 version comes from the workspace's default `ruffToolchain()` declaration, so
 local and CI runs use the same formatter and rule set.
 

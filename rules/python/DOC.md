@@ -66,6 +66,6 @@ imp package //services/acme:app
 
 `build` captures the generated `.pex` as a build artifact without writing it
 into the source tree. `package` publishes it below
-`dist/services/acme/app`. Formatting and linting currently apply to
-`python-app`; select the application target when checking the project's Python
-files.
+`dist/services/acme/app`. Formatting and linting currently apply to targets
+declared with `pythonApp()`; select the application target when checking the
+project's Python files.

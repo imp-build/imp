@@ -293,8 +293,8 @@ test("renders a language page with frontmatter and category headings in CATEGORY
     expect(md).toContain('title = "Odin"');
     expect(md).toContain("## Configuration");
     expect(md).toContain("## Targets");
-    expect(md).toContain("### odinToolchain");
-    expect(md).toContain("### odinPackage");
+    expect(md).toContain("### odinToolchain()");
+    expect(md).toContain("### odinPackage()");
     expect(md).toContain("Declare an Odin package.");
     expect(md).toContain("| collections | map<string, string> | `{}` | no |");
     expect(md).toContain("export const odinConfig = {");
@@ -315,8 +315,11 @@ test("renders capabilities by goal and directory-derived tool", () => {
         },
     });
     expect(md).toContain("## Available goals");
-    expect(md).toContain("| `imp build` | Rust | `cargo-package` |");
-    expect(md).toContain("| `imp lint` | [Clippy](./clippy/) | `cargo-package` |");
+    expect(md).toContain("| Goal | Tool |");
+    expect(md).toContain("| `imp build` | Rust |");
+    expect(md).toContain("| `imp lint` | [Clippy](./clippy/) |");
+    expect(md).not.toContain("Target kinds");
+    expect(md).not.toContain("cargo-package");
 });
 
 test("places the generated capability table at a guide marker", () => {
@@ -360,10 +363,12 @@ test("extractCodeReference emits one page per source module, nested to mirror it
     expect(byPath.has("odin/toolchain.md")).toBe(true);
     const page = byPath.get("odin/toolchain.md");
     expect(page).toContain('title = "rules/odin/toolchain.js"');
-    expect(page).toContain("### odinPackage");
+    expect(page).toContain("Developer reference: this page includes exported implementation details.");
+    expect(page).toContain("### odinPackage()");
     expect(page).toContain("### odinBuild");
     expect(page).toContain("_Undocumented._");
-    expect(page).toContain("### OdinPackage");
+    expect(page).toContain("### OdinPackage (implementation class)");
+    expect(page).toContain("Implementation class. BUILD files should use `odinPackage()`.");
 });
 
 test("extractCodeReference folds an index.js module into its own directory's page instead of a colliding index.md", () => {
@@ -372,7 +377,7 @@ test("extractCodeReference folds an index.js module into its own directory's pag
     ]);
     expect(soleFile.length).toBe(1);
     expect(soleFile[0].path).toBe("oci/_index.md");
-    expect(soleFile[0].markdown).toContain("### ociImage");
+    expect(soleFile[0].markdown).toContain("### ociImage()");
 
     const withSiblings = extractCodeReference([
         { sourcePath: "rules/c/index.js", sourceText: "export function cLibrary(opts) {}" },
@@ -381,7 +386,7 @@ test("extractCodeReference folds an index.js module into its own directory's pag
     const byPath = new Map(withSiblings.map(p => [p.path, p.markdown]));
     expect(byPath.has("c/index.md")).toBe(false);
     expect(byPath.has("c/_index.md")).toBe(true);
-    expect(byPath.get("c/_index.md")).toContain("### cLibrary");
+    expect(byPath.get("c/_index.md")).toContain("### cLibrary()");
     expect(byPath.has("c/gcc/toolchain.md")).toBe(true);
 });
 
@@ -444,9 +449,9 @@ test("extractUserApiReference emits curated language pages for target/configurat
     expect(byPath.has("odin/_index.md")).toBe(true);
     const odin = byPath.get("odin/_index.md");
     expect(odin).toContain("## Configuration");
-    expect(odin).toContain("### odinToolchain");
+    expect(odin).toContain("### odinToolchain()");
     expect(odin).toContain("## Targets");
-    expect(odin).toContain("### odinPackage");
+    expect(odin).toContain("### odinPackage()");
     expect(odin).not.toContain("## API");
     expect(odin).not.toContain("### odinBuild");
     // Configuration comes before Targets, which comes before API.
@@ -509,9 +514,9 @@ test("extractUserApiReference nests subdirectories as subcategories instead of f
 
     expect(byPath.has("c/cmake.md")).toBe(true);
     expect(byPath.has("c/mold.md")).toBe(true);
-    expect(byPath.get("c/cmake.md")).toContain("### cmakeToolchain");
+    expect(byPath.get("c/cmake.md")).toContain("### cmakeToolchain()");
     expect(byPath.get("c/cmake.md")).not.toContain("### moldToolchain");
-    expect(byPath.get("c/mold.md")).toContain("### moldToolchain");
+    expect(byPath.get("c/mold.md")).toContain("### moldToolchain()");
     expect(byPath.has("c.md")).toBe(false);
     expect(byPath.has("c/_index.md")).toBe(true);
 });
@@ -558,6 +563,6 @@ test("extractApiReference is the exhaustive code-reference compatibility wrapper
     const byPath = new Map(pages.map(p => [p.path, p.markdown]));
 
     expect(byPath.has("rules/asset.md")).toBe(true);
-    expect(byPath.get("rules/asset.md")).toContain("### asset");
+    expect(byPath.get("rules/asset.md")).toContain("### asset()");
 });
 });

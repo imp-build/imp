@@ -1,5 +1,5 @@
-Odinfmt is the formatting implementation for both `odin-package` and
-`odin-test-package` targets:
+Odinfmt formats targets declared with `odinPackage()` and
+`odinTestPackage()`:
 
 ```sh
 imp fmt //src/game:game

@@ -220,7 +220,12 @@ export function parseModule(sourceText) {
 
 function renderEntry(entry) {
     const lines = [];
-    lines.push(`### ${entry.name}`);
+    const heading = entry.kind === "function"
+        ? `${entry.name}()`
+        : (entry.kind === "class" && entry.factory
+            ? `${entry.name} (implementation class)`
+            : entry.name);
+    lines.push(`### ${heading}`);
     lines.push("");
     lines.push("```js");
     if (entry.kind === "function") {
@@ -232,6 +237,11 @@ function renderEntry(entry) {
     }
     lines.push("```");
     lines.push("");
+
+    if (entry.kind === "class" && entry.factory) {
+        lines.push(`_Implementation class. BUILD files should use \`${entry.factory}()\`._`);
+        lines.push("");
+    }
 
     if (entry.doc) {
         if (entry.doc.summary) {
@@ -552,17 +562,15 @@ export function renderRuleCapabilities(group, capabilities = {}) {
     const lines = [
         "## Available goals",
         "",
-        "| Goal | Tool | Target kinds |",
-        "| --- | --- | --- |",
+        "| Goal | Tool |",
+        "| --- | --- |",
     ];
     for (const goal of Object.keys(goals).sort()) {
         for (const tool of Object.keys(goals[goal]).sort()) {
-            const details = goals[goal][tool] || {};
             const toolLabel = tool === group
                 ? displayName(tool)
                 : `[${displayName(tool)}](./${tool}/)`;
-            const kinds = (details.targetKinds || []).map(kind => `\`${kind}\``).join(", ");
-            lines.push(`| \`imp ${goal}\` | ${toolLabel} | ${kinds} |`);
+            lines.push(`| \`imp ${goal}\` | ${toolLabel} |`);
         }
     }
     return lines.join("\n");
@@ -583,7 +591,14 @@ export function modulePageSegments(sourcePath) {
 
 function renderModulePage(sourcePath, entries) {
     const frontmatter = `+++\ntitle = "${sourcePath}"\n+++\n`;
-    return `${frontmatter}\n${renderEntries(entries)}`;
+    const developerNote = "_Developer reference: this page includes exported implementation details. BUILD authors should prefer the [User API reference](/reference/user-api/)._";
+    const names = new Set(entries.map(entry => entry.name));
+    const annotated = entries.map(entry => {
+        if (entry.kind !== "class") return entry;
+        const factory = entry.name.charAt(0).toLowerCase() + entry.name.slice(1);
+        return names.has(factory) ? { ...entry, factory } : entry;
+    });
+    return `${frontmatter}\n${developerNote}\n\n${renderEntries(annotated)}`;
 }
 
 /**

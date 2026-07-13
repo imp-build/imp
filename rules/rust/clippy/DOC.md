@@ -1,4 +1,4 @@
-Clippy is the lint implementation for `cargo-package` targets:
+Clippy lints targets declared with `cargoPackage()`:
 
 ```sh
 imp lint //crates/service:service
