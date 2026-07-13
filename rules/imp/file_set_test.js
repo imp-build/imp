@@ -3,7 +3,18 @@ import { glob, paths, file_set, memo, getMemoTrace } from "imp:core";
 
 describe("FileSet", () => {
 
-test("glob() returns a FileSet descriptor, not paths", async () => {
+let perTestModuleState = 0;
+
+test("an isolated test may mutate module state", () => {
+    perTestModuleState = 1;
+    expect(perTestModuleState).toBe(1);
+});
+
+test("the next test receives a fresh module instance", () => {
+    expect(perTestModuleState).toBe(0);
+});
+
+test("glob() returns a FileSet descriptor, not paths", { isolation: "process" }, async () => {
     const fs = glob({ root: "rules/imp", include: ["*.js"] });
     expect(fs.__fileset).toBe(true);
     expect(fs.kind).toBe("glob");

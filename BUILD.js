@@ -1,6 +1,7 @@
 import { cargoPackage } from "//rules/rust";
 import { resourcePackage } from "//rules/asset";
 import { protoAssets } from "//crates/imp-daemon";
+import { nativeTool } from "//rules/imp/native_tool";
 
 import { stampFile } from "//rules/gen";
 import { vsWorkspace } from "//rules/workflows/vs";
@@ -21,7 +22,11 @@ export const engineAssets = resourcePackage({
     srcs: ["src/imp_core.js", "rules/**/*"],
 });
 
+export const testTar = nativeTool("tar");
+export const testGzip = nativeTool("gzip");
+
 export const imp = cargoPackage({
     bin: "imp",
     deps: [engineAssets, protoAssets],
+    testTools: [testTar, testGzip],
 });

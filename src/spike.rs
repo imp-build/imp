@@ -325,6 +325,15 @@ pub(crate) async fn load_workspace_with_rules(
     root: &Path,
     rules_source: RulesSource,
 ) -> Result<LiveWorkspace> {
+    let service = make_execution_service()?;
+    load_workspace_with_rules_and_service(root, rules_source, service).await
+}
+
+async fn create_live_runtime(
+    root: &Path,
+    rules_source: RulesSource,
+    service: Arc<dyn ExecutionService>,
+) -> Result<LiveWorkspace> {
     crate::logging::ensure_installed();
 
     let root = root
@@ -339,9 +348,6 @@ pub(crate) async fn load_workspace_with_rules(
         Arc::new(Mutex::new(None));
     let selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(None));
     let goal_flags: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
-    let service: Arc<dyn ExecutionService> = make_execution_service()?;
-
-    // ----- QuickJS runtime + context -----
     let rt = Runtime::new().context("create QuickJS runtime")?;
     rt.set_loader(
         ImpResolver {
@@ -380,7 +386,6 @@ pub(crate) async fn load_workspace_with_rules(
     })))
     .await;
 
-    // ----- Register host globals -----
     {
         let state_clone = Arc::clone(&state);
         ctx.with(|ctx| -> rquickjs::Result<()> {
@@ -403,6 +408,51 @@ pub(crate) async fn load_workspace_with_rules(
         .await
         .map_err(|e| anyhow::anyhow!("register QuickJS globals: {e}"))?;
     }
+
+    let workspace = {
+        let hs = state.lock().unwrap();
+        Workspace {
+            targets: BTreeMap::new(),
+            products: hs.products.clone(),
+            build_rules: hs.build_rules.clone(),
+            workspace_config: hs.workspace_config.clone(),
+            config_schemas: hs.config_schemas.clone(),
+            owned_files: BTreeSet::new(),
+            named_caches: hs.named_caches.clone(),
+            goals: hs.goals.clone(),
+            platforms: hs.platforms.clone(),
+            goal_callbacks: hs.goal_callbacks.clone(),
+            expanders: hs.expanders.clone(),
+        }
+    };
+
+    Ok(LiveWorkspace {
+        workspace,
+        runtime: rt,
+        ctx,
+        exec_root,
+        exec_no_cache,
+        exec_sandbox_retention,
+        scheduler,
+        selected_roots,
+        goal_flags,
+        host_state: state,
+        dynamic_targets: Arc::new(Mutex::new(BTreeMap::new())),
+        service,
+    })
+}
+
+async fn load_workspace_with_rules_and_service(
+    root: &Path,
+    rules_source: RulesSource,
+    service: Arc<dyn ExecutionService>,
+) -> Result<LiveWorkspace> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("canonicalize workspace root {}", root.display()))?;
+    let mut live = create_live_runtime(&root, rules_source, service).await?;
+    let state = Arc::clone(&live.host_state);
+    let ctx = live.ctx.clone();
 
     // ----- Evaluate imp.workspace.js if present, and collect its named
     // exports the same way BUILD.js exports are collected below: a
@@ -560,20 +610,30 @@ pub(crate) async fn load_workspace_with_rules(
         hs.owned_files = workspace.owned_files.clone();
     }
 
-    Ok(LiveWorkspace {
-        workspace,
-        runtime: rt,
-        ctx,
-        exec_root,
-        exec_no_cache,
-        exec_sandbox_retention,
-        scheduler,
-        selected_roots,
-        goal_flags,
-        host_state: state,
-        dynamic_targets: Arc::new(Mutex::new(BTreeMap::new())),
-        service,
-    })
+    live.workspace = workspace;
+    Ok(live)
+}
+
+/// Create a rules-test runtime with no workspace or BUILD modules preloaded.
+/// The test module's own imports define the complete rule graph for the test.
+pub(crate) async fn load_minimal_rules_test_runtime(root: &Path) -> Result<LiveWorkspace> {
+    create_live_runtime(
+        root,
+        RulesSource::from_env(),
+        Arc::new(LocalExecutionService::new()),
+    )
+    .await
+}
+
+/// Load the real workspace for a rules test while still giving the test its
+/// own in-process execution service rather than attaching to a daemon.
+pub(crate) async fn load_workspace_rules_test_runtime(root: &Path) -> Result<LiveWorkspace> {
+    load_workspace_with_rules_and_service(
+        root,
+        RulesSource::from_env(),
+        Arc::new(LocalExecutionService::new()),
+    )
+    .await
 }
 
 /// Walk a module namespace object's own properties and return `(export_name,
@@ -1418,15 +1478,13 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_define_config_schema", host_define_config_schema)?;
 
     let state_schema = Arc::clone(&state);
-    let host_configuration_schemas = Function::new(
-        ctx.clone(),
-        move || -> rquickjs::Result<String> {
+    let host_configuration_schemas =
+        Function::new(ctx.clone(), move || -> rquickjs::Result<String> {
             let hs = state_schema.lock().unwrap();
             serde_json::to_string(&hs.config_schemas).map_err(|e| {
                 rquickjs::Error::new_loading_message("configurationSchemas", e.to_string())
             })
-        },
-    )?;
+        })?;
     globals.set("__host_configuration_schemas", host_configuration_schemas)?;
 
     let state_cfg = Arc::clone(&state);
@@ -1677,13 +1735,13 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_worker_get", host_worker_get)?;
 
     // ------------------------------------------------------------------
-    // __host_workspace_files(root, suffix) → JSON string ["//path/module"]
+    // __host_workspace_files(root, suffix, recursive) → JSON string ["//path/module"]
     // ------------------------------------------------------------------
     let wc = workspace_root.clone();
     let host_workspace_files = Function::new(
         ctx.clone(),
-        move |root: String, suffix: String| -> rquickjs::Result<String> {
-            workspace_files(&wc, &root, &suffix)
+        move |root: String, suffix: String, recursive: bool| -> rquickjs::Result<String> {
+            workspace_files(&wc, &root, &suffix, recursive)
                 .and_then(|files| serde_json::to_string(&files).context("encode workspace files"))
                 .map_err(|e| {
                     rquickjs::Error::new_loading_message("workspaceFiles", format!("{e:#}"))
@@ -2553,7 +2611,12 @@ fn parse_exec_run_opts<'js>(
     })
 }
 
-fn workspace_files(workspace_root: &Path, root: &str, suffix: &str) -> Result<Vec<String>> {
+fn workspace_files(
+    workspace_root: &Path,
+    root: &str,
+    suffix: &str,
+    recursive: bool,
+) -> Result<Vec<String>> {
     let rel = root
         .strip_prefix("//")
         .ok_or_else(|| anyhow::anyhow!("workspaceFiles root '{root}' must start with //"))?;
@@ -2568,7 +2631,11 @@ fn workspace_files(workspace_root: &Path, root: &str, suffix: &str) -> Result<Ve
     }
 
     let mut files = Vec::new();
-    for entry in WalkDir::new(&directory)
+    let mut walk = WalkDir::new(&directory);
+    if !recursive {
+        walk = walk.max_depth(1);
+    }
+    for entry in walk
         .into_iter()
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_file())
@@ -3445,32 +3512,50 @@ pub async fn execute_goal_live(
     result
 }
 
-/// Import the given JS test modules and run their registered tests via the
-/// `//rules/imp/test` harness. Backs the hidden `rules-test` subcommand,
-/// which the rules-test product invokes inside a task sandbox.
-///
-/// The caller must have installed a scheduler (and this sets `exec_root`).
-pub async fn run_rules_tests_live(
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RulesTestCase {
+    pub ordinal: usize,
+    pub name: String,
+    pub fixture: String,
+    pub isolation: String,
+}
+
+async fn run_rules_test_script(
     live: &LiveWorkspace,
     workspace_root: &Path,
-    modules: &[String],
-    js_workers: usize,
-) -> Result<()> {
+    script: String,
+    outer_cancellation: Arc<AtomicBool>,
+) -> Result<String> {
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
-    let modules_json = serde_json::to_string(modules).context("serialize test module list")?;
-    let script = format!(
-        r#"(async () => {{
-    const harness = await import("//rules/imp/test");
-    await harness.runTestModules({modules_json});
-}})()"#
-    );
+    let local_cancellation = Arc::new(AtomicBool::new(false));
+    let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+    let scheduler = crate::scheduler::Scheduler::new(1, Arc::clone(&local_cancellation), tx);
+    *live.scheduler.lock().unwrap() = Some(Arc::clone(&scheduler));
 
-    live.ctx
-        .async_with(async move |ctx| -> rquickjs::Result<()> {
+    let mirror_cancel = {
+        let outer = Arc::clone(&outer_cancellation);
+        let local = Arc::clone(&local_cancellation);
+        tokio::spawn(async move {
+            while !local.load(Ordering::SeqCst) {
+                if outer.load(Ordering::SeqCst) {
+                    local.store(true, Ordering::SeqCst);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+    };
+
+    let drive = live
+        .ctx
+        .async_with(async move |ctx| -> rquickjs::Result<String> {
+            Module::import(&ctx, "imp:core")?
+                .into_future::<Object>()
+                .await?;
             let set_js_workers: Function = ctx.globals().get("__imp_set_js_workers")?;
-            set_js_workers.call::<_, ()>((js_workers.max(1),))?;
+            set_js_workers.call::<_, ()>((1,))?;
             let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
-
             let result_value: Value = ctx
                 .eval(script.as_bytes())
                 .catch(&ctx)
@@ -3480,14 +3565,171 @@ pub async fn run_rules_tests_live(
                 .catch(&ctx)
                 .map_err(|e| rquickjs::Error::new_loading_message("rules-test", format!("{e}")))?;
             promise
-                .into_future::<Value>()
+                .into_future::<String>()
                 .await
                 .catch(&ctx)
-                .map_err(|e| rquickjs::Error::new_loading_message("rules-test", format!("{e}")))?;
-            Ok(())
-        })
+                .map_err(|e| rquickjs::Error::new_loading_message("rules-test", format!("{e}")))
+        });
+    let watchdog = async {
+        const STALL_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+        loop {
+            if scheduler.outstanding() == 0 {
+                tokio::select! {
+                    _ = scheduler.wait_for_activity() => {}
+                    _ = tokio::time::sleep(STALL_GRACE) => {
+                        if scheduler.outstanding() == 0 {
+                            return;
+                        }
+                    }
+                }
+            } else {
+                scheduler.wait_for_activity().await;
+            }
+        }
+    };
+    let result = tokio::select! {
+        result = drive => result.map_err(|error| anyhow::anyhow!("{error}")),
+        _ = watchdog => Err(anyhow::anyhow!("rules test stalled with no runnable work for 30s")),
+    };
+
+    if result.is_err() && scheduler.outstanding() > 0 {
+        local_cancellation.store(true, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    local_cancellation.store(true, Ordering::SeqCst);
+    mirror_cancel.abort();
+    *live.scheduler.lock().unwrap() = None;
+    result
+}
+
+async fn discover_rules_test_module(
+    workspace_root: &Path,
+    module: &str,
+    cancellation: Arc<AtomicBool>,
+) -> Result<Vec<RulesTestCase>> {
+    let live = load_minimal_rules_test_runtime(workspace_root).await?;
+    let module_json = serde_json::to_string(module)?;
+    let script = format!(
+        r#"(async () => {{
+    const harness = await import("//rules/imp/test");
+    return JSON.stringify(await harness.discoverTestModule({module_json}));
+}})()"#
+    );
+    let json = run_rules_test_script(&live, workspace_root, script, cancellation).await?;
+    serde_json::from_str(&json).context("decode rules-test discovery")
+}
+
+async fn load_rules_test_fixture(workspace_root: &Path, fixture: &str) -> Result<LiveWorkspace> {
+    match fixture {
+        "minimal" => load_minimal_rules_test_runtime(workspace_root).await,
+        "workspace" => load_workspace_rules_test_runtime(workspace_root).await,
+        other => bail!("unknown rules-test fixture '{other}'"),
+    }
+}
+
+pub(crate) async fn run_rules_test_case(
+    workspace_root: &Path,
+    module: &str,
+    ordinal: usize,
+    fixture: &str,
+    cancellation: Arc<AtomicBool>,
+) -> Result<()> {
+    let live = load_rules_test_fixture(workspace_root, fixture).await?;
+    let module_json = serde_json::to_string(module)?;
+    let script = format!(
+        r#"(async () => {{
+    const harness = await import("//rules/imp/test");
+    await harness.runTestCase({module_json}, {ordinal});
+    return "ok";
+}})()"#
+    );
+    run_rules_test_script(&live, workspace_root, script, cancellation)
         .await
-        .map_err(|e| anyhow::anyhow!("rules tests failed: {e}"))
+        .map(|_| ())
+}
+
+async fn run_rules_test_case_process(
+    workspace_root: &Path,
+    module: &str,
+    case: &RulesTestCase,
+) -> Result<()> {
+    let exe = std::env::current_exe().context("resolve current imp executable")?;
+    let output = tokio::process::Command::new(exe)
+        .current_dir(workspace_root)
+        .arg("rules-test-case")
+        .arg(module)
+        .arg(case.ordinal.to_string())
+        .arg(&case.fixture)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("spawn isolated rules test")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    bail!(
+        "isolated process exited with {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    )
+}
+
+/// Discover modules in disposable runtimes, then execute every test with a
+/// fresh runtime/session or, when requested, in a fresh OS process.
+pub async fn run_rules_tests_isolated(
+    workspace_root: &Path,
+    modules: &[String],
+    cancellation: Arc<AtomicBool>,
+) -> Result<()> {
+    let mut discovered = Vec::new();
+    let mut failures = Vec::new();
+    let mut seen_modules = HashSet::new();
+    for module in modules {
+        if !seen_modules.insert(module.clone()) {
+            failures.push(format!("  {module}: module was selected more than once"));
+            continue;
+        }
+        let result =
+            discover_rules_test_module(workspace_root, module, Arc::clone(&cancellation)).await;
+        match result {
+            Ok(cases) => {
+                discovered.extend(cases.into_iter().map(|case| (module.clone(), case)));
+            }
+            Err(error) => failures.push(format!("  {module} [discovery]: {error:#}")),
+        }
+    }
+
+    let total = discovered.len() + failures.len();
+    for (module, case) in discovered {
+        if cancellation.load(Ordering::SeqCst) {
+            bail!("execution canceled");
+        }
+        let result = if case.isolation == "process" {
+            run_rules_test_case_process(workspace_root, &module, &case).await
+        } else {
+            run_rules_test_case(
+                workspace_root,
+                &module,
+                case.ordinal,
+                &case.fixture,
+                Arc::clone(&cancellation),
+            )
+            .await
+        };
+        if let Err(error) = result {
+            failures.push(format!("  {}: {error:#}", case.name));
+        }
+    }
+    if failures.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "JS tests failed: {}/{}\n{}",
+        failures.len(),
+        total,
+        failures.join("\n")
+    )
 }
 
 #[cfg(test)]
@@ -4259,6 +4501,47 @@ export const ui = asset({ srcs: ["**/*.png"] });
         path.to_string_lossy()
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
+    }
+
+    #[test]
+    fn workspace_files_can_limit_discovery_to_one_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join("rules/pkg/direct_test.js"), "");
+        write_file(&p.join("rules/pkg/nested/nested_test.js"), "");
+
+        assert_eq!(
+            workspace_files(p, "//rules/pkg", "_test.js", false).unwrap(),
+            ["//rules/pkg/direct_test"],
+        );
+        assert_eq!(
+            workspace_files(p, "//rules/pkg", "_test.js", true).unwrap(),
+            ["//rules/pkg/direct_test", "//rules/pkg/nested/nested_test",],
+        );
+    }
+
+    #[tokio::test]
+    async fn rules_tests_receive_fresh_module_state_per_test() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), "");
+        write_file(
+            &p.join("rules/example/isolation_test.js"),
+            r#"
+import { expect, test } from "//rules/imp/test";
+let state = 0;
+test("mutates state", () => { state = 1; expect(state).toBe(1); });
+test("starts clean", () => { expect(state).toBe(0); });
+"#,
+        );
+
+        run_rules_tests_isolated(
+            p,
+            &["//rules/example/isolation_test".to_owned()],
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-import { Target, product, run, glob, workspaceFiles, resetMemoState } from "imp:core";
+import { Target, product, run, glob, workspaceFiles } from "imp:core";
 
 const suites = [];
 const tests = [];
@@ -118,8 +118,38 @@ export function describe(name, fn) {
     }
 }
 
-export function test(name, fn) {
-    tests.push({ name: fullName(name), fn });
+/**
+ * Register a test. The default fixture contains core host bindings plus only
+ * the test module's imports; use `fixture: "workspace"` for integration tests.
+ * Every test gets a fresh runtime, with `isolation: "process"` available for
+ * process-global state and hard-failure containment.
+ *
+ * @param {string} name
+ * @param {{fixture?: "minimal"|"workspace", isolation?: "runtime"|"process"}|Function} optionsOrFn
+ * @param {Function} [maybeFn]
+ */
+export function test(name, optionsOrFn, maybeFn) {
+    const options = typeof optionsOrFn === "function" ? {} : optionsOrFn;
+    const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
+    if (typeof fn !== "function") {
+        throw new Error("test(name, [options], fn) requires a test function");
+    }
+    if (options === null || typeof options !== "object" || Array.isArray(options)) {
+        throw new Error("test options must be an object");
+    }
+    const known = new Set(["fixture", "isolation"]);
+    for (const key of Object.keys(options)) {
+        if (!known.has(key)) throw new Error(`unknown test option ${JSON.stringify(key)}`);
+    }
+    const fixture = options.fixture || "minimal";
+    const isolation = options.isolation || "runtime";
+    if (fixture !== "minimal" && fixture !== "workspace") {
+        throw new Error(`test fixture must be "minimal" or "workspace", got ${JSON.stringify(fixture)}`);
+    }
+    if (isolation !== "runtime" && isolation !== "process") {
+        throw new Error(`test isolation must be "runtime" or "process", got ${JSON.stringify(isolation)}`);
+    }
+    tests.push({ name: fullName(name), fn, fixture, isolation });
 }
 
 export const it = test;
@@ -351,53 +381,43 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
     }
 }
 
-async function runRegisteredTests({ from = 0, label = "tests" } = {}) {
+async function importTestModule(testModule) {
+    const from = tests.length;
+    await import(testModule);
     const selected = tests.slice(from);
-    if (selected.length === 0) {
-        throw new Error(`no tests registered for ${label}`);
-    }
-
-    const failures = [];
-    for (const entry of selected) {
-        try {
-            resetMemoState();
-            await entry.fn();
-        } catch (error) {
-            failures.push({
-                name: entry.name,
-                message: error && error.message ? error.message : String(error),
-            });
-        }
-    }
-
-    if (failures.length > 0) {
-        const lines = failures.map((failure) => `  ${failure.name}: ${failure.message}`);
-        throw new Error(
-            `JS tests failed for ${label}: ${failures.length}/${selected.length}\n${lines.join("\n")}`,
-        );
-    }
+    if (selected.length === 0) throw new Error(`no tests registered for ${testModule}`);
+    return selected;
 }
 
 /**
- * Import each test module and run the tests it registers. Entry point for the
- * hidden `imp rules-test` subcommand.
+ * Discover one module in a disposable runtime. Test ordinals are local to the
+ * module and remain stable even when display names are duplicated.
  */
-export async function runTestModules(modules) {
-    const firstTest = tests.length;
-    for (const testModule of modules) {
-        await import(testModule);
-    }
-    await runRegisteredTests({ from: firstTest, label: modules.join(", ") });
+export async function discoverTestModule(testModule) {
+    const selected = await importTestModule(testModule);
+    return selected.map((entry, ordinal) => ({
+        ordinal,
+        name: entry.name,
+        fixture: entry.fixture,
+        isolation: entry.isolation,
+    }));
 }
 
-// Each rules-test target runs in its own imp subprocess: tests share
-// runtime-global memo state, so suites must not share a runtime with each
-// other or with the invoking workspace evaluation. Unsandboxed (and impure,
-// since the cache key cannot see the host binary's content yet — see ROADMAP
-// tool fingerprinting gap) because suites like native_tool_test/
-// tracked_apis_test deliberately probe real host state (`which`, `env`,
-// ambient PATH) — the point of those tests is to exercise the real
-// environment, not a hermetic one.
+/** Execute exactly one test in a fresh runtime. */
+export async function runTestCase(testModule, ordinal) {
+    const selected = await importTestModule(testModule);
+    const entry = selected[ordinal];
+    if (entry === undefined) {
+        throw new Error(`${testModule} has no test at ordinal ${ordinal}`);
+    }
+    await entry.fn();
+}
+
+// The target subprocess is a coordinator. It discovers these modules and
+// gives every registered test a fresh core-only runtime, execution service,
+// and scheduler; tests can explicitly request the loaded workspace or a
+// fresh OS process. The coordinator remains unsandboxed because suites such
+// as native_tool_test/tracked_apis_test deliberately probe ambient host state.
 export const test_product = product("rules-test", "test", async function test_product(handle) {
     const testModules = handle.attrs.tests
         .split(",")
@@ -421,9 +441,9 @@ export const test_product = product("rules-test", "test", async function test_pr
 export class RulesTest extends Target {
     static kind = "rules-test";
     constructor({ root }) {
-        const discoveredTests = workspaceFiles({ root, suffix: "_test.js" });
+        const discoveredTests = workspaceFiles({ root, suffix: "_test.js", recursive: false });
         if (discoveredTests.length === 0) {
-            throw new Error(`no JS rule tests found below ${root}`);
+            throw new Error(`no JS rule tests found directly in ${root}`);
         }
 
         super({
@@ -437,7 +457,9 @@ export class RulesTest extends Target {
 }
 
 /**
- * Declare a JS rule-test target for one workspace directory.
+ * Declare a JS rule-test target for one workspace directory. Only `_test.js`
+ * files directly in `root` are owned; nested directories declare their own
+ * rules-test target.
  *
  * @category target
  * @param {object} opts

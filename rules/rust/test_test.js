@@ -5,6 +5,7 @@ import {
     rustToolchain,
 } from "//rules/rust/toolchain";
 import { gccToolchain, __resetGccToolchainStateForTest } from "//rules/c/gcc/toolchain";
+import { nativeTool } from "//rules/imp/native_tool";
 
 function withRustHost(fn) {
     const run = async (host) => {
@@ -113,6 +114,35 @@ test("rustTestRun executes only the target's own binary, single-threaded", async
         expect(testRun.argv).toContain("--nocapture");
         expect(testRun.impure).toBe(true);
     });
+});
+
+test("rustTestRun exposes the parent package's native test tools", async () => {
+    await withRustHost(async (host) => {
+        gccToolchain("2025.08-1", { default: true });
+        rustToolchain("1.93.0", { default: true });
+        const rustTest = new RustTest({
+            path: "rules/rust/example",
+            buildDir: "build/rust/rules/rust/example",
+            executable: "build/rust/rules/rust/example/debug/deps/hello-abc123",
+            testTools: [nativeTool("tar")],
+        });
+
+        await rustTestRun(rustTest);
+
+        const testRun = host.runs[host.runs.length - 1];
+        expect(testRun.tools.some((tool) => tool.name === "tar")).toBe(true);
+    });
+});
+
+test("RustTest preserves workspace-member source scope", () => {
+    const rustTest = new RustTest({
+        path: "crates/imp-store",
+        buildDir: "build/rust/crates/imp-store",
+        executable: "build/rust/crates/imp-store/debug/deps/imp_store-abc123",
+        workspaceMember: true,
+    });
+
+    expect(rustTest.attrs.workspaceMember).toBe(true);
 });
 
 });

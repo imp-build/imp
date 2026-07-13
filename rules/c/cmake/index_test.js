@@ -50,11 +50,6 @@ test("expanded CMake cc targets are selected by output artifacts", () => {
     expect(lib.attrs.outputsInBuildDir).toBe(true);
 });
 
-// The following compiler-only tests run before "uses the default CMake
-// toolchain target" below, so the module-level default CMake toolchain
-// singleton hasn't been set yet — they'd otherwise pick up an extra
-// toolchain dependency, since the default toolchain (once set) is global
-// and persists across every test in this process.
 test("keeps no compiler set without one declared", () => {
     const lib = cmakeLib({ src: "build/no-compiler", deps: [] });
 
@@ -89,15 +84,13 @@ test("uses the default CMake toolchain target", () => {
     expect(lib.attrs.deps.length).toBe(1);
 });
 
-// Runs after the default CMake toolchain is set above, so this cmakeLib()
-// call picks up both defaults (CMake toolchain + Zig compiler) — 2 deps.
 test("uses the default Zig compiler target", () => {
     const compiler = zigToolchain("0.16.2", { default: true });
     const lib = cmakeLib({ src: "build/default-compiler", deps: [] });
 
     expect(lib.attrs.compiler).toBe("0.16.2");
     expect(lib.attrs.compilerTarget).toBe(compiler);
-    expect(lib.attrs.deps.length).toBe(2);
+    expect(lib.attrs.deps.length).toBe(1);
 });
 
 test("wires both a CMake toolchain and a Zig compiler together", () => {

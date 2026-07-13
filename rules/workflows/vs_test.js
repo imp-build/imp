@@ -21,7 +21,7 @@ test("vs is exported as a function and vsWorkspace declares a vs-workspace targe
     expect(target.kind).toBe("vs-workspace");
 });
 
-test("vs emits IDE config using the real output path computed by odinPackageAnalysis", async () => {
+test("vs emits IDE config using the real output path computed by odinPackageAnalysis", { fixture: "workspace" }, async () => {
     await withFakeRun(async () => {
         // Sanity: the workspace actually has at least one odin-package
         // target for this test to be meaningful (rules/odin/example:hello).

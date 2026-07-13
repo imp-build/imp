@@ -37,6 +37,7 @@ import {
 } from "//rules/rust";
 
 import { rustTool } from "//rules/rust/toolchain";
+import { nativeToolSpec } from "//rules/imp/native_tool";
 
 function safe_target_address(handle) {
     if (!handle || handle.__imp !== true) return null;
@@ -114,13 +115,14 @@ export function parseTestBinaries(stdout, buildDir) {
 
 export class RustTest extends Target {
     static kind = "rust_test";
-    constructor({ path = ".", buildDir, toolchain, toolchainVersion, executable, testArgs = [], deps = [] }) {
+    constructor({ path = ".", buildDir, toolchain, toolchainVersion, executable, testArgs = [], testTools = [], deps = [], workspaceMember = false }) {
         // Forwards the parent cargoPackage's own resource-package deps (see
         // //rules/asset) so resources(handle) resolves the same way for a
         // fanned-out rust_test as it does for the parent — the whole crate
         // (this test binary included) is recompiled from the same sources,
         // so it needs the same extra files.
         const normalizedDeps = normalize_deps(deps);
+        const normalizedTestTools = normalize_deps(testTools);
         super({
             kind: RustTest.kind,
             attrs: {
@@ -128,6 +130,8 @@ export class RustTest extends Target {
                 buildDir,
                 executable,
                 testArgs,
+                testTools: normalizedTestTools,
+                workspaceMember,
                 ...(toolchain ? { toolchain } : {}),
                 ...(toolchainVersion ? { toolchainVersion } : {}),
                 ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
@@ -135,6 +139,7 @@ export class RustTest extends Target {
             deps: [
                 ...(toolchain ? [{ target: toolchain }] : []),
                 ...normalizedDeps.map(target => ({ target })),
+                ...normalizedTestTools.map(target => ({ target, mode: "tool" })),
             ],
         });
     }
@@ -156,8 +161,10 @@ export const rustTestBuild = product("rust_test", "build", async function rustTe
 // within a single binary.
 export const rustTestRun = product("rust_test", "test", async function rustTestRun(handle) {
     const { outputDigest } = await rustTestBuild(handle);
+    const testTools = await Promise.all((handle.attrs.testTools || []).map(nativeToolSpec));
     return run({
         argv: [handle.attrs.executable, "--test-threads=1", ...handle.attrs.testArgs],
+        tools: testTools,
         inputs: [{ kind: "digest", digest: outputDigest }],
         impure: true,
         display: `cargo test binary ${handle.attrs.executable}`,
@@ -193,7 +200,9 @@ export const expandCargoTests = expand("cargo-package", async function expandCar
                 toolchainVersion: handle.attrs.toolchainVersion,
                 executable: bin.executable,
                 testArgs: [],
+                testTools: handle.attrs.testTools || [],
                 deps: handle.attrs.deps || [],
+                workspaceMember: handle.attrs.workspaceMember,
             }),
             `${scope}:${parentName}_tests_${bin.name}`,
         );

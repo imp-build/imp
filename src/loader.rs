@@ -259,7 +259,12 @@ fn resolve_workspace_module_in_root(
 
     let tried = candidates
         .iter()
-        .map(|p| p.display().to_string())
+        .map(|path| {
+            path.strip_prefix(root)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        })
         .collect::<Vec<_>>()
         .join(", ");
     Err(format!(

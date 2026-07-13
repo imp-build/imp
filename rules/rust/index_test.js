@@ -9,6 +9,7 @@ import {
     rustToolEnv,
 } from "//rules/rust";
 import { resourcePackage } from "//rules/asset";
+import { nativeTool } from "//rules/imp/native_tool";
 import {
     __resetRustToolchainStateForTest,
     rustToolchain,
@@ -177,6 +178,7 @@ test("cargoTest invokes cargo test with the manifest path, target dir, and toolc
         expect(testRun.argv[0]).toBe("sh");
         expect(testRun.argv[2]).toContain("cargo test");
         expect(testRun.argv).toContain(`${path}/Cargo.toml`);
+        expect(testRun.argv).toContain("--workspace");
         expect(testRun.env).toContain("RUSTUP_HOME=.imp/tools/rustup-home");
         expect(testRun.env).toContain("CARGO_HOME=.imp/tools/cargo-home");
         expect(testRun.argv[2]).toContain("RUSTFLAGS=\"$rustflags\"");
@@ -184,6 +186,22 @@ test("cargoTest invokes cargo test with the manifest path, target dir, and toolc
         expect(testRun.argv).toContain("-C linker=clang");
         expect(testRun.impure).toBe(true);
         expect(testRun.outputs).toEqual([]);
+    });
+});
+
+test("cargoTest does not retest the whole workspace from a member target", async () => {
+    await withRustHost(async (host) => {
+        rustToolchain("1.93.0", { default: true });
+        gccToolchain("2025.08-1", { default: true });
+        const pkg = cargoPackage({
+            path: "crates/imp-store",
+            workspaceMember: true,
+        });
+
+        await cargoTest(pkg);
+
+        const testRun = host.runs[host.runs.length - 1];
+        expect(testRun.argv).not.toContain("--workspace");
     });
 });
 
@@ -197,6 +215,26 @@ test("cargoTest passes through extra testArgs", async () => {
 
         const testRun = host.runs[host.runs.length - 1];
         expect(testRun.argv).toContain("--nocapture");
+    });
+});
+
+test("cargoTest exposes declared native test tools on PATH", async () => {
+    await withRustHost(async (host) => {
+        rustToolchain("1.93.0", { default: true });
+        gccToolchain("2025.08-1", { default: true });
+        const tar = nativeTool("tar");
+        const gzip = nativeTool("gzip");
+        const pkg = cargoPackage({
+            bin: "hello",
+            path: "rules/rust/example",
+            testTools: [tar, gzip],
+        });
+
+        await cargoTest(pkg);
+
+        const testRun = host.runs[host.runs.length - 1];
+        expect(testRun.tools.some((tool) => tool.name === "tar")).toBe(true);
+        expect(testRun.tools.some((tool) => tool.name === "gzip")).toBe(true);
     });
 });
 

@@ -1,0 +1,12 @@
+default_permissions = "sccache-local"
+
+[permissions.sccache-local]
+extends = ":workspace"
+
+[permissions.sccache-local.network]
+enabled = true
+allow_local_binding = true
+
+[permissions.sccache-local.network.domains]
+"localhost" = "allow"
+"127.0.0.1" = "allow"

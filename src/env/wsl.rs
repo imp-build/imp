@@ -248,7 +248,8 @@ impl WslEnv {
                 let tracked = tracker.get_synced_files()?;
                 let current_set: HashSet<&str> = source_files.iter().map(|s| s.as_str()).collect();
 
-                let to_delete: Vec<String> = tracked.keys()
+                let to_delete: Vec<String> = tracked
+                    .keys()
                     .filter(|k| !current_set.contains(k.as_str()))
                     .cloned()
                     .collect();
@@ -257,8 +258,11 @@ impl WslEnv {
 
                 for rel_path in &source_files {
                     let abs = root_dir.join(rel_path);
-                    let Ok(st) = std::fs::metadata(&abs) else { continue };
-                    let mtime = st.modified()
+                    let Ok(st) = std::fs::metadata(&abs) else {
+                        continue;
+                    };
+                    let mtime = st
+                        .modified()
                         .ok()
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs_f64())
@@ -266,7 +270,9 @@ impl WslEnv {
                     let size = st.len() as i64;
 
                     if let Some((old_mtime, old_size, old_hash)) = tracked.get(rel_path) {
-                        if (*old_mtime - mtime).abs() < 1e-6 && *old_size == size { continue; }
+                        if (*old_mtime - mtime).abs() < 1e-6 && *old_size == size {
+                            continue;
+                        }
                         let new_hash = compute_sha256(&abs)?;
                         if *old_hash == new_hash {
                             to_update_db_only.push((rel_path.clone(), mtime, size, new_hash));
@@ -280,7 +286,8 @@ impl WslEnv {
                 }
                 Ok((to_sync, to_delete, to_update_db_only))
             }
-        }).await??;
+        })
+        .await??;
 
         if to_update_db_only.is_empty() && to_sync.is_empty() && to_delete.is_empty() {
             return Ok(());

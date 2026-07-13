@@ -122,12 +122,19 @@ enum Cmd {
         #[command(flatten)]
         args: RawGoalArgs,
     },
-    /// Import JS rule-test modules and run their registered tests. Invoked by
-    /// the rules-test product inside a task sandbox; not for direct use.
+    /// Coordinate isolated JS rule tests. Invoked by the rules-test product;
+    /// not for direct use.
     #[command(hide = true)]
     RulesTest {
         /// Workspace-rooted test modules, e.g. //rules/odin/index_test
         modules: Vec<String>,
+    },
+    /// Execute one discovered JS rules test in an isolated child process.
+    #[command(hide = true)]
+    RulesTestCase {
+        module: String,
+        ordinal: usize,
+        fixture: String,
     },
     /// Run or inspect the local execution daemon.
     #[command(hide = true)]
@@ -491,6 +498,13 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
         Cmd::RulesTest { modules } => {
             return cmd_rules_test(modules, Arc::clone(&cancellation), tree).await;
         }
+        Cmd::RulesTestCase {
+            module,
+            ordinal,
+            fixture,
+        } => {
+            return cmd_rules_test_case(module, *ordinal, fixture, Arc::clone(&cancellation)).await;
+        }
         Cmd::Daemon { .. } | Cmd::Cache { .. } => {
             unreachable!("handled before UI setup")
         }
@@ -597,6 +611,7 @@ async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
         | Cmd::Run(_)
         | Cmd::Goal { .. }
         | Cmd::RulesTest { .. }
+        | Cmd::RulesTestCase { .. }
         | Cmd::Daemon { .. }
         | Cmd::Cache { .. }
         | Cmd::Config { .. } => unreachable!("handled before environment setup"),
@@ -652,9 +667,7 @@ async fn cmd_config(command: &ConfigCmd) -> Result<()> {
     Ok(())
 }
 
-/// What to drive on the live evaluation path: a goal over selected targets, or
-/// a JS rule-test suite (the hidden `rules-test` subcommand, invoked by the
-/// rules-test product inside a task sandbox).
+/// What to drive on the live evaluation path.
 ///
 /// `Goal`'s args are the raw, unvalidated argv tail from phase 1 (see
 /// `RawGoalArgs`) — `cmd_execute_live` re-parses them into selectors/flags
@@ -662,7 +675,6 @@ async fn cmd_config(command: &ConfigCmd) -> Result<()> {
 #[derive(Clone, Copy)]
 enum LiveInvocation<'a> {
     Goal { goal: &'a str, raw: &'a [String] },
-    RulesTests { modules: &'a [String] },
 }
 
 async fn cmd_execute_goal(
@@ -677,9 +689,22 @@ async fn cmd_execute_goal(
 async fn cmd_rules_test(
     modules: &[String],
     cancellation: Arc<AtomicBool>,
-    tree: &Tree,
+    _tree: &Tree,
 ) -> Result<()> {
-    cmd_execute_live(LiveInvocation::RulesTests { modules }, cancellation, tree).await
+    let current_dir = std::env::current_dir().context("determine current directory")?;
+    let workspace_root = spike::find_workspace_root(&current_dir)?;
+    spike::run_rules_tests_isolated(&workspace_root, modules, cancellation).await
+}
+
+async fn cmd_rules_test_case(
+    module: &str,
+    ordinal: usize,
+    fixture: &str,
+    cancellation: Arc<AtomicBool>,
+) -> Result<()> {
+    let current_dir = std::env::current_dir().context("determine current directory")?;
+    let workspace_root = spike::find_workspace_root(&current_dir)?;
+    spike::run_rules_test_case(&workspace_root, module, ordinal, fixture, cancellation).await
 }
 
 async fn cmd_execute_live(
@@ -737,14 +762,6 @@ async fn cmd_execute_live(
                 serde_json::Value::Object(flags),
             )
         }
-        LiveInvocation::RulesTests { .. } => (
-            Vec::new(),
-            1,
-            None,
-            false,
-            imp_execution::exec::SandboxRetention::default(),
-            serde_json::json!({}),
-        ),
     };
     let js_workers = effective_js_workers(&workspace.workspace, js_workers_cli)?;
 
@@ -762,7 +779,6 @@ async fn cmd_execute_live(
     let multi = tree.multi();
     let what = match invocation {
         LiveInvocation::Goal { goal, .. } => goal.to_owned(),
-        LiveInvocation::RulesTests { .. } => "rules-test".to_owned(),
     };
     let goal_label = format!("execute {what}");
     // Labels of Pending-but-not-Done tasks, shared with the watchdog so a
@@ -1026,9 +1042,6 @@ async fn cmd_execute_live(
                     goal_flags.clone(),
                 )
                 .await
-            }
-            LiveInvocation::RulesTests { modules } => {
-                spike::run_rules_tests_live(&workspace, &workspace_root, modules, js_workers).await
             }
         }
     };

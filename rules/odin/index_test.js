@@ -345,7 +345,7 @@ test("odinRun builds then executes the binary unsandboxed, reusing odinBuild's o
     try {
         await withFakeRun(async () => {
             await withFakeWriteWorkspace(async () => {
-                const pkg = odinPackage({ path: "rules/odin/example", toolchainVersion: "dev-2026-04", output: "build/odin/target" });
+            const pkg = odinPackage({ path: "rules/odin/example", toolchain: "dev-2026-04", output: "build/odin/target" });
                 await odinRun(pkg);
                 const { trace } = getMemoTrace();
                 const buildEffect = trace.find(t => t.event === "effect" && t.kind === "run" && t.display.startsWith("odin build"));
@@ -378,7 +378,7 @@ test("odinLint runs odin check -vet against the package", async () => {
     configure("odin", null);
     try {
         await withFakeRun(async () => {
-            const pkg = odinPackage({ path: "rules/odin/example", toolchainVersion: "dev-2026-04" });
+            const pkg = odinPackage({ path: "rules/odin/example", toolchain: "dev-2026-04" });
             const result = await odinLint(pkg);
             expect(result.ok).toBe(true);
             const { trace } = getMemoTrace();
@@ -395,7 +395,7 @@ test("odinLint runs odin check -vet against the package", async () => {
 test("odinLint reports a nonzero exit as ok:false instead of throwing", async () => {
     configure("odin", null);
     try {
-        const pkg = odinPackage({ path: "rules/odin/example", toolchainVersion: "dev-2026-04" });
+        const pkg = odinPackage({ path: "rules/odin/example", toolchain: "dev-2026-04" });
         const originalRun = globalThis.__host_run;
         globalThis.__host_run = async () => ({ stdout: "", stderr: "declared but not used\n", exitCode: 1 });
         try {

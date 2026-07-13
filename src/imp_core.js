@@ -443,10 +443,11 @@ export function workerGet(name) {
  * @param {object} opts
  * @param {string} opts.root Workspace-rooted directory, e.g. "//rules/odin".
  * @param {string} [opts.suffix] File suffix to include, e.g. "_test.js".
+ * @param {boolean} [opts.recursive=true] Whether to descend into subdirectories.
  * @returns {string[]} Sorted workspace module specifiers.
  */
 export function workspaceFiles(opts) {
-    return JSON.parse(__host_workspace_files(opts.root, opts.suffix || ""));
+    return JSON.parse(__host_workspace_files(opts.root, opts.suffix || "", opts.recursive !== false));
 }
 
 /**
@@ -1462,7 +1463,13 @@ function _materialise_inputs(inputs) {
     const result = [];
     for (const input of (inputs || [])) {
         if (input && input.__fileset === true) {
-            const { digest } = _eval_fileset(input);
+            const { files, digest } = _eval_fileset(input);
+            _trace_effect({
+                event: "effect",
+                kind: "paths",
+                fileset_kind: input.kind,
+                count: files.length,
+            });
             result.push({ kind: "digest", digest });
         } else if (input != null) {
             result.push(input);

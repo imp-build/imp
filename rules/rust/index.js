@@ -335,6 +335,7 @@ export const cargoTest = product("cargo-package", "test",
         const { tools: linkerTools, rustflags, env: linkerEnv } = await rustLinkerTools(toolchainHandle);
         const { tools: cacheTools, env: cacheEnv } = await rustBuildCacheTools(toolchainHandle);
         const { tools: rustTools, env: rustEnv } = rustToolEnv(toolSpec, !!(toolchainHandle && toolchainHandle.attrs.sccache));
+        const testTools = await Promise.all((handle.attrs.testTools || []).map(nativeToolSpec));
 
         const path = declared_path(handle, handle.attrs.path || ".");
         const srcs = await sources(handle);
@@ -342,9 +343,12 @@ export const cargoTest = product("cargo-package", "test",
         const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 
         // --workspace so member-crate tests run too when the manifest is a
-        // workspace root; on a plain single crate it's a no-op.
+        // workspace root; on a plain single crate it's a no-op. A generated
+        // workspace-member target must test only its own package, otherwise
+        // every member target redundantly retests the entire workspace using
+        // that member's narrower resources and test-tool declarations.
         const script = 'manifest=$1; target_dir=$2; rustflags=$3; shift 3; ' +
-            'RUSTFLAGS="$rustflags" cargo test --manifest-path "$manifest" --target-dir "$target_dir" --workspace "$@"';
+            'RUSTFLAGS="$rustflags" cargo test --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
 
         // No outputs/materialize: test binaries aren't user-addressable
         // artifacts. impure: true so a re-run always executes the tests
@@ -354,9 +358,10 @@ export const cargoTest = product("cargo-package", "test",
             argv: [
                 "sh", "-c", script, "cargo-test",
                 `${path}/Cargo.toml`, buildDir, rustflags,
+                ...(handle.attrs.workspaceMember ? [] : ["--workspace"]),
                 ...handle.attrs.testArgs,
             ],
-            tools: [...rustTools, ...linkerTools, ...cacheTools],
+            tools: [...rustTools, ...linkerTools, ...cacheTools, ...testTools],
             env: [...rustEnv, ...linkerEnv, ...cacheEnv],
             inputs: [srcs, resourceInputs],
             impure: true,
@@ -377,7 +382,7 @@ export function normalize_deps(deps) {
 
 export class CargoPackage extends Target {
     static kind = "cargo-package";
-    constructor({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [], deps = [], workspaceMember = false }) {
+    constructor({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [], testTools = [], deps = [], workspaceMember = false }) {
         const bins = bin ? (Array.isArray(bin) ? bin : [bin]) : [];
 
         const toolchainHandle = toolchain && toolchain.__imp === true ? toolchain
@@ -385,9 +390,11 @@ export class CargoPackage extends Target {
         const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
 
         const normalizedDeps = normalize_deps(deps);
+        const normalizedTestTools = normalize_deps(testTools);
         const allDeps = [
             ...(toolchainHandle ? [{ target: toolchainHandle }] : []),
             ...normalizedDeps.map(target => ({ target })),
+            ...normalizedTestTools.map(target => ({ target, mode: "tool" })),
         ];
 
         super({
@@ -398,6 +405,7 @@ export class CargoPackage extends Target {
                 release,
                 cargoArgs,
                 testArgs,
+                testTools: normalizedTestTools,
                 workspaceMember,
                 ...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
                 ...(toolchainVersion ? { toolchainVersion } : {}),
@@ -433,6 +441,7 @@ export class CargoPackage extends Target {
  * @param {object|string} [opts.toolchain] Rust toolchain target handle or version string.
  * @param {string[]} [opts.cargoArgs=[]] Extra arguments appended to `cargo build`.
  * @param {string[]} [opts.testArgs=[]] Extra arguments appended to `cargo test`.
+ * @param {Array<object>} [opts.testTools=[]] nativeTool() handles exposed on PATH while running `cargo test`.
  * @param {Array<object>} [opts.deps=[]] Extra deps, e.g. a resourcePackage() (see //rules/asset) providing non-.rs files an `include_str!`/`include_bytes!` needs.
  * @param {boolean} [opts.workspaceMember=false] This package is a member of
  *   a cargo workspace rooted in an ancestor directory (not this one) — build/
@@ -442,6 +451,6 @@ export class CargoPackage extends Target {
  *   root itself.
  * @returns {object} Target handle.
  */
-export function cargoPackage({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [], deps = [], workspaceMember = false }) {
-    return new CargoPackage({ path, bin, release, toolchain, cargoArgs, testArgs, deps, workspaceMember });
+export function cargoPackage({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [], testTools = [], deps = [], workspaceMember = false }) {
+    return new CargoPackage({ path, bin, release, toolchain, cargoArgs, testArgs, testTools, deps, workspaceMember });
 }
