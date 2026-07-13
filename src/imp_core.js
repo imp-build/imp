@@ -298,6 +298,17 @@ export function configurationSchemas() {
 }
 
 /**
+ * Read high-level goal capabilities derived from product registration
+ * provenance. Groups and tools come from their `//rules/<group>/<tool>`
+ * module paths; no separate catalog is maintained.
+ *
+ * @returns {object} Capability tree keyed by rule group, goal, and tool.
+ */
+export function ruleCapabilities() {
+    return JSON.parse(__host_rule_capabilities());
+}
+
+/**
  * Register a named platform.
  *
  * The built-in "local" platform is pre-registered with the native executor and
@@ -1114,7 +1125,8 @@ function _pop_call(key_string, contextId) {
  */
 export function product(kind, name, fn) {
     const memoized = memo(fn);
-    __host_product(kind, name, memoized);
+    const registrationStack = new Error("product registration").stack || "";
+    __host_product(kind, name, memoized, registrationStack);
     _product_fn_info.set(_stable_function_id(fn), name);
     _products_by_kind_name.set(`${kind}:${name}`, memoized);
     return memoized;

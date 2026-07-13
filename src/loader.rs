@@ -166,10 +166,18 @@ pub(crate) enum ModuleSource {
     Embedded(&'static str),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModuleForm {
+    Direct,
+    Index,
+    Build,
+}
+
 pub(crate) struct WorkspaceModuleResolution {
     pub(crate) name: String,
     pub(crate) source: ModuleSource,
     pub(crate) kind: ModuleKind,
+    pub(crate) form: ModuleForm,
 }
 
 pub(crate) fn resolve_workspace_module(
@@ -211,6 +219,7 @@ fn resolve_workspace_module_in_root(
                 name: name.to_owned(),
                 source: ModuleSource::File(build_path),
                 kind: ModuleKind::Build,
+                form: ModuleForm::Build,
             });
         }
     } else {
@@ -222,6 +231,7 @@ fn resolve_workspace_module_in_root(
                     name: name.to_owned(),
                     source: ModuleSource::File(build_path),
                     kind: ModuleKind::Build,
+                    form: ModuleForm::Direct,
                 });
             }
         }
@@ -233,6 +243,7 @@ fn resolve_workspace_module_in_root(
                 name: name.to_owned(),
                 source: ModuleSource::File(js_path),
                 kind: ModuleKind::Extension,
+                form: ModuleForm::Direct,
             });
         }
 
@@ -243,6 +254,7 @@ fn resolve_workspace_module_in_root(
                 name: name.to_owned(),
                 source: ModuleSource::File(index_path),
                 kind: ModuleKind::Extension,
+                form: ModuleForm::Index,
             });
         }
 
@@ -253,6 +265,7 @@ fn resolve_workspace_module_in_root(
                 name: name.to_owned(),
                 source: ModuleSource::File(build_path),
                 kind: ModuleKind::Build,
+                form: ModuleForm::Build,
             });
         }
     }
@@ -295,19 +308,19 @@ fn resolve_embedded_rules_module(
     let js_path = format!("{rel}.js");
     tried.push(js_path.clone());
     if let Some(file) = EMBEDDED_RULES.get_file(&js_path) {
-        return embedded_module(name, file, ModuleKind::Extension);
+        return embedded_module(name, file, ModuleKind::Extension, ModuleForm::Direct);
     }
 
     let index_path = format!("{rel}/index.js");
     tried.push(index_path.clone());
     if let Some(file) = EMBEDDED_RULES.get_file(&index_path) {
-        return embedded_module(name, file, ModuleKind::Extension);
+        return embedded_module(name, file, ModuleKind::Extension, ModuleForm::Index);
     }
 
     let build_path = format!("{rel}/{BUILD_FILE}");
     tried.push(build_path.clone());
     if let Some(file) = EMBEDDED_RULES.get_file(&build_path) {
-        return embedded_module(name, file, ModuleKind::Build);
+        return embedded_module(name, file, ModuleKind::Build, ModuleForm::Build);
     }
 
     Err(format!(
@@ -320,6 +333,7 @@ fn embedded_module(
     name: &str,
     file: &'static include_dir::File<'static>,
     kind: ModuleKind,
+    form: ModuleForm,
 ) -> std::result::Result<WorkspaceModuleResolution, String> {
     let contents = file.contents_utf8().ok_or_else(|| {
         format!(
@@ -331,6 +345,7 @@ fn embedded_module(
         name: name.to_owned(),
         source: ModuleSource::Embedded(contents),
         kind,
+        form,
     })
 }
 

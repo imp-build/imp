@@ -11,7 +11,7 @@
 import { own_sources, declared_path } from "//rules/odin";
 import { resolveOdinToolchainVersion } from "//rules/odin/toolchain";
 import { odinfmtTool } from "//rules/odin/odinfmt/toolchain";
-import { paths, output, run, digestOf, diffDigests } from "imp:core";
+import { paths, output, run, digestOf, diffDigests, product } from "imp:core";
 
 function odinfmt_version(handle) {
     const toolchainHandle = handle.attrs.toolchain;
@@ -68,3 +68,8 @@ export async function odinFormatCheck(handle) {
     const { total, changed } = await runOdinFmt(handle, { materialize: false });
     return { checked: total, unformatted: changed };
 }
+
+export const odinPackageFmt = product("odin-package", "fmt", odinFmt);
+export const odinTestPackageFmt = product("odin-test-package", "fmt", odinFmt);
+export const odinPackageFormatCheck = product("odin-package", "format-check", odinFormatCheck);
+export const odinTestPackageFormatCheck = product("odin-test-package", "format-check", odinFormatCheck);

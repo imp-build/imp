@@ -14,9 +14,9 @@
 // registered directly there — it follows the same allowFailure/{ok, output}
 // contract as cargoClippy/ruffCheck, running `odin check -vet`.
 
-import { cargoClippy } from "//rules/rust/lint";
-import { ruffCheck } from "//rules/python/lint";
-import { goal, product, resolveProduct, logInfo } from "imp:core";
+export { cargoPackageLint } from "//rules/rust/clippy";
+export { pythonAppLint } from "//rules/python/ruff";
+import { goal, resolveProduct, logInfo } from "imp:core";
 
 export async function lintGoal(selection) {
     const resolved = selection.map(resolveProduct);
@@ -39,6 +39,3 @@ export async function lintGoal(selection) {
 }
 
 goal("lint", lintGoal);
-
-export const cargoPackageLint = product("cargo-package", "lint", cargoClippy);
-export const pythonAppLint = product("python-app", "lint", ruffCheck);

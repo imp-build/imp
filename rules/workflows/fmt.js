@@ -14,10 +14,21 @@
 // summarized before any unformatted file turns into a thrown error — a
 // single formatter failing to compile shouldn't hide the report for every
 // other target.
-import { odinFmt, odinFormatCheck } from "//rules/odin/odinfmt";
-import { cargoFmt, cargoFormatCheck } from "//rules/rust/fmt";
-import { ruffFmt, ruffFormatCheck } from "//rules/python/fmt";
-import { goal, product, resolveProduct, goalFlags, logInfo } from "imp:core";
+export {
+    odinPackageFmt,
+    odinTestPackageFmt,
+    odinPackageFormatCheck,
+    odinTestPackageFormatCheck,
+} from "//rules/odin/odinfmt";
+export {
+    cargoPackageFmt,
+    cargoPackageFormatCheck,
+} from "//rules/rust/rustfmt";
+export {
+    pythonAppFmt,
+    pythonAppFormatCheck,
+} from "//rules/python/ruff";
+import { goal, resolveProduct, goalFlags, logInfo } from "imp:core";
 
 export async function fmtGoal(selection) {
     const { check } = goalFlags();
@@ -67,14 +78,3 @@ goal(
         },
     },
 );
-
-export const odinPackageFmt = product("odin-package", "fmt", odinFmt);
-export const odinTestPackageFmt = product("odin-test-package", "fmt", odinFmt);
-export const odinPackageFormatCheck = product("odin-package", "format-check", odinFormatCheck);
-export const odinTestPackageFormatCheck = product("odin-test-package", "format-check", odinFormatCheck);
-
-export const cargoPackageFmt = product("cargo-package", "fmt", cargoFmt);
-export const cargoPackageFormatCheck = product("cargo-package", "format-check", cargoFormatCheck);
-
-export const pythonAppFmt = product("python-app", "fmt", ruffFmt);
-export const pythonAppFormatCheck = product("python-app", "format-check", ruffFormatCheck);

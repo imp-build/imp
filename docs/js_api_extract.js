@@ -508,11 +508,64 @@ function renderConfigSchemas(schemas) {
  * @param {string} language
  * @param {Map<string, object[]>} byCategory
  * @param {object} [schemas] Registered schemas keyed by namespace.
+ * @param {string} [introduction] Authored DOC.md guide content.
+ * @param {string} [capabilityTable] Generated goal/tool table.
  * @returns {string}
  */
-export function renderLanguagePage(language, byCategory, schemas = {}) {
+export function renderLanguagePage(language, byCategory, schemas = {}, introduction = "", capabilityTable = "") {
     const frontmatter = `+++\ntitle = "${language}"\n+++\n`;
-    return `${frontmatter}\n${renderCategorySections(byCategory, schemas)}`;
+    let guide = introduction.trim();
+    let capabilities = capabilityTable;
+    if (guide.includes("<!-- capabilities -->")) {
+        guide = guide.replace("<!-- capabilities -->", capabilityTable);
+        capabilities = "";
+    }
+    const sections = [guide, capabilities, renderCategorySections(byCategory, schemas)]
+        .filter(Boolean);
+    return `${frontmatter}\n${sections.join("\n\n")}`;
+}
+
+function displayName(slug) {
+    const names = {
+        c: "C",
+        cmake: "CMake",
+        gcc: "GCC",
+        oci: "OCI",
+        odinfmt: "odinfmt",
+        rustfmt: "rustfmt",
+        sccache: "sccache",
+    };
+    if (names[slug]) return names[slug];
+    return slug.charAt(0).toUpperCase() + slug.slice(1);
+}
+
+/**
+ * Render high-level goals derived from registered product provenance.
+ *
+ * @param {string} group Rule-directory group slug.
+ * @param {object} capabilities Capability tree returned by ruleCapabilities().
+ * @returns {string}
+ */
+export function renderRuleCapabilities(group, capabilities = {}) {
+    const goals = capabilities[group];
+    if (!goals || Object.keys(goals).length === 0) return "";
+    const lines = [
+        "## Available goals",
+        "",
+        "| Goal | Tool | Target kinds |",
+        "| --- | --- | --- |",
+    ];
+    for (const goal of Object.keys(goals).sort()) {
+        for (const tool of Object.keys(goals[goal]).sort()) {
+            const details = goals[goal][tool] || {};
+            const toolLabel = tool === group
+                ? displayName(tool)
+                : `[${displayName(tool)}](./${tool}/)`;
+            const kinds = (details.targetKinds || []).map(kind => `\`${kind}\``).join(", ");
+            lines.push(`| \`imp ${goal}\` | ${toolLabel} | ${kinds} |`);
+        }
+    }
+    return lines.join("\n");
 }
 
 /**
@@ -567,16 +620,19 @@ export function extractCodeReference(files) {
  * `@category configuration` are included.
  *
  * @param {{ sourcePath: string, sourceText: string }[]} files
+ * @param {object} [schemas] Registered configuration schemas.
+ * @param {object} [capabilities] Directory-derived goal/tool capabilities.
+ * @param {{ sourcePath: string, sourceText: string }[]} [guides] DOC.md files.
  * @returns {{ path: string, markdown: string }[]}
  */
-export function extractUserApiReference(files, schemas = {}) {
+export function extractUserApiReference(files, schemas = {}, capabilities = {}, guides = []) {
     const byPath = new Map();
     for (const { sourcePath, sourceText } of files) {
         for (const entry of parseModule(sourceText)) {
             if (!isUserApiEntry(entry)) continue;
             const segments = sectionSegments(directoryForSourcePath(sourcePath));
             const key = segments.join("/");
-            if (!byPath.has(key)) byPath.set(key, { segments, byCategory: new Map() });
+            if (!byPath.has(key)) byPath.set(key, { segments, byCategory: new Map(), introduction: "" });
             const byCategory = byPath.get(key).byCategory;
             const category = categoryForEntry(entry);
             if (!byCategory.has(category)) byCategory.set(category, []);
@@ -584,13 +640,28 @@ export function extractUserApiReference(files, schemas = {}) {
         }
     }
 
+    for (const { sourcePath, sourceText } of guides) {
+        if (!sourcePath.startsWith("rules/") || !sourcePath.endsWith("/DOC.md")) continue;
+        const directory = sourcePath.slice(0, -"/DOC.md".length);
+        const segments = sectionSegments(directory);
+        const key = segments.join("/");
+        if (!byPath.has(key)) byPath.set(key, { segments, byCategory: new Map(), introduction: "" });
+        byPath.get(key).introduction = sourceText;
+    }
+
     const leaves = [];
     for (const key of [...byPath.keys()].sort()) {
-        const { segments, byCategory } = byPath.get(key);
+        const { segments, byCategory, introduction } = byPath.get(key);
         const language = segments[segments.length - 1];
-        const titleCased = language.charAt(0).toUpperCase() + language.slice(1);
+        const titleCased = displayName(language);
         const pageSchemas = titleCased === "Core" ? { imp: schemas.imp } : { [language]: schemas[language] };
-        leaves.push({ segments, markdown: renderLanguagePage(titleCased, byCategory, pageSchemas) });
+        const capabilityTable = segments.length === 1
+            ? renderRuleCapabilities(language, capabilities)
+            : "";
+        leaves.push({
+            segments,
+            markdown: renderLanguagePage(titleCased, byCategory, pageSchemas, introduction, capabilityTable),
+        });
     }
     return buildPageTree(leaves, { forceTopLevelSections: true });
 }

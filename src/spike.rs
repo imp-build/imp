@@ -14,7 +14,7 @@ use std::sync::{
 
 use crate::exec_bridge::{parse_io_specs, parse_tool_specs};
 use crate::loader::{
-    resolve_workspace_module, validate_workspace_module_path, ModuleKind, ModuleSource,
+    resolve_workspace_module, validate_workspace_module_path, ModuleForm, ModuleKind, ModuleSource,
     RulesSource, ImpLoader, ImpResolver,
 };
 use crate::runtime::LiveWorkspace;
@@ -142,6 +142,15 @@ pub struct Goal {
     pub flags: BTreeMap<String, GoalFlagDef>,
 }
 
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CapabilityTool {
+    target_kinds: BTreeSet<String>,
+    modules: BTreeSet<String>,
+}
+
+type RuleCapabilities = BTreeMap<String, BTreeMap<String, BTreeMap<String, CapabilityTool>>>;
+
 #[derive(Debug, Clone, Default)]
 pub struct Workspace {
     pub targets: BTreeMap<String, Target>,
@@ -208,6 +217,7 @@ pub(crate) struct HostState {
     next_exec: u32,
     pending: BTreeMap<u32, PendingTarget>,
     products: BTreeMap<(String, String), String>,
+    product_modules: BTreeMap<(String, String), String>,
     build_rules: BTreeMap<String, BuildRuleRender>,
     workspace_config: BTreeMap<String, serde_json::Value>,
     config_schemas: BTreeMap<String, serde_json::Value>,
@@ -251,6 +261,7 @@ impl Default for HostState {
             next_exec: 0,
             pending: BTreeMap::new(),
             products: BTreeMap::new(),
+            product_modules: BTreeMap::new(),
             build_rules: BTreeMap::new(),
             workspace_config: BTreeMap::new(),
             config_schemas: BTreeMap::new(),
@@ -1163,12 +1174,15 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     // __host_product(kind, name, fn)
     // ------------------------------------------------------------------
     let state_p = Arc::clone(&state);
+    let product_workspace_root = workspace_root.clone();
+    let product_rules_source = rules_source.clone();
     let host_product = Function::new(
         ctx.clone(),
         move |ctx: Ctx<'js>,
               kind: String,
               name: String,
-              fn_val: Value<'js>|
+              fn_val: Value<'js>,
+              registration_stack: String|
               -> rquickjs::Result<()> {
             let exec_name = {
                 let mut hs = state_p.lock().unwrap();
@@ -1177,11 +1191,19 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                 n
             };
             ctx.globals().set(exec_name.as_str(), fn_val)?;
-            state_p
-                .lock()
-                .unwrap()
-                .products
-                .insert((kind, name), exec_name);
+            let key = (kind, name);
+            let mut hs = state_p.lock().unwrap();
+            hs.products.insert(key.clone(), exec_name);
+            if let Some(module) = product_registration_module(&registration_stack) {
+                let source_module = resolved_product_module(
+                    &product_workspace_root,
+                    &product_rules_source,
+                    &module,
+                );
+                hs.product_modules.insert(key, source_module);
+            } else {
+                hs.product_modules.remove(&key);
+            }
             Ok(())
         },
     )?;
@@ -1486,6 +1508,16 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
             })
         })?;
     globals.set("__host_configuration_schemas", host_configuration_schemas)?;
+
+    let state_capabilities = Arc::clone(&state);
+    let host_rule_capabilities =
+        Function::new(ctx.clone(), move || -> rquickjs::Result<String> {
+            let hs = state_capabilities.lock().unwrap();
+            serde_json::to_string(&derive_rule_capabilities(&hs)).map_err(|e| {
+                rquickjs::Error::new_loading_message("ruleCapabilities", e.to_string())
+            })
+        })?;
+    globals.set("__host_rule_capabilities", host_rule_capabilities)?;
 
     let state_cfg = Arc::clone(&state);
     let host_configuration = Function::new(
@@ -2995,6 +3027,73 @@ fn validate_config_namespace(namespace: &str) -> rquickjs::Result<()> {
         )));
     }
     Ok(())
+}
+
+fn product_registration_module(stack: &str) -> Option<String> {
+    for line in stack.lines() {
+        let Some(start) = line.find("//rules/") else {
+            continue;
+        };
+        let mut location = line[start..].trim_end_matches(')').trim();
+        for _ in 0..2 {
+            let (prefix, suffix) = location.rsplit_once(':')?;
+            if !suffix.chars().all(|c| c.is_ascii_digit()) {
+                break;
+            }
+            location = prefix;
+        }
+        return Some(location.to_owned());
+    }
+    None
+}
+
+fn product_group_and_tool(module: &str) -> Option<(String, String)> {
+    let mut parts = module
+        .strip_prefix("//rules/")?
+        .split('/')
+        .collect::<Vec<_>>();
+    let top_level_file = (parts.len() == 1)
+        .then(|| parts[0].strip_suffix(".js"))
+        .flatten()
+        .map(str::to_owned);
+    if parts.last().is_some_and(|part| part.ends_with(".js")) {
+        parts.pop();
+    }
+    let group = parts
+        .first()
+        .map(|part| part.trim_end_matches(".js").to_owned())
+        .or(top_level_file)?;
+    let tool = parts.get(1).unwrap_or(&group.as_str()).to_string();
+    Some((group, tool))
+}
+
+fn resolved_product_module(root: &Path, rules: &RulesSource, module: &str) -> String {
+    match resolve_workspace_module(root, rules, module).map(|resolution| resolution.form) {
+        Ok(ModuleForm::Direct) => format!("{module}.js"),
+        Ok(ModuleForm::Index) => format!("{module}/index.js"),
+        Ok(ModuleForm::Build) | Err(_) => module.to_owned(),
+    }
+}
+
+fn derive_rule_capabilities(hs: &HostState) -> RuleCapabilities {
+    let mut capabilities = RuleCapabilities::new();
+    for ((kind, product), module) in &hs.product_modules {
+        let Some((group, tool)) = product_group_and_tool(module) else {
+            continue;
+        };
+        for goal in hs.goals.values().filter(|goal| goal.product == *product) {
+            let entry = capabilities
+                .entry(group.clone())
+                .or_default()
+                .entry(goal.name.clone())
+                .or_default()
+                .entry(tool.clone())
+                .or_default();
+            entry.target_kinds.insert(kind.clone());
+            entry.modules.insert(module.clone());
+        }
+    }
+    capabilities
 }
 
 fn merge_workspace_config(existing: &mut serde_json::Value, patch: serde_json::Value) {
@@ -4749,7 +4848,7 @@ import { configure } from "imp:core";
 import "//rules/configured";
 
 configure("example", { flags: { mode: "debug" } });
-"#,
+            "#,
         );
         write_file(
             &p.join("rules/configured.js"),
@@ -4879,6 +4978,119 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
         )
         .unwrap_err();
         assert!(error.to_string().contains("must be a string"));
+    }
+
+    #[test]
+    fn product_provenance_extracts_rule_modules_from_quickjs_stacks() {
+        let stack = [
+            "Error: product registration",
+            "    at product (imp:core:1128:31)",
+            "    at <anonymous> (//rules/rust/clippy/index.js:6:39)",
+        ]
+        .join("\n");
+        assert_eq!(
+            product_registration_module(&stack).as_deref(),
+            Some("//rules/rust/clippy/index.js")
+        );
+        assert_eq!(
+            product_group_and_tool("//rules/rust/clippy/index.js"),
+            Some(("rust".to_owned(), "clippy".to_owned()))
+        );
+        assert_eq!(
+            product_group_and_tool("//rules/rust/test.js"),
+            Some(("rust".to_owned(), "rust".to_owned()))
+        );
+        assert_eq!(
+            product_group_and_tool("//rules/rust/sccache/toolchain.js"),
+            Some(("rust".to_owned(), "sccache".to_owned()))
+        );
+        assert_eq!(
+            product_group_and_tool("//rules/odin/index.js"),
+            Some(("odin".to_owned(), "odin".to_owned()))
+        );
+        assert_eq!(
+            product_group_and_tool("//rules/asset.js"),
+            Some(("asset".to_owned(), "asset".to_owned()))
+        );
+    }
+
+    #[test]
+    fn rule_capabilities_are_derived_from_products_goals_and_module_paths() {
+        let mut hs = HostState::default();
+        hs.product_modules.insert(
+            ("cargo-package".to_owned(), "build".to_owned()),
+            "//rules/rust/index.js".to_owned(),
+        );
+        hs.product_modules.insert(
+            ("cargo-package".to_owned(), "lint".to_owned()),
+            "//rules/rust/clippy/index.js".to_owned(),
+        );
+        hs.product_modules.insert(
+            ("python-app".to_owned(), "lint".to_owned()),
+            "//rules/python/ruff/index.js".to_owned(),
+        );
+        hs.product_modules.insert(
+            ("cargo-package".to_owned(), "format-check".to_owned()),
+            "//rules/rust/rustfmt/index.js".to_owned(),
+        );
+
+        let capabilities = serde_json::to_value(derive_rule_capabilities(&hs)).unwrap();
+        assert_eq!(
+            capabilities["rust"]["build"]["rust"]["targetKinds"],
+            serde_json::json!(["cargo-package"])
+        );
+        assert_eq!(
+            capabilities["rust"]["lint"]["clippy"]["modules"],
+            serde_json::json!(["//rules/rust/clippy/index.js"])
+        );
+        assert_eq!(
+            capabilities["python"]["lint"]["ruff"]["targetKinds"],
+            serde_json::json!(["python-app"])
+        );
+        assert!(capabilities["rust"].get("format-check").is_none());
+    }
+
+    #[tokio::test]
+    async fn product_registration_stack_tracks_the_resolved_source_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/rust/test";
+import "//rules/rust/clippy";
+"#,
+        );
+        write_file(&p.join(BUILD_FILE), "");
+        write_file(
+            &p.join("rules/rust/test.js"),
+            r#"
+import { product } from "imp:core";
+product("rust_test", "test", async () => ({}));
+"#,
+        );
+        write_file(
+            &p.join("rules/rust/clippy/index.js"),
+            r#"
+import { product } from "imp:core";
+product("cargo-package", "lint", async () => ({}));
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let capabilities = {
+            let hs = live.host_state.lock().unwrap();
+            serde_json::to_value(derive_rule_capabilities(&hs)).unwrap()
+        };
+        assert_eq!(
+            capabilities["rust"]["test"]["rust"]["targetKinds"],
+            serde_json::json!(["rust_test"]),
+            "{capabilities}"
+        );
+        assert_eq!(
+            capabilities["rust"]["lint"]["clippy"]["targetKinds"],
+            serde_json::json!(["cargo-package"])
+        );
     }
 
     #[tokio::test]

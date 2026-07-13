@@ -1,5 +1,16 @@
-import { target, product, run, output, output_path, glob, paths, read_file, writeWorkspace, configurationSchemas } from "imp:core";
+import { target, product, run, output, output_path, glob, paths, read_file, writeWorkspace, configurationSchemas, ruleCapabilities } from "imp:core";
 import { rulesTest } from "//rules/imp/test";
+// The reference catalog describes imp's built-in rules, independently of
+// which subset this repository happens to import from imp.workspace.js.
+import "//rules/c";
+import "//rules/c/cmake";
+import "//rules/oci";
+import "//rules/odin";
+import "//rules/python";
+import "//rules/python/test";
+import "//rules/rust";
+import "//rules/workflows/fmt";
+import "//rules/workflows/lint";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import { extractCodeReference, extractUserApiReference } from "//docs/js_api_extract";
 import { zolaToolchain, zolaTool, zolaBin } from "//rules/zola/toolchain";
@@ -21,14 +32,16 @@ export const api_reference = target({ kind: "js-api-reference", attrs: {} });
 export const api_reference_build = product("js-api-reference", "build", async function api_reference_build(handle) {
     const srcs = glob({
         root: ".",
-        include: ["src/imp_core.js", "rules/**/*.js"],
+        include: ["src/imp_core.js", "rules/**/*.js", "rules/**/DOC.md"],
         exclude: ["**/*_test.js"],
     });
 
-    const files = paths(srcs).slice().sort().map(path => ({ sourcePath: path, sourceText: read_file(path) }));
+    const sources = paths(srcs).slice().sort().map(path => ({ sourcePath: path, sourceText: read_file(path) }));
+    const files = sources.filter(({ sourcePath }) => sourcePath.endsWith(".js"));
+    const guides = sources.filter(({ sourcePath }) => sourcePath.endsWith("/DOC.md"));
     const pages = [
         ...extractCodeReference(files).map(({ path, markdown }) => [`js-api/${path}`, markdown]),
-        ...extractUserApiReference(files, configurationSchemas()).map(({ path, markdown }) => [`user-api/${path}`, markdown]),
+        ...extractUserApiReference(files, configurationSchemas(), ruleCapabilities(), guides).map(({ path, markdown }) => [`user-api/${path}`, markdown]),
     ];
 
     const script = 'out=$1; shift; mkdir -p "$out"; while [ "$#" -gt 0 ]; do name=$1; content=$2; shift 2; mkdir -p "$out/$(dirname "$name")"; printf "%s" "$content" > "$out/$name"; done';

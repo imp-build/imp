@@ -14,6 +14,7 @@ import {
     isUserApiEntry,
     modulePageSegments,
     renderLanguagePage,
+    renderRuleCapabilities,
     extractApiReference,
     extractCodeReference,
     extractUserApiReference,
@@ -302,6 +303,35 @@ test("renders a language page with frontmatter and category headings in CATEGORY
     expect(md.indexOf("## Configuration") < md.indexOf("## Targets")).toBeTruthy();
 });
 
+test("renders capabilities by goal and directory-derived tool", () => {
+    const md = renderRuleCapabilities("rust", {
+        rust: {
+            build: {
+                rust: { targetKinds: ["cargo-package"], modules: ["//rules/rust"] },
+            },
+            lint: {
+                clippy: { targetKinds: ["cargo-package"], modules: ["//rules/rust/clippy"] },
+            },
+        },
+    });
+    expect(md).toContain("## Available goals");
+    expect(md).toContain("| `imp build` | Rust | `cargo-package` |");
+    expect(md).toContain("| `imp lint` | [Clippy](./clippy/) | `cargo-package` |");
+});
+
+test("places the generated capability table at a guide marker", () => {
+    const md = renderLanguagePage(
+        "Rust",
+        new Map(),
+        {},
+        "Opening guidance.\n\n<!-- capabilities -->\n\n## Details\n\nMore guidance.",
+        "## Available goals\n\n| Goal | Tool |",
+    );
+    expect(md.indexOf("Opening guidance.") < md.indexOf("## Available goals")).toBeTruthy();
+    expect(md.indexOf("## Available goals") < md.indexOf("## Details")).toBeTruthy();
+    expect(md).not.toContain("<!-- capabilities -->");
+});
+
 test("modulePageSegments mirrors the source directory nesting", () => {
     expect(modulePageSegments("src/imp_core.js")).toEqual(["core", "imp_core"]);
     expect(modulePageSegments("rules/odin/toolchain.js")).toEqual(["odin", "toolchain"]);
@@ -423,6 +453,31 @@ test("extractUserApiReference emits curated language pages for target/configurat
     expect(odin.indexOf("## Configuration") < odin.indexOf("## Targets")).toBeTruthy();
 
     expect(byPath.has("rules.md")).toBe(false);
+});
+
+test("extractUserApiReference creates guide-only tool pages and includes group capabilities", () => {
+    const pages = extractUserApiReference([], {}, {
+        rust: {
+            lint: {
+                clippy: { targetKinds: ["cargo-package"], modules: ["//rules/rust/clippy"] },
+            },
+        },
+    }, [
+        {
+            sourcePath: "rules/rust/DOC.md",
+            sourceText: "Rust guide.\n\n<!-- capabilities -->\n\n## Setup\n",
+        },
+        {
+            sourcePath: "rules/rust/clippy/DOC.md",
+            sourceText: "Clippy guide.",
+        },
+    ]);
+    const byPath = new Map(pages.map(p => [p.path, p.markdown]));
+    expect(byPath.has("rust/_index.md")).toBe(true);
+    expect(byPath.get("rust/_index.md")).toContain("Rust guide.");
+    expect(byPath.get("rust/_index.md")).toContain("[Clippy](./clippy/)");
+    expect(byPath.has("rust/clippy.md")).toBe(true);
+    expect(byPath.get("rust/clippy.md")).toContain("Clippy guide.");
 });
 
 test("extractUserApiReference nests subdirectories as subcategories instead of folding them into their parent", () => {
