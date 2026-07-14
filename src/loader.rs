@@ -1,4 +1,5 @@
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use include_dir::{include_dir, Dir};
 use rquickjs::{
@@ -6,6 +7,7 @@ use rquickjs::{
     Ctx, Module,
 };
 
+use crate::changed::ImportGraph;
 use crate::spike::{BUILD_FILE, WORKSPACE_FILE};
 
 /// The built-in `imp:core` module exposed to every plugin and BUILD file.
@@ -28,6 +30,10 @@ pub(crate) const RULES_DIR_ENV: &str = "IMP_RULES_DIR";
 pub(crate) struct ImpResolver {
     pub(crate) workspace_root: PathBuf,
     pub(crate) rules_source: RulesSource,
+    /// Import edges recorded for changed-target detection. QuickJS calls
+    /// `resolve` for every import statement, including ones whose module is
+    /// already cached, so the recorded graph is complete.
+    pub(crate) import_graph: Arc<Mutex<ImportGraph>>,
 }
 
 pub(crate) struct ImpLoader {
@@ -51,6 +57,46 @@ impl RulesSource {
             _ => RulesSource::Embedded,
         }
     }
+}
+
+impl ImpResolver {
+    fn record_import(&self, base: &str, resolution: &WorkspaceModuleResolution) {
+        let mut graph = self.import_graph.lock().unwrap();
+        graph
+            .importers
+            .entry(resolution.name.clone())
+            .or_default()
+            .insert(base.to_owned());
+        // Only on-disk files under the workspace root can appear in a git
+        // diff; embedded rules and external dev-rules directories can't.
+        let ModuleSource::File(path) = &resolution.source else {
+            return;
+        };
+        let Ok(relative) = path.strip_prefix(&self.workspace_root) else {
+            return;
+        };
+        let relative = relative
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let scope = (resolution.kind == ModuleKind::Build)
+            .then(|| package_scope_for_build_file(path, &self.workspace_root))
+            .flatten();
+        graph.record_module_file(relative, &resolution.name, scope.as_deref());
+    }
+}
+
+/// The package scope (`//dir`, or `//` at the root) a BUILD.js file defines.
+fn package_scope_for_build_file(path: &Path, workspace_root: &Path) -> Option<String> {
+    let directory = path.parent()?.strip_prefix(workspace_root).ok()?;
+    if directory.as_os_str().is_empty() {
+        return Some("//".to_owned());
+    }
+    Some(format!(
+        "//{}",
+        directory
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/")
+    ))
 }
 
 impl Resolver for ImpResolver {
@@ -90,6 +136,7 @@ impl Resolver for ImpResolver {
                         )
                     },
                 )?;
+            self.record_import(base, &resolution);
             return Ok(resolution.name);
         }
 

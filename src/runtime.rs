@@ -12,6 +12,7 @@ use std::sync::{
 
 use rquickjs::{AsyncContext as JsContext, AsyncRuntime as Runtime};
 
+use crate::changed::ImportGraph;
 use crate::scheduler::Scheduler;
 use crate::spike::{HostState, Target, Workspace};
 
@@ -52,6 +53,10 @@ pub struct LiveWorkspace {
     /// `ensure_expanded` can invoke expanders live and materialize the
     /// pending targets they register via `registerTarget()`.
     pub(crate) host_state: Arc<Mutex<HostState>>,
+    /// JS module import edges recorded while loading the workspace, shared
+    /// with the module resolver. Read by changed-target detection to map a
+    /// changed rule module onto the packages that transitively import it.
+    pub(crate) import_graph: Arc<Mutex<ImportGraph>>,
     /// Session-scoped overlay of targets materialized by lazy expansion.
     /// Reset at the start of each `execute_goal_live`/`evaluate_product_json`
     /// invocation; merged with `workspace.targets` at selector-resolution time.
@@ -77,6 +82,7 @@ impl std::fmt::Debug for LiveWorkspace {
             .field("selected_roots", &"Arc<Mutex<..>>")
             .field("goal_flags", &"Arc<Mutex<..>>")
             .field("host_state", &"Arc<Mutex<..>>")
+            .field("import_graph", &"Arc<Mutex<..>>")
             .field("dynamic_targets", &"Arc<Mutex<..>>")
             .field("service", &"Arc<dyn ExecutionService>")
             .finish()

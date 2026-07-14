@@ -1,3 +1,4 @@
+mod changed;
 mod codegen;
 mod commands;
 mod env;
@@ -72,6 +73,13 @@ enum Cmd {
     Targets {
         /// Target addresses or names to select; defaults to all targets
         selectors: Vec<String>,
+        /// List only targets owning files changed since this git ref
+        /// (merge-base against the working tree, like `git diff <ref>`)
+        #[arg(long, value_name = "REF", conflicts_with = "selectors")]
+        changed_since: Option<String>,
+        /// Also list targets that depend on the changed targets
+        #[arg(long, value_enum, default_value_t, requires = "changed_since")]
+        changed_dependents: changed::DependentsMode,
     },
     /// List target dependencies (QuickJS spike)
     Dependencies {
@@ -189,6 +197,13 @@ enum DaemonCmd {
 struct GoalArgs {
     /// Target selectors, e.g. //:app, //dir/..., //..., or //:app#build
     selectors: Vec<String>,
+    /// Select the targets owning files changed since this git ref
+    /// (merge-base against the working tree, like `git diff <ref>`)
+    #[arg(long, value_name = "REF", conflicts_with = "selectors")]
+    changed_since: Option<String>,
+    /// Also select targets that depend on the changed targets
+    #[arg(long, value_enum, default_value_t, requires = "changed_since")]
+    changed_dependents: changed::DependentsMode,
     /// Maximum number of ready tasks to execute concurrently
     #[arg(long, default_value_t = 1)]
     jobs: usize,
@@ -462,8 +477,18 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
     // The QuickJS spike only evaluates workspace definition files. It
     // must not acquire this project's toolchains or generate workspace files.
     match &cli.command {
-        Cmd::Targets { selectors } => {
-            return cmd_targets(selectors, tree).await;
+        Cmd::Targets {
+            selectors,
+            changed_since,
+            changed_dependents,
+        } => {
+            return cmd_targets(
+                selectors,
+                changed_since.as_deref(),
+                *changed_dependents,
+                tree,
+            )
+            .await;
         }
         Cmd::Dependencies { selectors } => {
             return cmd_dependencies(selectors, tree).await;
@@ -726,14 +751,7 @@ async fn cmd_execute_live(
     // argv tail captured in phase 1 (RawGoalArgs) for real, with full
     // validation and --help. Rule-test runs bypass this entirely — they carry
     // no CLI args of their own.
-    let (selectors, jobs, js_workers_cli, no_cache, sandbox_retention, goal_flags): (
-        Vec<String>,
-        usize,
-        Option<usize>,
-        bool,
-        imp_execution::exec::SandboxRetention,
-        serde_json::Value,
-    ) = match invocation {
+    let (args, goal_flags): (GoalArgs, serde_json::Value) = match invocation {
         LiveInvocation::Goal { goal, raw } => {
             let goal_def = workspace.workspace.goals.get(goal).ok_or_else(|| {
                 let known: Vec<&str> = workspace
@@ -753,17 +771,41 @@ async fn cmd_execute_live(
                     serde_json::Value::Bool(matches.get_flag(name)),
                 );
             }
-            (
-                args.selectors,
-                args.jobs,
-                args.js_workers,
-                args.no_cache,
-                args.keep_sandbox,
-                serde_json::Value::Object(flags),
-            )
+            (args, serde_json::Value::Object(flags))
         }
     };
+    let GoalArgs {
+        selectors,
+        changed_since,
+        changed_dependents,
+        jobs,
+        js_workers: js_workers_cli,
+        no_cache,
+        keep_sandbox: sandbox_retention,
+    } = args;
     let js_workers = effective_js_workers(&workspace.workspace, js_workers_cli)?;
+
+    // Resolve --changed-since into an exact address set before any execution
+    // machinery spins up; "nothing changed" is a successful no-op.
+    let changed_addresses = match &changed_since {
+        Some(since) => {
+            let graph = workspace.import_graph.lock().unwrap().clone();
+            let changed::ChangedTargets { addresses, unowned } = changed::changed_target_addresses(
+                &workspace_root,
+                &workspace.workspace,
+                &graph,
+                since,
+                changed_dependents,
+            )?;
+            warn_unowned_changed_files(&unowned);
+            if addresses.is_empty() {
+                eprintln!("nothing changed since '{since}'; nothing to do");
+                return Ok(());
+            }
+            Some(addresses)
+        }
+        None => None,
+    };
 
     if cancellation.load(Ordering::SeqCst) {
         anyhow::bail!("execution canceled");
@@ -1032,11 +1074,15 @@ async fn cmd_execute_live(
     let drive = async {
         match invocation {
             LiveInvocation::Goal { goal, .. } => {
-                spike::execute_goal_live(
+                let selection = match &changed_addresses {
+                    Some(addresses) => spike::GoalSelection::ChangedAddresses(addresses),
+                    None => spike::GoalSelection::Selectors(&selectors),
+                };
+                spike::execute_goal_live_selection(
                     &workspace,
                     &workspace_root,
                     goal,
-                    &selectors,
+                    selection,
                     no_cache,
                     js_workers,
                     goal_flags.clone(),
@@ -1111,11 +1157,51 @@ macro_rules! workspace_cmd {
     }};
 }
 
-async fn cmd_targets(selectors: &[String], tree: &Tree) -> Result<()> {
+async fn cmd_targets(
+    selectors: &[String],
+    changed_since: Option<&str>,
+    changed_dependents: changed::DependentsMode,
+    tree: &Tree,
+) -> Result<()> {
     workspace_cmd!(tree, |workspace, out| {
-        let targets = selector::select_targets(&workspace, selectors)?;
-        spike::format_targets(&targets, &mut out)?;
+        if let Some(since) = changed_since {
+            let current_dir = std::env::current_dir().context("determine current directory")?;
+            let workspace_root = spike::find_workspace_root(&current_dir)?;
+            let graph = workspace.import_graph.lock().unwrap().clone();
+            let changed::ChangedTargets { addresses, unowned } = changed::changed_target_addresses(
+                &workspace_root,
+                &workspace.workspace,
+                &graph,
+                since,
+                changed_dependents,
+            )?;
+            warn_unowned_changed_files(&unowned);
+            for address in &addresses {
+                use std::fmt::Write as _;
+                writeln!(out, "{address}")?;
+            }
+        } else {
+            let targets = selector::select_targets(&workspace, selectors)?;
+            spike::format_targets(&targets, &mut out)?;
+        }
     })
+}
+
+/// One consolidated stderr warning for changed files no target or module
+/// accounts for; not an error — unowned files are common (docs, CI config).
+fn warn_unowned_changed_files(unowned: &[String]) {
+    if unowned.is_empty() {
+        return;
+    }
+    const SHOWN: usize = 10;
+    let mut listed = unowned[..unowned.len().min(SHOWN)].join(", ");
+    if unowned.len() > SHOWN {
+        listed.push_str(&format!(", and {} more", unowned.len() - SHOWN));
+    }
+    eprintln!(
+        "warning: {} changed file(s) owned by no target: {listed}",
+        unowned.len()
+    );
 }
 
 async fn cmd_dependencies(selectors: &[String], tree: &Tree) -> Result<()> {
@@ -1268,6 +1354,57 @@ mod tests {
     fn effective_js_workers_cli_overrides_workspace_config() {
         let workspace = workspace_with_imp_config(json!({ "jsWorkers": 3 }));
         assert_eq!(effective_js_workers(&workspace, Some(1)).unwrap(), 1);
+    }
+
+    #[test]
+    fn changed_since_flags_parse_and_enforce_exclusivity() {
+        // The same Command shape parse_goal_args builds (minus process exit).
+        let cmd = || GoalArgs::augment_args(Command::new("build"));
+
+        let matches = cmd()
+            .try_get_matches_from([
+                "build",
+                "--changed-since",
+                "origin/main",
+                "--changed-dependents",
+                "transitive",
+            ])
+            .unwrap();
+        let args = GoalArgs::from_arg_matches(&matches).unwrap();
+        assert_eq!(args.changed_since.as_deref(), Some("origin/main"));
+        assert_eq!(args.changed_dependents, changed::DependentsMode::Transitive);
+        assert_eq!(
+            GoalArgs::from_arg_matches(&cmd().try_get_matches_from(["build"]).unwrap())
+                .unwrap()
+                .changed_dependents,
+            changed::DependentsMode::None
+        );
+
+        // Explicit selectors conflict with --changed-since.
+        assert!(cmd()
+            .try_get_matches_from(["build", "//:app", "--changed-since", "main"])
+            .is_err());
+        // --changed-dependents needs --changed-since.
+        assert!(cmd()
+            .try_get_matches_from(["build", "--changed-dependents", "direct"])
+            .is_err());
+    }
+
+    #[test]
+    fn targets_subcommand_accepts_changed_since() {
+        let cli = Cli::parse_from(["imp", "targets", "--changed-since", "HEAD~1"]);
+        match cli.command {
+            Cmd::Targets {
+                selectors,
+                changed_since,
+                changed_dependents,
+            } => {
+                assert!(selectors.is_empty());
+                assert_eq!(changed_since.as_deref(), Some("HEAD~1"));
+                assert_eq!(changed_dependents, changed::DependentsMode::None);
+            }
+            _ => panic!("expected targets subcommand"),
+        }
     }
 
     #[test]

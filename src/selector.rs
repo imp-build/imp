@@ -123,6 +123,34 @@ pub(crate) fn select_roots<'a>(
     Ok(selected.into_values().collect())
 }
 
+/// Resolve an exact, precomputed address set (e.g. changed-target detection)
+/// against the workspace with wildcard semantics: targets whose kind has no
+/// product for the goal are silently skipped, and an empty result is not an
+/// error. Unknown addresses are ignored — the caller derived them from the
+/// same workspace, so a miss only means an expander-owned address that never
+/// materialized.
+pub(crate) fn select_roots_for_addresses<'a>(
+    workspace: &'a Workspace,
+    dynamic: &'a BTreeMap<String, Target>,
+    goal: &Goal,
+    addresses: &std::collections::BTreeSet<String>,
+) -> Vec<(&'a Target, String)> {
+    let mut selected: BTreeMap<&str, (&Target, String)> = BTreeMap::new();
+    for address in addresses {
+        let Some(target) = workspace
+            .targets
+            .get(address)
+            .or_else(|| dynamic.get(address))
+        else {
+            continue;
+        };
+        if let Some(product) = goal_product_for_kind(workspace, goal, &target.kind) {
+            selected.insert(target.address.as_str(), (target, product));
+        }
+    }
+    selected.into_values().collect()
+}
+
 /// Return the product a goal would request for a given target kind, or `None`
 /// if the goal has nothing to produce for that kind.
 fn goal_product_for_kind(workspace: &Workspace, goal: &Goal, kind: &str) -> Option<String> {
@@ -207,6 +235,51 @@ mod tests {
         let root = target("//:pkg");
         // Root-package ":name" shorthand.
         assert!(matches_selector(&root, "pkg"));
+    }
+
+    #[test]
+    fn select_roots_for_addresses_skips_productless_kinds_and_allows_empty() {
+        let mut workspace = Workspace::default();
+        let mut with_product = target("//a:a");
+        with_product.kind = "lib".to_owned();
+        let mut without_product = target("//b:b");
+        without_product.kind = "docs".to_owned();
+        workspace.targets.insert("//a:a".to_owned(), with_product);
+        workspace
+            .targets
+            .insert("//b:b".to_owned(), without_product);
+        workspace.products.insert(
+            ("lib".to_owned(), "build".to_owned()),
+            "buildLib".to_owned(),
+        );
+        let goal = Goal {
+            name: "build".to_owned(),
+            product: "build".to_owned(),
+            flags: BTreeMap::new(),
+            selectorless: false,
+        };
+
+        let mut dynamic = BTreeMap::new();
+        let addresses: std::collections::BTreeSet<String> = ["//a:a", "//b:b", "//gone:gone"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let roots = select_roots_for_addresses(&workspace, &dynamic, &goal, &addresses);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].0.address, "//a:a");
+        assert_eq!(roots[0].1, "build");
+
+        // Empty input is not an error, and dynamic targets resolve too.
+        assert!(
+            select_roots_for_addresses(&workspace, &dynamic, &goal, &Default::default()).is_empty()
+        );
+        let mut dyn_target = target("//dyn:d");
+        dyn_target.kind = "lib".to_owned();
+        dynamic.insert("//dyn:d".to_owned(), dyn_target);
+        let addresses = std::collections::BTreeSet::from(["//dyn:d".to_owned()]);
+        let roots = select_roots_for_addresses(&workspace, &dynamic, &goal, &addresses);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].0.address, "//dyn:d");
     }
 
     #[test]

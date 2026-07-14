@@ -1,3 +1,8 @@
 /target/
 /build/
 /examples/
+/.imp/
+/dist/
+/generated/
+/test/
+/Stage-B.md

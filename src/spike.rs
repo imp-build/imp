@@ -18,7 +18,7 @@ use crate::loader::{
     RulesSource, ImpLoader, ImpResolver,
 };
 use crate::runtime::LiveWorkspace;
-use crate::selector::{select_roots, select_targets};
+use crate::selector::{select_roots, select_roots_for_addresses, select_targets};
 use anyhow::{bail, Context, Result};
 use regex::Regex;
 use rquickjs::{
@@ -408,11 +408,14 @@ async fn create_live_runtime(
         Arc::new(Mutex::new(None));
     let selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(None));
     let goal_flags: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let import_graph: Arc<Mutex<crate::changed::ImportGraph>> =
+        Arc::new(Mutex::new(crate::changed::ImportGraph::default()));
     let rt = Runtime::new().context("create QuickJS runtime")?;
     rt.set_loader(
         ImpResolver {
             workspace_root: root.clone(),
             rules_source: rules_source.clone(),
+            import_graph: Arc::clone(&import_graph),
         },
         ImpLoader {
             workspace_root: root.clone(),
@@ -498,6 +501,7 @@ async fn create_live_runtime(
         selected_roots,
         goal_flags,
         host_state: state,
+        import_graph,
         dynamic_targets: Arc::new(Mutex::new(BTreeMap::new())),
         service,
     })
@@ -604,6 +608,18 @@ async fn load_workspace_with_rules_and_service(
     for build_file in &build_files {
         let scope = scope_for(&root, build_file)?;
         let module_name = build_module_name_for(&root, build_file, &scope)?;
+
+        // Seed the import graph: these roots are loaded directly below, so
+        // the resolver never sees them as an importee.
+        {
+            let relative = build_file
+                .strip_prefix(&root)
+                .with_context(|| format!("{} is outside workspace", build_file.display()))?
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            let mut graph = live.import_graph.lock().unwrap();
+            graph.record_module_file(relative, &module_name, Some(&scope));
+        }
 
         let exports = ctx
             .async_with(async |ctx| -> Result<Vec<(String, u32)>> {
@@ -3021,7 +3037,7 @@ fn compile_regexes(label: &str, patterns: &[String]) -> Result<Vec<Regex>> {
         .collect()
 }
 
-fn compile_globs(label: &str, patterns: &[String]) -> Result<Vec<Regex>> {
+pub(crate) fn compile_globs(label: &str, patterns: &[String]) -> Result<Vec<Regex>> {
     patterns
         .iter()
         .map(|pattern| {
@@ -3630,11 +3646,46 @@ pub async fn evaluate_product_json(
 /// unchanged.
 ///
 /// The caller must have installed a scheduler (and this sets `exec_root`).
-pub async fn execute_goal_live(
+///
+/// Selector-string convenience wrapper around
+/// [`execute_goal_live_selection`]; production callers go through the
+/// selection-typed entry point, so this survives only for tests.
+#[cfg(test)]
+pub(crate) async fn execute_goal_live(
     live: &LiveWorkspace,
     workspace_root: &Path,
     goal: &str,
     selectors: &[String],
+    no_cache: bool,
+    js_workers: usize,
+    flags: serde_json::Value,
+) -> Result<()> {
+    execute_goal_live_selection(
+        live,
+        workspace_root,
+        goal,
+        GoalSelection::Selectors(selectors),
+        no_cache,
+        js_workers,
+        flags,
+    )
+    .await
+}
+
+/// How `execute_goal_live_selection` picks its root targets: user-typed
+/// selector strings (normal CLI path), or an exact address set precomputed by
+/// changed-target detection — resolved with wildcard semantics, where an
+/// empty selection is a successful no-op rather than an error.
+pub enum GoalSelection<'a> {
+    Selectors(&'a [String]),
+    ChangedAddresses(&'a BTreeSet<String>),
+}
+
+pub async fn execute_goal_live_selection(
+    live: &LiveWorkspace,
+    workspace_root: &Path,
+    goal: &str,
+    selection: GoalSelection<'_>,
     no_cache: bool,
     js_workers: usize,
     flags: serde_json::Value,
@@ -3662,21 +3713,39 @@ pub async fn execute_goal_live(
     // to expanding every statically-declared target whose kind can produce
     // more targets, then retry selector resolution below.
     let empty_dynamic: BTreeMap<String, Target> = BTreeMap::new();
-    let seed_addresses: Vec<String> =
-        match select_roots(&live.workspace, &empty_dynamic, goal_def, selectors) {
-            Ok(roots) => roots.iter().map(|(t, _)| t.address.clone()).collect(),
-            Err(_) => live
-                .workspace
-                .targets
-                .values()
-                .filter(|t| live.workspace.expanders.contains_key(&t.kind))
-                .map(|t| t.address.clone())
-                .collect(),
-        };
+    let seed_addresses: Vec<String> = match &selection {
+        GoalSelection::Selectors(selectors) => {
+            match select_roots(&live.workspace, &empty_dynamic, goal_def, selectors) {
+                Ok(roots) => roots.iter().map(|(t, _)| t.address.clone()).collect(),
+                Err(_) => live
+                    .workspace
+                    .targets
+                    .values()
+                    .filter(|t| live.workspace.expanders.contains_key(&t.kind))
+                    .map(|t| t.address.clone())
+                    .collect(),
+            }
+        }
+        // Changed addresses are statically known — no fallback needed.
+        GoalSelection::ChangedAddresses(addresses) => addresses.iter().cloned().collect(),
+    };
     ensure_expanded(live, &seed_addresses, Some(goal)).await?;
 
     let dynamic_snapshot: BTreeMap<String, Target> = live.dynamic_targets.lock().unwrap().clone();
-    let roots = select_roots(&live.workspace, &dynamic_snapshot, goal_def, selectors)?;
+    let roots = match &selection {
+        GoalSelection::Selectors(selectors) => {
+            select_roots(&live.workspace, &dynamic_snapshot, goal_def, selectors)?
+        }
+        GoalSelection::ChangedAddresses(addresses) => {
+            let roots =
+                select_roots_for_addresses(&live.workspace, &dynamic_snapshot, goal_def, addresses);
+            if roots.is_empty() {
+                eprintln!("no changed target has a '{}' product; nothing to do", goal);
+                return Ok(());
+            }
+            roots
+        }
+    };
     let goal_callback_name = live.workspace.goal_callbacks.get(goal).cloned();
 
     // Resolve owned (js_id, product fn name, label) triples so nothing borrows
@@ -7763,6 +7832,57 @@ export const pkg = target({
             .workspace
             .owned_files
             .contains("library/pkg/other.odin"));
+    }
+
+    #[tokio::test]
+    async fn workspace_load_records_import_graph_for_changed_detection() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join("tools/base.js"),
+            "export const baseKind = \"graph-test\";\n",
+        );
+        write_file(
+            &p.join("tools/macros.js"),
+            r#"
+import { target, sourcesField } from "imp:core";
+import { baseKind } from "//tools/base";
+
+export function mkTarget() {
+    return target({
+        kind: baseKind,
+        attrs: {},
+        sources: sourcesField({ root: ".", include: ["*.odin"], exclude: [] }),
+    });
+}
+"#,
+        );
+        write_file(
+            &p.join("a/BUILD.js"),
+            r#"
+import { mkTarget } from "//tools/macros";
+export const a = mkTarget();
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let graph = live.import_graph.lock().unwrap().clone();
+
+        // Seeded BUILD.js root plus resolver-recorded rule modules.
+        assert!(graph.module_files["a/BUILD.js"].contains("//a"));
+        assert_eq!(graph.build_module_scopes["//a"], "//a");
+        assert!(graph.module_files["tools/macros.js"].contains("//tools/macros"));
+        assert!(graph.module_files["tools/base.js"].contains("//tools/base"));
+        assert!(graph.importers["//tools/macros"].contains("//a"));
+        assert!(graph.importers["//tools/base"].contains("//tools/macros"));
+
+        // A change to the transitively imported module owns //a:a.
+        let changed = vec!["tools/base.js".to_owned()];
+        let (owners, unowned) =
+            crate::changed::owning_targets(&live.workspace, &graph, &changed).unwrap();
+        assert_eq!(owners, BTreeSet::from(["//a:a".to_owned()]));
+        assert!(unowned.is_empty());
     }
 
     #[tokio::test]
