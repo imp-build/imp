@@ -11,36 +11,14 @@
 // select it individually; generate-build itself is driven purely off the
 // registerBuildGenerator() list below rather than target selection, so a
 // rules group need not declare a dedicated per-language target just to be
-// eligible. Selector-less invocations still need *something* selectable for
-// the goal machinery, so this module declares one dummy, always-present
-// target type/kind ("build-generate") for that purpose; its own product is a
-// no-op and its selection is ignored by generateBuildGoal.
+// eligible. The goal is declared `selection: "none"`, so selector-less
+// invocations run without selecting anything.
 //
 // Runs through the same goal machinery as fmt/build/test/generate
 // (//rules/workflows/fmt.js, //rules/workflows/generate.js) rather than a
 // bespoke CLI command, so it gets a scheduler + exec_root for free — needed
 // because generator products (e.g. cargo metadata) call run().
-import { applyBuildEdits, configuration, goal, goalFlags, logInfo, product, productFor, Target } from "imp:core";
-
-class BuildGenerateRoot extends Target {
-    static kind = "build-generate";
-    constructor(opts = {}) {
-        super({ kind: BuildGenerateRoot.kind, attrs: {} });
-    }
-}
-
-/**
- * Declare the dummy `generate-build` selection root. Exactly one instance
- * should exist in the workspace (see imp.workspace.js) so selector-less
- * `imp goal generate-build` invocations have a target to select — the
- * actual fan-out to per-language generators happens via
- * registerBuildGenerator(), independent of this target.
- *
- * @returns {object} Target handle.
- */
-export function buildGenerateRoot(opts = {}) {
-    return new BuildGenerateRoot(opts);
-}
+import { applyBuildEdits, configuration, goal, goalFlags, logInfo, productFor } from "imp:core";
 
 export const GENERATE_BUILD = goal(
     "generate-build",
@@ -49,10 +27,9 @@ export const GENERATE_BUILD = goal(
         flags: {
             check: { description: "Verify generated BUILD files are up to date without writing changes" },
         },
+        selection: "none",
     },
 );
-
-product(BuildGenerateRoot, GENERATE_BUILD, async () => ({}));
 
 const _registeredGenerators = [];
 

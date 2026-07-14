@@ -147,7 +147,7 @@ export function namedCache(opts) {
  * (first-registration-wins). A goal's product is always the product named
  * after the goal itself (goals map uniformly onto products: build →
  * "build", fmt → "fmt", …); targets whose kind lacks that product are
- * skipped during selector-less selection.
+ * skipped by wildcard selectors such as `//...`.
  *
  * @param {string} name Goal name, e.g. "test" or "fmt".
  * @param {(selection: Array<{id: number, address: string, kind: string, product: string}>) => (void | Promise<void>)} [fn]
@@ -167,6 +167,12 @@ export function namedCache(opts) {
  *   Declaring a flag more than once (e.g. across re-evaluated modules) is
  *   idempotent, unlike the goal's callback/product, which is
  *   first-registration-wins.
+ * @param {"required" | "none"} [opts.selection] Defaults to "required":
+ *   invoking the goal without a selector is an error (use `//...` to select
+ *   the whole workspace). "none" declares that the goal ignores target
+ *   selection entirely — a selector-less invocation runs the callback with
+ *   an empty selection (e.g. gen-builtin-lockfiles, which walks a registry
+ *   instead of selected targets).
  * @returns {object} The product-name token for this goal's product; pass it
  *   to product() to register a target kind's implementation of the goal.
  *   Repeat registrations of the same goal return the same token.
@@ -176,8 +182,12 @@ export function goal(name, fn, opts) {
         throw new Error("goal(name, fn?, opts?) requires a non-empty string name");
     }
     const flags = opts && opts.flags ? opts.flags : {};
+    const selection = opts && opts.selection !== undefined ? opts.selection : "required";
+    if (selection !== "required" && selection !== "none") {
+        throw new Error(`goal '${name}': opts.selection must be "required" or "none"`);
+    }
     const stack = new Error("goal registration").stack || "";
-    const pid = __host_goal(name, "default", JSON.stringify(flags), stack);
+    const pid = __host_goal(name, "default", JSON.stringify(flags), selection === "none", stack);
     if (fn !== undefined) {
         if (typeof fn !== "function") {
             throw new Error("goal(name, fn?, opts?) expects fn to be a function when provided");

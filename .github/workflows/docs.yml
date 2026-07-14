@@ -59,13 +59,13 @@ jobs:
         run: ./imp goal generate //ci:docs_workflow --check
 
       - name: Check formatting
-        run: ./imp fmt --check
+        run: ./imp fmt --check //...
 
       - name: Lint
-        run: ./imp lint
+        run: ./imp lint //...
 
       - name: Test
-        run: ./imp test
+        run: ./imp test //...
 
   package:
     needs: build

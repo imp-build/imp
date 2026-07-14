@@ -96,7 +96,7 @@ enum Cmd {
         /// config flag, not by selectors
         selectors: Vec<String>,
     },
-    /// Build the selected targets; defaults to the workspace default build roots
+    /// Build the selected targets, e.g. `imp build //...`
     #[command(disable_help_flag = true)]
     Build(RawGoalArgs),
     /// Run tests for the selected targets
@@ -187,7 +187,7 @@ enum DaemonCmd {
 
 #[derive(clap::Args)]
 struct GoalArgs {
-    /// Target selectors, e.g. //:app or //:app#build
+    /// Target selectors, e.g. //:app, //dir/..., //..., or //:app#build
     selectors: Vec<String>,
     /// Maximum number of ready tasks to execute concurrently
     #[arg(long, default_value_t = 1)]

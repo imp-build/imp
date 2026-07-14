@@ -18,9 +18,13 @@ pub(crate) fn select_roots<'a>(
     let all_targets = || workspace.targets.values().chain(dynamic.values());
     let mut selected: BTreeMap<&str, (&Target, String)> = BTreeMap::new();
     if selectors.is_empty() {
-        // If the workspace exports a `//:default` target, it acts as the
-        // implicit root for selector-less invocations. Otherwise every target
-        // that has a product for the current goal is selected.
+        // Selection-independent goals (declared `selection: "none"`) run
+        // their callback against an empty selection; everything else needs
+        // an explicit selector. If the workspace exports a `//:default`
+        // target, it acts as the implicit root for selector-less invocations.
+        if goal.selectorless {
+            return Ok(Vec::new());
+        }
         if let Some(default_target) = workspace
             .targets
             .get("//:default")
@@ -36,11 +40,12 @@ pub(crate) fn select_roots<'a>(
                 })?;
             selected.insert(default_target.address.as_str(), (default_target, product));
         } else {
-            for target in all_targets() {
-                if let Some(product) = goal_product_for_kind(workspace, goal, &target.kind) {
-                    selected.insert(target.address.as_str(), (target, product));
-                }
-            }
+            bail!(
+                "goal '{}' requires a target selector; use '//...' to select every target \
+                 with a '{}' product, or export a //:default target",
+                goal.name,
+                goal.product
+            );
         }
     } else {
         for selector in selectors {
@@ -49,16 +54,24 @@ pub(crate) fn select_roots<'a>(
                 Some((t, p)) => (t, Some(p)),
                 None => (selector.as_str(), None),
             };
+            // Wildcard selectors (`//...`, `//dir/...`) filter to targets
+            // that have the requested product; exact selectors error when
+            // their target lacks it.
+            let wildcard = target_sel.ends_with("...");
             let matches: Vec<_> = all_targets()
                 .filter(|t| matches_selector(t, target_sel))
                 .collect();
             if matches.is_empty() {
                 bail!("no target matches selector '{selector}'");
             }
+            let mut with_product = 0usize;
             for target in matches {
                 let product = if let Some(p) = product_override {
                     let key = (target.kind.clone(), p.to_owned());
                     if !workspace.products.contains_key(&key) {
+                        if wildcard {
+                            continue;
+                        }
                         match workspace.declared_product_names.get(p) {
                             Some(decl) => {
                                 let declared_in = match (&decl.module, decl.builtin) {
@@ -90,11 +103,20 @@ pub(crate) fn select_roots<'a>(
                     }
                     p.to_owned()
                 } else {
-                    goal_product_for_kind(workspace, goal, &target.kind).ok_or_else(|| {
-                        anyhow::anyhow!("{} has no {} product", target.address, goal.name)
-                    })?
+                    match goal_product_for_kind(workspace, goal, &target.kind) {
+                        Some(product) => product,
+                        None if wildcard => continue,
+                        None => bail!("{} has no {} product", target.address, goal.name),
+                    }
                 };
+                with_product += 1;
                 selected.insert(target.address.as_str(), (target, product));
+            }
+            if with_product == 0 {
+                bail!(
+                    "selector '{selector}' matches no target with a '{}' product",
+                    product_override.unwrap_or(goal.product.as_str())
+                );
             }
         }
     }
@@ -112,6 +134,18 @@ fn goal_product_for_kind(workspace: &Workspace, goal: &Goal, kind: &str) -> Opti
 }
 
 fn matches_selector(target: &Target, selector: &str) -> bool {
+    // Recursive wildcard: `//...` matches every target, `//dir/...` every
+    // target at or below `dir` (`//dir:x` and `//dir/sub:y`).
+    if let Some(prefix) = selector.strip_suffix("...") {
+        let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
+        let prefix = match prefix {
+            "" | "/" | "//" => return true,
+            p if p.starts_with("//") => p.to_owned(),
+            p => format!("//{p}"),
+        };
+        return target.address.starts_with(&format!("{prefix}/"))
+            || target.address.starts_with(&format!("{prefix}:"));
+    }
     target.address == selector
         || target.address.strip_prefix("//:") == Some(selector)
         || target.address.ends_with(&format!(":{selector}"))
@@ -173,5 +207,30 @@ mod tests {
         let root = target("//:pkg");
         // Root-package ":name" shorthand.
         assert!(matches_selector(&root, "pkg"));
+    }
+
+    #[test]
+    fn matches_selector_supports_recursive_wildcards() {
+        let nested = target("//library/jodin:jodin");
+        let in_dir = target("//library:lib");
+        let at_root = target("//:pkg");
+
+        // `//...` matches everything.
+        for t in [&nested, &in_dir, &at_root] {
+            assert!(matches_selector(t, "//..."));
+        }
+
+        // `//dir/...` matches targets in the directory and below it.
+        assert!(matches_selector(&nested, "//library/..."));
+        assert!(matches_selector(&in_dir, "//library/..."));
+        assert!(!matches_selector(&at_root, "//library/..."));
+        assert!(matches_selector(&nested, "//library/jodin/..."));
+        assert!(!matches_selector(&in_dir, "//library/jodin/..."));
+
+        // Bare (non-"//") form, mirroring the other bare selector forms.
+        assert!(matches_selector(&nested, "library/..."));
+
+        // Prefixes match whole path components, not substrings.
+        assert!(!matches_selector(&nested, "//lib/..."));
     }
 }

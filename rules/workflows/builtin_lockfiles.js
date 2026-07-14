@@ -37,4 +37,4 @@ async function genBuiltinLockfiles() {
     }
 }
 
-goal("gen-builtin-lockfiles", genBuiltinLockfiles);
+goal("gen-builtin-lockfiles", genBuiltinLockfiles, { selection: "none" });

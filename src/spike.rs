@@ -136,10 +136,14 @@ pub struct Goal {
     pub name: String,
     /// Product requested from each selected target. Goals map uniformly onto
     /// products (build → "build", fmt → "fmt", …); targets whose kind lacks
-    /// the product are skipped during selector-less selection.
+    /// the product are skipped by wildcard selectors such as `//...`.
     pub product: String,
     /// Flags declared for this goal, keyed by flag name (e.g. "check").
     pub flags: BTreeMap<String, GoalFlagDef>,
+    /// Declared via `goal(name, fn, { selection: "none" })`: the goal ignores
+    /// target selection, so a selector-less invocation runs its callback
+    /// against an empty selection instead of erroring.
+    pub selectorless: bool,
 }
 
 /// A product name declared exactly once (via `productName()`/`goal()` in JS,
@@ -261,6 +265,7 @@ impl Default for HostState {
                     name: name.to_owned(),
                     product: name.to_owned(),
                     flags: BTreeMap::new(),
+                    selectorless: false,
                 },
             );
         }
@@ -1492,7 +1497,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_named_cache", host_named_cache)?;
 
     // ------------------------------------------------------------------
-    // __host_goal(name, productPolicy, flagsJson, stack) → u32 product-name id
+    // __host_goal(name, productPolicy, flagsJson, selectorless, stack) → u32 product-name id
     // flagsJson: JSON object of { flagName: { description?: string } },
     // merged into the goal's declared flags regardless of whether the goal
     // itself is a fresh registration (flags are additive/idempotent, unlike
@@ -1510,6 +1515,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         move |name: String,
               policy_val: Value,
               flags_json: String,
+              selectorless: bool,
               stack: String|
               -> rquickjs::Result<u32> {
             if name.is_empty() {
@@ -1561,6 +1567,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                             name: name.clone(),
                             product: product.clone(),
                             flags,
+                            selectorless,
                         },
                     );
                 }
@@ -5074,13 +5081,19 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
             "debug"
         );
         // The configured product evaluates live (its flags come from
-        // configuration()), and selector-less selection picks it up.
+        // configuration()), and wildcard selection picks it up.
         run_goal_live(&workspace, p, "build", &["pkg".into()])
             .await
             .unwrap();
         let goal_def = workspace.workspace.goals.get("build").unwrap();
         let no_dynamic_2: BTreeMap<String, Target> = BTreeMap::new();
-        let roots = select_roots(&workspace.workspace, &no_dynamic_2, goal_def, &[]).unwrap();
+        let roots = select_roots(
+            &workspace.workspace,
+            &no_dynamic_2,
+            goal_def,
+            &["//...".to_owned()],
+        )
+        .unwrap();
         assert!(roots
             .iter()
             .any(|(t, product)| t.address == "//:pkg" && product == "build"));
@@ -6543,12 +6556,20 @@ export const build = product(K_selected_targets_test, BUILD, async function buil
             "//:a"
         );
 
-        // Empty selectors: every target with a product for this goal is selected.
+        // Wildcard selector: every target with a product for this goal is selected.
         reset_js_memo_state(&live).await;
         *live.scheduler.lock().unwrap() = Some(scheduler);
-        execute_goal_live(&live, p, "build", &[], false, 1, serde_json::json!({}))
-            .await
-            .unwrap();
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &["//...".to_owned()],
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(p.join("selection-a.txt")).unwrap(),
             "//:a,//:b"
@@ -7465,6 +7486,70 @@ export const check = product(K_kind_a, P_check, async function check(handle) {})
             err.contains("'nonexistent' is not a declared product name"),
             "expected product-not-found error, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn selection_requires_selectors_and_wildcards_filter_by_product() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, goal, targetKind, BUILD } from "imp:core";
+const KindA = targetKind("wild-kind-a");
+const KindB = targetKind("wild-kind-b");
+
+export const a = target({ kind: "wild-kind-a", fields: {} });
+export const b = target({ kind: "wild-kind-b", fields: {} });
+export const build_a = product(KindA, BUILD, async function build_a(handle) {});
+
+goal("nosel", async function noselGoal(selection) {}, { selection: "none" });
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let no_dynamic: BTreeMap<String, Target> = BTreeMap::new();
+        let build_goal = live.workspace.goals.get("build").unwrap();
+
+        // No selector and no //:default target is an error.
+        let err = select_roots(&live.workspace, &no_dynamic, build_goal, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires a target selector"), "{err}");
+        assert!(err.contains("//..."), "{err}");
+
+        // A wildcard selects every target with the goal's product and
+        // silently skips the rest.
+        let roots = select_roots(
+            &live.workspace,
+            &no_dynamic,
+            build_goal,
+            &["//...".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].0.address, "//:a");
+
+        // A wildcard that matches targets but no products is an error.
+        let nosel_goal = live.workspace.goals.get("nosel").unwrap();
+        let err = select_roots(
+            &live.workspace,
+            &no_dynamic,
+            nosel_goal,
+            &["//...".to_owned()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("matches no target with a 'nosel' product"),
+            "{err}"
+        );
+
+        // A `selection: "none"` goal runs selector-less with an empty selection.
+        assert!(nosel_goal.selectorless);
+        let roots = select_roots(&live.workspace, &no_dynamic, nosel_goal, &[]).unwrap();
+        assert!(roots.is_empty());
     }
 
     #[tokio::test]

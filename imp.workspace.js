@@ -15,7 +15,7 @@ import "//rules/workflows/build_workflow";
 import "//rules/workflows/builtin_lockfiles";
 import "//rules/workflows/fmt";
 import "//rules/workflows/generate";
-import { buildGenerateRoot } from "//rules/workflows/generate_build";
+import "//rules/workflows/generate_build";
 import "//rules/workflows/lint";
 import "//rules/workflows/lockfiles";
 import "//rules/workflows/package";
@@ -39,12 +39,6 @@ export const sccache = sccacheToolchain("0.10.0", { default: true });
 // Rust binaries link via cargo/rustc, which shell out to a C link driver;
 // see rules/rust/index.js's rustLinkerTools for why this reuses gcc.
 export const rust = rustToolchain("1.93.0", { default: true, linkDriver: gcc, linker: mold, sccache });
-
-// Dummy selection root for `imp goal generate-build` (see
-// //rules/workflows/generate_build.js) — a selector-less run needs one
-// selectable target to exist; which languages actually get scanned is
-// decided per rules group by their own `buildGenerate` config flag below.
-export const buildGenerateTarget = buildGenerateRoot({});
 
 // This repo dogfoods generate-build for all three rules groups; a fresh
 // workspace defaults to none (see each package's own `buildGenerate` config
