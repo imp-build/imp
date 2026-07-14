@@ -7,13 +7,20 @@ template = "page.html"
 A rule module pairs a **target constructor** (a plain function returning `target({ kind, attrs })`) with a **product** — a memoized async function registered against that target kind and a goal name, e.g. `"build"`:
 
 ```js
-import { target, product, run, output, output_path } from "imp:core";
+import { Target, product, run, output, output_path, BUILD } from "imp:core";
 
-export function stampFile({ output, text }) {
-    return target({ kind: "stamp-file", attrs: { entrypoint: output, sources: text } });
+export class StampFile extends Target {
+    static kind = "stamp-file";
+    constructor({ output, text }) {
+        super({ kind: StampFile.kind, attrs: { entrypoint: output, sources: text } });
+    }
 }
 
-export const file = product("stamp-file", "build", async function file(handle) {
+export function stampFile(opts) {
+    return new StampFile(opts);
+}
+
+export const file = product(StampFile, BUILD, async function file(handle) {
     return run({
         argv: ["sh", "-c", "printf '%s\\n' \"$2\" > \"$1\"",
             "imp-stamp", output_path(handle.attrs.entrypoint), handle.attrs.sources],

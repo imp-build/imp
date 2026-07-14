@@ -1,4 +1,4 @@
-import { Target, product, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Target, product, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas, TOOLCHAIN } from "imp:core";
 
 import { resolveOdinToolchainVersion } from "//rules/odin/toolchain";
 
@@ -122,4 +122,4 @@ export function odinfmtToolchain(version) {
     return new OdinfmtToolchain({ version });
 }
 
-product("odinfmt-toolchain", "toolchain", (handle) => odinfmtBin(handle.attrs.version));
+product(OdinfmtToolchain, TOOLCHAIN, (handle) => odinfmtBin(handle.attrs.version));

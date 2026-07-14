@@ -1,4 +1,5 @@
 import { productFor } from "imp:core";
+import { RUST_BUILD_CACHE } from "//rules/rust/products";
 import {
     describe,
     expect,
@@ -136,7 +137,7 @@ test("registers a rust-build-cache product exposing RUSTC_WRAPPER/SCCACHE_DIR an
         installSccacheToolchain("0.10.0", "/tmp/sccache-0.10.0");
         const toolchain = sccacheToolchain("0.10.0");
 
-        const wrapper = await productFor(toolchain, "rust-build-cache");
+        const wrapper = await productFor(toolchain, RUST_BUILD_CACHE);
 
         expect(await wrapper.env()).toEqual([
             "SCCACHE_DIR=/cache/sccache-data/linux-x86_64",
@@ -153,7 +154,7 @@ test("env() starts the sccache worker via the host worker registry", async () =>
         installSccacheToolchain("0.10.0", "/tmp/sccache-0.10.0");
         const toolchain = sccacheToolchain("0.10.0");
 
-        const wrapper = await productFor(toolchain, "rust-build-cache");
+        const wrapper = await productFor(toolchain, RUST_BUILD_CACHE);
         await wrapper.env();
 
         const [name, opts] = host.calls.find((call) => call[0] === "workerStart").slice(1);

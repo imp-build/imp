@@ -295,7 +295,7 @@ fn run_direct_tool_command(bin: &std::path::Path, args: &[std::ffi::OsString]) -
 /// Resolve `@name` to an absolute binary path via the workspace's own
 /// declarations: `name` must be a top-level `export const <name> = ...` in
 /// `imp.workspace.js` whose target kind has a registered `"toolchain"`
-/// product (see `product(kind, "toolchain", fn)` in the toolchain rule
+/// product (see `product(SomeToolchain, TOOLCHAIN, fn)` in the toolchain rule
 /// modules, and `invokeToolchainProduct` in `imp_core.js`). No per-tool
 /// Rust code is required to add a new `@tool`.
 async fn resolve_workspace_tool_bin(name: &str) -> Result<PathBuf> {
@@ -1331,12 +1331,13 @@ mod tests {
         write_file(
             &p.join(spike::BUILD_FILE),
             r#"
-import { target, product } from "imp:core";
+import { target, product, targetKind, BUILD } from "imp:core";
+const K_workspace_js_workers_test = targetKind("workspace-js-workers-test");
 
 export const a = target({ kind: "workspace-js-workers-test" });
 export const b = target({ kind: "workspace-js-workers-test" });
 
-export const build = product("workspace-js-workers-test", "build", async function build(handle) {
+export const build = product(K_workspace_js_workers_test, BUILD, async function build(handle) {
     await Promise.resolve();
     return handle.label.name;
 });

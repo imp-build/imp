@@ -1,11 +1,16 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { memo, product } from "imp:core";
+import { memo, product, productName, targetKind } from "imp:core";
+
+const TestKind = targetKind("test-kind");
+const TEST_PRODUCT = productName("test-product");
+const OTHER_PRODUCT = productName("other-product");
+const P_PRODUCT = productName("p-product");
 
 describe("product", () => {
 
 test("returns a callable memoized function", async () => {
     let calls = 0;
-    const fn = product("test-kind", "test-product", async function compute(x) {
+    const fn = product(TestKind, TEST_PRODUCT, async function compute(x) {
         calls++;
         return x * 3;
     });
@@ -20,7 +25,7 @@ test("returns a callable memoized function", async () => {
 
 test("different args produce different results", async () => {
     let calls = 0;
-    const fn = product("test-kind", "other-product", async function compute2(x) {
+    const fn = product(TestKind, OTHER_PRODUCT, async function compute2(x) {
         calls++;
         return x + 10;
     });
@@ -37,7 +42,7 @@ test("product and memo of the same function have independent caches", async () =
     let calls = 0;
     async function shared(x) { calls++; return x; }
 
-    const p = product("test-kind", "p-product", shared);
+    const p = product(TestKind, P_PRODUCT, shared);
     const m = memo(shared);
 
     await p(5);

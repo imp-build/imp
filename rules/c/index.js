@@ -19,10 +19,14 @@ import {
     targetAddress,
     workspaceTargets,
     writeWorkspace,
+    BUILD,
+    PACKAGE,
+    TEST,
 } from "imp:core";
 
 import { distPathFor } from "//rules/workflows/package";
-import { registerBuildGenerator } from "//rules/workflows/generate_build";
+import { registerBuildGenerator, GENERATE_BUILD } from "//rules/workflows/generate_build";
+import { CC_TOOLCHAIN } from "//rules/c/products";
 
 /**
  * Declarative workspace configuration schema for C/C++.
@@ -40,12 +44,14 @@ import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import {
     defaultGccToolchain,
     gccTool,
+    GccToolchain,
 } from "//rules/c/gcc/toolchain";
 import {
     defaultZigToolchain,
     zigBuildCacheTool,
     zigGlobalCacheEnv,
     zigTool,
+    ZigToolchain,
 } from "//rules/c/zig/toolchain";
 
 // Generated BUILD.js files can reference these rule names regardless of which
@@ -332,6 +338,13 @@ export class CcBinary extends CcTarget {
     }
 }
 
+// Kind carrier for cc_test product registration. cc_test targets are minted
+// by the cmake expander (see //rules/c/cmake) rather than constructed
+// through a dedicated factory here.
+export class CcTest extends CcTarget {
+    static kind = "cc_test";
+}
+
 /**
  * Declare a raw C/C++ library target.
  *
@@ -445,15 +458,15 @@ class ZigCcToolchain {
     }
 }
 
-product("gcc-toolchain", "cc-toolchain", (handle) => new GccCcToolchain(handle));
-product("zig-toolchain", "cc-toolchain", (handle) => new ZigCcToolchain(handle));
+product(GccToolchain, CC_TOOLCHAIN, (handle) => new GccCcToolchain(handle));
+product(ZigToolchain, CC_TOOLCHAIN, (handle) => new ZigCcToolchain(handle));
 
 async function ccToolchainFor(handle) {
     const toolchain = handle.attrs.toolchain || defaultZigToolchain() || defaultGccToolchain();
     if (!toolchain) {
         throw new Error("C/C++ builds need an explicit toolchain or a declared default zigToolchain()/gccToolchain()");
     }
-    return productFor(toolchain, "cc-toolchain");
+    return productFor(toolchain, CC_TOOLCHAIN);
 }
 
 // Compiles each source to its own object file, sandboxed and cached
@@ -573,7 +586,7 @@ async function buildRawBinary(handle) {
     return result;
 }
 
-export const ccBuild = product("cc_library", "build", async function ccBuild(handle) {
+export const ccBuild = product(CcLibrary, BUILD, async function ccBuild(handle) {
     if (handle.attrs.backend === "cmake") {
         const cmake = await import("//rules/c/cmake");
         return cmake.buildCmakeArtifact(handle);
@@ -581,7 +594,7 @@ export const ccBuild = product("cc_library", "build", async function ccBuild(han
     return buildRawLibrary(handle);
 });
 
-product("cc_binary", "build", async function ccBinaryBuild(handle) {
+product(CcBinary, BUILD, async function ccBinaryBuild(handle) {
     if (handle.attrs.backend === "cmake") {
         const cmake = await import("//rules/c/cmake");
         return cmake.buildCmakeArtifact(handle);
@@ -589,7 +602,7 @@ product("cc_binary", "build", async function ccBinaryBuild(handle) {
     return buildRawBinary(handle);
 });
 
-product("cc_test", "build", async function ccTestBuild(handle) {
+product(CcTest, BUILD, async function ccTestBuild(handle) {
     if (handle.attrs.backend === "cmake") {
         const cmake = await import("//rules/c/cmake");
         return cmake.buildCmakeArtifact(handle);
@@ -597,7 +610,7 @@ product("cc_test", "build", async function ccTestBuild(handle) {
     return buildRawBinary(handle);
 });
 
-export const ccLibraryPackage = product("cc_library", "package", async function ccLibraryPackage(handle) {
+export const ccLibraryPackage = product(CcLibrary, PACKAGE, async function ccLibraryPackage(handle) {
     if (handle.attrs.backend === "cmake") {
         const cmake = await import("//rules/c/cmake");
         return cmake.packageCmakeArtifact(handle);
@@ -607,7 +620,7 @@ export const ccLibraryPackage = product("cc_library", "package", async function 
     return result;
 });
 
-product("cc_binary", "package", async function ccBinaryPackage(handle) {
+product(CcBinary, PACKAGE, async function ccBinaryPackage(handle) {
     if (handle.attrs.backend === "cmake") {
         const cmake = await import("//rules/c/cmake");
         return cmake.packageCmakeArtifact(handle);
@@ -617,7 +630,7 @@ product("cc_binary", "package", async function ccBinaryPackage(handle) {
     return result;
 });
 
-product("cc_test", "test", async function ccTestRun(handle) {
+product(CcTest, TEST, async function ccTestRun(handle) {
     if (handle.attrs.backend === "cmake") {
         const cmake = await import("//rules/c/cmake");
         return cmake.runCTest(handle);
@@ -638,7 +651,13 @@ function source_has_main(path) {
     return has_c_main_entrypoint(read_file(path));
 }
 
-export const generateBuild = product("cpp-build-generator", "generate-build",
+// Phantom kind: never declared as a workspace target; carries the kind for
+// the generate-build generator product and registerBuildGenerator().
+class CppBuildGenerator extends Target {
+    static kind = "cpp-build-generator";
+}
+
+export const generateBuild = product(CppBuildGenerator, GENERATE_BUILD,
     async function generateBuild(handle) {
         const root = handle.attrs.root || ".";
         const exclude = handle.attrs.exclude || DEFAULT_GENERATE_BUILD_EXCLUDES;
@@ -691,4 +710,4 @@ export const generateBuild = product("cpp-build-generator", "generate-build",
     }
 );
 
-registerBuildGenerator({ namespace: "c", kind: "cpp-build-generator" });
+registerBuildGenerator({ namespace: "c", kind: CppBuildGenerator });

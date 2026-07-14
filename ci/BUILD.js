@@ -7,7 +7,11 @@
 //
 //   imp goal generate //ci:docs_workflow          # regenerate the file
 //   imp goal generate //ci:docs_workflow --check   # CI drift gate, no writes
-import { target, product, file_set } from "imp:core";
+import { target, product, file_set, targetKind } from "imp:core";
+import { GENERATE } from "//rules/workflows/generate";
+import { GENERATE_CHECK } from "//rules/workflows/products";
+
+const CiWorkflow = targetKind("ci-workflow");
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import { generatedFiles } from "//rules/imp/generate";
 
@@ -35,12 +39,12 @@ async function runGenerator(materialize) {
 
 export const docs_workflow = target({ kind: "ci-workflow", attrs: {} });
 
-export const generate = product("ci-workflow", "generate", async function generate() {
+export const generate = product(CiWorkflow, GENERATE, async function generate() {
     const { changed } = await runGenerator(true);
     return { generated: changed.length };
 });
 
-export const generate_check = product("ci-workflow", "generate-check", async function generate_check() {
+export const generate_check = product(CiWorkflow, GENERATE_CHECK, async function generate_check() {
     const { changed } = await runGenerator(false);
     return { checked: 1, stale: changed };
 });

@@ -26,7 +26,7 @@ import { run, output, file_set, digestOf, diffDigests, writeWorkspace } from "im
  * `generate-check` product (CAS-only, safe for CI drift checks):
  *
  * ```js
- * export const generate = product("some-kind", "generate", async (handle) => {
+ * export const generate = product(SomeKind, GENERATE, async (handle) => {
  *     const built = await buildGenerator(handle);
  *     const { changed } = await generatedFiles({
  *         display: `generate ${handle.label.address}`,
@@ -39,7 +39,7 @@ import { run, output, file_set, digestOf, diffDigests, writeWorkspace } from "im
  *     return { generated: changed.length };
  * });
  *
- * export const generateCheck = product("some-kind", "generate-check", async (handle) => {
+ * export const generateCheck = product(SomeKind, GENERATE_CHECK, async (handle) => {
  *     const built = await buildGenerator(handle);
  *     const { changed } = await generatedFiles({
  *         display: `generate --check ${handle.label.address}`,

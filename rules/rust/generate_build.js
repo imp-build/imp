@@ -21,11 +21,12 @@ import {
     registerBuildRule,
     run,
     workspaceTargets,
+    Target,
 } from "imp:core";
 
 import { declared_path } from "//rules/rust";
 import { rustTool } from "//rules/rust/toolchain";
-import { registerBuildGenerator } from "//rules/workflows/generate_build";
+import { registerBuildGenerator, GENERATE_BUILD } from "//rules/workflows/generate_build";
 
 registerBuildRule({
     rule: "cargoPackage",
@@ -140,7 +141,13 @@ async function cargoMetadataFor(manifestPath) {
     return JSON.parse(result.stdout);
 }
 
-export const generateBuild = product("cargo-build-generator", "generate-build",
+// Phantom kind: never declared as a workspace target; carries the kind for
+// the generate-build generator product and registerBuildGenerator().
+class CargoBuildGenerator extends Target {
+    static kind = "cargo-build-generator";
+}
+
+export const generateBuild = product(CargoBuildGenerator, GENERATE_BUILD,
     async function generateBuild(handle) {
         const manifests = allUnowned({
             root: handle.attrs.root || ".",
@@ -180,4 +187,4 @@ export const generateBuild = product("cargo-build-generator", "generate-build",
     }
 );
 
-registerBuildGenerator({ namespace: "rust", kind: "cargo-build-generator" });
+registerBuildGenerator({ namespace: "rust", kind: CargoBuildGenerator });

@@ -1,4 +1,4 @@
-import { Target, glob, memo, output, output_path, product, registerBuildRule, run, targetAddress, writeWorkspace } from "imp:core";
+import { Target, glob, memo, output, output_path, product, registerBuildRule, run, targetAddress, writeWorkspace, BUILD, PACKAGE } from "imp:core";
 import { distPathFor } from "//rules/workflows/package";
 
 import {
@@ -137,7 +137,43 @@ export function sandboxRootEnvExports(envEntries) {
     });
 }
 
-export const python_app_build = product("python-app", "build", async function python_app_build(handle) {
+export class PythonApp extends Target {
+    static kind = "python-app";
+    constructor({ src = ".", entryPoint, uvVersion, pexVersion, extraPexArgs = [], deps = [] }) {
+        const explicitUvTarget = uvVersion && uvVersion.__imp === true ? uvVersion : null;
+        const explicitUvVersion = uvVersion && uvVersion.__imp !== true ? uvVersion : null;
+        const uvToolchainTarget = explicitUvTarget || (!explicitUvVersion ? defaultUvToolchain() : null);
+        const resolvedUvVersion = explicitUvVersion || (uvToolchainTarget && uvToolchainTarget.attrs?.version);
+
+        const explicitPexTarget = pexVersion && pexVersion.__imp === true ? pexVersion : null;
+        const explicitPexVersion = pexVersion && pexVersion.__imp !== true ? pexVersion : null;
+        const pexToolchainTarget = explicitPexTarget || (!explicitPexVersion ? defaultPexToolchain() : null);
+        const resolvedPexVersion = explicitPexVersion || (pexToolchainTarget && pexToolchainTarget.attrs?.version);
+
+        const allDeps = [
+            ...(uvToolchainTarget ? [{ target: uvToolchainTarget, mode: "tool" }] : []),
+            ...(pexToolchainTarget ? [{ target: pexToolchainTarget, mode: "tool" }] : []),
+            ...deps,
+        ];
+
+        super({
+            kind: PythonApp.kind,
+            attrs: {
+                src,
+                ...(entryPoint ? { entryPoint } : {}),
+                ...(resolvedUvVersion ? { uvVersion: resolvedUvVersion } : {}),
+                ...(uvToolchainTarget ? { uvToolchainTarget } : {}),
+                ...(resolvedPexVersion ? { pexVersion: resolvedPexVersion } : {}),
+                ...(pexToolchainTarget ? { pexToolchainTarget } : {}),
+                ...(extraPexArgs.length ? { extraPexArgs } : {}),
+                ...(allDeps.length ? { deps: allDeps.map(dep => dep.target || dep) } : {}),
+            },
+            deps: allDeps,
+        });
+    }
+}
+
+export const python_app_build = product(PythonApp, BUILD, async function python_app_build(handle) {
     const srcPath = declared_path(handle, handle.attrs.src || ".");
     const inputFiles = await sources(handle);
     // attrs.uvVersion/pexVersion hold the *resolved version string* fixed at
@@ -201,7 +237,7 @@ export const python_app_build = product("python-app", "build", async function py
     return { ...result, pexOutPath };
 });
 
-export const python_app_package = product("python-app", "package", async function python_app_package(handle) {
+export const python_app_package = product(PythonApp, PACKAGE, async function python_app_package(handle) {
     const result = await python_app_build(handle);
     const pexOutDir = result.pexOutPath.slice(0, result.pexOutPath.lastIndexOf("/"));
     writeWorkspace(distPathFor(handle), result.outputDigest, { from: pexOutDir });
@@ -211,42 +247,6 @@ export const python_app_package = product("python-app", "package", async functio
 // ---------------------------------------------------------------------------
 // Target constructor
 // ---------------------------------------------------------------------------
-
-export class PythonApp extends Target {
-    static kind = "python-app";
-    constructor({ src = ".", entryPoint, uvVersion, pexVersion, extraPexArgs = [], deps = [] }) {
-        const explicitUvTarget = uvVersion && uvVersion.__imp === true ? uvVersion : null;
-        const explicitUvVersion = uvVersion && uvVersion.__imp !== true ? uvVersion : null;
-        const uvToolchainTarget = explicitUvTarget || (!explicitUvVersion ? defaultUvToolchain() : null);
-        const resolvedUvVersion = explicitUvVersion || (uvToolchainTarget && uvToolchainTarget.attrs?.version);
-
-        const explicitPexTarget = pexVersion && pexVersion.__imp === true ? pexVersion : null;
-        const explicitPexVersion = pexVersion && pexVersion.__imp !== true ? pexVersion : null;
-        const pexToolchainTarget = explicitPexTarget || (!explicitPexVersion ? defaultPexToolchain() : null);
-        const resolvedPexVersion = explicitPexVersion || (pexToolchainTarget && pexToolchainTarget.attrs?.version);
-
-        const allDeps = [
-            ...(uvToolchainTarget ? [{ target: uvToolchainTarget, mode: "tool" }] : []),
-            ...(pexToolchainTarget ? [{ target: pexToolchainTarget, mode: "tool" }] : []),
-            ...deps,
-        ];
-
-        super({
-            kind: PythonApp.kind,
-            attrs: {
-                src,
-                ...(entryPoint ? { entryPoint } : {}),
-                ...(resolvedUvVersion ? { uvVersion: resolvedUvVersion } : {}),
-                ...(uvToolchainTarget ? { uvToolchainTarget } : {}),
-                ...(resolvedPexVersion ? { pexVersion: resolvedPexVersion } : {}),
-                ...(pexToolchainTarget ? { pexToolchainTarget } : {}),
-                ...(extraPexArgs.length ? { extraPexArgs } : {}),
-                ...(allDeps.length ? { deps: allDeps.map(dep => dep.target || dep) } : {}),
-            },
-            deps: allDeps,
-        });
-    }
-}
 
 /**
  * Declare a Python application packaged as a PEX file.

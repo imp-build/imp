@@ -49,7 +49,7 @@ Declaring `odinToolchain(...)` without exporting it (the old style) still works 
 This means adding a new `@tool` needs no changes to imp itself — just an exported target whose kind resolves to a binary. A toolchain rule module opts in with:
 
 ```js
-import { Target, product } from "imp:core";
+import { Target, product, TOOLCHAIN } from "imp:core";
 
 export class MyToolchain extends Target {
     static kind = "my-toolchain";
@@ -62,7 +62,7 @@ export function myToolchain(version) {
     return new MyToolchain({ version });
 }
 
-product("my-toolchain", "toolchain", (handle) => resolveMyToolBin(handle.attrs.version));
+product(MyToolchain, TOOLCHAIN, (handle) => resolveMyToolBin(handle.attrs.version));
 ```
 
 and the workspace file exports it:

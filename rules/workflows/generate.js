@@ -9,11 +9,12 @@
 // only provides the shared dispatch goal; a rule package adds the products for its
 // own target kind following the pattern documented in generate.js.
 import { goal, resolveProduct, goalFlags, logInfo } from "imp:core";
+import { GENERATE_CHECK } from "//rules/workflows/products";
 
 export async function generateGoal(selection) {
     const { check } = goalFlags();
     const targets = check
-        ? selection.map((entry) => ({ ...entry, product: "generate-check" }))
+        ? selection.map((entry) => ({ ...entry, product: GENERATE_CHECK }))
         : selection;
     const resolved = targets.map(resolveProduct);
     const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));
@@ -49,7 +50,7 @@ export async function generateGoal(selection) {
     }
 }
 
-goal(
+export const GENERATE = goal(
     "generate",
     generateGoal,
     {

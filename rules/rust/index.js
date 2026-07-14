@@ -14,9 +14,15 @@ import {
     sourcesField,
     targetAddress,
     writeWorkspace,
+    BUILD,
+    PACKAGE,
+    TEST,
 } from "imp:core";
 
 import { distPathFor } from "//rules/workflows/package";
+import { RUST_LINKER, RUST_LINK_DRIVER, RUST_BUILD_CACHE } from "//rules/rust/products";
+import { CargoPackage, normalize_deps } from "//rules/rust/cargo_package";
+export { CargoPackage, normalize_deps } from "//rules/rust/cargo_package";
 
 import {
     defaultRustToolchain,
@@ -182,10 +188,10 @@ export async function rustLinkerTools(toolchainHandle) {
     if (!linkDriverHandle) {
         throw new Error("cargo builds need a declared gccToolchain() default, or a rustToolchain({ linkDriver }) — see //rules/c/gcc");
     }
-    const linkDriver = await productFor(linkDriverHandle, "rust-link-driver");
+    const linkDriver = await productFor(linkDriverHandle, RUST_LINK_DRIVER);
 
     const linkerHandle = toolchainHandle && toolchainHandle.attrs.linker;
-    const linker = linkerHandle ? await productFor(linkerHandle, "rust-linker") : null;
+    const linker = linkerHandle ? await productFor(linkerHandle, RUST_LINKER) : null;
 
     const sccacheActive = !!(toolchainHandle && toolchainHandle.attrs.sccache);
     const tools = [...(await linkDriver.tools()), ...(linker ? await linker.tools() : [])];
@@ -203,7 +209,7 @@ export async function rustBuildCacheTools(toolchainHandle) {
     if (!sccacheHandle) {
         return { tools: [], env: [] };
     }
-    const wrapper = await productFor(sccacheHandle, "rust-build-cache");
+    const wrapper = await productFor(sccacheHandle, RUST_BUILD_CACHE);
     return {
         tools: await wrapper.tools(),
         env: await wrapper.env(),
@@ -264,7 +270,8 @@ export function rustToolEnv(toolSpec, sccacheActive) {
  * @returns {Promise<object>} Run result, plus `outputPaths`: the built
  * binaries' workspace-relative paths, one per `bin` entry.
  */
-export const cargoBuild = product("cargo-package", "build",
+
+export const cargoBuild = product(CargoPackage, BUILD,
     async function cargoBuild(handle) {
         if (handle.attrs.bins.length === 0) {
             return { outputPaths: [] };
@@ -307,7 +314,7 @@ export const cargoBuild = product("cargo-package", "build",
     }
 );
 
-export const cargoDistPackage = product("cargo-package", "package", async function cargoDistPackage(handle) {
+export const cargoDistPackage = product(CargoPackage, PACKAGE, async function cargoDistPackage(handle) {
     const result = await cargoBuild(handle);
     if (handle.attrs.bins.length === 0) {
         return result;
@@ -328,7 +335,7 @@ export const cargoDistPackage = product("cargo-package", "package", async functi
  * @param {object} handle Target handle returned by cargoPackage().
  * @returns {Promise<object>} Run result from `cargo test`.
  */
-export const cargoTest = product("cargo-package", "test",
+export const cargoTest = product(CargoPackage, TEST,
     async function cargoTest(handle) {
         const toolSpec = await rustTool(rust_toolchain_version(handle));
         const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
@@ -373,58 +380,6 @@ export const cargoTest = product("cargo-package", "test",
 // ---------------------------------------------------------------------------
 // Target constructor
 // ---------------------------------------------------------------------------
-
-export function normalize_deps(deps) {
-    return deps
-        .map(d => (d && d.__imp ? d : (d && d.target ? d.target : null)))
-        .filter(Boolean);
-}
-
-export class CargoPackage extends Target {
-    static kind = "cargo-package";
-    constructor({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [], testTools = [], deps = [], workspaceMember = false }) {
-        const bins = bin ? (Array.isArray(bin) ? bin : [bin]) : [];
-
-        const toolchainHandle = toolchain && toolchain.__imp === true ? toolchain
-                              : (typeof toolchain === "string" ? null : defaultRustToolchain());
-        const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
-
-        const normalizedDeps = normalize_deps(deps);
-        const normalizedTestTools = normalize_deps(testTools);
-        const allDeps = [
-            ...(toolchainHandle ? [{ target: toolchainHandle }] : []),
-            ...normalizedDeps.map(target => ({ target })),
-            ...normalizedTestTools.map(target => ({ target, mode: "tool" })),
-        ];
-
-        super({
-            kind: CargoPackage.kind,
-            attrs: {
-                path,
-                bins,
-                release,
-                cargoArgs,
-                testArgs,
-                testTools: normalizedTestTools,
-                workspaceMember,
-                ...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
-                ...(toolchainVersion ? { toolchainVersion } : {}),
-                ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
-            },
-            // Ownership tracking (compute_owned_files/allUnowned, see
-            // //rules/rust/generate_build) — deliberately narrower than
-            // sources() below: this crate owns only its own manifest and
-            // sources, not sibling workspace members that a workspace-root
-            // build merely needs to *see* to resolve path deps.
-            sources: sourcesField({
-                root: path,
-                include: ["Cargo.toml", "Cargo.lock", "**/*.rs"],
-                exclude: ["target/**"],
-            }),
-            deps: allDeps,
-        });
-    }
-}
 
 /**
  * Declare a Cargo package target: a self-contained crate, a cargo workspace

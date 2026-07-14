@@ -6,7 +6,12 @@ import {
 import {
     product,
     target,
+    BUILD,
+    targetKind,
 } from "imp:core";
+const K_build_workflow_artifact_a = targetKind("build-workflow-artifact-a");
+const K_build_workflow_artifact_b = targetKind("build-workflow-artifact-b");
+const K_build_workflow_broken = targetKind("build-workflow-broken");
 import {
     buildGoal,
 } from "//rules/workflows/build_workflow";
@@ -31,13 +36,13 @@ async function withFakeLog(fn) {
 describe("build workflow", () => {
 
 test("buildGoal logs a plain count after successful builds, not artifact paths", async () => {
-    product("build-workflow-artifact-a", "build", async () => ({
+    product(K_build_workflow_artifact_a, BUILD, async () => ({
         stdout: "hello\nworld\n",
         stderr: "",
         exitCode: 0,
         outputs: [{ kind: "file", path: "build/app.txt" }],
     }));
-    product("build-workflow-artifact-b", "build", async () => ({
+    product(K_build_workflow_artifact_b, BUILD, async () => ({
         stdout: "",
         stderr: "",
         exitCode: 0,
@@ -62,7 +67,7 @@ test("buildGoal logs a plain count after successful builds, not artifact paths",
 });
 
 test("buildGoal fails with the target label when a build product throws", async () => {
-    product("build-workflow-broken", "build", async () => {
+    product(K_build_workflow_broken, BUILD, async () => {
         throw new Error("boom");
     });
     const broken = target({ kind: "build-workflow-broken" });

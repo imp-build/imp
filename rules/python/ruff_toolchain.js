@@ -2,7 +2,7 @@ import { Target, product, namedCache, run, output, output_path, platformInfo, ca
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import { resolveToolLockfile, lockedDownloadArgv, lockedDownloadTools } from "//rules/imp/lockfile";
-import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 
 const RUFF_TOOLCHAIN_CACHE = "ruff-toolchains";
 // The bundled lockfile ships embedded in the binary (it lives inside
@@ -317,6 +317,6 @@ const LOCKFILE_SPEC = {
     artifactName: ruffArtifactName,
     lockfile: DEFAULT_LOCKFILE,
 };
-product("ruff-toolchain", "gen-lockfiles", (handle) =>
+product(RuffToolchain, GEN_LOCKFILES, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC, lockfile: handle.attrs.lockfile ?? DEFAULT_LOCKFILE }));
 registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["0.15.20", "0.15.21"] });

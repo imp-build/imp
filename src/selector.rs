@@ -59,7 +59,34 @@ pub(crate) fn select_roots<'a>(
                 let product = if let Some(p) = product_override {
                     let key = (target.kind.clone(), p.to_owned());
                     if !workspace.products.contains_key(&key) {
-                        bail!("{} has no product '{p}'", target.address);
+                        match workspace.declared_product_names.get(p) {
+                            Some(decl) => {
+                                let declared_in = match (&decl.module, decl.builtin) {
+                                    (Some(module), _) => format!(" (declared in {module})"),
+                                    (None, true) => " (builtin)".to_owned(),
+                                    (None, false) => String::new(),
+                                };
+                                bail!(
+                                    "{} (kind '{}') has no product '{p}'{declared_in}; \
+                                     no rule registers it for this kind",
+                                    target.address,
+                                    target.kind
+                                );
+                            }
+                            None => {
+                                let declared = workspace
+                                    .declared_product_names
+                                    .keys()
+                                    .map(String::as_str)
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                bail!(
+                                    "'{p}' is not a declared product name; declared names: {declared}. \
+                                     If it comes from a rule module, import that module from \
+                                     imp.workspace.js"
+                                );
+                            }
+                        }
                     }
                     p.to_owned()
                 } else {

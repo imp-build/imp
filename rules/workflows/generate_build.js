@@ -42,7 +42,17 @@ export function buildGenerateRoot(opts = {}) {
     return new BuildGenerateRoot(opts);
 }
 
-product(BuildGenerateRoot.kind, "generate-build", async () => ({}));
+export const GENERATE_BUILD = goal(
+    "generate-build",
+    generateBuildGoal,
+    {
+        flags: {
+            check: { description: "Verify generated BUILD files are up to date without writing changes" },
+        },
+    },
+);
+
+product(BuildGenerateRoot, GENERATE_BUILD, async () => ({}));
 
 const _registeredGenerators = [];
 
@@ -57,11 +67,12 @@ const _registeredGenerators = [];
  *
  * @param {object} opts
  * @param {string} opts.namespace Configuration namespace whose `buildGenerate` field gates this generator.
- * @param {string} opts.kind Target kind the "generate-build" product is registered under.
+ * @param {Function} opts.kind Target subclass the "generate-build" product is registered under.
  * @returns {void}
  */
 export function registerBuildGenerator({ namespace, kind }) {
-    _registeredGenerators.push({ namespace, kind });
+    const kindName = typeof kind === "function" ? kind.kind : kind;
+    _registeredGenerators.push({ namespace, kind: kindName });
 }
 
 function mergeEdits(target, edits) {
@@ -80,7 +91,7 @@ export async function generateBuildGoal(selection) {
         if (!config.buildGenerate) continue;
         let result;
         try {
-            result = await productFor({ __imp: true, kind, attrs: {} }, "generate-build");
+            result = await productFor({ __imp: true, kind, attrs: {} }, GENERATE_BUILD);
         } catch (e) {
             throw new Error(`${kind}#generate-build: ${e && e.message ? e.message : e}`);
         }
@@ -98,13 +109,3 @@ export async function generateBuildGoal(selection) {
         logInfo(`generate-build: ${changed.length} file(s) written\n${changed.map((f) => `  ${f}`).join("\n")}`);
     }
 }
-
-goal(
-    "generate-build",
-    generateBuildGoal,
-    {
-        flags: {
-            check: { description: "Verify generated BUILD files are up to date without writing changes" },
-        },
-    },
-);

@@ -16,7 +16,7 @@
 import { Target, goal, product, run, output, output_path, workspaceTargets, platformInfo } from "imp:core";
 import { default_output_path, odin_output_path, odinPackageAnalysis } from "//rules/odin";
 
-goal("vs");
+export const VS = goal("vs");
 
 const MODES = ["Debug", "Release"];
 
@@ -51,7 +51,14 @@ function writeJsonFile(path, value) {
     });
 }
 
-export const vs = product("vs-workspace", "vs", async function vs(handle) {
+export class VsWorkspace extends Target {
+    static kind = "vs-workspace";
+    constructor() {
+        super({ kind: VsWorkspace.kind, attrs: {} });
+    }
+}
+
+export const vs = product(VsWorkspace, VS, async function vs(handle) {
     const isWindows = platformInfo().os === "windows";
     const debuggerType = isWindows ? "cppvsdbg" : "lldb-dap";
 
@@ -124,13 +131,6 @@ export const vs = product("vs-workspace", "vs", async function vs(handle) {
 
     return { generated: Object.keys(files) };
 });
-
-export class VsWorkspace extends Target {
-    static kind = "vs-workspace";
-    constructor() {
-        super({ kind: VsWorkspace.kind, attrs: {} });
-    }
-}
 
 /**
  * Declare a target that generates VS/VS Code IDE configuration for the workspace.

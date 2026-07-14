@@ -5,7 +5,7 @@
 // pythonApp, a test run never needs to be packaged first, so this syncs its
 // own throwaway venv directly via uv, independent of PythonApp.
 
-import { Target, glob, product, run } from "imp:core";
+import { Target, glob, product, run, TEST } from "imp:core";
 
 import { declared_path, sandboxRootEnvExports, sources } from "//rules/python";
 
@@ -62,7 +62,7 @@ export function pythonTest({ src, testArgs, uvVersion, deps }) {
 // user-addressable artifacts. impure: true so a re-run always executes
 // pytest rather than replaying a cached pass/fail from the task cache —
 // same choice cargoTest/odinTest/runCTest make.
-export const pythonTestRun = product("python-test", "test", async function pythonTestRun(handle) {
+export const pythonTestRun = product(PythonTest, TEST, async function pythonTestRun(handle) {
     const srcPath = declared_path(handle, handle.attrs.src || ".");
     const inputFiles = await sources(handle);
     const uvToolSpec = await uvTool(handle.attrs.uvVersion);

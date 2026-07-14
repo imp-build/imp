@@ -1,4 +1,4 @@
-import { Target, product, nativeToolArtifact } from "imp:core";
+import { Target, product, productName, nativeToolArtifact } from "imp:core";
 
 export class NativeTool extends Target {
     static kind = "native-tool";
@@ -27,9 +27,11 @@ export function nativeTool(name) {
  * Memoized via product() — repeated resolution within one evaluation is free
  * and the PATH lookup + symlink materialization runs once.
  */
+export const TOOL = productName("tool");
+
 export const nativeToolSpec = product(
-    "native-tool",
-    "tool",
+    NativeTool,
+    TOOL,
     async function nativeToolSpec(handle) {
         const path = await nativeToolArtifact(handle.attrs.name);
         return {

@@ -1,7 +1,8 @@
 import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+import { RUST_LINK_DRIVER } from "//rules/rust/products";
 
 const GCC_TOOLCHAIN_CACHE = "gcc-toolchains";
 
@@ -274,7 +275,7 @@ const LOCKFILE_SPEC = {
     artifactName: gccArtifactName,
     lockfile: "//rules/c/gcc/gcc.lock",
 };
-product("gcc-toolchain", "gen-lockfiles", (handle) =>
+product(GccToolchain, GEN_LOCKFILES, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
 registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["2025.08-1"] });
 
@@ -284,7 +285,7 @@ registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["2025.08-1"] });
  * "clang"-named wrapper script Odin uses for the same reason (see gccTool()
  * docs above). Registered as the "rust-link-driver" product for the
  * "gcc-toolchain" kind so rustLinkerTools() (rules/rust/index.js) can
- * resolve it dynamically via productFor(handle, "rust-link-driver") — this
+ * resolve it dynamically via productFor(handle, RUST_LINK_DRIVER) — this
  * module never imports anything Rust-specific.
  */
 export class RustGccLinkDriver {
@@ -329,4 +330,4 @@ export class RustGccLinkDriver {
     }
 }
 
-product("gcc-toolchain", "rust-link-driver", (handle) => new RustGccLinkDriver(handle));
+product(GccToolchain, RUST_LINK_DRIVER, (handle) => new RustGccLinkDriver(handle));

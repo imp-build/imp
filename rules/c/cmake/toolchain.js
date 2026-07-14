@@ -1,7 +1,7 @@
 import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 
 const CMAKE_TOOLCHAIN_CACHE = "cmake-toolchains";
 
@@ -265,6 +265,6 @@ const LOCKFILE_SPEC = {
     artifactName: cmakeArtifactName,
     lockfile: "//rules/c/cmake/cmake.lock",
 };
-product("cmake-toolchain", "gen-lockfiles", (handle) =>
+product(CmakeToolchain, GEN_LOCKFILES, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
 registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["3.31.0"] });

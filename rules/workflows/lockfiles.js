@@ -18,7 +18,7 @@
 // meant to ship a pinned lockfile.
 //
 // Each toolchain rule module registers its own
-// `product("<x>-toolchain", "gen-lockfiles", ...)` by calling
+// `product(SomeToolchain, GEN_LOCKFILES, ...)` by calling
 // generateToolLockfile() with its pure URL/artifact helpers and its published
 // platform list. The goal carries no callback, so host dispatch runs that
 // product for every selected toolchain target. Invoke as
@@ -43,7 +43,9 @@ import {
 } from "imp:core";
 import { lockfileAddressToPath } from "//rules/imp/lockfile";
 
-goal("gen-lockfiles");
+/** Token for the per-toolchain lockfile-generation product; toolchain rule
+ * modules register it via `product(SomeToolchain, GEN_LOCKFILES, ...)`. */
+export const GEN_LOCKFILES = goal("gen-lockfiles");
 
 const defaultHost = { download, sha256, file_size, readAddressedFile, run, output, output_path };
 

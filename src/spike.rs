@@ -142,6 +142,19 @@ pub struct Goal {
     pub flags: BTreeMap<String, GoalFlagDef>,
 }
 
+/// A product name declared exactly once (via `productName()`/`goal()` in JS,
+/// or pre-declared as a builtin). Product registrations must present the
+/// declaration's id, so every product name provably originates from a single
+/// importable declaration site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredProductName {
+    pub id: u32,
+    /// Module that declared the name (e.g. "//rules/c/products"), or None
+    /// when the declaration stack couldn't be attributed to a module.
+    pub module: Option<String>,
+    pub builtin: bool,
+}
+
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CapabilityTool {
@@ -177,6 +190,9 @@ pub struct Workspace {
     /// Target kind -> expander registered via `expand(kind, fn, opts)`. An
     /// expander may optionally be scoped to the goals that need it.
     pub expanders: BTreeMap<String, Expander>,
+    /// Every declared product name, for resolving user-typed CLI strings
+    /// (`#product` overrides) against and for diagnostics.
+    pub declared_product_names: BTreeMap<String, DeclaredProductName>,
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +244,8 @@ pub(crate) struct HostState {
     id_to_address: BTreeMap<u32, String>,
     goal_callbacks: BTreeMap<String, String>,
     expanders: BTreeMap<String, Expander>,
+    declared_product_names: BTreeMap<String, DeclaredProductName>,
+    next_product_name_id: u32,
     /// `(pending id, address)` pairs appended by `__host_register_dynamic_target`
     /// as a rule's expander mints new targets. Drained by `ensure_expanded`.
     dynamic_registrations: Vec<(u32, String)>,
@@ -245,6 +263,30 @@ impl Default for HostState {
                     flags: BTreeMap::new(),
                 },
             );
+        }
+        // Builtin product names: one per pre-registered goal, plus the
+        // "toolchain" role hardcoded by `imp @tool` dispatch. imp:core
+        // re-fetches these tokens idempotently at module evaluation.
+        let mut declared_product_names = BTreeMap::new();
+        let mut next_product_name_id = 0u32;
+        for name in [
+            "build",
+            "test",
+            "fmt",
+            "lint",
+            "package",
+            "run",
+            "toolchain",
+        ] {
+            declared_product_names.insert(
+                name.to_owned(),
+                DeclaredProductName {
+                    id: next_product_name_id,
+                    module: None,
+                    builtin: true,
+                },
+            );
+            next_product_name_id += 1;
         }
         let mut platforms = BTreeMap::new();
         let local_target = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
@@ -272,6 +314,8 @@ impl Default for HostState {
             id_to_address: BTreeMap::new(),
             goal_callbacks: BTreeMap::new(),
             expanders: BTreeMap::new(),
+            declared_product_names,
+            next_product_name_id,
             dynamic_registrations: Vec::new(),
         }
     }
@@ -434,6 +478,7 @@ async fn create_live_runtime(
             platforms: hs.platforms.clone(),
             goal_callbacks: hs.goal_callbacks.clone(),
             expanders: hs.expanders.clone(),
+            declared_product_names: hs.declared_product_names.clone(),
         }
     };
 
@@ -610,6 +655,7 @@ async fn load_workspace_with_rules_and_service(
             expanders: hs.expanders.clone(),
             goals: hs.goals.clone(),
             platforms: hs.platforms.clone(),
+            declared_product_names: hs.declared_product_names.clone(),
         };
         (ws, id_to_address)
     };
@@ -1171,7 +1217,62 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_target", host_target)?;
 
     // ------------------------------------------------------------------
-    // __host_product(kind, name, fn)
+    // __host_declare_product_name(name, stack, builtinOk) → u32 id
+    //
+    // Declares a product name exactly once and returns its id; tokens minted
+    // from the id are the only way to register or look up products by name.
+    // Re-declaring from the same module is idempotent (module re-evaluation);
+    // `builtinOk` lets imp:core fetch the pre-declared builtin names.
+    // ------------------------------------------------------------------
+    let state_dpn = Arc::clone(&state);
+    let host_declare_product_name = Function::new(
+        ctx.clone(),
+        move |name: String, stack: String, builtin_ok: bool| -> rquickjs::Result<u32> {
+            if name.is_empty()
+                || name.contains('#')
+                || name.contains(':')
+                || name.contains(char::is_whitespace)
+            {
+                return Err(action_spec_error(format!(
+                    "invalid product name '{name}': must be non-empty, without '#', ':' or whitespace"
+                )));
+            }
+            let module = declaration_module(&stack);
+            let mut hs = state_dpn.lock().unwrap();
+            if let Some(existing) = hs.declared_product_names.get(&name) {
+                if (existing.builtin && builtin_ok) || existing.module == module {
+                    return Ok(existing.id);
+                }
+                let declared_in = if existing.builtin {
+                    "imp:core (builtin)".to_owned()
+                } else {
+                    existing
+                        .module
+                        .clone()
+                        .unwrap_or_else(|| "<unknown module>".to_owned())
+                };
+                return Err(action_spec_error(format!(
+                    "product name '{name}' is already declared in {declared_in}; \
+                     import its token instead of redeclaring it"
+                )));
+            }
+            let id = hs.next_product_name_id;
+            hs.next_product_name_id += 1;
+            hs.declared_product_names.insert(
+                name,
+                DeclaredProductName {
+                    id,
+                    module,
+                    builtin: false,
+                },
+            );
+            Ok(id)
+        },
+    )?;
+    globals.set("__host_declare_product_name", host_declare_product_name)?;
+
+    // ------------------------------------------------------------------
+    // __host_product(kind, name, nameId, fn, registrationStack)
     // ------------------------------------------------------------------
     let state_p = Arc::clone(&state);
     let product_workspace_root = workspace_root.clone();
@@ -1181,9 +1282,22 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         move |ctx: Ctx<'js>,
               kind: String,
               name: String,
+              name_id: u32,
               fn_val: Value<'js>,
               registration_stack: String|
               -> rquickjs::Result<()> {
+            {
+                let hs = state_p.lock().unwrap();
+                match hs.declared_product_names.get(&name) {
+                    Some(decl) if decl.id == name_id => {}
+                    _ => {
+                        return Err(action_spec_error(format!(
+                            "product registration for '{kind}#{name}' is not backed by a \
+                             declaration — import the token from its declaring module"
+                        )));
+                    }
+                }
+            }
             let exec_name = {
                 let mut hs = state_p.lock().unwrap();
                 let n = format!("__imp_exec_{}", hs.next_exec);
@@ -1378,16 +1492,26 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_named_cache", host_named_cache)?;
 
     // ------------------------------------------------------------------
-    // __host_goal(name, productPolicy, flagsJson)
+    // __host_goal(name, productPolicy, flagsJson, stack) → u32 product-name id
     // flagsJson: JSON object of { flagName: { description?: string } },
     // merged into the goal's declared flags regardless of whether the goal
     // itself is a fresh registration (flags are additive/idempotent, unlike
     // the first-registration-wins `product` field).
+    //
+    // Declares the goal's product name in the declared-name registry if
+    // needed and returns its id, so `goal()` can hand back a product-name
+    // token. Repeat registrations return the existing id (goals are
+    // first-registration-wins, so they are exempt from the
+    // duplicate-declaration error).
     // ------------------------------------------------------------------
     let state_g = Arc::clone(&state);
     let host_goal = Function::new(
         ctx.clone(),
-        move |name: String, policy_val: Value, flags_json: String| -> rquickjs::Result<()> {
+        move |name: String,
+              policy_val: Value,
+              flags_json: String,
+              stack: String|
+              -> rquickjs::Result<u32> {
             if name.is_empty() {
                 return Err(action_spec_error("goal name must not be empty".to_owned()));
             }
@@ -1434,14 +1558,33 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                     hs.goals.insert(
                         name.clone(),
                         Goal {
-                            name,
-                            product,
+                            name: name.clone(),
+                            product: product.clone(),
                             flags,
                         },
                     );
                 }
             }
-            Ok(())
+            // Declare the goal's product name (idempotent for repeat goal()
+            // calls and for goals shadowing an existing declaration).
+            let id = match hs.declared_product_names.get(&product) {
+                Some(existing) => existing.id,
+                None => {
+                    let id = hs.next_product_name_id;
+                    hs.next_product_name_id += 1;
+                    let module = declaration_module(&stack);
+                    hs.declared_product_names.insert(
+                        product,
+                        DeclaredProductName {
+                            id,
+                            module,
+                            builtin: false,
+                        },
+                    );
+                    id
+                }
+            };
+            Ok(id)
         },
     )?;
     globals.set("__host_goal", host_goal)?;
@@ -3047,6 +3190,38 @@ fn product_registration_module(stack: &str) -> Option<String> {
     None
 }
 
+/// Extract the declaring module from a JS stack for declaration-identity
+/// purposes. Unlike `product_registration_module` it accepts any module
+/// specifier (not just `//rules/…`), so declarations in workspace files and
+/// test modules still get a stable identity for duplicate detection; frames
+/// inside imp:core (the `productName()` helper itself) are skipped.
+fn declaration_module(stack: &str) -> Option<String> {
+    for line in stack.lines() {
+        let line = line.trim();
+        let rest = line.strip_prefix("at ").unwrap_or(line);
+        let mut location = match rest.rfind('(') {
+            Some(open) => rest[open + 1..].trim_end_matches(')'),
+            None => rest,
+        }
+        .trim();
+        for _ in 0..2 {
+            match location.rsplit_once(':') {
+                Some((prefix, suffix))
+                    if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) =>
+                {
+                    location = prefix;
+                }
+                _ => break,
+            }
+        }
+        if location.is_empty() || location == "imp:core" || !location.contains('/') {
+            continue;
+        }
+        return Some(location.to_owned());
+    }
+    None
+}
+
 fn product_group_and_tool(module: &str) -> Option<(String, String)> {
     let mut parts = module
         .strip_prefix("//rules/")?
@@ -4424,13 +4599,14 @@ mod tests {
     // ---- Common rule JS strings ----------------------------------------
 
     const CPP_RULES_JS: &str = r#"
-import { target, glob, memo, product, run } from "imp:core";
+import { target, glob, memo, product, run, BUILD, targetKind } from "imp:core";
+const K_cmake_lib = targetKind("cmake-lib");
 
 export const sources = memo(async function sources(handle) {
     return glob({ root: ".", include: handle.attrs.sources || [] });
 });
 
-export const native_link_library = product("cmake-lib", "build", async function native_link_library(handle) {
+export const native_link_library = product(K_cmake_lib, BUILD, async function native_link_library(handle) {
     const inputs = [];
     for (const dep of handle.attrs.deps || []) {
         if (dep.kind === "cpp-sources") inputs.push(await sources(dep));
@@ -4447,13 +4623,14 @@ export function cmakeLib({ entrypoint, deps = [] }) {
 "#;
 
     const ODIN_RULES_JS: &str = r#"
-import { target, glob, memo, product, run } from "imp:core";
+import { target, glob, memo, product, run, BUILD, targetKind } from "imp:core";
+const K_odin_package = targetKind("odin-package");
 
 export const sources = memo(async function sources(handle) {
     return glob({ root: ".", include: handle.attrs.sources || [] });
 });
 
-export const odin_package = product("odin-package", "build", async function odin_package(handle) {
+export const odin_package = product(K_odin_package, BUILD, async function odin_package(handle) {
     const srcs = await sources(handle);
     return run({ argv: ["sh", "-c", "true"], inputs: [srcs], display: "odin build", impure: true });
 });
@@ -4464,13 +4641,14 @@ export function odinPackage({ srcs, deps = [] }) {
 "#;
 
     const ASSET_RULES_JS: &str = r#"
-import { target, glob, memo, product, run } from "imp:core";
+import { target, glob, memo, product, run, BUILD, targetKind } from "imp:core";
+const K_asset = targetKind("asset");
 
 export const sources = memo(async function sources(handle) {
     return glob({ root: ".", include: handle.attrs.sources || [] });
 });
 
-export const bundle = product("asset", "build", async function bundle(handle) {
+export const bundle = product(K_asset, BUILD, async function bundle(handle) {
     const srcs = await sources(handle);
     return run({ argv: ["sh", "-c", "true"], inputs: [srcs], display: `bundle ${handle.attrs.sources.join(",")}`, impure: true });
 });
@@ -4481,7 +4659,9 @@ export function asset({ srcs }) {
 "#;
 
     const GENERATE_BUILD_RULES_JS: &str = r#"
-import { allUnowned, target, product, registerBuildRule, sourcesField } from "imp:core";
+import { allUnowned, target, product, registerBuildRule, sourcesField, productName, targetKind } from "imp:core";
+const K_odin_build_generator = targetKind("odin-build-generator");
+export const P_generate_build = productName("generate-build");
 
 registerBuildRule({ rule: "odinPackage", importFrom: "//rules/odin" });
 
@@ -4498,7 +4678,7 @@ function basename(path) {
     return index < 0 ? path : path.slice(index + 1);
 }
 
-export const generateBuild = product("odin-build-generator", "generate-build", async function generateBuild(handle) {
+export const generateBuild = product(K_odin_build_generator, P_generate_build, async function generateBuild(handle) {
     const files = allUnowned({
         root: handle.attrs.root || ".",
         include: ["**/*.odin"],
@@ -4730,10 +4910,11 @@ export const actionName = "external build {address}";
         write_file(
             &dev_rules_dir.join("external/index.js"),
             r#"
-import { target, product, run } from "imp:core";
+import { target, product, run, BUILD, targetKind } from "imp:core";
+const K_external = targetKind("external");
 import { actionName } from "//rules/external/helper";
 
-export const external_product = product("external", "build", async function external_product(handle) {
+export const external_product = product(K_external, BUILD, async function external_product(handle) {
     return run({ argv: ["sh", "-c", "true"], display: actionName.replace("{address}", handle.label.address), impure: true });
 });
 
@@ -4853,7 +5034,8 @@ configure("example", { flags: { mode: "debug" } });
         write_file(
             &p.join("rules/configured.js"),
             r#"
-import { target, glob, memo, product, run, configuration } from "imp:core";
+import { target, glob, memo, product, run, configuration, BUILD, targetKind } from "imp:core";
+const K_configured = targetKind("configured");
 
 export const sources = memo(async function sources(handle) {
     return glob({ root: ".", include: handle.attrs.sources || [] });
@@ -4864,7 +5046,7 @@ export const configured_flags = memo(async function configured_flags(handle) {
     return Object.entries(config.flags || {}).map(([name, value]) => `--${name}=${value}`);
 });
 
-export const configured_product = product("configured", "build", async function configured_product(handle) {
+export const configured_product = product(K_configured, BUILD, async function configured_product(handle) {
     const srcs = await sources(handle);
     const flags = await configured_flags(handle);
     return run({ argv: ["sh", "-c", "true"], inputs: [srcs], display: `configured ${flags.join(" ")}`, impure: true });
@@ -5065,15 +5247,17 @@ import "//rules/rust/clippy";
         write_file(
             &p.join("rules/rust/test.js"),
             r#"
-import { product } from "imp:core";
-product("rust_test", "test", async () => ({}));
+import { product, TEST, targetKind } from "imp:core";
+const K_rust_test = targetKind("rust_test");
+product(K_rust_test, TEST, async () => ({}));
 "#,
         );
         write_file(
             &p.join("rules/rust/clippy/index.js"),
             r#"
-import { product } from "imp:core";
-product("cargo-package", "lint", async () => ({}));
+import { product, LINT, targetKind } from "imp:core";
+const K_cargo_package = targetKind("cargo-package");
+product(K_cargo_package, LINT, async () => ({}));
 "#,
         );
 
@@ -5101,13 +5285,14 @@ product("cargo-package", "lint", async () => ({}));
         write_file(
             p.join(BUILD_FILE).as_path(),
             r#"
-import { target, expand, registerTarget, product, run } from "imp:core";
+import { target, expand, registerTarget, product, run, BUILD, targetKind } from "imp:core";
+const K_expandable = targetKind("expandable");
 
-export const build = product("expandable", "build", async function build(handle) {
+export const build = product(K_expandable, BUILD, async function build(handle) {
     return run({ argv: ["sh", "-c", "true"], display: "build", impure: true });
 });
 
-export const expandChildren = expand("expandable", async function expandChildren(handle) {
+export const expandChildren = expand(K_expandable, async function expandChildren(handle) {
     registerTarget(target({ kind: "expandable", attrs: {} }), "//:child");
 });
 
@@ -5228,11 +5413,12 @@ import "//rules/tool";
         write_file(
             &p.join("rules/tool.js"),
             r#"
-import { namedCache, output, product, run, target } from "imp:core";
+import { namedCache, output, product, run, target, BUILD, targetKind } from "imp:core";
+const K_tool_user = targetKind("tool-user");
 
 namedCache({ name: "test-tools" });
 
-export const file = product("tool-user", "build", async function file(handle) {
+export const file = product(K_tool_user, BUILD, async function file(handle) {
     return run({
         argv: ["hello-tool"],
         tools: [{
@@ -5871,12 +6057,13 @@ if (a !== "S" || b !== "S") {
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run } from "imp:core";
+import { target, product, run, BUILD, targetKind } from "imp:core";
+const K_root_nesting_test = targetKind("root-nesting-test");
 
 export const lib = target({ kind: "root-nesting-test" });
 export const app = target({ kind: "root-nesting-test", attrs: { dep: lib } });
 
-export const build = product("root-nesting-test", "build", async function do_build(handle) {
+export const build = product(K_root_nesting_test, BUILD, async function do_build(handle) {
     if (handle.attrs.dep) {
         await build(handle.attrs.dep);
     }
@@ -5956,7 +6143,8 @@ export const build = product("root-nesting-test", "build", async function do_bui
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, memo, run } from "imp:core";
+import { target, product, memo, run, BUILD, targetKind } from "imp:core";
+const K_promise_all_context_test = targetKind("promise-all-context-test");
 
 export const app = target({ kind: "promise-all-context-test" });
 
@@ -5968,7 +6156,7 @@ const child = memo(async function child(name) {
     });
 });
 
-export const build = product("promise-all-context-test", "build", async function build() {
+export const build = product(K_promise_all_context_test, BUILD, async function build() {
     await Promise.all([child("a"), child("b")]);
     await run({
         argv: ["sh", "-c", "true"],
@@ -6040,7 +6228,8 @@ export const build = product("promise-all-context-test", "build", async function
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, memo, run } from "imp:core";
+import { target, product, memo, run, BUILD, targetKind } from "imp:core";
+const K_sequential_sibling_context_test = targetKind("sequential-sibling-context-test");
 
 export const app = target({ kind: "sequential-sibling-context-test" });
 
@@ -6052,7 +6241,7 @@ const child = memo(async function child(name) {
     });
 });
 
-export const build = product("sequential-sibling-context-test", "build", async function build() {
+export const build = product(K_sequential_sibling_context_test, BUILD, async function build() {
     await child("a");
     await child("b");
 });
@@ -6116,11 +6305,12 @@ export const build = product("sequential-sibling-context-test", "build", async f
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run } from "imp:core";
+import { target, product, run, BUILD, targetKind } from "imp:core";
+const K_fail_test = targetKind("fail-test");
 
 export const app = target({ kind: "fail-test" });
 
-export const build = product("fail-test", "build", async function build() {
+export const build = product(K_fail_test, BUILD, async function build() {
     return run({ argv: ["sh", "-c", "echo boom >&2; exit 3"], display: "failing action", impure: true });
 });
 "#,
@@ -6166,7 +6356,8 @@ export const build = product("fail-test", "build", async function build() {
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, memo, output } from "imp:core";
+import { target, product, run, memo, output, BUILD, targetKind } from "imp:core";
+const K_shared_fail_test = targetKind("shared-fail-test");
 
 export const a = target({ kind: "shared-fail-test", attrs: { name: "a" } });
 export const b = target({ kind: "shared-fail-test", attrs: { name: "b" } });
@@ -6180,7 +6371,7 @@ const failing = memo(async function failing() {
     });
 });
 
-export const build = product("shared-fail-test", "build", async function build(handle) {
+export const build = product(K_shared_fail_test, BUILD, async function build(handle) {
     await failing();
     return run({ argv: ["sh", "-c", "true"], display: `after ${handle.attrs.name}`, impure: true });
 });
@@ -6228,12 +6419,13 @@ export const build = product("shared-fail-test", "build", async function build(h
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run } from "imp:core";
+import { target, product, run, BUILD, targetKind } from "imp:core";
+const K_concurrent_root_test = targetKind("concurrent-root-test");
 
 export const a = target({ kind: "concurrent-root-test" });
 export const b = target({ kind: "concurrent-root-test" });
 
-export const build = product("concurrent-root-test", "build", async function build(handle) {
+export const build = product(K_concurrent_root_test, BUILD, async function build(handle) {
     await run({
         argv: ["sh", "-c", "sleep 0.2"],
         display: `run ${handle.label.name}`,
@@ -6307,12 +6499,13 @@ export const build = product("concurrent-root-test", "build", async function bui
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, output, selectedTargets } from "imp:core";
+import { target, product, run, output, selectedTargets, BUILD, targetKind } from "imp:core";
+const K_selected_targets_test = targetKind("selected-targets-test");
 
 export const a = target({ kind: "selected-targets-test" });
 export const b = target({ kind: "selected-targets-test" });
 
-export const build = product("selected-targets-test", "build", async function build(handle) {
+export const build = product(K_selected_targets_test, BUILD, async function build(handle) {
     const addresses = selectedTargets("selected-targets-test").map((t) => t.address).sort().join(",");
     await run({
         argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", addresses, `selection-${handle.label.name}.txt`],
@@ -6375,11 +6568,13 @@ export const build = product("selected-targets-test", "build", async function bu
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, selectedTargets } from "imp:core";
+import { target, product, selectedTargets, productName, targetKind } from "imp:core";
+const K_selected_targets_outside_test = targetKind("selected-targets-outside-test");
+const P_check = productName("check");
 
 export const a = target({ kind: "selected-targets-outside-test" });
 
-export const check = product("selected-targets-outside-test", "check", async function check(handle) {
+export const check = product(K_selected_targets_outside_test, P_check, async function check(handle) {
     return selectedTargets();
 });
 "#,
@@ -6405,11 +6600,12 @@ export const check = product("selected-targets-outside-test", "check", async fun
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product } from "imp:core";
+import { target, product, BUILD, targetKind } from "imp:core";
+const K_selected_targets_reset_test = targetKind("selected-targets-reset-test");
 
 export const a = target({ kind: "selected-targets-reset-test" });
 
-export const build = product("selected-targets-reset-test", "build", async function build(handle) {
+export const build = product(K_selected_targets_reset_test, BUILD, async function build(handle) {
     return {};
 });
 "#,
@@ -6451,9 +6647,10 @@ export const build = product("selected-targets-reset-test", "build", async funct
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, output, goal } from "imp:core";
+import { target, product, run, output, goal, targetKind } from "imp:core";
+const K_callback_test = targetKind("callback-test");
 
-goal("custom-goal", (selection) => {
+const P_custom_goal = goal("custom-goal", (selection) => {
     if (selection.length > 1) {
         throw new Error(`too many: ${selection.map((t) => t.address).join(",")}`);
     }
@@ -6462,7 +6659,7 @@ goal("custom-goal", (selection) => {
 export const a = target({ kind: "callback-test" });
 export const b = target({ kind: "callback-test" });
 
-export const build = product("callback-test", "custom-goal", async function build(handle) {
+export const build = product(K_callback_test, P_custom_goal, async function build(handle) {
     await run({
         argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", "ran", `ran-${handle.label.name}.txt`],
         outputs: [output(`ran-${handle.label.name}.txt`)],
@@ -6513,9 +6710,10 @@ export const build = product("callback-test", "custom-goal", async function buil
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, output, goal } from "imp:core";
+import { target, product, run, output, goal, targetKind } from "imp:core";
+const K_callback_test = targetKind("callback-test");
 
-goal("custom-goal", (selection) => {
+const P_custom_goal = goal("custom-goal", (selection) => {
     if (selection.length > 1) {
         throw new Error(`too many: ${selection.map((t) => t.address).join(",")}`);
     }
@@ -6523,7 +6721,7 @@ goal("custom-goal", (selection) => {
 
 export const a = target({ kind: "callback-test" });
 
-export const build = product("callback-test", "custom-goal", async function build(handle) {
+export const build = product(K_callback_test, P_custom_goal, async function build(handle) {
     await run({
         argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", "ran", `ran-${handle.label.name}.txt`],
         outputs: [output(`ran-${handle.label.name}.txt`)],
@@ -6569,13 +6767,14 @@ export const build = product("callback-test", "custom-goal", async function buil
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, output, goal } from "imp:core";
+import { target, product, run, output, goal, targetKind } from "imp:core";
+const K_plain_goal_test = targetKind("plain-goal-test");
 
-goal("plain-goal");
+const P_plain_goal = goal("plain-goal");
 
 export const a = target({ kind: "plain-goal-test" });
 
-export const build = product("plain-goal-test", "plain-goal", async function build(handle) {
+export const build = product(K_plain_goal_test, P_plain_goal, async function build(handle) {
     await run({
         argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", "ran", `ran-${handle.label.name}.txt`],
         outputs: [output(`ran-${handle.label.name}.txt`)],
@@ -6618,12 +6817,13 @@ export const build = product("plain-goal-test", "plain-goal", async function bui
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product } from "imp:core";
+import { target, product, BUILD, targetKind } from "imp:core";
+const K_js_lane_slot_test = targetKind("js-lane-slot-test");
 
 export const a = target({ kind: "js-lane-slot-test" });
 export const b = target({ kind: "js-lane-slot-test" });
 
-export const build = product("js-lane-slot-test", "build", async function build(handle) {
+export const build = product(K_js_lane_slot_test, BUILD, async function build(handle) {
     await Promise.resolve();
     return handle.label.name;
 });
@@ -6679,7 +6879,8 @@ export const build = product("js-lane-slot-test", "build", async function build(
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, memo, run } from "imp:core";
+import { target, product, memo, run, BUILD, targetKind } from "imp:core";
+const K_js_lane_bound_test = targetKind("js-lane-bound-test");
 
 export const app = target({ kind: "js-lane-bound-test" });
 
@@ -6691,7 +6892,7 @@ const child = memo(async function child(name) {
     });
 });
 
-export const build = product("js-lane-bound-test", "build", async function build() {
+export const build = product(K_js_lane_bound_test, BUILD, async function build() {
     await Promise.all([child("a"), child("b"), child("c")]);
 });
 "#,
@@ -6765,7 +6966,8 @@ export const build = product("js-lane-bound-test", "build", async function build
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, memo } from "imp:core";
+import { target, product, memo, BUILD, targetKind } from "imp:core";
+const K_single_js_worker_inflight_test = targetKind("single-js-worker-inflight-test");
 
 export const app = target({ kind: "single-js-worker-inflight-test" });
 
@@ -6781,7 +6983,7 @@ const inner = memo(async function inner() {
     return "inner";
 });
 
-export const build = product("single-js-worker-inflight-test", "build", async function build() {
+export const build = product(K_single_js_worker_inflight_test, BUILD, async function build() {
     return await outer();
 });
 "#,
@@ -6819,12 +7021,13 @@ export const build = product("single-js-worker-inflight-test", "build", async fu
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run } from "imp:core";
+import { target, product, run, BUILD, targetKind } from "imp:core";
+const K_interleaved_root_context_test = targetKind("interleaved-root-context-test");
 
 export const a = target({ kind: "interleaved-root-context-test" });
 export const b = target({ kind: "interleaved-root-context-test" });
 
-export const build = product("interleaved-root-context-test", "build", async function build(handle) {
+export const build = product(K_interleaved_root_context_test, BUILD, async function build(handle) {
     const name = handle.label.name;
     await run({
         argv: ["sh", "-c", name === "a" ? "sleep 0.05" : "sleep 0.01"],
@@ -6901,11 +7104,12 @@ export const build = product("interleaved-root-context-test", "build", async fun
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run } from "imp:core";
+import { target, product, run, BUILD, targetKind } from "imp:core";
+const K_deferred_run_context_test = targetKind("deferred-run-context-test");
 
 export const app = target({ kind: "deferred-run-context-test" });
 
-export const build = product("deferred-run-context-test", "build", async function build() {
+export const build = product(K_deferred_run_context_test, BUILD, async function build() {
     const p1 = run({
         argv: ["sh", "-c", "sleep 0.02"],
         display: "deferred short",
@@ -6991,11 +7195,12 @@ export const build = product("deferred-run-context-test", "build", async functio
             &p.join(BUILD_FILE),
             &format!(
                 r#"
-import {{ target, product, run, output }} from "imp:core";
+import {{ target, product, run, output, BUILD, targetKind }} from "imp:core";
+const K_live_cache_test = targetKind("live-cache-test");
 
 export const app = target({{ kind: "live-cache-test" }});
 
-export const build = product("live-cache-test", "build", async function build() {{
+export const build = product(K_live_cache_test, BUILD, async function build() {{
     const result = await run({{
         argv: ["sh", "-c", "{command_js}"],
         outputs: [output("build/live.txt")],
@@ -7109,11 +7314,12 @@ export const build = product("live-cache-test", "build", async function build() 
             &p.join(BUILD_FILE),
             &format!(
                 r#"
-import {{ target, product, run, output }} from "imp:core";
+import {{ target, product, run, output, BUILD, targetKind }} from "imp:core";
+const K_config_cache_test = targetKind("config-cache-test");
 
 export const app = target({{ kind: "config-cache-test" }});
 
-export const build = product("config-cache-test", "build", async function build() {{
+export const build = product(K_config_cache_test, BUILD, async function build() {{
     return run({{
         argv: ["sh", "-c", "{command_js}"],
         outputs: [output("build/cfg.txt")],
@@ -7172,11 +7378,13 @@ configure("cache_test", {{ mode: {mode} }});
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product } from "imp:core";
+import { target, product, productName, targetKind } from "imp:core";
+const K_test_pkg = targetKind("test-pkg");
+const P_report = productName("report");
 
 export const pkg = target({ kind: "test-pkg", fields: { name: "hello" } });
 
-export const report = product("test-pkg", "report", async function report(handle) {
+export const report = product(K_test_pkg, P_report, async function report(handle) {
     return "ok";
 });
 "#,
@@ -7219,11 +7427,13 @@ export const report = product("test-pkg", "report", async function report(handle
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product } from "imp:core";
+import { target, product, productName, targetKind } from "imp:core";
+const K_kind_a = targetKind("kind-a");
+const P_check = productName("check");
 
 export const pkg = target({ kind: "kind-a", fields: {} });
 
-export const check = product("kind-a", "check", async function check(handle) {});
+export const check = product(K_kind_a, P_check, async function check(handle) {});
 "#,
         );
 
@@ -7252,8 +7462,181 @@ export const check = product("kind-a", "check", async function check(handle) {})
         .unwrap_err()
         .to_string();
         assert!(
-            err.contains("no product 'nonexistent'"),
+            err.contains("'nonexistent' is not a declared product name"),
             "expected product-not-found error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn product_name_tokens_declare_register_and_select() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join("tokens.js"),
+            r#"
+import { productName } from "imp:core";
+export const CHECK = productName("check");
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, targetKind } from "imp:core";
+import { CHECK } from "//tokens";
+
+const KindA = targetKind("kind-a");
+
+export const pkg = target({ kind: "kind-a", fields: {} });
+export const check = product(KindA, CHECK, async function check(handle) {});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let decl = live
+            .workspace
+            .declared_product_names
+            .get("check")
+            .expect("'check' must be declared");
+        assert!(!decl.builtin);
+        assert_eq!(decl.module.as_deref(), Some("//tokens"));
+
+        // Token-registered products stay selectable by CLI string.
+        let goal_def = live.workspace.goals.get("build").unwrap();
+        let no_dynamic: BTreeMap<String, Target> = BTreeMap::new();
+        let roots = select_roots(
+            &live.workspace,
+            &no_dynamic,
+            goal_def,
+            &["//:pkg#check".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].1, "check");
+    }
+
+    #[tokio::test]
+    async fn duplicate_product_name_declaration_across_modules_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join("tokens.js"),
+            r#"
+import { productName } from "imp:core";
+export const CHECK = productName("check");
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { productName } from "imp:core";
+import { CHECK } from "//tokens";
+export const CHECK2 = productName("check");
+"#,
+        );
+
+        let err = format!("{:#}", load_workspace(p).await.unwrap_err());
+        assert!(
+            err.contains("already declared in //tokens"),
+            "expected duplicate-declaration error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_product_names_are_redeclaration_protected() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { productName } from "imp:core";
+export const B = productName("build");
+"#,
+        );
+
+        let err = format!("{:#}", load_workspace(p).await.unwrap_err());
+        assert!(
+            err.contains("already declared in imp:core (builtin)"),
+            "expected builtin-redeclaration error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn forged_product_name_token_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { product, targetKind } from "imp:core";
+const KindA = targetKind("kind-a");
+const forged = { __imp_product_name: true, name: "forged", __pid: 12345 };
+export const x = product(KindA, forged, async function x(handle) {});
+"#,
+        );
+
+        let err = format!("{:#}", load_workspace(p).await.unwrap_err());
+        assert!(
+            err.contains("not backed by a declaration"),
+            "expected forged-token rejection, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_returns_token_usable_for_registration() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, goal, targetKind } from "imp:core";
+
+const CUSTOM = goal("custom-goal");
+const AGAIN = goal("custom-goal");
+if (CUSTOM !== AGAIN) throw new Error("goal() must return the same token for repeat registrations");
+
+const KindA = targetKind("kind-a");
+export const pkg = target({ kind: "kind-a", fields: {} });
+export const custom = product(KindA, CUSTOM, async function custom(handle) {});
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        assert!(live.workspace.goals.contains_key("custom-goal"));
+        assert!(live
+            .workspace
+            .declared_product_names
+            .contains_key("custom-goal"));
+        assert!(live
+            .workspace
+            .products
+            .contains_key(&("kind-a".to_owned(), "custom-goal".to_owned())));
+    }
+
+    #[tokio::test]
+    async fn duplicate_kind_classes_are_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { product, targetKind, BUILD, TEST } from "imp:core";
+const KindA = targetKind("kind-a");
+const KindAAgain = targetKind("kind-a");
+export const a = product(KindA, BUILD, async function a(handle) {});
+export const b = product(KindAAgain, TEST, async function b(handle) {});
+"#,
+        );
+
+        let err = format!("{:#}", load_workspace(p).await.unwrap_err());
+        assert!(
+            err.contains("declared by two classes"),
+            "expected duplicate-kind error, got: {err}"
         );
     }
 
@@ -7350,9 +7733,11 @@ import "//rules/custom";
         write_file(
             &p.join("rules/custom.js"),
             r#"
-import { product } from "imp:core";
+import { product, targetKind } from "imp:core";
+import { P_generate_build } from "//rules/odin";
+const K_custom_generator = targetKind("custom-generator");
 
-export const generateBuild = product("custom-generator", "generate-build", async function generateBuild() {
+export const generateBuild = product(K_custom_generator, P_generate_build, async function generateBuild() {
     return {
         "custom/BUILD.js": [{
                 name: "custom",

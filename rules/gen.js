@@ -1,6 +1,16 @@
-import { Target, product, run, output, output_path } from "imp:core";
+import { Target, product, run, output, output_path, BUILD } from "imp:core";
 
-export const file = product("stamp-file", "build", async function file(handle) {
+export class StampFile extends Target {
+    static kind = "stamp-file";
+    constructor({ output, text }) {
+        super({
+            kind: StampFile.kind,
+            attrs: { entrypoint: output, sources: text },
+        });
+    }
+}
+
+export const file = product(StampFile, BUILD, async function file(handle) {
     return run({
         argv: [
             "sh",
@@ -15,16 +25,6 @@ export const file = product("stamp-file", "build", async function file(handle) {
         display: `write ${handle.attrs.entrypoint}`,
     });
 });
-
-export class StampFile extends Target {
-    static kind = "stamp-file";
-    constructor({ output, text }) {
-        super({
-            kind: StampFile.kind,
-            attrs: { entrypoint: output, sources: text },
-        });
-    }
-}
 
 /**
  * Declare a target that writes fixed text to an output file.

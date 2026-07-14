@@ -29,11 +29,12 @@ export {
     pythonAppFormatCheck,
 } from "//rules/python/ruff";
 import { goal, resolveProduct, goalFlags, logInfo } from "imp:core";
+import { FORMAT_CHECK } from "//rules/workflows/products";
 
 export async function fmtGoal(selection) {
     const { check } = goalFlags();
     const targets = check
-        ? selection.map((entry) => ({ ...entry, product: "format-check" }))
+        ? selection.map((entry) => ({ ...entry, product: FORMAT_CHECK }))
         : selection;
     const resolved = targets.map(resolveProduct);
     const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));

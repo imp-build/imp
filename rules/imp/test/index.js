@@ -1,4 +1,4 @@
-import { Target, product, run, glob, workspaceFiles } from "imp:core";
+import { Target, product, run, glob, workspaceFiles, TEST } from "imp:core";
 
 const suites = [];
 const tests = [];
@@ -418,7 +418,25 @@ export async function runTestCase(testModule, ordinal) {
 // and scheduler; tests can explicitly request the loaded workspace or a
 // fresh OS process. The coordinator remains unsandboxed because suites such
 // as native_tool_test/tracked_apis_test deliberately probe ambient host state.
-export const test_product = product("rules-test", "test", async function test_product(handle) {
+export class RulesTest extends Target {
+    static kind = "rules-test";
+    constructor({ root }) {
+        const discoveredTests = workspaceFiles({ root, suffix: "_test.js", recursive: false });
+        if (discoveredTests.length === 0) {
+            throw new Error(`no JS rule tests found directly in ${root}`);
+        }
+
+        super({
+            kind: RulesTest.kind,
+            attrs: {
+                root,
+                tests: discoveredTests.join(","),
+            },
+        });
+    }
+}
+
+export const test_product = product(RulesTest, TEST, async function test_product(handle) {
     const testModules = handle.attrs.tests
         .split(",")
         .map((testModule) => testModule.trim())
@@ -437,24 +455,6 @@ export const test_product = product("rules-test", "test", async function test_pr
         impure: true,
     });
 });
-
-export class RulesTest extends Target {
-    static kind = "rules-test";
-    constructor({ root }) {
-        const discoveredTests = workspaceFiles({ root, suffix: "_test.js", recursive: false });
-        if (discoveredTests.length === 0) {
-            throw new Error(`no JS rule tests found directly in ${root}`);
-        }
-
-        super({
-            kind: RulesTest.kind,
-            attrs: {
-                root,
-                tests: discoveredTests.join(","),
-            },
-        });
-    }
-}
 
 /**
  * Declare a JS rule-test target for one workspace directory. Only `_test.js`

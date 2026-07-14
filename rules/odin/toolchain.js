@@ -1,6 +1,6 @@
-import { Target, product, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Target, product, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas, TOOLCHAIN } from "imp:core";
 
-import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 
 const ODIN_TOOLCHAIN_CACHE = "odin-toolchains";
 
@@ -216,8 +216,8 @@ const LOCKFILE_SPEC = {
     artifactName: odinArtifactName,
     lockfile: "//rules/odin/odin.lock",
 };
-product("odin-toolchain", "gen-lockfiles", (handle) =>
+product(OdinToolchain, GEN_LOCKFILES, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
 registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["dev-2026-03"] });
 
-product("odin-toolchain", "toolchain", (handle) => odinBin(handle.attrs.version));
+product(OdinToolchain, TOOLCHAIN, (handle) => odinBin(handle.attrs.version));

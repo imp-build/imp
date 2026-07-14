@@ -23,7 +23,13 @@ import {
 	workspaceTargets,
 	logInfo,
 	writeWorkspace,
+	BUILD,
+	TEST,
+	RUN,
+	LINT,
+	PACKAGE,
 } from "imp:core";
+import { ODIN_LINKER } from "//rules/odin/products";
 
 /**
  * Declarative workspace configuration schema for Odin.
@@ -54,7 +60,7 @@ export const odinConfigSchema = {
 defineConfigSchema("odin", odinConfigSchema);
 
 import { distPathFor } from "//rules/workflows/package";
-import { registerBuildGenerator } from "//rules/workflows/generate_build";
+import { registerBuildGenerator, GENERATE_BUILD } from "//rules/workflows/generate_build";
 
 import {
     defaultOdinToolchain,
@@ -732,345 +738,12 @@ async function odinScriptTools(handle, { needsDirname, isExecutable }) {
     if (!linkerHandle) {
         return { tools: [...base, await gccTool(gcc.attrs.version)], flags: [] };
     }
-    const linker = await productFor(linkerHandle, "odin-linker");
+    const linker = await productFor(linkerHandle, ODIN_LINKER);
     return {
         tools: [...base, await gccTool(gcc.attrs.version), ...(await linker.tools())],
         flags: await linker.flags(),
     };
 }
-
-// ---------------------------------------------------------------------------
-// Product functions
-// ---------------------------------------------------------------------------
-
-/**
- * Build an Odin package.
- *
- * @param {object} handle Target handle returned by odinPackage().
- * @returns {Promise<object>} Run result, plus `outputPath`: the built
- * binary/library's workspace-relative path.
- */
-export const odinBuild = product("odin-package", "build",
-    async function odinBuild(handle) {
-        const toolchainHandle = handle.attrs.toolchain;
-        const odinToolSpec = toolchainHandle
-            ? await tool(toolchainHandle)
-            : odinTool(resolveOdinToolchainVersion(handle.attrs.toolchainVersion));
-        const srcs = await sources(handle);
-        const genInputs = await collect_gen_sets(handle, new Set());
-        const resourceInputs = await resources(handle);
-        const flags = await collection_flags(handle);
-        const collectionDirs = await collection_dirs(handle);
-        const analysis = await odinPackageAnalysis(handle);
-        if (analysis.sourceFiles.length === 0) {
-            const packagePath = declared_path(handle, handle.attrs.path || ".");
-            throw new Error(empty_package_error(handle, packagePath));
-        }
-        const modeFlags = analysis.hasMainEntrypoint ? [] : ["-build-mode:lib"];
-        const path = analysis.packagePath;
-        const out = handle.attrs.output || default_output_path(handle);
-        const declaredOut = odin_output_path(out, analysis);
-        const outputDir = out.slice(0, out.lastIndexOf("/"));
-        const { tools: scriptTools, flags: linkerFlags } = await odinScriptTools(handle, { needsDirname: true, isExecutable: analysis.hasMainEntrypoint });
-        const result = await run({
-            argv: [
-                "sh",
-                "-c",
-                "out=$1; pkg=$2; dir_count=$3; shift 3; mkdir -p \"$(dirname \"$out\")\"; while [ \"$dir_count\" -gt 0 ]; do mkdir -p \"$1\"; shift; dir_count=$((dir_count - 1)); done; odin build \"$pkg\" \"-out:$out\" \"-debug\" \"$@\"",
-                "odin-build",
-                output_path(out),
-                path,
-                String(collectionDirs.length),
-                ...collectionDirs,
-                ...flags,
-                ...modeFlags,
-                ...linkerFlags,
-            ],
-            tools: [odinToolSpec, ...scriptTools],
-            inputs: [srcs, ...genInputs, ...resourceInputs],
-            // Keep the executable as the first artifact for callers that use
-            // outputPath, and also capture the complete output directory so
-            // runtime siblings such as libjolt_odin.so travel with it.
-            outputs: [output(declaredOut), output(outputDir, { kind: "directory" })],
-            materialize: false,
-            display: `odin build ${path}`,
-        });
-        return { ...result, outputPath: declaredOut };
-    }
-);
-
-export const odinTest = product("odin-test-package", "test",
-    async function odinTest(handle) {
-        const toolchainHandle = handle.attrs.toolchain;
-        const odinToolSpec = toolchainHandle
-            ? await tool(toolchainHandle)
-            : odinTool(resolveOdinToolchainVersion(handle.attrs.toolchainVersion));
-        const srcs = await sources(handle);
-        const genInputs = await collect_gen_sets(handle, new Set());
-        const resourceInputs = await resources(handle);
-        const flags = await collection_flags(handle);
-        const collectionDirs = await collection_dirs(handle);
-        const analysis = await odinPackageAnalysis(handle);
-        if (analysis.sourceFiles.length === 0) {
-            const packagePath = declared_path(handle, handle.attrs.path || ".");
-            throw new Error(empty_package_error(handle, packagePath));
-        }
-        const path = analysis.packagePath;
-        const { tools: scriptTools, flags: linkerFlags } = await odinScriptTools(handle, { needsDirname: false, isExecutable: true });
-        let outcome = run({
-            argv: [
-                "sh",
-                "-c",
-                "pkg=$1; dir_count=$2; shift 2; while [ \"$dir_count\" -gt 0 ]; do mkdir -p \"$1\"; shift; dir_count=$((dir_count - 1)); done; odin test \"$pkg\" \"$@\"",
-                "odin-test",
-                path,
-                String(collectionDirs.length),
-                ...collectionDirs,
-                ...flags,
-                ...linkerFlags,
-            ],
-            tools: [odinToolSpec, ...scriptTools],
-            inputs: [srcs, ...genInputs, ...resourceInputs],
-            impure: true,
-            display: `odin test ${path}`,
-        });
-		logInfo(`Test finished: ${path}`);
-		return outcome;
-
-    }
-);
-
-/**
- * Build and execute an Odin package's binary directly against the real
- * workspace (not sandboxed) — the package must have a main entrypoint. The
- * "run" goal's pre-flight callback (rules/workflows/run.js) rejects
- * multi-target selections before this ever runs, so it doesn't need to
- * check that itself.
- *
- * @param {object} handle Target handle returned by odinPackage().
- * @returns {Promise<object>} Run result.
- */
-export const odinRun = product("odin-package", "run", async function odinRun(handle) {
-    const analysis = await odinPackageAnalysis(handle);
-    if (!analysis.hasMainEntrypoint) {
-        const path = declared_path(handle, handle.attrs.path || ".");
-        throw new Error(`${path} has no main entrypoint; only executable odin-package targets can be run`);
-    }
-    const buildResult = await odinBuild(handle);
-    // odinBuild is materialize:false (sandboxed/cached only); this goal rule
-    // (`run` — rules/workflows/run.js) is one of the sanctioned exceptions
-    // allowed to write outside dist/, since executing unsandboxed against
-    // the real workspace genuinely needs the binary physically on disk.
-    const outDir = buildResult.outputPath.slice(0, buildResult.outputPath.lastIndexOf("/"));
-    writeWorkspace(outDir, buildResult.outputDigest, { from: outDir });
-    return run({
-        argv: [buildResult.outputPath],
-        sandbox: false,
-        impure: true,
-        display: `run ${buildResult.outputPath}`,
-    });
-});
-
-/**
- * Lint an Odin package via `odin check -vet` (type-checks the package and
- * flags unused declarations/imports, variable shadowing, and `using`
- * statement misuse — no build output is produced). Mirrors cargoClippy /
- * ruffCheck: reports a structured `{ ok, output }` instead of throwing, so
- * `imp lint` can run every selected target to completion and print a
- * summary at the end.
- *
- * @param {object} handle Target handle returned by odinPackage().
- * @returns {Promise<{ok: boolean, output: string}>}
- */
-export const odinLint = product("odin-package", "lint", async function odinLint(handle) {
-    const toolchainHandle = handle.attrs.toolchain;
-    const odinToolSpec = toolchainHandle
-        ? await tool(toolchainHandle)
-        : odinTool(resolveOdinToolchainVersion(handle.attrs.toolchainVersion));
-    const srcs = await sources(handle);
-    const genInputs = await collect_gen_sets(handle, new Set());
-    const resourceInputs = await resources(handle);
-    const flags = await collection_flags(handle);
-    const collectionDirs = await collection_dirs(handle);
-    const analysis = await odinPackageAnalysis(handle);
-    if (analysis.sourceFiles.length === 0) {
-        const packagePath = declared_path(handle, handle.attrs.path || ".");
-        throw new Error(empty_package_error(handle, packagePath));
-    }
-    const path = analysis.packagePath;
-    // Unlike odinBuild/odinTest, `odin check` never invokes a C
-    // compiler/linker — it only type-checks — so this doesn't go through
-    // odinScriptTools() (which always requires a declared default gcc
-    // toolchain). Only `mkdir` is needed, to materialize collection dirs.
-    const mkdirTool = await nativeToolSpec(nativeTool("mkdir"));
-    const result = await run({
-        argv: [
-            "sh",
-            "-c",
-            "pkg=$1; dir_count=$2; shift 2; while [ \"$dir_count\" -gt 0 ]; do mkdir -p \"$1\"; shift; dir_count=$((dir_count - 1)); done; odin check \"$pkg\" -vet \"$@\"",
-            "odin-check",
-            path,
-            String(collectionDirs.length),
-            ...collectionDirs,
-            ...flags,
-        ],
-        tools: [odinToolSpec, mkdirTool],
-        inputs: [srcs, ...genInputs, ...resourceInputs],
-        allowFailure: true,
-        display: `odin check -vet ${path}`,
-    });
-    return {
-        ok: result.exitCode === 0,
-        output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
-    };
-});
-
-export const odinDistPackage = product("odin-package", "package", async function odinDistPackage(handle) {
-    const buildResult = await odinBuild(handle);
-    const outDir = buildResult.outputPath.slice(0, buildResult.outputPath.lastIndexOf("/"));
-    writeWorkspace(distPathFor(handle), buildResult.outputDigest, { from: outDir });
-    return buildResult;
-});
-
-// ---------------------------------------------------------------------------
-// Odin source generation
-// ---------------------------------------------------------------------------
-
-export const gen_input_sources = memo(async function gen_input_sources(handle) {
-    const outPath = declared_path(handle, handle.attrs.out);
-    return glob({ root: ".", include: handle.attrs.srcs || [], exclude: [outPath] });
-});
-
-export const odinGenRun = product("odin-gen", "build", async function odinGenRun(handle) {
-    const inputFiles = await gen_input_sources(handle);
-    const outPath = declared_path(handle, handle.attrs.out);
-
-    if (handle.attrs.generator) {
-        const mod = await import(handle.attrs.generator);
-        const content = await mod.generate({ srcs: handle.attrs.srcs });
-        // Content rides in argv so it keys the task cache; no shell
-        // interpolation touches it (same pattern as vs.js writeJsonFile).
-        return run({
-            argv: [
-                "sh", "-c",
-                'printf %s "$2" > "$1"',
-                "odin-gen-write",
-                output_path(outPath),
-                content,
-            ],
-            outputs: [output(outPath)],
-            materialize: true,
-            display: `generate ${outPath}`,
-        });
-    }
-
-    return run({
-        argv: [...handle.attrs.cmd, outPath],
-        inputs: [inputFiles],
-        outputs: [output(outPath)],
-        materialize: true,
-        sandbox: false,
-        impure: true,
-        display: `generate ${outPath}`,
-    });
-});
-
-async function collect_gen_sets(handle, seen) {
-    const key = dep_key(handle);
-    if (seen.has(key)) return [];
-    seen.add(key);
-
-    const sets = [];
-    for (const dep of hydrateTarget(handle).deps.map(dep => dep.handle)) {
-        if (!dep) continue;
-        if (dep.kind === "odin-gen") {
-            await odinGenRun(dep);
-            const addr = targetAddress(dep);
-            const scope = addr.slice(2).split(":")[0];
-            const outPath = scope
-                ? normalize_workspace_path(`${scope}/${dep.attrs.out}`)
-                : normalize_workspace_path(dep.attrs.out);
-            sets.push(file_set.literal([outPath]));
-        }
-    }
-    for (const dep of await effective_deps(handle)) {
-        sets.push(...await collect_gen_sets(dep, seen));
-    }
-    return sets;
-}
-
-export const generateBuild = product("odin-build-generator", "generate-build",
-    async function generateBuild(handle) {
-        const files = allUnowned({
-            root: handle.attrs.root || ".",
-            include: ["**/*.odin"],
-            exclude: handle.attrs.exclude || DEFAULT_GENERATE_BUILD_EXCLUDES,
-        });
-        const normalDirs = new Set(
-            files
-                .filter(default_package_source_file)
-                .map(dirname),
-        );
-        const testDirs = new Set(
-            files
-                .filter(default_package_test_file)
-                .map(dirname),
-        );
-        const dirs = Array.from(normalDirs).sort();
-        const existingPackages = workspaceTargets("odin-package").map(package_spec_from_workspace_target);
-        const existingTestPackages = workspaceTargets("odin-test-package").map(package_spec_from_workspace_target);
-        const existingPaths = new Set(existingPackages.map(pkg => normalize_workspace_path(pkg.path || ".")));
-        const existingTestPaths = new Set(existingTestPackages.map(pkg => normalize_workspace_path(pkg.path || ".")));
-        const generatedPackages = dirs
-            .map(generated_package_spec)
-            .filter(pkg => !existingPaths.has(normalize_workspace_path(pkg.path || ".")));
-        const index = build_package_index([
-            ...existingPackages,
-            ...generatedPackages,
-        ]);
-        const collections = collection_map(null);
-        const result = {};
-        for (const pkg of generatedPackages) {
-            const deps = infer_dep_entries(pkg, index, collections)
-                .map(dep => targetRef(dep.address));
-            const props = { srcs: ["*.odin"] };
-            if (deps.length > 0) {
-                props.deps = deps;
-            }
-            append_build_target(result, build_file_for_dir(pkg.path), {
-                name: target_name_for_dir(pkg.path),
-                rule: "odinPackage",
-                props,
-            });
-        }
-
-        const generatedTestPackages = Array.from(testDirs)
-            .sort()
-            .map(dir => ({
-                ...generated_package_spec(dir),
-                srcs: ["*.odin"],
-                exclude: [],
-            }))
-            .filter(pkg => !existingTestPaths.has(normalize_workspace_path(pkg.path || ".")));
-        for (const pkg of generatedTestPackages) {
-            const deps = infer_dep_entries(pkg, index, collections)
-                .map(dep => targetRef(dep.address));
-            const props = {};
-            if (deps.length > 0) {
-                props.deps = deps;
-            }
-            const baseName = target_name_for_dir(pkg.path);
-            append_build_target(result, build_file_for_dir(pkg.path), {
-                name: normalDirs.has(pkg.path) ? `${baseName}_test` : baseName,
-                rule: "odinTestPackage",
-                props,
-            });
-        }
-        return result;
-    }
-);
-
-registerBuildGenerator({ namespace: "odin", kind: "odin-build-generator" });
 
 // ---------------------------------------------------------------------------
 // Target constructors
@@ -1221,3 +894,343 @@ export function odinTestPackage({ srcs = undefined, exclude = undefined, path = 
 }
 
 export const odin_test_package = odinTestPackage;
+
+// Phantom kind: never declared as a workspace target; carries the kind for
+// the generate-build generator product and registerBuildGenerator().
+class OdinBuildGenerator extends Target {
+    static kind = "odin-build-generator";
+}
+
+// ---------------------------------------------------------------------------
+// Product functions
+// ---------------------------------------------------------------------------
+
+/**
+ * Build an Odin package.
+ *
+ * @param {object} handle Target handle returned by odinPackage().
+ * @returns {Promise<object>} Run result, plus `outputPath`: the built
+ * binary/library's workspace-relative path.
+ */
+export const odinBuild = product(OdinPackage, BUILD,
+    async function odinBuild(handle) {
+        const toolchainHandle = handle.attrs.toolchain;
+        const odinToolSpec = toolchainHandle
+            ? await tool(toolchainHandle)
+            : odinTool(resolveOdinToolchainVersion(handle.attrs.toolchainVersion));
+        const srcs = await sources(handle);
+        const genInputs = await collect_gen_sets(handle, new Set());
+        const resourceInputs = await resources(handle);
+        const flags = await collection_flags(handle);
+        const collectionDirs = await collection_dirs(handle);
+        const analysis = await odinPackageAnalysis(handle);
+        if (analysis.sourceFiles.length === 0) {
+            const packagePath = declared_path(handle, handle.attrs.path || ".");
+            throw new Error(empty_package_error(handle, packagePath));
+        }
+        const modeFlags = analysis.hasMainEntrypoint ? [] : ["-build-mode:lib"];
+        const path = analysis.packagePath;
+        const out = handle.attrs.output || default_output_path(handle);
+        const declaredOut = odin_output_path(out, analysis);
+        const outputDir = out.slice(0, out.lastIndexOf("/"));
+        const { tools: scriptTools, flags: linkerFlags } = await odinScriptTools(handle, { needsDirname: true, isExecutable: analysis.hasMainEntrypoint });
+        const result = await run({
+            argv: [
+                "sh",
+                "-c",
+                "out=$1; pkg=$2; dir_count=$3; shift 3; mkdir -p \"$(dirname \"$out\")\"; while [ \"$dir_count\" -gt 0 ]; do mkdir -p \"$1\"; shift; dir_count=$((dir_count - 1)); done; odin build \"$pkg\" \"-out:$out\" \"-debug\" \"$@\"",
+                "odin-build",
+                output_path(out),
+                path,
+                String(collectionDirs.length),
+                ...collectionDirs,
+                ...flags,
+                ...modeFlags,
+                ...linkerFlags,
+            ],
+            tools: [odinToolSpec, ...scriptTools],
+            inputs: [srcs, ...genInputs, ...resourceInputs],
+            // Keep the executable as the first artifact for callers that use
+            // outputPath, and also capture the complete output directory so
+            // runtime siblings such as libjolt_odin.so travel with it.
+            outputs: [output(declaredOut), output(outputDir, { kind: "directory" })],
+            materialize: false,
+            display: `odin build ${path}`,
+        });
+        return { ...result, outputPath: declaredOut };
+    }
+);
+
+export const odinTest = product(OdinTestPackage, TEST,
+    async function odinTest(handle) {
+        const toolchainHandle = handle.attrs.toolchain;
+        const odinToolSpec = toolchainHandle
+            ? await tool(toolchainHandle)
+            : odinTool(resolveOdinToolchainVersion(handle.attrs.toolchainVersion));
+        const srcs = await sources(handle);
+        const genInputs = await collect_gen_sets(handle, new Set());
+        const resourceInputs = await resources(handle);
+        const flags = await collection_flags(handle);
+        const collectionDirs = await collection_dirs(handle);
+        const analysis = await odinPackageAnalysis(handle);
+        if (analysis.sourceFiles.length === 0) {
+            const packagePath = declared_path(handle, handle.attrs.path || ".");
+            throw new Error(empty_package_error(handle, packagePath));
+        }
+        const path = analysis.packagePath;
+        const { tools: scriptTools, flags: linkerFlags } = await odinScriptTools(handle, { needsDirname: false, isExecutable: true });
+        let outcome = run({
+            argv: [
+                "sh",
+                "-c",
+                "pkg=$1; dir_count=$2; shift 2; while [ \"$dir_count\" -gt 0 ]; do mkdir -p \"$1\"; shift; dir_count=$((dir_count - 1)); done; odin test \"$pkg\" \"$@\"",
+                "odin-test",
+                path,
+                String(collectionDirs.length),
+                ...collectionDirs,
+                ...flags,
+                ...linkerFlags,
+            ],
+            tools: [odinToolSpec, ...scriptTools],
+            inputs: [srcs, ...genInputs, ...resourceInputs],
+            impure: true,
+            display: `odin test ${path}`,
+        });
+		logInfo(`Test finished: ${path}`);
+		return outcome;
+
+    }
+);
+
+/**
+ * Build and execute an Odin package's binary directly against the real
+ * workspace (not sandboxed) — the package must have a main entrypoint. The
+ * "run" goal's pre-flight callback (rules/workflows/run.js) rejects
+ * multi-target selections before this ever runs, so it doesn't need to
+ * check that itself.
+ *
+ * @param {object} handle Target handle returned by odinPackage().
+ * @returns {Promise<object>} Run result.
+ */
+export const odinRun = product(OdinPackage, RUN, async function odinRun(handle) {
+    const analysis = await odinPackageAnalysis(handle);
+    if (!analysis.hasMainEntrypoint) {
+        const path = declared_path(handle, handle.attrs.path || ".");
+        throw new Error(`${path} has no main entrypoint; only executable odin-package targets can be run`);
+    }
+    const buildResult = await odinBuild(handle);
+    // odinBuild is materialize:false (sandboxed/cached only); this goal rule
+    // (`run` — rules/workflows/run.js) is one of the sanctioned exceptions
+    // allowed to write outside dist/, since executing unsandboxed against
+    // the real workspace genuinely needs the binary physically on disk.
+    const outDir = buildResult.outputPath.slice(0, buildResult.outputPath.lastIndexOf("/"));
+    writeWorkspace(outDir, buildResult.outputDigest, { from: outDir });
+    return run({
+        argv: [buildResult.outputPath],
+        sandbox: false,
+        impure: true,
+        display: `run ${buildResult.outputPath}`,
+    });
+});
+
+/**
+ * Lint an Odin package via `odin check -vet` (type-checks the package and
+ * flags unused declarations/imports, variable shadowing, and `using`
+ * statement misuse — no build output is produced). Mirrors cargoClippy /
+ * ruffCheck: reports a structured `{ ok, output }` instead of throwing, so
+ * `imp lint` can run every selected target to completion and print a
+ * summary at the end.
+ *
+ * @param {object} handle Target handle returned by odinPackage().
+ * @returns {Promise<{ok: boolean, output: string}>}
+ */
+export const odinLint = product(OdinPackage, LINT, async function odinLint(handle) {
+    const toolchainHandle = handle.attrs.toolchain;
+    const odinToolSpec = toolchainHandle
+        ? await tool(toolchainHandle)
+        : odinTool(resolveOdinToolchainVersion(handle.attrs.toolchainVersion));
+    const srcs = await sources(handle);
+    const genInputs = await collect_gen_sets(handle, new Set());
+    const resourceInputs = await resources(handle);
+    const flags = await collection_flags(handle);
+    const collectionDirs = await collection_dirs(handle);
+    const analysis = await odinPackageAnalysis(handle);
+    if (analysis.sourceFiles.length === 0) {
+        const packagePath = declared_path(handle, handle.attrs.path || ".");
+        throw new Error(empty_package_error(handle, packagePath));
+    }
+    const path = analysis.packagePath;
+    // Unlike odinBuild/odinTest, `odin check` never invokes a C
+    // compiler/linker — it only type-checks — so this doesn't go through
+    // odinScriptTools() (which always requires a declared default gcc
+    // toolchain). Only `mkdir` is needed, to materialize collection dirs.
+    const mkdirTool = await nativeToolSpec(nativeTool("mkdir"));
+    const result = await run({
+        argv: [
+            "sh",
+            "-c",
+            "pkg=$1; dir_count=$2; shift 2; while [ \"$dir_count\" -gt 0 ]; do mkdir -p \"$1\"; shift; dir_count=$((dir_count - 1)); done; odin check \"$pkg\" -vet \"$@\"",
+            "odin-check",
+            path,
+            String(collectionDirs.length),
+            ...collectionDirs,
+            ...flags,
+        ],
+        tools: [odinToolSpec, mkdirTool],
+        inputs: [srcs, ...genInputs, ...resourceInputs],
+        allowFailure: true,
+        display: `odin check -vet ${path}`,
+    });
+    return {
+        ok: result.exitCode === 0,
+        output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
+    };
+});
+
+export const odinDistPackage = product(OdinPackage, PACKAGE, async function odinDistPackage(handle) {
+    const buildResult = await odinBuild(handle);
+    const outDir = buildResult.outputPath.slice(0, buildResult.outputPath.lastIndexOf("/"));
+    writeWorkspace(distPathFor(handle), buildResult.outputDigest, { from: outDir });
+    return buildResult;
+});
+
+// ---------------------------------------------------------------------------
+// Odin source generation
+// ---------------------------------------------------------------------------
+
+export const gen_input_sources = memo(async function gen_input_sources(handle) {
+    const outPath = declared_path(handle, handle.attrs.out);
+    return glob({ root: ".", include: handle.attrs.srcs || [], exclude: [outPath] });
+});
+
+export const odinGenRun = product(OdinGen, BUILD, async function odinGenRun(handle) {
+    const inputFiles = await gen_input_sources(handle);
+    const outPath = declared_path(handle, handle.attrs.out);
+
+    if (handle.attrs.generator) {
+        const mod = await import(handle.attrs.generator);
+        const content = await mod.generate({ srcs: handle.attrs.srcs });
+        // Content rides in argv so it keys the task cache; no shell
+        // interpolation touches it (same pattern as vs.js writeJsonFile).
+        return run({
+            argv: [
+                "sh", "-c",
+                'printf %s "$2" > "$1"',
+                "odin-gen-write",
+                output_path(outPath),
+                content,
+            ],
+            outputs: [output(outPath)],
+            materialize: true,
+            display: `generate ${outPath}`,
+        });
+    }
+
+    return run({
+        argv: [...handle.attrs.cmd, outPath],
+        inputs: [inputFiles],
+        outputs: [output(outPath)],
+        materialize: true,
+        sandbox: false,
+        impure: true,
+        display: `generate ${outPath}`,
+    });
+});
+
+async function collect_gen_sets(handle, seen) {
+    const key = dep_key(handle);
+    if (seen.has(key)) return [];
+    seen.add(key);
+
+    const sets = [];
+    for (const dep of hydrateTarget(handle).deps.map(dep => dep.handle)) {
+        if (!dep) continue;
+        if (dep.kind === "odin-gen") {
+            await odinGenRun(dep);
+            const addr = targetAddress(dep);
+            const scope = addr.slice(2).split(":")[0];
+            const outPath = scope
+                ? normalize_workspace_path(`${scope}/${dep.attrs.out}`)
+                : normalize_workspace_path(dep.attrs.out);
+            sets.push(file_set.literal([outPath]));
+        }
+    }
+    for (const dep of await effective_deps(handle)) {
+        sets.push(...await collect_gen_sets(dep, seen));
+    }
+    return sets;
+}
+
+export const generateBuild = product(OdinBuildGenerator, GENERATE_BUILD,
+    async function generateBuild(handle) {
+        const files = allUnowned({
+            root: handle.attrs.root || ".",
+            include: ["**/*.odin"],
+            exclude: handle.attrs.exclude || DEFAULT_GENERATE_BUILD_EXCLUDES,
+        });
+        const normalDirs = new Set(
+            files
+                .filter(default_package_source_file)
+                .map(dirname),
+        );
+        const testDirs = new Set(
+            files
+                .filter(default_package_test_file)
+                .map(dirname),
+        );
+        const dirs = Array.from(normalDirs).sort();
+        const existingPackages = workspaceTargets("odin-package").map(package_spec_from_workspace_target);
+        const existingTestPackages = workspaceTargets("odin-test-package").map(package_spec_from_workspace_target);
+        const existingPaths = new Set(existingPackages.map(pkg => normalize_workspace_path(pkg.path || ".")));
+        const existingTestPaths = new Set(existingTestPackages.map(pkg => normalize_workspace_path(pkg.path || ".")));
+        const generatedPackages = dirs
+            .map(generated_package_spec)
+            .filter(pkg => !existingPaths.has(normalize_workspace_path(pkg.path || ".")));
+        const index = build_package_index([
+            ...existingPackages,
+            ...generatedPackages,
+        ]);
+        const collections = collection_map(null);
+        const result = {};
+        for (const pkg of generatedPackages) {
+            const deps = infer_dep_entries(pkg, index, collections)
+                .map(dep => targetRef(dep.address));
+            const props = { srcs: ["*.odin"] };
+            if (deps.length > 0) {
+                props.deps = deps;
+            }
+            append_build_target(result, build_file_for_dir(pkg.path), {
+                name: target_name_for_dir(pkg.path),
+                rule: "odinPackage",
+                props,
+            });
+        }
+
+        const generatedTestPackages = Array.from(testDirs)
+            .sort()
+            .map(dir => ({
+                ...generated_package_spec(dir),
+                srcs: ["*.odin"],
+                exclude: [],
+            }))
+            .filter(pkg => !existingTestPaths.has(normalize_workspace_path(pkg.path || ".")));
+        for (const pkg of generatedTestPackages) {
+            const deps = infer_dep_entries(pkg, index, collections)
+                .map(dep => targetRef(dep.address));
+            const props = {};
+            if (deps.length > 0) {
+                props.deps = deps;
+            }
+            const baseName = target_name_for_dir(pkg.path);
+            append_build_target(result, build_file_for_dir(pkg.path), {
+                name: normalDirs.has(pkg.path) ? `${baseName}_test` : baseName,
+                rule: "odinTestPackage",
+                props,
+            });
+        }
+        return result;
+    }
+);
+
+registerBuildGenerator({ namespace: "odin", kind: OdinBuildGenerator });
+

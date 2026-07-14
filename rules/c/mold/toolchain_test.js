@@ -1,4 +1,6 @@
 import { productFor } from "imp:core";
+import { ODIN_LINKER } from "//rules/odin/products";
+import { RUST_LINKER } from "//rules/rust/products";
 import {
     describe,
     expect,
@@ -138,7 +140,7 @@ test("registers an odin-linker product exposing -linker:mold and a mold tool", a
         installMoldToolchain("2.41.0", "/tmp/mold-2.41.0");
         const toolchain = moldToolchain("2.41.0");
 
-        const linker = await productFor(toolchain, "odin-linker");
+        const linker = await productFor(toolchain, ODIN_LINKER);
 
         expect(await linker.flags()).toEqual(["-linker:mold"]);
         const tools = await linker.tools();
@@ -152,7 +154,7 @@ test("registers a rust-linker product exposing -fuse-ld=mold and a mold tool", a
         installMoldToolchain("2.41.0", "/tmp/mold-2.41.0");
         const toolchain = moldToolchain("2.41.0");
 
-        const linker = await productFor(toolchain, "rust-linker");
+        const linker = await productFor(toolchain, RUST_LINKER);
 
         expect(await linker.rustflags()).toEqual(["-C", "link-arg=-fuse-ld=mold"]);
         const tools = await linker.tools();

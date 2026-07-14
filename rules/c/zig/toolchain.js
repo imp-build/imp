@@ -1,7 +1,7 @@
 import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 
 const ZIG_TOOLCHAIN_CACHE = "zig-toolchains";
 // Zig lazily JIT-compiles its own runtime support code (compiler-rt, libc
@@ -451,6 +451,6 @@ const LOCKFILE_SPEC = {
     artifactName: zigArtifactName,
     lockfile: "//rules/c/zig/zig.lock",
 };
-product("zig-toolchain", "gen-lockfiles", (handle) =>
+product(ZigToolchain, GEN_LOCKFILES, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
 registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["0.16.0"] });

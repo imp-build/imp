@@ -6,7 +6,11 @@ import {
 import {
     product,
     target,
+    TEST,
+    targetKind,
 } from "imp:core";
+const K_test_workflow_test_a = targetKind("test-workflow-test-a");
+const K_test_workflow_test_b = targetKind("test-workflow-test-b");
 import {
     testGoal,
 } from "//rules/workflows/test";
@@ -15,8 +19,8 @@ describe("test workflow", () => {
 
 test("testGoal dispatches every selected target, regardless of kind", async () => {
     const ran = [];
-    product("test-workflow-test-a", "test", async (handle) => { ran.push(handle.kind); });
-    product("test-workflow-test-b", "test", async (handle) => { ran.push(handle.kind); });
+    product(K_test_workflow_test_a, TEST, async (handle) => { ran.push(handle.kind); });
+    product(K_test_workflow_test_b, TEST, async (handle) => { ran.push(handle.kind); });
     const a = target({ kind: "test-workflow-test-a" });
     const b = target({ kind: "test-workflow-test-b" });
 

@@ -19,7 +19,8 @@
 import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas, workerStart } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+import { RUST_BUILD_CACHE } from "//rules/rust/products";
 
 const SCCACHE_TOOLCHAIN_CACHE = "sccache-toolchains";
 const SCCACHE_DATA_CACHE = "sccache-data";
@@ -329,7 +330,7 @@ const LOCKFILE_SPEC = {
     artifactName: sccacheArtifactName,
     lockfile: "//rules/rust/sccache/sccache.lock",
 };
-product("sccache-toolchain", "gen-lockfiles", (handle) =>
+product(SccacheToolchain, GEN_LOCKFILES, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
 registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["0.10.0"] });
 
@@ -338,7 +339,7 @@ registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["0.10.0"] });
  * persistent on-disk object cache across sandboxed cargo builds. Registered
  * as the "rust-build-cache" product for the "sccache-toolchain" kind so
  * rules/rust/index.js can resolve it dynamically via
- * productFor(handle, "rust-build-cache") the same way it resolves
+ * productFor(handle, RUST_BUILD_CACHE) the same way it resolves
  * "rust-link-driver"/"rust-linker".
  */
 export class RustSccacheWrapper {
@@ -410,4 +411,4 @@ export class RustSccacheWrapper {
     }
 }
 
-product("sccache-toolchain", "rust-build-cache", (handle) => new RustSccacheWrapper(handle));
+product(SccacheToolchain, RUST_BUILD_CACHE, (handle) => new RustSccacheWrapper(handle));

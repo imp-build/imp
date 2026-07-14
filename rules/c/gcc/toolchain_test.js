@@ -1,4 +1,5 @@
 import { productFor } from "imp:core";
+import { RUST_LINK_DRIVER } from "//rules/rust/products";
 import {
     describe,
     expect,
@@ -142,7 +143,7 @@ test("registers a rust-link-driver product exposing -C linker=clang and gcc/dirn
         installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
         const toolchain = gccToolchain("2025.08-1");
 
-        const linkDriver = await productFor(toolchain, "rust-link-driver");
+        const linkDriver = await productFor(toolchain, RUST_LINK_DRIVER);
 
         expect(await linkDriver.rustflags()).toEqual(["-C", "linker=clang"]);
         const tools = await linkDriver.tools();
@@ -157,7 +158,7 @@ test("rust-link-driver's env() resolves CC to a stable absolute path when sccach
         installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
         const toolchain = gccToolchain("2025.08-1");
 
-        const linkDriver = await productFor(toolchain, "rust-link-driver");
+        const linkDriver = await productFor(toolchain, RUST_LINK_DRIVER);
 
         expect(await linkDriver.env(true)).toEqual(["CC=/cache/gcc-toolchains/2025.08-1/linux-x86_64/bin/clang"]);
         // Still mounts gcc-toolchain/dirname as sandbox tools: rustc's own

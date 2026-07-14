@@ -167,20 +167,24 @@ export function namedCache(opts) {
  *   Declaring a flag more than once (e.g. across re-evaluated modules) is
  *   idempotent, unlike the goal's callback/product, which is
  *   first-registration-wins.
- * @returns {void}
+ * @returns {object} The product-name token for this goal's product; pass it
+ *   to product() to register a target kind's implementation of the goal.
+ *   Repeat registrations of the same goal return the same token.
  */
 export function goal(name, fn, opts) {
     if (typeof name !== "string" || name === "") {
         throw new Error("goal(name, fn?, opts?) requires a non-empty string name");
     }
     const flags = opts && opts.flags ? opts.flags : {};
-    __host_goal(name, "default", JSON.stringify(flags));
+    const stack = new Error("goal registration").stack || "";
+    const pid = __host_goal(name, "default", JSON.stringify(flags), stack);
     if (fn !== undefined) {
         if (typeof fn !== "function") {
             throw new Error("goal(name, fn?, opts?) expects fn to be a function when provided");
         }
         __host_goal_callback(name, fn);
     }
+    return _mint_product_name_token(name, pid);
 }
 
 /**
@@ -608,16 +612,24 @@ export function selectedTargets(kind = undefined) {
  * target handle, without invoking it — for goal callbacks that drive their
  * own resolve/fan-out/await loop (see build.js/run.js/test.js/fmt.js).
  *
- * @param {{id: number, address: string, kind: string, product: string}} entry
+ * @param {{id: number, address: string, kind: string, product: string|object}} entry
+ *   `product` may be a host-serialized string (as selection entries arrive)
+ *   or a product-name token (when a goal callback remaps, e.g. fmt --check).
  * @returns {{label: string, fn: function, handle: object}}
  */
 export function resolveProduct(entry) {
-    const fn = _products_by_kind_name.get(`${entry.kind}:${entry.product}`);
+    let product = entry.product;
+    if (product && product.__imp_product_name === true) {
+        product = product.name;
+    } else if (typeof product !== "string" || product === "") {
+        throw new Error("resolveProduct(entry) requires entry.product to be a product-name token or string");
+    }
+    const fn = _products_by_kind_name.get(`${entry.kind}:${product}`);
     if (fn === undefined) {
-        throw new Error(`no product '${entry.product}' for kind '${entry.kind}' (target '${entry.address}')`);
+        throw new Error(`no product '${product}' for kind '${entry.kind}' (target '${entry.address}')`);
     }
     return {
-        label: `${entry.address}#${entry.product}`,
+        label: `${entry.address}#${product}`,
         fn,
         handle: globalThis.__imp_resolve_handle(entry.id),
     };
@@ -625,17 +637,18 @@ export function resolveProduct(entry) {
 
 /**
  * Look up and invoke the product registered under an arbitrary role `name`
- * for a target handle's kind, e.g. productFor(moldHandle, "odin-linker").
+ * for a target handle's kind, e.g. productFor(moldHandle, ODIN_LINKER).
  * Generalizes the fixed-name "toolchain" lookup invokeToolchainProduct() uses
  * for `imp @tool` dispatch to any role name, so rule code can dynamically
  * resolve a capability (linker, link driver, ...) off a handle without
  * statically importing every module that might supply it.
  *
  * @param {object} handle Target handle whose kind determines which product resolves.
- * @param {string} name Product/role name, e.g. "odin-linker", "rust-linker".
+ * @param {object} nameToken Product-name token, e.g. ODIN_LINKER or TOOLCHAIN.
  * @returns {*} Whatever the registered product function returns (often a Promise).
  */
-export function productFor(handle, name) {
+export function productFor(handle, nameToken) {
+    const { name } = _product_name_of(nameToken, "productFor()");
     if (!handle || handle.__imp !== true) {
         throw new Error(`productFor(handle, "${name}") expects a target handle`);
     }
@@ -664,17 +677,18 @@ export function invokeToolchainProduct(id) {
     if (!_products_by_kind_name.has(`${handle.kind}:toolchain`)) {
         throw new Error(`target kind '${handle.kind}' has no 'toolchain' product (not toolchain-shaped)`);
     }
-    return productFor(handle, "toolchain");
+    return productFor(handle, TOOLCHAIN);
 }
 
 /**
  * Collect all targets of a given kind reachable from a handle (depth-first, deduped).
  *
  * @param {object} handle Root target handle.
- * @param {string} kind Target kind to collect, e.g. "odin-package".
+ * @param {Function} kindClass Target subclass to collect, e.g. OdinPackage.
  * @returns {object[]} Handles of all matching targets in the transitive closure.
  */
-export function gatherTransitiveClosure(handle, kind) {
+export function gatherTransitiveClosure(handle, kindClass) {
+    const kind = _kind_of(kindClass, "gatherTransitiveClosure()");
     const visited = new Set();
     const result = [];
     function walk(h) {
@@ -720,6 +734,105 @@ export function targetRef(address) {
         throw new Error("targetRef(address) requires a workspace target address");
     }
     return { __imp_target_ref: true, address };
+}
+
+// ---------------------------------------------------------------------------
+// Product-name tokens and target-kind classes
+// ---------------------------------------------------------------------------
+
+const _declared_product_names = new Map();  // name → frozen token; persists across resetMemoState
+const _kind_class_by_name = new Map();      // kind string → Target subclass; persists across resetMemoState
+
+function _mint_product_name_token(name, pid) {
+    const existing = _declared_product_names.get(name);
+    if (existing !== undefined && existing.__pid === pid) return existing;
+    const token = Object.freeze({ __imp_product_name: true, name, __pid: pid });
+    _declared_product_names.set(name, token);
+    return token;
+}
+
+/**
+ * Declare a product name and return its token. A name may be declared only
+ * once per workspace (per declaring module — re-evaluation is idempotent);
+ * every other module that registers or looks up a product under this name
+ * must import the token, which guarantees the declaring module is loaded.
+ *
+ * @category product
+ * @param {string} name Product name, e.g. "cc-toolchain" or "odin-linker".
+ * @returns {object} Frozen token accepted by product()/productFor()/resolveProduct().
+ */
+export function productName(name) {
+    if (typeof name !== "string" || name === "") {
+        throw new Error("productName(name) requires a non-empty string");
+    }
+    const stack = new Error("product name declaration").stack || "";
+    const pid = __host_declare_product_name(name, stack, false);
+    return _mint_product_name_token(name, pid);
+}
+
+function _builtin_product_name(name) {
+    const pid = __host_declare_product_name(name, "", true);
+    return _mint_product_name_token(name, pid);
+}
+
+/** Tokens for the built-in goals' products, plus the "toolchain" role used
+ * by `imp @tool` dispatch. Import these instead of writing name literals:
+ * `product(PythonApp, BUILD, fn)`. */
+export const BUILD = _builtin_product_name("build");
+export const TEST = _builtin_product_name("test");
+export const FMT = _builtin_product_name("fmt");
+export const LINT = _builtin_product_name("lint");
+export const PACKAGE = _builtin_product_name("package");
+export const RUN = _builtin_product_name("run");
+export const TOOLCHAIN = _builtin_product_name("toolchain");
+
+// Coerce a product-name argument to { name, pid }. Only declared tokens are
+// accepted — a bare string cannot prove its declaring module is loaded.
+function _product_name_of(value, api) {
+    if (value && value.__imp_product_name === true) {
+        return { name: value.name, pid: value.__pid };
+    }
+    throw new Error(
+        `${api} requires a product-name token; use the token returned by ` +
+        `productName()/goal(), or a builtin like BUILD from imp:core`);
+}
+
+// Coerce a target-kind argument to its kind string. The class *is* the kind
+// declaration: it must subclass Target, carry `static kind`, and be the only
+// class claiming that kind string.
+function _kind_of(cls, api) {
+    if (typeof cls !== "function" || !(cls === Target || cls.prototype instanceof Target)) {
+        throw new Error(`${api} requires a Target subclass as the kind argument`);
+    }
+    if (typeof cls.kind !== "string" || cls.kind === "") {
+        throw new Error(`${api}: class ${cls.name || "<anonymous>"} must declare 'static kind = "..."'`);
+    }
+    const existing = _kind_class_by_name.get(cls.kind);
+    if (existing !== undefined && existing !== cls) {
+        throw new Error(
+            `target kind '${cls.kind}' is declared by two classes ` +
+            `(${existing.name || "<anonymous>"} and ${cls.name || "<anonymous>"})`);
+    }
+    _kind_class_by_name.set(cls.kind, cls);
+    return cls.kind;
+}
+
+/**
+ * Mint an anonymous Target subclass for a kind string — for test fixtures
+ * and generator kinds that have no real rule class. Real rules should
+ * declare a proper `class Foo extends Target { static kind = "..." }`
+ * instead, so the class remains the single declaration site for the kind.
+ *
+ * @param {string} name Target kind, e.g. "cmake-lib".
+ * @returns {Function} A Target subclass with `static kind = name`.
+ */
+export function targetKind(name) {
+    if (typeof name !== "string" || name === "") {
+        throw new Error("targetKind(name) requires a non-empty string");
+    }
+    const cls = class extends Target { static kind = name; };
+    Object.defineProperty(cls, "name", { value: name });
+    return cls;
 }
 
 // ---------------------------------------------------------------------------
@@ -1118,15 +1231,19 @@ function _pop_call(key_string, contextId) {
  * registering the result so that goal execution (e.g. `imp build
  * //:target#name`) dispatches to it when the target's kind matches.
  *
- * @param {string} kind Target kind, e.g. "odin-package".
- * @param {string} name Product name, e.g. "executable".
+ * @param {Function} kindClass Target subclass declaring `static kind`, e.g. OdinPackage.
+ * @param {object} nameToken Product-name token from productName(), goal(), or
+ *   a builtin export (BUILD, TEST, …) — never a bare string, so registering a
+ *   name requires importing its declaring module.
  * @param {function} fn Async function taking a target handle and returning a result.
  * @returns {function} The same function, wrapped in memo().
  */
-export function product(kind, name, fn) {
+export function product(kindClass, nameToken, fn) {
+    const kind = _kind_of(kindClass, "product()");
+    const { name, pid } = _product_name_of(nameToken, "product()");
     const memoized = memo(fn);
     const registrationStack = new Error("product registration").stack || "";
-    __host_product(kind, name, memoized, registrationStack);
+    __host_product(kind, name, pid, memoized, registrationStack);
     _product_fn_info.set(_stable_function_id(fn), name);
     _products_by_kind_name.set(`${kind}:${name}`, memoized);
     return memoized;
@@ -1144,14 +1261,15 @@ export function product(kind, name, fn) {
  * current goal's selection (see `ensure_expanded` in spike.rs). An optional
  * `{ goals: ["test", ...] }` scope limits expansion to those goals.
  *
- * @param {string} kind Target kind, e.g. "cmake-lib".
+ * @param {Function} kindClass Target subclass declaring `static kind`, e.g. CmakeLib.
  * @param {function} fn Async function taking the expanding target's handle;
  *   calls `registerTarget()` for each target it discovers.
  * @param {object} [opts] Optional goal scope for expanders that are only
  *   needed by a particular graph traversal, such as test-binary discovery.
  * @returns {function} The same function, wrapped in memo().
  */
-export function expand(kind, fn, opts = {}) {
+export function expand(kindClass, fn, opts = {}) {
+    const kind = _kind_of(kindClass, "expand()");
     const memoized = memo(fn);
     __host_register_expander(kind, memoized, opts.goals ?? null);
     return memoized;

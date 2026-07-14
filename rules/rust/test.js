@@ -22,6 +22,8 @@ import {
     registerTarget,
     run,
     targetAddress,
+    BUILD,
+    TEST,
 } from "imp:core";
 
 import {
@@ -35,6 +37,7 @@ import {
     rustToolEnv,
     sources,
 } from "//rules/rust";
+import { CargoPackage } from "//rules/rust/cargo_package";
 
 import { rustTool } from "//rules/rust/toolchain";
 import { nativeToolSpec } from "//rules/imp/native_tool";
@@ -145,7 +148,7 @@ export class RustTest extends Target {
     }
 }
 
-export const rustTestBuild = product("rust_test", "build", async function rustTestBuild(handle) {
+export const rustTestBuild = product(RustTest, BUILD, async function rustTestBuild(handle) {
     const { result } = await buildTestBinaries(handle);
     return { outputPath: handle.attrs.executable, outputDigest: result.outputDigest };
 });
@@ -159,7 +162,7 @@ export const rustTestBuild = product("rust_test", "build", async function rustTe
 // the fan-out itself is what gets the parallelism/isolation (each binary is
 // its own imp target, its own sandbox), not thread-level concurrency
 // within a single binary.
-export const rustTestRun = product("rust_test", "test", async function rustTestRun(handle) {
+export const rustTestRun = product(RustTest, TEST, async function rustTestRun(handle) {
     const { outputDigest } = await rustTestBuild(handle);
     const testTools = await Promise.all((handle.attrs.testTools || []).map(nativeToolSpec));
     return run({
@@ -183,7 +186,7 @@ export const rustTestRun = product("rust_test", "test", async function rustTestR
 // unit tests, file stem for integration tests) can otherwise collide with
 // the parent's own hand-declared name, or with a sibling cargoPackage's
 // discovered binaries in the same directory.
-export const expandCargoTests = expand("cargo-package", async function expandCargoTests(handle) {
+export const expandCargoTests = expand(CargoPackage, async function expandCargoTests(handle) {
     const { result, buildDir } = await buildTestBinaries(handle);
     const binaries = parseTestBinaries(result.stdout, buildDir);
 

@@ -1,7 +1,9 @@
 import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile, registerBuiltinLockfile } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+import { ODIN_LINKER } from "//rules/odin/products";
+import { RUST_LINKER } from "//rules/rust/products";
 
 const MOLD_TOOLCHAIN_CACHE = "mold-toolchains";
 
@@ -249,7 +251,7 @@ const LOCKFILE_SPEC = {
     artifactName: moldArtifactName,
     lockfile: "//rules/c/mold/mold.lock",
 };
-product("mold-toolchain", "gen-lockfiles", (handle) =>
+product(MoldToolchain, GEN_LOCKFILES, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
 registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["2.41.0"] });
 
@@ -257,7 +259,7 @@ registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["2.41.0"] });
  * Adapter exposing a mold toolchain as Odin's `-linker:mold` linker role.
  * Registered as the "odin-linker" product for the "mold-toolchain" kind so
  * odinScriptTools() (rules/odin/index.js) can resolve it dynamically via
- * productFor(handle, "odin-linker") instead of a hardcoded default lookup.
+ * productFor(handle, ODIN_LINKER) instead of a hardcoded default lookup.
  */
 export class OdinMoldLinker {
     constructor(handle) {
@@ -275,7 +277,7 @@ export class OdinMoldLinker {
     }
 }
 
-product("mold-toolchain", "odin-linker", (handle) => new OdinMoldLinker(handle));
+product(MoldToolchain, ODIN_LINKER, (handle) => new OdinMoldLinker(handle));
 
 /**
  * Adapter exposing a mold toolchain as Rust/rustc's backend linker via
@@ -298,4 +300,4 @@ export class RustMoldLinker {
     }
 }
 
-product("mold-toolchain", "rust-linker", (handle) => new RustMoldLinker(handle));
+product(MoldToolchain, RUST_LINKER, (handle) => new RustMoldLinker(handle));

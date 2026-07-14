@@ -7,6 +7,7 @@ import {
     sourcesField,
     targetAddress,
     registerBuildRule,
+    BUILD,
 } from "imp:core";
 
 registerBuildRule({
@@ -58,7 +59,14 @@ export const sources = memo(async function sources(handle) {
     return glob({ root: ".", include: handle.attrs.sources || [] });
 });
 
-export const bundle = product("asset", "build", async function bundle(handle) {
+export class Asset extends Target {
+    static kind = "asset";
+    constructor({ srcs }) {
+        super({ kind: Asset.kind, attrs: { sources: srcs } });
+    }
+}
+
+export const bundle = product(Asset, BUILD, async function bundle(handle) {
     const srcs = await sources(handle);
     return run({
         argv: ["sh", "-c", "true"],
@@ -71,13 +79,6 @@ export const bundle = product("asset", "build", async function bundle(handle) {
 // ---------------------------------------------------------------------------
 // Target constructors
 // ---------------------------------------------------------------------------
-
-export class Asset extends Target {
-    static kind = "asset";
-    constructor({ srcs }) {
-        super({ kind: Asset.kind, attrs: { sources: srcs } });
-    }
-}
 
 /**
  * Declare an asset target bundling a set of source glob patterns.

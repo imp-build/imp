@@ -26,6 +26,7 @@ import {
     odinLint,
     default_output_path,
     odin_output_path,
+    OdinPackage,
 } from "//rules/odin";
 import {
     resourcePackage,
@@ -101,7 +102,7 @@ test("hydrateTarget returns kind, attrs, and dep handles", () => {
 test("gatherTransitiveClosure finds all odin-package targets", () => {
     const lib = odinPackage({ srcs: ["rules/odin/index.js"], toolchain: "dev-2026-04" });
     const app = odinPackage({ srcs: ["rules/odin/index_test.js"], toolchain: "dev-2026-04", deps: [lib] });
-    const closure = gatherTransitiveClosure(app, "odin-package");
+    const closure = gatherTransitiveClosure(app, OdinPackage);
 
     expect(closure.length).toBe(2);
 });

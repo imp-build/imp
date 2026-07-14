@@ -1,4 +1,4 @@
-import { Target, expand, glob, file_set, memo, mergeDigests, output, output_path, pathsInDigest, product, readFileInDigest, registerTarget, run, sourcesField, targetAddress, writeWorkspace } from "imp:core";
+import { Target, expand, glob, file_set, memo, mergeDigests, output, output_path, pathsInDigest, product, readFileInDigest, registerTarget, run, sourcesField, targetAddress, writeWorkspace, BUILD, PACKAGE, TEST } from "imp:core";
 import { distPathFor } from "//rules/workflows/package";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import {
@@ -6,6 +6,7 @@ import {
     cmakeBin,
     cmakeTool,
     defaultCmakeToolchain,
+    CmakeToolchain,
 } from "//rules/c/cmake/toolchain";
 import {
     zigTool,
@@ -101,7 +102,7 @@ function declared_path(handle, path = ".") {
 // Memo/product functions for C/CMake targets
 // ---------------------------------------------------------------------------
 
-export const tool = product("cmake-toolchain", "build", async function tool(handle) {
+export const tool = product(CmakeToolchain, BUILD, async function tool(handle) {
     await acquireCmakeToolchain(handle.attrs.version);
     return { name: "cmake", version: handle.attrs.version };
 });
@@ -490,7 +491,93 @@ export async function buildCmakeArtifact(handle) {
     return { ...result, outputBase, hasStageOutputs: stageOutputs.length > 0 };
 }
 
-export const native_link_library = product("cmake-lib", "build", buildCmakeArtifact);
+export class CppSources extends Target {
+    static kind = "cpp-sources";
+    constructor({ srcs }) {
+        super({
+            kind: CppSources.kind,
+            attrs: { sources: srcs },
+            sources: sourcesField({
+                root: ".",
+                include: srcs,
+                exclude: [],
+            }),
+        });
+    }
+}
+
+export class CmakeLib extends Target {
+    static kind = "cmake-lib";
+    constructor({
+        src = ".",
+        buildDir,
+        srcs,
+        dirs = [],
+        cmakeArgs = [],
+        ctestArgs = [],
+        outputs = [],
+        stageOutputs = [],
+        outputsInBuildDir = false,
+        toolchain,
+        compiler,
+        deps = [],
+        kind = CmakeLib.kind,
+        testNames = [],
+    }) {
+        const explicitToolchainTarget = toolchain && toolchain.__imp === true ? toolchain : null;
+        const explicitVersion = toolchain && toolchain.__imp !== true ? toolchain : null;
+        const toolchainTarget = explicitToolchainTarget || (!explicitVersion ? defaultCmakeToolchain() : null);
+        const toolchainVersion = explicitVersion || (toolchainTarget && toolchainTarget.attrs?.version);
+
+        const explicitCompilerTarget = compiler && compiler.__imp === true ? compiler : null;
+        const explicitCompilerVersion = compiler && compiler.__imp !== true ? compiler : null;
+        const compilerTarget = explicitCompilerTarget || (!explicitCompilerVersion ? defaultZigToolchain() : null);
+        const compilerVersion = explicitCompilerVersion || (compilerTarget && compilerTarget.attrs?.version);
+
+        const allDeps = [
+            ...(toolchainTarget ? [{ target: toolchainTarget, mode: "tool" }] : []),
+            ...(compilerTarget ? [{ target: compilerTarget, mode: "tool" }] : []),
+            ...deps,
+        ];
+
+        super({
+            kind,
+            attrs: {
+                src,    // stored as user-provided; resolved by declared_path in product/memo
+                srcs: srcs || DEFAULT_CPP_SRCS,
+                ...(kind !== CmakeLib.kind ? { backend: "cmake" } : {}),
+                ...(dirs.length ? { dirs } : {}),
+                cmakeArgs,
+                ...(ctestArgs.length ? { ctestArgs } : {}),
+                outputs,
+                ...(stageOutputs.length ? { stageOutputs } : {}),
+                ...(outputsInBuildDir ? { outputsInBuildDir } : {}),
+                ...(testNames.length ? { testNames } : {}),
+                ...(buildDir ? { buildDir } : {}),
+                ...(toolchainVersion ? { toolchain: toolchainVersion } : {}),
+                ...(toolchainTarget ? { toolchainTarget } : {}),
+                ...(compilerVersion ? { compiler: compilerVersion } : {}),
+                ...(compilerTarget ? { compilerTarget } : {}),
+                ...(allDeps.length ? { deps: allDeps.map(dep => dep.target || dep) } : {}),
+            },
+            sources: [
+                sourcesField({
+                    root: src,
+                    include: srcs || DEFAULT_CPP_SRCS,
+                    exclude: [],
+                }),
+                ...dirs.map(dir => sourcesField({
+                    root: dir,
+                    include: ["**/*"],
+                    exclude: [],
+                })),
+            ],
+            deps: allDeps,
+        });
+    }
+}
+
+export const native_link_library = product(CmakeLib, BUILD, buildCmakeArtifact);
 
 /**
  * Package a cmake-built artifact to dist/. Only supports the common case
@@ -511,7 +598,7 @@ export async function packageCmakeArtifact(handle) {
     return result;
 }
 
-export const cmakeLibPackage = product("cmake-lib", "package", packageCmakeArtifact);
+export const cmakeLibPackage = product(CmakeLib, PACKAGE, packageCmakeArtifact);
 
 // Regex-escapes and `-R`-joins a set of correlated CTest test names, scoping
 // a cc_test target's own "test" product to just its case(s) instead of the
@@ -573,7 +660,7 @@ export async function runCTest(handle) {
     });
 }
 
-export const ctest = product("cmake-lib", "test", runCTest);
+export const ctest = product(CmakeLib, TEST, runCTest);
 
 // Returns link artifacts at their staged locations as a resource file set for
 // odin package sandboxing. Also ensures the cmake build is a plan prerequisite.
@@ -668,7 +755,7 @@ function correlateCTestEntries(graph, buildDirPath) {
     return testsByBasename;
 }
 
-export const expandCmakeProject = expand("cmake-lib", async function expandCmakeProject(handle) {
+export const expandCmakeProject = expand(CmakeLib, async function expandCmakeProject(handle) {
     const setup = await resolveCmakeSetup(handle);
     const graph = await configureNinjaGraph(handle, setup);
     const parentAddress = safe_target_address(handle);
@@ -710,21 +797,6 @@ export const expandCmakeProject = expand("cmake-lib", async function expandCmake
 // Target constructors
 // ---------------------------------------------------------------------------
 
-export class CppSources extends Target {
-    static kind = "cpp-sources";
-    constructor({ srcs }) {
-        super({
-            kind: CppSources.kind,
-            attrs: { sources: srcs },
-            sources: sourcesField({
-                root: ".",
-                include: srcs,
-                exclude: [],
-            }),
-        });
-    }
-}
-
 /**
  * Declare a target that owns C/C++ source files.
  *
@@ -735,77 +807,6 @@ export class CppSources extends Target {
  */
 export function cppSources({ srcs }) {
     return new CppSources({ srcs });
-}
-
-export class CmakeLib extends Target {
-    static kind = "cmake-lib";
-    constructor({
-        src = ".",
-        buildDir,
-        srcs,
-        dirs = [],
-        cmakeArgs = [],
-        ctestArgs = [],
-        outputs = [],
-        stageOutputs = [],
-        outputsInBuildDir = false,
-        toolchain,
-        compiler,
-        deps = [],
-        kind = CmakeLib.kind,
-        testNames = [],
-    }) {
-        const explicitToolchainTarget = toolchain && toolchain.__imp === true ? toolchain : null;
-        const explicitVersion = toolchain && toolchain.__imp !== true ? toolchain : null;
-        const toolchainTarget = explicitToolchainTarget || (!explicitVersion ? defaultCmakeToolchain() : null);
-        const toolchainVersion = explicitVersion || (toolchainTarget && toolchainTarget.attrs?.version);
-
-        const explicitCompilerTarget = compiler && compiler.__imp === true ? compiler : null;
-        const explicitCompilerVersion = compiler && compiler.__imp !== true ? compiler : null;
-        const compilerTarget = explicitCompilerTarget || (!explicitCompilerVersion ? defaultZigToolchain() : null);
-        const compilerVersion = explicitCompilerVersion || (compilerTarget && compilerTarget.attrs?.version);
-
-        const allDeps = [
-            ...(toolchainTarget ? [{ target: toolchainTarget, mode: "tool" }] : []),
-            ...(compilerTarget ? [{ target: compilerTarget, mode: "tool" }] : []),
-            ...deps,
-        ];
-
-        super({
-            kind,
-            attrs: {
-                src,    // stored as user-provided; resolved by declared_path in product/memo
-                srcs: srcs || DEFAULT_CPP_SRCS,
-                ...(kind !== CmakeLib.kind ? { backend: "cmake" } : {}),
-                ...(dirs.length ? { dirs } : {}),
-                cmakeArgs,
-                ...(ctestArgs.length ? { ctestArgs } : {}),
-                outputs,
-                ...(stageOutputs.length ? { stageOutputs } : {}),
-                ...(outputsInBuildDir ? { outputsInBuildDir } : {}),
-                ...(testNames.length ? { testNames } : {}),
-                ...(buildDir ? { buildDir } : {}),
-                ...(toolchainVersion ? { toolchain: toolchainVersion } : {}),
-                ...(toolchainTarget ? { toolchainTarget } : {}),
-                ...(compilerVersion ? { compiler: compilerVersion } : {}),
-                ...(compilerTarget ? { compilerTarget } : {}),
-                ...(allDeps.length ? { deps: allDeps.map(dep => dep.target || dep) } : {}),
-            },
-            sources: [
-                sourcesField({
-                    root: src,
-                    include: srcs || DEFAULT_CPP_SRCS,
-                    exclude: [],
-                }),
-                ...dirs.map(dir => sourcesField({
-                    root: dir,
-                    include: ["**/*"],
-                    exclude: [],
-                })),
-            ],
-            deps: allDeps,
-        });
-    }
 }
 
 /**
