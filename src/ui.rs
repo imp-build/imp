@@ -15,13 +15,6 @@ impl Tree {
         Self { multi }
     }
 
-    pub fn add_child(&self, name: impl Into<String>) -> ProgressBar {
-        let item = self.multi.add(ProgressBar::new_spinner());
-        init_task(&item);
-        item.set_message(name.into());
-        item
-    }
-
     /// An owned handle to the progress renderer, suitable for moving into a
     /// spawned task (e.g. a scheduler event renderer). Adds bars via `add`.
     pub fn multi(&self) -> MultiProgress {
@@ -45,21 +38,6 @@ impl Session {
     pub fn shutdown(self) {
         let _ = self.tree.multi.clear();
     }
-}
-
-/// Prints `message` to the terminal scrollback and clears `item`'s line.
-///
-/// One-off setup steps (toolchain install, WSL sync, ...) shouldn't stay
-/// behind as static bar rows once done — every finished step otherwise pushes
-/// the interesting, still-live bars further down, so the on-screen layout
-/// looks different depending on which steps happened to run first.
-pub(crate) fn finish_step(item: &ProgressBar, message: &str) {
-    item.suspend(|| println!("{message}"));
-    item.finish_and_clear();
-}
-
-pub(crate) fn init_task(item: &ProgressBar) {
-    init_timed_task(item);
 }
 
 pub(crate) fn init_counted_task(item: &ProgressBar, max: usize) {

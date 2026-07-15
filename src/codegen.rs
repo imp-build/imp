@@ -2,21 +2,9 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use regex::Regex;
 use walkdir::WalkDir;
-
-use crate::env::LocalEnv;
-use crate::workspace;
-
-/// Scan Odin files for generated registration attributes, writing to the default workspace path.
-pub async fn update_module_list(progress: &mut indicatif::ProgressBar) -> Result<()> {
-    progress.set_message("codegen: scanning modules/components/assets");
-    let out_path = workspace::root_dir().join("ottar/generated_register.odin");
-    update_module_list_to(&out_path).await?;
-    progress.set_message(format!("codegen: wrote {}", out_path.display()));
-    Ok(())
-}
 
 const CODEGEN_EXCLUDE: &[&str] = &[
     ".toolchain",
@@ -52,7 +40,7 @@ fn get_odin_files_from(root: &Path) -> Vec<PathBuf> {
 
 /// Scan Odin files for generated registration attributes, writing to `out_path`.
 /// Scans from the current working directory.
-pub async fn update_module_list_to(out_path: &Path) -> Result<()> {
+pub async fn update_module_list_to(out_path: &Path, odinfmt: &Path) -> Result<()> {
     let root = std::env::current_dir().context("get current directory")?;
     let out_path_abs = if out_path.is_absolute() {
         out_path.to_owned()
@@ -227,13 +215,22 @@ pub async fn update_module_list_to(out_path: &Path) -> Result<()> {
     std::fs::write(&out_path_abs, out.join("\n"))
         .with_context(|| format!("write {}", out_path_abs.display()))?;
 
-    // format
-    let odinfmt = workspace::odinfmt_bin();
-    let odinfmt_str = odinfmt.to_string_lossy().into_owned();
-    let out_str = out_path_abs.to_string_lossy().into_owned();
-    LocalEnv::new()
-        .execute_check(&[&odinfmt_str, "-w", &out_str], None, false)
-        .await?;
+    let output = tokio::process::Command::new(odinfmt)
+        .arg("-w")
+        .arg(&out_path_abs)
+        .current_dir(&root)
+        .output()
+        .await
+        .with_context(|| format!("run {}", odinfmt.display()))?;
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "{} failed ({}):\n{stdout}{stderr}",
+            odinfmt.display(),
+            output.status
+        );
+    }
 
     Ok(())
 }

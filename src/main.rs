@@ -1,7 +1,6 @@
 mod changed;
 mod codegen;
 mod commands;
-mod env;
 mod exec_bridge;
 mod loader;
 mod logging;
@@ -9,9 +8,7 @@ mod runtime;
 mod scheduler;
 mod selector;
 mod spike;
-mod toolchain;
 mod ui;
-mod workspace;
 
 use std::path::PathBuf;
 use std::sync::{
@@ -23,8 +20,6 @@ use anyhow::{Context, Result};
 use clap::{Arg, ArgAction, Args, Command, FromArgMatches, Parser, Subcommand};
 use rquickjs::{promise::MaybePromise, CatchResultExt, FromJs, Function, Module, Object, Value};
 
-use env::{Env, LocalEnv, WslEnv};
-
 type Tree = ui::Tree;
 
 // ---------------------------------------------------------------------------
@@ -34,19 +29,13 @@ type Tree = ui::Tree;
 #[derive(Parser)]
 #[command(
     name = "imp",
-    about = "Build system for the Odin game engine project",
-    long_about = "Build system for the Odin game engine project.\n\n\
+    about = "Extensible workspace build system",
+    long_about = "Extensible workspace build system.\n\n\
 Run a managed toolchain binary directly with `imp @TOOL <args>` (e.g. `imp @odin build foo.odin -out:foo`); \
 args are passed through verbatim, no `--` needed. TOOL is any toolchain-shaped \
 top-level export in imp.workspace.js (e.g. odin, odinfmt), plus the built-in kcov."
 )]
 struct Cli {
-    /// Use WSL cross-compilation environment (Linux → Windows)
-    #[arg(long, global = true)]
-    cross_compile: bool,
-    /// Skip syncing workspace to target environment
-    #[arg(long, global = true)]
-    no_sync: bool,
     /// Route sandboxed execution through the local daemon.
     #[arg(long, global = true)]
     daemon: bool,
@@ -56,20 +45,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Download and install required toolchains
-    Setup {
-        /// Also install the Windows cross-compilation toolchain
-        #[arg(long)]
-        windows: bool,
-    },
-    /// Synchronise workspace to the target environment
-    Sync,
-    /// Check build environment and requirements
-    EnvCheck {
-        #[arg(long)]
-        cross_compile: bool,
-    },
-    /// List targets in the workspace (QuickJS spike)
+    /// List targets in the workspace
     Targets {
         /// Target addresses or names to select; defaults to all targets
         selectors: Vec<String>,
@@ -81,12 +57,12 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t, requires = "changed_since")]
         changed_dependents: changed::DependentsMode,
     },
-    /// List target dependencies (QuickJS spike)
+    /// List target dependencies
     Dependencies {
         /// Target addresses or names to select; defaults to all root targets
         selectors: Vec<String>,
     },
-    /// List target types and rules in the workspace (QuickJS spike)
+    /// List target types and rules in the workspace
     Rules,
     /// Generate the Odin module/component/asset registration file
     CodegenRegister {
@@ -290,7 +266,9 @@ async fn main() {
 /// the tool's own flags never need a `--` separator.
 async fn run_tool(name: &str, args: &[std::ffi::OsString]) -> Result<i32> {
     let bin = match name {
-        "kcov" => workspace::kcov_bin(),
+        "kcov" => std::env::var_os("KCOV_BIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("kcov")),
         other => resolve_workspace_tool_bin(other).await?,
     };
 
@@ -488,8 +466,6 @@ fn install_termination_signal_flag() -> Result<Arc<AtomicBool>> {
 }
 
 async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Result<()> {
-    // The QuickJS spike only evaluates workspace definition files. It
-    // must not acquire this project's toolchains or generate workspace files.
     match &cli.command {
         Cmd::Targets {
             selectors,
@@ -555,105 +531,12 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
             return cmd_execute_goal("generate-build", &raw, Arc::clone(&cancellation), tree).await;
         }
         Cmd::CodegenRegister { output } => {
-            return commands::codegen_register::run(output).await;
+            let odinfmt = match std::env::var_os("ODINFMT_BIN") {
+                Some(path) => PathBuf::from(path),
+                None => resolve_workspace_tool_bin("odinfmt").await?,
+            };
+            return commands::codegen_register::run(output, &odinfmt).await;
         }
-        _ => {}
-    }
-
-    // `setup` only needs local env + toolchain download
-    if let Cmd::Setup { windows } = &cli.command {
-        let mut p = tree.add_child("setup toolchains");
-        toolchain::setup_toolchains(&mut p, *windows).await?;
-        ui::finish_step(&p, "toolchains ready");
-        return Ok(());
-    }
-
-    let cross_compile = cli.cross_compile || matches!(cli.command, Cmd::Sync);
-
-    if cross_compile {
-        let p = tree.add_child("validate WSL environment");
-        WslEnv::new().validate().await?;
-        ui::finish_step(&p, "WSL ok");
-    }
-
-    {
-        let local = LocalEnv::new();
-        local
-            .ensure_paths(&[
-                workspace::build_dir(),
-                workspace::dist_dir(),
-                workspace::coverage_dir(),
-            ])
-            .await?;
-    }
-
-    {
-        let mut p = tree.add_child("check toolchains");
-        toolchain::setup_toolchains(&mut p, cross_compile).await?;
-        ui::finish_step(&p, "toolchains ok");
-    }
-
-    {
-        let mut p = tree.add_child("refresh module list");
-        codegen::update_module_list(&mut p).await?;
-        ui::finish_step(&p, "module list refreshed");
-    }
-
-    let mut target_env = if cross_compile {
-        Env::Wsl(WslEnv::new())
-    } else {
-        Env::Local(LocalEnv::new())
-    };
-
-    if !cli.no_sync && !matches!(cli.command, Cmd::Sync | Cmd::Setup { .. }) {
-        if let Env::Wsl(wsl) = &mut target_env {
-            let mut p = tree.add_child("sync workspace → Windows");
-            wsl.sync(&mut p).await?;
-            ui::finish_step(&p, "synced");
-        }
-    }
-
-    let result = dispatch(&cli.command, &target_env, tree).await;
-
-    if let Env::Wsl(wsl) = &target_env {
-        if wsl.synced {
-            let p = tree.add_child("copy artifacts back");
-            wsl.copy_artifacts_back().await?;
-            ui::finish_step(&p, "artifacts copied");
-        }
-    }
-
-    result
-}
-
-async fn dispatch(cmd: &Cmd, env: &Env, tree: &Tree) -> Result<()> {
-    match cmd {
-        Cmd::Setup { .. } => unreachable!("handled above"),
-
-        Cmd::Sync => {
-            println!("Workspace sync complete.");
-            Ok(())
-        }
-
-        Cmd::EnvCheck { cross_compile } => cmd_env_check(env, *cross_compile, tree).await,
-
-        Cmd::Targets { .. } => unreachable!("handled before environment setup"),
-        Cmd::Dependencies { .. } => unreachable!("handled before environment setup"),
-        Cmd::Rules => unreachable!("handled before environment setup"),
-        Cmd::GenerateBuild { .. } => unreachable!("handled before environment setup"),
-        Cmd::CodegenRegister { .. } => unreachable!("handled before environment setup"),
-        Cmd::Build(_)
-        | Cmd::Test(_)
-        | Cmd::Fmt(_)
-        | Cmd::Lint(_)
-        | Cmd::Package(_)
-        | Cmd::Run(_)
-        | Cmd::Goal { .. }
-        | Cmd::RulesTest { .. }
-        | Cmd::RulesTestCase { .. }
-        | Cmd::Daemon { .. }
-        | Cmd::Cache { .. }
-        | Cmd::Config { .. } => unreachable!("handled before environment setup"),
     }
 }
 
@@ -1228,106 +1111,6 @@ async fn cmd_rules(tree: &Tree) -> Result<()> {
     workspace_cmd!(tree, |workspace, out| {
         spike::format_products(&workspace, &mut out)?;
     })
-}
-
-// ---------------------------------------------------------------------------
-// env-check command (inlined since it's small)
-// ---------------------------------------------------------------------------
-
-async fn cmd_env_check(_env: &Env, check_cross: bool, tree: &Tree) -> Result<()> {
-    let p = tree.add_child("environment diagnostics");
-    // Report lines print above the bars, synchronized via `suspend` so they
-    // never tear a redraw.
-    let info = |line: &str| p.suspend(|| println!("{line}"));
-
-    let local = LocalEnv::new();
-    let odin_str = workspace::odin_bin().to_string_lossy().into_owned();
-    let odinfmt_str = workspace::odinfmt_bin().to_string_lossy().into_owned();
-    let kcov_str = workspace::kcov_bin().to_string_lossy().into_owned();
-
-    info("=== Build Environment ===");
-
-    let odin_status = local
-        .execute(&[&odin_str, "version"], None, false)
-        .await
-        .map(|(code, out)| {
-            if code == 0 {
-                format!("✓ {}", out.lines().next().unwrap_or("ok"))
-            } else {
-                "✗ not working".to_owned()
-            }
-        })
-        .unwrap_or_else(|_| "✗ not found".to_owned());
-    info(&format!("  odin      : {odin_status}"));
-
-    let fmt_status: String = local
-        .execute(&[&odinfmt_str, "--version"], None, false)
-        .await
-        .map(|(code, _)| {
-            if code == 0 {
-                "✓ available".to_owned()
-            } else {
-                "✗ not working".to_owned()
-            }
-        })
-        .unwrap_or_else(|_| "✗ not found".to_owned());
-    info(&format!("  odinfmt   : {fmt_status}"));
-
-    if !cfg!(windows) {
-        let kcov_status = local
-            .execute(&[&kcov_str, "--version"], None, false)
-            .await
-            .map(|(code, out)| {
-                if code == 0 {
-                    format!("✓ {}", out.lines().next().unwrap_or("ok"))
-                } else {
-                    "✗ not working".to_owned()
-                }
-            })
-            .unwrap_or_else(|_| "✗ not found (coverage unavailable)".to_owned());
-        info(&format!("  kcov      : {kcov_status}"));
-    } else {
-        info("  kcov      : N/A (Windows)");
-    }
-
-    if check_cross {
-        info("=== Cross-Compilation ===");
-        match WslEnv::new().validate().await {
-            Ok(_) => {
-                info("  WSL       : ✓ available");
-                let rsync_ok = local
-                    .execute(&["rsync", "--version"], None, false)
-                    .await
-                    .map(|(c, _)| c == 0)
-                    .unwrap_or(false);
-                info(if rsync_ok {
-                    "  rsync     : ✓ available"
-                } else {
-                    "  rsync     : ✗ not found"
-                });
-                info("  mount     : ✓ accessible");
-            }
-            Err(e) => {
-                info("  Status    : ✗ not ready");
-                info(&format!("  Error     : {e}"));
-            }
-        }
-    }
-
-    let targets = workspace::get_targets()?;
-    let tests = workspace::get_test_configs()?;
-    let odin_files = workspace::get_odin_files();
-    info("=== Workspace ===");
-    info(&format!("  Odin files    : {}", odin_files.len()));
-    info(&format!("  Build targets : {}", targets.len()));
-    info(&format!("  Test packages : {}", tests.len()));
-    if !targets.is_empty() {
-        let names: Vec<_> = targets.iter().map(|t| t.name.as_str()).collect();
-        info(&format!("  Target list   : {}", names.join(", ")));
-    }
-
-    p.finish_with_message("done");
-    Ok(())
 }
 
 #[cfg(test)]

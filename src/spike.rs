@@ -1,4 +1,4 @@
-//! QuickJS-backed target, rule, and goal planning spike.
+//! QuickJS-backed target, rule, and goal engine.
 //!
 //! `imp.workspace.js` imports plugin modules that register rules via
 //! `product()` registrations. Workspace `BUILD.js` files declare and export target handles
@@ -90,38 +90,6 @@ pub enum DependencyMode {
     Named(String),
 }
 
-/// Execution backend — where task commands are dispatched.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Executor {
-    /// Native `std::process::Command` on the local machine.
-    Local,
-    /// PowerShell bridge through WSL (model only — not yet implemented).
-    Wsl,
-    /// Container runtime (future).
-    Container,
-}
-
-impl Executor {
-    fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "local" => Some(Self::Local),
-            "wsl" => Some(Self::Wsl),
-            "container" => Some(Self::Container),
-            _ => None,
-        }
-    }
-}
-
-/// A registered platform: bundles executor (where to run) and target (what to build for).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlatformDef {
-    pub name: String,
-    pub executor: Executor,
-    /// Opaque OS-arch string, e.g. `"linux-x86_64"` or `"windows-x86_64"`.
-    pub target: String,
-}
-
 /// A boolean flag a goal declares for itself via `goal(name, fn, { flags })`,
 /// turned into a real CLI flag (e.g. `--check`) once the goal's declaring
 /// module has been evaluated. v1 scope: presence-based booleans defaulting to
@@ -187,8 +155,6 @@ pub struct Workspace {
     #[allow(dead_code)]
     pub named_caches: BTreeMap<String, NamedCache>,
     pub goals: BTreeMap<String, Goal>,
-    #[allow(dead_code)]
-    pub platforms: BTreeMap<String, PlatformDef>,
     /// Goal name -> global function name for an optional pre-flight
     /// callback registered via `goal(name, fn)`. Invoked once per goal
     /// invocation, before any per-target product dispatch.
@@ -249,7 +215,6 @@ pub(crate) struct HostState {
     owned_files: BTreeSet<String>,
     named_caches: BTreeMap<String, NamedCache>,
     goals: BTreeMap<String, Goal>,
-    platforms: BTreeMap<String, PlatformDef>,
     id_to_address: BTreeMap<u32, String>,
     goal_callbacks: BTreeMap<String, String>,
     expanders: BTreeMap<String, Expander>,
@@ -303,16 +268,6 @@ impl Default for HostState {
             );
             next_product_name_id += 1;
         }
-        let mut platforms = BTreeMap::new();
-        let local_target = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-        platforms.insert(
-            "local".to_owned(),
-            PlatformDef {
-                name: "local".to_owned(),
-                executor: Executor::Local,
-                target: local_target,
-            },
-        );
         Self {
             next_id: 0,
             next_exec: 0,
@@ -325,7 +280,6 @@ impl Default for HostState {
             owned_files: BTreeSet::new(),
             named_caches: BTreeMap::new(),
             goals,
-            platforms,
             id_to_address: BTreeMap::new(),
             goal_callbacks: BTreeMap::new(),
             expanders: BTreeMap::new(),
@@ -495,7 +449,6 @@ async fn create_live_runtime(
             owned_files: BTreeSet::new(),
             named_caches: hs.named_caches.clone(),
             goals: hs.goals.clone(),
-            platforms: hs.platforms.clone(),
             goal_callbacks: hs.goal_callbacks.clone(),
             expanders: hs.expanders.clone(),
             declared_product_names: hs.declared_product_names.clone(),
@@ -687,7 +640,6 @@ async fn load_workspace_with_rules_and_service(
             goal_callbacks: hs.goal_callbacks.clone(),
             expanders: hs.expanders.clone(),
             goals: hs.goals.clone(),
-            platforms: hs.platforms.clone(),
             declared_product_names: hs.declared_product_names.clone(),
         };
         (ws, id_to_address)
@@ -1814,39 +1766,6 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_configuration_digest", host_configuration_digest)?;
 
     // ------------------------------------------------------------------
-    // __host_platform(name, executor, target)
-    // ------------------------------------------------------------------
-    let state_p = Arc::clone(&state);
-    let host_platform = Function::new(
-        ctx.clone(),
-        move |name: String, executor_str: String, target: String| -> rquickjs::Result<()> {
-            if name.is_empty() {
-                return Err(action_spec_error(
-                    "platform name must not be empty".to_owned(),
-                ));
-            }
-            let executor = Executor::from_str(&executor_str).ok_or_else(|| {
-                action_spec_error(format!(
-                    "unknown executor '{executor_str}'; known: local, wsl, container"
-                ))
-            })?;
-            let mut hs = state_p.lock().unwrap();
-            if !hs.platforms.contains_key(&name) {
-                hs.platforms.insert(
-                    name.clone(),
-                    PlatformDef {
-                        name,
-                        executor,
-                        target,
-                    },
-                );
-            }
-            Ok(())
-        },
-    )?;
-    globals.set("__host_platform", host_platform)?;
-
-    // ------------------------------------------------------------------
     // __host_download(url) → path string
     // ------------------------------------------------------------------
     let service_download = Arc::clone(&service);
@@ -1877,7 +1796,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_extract", host_extract)?;
 
     // ------------------------------------------------------------------
-    // __host_platform() → JSON string { "os": "...", "arch": "..." }
+    // __host_platform_info() → JSON string { "os": "...", "arch": "..." }
     // ------------------------------------------------------------------
     let service_platform = Arc::clone(&service);
     let host_platform_fn = Function::new(ctx.clone(), move || -> rquickjs::Result<String> {

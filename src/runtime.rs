@@ -1,7 +1,7 @@
 //! QuickJS runtime integration for workspace loading and live product evaluation.
 //!
 //! This module is the public home for the embedded JavaScript runtime APIs
-//! while the larger `spike` module is split down further.
+//! while the larger runtime implementation is split down further.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

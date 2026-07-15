@@ -526,24 +526,6 @@ export function ruleCapabilities() {
 	return JSON.parse(__host_rule_capabilities());
 }
 
-/**
- * Register a named platform.
- *
- * The built-in "local" platform is pre-registered with the native executor and
- * the current machine's OS-arch as the target. Duplicate platform names are
- * silently ignored (first registration wins).
- *
- * @category configuration
- * @param {object} opts
- * @param {string} opts.name Platform name referenced in action.platform.
- * @param {string} opts.executor Execution backend: "local", "wsl", or "container".
- * @param {string} opts.target Target OS-arch string, e.g. "windows-x86_64".
- * @returns {void}
- */
-export function platform(opts) {
-	__host_platform(opts.name, opts.executor, opts.target);
-}
-
 // ---------------------------------------------------------------------------
 // Toolchain acquisition primitives
 // ---------------------------------------------------------------------------

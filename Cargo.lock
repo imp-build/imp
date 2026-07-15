@@ -745,7 +745,6 @@ dependencies = [
  "log",
  "regex",
  "rquickjs",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",
