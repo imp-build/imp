@@ -566,10 +566,6 @@ async fn load_workspace_with_rules_and_service(
         .collect();
     build_files.sort();
 
-    if build_files.is_empty() {
-        bail!("no {} files found below {}", BUILD_FILE, root.display());
-    }
-
     // ----- Evaluate each BUILD.js and collect named exports -----
     // We use dynamic `import()` so that QuickJS handles caching: if a BUILD.js
     // was already loaded (because another BUILD.js imported it), we get the
@@ -8083,12 +8079,6 @@ export const a = mkTarget();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/odin";"#);
         write_file(&p.join("rules/odin.js"), GENERATE_BUILD_RULES_JS);
-        write_file(
-            &p.join(BUILD_FILE),
-            r#"
-export const done = true;
-"#,
-        );
         write_file(&p.join("app/main.odin"), "package app\n");
         write_file(&p.join("library/spall/spall.odin"), "package spall\n");
         write_file(&p.join("vendor/ignored/main.odin"), "package ignored\n");
