@@ -45,6 +45,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Initialize an imp workspace in the current directory
+    Init,
     /// List targets in the workspace
     Targets {
         /// Target or package selectors, e.g. :app, dir, dir/..., or //...
@@ -384,6 +386,9 @@ async fn run() -> Result<()> {
             CacheCmd::Gc { max_age, apply } => return cmd_cache_gc(*max_age, *apply),
         }
     }
+    if let Cmd::Init = &cli.command {
+        return commands::init::run().await;
+    }
     let cancellation = install_termination_signal_flag()?;
 
     let ui = ui::Session::start();
@@ -467,6 +472,7 @@ fn install_termination_signal_flag() -> Result<Arc<AtomicBool>> {
 
 async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Result<()> {
     match &cli.command {
+        Cmd::Init => unreachable!("handled before UI setup"),
         Cmd::Targets {
             selectors,
             changed_since,

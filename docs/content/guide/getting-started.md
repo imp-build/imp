@@ -4,7 +4,21 @@ weight = 1
 template = "page.html"
 +++
 
-Every imp workspace has a root marker file, `imp.workspace.js`, which imports the rule modules your `BUILD.js` files will use (see [The workspace file](../workspace-file/) for what else it's for):
+Initialize a workspace from the repository root:
+
+```sh
+imp init
+```
+
+The interactive checklist detects C/C++, JavaScript/TypeScript, Odin, Python,
+and Rust sources. Select the languages and capabilities the workspace needs;
+imp then creates `imp.workspace.js` with pinned toolchains and the matching
+rule and workflow imports. Initialization never overwrites an existing
+workspace or creates a nested workspace.
+
+Every imp workspace has a root marker file, `imp.workspace.js`. To create
+one manually, import the rule modules your `BUILD.js` files will use (see [The
+workspace file](../workspace-file/) for what else it's for):
 
 ```js
 import "//rules/c/cmake";
