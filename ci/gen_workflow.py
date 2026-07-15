@@ -11,7 +11,8 @@ artifact; `check`, `package`, and `deploy` download that artifact and run it
 "installed" instead of each doing their own cargo build/run.
 
 The release workflow builds packaged Linux and Windows binaries on regular CI
-runs, then attaches those same artifacts to a draft release for version tags.
+runs. Main pushes update one rolling draft release, while version tags create a
+separate versioned draft release from the same artifacts.
 """
 
 import sys
@@ -26,6 +27,7 @@ LINUX_TARGET = "x86_64-unknown-linux-musl"
 WINDOWS_TARGET = "x86_64-pc-windows-msvc"
 LINUX_ARCHIVE = f"imp-{LINUX_TARGET}.tar.gz"
 WINDOWS_ARCHIVE = f"imp-{WINDOWS_TARGET}.zip"
+ROLLING_RELEASE_TAG = "main-preview"
 TAG_PUSH_ONLY = "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
 
 DOWNLOAD_IMP_STEPS = [
@@ -181,7 +183,46 @@ RELEASE_WINDOWS_STEPS = [
     },
 ]
 
-RELEASE_STEPS = [
+RELEASE_ARTIFACT_STEPS = [
+    {
+        "name": "Download artifacts",
+        "uses": "actions/download-artifact@v4",
+        "with": {"path": "dist", "merge-multiple": "true"},
+    },
+    {
+        "name": "Verify artifacts",
+        "run": f"test -f dist/{LINUX_ARCHIVE}\ntest -f dist/{WINDOWS_ARCHIVE}",
+    },
+]
+
+ROLLING_RELEASE_STEPS = [
+    {"uses": "actions/checkout@v4"},
+    *RELEASE_ARTIFACT_STEPS,
+    {
+        "name": "Move rolling release tag",
+        "run": (
+            f'git tag --force {ROLLING_RELEASE_TAG} "$GITHUB_SHA"\n'
+            f'git push --force origin "refs/tags/{ROLLING_RELEASE_TAG}"'
+        ),
+    },
+    {
+        "name": "Create or update rolling draft release",
+        "uses": "softprops/action-gh-release@v3",
+        "with": {
+            "tag_name": ROLLING_RELEASE_TAG,
+            "target_commitish": "${{ github.sha }}",
+            "name": "Latest main build",
+            "body": "Automated draft for `${{ github.sha }}` from `main`.",
+            "draft": "true",
+            "prerelease": "true",
+            "overwrite_files": "true",
+            "fail_on_unmatched_files": "true",
+            "files": f"dist/{LINUX_ARCHIVE}\ndist/{WINDOWS_ARCHIVE}",
+        },
+    },
+]
+
+VERSION_RELEASE_STEPS = [
     {"uses": "actions/checkout@v4"},
     {
         "name": "Confirm tag matches Cargo.toml version",
@@ -196,21 +237,14 @@ RELEASE_STEPS = [
             ]
         ),
     },
-    {
-        "name": "Download artifacts",
-        "uses": "actions/download-artifact@v4",
-        "with": {"path": "dist", "merge-multiple": "true"},
-    },
-    {
-        "name": "Verify artifacts",
-        "run": f"test -f dist/{LINUX_ARCHIVE}\ntest -f dist/{WINDOWS_ARCHIVE}",
-    },
+    *RELEASE_ARTIFACT_STEPS,
     {
         "name": "Create draft release",
         "uses": "softprops/action-gh-release@v3",
         "with": {
             "draft": "true",
             "generate_release_notes": "true",
+            "overwrite_files": "true",
             "fail_on_unmatched_files": "true",
             "files": f"dist/{LINUX_ARCHIVE}\ndist/{WINDOWS_ARCHIVE}",
         },
@@ -221,12 +255,20 @@ RELEASE_JOBS = [
     {"id": "linux", "runs_on": "ubuntu-latest", "steps": RELEASE_LINUX_STEPS},
     {"id": "windows", "runs_on": "windows-latest", "steps": RELEASE_WINDOWS_STEPS},
     {
+        "id": "rolling_release",
+        "needs": ["linux", "windows"],
+        "if": MAIN_PUSH_ONLY,
+        "runs_on": "ubuntu-latest",
+        "permissions": {"contents": "write"},
+        "steps": ROLLING_RELEASE_STEPS,
+    },
+    {
         "id": "release",
         "needs": ["linux", "windows"],
         "if": TAG_PUSH_ONLY,
         "runs_on": "ubuntu-latest",
         "permissions": {"contents": "write"},
-        "steps": RELEASE_STEPS,
+        "steps": VERSION_RELEASE_STEPS,
     },
 ]
 
@@ -330,6 +372,10 @@ def render_release_workflow():
         "",
         "permissions:",
         "  contents: read",
+        "",
+        "concurrency:",
+        "  group: release-artifacts-${{ github.ref }}",
+        "  cancel-in-progress: true",
         "",
         "jobs:",
         "\n\n".join(render_job(job) for job in RELEASE_JOBS),

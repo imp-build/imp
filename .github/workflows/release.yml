@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   linux:
     runs-on: ubuntu-latest
@@ -77,6 +81,46 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+  rolling_release:
+    needs: [linux, windows]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Verify artifacts
+        run: |
+          test -f dist/imp-x86_64-unknown-linux-musl.tar.gz
+          test -f dist/imp-x86_64-pc-windows-msvc.zip
+
+      - name: Move rolling release tag
+        run: |
+          git tag --force main-preview "$GITHUB_SHA"
+          git push --force origin "refs/tags/main-preview"
+
+      - name: Create or update rolling draft release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: main-preview
+          target_commitish: ${{ github.sha }}
+          name: Latest main build
+          body: Automated draft for `${{ github.sha }}` from `main`.
+          draft: true
+          prerelease: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/imp-x86_64-unknown-linux-musl.tar.gz
+            dist/imp-x86_64-pc-windows-msvc.zip
+
   release:
     needs: [linux, windows]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -111,6 +155,7 @@ jobs:
         with:
           draft: true
           generate_release_notes: true
+          overwrite_files: true
           fail_on_unmatched_files: true
           files: |
             dist/imp-x86_64-unknown-linux-musl.tar.gz
