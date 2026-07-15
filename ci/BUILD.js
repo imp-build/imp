@@ -1,7 +1,7 @@
-// Generates .github/workflows/docs.yml from ci/gen_workflow.py — a small,
+// Generates the GitHub workflows from ci/gen_workflow.py — a small,
 // concrete exercise of the generate/generate-check mechanism from
-// //rules/imp/generate and //rules/workflows/generate: the workflow file
-// must exist for real (GitHub Actions reads it off the repo, not out of
+// //rules/imp/generate and //rules/workflows/generate: the workflow files
+// must exist for real (GitHub Actions reads them off the repo, not out of
 // imp's build graph), so it belongs in the "workspace-materialized" bucket
 // rather than a plain build product.
 //
@@ -19,21 +19,21 @@ import { generatedFiles } from "//rules/imp/generate";
 const python3 = nativeTool("python3");
 
 const SCRIPT = "ci/gen_workflow.py";
-const OUT = ".github/workflows/docs.yml";
+const OUTS = [".github/workflows/docs.yml", ".github/workflows/release.yml"];
 
 async function runGenerator(materialize) {
     const py = await nativeToolSpec(python3);
     return generatedFiles({
-        display: `generate ${OUT}`,
+        display: "generate GitHub workflows",
         // Invoke the tool by its bare declared name — sandboxed runs build
         // PATH strictly from declared tools' bin dirs (see
         // sandbox_command_env in src/exec.rs), so `py.path` (the host path
         // used for cache-keying) isn't itself resolvable from inside the
         // sandbox. Same pattern as docs/BUILD.js's mkdir/dirname/zola calls.
-        argv: ["python3", SCRIPT, OUT],
+        argv: ["python3", SCRIPT, ...OUTS],
         tools: [py],
         inputs: [file_set.literal([SCRIPT])],
-        outputPaths: [OUT],
+        outputPaths: OUTS,
         materialize,
     });
 }

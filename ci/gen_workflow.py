@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Generates .github/workflows/docs.yml from structured job/step data.
+"""Generates the repository's GitHub workflows from structured job/step data.
 
 A small, stdlib-only stand-in for the codegen->workspace pattern this repo's
 imp supports via generatedFiles()/writeWorkspace() — see //ci:docs_workflow
 in ci/BUILD.js. `imp goal generate //ci:docs_workflow --check` fails the
-build if this script's output ever drifts from the committed workflow file.
+build if this script's output ever drifts from the committed workflow files.
 
 Jobs chain: `build` compiles the imp binary once and uploads it as an
 artifact; `check`, `package`, and `deploy` download that artifact and run it
 "installed" instead of each doing their own cargo build/run.
+
+The release workflow builds packaged Linux and Windows binaries on regular CI
+runs, then attaches those same artifacts to a draft release for version tags.
 """
+
 import sys
 
 SITE_TARGET = "//docs:site"
@@ -18,9 +22,18 @@ SITE_ARTIFACT_PATH = "dist/docs/site/public"
 RUST_TOOLCHAIN = "stable"
 IMP_ARTIFACT = "imp-linux"
 MAIN_PUSH_ONLY = "github.ref == 'refs/heads/main' && github.event_name == 'push'"
+LINUX_TARGET = "x86_64-unknown-linux-musl"
+WINDOWS_TARGET = "x86_64-pc-windows-msvc"
+LINUX_ARCHIVE = f"imp-{LINUX_TARGET}.tar.gz"
+WINDOWS_ARCHIVE = f"imp-{WINDOWS_TARGET}.zip"
+TAG_PUSH_ONLY = "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
 
 DOWNLOAD_IMP_STEPS = [
-    {"name": "Download imp binary", "uses": "actions/download-artifact@v4", "with": {"name": IMP_ARTIFACT, "path": "."}},
+    {
+        "name": "Download imp binary",
+        "uses": "actions/download-artifact@v4",
+        "with": {"name": IMP_ARTIFACT, "path": "."},
+    },
     {"name": "Make imp executable", "run": "chmod +x imp"},
 ]
 
@@ -29,7 +42,11 @@ BUILD_STEPS = [
     {"uses": f"dtolnay/rust-toolchain@{RUST_TOOLCHAIN}"},
     {"uses": "Swatinem/rust-cache@v2"},
     {"name": "Build imp", "run": "cargo build --release"},
-    {"name": "Upload imp binary", "uses": "actions/upload-artifact@v4", "with": {"name": IMP_ARTIFACT, "path": "target/release/imp"}},
+    {
+        "name": "Upload imp binary",
+        "uses": "actions/upload-artifact@v4",
+        "with": {"name": IMP_ARTIFACT, "path": "target/release/imp"},
+    },
 ]
 
 # Toolchains imp acquires on demand (rust, ruff, odinfmt, ...) land under
@@ -49,7 +66,10 @@ CHECK_STEPS = [
     {"uses": "actions/checkout@v4"},
     *DOWNLOAD_IMP_STEPS,
     CACHE_IMP_STEP,
-    {"name": "Check generated files", "run": f"./imp goal generate {SITE_CHECK_TARGET} --check"},
+    {
+        "name": "Check generated files",
+        "run": f"./imp goal generate {SITE_CHECK_TARGET} --check",
+    },
     {"name": "Check formatting", "run": "./imp fmt --check //..."},
     {"name": "Lint", "run": "./imp lint //..."},
     {"name": "Test", "run": "./imp test //..."},
@@ -70,16 +90,153 @@ DEPLOY_STEPS = [
 JOBS = [
     {"id": "build", "runs_on": "ubuntu-latest", "steps": BUILD_STEPS},
     {"id": "check", "needs": "build", "runs_on": "ubuntu-latest", "steps": CHECK_STEPS},
-    {"id": "package", "needs": "build", "runs_on": "ubuntu-latest", "if": MAIN_PUSH_ONLY, "steps": PACKAGE_STEPS},
+    {
+        "id": "package",
+        "needs": "build",
+        "runs_on": "ubuntu-latest",
+        "if": MAIN_PUSH_ONLY,
+        "steps": PACKAGE_STEPS,
+    },
     {
         "id": "deploy",
         "needs": "package",
         "runs_on": "ubuntu-latest",
         "if": MAIN_PUSH_ONLY,
-        "environment": {"name": "github-pages", "url": "${{ steps.deploy.outputs.page_url }}"},
+        "environment": {
+            "name": "github-pages",
+            "url": "${{ steps.deploy.outputs.page_url }}",
+        },
         "steps": DEPLOY_STEPS,
     },
 ]
+
+RELEASE_LINUX_STEPS = [
+    {"uses": "actions/checkout@v4"},
+    {
+        "uses": f"dtolnay/rust-toolchain@{RUST_TOOLCHAIN}",
+        "with": {"targets": LINUX_TARGET},
+    },
+    {
+        "uses": "Swatinem/rust-cache@v2",
+        "with": {"save-if": "${{ github.ref == 'refs/heads/main' }}"},
+    },
+    {"uses": "taiki-e/install-action@v2", "with": {"tool": "cross"}},
+    {
+        "name": "Build",
+        "run": f"cross build --release --locked --target {LINUX_TARGET}",
+    },
+    {"name": "Smoke test", "run": f"target/{LINUX_TARGET}/release/imp --help"},
+    {
+        "name": "Package",
+        "run": f"tar -C target/{LINUX_TARGET}/release -czf {LINUX_ARCHIVE} imp",
+    },
+    {
+        "name": "Upload artifact",
+        "uses": "actions/upload-artifact@v4",
+        "with": {
+            "name": f"imp-{LINUX_TARGET}",
+            "path": LINUX_ARCHIVE,
+            "if-no-files-found": "error",
+            "retention-days": 7,
+            "compression-level": 0,
+        },
+    },
+]
+
+RELEASE_WINDOWS_STEPS = [
+    {"uses": "actions/checkout@v4"},
+    {
+        "uses": f"dtolnay/rust-toolchain@{RUST_TOOLCHAIN}",
+        "with": {"targets": WINDOWS_TARGET},
+    },
+    {
+        "uses": "Swatinem/rust-cache@v2",
+        "with": {"save-if": "${{ github.ref == 'refs/heads/main' }}"},
+    },
+    {
+        "name": "Build",
+        "run": f"cargo build --release --locked --target {WINDOWS_TARGET}",
+    },
+    {
+        "name": "Smoke test",
+        "run": f"./target/{WINDOWS_TARGET}/release/imp.exe --help",
+    },
+    {
+        "name": "Package",
+        "run": (
+            f"Compress-Archive -Path target/{WINDOWS_TARGET}/release/imp.exe "
+            f"-DestinationPath {WINDOWS_ARCHIVE}"
+        ),
+    },
+    {
+        "name": "Upload artifact",
+        "uses": "actions/upload-artifact@v4",
+        "with": {
+            "name": f"imp-{WINDOWS_TARGET}",
+            "path": WINDOWS_ARCHIVE,
+            "if-no-files-found": "error",
+            "retention-days": 7,
+            "compression-level": 0,
+        },
+    },
+]
+
+RELEASE_STEPS = [
+    {"uses": "actions/checkout@v4"},
+    {
+        "name": "Confirm tag matches Cargo.toml version",
+        "run": "\n".join(
+            [
+                'tag="${GITHUB_REF_NAME#v}"',
+                'crate="$(python3 -c \'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])\')"',
+                'if [ "$tag" != "$crate" ]; then',
+                '  echo "tag v$tag does not match Cargo.toml version $crate" >&2',
+                "  exit 1",
+                "fi",
+            ]
+        ),
+    },
+    {
+        "name": "Download artifacts",
+        "uses": "actions/download-artifact@v4",
+        "with": {"path": "dist", "merge-multiple": "true"},
+    },
+    {
+        "name": "Verify artifacts",
+        "run": f"test -f dist/{LINUX_ARCHIVE}\ntest -f dist/{WINDOWS_ARCHIVE}",
+    },
+    {
+        "name": "Create draft release",
+        "uses": "softprops/action-gh-release@v3",
+        "with": {
+            "draft": "true",
+            "generate_release_notes": "true",
+            "fail_on_unmatched_files": "true",
+            "files": f"dist/{LINUX_ARCHIVE}\ndist/{WINDOWS_ARCHIVE}",
+        },
+    },
+]
+
+RELEASE_JOBS = [
+    {"id": "linux", "runs_on": "ubuntu-latest", "steps": RELEASE_LINUX_STEPS},
+    {"id": "windows", "runs_on": "windows-latest", "steps": RELEASE_WINDOWS_STEPS},
+    {
+        "id": "release",
+        "needs": ["linux", "windows"],
+        "if": TAG_PUSH_ONLY,
+        "runs_on": "ubuntu-latest",
+        "permissions": {"contents": "write"},
+        "steps": RELEASE_STEPS,
+    },
+]
+
+
+def render_value(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, list):
+        return f"[{', '.join(str(item) for item in value)}]"
+    return str(value)
 
 
 def render_step(step, indent):
@@ -90,16 +247,24 @@ def render_step(step, indent):
     def emit(key, value):
         nonlocal first
         prefix = f"{pad}- " if first else f"{pad}  "
-        lines.append(f"{prefix}{key}: {value}")
+        if isinstance(value, str) and "\n" in value:
+            lines.append(f"{prefix}{key}: |")
+            lines.extend(f"{pad}    {line}" for line in value.splitlines())
+        else:
+            lines.append(f"{prefix}{key}: {render_value(value)}")
         first = False
 
-    for key in ("name", "id", "uses", "run"):
+    for key in ("name", "id", "if", "uses", "run"):
         if key in step:
             emit(key, step[key])
     if "with" in step:
         lines.append(f"{pad}  with:")
         for k, v in step["with"].items():
-            lines.append(f"{pad}    {k}: {v}")
+            if isinstance(v, str) and "\n" in v:
+                lines.append(f"{pad}    {k}: |")
+                lines.extend(f"{pad}      {line}" for line in v.splitlines())
+            else:
+                lines.append(f"{pad}    {k}: {render_value(v)}")
     return lines
 
 
@@ -110,10 +275,14 @@ def render_steps(steps, indent):
 def render_job(job):
     lines = [f"  {job['id']}:"]
     if "needs" in job:
-        lines.append(f"    needs: {job['needs']}")
+        lines.append(f"    needs: {render_value(job['needs'])}")
     if "if" in job:
         lines.append(f"    if: {job['if']}")
     lines.append(f"    runs-on: {job['runs_on']}")
+    if "permissions" in job:
+        lines.append("    permissions:")
+        for k, v in job["permissions"].items():
+            lines.append(f"      {k}: {render_value(v)}")
     if "environment" in job:
         lines.append("    environment:")
         for k, v in job["environment"].items():
@@ -148,7 +317,30 @@ def render_workflow():
     return "\n".join(lines) + "\n"
 
 
+def render_release_workflow():
+    lines = [
+        "name: Build release artifacts",
+        "",
+        "on:",
+        "  push:",
+        "    branches: [main]",
+        '    tags: ["v*"]',
+        "  pull_request:",
+        "  workflow_dispatch:",
+        "",
+        "permissions:",
+        "  contents: read",
+        "",
+        "jobs:",
+        "\n\n".join(render_job(job) for job in RELEASE_JOBS),
+    ]
+    return "\n".join(lines) + "\n"
+
+
 if __name__ == "__main__":
-    out_path = sys.argv[1]
-    with open(out_path, "w") as f:
+    docs_out_path = sys.argv[1]
+    release_out_path = sys.argv[2]
+    with open(docs_out_path, "w") as f:
         f.write(render_workflow())
+    with open(release_out_path, "w") as f:
+        f.write(render_release_workflow())
