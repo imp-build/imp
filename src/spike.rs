@@ -171,7 +171,9 @@ type RuleCapabilities = BTreeMap<String, BTreeMap<String, BTreeMap<String, Capab
 #[derive(Debug, Clone, Default)]
 pub struct Workspace {
     pub targets: BTreeMap<String, Target>,
-    pub products: BTreeMap<(String, String), String>,
+    /// `(kind, product)` → tool → product-fn exec name; see
+    /// [`HostState::products`].
+    pub products: BTreeMap<(String, String), BTreeMap<String, String>>,
     // Only read by generate_build_files, a #[cfg(test)]-only integration
     // harness for apply_build_edits (production reaches that via
     // HostState.build_rules through the __host_apply_build_edits JS bridge
@@ -236,8 +238,11 @@ pub(crate) struct HostState {
     next_id: u32,
     next_exec: u32,
     pending: BTreeMap<u32, PendingTarget>,
-    products: BTreeMap<(String, String), String>,
-    product_modules: BTreeMap<(String, String), String>,
+    /// `(kind, product)` → tool → product-fn exec name. Keyed by tool so
+    /// several tools can implement the same product for one kind (e.g. two
+    /// formatters); dispatch fans out over the inner map.
+    products: BTreeMap<(String, String), BTreeMap<String, String>>,
+    product_modules: BTreeMap<(String, String, String), String>,
     build_rules: BTreeMap<String, BuildRuleRender>,
     workspace_config: BTreeMap<String, serde_json::Value>,
     config_schemas: BTreeMap<String, serde_json::Value>,
@@ -250,6 +255,11 @@ pub(crate) struct HostState {
     expanders: BTreeMap<String, Expander>,
     declared_product_names: BTreeMap<String, DeclaredProductName>,
     next_product_name_id: u32,
+    /// Tool names declared via `toolName()` — same single-declaration
+    /// discipline as product names: registering a product requires the
+    /// declaring token, so every tool name has one importable origin.
+    declared_tool_names: BTreeMap<String, DeclaredProductName>,
+    next_tool_name_id: u32,
     /// `(pending id, address)` pairs appended by `__host_register_dynamic_target`
     /// as a rule's expander mints new targets. Drained by `ensure_expanded`.
     dynamic_registrations: Vec<(u32, String)>,
@@ -321,6 +331,8 @@ impl Default for HostState {
             expanders: BTreeMap::new(),
             declared_product_names,
             next_product_name_id,
+            declared_tool_names: BTreeMap::new(),
+            next_tool_name_id: 0,
             dynamic_registrations: Vec::new(),
         }
     }
@@ -1293,7 +1305,61 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_declare_product_name", host_declare_product_name)?;
 
     // ------------------------------------------------------------------
-    // __host_product(kind, name, nameId, fn, registrationStack)
+    // __host_declare_tool_name(name, stack) → u32 id
+    //
+    // Declares a tool name exactly once and returns its id — the same
+    // discipline as product names: product registrations must present a
+    // declared tool token, so every tool name has a single importable
+    // declaration site. Re-declaring from the same module is idempotent.
+    // ------------------------------------------------------------------
+    let state_dtn = Arc::clone(&state);
+    let host_declare_tool_name = Function::new(
+        ctx.clone(),
+        move |name: String, stack: String| -> rquickjs::Result<u32> {
+            if name.is_empty()
+                || name.contains('#')
+                || name.contains(':')
+                || name.contains('@')
+                || name.contains(char::is_whitespace)
+            {
+                return Err(action_spec_error(format!(
+                    "invalid tool name '{name}': must be non-empty, without '#', ':', '@' or whitespace"
+                )));
+            }
+            let module = declaration_module(&stack);
+            let mut hs = state_dtn.lock().unwrap();
+            if let Some(existing) = hs.declared_tool_names.get(&name) {
+                if existing.module == module {
+                    return Ok(existing.id);
+                }
+                let declared_in = existing
+                    .module
+                    .clone()
+                    .unwrap_or_else(|| "<unknown module>".to_owned());
+                return Err(action_spec_error(format!(
+                    "tool name '{name}' is already declared in {declared_in}; \
+                     import its token instead of redeclaring it"
+                )));
+            }
+            let id = hs.next_tool_name_id;
+            hs.next_tool_name_id += 1;
+            hs.declared_tool_names.insert(
+                name,
+                DeclaredProductName {
+                    id,
+                    module,
+                    builtin: false,
+                },
+            );
+            Ok(id)
+        },
+    )?;
+    globals.set("__host_declare_tool_name", host_declare_tool_name)?;
+
+    // ------------------------------------------------------------------
+    // __host_product(specJson, fn, registrationStack) — specJson carries
+    // { kind, name, nameId, tool, toolId, module? } (one JSON param keeps
+    // the closure within rquickjs's argument-tuple arity).
     // ------------------------------------------------------------------
     let state_p = Arc::clone(&state);
     let product_workspace_root = workspace_root.clone();
@@ -1301,12 +1367,30 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     let host_product = Function::new(
         ctx.clone(),
         move |ctx: Ctx<'js>,
-              kind: String,
-              name: String,
-              name_id: u32,
+              spec_json: String,
               fn_val: Value<'js>,
               registration_stack: String|
               -> rquickjs::Result<()> {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct ProductSpec {
+                kind: String,
+                name: String,
+                name_id: u32,
+                tool: String,
+                tool_id: u32,
+                #[serde(default)]
+                module: Option<String>,
+            }
+            let ProductSpec {
+                kind,
+                name,
+                name_id,
+                tool,
+                tool_id,
+                module: declared_module,
+            } = serde_json::from_str(&spec_json)
+                .map_err(|e| action_spec_error(format!("malformed __host_product spec: {e}")))?;
             {
                 let hs = state_p.lock().unwrap();
                 match hs.declared_product_names.get(&name) {
@@ -1318,6 +1402,16 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                         )));
                     }
                 }
+                match hs.declared_tool_names.get(&tool) {
+                    Some(decl) if decl.id == tool_id => {}
+                    _ => {
+                        return Err(action_spec_error(format!(
+                            "product registration for '{kind}#{name}' names tool '{tool}' \
+                             without its declaration — import the token from its declaring \
+                             module (see toolName())"
+                        )));
+                    }
+                }
             }
             let exec_name = {
                 let mut hs = state_p.lock().unwrap();
@@ -1326,18 +1420,24 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                 n
             };
             ctx.globals().set(exec_name.as_str(), fn_val)?;
-            let key = (kind, name);
+            let module_key = (kind.clone(), name.clone(), tool.clone());
             let mut hs = state_p.lock().unwrap();
-            hs.products.insert(key.clone(), exec_name);
-            if let Some(module) = product_registration_module(&registration_stack) {
+            hs.products
+                .entry((kind, name))
+                .or_default()
+                .insert(tool, exec_name);
+            let module = declared_module
+                .filter(|module| !module.is_empty())
+                .or_else(|| product_registration_module(&registration_stack));
+            if let Some(module) = module {
                 let source_module = resolved_product_module(
                     &product_workspace_root,
                     &product_rules_source,
                     &module,
                 );
-                hs.product_modules.insert(key, source_module);
+                hs.product_modules.insert(module_key, source_module);
             } else {
-                hs.product_modules.remove(&key);
+                hs.product_modules.remove(&module_key);
             }
             Ok(())
         },
@@ -3245,7 +3345,11 @@ fn declaration_module(stack: &str) -> Option<String> {
     None
 }
 
-fn product_group_and_tool(module: &str) -> Option<(String, String)> {
+/// Rule group a product module belongs to — its first path segment under
+/// `//rules/`. Groups map onto the per-directory DOC.md guide tree, so they
+/// stay path-derived; tool identity, by contrast, is declared at product
+/// registration and never inferred from the path.
+fn product_group(module: &str) -> Option<String> {
     let mut parts = module
         .strip_prefix("//rules/")?
         .split('/')
@@ -3257,12 +3361,10 @@ fn product_group_and_tool(module: &str) -> Option<(String, String)> {
     if parts.last().is_some_and(|part| part.ends_with(".js")) {
         parts.pop();
     }
-    let group = parts
+    parts
         .first()
         .map(|part| part.trim_end_matches(".js").to_owned())
-        .or(top_level_file)?;
-    let tool = parts.get(1).unwrap_or(&group.as_str()).to_string();
-    Some((group, tool))
+        .or(top_level_file)
 }
 
 fn resolved_product_module(root: &Path, rules: &RulesSource, module: &str) -> String {
@@ -3275,8 +3377,8 @@ fn resolved_product_module(root: &Path, rules: &RulesSource, module: &str) -> St
 
 fn derive_rule_capabilities(hs: &HostState) -> RuleCapabilities {
     let mut capabilities = RuleCapabilities::new();
-    for ((kind, product), module) in &hs.product_modules {
-        let Some((group, tool)) = product_group_and_tool(module) else {
+    for ((kind, product, tool), module) in &hs.product_modules {
+        let Some(group) = product_group(module) else {
             continue;
         };
         for goal in hs.goals.values().filter(|goal| goal.product == *product) {
@@ -3521,12 +3623,17 @@ pub fn format_products(workspace: &Workspace, w: &mut String) -> std::fmt::Resul
         writeln!(w, "  (none)")?;
     } else {
         let mut current_kind: Option<&str> = Option::None;
-        for (kind, product) in workspace.products.keys() {
+        for ((kind, product), tools) in &workspace.products {
             if current_kind != Some(kind.as_str()) {
                 current_kind = Some(kind.as_str());
                 writeln!(w, "  {kind}:")?;
             }
-            writeln!(w, "    - {product}")?;
+            if tools.len() == 1 {
+                writeln!(w, "    - {product}")?;
+            } else {
+                let tool_list = tools.keys().cloned().collect::<Vec<_>>().join(", ");
+                writeln!(w, "    - {product} ({tool_list})")?;
+            }
         }
     }
     Ok(())
@@ -3581,17 +3688,26 @@ pub async fn evaluate_product_json(
     let target = lookup_dynamic_or_static(live, target_addr)
         .ok_or_else(|| anyhow::anyhow!("no target '{target_addr}' in workspace"))?;
 
-    let product_fn_name = live
+    let tools = live
         .workspace
         .products
         .get(&(target.kind.clone(), product_name.to_owned()))
+        .filter(|tools| !tools.is_empty())
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "no product '{product_name}' for kind '{}' (target '{target_addr}')",
                 target.kind
             )
-        })?
-        .clone();
+        })?;
+    if tools.len() > 1 {
+        bail!(
+            "product '{product_name}' for kind '{}' is registered by several tools ({}); \
+             this test helper evaluates a single product function",
+            target.kind,
+            tools.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    let product_fn_name = tools.values().next().expect("non-empty tool map").clone();
 
     live.ctx
         .async_with(async |ctx| -> rquickjs::Result<serde_json::Value> {
@@ -3755,23 +3871,29 @@ pub async fn execute_goal_live_selection(
     if goal_callback_name.is_none() {
         calls.reserve(roots.len());
         for (target, product) in &roots {
-            let product_fn_name = live
+            let tools = live
                 .workspace
                 .products
                 .get(&(target.kind.clone(), product.clone()))
+                .filter(|tools| !tools.is_empty())
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "no product '{product}' for kind '{}' (target '{})'",
                         target.kind,
                         target.address
                     )
-                })?
-                .clone();
-            calls.push((
-                target.js_id,
-                product_fn_name,
-                format!("{}#{}", target.address, product),
-            ));
+                })?;
+            // Every registered tool runs; the label carries the tool only
+            // when several implement the product, keeping single-tool output
+            // (the common case) unchanged.
+            for (tool, product_fn_name) in tools {
+                let label = if tools.len() == 1 {
+                    format!("{}#{}", target.address, product)
+                } else {
+                    format!("{}#{}@{}", target.address, product, tool)
+                };
+                calls.push((target.js_id, product_fn_name.clone(), label));
+            }
         }
     }
 
@@ -4154,8 +4276,11 @@ pub async fn generate_build_files(
             .workspace
             .products
             .iter()
-            .filter_map(|((kind, name), product_fn)| {
-                (name == "generate-build").then_some((kind.clone(), product_fn.clone()))
+            .filter(|((_, name), _)| name == "generate-build")
+            .flat_map(|((kind, _), tools)| {
+                tools
+                    .values()
+                    .map(|product_fn| (kind.clone(), product_fn.clone()))
             })
             .collect();
         if generators.is_empty() {
@@ -4675,14 +4800,14 @@ mod tests {
     // ---- Common rule JS strings ----------------------------------------
 
     const CPP_RULES_JS: &str = r#"
-import { target, glob, memo, product, run, BUILD, targetKind } from "imp:core";
+import { target, glob, memo, product, run, BUILD, targetKind, toolName } from "imp:core";
 const K_cmake_lib = targetKind("cmake-lib");
 
 export const sources = memo(async function sources(handle) {
     return glob({ root: ".", include: handle.attrs.sources || [] });
 });
 
-export const native_link_library = product(K_cmake_lib, BUILD, async function native_link_library(handle) {
+export const native_link_library = product(K_cmake_lib, BUILD, toolName("cmake-lib-tool"), async function native_link_library(handle) {
     const inputs = [];
     for (const dep of handle.attrs.deps || []) {
         if (dep.kind === "cpp-sources") inputs.push(await sources(dep));
@@ -4699,14 +4824,14 @@ export function cmakeLib({ entrypoint, deps = [] }) {
 "#;
 
     const ODIN_RULES_JS: &str = r#"
-import { target, glob, memo, product, run, BUILD, targetKind } from "imp:core";
+import { target, glob, memo, product, run, BUILD, targetKind, toolName } from "imp:core";
 const K_odin_package = targetKind("odin-package");
 
 export const sources = memo(async function sources(handle) {
     return glob({ root: ".", include: handle.attrs.sources || [] });
 });
 
-export const odin_package = product(K_odin_package, BUILD, async function odin_package(handle) {
+export const odin_package = product(K_odin_package, BUILD, toolName("odin-package-tool"), async function odin_package(handle) {
     const srcs = await sources(handle);
     return run({ argv: ["sh", "-c", "true"], inputs: [srcs], display: "odin build", impure: true });
 });
@@ -4717,14 +4842,14 @@ export function odinPackage({ srcs, deps = [] }) {
 "#;
 
     const ASSET_RULES_JS: &str = r#"
-import { target, glob, memo, product, run, BUILD, targetKind } from "imp:core";
+import { target, glob, memo, product, run, BUILD, targetKind, toolName } from "imp:core";
 const K_asset = targetKind("asset");
 
 export const sources = memo(async function sources(handle) {
     return glob({ root: ".", include: handle.attrs.sources || [] });
 });
 
-export const bundle = product(K_asset, BUILD, async function bundle(handle) {
+export const bundle = product(K_asset, BUILD, toolName("asset-tool"), async function bundle(handle) {
     const srcs = await sources(handle);
     return run({ argv: ["sh", "-c", "true"], inputs: [srcs], display: `bundle ${handle.attrs.sources.join(",")}`, impure: true });
 });
@@ -4735,7 +4860,7 @@ export function asset({ srcs }) {
 "#;
 
     const GENERATE_BUILD_RULES_JS: &str = r#"
-import { allUnowned, target, product, registerBuildRule, sourcesField, productName, targetKind } from "imp:core";
+import { allUnowned, target, product, registerBuildRule, sourcesField, productName, targetKind, toolName } from "imp:core";
 const K_odin_build_generator = targetKind("odin-build-generator");
 export const P_generate_build = productName("generate-build");
 
@@ -4754,7 +4879,7 @@ function basename(path) {
     return index < 0 ? path : path.slice(index + 1);
 }
 
-export const generateBuild = product(K_odin_build_generator, P_generate_build, async function generateBuild(handle) {
+export const generateBuild = product(K_odin_build_generator, P_generate_build, toolName("odin-build-generator-tool"), async function generateBuild(handle) {
     const files = allUnowned({
         root: handle.attrs.root || ".",
         include: ["**/*.odin"],
@@ -4986,11 +5111,11 @@ export const actionName = "external build {address}";
         write_file(
             &dev_rules_dir.join("external/index.js"),
             r#"
-import { target, product, run, BUILD, targetKind } from "imp:core";
+import { target, product, run, BUILD, targetKind, toolName } from "imp:core";
 const K_external = targetKind("external");
 import { actionName } from "//rules/external/helper";
 
-export const external_product = product(K_external, BUILD, async function external_product(handle) {
+export const external_product = product(K_external, BUILD, toolName("external-tool"), async function external_product(handle) {
     return run({ argv: ["sh", "-c", "true"], display: actionName.replace("{address}", handle.label.address), impure: true });
 });
 
@@ -5110,7 +5235,7 @@ configure("example", { flags: { mode: "debug" } });
         write_file(
             &p.join("rules/configured.js"),
             r#"
-import { target, glob, memo, product, run, configuration, BUILD, targetKind } from "imp:core";
+import { target, glob, memo, product, run, configuration, BUILD, targetKind, toolName } from "imp:core";
 const K_configured = targetKind("configured");
 
 export const sources = memo(async function sources(handle) {
@@ -5122,7 +5247,7 @@ export const configured_flags = memo(async function configured_flags(handle) {
     return Object.entries(config.flags || {}).map(([name, value]) => `--${name}=${value}`);
 });
 
-export const configured_product = product(K_configured, BUILD, async function configured_product(handle) {
+export const configured_product = product(K_configured, BUILD, toolName("configured-tool"), async function configured_product(handle) {
     const srcs = await sources(handle);
     const flags = await configured_flags(handle);
     return run({ argv: ["sh", "-c", "true"], inputs: [srcs], display: `configured ${flags.join(" ")}`, impure: true });
@@ -5257,44 +5382,73 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
             Some("//rules/rust/clippy/index.js")
         );
         assert_eq!(
-            product_group_and_tool("//rules/rust/clippy/index.js"),
-            Some(("rust".to_owned(), "clippy".to_owned()))
+            product_group("//rules/rust/clippy/index.js").as_deref(),
+            Some("rust")
         );
         assert_eq!(
-            product_group_and_tool("//rules/rust/test.js"),
-            Some(("rust".to_owned(), "rust".to_owned()))
+            product_group("//rules/rust/test.js").as_deref(),
+            Some("rust")
         );
         assert_eq!(
-            product_group_and_tool("//rules/rust/sccache/toolchain.js"),
-            Some(("rust".to_owned(), "sccache".to_owned()))
+            product_group("//rules/rust/sccache/toolchain.js").as_deref(),
+            Some("rust")
         );
         assert_eq!(
-            product_group_and_tool("//rules/odin/index.js"),
-            Some(("odin".to_owned(), "odin".to_owned()))
+            product_group("//rules/odin/index.js").as_deref(),
+            Some("odin")
         );
-        assert_eq!(
-            product_group_and_tool("//rules/asset.js"),
-            Some(("asset".to_owned(), "asset".to_owned()))
-        );
+        assert_eq!(product_group("//rules/asset.js").as_deref(), Some("asset"));
+        assert_eq!(product_group("//src/tool.js"), None);
     }
 
     #[test]
-    fn rule_capabilities_are_derived_from_products_goals_and_module_paths() {
+    fn rule_capabilities_are_derived_from_products_goals_and_declared_tools() {
         let mut hs = HostState::default();
         hs.product_modules.insert(
-            ("cargo-package".to_owned(), "build".to_owned()),
+            (
+                "cargo-package".to_owned(),
+                "build".to_owned(),
+                "rust".to_owned(),
+            ),
             "//rules/rust/index.js".to_owned(),
         );
         hs.product_modules.insert(
-            ("cargo-package".to_owned(), "lint".to_owned()),
+            (
+                "cargo-package".to_owned(),
+                "lint".to_owned(),
+                "clippy".to_owned(),
+            ),
             "//rules/rust/clippy/index.js".to_owned(),
         );
         hs.product_modules.insert(
-            ("python-app".to_owned(), "lint".to_owned()),
-            "//rules/python/ruff/index.js".to_owned(),
+            (
+                "python-app".to_owned(),
+                "lint".to_owned(),
+                "ruff".to_owned(),
+            ),
+            // Tool identity is declared, not path-derived: a flat module
+            // still attributes to ruff.
+            "//rules/python/lint.js".to_owned(),
+        );
+        // Two tools sharing one (kind, product) each get their own row.
+        hs.product_modules.insert(
+            ("python-app".to_owned(), "fmt".to_owned(), "ruff".to_owned()),
+            "//rules/python/fmt.js".to_owned(),
         );
         hs.product_modules.insert(
-            ("cargo-package".to_owned(), "format-check".to_owned()),
+            (
+                "python-app".to_owned(),
+                "fmt".to_owned(),
+                "black".to_owned(),
+            ),
+            "//rules/python/black.js".to_owned(),
+        );
+        hs.product_modules.insert(
+            (
+                "cargo-package".to_owned(),
+                "format-check".to_owned(),
+                "rustfmt".to_owned(),
+            ),
             "//rules/rust/rustfmt/index.js".to_owned(),
         );
 
@@ -5310,6 +5464,14 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
         assert_eq!(
             capabilities["python"]["lint"]["ruff"]["targetKinds"],
             serde_json::json!(["python-app"])
+        );
+        assert_eq!(
+            capabilities["python"]["fmt"]["ruff"]["modules"],
+            serde_json::json!(["//rules/python/fmt.js"])
+        );
+        assert_eq!(
+            capabilities["python"]["fmt"]["black"]["modules"],
+            serde_json::json!(["//rules/python/black.js"])
         );
         assert!(capabilities["rust"].get("format-check").is_none());
     }
@@ -5329,17 +5491,17 @@ import "//rules/rust/clippy";
         write_file(
             &p.join("rules/rust/test.js"),
             r#"
-import { product, TEST, targetKind } from "imp:core";
+import { product, TEST, targetKind, toolName } from "imp:core";
 const K_rust_test = targetKind("rust_test");
-product(K_rust_test, TEST, async () => ({}));
+product(K_rust_test, TEST, toolName("rust"), async () => ({}));
 "#,
         );
         write_file(
             &p.join("rules/rust/clippy/index.js"),
             r#"
-import { product, LINT, targetKind } from "imp:core";
+import { product, LINT, targetKind, toolName } from "imp:core";
 const K_cargo_package = targetKind("cargo-package");
-product(K_cargo_package, LINT, async () => ({}));
+product(K_cargo_package, LINT, toolName("clippy"), async () => ({}));
 "#,
         );
 
@@ -5360,6 +5522,113 @@ product(K_cargo_package, LINT, async () => ({}));
     }
 
     #[tokio::test]
+    async fn product_registered_via_a_shared_rules_helper_misattributes_to_the_helper() {
+        // Module attribution for capability docs is derived by walking the JS
+        // call stack back to the first `//rules/` frame (product_registration_module).
+        // A rule module that calls product() *indirectly*, through a helper it
+        // imports from a different //rules/ subtree, therefore misattributes
+        // to the shared helper's own directory rather than the real caller's
+        // — this is a general limitation of that stack-walk, not something
+        // any one call site can opt out of. It's why
+        // rules/workflows/lockfiles.js's registerToolchainLockfile()
+        // deliberately does *not* call product() on a toolchain's behalf;
+        // every toolchain module calls product() directly itself instead (see
+        // the sibling test below). Documented here so a future "simplify
+        // this by having the helper call product() too" doesn't silently
+        // reintroduce the misattribution.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/rust/toolchain";
+"#,
+        );
+        write_file(&p.join(BUILD_FILE), "");
+        write_file(
+            &p.join("rules/shared/helper.js"),
+            r#"
+import { product } from "imp:core";
+export function registerViaHelper(kindClass, name, tool, fn) {
+    product(kindClass, name, tool, fn);
+}
+"#,
+        );
+        write_file(
+            &p.join("rules/rust/toolchain.js"),
+            r#"
+import { BUILD, targetKind, toolName } from "imp:core";
+import { registerViaHelper } from "//rules/shared/helper";
+const K_rust_toolchain = targetKind("rust-toolchain");
+registerViaHelper(K_rust_toolchain, BUILD, toolName("rust"), async () => ({}));
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let capabilities = {
+            let hs = live.host_state.lock().unwrap();
+            serde_json::to_value(derive_rule_capabilities(&hs)).unwrap()
+        };
+        assert!(
+            capabilities.get("rust").is_none(),
+            "expected the indirect registration to misattribute away from 'rust': {capabilities}"
+        );
+        assert_eq!(
+            capabilities["shared"]["build"]["rust"]["targetKinds"],
+            serde_json::json!(["rust-toolchain"]),
+            "{capabilities}"
+        );
+    }
+
+    #[tokio::test]
+    async fn product_registered_directly_alongside_a_shared_lockfile_helper_attributes_correctly() {
+        // Companion to the test above: a toolchain module that calls
+        // product() itself, only delegating the (stack-attribution-
+        // irrelevant) registerBuiltinLockfile bookkeeping to a shared helper
+        // — the pattern rules/workflows/lockfiles.js's
+        // registerToolchainLockfile() actually implements — attributes
+        // correctly to the toolchain's own module.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/rust/toolchain";
+"#,
+        );
+        write_file(&p.join(BUILD_FILE), "");
+        write_file(
+            &p.join("rules/shared/helper.js"),
+            r#"
+export function registerBuiltinSpec(spec) {
+    return spec;
+}
+"#,
+        );
+        write_file(
+            &p.join("rules/rust/toolchain.js"),
+            r#"
+import { product, BUILD, targetKind, toolName } from "imp:core";
+import { registerBuiltinSpec } from "//rules/shared/helper";
+const K_rust_toolchain = targetKind("rust-toolchain");
+const spec = registerBuiltinSpec({ name: "rust" });
+product(K_rust_toolchain, BUILD, toolName("rust"), async () => spec);
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let capabilities = {
+            let hs = live.host_state.lock().unwrap();
+            serde_json::to_value(derive_rule_capabilities(&hs)).unwrap()
+        };
+        assert_eq!(
+            capabilities["rust"]["build"]["rust"]["targetKinds"],
+            serde_json::json!(["rust-toolchain"]),
+            "{capabilities}"
+        );
+    }
+
+    #[tokio::test]
     async fn expand_registers_a_lazily_materialized_dynamic_target() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
@@ -5367,10 +5636,10 @@ product(K_cargo_package, LINT, async () => ({}));
         write_file(
             p.join(BUILD_FILE).as_path(),
             r#"
-import { target, expand, registerTarget, product, run, BUILD, targetKind } from "imp:core";
+import { target, expand, registerTarget, product, run, BUILD, targetKind, toolName } from "imp:core";
 const K_expandable = targetKind("expandable");
 
-export const build = product(K_expandable, BUILD, async function build(handle) {
+export const build = product(K_expandable, BUILD, toolName("expandable-tool"), async function build(handle) {
     return run({ argv: ["sh", "-c", "true"], display: "build", impure: true });
 });
 
@@ -5495,12 +5764,12 @@ import "//rules/tool";
         write_file(
             &p.join("rules/tool.js"),
             r#"
-import { namedCache, output, product, run, target, BUILD, targetKind } from "imp:core";
+import { namedCache, output, product, run, target, BUILD, targetKind, toolName } from "imp:core";
 const K_tool_user = targetKind("tool-user");
 
 namedCache({ name: "test-tools" });
 
-export const file = product(K_tool_user, BUILD, async function file(handle) {
+export const file = product(K_tool_user, BUILD, toolName("tool-user-tool"), async function file(handle) {
     return run({
         argv: ["hello-tool"],
         tools: [{
@@ -6139,13 +6408,13 @@ if (a !== "S" || b !== "S") {
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, BUILD, targetKind } from "imp:core";
+import { target, product, run, BUILD, targetKind, toolName } from "imp:core";
 const K_root_nesting_test = targetKind("root-nesting-test");
 
 export const lib = target({ kind: "root-nesting-test" });
 export const app = target({ kind: "root-nesting-test", attrs: { dep: lib } });
 
-export const build = product(K_root_nesting_test, BUILD, async function do_build(handle) {
+export const build = product(K_root_nesting_test, BUILD, toolName("root-nesting-test-tool"), async function do_build(handle) {
     if (handle.attrs.dep) {
         await build(handle.attrs.dep);
     }
@@ -6225,7 +6494,7 @@ export const build = product(K_root_nesting_test, BUILD, async function do_build
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, memo, run, BUILD, targetKind } from "imp:core";
+import { target, product, memo, run, BUILD, targetKind, toolName } from "imp:core";
 const K_promise_all_context_test = targetKind("promise-all-context-test");
 
 export const app = target({ kind: "promise-all-context-test" });
@@ -6238,7 +6507,7 @@ const child = memo(async function child(name) {
     });
 });
 
-export const build = product(K_promise_all_context_test, BUILD, async function build() {
+export const build = product(K_promise_all_context_test, BUILD, toolName("promise-all-context-test-tool"), async function build() {
     await Promise.all([child("a"), child("b")]);
     await run({
         argv: ["sh", "-c", "true"],
@@ -6310,7 +6579,7 @@ export const build = product(K_promise_all_context_test, BUILD, async function b
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, memo, run, BUILD, targetKind } from "imp:core";
+import { target, product, memo, run, BUILD, targetKind, toolName } from "imp:core";
 const K_sequential_sibling_context_test = targetKind("sequential-sibling-context-test");
 
 export const app = target({ kind: "sequential-sibling-context-test" });
@@ -6323,7 +6592,7 @@ const child = memo(async function child(name) {
     });
 });
 
-export const build = product(K_sequential_sibling_context_test, BUILD, async function build() {
+export const build = product(K_sequential_sibling_context_test, BUILD, toolName("sequential-sibling-context-test-tool"), async function build() {
     await child("a");
     await child("b");
 });
@@ -6387,12 +6656,12 @@ export const build = product(K_sequential_sibling_context_test, BUILD, async fun
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, BUILD, targetKind } from "imp:core";
+import { target, product, run, BUILD, targetKind, toolName } from "imp:core";
 const K_fail_test = targetKind("fail-test");
 
 export const app = target({ kind: "fail-test" });
 
-export const build = product(K_fail_test, BUILD, async function build() {
+export const build = product(K_fail_test, BUILD, toolName("fail-test-tool"), async function build() {
     return run({ argv: ["sh", "-c", "echo boom >&2; exit 3"], display: "failing action", impure: true });
 });
 "#,
@@ -6438,7 +6707,7 @@ export const build = product(K_fail_test, BUILD, async function build() {
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, memo, output, BUILD, targetKind } from "imp:core";
+import { target, product, run, memo, output, BUILD, targetKind, toolName } from "imp:core";
 const K_shared_fail_test = targetKind("shared-fail-test");
 
 export const a = target({ kind: "shared-fail-test", attrs: { name: "a" } });
@@ -6453,7 +6722,7 @@ const failing = memo(async function failing() {
     });
 });
 
-export const build = product(K_shared_fail_test, BUILD, async function build(handle) {
+export const build = product(K_shared_fail_test, BUILD, toolName("shared-fail-test-tool"), async function build(handle) {
     await failing();
     return run({ argv: ["sh", "-c", "true"], display: `after ${handle.attrs.name}`, impure: true });
 });
@@ -6501,13 +6770,13 @@ export const build = product(K_shared_fail_test, BUILD, async function build(han
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, BUILD, targetKind } from "imp:core";
+import { target, product, run, BUILD, targetKind, toolName } from "imp:core";
 const K_concurrent_root_test = targetKind("concurrent-root-test");
 
 export const a = target({ kind: "concurrent-root-test" });
 export const b = target({ kind: "concurrent-root-test" });
 
-export const build = product(K_concurrent_root_test, BUILD, async function build(handle) {
+export const build = product(K_concurrent_root_test, BUILD, toolName("concurrent-root-test-tool"), async function build(handle) {
     await run({
         argv: ["sh", "-c", "sleep 0.2"],
         display: `run ${handle.label.name}`,
@@ -6581,13 +6850,13 @@ export const build = product(K_concurrent_root_test, BUILD, async function build
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, output, selectedTargets, BUILD, targetKind } from "imp:core";
+import { target, product, run, output, selectedTargets, BUILD, targetKind, toolName } from "imp:core";
 const K_selected_targets_test = targetKind("selected-targets-test");
 
 export const a = target({ kind: "selected-targets-test" });
 export const b = target({ kind: "selected-targets-test" });
 
-export const build = product(K_selected_targets_test, BUILD, async function build(handle) {
+export const build = product(K_selected_targets_test, BUILD, toolName("selected-targets-test-tool"), async function build(handle) {
     const addresses = selectedTargets("selected-targets-test").map((t) => t.address).sort().join(",");
     await run({
         argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", addresses, `selection-${handle.label.name}.txt`],
@@ -6658,13 +6927,13 @@ export const build = product(K_selected_targets_test, BUILD, async function buil
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, selectedTargets, productName, targetKind } from "imp:core";
+import { target, product, selectedTargets, productName, targetKind, toolName } from "imp:core";
 const K_selected_targets_outside_test = targetKind("selected-targets-outside-test");
 const P_check = productName("check");
 
 export const a = target({ kind: "selected-targets-outside-test" });
 
-export const check = product(K_selected_targets_outside_test, P_check, async function check(handle) {
+export const check = product(K_selected_targets_outside_test, P_check, toolName("selected-targets-outside-test-tool"), async function check(handle) {
     return selectedTargets();
 });
 "#,
@@ -6690,12 +6959,12 @@ export const check = product(K_selected_targets_outside_test, P_check, async fun
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, BUILD, targetKind } from "imp:core";
+import { target, product, BUILD, targetKind, toolName } from "imp:core";
 const K_selected_targets_reset_test = targetKind("selected-targets-reset-test");
 
 export const a = target({ kind: "selected-targets-reset-test" });
 
-export const build = product(K_selected_targets_reset_test, BUILD, async function build(handle) {
+export const build = product(K_selected_targets_reset_test, BUILD, toolName("selected-targets-reset-test-tool"), async function build(handle) {
     return {};
 });
 "#,
@@ -6737,7 +7006,7 @@ export const build = product(K_selected_targets_reset_test, BUILD, async functio
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, output, goal, targetKind } from "imp:core";
+import { target, product, run, output, goal, targetKind, toolName } from "imp:core";
 const K_callback_test = targetKind("callback-test");
 
 const P_custom_goal = goal("custom-goal", (selection) => {
@@ -6749,7 +7018,7 @@ const P_custom_goal = goal("custom-goal", (selection) => {
 export const a = target({ kind: "callback-test" });
 export const b = target({ kind: "callback-test" });
 
-export const build = product(K_callback_test, P_custom_goal, async function build(handle) {
+export const build = product(K_callback_test, P_custom_goal, toolName("callback-test-tool"), async function build(handle) {
     await run({
         argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", "ran", `ran-${handle.label.name}.txt`],
         outputs: [output(`ran-${handle.label.name}.txt`)],
@@ -6800,7 +7069,7 @@ export const build = product(K_callback_test, P_custom_goal, async function buil
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, output, goal, targetKind } from "imp:core";
+import { target, product, run, output, goal, targetKind, toolName } from "imp:core";
 const K_callback_test = targetKind("callback-test");
 
 const P_custom_goal = goal("custom-goal", (selection) => {
@@ -6811,7 +7080,7 @@ const P_custom_goal = goal("custom-goal", (selection) => {
 
 export const a = target({ kind: "callback-test" });
 
-export const build = product(K_callback_test, P_custom_goal, async function build(handle) {
+export const build = product(K_callback_test, P_custom_goal, toolName("callback-test-tool"), async function build(handle) {
     await run({
         argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", "ran", `ran-${handle.label.name}.txt`],
         outputs: [output(`ran-${handle.label.name}.txt`)],
@@ -6857,14 +7126,14 @@ export const build = product(K_callback_test, P_custom_goal, async function buil
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, output, goal, targetKind } from "imp:core";
+import { target, product, run, output, goal, targetKind, toolName } from "imp:core";
 const K_plain_goal_test = targetKind("plain-goal-test");
 
 const P_plain_goal = goal("plain-goal");
 
 export const a = target({ kind: "plain-goal-test" });
 
-export const build = product(K_plain_goal_test, P_plain_goal, async function build(handle) {
+export const build = product(K_plain_goal_test, P_plain_goal, toolName("plain-goal-test-tool"), async function build(handle) {
     await run({
         argv: ["sh", "-c", "printf %s \"$1\" > \"$2\"", "write", "ran", `ran-${handle.label.name}.txt`],
         outputs: [output(`ran-${handle.label.name}.txt`)],
@@ -6907,13 +7176,13 @@ export const build = product(K_plain_goal_test, P_plain_goal, async function bui
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, BUILD, targetKind } from "imp:core";
+import { target, product, BUILD, targetKind, toolName } from "imp:core";
 const K_js_lane_slot_test = targetKind("js-lane-slot-test");
 
 export const a = target({ kind: "js-lane-slot-test" });
 export const b = target({ kind: "js-lane-slot-test" });
 
-export const build = product(K_js_lane_slot_test, BUILD, async function build(handle) {
+export const build = product(K_js_lane_slot_test, BUILD, toolName("js-lane-slot-test-tool"), async function build(handle) {
     await Promise.resolve();
     return handle.label.name;
 });
@@ -6969,7 +7238,7 @@ export const build = product(K_js_lane_slot_test, BUILD, async function build(ha
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, memo, run, BUILD, targetKind } from "imp:core";
+import { target, product, memo, run, BUILD, targetKind, toolName } from "imp:core";
 const K_js_lane_bound_test = targetKind("js-lane-bound-test");
 
 export const app = target({ kind: "js-lane-bound-test" });
@@ -6982,7 +7251,7 @@ const child = memo(async function child(name) {
     });
 });
 
-export const build = product(K_js_lane_bound_test, BUILD, async function build() {
+export const build = product(K_js_lane_bound_test, BUILD, toolName("js-lane-bound-test-tool"), async function build() {
     await Promise.all([child("a"), child("b"), child("c")]);
 });
 "#,
@@ -7056,7 +7325,7 @@ export const build = product(K_js_lane_bound_test, BUILD, async function build()
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, memo, BUILD, targetKind } from "imp:core";
+import { target, product, memo, BUILD, targetKind, toolName } from "imp:core";
 const K_single_js_worker_inflight_test = targetKind("single-js-worker-inflight-test");
 
 export const app = target({ kind: "single-js-worker-inflight-test" });
@@ -7073,7 +7342,7 @@ const inner = memo(async function inner() {
     return "inner";
 });
 
-export const build = product(K_single_js_worker_inflight_test, BUILD, async function build() {
+export const build = product(K_single_js_worker_inflight_test, BUILD, toolName("single-js-worker-inflight-test-tool"), async function build() {
     return await outer();
 });
 "#,
@@ -7111,13 +7380,13 @@ export const build = product(K_single_js_worker_inflight_test, BUILD, async func
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, BUILD, targetKind } from "imp:core";
+import { target, product, run, BUILD, targetKind, toolName } from "imp:core";
 const K_interleaved_root_context_test = targetKind("interleaved-root-context-test");
 
 export const a = target({ kind: "interleaved-root-context-test" });
 export const b = target({ kind: "interleaved-root-context-test" });
 
-export const build = product(K_interleaved_root_context_test, BUILD, async function build(handle) {
+export const build = product(K_interleaved_root_context_test, BUILD, toolName("interleaved-root-context-test-tool"), async function build(handle) {
     const name = handle.label.name;
     await run({
         argv: ["sh", "-c", name === "a" ? "sleep 0.05" : "sleep 0.01"],
@@ -7194,12 +7463,12 @@ export const build = product(K_interleaved_root_context_test, BUILD, async funct
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, BUILD, targetKind } from "imp:core";
+import { target, product, run, BUILD, targetKind, toolName } from "imp:core";
 const K_deferred_run_context_test = targetKind("deferred-run-context-test");
 
 export const app = target({ kind: "deferred-run-context-test" });
 
-export const build = product(K_deferred_run_context_test, BUILD, async function build() {
+export const build = product(K_deferred_run_context_test, BUILD, toolName("deferred-run-context-test-tool"), async function build() {
     const p1 = run({
         argv: ["sh", "-c", "sleep 0.02"],
         display: "deferred short",
@@ -7285,12 +7554,12 @@ export const build = product(K_deferred_run_context_test, BUILD, async function 
             &p.join(BUILD_FILE),
             &format!(
                 r#"
-import {{ target, product, run, output, BUILD, targetKind }} from "imp:core";
+import {{ target, product, run, output, BUILD, targetKind, toolName }} from "imp:core";
 const K_live_cache_test = targetKind("live-cache-test");
 
 export const app = target({{ kind: "live-cache-test" }});
 
-export const build = product(K_live_cache_test, BUILD, async function build() {{
+export const build = product(K_live_cache_test, BUILD, toolName("live-cache-test-tool"), async function build() {{
     const result = await run({{
         argv: ["sh", "-c", "{command_js}"],
         outputs: [output("build/live.txt")],
@@ -7404,12 +7673,12 @@ export const build = product(K_live_cache_test, BUILD, async function build() {{
             &p.join(BUILD_FILE),
             &format!(
                 r#"
-import {{ target, product, run, output, BUILD, targetKind }} from "imp:core";
+import {{ target, product, run, output, BUILD, targetKind, toolName }} from "imp:core";
 const K_config_cache_test = targetKind("config-cache-test");
 
 export const app = target({{ kind: "config-cache-test" }});
 
-export const build = product(K_config_cache_test, BUILD, async function build() {{
+export const build = product(K_config_cache_test, BUILD, toolName("config-cache-test-tool"), async function build() {{
     return run({{
         argv: ["sh", "-c", "{command_js}"],
         outputs: [output("build/cfg.txt")],
@@ -7468,13 +7737,13 @@ configure("cache_test", {{ mode: {mode} }});
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, productName, targetKind } from "imp:core";
+import { target, product, productName, targetKind, toolName } from "imp:core";
 const K_test_pkg = targetKind("test-pkg");
 const P_report = productName("report");
 
 export const pkg = target({ kind: "test-pkg", fields: { name: "hello" } });
 
-export const report = product(K_test_pkg, P_report, async function report(handle) {
+export const report = product(K_test_pkg, P_report, toolName("test-pkg-tool"), async function report(handle) {
     return "ok";
 });
 "#,
@@ -7517,13 +7786,13 @@ export const report = product(K_test_pkg, P_report, async function report(handle
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, productName, targetKind } from "imp:core";
+import { target, product, productName, targetKind, toolName } from "imp:core";
 const K_kind_a = targetKind("kind-a");
 const P_check = productName("check");
 
 export const pkg = target({ kind: "kind-a", fields: {} });
 
-export const check = product(K_kind_a, P_check, async function check(handle) {});
+export const check = product(K_kind_a, P_check, toolName("kind-a-tool"), async function check(handle) {});
 "#,
         );
 
@@ -7565,13 +7834,13 @@ export const check = product(K_kind_a, P_check, async function check(handle) {})
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, goal, targetKind, BUILD } from "imp:core";
+import { target, product, goal, targetKind, BUILD, toolName } from "imp:core";
 const KindA = targetKind("wild-kind-a");
 const KindB = targetKind("wild-kind-b");
 
 export const a = target({ kind: "wild-kind-a", fields: {} });
 export const b = target({ kind: "wild-kind-b", fields: {} });
-export const build_a = product(KindA, BUILD, async function build_a(handle) {});
+export const build_a = product(KindA, BUILD, toolName("kinda-tool"), async function build_a(handle) {});
 
 goal("nosel", async function noselGoal(selection) {}, { selection: "none" });
 "#,
@@ -7636,13 +7905,13 @@ export const CHECK = productName("check");
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, targetKind } from "imp:core";
+import { target, product, targetKind, toolName } from "imp:core";
 import { CHECK } from "//tokens";
 
 const KindA = targetKind("kind-a");
 
 export const pkg = target({ kind: "kind-a", fields: {} });
-export const check = product(KindA, CHECK, async function check(handle) {});
+export const check = product(KindA, CHECK, toolName("kinda-tool"), async function check(handle) {});
 "#,
         );
 
@@ -7725,10 +7994,10 @@ export const B = productName("build");
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { product, targetKind } from "imp:core";
+import { product, targetKind, toolName } from "imp:core";
 const KindA = targetKind("kind-a");
 const forged = { __imp_product_name: true, name: "forged", __pid: 12345 };
-export const x = product(KindA, forged, async function x(handle) {});
+export const x = product(KindA, forged, toolName("kinda-tool"), async function x(handle) {});
 "#,
         );
 
@@ -7747,7 +8016,7 @@ export const x = product(KindA, forged, async function x(handle) {});
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, goal, targetKind } from "imp:core";
+import { target, product, goal, targetKind, toolName } from "imp:core";
 
 const CUSTOM = goal("custom-goal");
 const AGAIN = goal("custom-goal");
@@ -7755,7 +8024,7 @@ if (CUSTOM !== AGAIN) throw new Error("goal() must return the same token for rep
 
 const KindA = targetKind("kind-a");
 export const pkg = target({ kind: "kind-a", fields: {} });
-export const custom = product(KindA, CUSTOM, async function custom(handle) {});
+export const custom = product(KindA, CUSTOM, toolName("kinda-tool"), async function custom(handle) {});
 "#,
         );
 
@@ -7779,11 +8048,11 @@ export const custom = product(KindA, CUSTOM, async function custom(handle) {});
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { product, targetKind, BUILD, TEST } from "imp:core";
+import { product, targetKind, BUILD, TEST, toolName } from "imp:core";
 const KindA = targetKind("kind-a");
 const KindAAgain = targetKind("kind-a");
-export const a = product(KindA, BUILD, async function a(handle) {});
-export const b = product(KindAAgain, TEST, async function b(handle) {});
+export const a = product(KindA, BUILD, toolName("kinda-tool"), async function a(handle) {});
+export const b = product(KindAAgain, TEST, toolName("kindaagain-tool"), async function b(handle) {});
 "#,
         );
 
@@ -7938,11 +8207,11 @@ import "//rules/custom";
         write_file(
             &p.join("rules/custom.js"),
             r#"
-import { product, targetKind } from "imp:core";
+import { product, targetKind, toolName } from "imp:core";
 import { P_generate_build } from "//rules/odin";
 const K_custom_generator = targetKind("custom-generator");
 
-export const generateBuild = product(K_custom_generator, P_generate_build, async function generateBuild() {
+export const generateBuild = product(K_custom_generator, P_generate_build, toolName("custom-generator-tool"), async function generateBuild() {
     return {
         "custom/BUILD.js": [{
                 name: "custom",

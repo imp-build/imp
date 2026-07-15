@@ -1,6 +1,11 @@
-Ruff formats and lints targets declared with `pythonApp()`. The tool
-version comes from the workspace's default `ruffToolchain()` declaration, so
-local and CI runs use the same formatter and rule set.
+Ruff formats and lints targets declared with `pythonApp()`. The two features
+are registered by separate modules: importing `//rules/python/ruff/fmt`
+enables the `fmt` and `format-check` products, importing
+`//rules/python/ruff/lint` enables the `lint` product. The fmt and lint
+workflows each import their own half, so a workspace can enable one without
+the other. The tool version comes from the workspace's default
+`ruffToolchain()` declaration, so local and CI runs use the same formatter
+and rule set.
 
 ```sh
 # Rewrite Python files owned by the selected application.

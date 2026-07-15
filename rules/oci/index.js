@@ -21,6 +21,7 @@ import { distPathFor } from "//rules/workflows/package";
 
 import { craneTool } from "//rules/oci/toolchain";
 import { craneAuthTools, declareOciStorage, OCI_STORAGE_CACHE, ociStorageKey } from "//rules/oci/storage";
+import { CRANE_TOOL } from "//rules/oci/toolchain";
 
 export {
     craneBin,
@@ -137,7 +138,7 @@ export function ociPull({ repo, tag, digest }) {
  * @param {object} handle Target handle returned by ociPull().
  * @returns {Promise<{ ociLayoutPath: string, digest: string }>}
  */
-export const ociPullBuild = product(OciPull, BUILD, async function ociPullBuild(handle) {
+export const ociPullBuild = product(OciPull, BUILD, CRANE_TOOL, async function ociPullBuild(handle) {
     declareOciStorage();
     const craneToolSpec = await craneTool();
     const registry = registryHost(handle.attrs.repo);
@@ -242,7 +243,7 @@ async function packageOciLayoutAsTar(handle, layoutPath, manifestDigest, treeDig
  * @param {object} handle Target handle returned by ociPull().
  * @returns {Promise<{ tarPath: string }>}
  */
-export const ociPullPackage = product(OciPull, PACKAGE, async function ociPullPackage(handle) {
+export const ociPullPackage = product(OciPull, PACKAGE, CRANE_TOOL, async function ociPullPackage(handle) {
     const { ociLayoutPath, digest } = await ociPullBuild(handle);
     return packageOciLayoutAsTar(handle, ociLayoutPath, digest, null);
 });
@@ -450,7 +451,7 @@ const COMPOSE_OCI_IMAGE_SCRIPT = [
     'printf "sha256:%s" "$manifest_digest"',
 ].join("\n");
 
-export const ociBuildBuild = product(OciBuild, BUILD, async function ociBuildBuild(handle) {
+export const ociBuildBuild = product(OciBuild, BUILD, CRANE_TOOL, async function ociBuildBuild(handle) {
     declareOciStorage();
     const stageTools = [
         await nativeToolSpec(nativeTool("mkdir")),
@@ -535,7 +536,7 @@ export const ociBuildBuild = product(OciBuild, BUILD, async function ociBuildBui
  * @param {object} handle Target handle returned by ociBuild().
  * @returns {Promise<{ tarPath: string }>}
  */
-export const ociBuildPackage = product(OciBuild, PACKAGE, async function ociBuildPackage(handle) {
+export const ociBuildPackage = product(OciBuild, PACKAGE, CRANE_TOOL, async function ociBuildPackage(handle) {
     const { ociLayoutPath, digest, outputDigest } = await ociBuildBuild(handle);
     return packageOciLayoutAsTar(handle, ociLayoutPath, digest, outputDigest);
 });
@@ -575,7 +576,7 @@ export function ociPush({ image, repo, tag }) {
     return new OciPush({ image, repo, tag });
 }
 
-export const ociPushBuild = product(OciPush, BUILD, async function ociPushBuild(handle) {
+export const ociPushBuild = product(OciPush, BUILD, CRANE_TOOL, async function ociPushBuild(handle) {
     const { ociLayoutPath, digest, outputDigest } = await productFor(handle.attrs.image, BUILD);
     const craneToolSpec = await craneTool();
     const registry = registryHost(handle.attrs.repo);
@@ -633,7 +634,7 @@ export function ociMirror({ from, to }) {
     return new OciMirror({ from, to });
 }
 
-export const ociMirrorBuild = product(OciMirror, BUILD, async function ociMirrorBuild(handle) {
+export const ociMirrorBuild = product(OciMirror, BUILD, CRANE_TOOL, async function ociMirrorBuild(handle) {
     const craneToolSpec = await craneTool();
     const { from, to } = handle.attrs;
     const srcRef = from.digest ? `${from.repo}@${from.digest}` : `${from.repo}:${from.tag}`;

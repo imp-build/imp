@@ -1,4 +1,5 @@
 import { Target, product, productName, nativeToolArtifact } from "imp:core";
+import { IMP_TOOL } from "//rules/imp/imp_tool";
 
 export class NativeTool extends Target {
     static kind = "native-tool";
@@ -32,6 +33,7 @@ export const TOOL = productName("tool");
 export const nativeToolSpec = product(
     NativeTool,
     TOOL,
+    IMP_TOOL,
     async function nativeToolSpec(handle) {
         const path = await nativeToolArtifact(handle.attrs.name);
         return {

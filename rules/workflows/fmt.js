@@ -9,7 +9,7 @@
 // The "fmt" goal is declared with a callback so `--check` can pick a
 // different product (`format-check` instead of `fmt`) per selected target,
 // via the general goal-flags mechanism (`goalFlags()`). The callback drives
-// its own resolve/fan-out/await loop (resolveProduct) rather than delegating
+// its own resolve/fan-out/await loop (resolveProducts) rather than delegating
 // to a shared dispatch helper, so every selected target gets checked and
 // summarized before any unformatted file turns into a thrown error — a
 // single formatter failing to compile shouldn't hide the report for every
@@ -27,8 +27,8 @@ export {
 export {
     pythonAppFmt,
     pythonAppFormatCheck,
-} from "//rules/python/ruff";
-import { goal, resolveProduct, goalFlags, logInfo } from "imp:core";
+} from "//rules/python/ruff/fmt";
+import { goal, resolveProducts, goalFlags, logInfo } from "imp:core";
 import { FORMAT_CHECK } from "//rules/workflows/products";
 
 export async function fmtGoal(selection) {
@@ -36,7 +36,7 @@ export async function fmtGoal(selection) {
     const targets = check
         ? selection.map((entry) => ({ ...entry, product: FORMAT_CHECK }))
         : selection;
-    const resolved = targets.map(resolveProduct);
+    const resolved = targets.flatMap(resolveProducts);
     const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));
 
     const summaryLines = [];

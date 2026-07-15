@@ -1,10 +1,11 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { configure, product, targetKind } from "imp:core";
+import { configure, product, targetKind, toolName } from "imp:core";
 import { GENERATE_BUILD } from "//rules/workflows/generate_build";
 const K_generate_build_test_off = targetKind("generate-build-test-off");
 const K_generate_build_test_false = targetKind("generate-build-test-false");
 const K_generate_build_test_on = targetKind("generate-build-test-on");
 import { generateBuildGoal, registerBuildGenerator } from "//rules/workflows/generate_build";
+const TEST_TOOL = toolName("generate-build-test-tool");
 
 describe("generate-build workflow", () => {
 
@@ -20,7 +21,7 @@ async function withFakeGoalFlags(flags, fn) {
 
 test("a registered generator is skipped when its namespace's buildGenerate config is unset", async () => {
     let called = false;
-    product(K_generate_build_test_off, GENERATE_BUILD, async () => {
+    product(K_generate_build_test_off, GENERATE_BUILD, TEST_TOOL, async () => {
         called = true;
         return {};
     });
@@ -36,7 +37,7 @@ test("a registered generator is skipped when its namespace's buildGenerate confi
 
 test("a registered generator is skipped when its namespace's buildGenerate config is false", async () => {
     let called = false;
-    product(K_generate_build_test_false, GENERATE_BUILD, async () => {
+    product(K_generate_build_test_false, GENERATE_BUILD, TEST_TOOL, async () => {
         called = true;
         return {};
     });
@@ -53,7 +54,7 @@ test("a registered generator is skipped when its namespace's buildGenerate confi
 
 test("a registered generator runs when its namespace's buildGenerate config is true", async () => {
     let called = false;
-    product(K_generate_build_test_on, GENERATE_BUILD, async () => {
+    product(K_generate_build_test_on, GENERATE_BUILD, TEST_TOOL, async () => {
         called = true;
         return {};
     });

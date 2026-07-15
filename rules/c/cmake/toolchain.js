@@ -1,9 +1,16 @@
-import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Toolchain, product, namedCache, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+import { downloadToolArtifact, lockedDownloadTools } from "//rules/imp/lockfile";
+import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
+import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
+
+// Declared tool identity for products this toolchain implements; also
+// consumed by rule modules registering cmake-driven products.
+export const CMAKE_TOOL = toolName("cmake");
 
 const CMAKE_TOOLCHAIN_CACHE = "cmake-toolchains";
+const CMAKE_LOCKFILE = "//rules/c/cmake/cmake.lock";
 
 // CMake's Windows release archives use "arm64" rather than the "aarch64"
 // naming used elsewhere in this project (and by CMake's own Linux archives).
@@ -82,26 +89,34 @@ export function cmakeCacheKey(version, plat) {
 // BUILTIN_SHELL_CANDIDATES in src/exec.rs), so Windows needs `sh` (Git Bash)
 // declared as a tool too.
 function coreToolNames(plat) {
-    return ["curl", "mkdir", "tar", "gzip", ...(plat.os === "windows" ? ["sh"] : [])];
+    return [...new Set([
+        ...lockedDownloadTools(plat),
+        ...extractArchiveTools(plat.os === "windows" ? "zip" : "tar.gz"),
+    ])];
 }
 
-export class CmakeToolchain extends Target {
+export class CmakeToolchain extends Toolchain {
     static kind = "cmake-toolchain";
-    constructor({ version }) {
-        super({ kind: CmakeToolchain.kind, attrs: { version } });
+    static tool = CMAKE_TOOL;
+    constructor({ version, unverified }, opts) {
+        super({
+            kind: CmakeToolchain.kind,
+            attrs: { version, ...(unverified ? { unverified } : {}) },
+        }, opts);
+    }
+
+    bin() {
+        return cmakeBin(this.attrs.version);
     }
 }
 
-let defaultVersion = null;
-let defaultToolchain = null;
 // Declared lazily, once, the first time a toolchain is declared — target()
 // addresses are only assigned at workspace-load time, so this must happen
 // at BUILD.js top level rather than inside acquireToolchain() at execution time.
 let coreToolHandles = null;
 
 export function __resetCmakeToolchainStateForTest() {
-    defaultVersion = null;
-    defaultToolchain = null;
+    CmakeToolchain.clearDefault();
     coreToolHandles = null;
 }
 
@@ -111,6 +126,8 @@ export function __resetCmakeToolchainStateForTest() {
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
+ * @param {boolean} [opts.unverified=false] Allow downloading without a
+ *   matching lockfile entry (warns instead of failing).
  * @returns {object} Target handle for this CMake toolchain.
  * @category configuration
  */
@@ -120,14 +137,10 @@ export function cmakeToolchain(version, opts = {}) {
         coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
     }
 
-    const toolchain = new CmakeToolchain({ version });
-
-    if (opts.default) {
-        defaultVersion = version;
-        defaultToolchain = toolchain;
-    }
-
-    return toolchain;
+    return new CmakeToolchain(
+        { version, unverified: opts.unverified },
+        { default: opts.default },
+    );
 }
 
 /**
@@ -165,23 +178,26 @@ export async function acquireCmakeToolchain(version) {
 
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
-    const url = cmakeDownloadUrl(version, plat);
-    const extractPath = `.imp/cmake-toolchains/${key}`;
-    // tar can't sniff compression from a pipe, so -z (gzip) must be explicit
-    // on the tar.gz (unix) release; the windows .zip release isn't a filter
-    // format, so plain -xf works.
-    const tarFlags = plat.os === "windows" ? "-xf" : "-xzf";
-
-    await run({
-        argv: ["sh", "-c", `mkdir -p "$2" && curl -fSL "$1" | tar ${tarFlags} - -C "$2" --strip-components=1`, "install-cmake", url, extractPath],
+    const downloadPath = `.imp/cmake-downloads/${key}/${cmakeArtifactName(version, plat)}`;
+    await downloadToolArtifact({
+        lockfile: CMAKE_LOCKFILE,
+        tool: "cmake",
+        version,
+        plat,
+        url: cmakeDownloadUrl(version, plat),
+        downloadPath,
         tools: coreTools,
-        outputs: [
-            output(output_path(extractPath), {
-                kind: "directory",
-                namedCache: { name: CMAKE_TOOLCHAIN_CACHE, key },
-            }),
-        ],
-        materialize: false,
+        display: `download cmake ${version} (${plat.os}/${plat.arch})`,
+        unverified: CmakeToolchain.resolveUnverified(version),
+    });
+
+    await extractArchive({
+        archive: downloadPath,
+        dest: `.imp/cmake-toolchains/${key}`,
+        format: plat.os === "windows" ? "zip" : "tar.gz",
+        stripComponents: 1,
+        tools: coreTools,
+        namedCache: { name: CMAKE_TOOLCHAIN_CACHE, key },
         display: `install cmake ${version} (${plat.os}/${plat.arch})`,
     });
 
@@ -195,10 +211,7 @@ export async function acquireCmakeToolchain(version) {
  * @returns {string|null}
  */
 export function resolveCmakeToolchainVersion(version) {
-    if (version) {
-        return version;
-    }
-    return defaultVersion;
+    return CmakeToolchain.resolveVersion(version);
 }
 
 /**
@@ -225,10 +238,7 @@ export async function cmakeBin(version) {
  * @returns {Promise<object>}
  */
 export async function cmakeTool(version) {
-    const resolved = resolveCmakeToolchainVersion(version);
-    if (!resolved) {
-        throw new Error("no CMake toolchain version specified and no default set");
-    }
+    const resolved = CmakeToolchain.requireVersion(version, "CMake");
     await acquireCmakeToolchain(resolved);
     const plat = platformInfo();
     return {
@@ -246,7 +256,7 @@ export async function cmakeTool(version) {
  * @returns {string|null}
  */
 export function defaultCmakeToolchainVersion() {
-    return defaultVersion;
+    return CmakeToolchain.defaultVersion();
 }
 
 /**
@@ -255,16 +265,15 @@ export function defaultCmakeToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultCmakeToolchain() {
-    return defaultToolchain;
+    return CmakeToolchain.default();
 }
 
-const LOCKFILE_SPEC = {
+const LOCKFILE_SPEC = registerToolchainLockfile({
     name: "cmake",
     platforms: cmakeSupportedPlatforms(),
     downloadUrl: cmakeDownloadUrl,
     artifactName: cmakeArtifactName,
-    lockfile: "//rules/c/cmake/cmake.lock",
-};
-product(CmakeToolchain, GEN_LOCKFILES, (handle) =>
+    lockfile: CMAKE_LOCKFILE,
+}, ["3.31.0"]);
+product(CmakeToolchain, GEN_LOCKFILES, CMAKE_TOOL, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
-registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["3.31.0"] });

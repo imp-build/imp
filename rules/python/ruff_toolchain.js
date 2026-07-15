@@ -1,8 +1,13 @@
-import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Toolchain, product, namedCache, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { resolveToolLockfile, lockedDownloadArgv, lockedDownloadTools } from "//rules/imp/lockfile";
-import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+import { downloadToolArtifact, lockedDownloadTools } from "//rules/imp/lockfile";
+import { extractArchive } from "//rules/imp/archive";
+import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
+
+// Declared tool identity for products this toolchain implements; also
+// consumed by rule modules registering ruff-driven products.
+export const RUFF_TOOL = toolName("ruff");
 
 const RUFF_TOOLCHAIN_CACHE = "ruff-toolchains";
 // The bundled lockfile ships embedded in the binary (it lives inside
@@ -81,36 +86,32 @@ function coreToolNames(plat) {
     return [...new Set([...lockedDownloadTools(plat), ...extract])];
 }
 
-export class RuffToolchain extends Target {
+export class RuffToolchain extends Toolchain {
     static kind = "ruff-toolchain";
-    constructor({ version, lockfile, unverified }) {
-        super({ kind: RuffToolchain.kind, attrs: { version, lockfile, unverified } });
+    static tool = RUFF_TOOL;
+    constructor({ version, lockfile, unverified }, opts) {
+        super({ kind: RuffToolchain.kind, attrs: { version, lockfile, unverified } }, opts);
+    }
+
+    bin() {
+        return ruffBin(this.attrs.version);
     }
 }
 
-let defaultVersion = null;
-let defaultToolchain = null;
-let defaultLockfile = DEFAULT_LOCKFILE;
-let defaultUnverified = false;
+// The lockfile/unverified settings ride the declared instance's attrs —
+// the one that declared this exact version, else the default instance's.
+function lockfileFor(version) {
+    return RuffToolchain.instanceForVersion(version)?.attrs.lockfile ?? DEFAULT_LOCKFILE;
+}
+
 // Declared lazily, once — target() addresses are only assigned at
 // workspace-load time, so tool handles must be created when a toolchain is
 // declared at BUILD.js top level, not inside acquireRuffToolchain().
 let coreToolHandles = null;
 
 export function __resetRuffToolchainStateForTest() {
-    defaultVersion = null;
-    defaultToolchain = null;
-    defaultLockfile = DEFAULT_LOCKFILE;
-    defaultUnverified = false;
+    RuffToolchain.clearDefault();
     coreToolHandles = null;
-}
-
-function requireVersion(version) {
-    const resolved = resolveRuffToolchainVersion(version);
-    if (!resolved) {
-        throw new Error("no ruff toolchain version specified and no default set");
-    }
-    return resolved;
 }
 
 /**
@@ -136,16 +137,10 @@ export function ruffToolchain(version, opts = {}) {
 
     const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
     const unverified = opts.unverified ?? false;
-    const toolchain = new RuffToolchain({ version, lockfile, unverified });
-
-    if (opts.default) {
-        defaultVersion = version;
-        defaultToolchain = toolchain;
-        defaultLockfile = lockfile;
-        defaultUnverified = unverified;
-    }
-
-    return toolchain;
+    return new RuffToolchain(
+        { version, lockfile, unverified },
+        { default: opts.default },
+    );
 }
 
 /**
@@ -183,63 +178,30 @@ export async function acquireRuffToolchain(version) {
         // Verification only runs on this cold path — warm named-cache
         // contents were verified when inserted, or seeded deliberately via
         // installRuffToolchain.
-        const lockEntry = resolveToolLockfile({
-            address: defaultLockfile,
+        const downloadPath = `.imp/ruff-downloads/${key}/${ruffArtifactName(version, plat)}`;
+        await downloadToolArtifact({
+            lockfile: lockfileFor(version),
             tool: "ruff-toolchain",
             version,
             plat,
-            unverified: defaultUnverified,
-        });
-        const artifact = ruffArtifactName(version, plat);
-        const url = lockEntry ? lockEntry.url : ruffDownloadUrl(version, plat);
-        const downloadPath = `.imp/ruff-downloads/${key}/${artifact}`;
-        const extractPath = `.imp/ruff-toolchains/${key}`;
-
-        const downloadArgv = lockedDownloadArgv({
-            plat,
-            lockEntry,
-            url,
+            url: ruffDownloadUrl(version, plat),
             downloadPath,
-            displayName: "download-ruff",
+            tools: coreTools,
+            display: `download ruff ${version} (${plat.os}/${plat.arch})`,
+            unverified: RuffToolchain.resolveUnverified(version),
         });
-        try {
-            await run({
-                argv: downloadArgv,
-                tools: coreTools,
-                outputs: [output(output_path(downloadPath))],
-                materialize: true,
-                display: `download ruff ${version} (${plat.os}/${plat.arch})`,
-            });
-        } catch (e) {
-            if (lockEntry) {
-                throw new Error(
-                    `download of ruff ${version} from ${url} failed transfer or size/sha256 verification ` +
-                    `(expected ${lockEntry.sha256} from ${defaultLockfile}); if you intentionally ` +
-                    `changed versions, run \`imp goal gen-lockfiles\`: ${e && e.message ? e.message : e}`,
-                );
-            }
-            throw e;
-        }
 
         // ruff's release archives extract a single top-level
         // ruff-<triple>/ directory containing the `ruff` binary — strip it
         // so the cache root holds the binary directly, same shape
         // acquireUvToolchain uses.
-        const extractScript = plat.os === "windows"
-            ? 'mkdir -p "$2" && tar -xf "$1" -C "$2" --strip-components=1'
-            : 'mkdir -p "$2" && tar -xzf "$1" -C "$2" --strip-components=1';
-
-        await run({
-            argv: ["sh", "-c", extractScript, "extract-ruff", downloadPath, extractPath],
+        await extractArchive({
+            archive: downloadPath,
+            dest: `.imp/ruff-toolchains/${key}`,
+            format: plat.os === "windows" ? "zip" : "tar.gz",
+            stripComponents: 1,
             tools: coreTools,
-            inputs: [{ kind: "file", path: downloadPath }],
-            outputs: [
-                output(output_path(extractPath), {
-                    kind: "directory",
-                    namedCache: { name: RUFF_TOOLCHAIN_CACHE, key },
-                }),
-            ],
-            materialize: true,
+            namedCache: { name: RUFF_TOOLCHAIN_CACHE, key },
             display: `extract ruff ${version} (${plat.os}/${plat.arch})`,
         });
     }
@@ -254,10 +216,7 @@ export async function acquireRuffToolchain(version) {
  * @returns {string|null}
  */
 export function resolveRuffToolchainVersion(version) {
-    if (version) {
-        return version;
-    }
-    return defaultVersion;
+    return RuffToolchain.resolveVersion(version);
 }
 
 /**
@@ -267,7 +226,7 @@ export function resolveRuffToolchainVersion(version) {
  * @returns {Promise<string>}
  */
 export async function ruffBin(version) {
-    const resolved = requireVersion(version);
+    const resolved = RuffToolchain.requireVersion(version);
     const dir = await acquireRuffToolchain(resolved);
     const exe = platformInfo().os === "windows" ? "ruff.exe" : "ruff";
     return `${dir}/${exe}`;
@@ -280,7 +239,7 @@ export async function ruffBin(version) {
  * @returns {Promise<object>}
  */
 export async function ruffTool(version) {
-    const resolved = requireVersion(version);
+    const resolved = RuffToolchain.requireVersion(version);
     await acquireRuffToolchain(resolved);
     const plat = platformInfo();
     return {
@@ -298,7 +257,7 @@ export async function ruffTool(version) {
  * @returns {string|null}
  */
 export function defaultRuffToolchainVersion() {
-    return defaultVersion;
+    return RuffToolchain.defaultVersion();
 }
 
 /**
@@ -307,16 +266,15 @@ export function defaultRuffToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultRuffToolchain() {
-    return defaultToolchain;
+    return RuffToolchain.default();
 }
 
-const LOCKFILE_SPEC = {
+const LOCKFILE_SPEC = registerToolchainLockfile({
     name: "ruff-toolchain",
     platforms: ruffSupportedPlatforms(),
     downloadUrl: ruffDownloadUrl,
     artifactName: ruffArtifactName,
     lockfile: DEFAULT_LOCKFILE,
-};
-product(RuffToolchain, GEN_LOCKFILES, (handle) =>
+}, ["0.15.20", "0.15.21"]);
+product(RuffToolchain, GEN_LOCKFILES, RUFF_TOOL, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC, lockfile: handle.attrs.lockfile ?? DEFAULT_LOCKFILE }));
-registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["0.15.20", "0.15.21"] });

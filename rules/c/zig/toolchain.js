@@ -1,9 +1,15 @@
-import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Toolchain, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+import { downloadToolArtifact, lockedDownloadTools } from "//rules/imp/lockfile";
+import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
+
+// Declared tool identity for products this toolchain implements; also
+// consumed by rule modules registering zig-driven products.
+export const ZIG_TOOL = toolName("zig");
 
 const ZIG_TOOLCHAIN_CACHE = "zig-toolchains";
+const ZIG_LOCKFILE = "//rules/c/zig/zig.lock";
 // Zig lazily JIT-compiles its own runtime support code (compiler-rt, libc
 // start files, std for the `zig cc`/`zig c++` frontend) into
 // $ZIG_GLOBAL_CACHE_DIR on first use per (version, target, flags) — content-
@@ -110,14 +116,12 @@ export function zigCacheKey(version, plat) {
 // auto-resolves on unix (see BUILTIN_SHELL_CANDIDATES in src/exec.rs), so
 // Windows needs `sh` (Git Bash) declared as a tool too.
 function coreToolNames(plat) {
-    return [
-        "curl",
-        "mkdir",
-        "dirname",
+    return [...new Set([
+        ...lockedDownloadTools(plat),
         "tar",
         ...(plat.os === "linux" ? ["xz", "chmod"] : []),
         ...(plat.os === "windows" ? ["sh"] : []),
-    ];
+    ])];
 }
 
 function wrapperContent(plat, zigExe, subcommand) {
@@ -146,32 +150,29 @@ function wrapperNames(plat) {
         : { ar: "zigar", ranlib: "zigranlib", clang: "clang", genericAr: "ar" };
 }
 
-export class ZigToolchain extends Target {
+export class ZigToolchain extends Toolchain {
     static kind = "zig-toolchain";
-    constructor({ version }) {
-        super({ kind: ZigToolchain.kind, attrs: { version } });
+    static tool = ZIG_TOOL;
+    constructor({ version, unverified }, opts) {
+        super({
+            kind: ZigToolchain.kind,
+            attrs: { version, ...(unverified ? { unverified } : {}) },
+        }, opts);
+    }
+
+    bin() {
+        return zigBin(this.attrs.version);
     }
 }
 
-let defaultVersion = null;
-let defaultToolchain = null;
 // Declared lazily, once, the first time a toolchain is declared — target()
 // addresses are only assigned at workspace-load time, so this must happen
 // at BUILD.js top level rather than inside acquireToolchain() at execution time.
 let coreToolHandles = null;
 
 export function __resetZigToolchainStateForTest() {
-    defaultVersion = null;
-    defaultToolchain = null;
+    ZigToolchain.clearDefault();
     coreToolHandles = null;
-}
-
-function requireVersion(version) {
-    const resolved = resolveZigToolchainVersion(version);
-    if (!resolved) {
-        throw new Error("no Zig toolchain version specified and no default set");
-    }
-    return resolved;
 }
 
 /**
@@ -180,6 +181,8 @@ function requireVersion(version) {
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
+ * @param {boolean} [opts.unverified=false] Allow downloading without a
+ *   matching lockfile entry (warns instead of failing).
  * @returns {object} Target handle for this Zig toolchain.
  * @category configuration
  */
@@ -190,14 +193,10 @@ export function zigToolchain(version, opts = {}) {
         coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
     }
 
-    const toolchain = new ZigToolchain({ version });
-
-    if (opts.default) {
-        defaultVersion = version;
-        defaultToolchain = toolchain;
-    }
-
-    return toolchain;
+    return new ZigToolchain(
+        { version, unverified: opts.unverified },
+        { default: opts.default },
+    );
 }
 
 /**
@@ -242,14 +241,26 @@ export async function acquireZigToolchain(version) {
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
     if (!cacheHas(ZIG_TOOLCHAIN_CACHE, key)) {
-        const url = zigDownloadUrl(version, plat);
+        const downloadPath = `.imp/zig-downloads/${key}/${zigArtifactName(version, plat)}`;
+        await downloadToolArtifact({
+            lockfile: ZIG_LOCKFILE,
+            tool: "zig",
+            version,
+            plat,
+            url: zigDownloadUrl(version, plat),
+            downloadPath,
+            tools: coreTools,
+            display: `download zig ${version} (${plat.os}/${plat.arch})`,
+            unverified: ZigToolchain.resolveUnverified(version),
+        });
+
         const extractPath = `.imp/zig-toolchains/${key}`;
         const zigExe = plat.os === "windows" ? "zig.exe" : "zig";
         const { ar, ranlib, clang, genericAr } = wrapperNames(plat);
         // Wrapper content rides in argv (positional $N) so it keys the task
         // cache without any shell interpolation touching it, same pattern as
         // odinGenRun's generated-file writes. Each wrapper is a
-        // (content, filename) positional pair after $1 (url)/$2 (extractPath).
+        // (content, filename) positional pair after $1 (archive)/$2 (extractPath).
         const wrappers = [
             [wrapperContent(plat, zigExe, "ar"), ar],
             [wrapperContent(plat, zigExe, "ranlib"), ranlib],
@@ -268,11 +279,12 @@ export async function acquireZigToolchain(version) {
         // explicit on the tar.xz (unix) release; the windows .zip release
         // isn't a filter format, so plain -xf works.
         const tarFlags = plat.os === "windows" ? "-xf" : "-xJf";
-        const installScript = `mkdir -p "$2" && curl -fSL "$1" | tar ${tarFlags} - -C "$2" --strip-components=1 && ${writeCmds.join(" && ")}${chmodCmd}`;
+        const installScript = `mkdir -p "$2" && tar ${tarFlags} "$1" -C "$2" --strip-components=1 && ${writeCmds.join(" && ")}${chmodCmd}`;
 
         await run({
-            argv: ["sh", "-c", installScript, "install-zig", url, extractPath, ...wrapperArgs],
+            argv: ["sh", "-c", installScript, "install-zig", downloadPath, extractPath, ...wrapperArgs],
             tools: coreTools,
+            inputs: [{ kind: "file", path: downloadPath }],
             outputs: [
                 output(output_path(extractPath), {
                     kind: "directory",
@@ -330,10 +342,7 @@ export async function acquireZigToolchain(version) {
  * @returns {string|null}
  */
 export function resolveZigToolchainVersion(version) {
-    if (version) {
-        return version;
-    }
-    return defaultVersion;
+    return ZigToolchain.resolveVersion(version);
 }
 
 /**
@@ -343,7 +352,7 @@ export function resolveZigToolchainVersion(version) {
  * @returns {Promise<string>}
  */
 export async function zigBin(version) {
-    const resolved = requireVersion(version);
+    const resolved = ZigToolchain.requireVersion(version, "Zig");
     const dir = await acquireZigToolchain(resolved);
     const exe = platformInfo().os === "windows" ? "zig.exe" : "zig";
     return `${dir}/${exe}`;
@@ -356,7 +365,7 @@ export async function zigBin(version) {
  * @returns {Promise<object>}
  */
 export async function zigTool(version) {
-    const resolved = requireVersion(version);
+    const resolved = ZigToolchain.requireVersion(version, "Zig");
     await acquireZigToolchain(resolved);
     const plat = platformInfo();
     return {
@@ -379,7 +388,7 @@ export async function zigTool(version) {
  * @returns {Promise<object>}
  */
 export async function zigBuildCacheTool(version) {
-    const resolved = requireVersion(version);
+    const resolved = ZigToolchain.requireVersion(version, "Zig");
     await acquireZigToolchain(resolved);
     const plat = platformInfo();
     return {
@@ -410,7 +419,7 @@ export function zigGlobalCacheEnv() {
  * @returns {Promise<string[]>}
  */
 export async function zigCMakeArgs(version) {
-    const resolved = requireVersion(version);
+    const resolved = ZigToolchain.requireVersion(version, "Zig");
     await acquireZigToolchain(resolved);
     const plat = platformInfo();
     const exe = plat.os === "windows" ? "zig.exe" : "zig";
@@ -432,7 +441,7 @@ export async function zigCMakeArgs(version) {
  * @returns {string|null}
  */
 export function defaultZigToolchainVersion() {
-    return defaultVersion;
+    return ZigToolchain.defaultVersion();
 }
 
 /**
@@ -441,16 +450,15 @@ export function defaultZigToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultZigToolchain() {
-    return defaultToolchain;
+    return ZigToolchain.default();
 }
 
-const LOCKFILE_SPEC = {
+const LOCKFILE_SPEC = registerToolchainLockfile({
     name: "zig",
     platforms: zigSupportedPlatforms(),
     downloadUrl: zigDownloadUrl,
     artifactName: zigArtifactName,
-    lockfile: "//rules/c/zig/zig.lock",
-};
-product(ZigToolchain, GEN_LOCKFILES, (handle) =>
+    lockfile: ZIG_LOCKFILE,
+}, ["0.16.0"]);
+product(ZigToolchain, GEN_LOCKFILES, ZIG_TOOL, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
-registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["0.16.0"] });

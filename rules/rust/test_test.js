@@ -77,8 +77,8 @@ test("parseTestBinaries tolerates malformed JSON lines", () => {
 
 test("rustTestBuild builds via `cargo test --no-run --message-format=json`", async () => {
     await withRustHost(async (host) => {
-        gccToolchain("2025.08-1", { default: true });
-        rustToolchain("1.93.0", { default: true });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
         const rustTest = new RustTest({
             path: "rules/rust/example",
             buildDir: "build/rust/rules/rust/example",
@@ -97,8 +97,8 @@ test("rustTestBuild builds via `cargo test --no-run --message-format=json`", asy
 
 test("rustTestRun executes only the target's own binary, single-threaded", async () => {
     await withRustHost(async (host) => {
-        gccToolchain("2025.08-1", { default: true });
-        rustToolchain("1.93.0", { default: true });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
         const rustTest = new RustTest({
             path: "rules/rust/example",
             buildDir: "build/rust/rules/rust/example",
@@ -118,8 +118,8 @@ test("rustTestRun executes only the target's own binary, single-threaded", async
 
 test("rustTestRun exposes the parent package's native test tools", async () => {
     await withRustHost(async (host) => {
-        gccToolchain("2025.08-1", { default: true });
-        rustToolchain("1.93.0", { default: true });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
         const rustTest = new RustTest({
             path: "rules/rust/example",
             buildDir: "build/rust/rules/rust/example",

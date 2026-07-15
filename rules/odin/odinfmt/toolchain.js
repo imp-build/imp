@@ -1,6 +1,10 @@
-import { Target, product, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas, TOOLCHAIN } from "imp:core";
+import { Toolchain, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
 
 import { resolveOdinToolchainVersion } from "//rules/odin/toolchain";
+
+// Declared tool identity for products this toolchain implements; also
+// consumed by rule modules registering odinfmt-driven products.
+export const ODINFMT_TOOL = toolName("odinfmt");
 
 const ODINFMT_CACHE = "odinfmt-toolchains";
 
@@ -103,10 +107,15 @@ export function acquireOdinfmt(version) {
     return cacheGet(ODINFMT_CACHE, key);
 }
 
-export class OdinfmtToolchain extends Target {
+export class OdinfmtToolchain extends Toolchain {
     static kind = "odinfmt-toolchain";
-    constructor({ version }) {
-        super({ kind: OdinfmtToolchain.kind, attrs: { version: version ?? null } });
+    static tool = ODINFMT_TOOL;
+    constructor({ version }, opts) {
+        super({ kind: OdinfmtToolchain.kind, attrs: { version: version ?? null } }, opts);
+    }
+
+    bin() {
+        return odinfmtBin(this.attrs.version);
     }
 }
 
@@ -121,5 +130,3 @@ export class OdinfmtToolchain extends Target {
 export function odinfmtToolchain(version) {
     return new OdinfmtToolchain({ version });
 }
-
-product(OdinfmtToolchain, TOOLCHAIN, (handle) => odinfmtBin(handle.attrs.version));

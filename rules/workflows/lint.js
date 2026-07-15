@@ -15,11 +15,11 @@
 // contract as cargoClippy/ruffCheck, running `odin check -vet`.
 
 export { cargoPackageLint } from "//rules/rust/clippy";
-export { pythonAppLint } from "//rules/python/ruff";
-import { goal, resolveProduct, logInfo } from "imp:core";
+export { pythonAppLint } from "//rules/python/ruff/lint";
+import { goal, resolveProducts, logInfo } from "imp:core";
 
 export async function lintGoal(selection) {
-    const resolved = selection.map(resolveProduct);
+    const resolved = selection.flatMap(resolveProducts);
     const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));
 
     const results = [];

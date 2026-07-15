@@ -174,6 +174,30 @@ export function builtinLockfiles() {
 }
 
 /**
+ * Register a toolchain's builtin (checked-in) lockfile and return the spec
+ * for the caller's own `product(SomeToolchain, GEN_LOCKFILES, tool, ...)`
+ * registration — every toolchain rule module otherwise repeats the
+ * `registerBuiltinLockfile({ ...spec, versions })` line verbatim.
+ *
+ * Deliberately does *not* also register the `gen-lockfiles` product itself:
+ * module attribution for capability docs is derived by walking the JS call
+ * stack back to the first `//rules/` frame (see `product()`'s docs), so
+ * `product()` must still be called directly from each toolchain's own module
+ * — routing it through this shared helper would misattribute every
+ * toolchain's registration to `//rules/workflows` instead of its own
+ * language group.
+ *
+ * @param {object} spec Same shape as generateToolLockfile's opts minus
+ *   `handle`.
+ * @param {string[]} versions Versions the shipped lockfile should pin.
+ * @returns {object} `spec`, for the caller's own `generateToolLockfile` call.
+ */
+export function registerToolchainLockfile(spec, versions) {
+    registerBuiltinLockfile({ ...spec, versions });
+    return spec;
+}
+
+/**
  * Regenerate a builtin lockfile to exactly its registered versions — no
  * merge with existing contents; the spec's version list is the source of
  * truth.

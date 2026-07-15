@@ -14,6 +14,7 @@ import {
     uvCacheDirEnv,
     uvCacheDirTool,
     uvTool,
+    UV_TOOL,
 } from "//rules/python/uv_toolchain";
 
 export class PythonTest extends Target {
@@ -62,7 +63,7 @@ export function pythonTest({ src, testArgs, uvVersion, deps }) {
 // user-addressable artifacts. impure: true so a re-run always executes
 // pytest rather than replaying a cached pass/fail from the task cache —
 // same choice cargoTest/odinTest/runCTest make.
-export const pythonTestRun = product(PythonTest, TEST, async function pythonTestRun(handle) {
+export const pythonTestRun = product(PythonTest, TEST, UV_TOOL, async function pythonTestRun(handle) {
     const srcPath = declared_path(handle, handle.attrs.src || ".");
     const inputFiles = await sources(handle);
     const uvToolSpec = await uvTool(handle.attrs.uvVersion);

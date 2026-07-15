@@ -64,7 +64,7 @@ test("raw ccLibrary build compiles and archives with a declared C/C++ toolchain"
     await withGccHost(async (host) => {
         await withFakeMergeDigests(async () => {
             installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
-            const gcc = gccToolchain("2025.08-1", { default: true });
+            const gcc = gccToolchain("2025.08-1", { default: true, unverified: true });
             const lib = ccLibrary({ path: "rules/c/cmake/example", srcs: ["hello.c"], toolchain: gcc, output: "build/c/testlib.a" });
 
             const result = await ccBuild(lib);

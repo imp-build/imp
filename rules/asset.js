@@ -7,8 +7,11 @@ import {
     sourcesField,
     targetAddress,
     registerBuildRule,
+    toolName,
     BUILD,
 } from "imp:core";
+
+const ASSET_TOOL = toolName("asset");
 
 registerBuildRule({
     rule: "resourcePackage",
@@ -66,7 +69,7 @@ export class Asset extends Target {
     }
 }
 
-export const bundle = product(Asset, BUILD, async function bundle(handle) {
+export const bundle = product(Asset, BUILD, ASSET_TOOL, async function bundle(handle) {
     const srcs = await sources(handle);
     return run({
         argv: ["sh", "-c", "true"],

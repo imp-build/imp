@@ -18,7 +18,7 @@ describe("python test", () => {
 
 test("pythonTestRun syncs via uv --frozen then runs pytest scoped to src, impure", async () => {
     await withUvHost(async (host) => {
-        uvToolchain("0.11.16", { default: true });
+        uvToolchain("0.11.16", { default: true, unverified: true });
         const suite = new PythonTest({ src: "rules/python/example" });
 
         await pythonTestRun(suite);
@@ -36,7 +36,7 @@ test("pythonTestRun syncs via uv --frozen then runs pytest scoped to src, impure
 
 test("pythonTestRun forwards testArgs to pytest", async () => {
     await withUvHost(async (host) => {
-        uvToolchain("0.11.16", { default: true });
+        uvToolchain("0.11.16", { default: true, unverified: true });
         const suite = pythonTest({ src: "rules/python/example", testArgs: ["-k", "hello"] });
 
         await pythonTestRun(suite);

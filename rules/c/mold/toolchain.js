@@ -1,11 +1,18 @@
-import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Toolchain, product, namedCache, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+import { downloadToolArtifact, lockedDownloadTools } from "//rules/imp/lockfile";
+import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
+import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
 import { ODIN_LINKER } from "//rules/odin/products";
 import { RUST_LINKER } from "//rules/rust/products";
 
+// Declared tool identity for products this toolchain implements; also
+// consumed by rule modules registering mold-driven products.
+export const MOLD_TOOL = toolName("mold");
+
 const MOLD_TOOLCHAIN_CACHE = "mold-toolchains";
+const MOLD_LOCKFILE = "//rules/c/mold/mold.lock";
 
 // mold has no serious Windows story; this only targets Linux.
 function requireSupportedPlatform(plat) {
@@ -66,38 +73,36 @@ export function moldCacheKey(version, plat) {
     return `${version}/${plat.os}-${plat.arch}`;
 }
 
-// Bare coreutils used by the install script below. The sandbox is fully
-// hermetic — even `mkdir`/`tar` must be declared tools, not resolved from an
-// ambient or fixed-base PATH. GNU tar shells out to a separate `gzip`
-// process to decompress `.tar.gz`.
-const CORE_TOOL_NAMES = ["curl", "mkdir", "tar", "gzip"];
+// Bare coreutils the verified-download and extract scripts need. The sandbox
+// is fully hermetic — even `mkdir`/`tar` must be declared tools, not
+// resolved from an ambient or fixed-base PATH.
+function coreToolNames(plat) {
+    return [...new Set([...lockedDownloadTools(plat), ...extractArchiveTools("tar.gz")])];
+}
 
-export class MoldToolchain extends Target {
+export class MoldToolchain extends Toolchain {
     static kind = "mold-toolchain";
-    constructor({ version }) {
-        super({ kind: MoldToolchain.kind, attrs: { version } });
+    static tool = MOLD_TOOL;
+    constructor({ version, unverified }, opts) {
+        super({
+            kind: MoldToolchain.kind,
+            attrs: { version, ...(unverified ? { unverified } : {}) },
+        }, opts);
+    }
+
+    bin() {
+        return moldBin(this.attrs.version);
     }
 }
 
-let defaultVersion = null;
-let defaultToolchain = null;
 // Declared lazily, once, the first time a toolchain is declared — target()
 // addresses are only assigned at workspace-load time, so this must happen
 // at BUILD.js top level rather than inside acquireToolchain() at execution time.
 let coreToolHandles = null;
 
 export function __resetMoldToolchainStateForTest() {
-    defaultVersion = null;
-    defaultToolchain = null;
+    MoldToolchain.clearDefault();
     coreToolHandles = null;
-}
-
-function requireVersion(version) {
-    const resolved = resolveMoldToolchainVersion(version);
-    if (!resolved) {
-        throw new Error("no mold toolchain version specified and no default set");
-    }
-    return resolved;
 }
 
 /**
@@ -106,23 +111,21 @@ function requireVersion(version) {
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
+ * @param {boolean} [opts.unverified=false] Allow downloading without a
+ *   matching lockfile entry (warns instead of failing).
  * @returns {object} Target handle for this mold toolchain.
  * @category configuration
  */
 export function moldToolchain(version, opts = {}) {
     namedCache({ name: MOLD_TOOLCHAIN_CACHE, shared: true });
     if (!coreToolHandles) {
-        coreToolHandles = CORE_TOOL_NAMES.map((name) => nativeTool(name));
+        coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
     }
 
-    const toolchain = new MoldToolchain({ version });
-
-    if (opts.default) {
-        defaultVersion = version;
-        defaultToolchain = toolchain;
-    }
-
-    return toolchain;
+    return new MoldToolchain(
+        { version, unverified: opts.unverified },
+        { default: opts.default },
+    );
 }
 
 /**
@@ -160,22 +163,28 @@ export async function acquireMoldToolchain(version) {
 
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
-    const url = moldDownloadUrl(version, plat);
-    const extractPath = `.imp/mold-toolchains/${key}`;
-
-    // mold's release tarball already ships bin/mold and bin/ld.mold
-    // (the name clang's -fuse-ld=mold looks for) — no wrapper needed. tar
-    // can't sniff compression from a pipe, so -z (gzip) must be explicit.
-    await run({
-        argv: ["sh", "-c", 'mkdir -p "$2" && curl -fSL "$1" | tar -xzf - -C "$2" --strip-components=1', "install-mold", url, extractPath],
+    const downloadPath = `.imp/mold-downloads/${key}/${moldArtifactName(version, plat)}`;
+    await downloadToolArtifact({
+        lockfile: MOLD_LOCKFILE,
+        tool: "mold",
+        version,
+        plat,
+        url: moldDownloadUrl(version, plat),
+        downloadPath,
         tools: coreTools,
-        outputs: [
-            output(output_path(extractPath), {
-                kind: "directory",
-                namedCache: { name: MOLD_TOOLCHAIN_CACHE, key },
-            }),
-        ],
-        materialize: false,
+        display: `download mold ${version} (${plat.os}/${plat.arch})`,
+        unverified: MoldToolchain.resolveUnverified(version),
+    });
+
+    // mold's release tarball already ships bin/mold and bin/ld.mold (the
+    // name clang's -fuse-ld=mold looks for) — no wrapper needed.
+    await extractArchive({
+        archive: downloadPath,
+        dest: `.imp/mold-toolchains/${key}`,
+        format: "tar.gz",
+        stripComponents: 1,
+        tools: coreTools,
+        namedCache: { name: MOLD_TOOLCHAIN_CACHE, key },
         display: `install mold ${version} (${plat.os}/${plat.arch})`,
     });
 
@@ -189,10 +198,7 @@ export async function acquireMoldToolchain(version) {
  * @returns {string|null}
  */
 export function resolveMoldToolchainVersion(version) {
-    if (version) {
-        return version;
-    }
-    return defaultVersion;
+    return MoldToolchain.resolveVersion(version);
 }
 
 /**
@@ -202,7 +208,7 @@ export function resolveMoldToolchainVersion(version) {
  * @returns {Promise<string>}
  */
 export async function moldBin(version) {
-    const resolved = requireVersion(version);
+    const resolved = MoldToolchain.requireVersion(version);
     const dir = await acquireMoldToolchain(resolved);
     return `${dir}/bin/mold`;
 }
@@ -214,7 +220,7 @@ export async function moldBin(version) {
  * @returns {Promise<object>}
  */
 export async function moldTool(version) {
-    const resolved = requireVersion(version);
+    const resolved = MoldToolchain.requireVersion(version);
     await acquireMoldToolchain(resolved);
     const plat = platformInfo();
     return {
@@ -232,7 +238,7 @@ export async function moldTool(version) {
  * @returns {string|null}
  */
 export function defaultMoldToolchainVersion() {
-    return defaultVersion;
+    return MoldToolchain.defaultVersion();
 }
 
 /**
@@ -241,19 +247,18 @@ export function defaultMoldToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultMoldToolchain() {
-    return defaultToolchain;
+    return MoldToolchain.default();
 }
 
-const LOCKFILE_SPEC = {
+const LOCKFILE_SPEC = registerToolchainLockfile({
     name: "mold",
     platforms: moldSupportedPlatforms(),
     downloadUrl: moldDownloadUrl,
     artifactName: moldArtifactName,
-    lockfile: "//rules/c/mold/mold.lock",
-};
-product(MoldToolchain, GEN_LOCKFILES, (handle) =>
+    lockfile: MOLD_LOCKFILE,
+}, ["2.41.0"]);
+product(MoldToolchain, GEN_LOCKFILES, MOLD_TOOL, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
-registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["2.41.0"] });
 
 /**
  * Adapter exposing a mold toolchain as Odin's `-linker:mold` linker role.
@@ -277,7 +282,7 @@ export class OdinMoldLinker {
     }
 }
 
-product(MoldToolchain, ODIN_LINKER, (handle) => new OdinMoldLinker(handle));
+product(MoldToolchain, ODIN_LINKER, MOLD_TOOL, (handle) => new OdinMoldLinker(handle));
 
 /**
  * Adapter exposing a mold toolchain as Rust/rustc's backend linker via
@@ -300,4 +305,4 @@ export class RustMoldLinker {
     }
 }
 
-product(MoldToolchain, RUST_LINKER, (handle) => new RustMoldLinker(handle));
+product(MoldToolchain, RUST_LINKER, MOLD_TOOL, (handle) => new RustMoldLinker(handle));

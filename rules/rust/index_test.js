@@ -72,7 +72,7 @@ test("cargoPackage keeps explicit string versions free of toolchain target deps"
 
 test("cargoPackage uses the default Rust toolchain target when none is given", () => {
     return withRustHost(async () => {
-        const toolchain = rustToolchain("1.93.0", { default: true });
+        const toolchain = rustToolchain("1.93.0", { default: true, unverified: true });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
         expect(pkg.attrs.toolchain).toBe(toolchain);
     });
@@ -89,7 +89,7 @@ test("cargoBuild no-ops for a lib-only package (no bin)", async () => {
 
 test("cargoBuild throws without a declared gcc toolchain default", async () => {
     await withRustHost(async () => {
-        rustToolchain("1.93.0", { default: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
 
         let message = null;
@@ -104,8 +104,8 @@ test("cargoBuild throws without a declared gcc toolchain default", async () => {
 
 test("cargoBuild invokes cargo with the manifest path, target dir, and toolchain env", async () => {
     await withRustHost(async (host) => {
-        rustToolchain("1.93.0", { default: true });
-        gccToolchain("2025.08-1", { default: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
 
         const result = await cargoBuild(pkg);
@@ -126,8 +126,8 @@ test("cargoBuild invokes cargo with the manifest path, target dir, and toolchain
 
 test("cargoBuild passes --release and uses the release output dir", async () => {
     await withRustHost(async (host) => {
-        rustToolchain("1.93.0", { default: true });
-        gccToolchain("2025.08-1", { default: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
         const pkg = cargoPackage({ bin: "hello", release: true, path: "rules/rust/example" });
 
         const result = await cargoBuild(pkg);
@@ -139,7 +139,7 @@ test("cargoBuild passes --release and uses the release output dir", async () => 
 });
 test("cargoBuild uses native gcc as the linker on windows", async () => {
     await withRustHost({ os: "windows", arch: "x86_64" }, async (host) => {
-        rustToolchain("1.93.0", { default: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
 
         await cargoBuild(pkg);
@@ -152,7 +152,7 @@ test("cargoBuild uses native gcc as the linker on windows", async () => {
 
 test("cargoTest throws without a declared gcc toolchain default", async () => {
     await withRustHost(async () => {
-        rustToolchain("1.93.0", { default: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
 
         let message = null;
@@ -167,8 +167,8 @@ test("cargoTest throws without a declared gcc toolchain default", async () => {
 
 test("cargoTest invokes cargo test with the manifest path, target dir, and toolchain env", async () => {
     await withRustHost(async (host) => {
-        rustToolchain("1.93.0", { default: true });
-        gccToolchain("2025.08-1", { default: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
 
         await cargoTest(pkg);
@@ -191,8 +191,8 @@ test("cargoTest invokes cargo test with the manifest path, target dir, and toolc
 
 test("cargoTest does not retest the whole workspace from a member target", async () => {
     await withRustHost(async (host) => {
-        rustToolchain("1.93.0", { default: true });
-        gccToolchain("2025.08-1", { default: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
         const pkg = cargoPackage({
             path: "crates/imp-store",
             workspaceMember: true,
@@ -207,8 +207,8 @@ test("cargoTest does not retest the whole workspace from a member target", async
 
 test("cargoTest passes through extra testArgs", async () => {
     await withRustHost(async (host) => {
-        rustToolchain("1.93.0", { default: true });
-        gccToolchain("2025.08-1", { default: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example", testArgs: ["--", "--nocapture"] });
 
         await cargoTest(pkg);
@@ -220,8 +220,8 @@ test("cargoTest passes through extra testArgs", async () => {
 
 test("cargoTest exposes declared native test tools on PATH", async () => {
     await withRustHost(async (host) => {
-        rustToolchain("1.93.0", { default: true });
-        gccToolchain("2025.08-1", { default: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
         const tar = nativeTool("tar");
         const gzip = nativeTool("gzip");
         const pkg = cargoPackage({
@@ -240,9 +240,9 @@ test("cargoTest exposes declared native test tools on PATH", async () => {
 
 test("cargoBuild adds mold backend flags and tool when the toolchain configures a linker", async () => {
     await withRustHost(async (host) => {
-        gccToolchain("2025.08-1", { default: true });
-        const mold = moldToolchain("2.41.0");
-        const toolchain = rustToolchain("1.93.0", { default: true, linker: mold });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
+        const mold = moldToolchain("2.41.0", { default: true, unverified: true });
+        const toolchain = rustToolchain("1.93.0", { default: true, unverified: true, linker: mold });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
         expect(pkg.attrs.toolchain).toBe(toolchain);
 
@@ -256,9 +256,9 @@ test("cargoBuild adds mold backend flags and tool when the toolchain configures 
 
 test("cargoBuild honors an explicit non-default linkDriver over defaultGccToolchain()", async () => {
     await withRustHost(async (host) => {
-        gccToolchain("2025.08-1", { default: true });
-        const explicitGcc = gccToolchain("2024.02-1");
-        rustToolchain("1.93.0", { default: true, linkDriver: explicitGcc });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
+        const explicitGcc = gccToolchain("2024.02-1", { unverified: true });
+        rustToolchain("1.93.0", { default: true, unverified: true, linkDriver: explicitGcc });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
 
         await cargoBuild(pkg);
@@ -270,8 +270,8 @@ test("cargoBuild honors an explicit non-default linkDriver over defaultGccToolch
 
 test("cargoBuild builds one output path per bin", async () => {
     await withRustHost(async () => {
-        rustToolchain("1.93.0", { default: true });
-        gccToolchain("2025.08-1", { default: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
         const pkg = cargoPackage({ bin: ["hello", "world"], path: "rules/rust/example" });
 
         const result = await cargoBuild(pkg);
@@ -284,10 +284,10 @@ test("cargoBuild builds one output path per bin", async () => {
 
 test("cargoBuild wires RUSTC_WRAPPER/SCCACHE_DIR when the toolchain configures sccache", async () => {
     await withRustHost(async (host) => {
-        gccToolchain("2025.08-1", { default: true });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
         installSccacheToolchain("0.10.0", "/tmp/sccache-0.10.0");
-        const sccache = sccacheToolchain("0.10.0");
-        rustToolchain("1.93.0", { default: true, sccache });
+        const sccache = sccacheToolchain("0.10.0", { unverified: true });
+        rustToolchain("1.93.0", { default: true, unverified: true, sccache });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
 
         await cargoBuild(pkg);
@@ -334,8 +334,8 @@ test("rustToolEnv uses sandbox-relative tool mounts without sccache, and absolut
 
 test("cargoBuild has no sccache env/tools without an opted-in toolchain", async () => {
     await withRustHost(async (host) => {
-        rustToolchain("1.93.0", { default: true });
-        gccToolchain("2025.08-1", { default: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
 
         await cargoBuild(pkg);
@@ -360,8 +360,8 @@ test("resources(pkg) with a resource-package dep includes its files", async () =
 
 test("cargoBuild declares resource-package files as sandbox inputs", async () => {
     await withRustHost(async (host) => {
-        rustToolchain("1.93.0", { default: true });
-        gccToolchain("2025.08-1", { default: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
         const assets = resourcePackage({ path: "rules/rust", srcs: ["toolchain.js"] });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example", deps: [assets] });
 

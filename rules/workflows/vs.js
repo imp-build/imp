@@ -14,6 +14,7 @@
 // ever triggered by this goal.
 
 import { Target, goal, product, run, output, output_path, workspaceTargets, platformInfo } from "imp:core";
+import { IMP_TOOL } from "//rules/imp/imp_tool";
 import { default_output_path, odin_output_path, odinPackageAnalysis } from "//rules/odin";
 
 export const VS = goal("vs");
@@ -58,7 +59,7 @@ export class VsWorkspace extends Target {
     }
 }
 
-export const vs = product(VsWorkspace, VS, async function vs(handle) {
+export const vs = product(VsWorkspace, VS, IMP_TOOL, async function vs(handle) {
     const isWindows = platformInfo().os === "windows";
     const debuggerType = isWindows ? "cppvsdbg" : "lldb-dap";
 

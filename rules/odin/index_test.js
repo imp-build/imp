@@ -40,8 +40,8 @@ import { moldToolchain } from "//rules/c/mold/toolchain";
 // withFakeRun, which only stubs run()'s execution, not the tool-resolution
 // code that runs before it). mold is opt-in (not required) — declared here
 // only so tests below can exercise odinToolchain({ linker: mold }).
-gccToolchain("2025.08-1", { default: true });
-const moldForTests = moldToolchain("2.41.0");
+gccToolchain("2025.08-1", { default: true, unverified: true });
+const moldForTests = moldToolchain("2.41.0", { unverified: true });
 import {
     target,
     hydrateTarget,

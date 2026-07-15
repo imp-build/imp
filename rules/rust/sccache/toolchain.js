@@ -16,13 +16,20 @@
 //     in-place, not copied) so writes made during a build persist on disk
 //     for the next invocation — see materialize_tools_into_sandbox in
 //     src/exec.rs.
-import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas, workerStart } from "imp:core";
+import { Toolchain, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas, workerStart, toolName } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+import { downloadToolArtifact, lockedDownloadTools } from "//rules/imp/lockfile";
+import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
+import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
 import { RUST_BUILD_CACHE } from "//rules/rust/products";
 
+// Declared tool identity for products this toolchain implements; also
+// consumed by rule modules registering sccache-driven products.
+export const SCCACHE_TOOL = toolName("sccache");
+
 const SCCACHE_TOOLCHAIN_CACHE = "sccache-toolchains";
+const SCCACHE_LOCKFILE = "//rules/rust/sccache/sccache.lock";
 const SCCACHE_DATA_CACHE = "sccache-data";
 
 // sccache ships musl builds for Linux (no glibc-version coupling needed) and
@@ -105,34 +112,40 @@ export function sccacheSupportedPlatforms() {
 // Bare coreutils used by the install/init scripts below. The sandbox is
 // fully hermetic — even `mkdir`/`tar` must be declared tools, not resolved
 // from an ambient or fixed-base PATH.
-const CORE_TOOL_NAMES = ["curl", "mkdir", "tar", "gzip"];
+function coreToolNames(plat) {
+    return [...new Set([
+        ...lockedDownloadTools(plat),
+        ...extractArchiveTools("tar.gz"),
+    ])];
+}
 
-export class SccacheToolchain extends Target {
+export class SccacheToolchain extends Toolchain {
     static kind = "sccache-toolchain";
-    constructor({ version }) {
-        super({ kind: SccacheToolchain.kind, attrs: { version } });
+    static tool = SCCACHE_TOOL;
+    constructor({ version, unverified }, opts) {
+        super({
+            kind: SccacheToolchain.kind,
+            attrs: { version, ...(unverified ? { unverified } : {}) },
+        }, opts);
+    }
+
+    // sccache is a compiler wrapper resolved through the RUST_BUILD_CACHE
+    // role, not an @tool-dispatchable binary; expose the cached binary path.
+    async bin() {
+        const dir = await acquireSccacheToolchain(SccacheToolchain.requireVersion(this.attrs.version));
+        const exe = platformInfo().os === "windows" ? "sccache.exe" : "sccache";
+        return `${dir}/${exe}`;
     }
 }
 
-let defaultVersion = null;
-let defaultToolchain = null;
 // Declared lazily, once — target() addresses are only assigned at
 // workspace-load time, so tool handles must be created when a toolchain is
 // declared at BUILD.js top level, not inside acquireSccacheToolchain().
 let coreToolHandles = null;
 
 export function __resetSccacheToolchainStateForTest() {
-    defaultVersion = null;
-    defaultToolchain = null;
+    SccacheToolchain.clearDefault();
     coreToolHandles = null;
-}
-
-function requireVersion(version) {
-    const resolved = resolveSccacheToolchainVersion(version);
-    if (!resolved) {
-        throw new Error("no sccache toolchain version specified and no default set");
-    }
-    return resolved;
 }
 
 /**
@@ -141,6 +154,8 @@ function requireVersion(version) {
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
+ * @param {boolean} [opts.unverified=false] Allow downloading without a
+ *   matching lockfile entry (warns instead of failing).
  * @returns {object} Target handle for this sccache toolchain.
  * @category configuration
  */
@@ -148,17 +163,13 @@ export function sccacheToolchain(version, opts = {}) {
     namedCache({ name: SCCACHE_TOOLCHAIN_CACHE, shared: true });
     namedCache({ name: SCCACHE_DATA_CACHE });
     if (!coreToolHandles) {
-        coreToolHandles = CORE_TOOL_NAMES.map((name) => nativeTool(name));
+        coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
     }
 
-    const toolchain = new SccacheToolchain({ version });
-
-    if (opts.default) {
-        defaultVersion = version;
-        defaultToolchain = toolchain;
-    }
-
-    return toolchain;
+    return new SccacheToolchain(
+        { version, unverified: opts.unverified },
+        { default: opts.default },
+    );
 }
 
 /**
@@ -196,20 +207,26 @@ export async function acquireSccacheToolchain(version) {
 
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
-    const url = sccacheDownloadUrl(version, plat);
-    const extractPath = `.imp/sccache-toolchains/${key}`;
-
-    // tar can't sniff compression from a pipe, so -z (gzip) must be explicit.
-    await run({
-        argv: ["sh", "-c", 'mkdir -p "$2" && curl -fSL "$1" | tar -xzf - -C "$2" --strip-components=1', "install-sccache", url, extractPath],
+    const downloadPath = `.imp/sccache-downloads/${key}/${sccacheArtifactName(version, plat)}`;
+    await downloadToolArtifact({
+        lockfile: SCCACHE_LOCKFILE,
+        tool: "sccache",
+        version,
+        plat,
+        url: sccacheDownloadUrl(version, plat),
+        downloadPath,
         tools: coreTools,
-        outputs: [
-            output(output_path(extractPath), {
-                kind: "directory",
-                namedCache: { name: SCCACHE_TOOLCHAIN_CACHE, key },
-            }),
-        ],
-        materialize: false,
+        display: `download sccache ${version} (${plat.os}/${plat.arch})`,
+        unverified: SccacheToolchain.resolveUnverified(version),
+    });
+
+    await extractArchive({
+        archive: downloadPath,
+        dest: `.imp/sccache-toolchains/${key}`,
+        format: "tar.gz",
+        stripComponents: 1,
+        tools: coreTools,
+        namedCache: { name: SCCACHE_TOOLCHAIN_CACHE, key },
         display: `install sccache ${version} (${plat.os}/${plat.arch})`,
     });
 
@@ -261,10 +278,7 @@ async function ensureSccacheDataDir() {
  * @returns {string|null}
  */
 export function resolveSccacheToolchainVersion(version) {
-    if (version) {
-        return version;
-    }
-    return defaultVersion;
+    return SccacheToolchain.resolveVersion(version);
 }
 
 /**
@@ -274,7 +288,7 @@ export function resolveSccacheToolchainVersion(version) {
  * @returns {Promise<object>}
  */
 export async function sccacheTool(version) {
-    const resolved = requireVersion(version);
+    const resolved = SccacheToolchain.requireVersion(version);
     await acquireSccacheToolchain(resolved);
     const plat = platformInfo();
     return {
@@ -311,7 +325,7 @@ export async function sccacheDataDir() {
  * @returns {string|null}
  */
 export function defaultSccacheToolchainVersion() {
-    return defaultVersion;
+    return SccacheToolchain.defaultVersion();
 }
 
 /**
@@ -320,19 +334,18 @@ export function defaultSccacheToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultSccacheToolchain() {
-    return defaultToolchain;
+    return SccacheToolchain.default();
 }
 
-const LOCKFILE_SPEC = {
+const LOCKFILE_SPEC = registerToolchainLockfile({
     name: "sccache",
     platforms: sccacheSupportedPlatforms(),
     downloadUrl: sccacheDownloadUrl,
     artifactName: sccacheArtifactName,
-    lockfile: "//rules/rust/sccache/sccache.lock",
-};
-product(SccacheToolchain, GEN_LOCKFILES, (handle) =>
+    lockfile: SCCACHE_LOCKFILE,
+}, ["0.10.0"]);
+product(SccacheToolchain, GEN_LOCKFILES, SCCACHE_TOOL, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
-registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["0.10.0"] });
 
 /**
  * Adapter exposing an sccache toolchain as Rust's RUSTC_WRAPPER, sharing a
@@ -411,4 +424,4 @@ export class RustSccacheWrapper {
     }
 }
 
-product(SccacheToolchain, RUST_BUILD_CACHE, (handle) => new RustSccacheWrapper(handle));
+product(SccacheToolchain, RUST_BUILD_CACHE, SCCACHE_TOOL, (handle) => new RustSccacheWrapper(handle));

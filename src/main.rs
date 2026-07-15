@@ -318,6 +318,20 @@ async fn resolve_workspace_tool_bin(name: &str) -> Result<PathBuf> {
     let workspace_root = spike::find_workspace_root(&cwd)?;
     let live = runtime::load_workspace(&workspace_root).await?;
 
+    // A cold toolchain resolution may need to acquire the tool — verified
+    // download + install through run() — so install a minimal execution
+    // context (no progress rendering; events are drained and dropped).
+    *live.exec_root.lock().unwrap() = Some(workspace_root.clone());
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel::<scheduler::TaskEvent>();
+    let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sched = scheduler::Scheduler::new(
+        std::thread::available_parallelism().map_or(4, |n| n.get()),
+        cancellation,
+        tx,
+    );
+    *live.scheduler.lock().unwrap() = Some(sched);
+    tokio::spawn(async move { while events.recv().await.is_some() {} });
+
     let js_id = live
         .workspace
         .targets
@@ -1468,13 +1482,13 @@ mod tests {
         write_file(
             &p.join(spike::BUILD_FILE),
             r#"
-import { target, product, targetKind, BUILD } from "imp:core";
+import { target, product, targetKind, BUILD, toolName } from "imp:core";
 const K_workspace_js_workers_test = targetKind("workspace-js-workers-test");
 
 export const a = target({ kind: "workspace-js-workers-test" });
 export const b = target({ kind: "workspace-js-workers-test" });
 
-export const build = product(K_workspace_js_workers_test, BUILD, async function build(handle) {
+export const build = product(K_workspace_js_workers_test, BUILD, toolName("workspace-js-workers-test-tool"), async function build(handle) {
     await Promise.resolve();
     return handle.label.name;
 });

@@ -8,9 +8,11 @@ import {
     product,
     target,
     targetKind,
+    toolName,
 } from "imp:core";
 import { GENERATE_CHECK } from "//rules/workflows/products";
 import { GENERATE } from "//rules/workflows/generate";
+const TEST_TOOL = toolName("generate-test-tool");
 const K_generate_goal_test_clean = targetKind("generate-goal-test-clean");
 const K_generate_goal_test_stale_a = targetKind("generate-goal-test-stale-a");
 const K_generate_goal_test_stale_b = targetKind("generate-goal-test-stale-b");
@@ -42,9 +44,9 @@ async function withFakeLog(fn) {
 }
 
 test("generateGoal --check runs and reports every target before throwing", async () => {
-    product(K_generate_goal_test_clean, GENERATE_CHECK, async () => ({ checked: 1, stale: [] }));
-    product(K_generate_goal_test_stale_a, GENERATE_CHECK, async () => ({ checked: 1, stale: ["a/gen.h"] }));
-    product(K_generate_goal_test_stale_b, GENERATE_CHECK, async () => ({ checked: 2, stale: ["b/gen.h", "b/gen.rs"] }));
+    product(K_generate_goal_test_clean, GENERATE_CHECK, TEST_TOOL, async () => ({ checked: 1, stale: [] }));
+    product(K_generate_goal_test_stale_a, GENERATE_CHECK, TEST_TOOL, async () => ({ checked: 1, stale: ["a/gen.h"] }));
+    product(K_generate_goal_test_stale_b, GENERATE_CHECK, TEST_TOOL, async () => ({ checked: 2, stale: ["b/gen.h", "b/gen.rs"] }));
     const clean = target({ kind: "generate-goal-test-clean" });
     const staleA = target({ kind: "generate-goal-test-stale-a" });
     const staleB = target({ kind: "generate-goal-test-stale-b" });
@@ -76,7 +78,7 @@ test("generateGoal --check runs and reports every target before throwing", async
 });
 
 test("generateGoal --check does not throw when every target is already up to date", async () => {
-    product(K_generate_goal_test_all_clean, GENERATE_CHECK, async () => ({ checked: 1, stale: [] }));
+    product(K_generate_goal_test_all_clean, GENERATE_CHECK, TEST_TOOL, async () => ({ checked: 1, stale: [] }));
     const clean = target({ kind: "generate-goal-test-all-clean" });
 
     await withFakeGoalFlags({ check: true }, async () => {
@@ -87,7 +89,7 @@ test("generateGoal --check does not throw when every target is already up to dat
 });
 
 test("generateGoal without --check writes and reports change counts, never throws on its own", async () => {
-    product(K_generate_goal_test_write, GENERATE, async () => ({ generated: 2 }));
+    product(K_generate_goal_test_write, GENERATE, TEST_TOOL, async () => ({ generated: 2 }));
     const pkg = target({ kind: "generate-goal-test-write" });
 
     await withFakeGoalFlags({ check: false }, async () => {

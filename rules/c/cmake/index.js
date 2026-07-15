@@ -33,6 +33,7 @@ import "//rules/c";
 // Registers the "build" goal's artifact summary callback for consumers that
 // import CMake build rules without importing the workflows layer explicitly.
 import "//rules/workflows/build_workflow";
+import { CMAKE_TOOL } from "//rules/c/cmake/toolchain";
 
 export {
     acquireCmakeToolchain,
@@ -102,7 +103,7 @@ function declared_path(handle, path = ".") {
 // Memo/product functions for C/CMake targets
 // ---------------------------------------------------------------------------
 
-export const tool = product(CmakeToolchain, BUILD, async function tool(handle) {
+export const tool = product(CmakeToolchain, BUILD, CMAKE_TOOL, async function tool(handle) {
     await acquireCmakeToolchain(handle.attrs.version);
     return { name: "cmake", version: handle.attrs.version };
 });
@@ -577,7 +578,7 @@ export class CmakeLib extends Target {
     }
 }
 
-export const native_link_library = product(CmakeLib, BUILD, buildCmakeArtifact);
+export const native_link_library = product(CmakeLib, BUILD, CMAKE_TOOL, buildCmakeArtifact);
 
 /**
  * Package a cmake-built artifact to dist/. Only supports the common case
@@ -598,7 +599,7 @@ export async function packageCmakeArtifact(handle) {
     return result;
 }
 
-export const cmakeLibPackage = product(CmakeLib, PACKAGE, packageCmakeArtifact);
+export const cmakeLibPackage = product(CmakeLib, PACKAGE, CMAKE_TOOL, packageCmakeArtifact);
 
 // Regex-escapes and `-R`-joins a set of correlated CTest test names, scoping
 // a cc_test target's own "test" product to just its case(s) instead of the
@@ -660,7 +661,7 @@ export async function runCTest(handle) {
     });
 }
 
-export const ctest = product(CmakeLib, TEST, runCTest);
+export const ctest = product(CmakeLib, TEST, CMAKE_TOOL, runCTest);
 
 // Returns link artifacts at their staged locations as a resource file set for
 // odin package sandboxing. Also ensures the cmake build is a plan prerequisite.

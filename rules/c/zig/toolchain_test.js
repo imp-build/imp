@@ -120,23 +120,39 @@ test("describes the named-cache-backed zig tool", async () => {
     });
 });
 
-test("installs a toolchain via a single sandboxed curl|tar run() (linux)", async () => {
+test("downloads, verifies, and installs a toolchain via sandboxed runs (linux)", async () => {
     await withZigHost(async (host) => {
         const key = zigCacheKey("0.13.0", { os: "linux", arch: "x86_64" });
+        host.addFile("//rules/c/zig/zig.lock", JSON.stringify({
+            tool: "zig",
+            versions: {
+                "0.13.0": {
+                    "linux/x86_64": {
+                        url: "https://locked.example/zig-linux-x86_64-0.13.0.tar.xz",
+                        artifact: "zig-linux-x86_64-0.13.0.tar.xz",
+                        size: 12345,
+                        sha256: "deadbeef",
+                    },
+                },
+            },
+        }));
 
         zigToolchain("0.13.0", { default: true });
         const path = await acquireZigToolchain("0.13.0");
 
         expect(path).toBe("/cache/zig-toolchains/0.13.0/linux-x86_64");
-        // install (download|extract merged) and the zig-build-cache prewarm.
-        expect(host.runs.length).toBe(2);
+        // verified download, install, and the zig-build-cache prewarm.
+        expect(host.runs.length).toBe(3);
 
-        const [install, prewarm] = host.runs;
+        const [download, install, prewarm] = host.runs;
+        expect(download.argv).toContain("https://locked.example/zig-linux-x86_64-0.13.0.tar.xz");
+        expect(download.argv).toContain("deadbeef");
+        expect(download.argv[2]).toContain("sha256sum -c -");
+
         expect(install.argv[0]).toBe("sh");
         // 0.13.0 predates the 0.14.1 filename-order switch, so it's
         // zig-<os>-<arch>-..., not zig-<arch>-<os>-....
         expect(install.argv.some((arg) => arg.includes("zig-linux-x86_64-0.13.0.tar.xz"))).toBe(true);
-        expect(install.tools[0].name).toBe("curl");
         // Linux tar.xz decompression needs a separate xz process; Windows sh
         // isn't needed on this platform.
         expect(install.tools.some((t) => t.name === "xz")).toBe(true);
@@ -159,10 +175,11 @@ test("installs a toolchain via a single sandboxed curl|tar run() (linux)", async
 
 test("installs a toolchain on windows with .bat wrappers and a declared sh tool", async () => {
     await withZigHost({ os: "windows", arch: "x86_64" }, async (host) => {
-        zigToolchain("0.13.0", { default: true });
+        // unverified: exercises the lockfile-less opt-out path.
+        zigToolchain("0.13.0", { default: true, unverified: true });
         await acquireZigToolchain("0.13.0");
 
-        const [install] = host.runs;
+        const [, install] = host.runs;
         expect(install.argv.some((arg) => arg.includes("zig-windows-x86_64-0.13.0.zip"))).toBe(true);
         expect(install.tools.some((t) => t.name === "sh")).toBe(true);
         expect(install.tools.some((t) => t.name === "xz")).toBe(false);
@@ -175,7 +192,7 @@ test("installs a toolchain on windows with .bat wrappers and a declared sh tool"
 
 test("describes the CMake -D flags for a linux toolchain", async () => {
     await withZigHost({ os: "linux", arch: "x86_64" }, async () => {
-        zigToolchain("0.13.0", { default: true });
+        zigToolchain("0.13.0", { default: true, unverified: true });
 
         const args = await zigCMakeArgs();
 
@@ -207,7 +224,7 @@ test("treats non-numeric versions (dev builds) as current naming", () => {
 
 test("describes the CMake -D flags for a windows toolchain", async () => {
     await withZigHost({ os: "windows", arch: "x86_64" }, async () => {
-        zigToolchain("0.13.0", { default: true });
+        zigToolchain("0.13.0", { default: true, unverified: true });
 
         const args = await zigCMakeArgs();
 

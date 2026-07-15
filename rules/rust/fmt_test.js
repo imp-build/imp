@@ -22,7 +22,7 @@ describe("rust fmt", () => {
 
 test("cargoFormatCheck runs cargo fmt --check against the manifest", async () => {
     await withRustHost(async (host) => {
-        rustToolchain("1.93.0", { default: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
 
         await cargoFormatCheck(pkg);
@@ -36,7 +36,7 @@ test("cargoFormatCheck runs cargo fmt --check against the manifest", async () =>
 
 test("cargoFmt runs cargo fmt without --check and declares source outputs", async () => {
     await withRustHost(async (host) => {
-        rustToolchain("1.93.0", { default: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
 
         // withFakeRun-backed hosts don't produce a real outputDigest, so

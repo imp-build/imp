@@ -13,6 +13,7 @@ import { resolveOdinToolchainVersion } from "//rules/odin/toolchain";
 import { odinfmtTool } from "//rules/odin/odinfmt/toolchain";
 import { paths, output, run, digestOf, diffDigests, product, FMT } from "imp:core";
 import { FORMAT_CHECK } from "//rules/workflows/products";
+import { ODINFMT_TOOL } from "//rules/odin/odinfmt/toolchain";
 
 function odinfmt_version(handle) {
     const toolchainHandle = handle.attrs.toolchain;
@@ -70,7 +71,7 @@ export async function odinFormatCheck(handle) {
     return { checked: total, unformatted: changed };
 }
 
-export const odinPackageFmt = product(OdinPackage, FMT, odinFmt);
-export const odinTestPackageFmt = product(OdinTestPackage, FMT, odinFmt);
-export const odinPackageFormatCheck = product(OdinPackage, FORMAT_CHECK, odinFormatCheck);
-export const odinTestPackageFormatCheck = product(OdinTestPackage, FORMAT_CHECK, odinFormatCheck);
+export const odinPackageFmt = product(OdinPackage, FMT, ODINFMT_TOOL, odinFmt);
+export const odinTestPackageFmt = product(OdinTestPackage, FMT, ODINFMT_TOOL, odinFmt);
+export const odinPackageFormatCheck = product(OdinPackage, FORMAT_CHECK, ODINFMT_TOOL, odinFormatCheck);
+export const odinTestPackageFormatCheck = product(OdinTestPackage, FORMAT_CHECK, ODINFMT_TOOL, odinFormatCheck);

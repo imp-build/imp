@@ -19,14 +19,22 @@ import {
     targetAddress,
     workspaceTargets,
     writeWorkspace,
+    toolName,
     BUILD,
     PACKAGE,
     TEST,
 } from "imp:core";
 
+// The cc products drive whichever CC toolchain the workspace defaults to
+// (gcc or zig, via the CC_TOOLCHAIN role), so they carry a toolchain-neutral
+// "cc" tool identity.
+const CC_TOOL = toolName("cc");
+
 import { distPathFor } from "//rules/workflows/package";
 import { registerBuildGenerator, GENERATE_BUILD } from "//rules/workflows/generate_build";
 import { CC_TOOLCHAIN } from "//rules/c/products";
+import { GCC_TOOL } from "//rules/c/gcc/toolchain";
+import { ZIG_TOOL } from "//rules/c/zig/toolchain";
 
 /**
  * Declarative workspace configuration schema for C/C++.
@@ -458,8 +466,8 @@ class ZigCcToolchain {
     }
 }
 
-product(GccToolchain, CC_TOOLCHAIN, (handle) => new GccCcToolchain(handle));
-product(ZigToolchain, CC_TOOLCHAIN, (handle) => new ZigCcToolchain(handle));
+product(GccToolchain, CC_TOOLCHAIN, GCC_TOOL, (handle) => new GccCcToolchain(handle));
+product(ZigToolchain, CC_TOOLCHAIN, ZIG_TOOL, (handle) => new ZigCcToolchain(handle));
 
 async function ccToolchainFor(handle) {
     const toolchain = handle.attrs.toolchain || defaultZigToolchain() || defaultGccToolchain();
@@ -586,7 +594,7 @@ async function buildRawBinary(handle) {
     return result;
 }
 
-export const ccBuild = product(CcLibrary, BUILD, async function ccBuild(handle) {
+export const ccBuild = product(CcLibrary, BUILD, CC_TOOL, async function ccBuild(handle) {
     if (handle.attrs.backend === "cmake") {
         const cmake = await import("//rules/c/cmake");
         return cmake.buildCmakeArtifact(handle);
@@ -594,7 +602,7 @@ export const ccBuild = product(CcLibrary, BUILD, async function ccBuild(handle) 
     return buildRawLibrary(handle);
 });
 
-product(CcBinary, BUILD, async function ccBinaryBuild(handle) {
+product(CcBinary, BUILD, CC_TOOL, async function ccBinaryBuild(handle) {
     if (handle.attrs.backend === "cmake") {
         const cmake = await import("//rules/c/cmake");
         return cmake.buildCmakeArtifact(handle);
@@ -602,7 +610,7 @@ product(CcBinary, BUILD, async function ccBinaryBuild(handle) {
     return buildRawBinary(handle);
 });
 
-product(CcTest, BUILD, async function ccTestBuild(handle) {
+product(CcTest, BUILD, CC_TOOL, async function ccTestBuild(handle) {
     if (handle.attrs.backend === "cmake") {
         const cmake = await import("//rules/c/cmake");
         return cmake.buildCmakeArtifact(handle);
@@ -610,7 +618,7 @@ product(CcTest, BUILD, async function ccTestBuild(handle) {
     return buildRawBinary(handle);
 });
 
-export const ccLibraryPackage = product(CcLibrary, PACKAGE, async function ccLibraryPackage(handle) {
+export const ccLibraryPackage = product(CcLibrary, PACKAGE, CC_TOOL, async function ccLibraryPackage(handle) {
     if (handle.attrs.backend === "cmake") {
         const cmake = await import("//rules/c/cmake");
         return cmake.packageCmakeArtifact(handle);
@@ -620,7 +628,7 @@ export const ccLibraryPackage = product(CcLibrary, PACKAGE, async function ccLib
     return result;
 });
 
-product(CcBinary, PACKAGE, async function ccBinaryPackage(handle) {
+product(CcBinary, PACKAGE, CC_TOOL, async function ccBinaryPackage(handle) {
     if (handle.attrs.backend === "cmake") {
         const cmake = await import("//rules/c/cmake");
         return cmake.packageCmakeArtifact(handle);
@@ -630,7 +638,7 @@ product(CcBinary, PACKAGE, async function ccBinaryPackage(handle) {
     return result;
 });
 
-product(CcTest, TEST, async function ccTestRun(handle) {
+product(CcTest, TEST, CC_TOOL, async function ccTestRun(handle) {
     if (handle.attrs.backend === "cmake") {
         const cmake = await import("//rules/c/cmake");
         return cmake.runCTest(handle);
@@ -657,7 +665,7 @@ class CppBuildGenerator extends Target {
     static kind = "cpp-build-generator";
 }
 
-export const generateBuild = product(CppBuildGenerator, GENERATE_BUILD,
+export const generateBuild = product(CppBuildGenerator, GENERATE_BUILD, CC_TOOL,
     async function generateBuild(handle) {
         const root = handle.attrs.root || ".";
         const exclude = handle.attrs.exclude || DEFAULT_GENERATE_BUILD_EXCLUDES;

@@ -1,10 +1,16 @@
-import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Toolchain, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+import { downloadToolArtifact, lockedDownloadTools } from "//rules/imp/lockfile";
+import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
 import { RUST_LINK_DRIVER } from "//rules/rust/products";
 
+// Declared tool identity for products this toolchain implements; also
+// consumed by rule modules registering gcc-driven products.
+export const GCC_TOOL = toolName("gcc");
+
 const GCC_TOOLCHAIN_CACHE = "gcc-toolchains";
+const GCC_LOCKFILE = "//rules/c/gcc/gcc.lock";
 
 // Bootlin only publishes prebuilt Linux toolchains; this doesn't cover
 // Windows (a different linking story entirely — MSVC link.exe — and out of
@@ -71,38 +77,37 @@ export function gccCacheKey(version, plat) {
     return `${version}/${plat.os}-${plat.arch}`;
 }
 
-// Bare coreutils used by the install script below. The sandbox is fully
-// hermetic — even `mkdir`/`tar` must be declared tools, not resolved from an
-// ambient or fixed-base PATH. GNU tar shells out to a separate `xz` process
-// to decompress `.tar.xz`.
-const CORE_TOOL_NAMES = ["curl", "mkdir", "tar", "xz", "chmod"];
+// Bare coreutils the verified-download and install scripts need. The sandbox
+// is fully hermetic — even `mkdir`/`tar` must be declared tools, not
+// resolved from an ambient or fixed-base PATH. GNU tar shells out to a
+// separate `xz` process to decompress `.tar.xz`.
+function coreToolNames(plat) {
+    return [...new Set([...lockedDownloadTools(plat), "tar", "xz", "chmod"])];
+}
 
-export class GccToolchain extends Target {
+export class GccToolchain extends Toolchain {
     static kind = "gcc-toolchain";
-    constructor({ version }) {
-        super({ kind: GccToolchain.kind, attrs: { version } });
+    static tool = GCC_TOOL;
+    constructor({ version, unverified }, opts) {
+        super({
+            kind: GccToolchain.kind,
+            attrs: { version, ...(unverified ? { unverified } : {}) },
+        }, opts);
+    }
+
+    bin() {
+        return gccBin(this.attrs.version);
     }
 }
 
-let defaultVersion = null;
-let defaultToolchain = null;
 // Declared lazily, once, the first time a toolchain is declared — target()
 // addresses are only assigned at workspace-load time, so this must happen
 // at BUILD.js top level rather than inside acquireToolchain() at execution time.
 let coreToolHandles = null;
 
 export function __resetGccToolchainStateForTest() {
-    defaultVersion = null;
-    defaultToolchain = null;
+    GccToolchain.clearDefault();
     coreToolHandles = null;
-}
-
-function requireVersion(version) {
-    const resolved = resolveGccToolchainVersion(version);
-    if (!resolved) {
-        throw new Error("no gcc toolchain version specified and no default set");
-    }
-    return resolved;
 }
 
 /**
@@ -111,23 +116,21 @@ function requireVersion(version) {
  * @param {string} version Bootlin toolchain release version, e.g. "2025.08-1".
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
+ * @param {boolean} [opts.unverified=false] Allow downloading without a
+ *   matching lockfile entry (warns instead of failing).
  * @returns {object} Target handle for this gcc toolchain.
  * @category configuration
  */
 export function gccToolchain(version, opts = {}) {
     namedCache({ name: GCC_TOOLCHAIN_CACHE, shared: true });
     if (!coreToolHandles) {
-        coreToolHandles = CORE_TOOL_NAMES.map((name) => nativeTool(name));
+        coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
     }
 
-    const toolchain = new GccToolchain({ version });
-
-    if (opts.default) {
-        defaultVersion = version;
-        defaultToolchain = toolchain;
-    }
-
-    return toolchain;
+    return new GccToolchain(
+        { version, unverified: opts.unverified },
+        { default: opts.default },
+    );
 }
 
 /**
@@ -165,7 +168,19 @@ export async function acquireGccToolchain(version) {
 
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
-    const url = gccDownloadUrl(version, plat);
+    const downloadPath = `.imp/gcc-downloads/${key}/${gccArtifactName(version, plat)}`;
+    await downloadToolArtifact({
+        lockfile: GCC_LOCKFILE,
+        tool: "gcc",
+        version,
+        plat,
+        url: gccDownloadUrl(version, plat),
+        downloadPath,
+        tools: coreTools,
+        display: `download gcc ${version} (${plat.os}/${plat.arch})`,
+        unverified: GccToolchain.resolveUnverified(version),
+    });
+
     const extractPath = `.imp/gcc-toolchains/${key}`;
     const gccExe = `${GCC_EXE_PREFIX[plat.arch]}-gcc`;
     const gxxExe = `${GCC_EXE_PREFIX[plat.arch]}-g++`;
@@ -179,17 +194,17 @@ export async function acquireGccToolchain(version) {
         [`#!/bin/sh\nexec "$(dirname "$0")/${arExe}" "$@"\n`, "ar"],
     ];
     const wrapperArgs = wrappers.flat();
-    // $1 = url, $2 = extractPath, $3.. = wrapper (content, filename) pairs.
+    // $1 = archive, $2 = extractPath, $3.. = wrapper (content, filename) pairs.
     const writeCmds = wrappers.map((_, i) => `printf %s "\${${3 + i * 2}}" > "$2/bin/\${${4 + i * 2}}"`);
     const chmodCmds = wrappers.map((_, i) => `chmod +x "$2/bin/\${${4 + i * 2}}"`);
-    // tar can't sniff compression from a pipe (no filename to inspect), so
-    // -J (xz) must be explicit here even though a file-based `-xf x.tar.xz`
-    // wouldn't need it.
-    const installScript = `mkdir -p "$2" && curl -fSL "$1" | tar -xJf - -C "$2" --strip-components=1 && ${writeCmds.join(" && ")} && ${chmodCmds.join(" && ")}`;
+    // Extraction and wrapper-writing stay one run: the wrappers land inside
+    // the extract dir the named-cache output captures.
+    const installScript = `mkdir -p "$2" && tar -xJf "$1" -C "$2" --strip-components=1 && ${writeCmds.join(" && ")} && ${chmodCmds.join(" && ")}`;
 
     await run({
-        argv: ["sh", "-c", installScript, "install-gcc", url, extractPath, ...wrapperArgs],
+        argv: ["sh", "-c", installScript, "install-gcc", downloadPath, extractPath, ...wrapperArgs],
         tools: coreTools,
+        inputs: [{ kind: "file", path: downloadPath }],
         outputs: [
             output(output_path(extractPath), {
                 kind: "directory",
@@ -210,10 +225,7 @@ export async function acquireGccToolchain(version) {
  * @returns {string|null}
  */
 export function resolveGccToolchainVersion(version) {
-    if (version) {
-        return version;
-    }
-    return defaultVersion;
+    return GccToolchain.resolveVersion(version);
 }
 
 /**
@@ -223,7 +235,7 @@ export function resolveGccToolchainVersion(version) {
  * @returns {Promise<string>}
  */
 export async function gccBin(version) {
-    const resolved = requireVersion(version);
+    const resolved = GccToolchain.requireVersion(version);
     const dir = await acquireGccToolchain(resolved);
     const plat = platformInfo();
     return `${dir}/bin/${GCC_EXE_PREFIX[plat.arch]}-gcc`;
@@ -238,7 +250,7 @@ export async function gccBin(version) {
  * @returns {Promise<object>}
  */
 export async function gccTool(version) {
-    const resolved = requireVersion(version);
+    const resolved = GccToolchain.requireVersion(version);
     await acquireGccToolchain(resolved);
     const plat = platformInfo();
     return {
@@ -256,7 +268,7 @@ export async function gccTool(version) {
  * @returns {string|null}
  */
 export function defaultGccToolchainVersion() {
-    return defaultVersion;
+    return GccToolchain.defaultVersion();
 }
 
 /**
@@ -265,19 +277,18 @@ export function defaultGccToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultGccToolchain() {
-    return defaultToolchain;
+    return GccToolchain.default();
 }
 
-const LOCKFILE_SPEC = {
+const LOCKFILE_SPEC = registerToolchainLockfile({
     name: "gcc",
     platforms: gccSupportedPlatforms(),
     downloadUrl: gccDownloadUrl,
     artifactName: gccArtifactName,
-    lockfile: "//rules/c/gcc/gcc.lock",
-};
-product(GccToolchain, GEN_LOCKFILES, (handle) =>
+    lockfile: GCC_LOCKFILE,
+}, ["2025.08-1"]);
+product(GccToolchain, GEN_LOCKFILES, GCC_TOOL, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
-registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["2025.08-1"] });
 
 /**
  * Adapter exposing a gcc toolchain as Rust/rustc's C link driver — the
@@ -330,4 +341,4 @@ export class RustGccLinkDriver {
     }
 }
 
-product(GccToolchain, RUST_LINK_DRIVER, (handle) => new RustGccLinkDriver(handle));
+product(GccToolchain, RUST_LINK_DRIVER, GCC_TOOL, (handle) => new RustGccLinkDriver(handle));

@@ -1,4 +1,6 @@
 import { Target, glob, memo, output, output_path, product, registerBuildRule, run, targetAddress, writeWorkspace, BUILD, PACKAGE } from "imp:core";
+import { UV_TOOL } from "//rules/python/uv_toolchain";
+import { PEX_TOOL } from "//rules/python/pex_toolchain";
 import { distPathFor } from "//rules/workflows/package";
 
 import {
@@ -173,7 +175,7 @@ export class PythonApp extends Target {
     }
 }
 
-export const python_app_build = product(PythonApp, BUILD, async function python_app_build(handle) {
+export const python_app_build = product(PythonApp, BUILD, UV_TOOL, async function python_app_build(handle) {
     const srcPath = declared_path(handle, handle.attrs.src || ".");
     const inputFiles = await sources(handle);
     // attrs.uvVersion/pexVersion hold the *resolved version string* fixed at
@@ -237,7 +239,7 @@ export const python_app_build = product(PythonApp, BUILD, async function python_
     return { ...result, pexOutPath };
 });
 
-export const python_app_package = product(PythonApp, PACKAGE, async function python_app_package(handle) {
+export const python_app_package = product(PythonApp, PACKAGE, PEX_TOOL, async function python_app_package(handle) {
     const result = await python_app_build(handle);
     const pexOutDir = result.pexOutPath.slice(0, result.pexOutPath.lastIndexOf("/"));
     writeWorkspace(distPathFor(handle), result.outputDigest, { from: pexOutDir });

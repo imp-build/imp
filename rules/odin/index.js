@@ -94,6 +94,7 @@ import "//rules/workflows/run";
 // Registers the "build" goal's artifact summary callback for consumers that
 // import Odin build rules without importing the workflows layer explicitly.
 import "//rules/workflows/build_workflow";
+import { ODIN_TOOL } from "//rules/odin/toolchain";
 
 export {
     acquireOdinToolchain,
@@ -912,7 +913,7 @@ class OdinBuildGenerator extends Target {
  * @returns {Promise<object>} Run result, plus `outputPath`: the built
  * binary/library's workspace-relative path.
  */
-export const odinBuild = product(OdinPackage, BUILD,
+export const odinBuild = product(OdinPackage, BUILD, ODIN_TOOL,
     async function odinBuild(handle) {
         const toolchainHandle = handle.attrs.toolchain;
         const odinToolSpec = toolchainHandle
@@ -961,7 +962,7 @@ export const odinBuild = product(OdinPackage, BUILD,
     }
 );
 
-export const odinTest = product(OdinTestPackage, TEST,
+export const odinTest = product(OdinTestPackage, TEST, ODIN_TOOL,
     async function odinTest(handle) {
         const toolchainHandle = handle.attrs.toolchain;
         const odinToolSpec = toolchainHandle
@@ -1012,7 +1013,7 @@ export const odinTest = product(OdinTestPackage, TEST,
  * @param {object} handle Target handle returned by odinPackage().
  * @returns {Promise<object>} Run result.
  */
-export const odinRun = product(OdinPackage, RUN, async function odinRun(handle) {
+export const odinRun = product(OdinPackage, RUN, ODIN_TOOL, async function odinRun(handle) {
     const analysis = await odinPackageAnalysis(handle);
     if (!analysis.hasMainEntrypoint) {
         const path = declared_path(handle, handle.attrs.path || ".");
@@ -1044,7 +1045,7 @@ export const odinRun = product(OdinPackage, RUN, async function odinRun(handle) 
  * @param {object} handle Target handle returned by odinPackage().
  * @returns {Promise<{ok: boolean, output: string}>}
  */
-export const odinLint = product(OdinPackage, LINT, async function odinLint(handle) {
+export const odinLint = product(OdinPackage, LINT, ODIN_TOOL, async function odinLint(handle) {
     const toolchainHandle = handle.attrs.toolchain;
     const odinToolSpec = toolchainHandle
         ? await tool(toolchainHandle)
@@ -1087,7 +1088,7 @@ export const odinLint = product(OdinPackage, LINT, async function odinLint(handl
     };
 });
 
-export const odinDistPackage = product(OdinPackage, PACKAGE, async function odinDistPackage(handle) {
+export const odinDistPackage = product(OdinPackage, PACKAGE, ODIN_TOOL, async function odinDistPackage(handle) {
     const buildResult = await odinBuild(handle);
     const outDir = buildResult.outputPath.slice(0, buildResult.outputPath.lastIndexOf("/"));
     writeWorkspace(distPathFor(handle), buildResult.outputDigest, { from: outDir });
@@ -1103,7 +1104,7 @@ export const gen_input_sources = memo(async function gen_input_sources(handle) {
     return glob({ root: ".", include: handle.attrs.srcs || [], exclude: [outPath] });
 });
 
-export const odinGenRun = product(OdinGen, BUILD, async function odinGenRun(handle) {
+export const odinGenRun = product(OdinGen, BUILD, ODIN_TOOL, async function odinGenRun(handle) {
     const inputFiles = await gen_input_sources(handle);
     const outPath = declared_path(handle, handle.attrs.out);
 
@@ -1161,7 +1162,7 @@ async function collect_gen_sets(handle, seen) {
     return sets;
 }
 
-export const generateBuild = product(OdinBuildGenerator, GENERATE_BUILD,
+export const generateBuild = product(OdinBuildGenerator, GENERATE_BUILD, ODIN_TOOL,
     async function generateBuild(handle) {
         const files = allUnowned({
             root: handle.attrs.root || ".",

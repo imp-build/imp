@@ -1,9 +1,16 @@
-import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Toolchain, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+import { downloadToolArtifact, lockedDownloadTools } from "//rules/imp/lockfile";
+import { extractArchive } from "//rules/imp/archive";
+import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
+
+// Declared tool identity for products this toolchain implements; also
+// consumed by rule modules registering uv-driven products.
+export const UV_TOOL = toolName("uv");
 
 const UV_TOOLCHAIN_CACHE = "uv-toolchains";
+const UV_LOCKFILE = "//rules/python/uv-toolchain.lock";
 
 // uv's own wheel/package download cache ($UV_CACHE_DIR) and the interpreters
 // its automatic Python management provisions. Both are internally content-
@@ -88,37 +95,33 @@ export function uvSupportedPlatforms() {
 // be declared too — same reason Zig's toolchain.js declares `xz` for its
 // .tar.xz archives. Bare `sh` only auto-resolves on unix.
 function coreToolNames(plat) {
-    return plat.os === "windows"
-        ? ["curl", "mkdir", "dirname", "tar", "sh"]
-        : ["curl", "mkdir", "dirname", "tar", "gzip"];
+    const extract = plat.os === "windows" ? ["tar"] : ["tar", "gzip"];
+    return [...new Set([...lockedDownloadTools(plat), ...extract])];
 }
 
-export class UvToolchain extends Target {
+export class UvToolchain extends Toolchain {
     static kind = "uv-toolchain";
-    constructor({ version }) {
-        super({ kind: UvToolchain.kind, attrs: { version } });
+    static tool = UV_TOOL;
+    constructor({ version, unverified }, opts) {
+        super({
+            kind: UvToolchain.kind,
+            attrs: { version, ...(unverified ? { unverified } : {}) },
+        }, opts);
+    }
+
+    bin() {
+        return uvBin(this.attrs.version);
     }
 }
 
-let defaultVersion = null;
-let defaultToolchain = null;
 // Declared lazily, once — target() addresses are only assigned at
 // workspace-load time, so tool handles must be created when a toolchain is
 // declared at BUILD.js top level, not inside acquireUvToolchain().
 let coreToolHandles = null;
 
 export function __resetUvToolchainStateForTest() {
-    defaultVersion = null;
-    defaultToolchain = null;
+    UvToolchain.clearDefault();
     coreToolHandles = null;
-}
-
-function requireVersion(version) {
-    const resolved = resolveUvToolchainVersion(version);
-    if (!resolved) {
-        throw new Error("no uv toolchain version specified and no default set");
-    }
-    return resolved;
 }
 
 /**
@@ -127,6 +130,8 @@ function requireVersion(version) {
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
+ * @param {boolean} [opts.unverified=false] Allow downloading without a
+ *   matching lockfile entry (warns instead of failing).
  * @returns {object} Target handle for this uv toolchain.
  * @category configuration
  */
@@ -137,14 +142,10 @@ export function uvToolchain(version, opts = {}) {
         coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
     }
 
-    const toolchain = new UvToolchain({ version });
-
-    if (opts.default) {
-        defaultVersion = version;
-        defaultToolchain = toolchain;
-    }
-
-    return toolchain;
+    return new UvToolchain(
+        { version, unverified: opts.unverified },
+        { default: opts.default },
+    );
 }
 
 /**
@@ -179,38 +180,30 @@ export async function acquireUvToolchain(version) {
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
     if (!cacheHas(UV_TOOLCHAIN_CACHE, key)) {
-        const artifact = uvArtifactName(version, plat);
-        const url = uvDownloadUrl(version, plat);
-        const downloadPath = `.imp/uv-downloads/${key}/${artifact}`;
-        const extractPath = `.imp/uv-toolchains/${key}`;
-
-        await run({
-            argv: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"', "download-uv", downloadPath, url],
+        const downloadPath = `.imp/uv-downloads/${key}/${uvArtifactName(version, plat)}`;
+        await downloadToolArtifact({
+            lockfile: UV_LOCKFILE,
+            tool: "uv-toolchain",
+            version,
+            plat,
+            url: uvDownloadUrl(version, plat),
+            downloadPath,
             tools: coreTools,
-            outputs: [output(output_path(downloadPath))],
-            materialize: true,
             display: `download uv ${version} (${plat.os}/${plat.arch})`,
+            unverified: UvToolchain.resolveUnverified(version),
         });
 
         // uv's release archives extract a single top-level uv-<triple>/
         // directory containing `uv` (and `uvx`) — strip it so the cache
         // root holds the binaries directly, same shape acquireZigToolchain
         // uses.
-        const extractScript = plat.os === "windows"
-            ? 'mkdir -p "$2" && tar -xf "$1" -C "$2" --strip-components=1'
-            : 'mkdir -p "$2" && tar -xzf "$1" -C "$2" --strip-components=1';
-
-        await run({
-            argv: ["sh", "-c", extractScript, "extract-uv", downloadPath, extractPath],
+        await extractArchive({
+            archive: downloadPath,
+            dest: `.imp/uv-toolchains/${key}`,
+            format: plat.os === "windows" ? "zip" : "tar.gz",
+            stripComponents: 1,
             tools: coreTools,
-            inputs: [{ kind: "file", path: downloadPath }],
-            outputs: [
-                output(output_path(extractPath), {
-                    kind: "directory",
-                    namedCache: { name: UV_TOOLCHAIN_CACHE, key },
-                }),
-            ],
-            materialize: true,
+            namedCache: { name: UV_TOOLCHAIN_CACHE, key },
             display: `extract uv ${version} (${plat.os}/${plat.arch})`,
         });
     }
@@ -248,10 +241,7 @@ export async function acquireUvToolchain(version) {
  * @returns {string|null}
  */
 export function resolveUvToolchainVersion(version) {
-    if (version) {
-        return version;
-    }
-    return defaultVersion;
+    return UvToolchain.resolveVersion(version);
 }
 
 /**
@@ -261,7 +251,7 @@ export function resolveUvToolchainVersion(version) {
  * @returns {Promise<string>}
  */
 export async function uvBin(version) {
-    const resolved = requireVersion(version);
+    const resolved = UvToolchain.requireVersion(version);
     const dir = await acquireUvToolchain(resolved);
     const exe = platformInfo().os === "windows" ? "uv.exe" : "uv";
     return `${dir}/${exe}`;
@@ -274,7 +264,7 @@ export async function uvBin(version) {
  * @returns {Promise<object>}
  */
 export async function uvTool(version) {
-    const resolved = requireVersion(version);
+    const resolved = UvToolchain.requireVersion(version);
     await acquireUvToolchain(resolved);
     const plat = platformInfo();
     return {
@@ -337,7 +327,7 @@ export function uvCacheDirEnv() {
  * @returns {string|null}
  */
 export function defaultUvToolchainVersion() {
-    return defaultVersion;
+    return UvToolchain.defaultVersion();
 }
 
 /**
@@ -346,20 +336,19 @@ export function defaultUvToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultUvToolchain() {
-    return defaultToolchain;
+    return UvToolchain.default();
 }
 
 // Passing name: "uv" here would collide with a real project's own uv.lock
 // (uv's native per-project dependency lock — not ours to name), so
 // "uv-toolchain" is used instead for both the `tool` field and the lockfile
 // stem.
-const LOCKFILE_SPEC = {
+const LOCKFILE_SPEC = registerToolchainLockfile({
     name: "uv-toolchain",
     platforms: uvSupportedPlatforms(),
     downloadUrl: uvDownloadUrl,
     artifactName: uvArtifactName,
-    lockfile: "//rules/python/uv-toolchain.lock",
-};
-product(UvToolchain, GEN_LOCKFILES, (handle) =>
+    lockfile: UV_LOCKFILE,
+}, ["0.11.16"]);
+product(UvToolchain, GEN_LOCKFILES, UV_TOOL, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
-registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["0.11.16"] });

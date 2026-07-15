@@ -7,7 +7,7 @@ template = "page.html"
 A rule module pairs a **target constructor** (a plain function returning `target({ kind, attrs })`) with a **product** — a memoized async function registered against that target kind and a goal name, e.g. `"build"`:
 
 ```js
-import { Target, product, run, output, output_path, BUILD } from "imp:core";
+import { Target, product, run, output, output_path, toolName, BUILD } from "imp:core";
 
 export class StampFile extends Target {
     static kind = "stamp-file";
@@ -20,7 +20,12 @@ export function stampFile(opts) {
     return new StampFile(opts);
 }
 
-export const file = product(StampFile, BUILD, async function file(handle) {
+// Every product names the tool implementing it; products are keyed
+// (kind, product, tool), so several tools can implement the same product
+// for a kind (e.g. two formatters).
+const GEN_TOOL = toolName("gen");
+
+export const file = product(StampFile, BUILD, GEN_TOOL, async function file(handle) {
     return run({
         argv: ["sh", "-c", "printf '%s\\n' \"$2\" > \"$1\"",
             "imp-stamp", output_path(handle.attrs.entrypoint), handle.attrs.sources],

@@ -80,23 +80,37 @@ test("installs and acquires a toolchain from the named cache", async () => {
     });
 });
 
-test("installs a toolchain via a single sandboxed curl|tar run()", async () => {
+test("downloads, verifies, and extracts a toolchain via two sandboxed runs", async () => {
     await withSccacheHost(async (host) => {
         const key = sccacheCacheKey("0.10.0", { os: "linux", arch: "x86_64" });
+        host.addFile("//rules/rust/sccache/sccache.lock", JSON.stringify({
+            tool: "sccache",
+            versions: {
+                "0.10.0": {
+                    "linux/x86_64": {
+                        url: "https://locked.example/sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz",
+                        artifact: "sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz",
+                        size: 12345,
+                        sha256: "deadbeef",
+                    },
+                },
+            },
+        }));
 
         sccacheToolchain("0.10.0", { default: true });
         const path = await acquireSccacheToolchain("0.10.0");
 
         expect(path).toBe("/cache/sccache-toolchains/0.10.0/linux-x86_64");
-        expect(host.runs.length).toBe(1);
+        expect(host.runs.length).toBe(2);
 
-        const [install] = host.runs;
-        expect(install.argv[0]).toBe("sh");
-        expect(install.argv.some((arg) => arg.includes("sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz"))).toBe(true);
-        expect(install.tools[0].name).toBe("curl");
-        expect(install.tools.some((t) => t.name === "tar")).toBe(true);
-        expect(install.outputs[0].namedCache.name).toBe("sccache-toolchains");
-        expect(install.outputs[0].namedCache.key).toBe(key);
+        const [download, extract] = host.runs;
+        expect(download.argv[0]).toBe("sh");
+        expect(download.argv).toContain("https://locked.example/sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz");
+        expect(download.argv).toContain("deadbeef");
+        expect(download.argv[2]).toContain("sha256sum -c -");
+        expect(extract.argv[2]).toContain("--strip-components=1");
+        expect(extract.outputs[0].namedCache.name).toBe("sccache-toolchains");
+        expect(extract.outputs[0].namedCache.key).toBe(key);
 
         expect(host.calls.some((call) => call[0] === "nativeTool" && call[1] === "curl")).toBe(true);
     });

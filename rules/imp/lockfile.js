@@ -17,7 +17,7 @@
 // platform entry throws (the actionable default), unless the toolchain was
 // declared with `unverified: true`, which downgrades to a warning and an
 // unverified download.
-import { logWarn, readAddressedFile } from "imp:core";
+import { logWarn, output, output_path, readAddressedFile, run } from "imp:core";
 
 /**
  * Convert a lockfile address (`//a/b.lock`) to a workspace-relative path
@@ -124,6 +124,81 @@ export function lockedDownloadTools(plat) {
         tools.push("sh");
     }
     return tools;
+}
+
+/**
+ * Download a toolchain artifact, verified against its lockfile by default —
+ * the shared cold-path download step every toolchain's acquire composes with
+ * its own extract/install runs. Resolves the lockfile entry (throwing, or
+ * warning when `unverified`, on any miss), runs the verified download, and
+ * decorates a failed transfer or size/SHA-256 mismatch with a
+ * `gen-lockfiles` pointer.
+ *
+ * @param {object} opts
+ * @param {string} opts.lockfile Lockfile address, e.g. "//rules/c/mold/mold.lock".
+ * @param {string} opts.tool Lockfile `tool` stem, e.g. "mold".
+ * @param {string} opts.version
+ * @param {{ os: string, arch: string }} opts.plat Host platform (drives the
+ *   download script's tool selection).
+ * @param {{ os: string, arch: string }} [opts.lockPlat] Platform key used
+ *   for the lockfile entry lookup when it differs from the host — e.g.
+ *   pex's platform-independent `{ os: "any", arch: "any" }` artifact.
+ * @param {string} opts.url Fallback download URL when no lock entry resolves.
+ * @param {string} opts.downloadPath Sandbox-relative destination path.
+ * @param {object[]} opts.tools Resolved native-tool specs covering
+ *   lockedDownloadTools(plat).
+ * @param {string} opts.display run() display label.
+ * @param {boolean} [opts.unverified=false] Downgrade lockfile misses to a
+ *   warning and download unverified.
+ * @returns {Promise<string>} The materialized download path.
+ */
+export async function downloadToolArtifact({
+    lockfile,
+    tool,
+    version,
+    plat,
+    lockPlat,
+    url,
+    downloadPath,
+    tools,
+    display,
+    unverified = false,
+}) {
+    const lockEntry = resolveToolLockfile({
+        address: lockfile,
+        tool,
+        version,
+        plat: lockPlat ?? plat,
+        unverified,
+    });
+    const resolvedUrl = lockEntry ? lockEntry.url : url;
+    const argv = lockedDownloadArgv({
+        plat,
+        lockEntry,
+        url: resolvedUrl,
+        downloadPath,
+        displayName: `download-${tool}`,
+    });
+    try {
+        await run({
+            argv,
+            tools,
+            outputs: [output(output_path(downloadPath))],
+            materialize: true,
+            display,
+        });
+    } catch (e) {
+        if (lockEntry) {
+            throw new Error(
+                `download of ${tool} ${version} from ${resolvedUrl} failed transfer or ` +
+                `size/sha256 verification (expected ${lockEntry.sha256} from ${lockfile}); ` +
+                `if you intentionally changed versions, run \`imp goal gen-lockfiles\`: ` +
+                `${e && e.message ? e.message : e}`,
+            );
+        }
+        throw e;
+    }
+    return downloadPath;
 }
 
 /**

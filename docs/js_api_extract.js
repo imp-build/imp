@@ -568,9 +568,15 @@ export function renderRuleCapabilities(group, capabilities = {}) {
     for (const goal of Object.keys(goals).sort()) {
         for (const tool of Object.keys(goals[goal]).sort()) {
             const details = goals[goal][tool] || {};
-            const toolLabel = tool === group
-                ? displayName(tool)
-                : `[${displayName(tool)}](./${tool}/)`;
+            // Tool identity is declared at product registration, so a tool
+            // needn't have its own rules directory — only link when one of
+            // the registering modules actually lives under it.
+            const hasToolDir = (details.modules || []).some(module =>
+                module === `//rules/${group}/${tool}` ||
+                module.startsWith(`//rules/${group}/${tool}/`));
+            const toolLabel = tool !== group && hasToolDir
+                ? `[${displayName(tool)}](./${tool}/)`
+                : displayName(tool);
             const modules = (details.modules || [])
                 .map(module => module.replace(/\/index\.js$/, "").replace(/\.js$/, ""))
                 .map(module => `\`${module}\``)

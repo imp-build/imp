@@ -1,4 +1,6 @@
-import { Target, product, run, output, output_path, BUILD } from "imp:core";
+import { Target, product, run, output, output_path, toolName, BUILD } from "imp:core";
+
+const GEN_TOOL = toolName("gen");
 
 export class StampFile extends Target {
     static kind = "stamp-file";
@@ -10,7 +12,7 @@ export class StampFile extends Target {
     }
 }
 
-export const file = product(StampFile, BUILD, async function file(handle) {
+export const file = product(StampFile, BUILD, GEN_TOOL, async function file(handle) {
     return run({
         argv: [
             "sh",

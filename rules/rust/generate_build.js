@@ -27,6 +27,7 @@ import {
 import { declared_path } from "//rules/rust";
 import { rustTool } from "//rules/rust/toolchain";
 import { registerBuildGenerator, GENERATE_BUILD } from "//rules/workflows/generate_build";
+import { RUST_TOOL } from "//rules/rust/toolchain";
 
 registerBuildRule({
     rule: "cargoPackage",
@@ -147,7 +148,7 @@ class CargoBuildGenerator extends Target {
     static kind = "cargo-build-generator";
 }
 
-export const generateBuild = product(CargoBuildGenerator, GENERATE_BUILD,
+export const generateBuild = product(CargoBuildGenerator, GENERATE_BUILD, RUST_TOOL,
     async function generateBuild(handle) {
         const manifests = allUnowned({
             root: handle.attrs.root || ".",

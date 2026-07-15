@@ -8,7 +8,7 @@
 // No target kind registers `generate`/`generate-check` products yet — this module
 // only provides the shared dispatch goal; a rule package adds the products for its
 // own target kind following the pattern documented in generate.js.
-import { goal, resolveProduct, goalFlags, logInfo } from "imp:core";
+import { goal, resolveProducts, goalFlags, logInfo } from "imp:core";
 import { GENERATE_CHECK } from "//rules/workflows/products";
 
 export async function generateGoal(selection) {
@@ -16,7 +16,7 @@ export async function generateGoal(selection) {
     const targets = check
         ? selection.map((entry) => ({ ...entry, product: GENERATE_CHECK }))
         : selection;
-    const resolved = targets.map(resolveProduct);
+    const resolved = targets.flatMap(resolveProducts);
     const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));
 
     const summaryLines = [];

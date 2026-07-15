@@ -1,4 +1,5 @@
 import { Target, product, run, glob, workspaceFiles, TEST } from "imp:core";
+import { IMP_TOOL } from "//rules/imp/imp_tool";
 
 const suites = [];
 const tests = [];
@@ -436,7 +437,7 @@ export class RulesTest extends Target {
     }
 }
 
-export const test_product = product(RulesTest, TEST, async function test_product(handle) {
+export const test_product = product(RulesTest, TEST, IMP_TOOL, async function test_product(handle) {
     const testModules = handle.attrs.tests
         .split(",")
         .map((testModule) => testModule.trim())

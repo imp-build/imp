@@ -135,24 +135,40 @@ test("describes the two-cache tool with RUSTUP_HOME/CARGO_HOME mount paths", asy
     });
 });
 
-test("downloads rustup-init and installs into both caches via a single sandboxed run", async () => {
+test("downloads rustup-init verified, then installs into both caches", async () => {
     await withRustHost(async (host) => {
         const key = rustCacheKey("1.79.0", { os: "linux", arch: "x86_64" });
+        host.addFile("//rules/rust/rust.lock", JSON.stringify({
+            tool: "rust",
+            versions: {
+                "1.79.0": {
+                    "linux/x86_64": {
+                        url: "https://locked.example/x86_64-unknown-linux-gnu/rustup-init",
+                        artifact: "rustup-init",
+                        size: 12345,
+                        sha256: "deadbeef",
+                    },
+                },
+            },
+        }));
 
         rustToolchain("1.79.0", { default: true });
         const path = await acquireRustToolchain("1.79.0");
 
         expect(path).toBe("/cache/rustup-home/1.79.0/linux-x86_64");
-        expect(host.runs.length).toBe(1);
+        expect(host.runs.length).toBe(2);
 
-        const [install] = host.runs;
+        const [download, install] = host.runs;
+        expect(download.argv).toContain("https://locked.example/x86_64-unknown-linux-gnu/rustup-init");
+        expect(download.argv).toContain("deadbeef");
+        expect(download.argv[2]).toContain("sha256sum -c -");
+
         expect(install.argv[0]).toBe("sh");
-        expect(install.argv.some((arg) => arg.includes("x86_64-unknown-linux-gnu/rustup-init"))).toBe(true);
-        expect(install.tools[0].name).toBe("curl");
+        expect(install.argv.some((arg) => arg.includes("rustup-init"))).toBe(true);
 
-        // The install run downloads rustup-init, wires RUSTUP_HOME/CARGO_HOME
-        // from $PWD in-script, and pins the toolchain, then commits both
-        // directories to their caches.
+        // The install run wires RUSTUP_HOME/CARGO_HOME from $PWD in-script
+        // and pins the toolchain, then commits both directories to their
+        // caches.
         const script = install.argv[2];
         expect(script).toContain('RUSTUP_HOME="$PWD/$2"');
         expect(script).toContain('CARGO_HOME="$PWD/$3"');

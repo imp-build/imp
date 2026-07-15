@@ -250,7 +250,7 @@ mod tests {
             .insert("//b:b".to_owned(), without_product);
         workspace.products.insert(
             ("lib".to_owned(), "build".to_owned()),
-            "buildLib".to_owned(),
+            BTreeMap::from([("lib-tool".to_owned(), "buildLib".to_owned())]),
         );
         let goal = Goal {
             name: "build".to_owned(),

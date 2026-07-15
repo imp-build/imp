@@ -1,9 +1,18 @@
-import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Toolchain, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+import { downloadToolArtifact, lockedDownloadTools } from "//rules/imp/lockfile";
+import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
+
+// Declared tool identity for products this toolchain implements; also
+// consumed by rule modules registering pex-driven products.
+export const PEX_TOOL = toolName("pex");
 
 const PEX_TOOLCHAIN_CACHE = "pex-toolchains";
+const PEX_LOCKFILE = "//rules/python/pex-toolchain.lock";
+// pex publishes one platform-independent artifact; its lock entries are
+// keyed under this pseudo-platform (see LOCKFILE_SPEC.platforms below).
+const PEX_LOCK_PLATFORM = { os: "any", arch: "any" };
 
 // PEX's own PEX_ROOT (default ~/.pex): installed_wheels + venvs caches that
 // back its "exact subset, no global venv" symlink/hardlink-from-cache
@@ -36,41 +45,38 @@ export function pexDownloadUrl(version) {
     return `https://github.com/pantsbuild/pex/releases/download/v${version}/pex`;
 }
 
-// Bare coreutils the download script needs — even these must be declared
-// tools, not resolved from an ambient PATH, since the sandbox is fully
-// hermetic. No tar/extraction step (pex is a single file, not an archive).
+// Bare coreutils the verified-download and install scripts need — even
+// these must be declared tools, not resolved from an ambient PATH, since
+// the sandbox is fully hermetic. No tar/extraction step (pex is a single
+// file, not an archive).
 function coreToolNames(plat) {
-    return plat.os === "windows"
-        ? ["curl", "mkdir", "dirname"]
-        : ["curl", "mkdir", "dirname", "chmod"];
+    const extra = plat.os === "windows" ? ["cp"] : ["cp", "chmod"];
+    return [...new Set([...lockedDownloadTools(plat), ...extra])];
 }
 
-export class PexToolchain extends Target {
+export class PexToolchain extends Toolchain {
     static kind = "pex-toolchain";
-    constructor({ version }) {
-        super({ kind: PexToolchain.kind, attrs: { version } });
+    static tool = PEX_TOOL;
+    constructor({ version, unverified }, opts) {
+        super({
+            kind: PexToolchain.kind,
+            attrs: { version, ...(unverified ? { unverified } : {}) },
+        }, opts);
+    }
+
+    bin() {
+        return pexBin(this.attrs.version);
     }
 }
 
-let defaultVersion = null;
-let defaultToolchain = null;
 // Declared lazily, once — target() addresses are only assigned at
 // workspace-load time, so tool handles must be created when a toolchain is
 // declared at BUILD.js top level, not inside acquirePexToolchain().
 let coreToolHandles = null;
 
 export function __resetPexToolchainStateForTest() {
-    defaultVersion = null;
-    defaultToolchain = null;
+    PexToolchain.clearDefault();
     coreToolHandles = null;
-}
-
-function requireVersion(version) {
-    const resolved = resolvePexToolchainVersion(version);
-    if (!resolved) {
-        throw new Error("no pex toolchain version specified and no default set");
-    }
-    return resolved;
 }
 
 /**
@@ -79,6 +85,8 @@ function requireVersion(version) {
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
+ * @param {boolean} [opts.unverified=false] Allow downloading without a
+ *   matching lockfile entry (warns instead of failing).
  * @returns {object} Target handle for this pex toolchain.
  * @category configuration
  */
@@ -89,14 +97,10 @@ export function pexToolchain(version, opts = {}) {
         coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
     }
 
-    const toolchain = new PexToolchain({ version });
-
-    if (opts.default) {
-        defaultVersion = version;
-        defaultToolchain = toolchain;
-    }
-
-    return toolchain;
+    return new PexToolchain(
+        { version, unverified: opts.unverified },
+        { default: opts.default },
+    );
 }
 
 /**
@@ -130,20 +134,31 @@ export async function acquirePexToolchain(version) {
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
     if (!cacheHas(PEX_TOOLCHAIN_CACHE, key)) {
-        const url = pexDownloadUrl(version);
+        // No archive to extract — the verified download lands the single
+        // `pex` file straight into the named-cache directory, then a small
+        // install run marks it executable.
         const dir = `.imp/pex-toolchains/${key}`;
-
-        // Single download+chmod step, not split like uv/zig's download-then-
-        // extract — there's no archive to extract here, just one file to
-        // fetch and mark executable, so there's only one real cacheable
-        // unit of work.
-        const script = plat.os === "windows"
-            ? 'mkdir -p "$2" && curl -fSL -o "$2/pex" "$1"'
-            : 'mkdir -p "$2" && curl -fSL -o "$2/pex" "$1" && chmod +x "$2/pex"';
-
-        await run({
-            argv: ["sh", "-c", script, "download-pex", url, dir],
+        const downloadPath = `.imp/pex-downloads/${key}/pex`;
+        await downloadToolArtifact({
+            lockfile: PEX_LOCKFILE,
+            tool: "pex-toolchain",
+            version,
+            plat,
+            lockPlat: PEX_LOCK_PLATFORM,
+            url: pexDownloadUrl(version),
+            downloadPath,
             tools: coreTools,
+            display: `download pex ${version}`,
+            unverified: PexToolchain.resolveUnverified(version),
+        });
+
+        const script = plat.os === "windows"
+            ? 'mkdir -p "$2" && cp "$1" "$2/pex"'
+            : 'mkdir -p "$2" && cp "$1" "$2/pex" && chmod +x "$2/pex"';
+        await run({
+            argv: ["sh", "-c", script, "install-pex", downloadPath, dir],
+            tools: coreTools,
+            inputs: [{ kind: "file", path: downloadPath }],
             outputs: [
                 output(output_path(dir), {
                     kind: "directory",
@@ -151,7 +166,7 @@ export async function acquirePexToolchain(version) {
                 }),
             ],
             materialize: true,
-            display: `download pex ${version}`,
+            display: `install pex ${version}`,
         });
     }
 
@@ -187,10 +202,7 @@ export async function acquirePexToolchain(version) {
  * @returns {string|null}
  */
 export function resolvePexToolchainVersion(version) {
-    if (version) {
-        return version;
-    }
-    return defaultVersion;
+    return PexToolchain.resolveVersion(version);
 }
 
 /**
@@ -200,7 +212,7 @@ export function resolvePexToolchainVersion(version) {
  * @returns {Promise<string>}
  */
 export async function pexBin(version) {
-    const resolved = requireVersion(version);
+    const resolved = PexToolchain.requireVersion(version);
     const dir = await acquirePexToolchain(resolved);
     return `${dir}/pex`;
 }
@@ -216,7 +228,7 @@ export async function pexBin(version) {
  * @returns {Promise<object>}
  */
 export async function pexTool(version) {
-    const resolved = requireVersion(version);
+    const resolved = PexToolchain.requireVersion(version);
     await acquirePexToolchain(resolved);
     return {
         kind: "tool",
@@ -266,7 +278,7 @@ export function pexRootEnv() {
  * @returns {string|null}
  */
 export function defaultPexToolchainVersion() {
-    return defaultVersion;
+    return PexToolchain.defaultVersion();
 }
 
 /**
@@ -275,7 +287,7 @@ export function defaultPexToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultPexToolchain() {
-    return defaultToolchain;
+    return PexToolchain.default();
 }
 
 // pex has exactly one artifact for all platforms, so generateToolLockfile
@@ -283,13 +295,12 @@ export function defaultPexToolchain() {
 // degenerate platform entry; downloadUrl/artifactName below ignore their
 // `plat` argument. This reuses generateToolLockfile unmodified rather than
 // forking it for a single-artifact case.
-const LOCKFILE_SPEC = {
+const LOCKFILE_SPEC = registerToolchainLockfile({
     name: "pex-toolchain",
     platforms: [{ os: "any", arch: "any" }],
     downloadUrl: (version) => pexDownloadUrl(version),
     artifactName: () => "pex",
-    lockfile: "//rules/python/pex-toolchain.lock",
-};
-product(PexToolchain, GEN_LOCKFILES, (handle) =>
+    lockfile: PEX_LOCKFILE,
+}, ["2.97.1"]);
+product(PexToolchain, GEN_LOCKFILES, PEX_TOOL, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
-registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["2.97.1"] });

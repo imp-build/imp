@@ -46,23 +46,26 @@ Declaring `odinToolchain(...)` without exporting it (the old style) still works 
 
 `imp @odin build foo.odin -out:foo` and `imp @odinfmt` run a managed toolchain binary directly, bypassing imp's own CLI parsing so the tool's flags never need a `--` separator. `TOOL` is resolved purely from the workspace: imp looks up the export named `TOOL` at `//:TOOL`, and if its target kind has a `"toolchain"` product registered, calls that product to get an absolute binary path and runs it.
 
-This means adding a new `@tool` needs no changes to imp itself — just an exported target whose kind resolves to a binary. A toolchain rule module opts in with:
+This means adding a new `@tool` needs no changes to imp itself — just an exported target whose kind resolves to a binary. A toolchain rule module opts in by subclassing `Toolchain`, which registers the `"toolchain"` product automatically from the subclass's `bin()`:
 
 ```js
-import { Target, product, TOOLCHAIN } from "imp:core";
+import { Toolchain, toolName } from "imp:core";
 
-export class MyToolchain extends Target {
+export class MyToolchain extends Toolchain {
     static kind = "my-toolchain";
-    constructor({ version }) {
-        super({ kind: MyToolchain.kind, attrs: { version } });
+    static tool = toolName("mytool");
+    constructor({ version }, opts) {
+        super({ kind: MyToolchain.kind, attrs: { version } }, opts);
+    }
+
+    bin() {
+        return resolveMyToolBin(this.attrs.version);
     }
 }
 
-export function myToolchain(version) {
-    return new MyToolchain({ version });
+export function myToolchain(version, opts = {}) {
+    return new MyToolchain({ version }, { default: opts.default });
 }
-
-product(MyToolchain, TOOLCHAIN, (handle) => resolveMyToolBin(handle.attrs.version));
 ```
 
 and the workspace file exports it:

@@ -54,6 +54,7 @@ import "//rules/rust/test";
 // Registers the "generate-build" product (auto-declaring cargoPackage()
 // targets for unowned Cargo.toml files) for the same reason.
 import "//rules/rust/generate_build";
+import { RUST_TOOL } from "//rules/rust/toolchain";
 
 export {
     acquireRustToolchain,
@@ -271,7 +272,7 @@ export function rustToolEnv(toolSpec, sccacheActive) {
  * binaries' workspace-relative paths, one per `bin` entry.
  */
 
-export const cargoBuild = product(CargoPackage, BUILD,
+export const cargoBuild = product(CargoPackage, BUILD, RUST_TOOL,
     async function cargoBuild(handle) {
         if (handle.attrs.bins.length === 0) {
             return { outputPaths: [] };
@@ -314,7 +315,7 @@ export const cargoBuild = product(CargoPackage, BUILD,
     }
 );
 
-export const cargoDistPackage = product(CargoPackage, PACKAGE, async function cargoDistPackage(handle) {
+export const cargoDistPackage = product(CargoPackage, PACKAGE, RUST_TOOL, async function cargoDistPackage(handle) {
     const result = await cargoBuild(handle);
     if (handle.attrs.bins.length === 0) {
         return result;
@@ -335,7 +336,7 @@ export const cargoDistPackage = product(CargoPackage, PACKAGE, async function ca
  * @param {object} handle Target handle returned by cargoPackage().
  * @returns {Promise<object>} Run result from `cargo test`.
  */
-export const cargoTest = product(CargoPackage, TEST,
+export const cargoTest = product(CargoPackage, TEST, RUST_TOOL,
     async function cargoTest(handle) {
         const toolSpec = await rustTool(rust_toolchain_version(handle));
         const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();

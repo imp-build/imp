@@ -1,9 +1,16 @@
-import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Toolchain, product, namedCache, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+import { downloadToolArtifact, lockedDownloadTools } from "//rules/imp/lockfile";
+import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
+import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
+
+// Declared tool identity for products this toolchain implements; also
+// consumed by rule modules registering crane-driven products.
+export const CRANE_TOOL = toolName("crane");
 
 const CRANE_TOOLCHAIN_CACHE = "crane-toolchains";
+const CRANE_LOCKFILE = "//rules/oci/crane.lock";
 
 // crane (google/go-containerregistry) publishes prebuilt binaries for these
 // targets; see https://github.com/google/go-containerregistry/releases. The
@@ -82,29 +89,38 @@ export function craneCacheKey(version, plat) {
     return `${version}/${plat.os}-${plat.arch}`;
 }
 
-// Bare coreutils used by the install script below. The sandbox is fully
-// hermetic — even `mkdir`/`tar` must be declared tools, not resolved from an
-// ambient or fixed-base PATH. GNU tar shells out to a separate `gzip`
-// process to decompress `.tar.gz`.
-const CORE_TOOL_NAMES = ["curl", "mkdir", "tar", "gzip"];
+// Bare coreutils the verified-download and extract scripts need. The sandbox
+// is fully hermetic — even `mkdir`/`tar` must be declared tools, not
+// resolved from an ambient or fixed-base PATH.
+function coreToolNames(plat) {
+    return [...new Set([
+        ...lockedDownloadTools(plat),
+        ...extractArchiveTools("tar.gz"),
+    ])];
+}
 
-export class CraneToolchain extends Target {
+export class CraneToolchain extends Toolchain {
     static kind = "crane-toolchain";
-    constructor({ version }) {
-        super({ kind: CraneToolchain.kind, attrs: { version } });
+    static tool = CRANE_TOOL;
+    constructor({ version, unverified }, opts) {
+        super({
+            kind: CraneToolchain.kind,
+            attrs: { version, ...(unverified ? { unverified } : {}) },
+        }, opts);
+    }
+
+    bin() {
+        return craneBin(this.attrs.version);
     }
 }
 
-let defaultVersion = null;
-let defaultToolchain = null;
 // Declared lazily, once, the first time a toolchain is declared — target()
 // addresses are only assigned at workspace-load time, so this must happen
 // at BUILD.js top level rather than inside acquireToolchain() at execution time.
 let coreToolHandles = null;
 
 export function __resetCraneToolchainStateForTest() {
-    defaultVersion = null;
-    defaultToolchain = null;
+    CraneToolchain.clearDefault();
     coreToolHandles = null;
 }
 
@@ -114,23 +130,21 @@ export function __resetCraneToolchainStateForTest() {
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
+ * @param {boolean} [opts.unverified=false] Allow downloading without a
+ *   matching lockfile entry (warns instead of failing).
  * @returns {object} Target handle for this crane toolchain.
  * @category configuration
  */
 export function craneToolchain(version, opts = {}) {
     namedCache({ name: CRANE_TOOLCHAIN_CACHE, shared: true });
     if (!coreToolHandles) {
-        coreToolHandles = CORE_TOOL_NAMES.map((name) => nativeTool(name));
+        coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
     }
 
-    const toolchain = new CraneToolchain({ version });
-
-    if (opts.default) {
-        defaultVersion = version;
-        defaultToolchain = toolchain;
-    }
-
-    return toolchain;
+    return new CraneToolchain(
+        { version, unverified: opts.unverified },
+        { default: opts.default },
+    );
 }
 
 /**
@@ -168,22 +182,27 @@ export async function acquireCraneToolchain(version) {
 
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
-    const url = craneDownloadUrl(version, plat);
-    const extractPath = `.imp/crane-toolchains/${key}`;
+    const downloadPath = `.imp/crane-downloads/${key}/${craneArtifactName(version, plat)}`;
+    await downloadToolArtifact({
+        lockfile: CRANE_LOCKFILE,
+        tool: "crane",
+        version,
+        plat,
+        url: craneDownloadUrl(version, plat),
+        downloadPath,
+        tools: coreTools,
+        display: `download crane ${version} (${plat.os}/${plat.arch})`,
+        unverified: CraneToolchain.resolveUnverified(version),
+    });
 
     // crane's release tarball ships crane/gcrane/krane at the archive root
-    // (no wrapping directory), so no --strip-components is needed. tar
-    // can't sniff compression from a pipe, so -z (gzip) must be explicit.
-    await run({
-        argv: ["sh", "-c", 'mkdir -p "$2" && curl -fSL "$1" | tar -xzf - -C "$2"', "install-crane", url, extractPath],
+    // (no wrapping directory), so no --strip-components is needed.
+    await extractArchive({
+        archive: downloadPath,
+        dest: `.imp/crane-toolchains/${key}`,
+        format: "tar.gz",
         tools: coreTools,
-        outputs: [
-            output(output_path(extractPath), {
-                kind: "directory",
-                namedCache: { name: CRANE_TOOLCHAIN_CACHE, key },
-            }),
-        ],
-        materialize: false,
+        namedCache: { name: CRANE_TOOLCHAIN_CACHE, key },
         display: `install crane ${version} (${plat.os}/${plat.arch})`,
     });
 
@@ -197,10 +216,7 @@ export async function acquireCraneToolchain(version) {
  * @returns {string|null}
  */
 export function resolveCraneToolchainVersion(version) {
-    if (version) {
-        return version;
-    }
-    return defaultVersion;
+    return CraneToolchain.resolveVersion(version);
 }
 
 /**
@@ -210,10 +226,7 @@ export function resolveCraneToolchainVersion(version) {
  * @returns {Promise<string>}
  */
 export async function craneBin(version) {
-    const resolved = resolveCraneToolchainVersion(version);
-    if (!resolved) {
-        throw new Error("no crane toolchain version specified and no default set");
-    }
+    const resolved = CraneToolchain.requireVersion(version);
     const dir = await acquireCraneToolchain(resolved);
     const plat = platformInfo();
     return plat.os === "windows" ? `${dir}/crane.exe` : `${dir}/crane`;
@@ -226,10 +239,7 @@ export async function craneBin(version) {
  * @returns {Promise<object>}
  */
 export async function craneTool(version) {
-    const resolved = resolveCraneToolchainVersion(version);
-    if (!resolved) {
-        throw new Error("no crane toolchain version specified and no default set");
-    }
+    const resolved = CraneToolchain.requireVersion(version);
     await acquireCraneToolchain(resolved);
     const plat = platformInfo();
     return {
@@ -247,7 +257,7 @@ export async function craneTool(version) {
  * @returns {string|null}
  */
 export function defaultCraneToolchainVersion() {
-    return defaultVersion;
+    return CraneToolchain.defaultVersion();
 }
 
 /**
@@ -256,16 +266,15 @@ export function defaultCraneToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultCraneToolchain() {
-    return defaultToolchain;
+    return CraneToolchain.default();
 }
 
-const LOCKFILE_SPEC = {
+const LOCKFILE_SPEC = registerToolchainLockfile({
     name: "crane",
     platforms: craneSupportedPlatforms(),
     downloadUrl: craneDownloadUrl,
     artifactName: craneArtifactName,
-    lockfile: "//rules/oci/crane.lock",
-};
-product(CraneToolchain, GEN_LOCKFILES, (handle) =>
+    lockfile: CRANE_LOCKFILE,
+}, ["0.20.6"]);
+product(CraneToolchain, GEN_LOCKFILES, CRANE_TOOL, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
-registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["0.20.6"] });

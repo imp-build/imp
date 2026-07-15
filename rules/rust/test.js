@@ -41,6 +41,7 @@ import { CargoPackage } from "//rules/rust/cargo_package";
 
 import { rustTool } from "//rules/rust/toolchain";
 import { nativeToolSpec } from "//rules/imp/native_tool";
+import { RUST_TOOL } from "//rules/rust/toolchain";
 
 function safe_target_address(handle) {
     if (!handle || handle.__imp !== true) return null;
@@ -148,7 +149,7 @@ export class RustTest extends Target {
     }
 }
 
-export const rustTestBuild = product(RustTest, BUILD, async function rustTestBuild(handle) {
+export const rustTestBuild = product(RustTest, BUILD, RUST_TOOL, async function rustTestBuild(handle) {
     const { result } = await buildTestBinaries(handle);
     return { outputPath: handle.attrs.executable, outputDigest: result.outputDigest };
 });
@@ -162,7 +163,7 @@ export const rustTestBuild = product(RustTest, BUILD, async function rustTestBui
 // the fan-out itself is what gets the parallelism/isolation (each binary is
 // its own imp target, its own sandbox), not thread-level concurrency
 // within a single binary.
-export const rustTestRun = product(RustTest, TEST, async function rustTestRun(handle) {
+export const rustTestRun = product(RustTest, TEST, RUST_TOOL, async function rustTestRun(handle) {
     const { outputDigest } = await rustTestBuild(handle);
     const testTools = await Promise.all((handle.attrs.testTools || []).map(nativeToolSpec));
     return run({

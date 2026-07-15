@@ -10,10 +10,10 @@
 // to the default per-target dispatch, since a goal callback replaces native
 // dispatch entirely rather than running alongside it.
 
-import { goal, resolveProduct } from "imp:core";
+import { goal, resolveProducts } from "imp:core";
 
 export async function testGoal(selection) {
-    const resolved = selection.map(resolveProduct);
+    const resolved = selection.flatMap(resolveProducts);
     const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));
     for (const { label, promise } of calls) {
         try {

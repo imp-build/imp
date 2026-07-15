@@ -113,25 +113,97 @@ test("describes the named-cache-backed mold tool", async () => {
     });
 });
 
-test("installs a toolchain via a single sandboxed curl|tar run()", async () => {
+test("downloads, verifies, and extracts a toolchain via two sandboxed runs", async () => {
     await withMoldHost(async (host) => {
         const key = moldCacheKey("2.41.0", { os: "linux", arch: "x86_64" });
+        host.addFile("//rules/c/mold/mold.lock", JSON.stringify({
+            tool: "mold",
+            versions: {
+                "2.41.0": {
+                    "linux/x86_64": {
+                        url: "https://locked.example/mold-2.41.0-x86_64-linux.tar.gz",
+                        artifact: "mold-2.41.0-x86_64-linux.tar.gz",
+                        size: 12345,
+                        sha256: "deadbeef",
+                    },
+                },
+            },
+        }));
 
         moldToolchain("2.41.0", { default: true });
         const path = await acquireMoldToolchain("2.41.0");
 
         expect(path).toBe("/cache/mold-toolchains/2.41.0/linux-x86_64");
-        expect(host.runs.length).toBe(1);
+        expect(host.runs.length).toBe(2);
 
-        const [install] = host.runs;
-        expect(install.argv[0]).toBe("sh");
-        expect(install.argv.some((arg) => arg.includes("mold-2.41.0-x86_64-linux.tar.gz"))).toBe(true);
-        expect(install.tools[0].name).toBe("curl");
-        expect(install.tools.some((t) => t.name === "gzip")).toBe(true);
-        expect(install.outputs[0].namedCache.name).toBe("mold-toolchains");
-        expect(install.outputs[0].namedCache.key).toBe(key);
+        const [download, extract] = host.runs;
+        // The lock entry pins both the URL and the expected digest.
+        expect(download.argv[0]).toBe("sh");
+        expect(download.argv).toContain("https://locked.example/mold-2.41.0-x86_64-linux.tar.gz");
+        expect(download.argv).toContain("deadbeef");
+        expect(download.argv[2]).toContain("sha256sum -c -");
+        expect(extract.argv[2]).toContain("--strip-components=1");
+        expect(extract.outputs[0].namedCache.name).toBe("mold-toolchains");
+        expect(extract.outputs[0].namedCache.key).toBe(key);
 
         expect(host.calls.some((call) => call[0] === "nativeTool" && call[1] === "curl")).toBe(true);
+    });
+});
+
+test("cold acquire without a lockfile fails pointing at gen-lockfiles", async () => {
+    await withMoldHost(async () => {
+        moldToolchain("2.41.0", { default: true });
+        let message = null;
+        try {
+            await acquireMoldToolchain("2.41.0");
+        } catch (error) {
+            message = error.message;
+        }
+        expect(message).toContain("no lockfile found");
+        expect(message).toContain("gen-lockfiles");
+    });
+});
+
+test("unverified: true downloads without a sha check", async () => {
+    await withMoldHost(async (host) => {
+        moldToolchain("2.41.0", { default: true, unverified: true });
+        await acquireMoldToolchain("2.41.0");
+
+        expect(host.runs.length).toBe(2);
+        const [download] = host.runs;
+        expect(download.argv[2]).not.toContain("sha256sum");
+        expect(download.argv.some((arg) => arg.includes("mold-2.41.0-x86_64-linux.tar.gz"))).toBe(true);
+    });
+});
+
+test("a non-default unverified version doesn't need the verified default's lockfile entry", async () => {
+    await withMoldHost(async (host) => {
+        // 2.41.0 has a builtin lockfile entry; 9.9.9 doesn't. Declaring the
+        // default verified and a second, non-default instance unverified
+        // must resolve `unverified` from the instance being acquired, not
+        // from the default.
+        moldToolchain("2.41.0", { default: true });
+        moldToolchain("9.9.9", { unverified: true });
+
+        await acquireMoldToolchain("9.9.9");
+
+        const [download] = host.runs;
+        expect(download.argv[2]).not.toContain("sha256sum");
+    });
+});
+
+test("a non-default verified version still requires a lockfile entry even when the default is unverified", async () => {
+    await withMoldHost(async (host) => {
+        moldToolchain("2.41.0", { default: true, unverified: true });
+        moldToolchain("9.9.9");
+
+        let message = null;
+        try {
+            await acquireMoldToolchain("9.9.9");
+        } catch (error) {
+            message = error.message;
+        }
+        expect(message).toContain("no lockfile found");
     });
 });
 

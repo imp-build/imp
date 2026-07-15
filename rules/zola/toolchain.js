@@ -1,9 +1,16 @@
-import { Target, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas } from "imp:core";
+import { Toolchain, product, namedCache, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+import { downloadToolArtifact, lockedDownloadTools } from "//rules/imp/lockfile";
+import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
+import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
+
+// Declared tool identity for products this toolchain implements; also
+// consumed by rule modules registering zola-driven products.
+export const ZOLA_TOOL = toolName("zola");
 
 const ZOLA_TOOLCHAIN_CACHE = "zola-toolchains";
+const ZOLA_LOCKFILE = "//rules/zola/zola.lock";
 
 // Zola publishes prebuilt binaries for these targets; see
 // https://github.com/getzola/zola/releases.
@@ -70,29 +77,38 @@ export function zolaCacheKey(version, plat) {
     return `${version}/${plat.os}-${plat.arch}`;
 }
 
-// Bare coreutils used by the install script below. The sandbox is fully
-// hermetic — even `mkdir`/`tar` must be declared tools, not resolved from an
-// ambient or fixed-base PATH. GNU tar shells out to a separate `gzip`
-// process to decompress `.tar.gz`.
-const CORE_TOOL_NAMES = ["curl", "mkdir", "tar", "gzip"];
+// Bare coreutils the verified-download and extract scripts need. The sandbox
+// is fully hermetic — even `mkdir`/`tar` must be declared tools, not
+// resolved from an ambient or fixed-base PATH.
+function coreToolNames(plat) {
+    return [...new Set([
+        ...lockedDownloadTools(plat),
+        ...extractArchiveTools(plat.os === "windows" ? "zip" : "tar.gz"),
+    ])];
+}
 
-export class ZolaToolchain extends Target {
+export class ZolaToolchain extends Toolchain {
     static kind = "zola-toolchain";
-    constructor({ version }) {
-        super({ kind: ZolaToolchain.kind, attrs: { version } });
+    static tool = ZOLA_TOOL;
+    constructor({ version, unverified }, opts) {
+        super({
+            kind: ZolaToolchain.kind,
+            attrs: { version, ...(unverified ? { unverified } : {}) },
+        }, opts);
+    }
+
+    bin() {
+        return zolaBin(this.attrs.version);
     }
 }
 
-let defaultVersion = null;
-let defaultToolchain = null;
 // Declared lazily, once, the first time a toolchain is declared — target()
 // addresses are only assigned at workspace-load time, so this must happen
 // at BUILD.js top level rather than inside acquireToolchain() at execution time.
 let coreToolHandles = null;
 
 export function __resetZolaToolchainStateForTest() {
-    defaultVersion = null;
-    defaultToolchain = null;
+    ZolaToolchain.clearDefault();
     coreToolHandles = null;
 }
 
@@ -102,23 +118,21 @@ export function __resetZolaToolchainStateForTest() {
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
+ * @param {boolean} [opts.unverified=false] Allow downloading without a
+ *   matching lockfile entry (warns instead of failing).
  * @returns {object} Target handle for this zola toolchain.
  * @category configuration
  */
 export function zolaToolchain(version, opts = {}) {
     namedCache({ name: ZOLA_TOOLCHAIN_CACHE, shared: true });
     if (!coreToolHandles) {
-        coreToolHandles = CORE_TOOL_NAMES.map((name) => nativeTool(name));
+        coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
     }
 
-    const toolchain = new ZolaToolchain({ version });
-
-    if (opts.default) {
-        defaultVersion = version;
-        defaultToolchain = toolchain;
-    }
-
-    return toolchain;
+    return new ZolaToolchain(
+        { version, unverified: opts.unverified },
+        { default: opts.default },
+    );
 }
 
 /**
@@ -156,25 +170,27 @@ export async function acquireZolaToolchain(version) {
 
     const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
 
-    const url = zolaDownloadUrl(version, plat);
-    const extractPath = `.imp/zola-toolchains/${key}`;
-    // Zola's release tarball ships the `zola` binary at the archive root
-    // (no wrapping directory), so no --strip-components is needed. tar
-    // can't sniff compression from a pipe, so -z (gzip) must be explicit on
-    // the tar.gz (unix) release; the windows .zip release isn't a filter
-    // format, so plain -xf works.
-    const tarFlags = plat.os === "windows" ? "-xf" : "-xzf";
-
-    await run({
-        argv: ["sh", "-c", `mkdir -p "$2" && curl -fSL "$1" | tar ${tarFlags} - -C "$2"`, "install-zola", url, extractPath],
+    const downloadPath = `.imp/zola-downloads/${key}/${zolaArtifactName(version, plat)}`;
+    await downloadToolArtifact({
+        lockfile: ZOLA_LOCKFILE,
+        tool: "zola",
+        version,
+        plat,
+        url: zolaDownloadUrl(version, plat),
+        downloadPath,
         tools: coreTools,
-        outputs: [
-            output(output_path(extractPath), {
-                kind: "directory",
-                namedCache: { name: ZOLA_TOOLCHAIN_CACHE, key },
-            }),
-        ],
-        materialize: false,
+        display: `download zola ${version} (${plat.os}/${plat.arch})`,
+        unverified: ZolaToolchain.resolveUnverified(version),
+    });
+
+    // Zola's release archive ships the `zola` binary at the archive root
+    // (no wrapping directory), so no --strip-components is needed.
+    await extractArchive({
+        archive: downloadPath,
+        dest: `.imp/zola-toolchains/${key}`,
+        format: plat.os === "windows" ? "zip" : "tar.gz",
+        tools: coreTools,
+        namedCache: { name: ZOLA_TOOLCHAIN_CACHE, key },
         display: `install zola ${version} (${plat.os}/${plat.arch})`,
     });
 
@@ -188,10 +204,7 @@ export async function acquireZolaToolchain(version) {
  * @returns {string|null}
  */
 export function resolveZolaToolchainVersion(version) {
-    if (version) {
-        return version;
-    }
-    return defaultVersion;
+    return ZolaToolchain.resolveVersion(version);
 }
 
 /**
@@ -201,10 +214,7 @@ export function resolveZolaToolchainVersion(version) {
  * @returns {Promise<string>}
  */
 export async function zolaBin(version) {
-    const resolved = resolveZolaToolchainVersion(version);
-    if (!resolved) {
-        throw new Error("no zola toolchain version specified and no default set");
-    }
+    const resolved = ZolaToolchain.requireVersion(version);
     const dir = await acquireZolaToolchain(resolved);
     const plat = platformInfo();
     return plat.os === "windows" ? `${dir}/zola.exe` : `${dir}/zola`;
@@ -217,10 +227,7 @@ export async function zolaBin(version) {
  * @returns {Promise<object>}
  */
 export async function zolaTool(version) {
-    const resolved = resolveZolaToolchainVersion(version);
-    if (!resolved) {
-        throw new Error("no zola toolchain version specified and no default set");
-    }
+    const resolved = ZolaToolchain.requireVersion(version);
     await acquireZolaToolchain(resolved);
     const plat = platformInfo();
     return {
@@ -238,7 +245,7 @@ export async function zolaTool(version) {
  * @returns {string|null}
  */
 export function defaultZolaToolchainVersion() {
-    return defaultVersion;
+    return ZolaToolchain.defaultVersion();
 }
 
 /**
@@ -247,16 +254,15 @@ export function defaultZolaToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultZolaToolchain() {
-    return defaultToolchain;
+    return ZolaToolchain.default();
 }
 
-const LOCKFILE_SPEC = {
+const LOCKFILE_SPEC = registerToolchainLockfile({
     name: "zola",
     platforms: zolaSupportedPlatforms(),
     downloadUrl: zolaDownloadUrl,
     artifactName: zolaArtifactName,
-    lockfile: "//rules/zola/zola.lock",
-};
-product(ZolaToolchain, GEN_LOCKFILES, (handle) =>
+    lockfile: ZOLA_LOCKFILE,
+}, ["0.22.1"]);
+product(ZolaToolchain, GEN_LOCKFILES, ZOLA_TOOL, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
-registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["0.22.1"] });

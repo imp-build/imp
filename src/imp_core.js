@@ -102,6 +102,142 @@ export class Target {
     }
 }
 
+// Keyed by the concrete subclass (not stored as static fields, which
+// inheritance would share with the base), so each toolchain kind tracks its
+// own default independently.
+const _toolchain_defaults = new Map();     // concrete subclass → instance
+// Like the product registry, registration survives resetMemoState — the
+// TOOLCHAIN product for a kind is registered once per runtime.
+const _toolchain_registered = new Set();
+// concrete subclass → Map(version → instance), so attrs declared on a
+// non-default instance (e.g. `unverified`) resolve correctly even when
+// acquiring that version rather than the default one.
+const _toolchain_by_version = new Map();
+
+/**
+ * Base class for toolchain target kinds. Subclasses declare:
+ *
+ *   - `static kind` — the target kind, as for any Target subclass;
+ *   - `static tool` — the toolchain's declared tool token (see toolName());
+ *   - `bin()` — resolve this toolchain instance to an absolute binary path.
+ *
+ * The base owns the per-kind default instance (`{ default: true }` at
+ * construction, read back via `Sub.default()` / `Sub.defaultVersion()` /
+ * `Sub.resolveVersion(v)`), replacing the per-module `defaultVersion` /
+ * `defaultToolchain` state toolchain modules used to hand-roll. Constructing
+ * the first instance of a subclass also registers `product(Sub, TOOLCHAIN,
+ * Sub.tool, (handle) => handle.bin())`, which makes every toolchain
+ * dispatchable via `imp @<name>` for workspace-exported instances.
+ */
+export class Toolchain extends Target {
+    /**
+     * @param {object} targetOpts Options forwarded to Target: `{ kind, attrs, ... }`.
+     * @param {object} [opts]
+     * @param {boolean} [opts.default=false] Install this instance as the
+     *   subclass's default. Deliberately outside `attrs` so it never enters
+     *   target serialization.
+     */
+    constructor(targetOpts, opts = {}) {
+        super(targetOpts);
+        Toolchain._ensureRegistered(this.constructor);
+        if (opts.default) this.constructor.setDefault(this);
+        if (targetOpts.attrs?.version !== undefined) {
+            let byVersion = _toolchain_by_version.get(this.constructor);
+            if (!byVersion) {
+                byVersion = new Map();
+                _toolchain_by_version.set(this.constructor, byVersion);
+            }
+            byVersion.set(targetOpts.attrs.version, this);
+        }
+    }
+
+    static setDefault(instance) { _toolchain_defaults.set(this, instance); }
+    static clearDefault() {
+        _toolchain_defaults.delete(this);
+        _toolchain_by_version.delete(this);
+    }
+
+    /** The default instance declared for this toolchain kind, or null. */
+    static default() { return _toolchain_defaults.get(this) ?? null; }
+
+    /** The default instance's version, or null when no default is set. */
+    static defaultVersion() {
+        const instance = this.default();
+        return instance ? (instance.attrs.version ?? null) : null;
+    }
+
+    /** An explicit version if given, else the default instance's. */
+    static resolveVersion(version) {
+        if (version) return version;
+        return this.defaultVersion();
+    }
+
+    /**
+     * An explicit or default version, throwing the standard "no X toolchain
+     * version specified and no default set" error otherwise.
+     *
+     * @param {string} [version]
+     * @param {string} [label] Display name for the error message; defaults to
+     *   this subclass's declared tool name.
+     * @returns {string}
+     */
+    static requireVersion(version, label) {
+        const resolved = this.resolveVersion(version);
+        if (!resolved) {
+            throw new Error(
+                `no ${label ?? this.tool?.name ?? this.name} toolchain version specified and no default set`,
+            );
+        }
+        return resolved;
+    }
+
+    /**
+     * The instance that declared a given version, if any — distinct from the
+     * default instance, since a version may be declared without being set as
+     * default. Falls back to the default instance when no instance declared
+     * that exact version (e.g. `version` came from elsewhere and happens to
+     * match nothing declared here).
+     *
+     * @param {string} [version]
+     * @returns {Toolchain|null}
+     */
+    static instanceForVersion(version) {
+        return (version && _toolchain_by_version.get(this)?.get(version)) || this.default();
+    }
+
+    /** The `unverified` flag declared for a given version, else `false`. */
+    static resolveUnverified(version) {
+        return this.instanceForVersion(version)?.attrs.unverified ?? false;
+    }
+
+    /**
+     * Absolute path to this toolchain's binary; powers `imp @tool`
+     * dispatch. Subclasses must override.
+     *
+     * @returns {string|Promise<string>}
+     */
+    bin() {
+        throw new Error(`${this.constructor.name} must implement bin()`);
+    }
+
+    static _ensureRegistered(cls) {
+        if (cls === Toolchain || _toolchain_registered.has(cls)) return;
+        if (!cls.tool || cls.tool.__imp_tool_name !== true) {
+            throw new Error(
+                `${cls.name || "<anonymous>"}: Toolchain subclasses must declare ` +
+                `'static tool = toolName(...)'`);
+        }
+        _toolchain_registered.add(cls);
+        product(cls, TOOLCHAIN, cls.tool, (handle) => handle.bin());
+    }
+}
+
+/** Clear every toolchain kind's default instance (test isolation hook). */
+export function __resetToolchainDefaultsForTest() {
+    _toolchain_defaults.clear();
+    _toolchain_by_version.clear();
+}
+
 /**
  * Declare a target and return a target handle.
  *
@@ -154,7 +290,7 @@ export function namedCache(opts) {
  *   Optional. When provided, this callback is fully responsible for the goal
  *   invocation — it receives the resolved selection and native per-target
  *   product dispatch is skipped entirely, even on success. Use
- *   `resolveProduct(entry)` from within `fn` to look up each selected
+ *   `resolveProducts(entry)` from within `fn` to look up each selected
  *   target's registered product function and drive your own resolve/fan-out/
  *   await loop (see build.js/run.js/test.js/fmt.js for the pattern).
  *   Throwing (or rejecting) aborts the whole invocation with that one error.
@@ -618,31 +754,39 @@ export function selectedTargets(kind = undefined) {
 }
 
 /**
- * Resolve a single selection entry to its registered product function and
- * target handle, without invoking it — for goal callbacks that drive their
- * own resolve/fan-out/await loop (see build.js/run.js/test.js/fmt.js).
+ * Resolve a selection entry to the product functions registered for its
+ * kind and product — one per tool, since several tools may implement the
+ * same product (e.g. two formatters) — without invoking them. For goal
+ * callbacks that drive their own resolve/fan-out/await loop
+ * (see build.js/run.js/test.js/fmt.js): `selection.flatMap(resolveProducts)`.
  *
  * @param {{id: number, address: string, kind: string, product: string|object}} entry
  *   `product` may be a host-serialized string (as selection entries arrive)
  *   or a product-name token (when a goal callback remaps, e.g. fmt --check).
- * @returns {{label: string, fn: function, handle: object}}
+ * @returns {Array<{label: string, tool: string, fn: function, handle: object}>}
+ *   The label carries the tool (`addr#product@tool`) only when several tools
+ *   register the product, keeping single-tool output unchanged.
  */
-export function resolveProduct(entry) {
+export function resolveProducts(entry) {
     let product = entry.product;
     if (product && product.__imp_product_name === true) {
         product = product.name;
     } else if (typeof product !== "string" || product === "") {
-        throw new Error("resolveProduct(entry) requires entry.product to be a product-name token or string");
+        throw new Error("resolveProducts(entry) requires entry.product to be a product-name token or string");
     }
-    const fn = _products_by_kind_name.get(`${entry.kind}:${product}`);
-    if (fn === undefined) {
+    const by_tool = _products_by_kind_name.get(`${entry.kind}:${product}`);
+    if (by_tool === undefined || by_tool.size === 0) {
         throw new Error(`no product '${product}' for kind '${entry.kind}' (target '${entry.address}')`);
     }
-    return {
-        label: `${entry.address}#${product}`,
+    const handle = globalThis.__imp_resolve_handle(entry.id);
+    return [...by_tool.entries()].map(([tool, fn]) => ({
+        label: by_tool.size === 1
+            ? `${entry.address}#${product}`
+            : `${entry.address}#${product}@${tool}`,
+        tool,
         fn,
-        handle: globalThis.__imp_resolve_handle(entry.id),
-    };
+        handle,
+    }));
 }
 
 /**
@@ -662,10 +806,18 @@ export function productFor(handle, nameToken) {
     if (!handle || handle.__imp !== true) {
         throw new Error(`productFor(handle, "${name}") expects a target handle`);
     }
-    const fn = _products_by_kind_name.get(`${handle.kind}:${name}`);
-    if (fn === undefined) {
+    const by_tool = _products_by_kind_name.get(`${handle.kind}:${name}`);
+    if (by_tool === undefined || by_tool.size === 0) {
         throw new Error(`target kind '${handle.kind}' has no '${name}' product registered`);
     }
+    // Role lookups resolve a single provider; a kind with several tools
+    // registering the same role product is ambiguous by construction.
+    if (by_tool.size > 1) {
+        throw new Error(
+            `target kind '${handle.kind}' has '${name}' products from several tools ` +
+            `(${[...by_tool.keys()].join(", ")}); productFor() resolves a single provider`);
+    }
+    const fn = by_tool.values().next().value;
     return fn(handle);
 }
 
@@ -684,7 +836,8 @@ export function invokeToolchainProduct(id) {
     if (!handle) {
         throw new Error(`no live handle for target id ${id}`);
     }
-    if (!_products_by_kind_name.has(`${handle.kind}:toolchain`)) {
+    const by_tool = _products_by_kind_name.get(`${handle.kind}:toolchain`);
+    if (by_tool === undefined || by_tool.size === 0) {
         throw new Error(`target kind '${handle.kind}' has no 'toolchain' product (not toolchain-shaped)`);
     }
     return productFor(handle, TOOLCHAIN);
@@ -769,7 +922,7 @@ function _mint_product_name_token(name, pid) {
  *
  * @category product
  * @param {string} name Product name, e.g. "cc-toolchain" or "odin-linker".
- * @returns {object} Frozen token accepted by product()/productFor()/resolveProduct().
+ * @returns {object} Frozen token accepted by product()/productFor()/resolveProducts().
  */
 export function productName(name) {
     if (typeof name !== "string" || name === "") {
@@ -783,6 +936,44 @@ export function productName(name) {
 function _builtin_product_name(name) {
     const pid = __host_declare_product_name(name, "", true);
     return _mint_product_name_token(name, pid);
+}
+
+const _declared_tool_names = new Map();  // name → frozen token; persists across resetMemoState
+
+/**
+ * Declare a tool name and return its token. Every product registration names
+ * the tool that implements it (products are keyed `(kind, product, tool)`,
+ * so several tools can implement the same product for a kind). Like product
+ * names, a tool name is declared once per workspace and every other module
+ * must import the token — for toolchain-backed tools, use the toolchain
+ * class's `static tool` token instead of redeclaring.
+ *
+ * @category product
+ * @param {string} name Tool name, e.g. "ruff" or "clippy".
+ * @returns {object} Frozen token accepted by product().
+ */
+export function toolName(name) {
+    if (typeof name !== "string" || name === "") {
+        throw new Error("toolName(name) requires a non-empty string");
+    }
+    const stack = new Error("tool name declaration").stack || "";
+    const tid = __host_declare_tool_name(name, stack);
+    const existing = _declared_tool_names.get(name);
+    if (existing !== undefined && existing.__tid === tid) return existing;
+    const token = Object.freeze({ __imp_tool_name: true, name, __tid: tid });
+    _declared_tool_names.set(name, token);
+    return token;
+}
+
+// Coerce a tool argument to { name, tid }. Only declared tokens are accepted
+// — a bare string cannot prove its declaring module is loaded.
+function _tool_name_of(value, api) {
+    if (value && value.__imp_tool_name === true) {
+        return { name: value.name, tid: value.__tid };
+    }
+    throw new Error(
+        `${api} requires a tool-name token; use the token returned by toolName(), ` +
+        `or a toolchain class's 'static tool' token`);
 }
 
 /** Tokens for the built-in goals' products, plus the "toolchain" role used
@@ -853,7 +1044,7 @@ const _memo_fn_ids = new WeakMap();
 let _memo_fn_counter = 0;
 const _fn_id_names = new Map();  // fn_id → fn.name; persists across resetMemoState
 const _product_fn_info = new Map();  // fn_id → product_name; persists across resetMemoState
-const _products_by_kind_name = new Map();  // "kind:name" → memoized fn; persists across resetMemoState
+const _products_by_kind_name = new Map();  // "kind:name" → Map(tool → memoized fn); persists across resetMemoState
 
 function _stable_function_id(fn) {
     let id = _memo_fn_ids.get(fn);
@@ -1237,25 +1428,41 @@ function _pop_call(key_string, contextId) {
 /**
  * Register a memoized build function as a CLI-dispatchable product.
  *
- * Calling `product(kind, name, fn)` is equivalent to `memo(fn)` plus
+ * Calling `product(kind, name, tool, fn)` is equivalent to `memo(fn)` plus
  * registering the result so that goal execution (e.g. `imp build
  * //:target#name`) dispatches to it when the target's kind matches.
+ * Products are keyed `(kind, product, tool)`: several tools may register the
+ * same product for one kind (e.g. two formatters), and goal dispatch runs
+ * them all.
  *
  * @param {Function} kindClass Target subclass declaring `static kind`, e.g. OdinPackage.
  * @param {object} nameToken Product-name token from productName(), goal(), or
  *   a builtin export (BUILD, TEST, …) — never a bare string, so registering a
  *   name requires importing its declaring module.
+ * @param {object} toolToken Tool-name token from toolName() or a toolchain
+ *   class's `static tool` — the tool this registration attributes to in
+ *   capability docs and multi-tool dispatch labels.
  * @param {function} fn Async function taking a target handle and returning a result.
  * @returns {function} The same function, wrapped in memo().
  */
-export function product(kindClass, nameToken, fn) {
+export function product(kindClass, nameToken, toolToken, fn) {
     const kind = _kind_of(kindClass, "product()");
     const { name, pid } = _product_name_of(nameToken, "product()");
+    const { name: tool, tid } = _tool_name_of(toolToken, "product()");
     const memoized = memo(fn);
     const registrationStack = new Error("product registration").stack || "";
-    __host_product(kind, name, pid, memoized, registrationStack);
+    __host_product(
+        JSON.stringify({ kind, name, nameId: pid, tool, toolId: tid }),
+        memoized,
+        registrationStack,
+    );
     _product_fn_info.set(_stable_function_id(fn), name);
-    _products_by_kind_name.set(`${kind}:${name}`, memoized);
+    let by_tool = _products_by_kind_name.get(`${kind}:${name}`);
+    if (by_tool === undefined) {
+        by_tool = new Map();
+        _products_by_kind_name.set(`${kind}:${name}`, by_tool);
+    }
+    by_tool.set(tool, memoized);
     return memoized;
 }
 

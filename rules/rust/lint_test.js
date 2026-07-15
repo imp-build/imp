@@ -25,8 +25,8 @@ describe("rust lint", () => {
 
 test("cargoClippy runs cargo clippy with -D warnings against the manifest", async () => {
     await withRustHost(async (host) => {
-        gccToolchain("2025.08-1", { default: true });
-        rustToolchain("1.93.0", { default: true });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
 
         const result = await cargoClippy(pkg);
@@ -43,8 +43,8 @@ test("cargoClippy runs cargo clippy with -D warnings against the manifest", asyn
 
 test("cargoClippy reports a nonzero exit as ok:false instead of throwing", async () => {
     await withRustHost(async (host) => {
-        gccToolchain("2025.08-1", { default: true });
-        rustToolchain("1.93.0", { default: true });
+        gccToolchain("2025.08-1", { default: true, unverified: true });
+        rustToolchain("1.93.0", { default: true, unverified: true });
         const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
 
         const originalRun = globalThis.__host_run;

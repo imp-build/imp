@@ -16,7 +16,8 @@ import "//rules/workflows/fmt";
 import "//rules/workflows/lint";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import { extractCodeReference, extractUserApiReference } from "//docs/js_api_extract";
-import { zolaToolchain, zolaTool, zolaBin } from "//rules/zola/toolchain";
+import { zolaToolchain, zolaTool, zolaBin, ZOLA_TOOL } from "//rules/zola/toolchain";
+import { IMP_TOOL } from "//rules/imp/imp_tool";
 import { distPathFor } from "//rules/workflows/package";
 
 export const rules_test = rulesTest({ root: "//docs" });
@@ -32,7 +33,7 @@ zolaToolchain("0.22.1", { default: true });
 
 export const api_reference = target({ kind: "js-api-reference", attrs: {} });
 
-export const api_reference_build = product(JsApiReference, BUILD, async function api_reference_build(handle) {
+export const api_reference_build = product(JsApiReference, BUILD, IMP_TOOL, async function api_reference_build(handle) {
     const srcs = glob({
         root: ".",
         include: ["src/imp_core.js", "rules/**/*.js", "rules/**/DOC.md"],
@@ -65,7 +66,7 @@ export const api_reference_build = product(JsApiReference, BUILD, async function
 
 export const site = target({ kind: "zola-site", attrs: {} });
 
-export const site_build = product(ZolaSite, BUILD, async function site_build(handle) {
+export const site_build = product(ZolaSite, BUILD, ZOLA_TOOL, async function site_build(handle) {
     const apiRef = await api_reference_build(api_reference);
     const zolaToolSpec = await zolaTool();
 
@@ -101,7 +102,7 @@ export const site_build = product(ZolaSite, BUILD, async function site_build(han
     });
 });
 
-export const site_package = product(ZolaSite, PACKAGE, async function site_package(handle) {
+export const site_package = product(ZolaSite, PACKAGE, ZOLA_TOOL, async function site_package(handle) {
     const built = await site_build(handle);
     writeWorkspace(distPathFor(handle), built.outputDigest, { from: SITE_OUT });
 });
@@ -120,7 +121,7 @@ export const site_package = product(ZolaSite, PACKAGE, async function site_packa
 // cancelable background-run handle to restart it from within one sandboxed
 // call — so this restart-on-change loop is the closest fit without new
 // engine primitives.
-export const site_serve = product(ZolaSite, RUN, async function site_serve(handle) {
+export const site_serve = product(ZolaSite, RUN, ZOLA_TOOL, async function site_serve(handle) {
     const zolaBinPath = await zolaBin();
     const distPath = distPathFor(handle);
 

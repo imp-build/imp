@@ -112,20 +112,36 @@ test("describes the named-cache-backed gcc tool", async () => {
     });
 });
 
-test("installs a toolchain via a single sandboxed curl|tar run(), writing a clang wrapper", async () => {
+test("downloads, verifies, and installs via two sandboxed runs, writing a clang wrapper", async () => {
     await withGccHost(async (host) => {
         const key = gccCacheKey("2025.08-1", { os: "linux", arch: "x86_64" });
+        host.addFile("//rules/c/gcc/gcc.lock", JSON.stringify({
+            tool: "gcc",
+            versions: {
+                "2025.08-1": {
+                    "linux/x86_64": {
+                        url: "https://locked.example/x86-64--glibc--stable-2025.08-1.tar.xz",
+                        artifact: "x86-64--glibc--stable-2025.08-1.tar.xz",
+                        size: 12345,
+                        sha256: "deadbeef",
+                    },
+                },
+            },
+        }));
 
         gccToolchain("2025.08-1", { default: true });
         const path = await acquireGccToolchain("2025.08-1");
 
         expect(path).toBe("/cache/gcc-toolchains/2025.08-1/linux-x86_64");
-        expect(host.runs.length).toBe(1);
+        expect(host.runs.length).toBe(2);
 
-        const [install] = host.runs;
+        const [download, install] = host.runs;
+        expect(download.argv).toContain("https://locked.example/x86-64--glibc--stable-2025.08-1.tar.xz");
+        expect(download.argv).toContain("deadbeef");
+        expect(download.argv[2]).toContain("sha256sum -c -");
+
         expect(install.argv[0]).toBe("sh");
         expect(install.argv.some((arg) => arg.includes("x86-64--glibc--stable-2025.08-1.tar.xz"))).toBe(true);
-        expect(install.tools[0].name).toBe("curl");
         expect(install.tools.some((t) => t.name === "xz")).toBe(true);
         expect(install.argv).toContain("clang");
         expect(install.argv).toContain("ar");

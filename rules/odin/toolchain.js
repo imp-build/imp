@@ -1,6 +1,10 @@
-import { Target, product, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas, TOOLCHAIN } from "imp:core";
+import { Toolchain, product, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
 
-import { generateToolLockfile, registerBuiltinLockfile, GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
+
+// Declared tool identity for products this toolchain implements; also
+// consumed by rule modules registering odin-driven products.
+export const ODIN_TOOL = toolName("odin");
 
 const ODIN_TOOLCHAIN_CACHE = "odin-toolchains";
 
@@ -77,19 +81,20 @@ export function odinSupportedPlatforms() {
     return ODIN_SUPPORTED_PLATFORMS.map((plat) => ({ ...plat }));
 }
 
-export class OdinToolchain extends Target {
+export class OdinToolchain extends Toolchain {
     static kind = "odin-toolchain";
-    constructor({ version, linker }) {
-        super({ kind: OdinToolchain.kind, attrs: { version, ...(linker ? { linker } : {}) } });
+    static tool = ODIN_TOOL;
+    constructor({ version, linker }, opts) {
+        super({ kind: OdinToolchain.kind, attrs: { version, ...(linker ? { linker } : {}) } }, opts);
+    }
+
+    bin() {
+        return odinBin(this.attrs.version);
     }
 }
 
-let defaultVersion = null;
-let defaultToolchain = null;
-
 export function __resetOdinToolchainStateForTest() {
-    defaultVersion = null;
-    defaultToolchain = null;
+    OdinToolchain.clearDefault();
 }
 
 /**
@@ -107,14 +112,10 @@ export function __resetOdinToolchainStateForTest() {
 export function odinToolchain(version, opts = {}) {
     namedCache({ name: ODIN_TOOLCHAIN_CACHE, shared: true });
 
-    const toolchain = new OdinToolchain({ version, linker: opts.linker });
-
-    if (opts.default) {
-        defaultVersion = version;
-        defaultToolchain = toolchain;
-    }
-
-    return toolchain;
+    return new OdinToolchain(
+        { version, linker: opts.linker },
+        { default: opts.default },
+    );
 }
 
 /**
@@ -150,13 +151,11 @@ export function acquireOdinToolchain(version) {
  * @returns {string}
  */
 export function resolveOdinToolchainVersion(version) {
-    if (version) {
-        return version;
+    const resolved = OdinToolchain.resolveVersion(version);
+    if (!resolved) {
+        throw new Error("no Odin toolchain version specified and no default set");
     }
-    if (defaultVersion) {
-        return defaultVersion;
-    }
-    throw new Error("no Odin toolchain version specified and no default set");
+    return resolved;
 }
 
 /**
@@ -197,7 +196,7 @@ export function odinTool(version) {
  * @returns {string|null}
  */
 export function defaultOdinToolchainVersion() {
-    return defaultVersion;
+    return OdinToolchain.defaultVersion();
 }
 
 /**
@@ -206,18 +205,15 @@ export function defaultOdinToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultOdinToolchain() {
-    return defaultToolchain;
+    return OdinToolchain.default();
 }
 
-const LOCKFILE_SPEC = {
+const LOCKFILE_SPEC = registerToolchainLockfile({
     name: "odin",
     platforms: odinSupportedPlatforms(),
     downloadUrl: odinDownloadUrl,
     artifactName: odinArtifactName,
     lockfile: "//rules/odin/odin.lock",
-};
-product(OdinToolchain, GEN_LOCKFILES, (handle) =>
+}, ["dev-2026-03"]);
+product(OdinToolchain, GEN_LOCKFILES, ODIN_TOOL, (handle) =>
     generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
-registerBuiltinLockfile({ ...LOCKFILE_SPEC, versions: ["dev-2026-03"] });
-
-product(OdinToolchain, TOOLCHAIN, (handle) => odinBin(handle.attrs.version));
