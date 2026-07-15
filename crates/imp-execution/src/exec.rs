@@ -14,6 +14,8 @@ use indicatif::ProgressBar;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+#[cfg(not(unix))]
+use imp_store::cache::copy_directory;
 use imp_store::cache::{
     artifact_relative_path, cached_outputs_present, create_sandbox_root, digest_json, file_mode,
     materialize_cached_outputs, materialize_named_cache_artifacts, store_file_blob,
