@@ -1,50 +1,60 @@
 use crate::proto::execution_server::ExecutionServer;
 use crate::server::ExecutionServer as Service;
-use anyhow::Result;
-use std::path::PathBuf;
-use tokio::net::UnixListener;
-use tokio_stream::wrappers::UnixListenerStream;
+use anyhow::{bail, Context, Result};
+use std::net::SocketAddr;
 use tonic::transport::Server;
 use imp_execution::service::LocalExecutionService;
 
-pub fn socket_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("IMP_DAEMON_SOCKET") {
-        return path.into();
-    }
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return PathBuf::from(runtime).join("imp/daemon.sock");
-    }
-    PathBuf::from(format!(
-        "/tmp/imp-{}/daemon.sock",
-        std::env::var("UID").unwrap_or_else(|_| "0".to_owned())
-    ))
+const DEFAULT_DAEMON_ADDR: &str = "127.0.0.1:49671";
+
+pub fn address() -> Result<SocketAddr> {
+    let value =
+        std::env::var("IMP_DAEMON_ADDR").unwrap_or_else(|_| DEFAULT_DAEMON_ADDR.to_owned());
+    parse_address(&value)
 }
 
-pub fn status() -> bool {
-    socket_path().exists()
+fn parse_address(value: &str) -> Result<SocketAddr> {
+    let address: SocketAddr = value
+        .parse()
+        .with_context(|| format!("invalid IMP_DAEMON_ADDR {value:?}"))?;
+    if !address.ip().is_loopback() {
+        bail!("IMP_DAEMON_ADDR must use a loopback address");
+    }
+    Ok(address)
+}
+
+pub fn endpoint_uri() -> Result<String> {
+    Ok(format!("http://{}", address()?))
 }
 
 pub async fn serve() -> Result<()> {
-    #[cfg(not(unix))]
-    anyhow::bail!("daemon mode requires Unix sockets");
-    #[cfg(unix)]
-    {
-        let socket = socket_path();
-        if let Some(parent) = socket.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let _ = std::fs::remove_file(&socket);
-        let listener = UnixListener::bind(&socket)?;
-        let incoming = UnixListenerStream::new(listener);
-        let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
-        let service = Service {
-            service: std::sync::Arc::new(LocalExecutionService::new()),
-            shutdown: shutdown.clone(),
-        };
-        Server::builder()
-            .add_service(ExecutionServer::new(service))
-            .serve_with_incoming_shutdown(incoming, shutdown.notified())
-            .await?;
-    }
+    let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let service = Service {
+        service: std::sync::Arc::new(LocalExecutionService::new()),
+        shutdown: shutdown.clone(),
+    };
+    Server::builder()
+        .add_service(ExecutionServer::new(service))
+        .serve_with_shutdown(address()?, shutdown.notified())
+        .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_address;
+
+    #[test]
+    fn daemon_address_must_be_loopback() {
+        assert_eq!(
+            parse_address("127.0.0.1:1234").unwrap().to_string(),
+            "127.0.0.1:1234"
+        );
+        assert_eq!(
+            parse_address("[::1]:1234").unwrap().to_string(),
+            "[::1]:1234"
+        );
+        assert!(parse_address("0.0.0.0:1234").is_err());
+        assert!(parse_address("not-an-address").is_err());
+    }
 }

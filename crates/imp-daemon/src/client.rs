@@ -1,12 +1,9 @@
-use crate::{convert, lifecycle, proto};
+use crate::{convert, lifecycle, proto, PROTOCOL_VERSION};
 use anyhow::{bail, Result};
-use hyper_util::rt::TokioIo;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
-use tower::service_fn;
 use imp_exec_api::{
     Capabilities, ExecAction, ExecOutcome, ExecutionService, WorkerHandle, WorkerSpec,
 };
@@ -17,9 +14,6 @@ pub struct RemoteExecutionService {
 
 impl RemoteExecutionService {
     pub fn connect() -> Result<Self> {
-        if !cfg!(unix) {
-            bail!("daemon mode requires Unix sockets");
-        }
         // `connect` is part of a synchronous factory but is called while the
         // frontend runtime is loading QuickJS. Construct and drive the
         // blocking-capable client runtime on a plain OS thread so this never
@@ -34,7 +28,7 @@ impl RemoteExecutionService {
                 .rt
                 .as_ref()
                 .unwrap()
-                .block_on(service.channel())
+                .block_on(service.probe())
                 .is_err()
             {
                 let exe = std::env::current_exe()?;
@@ -56,7 +50,7 @@ impl RemoteExecutionService {
                         .rt
                         .as_ref()
                         .unwrap()
-                        .block_on(service.channel())
+                        .block_on(service.probe())
                         .is_ok()
                     {
                         connected = true;
@@ -73,20 +67,33 @@ impl RemoteExecutionService {
         .join()
         .map_err(|_| anyhow::anyhow!("daemon client initialization thread panicked"))?
     }
+
     async fn channel(&self) -> Result<Channel> {
-        let path = lifecycle::socket_path();
-        let endpoint = Endpoint::try_from("http://[::]:50051")?;
-        Ok(
-            endpoint
-                .connect_with_connector(service_fn(move |_: tonic::codegen::http::Uri| {
-                    let path = path.clone();
-                    async move {
-                        Ok::<_, std::io::Error>(TokioIo::new(UnixStream::connect(path).await?))
-                    }
-                }))
-                .await?,
-        )
+        let endpoint = Endpoint::from_shared(lifecycle::endpoint_uri()?)?
+            .connect_timeout(std::time::Duration::from_millis(250));
+        Ok(endpoint.connect().await?)
     }
+
+    async fn probe(&self) -> Result<()> {
+        let mut client = proto::execution_client::ExecutionClient::new(self.channel().await?);
+        let capabilities = client
+            .get_capabilities(Request::new(proto::Empty {}))
+            .await?
+            .into_inner();
+        if capabilities.protocol_version != PROTOCOL_VERSION {
+            bail!(
+                "imp daemon protocol mismatch: client {}, server {}",
+                PROTOCOL_VERSION,
+                capabilities.protocol_version
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn is_running() -> bool {
+        Self { rt: None }.probe().await.is_ok()
+    }
+
     fn block_on_external<T: Send>(
         &self,
         f: impl FnOnce(&tokio::runtime::Runtime) -> Result<T> + Send,
@@ -109,25 +116,11 @@ impl RemoteExecutionService {
         })
     }
 
-    pub fn shutdown_existing() -> Result<()> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        let path = lifecycle::socket_path();
-        rt.block_on(async move {
-            let endpoint = Endpoint::try_from("http://[::]:50051")?;
-            let channel = endpoint
-                .connect_with_connector(service_fn(move |_: tonic::codegen::http::Uri| {
-                    let path = path.clone();
-                    async move {
-                        Ok::<_, std::io::Error>(TokioIo::new(UnixStream::connect(path).await?))
-                    }
-                }))
-                .await?;
-            let mut client = proto::execution_client::ExecutionClient::new(channel);
-            client.shutdown(Request::new(proto::Empty {})).await?;
-            Ok::<(), anyhow::Error>(())
-        })
+    pub async fn shutdown_existing() -> Result<()> {
+        let service = Self { rt: None };
+        let mut client = proto::execution_client::ExecutionClient::new(service.channel().await?);
+        client.shutdown(Request::new(proto::Empty {})).await?;
+        Ok(())
     }
 }
 

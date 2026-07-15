@@ -384,7 +384,7 @@ async fn run() -> Result<()> {
             DaemonCmd::Status => {
                 println!(
                     "{}",
-                    if imp_daemon::lifecycle::status() {
+                    if imp_daemon::client::RemoteExecutionService::is_running().await {
                         "running"
                     } else {
                         "stopped"
@@ -393,7 +393,7 @@ async fn run() -> Result<()> {
                 return Ok(());
             }
             DaemonCmd::Stop => {
-                imp_daemon::client::RemoteExecutionService::shutdown_existing()?;
+                imp_daemon::client::RemoteExecutionService::shutdown_existing().await?;
                 return Ok(());
             }
         }

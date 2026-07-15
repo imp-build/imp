@@ -761,7 +761,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "hyper-util",
  "imp-exec-api",
  "imp-execution",
  "imp-store",
@@ -771,7 +770,6 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-build",
- "tower 0.5.3",
 ]
 
 [[package]]
