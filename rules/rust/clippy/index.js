@@ -6,4 +6,9 @@ import { cargoClippy } from "//rules/rust/lint";
 
 const CLIPPY_TOOL = toolName("clippy");
 
-export const cargoPackageLint = product(CargoPackage, LINT, CLIPPY_TOOL, cargoClippy);
+export const cargoPackageLint = product(
+	CargoPackage,
+	LINT,
+	CLIPPY_TOOL,
+	cargoClippy,
+);

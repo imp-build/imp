@@ -1,0 +1,37 @@
+{
+  "tool": "node-toolchain",
+  "versions": {
+    "22.11.0": {
+      "linux/x86_64": {
+        "url": "https://nodejs.org/dist/v22.11.0/node-v22.11.0-linux-x64.tar.gz",
+        "artifact": "node-v22.11.0-linux-x64.tar.gz",
+        "size": 53135426,
+        "sha256": "4f862bab52039835efbe613b532238b6e4dde98d139a34e6923193e073438b13"
+      },
+      "linux/aarch64": {
+        "url": "https://nodejs.org/dist/v22.11.0/node-v22.11.0-linux-arm64.tar.gz",
+        "artifact": "node-v22.11.0-linux-arm64.tar.gz",
+        "size": 52689560,
+        "sha256": "27453f7a0dd6b9e6738f1f6ea6a09b102ec7aa484de1e39d6a1c3608ad47aa6a"
+      },
+      "macos/x86_64": {
+        "url": "https://nodejs.org/dist/v22.11.0/node-v22.11.0-darwin-x64.tar.gz",
+        "artifact": "node-v22.11.0-darwin-x64.tar.gz",
+        "size": 48543942,
+        "sha256": "668d30b9512137b5f5baeef6c1bb4c46efff9a761ba990a034fb6b28b9da2465"
+      },
+      "macos/aarch64": {
+        "url": "https://nodejs.org/dist/v22.11.0/node-v22.11.0-darwin-arm64.tar.gz",
+        "artifact": "node-v22.11.0-darwin-arm64.tar.gz",
+        "size": 47807451,
+        "sha256": "2e89afe6f4e3aa6c7e21c560d8a0453d84807e97850bbb819b998531a22bdfde"
+      },
+      "windows/x86_64": {
+        "url": "https://nodejs.org/dist/v22.11.0/node-v22.11.0-win-x64.zip",
+        "artifact": "node-v22.11.0-win-x64.zip",
+        "size": 34188182,
+        "sha256": "905373a059aecaf7f48c1ce10ffbd5334457ca00f678747f19db5ea7d256c236"
+      }
+    }
+  }
+}

@@ -17,29 +17,29 @@ set_tests_properties([=[basic_test]=] PROPERTIES  _BACKTRACE_TRIPLES "/tmp/cmake
 `;
 
 describe("ctest_testfile parser", () => {
-    test("parses a resolved-absolute-path add_test() entry", () => {
-        const tests = parseCTestTestfile(CTEST_TESTFILE);
-        const mytestCase = tests.find((t) => t.name === "mytest_case");
-        expect(mytestCase.command).toEqual(["/tmp/cmake_probe/build/mytest"]);
-    });
+	test("parses a resolved-absolute-path add_test() entry", () => {
+		const tests = parseCTestTestfile(CTEST_TESTFILE);
+		const mytestCase = tests.find((t) => t.name === "mytest_case");
+		expect(mytestCase.command).toEqual(["/tmp/cmake_probe/build/mytest"]);
+	});
 
-    test("parses an old-style bare-command add_test() entry with args", () => {
-        const tests = parseCTestTestfile(CTEST_TESTFILE);
-        const basicTest = tests.find((t) => t.name === "basic_test");
-        expect(basicTest.command).toEqual(["mytest", "--basic"]);
-    });
+	test("parses an old-style bare-command add_test() entry with args", () => {
+		const tests = parseCTestTestfile(CTEST_TESTFILE);
+		const basicTest = tests.find((t) => t.name === "basic_test");
+		expect(basicTest.command).toEqual(["mytest", "--basic"]);
+	});
 
-    test("ignores set_tests_properties and other file content", () => {
-        const tests = parseCTestTestfile(CTEST_TESTFILE);
-        expect(tests.length).toBe(2);
-    });
+	test("ignores set_tests_properties and other file content", () => {
+		const tests = parseCTestTestfile(CTEST_TESTFILE);
+		expect(tests.length).toBe(2);
+	});
 
-    test("returns an empty list for a file with no add_test() calls", () => {
-        expect(parseCTestTestfile("# no tests here\n")).toEqual([]);
-    });
+	test("returns an empty list for a file with no add_test() calls", () => {
+		expect(parseCTestTestfile("# no tests here\n")).toEqual([]);
+	});
 
-    test("is case-insensitive and tolerant of extra whitespace before the paren", () => {
-        const tests = parseCTestTestfile('ADD_TEST  (  [=[spaced]=] "cmd" )');
-        expect(tests).toEqual([{ name: "spaced", command: ["cmd"] }]);
-    });
+	test("is case-insensitive and tolerant of extra whitespace before the paren", () => {
+		const tests = parseCTestTestfile('ADD_TEST  (  [=[spaced]=] "cmd" )');
+		expect(tests).toEqual([{ name: "spaced", command: ["cmd"] }]);
+	});
 });

@@ -14,28 +14,28 @@
 // additive, not a replacement.
 
 import {
-    Target,
-    expand,
-    output,
-    output_path,
-    product,
-    registerTarget,
-    run,
-    targetAddress,
-    BUILD,
-    TEST,
+	Target,
+	expand,
+	output,
+	output_path,
+	product,
+	registerTarget,
+	run,
+	targetAddress,
+	BUILD,
+	TEST,
 } from "imp:core";
 
 import {
-    declared_path,
-    defaultRustToolchain,
-    normalize_deps,
-    resources,
-    rust_toolchain_version,
-    rustBuildCacheTools,
-    rustLinkerTools,
-    rustToolEnv,
-    sources,
+	declared_path,
+	defaultRustToolchain,
+	normalize_deps,
+	resources,
+	rust_toolchain_version,
+	rustBuildCacheTools,
+	rustLinkerTools,
+	rustToolEnv,
+	sources,
 } from "//rules/rust";
 import { CargoPackage } from "//rules/rust/cargo_package";
 
@@ -44,12 +44,12 @@ import { nativeToolSpec } from "//rules/imp/native_tool";
 import { RUST_TOOL } from "//rules/rust/toolchain";
 
 function safe_target_address(handle) {
-    if (!handle || handle.__imp !== true) return null;
-    try {
-        return targetAddress(handle);
-    } catch (_) {
-        return null;
-    }
+	if (!handle || handle.__imp !== true) return null;
+	try {
+		return targetAddress(handle);
+	} catch (_) {
+		return null;
+	}
 }
 
 // Compiles every test binary in the crate (without running any of them) and
@@ -62,31 +62,48 @@ function safe_target_address(handle) {
 // at its normal on-disk path afterwards, with no per-binary staging step
 // needed.
 async function buildTestBinaries(handle) {
-    const toolSpec = await rustTool(rust_toolchain_version(handle));
-    const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-    const { tools: linkerTools, rustflags, env: linkerEnv } = await rustLinkerTools(toolchainHandle);
-    const { tools: cacheTools, env: cacheEnv } = await rustBuildCacheTools(toolchainHandle);
-    const { tools: rustTools, env: rustEnv } = rustToolEnv(toolSpec, !!(toolchainHandle && toolchainHandle.attrs.sccache));
+	const toolSpec = await rustTool(rust_toolchain_version(handle));
+	const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+	const {
+		tools: linkerTools,
+		rustflags,
+		env: linkerEnv,
+	} = await rustLinkerTools(toolchainHandle);
+	const { tools: cacheTools, env: cacheEnv } =
+		await rustBuildCacheTools(toolchainHandle);
+	const { tools: rustTools, env: rustEnv } = rustToolEnv(
+		toolSpec,
+		!!(toolchainHandle && toolchainHandle.attrs.sccache),
+	);
 
-    const path = declared_path(handle, handle.attrs.path || ".");
-    const srcs = await sources(handle);
-    const resourceInputs = await resources(handle);
-    const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
+	const path = declared_path(handle, handle.attrs.path || ".");
+	const srcs = await sources(handle);
+	const resourceInputs = await resources(handle);
+	const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 
-    const script = 'manifest=$1; target_dir=$2; rustflags=$3; shift 3; ' +
-        'RUSTFLAGS="$rustflags" cargo test --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
+	const script =
+		"manifest=$1; target_dir=$2; rustflags=$3; shift 3; " +
+		'RUSTFLAGS="$rustflags" cargo test --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
 
-    const result = await run({
-        argv: ["sh", "-c", script, "cargo-test-build", `${path}/Cargo.toml`, buildDir, rustflags],
-        tools: [...rustTools, ...linkerTools, ...cacheTools],
-        env: [...rustEnv, ...linkerEnv, ...cacheEnv],
-        inputs: [srcs, resourceInputs],
-        outputs: [output(output_path(buildDir), { kind: "directory" })],
-        materialize: false,
-        display: `cargo test --no-run ${path}`,
-    });
+	const result = await run({
+		argv: [
+			"sh",
+			"-c",
+			script,
+			"cargo-test-build",
+			`${path}/Cargo.toml`,
+			buildDir,
+			rustflags,
+		],
+		tools: [...rustTools, ...linkerTools, ...cacheTools],
+		env: [...rustEnv, ...linkerEnv, ...cacheEnv],
+		inputs: [srcs, resourceInputs],
+		outputs: [output(output_path(buildDir), { kind: "directory" })],
+		materialize: false,
+		display: `cargo test --no-run ${path}`,
+	});
 
-    return { result, buildDir, path };
+	return { result, buildDir, path };
 }
 
 // Parses `cargo test --no-run --message-format=json`'s newline-delimited
@@ -95,64 +112,87 @@ async function buildTestBinaries(handle) {
 // miss-only) and rebases each absolute executable path onto the
 // workspace-relative buildDir it was compiled under.
 export function parseTestBinaries(stdout, buildDir) {
-    const binaries = [];
-    for (const line of stdout.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        let msg;
-        try {
-            msg = JSON.parse(trimmed);
-        } catch (_) {
-            continue;
-        }
-        if (msg.reason !== "compiler-artifact" || !msg.executable || !(msg.profile && msg.profile.test)) continue;
-        const idx = msg.executable.indexOf(buildDir);
-        const executable = idx === -1 ? msg.executable : msg.executable.slice(idx);
-        binaries.push({
-            name: msg.target.name,
-            kind: (msg.target.kind && msg.target.kind[0]) || "test",
-            executable,
-        });
-    }
-    return binaries;
+	const binaries = [];
+	for (const line of stdout.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		let msg;
+		try {
+			msg = JSON.parse(trimmed);
+		} catch (_) {
+			continue;
+		}
+		if (
+			msg.reason !== "compiler-artifact" ||
+			!msg.executable ||
+			!(msg.profile && msg.profile.test)
+		)
+			continue;
+		const idx = msg.executable.indexOf(buildDir);
+		const executable = idx === -1 ? msg.executable : msg.executable.slice(idx);
+		binaries.push({
+			name: msg.target.name,
+			kind: (msg.target.kind && msg.target.kind[0]) || "test",
+			executable,
+		});
+	}
+	return binaries;
 }
 
 export class RustTest extends Target {
-    static kind = "rust_test";
-    constructor({ path = ".", buildDir, toolchain, toolchainVersion, executable, testArgs = [], testTools = [], deps = [], workspaceMember = false }) {
-        // Forwards the parent cargoPackage's own resource-package deps (see
-        // //rules/asset) so resources(handle) resolves the same way for a
-        // fanned-out rust_test as it does for the parent — the whole crate
-        // (this test binary included) is recompiled from the same sources,
-        // so it needs the same extra files.
-        const normalizedDeps = normalize_deps(deps);
-        const normalizedTestTools = normalize_deps(testTools);
-        super({
-            kind: RustTest.kind,
-            attrs: {
-                path,
-                buildDir,
-                executable,
-                testArgs,
-                testTools: normalizedTestTools,
-                workspaceMember,
-                ...(toolchain ? { toolchain } : {}),
-                ...(toolchainVersion ? { toolchainVersion } : {}),
-                ...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
-            },
-            deps: [
-                ...(toolchain ? [{ target: toolchain }] : []),
-                ...normalizedDeps.map(target => ({ target })),
-                ...normalizedTestTools.map(target => ({ target, mode: "tool" })),
-            ],
-        });
-    }
+	static kind = "rust_test";
+	constructor({
+		path = ".",
+		buildDir,
+		toolchain,
+		toolchainVersion,
+		executable,
+		testArgs = [],
+		testTools = [],
+		deps = [],
+		workspaceMember = false,
+	}) {
+		// Forwards the parent cargoPackage's own resource-package deps (see
+		// //rules/asset) so resources(handle) resolves the same way for a
+		// fanned-out rust_test as it does for the parent — the whole crate
+		// (this test binary included) is recompiled from the same sources,
+		// so it needs the same extra files.
+		const normalizedDeps = normalize_deps(deps);
+		const normalizedTestTools = normalize_deps(testTools);
+		super({
+			kind: RustTest.kind,
+			attrs: {
+				path,
+				buildDir,
+				executable,
+				testArgs,
+				testTools: normalizedTestTools,
+				workspaceMember,
+				...(toolchain ? { toolchain } : {}),
+				...(toolchainVersion ? { toolchainVersion } : {}),
+				...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
+			},
+			deps: [
+				...(toolchain ? [{ target: toolchain }] : []),
+				...normalizedDeps.map((target) => ({ target })),
+				...normalizedTestTools.map((target) => ({ target, mode: "tool" })),
+			],
+		});
+	}
 }
 
-export const rustTestBuild = product(RustTest, BUILD, RUST_TOOL, async function rustTestBuild(handle) {
-    const { result } = await buildTestBinaries(handle);
-    return { outputPath: handle.attrs.executable, outputDigest: result.outputDigest };
-});
+export const rustTestBuild = product(
+	RustTest,
+	BUILD,
+	RUST_TOOL,
+	async function rustTestBuild(handle) {
+		const { result } = await buildTestBinaries(handle);
+		return {
+			outputPath: handle.attrs.executable,
+			outputDigest: result.outputDigest,
+		};
+	},
+);
 
 // No outputs/materialize on this final step: test results aren't
 // user-addressable artifacts. impure: true so a re-run always executes
@@ -163,17 +203,28 @@ export const rustTestBuild = product(RustTest, BUILD, RUST_TOOL, async function 
 // the fan-out itself is what gets the parallelism/isolation (each binary is
 // its own imp target, its own sandbox), not thread-level concurrency
 // within a single binary.
-export const rustTestRun = product(RustTest, TEST, RUST_TOOL, async function rustTestRun(handle) {
-    const { outputDigest } = await rustTestBuild(handle);
-    const testTools = await Promise.all((handle.attrs.testTools || []).map(nativeToolSpec));
-    return run({
-        argv: [handle.attrs.executable, "--test-threads=1", ...handle.attrs.testArgs],
-        tools: testTools,
-        inputs: [{ kind: "digest", digest: outputDigest }],
-        impure: true,
-        display: `cargo test binary ${handle.attrs.executable}`,
-    });
-});
+export const rustTestRun = product(
+	RustTest,
+	TEST,
+	RUST_TOOL,
+	async function rustTestRun(handle) {
+		const { outputDigest } = await rustTestBuild(handle);
+		const testTools = await Promise.all(
+			(handle.attrs.testTools || []).map(nativeToolSpec),
+		);
+		return run({
+			argv: [
+				handle.attrs.executable,
+				"--test-threads=1",
+				...handle.attrs.testArgs,
+			],
+			tools: testTools,
+			inputs: [{ kind: "digest", digest: outputDigest }],
+			impure: true,
+			display: `cargo test binary ${handle.attrs.executable}`,
+		});
+	},
+);
 
 // Runs at most once per invocation, only for cargo-package targets actually
 // reachable from the current goal's selection (see `ensure_expanded` in
@@ -187,28 +238,35 @@ export const rustTestRun = product(RustTest, TEST, RUST_TOOL, async function rus
 // unit tests, file stem for integration tests) can otherwise collide with
 // the parent's own hand-declared name, or with a sibling cargoPackage's
 // discovered binaries in the same directory.
-export const expandCargoTests = expand(CargoPackage, async function expandCargoTests(handle) {
-    const { result, buildDir } = await buildTestBinaries(handle);
-    const binaries = parseTestBinaries(result.stdout, buildDir);
+export const expandCargoTests = expand(
+	CargoPackage,
+	async function expandCargoTests(handle) {
+		const { result, buildDir } = await buildTestBinaries(handle);
+		const binaries = parseTestBinaries(result.stdout, buildDir);
 
-    const parentAddress = safe_target_address(handle);
-    if (!parentAddress) return;
-    const [scope, parentName] = [parentAddress.split(":")[0], parentAddress.split(":")[1]];
+		const parentAddress = safe_target_address(handle);
+		if (!parentAddress) return;
+		const [scope, parentName] = [
+			parentAddress.split(":")[0],
+			parentAddress.split(":")[1],
+		];
 
-    for (const bin of binaries) {
-        registerTarget(
-            new RustTest({
-                path: handle.attrs.path,
-                buildDir,
-                toolchain: handle.attrs.toolchain,
-                toolchainVersion: handle.attrs.toolchainVersion,
-                executable: bin.executable,
-                testArgs: [],
-                testTools: handle.attrs.testTools || [],
-                deps: handle.attrs.deps || [],
-                workspaceMember: handle.attrs.workspaceMember,
-            }),
-            `${scope}:${parentName}_tests_${bin.name}`,
-        );
-    }
-}, { goals: ["test"] });
+		for (const bin of binaries) {
+			registerTarget(
+				new RustTest({
+					path: handle.attrs.path,
+					buildDir,
+					toolchain: handle.attrs.toolchain,
+					toolchainVersion: handle.attrs.toolchainVersion,
+					executable: bin.executable,
+					testArgs: [],
+					testTools: handle.attrs.testTools || [],
+					deps: handle.attrs.deps || [],
+					workspaceMember: handle.attrs.workspaceMember,
+				}),
+				`${scope}:${parentName}_tests_${bin.name}`,
+			);
+		}
+	},
+	{ goals: ["test"] },
+);

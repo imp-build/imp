@@ -16,12 +16,32 @@
 //     in-place, not copied) so writes made during a build persist on disk
 //     for the next invocation — see materialize_tools_into_sandbox in
 //     src/exec.rs.
-import { Toolchain, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas, workerStart, toolName } from "imp:core";
+import {
+	Toolchain,
+	product,
+	namedCache,
+	run,
+	output,
+	output_path,
+	platformInfo,
+	cachePut,
+	cacheGet,
+	cacheHas,
+	workerStart,
+	toolName,
+} from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { downloadToolArtifact, lockedDownloadTools } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockedDownloadTools,
+} from "//rules/imp/lockfile";
 import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
-import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
+import {
+	generateToolLockfile,
+	GEN_LOCKFILES,
+	registerToolchainLockfile,
+} from "//rules/workflows/lockfiles";
 import { RUST_BUILD_CACHE } from "//rules/rust/products";
 
 // Declared tool identity for products this toolchain implements; also
@@ -35,20 +55,22 @@ const SCCACHE_DATA_CACHE = "sccache-data";
 // sccache ships musl builds for Linux (no glibc-version coupling needed) and
 // native builds for macOS/Windows.
 const TARGET_TRIPLES = {
-    "linux-x86_64": "x86_64-unknown-linux-musl",
-    "linux-aarch64": "aarch64-unknown-linux-musl",
-    "macos-x86_64": "x86_64-apple-darwin",
-    "macos-aarch64": "aarch64-apple-darwin",
-    "windows-x86_64": "x86_64-pc-windows-msvc",
-    "windows-aarch64": "aarch64-pc-windows-msvc",
+	"linux-x86_64": "x86_64-unknown-linux-musl",
+	"linux-aarch64": "aarch64-unknown-linux-musl",
+	"macos-x86_64": "x86_64-apple-darwin",
+	"macos-aarch64": "aarch64-apple-darwin",
+	"windows-x86_64": "x86_64-pc-windows-msvc",
+	"windows-aarch64": "aarch64-pc-windows-msvc",
 };
 
 function targetTriple(plat) {
-    const triple = TARGET_TRIPLES[`${plat.os}-${plat.arch}`];
-    if (!triple) {
-        throw new Error(`unsupported sccache toolchain platform: ${plat.os}/${plat.arch}`);
-    }
-    return triple;
+	const triple = TARGET_TRIPLES[`${plat.os}-${plat.arch}`];
+	if (!triple) {
+		throw new Error(
+			`unsupported sccache toolchain platform: ${plat.os}/${plat.arch}`,
+		);
+	}
+	return triple;
 }
 
 /**
@@ -59,7 +81,7 @@ function targetTriple(plat) {
  * @returns {string}
  */
 export function sccacheArtifactName(version, plat) {
-    return `sccache-v${version}-${targetTriple(plat)}.tar.gz`;
+	return `sccache-v${version}-${targetTriple(plat)}.tar.gz`;
 }
 
 /**
@@ -70,7 +92,7 @@ export function sccacheArtifactName(version, plat) {
  * @returns {string}
  */
 export function sccacheDownloadUrl(version, plat) {
-    return `https://github.com/mozilla/sccache/releases/download/v${version}/${sccacheArtifactName(version, plat)}`;
+	return `https://github.com/mozilla/sccache/releases/download/v${version}/${sccacheArtifactName(version, plat)}`;
 }
 
 /**
@@ -81,7 +103,7 @@ export function sccacheDownloadUrl(version, plat) {
  * @returns {string}
  */
 export function sccacheCacheKey(version, plat) {
-    return `${version}/${plat.os}-${plat.arch}`;
+	return `${version}/${plat.os}-${plat.arch}`;
 }
 
 /**
@@ -94,7 +116,7 @@ export function sccacheCacheKey(version, plat) {
  * @returns {string}
  */
 export function sccacheDataCacheKey(plat) {
-    return `${plat.os}-${plat.arch}`;
+	return `${plat.os}-${plat.arch}`;
 }
 
 /**
@@ -103,39 +125,46 @@ export function sccacheDataCacheKey(plat) {
  * @returns {Array<{ os: string, arch: string }>}
  */
 export function sccacheSupportedPlatforms() {
-    return Object.keys(TARGET_TRIPLES).map((key) => {
-        const sep = key.indexOf("-");
-        return { os: key.slice(0, sep), arch: key.slice(sep + 1) };
-    });
+	return Object.keys(TARGET_TRIPLES).map((key) => {
+		const sep = key.indexOf("-");
+		return { os: key.slice(0, sep), arch: key.slice(sep + 1) };
+	});
 }
 
 // Bare coreutils used by the install/init scripts below. The sandbox is
 // fully hermetic — even `mkdir`/`tar` must be declared tools, not resolved
 // from an ambient or fixed-base PATH.
 function coreToolNames(plat) {
-    return [...new Set([
-        ...lockedDownloadTools(plat),
-        ...extractArchiveTools("tar.gz"),
-    ])];
+	return [
+		...new Set([
+			...lockedDownloadTools(plat),
+			...extractArchiveTools("tar.gz"),
+		]),
+	];
 }
 
 export class SccacheToolchain extends Toolchain {
-    static kind = "sccache-toolchain";
-    static tool = SCCACHE_TOOL;
-    constructor({ version, unverified }, opts) {
-        super({
-            kind: SccacheToolchain.kind,
-            attrs: { version, ...(unverified ? { unverified } : {}) },
-        }, opts);
-    }
+	static kind = "sccache-toolchain";
+	static tool = SCCACHE_TOOL;
+	constructor({ version, unverified }, opts) {
+		super(
+			{
+				kind: SccacheToolchain.kind,
+				attrs: { version, ...(unverified ? { unverified } : {}) },
+			},
+			opts,
+		);
+	}
 
-    // sccache is a compiler wrapper resolved through the RUST_BUILD_CACHE
-    // role, not an @tool-dispatchable binary; expose the cached binary path.
-    async bin() {
-        const dir = await acquireSccacheToolchain(SccacheToolchain.requireVersion(this.attrs.version));
-        const exe = platformInfo().os === "windows" ? "sccache.exe" : "sccache";
-        return `${dir}/${exe}`;
-    }
+	// sccache is a compiler wrapper resolved through the RUST_BUILD_CACHE
+	// role, not an @tool-dispatchable binary; expose the cached binary path.
+	async bin() {
+		const dir = await acquireSccacheToolchain(
+			SccacheToolchain.requireVersion(this.attrs.version),
+		);
+		const exe = platformInfo().os === "windows" ? "sccache.exe" : "sccache";
+		return `${dir}/${exe}`;
+	}
 }
 
 // Declared lazily, once — target() addresses are only assigned at
@@ -144,8 +173,8 @@ export class SccacheToolchain extends Toolchain {
 let coreToolHandles = null;
 
 export function __resetSccacheToolchainStateForTest() {
-    SccacheToolchain.clearDefault();
-    coreToolHandles = null;
+	SccacheToolchain.clearDefault();
+	coreToolHandles = null;
 }
 
 /**
@@ -160,16 +189,18 @@ export function __resetSccacheToolchainStateForTest() {
  * @category configuration
  */
 export function sccacheToolchain(version, opts = {}) {
-    namedCache({ name: SCCACHE_TOOLCHAIN_CACHE, shared: true });
-    namedCache({ name: SCCACHE_DATA_CACHE });
-    if (!coreToolHandles) {
-        coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
-    }
+	namedCache({ name: SCCACHE_TOOLCHAIN_CACHE, shared: true });
+	namedCache({ name: SCCACHE_DATA_CACHE });
+	if (!coreToolHandles) {
+		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
+			nativeTool(name),
+		);
+	}
 
-    return new SccacheToolchain(
-        { version, unverified: opts.unverified },
-        { default: opts.default },
-    );
+	return new SccacheToolchain(
+		{ version, unverified: opts.unverified },
+		{ default: opts.default },
+	);
 }
 
 /**
@@ -180,11 +211,11 @@ export function sccacheToolchain(version, opts = {}) {
  * @returns {string|null} Local path to the cached toolchain root.
  */
 export function installSccacheToolchain(version, source) {
-    namedCache({ name: SCCACHE_TOOLCHAIN_CACHE, shared: true });
-    const plat = platformInfo();
-    const key = sccacheCacheKey(version, plat);
-    cachePut(SCCACHE_TOOLCHAIN_CACHE, key, source);
-    return cacheGet(SCCACHE_TOOLCHAIN_CACHE, key);
+	namedCache({ name: SCCACHE_TOOLCHAIN_CACHE, shared: true });
+	const plat = platformInfo();
+	const key = sccacheCacheKey(version, plat);
+	cachePut(SCCACHE_TOOLCHAIN_CACHE, key, source);
+	return cacheGet(SCCACHE_TOOLCHAIN_CACHE, key);
 }
 
 /**
@@ -195,42 +226,46 @@ export function installSccacheToolchain(version, source) {
  * @returns {Promise<string>} Local path to the toolchain root.
  */
 export async function acquireSccacheToolchain(version) {
-    const plat = platformInfo();
-    const key = sccacheCacheKey(version, plat);
+	const plat = platformInfo();
+	const key = sccacheCacheKey(version, plat);
 
-    if (cacheHas(SCCACHE_TOOLCHAIN_CACHE, key)) {
-        return cacheGet(SCCACHE_TOOLCHAIN_CACHE, key);
-    }
-    if (!coreToolHandles) {
-        throw new Error("no sccache toolchain declared via sccacheToolchain(); nothing to acquire");
-    }
+	if (cacheHas(SCCACHE_TOOLCHAIN_CACHE, key)) {
+		return cacheGet(SCCACHE_TOOLCHAIN_CACHE, key);
+	}
+	if (!coreToolHandles) {
+		throw new Error(
+			"no sccache toolchain declared via sccacheToolchain(); nothing to acquire",
+		);
+	}
 
-    const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
+	const coreTools = await Promise.all(
+		coreToolHandles.map((handle) => nativeToolSpec(handle)),
+	);
 
-    const downloadPath = `.imp/sccache-downloads/${key}/${sccacheArtifactName(version, plat)}`;
-    await downloadToolArtifact({
-        lockfile: SCCACHE_LOCKFILE,
-        tool: "sccache",
-        version,
-        plat,
-        url: sccacheDownloadUrl(version, plat),
-        downloadPath,
-        tools: coreTools,
-        display: `download sccache ${version} (${plat.os}/${plat.arch})`,
-        unverified: SccacheToolchain.resolveUnverified(version),
-    });
+	const downloadPath = `.imp/sccache-downloads/${key}/${sccacheArtifactName(version, plat)}`;
+	await downloadToolArtifact({
+		lockfile: SCCACHE_LOCKFILE,
+		tool: "sccache",
+		version,
+		plat,
+		url: sccacheDownloadUrl(version, plat),
+		downloadPath,
+		tools: coreTools,
+		display: `download sccache ${version} (${plat.os}/${plat.arch})`,
+		unverified: SccacheToolchain.resolveUnverified(version),
+	});
 
-    await extractArchive({
-        archive: downloadPath,
-        dest: `.imp/sccache-toolchains/${key}`,
-        format: "tar.gz",
-        stripComponents: 1,
-        tools: coreTools,
-        namedCache: { name: SCCACHE_TOOLCHAIN_CACHE, key },
-        display: `install sccache ${version} (${plat.os}/${plat.arch})`,
-    });
+	await extractArchive({
+		archive: downloadPath,
+		dest: `.imp/sccache-toolchains/${key}`,
+		format: "tar.gz",
+		stripComponents: 1,
+		tools: coreTools,
+		namedCache: { name: SCCACHE_TOOLCHAIN_CACHE, key },
+		display: `install sccache ${version} (${plat.os}/${plat.arch})`,
+	});
 
-    return cacheGet(SCCACHE_TOOLCHAIN_CACHE, key);
+	return cacheGet(SCCACHE_TOOLCHAIN_CACHE, key);
 }
 
 /**
@@ -244,31 +279,35 @@ export async function acquireSccacheToolchain(version) {
  * @returns {Promise<string>} The named-cache key for the data directory.
  */
 async function ensureSccacheDataDir() {
-    const plat = platformInfo();
-    const key = sccacheDataCacheKey(plat);
-    if (cacheHas(SCCACHE_DATA_CACHE, key)) {
-        return key;
-    }
-    if (!coreToolHandles) {
-        throw new Error("no sccache toolchain declared via sccacheToolchain(); nothing to acquire");
-    }
-    const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
-    const dataDir = `.imp/sccache-data/${key}`;
+	const plat = platformInfo();
+	const key = sccacheDataCacheKey(plat);
+	if (cacheHas(SCCACHE_DATA_CACHE, key)) {
+		return key;
+	}
+	if (!coreToolHandles) {
+		throw new Error(
+			"no sccache toolchain declared via sccacheToolchain(); nothing to acquire",
+		);
+	}
+	const coreTools = await Promise.all(
+		coreToolHandles.map((handle) => nativeToolSpec(handle)),
+	);
+	const dataDir = `.imp/sccache-data/${key}`;
 
-    await run({
-        argv: ["sh", "-c", 'mkdir -p "$1"', "init-sccache-data", dataDir],
-        tools: coreTools,
-        outputs: [
-            output(output_path(dataDir), {
-                kind: "directory",
-                namedCache: { name: SCCACHE_DATA_CACHE, key },
-            }),
-        ],
-        materialize: false,
-        display: `init sccache data dir (${plat.os}/${plat.arch})`,
-    });
+	await run({
+		argv: ["sh", "-c", 'mkdir -p "$1"', "init-sccache-data", dataDir],
+		tools: coreTools,
+		outputs: [
+			output(output_path(dataDir), {
+				kind: "directory",
+				namedCache: { name: SCCACHE_DATA_CACHE, key },
+			}),
+		],
+		materialize: false,
+		display: `init sccache data dir (${plat.os}/${plat.arch})`,
+	});
 
-    return key;
+	return key;
 }
 
 /**
@@ -278,7 +317,7 @@ async function ensureSccacheDataDir() {
  * @returns {string|null}
  */
 export function resolveSccacheToolchainVersion(version) {
-    return SccacheToolchain.resolveVersion(version);
+	return SccacheToolchain.resolveVersion(version);
 }
 
 /**
@@ -288,16 +327,16 @@ export function resolveSccacheToolchainVersion(version) {
  * @returns {Promise<object>}
  */
 export async function sccacheTool(version) {
-    const resolved = SccacheToolchain.requireVersion(version);
-    await acquireSccacheToolchain(resolved);
-    const plat = platformInfo();
-    return {
-        kind: "tool",
-        name: "sccache",
-        cache: SCCACHE_TOOLCHAIN_CACHE,
-        key: sccacheCacheKey(resolved, plat),
-        binDirs: ["."],
-    };
+	const resolved = SccacheToolchain.requireVersion(version);
+	await acquireSccacheToolchain(resolved);
+	const plat = platformInfo();
+	return {
+		kind: "tool",
+		name: "sccache",
+		cache: SCCACHE_TOOLCHAIN_CACHE,
+		key: sccacheCacheKey(resolved, plat),
+		binDirs: ["."],
+	};
 }
 
 /**
@@ -315,8 +354,8 @@ export async function sccacheTool(version) {
  * @returns {Promise<string>}
  */
 export async function sccacheDataDir() {
-    const key = await ensureSccacheDataDir();
-    return cacheGet(SCCACHE_DATA_CACHE, key);
+	const key = await ensureSccacheDataDir();
+	return cacheGet(SCCACHE_DATA_CACHE, key);
 }
 
 /**
@@ -325,7 +364,7 @@ export async function sccacheDataDir() {
  * @returns {string|null}
  */
 export function defaultSccacheToolchainVersion() {
-    return SccacheToolchain.defaultVersion();
+	return SccacheToolchain.defaultVersion();
 }
 
 /**
@@ -334,18 +373,22 @@ export function defaultSccacheToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultSccacheToolchain() {
-    return SccacheToolchain.default();
+	return SccacheToolchain.default();
 }
 
-const LOCKFILE_SPEC = registerToolchainLockfile({
-    name: "sccache",
-    platforms: sccacheSupportedPlatforms(),
-    downloadUrl: sccacheDownloadUrl,
-    artifactName: sccacheArtifactName,
-    lockfile: SCCACHE_LOCKFILE,
-}, ["0.10.0"]);
+const LOCKFILE_SPEC = registerToolchainLockfile(
+	{
+		name: "sccache",
+		platforms: sccacheSupportedPlatforms(),
+		downloadUrl: sccacheDownloadUrl,
+		artifactName: sccacheArtifactName,
+		lockfile: SCCACHE_LOCKFILE,
+	},
+	["0.10.0"],
+);
 product(SccacheToolchain, GEN_LOCKFILES, SCCACHE_TOOL, (handle) =>
-    generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
+	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+);
 
 /**
  * Adapter exposing an sccache toolchain as Rust's RUSTC_WRAPPER, sharing a
@@ -356,72 +399,77 @@ product(SccacheToolchain, GEN_LOCKFILES, SCCACHE_TOOL, (handle) =>
  * "rust-link-driver"/"rust-linker".
  */
 export class RustSccacheWrapper {
-    constructor(handle) {
-        this.handle = handle;
-    }
+	constructor(handle) {
+		this.handle = handle;
+	}
 
-    /** @returns {Promise<object[]>} run({ tools }) entries this wrapper needs. */
-    async tools() {
-        return [await sccacheTool(this.handle.attrs.version)];
-    }
+	/** @returns {Promise<object[]>} run({ tools }) entries this wrapper needs. */
+	async tools() {
+		return [await sccacheTool(this.handle.attrs.version)];
+	}
 
-    /**
-     * Ensure sccache's background server is running, then return the env
-     * entries wiring rustc through it.
-     *
-     * The server is started via workerStart() (see //rules/imp, backed by
-     * src/worker.rs) rather than left to sccache's own auto-spawn-on-first-
-     * use behavior: sccache's client auto-spawns a persistent daemon that
-     * then keeps running detached from whatever sandbox/script started it,
-     * inheriting whatever TMPDIR/HOME were active at that moment. Since
-     * every imp run() sandbox gets a fresh TMPDIR/HOME that's deleted with
-     * its sandbox (src/exec.rs's sandbox_home_tmp), a daemon auto-spawned
-     * from inside one sandbox ends up pointed at directories that no longer
-     * exist as soon as that sandbox is torn down — every later build
-     * sharing that daemon then fails with sccache's own "Failed to create
-     * temp dir" error. workerStart() instead spawns the server directly from
-     * the host into a stable, workspace-scoped directory that outlives any
-     * single sandbox (and this imp process), and is idempotent/singleton
-     * across concurrent run()s (`--jobs > 1`) requesting it at once.
-     *
-     * sccache's own client/server rendezvous (a fixed default TCP port,
-     * `127.0.0.1:4226`, overridable via `SCCACHE_SERVER_PORT`) is left at
-     * its default rather than pinned to workerStart()'s per-worker port —
-     * that port is a generic convenience for sidecars that take an explicit
-     * `--port`-style flag, not needed here since sccache already has its
-     * own stable, documented rendezvous mechanism.
-     *
-     * @returns {Promise<string[]>} env entries wiring rustc through sccache.
-     */
-    async env() {
-        const version = this.handle.attrs.version;
-        await acquireSccacheToolchain(version);
-        const plat = platformInfo();
-        const bin = `${cacheGet(SCCACHE_TOOLCHAIN_CACHE, sccacheCacheKey(version, plat))}/sccache`;
-        const dataDir = await sccacheDataDir();
+	/**
+	 * Ensure sccache's background server is running, then return the env
+	 * entries wiring rustc through it.
+	 *
+	 * The server is started via workerStart() (see //rules/imp, backed by
+	 * src/worker.rs) rather than left to sccache's own auto-spawn-on-first-
+	 * use behavior: sccache's client auto-spawns a persistent daemon that
+	 * then keeps running detached from whatever sandbox/script started it,
+	 * inheriting whatever TMPDIR/HOME were active at that moment. Since
+	 * every imp run() sandbox gets a fresh TMPDIR/HOME that's deleted with
+	 * its sandbox (src/exec.rs's sandbox_home_tmp), a daemon auto-spawned
+	 * from inside one sandbox ends up pointed at directories that no longer
+	 * exist as soon as that sandbox is torn down — every later build
+	 * sharing that daemon then fails with sccache's own "Failed to create
+	 * temp dir" error. workerStart() instead spawns the server directly from
+	 * the host into a stable, workspace-scoped directory that outlives any
+	 * single sandbox (and this imp process), and is idempotent/singleton
+	 * across concurrent run()s (`--jobs > 1`) requesting it at once.
+	 *
+	 * sccache's own client/server rendezvous (a fixed default TCP port,
+	 * `127.0.0.1:4226`, overridable via `SCCACHE_SERVER_PORT`) is left at
+	 * its default rather than pinned to workerStart()'s per-worker port —
+	 * that port is a generic convenience for sidecars that take an explicit
+	 * `--port`-style flag, not needed here since sccache already has its
+	 * own stable, documented rendezvous mechanism.
+	 *
+	 * @returns {Promise<string[]>} env entries wiring rustc through sccache.
+	 */
+	async env() {
+		const version = this.handle.attrs.version;
+		await acquireSccacheToolchain(version);
+		const plat = platformInfo();
+		const bin = `${cacheGet(SCCACHE_TOOLCHAIN_CACHE, sccacheCacheKey(version, plat))}/sccache`;
+		const dataDir = await sccacheDataDir();
 
-        await workerStart("sccache", {
-            argv: [bin, "--start-server"],
-            env: [`SCCACHE_DIR=${dataDir}`],
-            healthCheckArgv: [bin, "--show-stats"],
-        });
+		await workerStart("sccache", {
+			argv: [bin, "--start-server"],
+			env: [`SCCACHE_DIR=${dataDir}`],
+			healthCheckArgv: [bin, "--show-stats"],
+		});
 
-        return [
-            `SCCACHE_DIR=${dataDir}`,
-            "RUSTC_WRAPPER=sccache",
-            // sccache refuses to cache any compile invoked with rustc's own
-            // -C incremental=<dir> (its cache key model is per-compile-unit,
-            // not per-incremental-fragment) — cargo passes that by default
-            // for dev builds, which would otherwise make every single
-            // compilation "non-cacheable" and sccache a pure no-op layered
-            // on top of an incremental state that's discarded every sandbox
-            // anyway (see the design discussion this toolchain was added
-            // for). Disabling it is what actually lets sccache's own
-            // content-keyed cache substitute for cargo's own incremental
-            // cache.
-            "CARGO_INCREMENTAL=0",
-        ];
-    }
+		return [
+			`SCCACHE_DIR=${dataDir}`,
+			"RUSTC_WRAPPER=sccache",
+			// sccache refuses to cache any compile invoked with rustc's own
+			// -C incremental=<dir> (its cache key model is per-compile-unit,
+			// not per-incremental-fragment) — cargo passes that by default
+			// for dev builds, which would otherwise make every single
+			// compilation "non-cacheable" and sccache a pure no-op layered
+			// on top of an incremental state that's discarded every sandbox
+			// anyway (see the design discussion this toolchain was added
+			// for). Disabling it is what actually lets sccache's own
+			// content-keyed cache substitute for cargo's own incremental
+			// cache.
+			"CARGO_INCREMENTAL=0",
+		];
+	}
 }
 
-product(SccacheToolchain, RUST_BUILD_CACHE, SCCACHE_TOOL, (handle) => new RustSccacheWrapper(handle));
+product(
+	SccacheToolchain,
+	RUST_BUILD_CACHE,
+	SCCACHE_TOOL,
+	(handle) => new RustSccacheWrapper(handle),
+);

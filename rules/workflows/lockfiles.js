@@ -32,14 +32,14 @@
 // the registered list is the source of truth (bump = append, prune = remove).
 
 import {
-    goal,
-    run,
-    output,
-    output_path,
-    download,
-    sha256,
-    file_size,
-    readAddressedFile,
+	goal,
+	run,
+	output,
+	output_path,
+	download,
+	sha256,
+	file_size,
+	readAddressedFile,
 } from "imp:core";
 import { lockfileAddressToPath } from "//rules/imp/lockfile";
 
@@ -47,24 +47,32 @@ import { lockfileAddressToPath } from "//rules/imp/lockfile";
  * modules register it via `product(SomeToolchain, GEN_LOCKFILES, ...)`. */
 export const GEN_LOCKFILES = goal("gen-lockfiles");
 
-const defaultHost = { download, sha256, file_size, readAddressedFile, run, output, output_path };
+const defaultHost = {
+	download,
+	sha256,
+	file_size,
+	readAddressedFile,
+	run,
+	output,
+	output_path,
+};
 
 // Write a JSON file as a cacheable run(). Content rides in a positional
 // argument so no shell interpolation touches it (mirrors rules/workflows/vs.js).
 function writeJsonFile(host, path, value) {
-    return host.run({
-        argv: [
-            "sh",
-            "-c",
-            'printf %s "$2" > "$1"',
-            "lockfile-write",
-            host.output_path(path),
-            `${JSON.stringify(value, null, 2)}\n`,
-        ],
-        outputs: [host.output(path)],
-        materialize: true,
-        display: `write ${path}`,
-    });
+	return host.run({
+		argv: [
+			"sh",
+			"-c",
+			'printf %s "$2" > "$1"',
+			"lockfile-write",
+			host.output_path(path),
+			`${JSON.stringify(value, null, 2)}\n`,
+		],
+		outputs: [host.output(path)],
+		materialize: true,
+		display: `write ${path}`,
+	});
 }
 
 // Versions already locked at `address` for tool `name`, as a
@@ -73,26 +81,26 @@ function writeJsonFile(host, path, value) {
 // (`{ tool, version, artifacts }`) folds into its one version so regeneration
 // upgrades it in place without dropping the pinned entries.
 function existingLockedVersions(host, address, name) {
-    const contents = host.readAddressedFile(address);
-    if (contents === null) {
-        return {};
-    }
-    let existing;
-    try {
-        existing = JSON.parse(contents);
-    } catch {
-        return {};
-    }
-    if (!existing || existing.tool !== name) {
-        return {};
-    }
-    if (existing.versions && typeof existing.versions === "object") {
-        return existing.versions;
-    }
-    if (existing.version && existing.artifacts) {
-        return { [existing.version]: existing.artifacts };
-    }
-    return {};
+	const contents = host.readAddressedFile(address);
+	if (contents === null) {
+		return {};
+	}
+	let existing;
+	try {
+		existing = JSON.parse(contents);
+	} catch {
+		return {};
+	}
+	if (!existing || existing.tool !== name) {
+		return {};
+	}
+	if (existing.versions && typeof existing.versions === "object") {
+		return existing.versions;
+	}
+	if (existing.version && existing.artifacts) {
+		return { [existing.version]: existing.artifacts };
+	}
+	return {};
 }
 
 /**
@@ -113,37 +121,50 @@ function existingLockedVersions(host, address, name) {
  * @returns {Promise<object>} The lockfile contents that were written.
  */
 export async function generateToolLockfile(
-    { handle, name, platforms, downloadUrl, artifactName, lockfile },
-    host = defaultHost,
+	{ handle, name, platforms, downloadUrl, artifactName, lockfile },
+	host = defaultHost,
 ) {
-    const version = handle.attrs.version;
-    const address = lockfile ?? `//${name}.lock`;
-    const versions = existingLockedVersions(host, address, name);
-    versions[version] = await lockVersionArtifacts(host, { version, platforms, downloadUrl, artifactName });
+	const version = handle.attrs.version;
+	const address = lockfile ?? `//${name}.lock`;
+	const versions = existingLockedVersions(host, address, name);
+	versions[version] = await lockVersionArtifacts(host, {
+		version,
+		platforms,
+		downloadUrl,
+		artifactName,
+	});
 
-    const lock = { tool: name, versions: sortedVersions(versions) };
-    const path = lockfile ? lockfileAddressToPath(lockfile) : `${name}.lock`;
-    await writeJsonFile(host, path, lock);
-    return lock;
+	const lock = { tool: name, versions: sortedVersions(versions) };
+	const path = lockfile ? lockfileAddressToPath(lockfile) : `${name}.lock`;
+	await writeJsonFile(host, path, lock);
+	return lock;
 }
 
-async function lockVersionArtifacts(host, { version, platforms, downloadUrl, artifactName }) {
-    const artifacts = {};
-    for (const plat of platforms) {
-        const url = downloadUrl(version, plat);
-        const artifact = artifactName(version, plat);
-        const path = await host.download(url);
-        const digest = await host.sha256(path);
-        const size = await host.file_size(path);
-        artifacts[`${plat.os}/${plat.arch}`] = { url, artifact, size, sha256: digest };
-    }
-    return artifacts;
+async function lockVersionArtifacts(
+	host,
+	{ version, platforms, downloadUrl, artifactName },
+) {
+	const artifacts = {};
+	for (const plat of platforms) {
+		const url = downloadUrl(version, plat);
+		const artifact = artifactName(version, plat);
+		const path = await host.download(url);
+		const digest = await host.sha256(path);
+		const size = await host.file_size(path);
+		artifacts[`${plat.os}/${plat.arch}`] = {
+			url,
+			artifact,
+			size,
+			sha256: digest,
+		};
+	}
+	return artifacts;
 }
 
 function sortedVersions(versions) {
-    return Object.fromEntries(
-        Object.entries(versions).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
-    );
+	return Object.fromEntries(
+		Object.entries(versions).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+	);
 }
 
 const builtinRegistry = [];
@@ -159,18 +180,22 @@ const builtinRegistry = [];
  *   `handle`, plus `versions: string[]`; `lockfile` is required.
  */
 export function registerBuiltinLockfile(spec) {
-    if (!spec.lockfile) {
-        throw new Error(`builtin lockfile for '${spec.name}' must declare a lockfile address`);
-    }
-    if (!Array.isArray(spec.versions) || spec.versions.length === 0) {
-        throw new Error(`builtin lockfile for '${spec.name}' must declare at least one version`);
-    }
-    builtinRegistry.push(spec);
+	if (!spec.lockfile) {
+		throw new Error(
+			`builtin lockfile for '${spec.name}' must declare a lockfile address`,
+		);
+	}
+	if (!Array.isArray(spec.versions) || spec.versions.length === 0) {
+		throw new Error(
+			`builtin lockfile for '${spec.name}' must declare at least one version`,
+		);
+	}
+	builtinRegistry.push(spec);
 }
 
 /** Registered builtin lockfile specs, in registration order. */
 export function builtinLockfiles() {
-    return [...builtinRegistry];
+	return [...builtinRegistry];
 }
 
 /**
@@ -193,8 +218,8 @@ export function builtinLockfiles() {
  * @returns {object} `spec`, for the caller's own `generateToolLockfile` call.
  */
 export function registerToolchainLockfile(spec, versions) {
-    registerBuiltinLockfile({ ...spec, versions });
-    return spec;
+	registerBuiltinLockfile({ ...spec, versions });
+	return spec;
 }
 
 /**
@@ -207,12 +232,18 @@ export function registerToolchainLockfile(spec, versions) {
  * @returns {Promise<object>} The lockfile contents that were written.
  */
 export async function generateBuiltinLockfile(spec, host = defaultHost) {
-    const { name, versions, platforms, downloadUrl, artifactName, lockfile } = spec;
-    const locked = {};
-    for (const version of versions) {
-        locked[version] = await lockVersionArtifacts(host, { version, platforms, downloadUrl, artifactName });
-    }
-    const lock = { tool: name, versions: sortedVersions(locked) };
-    await writeJsonFile(host, lockfileAddressToPath(lockfile), lock);
-    return lock;
+	const { name, versions, platforms, downloadUrl, artifactName, lockfile } =
+		spec;
+	const locked = {};
+	for (const version of versions) {
+		locked[version] = await lockVersionArtifacts(host, {
+			version,
+			platforms,
+			downloadUrl,
+			artifactName,
+		});
+	}
+	const lock = { tool: name, versions: sortedVersions(locked) };
+	await writeJsonFile(host, lockfileAddressToPath(lockfile), lock);
+	return lock;
 }

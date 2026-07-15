@@ -1,0 +1,43 @@
+{
+  "tool": "biome-toolchain",
+  "versions": {
+    "2.5.4": {
+      "linux/x86_64": {
+        "url": "https://github.com/biomejs/biome/releases/download/@biomejs/biome@2.5.4/biome-linux-x64",
+        "artifact": "biome-linux-x64",
+        "size": 64619688,
+        "sha256": "4cd66b4a2953197e0e169f24b8a6e5f0fc42b3e852c3f58e562866244f3e11db"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/biomejs/biome/releases/download/@biomejs/biome@2.5.4/biome-linux-arm64",
+        "artifact": "biome-linux-arm64",
+        "size": 58950704,
+        "sha256": "698199017fc0b0c865d9a0ca2074102eb1fd0b358fd164595f3960b004fe4b90"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/biomejs/biome/releases/download/@biomejs/biome@2.5.4/biome-darwin-x64",
+        "artifact": "biome-darwin-x64",
+        "size": 59811308,
+        "sha256": "b3dfae5422dbd86272bb8ed40afec66670ea7754531d8fbcbae7e445e5430387"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/biomejs/biome/releases/download/@biomejs/biome@2.5.4/biome-darwin-arm64",
+        "artifact": "biome-darwin-arm64",
+        "size": 56657888,
+        "sha256": "1250bb41a0409cf6c3133fc47819237eb61251624297f87158d2bed3ec123c3c"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/biomejs/biome/releases/download/@biomejs/biome@2.5.4/biome-win32-x64.exe",
+        "artifact": "biome-win32-x64.exe",
+        "size": 81399296,
+        "sha256": "49d1ef3925d31b2f08c00b76786621bf4603fdb4c3bfeff1aa2cd4d98de3a27c"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/biomejs/biome/releases/download/@biomejs/biome@2.5.4/biome-win32-arm64.exe",
+        "artifact": "biome-win32-arm64.exe",
+        "size": 66801152,
+        "sha256": "95bf56ccd99e090adf43127328e456b63422eb201471746b1d21c7aa33349005"
+      }
+    }
+  }
+}

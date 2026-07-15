@@ -1,45 +1,45 @@
 import {
-    Target,
-    file_set,
-    glob,
-    hydrateTarget,
-    memo,
-    output,
-    output_path,
-    paths,
-    platformInfo,
-    product,
-    productFor,
-    run,
-    sourcesField,
-    targetAddress,
-    writeWorkspace,
-    BUILD,
-    PACKAGE,
-    TEST,
+	Target,
+	file_set,
+	glob,
+	hydrateTarget,
+	memo,
+	output,
+	output_path,
+	paths,
+	platformInfo,
+	product,
+	productFor,
+	run,
+	sourcesField,
+	targetAddress,
+	writeWorkspace,
+	BUILD,
+	PACKAGE,
+	TEST,
 } from "imp:core";
 
 import { distPathFor } from "//rules/workflows/package";
-import { RUST_LINKER, RUST_LINK_DRIVER, RUST_BUILD_CACHE } from "//rules/rust/products";
+import {
+	RUST_LINKER,
+	RUST_LINK_DRIVER,
+	RUST_BUILD_CACHE,
+} from "//rules/rust/products";
 import { CargoPackage, normalize_deps } from "//rules/rust/cargo_package";
 export { CargoPackage, normalize_deps } from "//rules/rust/cargo_package";
 
 import {
-    defaultRustToolchain,
-    resolveRustToolchainVersion,
-    rustTool,
-    rustToolchain,
+	defaultRustToolchain,
+	resolveRustToolchainVersion,
+	rustTool,
+	rustToolchain,
 } from "//rules/rust/toolchain";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 
-import {
-    defaultGccToolchain,
-} from "//rules/c/gcc/toolchain";
+import { defaultGccToolchain } from "//rules/c/gcc/toolchain";
 
-import {
-    resources as resource_package_sources,
-} from "//rules/asset";
+import { resources as resource_package_sources } from "//rules/asset";
 
 // Registers the "build" goal's artifact summary callback for consumers that
 // import Rust build rules without importing the workflows layer explicitly.
@@ -57,16 +57,16 @@ import "//rules/rust/generate_build";
 import { RUST_TOOL } from "//rules/rust/toolchain";
 
 export {
-    acquireRustToolchain,
-    defaultRustToolchain,
-    defaultRustToolchainVersion,
-    resolveRustToolchainVersion,
-    rustArtifactName,
-    rustBin,
-    rustCacheKey,
-    rustDownloadUrl,
-    rustTool,
-    rustToolchain,
+	acquireRustToolchain,
+	defaultRustToolchain,
+	defaultRustToolchainVersion,
+	resolveRustToolchainVersion,
+	rustArtifactName,
+	rustBin,
+	rustCacheKey,
+	rustDownloadUrl,
+	rustTool,
+	rustToolchain,
 } from "//rules/rust/toolchain";
 
 // ---------------------------------------------------------------------------
@@ -74,39 +74,39 @@ export {
 // ---------------------------------------------------------------------------
 
 function normalize_workspace_path(path) {
-    const parts = [];
-    for (const part of path.split("/")) {
-        if (part === "" || part === ".") continue;
-        if (part === "..") {
-            throw new Error(`Rust paths must stay within the workspace: ${path}`);
-        }
-        parts.push(part);
-    }
-    return parts.length === 0 ? "." : parts.join("/");
+	const parts = [];
+	for (const part of path.split("/")) {
+		if (part === "" || part === ".") continue;
+		if (part === "..") {
+			throw new Error(`Rust paths must stay within the workspace: ${path}`);
+		}
+		parts.push(part);
+	}
+	return parts.length === 0 ? "." : parts.join("/");
 }
 
 function safe_target_address(handle) {
-    if (!handle || handle.__imp !== true) return null;
-    try {
-        return targetAddress(handle);
-    } catch (_) {
-        return null;
-    }
+	if (!handle || handle.__imp !== true) return null;
+	try {
+		return targetAddress(handle);
+	} catch (_) {
+		return null;
+	}
 }
 
 function declaring_directory(handle) {
-    const address = safe_target_address(handle);
-    if (!address || !address.startsWith("//")) return ".";
-    const scope = address.slice(2).split(":")[0];
-    return scope.length === 0 ? "." : scope;
+	const address = safe_target_address(handle);
+	if (!address || !address.startsWith("//")) return ".";
+	const scope = address.slice(2).split(":")[0];
+	return scope.length === 0 ? "." : scope;
 }
 
 export function declared_path(handle, path = ".") {
-    const base = declaring_directory(handle);
-    const local = path || ".";
-    if (base === ".") return normalize_workspace_path(local);
-    if (local === ".") return base;
-    return normalize_workspace_path(`${base}/${local}`);
+	const base = declaring_directory(handle);
+	const local = path || ".";
+	if (base === ".") return normalize_workspace_path(local);
+	if (local === ".") return base;
+	return normalize_workspace_path(`${base}/${local}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -116,8 +116,8 @@ export function declared_path(handle, path = ".") {
 // Just the crate's .rs files — used by fmt, which only ever reformats source
 // files (not Cargo.toml/Cargo.lock).
 export const rust_file_sources = memo(async function rust_file_sources(handle) {
-    const root = declared_path(handle, handle.attrs.path || ".");
-    return glob({ root, include: ["**/*.rs"], exclude: ["target/**"] });
+	const root = declared_path(handle, handle.attrs.path || ".");
+	return glob({ root, include: ["**/*.rs"], exclude: ["target/**"] });
 });
 
 // Everything cargo build needs to see: manifests, lockfile (if present), and
@@ -138,8 +138,14 @@ export const rust_file_sources = memo(async function rust_file_sources(handle) {
 // (confirmed directly against rules/rust/example, which sits under this
 // repo's own root Cargo.toml but isn't one of its `members`).
 export const sources = memo(async function sources(handle) {
-    const root = handle.attrs.workspaceMember ? "." : declared_path(handle, handle.attrs.path || ".");
-    return glob({ root, include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"], exclude: ["target/**"] });
+	const root = handle.attrs.workspaceMember
+		? "."
+		: declared_path(handle, handle.attrs.path || ".");
+	return glob({
+		root,
+		include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
+		exclude: ["target/**"],
+	});
 });
 
 // FileSet of a cargoPackage's declared resource-package deps (see
@@ -149,19 +155,19 @@ export const sources = memo(async function sources(handle) {
 // an odinPackage depends on other odin-package targets; Cargo itself owns
 // crate-to-crate deps via Cargo.toml/the registry).
 export const resources = memo(async function resources(handle) {
-    const sets = (hydrateTarget(handle).deps || [])
-        .map(dep => dep.handle)
-        .filter(dep => dep && dep.kind === "resource-package");
-    if (sets.length === 0) return file_set.literal([]);
-    const resolved = await Promise.all(sets.map(resource_package_sources));
-    return resolved.length === 1 ? resolved[0] : file_set.union(...resolved);
+	const sets = (hydrateTarget(handle).deps || [])
+		.map((dep) => dep.handle)
+		.filter((dep) => dep && dep.kind === "resource-package");
+	if (sets.length === 0) return file_set.literal([]);
+	const resolved = await Promise.all(sets.map(resource_package_sources));
+	return resolved.length === 1 ? resolved[0] : file_set.union(...resolved);
 });
 
 export function rust_toolchain_version(handle) {
-    const toolchainHandle = handle.attrs.toolchain;
-    return toolchainHandle
-        ? toolchainHandle.attrs.version
-        : resolveRustToolchainVersion(handle.attrs.toolchainVersion);
+	const toolchainHandle = handle.attrs.toolchain;
+	return toolchainHandle
+		? toolchainHandle.attrs.version
+		: resolveRustToolchainVersion(handle.attrs.toolchainVersion);
 }
 
 // cargo/rustc need a real C link driver in the hermetic sandbox — rustc
@@ -178,27 +184,39 @@ export function rust_toolchain_version(handle) {
 // gcc archive is Linux-only) — it always uses the host's own MinGW gcc,
 // discovered via PATH, regardless of any declared rustToolchain/linkDriver.
 export async function rustLinkerTools(toolchainHandle) {
-    if (platformInfo().os === "windows") {
-        return {
-            tools: [await nativeToolSpec(nativeTool("gcc"))],
-            rustflags: "-C linker=gcc",
-            env: [],
-        };
-    }
-    const linkDriverHandle = (toolchainHandle && toolchainHandle.attrs.linkDriver) || defaultGccToolchain();
-    if (!linkDriverHandle) {
-        throw new Error("cargo builds need a declared gccToolchain() default, or a rustToolchain({ linkDriver }) — see //rules/c/gcc");
-    }
-    const linkDriver = await productFor(linkDriverHandle, RUST_LINK_DRIVER);
+	if (platformInfo().os === "windows") {
+		return {
+			tools: [await nativeToolSpec(nativeTool("gcc"))],
+			rustflags: "-C linker=gcc",
+			env: [],
+		};
+	}
+	const linkDriverHandle =
+		(toolchainHandle && toolchainHandle.attrs.linkDriver) ||
+		defaultGccToolchain();
+	if (!linkDriverHandle) {
+		throw new Error(
+			"cargo builds need a declared gccToolchain() default, or a rustToolchain({ linkDriver }) — see //rules/c/gcc",
+		);
+	}
+	const linkDriver = await productFor(linkDriverHandle, RUST_LINK_DRIVER);
 
-    const linkerHandle = toolchainHandle && toolchainHandle.attrs.linker;
-    const linker = linkerHandle ? await productFor(linkerHandle, RUST_LINKER) : null;
+	const linkerHandle = toolchainHandle && toolchainHandle.attrs.linker;
+	const linker = linkerHandle
+		? await productFor(linkerHandle, RUST_LINKER)
+		: null;
 
-    const sccacheActive = !!(toolchainHandle && toolchainHandle.attrs.sccache);
-    const tools = [...(await linkDriver.tools()), ...(linker ? await linker.tools() : [])];
-    const rustflags = [...(await linkDriver.rustflags()), ...(linker ? await linker.rustflags() : [])].join(" ");
-    const env = await linkDriver.env(sccacheActive);
-    return { tools, rustflags, env };
+	const sccacheActive = !!(toolchainHandle && toolchainHandle.attrs.sccache);
+	const tools = [
+		...(await linkDriver.tools()),
+		...(linker ? await linker.tools() : []),
+	];
+	const rustflags = [
+		...(await linkDriver.rustflags()),
+		...(linker ? await linker.rustflags() : []),
+	].join(" ");
+	const env = await linkDriver.env(sccacheActive);
+	return { tools, rustflags, env };
 }
 
 // Optional rustc build-caching layer (e.g. sccache, //rules/rust/sccache),
@@ -206,15 +224,15 @@ export async function rustLinkerTools(toolchainHandle) {
 // itself rather than the link step. Opt in via
 // rustToolchain({ sccache: sccacheToolchain() }); no-ops otherwise.
 export async function rustBuildCacheTools(toolchainHandle) {
-    const sccacheHandle = toolchainHandle && toolchainHandle.attrs.sccache;
-    if (!sccacheHandle) {
-        return { tools: [], env: [] };
-    }
-    const wrapper = await productFor(sccacheHandle, RUST_BUILD_CACHE);
-    return {
-        tools: await wrapper.tools(),
-        env: await wrapper.env(),
-    };
+	const sccacheHandle = toolchainHandle && toolchainHandle.attrs.sccache;
+	if (!sccacheHandle) {
+		return { tools: [], env: [] };
+	}
+	const wrapper = await productFor(sccacheHandle, RUST_BUILD_CACHE);
+	return {
+		tools: await wrapper.tools(),
+		env: await wrapper.env(),
+	};
 }
 
 // Resolve RUSTUP_HOME/CARGO_HOME/PATH for invoking cargo/rustc.
@@ -244,20 +262,23 @@ export async function rustBuildCacheTools(toolchainHandle) {
 // sandbox-mount tradeoff already made for sccache's own data directory (see
 // sccacheDataDir() in //rules/rust/sccache/toolchain).
 export function rustToolEnv(toolSpec, sccacheActive) {
-    if (!sccacheActive) {
-        return {
-            tools: toolSpec.tools,
-            env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`],
-        };
-    }
-    return {
-        tools: [],
-        env: [
-            `RUSTUP_HOME=${toolSpec.rustupHomeAbs}`,
-            `CARGO_HOME=${toolSpec.cargoHomeAbs}`,
-            `PATH=${toolSpec.rustupHomeAbs}/toolchains/${toolSpec.toolchainId}/bin:${toolSpec.cargoHomeAbs}/bin`,
-        ],
-    };
+	if (!sccacheActive) {
+		return {
+			tools: toolSpec.tools,
+			env: [
+				`RUSTUP_HOME=${toolSpec.rustupHome}`,
+				`CARGO_HOME=${toolSpec.cargoHome}`,
+			],
+		};
+	}
+	return {
+		tools: [],
+		env: [
+			`RUSTUP_HOME=${toolSpec.rustupHomeAbs}`,
+			`CARGO_HOME=${toolSpec.cargoHomeAbs}`,
+			`PATH=${toolSpec.rustupHomeAbs}/toolchains/${toolSpec.toolchainId}/bin:${toolSpec.cargoHomeAbs}/bin`,
+		],
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -272,57 +293,83 @@ export function rustToolEnv(toolSpec, sccacheActive) {
  * binaries' workspace-relative paths, one per `bin` entry.
  */
 
-export const cargoBuild = product(CargoPackage, BUILD, RUST_TOOL,
-    async function cargoBuild(handle) {
-        if (handle.attrs.bins.length === 0) {
-            return { outputPaths: [] };
-        }
-        const toolSpec = await rustTool(rust_toolchain_version(handle));
-        const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-        const { tools: linkerTools, rustflags, env: linkerEnv } = await rustLinkerTools(toolchainHandle);
-        const { tools: cacheTools, env: cacheEnv } = await rustBuildCacheTools(toolchainHandle);
-        const { tools: rustTools, env: rustEnv } = rustToolEnv(toolSpec, !!(toolchainHandle && toolchainHandle.attrs.sccache));
+export const cargoBuild = product(
+	CargoPackage,
+	BUILD,
+	RUST_TOOL,
+	async function cargoBuild(handle) {
+		if (handle.attrs.bins.length === 0) {
+			return { outputPaths: [] };
+		}
+		const toolSpec = await rustTool(rust_toolchain_version(handle));
+		const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+		const {
+			tools: linkerTools,
+			rustflags,
+			env: linkerEnv,
+		} = await rustLinkerTools(toolchainHandle);
+		const { tools: cacheTools, env: cacheEnv } =
+			await rustBuildCacheTools(toolchainHandle);
+		const { tools: rustTools, env: rustEnv } = rustToolEnv(
+			toolSpec,
+			!!(toolchainHandle && toolchainHandle.attrs.sccache),
+		);
 
-        const path = declared_path(handle, handle.attrs.path || ".");
-        const srcs = await sources(handle);
-        const resourceInputs = await resources(handle);
+		const path = declared_path(handle, handle.attrs.path || ".");
+		const srcs = await sources(handle);
+		const resourceInputs = await resources(handle);
 
-        const profile = handle.attrs.release ? "release" : "debug";
-        const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
-        const plat = platformInfo();
-        const exeSuffix = plat.os === "windows" ? ".exe" : "";
-        const outPaths = handle.attrs.bins.map((name) => `${buildDir}/${profile}/${name}${exeSuffix}`);
+		const profile = handle.attrs.release ? "release" : "debug";
+		const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
+		const plat = platformInfo();
+		const exeSuffix = plat.os === "windows" ? ".exe" : "";
+		const outPaths = handle.attrs.bins.map(
+			(name) => `${buildDir}/${profile}/${name}${exeSuffix}`,
+		);
 
-        const script = 'manifest=$1; target_dir=$2; rustflags=$3; shift 3; ' +
-            'RUSTFLAGS="$rustflags" cargo build --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
+		const script =
+			"manifest=$1; target_dir=$2; rustflags=$3; shift 3; " +
+			'RUSTFLAGS="$rustflags" cargo build --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
 
-        const result = await run({
-            argv: [
-                "sh", "-c", script, "cargo-build",
-                `${path}/Cargo.toml`, buildDir, rustflags,
-                ...(handle.attrs.release ? ["--release"] : []),
-                ...handle.attrs.cargoArgs,
-            ],
-            tools: [...rustTools, ...linkerTools, ...cacheTools],
-            env: [...rustEnv, ...linkerEnv, ...cacheEnv],
-            inputs: [srcs, resourceInputs],
-            outputs: outPaths.map((p) => output(output_path(p))),
-            materialize: false,
-            display: `cargo build ${path}`,
-        });
+		const result = await run({
+			argv: [
+				"sh",
+				"-c",
+				script,
+				"cargo-build",
+				`${path}/Cargo.toml`,
+				buildDir,
+				rustflags,
+				...(handle.attrs.release ? ["--release"] : []),
+				...handle.attrs.cargoArgs,
+			],
+			tools: [...rustTools, ...linkerTools, ...cacheTools],
+			env: [...rustEnv, ...linkerEnv, ...cacheEnv],
+			inputs: [srcs, resourceInputs],
+			outputs: outPaths.map((p) => output(output_path(p))),
+			materialize: false,
+			display: `cargo build ${path}`,
+		});
 
-        return { ...result, outputPaths: outPaths, buildDir };
-    }
+		return { ...result, outputPaths: outPaths, buildDir };
+	},
 );
 
-export const cargoDistPackage = product(CargoPackage, PACKAGE, RUST_TOOL, async function cargoDistPackage(handle) {
-    const result = await cargoBuild(handle);
-    if (handle.attrs.bins.length === 0) {
-        return result;
-    }
-    writeWorkspace(distPathFor(handle), result.outputDigest, { from: result.buildDir });
-    return result;
-});
+export const cargoDistPackage = product(
+	CargoPackage,
+	PACKAGE,
+	RUST_TOOL,
+	async function cargoDistPackage(handle) {
+		const result = await cargoBuild(handle);
+		if (handle.attrs.bins.length === 0) {
+			return result;
+		}
+		writeWorkspace(distPathFor(handle), result.outputDigest, {
+			from: result.buildDir,
+		});
+		return result;
+	},
+);
 
 /**
  * Run a Cargo binary crate's tests.
@@ -336,46 +383,65 @@ export const cargoDistPackage = product(CargoPackage, PACKAGE, RUST_TOOL, async 
  * @param {object} handle Target handle returned by cargoPackage().
  * @returns {Promise<object>} Run result from `cargo test`.
  */
-export const cargoTest = product(CargoPackage, TEST, RUST_TOOL,
-    async function cargoTest(handle) {
-        const toolSpec = await rustTool(rust_toolchain_version(handle));
-        const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-        const { tools: linkerTools, rustflags, env: linkerEnv } = await rustLinkerTools(toolchainHandle);
-        const { tools: cacheTools, env: cacheEnv } = await rustBuildCacheTools(toolchainHandle);
-        const { tools: rustTools, env: rustEnv } = rustToolEnv(toolSpec, !!(toolchainHandle && toolchainHandle.attrs.sccache));
-        const testTools = await Promise.all((handle.attrs.testTools || []).map(nativeToolSpec));
+export const cargoTest = product(
+	CargoPackage,
+	TEST,
+	RUST_TOOL,
+	async function cargoTest(handle) {
+		const toolSpec = await rustTool(rust_toolchain_version(handle));
+		const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+		const {
+			tools: linkerTools,
+			rustflags,
+			env: linkerEnv,
+		} = await rustLinkerTools(toolchainHandle);
+		const { tools: cacheTools, env: cacheEnv } =
+			await rustBuildCacheTools(toolchainHandle);
+		const { tools: rustTools, env: rustEnv } = rustToolEnv(
+			toolSpec,
+			!!(toolchainHandle && toolchainHandle.attrs.sccache),
+		);
+		const testTools = await Promise.all(
+			(handle.attrs.testTools || []).map(nativeToolSpec),
+		);
 
-        const path = declared_path(handle, handle.attrs.path || ".");
-        const srcs = await sources(handle);
-        const resourceInputs = await resources(handle);
-        const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
+		const path = declared_path(handle, handle.attrs.path || ".");
+		const srcs = await sources(handle);
+		const resourceInputs = await resources(handle);
+		const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 
-        // --workspace so member-crate tests run too when the manifest is a
-        // workspace root; on a plain single crate it's a no-op. A generated
-        // workspace-member target must test only its own package, otherwise
-        // every member target redundantly retests the entire workspace using
-        // that member's narrower resources and test-tool declarations.
-        const script = 'manifest=$1; target_dir=$2; rustflags=$3; shift 3; ' +
-            'RUSTFLAGS="$rustflags" cargo test --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
+		// --workspace so member-crate tests run too when the manifest is a
+		// workspace root; on a plain single crate it's a no-op. A generated
+		// workspace-member target must test only its own package, otherwise
+		// every member target redundantly retests the entire workspace using
+		// that member's narrower resources and test-tool declarations.
+		const script =
+			"manifest=$1; target_dir=$2; rustflags=$3; shift 3; " +
+			'RUSTFLAGS="$rustflags" cargo test --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
 
-        // No outputs/materialize: test binaries aren't user-addressable
-        // artifacts. impure: true so a re-run always executes the tests
-        // rather than replaying a cached pass/fail from the task cache —
-        // same choice Odin's odinTest makes.
-        return run({
-            argv: [
-                "sh", "-c", script, "cargo-test",
-                `${path}/Cargo.toml`, buildDir, rustflags,
-                ...(handle.attrs.workspaceMember ? [] : ["--workspace"]),
-                ...handle.attrs.testArgs,
-            ],
-            tools: [...rustTools, ...linkerTools, ...cacheTools, ...testTools],
-            env: [...rustEnv, ...linkerEnv, ...cacheEnv],
-            inputs: [srcs, resourceInputs],
-            impure: true,
-            display: `cargo test ${path}`,
-        });
-    }
+		// No outputs/materialize: test binaries aren't user-addressable
+		// artifacts. impure: true so a re-run always executes the tests
+		// rather than replaying a cached pass/fail from the task cache —
+		// same choice Odin's odinTest makes.
+		return run({
+			argv: [
+				"sh",
+				"-c",
+				script,
+				"cargo-test",
+				`${path}/Cargo.toml`,
+				buildDir,
+				rustflags,
+				...(handle.attrs.workspaceMember ? [] : ["--workspace"]),
+				...handle.attrs.testArgs,
+			],
+			tools: [...rustTools, ...linkerTools, ...cacheTools, ...testTools],
+			env: [...rustEnv, ...linkerEnv, ...cacheEnv],
+			inputs: [srcs, resourceInputs],
+			impure: true,
+			display: `cargo test ${path}`,
+		});
+	},
 );
 
 // ---------------------------------------------------------------------------
@@ -407,6 +473,26 @@ export const cargoTest = product(CargoPackage, TEST, RUST_TOOL,
  *   root itself.
  * @returns {object} Target handle.
  */
-export function cargoPackage({ path = ".", bin, release = false, toolchain, cargoArgs = [], testArgs = [], testTools = [], deps = [], workspaceMember = false }) {
-    return new CargoPackage({ path, bin, release, toolchain, cargoArgs, testArgs, testTools, deps, workspaceMember });
+export function cargoPackage({
+	path = ".",
+	bin,
+	release = false,
+	toolchain,
+	cargoArgs = [],
+	testArgs = [],
+	testTools = [],
+	deps = [],
+	workspaceMember = false,
+}) {
+	return new CargoPackage({
+		path,
+		bin,
+		release,
+		toolchain,
+		cargoArgs,
+		testArgs,
+		testTools,
+		deps,
+		workspaceMember,
+	});
 }

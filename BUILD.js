@@ -24,9 +24,14 @@ export const engineAssets = resourcePackage({
 
 export const testTar = nativeTool("tar");
 export const testGzip = nativeTool("gzip");
+// changed.rs's tests shell out to `git` directly (Command::new("git")), so
+// it needs the same hermetic sandbox mount as tar/gzip — without it those
+// tests fail inside `imp test`'s sandbox with "run git (is git
+// installed?)", even though git is on the host PATH.
+export const testGit = nativeTool("git");
 
 export const imp = cargoPackage({
     bin: "imp",
     deps: [engineAssets, protoAssets],
-    testTools: [testTar, testGzip],
+    testTools: [testTar, testGzip, testGit],
 });

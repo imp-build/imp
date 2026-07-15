@@ -10,10 +10,10 @@ import { output, output_path, run } from "imp:core";
 // .zip through plain -xf; gzip/xz decompression must be explicit because tar
 // can't sniff the compression of a piped or plain file argument everywhere.
 const FORMAT_FLAGS = {
-    "tar.gz": "-xzf",
-    "tar.xz": "-xJf",
-    "tar": "-xf",
-    "zip": "-xf",
+	"tar.gz": "-xzf",
+	"tar.xz": "-xJf",
+	tar: "-xf",
+	zip: "-xf",
 };
 
 /**
@@ -25,12 +25,12 @@ const FORMAT_FLAGS = {
  * @returns {string[]}
  */
 export function extractArchiveTools(format) {
-    const flags = FORMAT_FLAGS[format];
-    if (!flags) {
-        throw new Error(`unsupported archive format '${format}'`);
-    }
-    const decompress = { "tar.gz": ["gzip"], "tar.xz": ["xz"] }[format] ?? [];
-    return ["mkdir", "tar", ...decompress];
+	const flags = FORMAT_FLAGS[format];
+	if (!flags) {
+		throw new Error(`unsupported archive format '${format}'`);
+	}
+	const decompress = { "tar.gz": ["gzip"], "tar.xz": ["xz"] }[format] ?? [];
+	return ["mkdir", "tar", ...decompress];
 }
 
 /**
@@ -53,38 +53,38 @@ export function extractArchiveTools(format) {
  * @returns {Promise<string>} The destination directory.
  */
 export async function extractArchive({
-    archive,
-    dest,
-    format,
-    stripComponents,
-    tools,
-    namedCache,
-    display,
+	archive,
+	dest,
+	format,
+	stripComponents,
+	tools,
+	namedCache,
+	display,
 }) {
-    const flags = FORMAT_FLAGS[format];
-    if (!flags) {
-        throw new Error(`unsupported archive format '${format}'`);
-    }
-    const strip = stripComponents ? ` --strip-components=${stripComponents}` : "";
-    await run({
-        argv: [
-            "sh",
-            "-c",
-            `mkdir -p "$2" && tar ${flags} "$1" -C "$2"${strip}`,
-            "extract-archive",
-            archive,
-            dest,
-        ],
-        tools,
-        inputs: [{ kind: "file", path: archive }],
-        outputs: [
-            output(output_path(dest), {
-                kind: "directory",
-                ...(namedCache ? { namedCache } : {}),
-            }),
-        ],
-        materialize: true,
-        display,
-    });
-    return dest;
+	const flags = FORMAT_FLAGS[format];
+	if (!flags) {
+		throw new Error(`unsupported archive format '${format}'`);
+	}
+	const strip = stripComponents ? ` --strip-components=${stripComponents}` : "";
+	await run({
+		argv: [
+			"sh",
+			"-c",
+			`mkdir -p "$2" && tar ${flags} "$1" -C "$2"${strip}`,
+			"extract-archive",
+			archive,
+			dest,
+		],
+		tools,
+		inputs: [{ kind: "file", path: archive }],
+		outputs: [
+			output(output_path(dest), {
+				kind: "directory",
+				...(namedCache ? { namedCache } : {}),
+			}),
+		],
+		materialize: true,
+		display,
+	});
+	return dest;
 }

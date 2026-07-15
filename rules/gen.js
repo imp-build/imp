@@ -1,32 +1,45 @@
-import { Target, product, run, output, output_path, toolName, BUILD } from "imp:core";
+import {
+	Target,
+	product,
+	run,
+	output,
+	output_path,
+	toolName,
+	BUILD,
+} from "imp:core";
 
 const GEN_TOOL = toolName("gen");
 
 export class StampFile extends Target {
-    static kind = "stamp-file";
-    constructor({ output, text }) {
-        super({
-            kind: StampFile.kind,
-            attrs: { entrypoint: output, sources: text },
-        });
-    }
+	static kind = "stamp-file";
+	constructor({ output, text }) {
+		super({
+			kind: StampFile.kind,
+			attrs: { entrypoint: output, sources: text },
+		});
+	}
 }
 
-export const file = product(StampFile, BUILD, GEN_TOOL, async function file(handle) {
-    return run({
-        argv: [
-            "sh",
-            "-c",
-            "printf '%s\\n' \"$2\" > \"$1\"",
-            "imp-stamp",
-            output_path(handle.attrs.entrypoint),
-            handle.attrs.sources,
-        ],
-        outputs: [output(handle.attrs.entrypoint)],
-        materialize: true,
-        display: `write ${handle.attrs.entrypoint}`,
-    });
-});
+export const file = product(
+	StampFile,
+	BUILD,
+	GEN_TOOL,
+	async function file(handle) {
+		return run({
+			argv: [
+				"sh",
+				"-c",
+				'printf \'%s\\n\' "$2" > "$1"',
+				"imp-stamp",
+				output_path(handle.attrs.entrypoint),
+				handle.attrs.sources,
+			],
+			outputs: [output(handle.attrs.entrypoint)],
+			materialize: true,
+			display: `write ${handle.attrs.entrypoint}`,
+		});
+	},
+);
 
 /**
  * Declare a target that writes fixed text to an output file.
@@ -38,5 +51,5 @@ export const file = product(StampFile, BUILD, GEN_TOOL, async function file(hand
  * @returns {object} Target handle.
  */
 export function stampFile({ output, text }) {
-    return new StampFile({ output, text });
+	return new StampFile({ output, text });
 }

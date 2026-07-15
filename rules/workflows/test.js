@@ -13,15 +13,18 @@
 import { goal, resolveProducts } from "imp:core";
 
 export async function testGoal(selection) {
-    const resolved = selection.flatMap(resolveProducts);
-    const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));
-    for (const { label, promise } of calls) {
-        try {
-            await promise;
-        } catch (e) {
-            throw new Error(`${label}: ${e && e.message ? e.message : e}`);
-        }
-    }
+	const resolved = selection.flatMap(resolveProducts);
+	const calls = resolved.map(({ label, fn, handle }) => ({
+		label,
+		promise: fn(handle),
+	}));
+	for (const { label, promise } of calls) {
+		try {
+			await promise;
+		} catch (e) {
+			throw new Error(`${label}: ${e && e.message ? e.message : e}`);
+		}
+	}
 }
 
 goal("test", testGoal);

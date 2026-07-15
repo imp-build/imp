@@ -1,4 +1,11 @@
-import { run, output, file_set, digestOf, diffDigests, writeWorkspace } from "imp:core";
+import {
+	run,
+	output,
+	file_set,
+	digestOf,
+	diffDigests,
+	writeWorkspace,
+} from "imp:core";
 
 /**
  * Run a generator and report which of its declared output paths changed,
@@ -65,39 +72,47 @@ import { run, output, file_set, digestOf, diffDigests, writeWorkspace } from "im
  *   subset of outputPaths whose content differs from what's currently on disk
  *   (missing paths count as changed).
  */
-export async function generatedFiles({ display, argv, tools, inputs, outputPaths, materialize }) {
-    if (!Array.isArray(outputPaths) || outputPaths.length === 0) {
-        throw new Error("generatedFiles() requires a non-empty outputPaths array");
-    }
-    if (materialize !== true && materialize !== false) {
-        throw new Error("generatedFiles() requires materialize: true or false");
-    }
+export async function generatedFiles({
+	display,
+	argv,
+	tools,
+	inputs,
+	outputPaths,
+	materialize,
+}) {
+	if (!Array.isArray(outputPaths) || outputPaths.length === 0) {
+		throw new Error("generatedFiles() requires a non-empty outputPaths array");
+	}
+	if (materialize !== true && materialize !== false) {
+		throw new Error("generatedFiles() requires materialize: true or false");
+	}
 
-    const before = digestOf(file_set.literal(outputPaths));
-    const result = await run({
-        argv,
-        tools,
-        inputs,
-        outputs: outputPaths.map((p) => output(p)),
-        materialize: false,
-        display,
-    });
-    const changes = diffDigests(before, result.outputDigest);
+	const before = digestOf(file_set.literal(outputPaths));
+	const result = await run({
+		argv,
+		tools,
+		inputs,
+		outputs: outputPaths.map((p) => output(p)),
+		materialize: false,
+		display,
+	});
+	const changes = diffDigests(before, result.outputDigest);
 
-    // diffDigests stops descending once a whole subtree is uniformly added or
-    // removed (e.g. the destination directory didn't exist at all before a
-    // first run), reporting that shallow ancestor rather than each leaf file
-    // under it. Since outputPaths are already the exact leaves we care about,
-    // treat a path as changed if any diff entry is that path itself or an
-    // ancestor of it.
-    const changed = outputPaths.filter((p) =>
-        changes.some((c) => c.path === p || p.startsWith(`${c.path}/`)));
+	// diffDigests stops descending once a whole subtree is uniformly added or
+	// removed (e.g. the destination directory didn't exist at all before a
+	// first run), reporting that shallow ancestor rather than each leaf file
+	// under it. Since outputPaths are already the exact leaves we care about,
+	// treat a path as changed if any diff entry is that path itself or an
+	// ancestor of it.
+	const changed = outputPaths.filter((p) =>
+		changes.some((c) => c.path === p || p.startsWith(`${c.path}/`)),
+	);
 
-    if (materialize) {
-        for (const p of outputPaths) {
-            writeWorkspace(p, result.outputDigest, { from: p });
-        }
-    }
+	if (materialize) {
+		for (const p of outputPaths) {
+			writeWorkspace(p, result.outputDigest, { from: p });
+		}
+	}
 
-    return { changed, result };
+	return { changed, result };
 }

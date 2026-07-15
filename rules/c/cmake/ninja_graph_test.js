@@ -1,13 +1,13 @@
 import { describe, expect, test } from "//rules/imp/test";
 import {
-    expandVar,
-    listNamedCmakeTargets,
-    parseNinja,
-    reachableEdges,
-    rebaseAbsolutePaths,
-    resolveEdgeCommand,
-    rewriteToolInvocations,
-    sandboxRootFromWorkdir,
+	expandVar,
+	listNamedCmakeTargets,
+	parseNinja,
+	reachableEdges,
+	rebaseAbsolutePaths,
+	resolveEdgeCommand,
+	rewriteToolInvocations,
+	sandboxRootFromWorkdir,
 } from "//rules/c/cmake/ninja_graph";
 
 // Fixture shape mirrors a real `cmake -S . -B build -G Ninja` probe of a
@@ -113,187 +113,251 @@ build help: HELP
 `;
 
 function readInclude(path) {
-    if (path === "CMakeFiles/rules.ninja") return RULES_NINJA;
-    throw new Error(`unexpected include: ${path}`);
+	if (path === "CMakeFiles/rules.ninja") return RULES_NINJA;
+	throw new Error(`unexpected include: ${path}`);
 }
 
 describe("ninja_graph parser", () => {
-    test("parses rules and build edges, following include", () => {
-        const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
+	test("parses rules and build edges, following include", () => {
+		const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
 
-        expect(Object.keys(rules).sort().join(",")).toBe(
-            [
-                "CLEAN", "CUSTOM_COMMAND", "C_COMPILER__app_unscanned_",
-                "C_COMPILER__core_unscanned_", "C_EXECUTABLE_LINKER__app_",
-                "C_STATIC_LIBRARY_LINKER__core_", "HELP", "RERUN_CMAKE",
-            ].sort().join(","),
-        );
-        expect(topVars.cmake_ninja_workdir).toBe(`${SANDBOX_ROOT}/build/`);
+		expect(Object.keys(rules).sort().join(",")).toBe(
+			[
+				"CLEAN",
+				"CUSTOM_COMMAND",
+				"C_COMPILER__app_unscanned_",
+				"C_COMPILER__core_unscanned_",
+				"C_EXECUTABLE_LINKER__app_",
+				"C_STATIC_LIBRARY_LINKER__core_",
+				"HELP",
+				"RERUN_CMAKE",
+			]
+				.sort()
+				.join(","),
+		);
+		expect(topVars.cmake_ninja_workdir).toBe(`${SANDBOX_ROOT}/build/`);
 
-        const coreObj = edges.find(e => e.outputs.includes("CMakeFiles/core.dir/src/core.c.o"));
-        expect(coreObj.rule).toBe("C_COMPILER__core_unscanned_");
-        expect(coreObj.inputs).toEqual([`${SANDBOX_ROOT}/src/core.c`]);
-        expect(coreObj.vars.DEP_FILE).toBe("CMakeFiles/core.dir/src/core.c.o.d");
-    });
+		const coreObj = edges.find((e) =>
+			e.outputs.includes("CMakeFiles/core.dir/src/core.c.o"),
+		);
+		expect(coreObj.rule).toBe("C_COMPILER__core_unscanned_");
+		expect(coreObj.inputs).toEqual([`${SANDBOX_ROOT}/src/core.c`]);
+		expect(coreObj.vars.DEP_FILE).toBe("CMakeFiles/core.dir/src/core.c.o.d");
+	});
 
-    test("parses implicit and order-only dependency edges (|, ||)", () => {
-        const { edges } = parseNinja(BUILD_NINJA, readInclude);
-        const appLink = edges.find(e => e.outputs.includes("app"));
-        expect(appLink.inputs).toEqual(["CMakeFiles/app.dir/src/main.c.o"]);
-        expect(appLink.implicitInputs).toEqual(["libcore.a"]);
-    });
+	test("parses implicit and order-only dependency edges (|, ||)", () => {
+		const { edges } = parseNinja(BUILD_NINJA, readInclude);
+		const appLink = edges.find((e) => e.outputs.includes("app"));
+		expect(appLink.inputs).toEqual(["CMakeFiles/app.dir/src/main.c.o"]);
+		expect(appLink.implicitInputs).toEqual(["libcore.a"]);
+	});
 });
 
 describe("ninja_graph reachability", () => {
-    test("reaches only the real compile/link edges from 'all', in dependency order", () => {
-        const { edges } = parseNinja(BUILD_NINJA, readInclude);
-        // phony edges (like "all" itself) are aliases, not real commands —
-        // callers filter them out before generating run() calls.
-        const reached = reachableEdges(edges, ["all"]).filter(e => e.rule !== "phony");
-        const outputs = reached.map(e => e.outputs[0] || e.implicitOutputs[0]);
+	test("reaches only the real compile/link edges from 'all', in dependency order", () => {
+		const { edges } = parseNinja(BUILD_NINJA, readInclude);
+		// phony edges (like "all" itself) are aliases, not real commands —
+		// callers filter them out before generating run() calls.
+		const reached = reachableEdges(edges, ["all"]).filter(
+			(e) => e.rule !== "phony",
+		);
+		const outputs = reached.map((e) => e.outputs[0] || e.implicitOutputs[0]);
 
-        expect(outputs).toEqual([
-            "CMakeFiles/core.dir/src/core.c.o",
-            "libcore.a",
-            "CMakeFiles/app.dir/src/main.c.o",
-            "app",
-        ]);
-    });
+		expect(outputs).toEqual([
+			"CMakeFiles/core.dir/src/core.c.o",
+			"libcore.a",
+			"CMakeFiles/app.dir/src/main.c.o",
+			"app",
+		]);
+	});
 
-    test("excludes CMake bookkeeping edges entirely", () => {
-        const { edges } = parseNinja(BUILD_NINJA, readInclude);
-        const reached = reachableEdges(edges, ["all"]);
-        const rules = new Set(reached.map(e => e.rule));
+	test("excludes CMake bookkeeping edges entirely", () => {
+		const { edges } = parseNinja(BUILD_NINJA, readInclude);
+		const reached = reachableEdges(edges, ["all"]);
+		const rules = new Set(reached.map((e) => e.rule));
 
-        expect(rules.has("RERUN_CMAKE")).toBe(false);
-        expect(rules.has("CLEAN")).toBe(false);
-        expect(rules.has("HELP")).toBe(false);
-        expect(rules.has("CUSTOM_COMMAND")).toBe(false);
-    });
+		expect(rules.has("RERUN_CMAKE")).toBe(false);
+		expect(rules.has("CLEAN")).toBe(false);
+		expect(rules.has("HELP")).toBe(false);
+		expect(rules.has("CUSTOM_COMMAND")).toBe(false);
+	});
 });
 
 describe("ninja_graph command resolution", () => {
-    test("expands $in/$out and edge-scoped vars", () => {
-        const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
-        const coreObj = edges.find(e => e.outputs.includes("CMakeFiles/core.dir/src/core.c.o"));
-        const expanded = expandVar(rules[coreObj.rule].command, coreObj, topVars, rules[coreObj.rule]);
+	test("expands $in/$out and edge-scoped vars", () => {
+		const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
+		const coreObj = edges.find((e) =>
+			e.outputs.includes("CMakeFiles/core.dir/src/core.c.o"),
+		);
+		const expanded = expandVar(
+			rules[coreObj.rule].command,
+			coreObj,
+			topVars,
+			rules[coreObj.rule],
+		);
 
-        expect(expanded).toContain(`-c ${SANDBOX_ROOT}/src/core.c`);
-        expect(expanded).toContain("-o CMakeFiles/core.dir/src/core.c.o");
-        expect(expanded).toContain(`-I${SANDBOX_ROOT}/src`);
-    });
+		expect(expanded).toContain(`-c ${SANDBOX_ROOT}/src/core.c`);
+		expect(expanded).toContain("-o CMakeFiles/core.dir/src/core.c.o");
+		expect(expanded).toContain(`-I${SANDBOX_ROOT}/src`);
+	});
 
-    test("rebases the configure sandbox's absolute root to workspace-relative", () => {
-        const root = sandboxRootFromWorkdir(`${SANDBOX_ROOT}/build/`, "build");
-        expect(root).toBe(SANDBOX_ROOT);
+	test("rebases the configure sandbox's absolute root to workspace-relative", () => {
+		const root = sandboxRootFromWorkdir(`${SANDBOX_ROOT}/build/`, "build");
+		expect(root).toBe(SANDBOX_ROOT);
 
-        const rebased = rebaseAbsolutePaths(`-I${SANDBOX_ROOT}/src -c ${SANDBOX_ROOT}/src/core.c`, root);
-        expect(rebased).toBe("-Isrc -c src/core.c");
-    });
+		const rebased = rebaseAbsolutePaths(
+			`-I${SANDBOX_ROOT}/src -c ${SANDBOX_ROOT}/src/core.c`,
+			root,
+		);
+		expect(rebased).toBe("-Isrc -c src/core.c");
+	});
 
-    test("rewrites command-position absolute tool paths to bare names, leaves argument paths alone", () => {
-        const { command, toolNames } = rewriteToolInvocations(
-            "/usr/bin/cc -Isrc -MD -MT out.o -MF out.o.d -o out.o -c /abs/src/core.c",
-        );
-        expect(command).toBe("cc -Isrc -MD -MT out.o -MF out.o.d -o out.o -c /abs/src/core.c");
-        expect(toolNames).toEqual(["cc"]);
-    });
+	test("rewrites command-position absolute tool paths to bare names, leaves argument paths alone", () => {
+		const { command, toolNames } = rewriteToolInvocations(
+			"/usr/bin/cc -Isrc -MD -MT out.o -MF out.o.d -o out.o -c /abs/src/core.c",
+		);
+		expect(command).toBe(
+			"cc -Isrc -MD -MT out.o -MF out.o.d -o out.o -c /abs/src/core.c",
+		);
+		expect(toolNames).toEqual(["cc"]);
+	});
 
-    test("rewrites every chained invocation after && but not their arguments", () => {
-        const { command, toolNames } = rewriteToolInvocations(
-            ": && /usr/bin/cmake -E rm -f libcore.a && /usr/bin/ar qc libcore.a obj.o && /usr/bin/ranlib libcore.a && :",
-        );
-        expect(command).toBe(": && cmake -E rm -f libcore.a && ar qc libcore.a obj.o && ranlib libcore.a && :");
-        expect(toolNames.sort()).toEqual(["ar", "cmake", "ranlib"]);
-    });
+	test("rewrites every chained invocation after && but not their arguments", () => {
+		const { command, toolNames } = rewriteToolInvocations(
+			": && /usr/bin/cmake -E rm -f libcore.a && /usr/bin/ar qc libcore.a obj.o && /usr/bin/ranlib libcore.a && :",
+		);
+		expect(command).toBe(
+			": && cmake -E rm -f libcore.a && ar qc libcore.a obj.o && ranlib libcore.a && :",
+		);
+		expect(toolNames.sort()).toEqual(["ar", "cmake", "ranlib"]);
+	});
 
-    test("resolveEdgeCommand combines expansion, rebasing (relative to build dir), and tool rewriting", () => {
-        const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
-        const coreObj = edges.find(e => e.outputs.includes("CMakeFiles/core.dir/src/core.c.o"));
-        const root = sandboxRootFromWorkdir(topVars.cmake_ninja_workdir, "build");
+	test("resolveEdgeCommand combines expansion, rebasing (relative to build dir), and tool rewriting", () => {
+		const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
+		const coreObj = edges.find((e) =>
+			e.outputs.includes("CMakeFiles/core.dir/src/core.c.o"),
+		);
+		const root = sandboxRootFromWorkdir(topVars.cmake_ninja_workdir, "build");
 
-        // Ninja always executes commands with cwd = the build directory, so
-        // a rebased source path must climb back out of it — "build" is one
-        // level deep, hence a single "../".
-        const { command, toolNames } = resolveEdgeCommand(coreObj, rules, topVars, root, "build");
+		// Ninja always executes commands with cwd = the build directory, so
+		// a rebased source path must climb back out of it — "build" is one
+		// level deep, hence a single "../".
+		const { command, toolNames } = resolveEdgeCommand(
+			coreObj,
+			rules,
+			topVars,
+			root,
+			"build",
+		);
 
-        expect(command).toContain("cc ");
-        expect(command).not.toContain(SANDBOX_ROOT);
-        expect(command).toContain("-c ../src/core.c");
-        expect(toolNames).toEqual(["cc"]);
-    });
+		expect(command).toContain("cc ");
+		expect(command).not.toContain(SANDBOX_ROOT);
+		expect(command).toContain("-c ../src/core.c");
+		expect(toolNames).toEqual(["cc"]);
+	});
 
-    test("resolveEdgeCommand rewrites imp's own relative tool-mount paths too", () => {
-        const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
-        const coreObj = edges.find(e => e.outputs.includes("CMakeFiles/core.dir/src/core.c.o"));
-        const zigRule = { ...rules[coreObj.rule], command: rules[coreObj.rule].command.replace("/usr/bin/cc", ".imp/tools/zig/zig cc") };
-        const rulesWithZig = { ...rules, [coreObj.rule]: zigRule };
-        const root = sandboxRootFromWorkdir(topVars.cmake_ninja_workdir, "build");
+	test("resolveEdgeCommand rewrites imp's own relative tool-mount paths too", () => {
+		const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
+		const coreObj = edges.find((e) =>
+			e.outputs.includes("CMakeFiles/core.dir/src/core.c.o"),
+		);
+		const zigRule = {
+			...rules[coreObj.rule],
+			command: rules[coreObj.rule].command.replace(
+				"/usr/bin/cc",
+				".imp/tools/zig/zig cc",
+			),
+		};
+		const rulesWithZig = { ...rules, [coreObj.rule]: zigRule };
+		const root = sandboxRootFromWorkdir(topVars.cmake_ninja_workdir, "build");
 
-        const { command, toolNames } = resolveEdgeCommand(coreObj, rulesWithZig, topVars, root, "build");
+		const { command, toolNames } = resolveEdgeCommand(
+			coreObj,
+			rulesWithZig,
+			topVars,
+			root,
+			"build",
+		);
 
-        expect(command).toContain("zig cc ");
-        expect(command).not.toContain(".imp/tools");
-        // "zig" is never a real host-wide binary — it only exists inside
-        // the toolchain's own mounted directory, already covered by
-        // compilerTools, so it must NOT trigger a fresh nativeTool() PATH
-        // lookup (which would always fail for a name like "zigranlib").
-        expect(toolNames).toEqual([]);
-    });
+		expect(command).toContain("zig cc ");
+		expect(command).not.toContain(".imp/tools");
+		// "zig" is never a real host-wide binary — it only exists inside
+		// the toolchain's own mounted directory, already covered by
+		// compilerTools, so it must NOT trigger a fresh nativeTool() PATH
+		// lookup (which would always fail for a name like "zigranlib").
+		expect(toolNames).toEqual([]);
+	});
 
-    test("resolveEdgeCommand rewrites imp tool-mount paths even after CMake canonicalized them to absolute", () => {
-        // CMAKE_AR/CMAKE_RANLIB (declared as the relative
-        // ".imp/tools/zig/zigar") get canonicalized to absolute by CMake
-        // at configure time, so they show up prefixed with the configure
-        // sandbox's root — rebasing turns that back into a build-dir-
-        // relative "../../.imp/tools/zig/zigar", which must still be
-        // recognized as a tool invocation, not left as a literal path.
-        const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
-        const libEdge = edges.find(e => e.outputs.includes("libcore.a"));
-        const zigRule = {
-            ...rules[libEdge.rule],
-            command: rules[libEdge.rule].command.replace("/usr/bin/ar", `${SANDBOX_ROOT}/.imp/tools/zig/zigar`),
-        };
-        const rulesWithZig = { ...rules, [libEdge.rule]: zigRule };
-        const root = sandboxRootFromWorkdir(topVars.cmake_ninja_workdir, "build");
+	test("resolveEdgeCommand rewrites imp tool-mount paths even after CMake canonicalized them to absolute", () => {
+		// CMAKE_AR/CMAKE_RANLIB (declared as the relative
+		// ".imp/tools/zig/zigar") get canonicalized to absolute by CMake
+		// at configure time, so they show up prefixed with the configure
+		// sandbox's root — rebasing turns that back into a build-dir-
+		// relative "../../.imp/tools/zig/zigar", which must still be
+		// recognized as a tool invocation, not left as a literal path.
+		const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
+		const libEdge = edges.find((e) => e.outputs.includes("libcore.a"));
+		const zigRule = {
+			...rules[libEdge.rule],
+			command: rules[libEdge.rule].command.replace(
+				"/usr/bin/ar",
+				`${SANDBOX_ROOT}/.imp/tools/zig/zigar`,
+			),
+		};
+		const rulesWithZig = { ...rules, [libEdge.rule]: zigRule };
+		const root = sandboxRootFromWorkdir(topVars.cmake_ninja_workdir, "build");
 
-        const { command, toolNames } = resolveEdgeCommand(libEdge, rulesWithZig, topVars, root, "build");
+		const { command, toolNames } = resolveEdgeCommand(
+			libEdge,
+			rulesWithZig,
+			topVars,
+			root,
+			"build",
+		);
 
-        expect(command).toContain("zigar qc");
-        expect(command).not.toContain(".imp/tools/zig/zigar ");
-        // Same reasoning as above: "zigar" must never be sent through a
-        // fresh nativeTool() PATH lookup.
-        expect(toolNames).not.toContain("zigar");
-    });
+		expect(command).toContain("zigar qc");
+		expect(command).not.toContain(".imp/tools/zig/zigar ");
+		// Same reasoning as above: "zigar" must never be sent through a
+		// fresh nativeTool() PATH lookup.
+		expect(toolNames).not.toContain("zigar");
+	});
 
-    test("resolveEdgeCommand handles the static-library link edge's multi-command chain", () => {
-        const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
-        const libEdge = edges.find(e => e.outputs.includes("libcore.a"));
-        const root = sandboxRootFromWorkdir(topVars.cmake_ninja_workdir, "build");
+	test("resolveEdgeCommand handles the static-library link edge's multi-command chain", () => {
+		const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
+		const libEdge = edges.find((e) => e.outputs.includes("libcore.a"));
+		const root = sandboxRootFromWorkdir(topVars.cmake_ninja_workdir, "build");
 
-        const { command, toolNames } = resolveEdgeCommand(libEdge, rules, topVars, root, "build");
+		const { command, toolNames } = resolveEdgeCommand(
+			libEdge,
+			rules,
+			topVars,
+			root,
+			"build",
+		);
 
-        expect(command).toBe(": && cmake -E rm -f libcore.a && ar qc libcore.a  CMakeFiles/core.dir/src/core.c.o && ranlib libcore.a && :");
-        expect(toolNames.sort()).toEqual(["ar", "cmake", "ranlib"]);
-    });
+		expect(command).toBe(
+			": && cmake -E rm -f libcore.a && ar qc libcore.a  CMakeFiles/core.dir/src/core.c.o && ranlib libcore.a && :",
+		);
+		expect(toolNames.sort()).toEqual(["ar", "cmake", "ranlib"]);
+	});
 });
 
 describe("ninja_graph target classification", () => {
-    test("captures each target's real CMake type from its own comment", () => {
-        const { targetTypes } = parseNinja(BUILD_NINJA, readInclude);
-        expect(targetTypes.core).toBe("STATIC_LIBRARY");
-        expect(targetTypes.app).toBe("EXECUTABLE");
-    });
+	test("captures each target's real CMake type from its own comment", () => {
+		const { targetTypes } = parseNinja(BUILD_NINJA, readInclude);
+		expect(targetTypes.core).toBe("STATIC_LIBRARY");
+		expect(targetTypes.app).toBe("EXECUTABLE");
+	});
 
-    test("listNamedCmakeTargets finds real targets by name and type, skipping bookkeeping", () => {
-        const graph = parseNinja(BUILD_NINJA, readInclude);
-        const named = listNamedCmakeTargets(graph);
-        const byName = Object.fromEntries(named.map((t) => [t.name, t]));
+	test("listNamedCmakeTargets finds real targets by name and type, skipping bookkeeping", () => {
+		const graph = parseNinja(BUILD_NINJA, readInclude);
+		const named = listNamedCmakeTargets(graph);
+		const byName = Object.fromEntries(named.map((t) => [t.name, t]));
 
-        expect(Object.keys(byName).sort()).toEqual(["app", "core"]);
-        expect(byName.core.type).toBe("STATIC_LIBRARY");
-        expect(byName.core.outputs).toEqual(["libcore.a"]);
-        expect(byName.app.type).toBe("EXECUTABLE");
-        expect(byName.app.outputs).toEqual(["app"]);
-    });
+		expect(Object.keys(byName).sort()).toEqual(["app", "core"]);
+		expect(byName.core.type).toBe("STATIC_LIBRARY");
+		expect(byName.core.outputs).toEqual(["libcore.a"]);
+		expect(byName.app.type).toBe("EXECUTABLE");
+		expect(byName.app.outputs).toEqual(["app"]);
+	});
 });

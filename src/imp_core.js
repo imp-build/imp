@@ -1,28 +1,38 @@
 function _serialize_attrs(value) {
-    if (value === null || value === undefined || typeof value !== "object") return value;
-    if (Array.isArray(value)) return value.map(_serialize_attrs);
-    if (value.__imp === true) return { __imp_ref: value.__id };
-    const out = {};
-    for (const [k, v] of Object.entries(value)) out[k] = _serialize_attrs(v);
-    return out;
+	if (value === null || value === undefined || typeof value !== "object")
+		return value;
+	if (Array.isArray(value)) return value.map(_serialize_attrs);
+	if (value.__imp === true) return { __imp_ref: value.__id };
+	const out = {};
+	for (const [k, v] of Object.entries(value)) out[k] = _serialize_attrs(v);
+	return out;
 }
 
 function _collect_dep_handles(value, out) {
-    if (value === null || value === undefined || typeof value !== "object") return;
-    if (value.__imp === true) { out.push(value); return; }
-    if (Array.isArray(value)) { for (const v of value) _collect_dep_handles(v, out); return; }
-    for (const v of Object.values(value)) _collect_dep_handles(v, out);
+	if (value === null || value === undefined || typeof value !== "object")
+		return;
+	if (value.__imp === true) {
+		out.push(value);
+		return;
+	}
+	if (Array.isArray(value)) {
+		for (const v of value) _collect_dep_handles(v, out);
+		return;
+	}
+	for (const v of Object.values(value)) _collect_dep_handles(v, out);
 }
 
 function _normalize_source_fields(value) {
-    if (value === null || value === undefined) return [];
-    const values = Array.isArray(value) ? value : [value];
-    return values.map(v => {
-        if (!v || v.__imp_source_field !== true) {
-            throw new Error("target({ sources }) expects sourcesField(...) or an array of sourcesField(...)");
-        }
-        return { root: v.root, include: v.include, exclude: v.exclude };
-    });
+	if (value === null || value === undefined) return [];
+	const values = Array.isArray(value) ? value : [value];
+	return values.map((v) => {
+		if (!v || v.__imp_source_field !== true) {
+			throw new Error(
+				"target({ sources }) expects sourcesField(...) or an array of sourcesField(...)",
+			);
+		}
+		return { root: v.root, include: v.include, exclude: v.exclude };
+	});
 }
 
 /**
@@ -35,15 +45,17 @@ function _normalize_source_fields(value) {
  * @returns {object} Source ownership descriptor for target({ sources }).
  */
 export function sourcesField(opts) {
-    if (!opts || !Array.isArray(opts.include)) {
-        throw new Error("sourcesField({ root?, include, exclude? }) requires include glob patterns");
-    }
-    return {
-        __imp_source_field: true,
-        root: opts.root || ".",
-        include: opts.include,
-        exclude: opts.exclude || [],
-    };
+	if (!opts || !Array.isArray(opts.include)) {
+		throw new Error(
+			"sourcesField({ root?, include, exclude? }) requires include glob patterns",
+		);
+	}
+	return {
+		__imp_source_field: true,
+		root: opts.root || ".",
+		include: opts.include,
+		exclude: opts.exclude || [],
+	};
 }
 
 /**
@@ -53,59 +65,78 @@ export function sourcesField(opts) {
  * `attrs` and pass them to `super(...)`.
  */
 export class Target {
-    /**
-     * @param {object} opts
-     * @param {string} opts.kind Stable target kind understood by extension rules.
-     * @param {object} [opts.attrs={}] Typed attributes stored on the target. May contain nested
-     *   target handles; those are extracted as dep edges automatically when opts.deps is omitted.
-     * @param {Array<object>} [opts.deps] Explicit dependency list as handles or { target, mode } pairs.
-     *   When omitted, deps are discovered by scanning opts.attrs for target handles.
-     */
-    constructor(opts) {
-        const depIds = [];
-        const depModes = [];
-        const attrs = opts.attrs !== undefined ? opts.attrs : (opts.fields !== undefined ? opts.fields : {});
-        const sources = _normalize_source_fields(opts.sources);
-        if (opts.deps != null) {
-            for (const d of opts.deps) {
-                if (d && d.__imp === true) {
-                    depIds.push(d.__id); depModes.push(null);
-                } else if (d && d.target && d.target.__imp === true) {
-                    depIds.push(d.target.__id);
-                    depModes.push(d.mode != null ? String(d.mode) : null);
-                } else {
-                    throw new Error('dep must be a target handle or { target, mode }, got: ' + JSON.stringify(d));
-                }
-            }
-        } else {
-            const found = [];
-            _collect_dep_handles(attrs, found);
-            for (const h of found) { depIds.push(h.__id); depModes.push(null); }
-        }
-        const id = __host_target(opts.kind, JSON.stringify(_serialize_attrs(attrs)), JSON.stringify(sources), depIds, depModes);
+	/**
+	 * @param {object} opts
+	 * @param {string} opts.kind Stable target kind understood by extension rules.
+	 * @param {object} [opts.attrs={}] Typed attributes stored on the target. May contain nested
+	 *   target handles; those are extracted as dep edges automatically when opts.deps is omitted.
+	 * @param {Array<object>} [opts.deps] Explicit dependency list as handles or { target, mode } pairs.
+	 *   When omitted, deps are discovered by scanning opts.attrs for target handles.
+	 */
+	constructor(opts) {
+		const depIds = [];
+		const depModes = [];
+		const attrs =
+			opts.attrs !== undefined
+				? opts.attrs
+				: opts.fields !== undefined
+					? opts.fields
+					: {};
+		const sources = _normalize_source_fields(opts.sources);
+		if (opts.deps != null) {
+			for (const d of opts.deps) {
+				if (d && d.__imp === true) {
+					depIds.push(d.__id);
+					depModes.push(null);
+				} else if (d && d.target && d.target.__imp === true) {
+					depIds.push(d.target.__id);
+					depModes.push(d.mode != null ? String(d.mode) : null);
+				} else {
+					throw new Error(
+						"dep must be a target handle or { target, mode }, got: " +
+							JSON.stringify(d),
+					);
+				}
+			}
+		} else {
+			const found = [];
+			_collect_dep_handles(attrs, found);
+			for (const h of found) {
+				depIds.push(h.__id);
+				depModes.push(null);
+			}
+		}
+		const id = __host_target(
+			opts.kind,
+			JSON.stringify(_serialize_attrs(attrs)),
+			JSON.stringify(sources),
+			depIds,
+			depModes,
+		);
 
-        this.__imp = true;
-        this.__id = id;
-        this.kind = opts.kind;
-        this.attrs = attrs;
+		this.__imp = true;
+		this.__id = id;
+		this.kind = opts.kind;
+		this.attrs = attrs;
 
-        if (globalThis.__imp_handle_by_id) globalThis.__imp_handle_by_id.set(id, this);
-    }
+		if (globalThis.__imp_handle_by_id)
+			globalThis.__imp_handle_by_id.set(id, this);
+	}
 
-    get label() {
-        const address = targetAddress(this);
-        const colon = address.lastIndexOf(":");
-        return {
-            address,
-            name: colon >= 0 ? address.slice(colon + 1) : address,
-        };
-    }
+	get label() {
+		const address = targetAddress(this);
+		const colon = address.lastIndexOf(":");
+		return {
+			address,
+			name: colon >= 0 ? address.slice(colon + 1) : address,
+		};
+	}
 }
 
 // Keyed by the concrete subclass (not stored as static fields, which
 // inheritance would share with the base), so each toolchain kind tracks its
 // own default independently.
-const _toolchain_defaults = new Map();     // concrete subclass → instance
+const _toolchain_defaults = new Map(); // concrete subclass → instance
 // Like the product registry, registration survives resetMemoState — the
 // TOOLCHAIN product for a kind is registered once per runtime.
 const _toolchain_registered = new Set();
@@ -130,112 +161,120 @@ const _toolchain_by_version = new Map();
  * dispatchable via `imp @<name>` for workspace-exported instances.
  */
 export class Toolchain extends Target {
-    /**
-     * @param {object} targetOpts Options forwarded to Target: `{ kind, attrs, ... }`.
-     * @param {object} [opts]
-     * @param {boolean} [opts.default=false] Install this instance as the
-     *   subclass's default. Deliberately outside `attrs` so it never enters
-     *   target serialization.
-     */
-    constructor(targetOpts, opts = {}) {
-        super(targetOpts);
-        Toolchain._ensureRegistered(this.constructor);
-        if (opts.default) this.constructor.setDefault(this);
-        if (targetOpts.attrs?.version !== undefined) {
-            let byVersion = _toolchain_by_version.get(this.constructor);
-            if (!byVersion) {
-                byVersion = new Map();
-                _toolchain_by_version.set(this.constructor, byVersion);
-            }
-            byVersion.set(targetOpts.attrs.version, this);
-        }
-    }
+	/**
+	 * @param {object} targetOpts Options forwarded to Target: `{ kind, attrs, ... }`.
+	 * @param {object} [opts]
+	 * @param {boolean} [opts.default=false] Install this instance as the
+	 *   subclass's default. Deliberately outside `attrs` so it never enters
+	 *   target serialization.
+	 */
+	constructor(targetOpts, opts = {}) {
+		super(targetOpts);
+		Toolchain._ensureRegistered(this.constructor);
+		if (opts.default) this.constructor.setDefault(this);
+		if (targetOpts.attrs?.version !== undefined) {
+			let byVersion = _toolchain_by_version.get(this.constructor);
+			if (!byVersion) {
+				byVersion = new Map();
+				_toolchain_by_version.set(this.constructor, byVersion);
+			}
+			byVersion.set(targetOpts.attrs.version, this);
+		}
+	}
 
-    static setDefault(instance) { _toolchain_defaults.set(this, instance); }
-    static clearDefault() {
-        _toolchain_defaults.delete(this);
-        _toolchain_by_version.delete(this);
-    }
+	static setDefault(instance) {
+		_toolchain_defaults.set(this, instance);
+	}
+	static clearDefault() {
+		_toolchain_defaults.delete(this);
+		_toolchain_by_version.delete(this);
+	}
 
-    /** The default instance declared for this toolchain kind, or null. */
-    static default() { return _toolchain_defaults.get(this) ?? null; }
+	/** The default instance declared for this toolchain kind, or null. */
+	static default() {
+		return _toolchain_defaults.get(this) ?? null;
+	}
 
-    /** The default instance's version, or null when no default is set. */
-    static defaultVersion() {
-        const instance = this.default();
-        return instance ? (instance.attrs.version ?? null) : null;
-    }
+	/** The default instance's version, or null when no default is set. */
+	static defaultVersion() {
+		const instance = this.default();
+		return instance ? (instance.attrs.version ?? null) : null;
+	}
 
-    /** An explicit version if given, else the default instance's. */
-    static resolveVersion(version) {
-        if (version) return version;
-        return this.defaultVersion();
-    }
+	/** An explicit version if given, else the default instance's. */
+	static resolveVersion(version) {
+		if (version) return version;
+		return this.defaultVersion();
+	}
 
-    /**
-     * An explicit or default version, throwing the standard "no X toolchain
-     * version specified and no default set" error otherwise.
-     *
-     * @param {string} [version]
-     * @param {string} [label] Display name for the error message; defaults to
-     *   this subclass's declared tool name.
-     * @returns {string}
-     */
-    static requireVersion(version, label) {
-        const resolved = this.resolveVersion(version);
-        if (!resolved) {
-            throw new Error(
-                `no ${label ?? this.tool?.name ?? this.name} toolchain version specified and no default set`,
-            );
-        }
-        return resolved;
-    }
+	/**
+	 * An explicit or default version, throwing the standard "no X toolchain
+	 * version specified and no default set" error otherwise.
+	 *
+	 * @param {string} [version]
+	 * @param {string} [label] Display name for the error message; defaults to
+	 *   this subclass's declared tool name.
+	 * @returns {string}
+	 */
+	static requireVersion(version, label) {
+		const resolved = this.resolveVersion(version);
+		if (!resolved) {
+			throw new Error(
+				`no ${label ?? this.tool?.name ?? this.name} toolchain version specified and no default set`,
+			);
+		}
+		return resolved;
+	}
 
-    /**
-     * The instance that declared a given version, if any — distinct from the
-     * default instance, since a version may be declared without being set as
-     * default. Falls back to the default instance when no instance declared
-     * that exact version (e.g. `version` came from elsewhere and happens to
-     * match nothing declared here).
-     *
-     * @param {string} [version]
-     * @returns {Toolchain|null}
-     */
-    static instanceForVersion(version) {
-        return (version && _toolchain_by_version.get(this)?.get(version)) || this.default();
-    }
+	/**
+	 * The instance that declared a given version, if any — distinct from the
+	 * default instance, since a version may be declared without being set as
+	 * default. Falls back to the default instance when no instance declared
+	 * that exact version (e.g. `version` came from elsewhere and happens to
+	 * match nothing declared here).
+	 *
+	 * @param {string} [version]
+	 * @returns {Toolchain|null}
+	 */
+	static instanceForVersion(version) {
+		return (
+			(version && _toolchain_by_version.get(this)?.get(version)) ||
+			this.default()
+		);
+	}
 
-    /** The `unverified` flag declared for a given version, else `false`. */
-    static resolveUnverified(version) {
-        return this.instanceForVersion(version)?.attrs.unverified ?? false;
-    }
+	/** The `unverified` flag declared for a given version, else `false`. */
+	static resolveUnverified(version) {
+		return this.instanceForVersion(version)?.attrs.unverified ?? false;
+	}
 
-    /**
-     * Absolute path to this toolchain's binary; powers `imp @tool`
-     * dispatch. Subclasses must override.
-     *
-     * @returns {string|Promise<string>}
-     */
-    bin() {
-        throw new Error(`${this.constructor.name} must implement bin()`);
-    }
+	/**
+	 * Absolute path to this toolchain's binary; powers `imp @tool`
+	 * dispatch. Subclasses must override.
+	 *
+	 * @returns {string|Promise<string>}
+	 */
+	bin() {
+		throw new Error(`${this.constructor.name} must implement bin()`);
+	}
 
-    static _ensureRegistered(cls) {
-        if (cls === Toolchain || _toolchain_registered.has(cls)) return;
-        if (!cls.tool || cls.tool.__imp_tool_name !== true) {
-            throw new Error(
-                `${cls.name || "<anonymous>"}: Toolchain subclasses must declare ` +
-                `'static tool = toolName(...)'`);
-        }
-        _toolchain_registered.add(cls);
-        product(cls, TOOLCHAIN, cls.tool, (handle) => handle.bin());
-    }
+	static _ensureRegistered(cls) {
+		if (cls === Toolchain || _toolchain_registered.has(cls)) return;
+		if (!cls.tool || cls.tool.__imp_tool_name !== true) {
+			throw new Error(
+				`${cls.name || "<anonymous>"}: Toolchain subclasses must declare ` +
+					`'static tool = toolName(...)'`,
+			);
+		}
+		_toolchain_registered.add(cls);
+		product(cls, TOOLCHAIN, cls.tool, (handle) => handle.bin());
+	}
 }
 
 /** Clear every toolchain kind's default instance (test isolation hook). */
 export function __resetToolchainDefaultsForTest() {
-    _toolchain_defaults.clear();
-    _toolchain_by_version.clear();
+	_toolchain_defaults.clear();
+	_toolchain_by_version.clear();
 }
 
 /**
@@ -251,7 +290,7 @@ export function __resetToolchainDefaultsForTest() {
  * @returns {object} An enriched target handle: { __imp, __id, kind, attrs }.
  */
 export function target(opts) {
-    return new Target(opts);
+	return new Target(opts);
 }
 
 /**
@@ -271,7 +310,7 @@ export function target(opts) {
  * @returns {void}
  */
 export function namedCache(opts) {
-    __host_named_cache(opts.name, opts.shared === true);
+	__host_named_cache(opts.name, opts.shared === true);
 }
 
 /**
@@ -314,23 +353,34 @@ export function namedCache(opts) {
  *   Repeat registrations of the same goal return the same token.
  */
 export function goal(name, fn, opts) {
-    if (typeof name !== "string" || name === "") {
-        throw new Error("goal(name, fn?, opts?) requires a non-empty string name");
-    }
-    const flags = opts && opts.flags ? opts.flags : {};
-    const selection = opts && opts.selection !== undefined ? opts.selection : "required";
-    if (selection !== "required" && selection !== "none") {
-        throw new Error(`goal '${name}': opts.selection must be "required" or "none"`);
-    }
-    const stack = new Error("goal registration").stack || "";
-    const pid = __host_goal(name, "default", JSON.stringify(flags), selection === "none", stack);
-    if (fn !== undefined) {
-        if (typeof fn !== "function") {
-            throw new Error("goal(name, fn?, opts?) expects fn to be a function when provided");
-        }
-        __host_goal_callback(name, fn);
-    }
-    return _mint_product_name_token(name, pid);
+	if (typeof name !== "string" || name === "") {
+		throw new Error("goal(name, fn?, opts?) requires a non-empty string name");
+	}
+	const flags = opts && opts.flags ? opts.flags : {};
+	const selection =
+		opts && opts.selection !== undefined ? opts.selection : "required";
+	if (selection !== "required" && selection !== "none") {
+		throw new Error(
+			`goal '${name}': opts.selection must be "required" or "none"`,
+		);
+	}
+	const stack = new Error("goal registration").stack || "";
+	const pid = __host_goal(
+		name,
+		"default",
+		JSON.stringify(flags),
+		selection === "none",
+		stack,
+	);
+	if (fn !== undefined) {
+		if (typeof fn !== "function") {
+			throw new Error(
+				"goal(name, fn?, opts?) expects fn to be a function when provided",
+			);
+		}
+		__host_goal_callback(name, fn);
+	}
+	return _mint_product_name_token(name, pid);
 }
 
 /**
@@ -343,7 +393,7 @@ export function goal(name, fn, opts) {
  * @returns {Record<string, boolean>}
  */
 export function goalFlags() {
-    return JSON.parse(__host_current_goal_flags());
+	return JSON.parse(__host_current_goal_flags());
 }
 
 /**
@@ -357,12 +407,17 @@ export function goalFlags() {
  * @category configuration
  */
 export const field = {
-    int: (opts = {}) => ({ __impField: "int", ...opts }),
-    string: (opts = {}) => ({ __impField: "string", ...opts }),
-    bool: (opts = {}) => ({ __impField: "bool", ...opts }),
-    enum: (values, opts = {}) => ({ __impField: "enum", values, ...opts }),
-    object: (shape, opts = {}) => ({ __impField: "object", shape, ...opts }),
-    map: (key, value, opts = {}) => ({ __impField: "map", key, value, ...opts }),
+	int: (opts = {}) => ({ __impField: "int", ...opts }),
+	string: (opts = {}) => ({ __impField: "string", ...opts }),
+	bool: (opts = {}) => ({ __impField: "bool", ...opts }),
+	enum: (values, opts = {}) => ({ __impField: "enum", values, ...opts }),
+	object: (shape, opts = {}) => ({ __impField: "object", shape, ...opts }),
+	map: (key, value, opts = {}) => ({
+		__impField: "map",
+		key,
+		value,
+		...opts,
+	}),
 };
 
 /**
@@ -380,14 +435,18 @@ export const field = {
  * @returns {void}
  */
 export function defineConfigSchema(namespace, shape) {
-    if (typeof namespace !== "string" || namespace.length === 0) {
-        throw new Error("defineConfigSchema(namespace, shape) requires a non-empty namespace");
-    }
-    const encoded = JSON.stringify(_serialize_attrs(shape));
-    if (encoded === undefined) {
-        throw new Error("defineConfigSchema(namespace, shape) requires a JSON-serializable shape");
-    }
-    __host_define_config_schema(namespace, encoded);
+	if (typeof namespace !== "string" || namespace.length === 0) {
+		throw new Error(
+			"defineConfigSchema(namespace, shape) requires a non-empty namespace",
+		);
+	}
+	const encoded = JSON.stringify(_serialize_attrs(shape));
+	if (encoded === undefined) {
+		throw new Error(
+			"defineConfigSchema(namespace, shape) requires a JSON-serializable shape",
+		);
+	}
+	__host_define_config_schema(namespace, encoded);
 }
 
 defineConfigSchema("imp", { jsWorkers: field.int({ default: 1 }) });
@@ -407,14 +466,18 @@ defineConfigSchema("imp", { jsWorkers: field.int({ default: 1 }) });
  * @returns {void}
  */
 export function configure(namespace, value) {
-    if (typeof namespace !== "string" || namespace.length === 0) {
-        throw new Error("configure(namespace, value) requires a non-empty namespace");
-    }
-    const encoded = JSON.stringify(_serialize_attrs(value));
-    if (encoded === undefined) {
-        throw new Error("configure(namespace, value) requires a JSON-serializable value");
-    }
-    __host_configure(namespace, encoded);
+	if (typeof namespace !== "string" || namespace.length === 0) {
+		throw new Error(
+			"configure(namespace, value) requires a non-empty namespace",
+		);
+	}
+	const encoded = JSON.stringify(_serialize_attrs(value));
+	if (encoded === undefined) {
+		throw new Error(
+			"configure(namespace, value) requires a JSON-serializable value",
+		);
+	}
+	__host_configure(namespace, encoded);
 }
 
 /**
@@ -429,12 +492,17 @@ export function configure(namespace, value) {
  * @returns {any}
  */
 export function configuration(namespace, fallback = undefined) {
-    if (typeof namespace !== "string" || namespace.length === 0) {
-        throw new Error("configuration(namespace) requires a non-empty namespace");
-    }
-    const encoded = __host_configuration(namespace);
-    _trace_effect({ event: "effect", kind: "configuration", namespace, configured: encoded != null });
-    return encoded == null ? fallback : JSON.parse(encoded);
+	if (typeof namespace !== "string" || namespace.length === 0) {
+		throw new Error("configuration(namespace) requires a non-empty namespace");
+	}
+	const encoded = __host_configuration(namespace);
+	_trace_effect({
+		event: "effect",
+		kind: "configuration",
+		namespace,
+		configured: encoded != null,
+	});
+	return encoded == null ? fallback : JSON.parse(encoded);
 }
 
 /**
@@ -444,7 +512,7 @@ export function configuration(namespace, fallback = undefined) {
  * @returns {object} Schemas keyed by configuration namespace.
  */
 export function configurationSchemas() {
-    return JSON.parse(__host_configuration_schemas());
+	return JSON.parse(__host_configuration_schemas());
 }
 
 /**
@@ -455,7 +523,7 @@ export function configurationSchemas() {
  * @returns {object} Capability tree keyed by rule group, goal, and tool.
  */
 export function ruleCapabilities() {
-    return JSON.parse(__host_rule_capabilities());
+	return JSON.parse(__host_rule_capabilities());
 }
 
 /**
@@ -473,7 +541,7 @@ export function ruleCapabilities() {
  * @returns {void}
  */
 export function platform(opts) {
-    __host_platform(opts.name, opts.executor, opts.target);
+	__host_platform(opts.name, opts.executor, opts.target);
 }
 
 // ---------------------------------------------------------------------------
@@ -486,7 +554,7 @@ export function platform(opts) {
  * @returns {string} Local path to the downloaded file.
  */
 export function download(url) {
-    return __host_download(url);
+	return __host_download(url);
 }
 
 /**
@@ -499,7 +567,7 @@ export function download(url) {
  * @returns {void}
  */
 export function extract(archive, dest, opts) {
-    __host_extract(archive, dest, opts.format, opts.strip_components || 0);
+	__host_extract(archive, dest, opts.format, opts.strip_components || 0);
 }
 
 /**
@@ -507,7 +575,7 @@ export function extract(archive, dest, opts) {
  * @returns {{ os: string, arch: string }}
  */
 export function platformInfo() {
-    return JSON.parse(__host_platform_info());
+	return JSON.parse(__host_platform_info());
 }
 
 /**
@@ -516,7 +584,7 @@ export function platformInfo() {
  * @returns {string} Hex-encoded digest.
  */
 export function sha256(path) {
-    return __host_sha256(path);
+	return __host_sha256(path);
 }
 
 /**
@@ -525,7 +593,7 @@ export function sha256(path) {
  * @returns {number}
  */
 export function file_size(path) {
-    return __host_file_size(path);
+	return __host_file_size(path);
 }
 
 /**
@@ -535,7 +603,7 @@ export function file_size(path) {
  * @param {string} source Path to the file or directory to cache.
  */
 export function cachePut(name, key, source) {
-    __host_cache_put(name, key, source);
+	__host_cache_put(name, key, source);
 }
 
 /**
@@ -545,7 +613,7 @@ export function cachePut(name, key, source) {
  * @returns {string|null} Local path if the key exists, null otherwise.
  */
 export function cacheGet(name, key) {
-    return __host_cache_get(name, key);
+	return __host_cache_get(name, key);
 }
 
 /**
@@ -555,7 +623,7 @@ export function cacheGet(name, key) {
  * @returns {boolean}
  */
 export function cacheHas(name, key) {
-    return __host_cache_has(name, key);
+	return __host_cache_has(name, key);
 }
 
 /**
@@ -584,12 +652,12 @@ export function cacheHas(name, key) {
  *   sidecars that need a private, collision-free port to listen on.
  */
 export async function workerStart(name, opts) {
-    const json = await __host_worker_start(name, {
-        argv: opts.argv,
-        env: opts.env ?? [],
-        healthCheckArgv: opts.healthCheckArgv ?? [],
-    });
-    return JSON.parse(json);
+	const json = await __host_worker_start(name, {
+		argv: opts.argv,
+		env: opts.env ?? [],
+		healthCheckArgv: opts.healthCheckArgv ?? [],
+	});
+	return JSON.parse(json);
 }
 
 /**
@@ -600,8 +668,8 @@ export async function workerStart(name, opts) {
  *   it has never been started (or never successfully so) this invocation.
  */
 export function workerGet(name) {
-    const json = __host_worker_get(name);
-    return json ? JSON.parse(json) : null;
+	const json = __host_worker_get(name);
+	return json ? JSON.parse(json) : null;
 }
 
 /**
@@ -617,7 +685,13 @@ export function workerGet(name) {
  * @returns {string[]} Sorted workspace module specifiers.
  */
 export function workspaceFiles(opts) {
-    return JSON.parse(__host_workspace_files(opts.root, opts.suffix || "", opts.recursive !== false));
+	return JSON.parse(
+		__host_workspace_files(
+			opts.root,
+			opts.suffix || "",
+			opts.recursive !== false,
+		),
+	);
 }
 
 /**
@@ -632,14 +706,18 @@ export function workspaceFiles(opts) {
  * @returns {string[]} Sorted workspace-relative file paths.
  */
 export function workspaceSourceFiles(opts) {
-    if (!opts || !Array.isArray(opts.include)) {
-        throw new Error("workspaceSourceFiles({ root?, include, exclude? }) requires include regexes");
-    }
-    return JSON.parse(__host_workspace_source_files(
-        opts.root || ".",
-        JSON.stringify(opts.include),
-        JSON.stringify(opts.exclude || []),
-    ));
+	if (!opts || !Array.isArray(opts.include)) {
+		throw new Error(
+			"workspaceSourceFiles({ root?, include, exclude? }) requires include regexes",
+		);
+	}
+	return JSON.parse(
+		__host_workspace_source_files(
+			opts.root || ".",
+			JSON.stringify(opts.include),
+			JSON.stringify(opts.exclude || []),
+		),
+	);
 }
 
 /**
@@ -654,14 +732,18 @@ export function workspaceSourceFiles(opts) {
  * @returns {string[]} Sorted workspace-relative file paths.
  */
 export function allUnowned(opts) {
-    if (!opts || !Array.isArray(opts.include)) {
-        throw new Error("allUnowned({ root?, include, exclude? }) requires include glob patterns");
-    }
-    return JSON.parse(__host_all_unowned(
-        opts.root || ".",
-        JSON.stringify(opts.include),
-        JSON.stringify(opts.exclude || []),
-    ));
+	if (!opts || !Array.isArray(opts.include)) {
+		throw new Error(
+			"allUnowned({ root?, include, exclude? }) requires include glob patterns",
+		);
+	}
+	return JSON.parse(
+		__host_all_unowned(
+			opts.root || ".",
+			JSON.stringify(opts.include),
+			JSON.stringify(opts.exclude || []),
+		),
+	);
 }
 
 /**
@@ -672,15 +754,15 @@ export function allUnowned(opts) {
  * @returns {{ kind: string, attrs: object, deps: Array<{ handle: object, mode: string|null }> }}
  */
 export function hydrateTarget(handle) {
-    if (!handle || handle.__imp !== true) {
-        throw new Error('hydrateTarget: expected a target handle');
-    }
-    const hydrated = JSON.parse(__host_hydrate_target(handle.__id));
-    hydrated.deps = (hydrated.deps || []).map(dep => ({
-        ...dep,
-        handle: globalThis.__imp_resolve_handle(dep.handle.__id) || dep.handle,
-    }));
-    return hydrated;
+	if (!handle || handle.__imp !== true) {
+		throw new Error("hydrateTarget: expected a target handle");
+	}
+	const hydrated = JSON.parse(__host_hydrate_target(handle.__id));
+	hydrated.deps = (hydrated.deps || []).map((dep) => ({
+		...dep,
+		handle: globalThis.__imp_resolve_handle(dep.handle.__id) || dep.handle,
+	}));
+	return hydrated;
 }
 
 /**
@@ -690,10 +772,10 @@ export function hydrateTarget(handle) {
  * @returns {string}
  */
 export function targetAddress(handle) {
-    if (!handle || handle.__imp !== true) {
-        throw new Error('targetAddress: expected a target handle');
-    }
-    return __host_target_address(handle.__id);
+	if (!handle || handle.__imp !== true) {
+		throw new Error("targetAddress: expected a target handle");
+	}
+	return __host_target_address(handle.__id);
 }
 
 /**
@@ -706,20 +788,27 @@ export function targetAddress(handle) {
  * @returns {Array<{ id: number, address: string, kind: string, attrs: object, handle: object }>}
  */
 export function workspaceTargets(kind = undefined) {
-    if (kind !== undefined && typeof kind !== "string") {
-        throw new Error("workspaceTargets(kind?) expects kind to be a string when provided");
-    }
-    const targets = JSON.parse(__host_workspace_targets(kind ?? ""));
-    _trace_effect({ event: "effect", kind: "workspaceTargets", target_kind: kind ?? null, count: targets.length });
-    return targets.map((target) => ({
-        ...target,
-        handle: globalThis.__imp_resolve_handle(target.id) || {
-            __imp: true,
-            __id: target.id,
-            kind: target.kind,
-            attrs: target.attrs || {},
-        },
-    }));
+	if (kind !== undefined && typeof kind !== "string") {
+		throw new Error(
+			"workspaceTargets(kind?) expects kind to be a string when provided",
+		);
+	}
+	const targets = JSON.parse(__host_workspace_targets(kind ?? ""));
+	_trace_effect({
+		event: "effect",
+		kind: "workspaceTargets",
+		target_kind: kind ?? null,
+		count: targets.length,
+	});
+	return targets.map((target) => ({
+		...target,
+		handle: globalThis.__imp_resolve_handle(target.id) || {
+			__imp: true,
+			__id: target.id,
+			kind: target.kind,
+			attrs: target.attrs || {},
+		},
+	}));
 }
 
 /**
@@ -736,21 +825,28 @@ export function workspaceTargets(kind = undefined) {
  * @returns {Array<{ id: number, address: string, kind: string, product: string, handle: object }>}
  */
 export function selectedTargets(kind = undefined) {
-    if (kind !== undefined && typeof kind !== "string") {
-        throw new Error("selectedTargets(kind?) expects kind to be a string when provided");
-    }
-    const all = JSON.parse(__host_selected_targets());
-    const targets = kind === undefined ? all : all.filter((t) => t.kind === kind);
-    _trace_effect({ event: "effect", kind: "selectedTargets", target_kind: kind ?? null, count: targets.length });
-    return targets.map((target) => ({
-        ...target,
-        handle: globalThis.__imp_resolve_handle(target.id) || {
-            __imp: true,
-            __id: target.id,
-            kind: target.kind,
-            attrs: {},
-        },
-    }));
+	if (kind !== undefined && typeof kind !== "string") {
+		throw new Error(
+			"selectedTargets(kind?) expects kind to be a string when provided",
+		);
+	}
+	const all = JSON.parse(__host_selected_targets());
+	const targets = kind === undefined ? all : all.filter((t) => t.kind === kind);
+	_trace_effect({
+		event: "effect",
+		kind: "selectedTargets",
+		target_kind: kind ?? null,
+		count: targets.length,
+	});
+	return targets.map((target) => ({
+		...target,
+		handle: globalThis.__imp_resolve_handle(target.id) || {
+			__imp: true,
+			__id: target.id,
+			kind: target.kind,
+			attrs: {},
+		},
+	}));
 }
 
 /**
@@ -768,25 +864,30 @@ export function selectedTargets(kind = undefined) {
  *   register the product, keeping single-tool output unchanged.
  */
 export function resolveProducts(entry) {
-    let product = entry.product;
-    if (product && product.__imp_product_name === true) {
-        product = product.name;
-    } else if (typeof product !== "string" || product === "") {
-        throw new Error("resolveProducts(entry) requires entry.product to be a product-name token or string");
-    }
-    const by_tool = _products_by_kind_name.get(`${entry.kind}:${product}`);
-    if (by_tool === undefined || by_tool.size === 0) {
-        throw new Error(`no product '${product}' for kind '${entry.kind}' (target '${entry.address}')`);
-    }
-    const handle = globalThis.__imp_resolve_handle(entry.id);
-    return [...by_tool.entries()].map(([tool, fn]) => ({
-        label: by_tool.size === 1
-            ? `${entry.address}#${product}`
-            : `${entry.address}#${product}@${tool}`,
-        tool,
-        fn,
-        handle,
-    }));
+	let product = entry.product;
+	if (product && product.__imp_product_name === true) {
+		product = product.name;
+	} else if (typeof product !== "string" || product === "") {
+		throw new Error(
+			"resolveProducts(entry) requires entry.product to be a product-name token or string",
+		);
+	}
+	const by_tool = _products_by_kind_name.get(`${entry.kind}:${product}`);
+	if (by_tool === undefined || by_tool.size === 0) {
+		throw new Error(
+			`no product '${product}' for kind '${entry.kind}' (target '${entry.address}')`,
+		);
+	}
+	const handle = globalThis.__imp_resolve_handle(entry.id);
+	return [...by_tool.entries()].map(([tool, fn]) => ({
+		label:
+			by_tool.size === 1
+				? `${entry.address}#${product}`
+				: `${entry.address}#${product}@${tool}`,
+		tool,
+		fn,
+		handle,
+	}));
 }
 
 /**
@@ -802,23 +903,26 @@ export function resolveProducts(entry) {
  * @returns {*} Whatever the registered product function returns (often a Promise).
  */
 export function productFor(handle, nameToken) {
-    const { name } = _product_name_of(nameToken, "productFor()");
-    if (!handle || handle.__imp !== true) {
-        throw new Error(`productFor(handle, "${name}") expects a target handle`);
-    }
-    const by_tool = _products_by_kind_name.get(`${handle.kind}:${name}`);
-    if (by_tool === undefined || by_tool.size === 0) {
-        throw new Error(`target kind '${handle.kind}' has no '${name}' product registered`);
-    }
-    // Role lookups resolve a single provider; a kind with several tools
-    // registering the same role product is ambiguous by construction.
-    if (by_tool.size > 1) {
-        throw new Error(
-            `target kind '${handle.kind}' has '${name}' products from several tools ` +
-            `(${[...by_tool.keys()].join(", ")}); productFor() resolves a single provider`);
-    }
-    const fn = by_tool.values().next().value;
-    return fn(handle);
+	const { name } = _product_name_of(nameToken, "productFor()");
+	if (!handle || handle.__imp !== true) {
+		throw new Error(`productFor(handle, "${name}") expects a target handle`);
+	}
+	const by_tool = _products_by_kind_name.get(`${handle.kind}:${name}`);
+	if (by_tool === undefined || by_tool.size === 0) {
+		throw new Error(
+			`target kind '${handle.kind}' has no '${name}' product registered`,
+		);
+	}
+	// Role lookups resolve a single provider; a kind with several tools
+	// registering the same role product is ambiguous by construction.
+	if (by_tool.size > 1) {
+		throw new Error(
+			`target kind '${handle.kind}' has '${name}' products from several tools ` +
+				`(${[...by_tool.keys()].join(", ")}); productFor() resolves a single provider`,
+		);
+	}
+	const fn = by_tool.values().next().value;
+	return fn(handle);
 }
 
 /**
@@ -832,15 +936,17 @@ export function productFor(handle, nameToken) {
  * @returns {string|Promise<string>} Absolute path to the toolchain's binary.
  */
 export function invokeToolchainProduct(id) {
-    const handle = globalThis.__imp_resolve_handle(id);
-    if (!handle) {
-        throw new Error(`no live handle for target id ${id}`);
-    }
-    const by_tool = _products_by_kind_name.get(`${handle.kind}:toolchain`);
-    if (by_tool === undefined || by_tool.size === 0) {
-        throw new Error(`target kind '${handle.kind}' has no 'toolchain' product (not toolchain-shaped)`);
-    }
-    return productFor(handle, TOOLCHAIN);
+	const handle = globalThis.__imp_resolve_handle(id);
+	if (!handle) {
+		throw new Error(`no live handle for target id ${id}`);
+	}
+	const by_tool = _products_by_kind_name.get(`${handle.kind}:toolchain`);
+	if (by_tool === undefined || by_tool.size === 0) {
+		throw new Error(
+			`target kind '${handle.kind}' has no 'toolchain' product (not toolchain-shaped)`,
+		);
+	}
+	return productFor(handle, TOOLCHAIN);
 }
 
 /**
@@ -851,20 +957,20 @@ export function invokeToolchainProduct(id) {
  * @returns {object[]} Handles of all matching targets in the transitive closure.
  */
 export function gatherTransitiveClosure(handle, kindClass) {
-    const kind = _kind_of(kindClass, "gatherTransitiveClosure()");
-    const visited = new Set();
-    const result = [];
-    function walk(h) {
-        if (!h || h.__imp !== true) return;
-        const id = h.__id;
-        if (visited.has(id)) return;
-        visited.add(id);
-        const t = hydrateTarget(h);
-        if (t.kind === kind) result.push(h);
-        for (const dep of t.deps) walk(dep.handle);
-    }
-    walk(handle);
-    return result;
+	const kind = _kind_of(kindClass, "gatherTransitiveClosure()");
+	const visited = new Set();
+	const result = [];
+	function walk(h) {
+		if (!h || h.__imp !== true) return;
+		const id = h.__id;
+		if (visited.has(id)) return;
+		visited.add(id);
+		const t = hydrateTarget(h);
+		if (t.kind === kind) result.push(h);
+		for (const dep of t.deps) walk(dep.handle);
+	}
+	walk(handle);
+	return result;
 }
 
 /**
@@ -879,10 +985,20 @@ export function gatherTransitiveClosure(handle, kindClass) {
  * @returns {void}
  */
 export function registerBuildRule(opts) {
-    if (!opts || typeof opts.rule !== "string" || typeof opts.importFrom !== "string") {
-        throw new Error("registerBuildRule({ rule, importFrom, importName? }) requires rule and importFrom");
-    }
-    __host_register_build_rule(opts.rule, opts.importFrom, opts.importName || opts.rule);
+	if (
+		!opts ||
+		typeof opts.rule !== "string" ||
+		typeof opts.importFrom !== "string"
+	) {
+		throw new Error(
+			"registerBuildRule({ rule, importFrom, importName? }) requires rule and importFrom",
+		);
+	}
+	__host_register_build_rule(
+		opts.rule,
+		opts.importFrom,
+		opts.importName || opts.rule,
+	);
 }
 
 /**
@@ -893,25 +1009,25 @@ export function registerBuildRule(opts) {
  * @returns {object} An opaque target-reference value.
  */
 export function targetRef(address) {
-    if (typeof address !== "string" || !address.startsWith("//")) {
-        throw new Error("targetRef(address) requires a workspace target address");
-    }
-    return { __imp_target_ref: true, address };
+	if (typeof address !== "string" || !address.startsWith("//")) {
+		throw new Error("targetRef(address) requires a workspace target address");
+	}
+	return { __imp_target_ref: true, address };
 }
 
 // ---------------------------------------------------------------------------
 // Product-name tokens and target-kind classes
 // ---------------------------------------------------------------------------
 
-const _declared_product_names = new Map();  // name → frozen token; persists across resetMemoState
-const _kind_class_by_name = new Map();      // kind string → Target subclass; persists across resetMemoState
+const _declared_product_names = new Map(); // name → frozen token; persists across resetMemoState
+const _kind_class_by_name = new Map(); // kind string → Target subclass; persists across resetMemoState
 
 function _mint_product_name_token(name, pid) {
-    const existing = _declared_product_names.get(name);
-    if (existing !== undefined && existing.__pid === pid) return existing;
-    const token = Object.freeze({ __imp_product_name: true, name, __pid: pid });
-    _declared_product_names.set(name, token);
-    return token;
+	const existing = _declared_product_names.get(name);
+	if (existing !== undefined && existing.__pid === pid) return existing;
+	const token = Object.freeze({ __imp_product_name: true, name, __pid: pid });
+	_declared_product_names.set(name, token);
+	return token;
 }
 
 /**
@@ -925,20 +1041,20 @@ function _mint_product_name_token(name, pid) {
  * @returns {object} Frozen token accepted by product()/productFor()/resolveProducts().
  */
 export function productName(name) {
-    if (typeof name !== "string" || name === "") {
-        throw new Error("productName(name) requires a non-empty string");
-    }
-    const stack = new Error("product name declaration").stack || "";
-    const pid = __host_declare_product_name(name, stack, false);
-    return _mint_product_name_token(name, pid);
+	if (typeof name !== "string" || name === "") {
+		throw new Error("productName(name) requires a non-empty string");
+	}
+	const stack = new Error("product name declaration").stack || "";
+	const pid = __host_declare_product_name(name, stack, false);
+	return _mint_product_name_token(name, pid);
 }
 
 function _builtin_product_name(name) {
-    const pid = __host_declare_product_name(name, "", true);
-    return _mint_product_name_token(name, pid);
+	const pid = __host_declare_product_name(name, "", true);
+	return _mint_product_name_token(name, pid);
 }
 
-const _declared_tool_names = new Map();  // name → frozen token; persists across resetMemoState
+const _declared_tool_names = new Map(); // name → frozen token; persists across resetMemoState
 
 /**
  * Declare a tool name and return its token. Every product registration names
@@ -953,27 +1069,28 @@ const _declared_tool_names = new Map();  // name → frozen token; persists acro
  * @returns {object} Frozen token accepted by product().
  */
 export function toolName(name) {
-    if (typeof name !== "string" || name === "") {
-        throw new Error("toolName(name) requires a non-empty string");
-    }
-    const stack = new Error("tool name declaration").stack || "";
-    const tid = __host_declare_tool_name(name, stack);
-    const existing = _declared_tool_names.get(name);
-    if (existing !== undefined && existing.__tid === tid) return existing;
-    const token = Object.freeze({ __imp_tool_name: true, name, __tid: tid });
-    _declared_tool_names.set(name, token);
-    return token;
+	if (typeof name !== "string" || name === "") {
+		throw new Error("toolName(name) requires a non-empty string");
+	}
+	const stack = new Error("tool name declaration").stack || "";
+	const tid = __host_declare_tool_name(name, stack);
+	const existing = _declared_tool_names.get(name);
+	if (existing !== undefined && existing.__tid === tid) return existing;
+	const token = Object.freeze({ __imp_tool_name: true, name, __tid: tid });
+	_declared_tool_names.set(name, token);
+	return token;
 }
 
 // Coerce a tool argument to { name, tid }. Only declared tokens are accepted
 // — a bare string cannot prove its declaring module is loaded.
 function _tool_name_of(value, api) {
-    if (value && value.__imp_tool_name === true) {
-        return { name: value.name, tid: value.__tid };
-    }
-    throw new Error(
-        `${api} requires a tool-name token; use the token returned by toolName(), ` +
-        `or a toolchain class's 'static tool' token`);
+	if (value && value.__imp_tool_name === true) {
+		return { name: value.name, tid: value.__tid };
+	}
+	throw new Error(
+		`${api} requires a tool-name token; use the token returned by toolName(), ` +
+			`or a toolchain class's 'static tool' token`,
+	);
 }
 
 /** Tokens for the built-in goals' products, plus the "toolchain" role used
@@ -990,32 +1107,39 @@ export const TOOLCHAIN = _builtin_product_name("toolchain");
 // Coerce a product-name argument to { name, pid }. Only declared tokens are
 // accepted — a bare string cannot prove its declaring module is loaded.
 function _product_name_of(value, api) {
-    if (value && value.__imp_product_name === true) {
-        return { name: value.name, pid: value.__pid };
-    }
-    throw new Error(
-        `${api} requires a product-name token; use the token returned by ` +
-        `productName()/goal(), or a builtin like BUILD from imp:core`);
+	if (value && value.__imp_product_name === true) {
+		return { name: value.name, pid: value.__pid };
+	}
+	throw new Error(
+		`${api} requires a product-name token; use the token returned by ` +
+			`productName()/goal(), or a builtin like BUILD from imp:core`,
+	);
 }
 
 // Coerce a target-kind argument to its kind string. The class *is* the kind
 // declaration: it must subclass Target, carry `static kind`, and be the only
 // class claiming that kind string.
 function _kind_of(cls, api) {
-    if (typeof cls !== "function" || !(cls === Target || cls.prototype instanceof Target)) {
-        throw new Error(`${api} requires a Target subclass as the kind argument`);
-    }
-    if (typeof cls.kind !== "string" || cls.kind === "") {
-        throw new Error(`${api}: class ${cls.name || "<anonymous>"} must declare 'static kind = "..."'`);
-    }
-    const existing = _kind_class_by_name.get(cls.kind);
-    if (existing !== undefined && existing !== cls) {
-        throw new Error(
-            `target kind '${cls.kind}' is declared by two classes ` +
-            `(${existing.name || "<anonymous>"} and ${cls.name || "<anonymous>"})`);
-    }
-    _kind_class_by_name.set(cls.kind, cls);
-    return cls.kind;
+	if (
+		typeof cls !== "function" ||
+		!(cls === Target || cls.prototype instanceof Target)
+	) {
+		throw new Error(`${api} requires a Target subclass as the kind argument`);
+	}
+	if (typeof cls.kind !== "string" || cls.kind === "") {
+		throw new Error(
+			`${api}: class ${cls.name || "<anonymous>"} must declare 'static kind = "..."'`,
+		);
+	}
+	const existing = _kind_class_by_name.get(cls.kind);
+	if (existing !== undefined && existing !== cls) {
+		throw new Error(
+			`target kind '${cls.kind}' is declared by two classes ` +
+				`(${existing.name || "<anonymous>"} and ${cls.name || "<anonymous>"})`,
+		);
+	}
+	_kind_class_by_name.set(cls.kind, cls);
+	return cls.kind;
 }
 
 /**
@@ -1028,12 +1152,14 @@ function _kind_of(cls, api) {
  * @returns {Function} A Target subclass with `static kind = name`.
  */
 export function targetKind(name) {
-    if (typeof name !== "string" || name === "") {
-        throw new Error("targetKind(name) requires a non-empty string");
-    }
-    const cls = class extends Target { static kind = name; };
-    Object.defineProperty(cls, "name", { value: name });
-    return cls;
+	if (typeof name !== "string" || name === "") {
+		throw new Error("targetKind(name) requires a non-empty string");
+	}
+	const cls = class extends Target {
+		static kind = name;
+	};
+	Object.defineProperty(cls, "name", { value: name });
+	return cls;
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,37 +1168,41 @@ export function targetKind(name) {
 
 const _memo_fn_ids = new WeakMap();
 let _memo_fn_counter = 0;
-const _fn_id_names = new Map();  // fn_id → fn.name; persists across resetMemoState
-const _product_fn_info = new Map();  // fn_id → product_name; persists across resetMemoState
-const _products_by_kind_name = new Map();  // "kind:name" → Map(tool → memoized fn); persists across resetMemoState
+const _fn_id_names = new Map(); // fn_id → fn.name; persists across resetMemoState
+const _product_fn_info = new Map(); // fn_id → product_name; persists across resetMemoState
+const _products_by_kind_name = new Map(); // "kind:name" → Map(tool → memoized fn); persists across resetMemoState
 
 function _stable_function_id(fn) {
-    let id = _memo_fn_ids.get(fn);
-    if (id === undefined) {
-        id = (fn.name || "<anonymous>") + "#" + (++_memo_fn_counter);
-        _memo_fn_ids.set(fn, id);
-        _fn_id_names.set(id, fn.name || "<anonymous>");
-    }
-    return id;
+	let id = _memo_fn_ids.get(fn);
+	if (id === undefined) {
+		id = (fn.name || "<anonymous>") + "#" + ++_memo_fn_counter;
+		_memo_fn_ids.set(fn, id);
+		_fn_id_names.set(id, fn.name || "<anonymous>");
+	}
+	return id;
 }
 
 // Serialize args to a stable string. Target handles ({ __imp: true, __id })
 // are replaced with { __imp_ref: <id> } so identity is by numeric ID.
 function _stable_digest(args) {
-    return JSON.stringify(args, function(key, value) {
-        if (value !== null && typeof value === "object"
-                && value.__imp === true && typeof value.__id === "number") {
-            return { __imp_ref: value.__id };
-        }
-        return value;
-    });
+	return JSON.stringify(args, function (key, value) {
+		if (
+			value !== null &&
+			typeof value === "object" &&
+			value.__imp === true &&
+			typeof value.__id === "number"
+		) {
+			return { __imp_ref: value.__id };
+		}
+		return value;
+	});
 }
 
 let _memo_table = new Map();
 let _memo_deps = [];
 let _memo_trace = [];
-let _key_display = new Map();  // key_string → "fnName(arg, ...)"
-let _key_product_call = new Map();  // key_string → {target_id, product_name} for product calls
+let _key_display = new Map(); // key_string → "fnName(arg, ...)"
+let _key_product_call = new Map(); // key_string → {target_id, product_name} for product calls
 
 // Task-tree tracking. Each memo evaluation is a node with a numeric id. The
 // active owner and call stack are stored in an async context, and the embedded
@@ -1081,7 +1211,9 @@ let _key_product_call = new Map();  // key_string → {target_id, product_name} 
 // branches from overwriting each other's owner/stack state.
 let _memo_context_counter = 0;
 let _current_memo_context_id = 0;
-let _memo_contexts = new Map([[0, { owner: null, stack: [], stackSet: new Set() }]]);
+let _memo_contexts = new Map([
+	[0, { owner: null, stack: [], stackSet: new Set() }],
+]);
 let _active_memo_context_ids = new Set();
 let _promise_contexts = new WeakMap();
 let _promise_context_stack = [];
@@ -1096,333 +1228,352 @@ let _js_available_lanes = [0];
 let _js_lane_queue = [];
 
 function _emit_js_lane(state, slot, id, label) {
-    if (typeof globalThis.__host_js_lane_event === "function") {
-        globalThis.__host_js_lane_event(state, slot, id, label);
-    }
+	if (typeof globalThis.__host_js_lane_event === "function") {
+		globalThis.__host_js_lane_event(state, slot, id, label);
+	}
 }
 
 function _reset_js_lanes() {
-    _js_available_lanes = [];
-    for (let i = 0; i < _js_worker_count; i++) {
-        _js_available_lanes.push(i);
-    }
-    _js_lane_queue = [];
+	_js_available_lanes = [];
+	for (let i = 0; i < _js_worker_count; i++) {
+		_js_available_lanes.push(i);
+	}
+	_js_lane_queue = [];
 }
 
-globalThis.__imp_set_js_workers = function(count) {
-    const parsed = Number(count);
-    _js_worker_count = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 1;
-    _reset_js_lanes();
+globalThis.__imp_set_js_workers = function (count) {
+	const parsed = Number(count);
+	_js_worker_count =
+		Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 1;
+	_reset_js_lanes();
 };
 
 function _grant_js_lane(slot, waiter) {
-    _emit_js_lane("start", slot, waiter.id, waiter.label);
-    waiter.run(slot);
+	_emit_js_lane("start", slot, waiter.id, waiter.label);
+	waiter.run(slot);
 }
 
 function _take_js_lane(id, label) {
-    const taskId = id || 0;
-    const taskLabel = label || "js";
-    if (_js_available_lanes.length > 0) {
-        const slot = _js_available_lanes.shift();
-        _emit_js_lane("start", slot, taskId, taskLabel);
-        return slot;
-    }
-    return null;
+	const taskId = id || 0;
+	const taskLabel = label || "js";
+	if (_js_available_lanes.length > 0) {
+		const slot = _js_available_lanes.shift();
+		_emit_js_lane("start", slot, taskId, taskLabel);
+		return slot;
+	}
+	return null;
 }
 
 function _enqueue_js_lane(id, label, run) {
-    return new Promise((resolve, reject) => {
-        _js_lane_queue.push({
-            id: id || 0,
-            label: label || "js",
-            run: (slot) => {
-                try {
-                    resolve(run(slot));
-                } catch (error) {
-                    reject(error);
-                }
-            },
-        });
-    });
+	return new Promise((resolve, reject) => {
+		_js_lane_queue.push({
+			id: id || 0,
+			label: label || "js",
+			run: (slot) => {
+				try {
+					resolve(run(slot));
+				} catch (error) {
+					reject(error);
+				}
+			},
+		});
+	});
 }
 
 function _release_js_lane(slot, id) {
-    _emit_js_lane("clear", slot, id || 0, "");
-    const waiter = _js_lane_queue.shift();
-    if (waiter !== undefined) {
-        _grant_js_lane(slot, waiter);
-    } else {
-        _js_available_lanes.push(slot);
-    }
+	_emit_js_lane("clear", slot, id || 0, "");
+	const waiter = _js_lane_queue.shift();
+	if (waiter !== undefined) {
+		_grant_js_lane(slot, waiter);
+	} else {
+		_js_available_lanes.push(slot);
+	}
 }
 
 function _with_js_lane(id, label, fn) {
-    const run = (slot) => {
-        try {
-            const result = fn();
-            _release_js_lane(slot, id);
-            return result;
-        } catch (error) {
-            _release_js_lane(slot, id);
-            throw error;
-        }
-    };
-    const slot = _take_js_lane(id, label);
-    if (slot !== null) {
-        return Promise.resolve(run(slot));
-    }
-    return _enqueue_js_lane(id, label, run);
+	const run = (slot) => {
+		try {
+			const result = fn();
+			_release_js_lane(slot, id);
+			return result;
+		} catch (error) {
+			_release_js_lane(slot, id);
+			throw error;
+		}
+	};
+	const slot = _take_js_lane(id, label);
+	if (slot !== null) {
+		return Promise.resolve(run(slot));
+	}
+	return _enqueue_js_lane(id, label, run);
 }
 
 function _context_label(contextId) {
-    return _memo_context_labels.get(contextId) || "";
+	return _memo_context_labels.get(contextId) || "";
 }
 
 function _context_owner(contextId) {
-    const ctx = _memo_contexts.get(contextId);
-    return ctx && ctx.owner !== null ? ctx.owner : 0;
+	const ctx = _memo_contexts.get(contextId);
+	return ctx && ctx.owner !== null ? ctx.owner : 0;
 }
 
 function _call_with_context(contextId, fn) {
-    const prevOverride = _promise_context_override;
-    const prevContextId = _current_memo_context_id;
-    _promise_context_override_stack.push(prevOverride);
-    _promise_job_context_stack.push(prevContextId);
-    _promise_context_override = contextId;
-    _current_memo_context_id = contextId;
-    try {
-        return fn();
-    } catch (error) {
-        _promise_context_override = _promise_context_override_stack.pop();
-        _current_memo_context_id = _promise_job_context_stack.pop();
-        throw error;
-    }
+	const prevOverride = _promise_context_override;
+	const prevContextId = _current_memo_context_id;
+	_promise_context_override_stack.push(prevOverride);
+	_promise_job_context_stack.push(prevContextId);
+	_promise_context_override = contextId;
+	_current_memo_context_id = contextId;
+	try {
+		return fn();
+	} catch (error) {
+		_promise_context_override = _promise_context_override_stack.pop();
+		_current_memo_context_id = _promise_job_context_stack.pop();
+		throw error;
+	}
 }
 
 function _clone_context(ctx) {
-    return {
-        owner: ctx.owner,
-        stack: ctx.stack.slice(),
-        stackSet: new Set(ctx.stackSet),
-    };
+	return {
+		owner: ctx.owner,
+		stack: ctx.stack.slice(),
+		stackSet: new Set(ctx.stackSet),
+	};
 }
 
 function _current_context() {
-    let ctx = _memo_contexts.get(_current_memo_context_id);
-    if (ctx === undefined) {
-        ctx = { owner: null, stack: [], stackSet: new Set() };
-        _memo_contexts.set(_current_memo_context_id, ctx);
-    }
-    return ctx;
+	let ctx = _memo_contexts.get(_current_memo_context_id);
+	if (ctx === undefined) {
+		ctx = { owner: null, stack: [], stackSet: new Set() };
+		_memo_contexts.set(_current_memo_context_id, ctx);
+	}
+	return ctx;
 }
 
 function _single_active_context_id() {
-    let only = null;
-    for (const contextId of _active_memo_context_ids) {
-        if (only !== null) return null;
-        only = contextId;
-    }
-    return only;
+	let only = null;
+	for (const contextId of _active_memo_context_ids) {
+		if (only !== null) return null;
+		only = contextId;
+	}
+	return only;
 }
 
 function _effective_context_entry(useSingleActive = false) {
-    const ctx = _current_context();
-    if (ctx.owner !== null || ctx.stack.length > 0) {
-        return { id: _current_memo_context_id, ctx };
-    }
-    if (useSingleActive && _current_memo_context_id === 0) {
-        const activeContextId = _single_active_context_id();
-        if (activeContextId !== null) {
-            return { id: activeContextId, ctx: _memo_contexts.get(activeContextId) || ctx };
-        }
-    }
-    return { id: _current_memo_context_id, ctx };
+	const ctx = _current_context();
+	if (ctx.owner !== null || ctx.stack.length > 0) {
+		return { id: _current_memo_context_id, ctx };
+	}
+	if (useSingleActive && _current_memo_context_id === 0) {
+		const activeContextId = _single_active_context_id();
+		if (activeContextId !== null) {
+			return {
+				id: activeContextId,
+				ctx: _memo_contexts.get(activeContextId) || ctx,
+			};
+		}
+	}
+	return { id: _current_memo_context_id, ctx };
 }
 
 function _effective_context(useSingleActive = false) {
-    return _effective_context_entry(useSingleActive).ctx;
+	return _effective_context_entry(useSingleActive).ctx;
 }
 
 function _fork_context(owner, baseContext = _effective_context(), label = "") {
-    const id = ++_memo_context_counter;
-    const ctx = _clone_context(baseContext);
-    ctx.owner = owner;
-    _memo_contexts.set(id, ctx);
-    _memo_context_labels.set(id, label);
-    _active_memo_context_ids.add(id);
-    return id;
+	const id = ++_memo_context_counter;
+	const ctx = _clone_context(baseContext);
+	ctx.owner = owner;
+	_memo_contexts.set(id, ctx);
+	_memo_context_labels.set(id, label);
+	_active_memo_context_ids.add(id);
+	return id;
 }
 
 function _with_context(contextId, fn) {
-    const prev = _current_memo_context_id;
-    _current_memo_context_id = contextId;
-    try {
-        return fn();
-    } finally {
-        _current_memo_context_id = prev;
-    }
+	const prev = _current_memo_context_id;
+	_current_memo_context_id = contextId;
+	try {
+		return fn();
+	} finally {
+		_current_memo_context_id = prev;
+	}
 }
 
 function _is_object_key(value) {
-    return (typeof value === "object" && value !== null) || typeof value === "function";
+	return (
+		(typeof value === "object" && value !== null) || typeof value === "function"
+	);
 }
 
 function _contextual_thenable(promise, contextId) {
-    const nativePromise = Promise.resolve(promise);
-    if (_is_object_key(nativePromise) && !_promise_contexts.has(nativePromise)) {
-        _promise_contexts.set(nativePromise, contextId);
-    }
-    const wrap = (callback) => {
-        if (typeof callback !== "function") return callback;
-        return (value) => {
-            return _with_js_lane(
-                _context_owner(contextId),
-                _context_label(contextId),
-                () => _call_with_context(contextId, () => callback(value)),
-            );
-        };
-    };
-    return {
-        then(onFulfilled, onRejected) {
-            return _contextual_thenable(
-                nativePromise.then(wrap(onFulfilled), wrap(onRejected)),
-                contextId,
-            );
-        },
-        catch(onRejected) {
-            return this.then(undefined, onRejected);
-        },
-        finally(onFinally) {
-            return _contextual_thenable(
-                nativePromise.finally(typeof onFinally === "function"
-                    ? () => _with_context(contextId, onFinally)
-                    : onFinally),
-                contextId,
-            );
-        },
-    };
+	const nativePromise = Promise.resolve(promise);
+	if (_is_object_key(nativePromise) && !_promise_contexts.has(nativePromise)) {
+		_promise_contexts.set(nativePromise, contextId);
+	}
+	const wrap = (callback) => {
+		if (typeof callback !== "function") return callback;
+		return (value) => {
+			return _with_js_lane(
+				_context_owner(contextId),
+				_context_label(contextId),
+				() => _call_with_context(contextId, () => callback(value)),
+			);
+		};
+	};
+	return {
+		then(onFulfilled, onRejected) {
+			return _contextual_thenable(
+				nativePromise.then(wrap(onFulfilled), wrap(onRejected)),
+				contextId,
+			);
+		},
+		catch(onRejected) {
+			return this.then(undefined, onRejected);
+		},
+		finally(onFinally) {
+			return _contextual_thenable(
+				nativePromise.finally(
+					typeof onFinally === "function"
+						? () => _with_context(contextId, onFinally)
+						: onFinally,
+				),
+				contextId,
+			);
+		},
+	};
 }
 
-globalThis.__imp_promise_context_init = function(promise, parent) {
-    if (!_is_object_key(promise)) return;
-    const parentContext = _is_object_key(parent) && _promise_contexts.has(parent)
-        ? _promise_contexts.get(parent)
-        : null;
-    const contextId =
-        _promise_context_override !== null ? _promise_context_override
-        : _current_memo_context_id !== 0 ? _current_memo_context_id
-        : parentContext !== null && parentContext !== 0 ? parentContext
-        : parentContext !== null ? parentContext
-        : _current_memo_context_id;
-    _promise_contexts.set(promise, contextId);
+globalThis.__imp_promise_context_init = function (promise, parent) {
+	if (!_is_object_key(promise)) return;
+	const parentContext =
+		_is_object_key(parent) && _promise_contexts.has(parent)
+			? _promise_contexts.get(parent)
+			: null;
+	const contextId =
+		_promise_context_override !== null
+			? _promise_context_override
+			: _current_memo_context_id !== 0
+				? _current_memo_context_id
+				: parentContext !== null && parentContext !== 0
+					? parentContext
+					: parentContext !== null
+						? parentContext
+						: _current_memo_context_id;
+	_promise_contexts.set(promise, contextId);
 };
 
-globalThis.__imp_promise_context_before = function(promise) {
-    _promise_context_stack.push(_current_memo_context_id);
-    if (_is_object_key(promise) && _promise_contexts.has(promise)) {
-        _current_memo_context_id = _promise_contexts.get(promise);
-    }
+globalThis.__imp_promise_context_before = function (promise) {
+	_promise_context_stack.push(_current_memo_context_id);
+	if (_is_object_key(promise) && _promise_contexts.has(promise)) {
+		_current_memo_context_id = _promise_contexts.get(promise);
+	}
 };
 
-globalThis.__imp_promise_context_after = function() {
-    if (_promise_job_context_stack.length > 0) {
-        _current_memo_context_id = _promise_job_context_stack.pop();
-    }
-    if (_promise_context_stack.length > 0) {
-        _current_memo_context_id = _promise_context_stack.pop();
-    }
-    if (_promise_context_override_stack.length > 0) {
-        _promise_context_override = _promise_context_override_stack.pop();
-    }
+globalThis.__imp_promise_context_after = function () {
+	if (_promise_job_context_stack.length > 0) {
+		_current_memo_context_id = _promise_job_context_stack.pop();
+	}
+	if (_promise_context_stack.length > 0) {
+		_current_memo_context_id = _promise_context_stack.pop();
+	}
+	if (_promise_context_override_stack.length > 0) {
+		_promise_context_override = _promise_context_override_stack.pop();
+	}
 };
 
 function _emit_task(state, id, parent, label) {
-    if (typeof globalThis.__host_task_event === "function") {
-        globalThis.__host_task_event(state, id, parent === null ? undefined : parent, label);
-    }
+	if (typeof globalThis.__host_task_event === "function") {
+		globalThis.__host_task_event(
+			state,
+			id,
+			parent === null ? undefined : parent,
+			label,
+		);
+	}
 }
 
 function _active_memo_key() {
-    const stack = _effective_context().stack;
-    if (stack.length === 0) return null;
-    return stack[stack.length - 1];
+	const stack = _effective_context().stack;
+	if (stack.length === 0) return null;
+	return stack[stack.length - 1];
 }
 
 function _trace_effect(entry) {
-    const owner = _active_memo_key();
-    if (owner !== null) entry.owner = owner;
-    _memo_trace.push(entry);
+	const owner = _active_memo_key();
+	if (owner !== null) entry.owner = owner;
+	_memo_trace.push(entry);
 }
 
 function _memo_label(key_string) {
-    return _key_display.get(key_string) || key_string;
+	return _key_display.get(key_string) || key_string;
 }
 
 function _memo_cycle_message(key_string) {
-    const stack = _effective_context().stack;
-    const start = stack.indexOf(key_string);
-    const cycle = (start >= 0 ? stack.slice(start) : stack.slice())
-        .concat([key_string]);
-    const lines = [
-        "memo cycle detected:",
-        ...cycle.map((key, index) => `  ${index + 1}. ${_memo_label(key)}`),
-        "",
-        "repeated key:",
-        `  ${key_string}`,
-    ];
-    return lines.join("\n");
+	const stack = _effective_context().stack;
+	const start = stack.indexOf(key_string);
+	const cycle = (start >= 0 ? stack.slice(start) : stack.slice()).concat([
+		key_string,
+	]);
+	const lines = [
+		"memo cycle detected:",
+		...cycle.map((key, index) => `  ${index + 1}. ${_memo_label(key)}`),
+		"",
+		"repeated key:",
+		`  ${key_string}`,
+	];
+	return lines.join("\n");
 }
 
 function _memo_eval(key_string, owner, label, thunk) {
-    // A concurrent branch that reaches the same in-flight memo must receive the
-    // pending promise. A call from a context that already has this key on its
-    // stack can still be a non-awaiting promise touch, so hits must win over
-    // stack-cycle checks.
-    if (_memo_table.has(key_string)) {
-        _memo_trace.push({ event: "hit", key: key_string });
-        return _memo_table.get(key_string);
-    }
-    if (_effective_context().stackSet.has(key_string)) {
-        throw new Error(_memo_cycle_message(key_string));
-    }
-    _memo_trace.push({ event: "miss", key: key_string });
-    // A fresh node for this evaluation, parented at the caller captured at the
-    // call site. Created on miss only, so a memo appears once (concurrent
-    // reusers just await it). The thunk runs when a cooperative JS lane is
-    // available, but the promise is recorded first so queued duplicate callers
-    // share the same work.
-    const nodeId = ++_memo_node_counter;
-    _memo_node_labels.set(nodeId, label);
-    _emit_task("pending", nodeId, owner, label);
-    const promise = _with_js_lane(nodeId, label, () => thunk(nodeId));
-    _memo_table.set(key_string, promise);
-    promise.then(
-        () => _emit_task("done", nodeId, owner, label),
-        (e) => _emit_task("fail", nodeId, owner, (e && e.message) || String(e)),
-    );
-    return promise;
+	// A concurrent branch that reaches the same in-flight memo must receive the
+	// pending promise. A call from a context that already has this key on its
+	// stack can still be a non-awaiting promise touch, so hits must win over
+	// stack-cycle checks.
+	if (_memo_table.has(key_string)) {
+		_memo_trace.push({ event: "hit", key: key_string });
+		return _memo_table.get(key_string);
+	}
+	if (_effective_context().stackSet.has(key_string)) {
+		throw new Error(_memo_cycle_message(key_string));
+	}
+	_memo_trace.push({ event: "miss", key: key_string });
+	// A fresh node for this evaluation, parented at the caller captured at the
+	// call site. Created on miss only, so a memo appears once (concurrent
+	// reusers just await it). The thunk runs when a cooperative JS lane is
+	// available, but the promise is recorded first so queued duplicate callers
+	// share the same work.
+	const nodeId = ++_memo_node_counter;
+	_memo_node_labels.set(nodeId, label);
+	_emit_task("pending", nodeId, owner, label);
+	const promise = _with_js_lane(nodeId, label, () => thunk(nodeId));
+	_memo_table.set(key_string, promise);
+	promise.then(
+		() => _emit_task("done", nodeId, owner, label),
+		(e) => _emit_task("fail", nodeId, owner, (e && e.message) || String(e)),
+	);
+	return promise;
 }
 
 function _push_call(key_string) {
-    const ctx = _effective_context();
-    if (ctx.stack.length > 0) {
-        _memo_deps.push({
-            caller: ctx.stack[ctx.stack.length - 1],
-            callee: key_string,
-        });
-    }
-    ctx.stack.push(key_string);
-    ctx.stackSet.add(key_string);
+	const ctx = _effective_context();
+	if (ctx.stack.length > 0) {
+		_memo_deps.push({
+			caller: ctx.stack[ctx.stack.length - 1],
+			callee: key_string,
+		});
+	}
+	ctx.stack.push(key_string);
+	ctx.stackSet.add(key_string);
 }
 
 function _pop_call(key_string, contextId) {
-    const ctx = _memo_contexts.get(contextId);
-    if (ctx === undefined) return;
-    ctx.stack.pop();
-    ctx.stackSet.delete(key_string);
-    _active_memo_context_ids.delete(contextId);
-    _memo_context_labels.delete(contextId);
+	const ctx = _memo_contexts.get(contextId);
+	if (ctx === undefined) return;
+	ctx.stack.pop();
+	ctx.stackSet.delete(key_string);
+	_active_memo_context_ids.delete(contextId);
+	_memo_context_labels.delete(contextId);
 }
 
 /**
@@ -1446,24 +1597,24 @@ function _pop_call(key_string, contextId) {
  * @returns {function} The same function, wrapped in memo().
  */
 export function product(kindClass, nameToken, toolToken, fn) {
-    const kind = _kind_of(kindClass, "product()");
-    const { name, pid } = _product_name_of(nameToken, "product()");
-    const { name: tool, tid } = _tool_name_of(toolToken, "product()");
-    const memoized = memo(fn);
-    const registrationStack = new Error("product registration").stack || "";
-    __host_product(
-        JSON.stringify({ kind, name, nameId: pid, tool, toolId: tid }),
-        memoized,
-        registrationStack,
-    );
-    _product_fn_info.set(_stable_function_id(fn), name);
-    let by_tool = _products_by_kind_name.get(`${kind}:${name}`);
-    if (by_tool === undefined) {
-        by_tool = new Map();
-        _products_by_kind_name.set(`${kind}:${name}`, by_tool);
-    }
-    by_tool.set(tool, memoized);
-    return memoized;
+	const kind = _kind_of(kindClass, "product()");
+	const { name, pid } = _product_name_of(nameToken, "product()");
+	const { name: tool, tid } = _tool_name_of(toolToken, "product()");
+	const memoized = memo(fn);
+	const registrationStack = new Error("product registration").stack || "";
+	__host_product(
+		JSON.stringify({ kind, name, nameId: pid, tool, toolId: tid }),
+		memoized,
+		registrationStack,
+	);
+	_product_fn_info.set(_stable_function_id(fn), name);
+	let by_tool = _products_by_kind_name.get(`${kind}:${name}`);
+	if (by_tool === undefined) {
+		by_tool = new Map();
+		_products_by_kind_name.set(`${kind}:${name}`, by_tool);
+	}
+	by_tool.set(tool, memoized);
+	return memoized;
 }
 
 /**
@@ -1486,10 +1637,10 @@ export function product(kindClass, nameToken, toolToken, fn) {
  * @returns {function} The same function, wrapped in memo().
  */
 export function expand(kindClass, fn, opts = {}) {
-    const kind = _kind_of(kindClass, "expand()");
-    const memoized = memo(fn);
-    __host_register_expander(kind, memoized, opts.goals ?? null);
-    return memoized;
+	const kind = _kind_of(kindClass, "expand()");
+	const memoized = memo(fn);
+	__host_register_expander(kind, memoized, opts.goals ?? null);
+	return memoized;
 }
 
 /**
@@ -1502,11 +1653,11 @@ export function expand(kindClass, fn, opts = {}) {
  * @returns {object} The same handle, for chaining.
  */
 export function registerTarget(handle, address) {
-    if (!handle || handle.__imp !== true) {
-        throw new Error("registerTarget(handle, address) expects a Target handle");
-    }
-    __host_register_dynamic_target(handle.__id, address);
-    return handle;
+	if (!handle || handle.__imp !== true) {
+		throw new Error("registerTarget(handle, address) expects a Target handle");
+	}
+	__host_register_dynamic_target(handle.__id, address);
+	return handle;
 }
 
 /**
@@ -1518,61 +1669,70 @@ export function registerTarget(handle, address) {
  * @returns {function}
  */
 export function memo(fn) {
-    const fn_id = _stable_function_id(fn);
-    function display_arg(arg) {
-        if (arg && arg.__imp === true) {
-            try {
-                return targetAddress(arg);
-            } catch (_) {
-                return "#" + arg.__id;
-            }
-        }
-        return JSON.stringify(arg);
-    }
-    return function memoized(...args) {
-        const key_string = JSON.stringify({
-            fn_id,
-            args_digest: _stable_digest(args),
-            config_digest: __host_configuration_digest(),
-        });
-        if (!_key_display.has(key_string)) {
-            const label = fn.name + "(" +
-                args.map(display_arg).join(", ") +
-                ")";
-            _key_display.set(key_string, label);
-            const product_name = _product_fn_info.get(fn_id);
-            if (product_name !== undefined && args.length > 0 && args[0] !== null
-                    && typeof args[0] === "object" && args[0].__imp === true) {
-                _key_product_call.set(key_string, { target_id: args[0].__id, product_name });
-            }
-        }
-        const label = _key_display.get(key_string) || key_string;
-        const callerContext = _effective_context_entry(true);
-        const callerContextId = callerContext.id;
-        const owner = callerContext.ctx.owner;
-        return _contextual_thenable(_memo_eval(key_string, owner, label, (nodeId) => {
-            const childContextId = _fork_context(nodeId, callerContext.ctx, label);
-            return _with_context(childContextId, () => {
-                _emit_task("running", nodeId, owner, label);
-                _push_call(key_string);
-                let promise;
-                try {
-                    promise = Promise.resolve(fn(...args));
-                } catch (e) {
-                    _pop_call(key_string, childContextId);
-                    throw e;
-                }
-                if (_is_object_key(promise)) {
-                    _promise_contexts.set(promise, childContextId);
-                }
-                promise.then(
-                    () => _pop_call(key_string, childContextId),
-                    () => _pop_call(key_string, childContextId),
-                );
-                return promise;
-            });
-        }), callerContextId);
-    };
+	const fn_id = _stable_function_id(fn);
+	function display_arg(arg) {
+		if (arg && arg.__imp === true) {
+			try {
+				return targetAddress(arg);
+			} catch (_) {
+				return "#" + arg.__id;
+			}
+		}
+		return JSON.stringify(arg);
+	}
+	return function memoized(...args) {
+		const key_string = JSON.stringify({
+			fn_id,
+			args_digest: _stable_digest(args),
+			config_digest: __host_configuration_digest(),
+		});
+		if (!_key_display.has(key_string)) {
+			const label = fn.name + "(" + args.map(display_arg).join(", ") + ")";
+			_key_display.set(key_string, label);
+			const product_name = _product_fn_info.get(fn_id);
+			if (
+				product_name !== undefined &&
+				args.length > 0 &&
+				args[0] !== null &&
+				typeof args[0] === "object" &&
+				args[0].__imp === true
+			) {
+				_key_product_call.set(key_string, {
+					target_id: args[0].__id,
+					product_name,
+				});
+			}
+		}
+		const label = _key_display.get(key_string) || key_string;
+		const callerContext = _effective_context_entry(true);
+		const callerContextId = callerContext.id;
+		const owner = callerContext.ctx.owner;
+		return _contextual_thenable(
+			_memo_eval(key_string, owner, label, (nodeId) => {
+				const childContextId = _fork_context(nodeId, callerContext.ctx, label);
+				return _with_context(childContextId, () => {
+					_emit_task("running", nodeId, owner, label);
+					_push_call(key_string);
+					let promise;
+					try {
+						promise = Promise.resolve(fn(...args));
+					} catch (e) {
+						_pop_call(key_string, childContextId);
+						throw e;
+					}
+					if (_is_object_key(promise)) {
+						_promise_contexts.set(promise, childContextId);
+					}
+					promise.then(
+						() => _pop_call(key_string, childContextId),
+						() => _pop_call(key_string, childContextId),
+					);
+					return promise;
+				});
+			}),
+			callerContextId,
+		);
+	};
 }
 
 /**
@@ -1581,24 +1741,26 @@ export function memo(fn) {
  * to the same ID even across resets.
  */
 export function resetMemoState() {
-    _memo_table = new Map();
-    _memo_deps = [];
-    _memo_trace = [];
-    _key_display = new Map();
-    _key_product_call = new Map();
-    _memo_context_counter = 0;
-    _current_memo_context_id = 0;
-    _memo_contexts = new Map([[0, { owner: null, stack: [], stackSet: new Set() }]]);
-    _active_memo_context_ids = new Set();
-    _promise_contexts = new WeakMap();
-    _promise_context_stack = [];
-    _promise_job_context_stack = [];
-    _promise_context_override = null;
-    _promise_context_override_stack = [];
-    _memo_node_counter = 0;
-    _memo_node_labels = new Map();
-    _memo_context_labels = new Map([[0, ""]]);
-    _reset_js_lanes();
+	_memo_table = new Map();
+	_memo_deps = [];
+	_memo_trace = [];
+	_key_display = new Map();
+	_key_product_call = new Map();
+	_memo_context_counter = 0;
+	_current_memo_context_id = 0;
+	_memo_contexts = new Map([
+		[0, { owner: null, stack: [], stackSet: new Set() }],
+	]);
+	_active_memo_context_ids = new Set();
+	_promise_contexts = new WeakMap();
+	_promise_context_stack = [];
+	_promise_job_context_stack = [];
+	_promise_context_override = null;
+	_promise_context_override_stack = [];
+	_memo_node_counter = 0;
+	_memo_node_labels = new Map();
+	_memo_context_labels = new Map([[0, ""]]);
+	_reset_js_lanes();
 }
 
 /**
@@ -1606,12 +1768,12 @@ export function resetMemoState() {
  * @returns {{ trace: Array, deps: Array, key_display: Object, key_product_calls: Object }}
  */
 export function getMemoTrace() {
-    return {
-        trace: _memo_trace.slice(),
-        deps: _memo_deps.slice(),
-        key_display: Object.fromEntries(_key_display),
-        key_product_calls: Object.fromEntries(_key_product_call),
-    };
+	return {
+		trace: _memo_trace.slice(),
+		deps: _memo_deps.slice(),
+		key_display: Object.fromEntries(_key_display),
+		key_product_calls: Object.fromEntries(_key_product_call),
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -1621,10 +1783,18 @@ export function getMemoTrace() {
 // glob() returns a lazy FileSet descriptor — no I/O happens here.
 // Call paths(fileset) to evaluate it.
 export function glob(opts) {
-    if (!opts || !Array.isArray(opts.include)) {
-        throw new Error("glob({ root?, include, exclude? }) requires include glob patterns");
-    }
-    return { __fileset: true, kind: "glob", root: opts.root || ".", include: opts.include, exclude: opts.exclude || [] };
+	if (!opts || !Array.isArray(opts.include)) {
+		throw new Error(
+			"glob({ root?, include, exclude? }) requires include glob patterns",
+		);
+	}
+	return {
+		__fileset: true,
+		kind: "glob",
+		root: opts.root || ".",
+		include: opts.include,
+		exclude: opts.exclude || [],
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -1638,49 +1808,66 @@ export function glob(opts) {
 // exclude (or a literal path list) are immutable inputs, so repeat evaluation
 // (e.g. paths() followed by using the same FileSet in run({inputs})) is free.
 function _eval_fileset(fs) {
-    if (!fs || fs.__fileset !== true) throw new Error("paths() requires a FileSet");
-    if (fs.__digest !== undefined) {
-        return { files: fs.__files, digest: fs.__digest };
-    }
-    let result;
-    if (fs.kind === "glob") {
-        const parsed = JSON.parse(__host_glob(
-            fs.root,
-            JSON.stringify(fs.include),
-            JSON.stringify(fs.exclude),
-        ));
-        result = { files: parsed.files, digest: parsed.digest };
-    } else if (fs.kind === "union") {
-        const seen = new Set();
-        const all = [];
-        const digests = [];
-        for (const s of fs.sets) {
-            const evaluated = _eval_fileset(s);
-            digests.push(evaluated.digest);
-            for (const p of evaluated.files) {
-                if (!seen.has(p)) { seen.add(p); all.push(p); }
-            }
-        }
-        all.sort();
-        result = { files: all, digest: __host_merge_digests(JSON.stringify(digests)) };
-    } else if (fs.kind === "literal") {
-        const sortedPaths = fs.paths.slice().sort();
-        result = { files: sortedPaths, digest: __host_capture_paths(JSON.stringify(sortedPaths)) };
-    } else {
-        throw new Error("paths(): unsupported FileSet kind: " + fs.kind);
-    }
-    fs.__files = result.files;
-    fs.__digest = result.digest;
-    return result;
+	if (!fs || fs.__fileset !== true)
+		throw new Error("paths() requires a FileSet");
+	if (fs.__digest !== undefined) {
+		return { files: fs.__files, digest: fs.__digest };
+	}
+	let result;
+	if (fs.kind === "glob") {
+		const parsed = JSON.parse(
+			__host_glob(
+				fs.root,
+				JSON.stringify(fs.include),
+				JSON.stringify(fs.exclude),
+			),
+		);
+		result = { files: parsed.files, digest: parsed.digest };
+	} else if (fs.kind === "union") {
+		const seen = new Set();
+		const all = [];
+		const digests = [];
+		for (const s of fs.sets) {
+			const evaluated = _eval_fileset(s);
+			digests.push(evaluated.digest);
+			for (const p of evaluated.files) {
+				if (!seen.has(p)) {
+					seen.add(p);
+					all.push(p);
+				}
+			}
+		}
+		all.sort();
+		result = {
+			files: all,
+			digest: __host_merge_digests(JSON.stringify(digests)),
+		};
+	} else if (fs.kind === "literal") {
+		const sortedPaths = fs.paths.slice().sort();
+		result = {
+			files: sortedPaths,
+			digest: __host_capture_paths(JSON.stringify(sortedPaths)),
+		};
+	} else {
+		throw new Error("paths(): unsupported FileSet kind: " + fs.kind);
+	}
+	fs.__files = result.files;
+	fs.__digest = result.digest;
+	return result;
 }
 
 export function paths(fileset) {
-    if (!fileset || fileset.__fileset !== true) {
-        throw new Error("paths() requires a FileSet value");
-    }
-    const result = _eval_fileset(fileset).files;
-    _trace_effect({ event: "effect", kind: "paths", fileset_kind: fileset.kind, count: result.length });
-    return result;
+	if (!fileset || fileset.__fileset !== true) {
+		throw new Error("paths() requires a FileSet value");
+	}
+	const result = _eval_fileset(fileset).files;
+	_trace_effect({
+		event: "effect",
+		kind: "paths",
+		fileset_kind: fileset.kind,
+		count: result.length,
+	});
+	return result;
 }
 
 /**
@@ -1692,10 +1879,10 @@ export function paths(fileset) {
  * @returns {string} Digest string.
  */
 export function digestOf(fileset) {
-    if (!fileset || fileset.__fileset !== true) {
-        throw new Error("digestOf() requires a FileSet value");
-    }
-    return _eval_fileset(fileset).digest;
+	if (!fileset || fileset.__fileset !== true) {
+		throw new Error("digestOf() requires a FileSet value");
+	}
+	return _eval_fileset(fileset).digest;
 }
 
 /**
@@ -1708,7 +1895,7 @@ export function digestOf(fileset) {
  * @returns {Array<{type: "added"|"removed"|"modified", path: string}>}
  */
 export function diffDigests(before, after) {
-    return JSON.parse(__host_diff_digests(before, after));
+	return JSON.parse(__host_diff_digests(before, after));
 }
 
 /**
@@ -1720,7 +1907,7 @@ export function diffDigests(before, after) {
  * @returns {string[]}
  */
 export function pathsInDigest(digest) {
-    return JSON.parse(__host_digest_paths(digest));
+	return JSON.parse(__host_digest_paths(digest));
 }
 
 /**
@@ -1732,7 +1919,7 @@ export function pathsInDigest(digest) {
  * @returns {string}
  */
 export function readFileInDigest(digest, path) {
-    return __host_digest_read_file(digest, path);
+	return __host_digest_read_file(digest, path);
 }
 
 /**
@@ -1756,9 +1943,12 @@ export function readFileInDigest(digest, path) {
  * @returns {void}
  */
 export function writeWorkspace(path, digest, opts) {
-    const contextEntry = _effective_context_entry(true);
-    _trace_effect_in_context({ event: "effect", kind: "write_workspace", path }, contextEntry.ctx);
-    return __host_write_workspace(path, digest, (opts && opts.from) ?? null);
+	const contextEntry = _effective_context_entry(true);
+	_trace_effect_in_context(
+		{ event: "effect", kind: "write_workspace", path },
+		contextEntry.ctx,
+	);
+	return __host_write_workspace(path, digest, (opts && opts.from) ?? null);
 }
 
 /**
@@ -1775,11 +1965,14 @@ export function writeWorkspace(path, digest, opts) {
  * @returns {{changed: string[], checked: string[]}}
  */
 export function applyBuildEdits({ edits, check }) {
-    const contextEntry = _effective_context_entry(true);
-    if (!check) {
-        _trace_effect_in_context({ event: "effect", kind: "apply_build_edits" }, contextEntry.ctx);
-    }
-    return JSON.parse(__host_apply_build_edits(JSON.stringify(edits), !!check));
+	const contextEntry = _effective_context_entry(true);
+	if (!check) {
+		_trace_effect_in_context(
+			{ event: "effect", kind: "apply_build_edits" },
+			contextEntry.ctx,
+		);
+	}
+	return JSON.parse(__host_apply_build_edits(JSON.stringify(edits), !!check));
 }
 
 /**
@@ -1794,20 +1987,22 @@ export function applyBuildEdits({ edits, check }) {
  * @returns {string} Merged digest string.
  */
 export function mergeDigests(digests) {
-    return __host_merge_digests(JSON.stringify(digests));
+	return __host_merge_digests(JSON.stringify(digests));
 }
 
 export const file_set = {
-    union(...sets) {
-        for (const s of sets) {
-            if (!s || s.__fileset !== true) throw new Error("file_set.union() requires FileSet values");
-        }
-        return { __fileset: true, kind: "union", sets };
-    },
-    literal(file_paths) {
-        if (!Array.isArray(file_paths)) throw new Error("file_set.literal() requires an array of paths");
-        return { __fileset: true, kind: "literal", paths: file_paths };
-    },
+	union(...sets) {
+		for (const s of sets) {
+			if (!s || s.__fileset !== true)
+				throw new Error("file_set.union() requires FileSet values");
+		}
+		return { __fileset: true, kind: "union", sets };
+	},
+	literal(file_paths) {
+		if (!Array.isArray(file_paths))
+			throw new Error("file_set.literal() requires an array of paths");
+		return { __fileset: true, kind: "literal", paths: file_paths };
+	},
 };
 
 // Reduce any FileSet objects in an inputs array to a single {kind:"digest"} entry
@@ -1816,61 +2011,61 @@ export const file_set = {
 // (e.g. from output(), or a prior run()'s outputDigest wrapped as {kind:"digest"})
 // are passed through unchanged.
 function _materialise_inputs(inputs) {
-    const result = [];
-    for (const input of (inputs || [])) {
-        if (input && input.__fileset === true) {
-            const { files, digest } = _eval_fileset(input);
-            _trace_effect({
-                event: "effect",
-                kind: "paths",
-                fileset_kind: input.kind,
-                count: files.length,
-            });
-            result.push({ kind: "digest", digest });
-        } else if (input != null) {
-            result.push(input);
-        }
-    }
-    return result;
+	const result = [];
+	for (const input of inputs || []) {
+		if (input && input.__fileset === true) {
+			const { files, digest } = _eval_fileset(input);
+			_trace_effect({
+				event: "effect",
+				kind: "paths",
+				fileset_kind: input.kind,
+				count: files.length,
+			});
+			result.push({ kind: "digest", digest });
+		} else if (input != null) {
+			result.push(input);
+		}
+	}
+	return result;
 }
 
 export function output(path, opts) {
-    return {
-        kind: (opts && opts.kind) || "file",
-        path,
-        ...(opts && opts.namedCache ? { namedCache: opts.namedCache } : {}),
-    };
+	return {
+		kind: (opts && opts.kind) || "file",
+		path,
+		...(opts && opts.namedCache ? { namedCache: opts.namedCache } : {}),
+	};
 }
 
 export function output_path(path) {
-    if (typeof path !== "string" || path.length === 0) {
-        throw new Error("output_path(path) requires a non-empty string");
-    }
-    return path;
+	if (typeof path !== "string" || path.length === 0) {
+		throw new Error("output_path(path) requires a non-empty string");
+	}
+	return path;
 }
 
 export function env(name) {
-    const result = __host_env(name);
-    _trace_effect({ event: "effect", kind: "env", name, result });
-    return result ?? null;
+	const result = __host_env(name);
+	_trace_effect({ event: "effect", kind: "env", name, result });
+	return result ?? null;
 }
 
 export function which(name) {
-    const result = __host_which(name);
-    _trace_effect({ event: "effect", kind: "which", name, result });
-    return result ?? null;
+	const result = __host_which(name);
+	_trace_effect({ event: "effect", kind: "which", name, result });
+	return result ?? null;
 }
 
 export function nativeToolArtifact(name) {
-    const result = __host_native_tool_artifact(name);
-    _trace_effect({ event: "effect", kind: "nativeToolArtifact", name, result });
-    return result;
+	const result = __host_native_tool_artifact(name);
+	_trace_effect({ event: "effect", kind: "nativeToolArtifact", name, result });
+	return result;
 }
 
 export function read_file(path) {
-    const result = __host_read_file(path);
-    _trace_effect({ event: "effect", kind: "read_file", path });
-    return result;
+	const result = __host_read_file(path);
+	_trace_effect({ event: "effect", kind: "read_file", path });
+	return result;
 }
 
 /**
@@ -1882,106 +2077,129 @@ export function read_file(path) {
  * @returns {string|null}
  */
 export function readAddressedFile(address) {
-    const result = __host_read_addressed_file(address);
-    _trace_effect({ event: "effect", kind: "read_addressed_file", address });
-    return result ?? null;
+	const result = __host_read_addressed_file(address);
+	_trace_effect({ event: "effect", kind: "read_addressed_file", address });
+	return result ?? null;
 }
 
 function _trace_effect_in_context(entry, ctx) {
-    const stack = ctx.stack;
-    if (stack.length > 0) entry.owner = stack[stack.length - 1];
-    _memo_trace.push(entry);
+	const stack = ctx.stack;
+	if (stack.length > 0) entry.owner = stack[stack.length - 1];
+	_memo_trace.push(entry);
 }
 
 export function run(opts) {
-    const contextEntry = _effective_context_entry(true);
-    const inputs = _materialise_inputs(opts.inputs);
-    const outputs = opts.outputs ?? [];
-    if (outputs.length > 0 && opts.materialize !== true && opts.materialize !== false) {
-        throw new Error(
-            "run(): materialize must be explicitly set (true or false) when outputs are declared",
-        );
-    }
-    const materialize = opts.materialize ?? true;
-    const effect = {
-        event: "effect",
-        kind: "run",
-        display: opts.display ?? (opts.argv && opts.argv[0]),
-        argv: opts.argv ?? [],
-        env: opts.env ?? [],
-        inputs,
-        outputs,
-        tools: opts.tools ?? [],
-        impure: opts.impure === true,
-        forceCache: opts.forceCache === true,
-        sandbox: opts.sandbox !== false,
-        allowFailure: opts.allowFailure === true,
-        materialize,
-    };
-    _trace_effect_in_context(effect, contextEntry.ctx);
-    const contextId = contextEntry.id;
-    const owner = contextEntry.ctx.owner;
-    const promise = __host_run({
-        argv: opts.argv,
-        display: opts.display,
-        env: opts.env,
-        configDigest: __host_configuration_digest(),
-        inputs,
-        outputs,
-        tools: opts.tools,
-        impure: opts.impure,
-        forceCache: opts.forceCache,
-        sandbox: opts.sandbox,
-        allowFailure: opts.allowFailure,
-        materialize,
-        __owner: owner,
-    }).then((result) => ({
-        ...result,
-        outputs,
-    }));
-    return _contextual_thenable(promise, contextId);
+	const contextEntry = _effective_context_entry(true);
+	const inputs = _materialise_inputs(opts.inputs);
+	const outputs = opts.outputs ?? [];
+	if (
+		outputs.length > 0 &&
+		opts.materialize !== true &&
+		opts.materialize !== false
+	) {
+		throw new Error(
+			"run(): materialize must be explicitly set (true or false) when outputs are declared",
+		);
+	}
+	const materialize = opts.materialize ?? true;
+	const effect = {
+		event: "effect",
+		kind: "run",
+		display: opts.display ?? (opts.argv && opts.argv[0]),
+		argv: opts.argv ?? [],
+		env: opts.env ?? [],
+		inputs,
+		outputs,
+		tools: opts.tools ?? [],
+		impure: opts.impure === true,
+		forceCache: opts.forceCache === true,
+		sandbox: opts.sandbox !== false,
+		allowFailure: opts.allowFailure === true,
+		materialize,
+	};
+	_trace_effect_in_context(effect, contextEntry.ctx);
+	const contextId = contextEntry.id;
+	const owner = contextEntry.ctx.owner;
+	const promise = __host_run({
+		argv: opts.argv,
+		display: opts.display,
+		env: opts.env,
+		configDigest: __host_configuration_digest(),
+		inputs,
+		outputs,
+		tools: opts.tools,
+		impure: opts.impure,
+		forceCache: opts.forceCache,
+		sandbox: opts.sandbox,
+		allowFailure: opts.allowFailure,
+		materialize,
+		__owner: owner,
+	}).then((result) => ({
+		...result,
+		outputs,
+	}));
+	return _contextual_thenable(promise, contextId);
 }
 
 export function group(items) {
-    if (!Array.isArray(items)) {
-        throw new Error("group(items) requires an array");
-    }
-    const contextEntry = _effective_context_entry(true);
-    _trace_effect_in_context({ event: "effect", kind: "group", count: items.length }, contextEntry.ctx);
-    return _contextual_thenable(Promise.all(items), contextEntry.id);
+	if (!Array.isArray(items)) {
+		throw new Error("group(items) requires an array");
+	}
+	const contextEntry = _effective_context_entry(true);
+	_trace_effect_in_context(
+		{ event: "effect", kind: "group", count: items.length },
+		contextEntry.ctx,
+	);
+	return _contextual_thenable(Promise.all(items), contextEntry.id);
 }
 
 export function workspace_mutation(opts) {
-    const contextEntry = _effective_context_entry(true);
-    const trace_entry = { event: "effect", kind: "workspace_mutation", display: opts.display ?? (opts.argv && opts.argv[0]) };
-    _trace_effect_in_context(trace_entry, contextEntry.ctx);
-    const contextId = contextEntry.id;
-    const owner = contextEntry.ctx.owner;
-    return _contextual_thenable(
-        __host_workspace_mutation({ ...opts, __owner: owner }).then((result) => {
-            if (result.changed_files !== undefined) {
-                trace_entry.changed_files = result.changed_files;
-            }
-            return result;
-        }),
-        contextId,
-    );
+	const contextEntry = _effective_context_entry(true);
+	const trace_entry = {
+		event: "effect",
+		kind: "workspace_mutation",
+		display: opts.display ?? (opts.argv && opts.argv[0]),
+	};
+	_trace_effect_in_context(trace_entry, contextEntry.ctx);
+	const contextId = contextEntry.id;
+	const owner = contextEntry.ctx.owner;
+	return _contextual_thenable(
+		__host_workspace_mutation({ ...opts, __owner: owner }).then((result) => {
+			if (result.changed_files !== undefined) {
+				trace_entry.changed_files = result.changed_files;
+			}
+			return result;
+		}),
+		contextId,
+	);
 }
 
 // Handle registry: maps numeric js_id → enriched handle for product function dispatch.
 globalThis.__imp_handle_by_id = new Map();
-globalThis.__imp_resolve_handle = function(id) { return globalThis.__imp_handle_by_id.get(id); };
+globalThis.__imp_resolve_handle = function (id) {
+	return globalThis.__imp_handle_by_id.get(id);
+};
 // Expose memo-state helpers as globals so Rust can call them without module imports.
 globalThis.resetMemoState = resetMemoState;
 globalThis.getMemoTrace = getMemoTrace;
 
 function _fmt(...args) {
-    return args.map(a => typeof a === "string" ? a : JSON.stringify(a, null, 2)).join(" ");
+	return args
+		.map((a) => (typeof a === "string" ? a : JSON.stringify(a, null, 2)))
+		.join(" ");
 }
-export function logDebug(...args)  { __host_log("debug", _fmt(...args)); }
-export function logInfo(...args)   { __host_log("info", _fmt(...args)); }
-export function logWarn(...args)   { __host_log("warn", _fmt(...args)); }
-export function logError(...args)  { __host_log("error", _fmt(...args)); }
+export function logDebug(...args) {
+	__host_log("debug", _fmt(...args));
+}
+export function logInfo(...args) {
+	__host_log("info", _fmt(...args));
+}
+export function logWarn(...args) {
+	__host_log("warn", _fmt(...args));
+}
+export function logError(...args) {
+	__host_log("error", _fmt(...args));
+}
 
 /** Path to the currently running imp executable. Use as the first element of
  *  an odinGen `cmd` to invoke imp subcommands as generators. */

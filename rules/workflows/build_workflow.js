@@ -19,20 +19,23 @@
 import { goal, logInfo, resolveProducts } from "imp:core";
 
 export async function buildGoal(selection) {
-    const resolved = selection.flatMap(resolveProducts);
-    const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));
-    let count = 0;
-    for (const { label, promise } of calls) {
-        try {
-            await promise;
-        } catch (e) {
-            throw new Error(`${label}: ${e && e.message ? e.message : e}`);
-        }
-        count++;
-    }
-    if (count > 0) {
-        logInfo(`Built ${count} target${count === 1 ? "" : "s"}`);
-    }
+	const resolved = selection.flatMap(resolveProducts);
+	const calls = resolved.map(({ label, fn, handle }) => ({
+		label,
+		promise: fn(handle),
+	}));
+	let count = 0;
+	for (const { label, promise } of calls) {
+		try {
+			await promise;
+		} catch (e) {
+			throw new Error(`${label}: ${e && e.message ? e.message : e}`);
+		}
+		count++;
+	}
+	if (count > 0) {
+		logInfo(`Built ${count} target${count === 1 ? "" : "s"}`);
+	}
 }
 
 goal("build", buildGoal);

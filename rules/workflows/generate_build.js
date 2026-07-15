@@ -18,18 +18,24 @@
 // (//rules/workflows/fmt.js, //rules/workflows/generate.js) rather than a
 // bespoke CLI command, so it gets a scheduler + exec_root for free — needed
 // because generator products (e.g. cargo metadata) call run().
-import { applyBuildEdits, configuration, goal, goalFlags, logInfo, productFor } from "imp:core";
+import {
+	applyBuildEdits,
+	configuration,
+	goal,
+	goalFlags,
+	logInfo,
+	productFor,
+} from "imp:core";
 
-export const GENERATE_BUILD = goal(
-    "generate-build",
-    generateBuildGoal,
-    {
-        flags: {
-            check: { description: "Verify generated BUILD files are up to date without writing changes" },
-        },
-        selection: "none",
-    },
-);
+export const GENERATE_BUILD = goal("generate-build", generateBuildGoal, {
+	flags: {
+		check: {
+			description:
+				"Verify generated BUILD files are up to date without writing changes",
+		},
+	},
+	selection: "none",
+});
 
 const _registeredGenerators = [];
 
@@ -48,41 +54,52 @@ const _registeredGenerators = [];
  * @returns {void}
  */
 export function registerBuildGenerator({ namespace, kind }) {
-    const kindName = typeof kind === "function" ? kind.kind : kind;
-    _registeredGenerators.push({ namespace, kind: kindName });
+	const kindName = typeof kind === "function" ? kind.kind : kind;
+	_registeredGenerators.push({ namespace, kind: kindName });
 }
 
 function mergeEdits(target, edits) {
-    for (const [file, targets] of Object.entries(edits || {})) {
-        if (!target[file]) target[file] = [];
-        target[file].push(...targets);
-    }
+	for (const [file, targets] of Object.entries(edits || {})) {
+		if (!target[file]) target[file] = [];
+		target[file].push(...targets);
+	}
 }
 
 export async function generateBuildGoal(selection) {
-    const { check } = goalFlags();
+	const { check } = goalFlags();
 
-    const edits = {};
-    for (const { namespace, kind } of _registeredGenerators) {
-        const config = configuration(namespace, {}) || {};
-        if (!config.buildGenerate) continue;
-        let result;
-        try {
-            result = await productFor({ __imp: true, kind, attrs: {} }, GENERATE_BUILD);
-        } catch (e) {
-            throw new Error(`${kind}#generate-build: ${e && e.message ? e.message : e}`);
-        }
-        mergeEdits(edits, result);
-    }
+	const edits = {};
+	for (const { namespace, kind } of _registeredGenerators) {
+		const config = configuration(namespace, {}) || {};
+		if (!config.buildGenerate) continue;
+		let result;
+		try {
+			result = await productFor(
+				{ __imp: true, kind, attrs: {} },
+				GENERATE_BUILD,
+			);
+		} catch (e) {
+			throw new Error(
+				`${kind}#generate-build: ${e && e.message ? e.message : e}`,
+			);
+		}
+		mergeEdits(edits, result);
+	}
 
-    const { changed, checked } = applyBuildEdits({ edits, check });
+	const { changed, checked } = applyBuildEdits({ edits, check });
 
-    if (check) {
-        logInfo(`generate-build: ${checked.length} file(s) checked, ${changed.length} out of date`);
-        if (changed.length > 0) {
-            throw new Error(`generated BUILD files are out of date: ${changed.join(", ")}`);
-        }
-    } else if (changed.length > 0) {
-        logInfo(`generate-build: ${changed.length} file(s) written\n${changed.map((f) => `  ${f}`).join("\n")}`);
-    }
+	if (check) {
+		logInfo(
+			`generate-build: ${checked.length} file(s) checked, ${changed.length} out of date`,
+		);
+		if (changed.length > 0) {
+			throw new Error(
+				`generated BUILD files are out of date: ${changed.join(", ")}`,
+			);
+		}
+	} else if (changed.length > 0) {
+		logInfo(
+			`generate-build: ${changed.length} file(s) written\n${changed.map((f) => `  ${f}`).join("\n")}`,
+		);
+	}
 }

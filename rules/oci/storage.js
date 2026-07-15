@@ -20,13 +20,13 @@ let declared = false;
  *
  */
 export function declareOciStorage() {
-    if (declared) return;
-    namedCache({ name: OCI_STORAGE_CACHE });
-    declared = true;
+	if (declared) return;
+	namedCache({ name: OCI_STORAGE_CACHE });
+	declared = true;
 }
 
 export function __resetOciStorageStateForTest() {
-    declared = false;
+	declared = false;
 }
 
 const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
@@ -40,10 +40,12 @@ const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
  *   path segments, so the colon is swapped for a path-safe separator.
  */
 export function ociStorageKey(digest) {
-    if (typeof digest !== "string" || !DIGEST_RE.test(digest)) {
-        throw new Error(`ociStorageKey: not a canonical digest: ${JSON.stringify(digest)}`);
-    }
-    return digest.replace(":", "/");
+	if (typeof digest !== "string" || !DIGEST_RE.test(digest)) {
+		throw new Error(
+			`ociStorageKey: not a canonical digest: ${JSON.stringify(digest)}`,
+		);
+	}
+	return digest.replace(":", "/");
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +65,6 @@ export function ociStorageKey(digest) {
  * @returns {Promise<{ tools: object[], env: string[] }>}
  */
 export async function craneAuthTools(registry) {
-    void registry;
-    return { tools: [], env: [] };
+	void registry;
+	return { tools: [], env: [] };
 }

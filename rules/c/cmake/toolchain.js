@@ -1,9 +1,25 @@
-import { Toolchain, product, namedCache, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
+import {
+	Toolchain,
+	product,
+	namedCache,
+	platformInfo,
+	cachePut,
+	cacheGet,
+	cacheHas,
+	toolName,
+} from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { downloadToolArtifact, lockedDownloadTools } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockedDownloadTools,
+} from "//rules/imp/lockfile";
 import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
-import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
+import {
+	generateToolLockfile,
+	GEN_LOCKFILES,
+	registerToolchainLockfile,
+} from "//rules/workflows/lockfiles";
 
 // Declared tool identity for products this toolchain implements; also
 // consumed by rule modules registering cmake-driven products.
@@ -15,18 +31,18 @@ const CMAKE_LOCKFILE = "//rules/c/cmake/cmake.lock";
 // CMake's Windows release archives use "arm64" rather than the "aarch64"
 // naming used elsewhere in this project (and by CMake's own Linux archives).
 const archNameByOs = {
-    linux: { x86_64: "x86_64", aarch64: "aarch64" },
-    windows: { x86_64: "x86_64", aarch64: "arm64" },
+	linux: { x86_64: "x86_64", aarch64: "aarch64" },
+	windows: { x86_64: "x86_64", aarch64: "arm64" },
 };
 
 function requireSupportedPlatform(plat) {
-    const archNames = archNameByOs[plat.os];
-    if (!archNames) {
-        throw new Error(`unsupported CMake toolchain OS: ${plat.os}`);
-    }
-    if (!archNames[plat.arch]) {
-        throw new Error(`unsupported CMake toolchain architecture: ${plat.arch}`);
-    }
+	const archNames = archNameByOs[plat.os];
+	if (!archNames) {
+		throw new Error(`unsupported CMake toolchain OS: ${plat.os}`);
+	}
+	if (!archNames[plat.arch]) {
+		throw new Error(`unsupported CMake toolchain architecture: ${plat.arch}`);
+	}
 }
 
 /**
@@ -37,10 +53,10 @@ function requireSupportedPlatform(plat) {
  * @returns {string}
  */
 export function cmakeArtifactName(version, plat) {
-    requireSupportedPlatform(plat);
-    const arch = archNameByOs[plat.os][plat.arch];
-    const ext = plat.os === "windows" ? "zip" : "tar.gz";
-    return `cmake-${version}-${plat.os}-${arch}.${ext}`;
+	requireSupportedPlatform(plat);
+	const arch = archNameByOs[plat.os][plat.arch];
+	const ext = plat.os === "windows" ? "zip" : "tar.gz";
+	return `cmake-${version}-${plat.os}-${arch}.${ext}`;
 }
 
 /**
@@ -51,7 +67,7 @@ export function cmakeArtifactName(version, plat) {
  * @returns {string}
  */
 export function cmakeDownloadUrl(version, plat) {
-    return `https://github.com/Kitware/CMake/releases/download/v${version}/${cmakeArtifactName(version, plat)}`;
+	return `https://github.com/Kitware/CMake/releases/download/v${version}/${cmakeArtifactName(version, plat)}`;
 }
 
 /**
@@ -61,8 +77,9 @@ export function cmakeDownloadUrl(version, plat) {
  * @returns {Array<{ os: string, arch: string }>}
  */
 export function cmakeSupportedPlatforms() {
-    return Object.entries(archNameByOs).flatMap(([os, archNames]) =>
-        Object.keys(archNames).map((arch) => ({ os, arch })));
+	return Object.entries(archNameByOs).flatMap(([os, archNames]) =>
+		Object.keys(archNames).map((arch) => ({ os, arch })),
+	);
 }
 
 /**
@@ -73,7 +90,7 @@ export function cmakeSupportedPlatforms() {
  * @returns {string}
  */
 export function cmakeCacheKey(version, plat) {
-    return `${version}/${plat.os}-${plat.arch}`;
+	return `${version}/${plat.os}-${plat.arch}`;
 }
 
 /**
@@ -89,25 +106,30 @@ export function cmakeCacheKey(version, plat) {
 // BUILTIN_SHELL_CANDIDATES in src/exec.rs), so Windows needs `sh` (Git Bash)
 // declared as a tool too.
 function coreToolNames(plat) {
-    return [...new Set([
-        ...lockedDownloadTools(plat),
-        ...extractArchiveTools(plat.os === "windows" ? "zip" : "tar.gz"),
-    ])];
+	return [
+		...new Set([
+			...lockedDownloadTools(plat),
+			...extractArchiveTools(plat.os === "windows" ? "zip" : "tar.gz"),
+		]),
+	];
 }
 
 export class CmakeToolchain extends Toolchain {
-    static kind = "cmake-toolchain";
-    static tool = CMAKE_TOOL;
-    constructor({ version, unverified }, opts) {
-        super({
-            kind: CmakeToolchain.kind,
-            attrs: { version, ...(unverified ? { unverified } : {}) },
-        }, opts);
-    }
+	static kind = "cmake-toolchain";
+	static tool = CMAKE_TOOL;
+	constructor({ version, unverified }, opts) {
+		super(
+			{
+				kind: CmakeToolchain.kind,
+				attrs: { version, ...(unverified ? { unverified } : {}) },
+			},
+			opts,
+		);
+	}
 
-    bin() {
-        return cmakeBin(this.attrs.version);
-    }
+	bin() {
+		return cmakeBin(this.attrs.version);
+	}
 }
 
 // Declared lazily, once, the first time a toolchain is declared — target()
@@ -116,8 +138,8 @@ export class CmakeToolchain extends Toolchain {
 let coreToolHandles = null;
 
 export function __resetCmakeToolchainStateForTest() {
-    CmakeToolchain.clearDefault();
-    coreToolHandles = null;
+	CmakeToolchain.clearDefault();
+	coreToolHandles = null;
 }
 
 /**
@@ -132,15 +154,17 @@ export function __resetCmakeToolchainStateForTest() {
  * @category configuration
  */
 export function cmakeToolchain(version, opts = {}) {
-    namedCache({ name: CMAKE_TOOLCHAIN_CACHE, shared: true });
-    if (!coreToolHandles) {
-        coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
-    }
+	namedCache({ name: CMAKE_TOOLCHAIN_CACHE, shared: true });
+	if (!coreToolHandles) {
+		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
+			nativeTool(name),
+		);
+	}
 
-    return new CmakeToolchain(
-        { version, unverified: opts.unverified },
-        { default: opts.default },
-    );
+	return new CmakeToolchain(
+		{ version, unverified: opts.unverified },
+		{ default: opts.default },
+	);
 }
 
 /**
@@ -151,11 +175,11 @@ export function cmakeToolchain(version, opts = {}) {
  * @returns {string|null} Local path to the cached toolchain root.
  */
 export function installCmakeToolchain(version, source) {
-    namedCache({ name: CMAKE_TOOLCHAIN_CACHE, shared: true });
-    const plat = platformInfo();
-    const key = cmakeCacheKey(version, plat);
-    cachePut(CMAKE_TOOLCHAIN_CACHE, key, source);
-    return cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
+	namedCache({ name: CMAKE_TOOLCHAIN_CACHE, shared: true });
+	const plat = platformInfo();
+	const key = cmakeCacheKey(version, plat);
+	cachePut(CMAKE_TOOLCHAIN_CACHE, key, source);
+	return cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
 }
 
 /**
@@ -166,42 +190,46 @@ export function installCmakeToolchain(version, source) {
  * @returns {Promise<string>} Local path to the toolchain root.
  */
 export async function acquireCmakeToolchain(version) {
-    const plat = platformInfo();
-    const key = cmakeCacheKey(version, plat);
+	const plat = platformInfo();
+	const key = cmakeCacheKey(version, plat);
 
-    if (cacheHas(CMAKE_TOOLCHAIN_CACHE, key)) {
-        return cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
-    }
-    if (!coreToolHandles) {
-        throw new Error("no CMake toolchain declared via cmakeToolchain(); nothing to acquire");
-    }
+	if (cacheHas(CMAKE_TOOLCHAIN_CACHE, key)) {
+		return cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
+	}
+	if (!coreToolHandles) {
+		throw new Error(
+			"no CMake toolchain declared via cmakeToolchain(); nothing to acquire",
+		);
+	}
 
-    const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
+	const coreTools = await Promise.all(
+		coreToolHandles.map((handle) => nativeToolSpec(handle)),
+	);
 
-    const downloadPath = `.imp/cmake-downloads/${key}/${cmakeArtifactName(version, plat)}`;
-    await downloadToolArtifact({
-        lockfile: CMAKE_LOCKFILE,
-        tool: "cmake",
-        version,
-        plat,
-        url: cmakeDownloadUrl(version, plat),
-        downloadPath,
-        tools: coreTools,
-        display: `download cmake ${version} (${plat.os}/${plat.arch})`,
-        unverified: CmakeToolchain.resolveUnverified(version),
-    });
+	const downloadPath = `.imp/cmake-downloads/${key}/${cmakeArtifactName(version, plat)}`;
+	await downloadToolArtifact({
+		lockfile: CMAKE_LOCKFILE,
+		tool: "cmake",
+		version,
+		plat,
+		url: cmakeDownloadUrl(version, plat),
+		downloadPath,
+		tools: coreTools,
+		display: `download cmake ${version} (${plat.os}/${plat.arch})`,
+		unverified: CmakeToolchain.resolveUnverified(version),
+	});
 
-    await extractArchive({
-        archive: downloadPath,
-        dest: `.imp/cmake-toolchains/${key}`,
-        format: plat.os === "windows" ? "zip" : "tar.gz",
-        stripComponents: 1,
-        tools: coreTools,
-        namedCache: { name: CMAKE_TOOLCHAIN_CACHE, key },
-        display: `install cmake ${version} (${plat.os}/${plat.arch})`,
-    });
+	await extractArchive({
+		archive: downloadPath,
+		dest: `.imp/cmake-toolchains/${key}`,
+		format: plat.os === "windows" ? "zip" : "tar.gz",
+		stripComponents: 1,
+		tools: coreTools,
+		namedCache: { name: CMAKE_TOOLCHAIN_CACHE, key },
+		display: `install cmake ${version} (${plat.os}/${plat.arch})`,
+	});
 
-    return cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
+	return cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
 }
 
 /**
@@ -211,7 +239,7 @@ export async function acquireCmakeToolchain(version) {
  * @returns {string|null}
  */
 export function resolveCmakeToolchainVersion(version) {
-    return CmakeToolchain.resolveVersion(version);
+	return CmakeToolchain.resolveVersion(version);
 }
 
 /**
@@ -222,13 +250,13 @@ export function resolveCmakeToolchainVersion(version) {
  * @returns {Promise<string>}
  */
 export async function cmakeBin(version) {
-    const resolved = resolveCmakeToolchainVersion(version);
-    if (!resolved) {
-        return "cmake";
-    }
-    const dir = await acquireCmakeToolchain(resolved);
-    const exe = platformInfo().os === "windows" ? "cmake.exe" : "cmake";
-    return `${dir}/bin/${exe}`;
+	const resolved = resolveCmakeToolchainVersion(version);
+	if (!resolved) {
+		return "cmake";
+	}
+	const dir = await acquireCmakeToolchain(resolved);
+	const exe = platformInfo().os === "windows" ? "cmake.exe" : "cmake";
+	return `${dir}/bin/${exe}`;
 }
 
 /**
@@ -238,16 +266,16 @@ export async function cmakeBin(version) {
  * @returns {Promise<object>}
  */
 export async function cmakeTool(version) {
-    const resolved = CmakeToolchain.requireVersion(version, "CMake");
-    await acquireCmakeToolchain(resolved);
-    const plat = platformInfo();
-    return {
-        kind: "tool",
-        name: "cmake",
-        cache: CMAKE_TOOLCHAIN_CACHE,
-        key: cmakeCacheKey(resolved, plat),
-        binDirs: ["bin"],
-    };
+	const resolved = CmakeToolchain.requireVersion(version, "CMake");
+	await acquireCmakeToolchain(resolved);
+	const plat = platformInfo();
+	return {
+		kind: "tool",
+		name: "cmake",
+		cache: CMAKE_TOOLCHAIN_CACHE,
+		key: cmakeCacheKey(resolved, plat),
+		binDirs: ["bin"],
+	};
 }
 
 /**
@@ -256,7 +284,7 @@ export async function cmakeTool(version) {
  * @returns {string|null}
  */
 export function defaultCmakeToolchainVersion() {
-    return CmakeToolchain.defaultVersion();
+	return CmakeToolchain.defaultVersion();
 }
 
 /**
@@ -265,15 +293,19 @@ export function defaultCmakeToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultCmakeToolchain() {
-    return CmakeToolchain.default();
+	return CmakeToolchain.default();
 }
 
-const LOCKFILE_SPEC = registerToolchainLockfile({
-    name: "cmake",
-    platforms: cmakeSupportedPlatforms(),
-    downloadUrl: cmakeDownloadUrl,
-    artifactName: cmakeArtifactName,
-    lockfile: CMAKE_LOCKFILE,
-}, ["3.31.0"]);
+const LOCKFILE_SPEC = registerToolchainLockfile(
+	{
+		name: "cmake",
+		platforms: cmakeSupportedPlatforms(),
+		downloadUrl: cmakeDownloadUrl,
+		artifactName: cmakeArtifactName,
+		lockfile: CMAKE_LOCKFILE,
+	},
+	["3.31.0"],
+);
 product(CmakeToolchain, GEN_LOCKFILES, CMAKE_TOOL, (handle) =>
-    generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
+	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+);

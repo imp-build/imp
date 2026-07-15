@@ -7,5 +7,15 @@ import { cargoFmt, cargoFormatCheck } from "//rules/rust/fmt";
 
 const RUSTFMT_TOOL = toolName("rustfmt");
 
-export const cargoPackageFmt = product(CargoPackage, FMT, RUSTFMT_TOOL, cargoFmt);
-export const cargoPackageFormatCheck = product(CargoPackage, FORMAT_CHECK, RUSTFMT_TOOL, cargoFormatCheck);
+export const cargoPackageFmt = product(
+	CargoPackage,
+	FMT,
+	RUSTFMT_TOOL,
+	cargoFmt,
+);
+export const cargoPackageFormatCheck = product(
+	CargoPackage,
+	FORMAT_CHECK,
+	RUSTFMT_TOOL,
+	cargoFormatCheck,
+);

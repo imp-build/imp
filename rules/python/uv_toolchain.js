@@ -1,9 +1,28 @@
-import { Toolchain, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
+import {
+	Toolchain,
+	product,
+	namedCache,
+	run,
+	output,
+	output_path,
+	platformInfo,
+	cachePut,
+	cacheGet,
+	cacheHas,
+	toolName,
+} from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { downloadToolArtifact, lockedDownloadTools } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockedDownloadTools,
+} from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
-import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
+import {
+	generateToolLockfile,
+	GEN_LOCKFILES,
+	registerToolchainLockfile,
+} from "//rules/workflows/lockfiles";
 
 // Declared tool identity for products this toolchain implements; also
 // consumed by rule modules registering uv-driven products.
@@ -29,19 +48,21 @@ const UV_CACHE_KEY = "shared";
 // Broader than Zig's linux+windows-only matrix (rules/c/zig/toolchain.js) —
 // uv publishes macOS builds too.
 const TARGET_TRIPLES = {
-    "linux-x86_64": "x86_64-unknown-linux-gnu",
-    "linux-aarch64": "aarch64-unknown-linux-gnu",
-    "macos-x86_64": "x86_64-apple-darwin",
-    "macos-aarch64": "aarch64-apple-darwin",
-    "windows-x86_64": "x86_64-pc-windows-msvc",
+	"linux-x86_64": "x86_64-unknown-linux-gnu",
+	"linux-aarch64": "aarch64-unknown-linux-gnu",
+	"macos-x86_64": "x86_64-apple-darwin",
+	"macos-aarch64": "aarch64-apple-darwin",
+	"windows-x86_64": "x86_64-pc-windows-msvc",
 };
 
 function targetTriple(plat) {
-    const triple = TARGET_TRIPLES[`${plat.os}-${plat.arch}`];
-    if (!triple) {
-        throw new Error(`unsupported uv toolchain platform: ${plat.os}/${plat.arch}`);
-    }
-    return triple;
+	const triple = TARGET_TRIPLES[`${plat.os}-${plat.arch}`];
+	if (!triple) {
+		throw new Error(
+			`unsupported uv toolchain platform: ${plat.os}/${plat.arch}`,
+		);
+	}
+	return triple;
 }
 
 /**
@@ -52,8 +73,8 @@ function targetTriple(plat) {
  * @returns {string}
  */
 export function uvArtifactName(version, plat) {
-    const ext = plat.os === "windows" ? "zip" : "tar.gz";
-    return `uv-${targetTriple(plat)}.${ext}`;
+	const ext = plat.os === "windows" ? "zip" : "tar.gz";
+	return `uv-${targetTriple(plat)}.${ext}`;
 }
 
 /**
@@ -64,7 +85,7 @@ export function uvArtifactName(version, plat) {
  * @returns {string}
  */
 export function uvDownloadUrl(version, plat) {
-    return `https://github.com/astral-sh/uv/releases/download/${version}/${uvArtifactName(version, plat)}`;
+	return `https://github.com/astral-sh/uv/releases/download/${version}/${uvArtifactName(version, plat)}`;
 }
 
 /**
@@ -75,16 +96,16 @@ export function uvDownloadUrl(version, plat) {
  * @returns {string}
  */
 export function uvCacheKey(version, plat) {
-    return `${version}/${plat.os}-${plat.arch}`;
+	return `${version}/${plat.os}-${plat.arch}`;
 }
 
 // The platforms this module acquires uv for and publishes lockfile entries
 // for (see TARGET_TRIPLES).
 export function uvSupportedPlatforms() {
-    return Object.keys(TARGET_TRIPLES).map((key) => {
-        const sep = key.indexOf("-");
-        return { os: key.slice(0, sep), arch: key.slice(sep + 1) };
-    });
+	return Object.keys(TARGET_TRIPLES).map((key) => {
+		const sep = key.indexOf("-");
+		return { os: key.slice(0, sep), arch: key.slice(sep + 1) };
+	});
 }
 
 // Bare coreutils the download/extract scripts need — even these must be
@@ -95,23 +116,26 @@ export function uvSupportedPlatforms() {
 // be declared too — same reason Zig's toolchain.js declares `xz` for its
 // .tar.xz archives. Bare `sh` only auto-resolves on unix.
 function coreToolNames(plat) {
-    const extract = plat.os === "windows" ? ["tar"] : ["tar", "gzip"];
-    return [...new Set([...lockedDownloadTools(plat), ...extract])];
+	const extract = plat.os === "windows" ? ["tar"] : ["tar", "gzip"];
+	return [...new Set([...lockedDownloadTools(plat), ...extract])];
 }
 
 export class UvToolchain extends Toolchain {
-    static kind = "uv-toolchain";
-    static tool = UV_TOOL;
-    constructor({ version, unverified }, opts) {
-        super({
-            kind: UvToolchain.kind,
-            attrs: { version, ...(unverified ? { unverified } : {}) },
-        }, opts);
-    }
+	static kind = "uv-toolchain";
+	static tool = UV_TOOL;
+	constructor({ version, unverified }, opts) {
+		super(
+			{
+				kind: UvToolchain.kind,
+				attrs: { version, ...(unverified ? { unverified } : {}) },
+			},
+			opts,
+		);
+	}
 
-    bin() {
-        return uvBin(this.attrs.version);
-    }
+	bin() {
+		return uvBin(this.attrs.version);
+	}
 }
 
 // Declared lazily, once — target() addresses are only assigned at
@@ -120,8 +144,8 @@ export class UvToolchain extends Toolchain {
 let coreToolHandles = null;
 
 export function __resetUvToolchainStateForTest() {
-    UvToolchain.clearDefault();
-    coreToolHandles = null;
+	UvToolchain.clearDefault();
+	coreToolHandles = null;
 }
 
 /**
@@ -136,16 +160,18 @@ export function __resetUvToolchainStateForTest() {
  * @category configuration
  */
 export function uvToolchain(version, opts = {}) {
-    namedCache({ name: UV_TOOLCHAIN_CACHE, shared: true });
-    namedCache({ name: UV_CACHE_DIR_CACHE });
-    if (!coreToolHandles) {
-        coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
-    }
+	namedCache({ name: UV_TOOLCHAIN_CACHE, shared: true });
+	namedCache({ name: UV_CACHE_DIR_CACHE });
+	if (!coreToolHandles) {
+		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
+			nativeTool(name),
+		);
+	}
 
-    return new UvToolchain(
-        { version, unverified: opts.unverified },
-        { default: opts.default },
-    );
+	return new UvToolchain(
+		{ version, unverified: opts.unverified },
+		{ default: opts.default },
+	);
 }
 
 /**
@@ -156,11 +182,11 @@ export function uvToolchain(version, opts = {}) {
  * @returns {string|null} Local path to the cached toolchain root.
  */
 export function installUvToolchain(version, source) {
-    namedCache({ name: UV_TOOLCHAIN_CACHE, shared: true });
-    const plat = platformInfo();
-    const key = uvCacheKey(version, plat);
-    cachePut(UV_TOOLCHAIN_CACHE, key, source);
-    return cacheGet(UV_TOOLCHAIN_CACHE, key);
+	namedCache({ name: UV_TOOLCHAIN_CACHE, shared: true });
+	const plat = platformInfo();
+	const key = uvCacheKey(version, plat);
+	cachePut(UV_TOOLCHAIN_CACHE, key, source);
+	return cacheGet(UV_TOOLCHAIN_CACHE, key);
 }
 
 /**
@@ -171,67 +197,71 @@ export function installUvToolchain(version, source) {
  * @returns {Promise<string>} Local path to the toolchain root.
  */
 export async function acquireUvToolchain(version) {
-    const plat = platformInfo();
-    const key = uvCacheKey(version, plat);
+	const plat = platformInfo();
+	const key = uvCacheKey(version, plat);
 
-    if (!coreToolHandles) {
-        throw new Error("no uv toolchain declared via uvToolchain(); nothing to acquire");
-    }
-    const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
+	if (!coreToolHandles) {
+		throw new Error(
+			"no uv toolchain declared via uvToolchain(); nothing to acquire",
+		);
+	}
+	const coreTools = await Promise.all(
+		coreToolHandles.map((handle) => nativeToolSpec(handle)),
+	);
 
-    if (!cacheHas(UV_TOOLCHAIN_CACHE, key)) {
-        const downloadPath = `.imp/uv-downloads/${key}/${uvArtifactName(version, plat)}`;
-        await downloadToolArtifact({
-            lockfile: UV_LOCKFILE,
-            tool: "uv-toolchain",
-            version,
-            plat,
-            url: uvDownloadUrl(version, plat),
-            downloadPath,
-            tools: coreTools,
-            display: `download uv ${version} (${plat.os}/${plat.arch})`,
-            unverified: UvToolchain.resolveUnverified(version),
-        });
+	if (!cacheHas(UV_TOOLCHAIN_CACHE, key)) {
+		const downloadPath = `.imp/uv-downloads/${key}/${uvArtifactName(version, plat)}`;
+		await downloadToolArtifact({
+			lockfile: UV_LOCKFILE,
+			tool: "uv-toolchain",
+			version,
+			plat,
+			url: uvDownloadUrl(version, plat),
+			downloadPath,
+			tools: coreTools,
+			display: `download uv ${version} (${plat.os}/${plat.arch})`,
+			unverified: UvToolchain.resolveUnverified(version),
+		});
 
-        // uv's release archives extract a single top-level uv-<triple>/
-        // directory containing `uv` (and `uvx`) — strip it so the cache
-        // root holds the binaries directly, same shape acquireZigToolchain
-        // uses.
-        await extractArchive({
-            archive: downloadPath,
-            dest: `.imp/uv-toolchains/${key}`,
-            format: plat.os === "windows" ? "zip" : "tar.gz",
-            stripComponents: 1,
-            tools: coreTools,
-            namedCache: { name: UV_TOOLCHAIN_CACHE, key },
-            display: `extract uv ${version} (${plat.os}/${plat.arch})`,
-        });
-    }
+		// uv's release archives extract a single top-level uv-<triple>/
+		// directory containing `uv` (and `uvx`) — strip it so the cache
+		// root holds the binaries directly, same shape acquireZigToolchain
+		// uses.
+		await extractArchive({
+			archive: downloadPath,
+			dest: `.imp/uv-toolchains/${key}`,
+			format: plat.os === "windows" ? "zip" : "tar.gz",
+			stripComponents: 1,
+			tools: coreTools,
+			namedCache: { name: UV_TOOLCHAIN_CACHE, key },
+			display: `extract uv ${version} (${plat.os}/${plat.arch})`,
+		});
+	}
 
-    // A named-cache "tool" mount (see uvCacheDirTool) requires its cache
-    // path to already exist as a real directory — materialize_tools_into_
-    // sandbox in src/exec.rs bails otherwise — so seed it with an empty
-    // directory here, guarded independently of the toolchain cacheHas()
-    // above since this cache is keyed "shared", not per-version (same
-    // independent-guard pattern as ZIG_BUILD_CACHE's seeding in
-    // rules/c/zig/toolchain.js).
-    if (!cacheHas(UV_CACHE_DIR_CACHE, UV_CACHE_KEY)) {
-        const seedPath = ".imp/uv-cache-dir-seed";
-        await run({
-            argv: ["sh", "-c", 'mkdir -p "$1"', "seed-uv-cache-dir", seedPath],
-            tools: coreTools,
-            outputs: [
-                output(output_path(seedPath), {
-                    kind: "directory",
-                    namedCache: { name: UV_CACHE_DIR_CACHE, key: UV_CACHE_KEY },
-                }),
-            ],
-            materialize: true,
-            display: "seed uv cache dir",
-        });
-    }
+	// A named-cache "tool" mount (see uvCacheDirTool) requires its cache
+	// path to already exist as a real directory — materialize_tools_into_
+	// sandbox in src/exec.rs bails otherwise — so seed it with an empty
+	// directory here, guarded independently of the toolchain cacheHas()
+	// above since this cache is keyed "shared", not per-version (same
+	// independent-guard pattern as ZIG_BUILD_CACHE's seeding in
+	// rules/c/zig/toolchain.js).
+	if (!cacheHas(UV_CACHE_DIR_CACHE, UV_CACHE_KEY)) {
+		const seedPath = ".imp/uv-cache-dir-seed";
+		await run({
+			argv: ["sh", "-c", 'mkdir -p "$1"', "seed-uv-cache-dir", seedPath],
+			tools: coreTools,
+			outputs: [
+				output(output_path(seedPath), {
+					kind: "directory",
+					namedCache: { name: UV_CACHE_DIR_CACHE, key: UV_CACHE_KEY },
+				}),
+			],
+			materialize: true,
+			display: "seed uv cache dir",
+		});
+	}
 
-    return cacheGet(UV_TOOLCHAIN_CACHE, key);
+	return cacheGet(UV_TOOLCHAIN_CACHE, key);
 }
 
 /**
@@ -241,7 +271,7 @@ export async function acquireUvToolchain(version) {
  * @returns {string|null}
  */
 export function resolveUvToolchainVersion(version) {
-    return UvToolchain.resolveVersion(version);
+	return UvToolchain.resolveVersion(version);
 }
 
 /**
@@ -251,10 +281,10 @@ export function resolveUvToolchainVersion(version) {
  * @returns {Promise<string>}
  */
 export async function uvBin(version) {
-    const resolved = UvToolchain.requireVersion(version);
-    const dir = await acquireUvToolchain(resolved);
-    const exe = platformInfo().os === "windows" ? "uv.exe" : "uv";
-    return `${dir}/${exe}`;
+	const resolved = UvToolchain.requireVersion(version);
+	const dir = await acquireUvToolchain(resolved);
+	const exe = platformInfo().os === "windows" ? "uv.exe" : "uv";
+	return `${dir}/${exe}`;
 }
 
 /**
@@ -264,16 +294,16 @@ export async function uvBin(version) {
  * @returns {Promise<object>}
  */
 export async function uvTool(version) {
-    const resolved = UvToolchain.requireVersion(version);
-    await acquireUvToolchain(resolved);
-    const plat = platformInfo();
-    return {
-        kind: "tool",
-        name: "uv",
-        cache: UV_TOOLCHAIN_CACHE,
-        key: uvCacheKey(resolved, plat),
-        binDirs: ["."],
-    };
+	const resolved = UvToolchain.requireVersion(version);
+	await acquireUvToolchain(resolved);
+	const plat = platformInfo();
+	return {
+		kind: "tool",
+		name: "uv",
+		cache: UV_TOOLCHAIN_CACHE,
+		key: uvCacheKey(resolved, plat),
+		binDirs: ["."],
+	};
 }
 
 /**
@@ -285,13 +315,13 @@ export async function uvTool(version) {
  * @returns {object}
  */
 export function uvCacheDirTool() {
-    return {
-        kind: "tool",
-        name: UV_CACHE_DIR_CACHE,
-        cache: UV_CACHE_DIR_CACHE,
-        key: UV_CACHE_KEY,
-        binDirs: [],
-    };
+	return {
+		kind: "tool",
+		name: UV_CACHE_DIR_CACHE,
+		cache: UV_CACHE_DIR_CACHE,
+		key: UV_CACHE_KEY,
+		binDirs: [],
+	};
 }
 
 /**
@@ -315,10 +345,10 @@ export function uvCacheDirTool() {
  * @returns {string[]}
  */
 export function uvCacheDirEnv() {
-    return [
-        `UV_CACHE_DIR=.imp/tools/${UV_CACHE_DIR_CACHE}`,
-        `UV_PYTHON_INSTALL_DIR=.imp/tools/${UV_CACHE_DIR_CACHE}/python-install`,
-    ];
+	return [
+		`UV_CACHE_DIR=.imp/tools/${UV_CACHE_DIR_CACHE}`,
+		`UV_PYTHON_INSTALL_DIR=.imp/tools/${UV_CACHE_DIR_CACHE}/python-install`,
+	];
 }
 
 /**
@@ -327,7 +357,7 @@ export function uvCacheDirEnv() {
  * @returns {string|null}
  */
 export function defaultUvToolchainVersion() {
-    return UvToolchain.defaultVersion();
+	return UvToolchain.defaultVersion();
 }
 
 /**
@@ -336,19 +366,23 @@ export function defaultUvToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultUvToolchain() {
-    return UvToolchain.default();
+	return UvToolchain.default();
 }
 
 // Passing name: "uv" here would collide with a real project's own uv.lock
 // (uv's native per-project dependency lock — not ours to name), so
 // "uv-toolchain" is used instead for both the `tool` field and the lockfile
 // stem.
-const LOCKFILE_SPEC = registerToolchainLockfile({
-    name: "uv-toolchain",
-    platforms: uvSupportedPlatforms(),
-    downloadUrl: uvDownloadUrl,
-    artifactName: uvArtifactName,
-    lockfile: UV_LOCKFILE,
-}, ["0.11.16"]);
+const LOCKFILE_SPEC = registerToolchainLockfile(
+	{
+		name: "uv-toolchain",
+		platforms: uvSupportedPlatforms(),
+		downloadUrl: uvDownloadUrl,
+		artifactName: uvArtifactName,
+		lockfile: UV_LOCKFILE,
+	},
+	["0.11.16"],
+);
 product(UvToolchain, GEN_LOCKFILES, UV_TOOL, (handle) =>
-    generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
+	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+);

@@ -17,7 +17,13 @@
 // platform entry throws (the actionable default), unless the toolchain was
 // declared with `unverified: true`, which downgrades to a warning and an
 // unverified download.
-import { logWarn, output, output_path, readAddressedFile, run } from "imp:core";
+import {
+	logWarn,
+	output,
+	output_path,
+	readAddressedFile,
+	run,
+} from "imp:core";
 
 /**
  * Convert a lockfile address (`//a/b.lock`) to a workspace-relative path
@@ -27,14 +33,19 @@ import { logWarn, output, output_path, readAddressedFile, run } from "imp:core";
  * @returns {string}
  */
 export function lockfileAddressToPath(address) {
-    if (!address.startsWith("//")) {
-        throw new Error(`lockfile address '${address}' must start with //`);
-    }
-    const rel = address.slice(2);
-    if (rel.length === 0 || rel.split("/").some((part) => part === "" || part === "." || part === "..")) {
-        throw new Error(`lockfile address '${address}' must be a workspace-relative file path`);
-    }
-    return rel;
+	if (!address.startsWith("//")) {
+		throw new Error(`lockfile address '${address}' must start with //`);
+	}
+	const rel = address.slice(2);
+	if (
+		rel.length === 0 ||
+		rel.split("/").some((part) => part === "" || part === "." || part === "..")
+	) {
+		throw new Error(
+			`lockfile address '${address}' must be a workspace-relative file path`,
+		);
+	}
+	return rel;
 }
 
 /**
@@ -55,46 +66,52 @@ export function lockfileAddressToPath(address) {
  * @param {boolean} [opts.unverified=false]
  * @returns {{ url: string, artifact: string, size?: number, sha256: string }|null}
  */
-export function resolveToolLockfile({ address, tool, version, plat, unverified = false }) {
-    const miss = (reason) => {
-        const message =
-            `${reason}; run \`imp goal gen-lockfiles\` to regenerate it, ` +
-            `or declare the toolchain with \`unverified: true\` to skip verification`;
-        if (unverified) {
-            logWarn(`${message} (continuing unverified)`);
-            return null;
-        }
-        throw new Error(message);
-    };
+export function resolveToolLockfile({
+	address,
+	tool,
+	version,
+	plat,
+	unverified = false,
+}) {
+	const miss = (reason) => {
+		const message =
+			`${reason}; run \`imp goal gen-lockfiles\` to regenerate it, ` +
+			`or declare the toolchain with \`unverified: true\` to skip verification`;
+		if (unverified) {
+			logWarn(`${message} (continuing unverified)`);
+			return null;
+		}
+		throw new Error(message);
+	};
 
-    const contents = readAddressedFile(address);
-    if (contents === null) {
-        return miss(`no lockfile found at ${address} for ${tool} ${version}`);
-    }
-    let lock;
-    try {
-        lock = JSON.parse(contents);
-    } catch (e) {
-        return miss(`lockfile ${address} is not valid JSON (${e.message})`);
-    }
-    if (lock.tool !== tool) {
-        return miss(`lockfile ${address} pins ${lock.tool}, not ${tool}`);
-    }
-    const versions = lock.versions || {};
-    const perPlat = versions[version];
-    if (!perPlat) {
-        const locked = Object.keys(versions).join(", ") || "none";
-        return miss(
-            `lockfile ${address} has no entry for ${tool} ${version} (locked versions: ${locked})`,
-        );
-    }
-    const entry = perPlat[`${plat.os}/${plat.arch}`];
-    if (!entry || !entry.sha256 || !entry.url) {
-        return miss(
-            `lockfile ${address} has no entry for ${tool} ${version} on platform ${plat.os}/${plat.arch}`,
-        );
-    }
-    return entry;
+	const contents = readAddressedFile(address);
+	if (contents === null) {
+		return miss(`no lockfile found at ${address} for ${tool} ${version}`);
+	}
+	let lock;
+	try {
+		lock = JSON.parse(contents);
+	} catch (e) {
+		return miss(`lockfile ${address} is not valid JSON (${e.message})`);
+	}
+	if (lock.tool !== tool) {
+		return miss(`lockfile ${address} pins ${lock.tool}, not ${tool}`);
+	}
+	const versions = lock.versions || {};
+	const perPlat = versions[version];
+	if (!perPlat) {
+		const locked = Object.keys(versions).join(", ") || "none";
+		return miss(
+			`lockfile ${address} has no entry for ${tool} ${version} (locked versions: ${locked})`,
+		);
+	}
+	const entry = perPlat[`${plat.os}/${plat.arch}`];
+	if (!entry || !entry.sha256 || !entry.url) {
+		return miss(
+			`lockfile ${address} has no entry for ${tool} ${version} on platform ${plat.os}/${plat.arch}`,
+		);
+	}
+	return entry;
 }
 
 /**
@@ -106,7 +123,7 @@ export function resolveToolLockfile({ address, tool, version, plat, unverified =
  * @returns {string}
  */
 export function shaToolName(plat) {
-    return plat.os === "macos" ? "shasum" : "sha256sum";
+	return plat.os === "macos" ? "shasum" : "sha256sum";
 }
 
 /**
@@ -119,11 +136,11 @@ export function shaToolName(plat) {
  * @returns {string[]}
  */
 export function lockedDownloadTools(plat) {
-    const tools = ["curl", "mkdir", "dirname", "wc", shaToolName(plat)];
-    if (plat.os === "windows") {
-        tools.push("sh");
-    }
-    return tools;
+	const tools = ["curl", "mkdir", "dirname", "wc", shaToolName(plat)];
+	if (plat.os === "windows") {
+		tools.push("sh");
+	}
+	return tools;
 }
 
 /**
@@ -153,52 +170,52 @@ export function lockedDownloadTools(plat) {
  * @returns {Promise<string>} The materialized download path.
  */
 export async function downloadToolArtifact({
-    lockfile,
-    tool,
-    version,
-    plat,
-    lockPlat,
-    url,
-    downloadPath,
-    tools,
-    display,
-    unverified = false,
+	lockfile,
+	tool,
+	version,
+	plat,
+	lockPlat,
+	url,
+	downloadPath,
+	tools,
+	display,
+	unverified = false,
 }) {
-    const lockEntry = resolveToolLockfile({
-        address: lockfile,
-        tool,
-        version,
-        plat: lockPlat ?? plat,
-        unverified,
-    });
-    const resolvedUrl = lockEntry ? lockEntry.url : url;
-    const argv = lockedDownloadArgv({
-        plat,
-        lockEntry,
-        url: resolvedUrl,
-        downloadPath,
-        displayName: `download-${tool}`,
-    });
-    try {
-        await run({
-            argv,
-            tools,
-            outputs: [output(output_path(downloadPath))],
-            materialize: true,
-            display,
-        });
-    } catch (e) {
-        if (lockEntry) {
-            throw new Error(
-                `download of ${tool} ${version} from ${resolvedUrl} failed transfer or ` +
-                `size/sha256 verification (expected ${lockEntry.sha256} from ${lockfile}); ` +
-                `if you intentionally changed versions, run \`imp goal gen-lockfiles\`: ` +
-                `${e && e.message ? e.message : e}`,
-            );
-        }
-        throw e;
-    }
-    return downloadPath;
+	const lockEntry = resolveToolLockfile({
+		address: lockfile,
+		tool,
+		version,
+		plat: lockPlat ?? plat,
+		unverified,
+	});
+	const resolvedUrl = lockEntry ? lockEntry.url : url;
+	const argv = lockedDownloadArgv({
+		plat,
+		lockEntry,
+		url: resolvedUrl,
+		downloadPath,
+		displayName: `download-${tool}`,
+	});
+	try {
+		await run({
+			argv,
+			tools,
+			outputs: [output(output_path(downloadPath))],
+			materialize: true,
+			display,
+		});
+	} catch (e) {
+		if (lockEntry) {
+			throw new Error(
+				`download of ${tool} ${version} from ${resolvedUrl} failed transfer or ` +
+					`size/sha256 verification (expected ${lockEntry.sha256} from ${lockfile}); ` +
+					`if you intentionally changed versions, run \`imp goal gen-lockfiles\`: ` +
+					`${e && e.message ? e.message : e}`,
+			);
+		}
+		throw e;
+	}
+	return downloadPath;
 }
 
 /**
@@ -217,29 +234,43 @@ export async function downloadToolArtifact({
  * @param {string} opts.displayName argv[0] label for the script, e.g. "download-ruff".
  * @returns {string[]}
  */
-export function lockedDownloadArgv({ plat, lockEntry, url, downloadPath, displayName }) {
-    if (!lockEntry) {
-        return [
-            "sh",
-            "-c",
-            'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"',
-            displayName,
-            downloadPath,
-            url,
-        ];
-    }
-    const check = plat.os === "macos" ? "shasum -a 256 -c -" : "sha256sum -c -";
-    const sizeCheck =
-        lockEntry.size === undefined
-            ? ""
-            : ' && actual="$(wc -c < "$1")" && { [ "$actual" -eq "$4" ] || { echo "size mismatch for $1: expected $4 bytes, got $actual" >&2; exit 1; }; }';
-    const script =
-        'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"' +
-        sizeCheck +
-        ` && printf '%s  %s\\n' "$3" "$1" | ${check}`;
-    const argv = ["sh", "-c", script, displayName, downloadPath, url, lockEntry.sha256];
-    if (lockEntry.size !== undefined) {
-        argv.push(String(lockEntry.size));
-    }
-    return argv;
+export function lockedDownloadArgv({
+	plat,
+	lockEntry,
+	url,
+	downloadPath,
+	displayName,
+}) {
+	if (!lockEntry) {
+		return [
+			"sh",
+			"-c",
+			'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"',
+			displayName,
+			downloadPath,
+			url,
+		];
+	}
+	const check = plat.os === "macos" ? "shasum -a 256 -c -" : "sha256sum -c -";
+	const sizeCheck =
+		lockEntry.size === undefined
+			? ""
+			: ' && actual="$(wc -c < "$1")" && { [ "$actual" -eq "$4" ] || { echo "size mismatch for $1: expected $4 bytes, got $actual" >&2; exit 1; }; }';
+	const script =
+		'mkdir -p "$(dirname "$1")" && curl -fSL -o "$1" "$2"' +
+		sizeCheck +
+		` && printf '%s  %s\\n' "$3" "$1" | ${check}`;
+	const argv = [
+		"sh",
+		"-c",
+		script,
+		displayName,
+		downloadPath,
+		url,
+		lockEntry.sha256,
+	];
+	if (lockEntry.size !== undefined) {
+		argv.push(String(lockEntry.size));
+	}
+	return argv;
 }

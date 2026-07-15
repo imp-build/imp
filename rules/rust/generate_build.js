@@ -13,25 +13,28 @@
 // so run() — needed to shell out to `cargo metadata` — is available.
 
 import {
-    allUnowned,
-    defineConfigSchema,
-    field,
-    glob,
-    product,
-    registerBuildRule,
-    run,
-    workspaceTargets,
-    Target,
+	allUnowned,
+	defineConfigSchema,
+	field,
+	glob,
+	product,
+	registerBuildRule,
+	run,
+	workspaceTargets,
+	Target,
 } from "imp:core";
 
 import { declared_path } from "//rules/rust";
 import { rustTool } from "//rules/rust/toolchain";
-import { registerBuildGenerator, GENERATE_BUILD } from "//rules/workflows/generate_build";
+import {
+	registerBuildGenerator,
+	GENERATE_BUILD,
+} from "//rules/workflows/generate_build";
 import { RUST_TOOL } from "//rules/rust/toolchain";
 
 registerBuildRule({
-    rule: "cargoPackage",
-    importFrom: "//rules/rust",
+	rule: "cargoPackage",
+	importFrom: "//rules/rust",
 });
 
 /**
@@ -41,7 +44,7 @@ registerBuildRule({
  * `Cargo.toml` manifests (off by default).
  */
 export const rustConfigSchema = {
-    buildGenerate: field.bool({ default: false }),
+	buildGenerate: field.bool({ default: false }),
 };
 
 defineConfigSchema("rust", rustConfigSchema);
@@ -50,43 +53,43 @@ defineConfigSchema("rust", rustConfigSchema);
 // writes a full Cargo.toml for every vendored dependency, none of which are
 // real, independently-buildable crates of this workspace.
 const DEFAULT_GENERATE_BUILD_EXCLUDES = [
-    "**/.*/**",
-    "**/build/**",
-    "**/coverage/**",
-    "**/dist/**",
-    "**/obj/**",
-    "**/target/**",
-    "**/vendor/**",
+	"**/.*/**",
+	"**/build/**",
+	"**/coverage/**",
+	"**/dist/**",
+	"**/obj/**",
+	"**/target/**",
+	"**/vendor/**",
 ];
 
 function dirname(path) {
-    const index = path.lastIndexOf("/");
-    return index < 0 ? "." : path.slice(0, index);
+	const index = path.lastIndexOf("/");
+	return index < 0 ? "." : path.slice(0, index);
 }
 
 function normalize_workspace_path(path) {
-    const parts = [];
-    for (const part of path.split("/")) {
-        if (part === "" || part === ".") continue;
-        parts.push(part);
-    }
-    return parts.length === 0 ? "." : parts.join("/");
+	const parts = [];
+	for (const part of path.split("/")) {
+		if (part === "" || part === ".") continue;
+		parts.push(part);
+	}
+	return parts.length === 0 ? "." : parts.join("/");
 }
 
 function sanitize_identifier(raw) {
-    let name = raw.replace(/[^A-Za-z0-9_$]/g, "_");
-    if (name.length === 0) name = "root";
-    if (!/^[A-Za-z_$]/.test(name)) name = `_${name}`;
-    return name;
+	let name = raw.replace(/[^A-Za-z0-9_$]/g, "_");
+	if (name.length === 0) name = "root";
+	if (!/^[A-Za-z_$]/.test(name)) name = `_${name}`;
+	return name;
 }
 
 function build_file_for_dir(dir) {
-    return dir === "." ? "BUILD.js" : `${dir}/BUILD.js`;
+	return dir === "." ? "BUILD.js" : `${dir}/BUILD.js`;
 }
 
 function append_build_target(result, file, target) {
-    if (!result[file]) result[file] = [];
-    result[file].push(target);
+	if (!result[file]) result[file] = [];
+	result[file].push(target);
 }
 
 // `cargo metadata`'s package list always includes every workspace member
@@ -99,13 +102,17 @@ function append_build_target(result, file, target) {
 // directory component (bare top-level "Cargo.toml" manifests are always
 // pre-owned by a declared target in practice), so the suffix is unambiguous.
 export function package_for_manifest(metadata, manifestPath) {
-    const suffix = `/${manifestPath}`;
-    return (metadata.packages || []).find((pkg) => pkg.manifest_path.endsWith(suffix)) || null;
+	const suffix = `/${manifestPath}`;
+	return (
+		(metadata.packages || []).find((pkg) =>
+			pkg.manifest_path.endsWith(suffix),
+		) || null
+	);
 }
 
 function manifest_dir(manifestPath) {
-    const index = manifestPath.lastIndexOf("/");
-    return index < 0 ? "" : manifestPath.slice(0, index);
+	const index = manifestPath.lastIndexOf("/");
+	return index < 0 ? "" : manifestPath.slice(0, index);
 }
 
 // True when this package's own manifest directory differs from cargo's
@@ -114,78 +121,94 @@ function manifest_dir(manifestPath) {
 // cargoPackage's `workspaceMember` option (//rules/rust) for why this
 // distinction matters for sandboxed build/test/fmt inputs.
 function is_workspace_member(metadata, pkg) {
-    return manifest_dir(pkg.manifest_path) !== metadata.workspace_root;
+	return manifest_dir(pkg.manifest_path) !== metadata.workspace_root;
 }
 
 // Shells out to the real toolchain rather than hand-parsing TOML (CMake's
 // rule shells out to real `cmake` instead of parsing CMakeLists.txt for the
 // same reason) — this is what needs `run()`, and thus the golden path.
 async function cargoMetadataFor(manifestPath) {
-    const toolSpec = await rustTool();
-    const result = await run({
-        argv: [
-            "sh", "-c", 'cargo metadata --no-deps --format-version=1 --manifest-path "$1"',
-            "cargo-metadata", manifestPath,
-        ],
-        tools: toolSpec.tools,
-        env: [`RUSTUP_HOME=${toolSpec.rustupHome}`, `CARGO_HOME=${toolSpec.cargoHome}`],
-        // Cargo infers implicit lib/bin targets (src/lib.rs, src/main.rs,
-        // src/bin/*.rs) from what's actually on disk, even for `cargo
-        // metadata` — manifests/lockfile alone aren't enough, cargo errors
-        // with "no targets specified" if the source files it expects to
-        // find aren't there, so this needs the same broad glob sources()
-        // uses for a real build, not just the manifests.
-        inputs: [glob({ root: ".", include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"], exclude: DEFAULT_GENERATE_BUILD_EXCLUDES })],
-        materialize: false,
-        display: `cargo metadata ${manifestPath}`,
-    });
-    return JSON.parse(result.stdout);
+	const toolSpec = await rustTool();
+	const result = await run({
+		argv: [
+			"sh",
+			"-c",
+			'cargo metadata --no-deps --format-version=1 --manifest-path "$1"',
+			"cargo-metadata",
+			manifestPath,
+		],
+		tools: toolSpec.tools,
+		env: [
+			`RUSTUP_HOME=${toolSpec.rustupHome}`,
+			`CARGO_HOME=${toolSpec.cargoHome}`,
+		],
+		// Cargo infers implicit lib/bin targets (src/lib.rs, src/main.rs,
+		// src/bin/*.rs) from what's actually on disk, even for `cargo
+		// metadata` — manifests/lockfile alone aren't enough, cargo errors
+		// with "no targets specified" if the source files it expects to
+		// find aren't there, so this needs the same broad glob sources()
+		// uses for a real build, not just the manifests.
+		inputs: [
+			glob({
+				root: ".",
+				include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
+				exclude: DEFAULT_GENERATE_BUILD_EXCLUDES,
+			}),
+		],
+		materialize: false,
+		display: `cargo metadata ${manifestPath}`,
+	});
+	return JSON.parse(result.stdout);
 }
 
 // Phantom kind: never declared as a workspace target; carries the kind for
 // the generate-build generator product and registerBuildGenerator().
 class CargoBuildGenerator extends Target {
-    static kind = "cargo-build-generator";
+	static kind = "cargo-build-generator";
 }
 
-export const generateBuild = product(CargoBuildGenerator, GENERATE_BUILD, RUST_TOOL,
-    async function generateBuild(handle) {
-        const manifests = allUnowned({
-            root: handle.attrs.root || ".",
-            include: ["**/Cargo.toml"],
-            exclude: handle.attrs.exclude || DEFAULT_GENERATE_BUILD_EXCLUDES,
-        });
+export const generateBuild = product(
+	CargoBuildGenerator,
+	GENERATE_BUILD,
+	RUST_TOOL,
+	async function generateBuild(handle) {
+		const manifests = allUnowned({
+			root: handle.attrs.root || ".",
+			include: ["**/Cargo.toml"],
+			exclude: handle.attrs.exclude || DEFAULT_GENERATE_BUILD_EXCLUDES,
+		});
 
-        const existingPaths = new Set(
-            workspaceTargets("cargo-package").map(({ handle: h }) =>
-                normalize_workspace_path(declared_path(h, h.attrs.path || "."))),
-        );
+		const existingPaths = new Set(
+			workspaceTargets("cargo-package").map(({ handle: h }) =>
+				normalize_workspace_path(declared_path(h, h.attrs.path || ".")),
+			),
+		);
 
-        const result = {};
-        for (const manifestPath of manifests) {
-            const dir = dirname(manifestPath);
-            if (existingPaths.has(normalize_workspace_path(dir))) continue;
+		const result = {};
+		for (const manifestPath of manifests) {
+			const dir = dirname(manifestPath);
+			if (existingPaths.has(normalize_workspace_path(dir))) continue;
 
-            const metadata = await cargoMetadataFor(manifestPath);
-            const pkg = package_for_manifest(metadata, manifestPath);
-            if (!pkg) continue;
+			const metadata = await cargoMetadataFor(manifestPath);
+			const pkg = package_for_manifest(metadata, manifestPath);
+			if (!pkg) continue;
 
-            const bins = (pkg.targets || [])
-                .filter((t) => Array.isArray(t.kind) && t.kind.includes("bin"))
-                .map((t) => t.name);
+			const bins = (pkg.targets || [])
+				.filter((t) => Array.isArray(t.kind) && t.kind.includes("bin"))
+				.map((t) => t.name);
 
-            const props = {};
-            if (bins.length > 0) props.bin = bins.length === 1 ? bins[0] : bins;
-            if (is_workspace_member(metadata, pkg)) props.workspaceMember = true;
+			const props = {};
+			if (bins.length > 0) props.bin = bins.length === 1 ? bins[0] : bins;
+			if (is_workspace_member(metadata, pkg)) props.workspaceMember = true;
 
-            append_build_target(result, build_file_for_dir(dir), {
-                name: sanitize_identifier(pkg.name),
-                rule: "cargoPackage",
-                props,
-            });
-        }
-        return result;
-    }
+			append_build_target(result, build_file_for_dir(dir), {
+				name: sanitize_identifier(pkg.name),
+				rule: "cargoPackage",
+				props,
+			});
+		}
+		return result;
+	},
 );
 
 registerBuildGenerator({ namespace: "rust", kind: CargoBuildGenerator });

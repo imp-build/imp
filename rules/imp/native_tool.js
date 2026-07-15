@@ -2,10 +2,10 @@ import { Target, product, productName, nativeToolArtifact } from "imp:core";
 import { IMP_TOOL } from "//rules/imp/imp_tool";
 
 export class NativeTool extends Target {
-    static kind = "native-tool";
-    constructor(name) {
-        super({ kind: NativeTool.kind, attrs: { name } });
-    }
+	static kind = "native-tool";
+	constructor(name) {
+		super({ kind: NativeTool.kind, attrs: { name } });
+	}
 }
 
 /**
@@ -20,7 +20,7 @@ export class NativeTool extends Target {
  * @returns {object} Target handle.
  */
 export function nativeTool(name) {
-    return new NativeTool(name);
+	return new NativeTool(name);
 }
 
 /**
@@ -31,17 +31,17 @@ export function nativeTool(name) {
 export const TOOL = productName("tool");
 
 export const nativeToolSpec = product(
-    NativeTool,
-    TOOL,
-    IMP_TOOL,
-    async function nativeToolSpec(handle) {
-        const path = await nativeToolArtifact(handle.attrs.name);
-        return {
-            name: handle.attrs.name,
-            cache: "native-tools",
-            key: handle.attrs.name,
-            path,
-            binDirs: ["."],
-        };
-    },
+	NativeTool,
+	TOOL,
+	IMP_TOOL,
+	async function nativeToolSpec(handle) {
+		const path = await nativeToolArtifact(handle.attrs.name);
+		return {
+			name: handle.attrs.name,
+			cache: "native-tools",
+			key: handle.attrs.name,
+			path,
+			binDirs: ["."],
+		};
+	},
 );

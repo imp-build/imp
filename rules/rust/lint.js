@@ -20,14 +20,14 @@
 // without also being re-linted here.
 
 import {
-    declared_path,
-    resources,
-    rust_file_sources,
-    rust_toolchain_version,
-    rustBuildCacheTools,
-    rustLinkerTools,
-    rustToolEnv,
-    sources,
+	declared_path,
+	resources,
+	rust_file_sources,
+	rust_toolchain_version,
+	rustBuildCacheTools,
+	rustLinkerTools,
+	rustToolEnv,
+	sources,
 } from "//rules/rust";
 import { defaultRustToolchain, rustTool } from "//rules/rust/toolchain";
 import { paths, run } from "imp:core";
@@ -36,38 +36,52 @@ import { paths, run } from "imp:core";
 // `--color=always` forces clippy's diagnostic colors even though stdout/
 // stderr are piped rather than a tty.
 export async function cargoClippy(handle) {
-    const files = paths(await rust_file_sources(handle));
-    if (files.length === 0) {
-        return { ok: true, output: "" };
-    }
-    const toolSpec = await rustTool(rust_toolchain_version(handle));
-    const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-    const { tools: linkerTools, rustflags, env: linkerEnv } = await rustLinkerTools(toolchainHandle);
-    const { tools: cacheTools, env: cacheEnv } = await rustBuildCacheTools(toolchainHandle);
-    const { tools: rustTools, env: rustEnv } = rustToolEnv(toolSpec, !!(toolchainHandle && toolchainHandle.attrs.sccache));
+	const files = paths(await rust_file_sources(handle));
+	if (files.length === 0) {
+		return { ok: true, output: "" };
+	}
+	const toolSpec = await rustTool(rust_toolchain_version(handle));
+	const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+	const {
+		tools: linkerTools,
+		rustflags,
+		env: linkerEnv,
+	} = await rustLinkerTools(toolchainHandle);
+	const { tools: cacheTools, env: cacheEnv } =
+		await rustBuildCacheTools(toolchainHandle);
+	const { tools: rustTools, env: rustEnv } = rustToolEnv(
+		toolSpec,
+		!!(toolchainHandle && toolchainHandle.attrs.sccache),
+	);
 
-    const path = declared_path(handle, handle.attrs.path || ".");
-    const srcs = await sources(handle);
-    const resourceInputs = await resources(handle);
+	const path = declared_path(handle, handle.attrs.path || ".");
+	const srcs = await sources(handle);
+	const resourceInputs = await resources(handle);
 
-    const script = 'manifest=$1; target_dir=$2; rustflags=$3; shift 3; ' +
-        'RUSTFLAGS="$rustflags" cargo clippy --manifest-path "$manifest" --target-dir "$target_dir" ' +
-        '--no-deps --color=always "$@" -- -D warnings';
+	const script =
+		"manifest=$1; target_dir=$2; rustflags=$3; shift 3; " +
+		'RUSTFLAGS="$rustflags" cargo clippy --manifest-path "$manifest" --target-dir "$target_dir" ' +
+		'--no-deps --color=always "$@" -- -D warnings';
 
-    const result = await run({
-        argv: [
-            "sh", "-c", script, "cargo-clippy",
-            `${path}/Cargo.toml`, `build/rust-clippy/${path === "." ? "root" : path}`, rustflags,
-        ],
-        tools: [...rustTools, ...linkerTools, ...cacheTools],
-        env: [...rustEnv, ...linkerEnv, ...cacheEnv],
-        inputs: [srcs, resourceInputs],
-        allowFailure: true,
-        display: `cargo clippy ${path}`,
-    });
+	const result = await run({
+		argv: [
+			"sh",
+			"-c",
+			script,
+			"cargo-clippy",
+			`${path}/Cargo.toml`,
+			`build/rust-clippy/${path === "." ? "root" : path}`,
+			rustflags,
+		],
+		tools: [...rustTools, ...linkerTools, ...cacheTools],
+		env: [...rustEnv, ...linkerEnv, ...cacheEnv],
+		inputs: [srcs, resourceInputs],
+		allowFailure: true,
+		display: `cargo clippy ${path}`,
+	});
 
-    return {
-        ok: result.exitCode === 0,
-        output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
-    };
+	return {
+		ok: result.exitCode === 0,
+		output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
+	};
 }

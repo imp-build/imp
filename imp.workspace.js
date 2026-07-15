@@ -5,6 +5,7 @@ import "//rules/c/cmake";
 import { gccToolchain } from "//rules/c/gcc/toolchain";
 import { moldToolchain } from "//rules/c/mold/toolchain";
 import "//rules/gen";
+import { biomeToolchain } from "//rules/js/biome_toolchain";
 import { odinToolchain } from "//rules/odin";
 import { odinfmtToolchain } from "//rules/odin/odinfmt/toolchain";
 import { ruffToolchain } from "//rules/python/ruff_toolchain";
@@ -24,6 +25,7 @@ import "//rules/workflows/test";
 import "//rules/workflows/vs";
 import "//rules/imp/test";
 
+export const biome = biomeToolchain("2.5.4", { default: true });
 export const gcc = gccToolchain("2025.08-1", { default: true });
 // Not the default — purely opt-in as a faster linker for Odin/Rust; both
 // fall back to gcc's bundled ld when no linker is configured.

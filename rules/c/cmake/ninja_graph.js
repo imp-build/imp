@@ -9,13 +9,13 @@
 // general-purpose Ninja parser.
 
 function tokenizePaths(s) {
-    const trimmed = (s || "").trim();
-    return trimmed.length === 0 ? [] : trimmed.split(/\s+/);
+	const trimmed = (s || "").trim();
+	return trimmed.length === 0 ? [] : trimmed.split(/\s+/);
 }
 
 function splitOnce(s, sep) {
-    const idx = s.indexOf(sep);
-    return idx === -1 ? [s, ""] : [s.slice(0, idx), s.slice(idx + sep.length)];
+	const idx = s.indexOf(sep);
+	return idx === -1 ? [s, ""] : [s.slice(0, idx), s.slice(idx + sep.length)];
 }
 
 // Comment line CMake's Ninja generator emits directly above a target's own
@@ -25,114 +25,124 @@ function splitOnce(s, sep) {
 // real `cmake -G Ninja` run: e.g. "# Link build statements for
 // SHARED_LIBRARY target mylib" / "# Object build statements for EXECUTABLE
 // target mytest".
-const TARGET_TYPE_COMMENT_RE = /^#\s*(?:Object|Link) build statements for (\S+) target (.+)$/;
+const TARGET_TYPE_COMMENT_RE =
+	/^#\s*(?:Object|Link) build statements for (\S+) target (.+)$/;
 
 // Parses `mainText` (normally build.ninja's content) plus any files it
 // `include`s, resolved via the synchronous `readInclude(path)` callback (so
 // this works identically against real CAS-backed reads and plain string
 // fixtures in tests). Returns { rules, edges, topVars, targetTypes }.
 export function parseNinja(mainText, readInclude) {
-    const rules = {};
-    const edges = [];
-    const topVars = {};
-    const targetTypes = {};
-    parseInto(mainText, rules, edges, topVars, targetTypes, readInclude);
-    return { rules, edges, topVars, targetTypes };
+	const rules = {};
+	const edges = [];
+	const topVars = {};
+	const targetTypes = {};
+	parseInto(mainText, rules, edges, topVars, targetTypes, readInclude);
+	return { rules, edges, topVars, targetTypes };
 }
 
 function parseInto(text, rules, edges, topVars, targetTypes, readInclude) {
-    const lines = text.split("\n");
-    let i = 0;
-    while (i < lines.length) {
-        const line = lines[i];
-        const stripped = line.trim();
+	const lines = text.split("\n");
+	let i = 0;
+	while (i < lines.length) {
+		const line = lines[i];
+		const stripped = line.trim();
 
-        if (stripped.length === 0) {
-            i += 1;
-            continue;
-        }
+		if (stripped.length === 0) {
+			i += 1;
+			continue;
+		}
 
-        if (stripped.startsWith("#")) {
-            const match = TARGET_TYPE_COMMENT_RE.exec(stripped);
-            if (match) targetTypes[match[2]] = match[1];
-            i += 1;
-            continue;
-        }
+		if (stripped.startsWith("#")) {
+			const match = TARGET_TYPE_COMMENT_RE.exec(stripped);
+			if (match) targetTypes[match[2]] = match[1];
+			i += 1;
+			continue;
+		}
 
-        if (stripped.startsWith("include ")) {
-            const incPath = stripped.slice("include ".length).trim();
-            parseInto(readInclude(incPath), rules, edges, topVars, targetTypes, readInclude);
-            i += 1;
-            continue;
-        }
+		if (stripped.startsWith("include ")) {
+			const incPath = stripped.slice("include ".length).trim();
+			parseInto(
+				readInclude(incPath),
+				rules,
+				edges,
+				topVars,
+				targetTypes,
+				readInclude,
+			);
+			i += 1;
+			continue;
+		}
 
-        if (stripped.startsWith("rule ")) {
-            const name = stripped.slice("rule ".length).trim();
-            i += 1;
-            const body = {};
-            while (i < lines.length && lines[i].startsWith("  ")) {
-                const [k, v] = splitOnce(lines[i].trim(), "=");
-                body[k.trim()] = v.trim();
-                i += 1;
-            }
-            rules[name] = body;
-            continue;
-        }
+		if (stripped.startsWith("rule ")) {
+			const name = stripped.slice("rule ".length).trim();
+			i += 1;
+			const body = {};
+			while (i < lines.length && lines[i].startsWith("  ")) {
+				const [k, v] = splitOnce(lines[i].trim(), "=");
+				body[k.trim()] = v.trim();
+				i += 1;
+			}
+			rules[name] = body;
+			continue;
+		}
 
-        if (stripped.startsWith("build ")) {
-            const rest = stripped.slice("build ".length);
-            const [outsPart, rhsRaw] = splitOnce(rest, ":");
-            const rhs = rhsRaw.trim();
+		if (stripped.startsWith("build ")) {
+			const rest = stripped.slice("build ".length);
+			const [outsPart, rhsRaw] = splitOnce(rest, ":");
+			const rhs = rhsRaw.trim();
 
-            const [explicitOut, implicitOutRaw] = splitOnce(outsPart, "|");
-            const [ruleAndInsRaw, orderOnlyRaw] = splitOnce(rhs, "||");
-            const ruleAndIns = ruleAndInsRaw.trim();
-            const [ruleName, insRaw] = splitOnce(ruleAndIns, " ");
-            const [explicitIn, implicitInRaw] = splitOnce(insRaw.trim(), "|");
+			const [explicitOut, implicitOutRaw] = splitOnce(outsPart, "|");
+			const [ruleAndInsRaw, orderOnlyRaw] = splitOnce(rhs, "||");
+			const ruleAndIns = ruleAndInsRaw.trim();
+			const [ruleName, insRaw] = splitOnce(ruleAndIns, " ");
+			const [explicitIn, implicitInRaw] = splitOnce(insRaw.trim(), "|");
 
-            i += 1;
-            const vars = {};
-            while (i < lines.length && lines[i].startsWith("  ")) {
-                const [k, v] = splitOnce(lines[i].trim(), "=");
-                vars[k.trim()] = v.trim();
-                i += 1;
-            }
+			i += 1;
+			const vars = {};
+			while (i < lines.length && lines[i].startsWith("  ")) {
+				const [k, v] = splitOnce(lines[i].trim(), "=");
+				vars[k.trim()] = v.trim();
+				i += 1;
+			}
 
-            edges.push({
-                outputs: tokenizePaths(explicitOut),
-                implicitOutputs: tokenizePaths(implicitOutRaw),
-                rule: ruleName.trim(),
-                inputs: tokenizePaths(explicitIn),
-                implicitInputs: tokenizePaths(implicitInRaw),
-                orderOnly: tokenizePaths(orderOnlyRaw),
-                vars,
-            });
-            continue;
-        }
+			edges.push({
+				outputs: tokenizePaths(explicitOut),
+				implicitOutputs: tokenizePaths(implicitOutRaw),
+				rule: ruleName.trim(),
+				inputs: tokenizePaths(explicitIn),
+				implicitInputs: tokenizePaths(implicitInRaw),
+				orderOnly: tokenizePaths(orderOnlyRaw),
+				vars,
+			});
+			continue;
+		}
 
-        // Top-level "name = value" variable assignment.
-        if (stripped.includes("=")) {
-            const [k, v] = splitOnce(stripped, "=");
-            topVars[k.trim()] = v.trim();
-        }
-        i += 1;
-    }
+		// Top-level "name = value" variable assignment.
+		if (stripped.includes("=")) {
+			const [k, v] = splitOnce(stripped, "=");
+			topVars[k.trim()] = v.trim();
+		}
+		i += 1;
+	}
 }
 
 // Resolves $in / $out / $VAR references in a template string against an
 // edge's own bindings, falling back to the rule's defaults, then top-level
 // variables — matching Ninja's scoping for the subset CMake emits.
 export function expandVar(template, edge, topVars, ruleDefaults) {
-    return template.replace(/\$\{?(\w+)\}?/g, (whole, name) => {
-        if (name === "in") return edge.inputs.join(" ");
-        if (name === "out") return edge.outputs.join(" ");
-        if (Object.prototype.hasOwnProperty.call(edge.vars, name)) {
-            return expandVar(edge.vars[name], edge, topVars, ruleDefaults);
-        }
-        if (Object.prototype.hasOwnProperty.call(ruleDefaults, name)) return ruleDefaults[name];
-        if (Object.prototype.hasOwnProperty.call(topVars, name)) return topVars[name];
-        return "";
-    });
+	return template.replace(/\$\{?(\w+)\}?/g, (whole, name) => {
+		if (name === "in") return edge.inputs.join(" ");
+		if (name === "out") return edge.outputs.join(" ");
+		if (Object.prototype.hasOwnProperty.call(edge.vars, name)) {
+			return expandVar(edge.vars[name], edge, topVars, ruleDefaults);
+		}
+		if (Object.prototype.hasOwnProperty.call(ruleDefaults, name))
+			return ruleDefaults[name];
+		if (Object.prototype.hasOwnProperty.call(topVars, name))
+			return topVars[name];
+		return "";
+	});
 }
 
 // Backward-reachability: given one or more starting output names (e.g.
@@ -141,31 +151,35 @@ export function expandVar(template, edge, topVars, ruleDefaults) {
 // regen, clean, help, edit_cache, rebuild_cache) are naturally excluded
 // since nothing real depends on them from "all".
 export function reachableEdges(edges, targetNames) {
-    const byOutput = new Map();
-    for (const edge of edges) {
-        for (const o of [...edge.outputs, ...edge.implicitOutputs]) {
-            byOutput.set(o, edge);
-        }
-    }
+	const byOutput = new Map();
+	for (const edge of edges) {
+		for (const o of [...edge.outputs, ...edge.implicitOutputs]) {
+			byOutput.set(o, edge);
+		}
+	}
 
-    const visited = new Set();
-    const order = [];
+	const visited = new Set();
+	const order = [];
 
-    function visit(edge) {
-        if (visited.has(edge)) return;
-        visited.add(edge);
-        for (const dep of [...edge.inputs, ...edge.implicitInputs, ...edge.orderOnly]) {
-            const depEdge = byOutput.get(dep);
-            if (depEdge) visit(depEdge);
-        }
-        order.push(edge);
-    }
+	function visit(edge) {
+		if (visited.has(edge)) return;
+		visited.add(edge);
+		for (const dep of [
+			...edge.inputs,
+			...edge.implicitInputs,
+			...edge.orderOnly,
+		]) {
+			const depEdge = byOutput.get(dep);
+			if (depEdge) visit(depEdge);
+		}
+		order.push(edge);
+	}
 
-    for (const name of targetNames) {
-        const edge = byOutput.get(name);
-        if (edge) visit(edge);
-    }
-    return order;
+	for (const name of targetNames) {
+		const edge = byOutput.get(name);
+		if (edge) visit(edge);
+	}
+	return order;
 }
 
 // Absolute host paths CMake bakes into rule commands (e.g. "/usr/bin/cc")
@@ -190,23 +204,30 @@ const HOST_ABSOLUTE_TOOL_RE = /(^|&&|\|\||;|\()\s*(\/[^\s&|;()'"]+)/g;
 // mounted), but the name itself is deliberately *not* added to toolNames,
 // since whatever already mounted that tool directory (compilerTools/
 // cmakeToolSpec) already covers it.
-const IMP_MOUNT_TOOL_RE = /(^|&&|\|\||;|\()\s*((?:\.\.\/)*\.imp\/tools\/)([^\s&|;()'"]+)/g;
+const IMP_MOUNT_TOOL_RE =
+	/(^|&&|\|\||;|\()\s*((?:\.\.\/)*\.imp\/tools\/)([^\s&|;()'"]+)/g;
 
 export function rewriteToolInvocations(command) {
-    const toolNames = new Set();
+	const toolNames = new Set();
 
-    let rewritten = command.replace(IMP_MOUNT_TOOL_RE, (whole, prefix, mountPrefix, rest) => {
-        const base = rest.split("/").pop();
-        return prefix.length > 0 ? `${prefix} ${base}` : base;
-    });
+	let rewritten = command.replace(
+		IMP_MOUNT_TOOL_RE,
+		(whole, prefix, mountPrefix, rest) => {
+			const base = rest.split("/").pop();
+			return prefix.length > 0 ? `${prefix} ${base}` : base;
+		},
+	);
 
-    rewritten = rewritten.replace(HOST_ABSOLUTE_TOOL_RE, (whole, prefix, absPath) => {
-        const base = absPath.split("/").pop();
-        toolNames.add(base);
-        return prefix.length > 0 ? `${prefix} ${base}` : base;
-    });
+	rewritten = rewritten.replace(
+		HOST_ABSOLUTE_TOOL_RE,
+		(whole, prefix, absPath) => {
+			const base = absPath.split("/").pop();
+			toolNames.add(base);
+			return prefix.length > 0 ? `${prefix} ${base}` : base;
+		},
+	);
 
-    return { command: rewritten, toolNames: Array.from(toolNames) };
+	return { command: rewritten, toolNames: Array.from(toolNames) };
 }
 
 // CMake always canonicalizes CMAKE_SOURCE_DIR/CMAKE_BINARY_DIR to absolute
@@ -220,11 +241,11 @@ export function rewriteToolInvocations(command) {
 // with, lets us compute and strip the sandbox-root prefix so paths become
 // workspace-relative again and resolve correctly in any later sandbox.
 export function sandboxRootFromWorkdir(cmakeNinjaWorkdir, buildDirPath) {
-    if (!cmakeNinjaWorkdir) return null;
-    const workdir = cmakeNinjaWorkdir.replace(/\/+$/, "");
-    const suffix = `/${buildDirPath}`;
-    if (!workdir.endsWith(suffix)) return null;
-    return workdir.slice(0, workdir.length - suffix.length);
+	if (!cmakeNinjaWorkdir) return null;
+	const workdir = cmakeNinjaWorkdir.replace(/\/+$/, "");
+	const suffix = `/${buildDirPath}`;
+	if (!workdir.endsWith(suffix)) return null;
+	return workdir.slice(0, workdir.length - suffix.length);
 }
 
 // Ninja always executes build commands with cwd = the build directory (that
@@ -235,23 +256,25 @@ export function sandboxRootFromWorkdir(cmakeNinjaWorkdir, buildDirPath) {
 // to become relative *to the build directory*, not to the sandbox root —
 // hence the "../" x depth prefix instead of stripping to "".
 function upPrefixForBuildDir(buildDirPath) {
-    const depth = buildDirPath.split("/").filter(part => part.length > 0 && part !== ".").length;
-    return "../".repeat(depth);
+	const depth = buildDirPath
+		.split("/")
+		.filter((part) => part.length > 0 && part !== ".").length;
+	return "../".repeat(depth);
 }
 
 export function rebaseAbsolutePaths(text, sandboxRoot, replacement = "") {
-    if (!sandboxRoot) return text;
-    return text.split(sandboxRoot + "/").join(replacement);
+	if (!sandboxRoot) return text;
+	return text.split(sandboxRoot + "/").join(replacement);
 }
 
 // Rebases a single path token the same way, for use on edge input/output
 // path lists (which are workspace/sandbox-root-relative, independent of
 // whatever cwd a replayed command executes from) rather than command text.
 export function rebasePath(path, sandboxRoot) {
-    if (sandboxRoot && path.startsWith(sandboxRoot + "/")) {
-        return path.slice(sandboxRoot.length + 1);
-    }
-    return path;
+	if (sandboxRoot && path.startsWith(sandboxRoot + "/")) {
+		return path.slice(sandboxRoot.length + 1);
+	}
+	return path;
 }
 
 // Fully resolves one edge into a shell command ready to hand to run() with
@@ -260,14 +283,24 @@ export function rebasePath(path, sandboxRoot) {
 // directory, and rewrites tool-binary invocations (absolute host paths, or
 // imp's own ".imp/tools/..." mount paths) to bare names, resolved via
 // PATH by whatever tools the caller declares for the run().
-export function resolveEdgeCommand(edge, rules, topVars, sandboxRoot, buildDirPath) {
-    const rule = rules[edge.rule];
-    if (!rule || !rule.command) return null;
+export function resolveEdgeCommand(
+	edge,
+	rules,
+	topVars,
+	sandboxRoot,
+	buildDirPath,
+) {
+	const rule = rules[edge.rule];
+	if (!rule || !rule.command) return null;
 
-    const expanded = expandVar(rule.command, edge, topVars, rule);
-    const rebased = rebaseAbsolutePaths(expanded, sandboxRoot, upPrefixForBuildDir(buildDirPath));
-    const { command, toolNames } = rewriteToolInvocations(rebased);
-    return { command, toolNames };
+	const expanded = expandVar(rule.command, edge, topVars, rule);
+	const rebased = rebaseAbsolutePaths(
+		expanded,
+		sandboxRoot,
+		upPrefixForBuildDir(buildDirPath),
+	);
+	const { command, toolNames } = rewriteToolInvocations(rebased);
+	return { command, toolNames };
 }
 
 // Joins a build-dir-relative path onto buildDirPath and normalizes ".."
@@ -276,16 +309,18 @@ export function resolveEdgeCommand(edge, rules, topVars, sandboxRoot, buildDirPa
 // whose paths are expressed relative to cwd = buildDirPath, not the
 // workspace root.
 export function joinAndNormalize(baseDir, relativePath) {
-    const stack = baseDir.split("/").filter(part => part.length > 0 && part !== ".");
-    for (const part of relativePath.split("/")) {
-        if (part.length === 0 || part === ".") continue;
-        if (part === "..") {
-            stack.pop();
-        } else {
-            stack.push(part);
-        }
-    }
-    return stack.join("/");
+	const stack = baseDir
+		.split("/")
+		.filter((part) => part.length > 0 && part !== ".");
+	for (const part of relativePath.split("/")) {
+		if (part.length === 0 || part === ".") continue;
+		if (part === "..") {
+			stack.pop();
+		} else {
+			stack.push(part);
+		}
+	}
+	return stack.join("/");
 }
 
 // A CMakeLists.txt can attach an arbitrary POST_BUILD/PRE_BUILD custom
@@ -320,51 +355,60 @@ const TARGET_DIR_RE = /CMakeFiles\/([^/]+)\.dir\//;
 // targets — arbitrary, no reliable single output), and anything
 // unrecognized are left unexpanded; they're still built as part of the
 // parent's own "all" replay whenever something depends on them.
-const REAL_TARGET_TYPES = new Set(["STATIC_LIBRARY", "SHARED_LIBRARY", "MODULE_LIBRARY", "EXECUTABLE"]);
+const REAL_TARGET_TYPES = new Set([
+	"STATIC_LIBRARY",
+	"SHARED_LIBRARY",
+	"MODULE_LIBRARY",
+	"EXECUTABLE",
+]);
 
 export function listNamedCmakeTargets(graph) {
-    const { rules, edges, targetTypes } = graph;
-    const names = new Set();
-    for (const edge of edges) {
-        for (const value of Object.values(edge.vars)) {
-            const match = TARGET_DIR_RE.exec(value);
-            if (match) names.add(match[1]);
-        }
-    }
+	const { rules, edges, targetTypes } = graph;
+	const names = new Set();
+	for (const edge of edges) {
+		for (const value of Object.values(edge.vars)) {
+			const match = TARGET_DIR_RE.exec(value);
+			if (match) names.add(match[1]);
+		}
+	}
 
-    const named = [];
-    for (const name of names) {
-        const type = targetTypes[name];
-        if (!REAL_TARGET_TYPES.has(type)) continue;
-        const reached = reachableEdges(edges, [name]).filter(
-            (e) => e.rule !== "phony" && rules[e.rule] && rules[e.rule].command,
-        );
-        if (reached.length === 0) continue;
-        // Only the final product(s): outputs consumed as another reached
-        // edge's own input (e.g. an intermediate .o file feeding the link
-        // edge) are internal build byproducts, not the target's own result.
-        const consumed = new Set(
-            reached.flatMap((e) => [...e.inputs, ...e.implicitInputs, ...e.orderOnly]),
-        );
-        const outputs = Array.from(
-            new Set(
-                reached
-                    .flatMap((e) => [...e.outputs, ...e.implicitOutputs])
-                    .filter((p) => !consumed.has(p)),
-            ),
-        );
-        named.push({ name, outputs, type });
-    }
-    return named;
+	const named = [];
+	for (const name of names) {
+		const type = targetTypes[name];
+		if (!REAL_TARGET_TYPES.has(type)) continue;
+		const reached = reachableEdges(edges, [name]).filter(
+			(e) => e.rule !== "phony" && rules[e.rule] && rules[e.rule].command,
+		);
+		if (reached.length === 0) continue;
+		// Only the final product(s): outputs consumed as another reached
+		// edge's own input (e.g. an intermediate .o file feeding the link
+		// edge) are internal build byproducts, not the target's own result.
+		const consumed = new Set(
+			reached.flatMap((e) => [
+				...e.inputs,
+				...e.implicitInputs,
+				...e.orderOnly,
+			]),
+		);
+		const outputs = Array.from(
+			new Set(
+				reached
+					.flatMap((e) => [...e.outputs, ...e.implicitOutputs])
+					.filter((p) => !consumed.has(p)),
+			),
+		);
+		named.push({ name, outputs, type });
+	}
+	return named;
 }
 
 export function extractCopyDestinations(command, buildDirPath) {
-    const destinations = new Set();
-    let match;
-    CMAKE_COPY_RE.lastIndex = 0;
-    while ((match = CMAKE_COPY_RE.exec(command)) !== null) {
-        const dest = match[2].replace(/^['"]|['"]$/g, "");
-        destinations.add(joinAndNormalize(buildDirPath, dest));
-    }
-    return Array.from(destinations);
+	const destinations = new Set();
+	let match;
+	CMAKE_COPY_RE.lastIndex = 0;
+	while ((match = CMAKE_COPY_RE.exec(command)) !== null) {
+		const dest = match[2].replace(/^['"]|['"]$/g, "");
+		destinations.add(joinAndNormalize(buildDirPath, dest));
+	}
+	return Array.from(destinations);
 }

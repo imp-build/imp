@@ -8,18 +8,31 @@
 // result is materialized back into the workspace.
 // Exposed to the build graph as products by //rules/workflows/fmt.
 
-import { own_sources, declared_path, OdinPackage, OdinTestPackage } from "//rules/odin";
+import {
+	own_sources,
+	declared_path,
+	OdinPackage,
+	OdinTestPackage,
+} from "//rules/odin";
 import { resolveOdinToolchainVersion } from "//rules/odin/toolchain";
 import { odinfmtTool } from "//rules/odin/odinfmt/toolchain";
-import { paths, output, run, digestOf, diffDigests, product, FMT } from "imp:core";
+import {
+	paths,
+	output,
+	run,
+	digestOf,
+	diffDigests,
+	product,
+	FMT,
+} from "imp:core";
 import { FORMAT_CHECK } from "//rules/workflows/products";
 import { ODINFMT_TOOL } from "//rules/odin/odinfmt/toolchain";
 
 function odinfmt_version(handle) {
-    const toolchainHandle = handle.attrs.toolchain;
-    return toolchainHandle
-        ? toolchainHandle.attrs.version
-        : resolveOdinToolchainVersion(handle.attrs.toolchainVersion);
+	const toolchainHandle = handle.attrs.toolchain;
+	return toolchainHandle
+		? toolchainHandle.attrs.version
+		: resolveOdinToolchainVersion(handle.attrs.toolchainVersion);
 }
 
 // Runs odinfmt -w over a package's own sources inside the sandbox, and
@@ -29,36 +42,36 @@ function odinfmt_version(handle) {
 // `format-check` product), the sandboxed result is captured into CAS and
 // diffed, but the workspace is left untouched.
 async function runOdinFmt(handle, { materialize }) {
-    const srcs = await own_sources(handle);
-    const files = paths(srcs);
-    if (files.length === 0) {
-        return { total: 0, changed: [] };
-    }
-    const before = digestOf(srcs);
-    const { tool, command } = odinfmtTool(odinfmt_version(handle));
-    const result = await run({
-        argv: [
-            "sh",
-            "-c",
-            `for f in "$@"; do ${command} -w "$f"; done`,
-            "odinfmt",
-            ...files,
-        ],
-        tools: [tool],
-        inputs: [srcs],
-        outputs: files.map(f => output(f)),
-        materialize,
-        display: `odinfmt ${materialize ? "" : "--check "}${declared_path(handle, handle.attrs.path || ".")}`,
-    });
-    const changes = diffDigests(before, result.outputDigest);
-    return { total: files.length, changed: changes.map((c) => c.path) };
+	const srcs = await own_sources(handle);
+	const files = paths(srcs);
+	if (files.length === 0) {
+		return { total: 0, changed: [] };
+	}
+	const before = digestOf(srcs);
+	const { tool, command } = odinfmtTool(odinfmt_version(handle));
+	const result = await run({
+		argv: [
+			"sh",
+			"-c",
+			`for f in "$@"; do ${command} -w "$f"; done`,
+			"odinfmt",
+			...files,
+		],
+		tools: [tool],
+		inputs: [srcs],
+		outputs: files.map((f) => output(f)),
+		materialize,
+		display: `odinfmt ${materialize ? "" : "--check "}${declared_path(handle, handle.attrs.path || ".")}`,
+	});
+	const changes = diffDigests(before, result.outputDigest);
+	return { total: files.length, changed: changes.map((c) => c.path) };
 }
 
 // Reformat a package's own sources in place. Only the package's own sources
 // are touched; dependencies are formatted by their own targets.
 export async function odinFmt(handle) {
-    const { changed } = await runOdinFmt(handle, { materialize: true });
-    return { formatted: changed.length };
+	const { changed } = await runOdinFmt(handle, { materialize: true });
+	return { formatted: changed.length };
 }
 
 // Verify a package's own sources are already formatted, without writing
@@ -67,11 +80,26 @@ export async function odinFmt(handle) {
 // failure, so every selected target gets checked and reported before any
 // error is raised.
 export async function odinFormatCheck(handle) {
-    const { total, changed } = await runOdinFmt(handle, { materialize: false });
-    return { checked: total, unformatted: changed };
+	const { total, changed } = await runOdinFmt(handle, { materialize: false });
+	return { checked: total, unformatted: changed };
 }
 
 export const odinPackageFmt = product(OdinPackage, FMT, ODINFMT_TOOL, odinFmt);
-export const odinTestPackageFmt = product(OdinTestPackage, FMT, ODINFMT_TOOL, odinFmt);
-export const odinPackageFormatCheck = product(OdinPackage, FORMAT_CHECK, ODINFMT_TOOL, odinFormatCheck);
-export const odinTestPackageFormatCheck = product(OdinTestPackage, FORMAT_CHECK, ODINFMT_TOOL, odinFormatCheck);
+export const odinTestPackageFmt = product(
+	OdinTestPackage,
+	FMT,
+	ODINFMT_TOOL,
+	odinFmt,
+);
+export const odinPackageFormatCheck = product(
+	OdinPackage,
+	FORMAT_CHECK,
+	ODINFMT_TOOL,
+	odinFormatCheck,
+);
+export const odinTestPackageFormatCheck = product(
+	OdinTestPackage,
+	FORMAT_CHECK,
+	ODINFMT_TOOL,
+	odinFormatCheck,
+);

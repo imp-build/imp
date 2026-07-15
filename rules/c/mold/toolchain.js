@@ -1,9 +1,25 @@
-import { Toolchain, product, namedCache, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
+import {
+	Toolchain,
+	product,
+	namedCache,
+	platformInfo,
+	cachePut,
+	cacheGet,
+	cacheHas,
+	toolName,
+} from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { downloadToolArtifact, lockedDownloadTools } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockedDownloadTools,
+} from "//rules/imp/lockfile";
 import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
-import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
+import {
+	generateToolLockfile,
+	GEN_LOCKFILES,
+	registerToolchainLockfile,
+} from "//rules/workflows/lockfiles";
 import { ODIN_LINKER } from "//rules/odin/products";
 import { RUST_LINKER } from "//rules/rust/products";
 
@@ -16,12 +32,12 @@ const MOLD_LOCKFILE = "//rules/c/mold/mold.lock";
 
 // mold has no serious Windows story; this only targets Linux.
 function requireSupportedPlatform(plat) {
-    if (plat.os !== "linux") {
-        throw new Error(`unsupported mold toolchain OS: ${plat.os}`);
-    }
-    if (plat.arch !== "x86_64" && plat.arch !== "aarch64") {
-        throw new Error(`unsupported mold toolchain architecture: ${plat.arch}`);
-    }
+	if (plat.os !== "linux") {
+		throw new Error(`unsupported mold toolchain OS: ${plat.os}`);
+	}
+	if (plat.arch !== "x86_64" && plat.arch !== "aarch64") {
+		throw new Error(`unsupported mold toolchain architecture: ${plat.arch}`);
+	}
 }
 
 /**
@@ -32,8 +48,8 @@ function requireSupportedPlatform(plat) {
  * @returns {string}
  */
 export function moldArtifactName(version, plat) {
-    requireSupportedPlatform(plat);
-    return `mold-${version}-${plat.arch}-linux.tar.gz`;
+	requireSupportedPlatform(plat);
+	return `mold-${version}-${plat.arch}-linux.tar.gz`;
 }
 
 /**
@@ -44,13 +60,13 @@ export function moldArtifactName(version, plat) {
  * @returns {string}
  */
 export function moldDownloadUrl(version, plat) {
-    return `https://github.com/rui314/mold/releases/download/v${version}/${moldArtifactName(version, plat)}`;
+	return `https://github.com/rui314/mold/releases/download/v${version}/${moldArtifactName(version, plat)}`;
 }
 
 // mold ships prebuilt Linux binaries only (see requireSupportedPlatform).
 const MOLD_SUPPORTED_PLATFORMS = [
-    { os: "linux", arch: "x86_64" },
-    { os: "linux", arch: "aarch64" },
+	{ os: "linux", arch: "x86_64" },
+	{ os: "linux", arch: "aarch64" },
 ];
 
 /**
@@ -59,7 +75,7 @@ const MOLD_SUPPORTED_PLATFORMS = [
  * @returns {Array<{ os: string, arch: string }>}
  */
 export function moldSupportedPlatforms() {
-    return MOLD_SUPPORTED_PLATFORMS.map((plat) => ({ ...plat }));
+	return MOLD_SUPPORTED_PLATFORMS.map((plat) => ({ ...plat }));
 }
 
 /**
@@ -70,29 +86,37 @@ export function moldSupportedPlatforms() {
  * @returns {string}
  */
 export function moldCacheKey(version, plat) {
-    return `${version}/${plat.os}-${plat.arch}`;
+	return `${version}/${plat.os}-${plat.arch}`;
 }
 
 // Bare coreutils the verified-download and extract scripts need. The sandbox
 // is fully hermetic — even `mkdir`/`tar` must be declared tools, not
 // resolved from an ambient or fixed-base PATH.
 function coreToolNames(plat) {
-    return [...new Set([...lockedDownloadTools(plat), ...extractArchiveTools("tar.gz")])];
+	return [
+		...new Set([
+			...lockedDownloadTools(plat),
+			...extractArchiveTools("tar.gz"),
+		]),
+	];
 }
 
 export class MoldToolchain extends Toolchain {
-    static kind = "mold-toolchain";
-    static tool = MOLD_TOOL;
-    constructor({ version, unverified }, opts) {
-        super({
-            kind: MoldToolchain.kind,
-            attrs: { version, ...(unverified ? { unverified } : {}) },
-        }, opts);
-    }
+	static kind = "mold-toolchain";
+	static tool = MOLD_TOOL;
+	constructor({ version, unverified }, opts) {
+		super(
+			{
+				kind: MoldToolchain.kind,
+				attrs: { version, ...(unverified ? { unverified } : {}) },
+			},
+			opts,
+		);
+	}
 
-    bin() {
-        return moldBin(this.attrs.version);
-    }
+	bin() {
+		return moldBin(this.attrs.version);
+	}
 }
 
 // Declared lazily, once, the first time a toolchain is declared — target()
@@ -101,8 +125,8 @@ export class MoldToolchain extends Toolchain {
 let coreToolHandles = null;
 
 export function __resetMoldToolchainStateForTest() {
-    MoldToolchain.clearDefault();
-    coreToolHandles = null;
+	MoldToolchain.clearDefault();
+	coreToolHandles = null;
 }
 
 /**
@@ -117,15 +141,17 @@ export function __resetMoldToolchainStateForTest() {
  * @category configuration
  */
 export function moldToolchain(version, opts = {}) {
-    namedCache({ name: MOLD_TOOLCHAIN_CACHE, shared: true });
-    if (!coreToolHandles) {
-        coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
-    }
+	namedCache({ name: MOLD_TOOLCHAIN_CACHE, shared: true });
+	if (!coreToolHandles) {
+		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
+			nativeTool(name),
+		);
+	}
 
-    return new MoldToolchain(
-        { version, unverified: opts.unverified },
-        { default: opts.default },
-    );
+	return new MoldToolchain(
+		{ version, unverified: opts.unverified },
+		{ default: opts.default },
+	);
 }
 
 /**
@@ -136,11 +162,11 @@ export function moldToolchain(version, opts = {}) {
  * @returns {string|null} Local path to the cached toolchain root.
  */
 export function installMoldToolchain(version, source) {
-    namedCache({ name: MOLD_TOOLCHAIN_CACHE, shared: true });
-    const plat = platformInfo();
-    const key = moldCacheKey(version, plat);
-    cachePut(MOLD_TOOLCHAIN_CACHE, key, source);
-    return cacheGet(MOLD_TOOLCHAIN_CACHE, key);
+	namedCache({ name: MOLD_TOOLCHAIN_CACHE, shared: true });
+	const plat = platformInfo();
+	const key = moldCacheKey(version, plat);
+	cachePut(MOLD_TOOLCHAIN_CACHE, key, source);
+	return cacheGet(MOLD_TOOLCHAIN_CACHE, key);
 }
 
 /**
@@ -151,44 +177,48 @@ export function installMoldToolchain(version, source) {
  * @returns {Promise<string>} Local path to the toolchain root.
  */
 export async function acquireMoldToolchain(version) {
-    const plat = platformInfo();
-    const key = moldCacheKey(version, plat);
+	const plat = platformInfo();
+	const key = moldCacheKey(version, plat);
 
-    if (cacheHas(MOLD_TOOLCHAIN_CACHE, key)) {
-        return cacheGet(MOLD_TOOLCHAIN_CACHE, key);
-    }
-    if (!coreToolHandles) {
-        throw new Error("no mold toolchain declared via moldToolchain(); nothing to acquire");
-    }
+	if (cacheHas(MOLD_TOOLCHAIN_CACHE, key)) {
+		return cacheGet(MOLD_TOOLCHAIN_CACHE, key);
+	}
+	if (!coreToolHandles) {
+		throw new Error(
+			"no mold toolchain declared via moldToolchain(); nothing to acquire",
+		);
+	}
 
-    const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
+	const coreTools = await Promise.all(
+		coreToolHandles.map((handle) => nativeToolSpec(handle)),
+	);
 
-    const downloadPath = `.imp/mold-downloads/${key}/${moldArtifactName(version, plat)}`;
-    await downloadToolArtifact({
-        lockfile: MOLD_LOCKFILE,
-        tool: "mold",
-        version,
-        plat,
-        url: moldDownloadUrl(version, plat),
-        downloadPath,
-        tools: coreTools,
-        display: `download mold ${version} (${plat.os}/${plat.arch})`,
-        unverified: MoldToolchain.resolveUnverified(version),
-    });
+	const downloadPath = `.imp/mold-downloads/${key}/${moldArtifactName(version, plat)}`;
+	await downloadToolArtifact({
+		lockfile: MOLD_LOCKFILE,
+		tool: "mold",
+		version,
+		plat,
+		url: moldDownloadUrl(version, plat),
+		downloadPath,
+		tools: coreTools,
+		display: `download mold ${version} (${plat.os}/${plat.arch})`,
+		unverified: MoldToolchain.resolveUnverified(version),
+	});
 
-    // mold's release tarball already ships bin/mold and bin/ld.mold (the
-    // name clang's -fuse-ld=mold looks for) — no wrapper needed.
-    await extractArchive({
-        archive: downloadPath,
-        dest: `.imp/mold-toolchains/${key}`,
-        format: "tar.gz",
-        stripComponents: 1,
-        tools: coreTools,
-        namedCache: { name: MOLD_TOOLCHAIN_CACHE, key },
-        display: `install mold ${version} (${plat.os}/${plat.arch})`,
-    });
+	// mold's release tarball already ships bin/mold and bin/ld.mold (the
+	// name clang's -fuse-ld=mold looks for) — no wrapper needed.
+	await extractArchive({
+		archive: downloadPath,
+		dest: `.imp/mold-toolchains/${key}`,
+		format: "tar.gz",
+		stripComponents: 1,
+		tools: coreTools,
+		namedCache: { name: MOLD_TOOLCHAIN_CACHE, key },
+		display: `install mold ${version} (${plat.os}/${plat.arch})`,
+	});
 
-    return cacheGet(MOLD_TOOLCHAIN_CACHE, key);
+	return cacheGet(MOLD_TOOLCHAIN_CACHE, key);
 }
 
 /**
@@ -198,7 +228,7 @@ export async function acquireMoldToolchain(version) {
  * @returns {string|null}
  */
 export function resolveMoldToolchainVersion(version) {
-    return MoldToolchain.resolveVersion(version);
+	return MoldToolchain.resolveVersion(version);
 }
 
 /**
@@ -208,9 +238,9 @@ export function resolveMoldToolchainVersion(version) {
  * @returns {Promise<string>}
  */
 export async function moldBin(version) {
-    const resolved = MoldToolchain.requireVersion(version);
-    const dir = await acquireMoldToolchain(resolved);
-    return `${dir}/bin/mold`;
+	const resolved = MoldToolchain.requireVersion(version);
+	const dir = await acquireMoldToolchain(resolved);
+	return `${dir}/bin/mold`;
 }
 
 /**
@@ -220,16 +250,16 @@ export async function moldBin(version) {
  * @returns {Promise<object>}
  */
 export async function moldTool(version) {
-    const resolved = MoldToolchain.requireVersion(version);
-    await acquireMoldToolchain(resolved);
-    const plat = platformInfo();
-    return {
-        kind: "tool",
-        name: "mold",
-        cache: MOLD_TOOLCHAIN_CACHE,
-        key: moldCacheKey(resolved, plat),
-        binDirs: ["bin"],
-    };
+	const resolved = MoldToolchain.requireVersion(version);
+	await acquireMoldToolchain(resolved);
+	const plat = platformInfo();
+	return {
+		kind: "tool",
+		name: "mold",
+		cache: MOLD_TOOLCHAIN_CACHE,
+		key: moldCacheKey(resolved, plat),
+		binDirs: ["bin"],
+	};
 }
 
 /**
@@ -238,7 +268,7 @@ export async function moldTool(version) {
  * @returns {string|null}
  */
 export function defaultMoldToolchainVersion() {
-    return MoldToolchain.defaultVersion();
+	return MoldToolchain.defaultVersion();
 }
 
 /**
@@ -247,18 +277,22 @@ export function defaultMoldToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultMoldToolchain() {
-    return MoldToolchain.default();
+	return MoldToolchain.default();
 }
 
-const LOCKFILE_SPEC = registerToolchainLockfile({
-    name: "mold",
-    platforms: moldSupportedPlatforms(),
-    downloadUrl: moldDownloadUrl,
-    artifactName: moldArtifactName,
-    lockfile: MOLD_LOCKFILE,
-}, ["2.41.0"]);
+const LOCKFILE_SPEC = registerToolchainLockfile(
+	{
+		name: "mold",
+		platforms: moldSupportedPlatforms(),
+		downloadUrl: moldDownloadUrl,
+		artifactName: moldArtifactName,
+		lockfile: MOLD_LOCKFILE,
+	},
+	["2.41.0"],
+);
 product(MoldToolchain, GEN_LOCKFILES, MOLD_TOOL, (handle) =>
-    generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
+	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+);
 
 /**
  * Adapter exposing a mold toolchain as Odin's `-linker:mold` linker role.
@@ -267,22 +301,27 @@ product(MoldToolchain, GEN_LOCKFILES, MOLD_TOOL, (handle) =>
  * productFor(handle, ODIN_LINKER) instead of a hardcoded default lookup.
  */
 export class OdinMoldLinker {
-    constructor(handle) {
-        this.handle = handle;
-    }
+	constructor(handle) {
+		this.handle = handle;
+	}
 
-    /** @returns {Promise<object[]>} run({ tools }) entries this linker needs. */
-    async tools() {
-        return [await moldTool(this.handle.attrs.version)];
-    }
+	/** @returns {Promise<object[]>} run({ tools }) entries this linker needs. */
+	async tools() {
+		return [await moldTool(this.handle.attrs.version)];
+	}
 
-    /** @returns {Promise<string[]>} Odin CLI flags selecting this linker. */
-    async flags() {
-        return ["-linker:mold"];
-    }
+	/** @returns {Promise<string[]>} Odin CLI flags selecting this linker. */
+	async flags() {
+		return ["-linker:mold"];
+	}
 }
 
-product(MoldToolchain, ODIN_LINKER, MOLD_TOOL, (handle) => new OdinMoldLinker(handle));
+product(
+	MoldToolchain,
+	ODIN_LINKER,
+	MOLD_TOOL,
+	(handle) => new OdinMoldLinker(handle),
+);
 
 /**
  * Adapter exposing a mold toolchain as Rust/rustc's backend linker via
@@ -291,18 +330,23 @@ product(MoldToolchain, ODIN_LINKER, MOLD_TOOL, (handle) => new OdinMoldLinker(ha
  * "rust-linker" product for the "mold-toolchain" kind.
  */
 export class RustMoldLinker {
-    constructor(handle) {
-        this.handle = handle;
-    }
+	constructor(handle) {
+		this.handle = handle;
+	}
 
-    async tools() {
-        return [await moldTool(this.handle.attrs.version)];
-    }
+	async tools() {
+		return [await moldTool(this.handle.attrs.version)];
+	}
 
-    /** @returns {Promise<string[]>} paired rustc -C flags enabling mold. */
-    async rustflags() {
-        return ["-C", "link-arg=-fuse-ld=mold"];
-    }
+	/** @returns {Promise<string[]>} paired rustc -C flags enabling mold. */
+	async rustflags() {
+		return ["-C", "link-arg=-fuse-ld=mold"];
+	}
 }
 
-product(MoldToolchain, RUST_LINKER, MOLD_TOOL, (handle) => new RustMoldLinker(handle));
+product(
+	MoldToolchain,
+	RUST_LINKER,
+	MOLD_TOOL,
+	(handle) => new RustMoldLinker(handle),
+);

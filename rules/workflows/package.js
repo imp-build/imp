@@ -34,8 +34,8 @@ goal("package");
  * @returns {string} Workspace-relative dist/ path.
  */
 export function distPathFor(handle) {
-    const address = targetAddress(handle);
-    const withoutSlashes = address.replace(/^\/\//, "");
-    const [dir, name] = withoutSlashes.split(":");
-    return dir ? `dist/${dir}/${name}` : `dist/${name}`;
+	const address = targetAddress(handle);
+	const withoutSlashes = address.replace(/^\/\//, "");
+	const [dir, name] = withoutSlashes.split(":");
+	return dir ? `dist/${dir}/${name}` : `dist/${name}`;
 }

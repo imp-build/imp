@@ -1,7 +1,26 @@
-import { Toolchain, product, namedCache, run, output, output_path, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
+import {
+	Toolchain,
+	product,
+	namedCache,
+	run,
+	output,
+	output_path,
+	platformInfo,
+	cachePut,
+	cacheGet,
+	cacheHas,
+	toolName,
+} from "imp:core";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { downloadToolArtifact, lockedDownloadTools } from "//rules/imp/lockfile";
-import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
+import {
+	downloadToolArtifact,
+	lockedDownloadTools,
+} from "//rules/imp/lockfile";
+import {
+	generateToolLockfile,
+	GEN_LOCKFILES,
+	registerToolchainLockfile,
+} from "//rules/workflows/lockfiles";
 
 // Declared tool identity for products this toolchain implements; also
 // consumed by rule modules registering rust-driven products.
@@ -23,30 +42,32 @@ const RUSTUP_VERSION = "1.27.1";
 // The rustup-init target triples for the platforms we publish lockfile entries
 // for; see https://static.rust-lang.org/rustup/. Keyed "os-arch".
 const TARGET_TRIPLES = {
-    "linux-x86_64": "x86_64-unknown-linux-gnu",
-    "linux-aarch64": "aarch64-unknown-linux-gnu",
-    "macos-x86_64": "x86_64-apple-darwin",
-    "macos-aarch64": "aarch64-apple-darwin",
-    "windows-x86_64": "x86_64-pc-windows-msvc",
+	"linux-x86_64": "x86_64-unknown-linux-gnu",
+	"linux-aarch64": "aarch64-unknown-linux-gnu",
+	"macos-x86_64": "x86_64-apple-darwin",
+	"macos-aarch64": "aarch64-apple-darwin",
+	"windows-x86_64": "x86_64-pc-windows-msvc",
 };
 
 function targetTriple(plat) {
-    const triple = TARGET_TRIPLES[`${plat.os}-${plat.arch}`];
-    if (!triple) {
-        throw new Error(`unsupported rust toolchain platform: ${plat.os}/${plat.arch}`);
-    }
-    return triple;
+	const triple = TARGET_TRIPLES[`${plat.os}-${plat.arch}`];
+	if (!triple) {
+		throw new Error(
+			`unsupported rust toolchain platform: ${plat.os}/${plat.arch}`,
+		);
+	}
+	return triple;
 }
 
 // Only exact MAJOR.MINOR.PATCH pins are accepted — channels like "stable" or
 // "nightly" are rejected so a toolchain always resolves to the same bytes.
 function requirePinnedVersion(version) {
-    if (!/^\d+\.\d+\.\d+$/.test(version)) {
-        throw new Error(
-            `rust toolchain version must be an exact version like "1.79.0", got "${version}"`,
-        );
-    }
-    return version;
+	if (!/^\d+\.\d+\.\d+$/.test(version)) {
+		throw new Error(
+			`rust toolchain version must be an exact version like "1.79.0", got "${version}"`,
+		);
+	}
+	return version;
 }
 
 /**
@@ -58,8 +79,8 @@ function requirePinnedVersion(version) {
  * @returns {string}
  */
 export function rustArtifactName(_version, plat) {
-    targetTriple(plat);
-    return plat.os === "windows" ? "rustup-init.exe" : "rustup-init";
+	targetTriple(plat);
+	return plat.os === "windows" ? "rustup-init.exe" : "rustup-init";
 }
 
 /**
@@ -70,7 +91,7 @@ export function rustArtifactName(_version, plat) {
  * @returns {string}
  */
 export function rustDownloadUrl(version, plat) {
-    return `https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${targetTriple(plat)}/${rustArtifactName(version, plat)}`;
+	return `https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${targetTriple(plat)}/${rustArtifactName(version, plat)}`;
 }
 
 /**
@@ -82,7 +103,7 @@ export function rustDownloadUrl(version, plat) {
  * @returns {string}
  */
 export function rustCacheKey(version, plat) {
-    return `${version}/${plat.os}-${plat.arch}`;
+	return `${version}/${plat.os}-${plat.arch}`;
 }
 
 /**
@@ -93,7 +114,7 @@ export function rustCacheKey(version, plat) {
  * @returns {string}
  */
 export function rustToolchainId(version, plat) {
-    return `${version}-${targetTriple(plat)}`;
+	return `${version}-${targetTriple(plat)}`;
 }
 
 /**
@@ -103,10 +124,10 @@ export function rustToolchainId(version, plat) {
  * @returns {Array<{ os: string, arch: string }>}
  */
 export function rustSupportedPlatforms() {
-    return Object.keys(TARGET_TRIPLES).map((key) => {
-        const sep = key.indexOf("-");
-        return { os: key.slice(0, sep), arch: key.slice(sep + 1) };
-    });
+	return Object.keys(TARGET_TRIPLES).map((key) => {
+		const sep = key.indexOf("-");
+		return { os: key.slice(0, sep), arch: key.slice(sep + 1) };
+	});
 }
 
 // Bare coreutils the install script needs. The sandbox is fully hermetic —
@@ -115,29 +136,32 @@ export function rustSupportedPlatforms() {
 // SSL_CERT_* env), so no tar/gzip is needed. Bare `sh` only auto-resolves on
 // unix, so windows declares it explicitly.
 function coreToolNames(plat) {
-    const extra = plat.os === "windows" ? [] : ["chmod"];
-    return [...new Set([...lockedDownloadTools(plat), ...extra])];
+	const extra = plat.os === "windows" ? [] : ["chmod"];
+	return [...new Set([...lockedDownloadTools(plat), ...extra])];
 }
 
 export class RustToolchain extends Toolchain {
-    static kind = "rust-toolchain";
-    static tool = RUST_TOOL;
-    constructor({ version, linkDriver, linker, sccache, unverified }, opts) {
-        super({
-            kind: RustToolchain.kind,
-            attrs: {
-                version,
-                ...(linkDriver ? { linkDriver } : {}),
-                ...(linker ? { linker } : {}),
-                ...(sccache ? { sccache } : {}),
-                ...(unverified ? { unverified } : {}),
-            },
-        }, opts);
-    }
+	static kind = "rust-toolchain";
+	static tool = RUST_TOOL;
+	constructor({ version, linkDriver, linker, sccache, unverified }, opts) {
+		super(
+			{
+				kind: RustToolchain.kind,
+				attrs: {
+					version,
+					...(linkDriver ? { linkDriver } : {}),
+					...(linker ? { linker } : {}),
+					...(sccache ? { sccache } : {}),
+					...(unverified ? { unverified } : {}),
+				},
+			},
+			opts,
+		);
+	}
 
-    bin() {
-        return rustBin(this.attrs.version);
-    }
+	bin() {
+		return rustBin(this.attrs.version);
+	}
 }
 
 // Declared lazily, once — target() addresses are only assigned at
@@ -146,13 +170,13 @@ export class RustToolchain extends Toolchain {
 let coreToolHandles = null;
 
 export function __resetRustToolchainStateForTest() {
-    RustToolchain.clearDefault();
-    coreToolHandles = null;
+	RustToolchain.clearDefault();
+	coreToolHandles = null;
 }
 
 function declareBothCaches() {
-    namedCache({ name: RUSTUP_HOME_CACHE, shared: true });
-    namedCache({ name: CARGO_HOME_CACHE, shared: true });
+	namedCache({ name: RUSTUP_HOME_CACHE, shared: true });
+	namedCache({ name: CARGO_HOME_CACHE, shared: true });
 }
 
 /**
@@ -178,22 +202,24 @@ function declareBothCaches() {
  * @category configuration
  */
 export function rustToolchain(version, opts = {}) {
-    requirePinnedVersion(version);
-    declareBothCaches();
-    if (!coreToolHandles) {
-        coreToolHandles = coreToolNames(platformInfo()).map((name) => nativeTool(name));
-    }
+	requirePinnedVersion(version);
+	declareBothCaches();
+	if (!coreToolHandles) {
+		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
+			nativeTool(name),
+		);
+	}
 
-    return new RustToolchain(
-        {
-            version,
-            linkDriver: opts.linkDriver,
-            linker: opts.linker,
-            sccache: opts.sccache,
-            unverified: opts.unverified,
-        },
-        { default: opts.default },
-    );
+	return new RustToolchain(
+		{
+			version,
+			linkDriver: opts.linkDriver,
+			linker: opts.linker,
+			sccache: opts.sccache,
+			unverified: opts.unverified,
+		},
+		{ default: opts.default },
+	);
 }
 
 /**
@@ -204,16 +230,16 @@ export function rustToolchain(version, opts = {}) {
  * @returns {{ rustupHome: string|null, cargoHome: string|null }}
  */
 export function installRustToolchain(version, source) {
-    requirePinnedVersion(version);
-    declareBothCaches();
-    const plat = platformInfo();
-    const key = rustCacheKey(version, plat);
-    cachePut(RUSTUP_HOME_CACHE, key, source.rustupHome);
-    cachePut(CARGO_HOME_CACHE, key, source.cargoHome);
-    return {
-        rustupHome: cacheGet(RUSTUP_HOME_CACHE, key),
-        cargoHome: cacheGet(CARGO_HOME_CACHE, key),
-    };
+	requirePinnedVersion(version);
+	declareBothCaches();
+	const plat = platformInfo();
+	const key = rustCacheKey(version, plat);
+	cachePut(RUSTUP_HOME_CACHE, key, source.rustupHome);
+	cachePut(CARGO_HOME_CACHE, key, source.cargoHome);
+	return {
+		rustupHome: cacheGet(RUSTUP_HOME_CACHE, key),
+		cargoHome: cacheGet(CARGO_HOME_CACHE, key),
+	};
 }
 
 /**
@@ -224,66 +250,80 @@ export function installRustToolchain(version, source) {
  * @returns {Promise<string>} Local path to the RUSTUP_HOME cache root.
  */
 export async function acquireRustToolchain(version) {
-    const plat = platformInfo();
-    const key = rustCacheKey(version, plat);
+	const plat = platformInfo();
+	const key = rustCacheKey(version, plat);
 
-    if (cacheHas(RUSTUP_HOME_CACHE, key) && cacheHas(CARGO_HOME_CACHE, key)) {
-        return cacheGet(RUSTUP_HOME_CACHE, key);
-    }
-    if (!coreToolHandles) {
-        throw new Error("no rust toolchain declared via rustToolchain(); nothing to acquire");
-    }
+	if (cacheHas(RUSTUP_HOME_CACHE, key) && cacheHas(CARGO_HOME_CACHE, key)) {
+		return cacheGet(RUSTUP_HOME_CACHE, key);
+	}
+	if (!coreToolHandles) {
+		throw new Error(
+			"no rust toolchain declared via rustToolchain(); nothing to acquire",
+		);
+	}
 
-    const coreTools = await Promise.all(coreToolHandles.map((handle) => nativeToolSpec(handle)));
+	const coreTools = await Promise.all(
+		coreToolHandles.map((handle) => nativeToolSpec(handle)),
+	);
 
-    const rustupHomeDir = `.imp/rustup-home/${key}`;
-    const cargoHomeDir = `.imp/cargo-home/${key}`;
-    const rustupInitExe = plat.os === "windows" ? "rustup-init.exe" : "rustup-init";
+	const rustupHomeDir = `.imp/rustup-home/${key}`;
+	const cargoHomeDir = `.imp/cargo-home/${key}`;
+	const rustupInitExe =
+		plat.os === "windows" ? "rustup-init.exe" : "rustup-init";
 
-    // The verified rustup-init download (pinned by rust.lock) lands in a
-    // materialized scratch path; only the resulting RUSTUP_HOME/CARGO_HOME
-    // are cached — the installer file is discarded with the sandbox.
-    const downloadPath = `.imp/rust-downloads/${key}/${rustupInitExe}`;
-    await downloadToolArtifact({
-        lockfile: RUST_LOCKFILE,
-        tool: "rust",
-        version,
-        plat,
-        url: rustDownloadUrl(version, plat),
-        downloadPath,
-        tools: coreTools,
-        display: `download rustup-init for rust ${version} (${plat.os}/${plat.arch})`,
-        unverified: RustToolchain.resolveUnverified(version),
-    });
+	// The verified rustup-init download (pinned by rust.lock) lands in a
+	// materialized scratch path; only the resulting RUSTUP_HOME/CARGO_HOME
+	// are cached — the installer file is discarded with the sandbox.
+	const downloadPath = `.imp/rust-downloads/${key}/${rustupInitExe}`;
+	await downloadToolArtifact({
+		lockfile: RUST_LOCKFILE,
+		tool: "rust",
+		version,
+		plat,
+		url: rustDownloadUrl(version, plat),
+		downloadPath,
+		tools: coreTools,
+		display: `download rustup-init for rust ${version} (${plat.os}/${plat.arch})`,
+		unverified: RustToolchain.resolveUnverified(version),
+	});
 
-    // rustup writes into RUSTUP_HOME/CARGO_HOME, which we point at via $PWD
-    // (run() env can't expand $PWD, so this lives in the script). Profile
-    // "minimal" plus explicit rustfmt (for fmt/format-check,
-    // rules/rust/fmt.js) and clippy (for lint) components — "default" would
-    // also pull in rust-docs, ~740MB of small files that dominate
-    // cold-acquire time.
-    const chmodStep = plat.os === "windows" ? "" : 'chmod +x "$1"; ';
-    const installScript = `set -e; ${chmodStep}export RUSTUP_HOME="$PWD/$2" CARGO_HOME="$PWD/$3"; ./"$1" -y --no-modify-path --profile minimal --component rustfmt --component clippy --default-toolchain "$4"`;
+	// rustup writes into RUSTUP_HOME/CARGO_HOME, which we point at via $PWD
+	// (run() env can't expand $PWD, so this lives in the script). Profile
+	// "minimal" plus explicit rustfmt (for fmt/format-check,
+	// rules/rust/fmt.js) and clippy (for lint) components — "default" would
+	// also pull in rust-docs, ~740MB of small files that dominate
+	// cold-acquire time.
+	const chmodStep = plat.os === "windows" ? "" : 'chmod +x "$1"; ';
+	const installScript = `set -e; ${chmodStep}export RUSTUP_HOME="$PWD/$2" CARGO_HOME="$PWD/$3"; ./"$1" -y --no-modify-path --profile minimal --component rustfmt --component clippy --default-toolchain "$4"`;
 
-    await run({
-        argv: ["sh", "-c", installScript, "install-rust", downloadPath, rustupHomeDir, cargoHomeDir, version],
-        tools: coreTools,
-        inputs: [{ kind: "file", path: downloadPath }],
-        outputs: [
-            output(output_path(rustupHomeDir), {
-                kind: "directory",
-                namedCache: { name: RUSTUP_HOME_CACHE, key },
-            }),
-            output(output_path(cargoHomeDir), {
-                kind: "directory",
-                namedCache: { name: CARGO_HOME_CACHE, key },
-            }),
-        ],
-        materialize: false,
-        display: `install rust ${version} (${plat.os}/${plat.arch})`,
-    });
+	await run({
+		argv: [
+			"sh",
+			"-c",
+			installScript,
+			"install-rust",
+			downloadPath,
+			rustupHomeDir,
+			cargoHomeDir,
+			version,
+		],
+		tools: coreTools,
+		inputs: [{ kind: "file", path: downloadPath }],
+		outputs: [
+			output(output_path(rustupHomeDir), {
+				kind: "directory",
+				namedCache: { name: RUSTUP_HOME_CACHE, key },
+			}),
+			output(output_path(cargoHomeDir), {
+				kind: "directory",
+				namedCache: { name: CARGO_HOME_CACHE, key },
+			}),
+		],
+		materialize: false,
+		display: `install rust ${version} (${plat.os}/${plat.arch})`,
+	});
 
-    return cacheGet(RUSTUP_HOME_CACHE, key);
+	return cacheGet(RUSTUP_HOME_CACHE, key);
 }
 
 /**
@@ -293,7 +333,7 @@ export async function acquireRustToolchain(version) {
  * @returns {string|null}
  */
 export function resolveRustToolchainVersion(version) {
-    return RustToolchain.resolveVersion(version);
+	return RustToolchain.resolveVersion(version);
 }
 
 /**
@@ -304,11 +344,11 @@ export function resolveRustToolchainVersion(version) {
  * @returns {Promise<string>}
  */
 export async function rustBin(version, name = "cargo") {
-    const resolved = RustToolchain.requireVersion(version);
-    const dir = await acquireRustToolchain(resolved);
-    const plat = platformInfo();
-    const exe = plat.os === "windows" ? ".exe" : "";
-    return `${dir}/toolchains/${rustToolchainId(resolved, plat)}/bin/${name}${exe}`;
+	const resolved = RustToolchain.requireVersion(version);
+	const dir = await acquireRustToolchain(resolved);
+	const plat = platformInfo();
+	const exe = plat.os === "windows" ? ".exe" : "";
+	return `${dir}/toolchains/${rustToolchainId(resolved, plat)}/bin/${name}${exe}`;
 }
 
 /**
@@ -319,31 +359,43 @@ export async function rustBin(version, name = "cargo") {
  * @returns {Promise<object>}
  */
 export async function rustTool(version) {
-    const resolved = RustToolchain.requireVersion(version);
-    await acquireRustToolchain(resolved);
-    const plat = platformInfo();
-    const key = rustCacheKey(resolved, plat);
-    const id = rustToolchainId(resolved, plat);
-    return {
-        tools: [
-            { kind: "tool", name: RUSTUP_HOME_CACHE, cache: RUSTUP_HOME_CACHE, key, binDirs: [`toolchains/${id}/bin`] },
-            // CARGO_HOME/bin holds the cargo-subcommand proxies rustup
-            // installs for components like rustfmt (cargo-fmt) and clippy
-            // (cargo-clippy) — cargo finds `cargo-<sub>` via PATH, so this
-            // must be on it too, not just the toolchain's own bin dir.
-            { kind: "tool", name: CARGO_HOME_CACHE, cache: CARGO_HOME_CACHE, key, binDirs: ["bin"] },
-        ],
-        rustupHome: `.imp/tools/${RUSTUP_HOME_CACHE}`,
-        cargoHome: `.imp/tools/${CARGO_HOME_CACHE}`,
-        // Real, absolute, stable on-disk paths for the same two named
-        // caches — bypassing the sandbox "tool" mount above. Only needed
-        // when sccache is wrapping rustc: see rustToolEnv() in
-        // //rules/rust for why the literal (not just canonically-equal)
-        // rustc exe path must stay identical across sandboxes in that case.
-        rustupHomeAbs: cacheGet(RUSTUP_HOME_CACHE, key),
-        cargoHomeAbs: cacheGet(CARGO_HOME_CACHE, key),
-        toolchainId: id,
-    };
+	const resolved = RustToolchain.requireVersion(version);
+	await acquireRustToolchain(resolved);
+	const plat = platformInfo();
+	const key = rustCacheKey(resolved, plat);
+	const id = rustToolchainId(resolved, plat);
+	return {
+		tools: [
+			{
+				kind: "tool",
+				name: RUSTUP_HOME_CACHE,
+				cache: RUSTUP_HOME_CACHE,
+				key,
+				binDirs: [`toolchains/${id}/bin`],
+			},
+			// CARGO_HOME/bin holds the cargo-subcommand proxies rustup
+			// installs for components like rustfmt (cargo-fmt) and clippy
+			// (cargo-clippy) — cargo finds `cargo-<sub>` via PATH, so this
+			// must be on it too, not just the toolchain's own bin dir.
+			{
+				kind: "tool",
+				name: CARGO_HOME_CACHE,
+				cache: CARGO_HOME_CACHE,
+				key,
+				binDirs: ["bin"],
+			},
+		],
+		rustupHome: `.imp/tools/${RUSTUP_HOME_CACHE}`,
+		cargoHome: `.imp/tools/${CARGO_HOME_CACHE}`,
+		// Real, absolute, stable on-disk paths for the same two named
+		// caches — bypassing the sandbox "tool" mount above. Only needed
+		// when sccache is wrapping rustc: see rustToolEnv() in
+		// //rules/rust for why the literal (not just canonically-equal)
+		// rustc exe path must stay identical across sandboxes in that case.
+		rustupHomeAbs: cacheGet(RUSTUP_HOME_CACHE, key),
+		cargoHomeAbs: cacheGet(CARGO_HOME_CACHE, key),
+		toolchainId: id,
+	};
 }
 
 /**
@@ -352,7 +404,7 @@ export async function rustTool(version) {
  * @returns {string|null}
  */
 export function defaultRustToolchainVersion() {
-    return RustToolchain.defaultVersion();
+	return RustToolchain.defaultVersion();
 }
 
 /**
@@ -361,15 +413,19 @@ export function defaultRustToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultRustToolchain() {
-    return RustToolchain.default();
+	return RustToolchain.default();
 }
 
-const LOCKFILE_SPEC = registerToolchainLockfile({
-    name: "rust",
-    platforms: rustSupportedPlatforms(),
-    downloadUrl: rustDownloadUrl,
-    artifactName: rustArtifactName,
-    lockfile: RUST_LOCKFILE,
-}, ["1.93.0"]);
+const LOCKFILE_SPEC = registerToolchainLockfile(
+	{
+		name: "rust",
+		platforms: rustSupportedPlatforms(),
+		downloadUrl: rustDownloadUrl,
+		artifactName: rustArtifactName,
+		lockfile: RUST_LOCKFILE,
+	},
+	["1.93.0"],
+);
 product(RustToolchain, GEN_LOCKFILES, RUST_TOOL, (handle) =>
-    generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
+	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+);

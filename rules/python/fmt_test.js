@@ -1,71 +1,86 @@
-import { describe, expect, test, withFakeDiff, withFakeToolchainHost } from "//rules/imp/test";
+import {
+	describe,
+	expect,
+	test,
+	withFakeDiff,
+	withFakeToolchainHost,
+} from "//rules/imp/test";
 import { pythonApp } from "//rules/python";
 import { ruffFmt, ruffFormatCheck } from "//rules/python/fmt";
 import {
-    __resetRuffToolchainStateForTest,
-    ruffToolchain,
+	__resetRuffToolchainStateForTest,
+	ruffToolchain,
 } from "//rules/python/ruff_toolchain";
 
 function withRuffHost(fn) {
-    const run = async (host) => {
-        __resetRuffToolchainStateForTest();
-        // Cold acquires verify against the lockfile, so the fake host needs
-        // a matching entry for the toolchain the tests declare.
-        host.addFile("//rules/python/ruff-toolchain.lock", JSON.stringify({
-            tool: "ruff-toolchain",
-            versions: {
-                "0.15.21": {
-                    "linux/x86_64": {
-                        url: "https://locked.example/ruff.tar.gz",
-                        artifact: "ruff.tar.gz",
-                        size: 12345,
-                        sha256: "deadbeef",
-                    },
-                },
-            },
-        }));
-        try {
-            return await fn(host);
-        } finally {
-            __resetRuffToolchainStateForTest();
-        }
-    };
-    return withFakeToolchainHost(run);
+	const run = async (host) => {
+		__resetRuffToolchainStateForTest();
+		// Cold acquires verify against the lockfile, so the fake host needs
+		// a matching entry for the toolchain the tests declare.
+		host.addFile(
+			"//rules/python/ruff-toolchain.lock",
+			JSON.stringify({
+				tool: "ruff-toolchain",
+				versions: {
+					"0.15.21": {
+						"linux/x86_64": {
+							url: "https://locked.example/ruff.tar.gz",
+							artifact: "ruff.tar.gz",
+							size: 12345,
+							sha256: "deadbeef",
+						},
+					},
+				},
+			}),
+		);
+		try {
+			return await fn(host);
+		} finally {
+			__resetRuffToolchainStateForTest();
+		}
+	};
+	return withFakeToolchainHost(run);
 }
 
 describe("python fmt", () => {
+	test("ruffFormatCheck runs ruff format --check against the target's sources", async () => {
+		await withRuffHost(async (host) => {
+			ruffToolchain("0.15.21", { default: true });
+			const app = pythonApp({ src: "rules/python/example" });
 
-test("ruffFormatCheck runs ruff format --check against the target's sources", async () => {
-    await withRuffHost(async (host) => {
-        ruffToolchain("0.15.21", { default: true });
-        const app = pythonApp({ src: "rules/python/example" });
+			await ruffFormatCheck(app);
 
-        await ruffFormatCheck(app);
+			const fmtRun = host.runs[host.runs.length - 1];
+			expect(fmtRun.argv[0]).toBe("ruff");
+			expect(fmtRun.argv).toContain("--check");
+			expect(fmtRun.outputs).toEqual([]);
+		});
+	});
 
-        const fmtRun = host.runs[host.runs.length - 1];
-        expect(fmtRun.argv[0]).toBe("ruff");
-        expect(fmtRun.argv).toContain("--check");
-        expect(fmtRun.outputs).toEqual([]);
-    });
-});
+	test("ruffFmt runs ruff format without --check and declares source outputs", async () => {
+		await withRuffHost(async (host) => {
+			ruffToolchain("0.15.21", { default: true });
+			const app = pythonApp({ src: "rules/python/example" });
 
-test("ruffFmt runs ruff format without --check and declares source outputs", async () => {
-    await withRuffHost(async (host) => {
-        ruffToolchain("0.15.21", { default: true });
-        const app = pythonApp({ src: "rules/python/example" });
+			// withFakeRun-backed hosts don't produce a real outputDigest, so
+			// diffDigests needs a stubbed result — same pattern as
+			// rules/rust/fmt_test.js.
+			await withFakeDiff(
+				[
+					{
+						type: "modified",
+						path: "rules/python/example/src/hello/__init__.py",
+					},
+				],
+				async () => {
+					const result = await ruffFmt(app);
+					expect(result.formatted).toBe(1);
+				},
+			);
 
-        // withFakeRun-backed hosts don't produce a real outputDigest, so
-        // diffDigests needs a stubbed result — same pattern as
-        // rules/rust/fmt_test.js.
-        await withFakeDiff([{ type: "modified", path: "rules/python/example/src/hello/__init__.py" }], async () => {
-            const result = await ruffFmt(app);
-            expect(result.formatted).toBe(1);
-        });
-
-        const fmtRun = host.runs[host.runs.length - 1];
-        expect(fmtRun.argv).not.toContain("--check");
-        expect(Array.isArray(fmtRun.outputs)).toBe(true);
-    });
-});
-
+			const fmtRun = host.runs[host.runs.length - 1];
+			expect(fmtRun.argv).not.toContain("--check");
+			expect(Array.isArray(fmtRun.outputs)).toBe(true);
+		});
+	});
 });

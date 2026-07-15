@@ -1,6 +1,21 @@
-import { Toolchain, product, namedCache, download, extract, platformInfo, cachePut, cacheGet, cacheHas, toolName } from "imp:core";
+import {
+	Toolchain,
+	product,
+	namedCache,
+	download,
+	extract,
+	platformInfo,
+	cachePut,
+	cacheGet,
+	cacheHas,
+	toolName,
+} from "imp:core";
 
-import { generateToolLockfile, GEN_LOCKFILES, registerToolchainLockfile } from "//rules/workflows/lockfiles";
+import {
+	generateToolLockfile,
+	GEN_LOCKFILES,
+	registerToolchainLockfile,
+} from "//rules/workflows/lockfiles";
 
 // Declared tool identity for products this toolchain implements; also
 // consumed by rule modules registering odin-driven products.
@@ -12,16 +27,16 @@ const osMap = { linux: "linux", macos: "macos", windows: "windows" };
 const archMap = { x86_64: "amd64", aarch64: "arm64" };
 
 function requireSupportedPlatform(plat) {
-    if (!osMap[plat.os]) {
-        throw new Error(`unsupported Odin toolchain OS: ${plat.os}`);
-    }
-    if (!archMap[plat.arch]) {
-        throw new Error(`unsupported Odin toolchain architecture: ${plat.arch}`);
-    }
+	if (!osMap[plat.os]) {
+		throw new Error(`unsupported Odin toolchain OS: ${plat.os}`);
+	}
+	if (!archMap[plat.arch]) {
+		throw new Error(`unsupported Odin toolchain architecture: ${plat.arch}`);
+	}
 }
 
 function stagingPath(version, plat) {
-    return `/tmp/imp-odin-${version}-${plat.arch}`;
+	return `/tmp/imp-odin-${version}-${plat.arch}`;
 }
 
 /**
@@ -32,8 +47,8 @@ function stagingPath(version, plat) {
  * @returns {string}
  */
 export function odinCacheKey(version, plat) {
-    requireSupportedPlatform(plat);
-    return `${version}/${plat.os}-${plat.arch}`;
+	requireSupportedPlatform(plat);
+	return `${version}/${plat.os}-${plat.arch}`;
 }
 
 /**
@@ -44,9 +59,9 @@ export function odinCacheKey(version, plat) {
  * @returns {string}
  */
 export function odinArtifactName(version, plat) {
-    requireSupportedPlatform(plat);
-    const ext = plat.os === "windows" ? "zip" : "tar.gz";
-    return `odin-${osMap[plat.os]}-${archMap[plat.arch]}-${version}.${ext}`;
+	requireSupportedPlatform(plat);
+	const ext = plat.os === "windows" ? "zip" : "tar.gz";
+	return `odin-${osMap[plat.os]}-${archMap[plat.arch]}-${version}.${ext}`;
 }
 
 /**
@@ -57,19 +72,18 @@ export function odinArtifactName(version, plat) {
  * @returns {string}
  */
 export function odinDownloadUrl(version, plat) {
-    return `https://github.com/odin-lang/Odin/releases/download/${version}/${odinArtifactName(version, plat)}`;
+	return `https://github.com/odin-lang/Odin/releases/download/${version}/${odinArtifactName(version, plat)}`;
 }
-
 
 // The platforms Odin publishes a release archive for. osMap × archMap would also
 // admit windows/aarch64, which Odin does not ship — so the lockfile matrix is
 // curated to what actually exists on the releases page.
 const ODIN_SUPPORTED_PLATFORMS = [
-    { os: "linux", arch: "x86_64" },
-    { os: "linux", arch: "aarch64" },
-    { os: "macos", arch: "x86_64" },
-    { os: "macos", arch: "aarch64" },
-    { os: "windows", arch: "x86_64" },
+	{ os: "linux", arch: "x86_64" },
+	{ os: "linux", arch: "aarch64" },
+	{ os: "macos", arch: "x86_64" },
+	{ os: "macos", arch: "aarch64" },
+	{ os: "windows", arch: "x86_64" },
 ];
 
 /**
@@ -78,23 +92,29 @@ const ODIN_SUPPORTED_PLATFORMS = [
  * @returns {Array<{ os: string, arch: string }>}
  */
 export function odinSupportedPlatforms() {
-    return ODIN_SUPPORTED_PLATFORMS.map((plat) => ({ ...plat }));
+	return ODIN_SUPPORTED_PLATFORMS.map((plat) => ({ ...plat }));
 }
 
 export class OdinToolchain extends Toolchain {
-    static kind = "odin-toolchain";
-    static tool = ODIN_TOOL;
-    constructor({ version, linker }, opts) {
-        super({ kind: OdinToolchain.kind, attrs: { version, ...(linker ? { linker } : {}) } }, opts);
-    }
+	static kind = "odin-toolchain";
+	static tool = ODIN_TOOL;
+	constructor({ version, linker }, opts) {
+		super(
+			{
+				kind: OdinToolchain.kind,
+				attrs: { version, ...(linker ? { linker } : {}) },
+			},
+			opts,
+		);
+	}
 
-    bin() {
-        return odinBin(this.attrs.version);
-    }
+	bin() {
+		return odinBin(this.attrs.version);
+	}
 }
 
 export function __resetOdinToolchainStateForTest() {
-    OdinToolchain.clearDefault();
+	OdinToolchain.clearDefault();
 }
 
 /**
@@ -110,12 +130,12 @@ export function __resetOdinToolchainStateForTest() {
  * @returns {object} Target handle for this Odin toolchain.
  */
 export function odinToolchain(version, opts = {}) {
-    namedCache({ name: ODIN_TOOLCHAIN_CACHE, shared: true });
+	namedCache({ name: ODIN_TOOLCHAIN_CACHE, shared: true });
 
-    return new OdinToolchain(
-        { version, linker: opts.linker },
-        { default: opts.default },
-    );
+	return new OdinToolchain(
+		{ version, linker: opts.linker },
+		{ default: opts.default },
+	);
 }
 
 /**
@@ -125,23 +145,23 @@ export function odinToolchain(version, opts = {}) {
  * @returns {string} Local path to the toolchain root containing the Odin binary.
  */
 export function acquireOdinToolchain(version) {
-    const plat = platformInfo();
-    const key = odinCacheKey(version, plat);
+	const plat = platformInfo();
+	const key = odinCacheKey(version, plat);
 
-    if (cacheHas(ODIN_TOOLCHAIN_CACHE, key)) {
-        return cacheGet(ODIN_TOOLCHAIN_CACHE, key);
-    }
+	if (cacheHas(ODIN_TOOLCHAIN_CACHE, key)) {
+		return cacheGet(ODIN_TOOLCHAIN_CACHE, key);
+	}
 
-    const artifact = odinArtifactName(version, plat);
-    const archive = download(odinDownloadUrl(version, plat));
-    const staging = stagingPath(version, plat);
-    extract(archive, staging, {
-        format: artifact.endsWith(".zip") ? "zip" : "tar.gz",
-        strip_components: 1,
-    });
+	const artifact = odinArtifactName(version, plat);
+	const archive = download(odinDownloadUrl(version, plat));
+	const staging = stagingPath(version, plat);
+	extract(archive, staging, {
+		format: artifact.endsWith(".zip") ? "zip" : "tar.gz",
+		strip_components: 1,
+	});
 
-    cachePut(ODIN_TOOLCHAIN_CACHE, key, staging);
-    return cacheGet(ODIN_TOOLCHAIN_CACHE, key);
+	cachePut(ODIN_TOOLCHAIN_CACHE, key, staging);
+	return cacheGet(ODIN_TOOLCHAIN_CACHE, key);
 }
 
 /**
@@ -151,11 +171,11 @@ export function acquireOdinToolchain(version) {
  * @returns {string}
  */
 export function resolveOdinToolchainVersion(version) {
-    const resolved = OdinToolchain.resolveVersion(version);
-    if (!resolved) {
-        throw new Error("no Odin toolchain version specified and no default set");
-    }
-    return resolved;
+	const resolved = OdinToolchain.resolveVersion(version);
+	if (!resolved) {
+		throw new Error("no Odin toolchain version specified and no default set");
+	}
+	return resolved;
 }
 
 /**
@@ -165,10 +185,10 @@ export function resolveOdinToolchainVersion(version) {
  * @returns {string}
  */
 export function odinBin(version) {
-    const resolved = resolveOdinToolchainVersion(version);
-    const dir = acquireOdinToolchain(resolved);
-    const exe = platformInfo().os === "windows" ? "odin.exe" : "odin";
-    return `${dir}/${exe}`;
+	const resolved = resolveOdinToolchainVersion(version);
+	const dir = acquireOdinToolchain(resolved);
+	const exe = platformInfo().os === "windows" ? "odin.exe" : "odin";
+	return `${dir}/${exe}`;
 }
 
 /**
@@ -178,16 +198,16 @@ export function odinBin(version) {
  * @returns {object}
  */
 export function odinTool(version) {
-    const resolved = resolveOdinToolchainVersion(version);
-    acquireOdinToolchain(resolved);
-    const plat = platformInfo();
-    return {
-        kind: "tool",
-        name: "odin",
-        cache: ODIN_TOOLCHAIN_CACHE,
-        key: odinCacheKey(resolved, plat),
-        binDirs: ["."],
-    };
+	const resolved = resolveOdinToolchainVersion(version);
+	acquireOdinToolchain(resolved);
+	const plat = platformInfo();
+	return {
+		kind: "tool",
+		name: "odin",
+		cache: ODIN_TOOLCHAIN_CACHE,
+		key: odinCacheKey(resolved, plat),
+		binDirs: ["."],
+	};
 }
 
 /**
@@ -196,7 +216,7 @@ export function odinTool(version) {
  * @returns {string|null}
  */
 export function defaultOdinToolchainVersion() {
-    return OdinToolchain.defaultVersion();
+	return OdinToolchain.defaultVersion();
 }
 
 /**
@@ -205,15 +225,19 @@ export function defaultOdinToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultOdinToolchain() {
-    return OdinToolchain.default();
+	return OdinToolchain.default();
 }
 
-const LOCKFILE_SPEC = registerToolchainLockfile({
-    name: "odin",
-    platforms: odinSupportedPlatforms(),
-    downloadUrl: odinDownloadUrl,
-    artifactName: odinArtifactName,
-    lockfile: "//rules/odin/odin.lock",
-}, ["dev-2026-03"]);
+const LOCKFILE_SPEC = registerToolchainLockfile(
+	{
+		name: "odin",
+		platforms: odinSupportedPlatforms(),
+		downloadUrl: odinDownloadUrl,
+		artifactName: odinArtifactName,
+		lockfile: "//rules/odin/odin.lock",
+	},
+	["dev-2026-03"],
+);
 product(OdinToolchain, GEN_LOCKFILES, ODIN_TOOL, (handle) =>
-    generateToolLockfile({ handle, ...LOCKFILE_SPEC }));
+	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+);

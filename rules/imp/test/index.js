@@ -5,118 +5,128 @@ const suites = [];
 const tests = [];
 
 function fullName(name) {
-    return [...suites, name].join(" ");
+	return [...suites, name].join(" ");
 }
 
 function formatValue(value) {
-    if (typeof value === "string") {
-        return JSON.stringify(value);
-    }
-    if (value === undefined) {
-        return "undefined";
-    }
-    try {
-        return JSON.stringify(value);
-    } catch (_) {
-        return String(value);
-    }
+	if (typeof value === "string") {
+		return JSON.stringify(value);
+	}
+	if (value === undefined) {
+		return "undefined";
+	}
+	try {
+		return JSON.stringify(value);
+	} catch (_) {
+		return String(value);
+	}
 }
 
 function isObject(value) {
-    return value !== null && typeof value === "object";
+	return value !== null && typeof value === "object";
 }
 
 function deepEqual(actual, expected) {
-    if (Object.is(actual, expected)) {
-        return true;
-    }
-    if (Array.isArray(actual) || Array.isArray(expected)) {
-        if (!Array.isArray(actual) || !Array.isArray(expected) || actual.length !== expected.length) {
-            return false;
-        }
-        return actual.every((value, index) => deepEqual(value, expected[index]));
-    }
-    if (isObject(actual) || isObject(expected)) {
-        if (!isObject(actual) || !isObject(expected)) {
-            return false;
-        }
-        const actualKeys = Object.keys(actual).sort();
-        const expectedKeys = Object.keys(expected).sort();
-        if (!deepEqual(actualKeys, expectedKeys)) {
-            return false;
-        }
-        return actualKeys.every((key) => deepEqual(actual[key], expected[key]));
-    }
-    return false;
+	if (Object.is(actual, expected)) {
+		return true;
+	}
+	if (Array.isArray(actual) || Array.isArray(expected)) {
+		if (
+			!Array.isArray(actual) ||
+			!Array.isArray(expected) ||
+			actual.length !== expected.length
+		) {
+			return false;
+		}
+		return actual.every((value, index) => deepEqual(value, expected[index]));
+	}
+	if (isObject(actual) || isObject(expected)) {
+		if (!isObject(actual) || !isObject(expected)) {
+			return false;
+		}
+		const actualKeys = Object.keys(actual).sort();
+		const expectedKeys = Object.keys(expected).sort();
+		if (!deepEqual(actualKeys, expectedKeys)) {
+			return false;
+		}
+		return actualKeys.every((key) => deepEqual(actual[key], expected[key]));
+	}
+	return false;
 }
 
 function failMatcher(name, actual, expected, negated) {
-    const not = negated ? " not" : "";
-    throw new Error(`${name}: expected ${formatValue(actual)}${not} to match ${formatValue(expected)}`);
+	const not = negated ? " not" : "";
+	throw new Error(
+		`${name}: expected ${formatValue(actual)}${not} to match ${formatValue(expected)}`,
+	);
 }
 
 function makeMatchers(actual, negated = false) {
-    function check(name, passed, expected) {
-        const ok = negated ? !passed : passed;
-        if (!ok) {
-            failMatcher(name, actual, expected, negated);
-        }
-    }
+	function check(name, passed, expected) {
+		const ok = negated ? !passed : passed;
+		if (!ok) {
+			failMatcher(name, actual, expected, negated);
+		}
+	}
 
-    return {
-        get not() {
-            return makeMatchers(actual, !negated);
-        },
-        toBe(expected) {
-            check("toBe", Object.is(actual, expected), expected);
-        },
-        toEqual(expected) {
-            check("toEqual", deepEqual(actual, expected), expected);
-        },
-        toContain(expected) {
-            const passed = typeof actual === "string"
-                ? actual.includes(expected)
-                : Array.isArray(actual) && actual.includes(expected);
-            check("toContain", passed, expected);
-        },
-        toBeTruthy() {
-            check("toBeTruthy", !!actual, true);
-        },
-        toBeFalsy() {
-            check("toBeFalsy", !actual, false);
-        },
-        toThrow(expected) {
-            if (typeof actual !== "function") {
-                throw new Error(`toThrow: expected ${formatValue(actual)} to be a function`);
-            }
-            let thrown = null;
-            try {
-                actual();
-            } catch (error) {
-                thrown = error;
-            }
-            const message = thrown && thrown.message ? thrown.message : String(thrown);
-            const passed = thrown !== null && (
-                expected === undefined
-                    || (typeof expected === "string" && message.includes(expected))
-                    || (expected instanceof RegExp && expected.test(message))
-            );
-            check("toThrow", passed, expected === undefined ? "an error" : expected);
-        },
-    };
+	return {
+		get not() {
+			return makeMatchers(actual, !negated);
+		},
+		toBe(expected) {
+			check("toBe", Object.is(actual, expected), expected);
+		},
+		toEqual(expected) {
+			check("toEqual", deepEqual(actual, expected), expected);
+		},
+		toContain(expected) {
+			const passed =
+				typeof actual === "string"
+					? actual.includes(expected)
+					: Array.isArray(actual) && actual.includes(expected);
+			check("toContain", passed, expected);
+		},
+		toBeTruthy() {
+			check("toBeTruthy", !!actual, true);
+		},
+		toBeFalsy() {
+			check("toBeFalsy", !actual, false);
+		},
+		toThrow(expected) {
+			if (typeof actual !== "function") {
+				throw new Error(
+					`toThrow: expected ${formatValue(actual)} to be a function`,
+				);
+			}
+			let thrown = null;
+			try {
+				actual();
+			} catch (error) {
+				thrown = error;
+			}
+			const message =
+				thrown && thrown.message ? thrown.message : String(thrown);
+			const passed =
+				thrown !== null &&
+				(expected === undefined ||
+					(typeof expected === "string" && message.includes(expected)) ||
+					(expected instanceof RegExp && expected.test(message)));
+			check("toThrow", passed, expected === undefined ? "an error" : expected);
+		},
+	};
 }
 
 export function expect(actual) {
-    return makeMatchers(actual);
+	return makeMatchers(actual);
 }
 
 export function describe(name, fn) {
-    suites.push(name);
-    try {
-        fn();
-    } finally {
-        suites.pop();
-    }
+	suites.push(name);
+	try {
+		fn();
+	} finally {
+		suites.pop();
+	}
 }
 
 /**
@@ -130,27 +140,36 @@ export function describe(name, fn) {
  * @param {Function} [maybeFn]
  */
 export function test(name, optionsOrFn, maybeFn) {
-    const options = typeof optionsOrFn === "function" ? {} : optionsOrFn;
-    const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
-    if (typeof fn !== "function") {
-        throw new Error("test(name, [options], fn) requires a test function");
-    }
-    if (options === null || typeof options !== "object" || Array.isArray(options)) {
-        throw new Error("test options must be an object");
-    }
-    const known = new Set(["fixture", "isolation"]);
-    for (const key of Object.keys(options)) {
-        if (!known.has(key)) throw new Error(`unknown test option ${JSON.stringify(key)}`);
-    }
-    const fixture = options.fixture || "minimal";
-    const isolation = options.isolation || "runtime";
-    if (fixture !== "minimal" && fixture !== "workspace") {
-        throw new Error(`test fixture must be "minimal" or "workspace", got ${JSON.stringify(fixture)}`);
-    }
-    if (isolation !== "runtime" && isolation !== "process") {
-        throw new Error(`test isolation must be "runtime" or "process", got ${JSON.stringify(isolation)}`);
-    }
-    tests.push({ name: fullName(name), fn, fixture, isolation });
+	const options = typeof optionsOrFn === "function" ? {} : optionsOrFn;
+	const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
+	if (typeof fn !== "function") {
+		throw new Error("test(name, [options], fn) requires a test function");
+	}
+	if (
+		options === null ||
+		typeof options !== "object" ||
+		Array.isArray(options)
+	) {
+		throw new Error("test options must be an object");
+	}
+	const known = new Set(["fixture", "isolation"]);
+	for (const key of Object.keys(options)) {
+		if (!known.has(key))
+			throw new Error(`unknown test option ${JSON.stringify(key)}`);
+	}
+	const fixture = options.fixture || "minimal";
+	const isolation = options.isolation || "runtime";
+	if (fixture !== "minimal" && fixture !== "workspace") {
+		throw new Error(
+			`test fixture must be "minimal" or "workspace", got ${JSON.stringify(fixture)}`,
+		);
+	}
+	if (isolation !== "runtime" && isolation !== "process") {
+		throw new Error(
+			`test isolation must be "runtime" or "process", got ${JSON.stringify(isolation)}`,
+		);
+	}
+	tests.push({ name: fullName(name), fn, fixture, isolation });
 }
 
 export const it = test;
@@ -161,13 +180,13 @@ export const it = test;
  * before the host bridge), so `getMemoTrace()` assertions work unchanged.
  */
 export async function withFakeRun(fn) {
-    const real = globalThis.__host_run;
-    globalThis.__host_run = async () => ({ stdout: "", stderr: "", exitCode: 0 });
-    try {
-        return await fn();
-    } finally {
-        globalThis.__host_run = real;
-    }
+	const real = globalThis.__host_run;
+	globalThis.__host_run = async () => ({ stdout: "", stderr: "", exitCode: 0 });
+	try {
+		return await fn();
+	} finally {
+		globalThis.__host_run = real;
+	}
 }
 
 /**
@@ -181,13 +200,13 @@ export async function withFakeRun(fn) {
  * @param {() => Promise<any>} fn
  */
 export async function withFakeDiff(changes, fn) {
-    const real = globalThis.__host_diff_digests;
-    globalThis.__host_diff_digests = () => JSON.stringify(changes);
-    try {
-        return await fn();
-    } finally {
-        globalThis.__host_diff_digests = real;
-    }
+	const real = globalThis.__host_diff_digests;
+	globalThis.__host_diff_digests = () => JSON.stringify(changes);
+	try {
+		return await fn();
+	} finally {
+		globalThis.__host_diff_digests = real;
+	}
 }
 
 /**
@@ -200,16 +219,16 @@ export async function withFakeDiff(changes, fn) {
  * @param {() => Promise<any>} fn
  */
 export async function withFakeMergeDigests(fn) {
-    const real = globalThis.__host_merge_digests;
-    globalThis.__host_merge_digests = (digestsJson) => {
-        const digests = JSON.parse(digestsJson);
-        return digests.length > 0 ? digests[0] : "";
-    };
-    try {
-        return await fn();
-    } finally {
-        globalThis.__host_merge_digests = real;
-    }
+	const real = globalThis.__host_merge_digests;
+	globalThis.__host_merge_digests = (digestsJson) => {
+		const digests = JSON.parse(digestsJson);
+		return digests.length > 0 ? digests[0] : "";
+	};
+	try {
+		return await fn();
+	} finally {
+		globalThis.__host_merge_digests = real;
+	}
 }
 
 /**
@@ -221,16 +240,16 @@ export async function withFakeMergeDigests(fn) {
  * @param {(calls: Array<{path: string, digest: string, from: string|null}>) => Promise<any>} fn
  */
 export async function withFakeWriteWorkspace(fn) {
-    const real = globalThis.__host_write_workspace;
-    const calls = [];
-    globalThis.__host_write_workspace = (path, digest, from) => {
-        calls.push({ path, digest, from });
-    };
-    try {
-        return await fn(calls);
-    } finally {
-        globalThis.__host_write_workspace = real;
-    }
+	const real = globalThis.__host_write_workspace;
+	const calls = [];
+	globalThis.__host_write_workspace = (path, digest, from) => {
+		calls.push({ path, digest, from });
+	};
+	try {
+		return await fn(calls);
+	} finally {
+		globalThis.__host_write_workspace = real;
+	}
 }
 
 /**
@@ -242,13 +261,13 @@ export async function withFakeWriteWorkspace(fn) {
  * @param {() => Promise<any>} fn
  */
 export async function withFakeSelectedTargets(list, fn) {
-    const real = globalThis.__host_selected_targets;
-    globalThis.__host_selected_targets = () => JSON.stringify(list);
-    try {
-        return await fn();
-    } finally {
-        globalThis.__host_selected_targets = real;
-    }
+	const real = globalThis.__host_selected_targets;
+	globalThis.__host_selected_targets = () => JSON.stringify(list);
+	try {
+		return await fn();
+	} finally {
+		globalThis.__host_selected_targets = real;
+	}
 }
 
 /**
@@ -257,137 +276,148 @@ export async function withFakeSelectedTargets(list, fn) {
  * archive extraction, or real native-tool resolution.
  */
 export async function withFakeToolchainHost(platOrFn, maybeFn) {
-    const plat = typeof platOrFn === "function" ? { os: "linux", arch: "x86_64" } : platOrFn;
-    const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;
-    const calls = [];
-    const runs = [];
-    const cache = new Map();
+	const plat =
+		typeof platOrFn === "function" ? { os: "linux", arch: "x86_64" } : platOrFn;
+	const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;
+	const calls = [];
+	const runs = [];
+	const cache = new Map();
 
-    const originals = {
-        target: globalThis.__host_target,
-        namedCache: globalThis.__host_named_cache,
-        platformInfo: globalThis.__host_platform_info,
-        cacheHas: globalThis.__host_cache_has,
-        cacheGet: globalThis.__host_cache_get,
-        cachePut: globalThis.__host_cache_put,
-        download: globalThis.__host_download,
-        extract: globalThis.__host_extract,
-        run: globalThis.__host_run,
-        nativeToolArtifact: globalThis.__host_native_tool_artifact,
-        workerStart: globalThis.__host_worker_start,
-        workerGet: globalThis.__host_worker_get,
-        readAddressedFile: globalThis.__host_read_addressed_file,
-    };
+	const originals = {
+		target: globalThis.__host_target,
+		namedCache: globalThis.__host_named_cache,
+		platformInfo: globalThis.__host_platform_info,
+		cacheHas: globalThis.__host_cache_has,
+		cacheGet: globalThis.__host_cache_get,
+		cachePut: globalThis.__host_cache_put,
+		download: globalThis.__host_download,
+		extract: globalThis.__host_extract,
+		run: globalThis.__host_run,
+		nativeToolArtifact: globalThis.__host_native_tool_artifact,
+		workerStart: globalThis.__host_worker_start,
+		workerGet: globalThis.__host_worker_get,
+		readAddressedFile: globalThis.__host_read_addressed_file,
+	};
 
-    const workers = new Map();
-    const files = new Map();
+	const workers = new Map();
+	const files = new Map();
 
-    const host = {
-        calls,
-        runs,
-        workers,
-        install(name, key, path) {
-            cache.set(`${name}/${key}`, path);
-        },
-        addFile(address, content) {
-            files.set(address, content);
-        },
-        clearCalls() {
-            calls.length = 0;
-        },
-    };
+	const host = {
+		calls,
+		runs,
+		workers,
+		install(name, key, path) {
+			cache.set(`${name}/${key}`, path);
+		},
+		addFile(address, content) {
+			files.set(address, content);
+		},
+		clearCalls() {
+			calls.length = 0;
+		},
+	};
 
-    globalThis.__host_target = (kind, attrsJson, sourcesJson, depIds, depModes) => {
-        if (kind === "native-tool") {
-            const attrs = JSON.parse(attrsJson);
-            calls.push(["nativeTool", attrs.name]);
-        }
-        return originals.target(kind, attrsJson, sourcesJson, depIds, depModes);
-    };
-    globalThis.__host_named_cache = (name) => {
-        calls.push(["namedCache", name]);
-    };
-    globalThis.__host_platform_info = () => {
-        calls.push(["platformInfo"]);
-        return JSON.stringify(plat);
-    };
-    globalThis.__host_cache_has = (name, key) => {
-        calls.push(["cacheHas", name, key]);
-        return cache.has(`${name}/${key}`);
-    };
-    globalThis.__host_cache_get = (name, key) => {
-        calls.push(["cacheGet", name, key]);
-        return cache.get(`${name}/${key}`) || null;
-    };
-    globalThis.__host_cache_put = (name, key, source) => {
-        calls.push(["cachePut", name, key, source]);
-        cache.set(`${name}/${key}`, `/cache/${name}/${key}`);
-    };
-    globalThis.__host_download = (url) => {
-        calls.push(["download", url]);
-        return "/downloads/odin-release";
-    };
-    globalThis.__host_extract = (archive, dest, format, stripComponents) => {
-        calls.push(["extract", archive, dest, format, stripComponents]);
-    };
-    globalThis.__host_native_tool_artifact = (name) => {
-        calls.push(["nativeToolSpec", name]);
-        return `/tools/${name}`;
-    };
-    globalThis.__host_run = async (opts) => {
-        runs.push(opts);
-        for (const out of opts.outputs || []) {
-            if (out.namedCache) {
-                cache.set(`${out.namedCache.name}/${out.namedCache.key}`, `/cache/${out.namedCache.name}/${out.namedCache.key}`);
-            }
-        }
-        return { stdout: "", stderr: "", exitCode: 0 };
-    };
-    globalThis.__host_worker_start = async (name, opts) => {
-        calls.push(["workerStart", name, opts]);
-        const handle = workers.get(name) || {
-            homeDir: `/workers/${name}/home`,
-            tmpDir: `/workers/${name}/tmp`,
-            port: 40000,
-        };
-        workers.set(name, handle);
-        return JSON.stringify(handle);
-    };
-    globalThis.__host_worker_get = (name) => {
-        calls.push(["workerGet", name]);
-        const handle = workers.get(name);
-        return handle ? JSON.stringify(handle) : null;
-    };
-    globalThis.__host_read_addressed_file = (address) => {
-        calls.push(["readAddressedFile", address]);
-        return files.get(address) ?? null;
-    };
+	globalThis.__host_target = (
+		kind,
+		attrsJson,
+		sourcesJson,
+		depIds,
+		depModes,
+	) => {
+		if (kind === "native-tool") {
+			const attrs = JSON.parse(attrsJson);
+			calls.push(["nativeTool", attrs.name]);
+		}
+		return originals.target(kind, attrsJson, sourcesJson, depIds, depModes);
+	};
+	globalThis.__host_named_cache = (name) => {
+		calls.push(["namedCache", name]);
+	};
+	globalThis.__host_platform_info = () => {
+		calls.push(["platformInfo"]);
+		return JSON.stringify(plat);
+	};
+	globalThis.__host_cache_has = (name, key) => {
+		calls.push(["cacheHas", name, key]);
+		return cache.has(`${name}/${key}`);
+	};
+	globalThis.__host_cache_get = (name, key) => {
+		calls.push(["cacheGet", name, key]);
+		return cache.get(`${name}/${key}`) || null;
+	};
+	globalThis.__host_cache_put = (name, key, source) => {
+		calls.push(["cachePut", name, key, source]);
+		cache.set(`${name}/${key}`, `/cache/${name}/${key}`);
+	};
+	globalThis.__host_download = (url) => {
+		calls.push(["download", url]);
+		return "/downloads/odin-release";
+	};
+	globalThis.__host_extract = (archive, dest, format, stripComponents) => {
+		calls.push(["extract", archive, dest, format, stripComponents]);
+	};
+	globalThis.__host_native_tool_artifact = (name) => {
+		calls.push(["nativeToolSpec", name]);
+		return `/tools/${name}`;
+	};
+	globalThis.__host_run = async (opts) => {
+		runs.push(opts);
+		for (const out of opts.outputs || []) {
+			if (out.namedCache) {
+				cache.set(
+					`${out.namedCache.name}/${out.namedCache.key}`,
+					`/cache/${out.namedCache.name}/${out.namedCache.key}`,
+				);
+			}
+		}
+		return { stdout: "", stderr: "", exitCode: 0 };
+	};
+	globalThis.__host_worker_start = async (name, opts) => {
+		calls.push(["workerStart", name, opts]);
+		const handle = workers.get(name) || {
+			homeDir: `/workers/${name}/home`,
+			tmpDir: `/workers/${name}/tmp`,
+			port: 40000,
+		};
+		workers.set(name, handle);
+		return JSON.stringify(handle);
+	};
+	globalThis.__host_worker_get = (name) => {
+		calls.push(["workerGet", name]);
+		const handle = workers.get(name);
+		return handle ? JSON.stringify(handle) : null;
+	};
+	globalThis.__host_read_addressed_file = (address) => {
+		calls.push(["readAddressedFile", address]);
+		return files.get(address) ?? null;
+	};
 
-    try {
-        return await fn(host);
-    } finally {
-        globalThis.__host_target = originals.target;
-        globalThis.__host_named_cache = originals.namedCache;
-        globalThis.__host_platform_info = originals.platformInfo;
-        globalThis.__host_cache_has = originals.cacheHas;
-        globalThis.__host_cache_get = originals.cacheGet;
-        globalThis.__host_cache_put = originals.cachePut;
-        globalThis.__host_download = originals.download;
-        globalThis.__host_extract = originals.extract;
-        globalThis.__host_run = originals.run;
-        globalThis.__host_native_tool_artifact = originals.nativeToolArtifact;
-        globalThis.__host_worker_start = originals.workerStart;
-        globalThis.__host_worker_get = originals.workerGet;
-        globalThis.__host_read_addressed_file = originals.readAddressedFile;
-    }
+	try {
+		return await fn(host);
+	} finally {
+		globalThis.__host_target = originals.target;
+		globalThis.__host_named_cache = originals.namedCache;
+		globalThis.__host_platform_info = originals.platformInfo;
+		globalThis.__host_cache_has = originals.cacheHas;
+		globalThis.__host_cache_get = originals.cacheGet;
+		globalThis.__host_cache_put = originals.cachePut;
+		globalThis.__host_download = originals.download;
+		globalThis.__host_extract = originals.extract;
+		globalThis.__host_run = originals.run;
+		globalThis.__host_native_tool_artifact = originals.nativeToolArtifact;
+		globalThis.__host_worker_start = originals.workerStart;
+		globalThis.__host_worker_get = originals.workerGet;
+		globalThis.__host_read_addressed_file = originals.readAddressedFile;
+	}
 }
 
 async function importTestModule(testModule) {
-    const from = tests.length;
-    await import(testModule);
-    const selected = tests.slice(from);
-    if (selected.length === 0) throw new Error(`no tests registered for ${testModule}`);
-    return selected;
+	const from = tests.length;
+	await import(testModule);
+	const selected = tests.slice(from);
+	if (selected.length === 0)
+		throw new Error(`no tests registered for ${testModule}`);
+	return selected;
 }
 
 /**
@@ -395,23 +425,23 @@ async function importTestModule(testModule) {
  * module and remain stable even when display names are duplicated.
  */
 export async function discoverTestModule(testModule) {
-    const selected = await importTestModule(testModule);
-    return selected.map((entry, ordinal) => ({
-        ordinal,
-        name: entry.name,
-        fixture: entry.fixture,
-        isolation: entry.isolation,
-    }));
+	const selected = await importTestModule(testModule);
+	return selected.map((entry, ordinal) => ({
+		ordinal,
+		name: entry.name,
+		fixture: entry.fixture,
+		isolation: entry.isolation,
+	}));
 }
 
 /** Execute exactly one test in a fresh runtime. */
 export async function runTestCase(testModule, ordinal) {
-    const selected = await importTestModule(testModule);
-    const entry = selected[ordinal];
-    if (entry === undefined) {
-        throw new Error(`${testModule} has no test at ordinal ${ordinal}`);
-    }
-    await entry.fn();
+	const selected = await importTestModule(testModule);
+	const entry = selected[ordinal];
+	if (entry === undefined) {
+		throw new Error(`${testModule} has no test at ordinal ${ordinal}`);
+	}
+	await entry.fn();
 }
 
 // The target subprocess is a coordinator. It discovers these modules and
@@ -420,42 +450,51 @@ export async function runTestCase(testModule, ordinal) {
 // fresh OS process. The coordinator remains unsandboxed because suites such
 // as native_tool_test/tracked_apis_test deliberately probe ambient host state.
 export class RulesTest extends Target {
-    static kind = "rules-test";
-    constructor({ root }) {
-        const discoveredTests = workspaceFiles({ root, suffix: "_test.js", recursive: false });
-        if (discoveredTests.length === 0) {
-            throw new Error(`no JS rule tests found directly in ${root}`);
-        }
+	static kind = "rules-test";
+	constructor({ root }) {
+		const discoveredTests = workspaceFiles({
+			root,
+			suffix: "_test.js",
+			recursive: false,
+		});
+		if (discoveredTests.length === 0) {
+			throw new Error(`no JS rule tests found directly in ${root}`);
+		}
 
-        super({
-            kind: RulesTest.kind,
-            attrs: {
-                root,
-                tests: discoveredTests.join(","),
-            },
-        });
-    }
+		super({
+			kind: RulesTest.kind,
+			attrs: {
+				root,
+				tests: discoveredTests.join(","),
+			},
+		});
+	}
 }
 
-export const test_product = product(RulesTest, TEST, IMP_TOOL, async function test_product(handle) {
-    const testModules = handle.attrs.tests
-        .split(",")
-        .map((testModule) => testModule.trim())
-        .filter((testModule) => testModule.length > 0);
+export const test_product = product(
+	RulesTest,
+	TEST,
+	IMP_TOOL,
+	async function test_product(handle) {
+		const testModules = handle.attrs.tests
+			.split(",")
+			.map((testModule) => testModule.trim())
+			.filter((testModule) => testModule.length > 0);
 
-    return run({
-        argv: [globalThis.__imp_self_bin, "rules-test", ...testModules],
-        // Tests glob example sources and resources, not just modules — stage
-        // the whole rules tree.
-        inputs: [glob({ include: ["rules/**/*", "imp.workspace.js"] })],
-        // Share the host cache so toolchain named-cache lookups hit instead of
-        // re-downloading into the sandbox's pinned HOME.
-        env: [`IMP_CACHE_DIR=${globalThis.__imp_cache_dir}`],
-        display: `test JS rules ${handle.attrs.root}`,
-        sandbox: false,
-        impure: true,
-    });
-});
+		return run({
+			argv: [globalThis.__imp_self_bin, "rules-test", ...testModules],
+			// Tests glob example sources and resources, not just modules — stage
+			// the whole rules tree.
+			inputs: [glob({ include: ["rules/**/*", "imp.workspace.js"] })],
+			// Share the host cache so toolchain named-cache lookups hit instead of
+			// re-downloading into the sandbox's pinned HOME.
+			env: [`IMP_CACHE_DIR=${globalThis.__imp_cache_dir}`],
+			display: `test JS rules ${handle.attrs.root}`,
+			sandbox: false,
+			impure: true,
+		});
+	},
+);
 
 /**
  * Declare a JS rule-test target for one workspace directory. Only `_test.js`
@@ -468,5 +507,5 @@ export const test_product = product(RulesTest, TEST, IMP_TOOL, async function te
  * @returns {object} Target handle.
  */
 export function rulesTest({ root }) {
-    return new RulesTest({ root });
+	return new RulesTest({ root });
 }

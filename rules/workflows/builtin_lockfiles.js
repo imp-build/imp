@@ -11,12 +11,18 @@
 // the callback ignores the selection and walks the registry).
 
 import { goal, logInfo } from "imp:core";
-import { builtinLockfiles, generateBuiltinLockfile } from "//rules/workflows/lockfiles";
+import {
+	builtinLockfiles,
+	generateBuiltinLockfile,
+} from "//rules/workflows/lockfiles";
 
 import "//rules/c/cmake/toolchain";
 import "//rules/c/gcc/toolchain";
 import "//rules/c/mold/toolchain";
 import "//rules/c/zig/toolchain";
+import "//rules/js/biome_toolchain";
+import "//rules/js/node_toolchain";
+import "//rules/js/pnpm_toolchain";
 import "//rules/oci/toolchain";
 import "//rules/odin/toolchain";
 import "//rules/python/pex_toolchain";
@@ -27,14 +33,18 @@ import "//rules/rust/toolchain";
 import "//rules/zola/toolchain";
 
 async function genBuiltinLockfiles() {
-    const specs = builtinLockfiles();
-    if (specs.length === 0) {
-        throw new Error("no builtin lockfiles registered; did the toolchain module imports change?");
-    }
-    for (const spec of specs) {
-        logInfo(`lock ${spec.name} ${spec.versions.join(", ")} -> ${spec.lockfile}`);
-        await generateBuiltinLockfile(spec);
-    }
+	const specs = builtinLockfiles();
+	if (specs.length === 0) {
+		throw new Error(
+			"no builtin lockfiles registered; did the toolchain module imports change?",
+		);
+	}
+	for (const spec of specs) {
+		logInfo(
+			`lock ${spec.name} ${spec.versions.join(", ")} -> ${spec.lockfile}`,
+		);
+		await generateBuiltinLockfile(spec);
+	}
 }
 
 goal("gen-builtin-lockfiles", genBuiltinLockfiles, { selection: "none" });

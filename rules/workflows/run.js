@@ -18,23 +18,28 @@
 import { goal, resolveProducts } from "imp:core";
 
 export function requireSingleOdinPackage(selection) {
-    const targets = selection.filter(t => t.kind === "odin-package");
-    if (targets.length > 1) {
-        throw new Error(`run requires a single target, got ${targets.length}: ${targets.map(t => t.address).join(", ")}`);
-    }
+	const targets = selection.filter((t) => t.kind === "odin-package");
+	if (targets.length > 1) {
+		throw new Error(
+			`run requires a single target, got ${targets.length}: ${targets.map((t) => t.address).join(", ")}`,
+		);
+	}
 }
 
 export async function runGoal(selection) {
-    requireSingleOdinPackage(selection);
-    const resolved = selection.flatMap(resolveProducts);
-    const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));
-    for (const { label, promise } of calls) {
-        try {
-            await promise;
-        } catch (e) {
-            throw new Error(`${label}: ${e && e.message ? e.message : e}`);
-        }
-    }
+	requireSingleOdinPackage(selection);
+	const resolved = selection.flatMap(resolveProducts);
+	const calls = resolved.map(({ label, fn, handle }) => ({
+		label,
+		promise: fn(handle),
+	}));
+	for (const { label, promise } of calls) {
+		try {
+			await promise;
+		} catch (e) {
+			throw new Error(`${label}: ${e && e.message ? e.message : e}`);
+		}
+	}
 }
 
 goal("run", runGoal);

@@ -12,51 +12,54 @@ import { goal, resolveProducts, goalFlags, logInfo } from "imp:core";
 import { GENERATE_CHECK } from "//rules/workflows/products";
 
 export async function generateGoal(selection) {
-    const { check } = goalFlags();
-    const targets = check
-        ? selection.map((entry) => ({ ...entry, product: GENERATE_CHECK }))
-        : selection;
-    const resolved = targets.flatMap(resolveProducts);
-    const calls = resolved.map(({ label, fn, handle }) => ({ label, promise: fn(handle) }));
+	const { check } = goalFlags();
+	const targets = check
+		? selection.map((entry) => ({ ...entry, product: GENERATE_CHECK }))
+		: selection;
+	const resolved = targets.flatMap(resolveProducts);
+	const calls = resolved.map(({ label, fn, handle }) => ({
+		label,
+		promise: fn(handle),
+	}));
 
-    const summaryLines = [];
-    const staleReports = [];
-    for (const { label, promise } of calls) {
-        let result;
-        try {
-            result = await promise;
-        } catch (e) {
-            throw new Error(`${label}: ${e && e.message ? e.message : e}`);
-        }
-        if (check) {
-            const stale = (result && result.stale) || [];
-            if (stale.length > 0) {
-                summaryLines.push(`- ${label}: ${stale.length} file(s) out of date`);
-                for (const file of stale) staleReports.push(`${label}: ${file}`);
-            }
-        } else {
-            const count = (result && result.generated) || 0;
-            if (count > 0) {
-                summaryLines.push(`- ${label}: ${count} file(s) generated`);
-            }
-        }
-    }
+	const summaryLines = [];
+	const staleReports = [];
+	for (const { label, promise } of calls) {
+		let result;
+		try {
+			result = await promise;
+		} catch (e) {
+			throw new Error(`${label}: ${e && e.message ? e.message : e}`);
+		}
+		if (check) {
+			const stale = (result && result.stale) || [];
+			if (stale.length > 0) {
+				summaryLines.push(`- ${label}: ${stale.length} file(s) out of date`);
+				for (const file of stale) staleReports.push(`${label}: ${file}`);
+			}
+		} else {
+			const count = (result && result.generated) || 0;
+			if (count > 0) {
+				summaryLines.push(`- ${label}: ${count} file(s) generated`);
+			}
+		}
+	}
 
-    if (summaryLines.length > 0) {
-        logInfo(["generate:", ...summaryLines].join("\n"));
-    }
-    if (check && staleReports.length > 0) {
-        throw new Error(`generated files out of date:\n${staleReports.map((f) => `  ${f}`).join("\n")}`);
-    }
+	if (summaryLines.length > 0) {
+		logInfo(["generate:", ...summaryLines].join("\n"));
+	}
+	if (check && staleReports.length > 0) {
+		throw new Error(
+			`generated files out of date:\n${staleReports.map((f) => `  ${f}`).join("\n")}`,
+		);
+	}
 }
 
-export const GENERATE = goal(
-    "generate",
-    generateGoal,
-    {
-        flags: {
-            check: { description: "Verify generated files are up to date without writing changes" },
-        },
-    },
-);
-
+export const GENERATE = goal("generate", generateGoal, {
+	flags: {
+		check: {
+			description:
+				"Verify generated files are up to date without writing changes",
+		},
+	},
+});
