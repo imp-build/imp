@@ -18,7 +18,11 @@ use crate::loader::{
     RulesSource, ImpLoader, ImpResolver,
 };
 use crate::runtime::LiveWorkspace;
-use crate::selector::{select_roots, select_roots_for_addresses, select_targets};
+#[cfg(test)]
+use crate::selector::{select_roots, select_targets};
+use crate::selector::{
+    select_roots_for_addresses, select_roots_in, select_targets_in, SelectorContext,
+};
 use anyhow::{bail, Context, Result};
 use regex::Regex;
 use rquickjs::{
@@ -3387,29 +3391,10 @@ pub fn format_targets(targets: &[&Target], w: &mut String) -> std::fmt::Result {
 pub fn format_dependencies(
     workspace: &Workspace,
     selectors: &[String],
+    context: &SelectorContext,
     w: &mut String,
 ) -> Result<()> {
-    let targets = if selectors.is_empty() {
-        // Show roots (targets not depended on by any other target).
-        let mut child_addrs: BTreeSet<&str> = BTreeSet::new();
-        for t in workspace.targets.values() {
-            for d in &t.dependencies {
-                child_addrs.insert(d.address.as_str());
-            }
-        }
-        let roots: Vec<_> = workspace
-            .targets
-            .values()
-            .filter(|t| !child_addrs.contains(t.address.as_str()))
-            .collect();
-        if roots.is_empty() {
-            workspace.targets.values().collect()
-        } else {
-            roots
-        }
-    } else {
-        select_targets(workspace, selectors)?
-    };
+    let targets = select_targets_in(workspace, selectors, context)?;
 
     for target in targets {
         let mut visited = BTreeSet::new();
@@ -3698,6 +3683,7 @@ pub(crate) async fn execute_goal_live(
     execute_goal_live_selection(
         live,
         workspace_root,
+        &SelectorContext::root(),
         goal,
         GoalSelection::Selectors(selectors),
         no_cache,
@@ -3719,6 +3705,7 @@ pub enum GoalSelection<'a> {
 pub async fn execute_goal_live_selection(
     live: &LiveWorkspace,
     workspace_root: &Path,
+    selector_context: &SelectorContext,
     goal: &str,
     selection: GoalSelection<'_>,
     no_cache: bool,
@@ -3742,7 +3729,7 @@ pub async fn execute_goal_live_selection(
 
     // Resolve selectors against the statically-known workspace first, to
     // find the roots that should seed lazy expansion (the common case:
-    // selecting an existing target, or a selector-less default build). If a
+    // selecting an existing target). If a
     // selector doesn't match anything statically known, it may name a target
     // that only exists after expansion (e.g. a CMake sub-target) — fall back
     // to expanding every statically-declared target whose kind can produce
@@ -3750,7 +3737,13 @@ pub async fn execute_goal_live_selection(
     let empty_dynamic: BTreeMap<String, Target> = BTreeMap::new();
     let seed_addresses: Vec<String> = match &selection {
         GoalSelection::Selectors(selectors) => {
-            match select_roots(&live.workspace, &empty_dynamic, goal_def, selectors) {
+            match select_roots_in(
+                &live.workspace,
+                &empty_dynamic,
+                goal_def,
+                selectors,
+                selector_context,
+            ) {
                 Ok(roots) => roots.iter().map(|(t, _)| t.address.clone()).collect(),
                 Err(_) => live
                     .workspace
@@ -3768,9 +3761,13 @@ pub async fn execute_goal_live_selection(
 
     let dynamic_snapshot: BTreeMap<String, Target> = live.dynamic_targets.lock().unwrap().clone();
     let roots = match &selection {
-        GoalSelection::Selectors(selectors) => {
-            select_roots(&live.workspace, &dynamic_snapshot, goal_def, selectors)?
-        }
+        GoalSelection::Selectors(selectors) => select_roots_in(
+            &live.workspace,
+            &dynamic_snapshot,
+            goal_def,
+            selectors,
+            selector_context,
+        )?,
         GoalSelection::ChangedAddresses(addresses) => {
             let roots =
                 select_roots_for_addresses(&live.workspace, &dynamic_snapshot, goal_def, addresses);
@@ -5076,13 +5073,13 @@ export const app = externalThing("app");
             &workspace.workspace,
             &no_dynamic_1,
             goal_def,
-            &["app".into()],
+            &[":app".into()],
         )
         .unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].0.address, "//:app");
         assert_eq!(roots[0].1, "build");
-        run_goal_live(&workspace, p, "build", &["app".into()])
+        run_goal_live(&workspace, p, "build", &[":app".into()])
             .await
             .unwrap();
     }
@@ -5195,7 +5192,7 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
         );
         // The configured product evaluates live (its flags come from
         // configuration()), and wildcard selection picks it up.
-        run_goal_live(&workspace, p, "build", &["pkg".into()])
+        run_goal_live(&workspace, p, "build", &[":pkg".into()])
             .await
             .unwrap();
         let goal_def = workspace.workspace.goals.get("build").unwrap();
@@ -5717,7 +5714,7 @@ export const generated = toolUser();
         );
 
         let live = load_workspace(p).await.unwrap();
-        run_goal_live(&live, p, "build", &["generated".to_owned()])
+        run_goal_live(&live, p, "build", &[":generated".to_owned()])
             .await
             .unwrap();
         assert_eq!(
@@ -5868,11 +5865,12 @@ export const ignored = missing;
         let root = fixture();
         let workspace = load_workspace(root.path()).await.unwrap();
 
-        let all = select_targets(&workspace, &[]).unwrap();
+        assert!(select_targets(&workspace, &[]).is_err());
+        let all = select_targets(&workspace, &["//...".to_owned()]).unwrap();
         // joltphysics, cmake, jodin, ui = 4
         assert_eq!(all.len(), 4);
 
-        let sel = select_targets(&workspace, &["jodin".to_owned()]).unwrap();
+        let sel = select_targets(&workspace, &["library/jodin".to_owned()]).unwrap();
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].address, "//library/jodin:jodin");
 
@@ -5890,7 +5888,7 @@ export const ignored = missing;
     async fn test_format_targets() {
         let root = fixture();
         let workspace = load_workspace(root.path()).await.unwrap();
-        let targets = select_targets(&workspace, &["jodin".to_owned()]).unwrap();
+        let targets = select_targets(&workspace, &["library/jodin".to_owned()]).unwrap();
         let mut out = String::new();
         format_targets(&targets, &mut out).unwrap();
         assert!(out.contains("//library/jodin:jodin (odin-package)"));
@@ -5903,7 +5901,13 @@ export const ignored = missing;
         let root = fixture();
         let workspace = load_workspace(root.path()).await.unwrap();
         let mut out = String::new();
-        format_dependencies(&workspace, &["jodin".to_owned()], &mut out).unwrap();
+        format_dependencies(
+            &workspace,
+            &["library/jodin".to_owned()],
+            &SelectorContext::root(),
+            &mut out,
+        )
+        .unwrap();
         let expected = "\
 //library/jodin:jodin
 └── //src/cpp/joltphysics:cmake
@@ -6355,7 +6359,7 @@ export const build = product(K_root_nesting_test, BUILD, toolName("root-nesting-
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
-        let selectors = vec!["app".to_owned(), "lib".to_owned()];
+        let selectors = vec![":app".to_owned(), ":lib".to_owned()];
         execute_goal_live(
             &live,
             p,
@@ -6446,7 +6450,7 @@ export const build = product(K_promise_all_context_test, BUILD, toolName("promis
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
-        let selectors = vec!["app".to_owned()];
+        let selectors = vec![":app".to_owned()];
         execute_goal_live(
             &live,
             p,
@@ -6527,7 +6531,7 @@ export const build = product(K_sequential_sibling_context_test, BUILD, toolName(
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
-        let selectors = vec!["app".to_owned()];
+        let selectors = vec![":app".to_owned()];
         execute_goal_live(
             &live,
             p,
@@ -6601,7 +6605,7 @@ export const build = product(K_fail_test, BUILD, toolName("fail-test-tool"), asy
                 &live,
                 p,
                 "build",
-                &["app".to_owned()],
+                &[":app".to_owned()],
                 false,
                 1,
                 serde_json::json!({}),
@@ -6663,7 +6667,7 @@ export const build = product(K_shared_fail_test, BUILD, toolName("shared-fail-te
                 &live,
                 p,
                 "build",
-                &["a".to_owned(), "b".to_owned()],
+                &[":a".to_owned(), ":b".to_owned()],
                 false,
                 2,
                 serde_json::json!({}),
@@ -6714,7 +6718,7 @@ export const build = product(K_concurrent_root_test, BUILD, toolName("concurrent
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
-        let selectors = vec!["a".to_owned(), "b".to_owned()];
+        let selectors = vec![":a".to_owned(), ":b".to_owned()];
         execute_goal_live(
             &live,
             p,
@@ -6801,7 +6805,7 @@ export const build = product(K_selected_targets_test, BUILD, toolName("selected-
             &live,
             p,
             "build",
-            &["a".to_owned()],
+            &[":a".to_owned()],
             false,
             1,
             serde_json::json!({}),
@@ -6903,7 +6907,7 @@ export const build = product(K_selected_targets_reset_test, BUILD, toolName("sel
             &live,
             p,
             "build",
-            &["a".to_owned()],
+            &[":a".to_owned()],
             false,
             1,
             serde_json::json!({}),
@@ -6961,7 +6965,7 @@ export const build = product(K_callback_test, P_custom_goal, toolName("callback-
             &live,
             p,
             "custom-goal",
-            &["a".to_owned(), "b".to_owned()],
+            &[":a".to_owned(), ":b".to_owned()],
             false,
             1,
             serde_json::json!({}),
@@ -7023,7 +7027,7 @@ export const build = product(K_callback_test, P_custom_goal, toolName("callback-
             &live,
             p,
             "custom-goal",
-            &["a".to_owned()],
+            &[":a".to_owned()],
             false,
             1,
             serde_json::json!({}),
@@ -7076,7 +7080,7 @@ export const build = product(K_plain_goal_test, P_plain_goal, toolName("plain-go
             &live,
             p,
             "plain-goal",
-            &["a".to_owned()],
+            &[":a".to_owned()],
             false,
             1,
             serde_json::json!({}),
@@ -7117,7 +7121,7 @@ export const build = product(K_js_lane_slot_test, BUILD, toolName("js-lane-slot-
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
-        let selectors = vec!["a".to_owned(), "b".to_owned()];
+        let selectors = vec![":a".to_owned(), ":b".to_owned()];
         execute_goal_live(
             &live,
             p,
@@ -7185,7 +7189,7 @@ export const build = product(K_js_lane_bound_test, BUILD, toolName("js-lane-boun
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
-        let selectors = vec!["app".to_owned()];
+        let selectors = vec![":app".to_owned()];
         execute_goal_live(
             &live,
             p,
@@ -7276,7 +7280,7 @@ export const build = product(K_single_js_worker_inflight_test, BUILD, toolName("
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
-        let selectors = vec!["app".to_owned()];
+        let selectors = vec![":app".to_owned()];
         execute_goal_live(
             &live,
             p,
@@ -7330,7 +7334,7 @@ export const build = product(K_interleaved_root_context_test, BUILD, toolName("i
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
-        let selectors = vec!["a".to_owned(), "b".to_owned()];
+        let selectors = vec![":a".to_owned(), ":b".to_owned()];
         execute_goal_live(
             &live,
             p,
@@ -7417,7 +7421,7 @@ export const build = product(K_deferred_run_context_test, BUILD, toolName("defer
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
-        let selectors = vec!["app".to_owned()];
+        let selectors = vec![":app".to_owned()];
         execute_goal_live(
             &live,
             p,
@@ -7506,7 +7510,7 @@ export const build = product(K_live_cache_test, BUILD, toolName("live-cache-test
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
-        let selectors = vec!["app".to_owned()];
+        let selectors = vec![":app".to_owned()];
         execute_goal_live(
             &live,
             p,
@@ -7609,7 +7613,7 @@ export const build = product(K_config_cache_test, BUILD, toolName("config-cache-
             ),
         );
 
-        let selectors = vec!["app".to_owned()];
+        let selectors = vec![":app".to_owned()];
         let mut runs = Vec::new();
         // Same config twice (second must hit), then a changed config value
         // (must invalidate even though argv/inputs are unchanged).
@@ -7769,7 +7773,7 @@ goal("nosel", async function noselGoal(selection) {}, { selection: "none" });
         let no_dynamic: BTreeMap<String, Target> = BTreeMap::new();
         let build_goal = live.workspace.goals.get("build").unwrap();
 
-        // No selector and no //:default target is an error.
+        // A selection-dependent goal always requires a selector.
         let err = select_roots(&live.workspace, &no_dynamic, build_goal, &[])
             .unwrap_err()
             .to_string();

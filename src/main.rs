@@ -47,7 +47,7 @@ struct Cli {
 enum Cmd {
     /// List targets in the workspace
     Targets {
-        /// Target addresses or names to select; defaults to all targets
+        /// Target or package selectors, e.g. :app, dir, dir/..., or //...
         selectors: Vec<String>,
         /// List only targets owning files changed since this git ref
         /// (merge-base against the working tree, like `git diff <ref>`)
@@ -59,7 +59,7 @@ enum Cmd {
     },
     /// List target dependencies
     Dependencies {
-        /// Target addresses or names to select; defaults to all root targets
+        /// Target or package selectors, e.g. :app, dir, dir/..., or //...
         selectors: Vec<String>,
     },
     /// List target types and rules in the workspace
@@ -171,7 +171,7 @@ enum DaemonCmd {
 
 #[derive(clap::Args)]
 struct GoalArgs {
-    /// Target selectors, e.g. //:app, //dir/..., //..., or //:app#build
+    /// Target or package selectors, e.g. :app, dir, dir/..., //..., or //:app#build
     selectors: Vec<String>,
     /// Select the targets owning files changed since this git ref
     /// (merge-base against the working tree, like `git diff <ref>`)
@@ -636,6 +636,8 @@ async fn cmd_execute_live(
 ) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
+    let selector_context =
+        selector::SelectorContext::for_invocation(&workspace_root, &current_dir)?;
     let workspace = {
         let start = std::time::Instant::now();
         let ws = load_workspace_with_messages(&workspace_root, tree).await?;
@@ -978,6 +980,7 @@ async fn cmd_execute_live(
                 spike::execute_goal_live_selection(
                     &workspace,
                     &workspace_root,
+                    &selector_context,
                     goal,
                     selection,
                     no_cache,
@@ -1060,10 +1063,12 @@ async fn cmd_targets(
     changed_dependents: changed::DependentsMode,
     tree: &Tree,
 ) -> Result<()> {
+    let current_dir = std::env::current_dir().context("determine current directory")?;
+    let workspace_root = spike::find_workspace_root(&current_dir)?;
+    let selector_context =
+        selector::SelectorContext::for_invocation(&workspace_root, &current_dir)?;
     workspace_cmd!(tree, |workspace, out| {
         if let Some(since) = changed_since {
-            let current_dir = std::env::current_dir().context("determine current directory")?;
-            let workspace_root = spike::find_workspace_root(&current_dir)?;
             let graph = workspace.import_graph.lock().unwrap().clone();
             let changed::ChangedTargets { addresses, unowned } = changed::changed_target_addresses(
                 &workspace_root,
@@ -1078,7 +1083,7 @@ async fn cmd_targets(
                 writeln!(out, "{address}")?;
             }
         } else {
-            let targets = selector::select_targets(&workspace, selectors)?;
+            let targets = selector::select_targets_in(&workspace, selectors, &selector_context)?;
             spike::format_targets(&targets, &mut out)?;
         }
     })
@@ -1102,8 +1107,12 @@ fn warn_unowned_changed_files(unowned: &[String]) {
 }
 
 async fn cmd_dependencies(selectors: &[String], tree: &Tree) -> Result<()> {
+    let current_dir = std::env::current_dir().context("determine current directory")?;
+    let workspace_root = spike::find_workspace_root(&current_dir)?;
+    let selector_context =
+        selector::SelectorContext::for_invocation(&workspace_root, &current_dir)?;
     workspace_cmd!(tree, |workspace, out| {
-        spike::format_dependencies(&workspace, selectors, &mut out)?;
+        spike::format_dependencies(&workspace, selectors, &selector_context, &mut out)?;
     })
 }
 
@@ -1288,7 +1297,7 @@ export const build = product(K_workspace_js_workers_test, BUILD, toolName("works
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
-        let selectors = vec!["a".to_owned(), "b".to_owned()];
+        let selectors = vec![":a".to_owned(), ":b".to_owned()];
         spike::execute_goal_live(
             &live,
             p,

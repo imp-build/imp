@@ -1,52 +1,168 @@
 //! Target selector parsing and resolution.
 //!
-//! A selector is a string like `//path:name`, `path:name`, `:name`, or a bare
-//! `name`, optionally suffixed with a product override (`selector#product`).
-//! This module resolves selectors against a loaded [`Workspace`]'s targets.
+//! Exact targets use `:` (`:name`, `path:name`, `//path:name`). Package
+//! selectors omit it (`.`, `path`, `path/...`, `//...`). Relative selectors
+//! resolve from the invocation package; `//` anchors them at the workspace.
+//! Goal selectors may also carry a product override (`selector#product`).
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::spike::{Goal, Target, Workspace};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
-pub(crate) fn select_roots<'a>(
+/// Invocation-relative context used to resolve CLI selectors.
+///
+/// Selectors without a leading `//` are relative to `package`; `//`-prefixed
+/// selectors are always workspace-relative.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SelectorContext {
+    package: String,
+}
+
+impl SelectorContext {
+    pub(crate) fn for_invocation(workspace_root: &Path, current_dir: &Path) -> Result<Self> {
+        let relative = current_dir.strip_prefix(workspace_root).with_context(|| {
+            format!(
+                "invocation directory {} is outside workspace {}",
+                current_dir.display(),
+                workspace_root.display()
+            )
+        })?;
+        let package = relative
+            .iter()
+            .map(|part| {
+                part.to_str().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "invocation directory contains non-UTF-8 path component: {}",
+                        current_dir.display()
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+            .join("/");
+        Ok(Self { package })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn root() -> Self {
+        Self::default()
+    }
+
+    fn parse(&self, selector: &str) -> Result<ParsedSelector> {
+        if selector.is_empty() {
+            bail!("target selector cannot be empty");
+        }
+
+        if let Some((package, name)) = selector.split_once(':') {
+            if name.is_empty() || name.contains(':') || name.contains('/') {
+                bail!("invalid exact target selector '{selector}'");
+            }
+            let package = if package.is_empty() { "." } else { package };
+            let package = self.normalize_package(package, selector)?;
+            let address = if package.is_empty() {
+                format!("//:{name}")
+            } else {
+                format!("//{package}:{name}")
+            };
+            return Ok(ParsedSelector::Exact(address));
+        }
+
+        let (package, recursive) = match selector {
+            "..." => (".", true),
+            "//..." => ("//", true),
+            other => match other.strip_suffix("/...") {
+                Some(package) => (package, true),
+                None => (other, false),
+            },
+        };
+        let package = self.normalize_package(package, selector)?;
+        Ok(ParsedSelector::Package { package, recursive })
+    }
+
+    fn normalize_package(&self, package: &str, selector: &str) -> Result<String> {
+        let absolute = package.starts_with("//");
+        let package = package.strip_prefix("//").unwrap_or(package);
+        if package.starts_with('/') {
+            bail!("invalid target selector '{selector}'; use '//' for workspace-relative paths");
+        }
+
+        let mut components: Vec<&str> = if absolute || self.package.is_empty() {
+            Vec::new()
+        } else {
+            self.package.split('/').collect()
+        };
+        for component in package.split('/') {
+            match component {
+                "" | "." => {}
+                ".." => {
+                    if components.pop().is_none() {
+                        bail!("target selector '{selector}' escapes the workspace root");
+                    }
+                }
+                "..." => bail!(
+                    "invalid target selector '{selector}'; '...' is only valid as a final path component"
+                ),
+                component => components.push(component),
+            }
+        }
+        Ok(components.join("/"))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ParsedSelector {
+    Exact(String),
+    Package { package: String, recursive: bool },
+}
+
+impl ParsedSelector {
+    fn matches(&self, target: &Target) -> bool {
+        match self {
+            Self::Exact(address) => target.address == *address,
+            Self::Package { package, recursive } => {
+                let Some((target_package, _)) = target
+                    .address
+                    .strip_prefix("//")
+                    .and_then(|address| address.split_once(':'))
+                else {
+                    return false;
+                };
+                target_package == package
+                    || (*recursive
+                        && (package.is_empty()
+                            || target_package.starts_with(&format!("{package}/"))))
+            }
+        }
+    }
+
+    fn selects_multiple(&self) -> bool {
+        matches!(self, Self::Package { .. })
+    }
+}
+
+pub(crate) fn select_roots_in<'a>(
     workspace: &'a Workspace,
     dynamic: &'a BTreeMap<String, Target>,
     goal: &Goal,
     selectors: &[String],
+    context: &SelectorContext,
 ) -> Result<Vec<(&'a Target, String)>> {
     let all_targets = || workspace.targets.values().chain(dynamic.values());
     let mut selected: BTreeMap<&str, (&Target, String)> = BTreeMap::new();
     if selectors.is_empty() {
         // Selection-independent goals (declared `selection: "none"`) run
         // their callback against an empty selection; everything else needs
-        // an explicit selector. If the workspace exports a `//:default`
-        // target, it acts as the implicit root for selector-less invocations.
+        // an explicit selector.
         if goal.selectorless {
             return Ok(Vec::new());
         }
-        if let Some(default_target) = workspace
-            .targets
-            .get("//:default")
-            .or_else(|| dynamic.get("//:default"))
-        {
-            let product =
-                goal_product_for_kind(workspace, goal, &default_target.kind).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "//:default has no {} product; add a rule for kind '{}'",
-                        goal.name,
-                        default_target.kind
-                    )
-                })?;
-            selected.insert(default_target.address.as_str(), (default_target, product));
-        } else {
-            bail!(
-                "goal '{}' requires a target selector; use '//...' to select every target \
-                 with a '{}' product, or export a //:default target",
-                goal.name,
-                goal.product
-            );
-        }
+        bail!(
+            "goal '{}' requires a target selector; use '//...' to select every target \
+             with a '{}' product",
+            goal.name,
+            goal.product
+        );
     } else {
         for selector in selectors {
             // A selector may contain a product override: "//:target#product".
@@ -54,13 +170,11 @@ pub(crate) fn select_roots<'a>(
                 Some((t, p)) => (t, Some(p)),
                 None => (selector.as_str(), None),
             };
-            // Wildcard selectors (`//...`, `//dir/...`) filter to targets
-            // that have the requested product; exact selectors error when
-            // their target lacks it.
-            let wildcard = target_sel.ends_with("...");
-            let matches: Vec<_> = all_targets()
-                .filter(|t| matches_selector(t, target_sel))
-                .collect();
+            // Package selectors filter to targets that have the requested
+            // product; exact selectors error when their target lacks it.
+            let parsed = context.parse(target_sel)?;
+            let multi = parsed.selects_multiple();
+            let matches: Vec<_> = all_targets().filter(|t| parsed.matches(t)).collect();
             if matches.is_empty() {
                 bail!("no target matches selector '{selector}'");
             }
@@ -69,7 +183,7 @@ pub(crate) fn select_roots<'a>(
                 let product = if let Some(p) = product_override {
                     let key = (target.kind.clone(), p.to_owned());
                     if !workspace.products.contains_key(&key) {
-                        if wildcard {
+                        if multi {
                             continue;
                         }
                         match workspace.declared_product_names.get(p) {
@@ -105,7 +219,7 @@ pub(crate) fn select_roots<'a>(
                 } else {
                     match goal_product_for_kind(workspace, goal, &target.kind) {
                         Some(product) => product,
-                        None if wildcard => continue,
+                        None if multi => continue,
                         None => bail!("{} has no {} product", target.address, goal.name),
                     }
                 };
@@ -121,6 +235,22 @@ pub(crate) fn select_roots<'a>(
         }
     }
     Ok(selected.into_values().collect())
+}
+
+#[cfg(test)]
+pub(crate) fn select_roots<'a>(
+    workspace: &'a Workspace,
+    dynamic: &'a BTreeMap<String, Target>,
+    goal: &Goal,
+    selectors: &[String],
+) -> Result<Vec<(&'a Target, String)>> {
+    select_roots_in(
+        workspace,
+        dynamic,
+        goal,
+        selectors,
+        &SelectorContext::root(),
+    )
 }
 
 /// Resolve an exact, precomputed address set (e.g. changed-target detection)
@@ -161,38 +291,21 @@ fn goal_product_for_kind(workspace: &Workspace, goal: &Goal, kind: &str) -> Opti
         .then(|| goal.product.clone())
 }
 
-fn matches_selector(target: &Target, selector: &str) -> bool {
-    // Recursive wildcard: `//...` matches every target, `//dir/...` every
-    // target at or below `dir` (`//dir:x` and `//dir/sub:y`).
-    if let Some(prefix) = selector.strip_suffix("...") {
-        let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
-        let prefix = match prefix {
-            "" | "/" | "//" => return true,
-            p if p.starts_with("//") => p.to_owned(),
-            p => format!("//{p}"),
-        };
-        return target.address.starts_with(&format!("{prefix}/"))
-            || target.address.starts_with(&format!("{prefix}:"));
-    }
-    target.address == selector
-        || target.address.strip_prefix("//:") == Some(selector)
-        || target.address.ends_with(&format!(":{selector}"))
-        || (!selector.starts_with("//") && target.address == format!("//{selector}"))
-}
-
-pub fn select_targets<'a>(
+pub(crate) fn select_targets_in<'a>(
     workspace: &'a Workspace,
     selectors: &[String],
+    context: &SelectorContext,
 ) -> Result<Vec<&'a Target>> {
     if selectors.is_empty() {
-        return Ok(workspace.targets.values().collect());
+        bail!("a target selector is required; use '//...' to select every target");
     }
     let mut selected = BTreeMap::new();
     for selector in selectors {
+        let parsed = context.parse(selector)?;
         let matches: Vec<_> = workspace
             .targets
             .values()
-            .filter(|t| matches_selector(t, selector))
+            .filter(|t| parsed.matches(t))
             .collect();
         if matches.is_empty() {
             bail!("no target matches selector '{selector}'");
@@ -202,6 +315,14 @@ pub fn select_targets<'a>(
         }
     }
     Ok(selected.into_values().collect())
+}
+
+#[cfg(test)]
+pub fn select_targets<'a>(
+    workspace: &'a Workspace,
+    selectors: &[String],
+) -> Result<Vec<&'a Target>> {
+    select_targets_in(workspace, selectors, &SelectorContext::default())
 }
 
 #[cfg(test)]
@@ -221,20 +342,138 @@ mod tests {
 
     #[test]
     fn matches_selector_recognizes_all_supported_forms() {
-        let t = target("//library/jodin:jodin");
-        // Full "//"-prefixed address.
-        assert!(matches_selector(&t, "//library/jodin:jodin"));
-        // Bare package-path form (no leading "//").
-        assert!(matches_selector(&t, "library/jodin:jodin"));
-        // Bare trailing target-name suffix.
-        assert!(matches_selector(&t, "jodin"));
-        // Non-matching package path.
-        assert!(!matches_selector(&t, "other:jodin"));
-        assert!(!matches_selector(&t, "nonexistent"));
-
+        let context = SelectorContext::root();
+        let nested = target("//library/jodin:jodin");
+        let sibling = target("//library/jodin:tests");
+        let descendant = target("//library/jodin/internal:helper");
         let root = target("//:pkg");
-        // Root-package ":name" shorthand.
-        assert!(matches_selector(&root, "pkg"));
+
+        for selector in ["//library/jodin:jodin", "library/jodin:jodin"] {
+            assert!(context.parse(selector).unwrap().matches(&nested));
+        }
+        let package = context.parse("library/jodin").unwrap();
+        assert!(package.matches(&nested));
+        assert!(package.matches(&sibling));
+        assert!(!package.matches(&descendant));
+        assert!(!package.matches(&root));
+
+        assert!(context.parse(":pkg").unwrap().matches(&root));
+        assert!(!context.parse("jodin").unwrap().matches(&nested));
+    }
+
+    #[test]
+    fn relative_selectors_resolve_from_the_invocation_package() {
+        let context = SelectorContext {
+            package: "foo/bar".to_owned(),
+        };
+
+        assert_eq!(
+            context.parse(":app").unwrap(),
+            ParsedSelector::Exact("//foo/bar:app".to_owned())
+        );
+        assert_eq!(
+            context.parse("child:app").unwrap(),
+            ParsedSelector::Exact("//foo/bar/child:app".to_owned())
+        );
+        assert_eq!(
+            context.parse("//child:app").unwrap(),
+            ParsedSelector::Exact("//child:app".to_owned())
+        );
+        assert_eq!(
+            context.parse("../sibling").unwrap(),
+            ParsedSelector::Package {
+                package: "foo/sibling".to_owned(),
+                recursive: false,
+            }
+        );
+        assert_eq!(
+            context.parse("...").unwrap(),
+            ParsedSelector::Package {
+                package: "foo/bar".to_owned(),
+                recursive: true,
+            }
+        );
+        assert!(context.parse("../../../outside").is_err());
+    }
+
+    #[test]
+    fn package_goal_selection_filters_products_and_stays_non_recursive() {
+        let mut workspace = Workspace::default();
+        let mut buildable = target("//pkg:lib");
+        buildable.kind = "lib".to_owned();
+        let docs = target("//pkg:docs");
+        let mut nested = target("//pkg/nested:lib");
+        nested.kind = "lib".to_owned();
+        for target in [buildable, docs, nested] {
+            workspace.targets.insert(target.address.clone(), target);
+        }
+        workspace.products.insert(
+            ("lib".to_owned(), "build".to_owned()),
+            BTreeMap::from([("lib-tool".to_owned(), "buildLib".to_owned())]),
+        );
+        let goal = Goal {
+            name: "build".to_owned(),
+            product: "build".to_owned(),
+            flags: BTreeMap::new(),
+            selectorless: false,
+        };
+        let dynamic = BTreeMap::new();
+        let context = SelectorContext::root();
+
+        let direct =
+            select_roots_in(&workspace, &dynamic, &goal, &["pkg".to_owned()], &context).unwrap();
+        assert_eq!(
+            direct
+                .iter()
+                .map(|(target, _)| target.address.as_str())
+                .collect::<Vec<_>>(),
+            ["//pkg:lib"]
+        );
+
+        let recursive = select_roots_in(
+            &workspace,
+            &dynamic,
+            &goal,
+            &["pkg/...".to_owned()],
+            &context,
+        )
+        .unwrap();
+        assert_eq!(
+            recursive
+                .iter()
+                .map(|(target, _)| target.address.as_str())
+                .collect::<Vec<_>>(),
+            ["//pkg/nested:lib", "//pkg:lib"]
+        );
+    }
+
+    #[test]
+    fn default_target_does_not_bypass_required_selection() {
+        let mut workspace = Workspace::default();
+        let mut default = target("//:default");
+        default.kind = "lib".to_owned();
+        workspace.targets.insert(default.address.clone(), default);
+        workspace.products.insert(
+            ("lib".to_owned(), "build".to_owned()),
+            BTreeMap::from([("lib-tool".to_owned(), "buildLib".to_owned())]),
+        );
+        let goal = Goal {
+            name: "build".to_owned(),
+            product: "build".to_owned(),
+            flags: BTreeMap::new(),
+            selectorless: false,
+        };
+
+        let error = select_roots_in(
+            &workspace,
+            &BTreeMap::new(),
+            &goal,
+            &[],
+            &SelectorContext::root(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("requires a target selector"), "{error}");
     }
 
     #[test]
@@ -284,26 +523,29 @@ mod tests {
 
     #[test]
     fn matches_selector_supports_recursive_wildcards() {
+        let context = SelectorContext::root();
         let nested = target("//library/jodin:jodin");
         let in_dir = target("//library:lib");
         let at_root = target("//:pkg");
 
         // `//...` matches everything.
         for t in [&nested, &in_dir, &at_root] {
-            assert!(matches_selector(t, "//..."));
+            assert!(context.parse("//...").unwrap().matches(t));
         }
 
         // `//dir/...` matches targets in the directory and below it.
-        assert!(matches_selector(&nested, "//library/..."));
-        assert!(matches_selector(&in_dir, "//library/..."));
-        assert!(!matches_selector(&at_root, "//library/..."));
-        assert!(matches_selector(&nested, "//library/jodin/..."));
-        assert!(!matches_selector(&in_dir, "//library/jodin/..."));
+        let library = context.parse("//library/...").unwrap();
+        assert!(library.matches(&nested));
+        assert!(library.matches(&in_dir));
+        assert!(!library.matches(&at_root));
+        let jodin = context.parse("//library/jodin/...").unwrap();
+        assert!(jodin.matches(&nested));
+        assert!(!jodin.matches(&in_dir));
 
         // Bare (non-"//") form, mirroring the other bare selector forms.
-        assert!(matches_selector(&nested, "library/..."));
+        assert!(context.parse("library/...").unwrap().matches(&nested));
 
         // Prefixes match whole path components, not substrings.
-        assert!(!matches_selector(&nested, "//lib/..."));
+        assert!(!context.parse("//lib/...").unwrap().matches(&nested));
     }
 }
