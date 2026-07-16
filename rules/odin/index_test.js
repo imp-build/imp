@@ -440,17 +440,17 @@ describe("Odin rules", () => {
 		}
 	});
 
-	test("odinRun builds then executes the binary unsandboxed, reusing odinBuild's outputPath", async () => {
+	test("odinRun builds, publishes the executable, then returns a run template reusing odinBuild's outputPath", async () => {
 		configure("odin", null);
 		try {
 			await withFakeRun(async () => {
-				await withFakeWriteWorkspace(async () => {
+				await withFakeWriteWorkspace(async (calls) => {
 					const pkg = odinPackage({
 						path: "rules/odin/example",
 						toolchain: "dev-2026-04",
 						output: "build/odin/target",
 					});
-					await odinRun(pkg);
+					const template = await odinRun(pkg);
 					const { trace } = getMemoTrace();
 					const buildEffect = trace.find(
 						(t) =>
@@ -458,15 +458,14 @@ describe("Odin rules", () => {
 							t.kind === "run" &&
 							t.display.startsWith("odin build"),
 					);
-					const runEffect = trace.find(
-						(t) =>
-							t.event === "effect" &&
-							t.kind === "run" &&
-							t.display.startsWith("run "),
-					);
-					expect(runEffect.sandbox).toBe(false);
-					expect(runEffect.impure).toBe(true);
-					expect(runEffect.argv).toEqual([buildEffect.outputs[0].path]);
+					// odinRun itself no longer executes the binary — it publishes it
+					// (via writeWorkspace) and returns a runTemplate; the `run` goal
+					// (runFromTemplate, rules/workflows/run.js) is what actually runs
+					// it, unsandboxed and impure.
+					expect(calls.length).toBe(1);
+					expect(calls[0].from).toBe(calls[0].path);
+					expect(template.opts.argv).toEqual([buildEffect.outputs[0].path]);
+					expect(template.opts.display).toBe(`run ${buildEffect.outputs[0].path}`);
 				});
 			});
 		} finally {
