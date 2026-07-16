@@ -51,16 +51,28 @@ BUILD_STEPS = [
     },
 ]
 
-# Toolchains imp acquires on demand (rust, ruff, odinfmt, ...) land under
-# ~/.cache/imp; without this cache every run pays the full cold acquire
-# (minutes), with it a warm run is ~1s. Keyed on the version pins: the
-# workspace config declares toolchain versions, the lockfiles pin artifacts.
+# Everything imp-store persists (downloaded toolchains, the CAS blob store,
+# and cached task results) lives under this one directory; without it every
+# run pays full cold toolchain acquire plus a from-scratch build/test graph.
+# The key always includes run_id, so it's always a miss and this job's
+# additions (new CAS blobs, task results) always get saved back at the end —
+# actions/cache only saves on an exact-key miss, so a stable key would let
+# the very first hit freeze the cache forever. restore-keys falls back first
+# to the newest cache with matching toolchain pins, then to any same-OS
+# cache, so a toolchain bump still starts from the closest prior snapshot
+# instead of from scratch.
 CACHE_IMP_STEP = {
-    "name": "Cache imp toolchains",
+    "name": "Cache imp store",
     "uses": "actions/cache@v4",
     "with": {
         "path": "~/.cache/imp",
-        "key": "imp-toolchains-v3-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}",
+        "key": "imp-store-v4-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}",
+        "restore-keys": "\n".join(
+            [
+                "imp-store-v4-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-",
+                "imp-store-v4-${{ runner.os }}-",
+            ]
+        ),
     },
 }
 
@@ -80,6 +92,7 @@ CHECK_STEPS = [
 PACKAGE_STEPS = [
     {"uses": "actions/checkout@v4"},
     *DOWNLOAD_IMP_STEPS,
+    CACHE_IMP_STEP,
     {"name": "Package docs site", "run": f"./imp package {SITE_TARGET}"},
     {"uses": "actions/configure-pages@v5"},
     {"uses": "actions/upload-pages-artifact@v3", "with": {"path": SITE_ARTIFACT_PATH}},
