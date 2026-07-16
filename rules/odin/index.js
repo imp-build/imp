@@ -23,6 +23,7 @@ import {
 	workspaceTargets,
 	logInfo,
 	writeWorkspace,
+	runArgs,
 	BUILD,
 	TEST,
 	RUN,
@@ -1158,7 +1159,7 @@ export const odinRun = product(
 		);
 		writeWorkspace(outDir, buildResult.outputDigest, { from: outDir });
 		return run({
-			argv: [buildResult.outputPath],
+			argv: [buildResult.outputPath, ...runArgs()],
 			sandbox: false,
 			impure: true,
 			display: `run ${buildResult.outputPath}`,

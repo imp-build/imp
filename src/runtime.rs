@@ -49,6 +49,10 @@ pub struct LiveWorkspace {
     /// `goalFlags()`. Set for the duration of `execute_goal_live` and reset to
     /// `None` afterward, mirroring `selected_roots`.
     pub(crate) goal_flags: Arc<Mutex<Option<serde_json::Value>>>,
+    /// Arguments supplied after `--` to the current `run` invocation,
+    /// queryable from JS as `runArgs()`. Kept separate from goal flags so
+    /// arbitrary program argv never participates in selector parsing.
+    pub(crate) run_args: Arc<Mutex<Option<Vec<String>>>>,
     /// The same host state used during workspace load, retained so
     /// `ensure_expanded` can invoke expanders live and materialize the
     /// pending targets they register via `registerTarget()`.

@@ -9,6 +9,7 @@ import { biomeToolchain } from "//rules/js/biome_toolchain";
 import { odinToolchain } from "//rules/odin";
 import { odinfmtToolchain } from "//rules/odin/odinfmt/toolchain";
 import { ruffToolchain } from "//rules/python/ruff_toolchain";
+import { pythonToolchain } from "//rules/python";
 import { rustToolchain } from "//rules/rust";
 import "//rules/rust/generate_build";
 import { sccacheToolchain } from "//rules/rust/sccache/toolchain";
@@ -33,6 +34,7 @@ export const mold = moldToolchain("2.41.0");
 export const odin = odinToolchain("dev-2026-03", { default: true, linker: mold });
 export const odinfmt = odinfmtToolchain();
 export const ruff = ruffToolchain("0.15.21", { default: true });
+export const python = pythonToolchain("3.13.0", { default: true });
 // sccache wraps rustc with a content-keyed compiler cache backed by a
 // host-managed persistent worker (see src/worker.rs) — sidesteps cargo's own
 // mtime-based incremental compilation, which imp's fresh-per-sandbox

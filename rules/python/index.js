@@ -30,6 +30,22 @@ import {
 	pexTool,
 } from "//rules/python/pex_toolchain";
 
+// File-granular source execution is intentionally separate from pythonApp's
+// PEX packaging model. Import for its target/product registrations.
+import "//rules/python/source";
+
+export {
+	PythonProject,
+	PythonSource,
+	PythonSources,
+	PythonToolchain,
+	defaultPythonProject,
+	defaultPythonToolchain,
+	pythonProject,
+	pythonSources,
+	pythonToolchain,
+} from "//rules/python/source";
+
 // Registers the "build" goal's artifact summary callback for consumers that
 // import Python build rules without importing the workflows layer explicitly.
 import "//rules/workflows/build_workflow";

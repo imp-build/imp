@@ -378,6 +378,7 @@ async fn create_live_runtime(
         Arc::new(Mutex::new(None));
     let selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(None));
     let goal_flags: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let run_args: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
     let import_graph: Arc<Mutex<crate::changed::ImportGraph>> =
         Arc::new(Mutex::new(crate::changed::ImportGraph::default()));
     let rt = Runtime::new().context("create QuickJS runtime")?;
@@ -434,6 +435,7 @@ async fn create_live_runtime(
                     scheduler: Arc::clone(&scheduler),
                     selected_roots: Arc::clone(&selected_roots),
                     goal_flags: Arc::clone(&goal_flags),
+                    run_args: Arc::clone(&run_args),
                     service: Arc::clone(&service),
                 },
             )
@@ -469,6 +471,7 @@ async fn create_live_runtime(
         scheduler,
         selected_roots,
         goal_flags,
+        run_args,
         host_state: state,
         import_graph,
         dynamic_targets: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1125,6 +1128,7 @@ struct RegisterGlobalsArgs {
     scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>>,
     selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
     goal_flags: Arc<Mutex<Option<serde_json::Value>>>,
+    run_args: Arc<Mutex<Option<Vec<String>>>>,
     service: Arc<dyn ExecutionService>,
 }
 
@@ -1140,6 +1144,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         scheduler,
         selected_roots,
         goal_flags,
+        run_args,
         service,
     } = args;
     let globals = ctx.globals();
@@ -2157,6 +2162,19 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                 .map_err(|e| rquickjs::Error::new_loading_message("goalFlags", e.to_string()))
         })?;
     globals.set("__host_current_goal_flags", host_current_goal_flags)?;
+
+    // ------------------------------------------------------------------
+    // __host_run_args() → JSON string[]
+    // ------------------------------------------------------------------
+    let run_args_ra = Arc::clone(&run_args);
+    let host_run_args = Function::new(ctx.clone(), move || -> rquickjs::Result<String> {
+        let guard = run_args_ra.lock().unwrap();
+        // Product unit tests invoke functions directly rather than through a
+        // run goal; the natural argv in that case is the empty list.
+        serde_json::to_string(guard.as_deref().unwrap_or(&[]))
+            .map_err(|e| rquickjs::Error::new_loading_message("runArgs", e.to_string()))
+    })?;
+    globals.set("__host_run_args", host_run_args)?;
 
     // ------------------------------------------------------------------
     // Tracked runtime APIs (Phase 3)
@@ -3685,6 +3703,7 @@ pub(crate) async fn execute_goal_live(
         no_cache,
         js_workers,
         flags,
+        &[],
     )
     .await
 }
@@ -3707,6 +3726,7 @@ pub async fn execute_goal_live_selection(
     no_cache: bool,
     js_workers: usize,
     flags: serde_json::Value,
+    run_args: &[String],
 ) -> Result<()> {
     let goal_def = live.workspace.goals.get(goal).ok_or_else(|| {
         let known: Vec<_> = live.workspace.goals.keys().map(String::as_str).collect();
@@ -3757,13 +3777,29 @@ pub async fn execute_goal_live_selection(
 
     let dynamic_snapshot: BTreeMap<String, Target> = live.dynamic_targets.lock().unwrap().clone();
     let roots = match &selection {
-        GoalSelection::Selectors(selectors) => select_roots_in(
+        GoalSelection::Selectors(selectors) => match select_roots_in(
             &live.workspace,
             &dynamic_snapshot,
             goal_def,
             selectors,
             selector_context,
-        )?,
+        ) {
+            Ok(roots) => roots,
+            Err(error) if goal == "run" => {
+                let kinds = live
+                    .workspace
+                    .products
+                    .keys()
+                    .filter(|(_, product)| product == "run")
+                    .map(|(kind, _)| kind.as_str())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(anyhow::anyhow!("{error}; runnable target kinds: {kinds}"));
+            }
+            Err(error) => return Err(error),
+        },
         GoalSelection::ChangedAddresses(addresses) => {
             let roots =
                 select_roots_for_addresses(&live.workspace, &dynamic_snapshot, goal_def, addresses);
@@ -3824,6 +3860,7 @@ pub async fn execute_goal_live_selection(
 
     *live.selected_roots.lock().unwrap() = Some(selection);
     *live.goal_flags.lock().unwrap() = Some(flags);
+    *live.run_args.lock().unwrap() = Some(run_args.to_vec());
 
     let goal_owned = goal.to_owned();
     let result = live
@@ -3906,6 +3943,7 @@ pub async fn execute_goal_live_selection(
         .store(SandboxRetention::default().as_u8(), Ordering::SeqCst);
     *live.selected_roots.lock().unwrap() = None;
     *live.goal_flags.lock().unwrap() = None;
+    *live.run_args.lock().unwrap() = None;
     result
 }
 
@@ -5589,6 +5627,91 @@ export const parent = target({ kind: "expandable", attrs: {} });
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].0.address, "//:child");
         assert_eq!(roots[0].1, "build");
+    }
+
+    #[tokio::test]
+    async fn python_source_set_expands_one_leaf_per_direct_file() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { uvToolchain } from "//rules/python/uv_toolchain";
+import { pythonToolchain } from "//rules/python";
+export const uv = uvToolchain("0.11.16", { default: true, unverified: true });
+export const python = pythonToolchain("3.13.0", { default: true });
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { pythonSources } from "//rules/python";
+export const scripts = pythonSources({ root: "scripts" });
+"#,
+        );
+        write_file(&p.join("scripts/hello.py"), "print('hello')\n");
+        write_file(&p.join("scripts/nested/ignored.py"), "print('ignored')\n");
+
+        let live = load_workspace(p).await.unwrap();
+        ensure_expanded(&live, &["//:scripts".to_owned()], Some("run"))
+            .await
+            .unwrap();
+        let dynamic = live.dynamic_targets.lock().unwrap();
+        assert!(dynamic.contains_key("//scripts/hello.py:python"));
+        assert!(!dynamic.contains_key("//scripts/nested/ignored.py:python"));
+        assert_eq!(dynamic["//scripts/hello.py:python"].kind, "python-source");
+        let run_goal = live.workspace.goals.get("run").unwrap();
+        let roots = select_roots(
+            &live.workspace,
+            &dynamic,
+            run_goal,
+            &["scripts/hello.py".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].0.address, "//scripts/hello.py:python");
+    }
+
+    #[tokio::test]
+    async fn run_arguments_are_visible_to_run_products() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), "");
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { product, runArgs, RUN, target, targetKind, toolName } from "imp:core";
+const K_run_args = targetKind("run-args-test");
+export const app = target({ kind: "run-args-test" });
+export const run = product(K_run_args, RUN, toolName("run-args-test-tool"), async function run() {
+    const args = runArgs();
+    if (args.length !== 2 || args[0] !== "--flag" || args[1] !== "value") {
+        throw new Error(`unexpected run arguments: ${JSON.stringify(args)}`);
+    }
+});
+"#,
+        );
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+        execute_goal_live_selection(
+            &live,
+            p,
+            &SelectorContext::root(),
+            "run",
+            GoalSelection::Selectors(&[":app".to_owned()]),
+            false,
+            1,
+            serde_json::json!({}),
+            &["--flag".to_owned(), "value".to_owned()],
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

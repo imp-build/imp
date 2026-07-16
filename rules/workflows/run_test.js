@@ -2,30 +2,20 @@ import { describe, expect, test } from "//rules/imp/test";
 import { product, target, RUN, targetKind, toolName } from "imp:core";
 const K_run_test_reject_kind = targetKind("run-test-reject-kind");
 const K_run_test_dispatch_kind = targetKind("run-test-dispatch-kind");
-import { requireSingleOdinPackage, runGoal } from "//rules/workflows/run";
+import { requireSingleRunnable, runGoal } from "//rules/workflows/run";
 const TEST_TOOL = toolName("run-test-tool");
 
 describe("run workflow", () => {
-	test("requireSingleOdinPackage passes through zero or one odin-package target", () => {
-		expect(() => requireSingleOdinPackage([])).not.toThrow();
+	test("requireSingleRunnable accepts exactly one target", () => {
 		expect(() =>
-			requireSingleOdinPackage([{ address: "//:a", kind: "odin-package" }]),
+			requireSingleRunnable([{ address: "//:a", kind: "odin-package" }]),
 		).not.toThrow();
 	});
 
-	test("requireSingleOdinPackage ignores non-odin-package targets in the selection", () => {
-		expect(() =>
-			requireSingleOdinPackage([
-				{ address: "//:a", kind: "odin-package" },
-				{ address: "//:vs", kind: "vs-workspace" },
-			]),
-		).not.toThrow();
-	});
-
-	test("requireSingleOdinPackage rejects more than one odin-package target, naming every offender", () => {
+	test("requireSingleRunnable rejects zero or multiple targets, naming every offender", () => {
 		let message = "";
 		try {
-			requireSingleOdinPackage([
+			requireSingleRunnable([
 				{ address: "//:a", kind: "odin-package" },
 				{ address: "//:b", kind: "odin-package" },
 			]);
@@ -35,6 +25,7 @@ describe("run workflow", () => {
 		expect(message).toContain("run requires a single target");
 		expect(message).toContain("//:a");
 		expect(message).toContain("//:b");
+		expect(() => requireSingleRunnable([])).toThrow();
 	});
 
 	test("runGoal rejects a multi-target odin-package selection before dispatching anything", async () => {

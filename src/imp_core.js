@@ -397,6 +397,17 @@ export function goalFlags() {
 }
 
 /**
+ * Return the program arguments supplied after `--` to the current `run`
+ * invocation. This is intentionally available only while a run product is
+ * executing; other goals have no program argv.
+ *
+ * @returns {string[]}
+ */
+export function runArgs() {
+	return JSON.parse(__host_run_args());
+}
+
+/**
  * Builders for declarative workspace configuration schemas.
  *
  * Available descriptors are `field.int`, `field.string`, `field.bool`,

@@ -656,7 +656,8 @@ async fn cmd_execute_live(
     // argv tail captured in phase 1 (RawGoalArgs) for real, with full
     // validation and --help. Rule-test runs bypass this entirely — they carry
     // no CLI args of their own.
-    let (args, goal_flags): (GoalArgs, serde_json::Value) = match invocation {
+    let (args, goal_flags, run_args): (GoalArgs, serde_json::Value, Vec<String>) = match invocation
+    {
         LiveInvocation::Goal { goal, raw } => {
             let goal_def = workspace.workspace.goals.get(goal).ok_or_else(|| {
                 let known: Vec<&str> = workspace
@@ -667,7 +668,17 @@ async fn cmd_execute_live(
                     .collect();
                 anyhow::anyhow!("no '{goal}' goal; registered goals: {}", known.join(", "))
             })?;
-            let matches = parse_goal_args(goal, &goal_def.flags, raw);
+            // `run` reserves everything after `--` for the launched program;
+            // other goals retain their existing all-selector argv grammar.
+            let (goal_raw, run_args) = if goal == "run" {
+                match raw.iter().position(|arg| arg == "--") {
+                    Some(split) => (&raw[..split], raw[split + 1..].to_vec()),
+                    None => (raw, Vec::new()),
+                }
+            } else {
+                (raw, Vec::new())
+            };
+            let matches = parse_goal_args(goal, &goal_def.flags, goal_raw);
             let args = GoalArgs::from_arg_matches(&matches).context("parse goal arguments")?;
             let mut flags = serde_json::Map::new();
             for name in goal_def.flags.keys() {
@@ -676,7 +687,7 @@ async fn cmd_execute_live(
                     serde_json::Value::Bool(matches.get_flag(name)),
                 );
             }
-            (args, serde_json::Value::Object(flags))
+            (args, serde_json::Value::Object(flags), run_args)
         }
     };
     let GoalArgs {
@@ -992,6 +1003,7 @@ async fn cmd_execute_live(
                     no_cache,
                     js_workers,
                     goal_flags.clone(),
+                    &run_args,
                 )
                 .await
             }
@@ -1234,6 +1246,25 @@ mod tests {
                 );
             }
             _ => panic!("expected Cmd::Goal"),
+        }
+    }
+
+    #[test]
+    fn run_subcommand_preserves_double_dash_in_raw_tail() {
+        let cli = Cli::parse_from(["imp", "run", "//:program", "--", "--script-flag", "value"]);
+        match cli.command {
+            Cmd::Run(args) => {
+                assert_eq!(
+                    args.raw,
+                    vec![
+                        "//:program".to_owned(),
+                        "--".to_owned(),
+                        "--script-flag".to_owned(),
+                        "value".to_owned(),
+                    ]
+                );
+            }
+            _ => panic!("expected run subcommand"),
         }
     }
 
