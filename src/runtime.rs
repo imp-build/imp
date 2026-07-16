@@ -39,6 +39,11 @@ pub struct LiveWorkspace {
     /// Scheduler that live `run()` calls submit to. Installed for the duration
     /// of an execution and cleared afterward; `None` outside execution context.
     pub(crate) scheduler: Arc<Mutex<Option<Arc<Scheduler>>>>,
+    /// MultiProgress handle for the live dynamic UI, so a streamed `run()`
+    /// call can suspend it for the duration of the launched process.
+    /// Installed for the duration of a command's execution, mirroring
+    /// `scheduler`.
+    pub(crate) ui_multi: Arc<Mutex<Option<indicatif::MultiProgress>>>,
     /// Targets resolved by `select_roots` for the goal currently executing,
     /// queryable from JS as `selectedTargets()`. Set for the duration of
     /// `execute_goal_live` and reset to `None` afterward — unlike `exec_root`,

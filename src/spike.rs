@@ -376,6 +376,7 @@ async fn create_live_runtime(
     let exec_sandbox_retention = Arc::new(AtomicU8::new(SandboxRetention::default().as_u8()));
     let scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>> =
         Arc::new(Mutex::new(None));
+    let ui_multi: Arc<Mutex<Option<indicatif::MultiProgress>>> = Arc::new(Mutex::new(None));
     let selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(None));
     let goal_flags: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
     let run_args: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
@@ -433,6 +434,7 @@ async fn create_live_runtime(
                     exec_no_cache: Arc::clone(&exec_no_cache),
                     exec_sandbox_retention: Arc::clone(&exec_sandbox_retention),
                     scheduler: Arc::clone(&scheduler),
+                    ui_multi: Arc::clone(&ui_multi),
                     selected_roots: Arc::clone(&selected_roots),
                     goal_flags: Arc::clone(&goal_flags),
                     run_args: Arc::clone(&run_args),
@@ -469,6 +471,7 @@ async fn create_live_runtime(
         exec_no_cache,
         exec_sandbox_retention,
         scheduler,
+        ui_multi,
         selected_roots,
         goal_flags,
         run_args,
@@ -1126,6 +1129,7 @@ struct RegisterGlobalsArgs {
     exec_no_cache: Arc<AtomicBool>,
     exec_sandbox_retention: Arc<AtomicU8>,
     scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>>,
+    ui_multi: Arc<Mutex<Option<indicatif::MultiProgress>>>,
     selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
     goal_flags: Arc<Mutex<Option<serde_json::Value>>>,
     run_args: Arc<Mutex<Option<Vec<String>>>>,
@@ -1142,6 +1146,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         exec_no_cache,
         exec_sandbox_retention,
         scheduler,
+        ui_multi,
         selected_roots,
         goal_flags,
         run_args,
@@ -2443,6 +2448,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     let exec_no_cache_run = Arc::clone(&exec_no_cache);
     let exec_sandbox_retention_run = Arc::clone(&exec_sandbox_retention);
     let scheduler_run = Arc::clone(&scheduler);
+    let ui_multi_run = Arc::clone(&ui_multi);
     let service_run = Arc::clone(&service);
     let state_run = Arc::clone(&state);
     let host_run = Function::new(
@@ -2452,6 +2458,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
             let exec_no_cache_run = Arc::clone(&exec_no_cache_run);
             let exec_sandbox_retention_run = Arc::clone(&exec_sandbox_retention_run);
             let scheduler_run = Arc::clone(&scheduler_run);
+            let ui_multi_run = Arc::clone(&ui_multi_run);
             let service = Arc::clone(&service_run);
             let state_run = Arc::clone(&state_run);
             async move {
@@ -2477,6 +2484,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                 let display = run_opts.display.clone();
                 let cancellation = sched.cancellation_flag();
                 let workspace_id = workspace_cache_id(&root);
+                let ui_multi = ui_multi_run.lock().unwrap().clone();
                 let result = sched
                     .run(
                         parent,
@@ -2494,6 +2502,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                                     run_opts,
                                     Some(cancellation.as_ref()),
                                     Some(&|| run_context.started()),
+                                    ui_multi.as_ref(),
                                 )
                                 .map(|result| {
                                     imp_exec_api::ExecOutcome {
@@ -2835,6 +2844,7 @@ fn parse_exec_run_opts<'js>(
     let workspace_cwd = opts
         .get::<_, Option<bool>>("workspaceCwd")?
         .unwrap_or(false);
+    let stream = opts.get::<_, Option<bool>>("stream")?.unwrap_or(false);
     // Enforcement of "must be explicit when outputs are declared" lives in
     // imp_core.js's run() wrapper; this default is only a fallback for
     // callers that reach __host_run without going through it.
@@ -2854,6 +2864,7 @@ fn parse_exec_run_opts<'js>(
         force_cache,
         sandbox,
         workspace_cwd,
+        stream,
         materialize,
         allow_failure,
         no_cache: false,

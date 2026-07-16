@@ -2110,6 +2110,7 @@ export function run(opts) {
 		workspaceCwd: opts.workspaceCwd === true,
 		allowFailure: opts.allowFailure === true,
 		materialize,
+		stream: opts.stream === true,
 	};
 	_trace_effect_in_context(effect, contextEntry.ctx);
 	const contextId = contextEntry.id;
@@ -2128,6 +2129,7 @@ export function run(opts) {
 		workspaceCwd: opts.workspaceCwd,
 		allowFailure: opts.allowFailure,
 		materialize,
+		stream: opts.stream,
 		__owner: owner,
 	}).then((result) => ({
 		...result,

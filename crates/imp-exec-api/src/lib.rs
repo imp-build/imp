@@ -84,6 +84,12 @@ pub struct ExecRunOpts {
     /// process in the real workspace root. Local-executor-only because the
     /// workspace path is deliberately absent from [`ExecAction`].
     pub workspace_cwd: bool,
+    /// Inherit the real stdout/stderr instead of piping and capturing them,
+    /// so the child owns the terminal directly (real-time output instead of
+    /// buffer-then-return). Local-executor-only, and mutually exclusive with
+    /// caching: requires `impure: true` and no `force_cache`, since streamed
+    /// output can't be replayed from a cache hit.
+    pub stream: bool,
     pub no_cache: bool,
     pub sandbox_retention: SandboxRetention,
     /// A nonzero exit is reported via the returned `exit_code` instead of

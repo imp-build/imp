@@ -981,6 +981,9 @@ async fn cmd_execute_live(
     workspace
         .exec_sandbox_retention
         .store(sandbox_retention.as_u8(), Ordering::SeqCst);
+    // A streamed `run()` call suspends this MultiProgress for the duration of
+    // the launched process, so it doesn't fight indicatif for the terminal.
+    *workspace.ui_multi.lock().unwrap() = Some(tree.multi());
 
     // Drive the goal, with a deadlock watchdog: a genuine async dependency
     // cycle (which QuickJS gives us no way to detect precisely) surfaces as the
@@ -1054,6 +1057,7 @@ async fn cmd_execute_live(
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
     *workspace.scheduler.lock().unwrap() = None;
+    *workspace.ui_multi.lock().unwrap() = None;
     drop(scheduler);
     let shutdown_result = result
         .as_ref()

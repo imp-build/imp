@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use indicatif::ProgressBar;
+use indicatif::{MultiProgress, ProgressBar};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -71,6 +71,7 @@ pub fn exec_run_hermetic_with_start(
         force_cache: action.force_cache,
         sandbox: true,
         workspace_cwd: false,
+        stream: false,
         no_cache: action.no_cache,
         sandbox_retention: action.sandbox_retention,
         allow_failure: action.allow_failure,
@@ -85,6 +86,7 @@ pub fn exec_run_hermetic_with_start(
         legacy,
         cancellation,
         Some(started),
+        None,
     )
     .with_context(|| format!("hermetic executor action for workspace {workspace_id}"))?;
     let task_key = imp_store::cache::digest_json(&serde_json::json!({
@@ -320,6 +322,32 @@ pub fn wait_for_child_output(
     let _ = stderr_thread.join();
     drain_process_lines(&receiver, &mut stdout, &mut stderr, progress);
     Ok((status, stdout, stderr))
+}
+
+/// Like [`wait_for_child_output`], but for a child whose stdout/stderr were
+/// inherited rather than piped — there's nothing to read, just an exit
+/// status to poll for.
+fn wait_for_child_status(
+    child: &mut Child,
+    display: &str,
+    cancellation: Option<&AtomicBool>,
+) -> Result<ExitStatus> {
+    loop {
+        if cancellation
+            .map(|cancellation| cancellation.load(Ordering::SeqCst))
+            .unwrap_or(false)
+        {
+            terminate_child_and_wait(child);
+            bail!("{display} canceled");
+        }
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("wait for {display}"))?
+        {
+            return Ok(status);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn terminate_child_and_wait(child: &mut Child) {
@@ -633,7 +661,7 @@ pub fn exec_run_inner(
     opts: ExecRunOpts,
     cancellation: Option<&AtomicBool>,
 ) -> Result<ExecRunResult> {
-    exec_run_local_with_start(workspace_root, opts, cancellation, None)
+    exec_run_local_with_start(workspace_root, opts, cancellation, None, None)
 }
 
 /// Execute locally, retaining the caller's workspace path for sandboxed
@@ -643,9 +671,17 @@ pub fn exec_run_local_with_start(
     opts: ExecRunOpts,
     cancellation: Option<&AtomicBool>,
     started: Option<&dyn Fn()>,
+    ui_suspend: Option<&MultiProgress>,
 ) -> Result<ExecRunResult> {
     let workspace_id = imp_store::cache::workspace_cache_id(workspace_root);
-    exec_run_inner_with_start(workspace_root, &workspace_id, opts, cancellation, started)
+    exec_run_inner_with_start(
+        workspace_root,
+        &workspace_id,
+        opts,
+        cancellation,
+        started,
+        ui_suspend,
+    )
 }
 
 fn exec_run_inner_with_start(
@@ -654,6 +690,7 @@ fn exec_run_inner_with_start(
     opts: ExecRunOpts,
     cancellation: Option<&AtomicBool>,
     started: Option<&dyn Fn()>,
+    ui_suspend: Option<&MultiProgress>,
 ) -> Result<ExecRunResult> {
     if !opts.sandbox {
         if !opts.impure {
@@ -726,6 +763,12 @@ fn exec_run_inner_with_start(
 
     // Check cache.
     let cacheable = !opts.impure || opts.force_cache;
+    if opts.stream && cacheable {
+        bail!(
+            "run({{ stream: true }}) requires impure: true and no force_cache — \
+             streamed output can't be replayed from a cache hit"
+        );
+    }
     let record_path = task_record_path(&task_key)?;
     let cached_record_opt: Option<TaskCacheRecord> = if cacheable && !opts.no_cache {
         match std::fs::read_to_string(&record_path) {
@@ -845,31 +888,51 @@ fn exec_run_inner_with_start(
         .args(args)
         .current_dir(command_cwd)
         .env_clear()
-        .envs(&command_env)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .envs(&command_env);
+    if opts.stream {
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    }
     #[cfg(unix)]
     command.process_group(0);
 
     if let Some(started) = started {
         started();
     }
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("run() command in {}", command_cwd.display()))?;
 
-    let (status, stdout, stderr) =
-        wait_for_child_output(&mut child, &opts.display, cancellation, None)?;
+    let (status, stdout, stderr) = if opts.stream {
+        let mut run_child = || -> Result<ExitStatus> {
+            let mut child = command
+                .spawn()
+                .with_context(|| format!("run() command in {}", command_cwd.display()))?;
+            wait_for_child_status(&mut child, &opts.display, cancellation)
+        };
+        let status = match ui_suspend {
+            Some(multi) => multi.suspend(run_child),
+            None => run_child(),
+        }?;
+        (status, String::new(), String::new())
+    } else {
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("run() command in {}", command_cwd.display()))?;
+        wait_for_child_output(&mut child, &opts.display, cancellation, None)?
+    };
 
     let exit_code = status.code().unwrap_or(-1);
     if !status.success() && !opts.allow_failure {
-        bail!(
-            "{} failed with exit code {}\nstdout:\n{}\nstderr:\n{}",
-            opts.display,
-            exit_code,
-            stdout.trim_end(),
-            stderr.trim_end()
-        );
+        if opts.stream {
+            bail!("{} failed with exit code {}", opts.display, exit_code);
+        } else {
+            bail!(
+                "{} failed with exit code {}\nstdout:\n{}\nstderr:\n{}",
+                opts.display,
+                exit_code,
+                stdout.trim_end(),
+                stderr.trim_end()
+            );
+        }
     }
 
     // Ingest outputs into CAS, and build both per-output cache records and one
@@ -1142,6 +1205,7 @@ mod tests {
             force_cache: false,
             sandbox: true,
             workspace_cwd: false,
+            stream: false,
             materialize: true,
             no_cache: false,
             sandbox_retention: SandboxRetention::default(),
@@ -1203,6 +1267,7 @@ mod tests {
             force_cache: false,
             sandbox: true,
             workspace_cwd: false,
+            stream: false,
             materialize: true,
             no_cache: false,
             sandbox_retention: SandboxRetention::default(),
@@ -1541,6 +1606,7 @@ mod tests {
             force_cache: false,
             sandbox: true,
             workspace_cwd: false,
+            stream: false,
             materialize: true,
             no_cache: true,
             sandbox_retention: SandboxRetention::default(),

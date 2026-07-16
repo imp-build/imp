@@ -33,6 +33,7 @@ export async function runGoal(selection) {
 			sandbox: true,
 			workspaceCwd: true,
 			impure: true,
+			stream: true,
 		});
 	} catch (e) {
 		throw new Error(`${label}: ${e && e.message ? e.message : e}`);
