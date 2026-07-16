@@ -368,16 +368,18 @@ export const cargoDistPackage = product(
 );
 
 /**
- * Run a Cargo binary crate's tests.
+ * Run a Cargo binary crate's doc-tests.
  *
- * Unlike Odin (which compiles a separate odin-test-package target excluding
- * test files from its regular build), Cargo compiles test code from the same
- * crate/manifest — `sources()` already globs the whole crate, tests
- * included — so this reuses the cargo-package target directly rather than
- * needing a distinct test target kind.
+ * //rules/rust/test.js's expandCargoTests fan-out already discovers and runs
+ * every unit/integration test binary (via `cargo test --no-run`, one
+ * `rust_test` target per binary) — running the whole crate's tests again
+ * here would duplicate all of that work under a package/recursive selector.
+ * Doc-tests aren't discoverable via `--no-run` though (they only ever run
+ * through a real `cargo test`), so this stays scoped to `--doc` as the one
+ * piece the fan-out can't cover.
  *
  * @param {object} handle Target handle returned by cargoPackage().
- * @returns {Promise<object>} Run result from `cargo test`.
+ * @returns {Promise<object>} Run result from `cargo test --doc`.
  */
 export const cargoTest = product(
 	CargoPackage,
@@ -406,19 +408,35 @@ export const cargoTest = product(
 		const resourceInputs = await resources(handle);
 		const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 
-		// --workspace so member-crate tests run too when the manifest is a
+		// --workspace so member-crate doc-tests run too when the manifest is a
 		// workspace root; on a plain single crate it's a no-op. A generated
 		// workspace-member target must test only its own package, otherwise
 		// every member target redundantly retests the entire workspace using
 		// that member's narrower resources and test-tool declarations.
+		//
+		// --doc: see cargoTest's docstring above — everything else is covered
+		// by the rust_test fan-out in //rules/rust/test.js.
+		//
+		// A bin-only crate (no `[lib]` target) has no doc-tests by
+		// definition, but `cargo test --doc` still hard-errors on it
+		// ("no library targets found in package ...", exit 101) instead of
+		// just finding zero doc-tests — so that specific message is treated
+		// as a benign no-op rather than a real test failure.
 		const script =
 			"manifest=$1; target_dir=$2; rustflags=$3; shift 3; " +
-			'RUSTFLAGS="$rustflags" cargo test --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
+			'out=$(RUSTFLAGS="$rustflags" cargo test --doc --manifest-path "$manifest" --target-dir "$target_dir" "$@" 2>&1); ec=$?; ' +
+			'printf "%s\\n" "$out"; ' +
+			"case $ec,\"$out\" in " +
+			'0,*) exit 0 ;; ' +
+			'*,*"no library targets found"*) exit 0 ;; ' +
+			"esac; " +
+			"exit $ec";
 
 		// No outputs/materialize: test binaries aren't user-addressable
-		// artifacts. impure: true so a re-run always executes the tests
-		// rather than replaying a cached pass/fail from the task cache —
-		// same choice Odin's odinTest makes.
+		// artifacts. No impure flag: a passing run is cached like any other
+		// task, replayed on a later run with unchanged inputs; a failing run
+		// bails before any cache record is written, so it's guaranteed to
+		// rerun next time rather than replaying a stale failure.
 		return run({
 			argv: [
 				"sh",
@@ -434,8 +452,7 @@ export const cargoTest = product(
 			tools: [...rustTools, ...linkerTools, ...cacheTools, ...testTools],
 			env: [...rustEnv, ...linkerEnv, ...cacheEnv],
 			inputs: [srcs, resourceInputs],
-			impure: true,
-			display: `cargo test ${path}`,
+			display: `Run cargo doc-tests for ${path}`,
 		});
 	},
 );

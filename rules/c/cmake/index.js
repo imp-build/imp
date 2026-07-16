@@ -808,9 +808,10 @@ export async function runCTest(handle) {
 		'ctest --test-dir "$bdir" "$@"';
 
 	// No outputs/materialize on this final step: test results aren't
-	// user-addressable artifacts. impure: true so a re-run always executes
-	// the suite rather than replaying a cached pass/fail from the task
-	// cache — same choice cargoTest/odinTest make.
+	// user-addressable artifacts. No impure flag: a passing run is cached
+	// and replayed on a later run with unchanged inputs; a failing run
+	// bails before any cache record is written, so it always reruns until
+	// it passes — same choice cargoTest/odinTest make.
 	return run({
 		argv: [
 			"sh",
@@ -827,7 +828,6 @@ export async function runCTest(handle) {
 			await nativeToolSpec(nativeTool("sed")),
 		],
 		inputs: [{ kind: "digest", digest: replayDigest }],
-		impure: true,
 		display: `ctest ${srcPath}`,
 	});
 }

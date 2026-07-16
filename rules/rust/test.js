@@ -195,9 +195,10 @@ export const rustTestBuild = product(
 );
 
 // No outputs/materialize on this final step: test results aren't
-// user-addressable artifacts. impure: true so a re-run always executes
-// the binary rather than replaying a cached pass/fail from the task
-// cache — same choice cargoTest/odinTest/runCTest make.
+// user-addressable artifacts. No impure flag: a passing run is cached and
+// replayed on a later run with unchanged inputs; a failing run bails
+// before any cache record is written, so it always reruns until it
+// passes — same choice cargoTest/odinTest/runCTest make.
 //
 // --test-threads=1 makes this one binary's own #[test] fns run serially —
 // the fan-out itself is what gets the parallelism/isolation (each binary is
@@ -220,7 +221,6 @@ export const rustTestRun = product(
 			],
 			tools: testTools,
 			inputs: [{ kind: "digest", digest: outputDigest }],
-			impure: true,
 			display: `cargo test binary ${handle.attrs.executable}`,
 		});
 	},

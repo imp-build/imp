@@ -1118,7 +1118,10 @@ export const odinTest = product(
 			],
 			tools: [odinToolSpec, ...scriptTools],
 			inputs: [srcs, ...genInputs, ...resourceInputs],
-			impure: true,
+			// No impure flag: a passing run is cached and replayed on a
+			// later run with unchanged inputs; a failing run bails before
+			// any cache record is written, so it always reruns until it
+			// passes.
 			display: `odin test ${path}`,
 		});
 		logInfo(`Test finished: ${path}`);

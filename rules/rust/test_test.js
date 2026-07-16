@@ -130,7 +130,7 @@ describe("rust test fan-out", () => {
 			);
 			expect(testRun.argv).toContain("--test-threads=1");
 			expect(testRun.argv).toContain("--nocapture");
-			expect(testRun.impure).toBe(true);
+			expect(testRun.impure).toBeFalsy();
 		});
 	});
 

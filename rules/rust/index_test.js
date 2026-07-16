@@ -199,7 +199,7 @@ describe("rust rules", () => {
 			expect(testRun.argv[2]).toContain('RUSTFLAGS="$rustflags"');
 			expect(testRun.env).toContain("CC=clang");
 			expect(testRun.argv).toContain("-C linker=clang");
-			expect(testRun.impure).toBe(true);
+			expect(testRun.impure).toBeFalsy();
 			expect(testRun.outputs).toEqual([]);
 		});
 	});

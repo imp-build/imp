@@ -709,7 +709,7 @@ describe("Odin rules", () => {
 				expect(
 					inputsIncludePath(runEffect.inputs, "rules/odin/example/main.odin"),
 				).toBe(true);
-				expect(runEffect.impure).toBe(true);
+				expect(runEffect.impure).toBeFalsy();
 			});
 		} finally {
 			configure("odin", null);
