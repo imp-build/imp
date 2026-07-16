@@ -80,10 +80,10 @@ imp run tools/demo.py -- --verbose
 ```
 
 The source set's complete file list is staged and `root` is added to
-`PYTHONPATH`. Runs are sandboxed with the workspace root as their working
-directory, so output is retained but filesystem writes are discarded. Nested
-directories need their own `pythonSources()` declaration; recursive `**`
-patterns are rejected.
+`PYTHONPATH`. The `run` goal keeps the process sandboxed but sets its working
+directory to the real workspace, so files written by the script persist there.
+Nested directories need their own `pythonSources()` declaration; recursive
+`**` patterns are rejected.
 
 Sources do not require a project. They run with the pinned interpreter and
 the standard library by default. A workspace may declare one optional locked

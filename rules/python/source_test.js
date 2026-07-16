@@ -43,7 +43,7 @@ describe("python sources", () => {
 	});
 
 	test("runs an unprojected source through the pinned interpreter", async () => {
-		await withPythonHost(async (host) => {
+		await withPythonHost(async () => {
 			uvToolchain("0.11.16", { default: true, unverified: true });
 			const runtime = pythonToolchain("3.13.0", { default: true });
 			const source = new PythonSource({
@@ -56,20 +56,22 @@ describe("python sources", () => {
 				runtime,
 			});
 
-			await pythonSourceRun(source);
+			const template = await pythonSourceRun(source);
 
-			const action = host.runs[host.runs.length - 1];
-			expect(action.argv[2]).toContain("uv run --no-project --managed-python");
-			expect(action.argv).toContain("3.13.0");
-			expect(action.argv).toContain(
+			expect(template.opts.argv[2]).toContain(
+				"uv run --no-project --managed-python",
+			);
+			expect(template.opts.argv).toContain("3.13.0");
+			expect(template.opts.argv).toContain(
 				"rules/python/example/src/hello/__main__.py",
 			);
-			expect(action.impure).toBe(true);
+			expect(template.__impRunTemplate).toBe(true);
+			expect(template.opts.impure).toBe(undefined);
 		});
 	});
 
 	test("uses the default locked project without making it the source owner", async () => {
-		await withPythonHost(async (host) => {
+		await withPythonHost(async () => {
 			uvToolchain("0.11.16", { default: true, unverified: true });
 			const runtime = pythonToolchain("3.13.0", { default: true });
 			const project = pythonProject({
@@ -84,12 +86,11 @@ describe("python sources", () => {
 				project,
 			});
 
-			await pythonSourceRun(source);
+			const template = await pythonSourceRun(source);
 
-			const action = host.runs[host.runs.length - 1];
-			expect(action.argv[2]).toContain("uv sync --project");
-			expect(action.argv[2]).toContain("--no-install-project");
-			expect(action.argv).toContain("rules/python/example/.venv");
+			expect(template.opts.argv[2]).toContain("uv sync --project");
+			expect(template.opts.argv[2]).toContain("--no-install-project");
+			expect(template.opts.argv).toContain("rules/python/example/.venv");
 		});
 	});
 });

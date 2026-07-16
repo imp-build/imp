@@ -80,6 +80,10 @@ pub struct ExecRunOpts {
     /// `false` runs the command directly in the workspace root (requires
     /// `impure`); the non-REv2 escape hatch, local-executor-only in Stage B.
     pub sandbox: bool,
+    /// Keep the sandboxed environment and staged inputs, but start the child
+    /// process in the real workspace root. Local-executor-only because the
+    /// workspace path is deliberately absent from [`ExecAction`].
+    pub workspace_cwd: bool,
     pub no_cache: bool,
     pub sandbox_retention: SandboxRetention,
     /// A nonzero exit is reported via the returned `exit_code` instead of

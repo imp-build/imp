@@ -1,5 +1,17 @@
-import { describe, expect, test } from "//rules/imp/test";
-import { product, target, RUN, targetKind, toolName } from "imp:core";
+import {
+	describe,
+	expect,
+	test,
+	withFakeToolchainHost,
+} from "//rules/imp/test";
+import {
+	product,
+	runTemplate,
+	target,
+	RUN,
+	targetKind,
+	toolName,
+} from "imp:core";
 const K_run_test_reject_kind = targetKind("run-test-reject-kind");
 const K_run_test_dispatch_kind = targetKind("run-test-dispatch-kind");
 import { requireSingleRunnable, runGoal } from "//rules/workflows/run";
@@ -48,21 +60,29 @@ describe("run workflow", () => {
 	});
 
 	test("runGoal dispatches the sole selected target's registered product", async () => {
-		let ranWith = null;
-		product(K_run_test_dispatch_kind, RUN, TEST_TOOL, async (handle) => {
-			ranWith = handle;
+		await withFakeToolchainHost(async (host) => {
+			let ranWith = null;
+			product(K_run_test_dispatch_kind, RUN, TEST_TOOL, async (handle) => {
+				ranWith = handle;
+				return runTemplate({ argv: ["program", "template-arg"] });
+			});
+			const fake = target({ kind: "run-test-dispatch-kind" });
+
+			await runGoal([
+				{
+					id: fake.__id,
+					address: "//:fake",
+					kind: "run-test-dispatch-kind",
+					product: "run",
+				},
+			]);
+
+			expect(ranWith).toBe(fake);
+			const action = host.runs[host.runs.length - 1];
+			expect(action.argv).toEqual(["program", "template-arg"]);
+			expect(action.sandbox).toBe(true);
+			expect(action.workspaceCwd).toBe(true);
+			expect(action.impure).toBe(true);
 		});
-		const fake = target({ kind: "run-test-dispatch-kind" });
-
-		await runGoal([
-			{
-				id: fake.__id,
-				address: "//:fake",
-				kind: "run-test-dispatch-kind",
-				product: "run",
-			},
-		]);
-
-		expect(ranWith).toBe(fake);
 	});
 });

@@ -2483,18 +2483,17 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                         display,
                         crate::scheduler::TaskKind::Sandbox,
                         move |run_context| {
-                            if !run_opts.sandbox {
-                                if !run_opts.impure {
+                            if !run_opts.sandbox || run_opts.workspace_cwd {
+                                if !run_opts.sandbox && !run_opts.impure {
                                     anyhow::bail!(
                                         "run({{ sandbox: false }}) requires impure: true"
                                     );
                                 }
-                                run_context.started();
-                                return imp_execution::exec::exec_run_unsandboxed(
+                                return imp_execution::exec::exec_run_local_with_start(
                                     &root,
                                     run_opts,
                                     Some(cancellation.as_ref()),
-                                    None,
+                                    Some(&|| run_context.started()),
                                 )
                                 .map(|result| {
                                     imp_exec_api::ExecOutcome {
@@ -2502,7 +2501,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                                         stderr: result.stderr,
                                         exit_code: result.exit_code,
                                         output_digest: result.output_digest.unwrap_or_default(),
-                                        outputs: Vec::new(),
+                                        outputs: result.outputs,
                                     }
                                 });
                             }
@@ -2833,6 +2832,9 @@ fn parse_exec_run_opts<'js>(
         .get::<_, Option<bool>>("allowFailure")?
         .unwrap_or(false);
     let sandbox = opts.get::<_, Option<bool>>("sandbox")?.unwrap_or(true);
+    let workspace_cwd = opts
+        .get::<_, Option<bool>>("workspaceCwd")?
+        .unwrap_or(false);
     // Enforcement of "must be explicit when outputs are declared" lives in
     // imp_core.js's run() wrapper; this default is only a fallback for
     // callers that reach __host_run without going through it.
@@ -2851,6 +2853,7 @@ fn parse_exec_run_opts<'js>(
         impure,
         force_cache,
         sandbox,
+        workspace_cwd,
         materialize,
         allow_failure,
         no_cache: false,
@@ -3700,10 +3703,12 @@ pub(crate) async fn execute_goal_live(
         &SelectorContext::root(),
         goal,
         GoalSelection::Selectors(selectors),
-        no_cache,
-        js_workers,
-        flags,
-        &[],
+        GoalExecutionOptions {
+            no_cache,
+            js_workers,
+            flags,
+            run_args: &[],
+        },
     )
     .await
 }
@@ -3717,17 +3722,27 @@ pub enum GoalSelection<'a> {
     ChangedAddresses(&'a BTreeSet<String>),
 }
 
+pub struct GoalExecutionOptions<'a> {
+    pub no_cache: bool,
+    pub js_workers: usize,
+    pub flags: serde_json::Value,
+    pub run_args: &'a [String],
+}
+
 pub async fn execute_goal_live_selection(
     live: &LiveWorkspace,
     workspace_root: &Path,
     selector_context: &SelectorContext,
     goal: &str,
     selection: GoalSelection<'_>,
-    no_cache: bool,
-    js_workers: usize,
-    flags: serde_json::Value,
-    run_args: &[String],
+    options: GoalExecutionOptions<'_>,
 ) -> Result<()> {
+    let GoalExecutionOptions {
+        no_cache,
+        js_workers,
+        flags,
+        run_args,
+    } = options;
     let goal_def = live.workspace.goals.get(goal).ok_or_else(|| {
         let known: Vec<_> = live.workspace.goals.keys().map(String::as_str).collect();
         anyhow::anyhow!(
@@ -5673,21 +5688,20 @@ export const scripts = pythonSources({ root: "scripts" });
     }
 
     #[tokio::test]
-    async fn run_arguments_are_visible_to_run_products() {
+    async fn run_arguments_are_forwarded_to_run_templates() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), "");
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { product, runArgs, RUN, target, targetKind, toolName } from "imp:core";
+import { product, runTemplate, RUN, target, targetKind, toolName } from "imp:core";
 const K_run_args = targetKind("run-args-test");
 export const app = target({ kind: "run-args-test" });
 export const run = product(K_run_args, RUN, toolName("run-args-test-tool"), async function run() {
-    const args = runArgs();
-    if (args.length !== 2 || args[0] !== "--flag" || args[1] !== "value") {
-        throw new Error(`unexpected run arguments: ${JSON.stringify(args)}`);
-    }
+    return runTemplate({
+        argv: ["sh", "-c", 'test "$1" = "--flag" && test "$2" = "value"', "run-args-test"],
+    });
 });
 "#,
         );
@@ -5699,16 +5713,19 @@ export const run = product(K_run_args, RUN, toolName("run-args-test-tool"), asyn
             tx,
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
+        let run_args = vec!["--flag".to_owned(), "value".to_owned()];
         execute_goal_live_selection(
             &live,
             p,
             &SelectorContext::root(),
             "run",
             GoalSelection::Selectors(&[":app".to_owned()]),
-            false,
-            1,
-            serde_json::json!({}),
-            &["--flag".to_owned(), "value".to_owned()],
+            GoalExecutionOptions {
+                no_cache: false,
+                js_workers: 1,
+                flags: serde_json::json!({}),
+                run_args: &run_args,
+            },
         )
         .await
         .unwrap();

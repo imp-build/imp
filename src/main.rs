@@ -1000,10 +1000,12 @@ async fn cmd_execute_live(
                     &selector_context,
                     goal,
                     selection,
-                    no_cache,
-                    js_workers,
-                    goal_flags.clone(),
-                    &run_args,
+                    spike::GoalExecutionOptions {
+                        no_cache,
+                        js_workers,
+                        flags: goal_flags.clone(),
+                        run_args: &run_args,
+                    },
                 )
                 .await
             }

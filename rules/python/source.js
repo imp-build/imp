@@ -11,10 +11,10 @@ import {
 	glob,
 	paths,
 	product,
+	productFor,
 	registerBuildRule,
 	registerTarget,
-	run,
-	runArgs,
+	runTemplate,
 	sourcesField,
 	toolName,
 	RUN,
@@ -27,6 +27,8 @@ import {
 	uvTool,
 	UV_TOOL,
 } from "//rules/python/uv_toolchain";
+
+import { TOOL } from "//rules/imp/native_tool";
 
 // Keep `run`'s single-program contract available to consumers that import
 // Python rules without separately importing the workflows layer.
@@ -58,7 +60,7 @@ function normalize_workspace_path(path) {
 function sandboxRootEnvExports(envEntries) {
 	return envEntries.map((entry) => {
 		const eq = entry.indexOf("=");
-		return `export ${entry.slice(0, eq)}="$imp_sandbox_root/${entry.slice(eq + 1)}"`;
+		return `export ${entry.slice(0, eq)}="$IMP_SANDBOX_ROOT/${entry.slice(eq + 1)}"`;
 	});
 }
 
@@ -144,7 +146,14 @@ export function defaultPythonProject() {
 
 export class PythonSources extends Target {
 	static kind = "python-sources";
-	constructor({ root, sources = ["*.py"], runtime, project, uvVersion }) {
+	constructor({
+		root,
+		sources = ["*.py"],
+		runtime,
+		project,
+		uvVersion,
+		deps = [],
+	}) {
 		if (typeof root !== "string" || root === "") {
 			throw new Error(
 				"pythonSources({ root, ... }) requires a workspace-relative root",
@@ -169,9 +178,10 @@ export class PythonSources extends Target {
 				sources,
 				runtime,
 				uvVersion,
+				deps,
 				...(project ? { project } : {}),
 			},
-			deps: [runtime, ...(project ? [project] : [])],
+			deps: [runtime, ...deps, ...(project ? [project] : [])],
 		});
 	}
 }
@@ -179,20 +189,37 @@ export class PythonSources extends Target {
 /**
  * Declare a shallow Python source-set generator. Every matching file is made
  * into an internal `python-source` target when it is selected for `run`.
+ *
+ * @param {object} opts
+ * @param {string} opts.root Workspace-relative directory to scan (no recursion).
+ * @param {string[]} [opts.sources=["*.py"]] Direct glob patterns matched under root.
+ * @param {Array} [opts.deps=[]] Extra target handles made available on PATH
+ *   inside each source's run — anything whose kind registers a `TOOL`
+ *   product, e.g. `nativeTool()` handles for scripts that shell out to host
+ *   programs (`git`, comparison-language interpreters, ...).
  */
-export function pythonSources({ root, sources } = {}) {
+export function pythonSources({ root, sources, deps } = {}) {
 	return new PythonSources({
 		root,
 		sources,
 		runtime: require_default_python_toolchain(),
 		project: default_python_project,
 		uvVersion: require_default_uv_version(),
+		deps,
 	});
 }
 
 export class PythonSource extends Target {
 	static kind = "python-source";
-	constructor({ file, root, sourceFiles, runtime, project, uvVersion }) {
+	constructor({
+		file,
+		root,
+		sourceFiles,
+		runtime,
+		project,
+		uvVersion,
+		deps = [],
+	}) {
 		super({
 			kind: PythonSource.kind,
 			attrs: {
@@ -201,10 +228,11 @@ export class PythonSource extends Target {
 				sourceFiles,
 				pythonVersion: runtime.attrs.version,
 				uvVersion,
+				deps,
 				...(project ? { projectPath: project.attrs.path } : {}),
 			},
 			sources: sourcesField({ root: "//", include: [file] }),
-			deps: [runtime, ...(project ? [project] : [])],
+			deps: [runtime, ...deps, ...(project ? [project] : [])],
 		});
 	}
 }
@@ -227,6 +255,7 @@ export const expandPythonSources = expand(
 					runtime: handle.attrs.runtime,
 					project: handle.attrs.project,
 					uvVersion: handle.attrs.uvVersion,
+					deps: handle.attrs.deps,
 				}),
 				`//${file}:python`,
 			);
@@ -246,6 +275,9 @@ export const pythonSourceRun = product(
 		const venv = project ? `${project}/.venv` : "";
 		const uvToolSpec = await uvTool(handle.attrs.uvVersion);
 		const uvCacheToolSpec = uvCacheDirTool();
+		const depToolSpecs = await Promise.all(
+			(handle.attrs.deps || []).map((dep) => productFor(dep, TOOL)),
+		);
 		const envExports = sandboxRootEnvExports(uvCacheDirEnv());
 		const inputs = [file_set.literal(handle.attrs.sourceFiles)];
 		if (project) {
@@ -255,14 +287,14 @@ export const pythonSourceRun = product(
 		}
 		const script =
 			`file=$1; root=$2; project=$3; venv=$4; version=$5; shift 5; ` +
-			`imp_sandbox_root="$(pwd)" && ${envExports.join(" && ")} && ` +
+			`${envExports.join(" && ")} && ` +
 			'export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" && ' +
 			'if [ -n "$project" ]; then ' +
 			'uv sync --project "$project" --frozen --no-progress --no-install-project --managed-python --python "$version" && ' +
 			'"$venv/bin/python" "$file" "$@"; ' +
 			'else uv run --no-project --managed-python --python "$version" -- "$file" "$@"; fi';
 
-		return run({
+		return runTemplate({
 			argv: [
 				"sh",
 				"-c",
@@ -273,11 +305,9 @@ export const pythonSourceRun = product(
 				project,
 				venv,
 				handle.attrs.pythonVersion,
-				...runArgs(),
 			],
-			tools: [uvToolSpec, uvCacheToolSpec],
+			tools: [uvToolSpec, uvCacheToolSpec, ...depToolSpecs],
 			inputs,
-			impure: true,
 			display: `python run ${file}`,
 		});
 	},

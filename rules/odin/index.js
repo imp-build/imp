@@ -23,7 +23,7 @@ import {
 	workspaceTargets,
 	logInfo,
 	writeWorkspace,
-	runArgs,
+	runTemplate,
 	BUILD,
 	TEST,
 	RUN,
@@ -1134,7 +1134,7 @@ export const odinTest = product(
  * check that itself.
  *
  * @param {object} handle Target handle returned by odinPackage().
- * @returns {Promise<object>} Run result.
+ * @returns {Promise<object>} Run template.
  */
 export const odinRun = product(
 	OdinPackage,
@@ -1149,19 +1149,16 @@ export const odinRun = product(
 			);
 		}
 		const buildResult = await odinBuild(handle);
-		// odinBuild is materialize:false (sandboxed/cached only); this goal rule
-		// (`run` — rules/workflows/run.js) is one of the sanctioned exceptions
-		// allowed to write outside dist/, since executing unsandboxed against
-		// the real workspace genuinely needs the binary physically on disk.
+		// odinBuild is materialize:false (sandboxed/cached only), so publish the
+		// executable before returning the run template. The run goal starts the
+		// program in the real workspace while retaining its sandboxed environment.
 		const outDir = buildResult.outputPath.slice(
 			0,
 			buildResult.outputPath.lastIndexOf("/"),
 		);
 		writeWorkspace(outDir, buildResult.outputDigest, { from: outDir });
-		return run({
-			argv: [buildResult.outputPath, ...runArgs()],
-			sandbox: false,
-			impure: true,
+		return runTemplate({
+			argv: [buildResult.outputPath],
 			display: `run ${buildResult.outputPath}`,
 		});
 	},

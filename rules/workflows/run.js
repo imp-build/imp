@@ -3,16 +3,11 @@
 // first-registration-wins, so this is a no-op today and stays correct if
 // that default is ever dropped.
 //
-// No legacy Rust predecessor ever existed for this goal. Individual rule
-// products own execution details: Odin materializes and launches a binary on
-// the real workspace, while Python source targets execute sandboxed.
-//
-// The callback below fully owns the goal: it validates the selection first,
-// rejecting anything but one target with one error naming every offender —
-// then dispatches to the selected target's product itself,
-// since a goal callback replaces native per-target dispatch entirely.
+// Run products return a template describing their executable. This workflow
+// owns the common policy: every program is impure, runs in a sandbox, starts
+// in the real workspace, and receives the CLI tail after `--`.
 
-import { goal, resolveProducts } from "imp:core";
+import { goal, resolveProducts, runArgs, runFromTemplate } from "imp:core";
 
 export function requireSingleRunnable(selection) {
 	if (selection.length !== 1) {
@@ -25,16 +20,22 @@ export function requireSingleRunnable(selection) {
 export async function runGoal(selection) {
 	requireSingleRunnable(selection);
 	const resolved = selection.flatMap(resolveProducts);
-	const calls = resolved.map(({ label, fn, handle }) => ({
-		label,
-		promise: fn(handle),
-	}));
-	for (const { label, promise } of calls) {
-		try {
-			await promise;
-		} catch (e) {
-			throw new Error(`${label}: ${e && e.message ? e.message : e}`);
-		}
+	if (resolved.length !== 1) {
+		throw new Error(
+			`run requires exactly one run product, got ${resolved.length}: ${resolved.map((entry) => entry.label).join(", ")}`,
+		);
+	}
+	const { label, fn, handle } = resolved[0];
+	try {
+		const template = await fn(handle);
+		return await runFromTemplate(template, {
+			args: runArgs(),
+			sandbox: true,
+			workspaceCwd: true,
+			impure: true,
+		});
+	} catch (e) {
+		throw new Error(`${label}: ${e && e.message ? e.message : e}`);
 	}
 }
 

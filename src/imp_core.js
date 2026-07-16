@@ -2107,6 +2107,7 @@ export function run(opts) {
 		impure: opts.impure === true,
 		forceCache: opts.forceCache === true,
 		sandbox: opts.sandbox !== false,
+		workspaceCwd: opts.workspaceCwd === true,
 		allowFailure: opts.allowFailure === true,
 		materialize,
 	};
@@ -2124,6 +2125,7 @@ export function run(opts) {
 		impure: opts.impure,
 		forceCache: opts.forceCache,
 		sandbox: opts.sandbox,
+		workspaceCwd: opts.workspaceCwd,
 		allowFailure: opts.allowFailure,
 		materialize,
 		__owner: owner,
@@ -2132,6 +2134,47 @@ export function run(opts) {
 		outputs,
 	}));
 	return _contextual_thenable(promise, contextId);
+}
+
+/**
+ * Describe a program that the `run` goal will execute. A run product returns
+ * one of these instead of calling run() itself, leaving goal-wide policy
+ * (sandboxing, working directory, impurity, and CLI arguments) in one place.
+ *
+ * @param {object} opts The run() options owned by the product.
+ * @returns {object} An opaque run template.
+ */
+export function runTemplate(opts) {
+	if (!opts || typeof opts !== "object" || !Array.isArray(opts.argv)) {
+		throw new Error("runTemplate({ argv, ... }) requires an argv array");
+	}
+	return Object.freeze({
+		__impRunTemplate: true,
+		opts: Object.freeze({ ...opts, argv: [...opts.argv] }),
+	});
+}
+
+/**
+ * Execute a runTemplate with policy supplied by the run workflow.
+ * `args` are appended to the template argv rather than replacing it.
+ *
+ * @param {object} template A value returned by runTemplate().
+ * @param {object} policy Goal-owned run() options plus optional `args`.
+ * @returns {Promise<object>} Run result.
+ */
+export function runFromTemplate(template, policy = {}) {
+	if (!template || template.__impRunTemplate !== true || !template.opts) {
+		throw new Error("run goal product must return runTemplate({ argv, ... })");
+	}
+	if (!Array.isArray(policy.args ?? [])) {
+		throw new Error("runFromTemplate(..., { args }) requires an array");
+	}
+	const { args = [], ...runPolicy } = policy;
+	return run({
+		...template.opts,
+		...runPolicy,
+		argv: [...template.opts.argv, ...args],
+	});
 }
 
 export function group(items) {

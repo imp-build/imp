@@ -70,6 +70,7 @@ pub fn exec_run_hermetic_with_start(
         impure: action.impure,
         force_cache: action.force_cache,
         sandbox: true,
+        workspace_cwd: false,
         no_cache: action.no_cache,
         sandbox_retention: action.sandbox_retention,
         allow_failure: action.allow_failure,
@@ -623,6 +624,7 @@ pub fn live_action_digest(
         "config_digest": opts.config_digest,
         "display": opts.display,
         "tools": opts.tools,
+        "workspace_cwd": opts.workspace_cwd,
     }))
 }
 
@@ -631,8 +633,19 @@ pub fn exec_run_inner(
     opts: ExecRunOpts,
     cancellation: Option<&AtomicBool>,
 ) -> Result<ExecRunResult> {
+    exec_run_local_with_start(workspace_root, opts, cancellation, None)
+}
+
+/// Execute locally, retaining the caller's workspace path for sandboxed
+/// actions that intentionally use it as their working directory.
+pub fn exec_run_local_with_start(
+    workspace_root: &Path,
+    opts: ExecRunOpts,
+    cancellation: Option<&AtomicBool>,
+    started: Option<&dyn Fn()>,
+) -> Result<ExecRunResult> {
     let workspace_id = imp_store::cache::workspace_cache_id(workspace_root);
-    exec_run_inner_with_start(workspace_root, &workspace_id, opts, cancellation, None)
+    exec_run_inner_with_start(workspace_root, &workspace_id, opts, cancellation, started)
 }
 
 fn exec_run_inner_with_start(
@@ -816,12 +829,21 @@ fn exec_run_inner_with_start(
     let (home_dir, tmp_dir) = sandbox_home_tmp(&sandbox_root)?;
     command_env.insert("HOME".to_owned(), home_dir.to_string_lossy().into_owned());
     command_env.insert("TMPDIR".to_owned(), tmp_dir.to_string_lossy().into_owned());
+    command_env.insert(
+        "IMP_SANDBOX_ROOT".to_owned(),
+        sandbox_root.to_string_lossy().into_owned(),
+    );
     let resolved_program = resolve_program(program)?;
     add_executable_library_path(&mut command_env, &resolved_program, &sandbox_root);
     let mut command = Command::new(&resolved_program);
+    let command_cwd = if opts.workspace_cwd {
+        workspace_root
+    } else {
+        &sandbox_root
+    };
     command
         .args(args)
-        .current_dir(&sandbox_root)
+        .current_dir(command_cwd)
         .env_clear()
         .envs(&command_env)
         .stdout(Stdio::piped())
@@ -834,7 +856,7 @@ fn exec_run_inner_with_start(
     }
     let mut child = command
         .spawn()
-        .with_context(|| format!("run() command in {}", sandbox_root.display()))?;
+        .with_context(|| format!("run() command in {}", command_cwd.display()))?;
 
     let (status, stdout, stderr) =
         wait_for_child_output(&mut child, &opts.display, cancellation, None)?;
@@ -1119,6 +1141,7 @@ mod tests {
             impure: false,
             force_cache: false,
             sandbox: true,
+            workspace_cwd: false,
             materialize: true,
             no_cache: false,
             sandbox_retention: SandboxRetention::default(),
@@ -1179,6 +1202,7 @@ mod tests {
             impure: false,
             force_cache: false,
             sandbox: true,
+            workspace_cwd: false,
             materialize: true,
             no_cache: false,
             sandbox_retention: SandboxRetention::default(),
@@ -1205,6 +1229,31 @@ mod tests {
         let opts = run_opts(&["sh", "-c", "printf 'a\\n\\nb\\n\\n\\nc\\n'"], &[], &[]);
         let result = exec_run_inner(p, opts, None).unwrap();
         assert_eq!(result.stdout, "a\n\nb\n\n\nc\n");
+    }
+
+    #[test]
+    fn exec_run_workspace_cwd_keeps_the_sandboxed_environment() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let mut opts = run_opts(
+            &[
+                "sh",
+                "-c",
+                "test \"$HOME\" != \"$PWD\" && printf %s \"$PWD\" > workspace-cwd.txt",
+            ],
+            &[],
+            &[],
+        );
+        opts.impure = true;
+        opts.workspace_cwd = true;
+
+        exec_run_inner(p, opts, None).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(p.join("workspace-cwd.txt")).unwrap(),
+            p.to_string_lossy(),
+            "the process should write through its workspace working directory"
+        );
     }
 
     #[test]
@@ -1491,6 +1540,7 @@ mod tests {
             impure: false,
             force_cache: false,
             sandbox: true,
+            workspace_cwd: false,
             materialize: true,
             no_cache: true,
             sandbox_retention: SandboxRetention::default(),

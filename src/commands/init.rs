@@ -309,10 +309,11 @@ fn prompt_for_selection(
         .groups
         .iter()
         .map(|group| {
-            let detected_suffix = detected
-                .contains(&group.id)
-                .then_some(" (detected)")
-                .unwrap_or_default();
+            let detected_suffix = if detected.contains(&group.id) {
+                " (detected)"
+            } else {
+                ""
+            };
             format!("{}{} — {}", group.label, detected_suffix, group.description)
         })
         .collect();
