@@ -426,8 +426,8 @@ export const cargoTest = product(
 			"manifest=$1; target_dir=$2; rustflags=$3; shift 3; " +
 			'out=$(RUSTFLAGS="$rustflags" cargo test --doc --manifest-path "$manifest" --target-dir "$target_dir" "$@" 2>&1); ec=$?; ' +
 			'printf "%s\\n" "$out"; ' +
-			"case $ec,\"$out\" in " +
-			'0,*) exit 0 ;; ' +
+			'case $ec,"$out" in ' +
+			"0,*) exit 0 ;; " +
 			'*,*"no library targets found"*) exit 0 ;; ' +
 			"esac; " +
 			"exit $ec";
