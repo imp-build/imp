@@ -3,6 +3,7 @@ import {
 	defineConfigSchema,
 	allUnowned,
 	Target,
+	artifact,
 	glob,
 	file_set,
 	paths,
@@ -60,7 +61,6 @@ export const odinConfigSchema = {
 
 defineConfigSchema("odin", odinConfigSchema);
 
-import { distPathFor } from "//rules/workflows/package";
 import {
 	registerBuildGenerator,
 	GENERATE_BUILD,
@@ -1233,10 +1233,7 @@ export const odinDistPackage = product(
 			0,
 			buildResult.outputPath.lastIndexOf("/"),
 		);
-		writeWorkspace(distPathFor(handle), buildResult.outputDigest, {
-			from: outDir,
-		});
-		return buildResult;
+		return artifact(buildResult.outputDigest, { from: outDir });
 	},
 );
 

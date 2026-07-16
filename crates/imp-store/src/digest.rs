@@ -448,6 +448,58 @@ pub fn read_file_in_digest(digest: &DirectoryDigest, path: &str) -> Result<Strin
     read_file_from_trie(digest.tree()?, path)
 }
 
+/// Aggregate file count and total byte size of a directory tree (optionally
+/// narrowed via `from`, resolved the same way `write_workspace` resolves it) —
+/// lets callers report what a digest actually contains without materializing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DigestStat {
+    pub file_count: u64,
+    pub total_size: u64,
+}
+
+pub fn digest_stat(digest: &DirectoryDigest, from: Option<&str>) -> Result<DigestStat> {
+    let resolved = match from {
+        Some(path) => resolve_in_trie(digest.tree()?, path)?,
+        None => ResolvedEntry::Directory(DirectoryDigest::from_digest(digest.digest().to_owned())),
+    };
+    match resolved {
+        ResolvedEntry::Directory(dir) => stat_trie(dir.tree()?),
+        ResolvedEntry::File { digest, .. } => {
+            crate::usage::record_cas_read(&digest);
+            let size = std::fs::metadata(cas_blob_path(&digest)?)
+                .with_context(|| format!("stat CAS blob for file digest {digest}"))?
+                .len();
+            Ok(DigestStat {
+                file_count: 1,
+                total_size: size,
+            })
+        }
+        ResolvedEntry::Symlink { .. } => Ok(DigestStat {
+            file_count: 1,
+            total_size: 0,
+        }),
+    }
+}
+
+fn stat_trie(trie: &DigestTrie) -> Result<DigestStat> {
+    let mut stat = DigestStat::default();
+    for entry in trie.entries() {
+        match entry {
+            Entry::File(f) => {
+                stat.file_count += 1;
+                stat.total_size += f.size;
+            }
+            Entry::Symlink(_) => stat.file_count += 1,
+            Entry::Directory(d) => {
+                let child = stat_trie(&DigestTrie::load(&d.digest)?)?;
+                stat.file_count += child.file_count;
+                stat.total_size += child.total_size;
+            }
+        }
+    }
+    Ok(stat)
+}
+
 fn diff_helper(parent: &str, before: &DigestTrie, after: &DigestTrie) -> Result<Vec<PathChange>> {
     let mut before_by_name: BTreeMap<&str, &Entry> =
         before.entries().iter().map(|e| (e.name(), e)).collect();
@@ -1063,6 +1115,59 @@ mod tests {
         let mut files = list_files_in_digest(&digest).unwrap();
         files.sort();
         assert_eq!(files, vec!["a.txt".to_string(), "nested/b.txt".to_string()]);
+    }
+
+    #[test]
+    fn digest_stat_sums_nested_file_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("a.txt"), "ab");
+        write(&src.join("nested").join("b.txt"), "abc");
+
+        let digest = capture_directory(&src).unwrap();
+        let stat = digest_stat(&digest, None).unwrap();
+        assert_eq!(
+            stat,
+            DigestStat {
+                file_count: 2,
+                total_size: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn digest_stat_narrows_to_a_subtree() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("out").join("nested").join("f.txt"), "content");
+        write(&src.join("other.txt"), "ignored");
+
+        let digest = capture_directory(&src).unwrap();
+        let stat = digest_stat(&digest, Some("out")).unwrap();
+        assert_eq!(
+            stat,
+            DigestStat {
+                file_count: 1,
+                total_size: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn digest_stat_narrows_to_a_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("a.txt"), "hello");
+
+        let digest = capture_directory(&src).unwrap();
+        let stat = digest_stat(&digest, Some("a.txt")).unwrap();
+        assert_eq!(
+            stat,
+            DigestStat {
+                file_count: 1,
+                total_size: 5,
+            }
+        );
     }
 
     #[test]

@@ -1904,6 +1904,20 @@ export function pathsInDigest(digest) {
 }
 
 /**
+ * Aggregate file count and total byte size of a digest's tree (optionally
+ * narrowed to the entry at `from`, resolved the same way writeWorkspace()
+ * resolves its `opts.from`) — lets a caller report what a digest contains
+ * without materializing it to disk.
+ *
+ * @param {string} digest Digest string.
+ * @param {string} [from] Path within `digest` to narrow to.
+ * @returns {{fileCount: number, totalSize: number}}
+ */
+export function digestStat(digest, from) {
+	return JSON.parse(__host_digest_stat(digest, from ?? null));
+}
+
+/**
  * Read a single file's content out of a digest's tree by its relative path —
  * the digest-backed analog of read_file() for the real workspace.
  *
@@ -1918,9 +1932,11 @@ export function readFileInDigest(digest, path) {
 /**
  * Materialize `digest` (optionally narrowed to the entry at `opts.from`)
  * directly into the workspace at `path` — no sandbox, no cache record, no
- * process spawn. This is the one blessed way for a `package` product to
- * publish a final digest under dist/, bypassing run()'s materialize:true
- * path (and its warning) entirely.
+ * process spawn. This is the one blessed way to publish a final digest under
+ * dist/, bypassing run()'s materialize:true path (and its warning) entirely.
+ * The `package` goal (rules/workflows/package.js) is its only caller today —
+ * package products themselves just describe what to publish via artifact(),
+ * they don't call this directly.
  *
  * `opts.from` may resolve to a directory (published wholesale at `path`,
  * replacing whatever was there — the dist/ package pattern) or to an
@@ -1942,6 +1958,26 @@ export function writeWorkspace(path, digest, opts) {
 		contextEntry.ctx,
 	);
 	return __host_write_workspace(path, digest, (opts && opts.from) ?? null);
+}
+
+/**
+ * Construct the container a `package` product returns: a digest plus the
+ * (optional) subtree path within it to publish. Package products describe
+ * what to publish — the `package` goal (rules/workflows/package.js) is the
+ * only thing that actually materializes it (via writeWorkspace) and reports
+ * on it (via digestStat).
+ *
+ * @param {string} digest Digest string (e.g. a build product's outputDigest).
+ * @param {object} [opts]
+ * @param {string} [opts.from] Path within `digest` to publish, stripping its
+ *   prefix — mirrors writeWorkspace()'s `opts.from`.
+ * @returns {{digest: string, from: string|null}}
+ */
+export function artifact(digest, opts) {
+	if (!digest || typeof digest !== "string") {
+		throw new Error("artifact(digest, opts?) requires a non-empty digest string");
+	}
+	return { digest, from: (opts && opts.from) ?? null, __imp_artifact: true };
 }
 
 /**

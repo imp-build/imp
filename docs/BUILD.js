@@ -1,4 +1,4 @@
-import { target, product, run, output, output_path, glob, paths, read_file, writeWorkspace, configurationSchemas, ruleCapabilities, targetKind, BUILD, PACKAGE, RUN } from "imp:core";
+import { target, product, run, output, output_path, glob, paths, read_file, artifact, configurationSchemas, ruleCapabilities, targetKind, BUILD, PACKAGE, RUN } from "imp:core";
 
 const JsApiReference = targetKind("js-api-reference");
 const ZolaSite = targetKind("zola-site");
@@ -104,7 +104,7 @@ export const site_build = product(ZolaSite, BUILD, ZOLA_TOOL, async function sit
 
 export const site_package = product(ZolaSite, PACKAGE, ZOLA_TOOL, async function site_package(handle) {
     const built = await site_build(handle);
-    writeWorkspace(distPathFor(handle), built.outputDigest, { from: SITE_OUT });
+    return artifact(built.outputDigest, { from: SITE_OUT });
 });
 
 // `imp run //docs:site` supervises a "serve while editing" loop: every

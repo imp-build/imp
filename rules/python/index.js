@@ -1,5 +1,6 @@
 import {
 	Target,
+	artifact,
 	glob,
 	memo,
 	output,
@@ -8,13 +9,11 @@ import {
 	registerBuildRule,
 	run,
 	targetAddress,
-	writeWorkspace,
 	BUILD,
 	PACKAGE,
 } from "imp:core";
 import { UV_TOOL } from "//rules/python/uv_toolchain";
 import { PEX_TOOL } from "//rules/python/pex_toolchain";
-import { distPathFor } from "//rules/workflows/package";
 
 import {
 	defaultUvToolchain,
@@ -324,10 +323,7 @@ export const python_app_package = product(
 			0,
 			result.pexOutPath.lastIndexOf("/"),
 		);
-		writeWorkspace(distPathFor(handle), result.outputDigest, {
-			from: pexOutDir,
-		});
-		return result;
+		return artifact(result.outputDigest, { from: pexOutDir });
 	},
 );
 

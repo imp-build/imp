@@ -1,5 +1,6 @@
 import {
 	Target,
+	artifact,
 	file_set,
 	glob,
 	hydrateTarget,
@@ -13,13 +14,11 @@ import {
 	run,
 	sourcesField,
 	targetAddress,
-	writeWorkspace,
 	BUILD,
 	PACKAGE,
 	TEST,
 } from "imp:core";
 
-import { distPathFor } from "//rules/workflows/package";
 import {
 	RUST_LINKER,
 	RUST_LINK_DRIVER,
@@ -362,12 +361,9 @@ export const cargoDistPackage = product(
 	async function cargoDistPackage(handle) {
 		const result = await cargoBuild(handle);
 		if (handle.attrs.bins.length === 0) {
-			return result;
+			return null;
 		}
-		writeWorkspace(distPathFor(handle), result.outputDigest, {
-			from: result.buildDir,
-		});
-		return result;
+		return artifact(result.outputDigest, { from: result.buildDir });
 	},
 );
 

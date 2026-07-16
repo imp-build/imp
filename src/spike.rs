@@ -2273,6 +2273,23 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_digest_paths", host_digest_paths)?;
 
+    // __host_digest_stat(digest, from) → JSON { fileCount, totalSize }
+    let host_digest_stat = Function::new(
+        ctx.clone(),
+        move |digest: String, from: Option<String>| -> rquickjs::Result<String> {
+            let digest = imp_store::digest::DirectoryDigest::from_digest(digest);
+            let stat = imp_store::digest::digest_stat(&digest, from.as_deref()).map_err(|e| {
+                rquickjs::Error::new_loading_message("digestStat", format!("{e:#}"))
+            })?;
+            serde_json::to_string(&serde_json::json!({
+                "fileCount": stat.file_count,
+                "totalSize": stat.total_size,
+            }))
+            .map_err(|e| rquickjs::Error::new_loading_message("digestStat", e.to_string()))
+        },
+    )?;
+    globals.set("__host_digest_stat", host_digest_stat)?;
+
     // __host_digest_read_file(digest, path) → string, the digest-backed
     // analog of __host_read_file for a real workspace path.
     let host_digest_read_file = Function::new(

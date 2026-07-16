@@ -1,6 +1,7 @@
 import {
 	Target,
 	allUnowned,
+	artifact,
 	defineConfigSchema,
 	field,
 	file_set,
@@ -18,7 +19,6 @@ import {
 	sourcesField,
 	targetAddress,
 	workspaceTargets,
-	writeWorkspace,
 	toolName,
 	BUILD,
 	PACKAGE,
@@ -30,7 +30,6 @@ import {
 // "cc" tool identity.
 const CC_TOOL = toolName("cc");
 
-import { distPathFor } from "//rules/workflows/package";
 import {
 	registerBuildGenerator,
 	GENERATE_BUILD,
@@ -662,10 +661,7 @@ export const ccLibraryPackage = product(
 			return cmake.packageCmakeArtifact(handle);
 		}
 		const result = await buildRawLibrary(handle);
-		writeWorkspace(distPathFor(handle), result.outputDigest, {
-			from: dirname(result.outputPath),
-		});
-		return result;
+		return artifact(result.outputDigest, { from: dirname(result.outputPath) });
 	},
 );
 
@@ -675,10 +671,7 @@ product(CcBinary, PACKAGE, CC_TOOL, async function ccBinaryPackage(handle) {
 		return cmake.packageCmakeArtifact(handle);
 	}
 	const result = await buildRawBinary(handle);
-	writeWorkspace(distPathFor(handle), result.outputDigest, {
-		from: dirname(result.outputPath),
-	});
-	return result;
+	return artifact(result.outputDigest, { from: dirname(result.outputPath) });
 });
 
 product(CcTest, TEST, CC_TOOL, async function ccTestRun(handle) {

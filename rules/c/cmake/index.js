@@ -1,5 +1,6 @@
 import {
 	Target,
+	artifact,
 	expand,
 	glob,
 	file_set,
@@ -14,12 +15,10 @@ import {
 	run,
 	sourcesField,
 	targetAddress,
-	writeWorkspace,
 	BUILD,
 	PACKAGE,
 	TEST,
 } from "imp:core";
-import { distPathFor } from "//rules/workflows/package";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import {
 	acquireCmakeToolchain,
@@ -735,7 +734,7 @@ export const native_link_library = product(
  *
  * @param {object} handle Target handle (cmake-lib, or a cc_library/cc_binary/
  *   cc_test using the cmake backend).
- * @returns {Promise<object>} buildCmakeArtifact's result.
+ * @returns {Promise<object>} An artifact(...) built from the cmake result.
  */
 export async function packageCmakeArtifact(handle) {
 	const result = await buildCmakeArtifact(handle);
@@ -744,10 +743,7 @@ export async function packageCmakeArtifact(handle) {
 			"package is not yet implemented for cmake targets using stageOutputs (their outputs may not share a common directory)",
 		);
 	}
-	writeWorkspace(distPathFor(handle), result.outputDigest, {
-		from: result.outputBase,
-	});
-	return result;
+	return artifact(result.outputDigest, { from: result.outputBase });
 }
 
 export const cmakeLibPackage = product(

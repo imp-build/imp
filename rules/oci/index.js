@@ -1,5 +1,6 @@
 import {
 	Target,
+	artifact,
 	cacheGet,
 	cacheHas,
 	glob,
@@ -11,13 +12,11 @@ import {
 	productFor,
 	run,
 	targetAddress,
-	writeWorkspace,
 	BUILD,
 	PACKAGE,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import { distPathFor } from "//rules/workflows/package";
 
 import { craneTool } from "//rules/oci/toolchain";
 import {
@@ -273,9 +272,7 @@ async function packageOciLayoutAsTar(
 		display: `package ${slug} as OCI archive tar`,
 	});
 
-	const dist = distPathFor(handle);
-	writeWorkspace(dist, result.outputDigest, { from: dir });
-	return { tarPath: `${dist}/image.tar` };
+	return artifact(result.outputDigest, { from: dir });
 }
 
 /**
@@ -284,7 +281,8 @@ async function packageOciLayoutAsTar(
  * `podman load` / `docker load`.
  *
  * @param {object} handle Target handle returned by ociPull().
- * @returns {Promise<{ tarPath: string }>}
+ * @returns {Promise<object>} An artifact(...) whose published dist/ path
+ *   will contain an `image.tar`.
  */
 export const ociPullPackage = product(
 	OciPull,
@@ -673,7 +671,8 @@ export const ociBuildBuild = product(
  * `podman load` / `docker load`.
  *
  * @param {object} handle Target handle returned by ociBuild().
- * @returns {Promise<{ tarPath: string }>}
+ * @returns {Promise<object>} An artifact(...) whose published dist/ path
+ *   will contain an `image.tar`.
  */
 export const ociBuildPackage = product(
 	OciBuild,

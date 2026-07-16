@@ -543,10 +543,12 @@ describe("Odin rules", () => {
 		}
 	});
 
-	// odinDistPackage's dist/ path comes from distPathFor(handle), which resolves
-	// a target's real workspace address — unavailable for a target constructed
-	// directly in a unit test (only BUILD.js-loaded targets get one), so its
-	// end-to-end behavior is covered by `imp package` rather than here.
+	// odinDistPackage just returns artifact(buildResult.outputDigest, {from}) —
+	// publishing to dist/ now happens in the `package` goal (packageGoal,
+	// rules/workflows/package.js), not here. But that digest comes from
+	// __host_run's real return value, which withFakeRun doesn't fake (it only
+	// stubs stdout/stderr/exitCode), so this is still covered end-to-end via
+	// `imp package` rather than a unit test here.
 
 	test("odinBuild rejects packages with no source files after excludes", async () => {
 		configure("odin", null);
