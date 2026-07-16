@@ -1975,7 +1975,9 @@ export function writeWorkspace(path, digest, opts) {
  */
 export function artifact(digest, opts) {
 	if (!digest || typeof digest !== "string") {
-		throw new Error("artifact(digest, opts?) requires a non-empty digest string");
+		throw new Error(
+			"artifact(digest, opts?) requires a non-empty digest string",
+		);
 	}
 	return { digest, from: (opts && opts.from) ?? null, __imp_artifact: true };
 }

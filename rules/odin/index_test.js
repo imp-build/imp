@@ -465,7 +465,9 @@ describe("Odin rules", () => {
 					expect(calls.length).toBe(1);
 					expect(calls[0].from).toBe(calls[0].path);
 					expect(template.opts.argv).toEqual([buildEffect.outputs[0].path]);
-					expect(template.opts.display).toBe(`run ${buildEffect.outputs[0].path}`);
+					expect(template.opts.display).toBe(
+						`run ${buildEffect.outputs[0].path}`,
+					);
 				});
 			});
 		} finally {

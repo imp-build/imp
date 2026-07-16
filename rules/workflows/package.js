@@ -21,7 +21,14 @@
 // a distributable zip) than odinDistPackage's plain binary publish, and
 // still a TODO if that's needed again.
 
-import { digestStat, goal, logInfo, resolveProducts, targetAddress, writeWorkspace } from "imp:core";
+import {
+	digestStat,
+	goal,
+	logInfo,
+	resolveProducts,
+	targetAddress,
+	writeWorkspace,
+} from "imp:core";
 
 /**
  * Derive a target's dist/ destination from its workspace address (e.g.
@@ -88,7 +95,9 @@ export async function packageGoal(selection) {
 		logInfo("Packaged 0 targets");
 		return;
 	}
-	logInfo(`Packaged ${published.length} target${published.length === 1 ? "" : "s"}:`);
+	logInfo(
+		`Packaged ${published.length} target${published.length === 1 ? "" : "s"}:`,
+	);
 	for (const p of published) {
 		logInfo(
 			`  ${p.label} -> ${p.dest} (${p.fileCount} file${p.fileCount === 1 ? "" : "s"}, ${formatSize(p.totalSize)}, ${p.digest})`,
