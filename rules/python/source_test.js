@@ -61,7 +61,9 @@ describe("python sources", () => {
 			const action = host.runs[host.runs.length - 1];
 			expect(action.argv[2]).toContain("uv run --no-project --managed-python");
 			expect(action.argv).toContain("3.13.0");
-			expect(action.argv).toContain("rules/python/example/src/hello/__main__.py");
+			expect(action.argv).toContain(
+				"rules/python/example/src/hello/__main__.py",
+			);
 			expect(action.impure).toBe(true);
 		});
 	});

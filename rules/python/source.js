@@ -46,7 +46,9 @@ function normalize_workspace_path(path) {
 	for (const part of path.split("/")) {
 		if (part === "" || part === ".") continue;
 		if (part === "..") {
-			throw new Error(`python source paths must stay within the workspace: ${path}`);
+			throw new Error(
+				`python source paths must stay within the workspace: ${path}`,
+			);
 		}
 		parts.push(part);
 	}
@@ -94,7 +96,9 @@ export class PythonToolchain extends Target {
  */
 export function pythonToolchain(version, { default: isDefault = false } = {}) {
 	if (typeof version !== "string" || version === "") {
-		throw new Error("pythonToolchain(version) requires a non-empty version string");
+		throw new Error(
+			"pythonToolchain(version) requires a non-empty version string",
+		);
 	}
 	const handle = new PythonToolchain({ version });
 	if (isDefault) default_python_toolchain = handle;
@@ -111,8 +115,11 @@ export class PythonProject extends Target {
 		super({
 			kind: PythonProject.kind,
 			attrs: { path },
-			sources: sourcesField({ root: path, include: ["pyproject.toml", "uv.lock"] }),
-	});
+			sources: sourcesField({
+				root: path,
+				include: ["pyproject.toml", "uv.lock"],
+			}),
+		});
 	}
 }
 
@@ -139,12 +146,20 @@ export class PythonSources extends Target {
 	static kind = "python-sources";
 	constructor({ root, sources = ["*.py"], runtime, project, uvVersion }) {
 		if (typeof root !== "string" || root === "") {
-			throw new Error("pythonSources({ root, ... }) requires a workspace-relative root");
+			throw new Error(
+				"pythonSources({ root, ... }) requires a workspace-relative root",
+			);
 		}
 		if (!Array.isArray(sources) || sources.length === 0) {
-			throw new Error("pythonSources({ sources }) requires at least one source pattern");
+			throw new Error(
+				"pythonSources({ sources }) requires at least one source pattern",
+			);
 		}
-		if (sources.some((pattern) => typeof pattern !== "string" || pattern.includes("**"))) {
+		if (
+			sources.some(
+				(pattern) => typeof pattern !== "string" || pattern.includes("**"),
+			)
+		) {
 			throw new Error("pythonSources source patterns must be direct (no '**')");
 		}
 		super({
@@ -234,7 +249,9 @@ export const pythonSourceRun = product(
 		const envExports = sandboxRootEnvExports(uvCacheDirEnv());
 		const inputs = [file_set.literal(handle.attrs.sourceFiles)];
 		if (project) {
-			inputs.push(glob({ root: project, include: ["pyproject.toml", "uv.lock"] }));
+			inputs.push(
+				glob({ root: project, include: ["pyproject.toml", "uv.lock"] }),
+			);
 		}
 		const script =
 			`file=$1; root=$2; project=$3; venv=$4; version=$5; shift 5; ` +
@@ -266,4 +283,7 @@ export const pythonSourceRun = product(
 	},
 );
 
-registerBuildRule({ rule: "pythonSources", importFrom: "//rules/python/source" });
+registerBuildRule({
+	rule: "pythonSources",
+	importFrom: "//rules/python/source",
+});

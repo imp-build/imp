@@ -61,10 +61,18 @@ export function catalog(context = {}) {
 				description: "Odin packages and tests",
 				detection: { fileNames: [], extensions: ["odin"] },
 				features: [
-					feature("odin.fmt", "Format with odinfmt", "Enable fmt and fmt --check"),
+					feature(
+						"odin.fmt",
+						"Format with odinfmt",
+						"Enable fmt and fmt --check",
+					),
 					feature("odin.lint", "Lint", "Enable odin check -vet"),
 					feature("odin.test", "Test", "Enable the test workflow"),
-					feature("odin.package", "Package", "Publish build outputs under dist/"),
+					feature(
+						"odin.package",
+						"Package",
+						"Publish build outputs under dist/",
+					),
 					feature("odin.run", "Run", "Run a selected Odin package"),
 					feature(
 						"odin.generate-build",
@@ -83,10 +91,18 @@ export function catalog(context = {}) {
 					extensions: ["py"],
 				},
 				features: [
-					feature("python.fmt", "Format with Ruff", "Enable fmt and fmt --check"),
+					feature(
+						"python.fmt",
+						"Format with Ruff",
+						"Enable fmt and fmt --check",
+					),
 					feature("python.lint", "Lint with Ruff", "Enable Ruff checks"),
 					feature("python.test", "Test", "Enable the test workflow"),
-					feature("python.package", "Package", "Build and publish PEX applications"),
+					feature(
+						"python.package",
+						"Package",
+						"Build and publish PEX applications",
+					),
 				],
 			},
 			{
@@ -98,10 +114,22 @@ export function catalog(context = {}) {
 					extensions: ["rs"],
 				},
 				features: [
-					feature("rust.fmt", "Format with rustfmt", "Enable fmt and fmt --check"),
-					feature("rust.lint", "Lint with Clippy", "Enable Clippy with warnings denied"),
+					feature(
+						"rust.fmt",
+						"Format with rustfmt",
+						"Enable fmt and fmt --check",
+					),
+					feature(
+						"rust.lint",
+						"Lint with Clippy",
+						"Enable Clippy with warnings denied",
+					),
 					feature("rust.test", "Test", "Enable the test workflow"),
-					feature("rust.package", "Package", "Publish build outputs under dist/"),
+					feature(
+						"rust.package",
+						"Package",
+						"Publish build outputs under dist/",
+					),
 					feature(
 						"rust.generate-build",
 						"Generate BUILD files",
@@ -134,9 +162,7 @@ export function render(context = {}) {
 
 	const needsGcc = any("c", "odin", "rust");
 	if (needsGcc) {
-		namedImports.add(
-			'import { gccToolchain } from "//rules/c/gcc/toolchain";',
-		);
+		namedImports.add('import { gccToolchain } from "//rules/c/gcc/toolchain";');
 		declarations.push(
 			'export const gcc = gccToolchain("2025.08-1", { default: true });',
 		);
@@ -163,9 +189,7 @@ export function render(context = {}) {
 	}
 
 	if (has("odin")) {
-		namedImports.add(
-			'import { odinToolchain } from "//rules/odin/toolchain";',
-		);
+		namedImports.add('import { odinToolchain } from "//rules/odin/toolchain";');
 		declarations.push(
 			'export const odin = odinToolchain("dev-2026-03", { default: true });',
 		);
@@ -202,9 +226,7 @@ export function render(context = {}) {
 	}
 
 	if (has("rust")) {
-		namedImports.add(
-			'import { rustToolchain } from "//rules/rust/toolchain";',
-		);
+		namedImports.add('import { rustToolchain } from "//rules/rust/toolchain";');
 		declarations.push(
 			'export const rust = rustToolchain("1.93.0", { default: true, linkDriver: gcc });',
 		);
