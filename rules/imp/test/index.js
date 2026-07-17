@@ -1,5 +1,15 @@
-import { Target, product, run, glob, workspaceFiles, TEST } from "imp:core";
+import {
+	Target,
+	product,
+	run,
+	glob,
+	workspaceFiles,
+	memo,
+	hydrateTarget,
+	TEST,
+} from "imp:core";
 import { IMP_TOOL } from "//rules/imp/imp_tool";
+import { nativeToolSpec } from "//rules/imp/native_tool";
 
 const suites = [];
 const tests = [];
@@ -451,7 +461,7 @@ export async function runTestCase(testModule, ordinal) {
 // as native_tool_test/tracked_apis_test deliberately probe ambient host state.
 export class RulesTest extends Target {
 	static kind = "rules-test";
-	constructor({ root }) {
+	constructor({ root, tools = [] }) {
 		const discoveredTests = workspaceFiles({
 			root,
 			suffix: "_test.js",
@@ -467,9 +477,21 @@ export class RulesTest extends Target {
 				root,
 				tests: discoveredTests.join(","),
 			},
+			deps: tools.map((tool) => ({ target: tool, mode: "tool" })),
 		});
 	}
 }
+
+// Everything a rules-test subprocess needs of its own target's root: the
+// discovered *_test.js files plus any fixtures/data they load. Combined in
+// test_product with the constant "rules/**/*" glob, which stages the shared
+// rule library every test module transitively imports from.
+export const sources = memo(async function sources(handle) {
+	const root = handle.attrs.root.startsWith("//")
+		? handle.attrs.root.slice(2)
+		: handle.attrs.root;
+	return glob({ root, include: ["**/*"] });
+});
 
 export const test_product = product(
 	RulesTest,
@@ -480,18 +502,32 @@ export const test_product = product(
 			.split(",")
 			.map((testModule) => testModule.trim())
 			.filter((testModule) => testModule.length > 0);
+		const toolDeps = (hydrateTarget(handle).deps || [])
+			.map((dep) => dep.handle)
+			.filter((dep) => dep && dep.kind === "native-tool");
+		const tools = await Promise.all(toolDeps.map((dep) => nativeToolSpec(dep)));
 
 		return run({
 			argv: [globalThis.__imp_self_bin, "rules-test", ...testModules],
 			// Tests glob example sources and resources, not just modules — stage
-			// the whole rules tree.
-			inputs: [glob({ include: ["rules/**/*", "imp.workspace.js"] })],
+			// the whole rules tree (shared rule library every test imports from)
+			// plus this target's own root (covers roots like //docs that live
+			// outside rules/).
+			inputs: [
+				glob({ include: ["rules/**/*", "imp.workspace.js"] }),
+				await sources(handle),
+			],
+			// Gives the sandboxed subprocess a real PATH containing these
+			// binaries, so tests that do genuine (unstubbed) nativeTool/which/env
+			// PATH lookups against them succeed — sandboxed runs otherwise get no
+			// PATH at all (see sandbox_command_env, imp-execution/src/exec.rs).
+			tools,
 			// Share the host cache so toolchain named-cache lookups hit instead of
 			// re-downloading into the sandbox's pinned HOME.
 			env: [`IMP_CACHE_DIR=${globalThis.__imp_cache_dir}`],
 			display: `test JS rules ${handle.attrs.root}`,
-			sandbox: false,
-			impure: true,
+			sandbox: true,
+			impure: false,
 		});
 	},
 );
@@ -504,8 +540,13 @@ export const test_product = product(
  * @category target
  * @param {object} opts
  * @param {string} opts.root Workspace-rooted directory, e.g. "//rules/odin".
+ * @param {object[]} [opts.tools] `nativeTool(...)` handles this root's test
+ *   suite genuinely resolves via PATH (not stubbed with withFakeToolchainHost)
+ *   — e.g. odin's tests call real `nativeToolSpec(nativeTool("mkdir"))`. The
+ *   sandboxed test subprocess otherwise has no PATH at all, so any undeclared
+ *   real lookup fails.
  * @returns {object} Target handle.
  */
-export function rulesTest({ root }) {
-	return new RulesTest({ root });
+export function rulesTest({ root, tools = [] }) {
+	return new RulesTest({ root, tools });
 }

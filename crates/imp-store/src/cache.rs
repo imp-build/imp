@@ -195,18 +195,32 @@ pub fn validate_tool_name(name: &str) -> Result<()> {
 /// dereferences symlinks into real-byte copies; run()'s tool materialization
 /// is expected to symlink the tool root wholesale, so the artifact itself
 /// must already be the symlink, not a copy.
+///
+/// `resolved` is canonicalized first: this cache is a single global path per
+/// tool name, shared between the host process and any sandboxed subprocess
+/// that also resolves the same tool name for real (e.g. a rules-test suite
+/// exercising nativeTool() as its own subject under test). A sandboxed
+/// resolution's PATH search finds this very cache entry's sandbox-local
+/// symlink first, so an uncanonicalized `resolved` would persist a path
+/// inside that ephemeral sandbox — dangling, or worse, a self-referential
+/// symlink loop once the sandbox is torn down. Canonicalizing collapses any
+/// such alias chain back to the one real, stable system binary underneath,
+/// so repeated resolutions (host or sandboxed) always converge on the same
+/// value instead of drifting.
 pub fn ensure_native_tool_artifact(name: &str, resolved: &Path) -> Result<PathBuf> {
     validate_tool_name(name)?;
+    let resolved = std::fs::canonicalize(resolved)
+        .with_context(|| format!("canonicalize {}", resolved.display()))?;
     let root = cache_root()?.join("native-tools").join(name);
     std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
-    let link = root.join(native_tool_artifact_filename(name, resolved));
-    if std::fs::read_link(&link).ok().as_deref() != Some(resolved) {
+    let link = root.join(native_tool_artifact_filename(name, &resolved));
+    if std::fs::read_link(&link).ok().as_deref() != Some(resolved.as_path()) {
         let _ = std::fs::remove_file(&link);
         #[cfg(unix)]
-        std::os::unix::fs::symlink(resolved, &link)
+        std::os::unix::fs::symlink(&resolved, &link)
             .with_context(|| format!("symlink {} -> {}", link.display(), resolved.display()))?;
         #[cfg(not(unix))]
-        std::fs::copy(resolved, &link)
+        std::fs::copy(&resolved, &link)
             .with_context(|| format!("copy {} -> {}", resolved.display(), link.display()))?;
     }
     Ok(root)
