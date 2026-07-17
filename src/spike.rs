@@ -478,6 +478,7 @@ async fn create_live_runtime(
         host_state: state,
         import_graph,
         dynamic_targets: Arc::new(Mutex::new(BTreeMap::new())),
+        expansion_children: Arc::new(Mutex::new(BTreeMap::new())),
         service,
     })
 }
@@ -981,6 +982,7 @@ async fn ensure_expanded(
             break;
         }
 
+        let mut next_frontier: Vec<String> = Vec::new();
         for target in &to_expand {
             expanded.insert(target.address.clone());
             let exec_name = live.workspace.expanders[&target.kind].exec_name.clone();
@@ -1015,46 +1017,54 @@ async fn ensure_expanded(
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("expand '{address}' failed: {e}"))?;
-        }
 
-        // Drain whatever the expanders just registered and materialize them
-        // into the dynamic overlay, reusing the same resolution logic used
-        // at workspace-load time.
-        let registrations: Vec<(u32, String)> = {
-            let mut hs = live.host_state.lock().unwrap();
-            std::mem::take(&mut hs.dynamic_registrations)
-        };
+            // Drain whatever this expander call just registered (and only
+            // this call's registrations — draining per-target, not batched
+            // across the whole `to_expand` set) so they can be attributed to
+            // `address` as their expansion parent below.
+            let registrations: Vec<(u32, String)> = {
+                let mut hs = live.host_state.lock().unwrap();
+                std::mem::take(&mut hs.dynamic_registrations)
+            };
 
-        {
-            let hs = live.host_state.lock().unwrap();
-            let mut id_to_address = hs.id_to_address.clone();
-            let mut dynamic = live.dynamic_targets.lock().unwrap();
-            let mut visiting = BTreeSet::new();
-            for (id, address) in &registrations {
-                materialize_pending_target(
-                    &hs,
-                    &mut id_to_address,
-                    &mut dynamic,
-                    &mut visiting,
-                    *id,
-                    address.clone(),
-                )?;
+            {
+                let hs = live.host_state.lock().unwrap();
+                let mut id_to_address = hs.id_to_address.clone();
+                let mut dynamic = live.dynamic_targets.lock().unwrap();
+                let mut visiting = BTreeSet::new();
+                for (id, reg_address) in &registrations {
+                    materialize_pending_target(
+                        &hs,
+                        &mut id_to_address,
+                        &mut dynamic,
+                        &mut visiting,
+                        *id,
+                        reg_address.clone(),
+                    )?;
+                }
+                drop(dynamic);
+                drop(hs);
+                live.host_state.lock().unwrap().id_to_address = id_to_address;
             }
-            drop(dynamic);
-            drop(hs);
-            live.host_state.lock().unwrap().id_to_address = id_to_address;
-        }
 
-        // Newly-minted targets are themselves already-expanded (an expander
-        // never re-triggers on its own output) but may declare deps on other
-        // expandable kinds — re-walk from their addresses.
-        for (_, address) in &registrations {
-            expanded.insert(address.clone());
+            if !registrations.is_empty() {
+                live.expansion_children
+                    .lock()
+                    .unwrap()
+                    .entry(address)
+                    .or_default()
+                    .extend(registrations.iter().map(|(_, addr)| addr.clone()));
+            }
+
+            // Newly-minted targets are themselves already-expanded (an
+            // expander never re-triggers on its own output) but may declare
+            // deps on other expandable kinds — re-walk from their addresses.
+            for (_, reg_address) in &registrations {
+                expanded.insert(reg_address.clone());
+            }
+            next_frontier.extend(registrations.into_iter().map(|(_, addr)| addr));
         }
-        frontier = registrations
-            .into_iter()
-            .map(|(_, address)| address)
-            .collect();
+        frontier = next_frontier;
     }
 
     Ok(())
@@ -3828,7 +3838,7 @@ pub async fn execute_goal_live_selection(
     ensure_expanded(live, &seed_addresses, Some(goal)).await?;
 
     let dynamic_snapshot: BTreeMap<String, Target> = live.dynamic_targets.lock().unwrap().clone();
-    let roots = match &selection {
+    let mut roots = match &selection {
         GoalSelection::Selectors(selectors) => match select_roots_in(
             &live.workspace,
             &dynamic_snapshot,
@@ -3862,6 +3872,52 @@ pub async fn execute_goal_live_selection(
             roots
         }
     };
+
+    // A selector (or changed-address) can name a target directly that is
+    // itself an expansion source for this goal — e.g. `test //pkg:crate`
+    // matching a `cargo_package` with its own `cargoTest` product, which
+    // `expandCargoTests` also fans out into per-binary `rust_test` targets.
+    // Those minted children live at different addresses, so the exact-match
+    // selector resolution above can't pick them up on its own; pull in
+    // whatever `ensure_expanded` recorded as reachable from each root.
+    {
+        let children_map = live.expansion_children.lock().unwrap();
+        if !children_map.is_empty() {
+            let mut extra: BTreeSet<String> = BTreeSet::new();
+            let mut seen: BTreeSet<String> = roots.iter().map(|(t, _)| t.address.clone()).collect();
+            let mut stack: Vec<String> = seen.iter().cloned().collect();
+            while let Some(address) = stack.pop() {
+                if let Some(children) = children_map.get(&address) {
+                    for child in children {
+                        if seen.insert(child.clone()) {
+                            extra.insert(child.clone());
+                            stack.push(child.clone());
+                        }
+                    }
+                }
+            }
+            drop(children_map);
+            if !extra.is_empty() {
+                let extra_roots = select_roots_for_addresses(
+                    &live.workspace,
+                    &dynamic_snapshot,
+                    goal_def,
+                    &extra,
+                );
+                let mut by_address: BTreeMap<&str, (&Target, String)> = roots
+                    .into_iter()
+                    .map(|(target, product)| (target.address.as_str(), (target, product)))
+                    .collect();
+                for (target, product) in extra_roots {
+                    by_address
+                        .entry(target.address.as_str())
+                        .or_insert((target, product));
+                }
+                roots = by_address.into_values().collect();
+            }
+        }
+    }
+
     let goal_callback_name = live.workspace.goal_callbacks.get(goal).cloned();
 
     // Resolve owned (js_id, product fn name, label) triples so nothing borrows
@@ -5679,6 +5735,70 @@ export const parent = target({ kind: "expandable", attrs: {} });
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].0.address, "//:child");
         assert_eq!(roots[0].1, "build");
+    }
+
+    #[tokio::test]
+    async fn naming_an_expansion_source_target_directly_also_runs_its_minted_children() {
+        // Regression test: `rules/rust/test.js`'s expandCargoTests fans a
+        // cargo_package target out into per-binary rust_test targets at
+        // different addresses. Selecting the cargo_package target by its own
+        // exact address for a goal it already has a product for (e.g. `test`
+        // //pkg:crate` matching cargoTest) must *also* dispatch whatever got
+        // expanded from it — an exact-address selector re-resolved after
+        // expansion can't discover sibling addresses on its own the way a
+        // package/wildcard selector naturally does.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker_dir = p.join("markers");
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        write_file(p.join(WORKSPACE_FILE).as_path(), "");
+        write_file(
+            p.join(BUILD_FILE).as_path(),
+            &format!(
+                r#"
+import {{ target, expand, registerTarget, product, run, targetAddress, BUILD, targetKind, toolName }} from "imp:core";
+const K_expandable = targetKind("expandable");
+const markerDir = {marker_dir:?};
+
+export const build = product(K_expandable, BUILD, toolName("expandable-tool"), async function build(handle) {{
+    const name = targetAddress(handle).replace(/[^a-zA-Z0-9]/g, "_");
+    return run({{ argv: ["sh", "-c", `touch "${{markerDir}}/${{name}}"`], display: "build", impure: true }});
+}});
+
+export const expandChildren = expand(K_expandable, async function expandChildren(handle) {{
+    if (targetAddress(handle) === "//:parent") {{
+        registerTarget(target({{ kind: "expandable", attrs: {{}} }}), "//:child");
+    }}
+}});
+
+export const parent = target({{ kind: "expandable", attrs: {{}} }});
+"#,
+                marker_dir = marker_dir.display()
+            ),
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+
+        // Select the parent directly, by its own exact address — not a
+        // package/wildcard selector, and not the child's (not-yet-existing)
+        // address either.
+        run_goal_live(&workspace, p, "build", &["//:parent".into()])
+            .await
+            .unwrap();
+
+        let dynamic_snapshot = workspace.dynamic_targets.lock().unwrap().clone();
+        assert!(
+            dynamic_snapshot.contains_key("//:child"),
+            "expander should still have run and minted //:child"
+        );
+        assert!(
+            marker_dir.join("___parent").exists(),
+            "parent's own build product should have run"
+        );
+        assert!(
+            marker_dir.join("___child").exists(),
+            "child minted by expanding the directly-named parent should also have run its build product"
+        );
     }
 
     #[tokio::test]

@@ -471,6 +471,38 @@ pub(crate) fn validate_workspace_module_path(
     Ok(())
 }
 
+pub(crate) fn module_kind(root: &Path, rules: &RulesSource, name: &str) -> ModuleKind {
+    if name == "imp:core" {
+        ModuleKind::BuiltIn
+    } else if name == WORKSPACE_FILE {
+        ModuleKind::Workspace
+    } else if name.starts_with("//") {
+        resolve_workspace_module(root, rules, name)
+            .map(|resolution| resolution.kind)
+            .unwrap_or(ModuleKind::Unknown)
+    } else {
+        ModuleKind::Unknown
+    }
+}
+
+pub(crate) fn module_location(root: &Path, rules: &RulesSource, name: &str) -> String {
+    if name == "imp:core" {
+        return "built-in imp:core".to_owned();
+    }
+    if name == WORKSPACE_FILE {
+        return root.join(WORKSPACE_FILE).display().to_string();
+    }
+    if let Some(stripped) = name.strip_prefix("//") {
+        if let Ok(resolution) = resolve_workspace_module(root, rules, name) {
+            return match resolution.source {
+                ModuleSource::File(path) => path.display().to_string(),
+                ModuleSource::Embedded(_) => format!("<embedded {stripped}>"),
+            };
+        }
+    }
+    name.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,36 +563,4 @@ mod tests {
         );
         assert!(resolve_workspace_file(root.path(), &RulesSource::Embedded, "//").is_err());
     }
-}
-
-pub(crate) fn module_kind(root: &Path, rules: &RulesSource, name: &str) -> ModuleKind {
-    if name == "imp:core" {
-        ModuleKind::BuiltIn
-    } else if name == WORKSPACE_FILE {
-        ModuleKind::Workspace
-    } else if name.starts_with("//") {
-        resolve_workspace_module(root, rules, name)
-            .map(|resolution| resolution.kind)
-            .unwrap_or(ModuleKind::Unknown)
-    } else {
-        ModuleKind::Unknown
-    }
-}
-
-pub(crate) fn module_location(root: &Path, rules: &RulesSource, name: &str) -> String {
-    if name == "imp:core" {
-        return "built-in imp:core".to_owned();
-    }
-    if name == WORKSPACE_FILE {
-        return root.join(WORKSPACE_FILE).display().to_string();
-    }
-    if let Some(stripped) = name.strip_prefix("//") {
-        if let Ok(resolution) = resolve_workspace_module(root, rules, name) {
-            return match resolution.source {
-                ModuleSource::File(path) => path.display().to_string(),
-                ModuleSource::Embedded(_) => format!("<embedded {stripped}>"),
-            };
-        }
-    }
-    name.to_owned()
 }

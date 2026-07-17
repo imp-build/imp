@@ -70,6 +70,13 @@ pub struct LiveWorkspace {
     /// Reset at the start of each `execute_goal_live`/`evaluate_product_json`
     /// invocation; merged with `workspace.targets` at selector-resolution time.
     pub(crate) dynamic_targets: Arc<Mutex<BTreeMap<String, Target>>>,
+    /// Immediate parent → minted-children links recorded by `ensure_expanded`
+    /// as `expand()` rules register targets. Lets a selector that names an
+    /// expansion source directly (e.g. a `cargo_package` target addressed
+    /// exactly, not via a package/wildcard selector) still pick up whatever
+    /// it expanded into — an exact address match alone can't, since minted
+    /// children live at different addresses.
+    pub(crate) expansion_children: Arc<Mutex<BTreeMap<String, Vec<String>>>>,
     /// The execution service live `run()`/worker/toolchain host functions go
     /// through — the in-process local executor today, a daemon client later.
     /// Owns the persistent-worker registry and all other live execution
@@ -93,6 +100,7 @@ impl std::fmt::Debug for LiveWorkspace {
             .field("host_state", &"Arc<Mutex<..>>")
             .field("import_graph", &"Arc<Mutex<..>>")
             .field("dynamic_targets", &"Arc<Mutex<..>>")
+            .field("expansion_children", &"Arc<Mutex<..>>")
             .field("service", &"Arc<dyn ExecutionService>")
             .finish()
     }
