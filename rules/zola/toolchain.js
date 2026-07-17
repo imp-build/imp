@@ -2,6 +2,7 @@ import {
 	Toolchain,
 	product,
 	namedCache,
+	memo,
 	platformInfo,
 	cachePut,
 	cacheGet,
@@ -182,49 +183,51 @@ export function installZolaToolchain(version, source) {
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
-export async function acquireZolaToolchain(version) {
-	const plat = platformInfo();
-	const key = zolaCacheKey(version, plat);
+export const acquireZolaToolchain = memo(
+	async function acquireZolaToolchain(version) {
+		const plat = platformInfo();
+		const key = zolaCacheKey(version, plat);
 
-	if (cacheHas(ZOLA_TOOLCHAIN_CACHE, key)) {
-		return cacheGet(ZOLA_TOOLCHAIN_CACHE, key);
-	}
-	if (!coreToolHandles) {
-		throw new Error(
-			"no zola toolchain declared via zolaToolchain(); nothing to acquire",
+		if (cacheHas(ZOLA_TOOLCHAIN_CACHE, key)) {
+			return cacheGet(ZOLA_TOOLCHAIN_CACHE, key);
+		}
+		if (!coreToolHandles) {
+			throw new Error(
+				"no zola toolchain declared via zolaToolchain(); nothing to acquire",
+			);
+		}
+
+		const coreTools = await Promise.all(
+			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
-	}
 
-	const coreTools = await Promise.all(
-		coreToolHandles.map((handle) => nativeToolSpec(handle)),
-	);
+		const downloadPath = `.imp/zola-downloads/${key}/${zolaArtifactName(version, plat)}`;
+		await downloadToolArtifact({
+			lockfile: ZOLA_LOCKFILE,
+			tool: "zola",
+			version,
+			plat,
+			url: zolaDownloadUrl(version, plat),
+			downloadPath,
+			tools: coreTools,
+			display: `download zola ${version} (${plat.os}/${plat.arch})`,
+			unverified: ZolaToolchain.resolveUnverified(version),
+		});
 
-	const downloadPath = `.imp/zola-downloads/${key}/${zolaArtifactName(version, plat)}`;
-	await downloadToolArtifact({
-		lockfile: ZOLA_LOCKFILE,
-		tool: "zola",
-		version,
-		plat,
-		url: zolaDownloadUrl(version, plat),
-		downloadPath,
-		tools: coreTools,
-		display: `download zola ${version} (${plat.os}/${plat.arch})`,
-		unverified: ZolaToolchain.resolveUnverified(version),
-	});
+		// Zola's release archive ships the `zola` binary at the archive root
+		// (no wrapping directory), so no --strip-components is needed.
+		await extractArchive({
+			archive: downloadPath,
+			dest: `.imp/zola-toolchains/${key}`,
+			format: plat.os === "windows" ? "zip" : "tar.gz",
+			tools: coreTools,
+			namedCache: { name: ZOLA_TOOLCHAIN_CACHE, key },
+			display: `install zola ${version} (${plat.os}/${plat.arch})`,
+		});
 
-	// Zola's release archive ships the `zola` binary at the archive root
-	// (no wrapping directory), so no --strip-components is needed.
-	await extractArchive({
-		archive: downloadPath,
-		dest: `.imp/zola-toolchains/${key}`,
-		format: plat.os === "windows" ? "zip" : "tar.gz",
-		tools: coreTools,
-		namedCache: { name: ZOLA_TOOLCHAIN_CACHE, key },
-		display: `install zola ${version} (${plat.os}/${plat.arch})`,
-	});
-
-	return cacheGet(ZOLA_TOOLCHAIN_CACHE, key);
-}
+		return cacheGet(ZOLA_TOOLCHAIN_CACHE, key);
+	},
+);
 
 /**
  * Resolve an explicit or default zola toolchain version.

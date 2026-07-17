@@ -2,6 +2,7 @@ import {
 	Toolchain,
 	product,
 	namedCache,
+	memo,
 	run,
 	output,
 	output_path,
@@ -196,73 +197,75 @@ export function installUvToolchain(version, source) {
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
-export async function acquireUvToolchain(version) {
-	const plat = platformInfo();
-	const key = uvCacheKey(version, plat);
+export const acquireUvToolchain = memo(
+	async function acquireUvToolchain(version) {
+		const plat = platformInfo();
+		const key = uvCacheKey(version, plat);
 
-	if (!coreToolHandles) {
-		throw new Error(
-			"no uv toolchain declared via uvToolchain(); nothing to acquire",
+		if (!coreToolHandles) {
+			throw new Error(
+				"no uv toolchain declared via uvToolchain(); nothing to acquire",
+			);
+		}
+		const coreTools = await Promise.all(
+			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
-	}
-	const coreTools = await Promise.all(
-		coreToolHandles.map((handle) => nativeToolSpec(handle)),
-	);
 
-	if (!cacheHas(UV_TOOLCHAIN_CACHE, key)) {
-		const downloadPath = `.imp/uv-downloads/${key}/${uvArtifactName(version, plat)}`;
-		await downloadToolArtifact({
-			lockfile: UV_LOCKFILE,
-			tool: "uv-toolchain",
-			version,
-			plat,
-			url: uvDownloadUrl(version, plat),
-			downloadPath,
-			tools: coreTools,
-			display: `download uv ${version} (${plat.os}/${plat.arch})`,
-			unverified: UvToolchain.resolveUnverified(version),
-		});
+		if (!cacheHas(UV_TOOLCHAIN_CACHE, key)) {
+			const downloadPath = `.imp/uv-downloads/${key}/${uvArtifactName(version, plat)}`;
+			await downloadToolArtifact({
+				lockfile: UV_LOCKFILE,
+				tool: "uv-toolchain",
+				version,
+				plat,
+				url: uvDownloadUrl(version, plat),
+				downloadPath,
+				tools: coreTools,
+				display: `download uv ${version} (${plat.os}/${plat.arch})`,
+				unverified: UvToolchain.resolveUnverified(version),
+			});
 
-		// uv's release archives extract a single top-level uv-<triple>/
-		// directory containing `uv` (and `uvx`) — strip it so the cache
-		// root holds the binaries directly, same shape acquireZigToolchain
-		// uses.
-		await extractArchive({
-			archive: downloadPath,
-			dest: `.imp/uv-toolchains/${key}`,
-			format: plat.os === "windows" ? "zip" : "tar.gz",
-			stripComponents: 1,
-			tools: coreTools,
-			namedCache: { name: UV_TOOLCHAIN_CACHE, key },
-			display: `extract uv ${version} (${plat.os}/${plat.arch})`,
-		});
-	}
+			// uv's release archives extract a single top-level uv-<triple>/
+			// directory containing `uv` (and `uvx`) — strip it so the cache
+			// root holds the binaries directly, same shape acquireZigToolchain
+			// uses.
+			await extractArchive({
+				archive: downloadPath,
+				dest: `.imp/uv-toolchains/${key}`,
+				format: plat.os === "windows" ? "zip" : "tar.gz",
+				stripComponents: 1,
+				tools: coreTools,
+				namedCache: { name: UV_TOOLCHAIN_CACHE, key },
+				display: `extract uv ${version} (${plat.os}/${plat.arch})`,
+			});
+		}
 
-	// A named-cache "tool" mount (see uvCacheDirTool) requires its cache
-	// path to already exist as a real directory — materialize_tools_into_
-	// sandbox in src/exec.rs bails otherwise — so seed it with an empty
-	// directory here, guarded independently of the toolchain cacheHas()
-	// above since this cache is keyed "shared", not per-version (same
-	// independent-guard pattern as ZIG_BUILD_CACHE's seeding in
-	// rules/c/zig/toolchain.js).
-	if (!cacheHas(UV_CACHE_DIR_CACHE, UV_CACHE_KEY)) {
-		const seedPath = ".imp/uv-cache-dir-seed";
-		await run({
-			argv: ["sh", "-c", 'mkdir -p "$1"', "seed-uv-cache-dir", seedPath],
-			tools: coreTools,
-			outputs: [
-				output(output_path(seedPath), {
-					kind: "directory",
-					namedCache: { name: UV_CACHE_DIR_CACHE, key: UV_CACHE_KEY },
-				}),
-			],
-			materialize: true,
-			display: "seed uv cache dir",
-		});
-	}
+		// A named-cache "tool" mount (see uvCacheDirTool) requires its cache
+		// path to already exist as a real directory — materialize_tools_into_
+		// sandbox in src/exec.rs bails otherwise — so seed it with an empty
+		// directory here, guarded independently of the toolchain cacheHas()
+		// above since this cache is keyed "shared", not per-version (same
+		// independent-guard pattern as ZIG_BUILD_CACHE's seeding in
+		// rules/c/zig/toolchain.js).
+		if (!cacheHas(UV_CACHE_DIR_CACHE, UV_CACHE_KEY)) {
+			const seedPath = ".imp/uv-cache-dir-seed";
+			await run({
+				argv: ["sh", "-c", 'mkdir -p "$1"', "seed-uv-cache-dir", seedPath],
+				tools: coreTools,
+				outputs: [
+					output(output_path(seedPath), {
+						kind: "directory",
+						namedCache: { name: UV_CACHE_DIR_CACHE, key: UV_CACHE_KEY },
+					}),
+				],
+				materialize: true,
+				display: "seed uv cache dir",
+			});
+		}
 
-	return cacheGet(UV_TOOLCHAIN_CACHE, key);
-}
+		return cacheGet(UV_TOOLCHAIN_CACHE, key);
+	},
+);
 
 /**
  * Resolve an explicit or default uv toolchain version.

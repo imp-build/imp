@@ -2,6 +2,7 @@ import {
 	Toolchain,
 	product,
 	namedCache,
+	memo,
 	platformInfo,
 	cachePut,
 	cacheGet,
@@ -191,53 +192,55 @@ export function installRuffToolchain(version, source) {
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
-export async function acquireRuffToolchain(version) {
-	const plat = platformInfo();
-	const key = ruffCacheKey(version, plat);
+export const acquireRuffToolchain = memo(
+	async function acquireRuffToolchain(version) {
+		const plat = platformInfo();
+		const key = ruffCacheKey(version, plat);
 
-	if (!coreToolHandles) {
-		throw new Error(
-			"no ruff toolchain declared via ruffToolchain(); nothing to acquire",
+		if (!coreToolHandles) {
+			throw new Error(
+				"no ruff toolchain declared via ruffToolchain(); nothing to acquire",
+			);
+		}
+		const coreTools = await Promise.all(
+			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
-	}
-	const coreTools = await Promise.all(
-		coreToolHandles.map((handle) => nativeToolSpec(handle)),
-	);
 
-	if (!cacheHas(RUFF_TOOLCHAIN_CACHE, key)) {
-		// Verification only runs on this cold path — warm named-cache
-		// contents were verified when inserted, or seeded deliberately via
-		// installRuffToolchain.
-		const downloadPath = `.imp/ruff-downloads/${key}/${ruffArtifactName(version, plat)}`;
-		await downloadToolArtifact({
-			lockfile: lockfileFor(version),
-			tool: "ruff-toolchain",
-			version,
-			plat,
-			url: ruffDownloadUrl(version, plat),
-			downloadPath,
-			tools: coreTools,
-			display: `download ruff ${version} (${plat.os}/${plat.arch})`,
-			unverified: RuffToolchain.resolveUnverified(version),
-		});
+		if (!cacheHas(RUFF_TOOLCHAIN_CACHE, key)) {
+			// Verification only runs on this cold path — warm named-cache
+			// contents were verified when inserted, or seeded deliberately via
+			// installRuffToolchain.
+			const downloadPath = `.imp/ruff-downloads/${key}/${ruffArtifactName(version, plat)}`;
+			await downloadToolArtifact({
+				lockfile: lockfileFor(version),
+				tool: "ruff-toolchain",
+				version,
+				plat,
+				url: ruffDownloadUrl(version, plat),
+				downloadPath,
+				tools: coreTools,
+				display: `download ruff ${version} (${plat.os}/${plat.arch})`,
+				unverified: RuffToolchain.resolveUnverified(version),
+			});
 
-		// ruff's release archives extract a single top-level
-		// ruff-<triple>/ directory containing the `ruff` binary — strip it
-		// so the cache root holds the binary directly, same shape
-		// acquireUvToolchain uses.
-		await extractArchive({
-			archive: downloadPath,
-			dest: `.imp/ruff-toolchains/${key}`,
-			format: plat.os === "windows" ? "zip" : "tar.gz",
-			stripComponents: 1,
-			tools: coreTools,
-			namedCache: { name: RUFF_TOOLCHAIN_CACHE, key },
-			display: `extract ruff ${version} (${plat.os}/${plat.arch})`,
-		});
-	}
+			// ruff's release archives extract a single top-level
+			// ruff-<triple>/ directory containing the `ruff` binary — strip it
+			// so the cache root holds the binary directly, same shape
+			// acquireUvToolchain uses.
+			await extractArchive({
+				archive: downloadPath,
+				dest: `.imp/ruff-toolchains/${key}`,
+				format: plat.os === "windows" ? "zip" : "tar.gz",
+				stripComponents: 1,
+				tools: coreTools,
+				namedCache: { name: RUFF_TOOLCHAIN_CACHE, key },
+				display: `extract ruff ${version} (${plat.os}/${plat.arch})`,
+			});
+		}
 
-	return cacheGet(RUFF_TOOLCHAIN_CACHE, key);
-}
+		return cacheGet(RUFF_TOOLCHAIN_CACHE, key);
+	},
+);
 
 /**
  * Resolve an explicit or default ruff toolchain version.

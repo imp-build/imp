@@ -2,6 +2,7 @@ import {
 	Toolchain,
 	product,
 	namedCache,
+	memo,
 	run,
 	output,
 	output_path,
@@ -249,82 +250,84 @@ export function installRustToolchain(version, source) {
  * @param {string} version
  * @returns {Promise<string>} Local path to the RUSTUP_HOME cache root.
  */
-export async function acquireRustToolchain(version) {
-	const plat = platformInfo();
-	const key = rustCacheKey(version, plat);
+export const acquireRustToolchain = memo(
+	async function acquireRustToolchain(version) {
+		const plat = platformInfo();
+		const key = rustCacheKey(version, plat);
 
-	if (cacheHas(RUSTUP_HOME_CACHE, key) && cacheHas(CARGO_HOME_CACHE, key)) {
-		return cacheGet(RUSTUP_HOME_CACHE, key);
-	}
-	if (!coreToolHandles) {
-		throw new Error(
-			"no rust toolchain declared via rustToolchain(); nothing to acquire",
+		if (cacheHas(RUSTUP_HOME_CACHE, key) && cacheHas(CARGO_HOME_CACHE, key)) {
+			return cacheGet(RUSTUP_HOME_CACHE, key);
+		}
+		if (!coreToolHandles) {
+			throw new Error(
+				"no rust toolchain declared via rustToolchain(); nothing to acquire",
+			);
+		}
+
+		const coreTools = await Promise.all(
+			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
-	}
 
-	const coreTools = await Promise.all(
-		coreToolHandles.map((handle) => nativeToolSpec(handle)),
-	);
+		const rustupHomeDir = `.imp/rustup-home/${key}`;
+		const cargoHomeDir = `.imp/cargo-home/${key}`;
+		const rustupInitExe =
+			plat.os === "windows" ? "rustup-init.exe" : "rustup-init";
 
-	const rustupHomeDir = `.imp/rustup-home/${key}`;
-	const cargoHomeDir = `.imp/cargo-home/${key}`;
-	const rustupInitExe =
-		plat.os === "windows" ? "rustup-init.exe" : "rustup-init";
-
-	// The verified rustup-init download (pinned by rust.lock) lands in a
-	// materialized scratch path; only the resulting RUSTUP_HOME/CARGO_HOME
-	// are cached — the installer file is discarded with the sandbox.
-	const downloadPath = `.imp/rust-downloads/${key}/${rustupInitExe}`;
-	await downloadToolArtifact({
-		lockfile: RUST_LOCKFILE,
-		tool: "rust",
-		version,
-		plat,
-		url: rustDownloadUrl(version, plat),
-		downloadPath,
-		tools: coreTools,
-		display: `download rustup-init for rust ${version} (${plat.os}/${plat.arch})`,
-		unverified: RustToolchain.resolveUnverified(version),
-	});
-
-	// rustup writes into RUSTUP_HOME/CARGO_HOME, which we point at via $PWD
-	// (run() env can't expand $PWD, so this lives in the script). Profile
-	// "minimal" plus explicit rustfmt (for fmt/format-check,
-	// rules/rust/fmt.js) and clippy (for lint) components — "default" would
-	// also pull in rust-docs, ~740MB of small files that dominate
-	// cold-acquire time.
-	const chmodStep = plat.os === "windows" ? "" : 'chmod +x "$1"; ';
-	const installScript = `set -e; ${chmodStep}export RUSTUP_HOME="$PWD/$2" CARGO_HOME="$PWD/$3"; ./"$1" -y --no-modify-path --profile minimal --component rustfmt --component clippy --default-toolchain "$4"`;
-
-	await run({
-		argv: [
-			"sh",
-			"-c",
-			installScript,
-			"install-rust",
-			downloadPath,
-			rustupHomeDir,
-			cargoHomeDir,
+		// The verified rustup-init download (pinned by rust.lock) lands in a
+		// materialized scratch path; only the resulting RUSTUP_HOME/CARGO_HOME
+		// are cached — the installer file is discarded with the sandbox.
+		const downloadPath = `.imp/rust-downloads/${key}/${rustupInitExe}`;
+		await downloadToolArtifact({
+			lockfile: RUST_LOCKFILE,
+			tool: "rust",
 			version,
-		],
-		tools: coreTools,
-		inputs: [{ kind: "file", path: downloadPath }],
-		outputs: [
-			output(output_path(rustupHomeDir), {
-				kind: "directory",
-				namedCache: { name: RUSTUP_HOME_CACHE, key },
-			}),
-			output(output_path(cargoHomeDir), {
-				kind: "directory",
-				namedCache: { name: CARGO_HOME_CACHE, key },
-			}),
-		],
-		materialize: false,
-		display: `install rust ${version} (${plat.os}/${plat.arch})`,
-	});
+			plat,
+			url: rustDownloadUrl(version, plat),
+			downloadPath,
+			tools: coreTools,
+			display: `download rustup-init for rust ${version} (${plat.os}/${plat.arch})`,
+			unverified: RustToolchain.resolveUnverified(version),
+		});
 
-	return cacheGet(RUSTUP_HOME_CACHE, key);
-}
+		// rustup writes into RUSTUP_HOME/CARGO_HOME, which we point at via $PWD
+		// (run() env can't expand $PWD, so this lives in the script). Profile
+		// "minimal" plus explicit rustfmt (for fmt/format-check,
+		// rules/rust/fmt.js) and clippy (for lint) components — "default" would
+		// also pull in rust-docs, ~740MB of small files that dominate
+		// cold-acquire time.
+		const chmodStep = plat.os === "windows" ? "" : 'chmod +x "$1"; ';
+		const installScript = `set -e; ${chmodStep}export RUSTUP_HOME="$PWD/$2" CARGO_HOME="$PWD/$3"; ./"$1" -y --no-modify-path --profile minimal --component rustfmt --component clippy --default-toolchain "$4"`;
+
+		await run({
+			argv: [
+				"sh",
+				"-c",
+				installScript,
+				"install-rust",
+				downloadPath,
+				rustupHomeDir,
+				cargoHomeDir,
+				version,
+			],
+			tools: coreTools,
+			inputs: [{ kind: "file", path: downloadPath }],
+			outputs: [
+				output(output_path(rustupHomeDir), {
+					kind: "directory",
+					namedCache: { name: RUSTUP_HOME_CACHE, key },
+				}),
+				output(output_path(cargoHomeDir), {
+					kind: "directory",
+					namedCache: { name: CARGO_HOME_CACHE, key },
+				}),
+			],
+			materialize: false,
+			display: `install rust ${version} (${plat.os}/${plat.arch})`,
+		});
+
+		return cacheGet(RUSTUP_HOME_CACHE, key);
+	},
+);
 
 /**
  * Resolve an explicit or default Rust toolchain version.

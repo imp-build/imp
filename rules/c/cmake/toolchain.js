@@ -2,6 +2,7 @@ import {
 	Toolchain,
 	product,
 	namedCache,
+	memo,
 	platformInfo,
 	cachePut,
 	cacheGet,
@@ -189,48 +190,50 @@ export function installCmakeToolchain(version, source) {
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
-export async function acquireCmakeToolchain(version) {
-	const plat = platformInfo();
-	const key = cmakeCacheKey(version, plat);
+export const acquireCmakeToolchain = memo(
+	async function acquireCmakeToolchain(version) {
+		const plat = platformInfo();
+		const key = cmakeCacheKey(version, plat);
 
-	if (cacheHas(CMAKE_TOOLCHAIN_CACHE, key)) {
-		return cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
-	}
-	if (!coreToolHandles) {
-		throw new Error(
-			"no CMake toolchain declared via cmakeToolchain(); nothing to acquire",
+		if (cacheHas(CMAKE_TOOLCHAIN_CACHE, key)) {
+			return cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
+		}
+		if (!coreToolHandles) {
+			throw new Error(
+				"no CMake toolchain declared via cmakeToolchain(); nothing to acquire",
+			);
+		}
+
+		const coreTools = await Promise.all(
+			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
-	}
 
-	const coreTools = await Promise.all(
-		coreToolHandles.map((handle) => nativeToolSpec(handle)),
-	);
+		const downloadPath = `.imp/cmake-downloads/${key}/${cmakeArtifactName(version, plat)}`;
+		await downloadToolArtifact({
+			lockfile: CMAKE_LOCKFILE,
+			tool: "cmake",
+			version,
+			plat,
+			url: cmakeDownloadUrl(version, plat),
+			downloadPath,
+			tools: coreTools,
+			display: `download cmake ${version} (${plat.os}/${plat.arch})`,
+			unverified: CmakeToolchain.resolveUnverified(version),
+		});
 
-	const downloadPath = `.imp/cmake-downloads/${key}/${cmakeArtifactName(version, plat)}`;
-	await downloadToolArtifact({
-		lockfile: CMAKE_LOCKFILE,
-		tool: "cmake",
-		version,
-		plat,
-		url: cmakeDownloadUrl(version, plat),
-		downloadPath,
-		tools: coreTools,
-		display: `download cmake ${version} (${plat.os}/${plat.arch})`,
-		unverified: CmakeToolchain.resolveUnverified(version),
-	});
+		await extractArchive({
+			archive: downloadPath,
+			dest: `.imp/cmake-toolchains/${key}`,
+			format: plat.os === "windows" ? "zip" : "tar.gz",
+			stripComponents: 1,
+			tools: coreTools,
+			namedCache: { name: CMAKE_TOOLCHAIN_CACHE, key },
+			display: `install cmake ${version} (${plat.os}/${plat.arch})`,
+		});
 
-	await extractArchive({
-		archive: downloadPath,
-		dest: `.imp/cmake-toolchains/${key}`,
-		format: plat.os === "windows" ? "zip" : "tar.gz",
-		stripComponents: 1,
-		tools: coreTools,
-		namedCache: { name: CMAKE_TOOLCHAIN_CACHE, key },
-		display: `install cmake ${version} (${plat.os}/${plat.arch})`,
-	});
-
-	return cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
-}
+		return cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
+	},
+);
 
 /**
  * Resolve an explicit or default CMake toolchain version.

@@ -2,6 +2,7 @@ import {
 	Toolchain,
 	product,
 	namedCache,
+	memo,
 	platformInfo,
 	cachePut,
 	cacheGet,
@@ -194,49 +195,51 @@ export function installCraneToolchain(version, source) {
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
-export async function acquireCraneToolchain(version) {
-	const plat = platformInfo();
-	const key = craneCacheKey(version, plat);
+export const acquireCraneToolchain = memo(
+	async function acquireCraneToolchain(version) {
+		const plat = platformInfo();
+		const key = craneCacheKey(version, plat);
 
-	if (cacheHas(CRANE_TOOLCHAIN_CACHE, key)) {
-		return cacheGet(CRANE_TOOLCHAIN_CACHE, key);
-	}
-	if (!coreToolHandles) {
-		throw new Error(
-			"no crane toolchain declared via craneToolchain(); nothing to acquire",
+		if (cacheHas(CRANE_TOOLCHAIN_CACHE, key)) {
+			return cacheGet(CRANE_TOOLCHAIN_CACHE, key);
+		}
+		if (!coreToolHandles) {
+			throw new Error(
+				"no crane toolchain declared via craneToolchain(); nothing to acquire",
+			);
+		}
+
+		const coreTools = await Promise.all(
+			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
-	}
 
-	const coreTools = await Promise.all(
-		coreToolHandles.map((handle) => nativeToolSpec(handle)),
-	);
+		const downloadPath = `.imp/crane-downloads/${key}/${craneArtifactName(version, plat)}`;
+		await downloadToolArtifact({
+			lockfile: CRANE_LOCKFILE,
+			tool: "crane",
+			version,
+			plat,
+			url: craneDownloadUrl(version, plat),
+			downloadPath,
+			tools: coreTools,
+			display: `download crane ${version} (${plat.os}/${plat.arch})`,
+			unverified: CraneToolchain.resolveUnverified(version),
+		});
 
-	const downloadPath = `.imp/crane-downloads/${key}/${craneArtifactName(version, plat)}`;
-	await downloadToolArtifact({
-		lockfile: CRANE_LOCKFILE,
-		tool: "crane",
-		version,
-		plat,
-		url: craneDownloadUrl(version, plat),
-		downloadPath,
-		tools: coreTools,
-		display: `download crane ${version} (${plat.os}/${plat.arch})`,
-		unverified: CraneToolchain.resolveUnverified(version),
-	});
+		// crane's release tarball ships crane/gcrane/krane at the archive root
+		// (no wrapping directory), so no --strip-components is needed.
+		await extractArchive({
+			archive: downloadPath,
+			dest: `.imp/crane-toolchains/${key}`,
+			format: "tar.gz",
+			tools: coreTools,
+			namedCache: { name: CRANE_TOOLCHAIN_CACHE, key },
+			display: `install crane ${version} (${plat.os}/${plat.arch})`,
+		});
 
-	// crane's release tarball ships crane/gcrane/krane at the archive root
-	// (no wrapping directory), so no --strip-components is needed.
-	await extractArchive({
-		archive: downloadPath,
-		dest: `.imp/crane-toolchains/${key}`,
-		format: "tar.gz",
-		tools: coreTools,
-		namedCache: { name: CRANE_TOOLCHAIN_CACHE, key },
-		display: `install crane ${version} (${plat.os}/${plat.arch})`,
-	});
-
-	return cacheGet(CRANE_TOOLCHAIN_CACHE, key);
-}
+		return cacheGet(CRANE_TOOLCHAIN_CACHE, key);
+	},
+);
 
 /**
  * Resolve an explicit or default crane toolchain version.

@@ -20,6 +20,7 @@ import {
 	Toolchain,
 	product,
 	namedCache,
+	memo,
 	run,
 	output,
 	output_path,
@@ -225,48 +226,50 @@ export function installSccacheToolchain(version, source) {
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
-export async function acquireSccacheToolchain(version) {
-	const plat = platformInfo();
-	const key = sccacheCacheKey(version, plat);
+export const acquireSccacheToolchain = memo(
+	async function acquireSccacheToolchain(version) {
+		const plat = platformInfo();
+		const key = sccacheCacheKey(version, plat);
 
-	if (cacheHas(SCCACHE_TOOLCHAIN_CACHE, key)) {
-		return cacheGet(SCCACHE_TOOLCHAIN_CACHE, key);
-	}
-	if (!coreToolHandles) {
-		throw new Error(
-			"no sccache toolchain declared via sccacheToolchain(); nothing to acquire",
+		if (cacheHas(SCCACHE_TOOLCHAIN_CACHE, key)) {
+			return cacheGet(SCCACHE_TOOLCHAIN_CACHE, key);
+		}
+		if (!coreToolHandles) {
+			throw new Error(
+				"no sccache toolchain declared via sccacheToolchain(); nothing to acquire",
+			);
+		}
+
+		const coreTools = await Promise.all(
+			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
-	}
 
-	const coreTools = await Promise.all(
-		coreToolHandles.map((handle) => nativeToolSpec(handle)),
-	);
+		const downloadPath = `.imp/sccache-downloads/${key}/${sccacheArtifactName(version, plat)}`;
+		await downloadToolArtifact({
+			lockfile: SCCACHE_LOCKFILE,
+			tool: "sccache",
+			version,
+			plat,
+			url: sccacheDownloadUrl(version, plat),
+			downloadPath,
+			tools: coreTools,
+			display: `download sccache ${version} (${plat.os}/${plat.arch})`,
+			unverified: SccacheToolchain.resolveUnverified(version),
+		});
 
-	const downloadPath = `.imp/sccache-downloads/${key}/${sccacheArtifactName(version, plat)}`;
-	await downloadToolArtifact({
-		lockfile: SCCACHE_LOCKFILE,
-		tool: "sccache",
-		version,
-		plat,
-		url: sccacheDownloadUrl(version, plat),
-		downloadPath,
-		tools: coreTools,
-		display: `download sccache ${version} (${plat.os}/${plat.arch})`,
-		unverified: SccacheToolchain.resolveUnverified(version),
-	});
+		await extractArchive({
+			archive: downloadPath,
+			dest: `.imp/sccache-toolchains/${key}`,
+			format: "tar.gz",
+			stripComponents: 1,
+			tools: coreTools,
+			namedCache: { name: SCCACHE_TOOLCHAIN_CACHE, key },
+			display: `install sccache ${version} (${plat.os}/${plat.arch})`,
+		});
 
-	await extractArchive({
-		archive: downloadPath,
-		dest: `.imp/sccache-toolchains/${key}`,
-		format: "tar.gz",
-		stripComponents: 1,
-		tools: coreTools,
-		namedCache: { name: SCCACHE_TOOLCHAIN_CACHE, key },
-		display: `install sccache ${version} (${plat.os}/${plat.arch})`,
-	});
-
-	return cacheGet(SCCACHE_TOOLCHAIN_CACHE, key);
-}
+		return cacheGet(SCCACHE_TOOLCHAIN_CACHE, key);
+	},
+);
 
 /**
  * Ensure the sccache data (object cache) directory exists in the named

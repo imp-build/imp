@@ -2,6 +2,7 @@ import {
 	Toolchain,
 	product,
 	namedCache,
+	memo,
 	run,
 	output,
 	output_path,
@@ -179,84 +180,86 @@ export function installGccToolchain(version, source) {
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
-export async function acquireGccToolchain(version) {
-	const plat = platformInfo();
-	const key = gccCacheKey(version, plat);
+export const acquireGccToolchain = memo(
+	async function acquireGccToolchain(version) {
+		const plat = platformInfo();
+		const key = gccCacheKey(version, plat);
 
-	if (cacheHas(GCC_TOOLCHAIN_CACHE, key)) {
-		return cacheGet(GCC_TOOLCHAIN_CACHE, key);
-	}
-	if (!coreToolHandles) {
-		throw new Error(
-			"no gcc toolchain declared via gccToolchain(); nothing to acquire",
+		if (cacheHas(GCC_TOOLCHAIN_CACHE, key)) {
+			return cacheGet(GCC_TOOLCHAIN_CACHE, key);
+		}
+		if (!coreToolHandles) {
+			throw new Error(
+				"no gcc toolchain declared via gccToolchain(); nothing to acquire",
+			);
+		}
+
+		const coreTools = await Promise.all(
+			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
-	}
 
-	const coreTools = await Promise.all(
-		coreToolHandles.map((handle) => nativeToolSpec(handle)),
-	);
-
-	const downloadPath = `.imp/gcc-downloads/${key}/${gccArtifactName(version, plat)}`;
-	await downloadToolArtifact({
-		lockfile: GCC_LOCKFILE,
-		tool: "gcc",
-		version,
-		plat,
-		url: gccDownloadUrl(version, plat),
-		downloadPath,
-		tools: coreTools,
-		display: `download gcc ${version} (${plat.os}/${plat.arch})`,
-		unverified: GccToolchain.resolveUnverified(version),
-	});
-
-	const extractPath = `.imp/gcc-toolchains/${key}`;
-	const gccExe = `${GCC_EXE_PREFIX[plat.arch]}-gcc`;
-	const gxxExe = `${GCC_EXE_PREFIX[plat.arch]}-g++`;
-	const arExe = `${BINUTILS_PREFIX[plat.arch]}-ar`;
-	// Bootlin's own gcc binary is a `toolchain-wrapper` that's argv[0]-
-	// sensitive; wrapper scripts that exec the real binary keep its own name.
-	const wrappers = [
-		[`#!/bin/sh\nexec "$(dirname "$0")/${gccExe}" "$@"\n`, "clang"],
-		[`#!/bin/sh\nexec "$(dirname "$0")/${gccExe}" "$@"\n`, "cc"],
-		[`#!/bin/sh\nexec "$(dirname "$0")/${gxxExe}" "$@"\n`, "c++"],
-		[`#!/bin/sh\nexec "$(dirname "$0")/${arExe}" "$@"\n`, "ar"],
-	];
-	const wrapperArgs = wrappers.flat();
-	// $1 = archive, $2 = extractPath, $3.. = wrapper (content, filename) pairs.
-	const writeCmds = wrappers.map(
-		(_, i) => `printf %s "\${${3 + i * 2}}" > "$2/bin/\${${4 + i * 2}}"`,
-	);
-	const chmodCmds = wrappers.map(
-		(_, i) => `chmod +x "$2/bin/\${${4 + i * 2}}"`,
-	);
-	// Extraction and wrapper-writing stay one run: the wrappers land inside
-	// the extract dir the named-cache output captures.
-	const installScript = `mkdir -p "$2" && tar -xJf "$1" -C "$2" --strip-components=1 && ${writeCmds.join(" && ")} && ${chmodCmds.join(" && ")}`;
-
-	await run({
-		argv: [
-			"sh",
-			"-c",
-			installScript,
-			"install-gcc",
+		const downloadPath = `.imp/gcc-downloads/${key}/${gccArtifactName(version, plat)}`;
+		await downloadToolArtifact({
+			lockfile: GCC_LOCKFILE,
+			tool: "gcc",
+			version,
+			plat,
+			url: gccDownloadUrl(version, plat),
 			downloadPath,
-			extractPath,
-			...wrapperArgs,
-		],
-		tools: coreTools,
-		inputs: [{ kind: "file", path: downloadPath }],
-		outputs: [
-			output(output_path(extractPath), {
-				kind: "directory",
-				namedCache: { name: GCC_TOOLCHAIN_CACHE, key },
-			}),
-		],
-		materialize: false,
-		display: `install gcc ${version} (${plat.os}/${plat.arch})`,
-	});
+			tools: coreTools,
+			display: `download gcc ${version} (${plat.os}/${plat.arch})`,
+			unverified: GccToolchain.resolveUnverified(version),
+		});
 
-	return cacheGet(GCC_TOOLCHAIN_CACHE, key);
-}
+		const extractPath = `.imp/gcc-toolchains/${key}`;
+		const gccExe = `${GCC_EXE_PREFIX[plat.arch]}-gcc`;
+		const gxxExe = `${GCC_EXE_PREFIX[plat.arch]}-g++`;
+		const arExe = `${BINUTILS_PREFIX[plat.arch]}-ar`;
+		// Bootlin's own gcc binary is a `toolchain-wrapper` that's argv[0]-
+		// sensitive; wrapper scripts that exec the real binary keep its own name.
+		const wrappers = [
+			[`#!/bin/sh\nexec "$(dirname "$0")/${gccExe}" "$@"\n`, "clang"],
+			[`#!/bin/sh\nexec "$(dirname "$0")/${gccExe}" "$@"\n`, "cc"],
+			[`#!/bin/sh\nexec "$(dirname "$0")/${gxxExe}" "$@"\n`, "c++"],
+			[`#!/bin/sh\nexec "$(dirname "$0")/${arExe}" "$@"\n`, "ar"],
+		];
+		const wrapperArgs = wrappers.flat();
+		// $1 = archive, $2 = extractPath, $3.. = wrapper (content, filename) pairs.
+		const writeCmds = wrappers.map(
+			(_, i) => `printf %s "\${${3 + i * 2}}" > "$2/bin/\${${4 + i * 2}}"`,
+		);
+		const chmodCmds = wrappers.map(
+			(_, i) => `chmod +x "$2/bin/\${${4 + i * 2}}"`,
+		);
+		// Extraction and wrapper-writing stay one run: the wrappers land inside
+		// the extract dir the named-cache output captures.
+		const installScript = `mkdir -p "$2" && tar -xJf "$1" -C "$2" --strip-components=1 && ${writeCmds.join(" && ")} && ${chmodCmds.join(" && ")}`;
+
+		await run({
+			argv: [
+				"sh",
+				"-c",
+				installScript,
+				"install-gcc",
+				downloadPath,
+				extractPath,
+				...wrapperArgs,
+			],
+			tools: coreTools,
+			inputs: [{ kind: "file", path: downloadPath }],
+			outputs: [
+				output(output_path(extractPath), {
+					kind: "directory",
+					namedCache: { name: GCC_TOOLCHAIN_CACHE, key },
+				}),
+			],
+			materialize: false,
+			display: `install gcc ${version} (${plat.os}/${plat.arch})`,
+		});
+
+		return cacheGet(GCC_TOOLCHAIN_CACHE, key);
+	},
+);
 
 /**
  * Resolve an explicit or default gcc toolchain version.

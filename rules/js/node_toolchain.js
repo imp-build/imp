@@ -2,6 +2,7 @@ import {
 	Toolchain,
 	product,
 	namedCache,
+	memo,
 	platformInfo,
 	cachePut,
 	cacheGet,
@@ -180,50 +181,52 @@ export function installNodeToolchain(version, source) {
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
-export async function acquireNodeToolchain(version) {
-	const plat = platformInfo();
-	const key = nodeCacheKey(version, plat);
+export const acquireNodeToolchain = memo(
+	async function acquireNodeToolchain(version) {
+		const plat = platformInfo();
+		const key = nodeCacheKey(version, plat);
 
-	if (!coreToolHandles) {
-		throw new Error(
-			"no node toolchain declared via nodeToolchain(); nothing to acquire",
+		if (!coreToolHandles) {
+			throw new Error(
+				"no node toolchain declared via nodeToolchain(); nothing to acquire",
+			);
+		}
+		const coreTools = await Promise.all(
+			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
-	}
-	const coreTools = await Promise.all(
-		coreToolHandles.map((handle) => nativeToolSpec(handle)),
-	);
 
-	if (!cacheHas(NODE_TOOLCHAIN_CACHE, key)) {
-		const downloadPath = `.imp/node-downloads/${key}/${nodeArtifactName(version, plat)}`;
-		await downloadToolArtifact({
-			lockfile: NODE_LOCKFILE,
-			tool: "node-toolchain",
-			version,
-			plat,
-			url: nodeDownloadUrl(version, plat),
-			downloadPath,
-			tools: coreTools,
-			display: `download node ${version} (${plat.os}/${plat.arch})`,
-			unverified: NodeToolchain.resolveUnverified(version),
-		});
+		if (!cacheHas(NODE_TOOLCHAIN_CACHE, key)) {
+			const downloadPath = `.imp/node-downloads/${key}/${nodeArtifactName(version, plat)}`;
+			await downloadToolArtifact({
+				lockfile: NODE_LOCKFILE,
+				tool: "node-toolchain",
+				version,
+				plat,
+				url: nodeDownloadUrl(version, plat),
+				downloadPath,
+				tools: coreTools,
+				display: `download node ${version} (${plat.os}/${plat.arch})`,
+				unverified: NodeToolchain.resolveUnverified(version),
+			});
 
-		// Node's release archives extract a single top-level
-		// node-v<version>-<os>-<arch>/ directory containing bin/node (and
-		// bin/npm/bin/npx) — strip it so the cache root holds the binaries
-		// directly, same shape acquireUvToolchain/acquireRuffToolchain use.
-		await extractArchive({
-			archive: downloadPath,
-			dest: `.imp/node-toolchains/${key}`,
-			format: plat.os === "windows" ? "zip" : "tar.gz",
-			stripComponents: 1,
-			tools: coreTools,
-			namedCache: { name: NODE_TOOLCHAIN_CACHE, key },
-			display: `extract node ${version} (${plat.os}/${plat.arch})`,
-		});
-	}
+			// Node's release archives extract a single top-level
+			// node-v<version>-<os>-<arch>/ directory containing bin/node (and
+			// bin/npm/bin/npx) — strip it so the cache root holds the binaries
+			// directly, same shape acquireUvToolchain/acquireRuffToolchain use.
+			await extractArchive({
+				archive: downloadPath,
+				dest: `.imp/node-toolchains/${key}`,
+				format: plat.os === "windows" ? "zip" : "tar.gz",
+				stripComponents: 1,
+				tools: coreTools,
+				namedCache: { name: NODE_TOOLCHAIN_CACHE, key },
+				display: `extract node ${version} (${plat.os}/${plat.arch})`,
+			});
+		}
 
-	return cacheGet(NODE_TOOLCHAIN_CACHE, key);
-}
+		return cacheGet(NODE_TOOLCHAIN_CACHE, key);
+	},
+);
 
 /**
  * Resolve an explicit or default node toolchain version.

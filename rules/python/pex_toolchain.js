@@ -2,6 +2,7 @@ import {
 	Toolchain,
 	product,
 	namedCache,
+	memo,
 	run,
 	output,
 	output_path,
@@ -148,81 +149,83 @@ export function installPexToolchain(version, source) {
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain directory (containing `pex`).
  */
-export async function acquirePexToolchain(version) {
-	const plat = platformInfo();
-	const key = pexCacheKey(version);
+export const acquirePexToolchain = memo(
+	async function acquirePexToolchain(version) {
+		const plat = platformInfo();
+		const key = pexCacheKey(version);
 
-	if (!coreToolHandles) {
-		throw new Error(
-			"no pex toolchain declared via pexToolchain(); nothing to acquire",
+		if (!coreToolHandles) {
+			throw new Error(
+				"no pex toolchain declared via pexToolchain(); nothing to acquire",
+			);
+		}
+		const coreTools = await Promise.all(
+			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
-	}
-	const coreTools = await Promise.all(
-		coreToolHandles.map((handle) => nativeToolSpec(handle)),
-	);
 
-	if (!cacheHas(PEX_TOOLCHAIN_CACHE, key)) {
-		// No archive to extract — the verified download lands the single
-		// `pex` file straight into the named-cache directory, then a small
-		// install run marks it executable.
-		const dir = `.imp/pex-toolchains/${key}`;
-		const downloadPath = `.imp/pex-downloads/${key}/pex`;
-		await downloadToolArtifact({
-			lockfile: PEX_LOCKFILE,
-			tool: "pex-toolchain",
-			version,
-			plat,
-			lockPlat: PEX_LOCK_PLATFORM,
-			url: pexDownloadUrl(version),
-			downloadPath,
-			tools: coreTools,
-			display: `download pex ${version}`,
-			unverified: PexToolchain.resolveUnverified(version),
-		});
+		if (!cacheHas(PEX_TOOLCHAIN_CACHE, key)) {
+			// No archive to extract — the verified download lands the single
+			// `pex` file straight into the named-cache directory, then a small
+			// install run marks it executable.
+			const dir = `.imp/pex-toolchains/${key}`;
+			const downloadPath = `.imp/pex-downloads/${key}/pex`;
+			await downloadToolArtifact({
+				lockfile: PEX_LOCKFILE,
+				tool: "pex-toolchain",
+				version,
+				plat,
+				lockPlat: PEX_LOCK_PLATFORM,
+				url: pexDownloadUrl(version),
+				downloadPath,
+				tools: coreTools,
+				display: `download pex ${version}`,
+				unverified: PexToolchain.resolveUnverified(version),
+			});
 
-		const script =
-			plat.os === "windows"
-				? 'mkdir -p "$2" && cp "$1" "$2/pex"'
-				: 'mkdir -p "$2" && cp "$1" "$2/pex" && chmod +x "$2/pex"';
-		await run({
-			argv: ["sh", "-c", script, "install-pex", downloadPath, dir],
-			tools: coreTools,
-			inputs: [{ kind: "file", path: downloadPath }],
-			outputs: [
-				output(output_path(dir), {
-					kind: "directory",
-					namedCache: { name: PEX_TOOLCHAIN_CACHE, key },
-				}),
-			],
-			materialize: true,
-			display: `install pex ${version}`,
-		});
-	}
+			const script =
+				plat.os === "windows"
+					? 'mkdir -p "$2" && cp "$1" "$2/pex"'
+					: 'mkdir -p "$2" && cp "$1" "$2/pex" && chmod +x "$2/pex"';
+			await run({
+				argv: ["sh", "-c", script, "install-pex", downloadPath, dir],
+				tools: coreTools,
+				inputs: [{ kind: "file", path: downloadPath }],
+				outputs: [
+					output(output_path(dir), {
+						kind: "directory",
+						namedCache: { name: PEX_TOOLCHAIN_CACHE, key },
+					}),
+				],
+				materialize: true,
+				display: `install pex ${version}`,
+			});
+		}
 
-	// A named-cache "tool" mount (see pexRootTool) requires its cache path
-	// to already exist as a real directory — materialize_tools_into_sandbox
-	// in src/exec.rs bails otherwise — so seed it with an empty directory
-	// here, guarded independently of the toolchain cacheHas() above since
-	// this cache is keyed "shared", not per-version (same independent-guard
-	// pattern as ZIG_BUILD_CACHE's seeding in rules/c/zig/toolchain.js).
-	if (!cacheHas(PEX_ROOT_CACHE, PEX_ROOT_KEY)) {
-		const seedPath = ".imp/pex-root-seed";
-		await run({
-			argv: ["sh", "-c", 'mkdir -p "$1"', "seed-pex-root", seedPath],
-			tools: coreTools,
-			outputs: [
-				output(output_path(seedPath), {
-					kind: "directory",
-					namedCache: { name: PEX_ROOT_CACHE, key: PEX_ROOT_KEY },
-				}),
-			],
-			materialize: true,
-			display: "seed pex root",
-		});
-	}
+		// A named-cache "tool" mount (see pexRootTool) requires its cache path
+		// to already exist as a real directory — materialize_tools_into_sandbox
+		// in src/exec.rs bails otherwise — so seed it with an empty directory
+		// here, guarded independently of the toolchain cacheHas() above since
+		// this cache is keyed "shared", not per-version (same independent-guard
+		// pattern as ZIG_BUILD_CACHE's seeding in rules/c/zig/toolchain.js).
+		if (!cacheHas(PEX_ROOT_CACHE, PEX_ROOT_KEY)) {
+			const seedPath = ".imp/pex-root-seed";
+			await run({
+				argv: ["sh", "-c", 'mkdir -p "$1"', "seed-pex-root", seedPath],
+				tools: coreTools,
+				outputs: [
+					output(output_path(seedPath), {
+						kind: "directory",
+						namedCache: { name: PEX_ROOT_CACHE, key: PEX_ROOT_KEY },
+					}),
+				],
+				materialize: true,
+				display: "seed pex root",
+			});
+		}
 
-	return cacheGet(PEX_TOOLCHAIN_CACHE, key);
-}
+		return cacheGet(PEX_TOOLCHAIN_CACHE, key);
+	},
+);
 
 /**
  * Resolve an explicit or default pex toolchain version.

@@ -2,6 +2,7 @@ import {
 	Toolchain,
 	product,
 	namedCache,
+	memo,
 	run,
 	output,
 	output_path,
@@ -200,72 +201,74 @@ export function installPnpmToolchain(version, source) {
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
-export async function acquirePnpmToolchain(version) {
-	const plat = platformInfo();
-	const key = pnpmCacheKey(version, plat);
+export const acquirePnpmToolchain = memo(
+	async function acquirePnpmToolchain(version) {
+		const plat = platformInfo();
+		const key = pnpmCacheKey(version, plat);
 
-	if (!coreToolHandles) {
-		throw new Error(
-			"no pnpm toolchain declared via pnpmToolchain(); nothing to acquire",
+		if (!coreToolHandles) {
+			throw new Error(
+				"no pnpm toolchain declared via pnpmToolchain(); nothing to acquire",
+			);
+		}
+		const coreTools = await Promise.all(
+			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
-	}
-	const coreTools = await Promise.all(
-		coreToolHandles.map((handle) => nativeToolSpec(handle)),
-	);
 
-	if (!cacheHas(PNPM_TOOLCHAIN_CACHE, key)) {
-		const downloadPath = `.imp/pnpm-downloads/${key}/${pnpmArtifactName(version, plat)}`;
-		await downloadToolArtifact({
-			lockfile: PNPM_LOCKFILE,
-			tool: "pnpm-toolchain",
-			version,
-			plat,
-			url: pnpmDownloadUrl(version, plat),
-			downloadPath,
-			tools: coreTools,
-			display: `download pnpm ${version} (${plat.os}/${plat.arch})`,
-			unverified: PnpmToolchain.resolveUnverified(version),
-		});
+		if (!cacheHas(PNPM_TOOLCHAIN_CACHE, key)) {
+			const downloadPath = `.imp/pnpm-downloads/${key}/${pnpmArtifactName(version, plat)}`;
+			await downloadToolArtifact({
+				lockfile: PNPM_LOCKFILE,
+				tool: "pnpm-toolchain",
+				version,
+				plat,
+				url: pnpmDownloadUrl(version, plat),
+				downloadPath,
+				tools: coreTools,
+				display: `download pnpm ${version} (${plat.os}/${plat.arch})`,
+				unverified: PnpmToolchain.resolveUnverified(version),
+			});
 
-		// pnpm's release archives are flat — a `pnpm` executable (plus its
-		// bundled dist/ payload) sit at the archive root already, unlike
-		// node/uv/ruff's single top-level `<name>-<triple>/` wrapper — so no
-		// stripComponents here.
-		await extractArchive({
-			archive: downloadPath,
-			dest: `.imp/pnpm-toolchains/${key}`,
-			format: plat.os === "windows" ? "zip" : "tar.gz",
-			tools: coreTools,
-			namedCache: { name: PNPM_TOOLCHAIN_CACHE, key },
-			display: `extract pnpm ${version} (${plat.os}/${plat.arch})`,
-		});
-	}
+			// pnpm's release archives are flat — a `pnpm` executable (plus its
+			// bundled dist/ payload) sit at the archive root already, unlike
+			// node/uv/ruff's single top-level `<name>-<triple>/` wrapper — so no
+			// stripComponents here.
+			await extractArchive({
+				archive: downloadPath,
+				dest: `.imp/pnpm-toolchains/${key}`,
+				format: plat.os === "windows" ? "zip" : "tar.gz",
+				tools: coreTools,
+				namedCache: { name: PNPM_TOOLCHAIN_CACHE, key },
+				display: `extract pnpm ${version} (${plat.os}/${plat.arch})`,
+			});
+		}
 
-	// A named-cache "tool" mount (see pnpmStoreDirTool) requires its cache
-	// path to already exist as a real directory — materialize_tools_into_
-	// sandbox in src/exec.rs bails otherwise — so seed it with an empty
-	// directory here, guarded independently of the toolchain cacheHas()
-	// above since this cache is keyed "shared", not per-version (same
-	// independent-guard pattern as UV_CACHE_DIR_CACHE's seeding in
-	// rules/python/uv_toolchain.js).
-	if (!cacheHas(PNPM_STORE_CACHE, PNPM_STORE_KEY)) {
-		const seedPath = ".imp/pnpm-store-seed";
-		await run({
-			argv: ["sh", "-c", 'mkdir -p "$1"', "seed-pnpm-store", seedPath],
-			tools: coreTools,
-			outputs: [
-				output(output_path(seedPath), {
-					kind: "directory",
-					namedCache: { name: PNPM_STORE_CACHE, key: PNPM_STORE_KEY },
-				}),
-			],
-			materialize: true,
-			display: "seed pnpm store",
-		});
-	}
+		// A named-cache "tool" mount (see pnpmStoreDirTool) requires its cache
+		// path to already exist as a real directory — materialize_tools_into_
+		// sandbox in src/exec.rs bails otherwise — so seed it with an empty
+		// directory here, guarded independently of the toolchain cacheHas()
+		// above since this cache is keyed "shared", not per-version (same
+		// independent-guard pattern as UV_CACHE_DIR_CACHE's seeding in
+		// rules/python/uv_toolchain.js).
+		if (!cacheHas(PNPM_STORE_CACHE, PNPM_STORE_KEY)) {
+			const seedPath = ".imp/pnpm-store-seed";
+			await run({
+				argv: ["sh", "-c", 'mkdir -p "$1"', "seed-pnpm-store", seedPath],
+				tools: coreTools,
+				outputs: [
+					output(output_path(seedPath), {
+						kind: "directory",
+						namedCache: { name: PNPM_STORE_CACHE, key: PNPM_STORE_KEY },
+					}),
+				],
+				materialize: true,
+				display: "seed pnpm store",
+			});
+		}
 
-	return cacheGet(PNPM_TOOLCHAIN_CACHE, key);
-}
+		return cacheGet(PNPM_TOOLCHAIN_CACHE, key);
+	},
+);
 
 /**
  * Resolve an explicit or default pnpm toolchain version.

@@ -2,6 +2,7 @@ import {
 	Toolchain,
 	product,
 	namedCache,
+	memo,
 	run,
 	output,
 	output_path,
@@ -184,59 +185,61 @@ export function installBiomeToolchain(version, source) {
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain directory (containing `biome`).
  */
-export async function acquireBiomeToolchain(version) {
-	const plat = platformInfo();
-	const key = biomeCacheKey(version, plat);
+export const acquireBiomeToolchain = memo(
+	async function acquireBiomeToolchain(version) {
+		const plat = platformInfo();
+		const key = biomeCacheKey(version, plat);
 
-	if (!coreToolHandles) {
-		throw new Error(
-			"no biome toolchain declared via biomeToolchain(); nothing to acquire",
+		if (!coreToolHandles) {
+			throw new Error(
+				"no biome toolchain declared via biomeToolchain(); nothing to acquire",
+			);
+		}
+		const coreTools = await Promise.all(
+			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
-	}
-	const coreTools = await Promise.all(
-		coreToolHandles.map((handle) => nativeToolSpec(handle)),
-	);
 
-	if (!cacheHas(BIOME_TOOLCHAIN_CACHE, key)) {
-		// No archive to extract — the verified download lands the single
-		// `biome` executable straight into a download path, then a small
-		// install run marks it executable and publishes it into the cache.
-		const exe = plat.os === "windows" ? "biome.exe" : "biome";
-		const dir = `.imp/biome-toolchains/${key}`;
-		const downloadPath = `.imp/biome-downloads/${key}/${biomeArtifactName(plat)}`;
-		await downloadToolArtifact({
-			lockfile: BIOME_LOCKFILE,
-			tool: "biome-toolchain",
-			version,
-			plat,
-			url: biomeDownloadUrl(version, plat),
-			downloadPath,
-			tools: coreTools,
-			display: `download biome ${version} (${plat.os}/${plat.arch})`,
-			unverified: BiomeToolchain.resolveUnverified(version),
-		});
+		if (!cacheHas(BIOME_TOOLCHAIN_CACHE, key)) {
+			// No archive to extract — the verified download lands the single
+			// `biome` executable straight into a download path, then a small
+			// install run marks it executable and publishes it into the cache.
+			const exe = plat.os === "windows" ? "biome.exe" : "biome";
+			const dir = `.imp/biome-toolchains/${key}`;
+			const downloadPath = `.imp/biome-downloads/${key}/${biomeArtifactName(plat)}`;
+			await downloadToolArtifact({
+				lockfile: BIOME_LOCKFILE,
+				tool: "biome-toolchain",
+				version,
+				plat,
+				url: biomeDownloadUrl(version, plat),
+				downloadPath,
+				tools: coreTools,
+				display: `download biome ${version} (${plat.os}/${plat.arch})`,
+				unverified: BiomeToolchain.resolveUnverified(version),
+			});
 
-		const script =
-			plat.os === "windows"
-				? `mkdir -p "$2" && cp "$1" "$2/${exe}"`
-				: `mkdir -p "$2" && cp "$1" "$2/${exe}" && chmod +x "$2/${exe}"`;
-		await run({
-			argv: ["sh", "-c", script, "install-biome", downloadPath, dir],
-			tools: coreTools,
-			inputs: [{ kind: "file", path: downloadPath }],
-			outputs: [
-				output(output_path(dir), {
-					kind: "directory",
-					namedCache: { name: BIOME_TOOLCHAIN_CACHE, key },
-				}),
-			],
-			materialize: true,
-			display: `install biome ${version} (${plat.os}/${plat.arch})`,
-		});
-	}
+			const script =
+				plat.os === "windows"
+					? `mkdir -p "$2" && cp "$1" "$2/${exe}"`
+					: `mkdir -p "$2" && cp "$1" "$2/${exe}" && chmod +x "$2/${exe}"`;
+			await run({
+				argv: ["sh", "-c", script, "install-biome", downloadPath, dir],
+				tools: coreTools,
+				inputs: [{ kind: "file", path: downloadPath }],
+				outputs: [
+					output(output_path(dir), {
+						kind: "directory",
+						namedCache: { name: BIOME_TOOLCHAIN_CACHE, key },
+					}),
+				],
+				materialize: true,
+				display: `install biome ${version} (${plat.os}/${plat.arch})`,
+			});
+		}
 
-	return cacheGet(BIOME_TOOLCHAIN_CACHE, key);
-}
+		return cacheGet(BIOME_TOOLCHAIN_CACHE, key);
+	},
+);
 
 /**
  * Resolve an explicit or default biome toolchain version.

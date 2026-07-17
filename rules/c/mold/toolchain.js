@@ -2,6 +2,7 @@ import {
 	Toolchain,
 	product,
 	namedCache,
+	memo,
 	platformInfo,
 	cachePut,
 	cacheGet,
@@ -176,50 +177,52 @@ export function installMoldToolchain(version, source) {
  * @param {string} version
  * @returns {Promise<string>} Local path to the toolchain root.
  */
-export async function acquireMoldToolchain(version) {
-	const plat = platformInfo();
-	const key = moldCacheKey(version, plat);
+export const acquireMoldToolchain = memo(
+	async function acquireMoldToolchain(version) {
+		const plat = platformInfo();
+		const key = moldCacheKey(version, plat);
 
-	if (cacheHas(MOLD_TOOLCHAIN_CACHE, key)) {
-		return cacheGet(MOLD_TOOLCHAIN_CACHE, key);
-	}
-	if (!coreToolHandles) {
-		throw new Error(
-			"no mold toolchain declared via moldToolchain(); nothing to acquire",
+		if (cacheHas(MOLD_TOOLCHAIN_CACHE, key)) {
+			return cacheGet(MOLD_TOOLCHAIN_CACHE, key);
+		}
+		if (!coreToolHandles) {
+			throw new Error(
+				"no mold toolchain declared via moldToolchain(); nothing to acquire",
+			);
+		}
+
+		const coreTools = await Promise.all(
+			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
-	}
 
-	const coreTools = await Promise.all(
-		coreToolHandles.map((handle) => nativeToolSpec(handle)),
-	);
+		const downloadPath = `.imp/mold-downloads/${key}/${moldArtifactName(version, plat)}`;
+		await downloadToolArtifact({
+			lockfile: MOLD_LOCKFILE,
+			tool: "mold",
+			version,
+			plat,
+			url: moldDownloadUrl(version, plat),
+			downloadPath,
+			tools: coreTools,
+			display: `download mold ${version} (${plat.os}/${plat.arch})`,
+			unverified: MoldToolchain.resolveUnverified(version),
+		});
 
-	const downloadPath = `.imp/mold-downloads/${key}/${moldArtifactName(version, plat)}`;
-	await downloadToolArtifact({
-		lockfile: MOLD_LOCKFILE,
-		tool: "mold",
-		version,
-		plat,
-		url: moldDownloadUrl(version, plat),
-		downloadPath,
-		tools: coreTools,
-		display: `download mold ${version} (${plat.os}/${plat.arch})`,
-		unverified: MoldToolchain.resolveUnverified(version),
-	});
+		// mold's release tarball already ships bin/mold and bin/ld.mold (the
+		// name clang's -fuse-ld=mold looks for) — no wrapper needed.
+		await extractArchive({
+			archive: downloadPath,
+			dest: `.imp/mold-toolchains/${key}`,
+			format: "tar.gz",
+			stripComponents: 1,
+			tools: coreTools,
+			namedCache: { name: MOLD_TOOLCHAIN_CACHE, key },
+			display: `install mold ${version} (${plat.os}/${plat.arch})`,
+		});
 
-	// mold's release tarball already ships bin/mold and bin/ld.mold (the
-	// name clang's -fuse-ld=mold looks for) — no wrapper needed.
-	await extractArchive({
-		archive: downloadPath,
-		dest: `.imp/mold-toolchains/${key}`,
-		format: "tar.gz",
-		stripComponents: 1,
-		tools: coreTools,
-		namedCache: { name: MOLD_TOOLCHAIN_CACHE, key },
-		display: `install mold ${version} (${plat.os}/${plat.arch})`,
-	});
-
-	return cacheGet(MOLD_TOOLCHAIN_CACHE, key);
-}
+		return cacheGet(MOLD_TOOLCHAIN_CACHE, key);
+	},
+);
 
 /**
  * Resolve an explicit or default mold toolchain version.
