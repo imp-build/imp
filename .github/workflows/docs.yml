@@ -53,10 +53,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/imp
-          key: imp-store-v4-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}
+          key: imp-store-v4-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}
           restore-keys: |
-            imp-store-v4-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-
-            imp-store-v4-${{ runner.os }}-
+            imp-store-v4-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-
+            imp-store-v4-check-${{ runner.os }}-
 
       - name: Check generated files
         run: ./imp goal generate //ci:docs_workflow --check
@@ -90,10 +90,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/imp
-          key: imp-store-v4-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}
+          key: imp-store-v4-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}
           restore-keys: |
-            imp-store-v4-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-
-            imp-store-v4-${{ runner.os }}-
+            imp-store-v4-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-
+            imp-store-v4-package-${{ runner.os }}-
 
       - name: Package docs site
         run: ./imp package //docs:site

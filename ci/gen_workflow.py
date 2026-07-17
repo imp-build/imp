@@ -61,25 +61,34 @@ BUILD_STEPS = [
 # to the newest cache with matching toolchain pins, then to any same-OS
 # cache, so a toolchain bump still starts from the closest prior snapshot
 # instead of from scratch.
-CACHE_IMP_STEP = {
-    "name": "Cache imp store",
-    "uses": "actions/cache@v4",
-    "with": {
-        "path": "~/.cache/imp",
-        "key": "imp-store-v4-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}",
-        "restore-keys": "\n".join(
-            [
-                "imp-store-v4-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-",
-                "imp-store-v4-${{ runner.os }}-",
-            ]
-        ),
-    },
-}
+#
+# Keyed per job (not just per run_id): `check` and `package` both only
+# `needs: build`, so they run concurrently. A shared key means whichever job's
+# restore lands second gets an exact primary-key hit on the first job's
+# already-saved cache — and actions/cache skips saving on an exact hit, so
+# that job's toolchain downloads would silently never persist.
+def cache_imp_step(job):
+    prefix = f"imp-store-v4-{job}-${{{{ runner.os }}}}"
+    return {
+        "name": "Cache imp store",
+        "uses": "actions/cache@v4",
+        "with": {
+            "path": "~/.cache/imp",
+            "key": f"{prefix}-${{{{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}}}-${{{{ github.run_id }}}}",
+            "restore-keys": "\n".join(
+                [
+                    f"{prefix}-${{{{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}}}-",
+                    f"{prefix}-",
+                ]
+            ),
+        },
+    }
+
 
 CHECK_STEPS = [
     {"uses": "actions/checkout@v4"},
     *DOWNLOAD_IMP_STEPS,
-    CACHE_IMP_STEP,
+    cache_imp_step("check"),
     {
         "name": "Check generated files",
         "run": f"./imp goal generate {SITE_CHECK_TARGET} --check",
@@ -92,7 +101,7 @@ CHECK_STEPS = [
 PACKAGE_STEPS = [
     {"uses": "actions/checkout@v4"},
     *DOWNLOAD_IMP_STEPS,
-    CACHE_IMP_STEP,
+    cache_imp_step("package"),
     {"name": "Package docs site", "run": f"./imp package {SITE_TARGET}"},
     {"uses": "actions/configure-pages@v5"},
     {"uses": "actions/upload-pages-artifact@v3", "with": {"path": SITE_ARTIFACT_PATH}},
