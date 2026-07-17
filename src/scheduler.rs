@@ -67,6 +67,12 @@ pub enum TaskEvent {
     Done {
         id: u64,
         outcome: TaskOutcome,
+        /// `Some(true)`/`Some(false)` for jobs submitted via [`Scheduler::run`],
+        /// based on whether [`RunContext::started`] was ever called (a cache
+        /// hit never calls it). `None` for nodes emitted via [`Scheduler::emit`]
+        /// (JS memo nodes) — a memo cache hit never reaches `Done` at all, so a
+        /// memo's `Done` is always a fresh evaluation and "cached" doesn't apply.
+        cached: Option<bool>,
     },
     LaneStarted {
         kind: LaneKind,
@@ -113,10 +119,12 @@ pub struct RunContext {
 struct RunState {
     slot: Mutex<Option<usize>>,
     permit: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
+    started: AtomicBool,
 }
 
 impl RunContext {
     pub fn started(&self) {
+        self.state.started.store(true, Ordering::SeqCst);
         let mut slot = self.state.slot.lock().unwrap();
         if slot.is_some() {
             return;
@@ -227,6 +235,7 @@ impl Scheduler {
             let _ = self.events.send(TaskEvent::Done {
                 id,
                 outcome: TaskOutcome::Canceled,
+                cached: None,
             });
             self.bump_outstanding(-1);
             bail!("canceled before execution");
@@ -235,6 +244,7 @@ impl Scheduler {
         let state = Arc::new(RunState {
             slot: Mutex::new(None),
             permit: Mutex::new(None),
+            started: AtomicBool::new(false),
         });
         let context = RunContext {
             events: self.events.clone(),
@@ -260,7 +270,12 @@ impl Scheduler {
             Ok(Err(error)) => TaskOutcome::Err(format!("{error:#}")),
             Err(join) => TaskOutcome::Err(format!("worker panicked: {join}")),
         };
-        let _ = self.events.send(TaskEvent::Done { id, outcome });
+        let cached = Some(!state.started.load(Ordering::SeqCst));
+        let _ = self.events.send(TaskEvent::Done {
+            id,
+            outcome,
+            cached,
+        });
         self.bump_outstanding(-1);
 
         match result {
@@ -300,5 +315,35 @@ mod tests {
         assert!(collected
             .iter()
             .any(|event| matches!(event, TaskEvent::Done { .. })));
+        assert!(collected.iter().any(|event| matches!(
+            event,
+            TaskEvent::Done {
+                cached: Some(true),
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn started_sandbox_job_is_reported_as_not_cached() {
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = Scheduler::new(1, Arc::new(AtomicBool::new(false)), tx);
+
+        scheduler
+            .run(None, "fresh command", TaskKind::Sandbox, |context| {
+                context.started();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let collected: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(collected.iter().any(|event| matches!(
+            event,
+            TaskEvent::Done {
+                cached: Some(false),
+                ..
+            }
+        )));
     }
 }

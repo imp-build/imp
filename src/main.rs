@@ -635,6 +635,17 @@ async fn cmd_rules_test_case(
     spike::run_rules_test_case(&workspace_root, module, ordinal, fixture, cancellation).await
 }
 
+/// Per-task completion counts accumulated by the render loop, printed as a
+/// one-line summary once a goal finishes.
+struct GoalSummary {
+    cached: usize,
+    fresh: usize,
+    failed: usize,
+    canceled: usize,
+    total: usize,
+    wall: std::time::Duration,
+}
+
 async fn cmd_execute_live(
     invocation: LiveInvocation<'_>,
     cancellation: Arc<AtomicBool>,
@@ -859,6 +870,18 @@ async fn cmd_execute_live(
         let mut done_js: usize = 0;
         let mut completion: Option<Result<(), String>> = None;
 
+        // Per-task completion reporting: retained across the Pending→Done gap
+        // (unlike `render_labels`, sandbox_tasks, etc., which the bar-rendering
+        // logic above already clears at Done) purely to print a summary line.
+        let mut started_at: std::collections::HashMap<u64, std::time::Instant> =
+            std::collections::HashMap::new();
+        let wall_start = std::time::Instant::now();
+        let mut cached_count: usize = 0;
+        let mut fresh_count: usize = 0;
+        let mut failed_count: usize = 0;
+        let mut canceled_count: usize = 0;
+        let mut done_count: usize = 0;
+
         loop {
             let event = tokio::select! {
                 ev = events.recv() => match ev {
@@ -884,6 +907,7 @@ async fn cmd_execute_live(
                         ));
                     }
                     render_labels.lock().unwrap().insert(id, display);
+                    started_at.insert(id, std::time::Instant::now());
                 }
                 TaskEvent::Running { id, detail } => {
                     if detail.is_none() {
@@ -894,8 +918,48 @@ async fn cmd_execute_live(
                         js_progress.set_message(format!("js tasks {done_js}/{total_js}"));
                     }
                 }
-                TaskEvent::Done { id, outcome } => {
-                    render_labels.lock().unwrap().remove(&id);
+                TaskEvent::Done {
+                    id,
+                    outcome,
+                    cached,
+                } => {
+                    let label = render_labels
+                        .lock()
+                        .unwrap()
+                        .remove(&id)
+                        .unwrap_or_else(|| format!("task {id}"));
+                    let elapsed = started_at.remove(&id);
+                    done_count += 1;
+                    match &outcome {
+                        TaskOutcome::Ok => {
+                            let tag = match cached {
+                                Some(true) => {
+                                    cached_count += 1;
+                                    "cached "
+                                }
+                                Some(false) => {
+                                    fresh_count += 1;
+                                    "fresh "
+                                }
+                                None => "",
+                            };
+                            let timing = elapsed
+                                .map(|e| format!(" ({:.2?})", e.elapsed()))
+                                .unwrap_or_default();
+                            log::info!("[ok] {tag}{label}{timing}");
+                        }
+                        TaskOutcome::Err(error) => {
+                            failed_count += 1;
+                            log::info!("[fail] {label}: {error}");
+                        }
+                        TaskOutcome::Canceled => {
+                            // No per-line print: cancellation fans out to every
+                            // in-flight task at once (see the post-failure
+                            // cancellation sleep in cmd_execute_live), so this
+                            // would flood the terminal. Still counted below.
+                            canceled_count += 1;
+                        }
+                    }
 
                     // Cache hits never acquire a lane, but they still count as
                     // completed sandbox tasks because they were queued here.
@@ -973,6 +1037,15 @@ async fn cmd_execute_live(
                 progress.abandon_with_message("canceled".to_owned());
                 js_progress.abandon_with_message("canceled".to_owned());
             }
+        }
+
+        GoalSummary {
+            cached: cached_count,
+            fresh: fresh_count,
+            failed: failed_count,
+            canceled: canceled_count,
+            total: done_count,
+            wall: wall_start.elapsed(),
         }
     });
 
@@ -1064,7 +1137,17 @@ async fn cmd_execute_live(
         .map(|_| ())
         .map_err(|error| format!("{error:#}"));
     let _ = shutdown_tx.send(shutdown_result);
-    let _ = render.await;
+    if let Ok(summary) = render.await {
+        log::info!(
+            "execute {what}: {} cached, {} fresh, {} failed, {} canceled ({} tasks) in {:.2}s",
+            summary.cached,
+            summary.fresh,
+            summary.failed,
+            summary.canceled,
+            summary.total,
+            summary.wall.as_secs_f64()
+        );
+    }
 
     result
 }

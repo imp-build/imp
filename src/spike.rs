@@ -2514,6 +2514,13 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                                         "run({{ sandbox: false }}) requires impure: true"
                                     );
                                 }
+                                if !run_opts.sandbox {
+                                    // exec_run_unsandboxed never calls `started`
+                                    // (it has no cache check at all), so mark
+                                    // this job started immediately — it can
+                                    // never be a cache hit.
+                                    run_context.started();
+                                }
                                 return imp_execution::exec::exec_run_local_with_start(
                                     &root,
                                     run_opts,
@@ -2610,10 +2617,12 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                     "done" => crate::scheduler::TaskEvent::Done {
                         id,
                         outcome: crate::scheduler::TaskOutcome::Ok,
+                        cached: None,
                     },
                     "fail" => crate::scheduler::TaskEvent::Done {
                         id,
                         outcome: crate::scheduler::TaskOutcome::Err(display.unwrap_or_default()),
+                        cached: None,
                     },
                     _ => return Ok(()),
                 };
