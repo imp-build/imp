@@ -1,6 +1,7 @@
 import {
 	Target,
 	artifact,
+	configuration,
 	file_set,
 	glob,
 	hydrateTarget,
@@ -318,7 +319,13 @@ export const cargoBuild = product(
 		const srcs = await sources(handle);
 		const resourceInputs = await resources(handle);
 
-		const profile = handle.attrs.release ? "release" : "debug";
+		// A target-local release opt-in remains authoritative, while a workspace
+		// may supply the ordinary debug/release default through its opt axis.
+		// Read the namespace directly so the reusable Rust rules keep their
+		// existing debug behavior in workspaces that do not declare that axis.
+		const mode = configuration("imp.mode", {}) || {};
+		const release = handle.attrs.release || mode.opt === "release";
+		const profile = release ? "release" : "debug";
 		const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 		const plat = platformInfo();
 		const exeSuffix = plat.os === "windows" ? ".exe" : "";
@@ -339,7 +346,7 @@ export const cargoBuild = product(
 				`${path}/Cargo.toml`,
 				buildDir,
 				rustflags,
-				...(handle.attrs.release ? ["--release"] : []),
+				...(release ? ["--release"] : []),
 				...handle.attrs.cargoArgs,
 			],
 			tools: [...rustTools, ...linkerTools, ...cacheTools],
@@ -472,7 +479,8 @@ export const cargoTest = product(
  * @param {object} opts
  * @param {string} [opts.path="."] Workspace-relative directory containing Cargo.toml.
  * @param {string|string[]} [opts.bin] Binary name(s) cargo produces (matches `[[bin]]`/package name in Cargo.toml). Omit for a lib-only package.
- * @param {boolean} [opts.release=false] Build with `cargo build --release`.
+ * @param {boolean} [opts.release=false] Always build with `cargo build --release`,
+ *   even when the workspace `opt` mode is `debug`.
  * @param {object|string} [opts.toolchain] Rust toolchain target handle or version string.
  * @param {string[]} [opts.cargoArgs=[]] Extra arguments appended to `cargo build`.
  * @param {string[]} [opts.testArgs=[]] Extra arguments appended to `cargo test`.

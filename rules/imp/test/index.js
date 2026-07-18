@@ -333,12 +333,20 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		sourcesJson,
 		depIds,
 		depModes,
+		depLinks,
 	) => {
 		if (kind === "native-tool") {
 			const attrs = JSON.parse(attrsJson);
 			calls.push(["nativeTool", attrs.name]);
 		}
-		return originals.target(kind, attrsJson, sourcesJson, depIds, depModes);
+		return originals.target(
+			kind,
+			attrsJson,
+			sourcesJson,
+			depIds,
+			depModes,
+			depLinks,
+		);
 	};
 	globalThis.__host_named_cache = (name) => {
 		calls.push(["namedCache", name]);

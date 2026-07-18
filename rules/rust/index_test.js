@@ -54,6 +54,19 @@ function withRustHost(platOrFn, maybeFn) {
 		: withFakeToolchainHost(platOrFn, run);
 }
 
+async function withOptMode(value, fn) {
+	const original = globalThis.__host_configuration;
+	globalThis.__host_configuration = (namespace) =>
+		namespace === "imp.mode"
+			? JSON.stringify({ opt: value })
+			: original(namespace);
+	try {
+		return await fn();
+	} finally {
+		globalThis.__host_configuration = original;
+	}
+}
+
 describe("rust rules", () => {
 	test("cargoPackage is valid without a bin name (lib-only package)", () => {
 		const pkg = cargoPackage({});
@@ -144,6 +157,22 @@ describe("rust rules", () => {
 			const result = await cargoBuild(pkg);
 
 			expect(result.outputPaths[0].endsWith("/release/hello")).toBe(true);
+			const buildRun = host.runs[host.runs.length - 1];
+			expect(buildRun.argv).toContain("--release");
+		});
+	});
+
+	test("cargoBuild follows the workspace release mode", async () => {
+		await withRustHost(async (host) => {
+			rustToolchain("1.93.0", { default: true, unverified: true });
+			gccToolchain("2025.08-1", { default: true, unverified: true });
+			const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
+
+			await withOptMode("release", async () => {
+				const result = await cargoBuild(pkg);
+				expect(result.outputPaths[0].endsWith("/release/hello")).toBe(true);
+			});
+
 			const buildRun = host.runs[host.runs.length - 1];
 			expect(buildRun.argv).toContain("--release");
 		});

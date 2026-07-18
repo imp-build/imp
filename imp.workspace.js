@@ -24,6 +24,7 @@ import "//rules/workflows/package";
 import "//rules/workflows/run";
 import "//rules/workflows/test";
 import "//rules/workflows/vs";
+import "//rules/imp/mode";
 import "//rules/imp/test";
 
 export const biome = biomeToolchain("2.5.4", { default: true });

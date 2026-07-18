@@ -27,6 +27,17 @@ Toolchains may also select an explicit C link driver, linker, and sccache
 target. Pinning them in the workspace file makes the same tool graph available
 to build, test, and Clippy instead of letting those commands drift apart.
 
+This repository's workspace also imports `//rules/imp/mode`, which declares
+the `default` (`opt=debug`) and `release` (`opt=release`) profiles. Cargo
+builds follow the selected profile:
+
+```sh
+imp build --profile release //path/to/package:server
+```
+
+`release: true` on an individual `cargoPackage()` remains an unconditional
+opt-in to Cargo's release profile.
+
 ## Declare a Cargo package
 
 In the directory containing `Cargo.toml`, add a `BUILD.js`:
