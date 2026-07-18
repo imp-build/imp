@@ -931,6 +931,8 @@ async fn cmd_execute_live(
                         ));
                     }
                     render_labels.lock().unwrap().insert(id, display);
+                    // Fallback start time, in case this task is satisfied by
+                    // cache and never reaches `Running` (see below).
                     started_at.insert(id, std::time::Instant::now());
                 }
                 TaskEvent::Running { id, detail } => {
@@ -941,6 +943,12 @@ async fn cmd_execute_live(
                         js_progress.set_position(done_js as u64);
                         js_progress.set_message(format!("js tasks {done_js}/{total_js}"));
                     }
+                    // Work has actually started now (a sandbox job cleared
+                    // `RunContext::started()`, or a memo's JS lane was
+                    // granted and its function body began running). Reset
+                    // the clock here so the reported duration is time spent
+                    // doing work, not time spent queued behind other tasks.
+                    started_at.insert(id, std::time::Instant::now());
                 }
                 TaskEvent::Done {
                     id,

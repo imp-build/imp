@@ -51,6 +51,7 @@ BUILD_STEPS = [
     },
 ]
 
+
 # Everything imp-store persists (downloaded toolchains, the CAS blob store,
 # and cached task results) lives under this one directory; without it every
 # run pays full cold toolchain acquire plus a from-scratch build/test graph.
@@ -85,8 +86,18 @@ def cache_imp_step(job):
     }
 
 
+FREE_DISK_SPACE_STEP = {
+    "name": "Free disk space",
+    "run": (
+        "sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \\\n"
+        "  /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift\n"
+        "df -h /"
+    ),
+}
+
 CHECK_STEPS = [
     {"uses": "actions/checkout@v4"},
+    FREE_DISK_SPACE_STEP,
     *DOWNLOAD_IMP_STEPS,
     cache_imp_step("check"),
     {
