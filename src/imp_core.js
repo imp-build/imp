@@ -528,7 +528,10 @@ export function defineConfigSchema(namespace, shape) {
 	__host_define_config_schema(namespace, encoded);
 }
 
-defineConfigSchema("imp", { jsWorkers: field.int({ default: 1 }) });
+defineConfigSchema("imp", {
+	jsWorkers: field.int({ default: 1 }),
+	jobs: field.int({ default: 1 }),
+});
 
 /**
  * Merge JSON-serializable workspace configuration into a namespace.

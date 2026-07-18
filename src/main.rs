@@ -183,8 +183,8 @@ struct GoalArgs {
     #[arg(long, value_enum, default_value_t, requires = "changed_since")]
     changed_dependents: changed::DependentsMode,
     /// Maximum number of ready tasks to execute concurrently
-    #[arg(long, default_value_t = 1)]
-    jobs: usize,
+    #[arg(long)]
+    jobs: Option<usize>,
     /// Number of concurrent JS worker slots for live evaluation
     #[arg(long)]
     js_workers: Option<usize>,
@@ -574,6 +574,20 @@ fn effective_js_workers(workspace: &spike::Workspace, cli_value: Option<usize>) 
         .unwrap_or(1))
 }
 
+fn effective_jobs(workspace: &spike::Workspace, cli_value: Option<usize>) -> Result<usize> {
+    if let Some(value) = cli_value {
+        return Ok(value.max(1));
+    }
+
+    Ok(workspace
+        .workspace_config
+        .get("imp")
+        .and_then(|config| config.get("jobs"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(1))
+}
+
 async fn cmd_config(command: &ConfigCmd) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
@@ -712,7 +726,7 @@ async fn cmd_execute_live(
         selectors,
         changed_since,
         changed_dependents,
-        jobs,
+        jobs: jobs_cli,
         js_workers: js_workers_cli,
         no_cache,
         keep_sandbox: sandbox_retention,
@@ -720,6 +734,7 @@ async fn cmd_execute_live(
         profile,
     } = args;
     let js_workers = effective_js_workers(&workspace.workspace, js_workers_cli)?;
+    let jobs = effective_jobs(&workspace.workspace, jobs_cli)?;
 
     // Resolve --changed-since into an exact address set before any execution
     // machinery spins up; "nothing changed" is a successful no-op.
@@ -1281,6 +1296,24 @@ mod tests {
     }
 
     #[test]
+    fn effective_jobs_defaults_to_one() {
+        let workspace = spike::Workspace::default();
+        assert_eq!(effective_jobs(&workspace, None).unwrap(), 1);
+    }
+
+    #[test]
+    fn effective_jobs_uses_workspace_config() {
+        let workspace = workspace_with_imp_config(json!({ "jobs": 4 }));
+        assert_eq!(effective_jobs(&workspace, None).unwrap(), 4);
+    }
+
+    #[test]
+    fn effective_jobs_cli_overrides_workspace_config() {
+        let workspace = workspace_with_imp_config(json!({ "jobs": 4 }));
+        assert_eq!(effective_jobs(&workspace, Some(1)).unwrap(), 1);
+    }
+
+    #[test]
     fn changed_since_flags_parse_and_enforce_exclusivity() {
         // The same Command shape parse_goal_args builds (minus process exit).
         let cmd = || GoalArgs::augment_args(Command::new("build"));
@@ -1380,7 +1413,7 @@ mod tests {
         let matches = parse_goal_args("fmt", &flag_defs, &raw);
         let args = GoalArgs::from_arg_matches(&matches).unwrap();
         assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
-        assert_eq!(args.jobs, 2);
+        assert_eq!(args.jobs, Some(2));
         assert!(!matches.get_flag("check"));
     }
 
