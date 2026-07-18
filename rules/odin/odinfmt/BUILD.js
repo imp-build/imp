@@ -6,6 +6,7 @@ export const rules_test = rulesTest({
 	root: "//rules/odin/odinfmt",
 	tools: [
 		nativeTool("mkdir"),
+		nativeTool("dirname"),
 		nativeTool("curl"),
 		nativeTool("tar"),
 		nativeTool("wc"),

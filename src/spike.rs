@@ -216,6 +216,11 @@ pub(crate) struct HostState {
     build_rules: BTreeMap<String, BuildRuleRender>,
     workspace_config: BTreeMap<String, serde_json::Value>,
     config_schemas: BTreeMap<String, serde_json::Value>,
+    /// Mode axes declared via `defineModeAxis(name, {kind, values?, default})`
+    /// — `{kind, values?, default}` per axis, keyed by axis name. Resolved
+    /// CLI overrides land in `workspace_config["imp.mode"]`, written only
+    /// by `execute_goal_live_selection`; see mode-axis-registry.md.
+    mode_axes: BTreeMap<String, serde_json::Value>,
     owned_files: BTreeSet<String>,
     named_caches: BTreeMap<String, NamedCache>,
     goals: BTreeMap<String, Goal>,
@@ -281,6 +286,7 @@ impl Default for HostState {
             build_rules: BTreeMap::new(),
             workspace_config: BTreeMap::new(),
             config_schemas: BTreeMap::new(),
+            mode_axes: BTreeMap::new(),
             owned_files: BTreeSet::new(),
             named_caches: BTreeMap::new(),
             goals,
@@ -1694,6 +1700,12 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         ctx.clone(),
         move |namespace: String, value_json: String| -> rquickjs::Result<()> {
             validate_config_namespace(&namespace)?;
+            if namespace == MODE_AXIS_NAMESPACE {
+                return Err(action_spec_error(format!(
+                    "configure(\"{MODE_AXIS_NAMESPACE}\", ...) is reserved for mode-axis \
+                     resolution (see defineModeAxis/--axis); it cannot be written directly"
+                )));
+            }
             let value: serde_json::Value = serde_json::from_str(&value_json).map_err(|e| {
                 rquickjs::Error::new_loading_message("configure", format!("parse value: {e}"))
             })?;
@@ -1737,6 +1749,71 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_define_config_schema", host_define_config_schema)?;
 
+    // __host_define_mode_axis(name, defJson) — defJson is
+    // `{kind: "rebuild" | "output-select", values?: [...], default: ...}`.
+    // Registers the axis's declared shape so `execute_goal_live_selection`
+    // can validate/default `--axis` overrides. See mode-axis-registry.md.
+    let state_mode_axes = Arc::clone(&state);
+    let host_define_mode_axis = Function::new(
+        ctx.clone(),
+        move |name: String, def_json: String| -> rquickjs::Result<()> {
+            validate_config_namespace(&name)?;
+            let def: serde_json::Value = serde_json::from_str(&def_json).map_err(|e| {
+                rquickjs::Error::new_loading_message("defineModeAxis", format!("parse def: {e}"))
+            })?;
+            let Some(obj) = def.as_object() else {
+                return Err(rquickjs::Error::new_loading_message(
+                    "defineModeAxis",
+                    "definition must be an object",
+                ));
+            };
+            if !obj.contains_key("default") {
+                return Err(rquickjs::Error::new_loading_message(
+                    "defineModeAxis",
+                    "definition must include a \"default\" value",
+                ));
+            }
+            let Some(default) = obj.get("default").and_then(|value| value.as_str()) else {
+                return Err(rquickjs::Error::new_loading_message(
+                    "defineModeAxis",
+                    "\"default\" must be a string",
+                ));
+            };
+            match obj.get("kind").and_then(|k| k.as_str()) {
+                Some("rebuild") | Some("output-select") => {}
+                _ => {
+                    return Err(rquickjs::Error::new_loading_message(
+                        "defineModeAxis",
+                        "\"kind\" must be \"rebuild\" or \"output-select\"",
+                    ));
+                }
+            }
+            if let Some(values) = obj.get("values") {
+                let Some(values) = values.as_array() else {
+                    return Err(rquickjs::Error::new_loading_message(
+                        "defineModeAxis",
+                        "\"values\" must be an array of strings",
+                    ));
+                };
+                if !values.iter().all(|value| value.as_str().is_some()) {
+                    return Err(rquickjs::Error::new_loading_message(
+                        "defineModeAxis",
+                        "\"values\" must be an array of strings",
+                    ));
+                }
+                if !values.iter().any(|value| value.as_str() == Some(default)) {
+                    return Err(rquickjs::Error::new_loading_message(
+                        "defineModeAxis",
+                        "\"default\" must be included in \"values\" when values are declared",
+                    ));
+                }
+            }
+            state_mode_axes.lock().unwrap().mode_axes.insert(name, def);
+            Ok(())
+        },
+    )?;
+    globals.set("__host_define_mode_axis", host_define_mode_axis)?;
+
     let state_schema = Arc::clone(&state);
     let host_configuration_schemas =
         Function::new(ctx.clone(), move || -> rquickjs::Result<String> {
@@ -1775,14 +1852,46 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_configuration", host_configuration)?;
 
+    // __host_configuration_digest(namespacesJson?) → hex digest.
+    //
+    // Called with no argument (from memo(), an in-process dedup cache cleared
+    // every invocation — its coarseness is harmless): digest the whole
+    // workspace_config map, as before.
+    //
+    // Called with a JSON array of namespace names (from run(), whose
+    // configDigest becomes the persistent action-cache salt — see
+    // config-digest-scoping.md): digest only the sub-map restricted to those
+    // namespaces, computed automatically from what the calling frame actually
+    // read via configuration(), not a caller-maintained list. An empty array
+    // (nothing read) digests to a fixed constant, independent of any
+    // configure() call anywhere.
     let state_cfg = Arc::clone(&state);
-    let host_configuration_digest =
-        Function::new(ctx.clone(), move || -> rquickjs::Result<String> {
+    let host_configuration_digest = Function::new(
+        ctx.clone(),
+        move |namespaces_json: Option<String>| -> rquickjs::Result<String> {
             let hs = state_cfg.lock().unwrap();
-            digest_json(&hs.workspace_config).map_err(|e| {
+            let digest_error = |e: anyhow::Error| {
                 rquickjs::Error::new_loading_message("configurationDigest", format!("{e:#}"))
-            })
-        })?;
+            };
+            match namespaces_json {
+                None => digest_json(&hs.workspace_config).map_err(digest_error),
+                Some(json) => {
+                    let namespaces: Vec<String> = serde_json::from_str(&json).map_err(|e| {
+                        rquickjs::Error::new_loading_message(
+                            "configurationDigest",
+                            format!("parse namespaces: {e}"),
+                        )
+                    })?;
+                    let scoped: std::collections::BTreeMap<&String, &serde_json::Value> =
+                        namespaces
+                            .iter()
+                            .filter_map(|ns| hs.workspace_config.get(ns).map(|v| (ns, v)))
+                            .collect();
+                    digest_json(&scoped).map_err(digest_error)
+                }
+            }
+        },
+    )?;
     globals.set("__host_configuration_digest", host_configuration_digest)?;
 
     // ------------------------------------------------------------------
@@ -3269,6 +3378,12 @@ fn action_spec_error(message: String) -> rquickjs::Error {
     rquickjs::Error::new_from_js_message("value", "imp host API", message)
 }
 
+/// Configuration namespace reserved for mode-axis resolution. Only
+/// `execute_goal_live_selection` may write it (directly on `HostState`,
+/// bypassing `__host_configure`'s guard below); JS code reads it indirectly
+/// via `modeAxis()`. See mode-axis-registry.md.
+const MODE_AXIS_NAMESPACE: &str = "imp.mode";
+
 fn validate_config_namespace(namespace: &str) -> rquickjs::Result<()> {
     if namespace.is_empty()
         || !namespace
@@ -3755,6 +3870,7 @@ pub(crate) async fn execute_goal_live(
             js_workers,
             flags,
             run_args: &[],
+            axis_overrides: &[],
         },
     )
     .await
@@ -3774,6 +3890,63 @@ pub struct GoalExecutionOptions<'a> {
     pub js_workers: usize,
     pub flags: serde_json::Value,
     pub run_args: &'a [String],
+    /// Raw `--axis KEY=VALUE` CLI overrides, resolved against declared mode
+    /// axes and written into the live workspace config before any target
+    /// executes. See mode-axis-registry.md.
+    pub axis_overrides: &'a [String],
+}
+
+/// Resolve `--axis KEY=VALUE` CLI overrides against the mode axes declared
+/// via `defineModeAxis` and write the fully-defaulted result into the live
+/// `"imp.mode"` config namespace, before any target executes. See
+/// mode-axis-registry.md.
+fn resolve_mode_axes(live: &LiveWorkspace, axis_overrides: &[String]) -> Result<()> {
+    let mut hs = live.host_state.lock().unwrap();
+    let mode_axes = hs.mode_axes.clone();
+
+    let mut overrides: BTreeMap<String, String> = BTreeMap::new();
+    for entry in axis_overrides {
+        let (key, value) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--axis '{entry}' must be in the form KEY=VALUE"))?;
+        overrides.insert(key.to_owned(), value.to_owned());
+    }
+    for (key, value) in &overrides {
+        let Some(def) = mode_axes.get(key) else {
+            let known: Vec<&str> = mode_axes.keys().map(String::as_str).collect();
+            anyhow::bail!(
+                "--axis '{key}={value}' names an undeclared mode axis; declared axes: {}",
+                known.join(", ")
+            );
+        };
+        if let Some(values) = def.get("values").and_then(|v| v.as_array()) {
+            let valid: Vec<&str> = values.iter().filter_map(|v| v.as_str()).collect();
+            if !valid.contains(&value.as_str()) {
+                anyhow::bail!(
+                    "--axis '{key}={value}' is not a valid value for '{key}'; valid values: {}",
+                    valid.join(", ")
+                );
+            }
+        }
+    }
+
+    let mut resolved = serde_json::Map::new();
+    for (name, def) in &mode_axes {
+        let value = overrides
+            .get(name)
+            .map(|v| serde_json::Value::String(v.clone()))
+            .unwrap_or_else(|| {
+                def.get("default")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null)
+            });
+        resolved.insert(name.clone(), value);
+    }
+    hs.workspace_config.insert(
+        MODE_AXIS_NAMESPACE.to_owned(),
+        serde_json::Value::Object(resolved),
+    );
+    Ok(())
 }
 
 pub async fn execute_goal_live_selection(
@@ -3789,6 +3962,7 @@ pub async fn execute_goal_live_selection(
         js_workers,
         flags,
         run_args,
+        axis_overrides,
     } = options;
     let goal_def = live.workspace.goals.get(goal).ok_or_else(|| {
         let known: Vec<_> = live.workspace.goals.keys().map(String::as_str).collect();
@@ -3804,6 +3978,7 @@ pub async fn execute_goal_live_selection(
     // The caller is required to have installed a scheduler already.
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
     live.exec_no_cache.store(no_cache, Ordering::SeqCst);
+    resolve_mode_axes(live, axis_overrides)?;
 
     // Resolve selectors against the statically-known workspace first, to
     // find the roots that should seed lazy expansion (the common case:
@@ -5882,6 +6057,7 @@ export const run = product(K_run_args, RUN, toolName("run-args-test-tool"), asyn
                 js_workers: 1,
                 flags: serde_json::json!({}),
                 run_args: &run_args,
+                axis_overrides: &[],
             },
         )
         .await
@@ -7889,12 +8065,13 @@ export const build = product(K_live_cache_test, BUILD, toolName("live-cache-test
             &p.join(BUILD_FILE),
             &format!(
                 r#"
-import {{ target, product, run, output, BUILD, targetKind, toolName }} from "imp:core";
+import {{ target, product, run, output, configuration, BUILD, targetKind, toolName }} from "imp:core";
 const K_config_cache_test = targetKind("config-cache-test");
 
 export const app = target({{ kind: "config-cache-test" }});
 
 export const build = product(K_config_cache_test, BUILD, toolName("config-cache-test-tool"), async function build() {{
+    configuration("cache_test");
     return run({{
         argv: ["sh", "-c", "{command_js}"],
         outputs: [output("build/cfg.txt")],
@@ -7942,6 +8119,346 @@ configure("cache_test", {{ mode: {mode} }});
             runs.push(std::fs::read_to_string(&marker).unwrap());
         }
         assert_eq!(runs, ["r", "r", "rr"]);
+    }
+
+    #[tokio::test]
+    async fn live_config_digest_ignores_namespaces_the_product_never_read() {
+        // Same shape as live_config_digest_change_invalidates_run_cache, but
+        // the product only reads "cache_test_read"; the workspace changes a
+        // different namespace ("cache_test_unread") on every iteration. Per
+        // config-digest-scoping.md, run()'s cache salt is scoped to the
+        // namespaces the calling frame actually read via configuration() —
+        // an unrelated namespace changing must not invalidate the cache.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker = p.join("runs.txt");
+        let command = format!(
+            "printf r >> '{}' && mkdir -p build && printf payload > build/cfg.txt",
+            marker.display()
+        );
+        let command_js = command.replace('\\', "\\\\").replace('"', "\\\"");
+
+        write_file(
+            &p.join(BUILD_FILE),
+            &format!(
+                r#"
+import {{ target, product, run, output, configuration, BUILD, targetKind, toolName }} from "imp:core";
+const K_config_cache_test = targetKind("config-cache-test");
+
+export const app = target({{ kind: "config-cache-test" }});
+
+export const build = product(K_config_cache_test, BUILD, toolName("config-cache-test-tool"), async function build() {{
+    configuration("cache_test_read");
+    return run({{
+        argv: ["sh", "-c", "{command_js}"],
+        outputs: [output("build/cfg.txt")],
+        materialize: true,
+        display: "config cache action",
+    }});
+}});
+"#
+            ),
+        );
+
+        let selectors = vec![":app".to_owned()];
+        let mut runs = Vec::new();
+        for mode in [1, 2, 3] {
+            write_file(
+                &p.join(WORKSPACE_FILE),
+                &format!(
+                    r#"
+import {{ configure }} from "imp:core";
+configure("cache_test_read", {{ mode: 1 }});
+configure("cache_test_unread", {{ mode: {mode} }});
+"#
+                ),
+            );
+            let live = load_workspace(p).await.unwrap();
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let scheduler = crate::scheduler::Scheduler::new(
+                1,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                tx,
+            );
+            *live.scheduler.lock().unwrap() = Some(scheduler);
+            execute_goal_live(
+                &live,
+                p,
+                "build",
+                &selectors,
+                false,
+                1,
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+            runs.push(std::fs::read_to_string(&marker).unwrap());
+        }
+        // "cache_test_read" (the only namespace actually read) never changes,
+        // so every iteration after the first must be a cache hit despite
+        // "cache_test_unread" changing every time.
+        assert_eq!(runs, ["r", "r", "r"]);
+    }
+
+    #[tokio::test]
+    async fn live_config_digest_never_invalidates_a_product_that_reads_no_configuration() {
+        // A product whose body never calls configuration() at all must never
+        // be invalidated by any configure() call anywhere in the workspace.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker = p.join("runs.txt");
+        let command = format!(
+            "printf r >> '{}' && mkdir -p build && printf payload > build/cfg.txt",
+            marker.display()
+        );
+        let command_js = command.replace('\\', "\\\\").replace('"', "\\\"");
+
+        write_file(
+            &p.join(BUILD_FILE),
+            &format!(
+                r#"
+import {{ target, product, run, output, BUILD, targetKind, toolName }} from "imp:core";
+const K_config_cache_test = targetKind("config-cache-test");
+
+export const app = target({{ kind: "config-cache-test" }});
+
+export const build = product(K_config_cache_test, BUILD, toolName("config-cache-test-tool"), async function build() {{
+    return run({{
+        argv: ["sh", "-c", "{command_js}"],
+        outputs: [output("build/cfg.txt")],
+        materialize: true,
+        display: "config cache action",
+    }});
+}});
+"#
+            ),
+        );
+
+        let selectors = vec![":app".to_owned()];
+        let mut runs = Vec::new();
+        for mode in [1, 2, 3] {
+            write_file(
+                &p.join(WORKSPACE_FILE),
+                &format!(
+                    r#"
+import {{ configure }} from "imp:core";
+configure("cache_test_unread", {{ mode: {mode} }});
+"#
+                ),
+            );
+            let live = load_workspace(p).await.unwrap();
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let scheduler = crate::scheduler::Scheduler::new(
+                1,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                tx,
+            );
+            *live.scheduler.lock().unwrap() = Some(scheduler);
+            execute_goal_live(
+                &live,
+                p,
+                "build",
+                &selectors,
+                false,
+                1,
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+            runs.push(std::fs::read_to_string(&marker).unwrap());
+        }
+        assert_eq!(runs, ["r", "r", "r"]);
+    }
+
+    async fn run_mode_axis_test_goal(p: &Path, axis_overrides: &[String]) -> Result<()> {
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+        execute_goal_live_selection(
+            &live,
+            p,
+            &SelectorContext::root(),
+            "build",
+            GoalSelection::Selectors(&[":app".to_owned()]),
+            GoalExecutionOptions {
+                no_cache: false,
+                js_workers: 1,
+                flags: serde_json::json!({}),
+                run_args: &[],
+                axis_overrides,
+            },
+        )
+        .await
+    }
+
+    fn write_mode_axis_build_file(p: &Path) {
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis } from "imp:core";
+defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, run, output, modeAxis, BUILD, targetKind, toolName } from "imp:core";
+const K = targetKind("mode-axis-test");
+
+export const app = target({ kind: "mode-axis-test" });
+
+export const build = product(K, BUILD, toolName("mode-axis-test-tool"), async function build() {
+    const opt = modeAxis("opt");
+    return run({
+        argv: ["sh", "-c", `mkdir -p build && printf '%s' "${opt}" > build/marker.txt`],
+        outputs: [output("build/marker.txt")],
+        materialize: true,
+        display: "mode axis test",
+    });
+});
+"#,
+        );
+    }
+
+    fn write_mode_axis_unread_build_file(p: &Path, marker: &Path) {
+        let command = format!(
+            "printf r >> '{}' && mkdir -p build && printf payload > build/marker.txt",
+            marker.display()
+        );
+        let command_js = command.replace('\\', "\\\\").replace('"', "\\\"");
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis } from "imp:core";
+defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            &format!(
+                r#"
+import {{ target, product, run, output, BUILD, targetKind, toolName }} from "imp:core";
+const K = targetKind("mode-axis-unread-test");
+
+export const app = target({{ kind: "mode-axis-unread-test" }});
+
+export const build = product(K, BUILD, toolName("mode-axis-unread-test-tool"), async function build() {{
+    return run({{
+        argv: ["sh", "-c", "{command_js}"],
+        outputs: [output("build/marker.txt")],
+        materialize: true,
+        display: "mode axis unread test",
+    }});
+}});
+"#
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn mode_axis_resolves_to_declared_default_when_no_override() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_mode_axis_build_file(p);
+
+        run_mode_axis_test_goal(p, &[]).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/marker.txt")).unwrap(),
+            "debug"
+        );
+    }
+
+    #[tokio::test]
+    async fn mode_axis_resolves_to_cli_override() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_mode_axis_build_file(p);
+
+        run_mode_axis_test_goal(p, &["opt=release".to_owned()])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/marker.txt")).unwrap(),
+            "release"
+        );
+    }
+
+    #[tokio::test]
+    async fn mode_axis_does_not_invalidate_a_product_that_does_not_read_it() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker = p.join("runs.txt");
+        write_mode_axis_unread_build_file(p, &marker);
+
+        run_mode_axis_test_goal(p, &["opt=debug".to_owned()])
+            .await
+            .unwrap();
+        run_mode_axis_test_goal(p, &["opt=release".to_owned()])
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "r");
+    }
+
+    #[tokio::test]
+    async fn mode_axis_rejects_invalid_value() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_mode_axis_build_file(p);
+
+        let err = run_mode_axis_test_goal(p, &["opt=turbo".to_owned()])
+            .await
+            .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("turbo"), "{message}");
+        assert!(message.contains("debug"), "{message}");
+        assert!(message.contains("release"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn mode_axis_rejects_unknown_axis_name() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_mode_axis_build_file(p);
+
+        let err = run_mode_axis_test_goal(p, &["bogus=x".to_owned()])
+            .await
+            .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("bogus"), "{message}");
+        assert!(message.contains("opt"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn mode_axis_namespace_is_reserved_against_direct_configure() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, configure, BUILD, targetKind, toolName } from "imp:core";
+const K = targetKind("mode-axis-reserved-test");
+
+export const app = target({ kind: "mode-axis-reserved-test" });
+
+export const build = product(K, BUILD, toolName("mode-axis-reserved-test-tool"), async function build() {
+    configure("imp.mode", { opt: "release" });
+    return "ok";
+});
+"#,
+        );
+
+        let err = run_mode_axis_test_goal(p, &[]).await.unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("reserved"), "{message}");
     }
 
     #[tokio::test]

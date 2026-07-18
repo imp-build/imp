@@ -13,6 +13,8 @@ const FORMAT_FLAGS = {
 	"tar.gz": "-xzf",
 	"tar.xz": "-xJf",
 	tar: "-xf",
+	// Windows' bsdtar can read zip files; Unix callers needing a zip must use
+	// "zip-unix", which invokes the native unzip utility instead.
 	zip: "-xf",
 };
 
@@ -21,10 +23,14 @@ const FORMAT_FLAGS = {
  * these into their declared core-tool set; the hermetic sandbox resolves no
  * ambient PATH).
  *
- * @param {string} format One of "tar.gz", "tar.xz", "tar", "zip".
+ * @param {string} format One of "tar.gz", "tar.xz", "tar", "zip", or
+ *   "zip-unix".
  * @returns {string[]}
  */
 export function extractArchiveTools(format) {
+	if (format === "zip-unix") {
+		return ["mkdir", "unzip"];
+	}
 	const flags = FORMAT_FLAGS[format];
 	if (!flags) {
 		throw new Error(`unsupported archive format '${format}'`);
@@ -39,11 +45,9 @@ export function extractArchiveTools(format) {
  * @param {object} opts
  * @param {string} opts.archive Sandbox-relative path of the downloaded archive.
  * @param {string} opts.dest Sandbox-relative extraction directory.
- * @param {string} opts.format One of "tar.gz", "tar.xz", "tar", "zip". "zip"
- *   unpacks via `tar -xf`, which only works with bsdtar (Windows Git Bash) —
- *   the caller is responsible for only choosing "zip" for a windows target
- *   (see zola/uv/ruff/cmake toolchain.js for the `plat.os === "windows" ? ...`
- *   pattern); GNU tar cannot open a zip this way.
+ * @param {string} opts.format One of "tar.gz", "tar.xz", "tar", "zip", or
+ *   "zip-unix". "zip" unpacks via `tar -xf` for Windows' bsdtar; use
+ *   "zip-unix" for GNU/Linux and macOS, where it invokes `unzip` instead.
  * @param {number} [opts.stripComponents] tar --strip-components value.
  * @param {object[]} opts.tools Resolved native-tool specs covering
  *   extractArchiveTools(format) (plus `sh` on windows).
@@ -62,19 +66,19 @@ export async function extractArchive({
 	display,
 }) {
 	const flags = FORMAT_FLAGS[format];
-	if (!flags) {
+	if (!flags && format !== "zip-unix") {
 		throw new Error(`unsupported archive format '${format}'`);
 	}
+	if (format === "zip-unix" && stripComponents) {
+		throw new Error("zip-unix extraction does not support stripComponents");
+	}
 	const strip = stripComponents ? ` --strip-components=${stripComponents}` : "";
+	const command =
+		format === "zip-unix"
+			? 'mkdir -p "$2" && unzip -q "$1" -d "$2"'
+			: `mkdir -p "$2" && tar ${flags} "$1" -C "$2"${strip}`;
 	await run({
-		argv: [
-			"sh",
-			"-c",
-			`mkdir -p "$2" && tar ${flags} "$1" -C "$2"${strip}`,
-			"extract-archive",
-			archive,
-			dest,
-		],
+		argv: ["sh", "-c", command, "extract-archive", archive, dest],
 		tools,
 		inputs: [{ kind: "file", path: archive }],
 		outputs: [

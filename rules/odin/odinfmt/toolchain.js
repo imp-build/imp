@@ -99,7 +99,10 @@ export function odinfmtDownloadUrl(version, plat) {
 // from an ambient PATH.
 function coreToolNames(plat) {
 	return [
-		...new Set([...lockedDownloadTools(plat), ...extractArchiveTools("zip")]),
+		...new Set([
+			...lockedDownloadTools(plat),
+			...extractArchiveTools(plat.os === "windows" ? "zip" : "zip-unix"),
+		]),
 	];
 }
 
@@ -187,7 +190,7 @@ export const acquireOdinfmt = memo(async function acquireOdinfmt(version) {
 	await extractArchive({
 		archive: downloadPath,
 		dest: `.imp/odinfmt-toolchains/${key}`,
-		format: "zip",
+		format: plat.os === "windows" ? "zip" : "zip-unix",
 		tools: coreTools,
 		namedCache: { name: ODINFMT_CACHE, key },
 		display: `install odinfmt ${version} (${plat.os}/${plat.arch})`,

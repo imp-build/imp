@@ -506,6 +506,10 @@ export function configuration(namespace, fallback = undefined) {
 	if (typeof namespace !== "string" || namespace.length === 0) {
 		throw new Error("configuration(namespace) requires a non-empty namespace");
 	}
+	// Record the read on the current call frame so run()'s cache-key salt
+	// (see run() below) can be scoped to only the namespaces actually read,
+	// instead of the whole workspace_config map. See config-digest-scoping.md.
+	_effective_context_entry(true).ctx.readNamespaces.add(namespace);
 	const encoded = __host_configuration(namespace);
 	_trace_effect({
 		event: "effect",
@@ -514,6 +518,63 @@ export function configuration(namespace, fallback = undefined) {
 		configured: encoded != null,
 	});
 	return encoded == null ? fallback : JSON.parse(encoded);
+}
+
+/**
+ * Declare a mode axis (e.g. optimization level, cross-compilation target)
+ * that can be overridden per-invocation via `--axis name=value`.
+ *
+ * This only registers the axis's shape (for CLI validation/defaulting); it
+ * does not itself make the axis readable — call modeAxis() at execution
+ * time to read the CLI-resolved value.
+ *
+ * @category configuration
+ * @param {string} name Axis name, e.g. "opt".
+ * @param {object} def
+ * @param {"rebuild"|"output-select"} def.kind Whether resolving this axis to
+ *   a different value requires a differently-invoked build ("rebuild") or
+ *   just selects among outputs an existing build already produced
+ *   ("output-select").
+ * @param {string[]} [def.values] Closed set of valid values. Omit for a
+ *   free-form axis (e.g. an arbitrary cross-compile target triple).
+ * @param {string} def.default Value used when not overridden by --axis.
+ * @returns {void}
+ */
+export function defineModeAxis(name, def) {
+	if (typeof name !== "string" || name.length === 0) {
+		throw new Error("defineModeAxis(name, def) requires a non-empty name");
+	}
+	const encoded = JSON.stringify(_serialize_attrs(def));
+	if (encoded === undefined) {
+		throw new Error(
+			"defineModeAxis(name, def) requires a JSON-serializable def",
+		);
+	}
+	__host_define_mode_axis(name, encoded);
+}
+
+/**
+ * Read the CLI-resolved value of a declared mode axis.
+ *
+ * Backed by configuration("imp.mode"), so a call frame that reads a mode
+ * axis is automatically tracked for run()'s cache-key scoping — see
+ * config-digest-scoping.md.
+ *
+ * @category configuration
+ * @param {string} name Axis name, as passed to defineModeAxis.
+ * @returns {string}
+ */
+export function modeAxis(name) {
+	if (typeof name !== "string" || name.length === 0) {
+		throw new Error("modeAxis(name) requires a non-empty name");
+	}
+	const cfg = configuration("imp.mode");
+	if (cfg == null || !(name in cfg)) {
+		throw new Error(
+			`modeAxis: axis "${name}" was not declared via defineModeAxis, or has not been resolved yet`,
+		);
+	}
+	return cfg[name];
 }
 
 /**
@@ -1205,7 +1266,10 @@ let _key_product_call = new Map(); // key_string → {target_id, product_name} f
 let _memo_context_counter = 0;
 let _current_memo_context_id = 0;
 let _memo_contexts = new Map([
-	[0, { owner: null, stack: [], stackSet: new Set() }],
+	[
+		0,
+		{ owner: null, stack: [], stackSet: new Set(), readNamespaces: new Set() },
+	],
 ]);
 let _active_memo_context_ids = new Set();
 let _promise_contexts = new WeakMap();
@@ -1331,13 +1395,24 @@ function _clone_context(ctx) {
 		owner: ctx.owner,
 		stack: ctx.stack.slice(),
 		stackSet: new Set(ctx.stackSet),
+		// Deliberately NOT inherited from the parent: each frame tracks only
+		// the configuration namespaces its own body reads directly. A
+		// callee's config-dependent behavior is already captured in the
+		// result it returns, so invalidation propagates to the caller via
+		// args_digest without the caller needing the callee's reads too.
+		readNamespaces: new Set(),
 	};
 }
 
 function _current_context() {
 	let ctx = _memo_contexts.get(_current_memo_context_id);
 	if (ctx === undefined) {
-		ctx = { owner: null, stack: [], stackSet: new Set() };
+		ctx = {
+			owner: null,
+			stack: [],
+			stackSet: new Set(),
+			readNamespaces: new Set(),
+		};
 		_memo_contexts.set(_current_memo_context_id, ctx);
 	}
 	return ctx;
@@ -1677,7 +1752,7 @@ export function memo(fn) {
 		const key_string = JSON.stringify({
 			fn_id,
 			args_digest: _stable_digest(args),
-			config_digest: __host_configuration_digest(),
+			config_digest: __host_configuration_digest(undefined),
 		});
 		if (!_key_display.has(key_string)) {
 			const label = fn.name + "(" + args.map(display_arg).join(", ") + ")";
@@ -1742,7 +1817,15 @@ export function resetMemoState() {
 	_memo_context_counter = 0;
 	_current_memo_context_id = 0;
 	_memo_contexts = new Map([
-		[0, { owner: null, stack: [], stackSet: new Set() }],
+		[
+			0,
+			{
+				owner: null,
+				stack: [],
+				stackSet: new Set(),
+				readNamespaces: new Set(),
+			},
+		],
 	]);
 	_active_memo_context_ids = new Set();
 	_promise_contexts = new WeakMap();
@@ -2157,7 +2240,9 @@ export function run(opts) {
 		argv: opts.argv,
 		display: opts.display,
 		env: opts.env,
-		configDigest: __host_configuration_digest(),
+		configDigest: __host_configuration_digest(
+			JSON.stringify(Array.from(contextEntry.ctx.readNamespaces)),
+		),
 		inputs,
 		outputs,
 		tools: opts.tools,

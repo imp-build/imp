@@ -195,6 +195,10 @@ struct GoalArgs {
     /// sandboxes for debugging, the default), or always (keep every sandbox)
     #[arg(long, value_enum, default_value_t = imp_execution::exec::SandboxRetention::default())]
     keep_sandbox: imp_execution::exec::SandboxRetention,
+    /// Override a mode axis for this invocation, e.g. --axis opt=release
+    /// (repeatable). See defineModeAxis/modeAxis in the JS rule API.
+    #[arg(long = "axis", value_name = "KEY=VALUE")]
+    axis: Vec<String>,
 }
 
 /// Opaque capture of a goal subcommand's argv tail. Goal-declared flags (e.g.
@@ -709,6 +713,7 @@ async fn cmd_execute_live(
         js_workers: js_workers_cli,
         no_cache,
         keep_sandbox: sandbox_retention,
+        axis,
     } = args;
     let js_workers = effective_js_workers(&workspace.workspace, js_workers_cli)?;
 
@@ -1081,6 +1086,7 @@ async fn cmd_execute_live(
                         js_workers,
                         flags: goal_flags.clone(),
                         run_args: &run_args,
+                        axis_overrides: &axis,
                     },
                 )
                 .await
@@ -1371,6 +1377,27 @@ mod tests {
         assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
         assert_eq!(args.jobs, 2);
         assert!(!matches.get_flag("check"));
+    }
+
+    #[test]
+    fn parse_goal_args_collects_repeated_axis_overrides() {
+        let raw = vec![
+            "--axis".to_owned(),
+            "opt=release".to_owned(),
+            "--axis=target=x86_64-unknown-linux-gnu".to_owned(),
+            "//:pkg".to_owned(),
+        ];
+        let matches = parse_goal_args("build", &Default::default(), &raw);
+        let args = GoalArgs::from_arg_matches(&matches).unwrap();
+
+        assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
+        assert_eq!(
+            args.axis,
+            vec![
+                "opt=release".to_owned(),
+                "target=x86_64-unknown-linux-gnu".to_owned(),
+            ]
+        );
     }
 
     #[test]

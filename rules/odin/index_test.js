@@ -40,6 +40,9 @@ import { moldToolchain } from "//rules/c/mold/toolchain";
 // only so tests below can exercise odinToolchain({ linker: mold }).
 gccToolchain("2025.08-1", { default: true, unverified: true });
 const moldForTests = moldToolchain("2.41.0", { unverified: true });
+// Product tests below resolve the toolchain before the fake run host takes
+// over, so use a version pinned in the checked-in Odin lockfile.
+const LOCKED_TEST_VERSION = "dev-2026-03";
 import {
 	target,
 	hydrateTarget,
@@ -245,7 +248,7 @@ describe("Odin rules", () => {
 			});
 			const app = odinPackage({
 				srcs: ["rules/odin/index.js"],
-				toolchain: "dev-2026-04",
+				toolchain: LOCKED_TEST_VERSION,
 				output: "build/odin/target",
 				deps: [fonts],
 			});
@@ -356,7 +359,7 @@ describe("Odin rules", () => {
 			await withFakeRun(async () => {
 				const app = odinPackage({
 					srcs: ["rules/odin/index.js"],
-					toolchain: "dev-2026-04",
+					toolchain: LOCKED_TEST_VERSION,
 					output: "build/odin/target",
 				});
 				await odinBuild(app);
@@ -387,7 +390,7 @@ describe("Odin rules", () => {
 			await withFakeRun(async () => {
 				const lib = odinPackage({
 					srcs: ["rules/odin/index.js"],
-					toolchain: "dev-2026-04",
+					toolchain: LOCKED_TEST_VERSION,
 					output: "build/odin/target",
 				});
 				await odinBuild(lib);
@@ -429,7 +432,7 @@ describe("Odin rules", () => {
 			await withFakeRun(async () => {
 				const lib = odinPackage({
 					srcs: ["rules/odin/index.js"],
-					toolchain: "dev-2026-04",
+					toolchain: LOCKED_TEST_VERSION,
 					output: "build/odin/target",
 				});
 				const result = await odinBuild(lib);
@@ -447,7 +450,7 @@ describe("Odin rules", () => {
 				await withFakeWriteWorkspace(async (calls) => {
 					const pkg = odinPackage({
 						path: "rules/odin/example",
-						toolchain: "dev-2026-04",
+						toolchain: LOCKED_TEST_VERSION,
 						output: "build/odin/target",
 					});
 					const template = await odinRun(pkg);
@@ -481,7 +484,7 @@ describe("Odin rules", () => {
 		try {
 			const lib = odinPackage({
 				srcs: ["rules/odin/index.js"],
-				toolchain: "dev-2026-04",
+				toolchain: LOCKED_TEST_VERSION,
 				output: "build/odin/target",
 			});
 			await odinRun(lib);
@@ -499,7 +502,7 @@ describe("Odin rules", () => {
 			await withFakeRun(async () => {
 				const pkg = odinPackage({
 					path: "rules/odin/example",
-					toolchain: "dev-2026-04",
+					toolchain: LOCKED_TEST_VERSION,
 				});
 				const result = await odinLint(pkg);
 				expect(result.ok).toBe(true);
@@ -524,7 +527,7 @@ describe("Odin rules", () => {
 		try {
 			const pkg = odinPackage({
 				path: "rules/odin/example",
-				toolchain: "dev-2026-04",
+				toolchain: LOCKED_TEST_VERSION,
 			});
 			const originalRun = globalThis.__host_run;
 			globalThis.__host_run = async () => ({
@@ -556,7 +559,7 @@ describe("Odin rules", () => {
 		const pkg = odinPackage({
 			path: "rules/odin",
 			srcs: ["missing*.odin"],
-			toolchain: "dev-2026-04",
+			toolchain: LOCKED_TEST_VERSION,
 		});
 		let message = "";
 		try {
@@ -575,7 +578,7 @@ describe("Odin rules", () => {
 				const pkg = odinPackage({
 					path: "rules/odin",
 					srcs: ["example/*.odin"],
-					toolchain: "dev-2026-04",
+					toolchain: LOCKED_TEST_VERSION,
 					output: "build/odin/target",
 				});
 				await odinBuild(pkg);
@@ -602,7 +605,7 @@ describe("Odin rules", () => {
 			await withFakeRun(async () => {
 				const app = odinPackage({
 					path: "rules/odin/example",
-					toolchain: "dev-2026-04",
+					toolchain: LOCKED_TEST_VERSION,
 					output: "build/odin/target",
 				});
 				await odinBuild(app);
@@ -628,7 +631,7 @@ describe("Odin rules", () => {
 		configure("odin", null);
 		try {
 			await withFakeRun(async () => {
-				const toolchain = odinToolchain("dev-2026-06", {});
+				const toolchain = odinToolchain(LOCKED_TEST_VERSION, {});
 				const app = odinPackage({
 					path: "rules/odin/example",
 					toolchain,
@@ -654,7 +657,7 @@ describe("Odin rules", () => {
 		configure("odin", null);
 		try {
 			await withFakeRun(async () => {
-				const toolchain = odinToolchain("dev-2026-06", {
+				const toolchain = odinToolchain(LOCKED_TEST_VERSION, {
 					linker: moldForTests,
 				});
 				const app = odinPackage({
@@ -694,7 +697,7 @@ describe("Odin rules", () => {
 			await withFakeRun(async () => {
 				const pkg = odinTestPackage({
 					path: "rules/odin/example",
-					toolchain: "dev-2026-04",
+					toolchain: LOCKED_TEST_VERSION,
 				});
 				await odinTest(pkg);
 				const { trace } = getMemoTrace();

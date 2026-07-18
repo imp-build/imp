@@ -10,6 +10,7 @@ import { odinPackage } from "//rules/odin";
 import { getMemoTrace } from "imp:core";
 
 const MAIN_ODIN = "rules/odin/example/main.odin";
+const LOCKED_TEST_VERSION = "dev-2026-03";
 
 describe("Odin fmt mechanics", () => {
 	test("odinFmt runs odinfmt -w over the package's own sources, declares them as materialized outputs, no changes", async () => {
@@ -21,7 +22,7 @@ describe("Odin fmt mechanics", () => {
 				const pkg = odinPackage({
 					path: "rules/odin/example",
 					srcs: ["**/*.odin"],
-					toolchain: "dev-2026-04",
+					toolchain: LOCKED_TEST_VERSION,
 				});
 				const result = await odinFmt(pkg);
 				const { trace } = getMemoTrace();
@@ -45,7 +46,7 @@ describe("Odin fmt mechanics", () => {
 				const pkg = odinPackage({
 					path: "rules/odin/example",
 					srcs: ["**/*.odin"],
-					toolchain: "dev-2026-04",
+					toolchain: LOCKED_TEST_VERSION,
 				});
 				const result = await odinFmt(pkg);
 				expect(result).toEqual({ formatted: 1 });
@@ -59,7 +60,7 @@ describe("Odin fmt mechanics", () => {
 				const pkg = odinPackage({
 					path: "rules/odin/example",
 					srcs: ["**/*.odin"],
-					toolchain: "dev-2026-04",
+					toolchain: LOCKED_TEST_VERSION,
 				});
 				const result = await odinFormatCheck(pkg);
 				const { trace } = getMemoTrace();
@@ -82,7 +83,7 @@ describe("Odin fmt mechanics", () => {
 				const pkg = odinPackage({
 					path: "rules/odin/example",
 					srcs: ["**/*.odin"],
-					toolchain: "dev-2026-04",
+					toolchain: LOCKED_TEST_VERSION,
 				});
 				const result = await odinFormatCheck(pkg);
 				expect(result).toEqual({ checked: 1, unformatted: [MAIN_ODIN] });

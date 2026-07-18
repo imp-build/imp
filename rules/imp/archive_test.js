@@ -12,9 +12,24 @@ describe("archive", () => {
 		expect(extractArchiveTools("tar.xz")).toEqual(["mkdir", "tar", "xz"]);
 		expect(extractArchiveTools("tar")).toEqual(["mkdir", "tar"]);
 		expect(extractArchiveTools("zip")).toEqual(["mkdir", "tar"]);
+		expect(extractArchiveTools("zip-unix")).toEqual(["mkdir", "unzip"]);
 		expect(() => extractArchiveTools("rar")).toThrow(
 			"unsupported archive format",
 		);
+	});
+
+	test("extractArchive uses unzip for a Unix zip archive", async () => {
+		await withFakeToolchainHost(async (host) => {
+			await extractArchive({
+				archive: "a.zip",
+				dest: "out",
+				format: "zip-unix",
+				tools: [],
+				display: "unzip",
+			});
+
+			expect(host.runs[0].argv[2]).toContain("unzip -q");
+		});
 	});
 
 	test("extractArchive runs tar with format flags into a named-cache output", async () => {
