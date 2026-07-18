@@ -8796,25 +8796,24 @@ export const build = product(K, BUILD, toolName("mode-axis-unread-test-tool"), a
         write_file(
             &p.join(WORKSPACE_FILE),
             r#"
-import { defineModeAxis } from "imp:core";
+import { defineModeAxis, defineProfile } from "imp:core";
 defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
 defineModeAxis("linking", { kind: "output-select", values: ["static", "shared"], default: "static" });
+defineProfile("release", { opt: "release" });
+defineProfile("debug", { opt: "debug" });
 "#,
         );
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { Target, BUILD, toolName, product, link, productFor, hydrateTarget, modeAxis, output, run } from "imp:core";
+import { Target, BUILD, toolName, product, link, profile, productFor, modeAxis, namedOutput, output, run } from "imp:core";
 
 const LINK_TOOL = toolName("link-mode-test");
 
 class Linkable extends Target {
     static kind = "linkable";
-    constructor({ derivation = 0 } = {}) {
-        super({ kind: Linkable.kind, attrs: { derivation } });
-    }
-    static derive(base, overrides) {
-        return new Linkable({ derivation: base.attrs.derivation + 1 });
+    constructor() {
+        super({ kind: Linkable.kind, attrs: {} });
     }
 }
 
@@ -8825,27 +8824,80 @@ class Consumer extends Target {
     }
 }
 
-export const linkableBuild = product(Linkable, BUILD, LINK_TOOL, async function linkableBuild(handle) {
-    const path = `build/link-${handle.attrs.derivation}.txt`;
-    return run({
-        argv: ["sh", "-c", "mkdir -p build && printf %s \"$1\" > \"$2\"", "link-mode", modeAxis("opt"), path],
-        outputs: [output(path)],
+export const linkableBuild = product(Linkable, BUILD, LINK_TOOL, async function linkableBuild() {
+    const opt = modeAxis("opt");
+    const result = await run({
+        argv: ["sh", "-c", "mkdir -p build && printf %s \"$1\" > \"$2\"", "link-mode", opt, "build/link.txt"],
+        outputs: [output("build/link.txt")],
         materialize: true,
         display: "linked build",
+    });
+    return namedOutput("linking", {
+        static: { name: `${opt}-static`, outputDigest: result.outputDigest },
+        shared: { name: `${opt}-shared`, outputDigest: result.outputDigest },
     });
 });
 
 export const consumerBuild = product(Consumer, BUILD, LINK_TOOL, async function consumerBuild(handle) {
-    const hydrated = hydrateTarget(handle);
-    await Promise.all([
-        productFor(handle.attrs.dep, BUILD),
-        productFor(hydrated.deps[0].handle, BUILD),
-    ]);
+    const selected = await productFor(handle.attrs.dep, BUILD);
+    return run({
+        argv: ["sh", "-c", "mkdir -p build && printf %s \"$1\" > build/selected.txt", "selected", selected.name],
+        outputs: [output("build/selected.txt")],
+        materialize: true,
+        display: "select linked output",
+    });
 });
 
 export const base = new Linkable();
-const release = link(base, { opt: "release" });
-export const app = new Consumer({ dep: release });
+export const app = new Consumer({ dep: link(profile(base, "release"), { linking: "shared" }) });
+"#,
+        );
+    }
+
+    fn write_link_missing_named_output_build_file(p: &Path) {
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis } from "imp:core";
+defineModeAxis("linking", { kind: "output-select", values: ["static", "shared"], default: "static" });
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { Target, BUILD, toolName, product, link, productFor, output, run } from "imp:core";
+
+const TOOL = toolName("link-missing-named-output-test");
+
+class Plain extends Target {
+    static kind = "link-missing-named-output-plain";
+    constructor() {
+        super({ kind: Plain.kind, attrs: {} });
+    }
+}
+
+class Consumer extends Target {
+    static kind = "link-missing-named-output-consumer";
+    constructor({ dep }) {
+        super({ kind: Consumer.kind, attrs: { dep }, deps: [dep] });
+    }
+}
+
+export const plainBuild = product(Plain, BUILD, TOOL, async function plainBuild() {
+    return run({
+        argv: ["sh", "-c", "mkdir -p build && printf payload > build/plain.txt"],
+        outputs: [output("build/plain.txt")],
+        materialize: true,
+        display: "plain build",
+    });
+});
+
+export const consumerBuild = product(Consumer, BUILD, TOOL, async function consumerBuild(handle) {
+    return productFor(handle.attrs.dep, BUILD);
+});
+
+export const base = new Plain();
+export const app = new Consumer({ dep: link(base, { linking: "shared" }) });
 "#,
         );
     }
@@ -8859,14 +8911,14 @@ import { defineModeAxis, defineProfile } from "imp:core";
 defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
 defineModeAxis("linking", { kind: "output-select", values: ["static", "shared"], default: "static" });
 defineModeAxis("flavor", { kind: "output-select", values: ["plain", "fancy"], default: "plain" });
-defineProfile("release-shared", { opt: "release", linking: "shared" });
+defineProfile("release", { opt: "release" });
 "#,
         );
         write_file(
             &p.join(BUILD_FILE),
             &format!(
                 r#"
-import {{ Target, BUILD, toolName, product, link, productFor, modeAxis, namedOutput, output, run }} from "imp:core";
+import {{ Target, BUILD, toolName, product, link, profile, productFor, modeAxis, namedOutput, output, run }} from "imp:core";
 
 const OUTPUT_TOOL = toolName("named-output-test");
 
@@ -8874,12 +8926,6 @@ class Library extends Target {{
     static kind = "named-output-library";
     constructor() {{
         super({{ kind: Library.kind, attrs: {{}} }});
-    }}
-    static derive(base, overrides) {{
-        if ("linking" in overrides || "flavor" in overrides) {{
-            throw new Error("output-select overrides must not reach derive()");
-        }}
-        return new Library();
     }}
 }}
 
@@ -8932,7 +8978,7 @@ export const app = new Consumer({{
     base,
     shared: link(base, {{ linking: "shared" }}),
     fancyStatic: link(base, {{ linking: "static", flavor: "fancy" }}),
-    releaseShared: link(base, {{ opt: "release", linking: "shared" }}),
+    releaseShared: link(profile(base, "release"), {{ linking: "shared" }}),
 }});
 "#,
             ),
@@ -8976,7 +9022,7 @@ export const app = new Consumer({{
     }
 
     #[tokio::test]
-    async fn link_lazily_derives_one_variant_and_overlays_mode_axis() {
+    async fn link_composes_with_profile_to_select_output_and_overlay_mode_axis() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_link_mode_build_file(p);
@@ -8984,12 +9030,38 @@ export const app = new Consumer({{
         run_mode_axis_test_goal(p, None, &[]).await.unwrap();
 
         assert_eq!(
-            std::fs::read_to_string(p.join("build/link-1.txt")).unwrap(),
+            std::fs::read_to_string(p.join("build/link.txt")).unwrap(),
             "release"
         );
-        assert!(
-            !p.join("build/link-2.txt").exists(),
-            "identical linked edges should share one derived target"
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/selected.txt")).unwrap(),
+            "release-shared"
+        );
+    }
+
+    #[tokio::test]
+    async fn link_and_profile_compose_regardless_of_nesting_order() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_link_mode_build_file(p);
+        let source = std::fs::read_to_string(p.join(BUILD_FILE)).unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            &source.replace(
+                "link(profile(base, \"release\"), { linking: \"shared\" })",
+                "profile(link(base, { linking: \"shared\" }), \"release\")",
+            ),
+        );
+
+        run_mode_axis_test_goal(p, None, &[]).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/link.txt")).unwrap(),
+            "release"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/selected.txt")).unwrap(),
+            "release-shared"
         );
     }
 
@@ -9001,21 +9073,22 @@ export const app = new Consumer({{
         write_link_mode_build_file(p);
         let source = std::fs::read_to_string(p.join(BUILD_FILE)).unwrap();
         let command = format!(
-            "printf r >> '{}' && mkdir -p build && printf payload > build/link-1.txt",
+            "printf r >> '{}' && mkdir -p build && printf payload > build/link.txt",
             marker.display()
         );
         let command = command.replace('\\', "\\\\").replace('"', "\\\"");
         let cache_source = source.replace(
-            "    return run({\n        argv: [\"sh\", \"-c\", \"mkdir -p build && printf %s \\\"$1\\\" > \\\"$2\\\"\", \"link-mode\", modeAxis(\"opt\"), path],",
-            &format!(
-                "    modeAxis(\"opt\");\n    return run({{\n        argv: [\"sh\", \"-c\", \"{command}\"],"
-            ),
+            "        argv: [\"sh\", \"-c\", \"mkdir -p build && printf %s \\\"$1\\\" > \\\"$2\\\"\", \"link-mode\", opt, \"build/link.txt\"],",
+            &format!("        argv: [\"sh\", \"-c\", \"{command}\"],"),
         );
 
         for value in ["release", "release", "debug"] {
             write_file(
                 &p.join(BUILD_FILE),
-                &cache_source.replace("{ opt: \"release\" }", &format!("{{ opt: \"{value}\" }}")),
+                &cache_source.replace(
+                    "profile(base, \"release\")",
+                    &format!("profile(base, \"{value}\")"),
+                ),
             );
             run_mode_axis_test_goal(p, None, &[]).await.unwrap();
         }
@@ -9027,12 +9100,7 @@ export const app = new Consumer({{
     async fn link_rejects_output_select_axis_when_product_has_no_named_output() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
-        write_link_mode_build_file(p);
-        let source = std::fs::read_to_string(p.join(BUILD_FILE)).unwrap();
-        write_file(
-            &p.join(BUILD_FILE),
-            &source.replace("{ opt: \"release\" }", "{ linking: \"shared\" }"),
-        );
+        write_link_missing_named_output_build_file(p);
 
         let err = run_mode_axis_test_goal(p, None, &[]).await.unwrap_err();
         let message = format!("{err:#}");
@@ -9059,25 +9127,7 @@ export const app = new Consumer({{
     }
 
     #[tokio::test]
-    async fn link_rejects_invalid_rebuild_axis_value() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-        write_link_mode_build_file(p);
-        let source = std::fs::read_to_string(p.join(BUILD_FILE)).unwrap();
-        write_file(
-            &p.join(BUILD_FILE),
-            &source.replace("{ opt: \"release\" }", "{ opt: \"turbo\" }"),
-        );
-
-        let err = run_mode_axis_test_goal(p, None, &[]).await.unwrap_err();
-        let message = format!("{err:#}");
-        assert!(message.contains("turbo"), "{message}");
-        assert!(message.contains("debug"), "{message}");
-        assert!(message.contains("release"), "{message}");
-    }
-
-    #[tokio::test]
-    async fn link_rejects_non_participating_target_kind() {
+    async fn link_rejects_rebuild_axis() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_link_mode_build_file(p);
@@ -9085,15 +9135,35 @@ export const app = new Consumer({{
         write_file(
             &p.join(BUILD_FILE),
             &source.replace(
-                "static derive(base, overrides) {\n        return new Linkable({ derivation: base.attrs.derivation + 1 });\n    }\n",
-                "",
+                "link(profile(base, \"release\"), { linking: \"shared\" })",
+                "link(base, { opt: \"release\" })",
             ),
         );
 
-        let err = run_mode_axis_test_goal(p, None, &[]).await.unwrap_err();
-        let message = format!("{err:#}");
-        assert!(message.contains("does not participate"), "{message}");
-        assert!(message.contains("derive"), "{message}");
+        let err = format!("{:#}", load_workspace(p).await.unwrap_err());
+        assert!(err.contains("only accepts output-select axes"), "{err}");
+        assert!(err.contains("'opt'"), "{err}");
+        assert!(err.contains("profile()"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn link_rejects_invalid_output_select_axis_value() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_link_mode_build_file(p);
+        let source = std::fs::read_to_string(p.join(BUILD_FILE)).unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            &source.replace(
+                "link(profile(base, \"release\"), { linking: \"shared\" })",
+                "link(base, { linking: \"bogus\" })",
+            ),
+        );
+
+        let err = format!("{:#}", load_workspace(p).await.unwrap_err());
+        assert!(err.contains("bogus"), "{err}");
+        assert!(err.contains("static"), "{err}");
+        assert!(err.contains("shared"), "{err}");
     }
 
     #[tokio::test]

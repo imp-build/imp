@@ -1,17 +1,39 @@
+// Peels an arbitrary nesting of link()/profile() dependency-edge wrappers
+// (in either order) down to the plain base Target handle, accumulating each
+// wrapper's own metadata along the way. Used everywhere a dep edge is read:
+// Target construction, hydrateTarget(), productFor(), memo()'s per-call
+// mode-axis overlay, and the digest/serialization helpers below.
+function _unwrap_dep_edge(value) {
+	let outputOverrides = null;
+	let profiles = null;
+	let modeOverrides = null;
+	while (
+		value &&
+		typeof value === "object" &&
+		(value.__imp_link === true || value.__imp_profile === true)
+	) {
+		if (value.__imp_link === true) {
+			outputOverrides = value.overrides;
+		} else {
+			profiles = value.profiles;
+			modeOverrides = value.overrides;
+		}
+		value = value.handle;
+	}
+	return { handle: value, outputOverrides, profiles, modeOverrides };
+}
+
 function _serialize_attrs(value) {
 	if (value === null || value === undefined || typeof value !== "object")
 		return value;
 	if (Array.isArray(value)) return value.map(_serialize_attrs);
-	if (value.__imp_profile === true) {
+	if (value.__imp_link === true || value.__imp_profile === true) {
+		const { handle, outputOverrides, profiles } = _unwrap_dep_edge(value);
 		return {
-			__imp_profile_ref: value.handle.__id,
-			profiles: value.profiles,
-		};
-	}
-	if (value.__imp_link === true) {
-		return {
-			__imp_link_ref: value.handle.__id,
-			overrides: _serialize_attrs(value.overrides),
+			__imp_dep_ref: handle.__id,
+			overrides:
+				outputOverrides === null ? null : _serialize_attrs(outputOverrides),
+			profiles,
 		};
 	}
 	if (value.__imp === true) return { __imp_ref: value.__id };
@@ -23,15 +45,11 @@ function _serialize_attrs(value) {
 function _collect_dependencies(value, out) {
 	if (value === null || value === undefined || typeof value !== "object")
 		return;
-	if (value.__imp_profile === true) {
-		out.push(value);
-		return;
-	}
-	if (value.__imp_link === true) {
-		out.push(value);
-		return;
-	}
-	if (value.__imp === true) {
+	if (
+		value.__imp_link === true ||
+		value.__imp_profile === true ||
+		value.__imp === true
+	) {
 		out.push(value);
 		return;
 	}
@@ -107,25 +125,10 @@ export class Target {
 		const sources = _normalize_source_fields(opts.sources);
 		if (opts.deps != null) {
 			for (const d of opts.deps) {
-				const profile = d && d.__imp_profile === true ? d : null;
-				const handle = profile
-					? profile.handle
-					: d && d.__imp_link === true
-						? d.handle
-						: d;
-				if (handle && handle.__imp === true) {
-					depIds.push(handle.__id);
-					depModes.push(null);
-					depLinks.push(d && d.__imp_link === true ? d.overrides : null);
-					depProfiles.push(profile ? profile.profiles : null);
-				} else if (d && d.target) {
-					const target = d.target;
-					const profile = target.__imp_profile === true ? target : null;
-					const handle = profile
-						? profile.handle
-						: target.__imp_link === true
-							? target.handle
-							: target;
+				if (d && d.target !== undefined) {
+					const { handle, outputOverrides, profiles } = _unwrap_dep_edge(
+						d.target,
+					);
 					if (!handle || handle.__imp !== true) {
 						throw new Error(
 							"dep must be a target handle or { target, mode }, got: " +
@@ -134,29 +137,31 @@ export class Target {
 					}
 					depIds.push(handle.__id);
 					depModes.push(d.mode != null ? String(d.mode) : null);
-					depLinks.push(target.__imp_link === true ? target.overrides : null);
-					depProfiles.push(profile ? profile.profiles : null);
-				} else {
+					depLinks.push(outputOverrides);
+					depProfiles.push(profiles);
+					continue;
+				}
+				const { handle, outputOverrides, profiles } = _unwrap_dep_edge(d);
+				if (!handle || handle.__imp !== true) {
 					throw new Error(
 						"dep must be a target handle or { target, mode }, got: " +
 							JSON.stringify(d),
 					);
 				}
+				depIds.push(handle.__id);
+				depModes.push(null);
+				depLinks.push(outputOverrides);
+				depProfiles.push(profiles);
 			}
 		} else {
 			const found = [];
 			_collect_dependencies(attrs, found);
 			for (const dep of found) {
-				const profile = dep.__imp_profile === true ? dep : null;
-				const handle = profile
-					? profile.handle
-					: dep.__imp_link === true
-						? dep.handle
-						: dep;
+				const { handle, outputOverrides, profiles } = _unwrap_dep_edge(dep);
 				depIds.push(handle.__id);
 				depModes.push(null);
-				depLinks.push(dep.__imp_link === true ? dep.overrides : null);
-				depProfiles.push(profile ? profile.profiles : null);
+				depLinks.push(outputOverrides);
+				depProfiles.push(profiles);
 			}
 		}
 		const id = __host_target(
@@ -1102,71 +1107,34 @@ export function resolveProducts(entry) {
  */
 export function productFor(handle, nameToken) {
 	const { name } = _product_name_of(nameToken, "productFor()");
-	if (!handle || (handle.__imp !== true && handle.__imp_link !== true)) {
+	if (!handle || handle.__imp !== true) {
 		throw new Error(`productFor(handle, "${name}") expects a target handle`);
 	}
-	let rebuildOverrides = null;
-	let outputOverrides = null;
-	if (handle.__imp_link === true) {
-		const classified = JSON.parse(
-			__host_classify_link_overrides(JSON.stringify(handle.overrides)),
-		);
-		rebuildOverrides = classified.rebuild;
-		outputOverrides = classified.outputSelect;
-		const baseHandle = handle.handle;
-		if (Object.keys(rebuildOverrides).length > 0) {
-			const kindClass = _kind_class_by_name.get(baseHandle.kind);
-			if (typeof kindClass?.derive !== "function") {
-				throw new Error(
-					`target kind '${baseHandle.kind}' does not participate in link(); ` +
-						"define static derive(base, overrides) on its Target class",
-				);
-			}
-			let derived = _linked_variant_cache.get(handle);
-			if (derived === undefined) {
-				derived = _with_mode_overrides(rebuildOverrides, () =>
-					kindClass.derive(baseHandle, rebuildOverrides),
-				);
-				if (
-					!derived ||
-					derived.__imp !== true ||
-					derived.__id === baseHandle.__id
-				) {
-					throw new Error(
-						`target kind '${handle.handle.kind}' static derive(base, overrides) must return a distinct Target handle`,
-					);
-				}
-				_linked_variant_cache.set(handle, derived);
-			}
-			handle = derived;
-		} else {
-			handle = baseHandle;
-		}
-	}
-	const by_tool = _products_by_kind_name.get(`${handle.kind}:${name}`);
+	const { handle: baseHandle, outputOverrides } = _unwrap_dep_edge(handle);
+	const by_tool = _products_by_kind_name.get(`${baseHandle.kind}:${name}`);
 	if (by_tool === undefined || by_tool.size === 0) {
 		throw new Error(
-			`target kind '${handle.kind}' has no '${name}' product registered`,
+			`target kind '${baseHandle.kind}' has no '${name}' product registered`,
 		);
 	}
 	// Role lookups resolve a single provider; a kind with several tools
 	// registering the same role product is ambiguous by construction.
 	if (by_tool.size > 1) {
 		throw new Error(
-			`target kind '${handle.kind}' has '${name}' products from several tools ` +
+			`target kind '${baseHandle.kind}' has '${name}' products from several tools ` +
 				`(${[...by_tool.keys()].join(", ")}); productFor() resolves a single provider`,
 		);
 	}
 	const fn = by_tool.values().next().value;
-	const result =
-		rebuildOverrides === null || Object.keys(rebuildOverrides).length === 0
-			? fn(handle)
-			: _with_mode_overrides(rebuildOverrides, () => fn(handle));
+	// fn is the memo()-wrapped product function; passing the still-wrapped
+	// handle lets memo() apply any nested profile()'s mode-axis overlay and
+	// strip wrapper layers itself, so direct calls and productFor() agree.
+	const result = fn(handle);
 	return _resolve_named_output_result(
 		result,
 		outputOverrides || {},
 		new Set(Object.keys(outputOverrides || {})),
-		`target kind '${handle.kind}' product '${name}'`,
+		`target kind '${baseHandle.kind}' product '${name}'`,
 	);
 }
 
@@ -1407,8 +1375,7 @@ export function targetKind(name) {
 	return cls;
 }
 
-const _linked_edge_cache = new Map();
-const _linked_variant_cache = new WeakMap();
+const _linked_edge_cache = new WeakMap();
 
 function _canonical_link_overrides(overrides) {
 	if (
@@ -1434,17 +1401,20 @@ function _canonical_link_overrides(overrides) {
 }
 
 /**
- * Annotate one dependency edge with mode-axis overrides. This is declaration
- * metadata only: the linked variant is reconstructed lazily if a consumer
- * calls productFor(link(...), productName).
+ * Select a dependency edge's product type: an object of output-select
+ * mode-axis values (see defineModeAxis's `kind: "output-select"`) that
+ * `productFor()` uses to pick a branch of the producer's namedOutput()
+ * result after it has already built — never a rebuild. This is declaration
+ * metadata only.
  *
- * A participating target kind defines `static derive(base, overrides)`, which
- * returns the concrete target handle to dispatch. The override is also visible
- * to that product call through modeAxis().
+ * `link()` composes with profile(): nest a profile()-wrapped handle to also
+ * overlay that dependency's rebuild-axis mode bundle, e.g.
+ * `link(profile(dep, "release"), { linking: "shared" })`. Rebuild-axis
+ * values belong to profile(), not link() — passing one here throws.
  *
  * @category target
- * @param {object} handle Base target handle.
- * @param {object.<string, string>} overrides Per-edge rebuild-axis values.
+ * @param {object} handle Base target handle, optionally profile()-wrapped.
+ * @param {object.<string, string>} overrides Per-edge output-select axis values.
  * @returns {object} Immutable linked-edge reference accepted by productFor() and deps.
  */
 export function link(handle, overrides) {
@@ -1452,16 +1422,38 @@ export function link(handle, overrides) {
 		throw new Error("link(handle, overrides) expects a Target handle");
 	}
 	const canonical = _canonical_link_overrides(overrides);
-	const key = `${handle.__id}:${JSON.stringify(canonical)}`;
-	const existing = _linked_edge_cache.get(key);
+	const classified = JSON.parse(
+		__host_classify_link_overrides(JSON.stringify(canonical)),
+	);
+	const rebuildAxes = Object.keys(classified.rebuild);
+	if (rebuildAxes.length > 0) {
+		throw new Error(
+			"link(handle, overrides) only accepts output-select axes (product type); " +
+				`rebuild axis(es) ${rebuildAxes.map((a) => `'${a}'`).join(", ")} must be set via profile() instead`,
+		);
+	}
+	const overridesKey = JSON.stringify(canonical);
+	let byOverrides = _linked_edge_cache.get(handle);
+	if (byOverrides === undefined) {
+		byOverrides = new Map();
+		_linked_edge_cache.set(handle, byOverrides);
+	}
+	const existing = byOverrides.get(overridesKey);
 	if (existing !== undefined) return existing;
-	const reference = Object.freeze({
+	const reference = {
+		__imp: true,
 		__imp_link: true,
-		handle,
+		__id: handle.__id,
 		kind: handle.kind,
+		attrs: handle.attrs,
+		handle,
 		overrides: canonical,
+	};
+	Object.defineProperty(reference, "label", {
+		get: () => handle.label,
 	});
-	_linked_edge_cache.set(key, reference);
+	Object.freeze(reference);
+	byOverrides.set(overridesKey, reference);
 	return reference;
 }
 
@@ -1560,13 +1552,17 @@ function _stable_digest(args) {
 		if (
 			value !== null &&
 			typeof value === "object" &&
-			value.__imp_profile === true &&
-			typeof value.__id === "number"
+			(value.__imp_link === true || value.__imp_profile === true)
 		) {
-			return {
-				__imp_profile_ref: value.__id,
-				overrides: value.overrides,
-			};
+			// link()'s own output-select overrides never change what the
+			// memoized product function computes — they only pick a branch
+			// of its already-built result afterward (productFor()) — so they
+			// must not fragment the memo cache key. Only a nested profile()
+			// (which does overlay modeAxis() reads) is digest-relevant.
+			const { handle, profiles } = _unwrap_dep_edge(value);
+			return profiles && profiles.length > 0
+				? { __imp_dep_ref: handle.__id, profiles }
+				: { __imp_ref: handle.__id };
 		}
 		if (
 			value !== null &&
@@ -2099,9 +2095,9 @@ export function memo(fn) {
 		return JSON.stringify(arg);
 	}
 	return function memoized(...args) {
-		const configured =
-			args[0] && args[0].__imp_profile === true ? args[0] : null;
-		const callArgs = configured ? [configured.handle, ...args.slice(1)] : args;
+		const unwrapped = args.length > 0 ? _unwrap_dep_edge(args[0]) : null;
+		const hasProfile = !!(unwrapped?.profiles && unwrapped.profiles.length > 0);
+		const callArgs = unwrapped ? [unwrapped.handle, ...args.slice(1)] : args;
 		const key_string = JSON.stringify({
 			fn_id,
 			args_digest: _stable_digest(args),
@@ -2136,8 +2132,8 @@ export function memo(fn) {
 					_push_call(key_string);
 					let promise;
 					try {
-						promise = configured
-							? _with_mode_overrides(configured.overrides, () =>
+						promise = hasProfile
+							? _with_mode_overrides(unwrapped.modeOverrides, () =>
 									Promise.resolve(fn(...callArgs)),
 								)
 							: Promise.resolve(fn(...callArgs));
