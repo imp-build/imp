@@ -311,7 +311,16 @@ struct PendingTarget {
     kind: String,
     attrs: serde_json::Value,
     sources: Vec<SourceField>,
-    dep_ids: Vec<(u32, Option<String>)>,
+    dep_ids: Vec<PendingDependency>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingDependency {
+    id: u32,
+    mode: Option<String>,
+    /// Per-edge mode overrides from link(handle, overrides). These remain
+    /// declaration metadata until JS calls productFor() on the hydrated link.
+    link_overrides: Option<BTreeMap<String, String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -895,14 +904,15 @@ fn materialize_pending_target(
         .get(&id)
         .ok_or_else(|| anyhow::anyhow!("no pending target for id {id}"))?;
     let mut deps = Vec::new();
-    for (index, (dep_id, mode_str)) in pending.dep_ids.iter().enumerate() {
+    for (index, dep) in pending.dep_ids.iter().enumerate() {
+        let dep_id = dep.id;
         let dep_address = id_to_address
-            .get(dep_id)
+            .get(&dep_id)
             .cloned()
             .unwrap_or_else(|| format!("{address}__implicit{index}"));
         let dep_address =
-            materialize_pending_target(hs, id_to_address, targets, visiting, *dep_id, dep_address)?;
-        let mode = match mode_str.as_deref() {
+            materialize_pending_target(hs, id_to_address, targets, visiting, dep_id, dep_address)?;
+        let mode = match dep.mode.as_deref() {
             None | Some("auto") => DependencyMode::Auto,
             Some(m) => DependencyMode::Named(m.to_owned()),
         };
@@ -1180,8 +1190,9 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     imp_store::usage::record_workspace(&workspace_cache_id(&workspace_root), &workspace_root);
 
     // ------------------------------------------------------------------
-    // __host_target(kind, attrsJson, sourcesJson, depIds, depModes) → u32 (handle id)
-    // depIds: Array<number>, depModes: Array<string|null> (parallel arrays)
+    // __host_target(kind, attrsJson, sourcesJson, depIds, depModes, depLinks) → u32
+    // depIds, depModes, and depLinks are parallel arrays. depLinks contains
+    // either null or a JSON object from link(handle, overrides).
     // ------------------------------------------------------------------
     let state_t = Arc::clone(&state);
     let host_target = Function::new(
@@ -1191,7 +1202,8 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
               attrs_json: String,
               sources_json: String,
               dep_ids: Array<'js>,
-              dep_modes: Array<'js>|
+              dep_modes: Array<'js>,
+              dep_links: Array<'js>|
               -> rquickjs::Result<u32> {
             let mut hs = state_t.lock().unwrap();
             let id = hs.next_id;
@@ -1204,9 +1216,15 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                 rquickjs::Error::new_loading_message("__host_target", e.to_string())
             })?;
 
-            // Extract (dep_id, mode) pairs from the two parallel arrays.
+            // Extract dependency metadata from the parallel arrays.
             let len = dep_ids.len();
-            let mut dep_id_list: Vec<(u32, Option<String>)> = Vec::with_capacity(len);
+            if dep_modes.len() != len || dep_links.len() != len {
+                return Err(rquickjs::Error::new_loading_message(
+                    "__host_target",
+                    "dependency metadata arrays must have equal lengths",
+                ));
+            }
+            let mut dep_id_list: Vec<PendingDependency> = Vec::with_capacity(len);
             for i in 0..len {
                 let dep_id: u32 = dep_ids.get(i)?;
                 let mode_val: Value = dep_modes.get(i)?;
@@ -1215,7 +1233,40 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                 } else {
                     Some(mode_val.get::<String>()?)
                 };
-                dep_id_list.push((dep_id, mode));
+                let link_val: Value = dep_links.get(i)?;
+                let link_overrides = if link_val.is_null() || link_val.is_undefined() {
+                    None
+                } else {
+                    let json = link_val.get::<String>()?;
+                    let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| {
+                        rquickjs::Error::new_loading_message(
+                            "__host_target",
+                            format!("parse link overrides: {e}"),
+                        )
+                    })?;
+                    let Some(values) = value.as_object() else {
+                        return Err(rquickjs::Error::new_loading_message(
+                            "__host_target",
+                            "link overrides must be an object of strings",
+                        ));
+                    };
+                    let mut overrides = BTreeMap::new();
+                    for (axis, value) in values {
+                        let Some(value) = value.as_str() else {
+                            return Err(rquickjs::Error::new_loading_message(
+                                "__host_target",
+                                "link overrides must be an object of strings",
+                            ));
+                        };
+                        overrides.insert(axis.clone(), value.to_owned());
+                    }
+                    Some(overrides)
+                };
+                dep_id_list.push(PendingDependency {
+                    id: dep_id,
+                    mode,
+                    link_overrides,
+                });
             }
 
             hs.pending.insert(
@@ -1856,6 +1907,47 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_define_profile", host_define_profile)?;
 
+    // __host_validate_link_overrides(overridesJson) — validates the
+    // declaration metadata carried by link(handle, overrides) when a linked
+    // edge is actually consumed through productFor(). Output-selection axes
+    // deliberately remain deferred to Phase 4.
+    let state_link_overrides = Arc::clone(&state);
+    let host_validate_link_overrides = Function::new(
+        ctx.clone(),
+        move |overrides_json: String| -> rquickjs::Result<()> {
+            let overrides: BTreeMap<String, String> = serde_json::from_str(&overrides_json)
+                .map_err(|e| {
+                    rquickjs::Error::new_loading_message("link", format!("parse overrides: {e}"))
+                })?;
+            let hs = state_link_overrides.lock().unwrap();
+            for (axis, value) in &overrides {
+                let Some(def) = hs.mode_axes.get(axis) else {
+                    let known: Vec<&str> = hs.mode_axes.keys().map(String::as_str).collect();
+                    return Err(rquickjs::Error::new_loading_message(
+                        "link",
+                        format!(
+                            "link() overrides undeclared mode axis '{axis}'; declared axes: {}",
+                            known.join(", ")
+                        ),
+                    ));
+                };
+                if def.get("kind").and_then(|kind| kind.as_str()) != Some("rebuild") {
+                    return Err(rquickjs::Error::new_loading_message(
+                        "link",
+                        format!("link() cannot override output-select axis '{axis}' until Phase 4"),
+                    ));
+                }
+                validate_mode_axis_value(axis, value, def, "link()")
+                    .map_err(|e| rquickjs::Error::new_loading_message("link", e.to_string()))?;
+            }
+            Ok(())
+        },
+    )?;
+    globals.set(
+        "__host_validate_link_overrides",
+        host_validate_link_overrides,
+    )?;
+
     let state_schema = Arc::clone(&state);
     let host_configuration_schemas =
         Function::new(ctx.clone(), move || -> rquickjs::Result<String> {
@@ -1894,7 +1986,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_configuration", host_configuration)?;
 
-    // __host_configuration_digest(namespacesJson?) → hex digest.
+    // __host_configuration_digest(namespacesJson?, modeOverridesJson?) → hex digest.
     //
     // Called with no argument (from memo(), an in-process dedup cache cleared
     // every invocation — its coarseness is harmless): digest the whole
@@ -1908,32 +2000,67 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     // (nothing read) digests to a fixed constant, independent of any
     // configure() call anywhere.
     let state_cfg = Arc::clone(&state);
-    let host_configuration_digest = Function::new(
-        ctx.clone(),
-        move |namespaces_json: Option<String>| -> rquickjs::Result<String> {
-            let hs = state_cfg.lock().unwrap();
-            let digest_error = |e: anyhow::Error| {
-                rquickjs::Error::new_loading_message("configurationDigest", format!("{e:#}"))
-            };
-            match namespaces_json {
-                None => digest_json(&hs.workspace_config).map_err(digest_error),
-                Some(json) => {
-                    let namespaces: Vec<String> = serde_json::from_str(&json).map_err(|e| {
-                        rquickjs::Error::new_loading_message(
-                            "configurationDigest",
-                            format!("parse namespaces: {e}"),
-                        )
-                    })?;
-                    let scoped: std::collections::BTreeMap<&String, &serde_json::Value> =
-                        namespaces
+    let host_configuration_digest =
+        Function::new(
+            ctx.clone(),
+            move |namespaces_json: Option<String>,
+                  mode_overrides_json: Option<String>|
+                  -> rquickjs::Result<String> {
+                let hs = state_cfg.lock().unwrap();
+                let digest_error = |e: anyhow::Error| {
+                    rquickjs::Error::new_loading_message("configurationDigest", format!("{e:#}"))
+                };
+                match namespaces_json {
+                    None => digest_json(&hs.workspace_config).map_err(digest_error),
+                    Some(json) => {
+                        let namespaces: Vec<String> = serde_json::from_str(&json).map_err(|e| {
+                            rquickjs::Error::new_loading_message(
+                                "configurationDigest",
+                                format!("parse namespaces: {e}"),
+                            )
+                        })?;
+                        let mut scoped: BTreeMap<String, serde_json::Value> = namespaces
                             .iter()
-                            .filter_map(|ns| hs.workspace_config.get(ns).map(|v| (ns, v)))
+                            .filter_map(|ns| {
+                                hs.workspace_config
+                                    .get(ns)
+                                    .map(|value| (ns.clone(), value.clone()))
+                            })
                             .collect();
-                    digest_json(&scoped).map_err(digest_error)
+                        if namespaces.iter().any(|ns| ns == MODE_AXIS_NAMESPACE) {
+                            let overrides: BTreeMap<String, String> = mode_overrides_json
+                                .as_deref()
+                                .filter(|json| !json.is_empty())
+                                .map(serde_json::from_str)
+                                .transpose()
+                                .map_err(|e| {
+                                    rquickjs::Error::new_loading_message(
+                                        "configurationDigest",
+                                        format!("parse mode overrides: {e}"),
+                                    )
+                                })?
+                                .unwrap_or_default();
+                            if !overrides.is_empty() {
+                                let mode =
+                                    scoped.entry(MODE_AXIS_NAMESPACE.to_owned()).or_insert_with(
+                                        || serde_json::Value::Object(serde_json::Map::new()),
+                                    );
+                                let Some(mode) = mode.as_object_mut() else {
+                                    return Err(rquickjs::Error::new_loading_message(
+                                        "configurationDigest",
+                                        "imp.mode must be an object",
+                                    ));
+                                };
+                                for (axis, value) in overrides {
+                                    mode.insert(axis, serde_json::Value::String(value));
+                                }
+                            }
+                        }
+                        digest_json(&scoped).map_err(digest_error)
+                    }
                 }
-            }
-        },
-    )?;
+            },
+        )?;
     globals.set("__host_configuration_digest", host_configuration_digest)?;
 
     // ------------------------------------------------------------------
@@ -2233,10 +2360,11 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
             let deps: Vec<serde_json::Value> = pending
                 .dep_ids
                 .iter()
-                .map(|(dep_id, mode)| {
+                .map(|dep| {
                     serde_json::json!({
-                        "handle": { "__imp": true, "__id": dep_id },
-                        "mode": mode,
+                        "handle": { "__imp": true, "__id": dep.id },
+                        "mode": dep.mode,
+                        "overrides": dep.link_overrides,
                     })
                 })
                 .collect();
@@ -8490,6 +8618,64 @@ export const build = product(K, BUILD, toolName("mode-axis-unread-test-tool"), a
         );
     }
 
+    fn write_link_mode_build_file(p: &Path) {
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis } from "imp:core";
+defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
+defineModeAxis("linking", { kind: "output-select", values: ["static", "shared"], default: "static" });
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { Target, BUILD, toolName, product, link, productFor, hydrateTarget, modeAxis, output, run } from "imp:core";
+
+const LINK_TOOL = toolName("link-mode-test");
+
+class Linkable extends Target {
+    static kind = "linkable";
+    constructor({ derivation = 0 } = {}) {
+        super({ kind: Linkable.kind, attrs: { derivation } });
+    }
+    static derive(base, overrides) {
+        return new Linkable({ derivation: base.attrs.derivation + 1 });
+    }
+}
+
+class Consumer extends Target {
+    static kind = "link-consumer";
+    constructor({ dep }) {
+        super({ kind: Consumer.kind, attrs: { dep }, deps: [dep] });
+    }
+}
+
+export const linkableBuild = product(Linkable, BUILD, LINK_TOOL, async function linkableBuild(handle) {
+    const path = `build/link-${handle.attrs.derivation}.txt`;
+    return run({
+        argv: ["sh", "-c", "mkdir -p build && printf %s \"$1\" > \"$2\"", "link-mode", modeAxis("opt"), path],
+        outputs: [output(path)],
+        materialize: true,
+        display: "linked build",
+    });
+});
+
+export const consumerBuild = product(Consumer, BUILD, LINK_TOOL, async function consumerBuild(handle) {
+    const hydrated = hydrateTarget(handle);
+    await Promise.all([
+        productFor(handle.attrs.dep, BUILD),
+        productFor(hydrated.deps[0].handle, BUILD),
+    ]);
+});
+
+export const base = new Linkable();
+const release = link(base, { opt: "release" });
+export const app = new Consumer({ dep: release });
+"#,
+        );
+    }
+
     #[tokio::test]
     async fn mode_axis_resolves_to_declared_default_when_no_override() {
         let root = tempfile::tempdir().unwrap();
@@ -8502,6 +8688,109 @@ export const build = product(K, BUILD, toolName("mode-axis-unread-test-tool"), a
             std::fs::read_to_string(p.join("build/marker.txt")).unwrap(),
             "debug"
         );
+    }
+
+    #[tokio::test]
+    async fn link_lazily_derives_one_variant_and_overlays_mode_axis() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_link_mode_build_file(p);
+
+        run_mode_axis_test_goal(p, None, &[]).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/link-1.txt")).unwrap(),
+            "release"
+        );
+        assert!(
+            !p.join("build/link-2.txt").exists(),
+            "identical linked edges should share one derived target"
+        );
+    }
+
+    #[tokio::test]
+    async fn link_mode_overlay_scopes_the_persistent_action_cache_salt() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker = p.join("runs.txt");
+        write_link_mode_build_file(p);
+        let source = std::fs::read_to_string(p.join(BUILD_FILE)).unwrap();
+        let command = format!(
+            "printf r >> '{}' && mkdir -p build && printf payload > build/link-1.txt",
+            marker.display()
+        );
+        let command = command.replace('\\', "\\\\").replace('"', "\\\"");
+        let cache_source = source.replace(
+            "    return run({\n        argv: [\"sh\", \"-c\", \"mkdir -p build && printf %s \\\"$1\\\" > \\\"$2\\\"\", \"link-mode\", modeAxis(\"opt\"), path],",
+            &format!(
+                "    modeAxis(\"opt\");\n    return run({{\n        argv: [\"sh\", \"-c\", \"{command}\"],"
+            ),
+        );
+
+        for value in ["release", "release", "debug"] {
+            write_file(
+                &p.join(BUILD_FILE),
+                &cache_source.replace("{ opt: \"release\" }", &format!("{{ opt: \"{value}\" }}")),
+            );
+            run_mode_axis_test_goal(p, None, &[]).await.unwrap();
+        }
+
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "rr");
+    }
+
+    #[tokio::test]
+    async fn link_rejects_output_select_axis_until_phase_four() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_link_mode_build_file(p);
+        let source = std::fs::read_to_string(p.join(BUILD_FILE)).unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            &source.replace("{ opt: \"release\" }", "{ linking: \"shared\" }"),
+        );
+
+        let err = run_mode_axis_test_goal(p, None, &[]).await.unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("output-select"), "{message}");
+        assert!(message.contains("linking"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn link_rejects_invalid_rebuild_axis_value() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_link_mode_build_file(p);
+        let source = std::fs::read_to_string(p.join(BUILD_FILE)).unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            &source.replace("{ opt: \"release\" }", "{ opt: \"turbo\" }"),
+        );
+
+        let err = run_mode_axis_test_goal(p, None, &[]).await.unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("turbo"), "{message}");
+        assert!(message.contains("debug"), "{message}");
+        assert!(message.contains("release"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn link_rejects_non_participating_target_kind() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_link_mode_build_file(p);
+        let source = std::fs::read_to_string(p.join(BUILD_FILE)).unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            &source.replace(
+                "static derive(base, overrides) {\n        return new Linkable({ derivation: base.attrs.derivation + 1 });\n    }\n",
+                "",
+            ),
+        );
+
+        let err = run_mode_axis_test_goal(p, None, &[]).await.unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("does not participate"), "{message}");
+        assert!(message.contains("derive"), "{message}");
     }
 
     #[tokio::test]

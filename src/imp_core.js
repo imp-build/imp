@@ -2,24 +2,34 @@ function _serialize_attrs(value) {
 	if (value === null || value === undefined || typeof value !== "object")
 		return value;
 	if (Array.isArray(value)) return value.map(_serialize_attrs);
+	if (value.__imp_link === true) {
+		return {
+			__imp_link_ref: value.handle.__id,
+			overrides: _serialize_attrs(value.overrides),
+		};
+	}
 	if (value.__imp === true) return { __imp_ref: value.__id };
 	const out = {};
 	for (const [k, v] of Object.entries(value)) out[k] = _serialize_attrs(v);
 	return out;
 }
 
-function _collect_dep_handles(value, out) {
+function _collect_dependencies(value, out) {
 	if (value === null || value === undefined || typeof value !== "object")
 		return;
+	if (value.__imp_link === true) {
+		out.push(value);
+		return;
+	}
 	if (value.__imp === true) {
 		out.push(value);
 		return;
 	}
 	if (Array.isArray(value)) {
-		for (const v of value) _collect_dep_handles(v, out);
+		for (const v of value) _collect_dependencies(v, out);
 		return;
 	}
-	for (const v of Object.values(value)) _collect_dep_handles(v, out);
+	for (const v of Object.values(value)) _collect_dependencies(v, out);
 }
 
 function _normalize_source_fields(value) {
@@ -76,6 +86,7 @@ export class Target {
 	constructor(opts) {
 		const depIds = [];
 		const depModes = [];
+		const depLinks = [];
 		const attrs =
 			opts.attrs !== undefined
 				? opts.attrs
@@ -85,12 +96,23 @@ export class Target {
 		const sources = _normalize_source_fields(opts.sources);
 		if (opts.deps != null) {
 			for (const d of opts.deps) {
-				if (d && d.__imp === true) {
-					depIds.push(d.__id);
+				const handle = d && d.__imp_link === true ? d.handle : d;
+				if (handle && handle.__imp === true) {
+					depIds.push(handle.__id);
 					depModes.push(null);
-				} else if (d && d.target && d.target.__imp === true) {
-					depIds.push(d.target.__id);
+					depLinks.push(d && d.__imp_link === true ? d.overrides : null);
+				} else if (d && d.target) {
+					const target = d.target;
+					const handle = target.__imp_link === true ? target.handle : target;
+					if (!handle || handle.__imp !== true) {
+						throw new Error(
+							"dep must be a target handle or { target, mode }, got: " +
+								JSON.stringify(d),
+						);
+					}
+					depIds.push(handle.__id);
 					depModes.push(d.mode != null ? String(d.mode) : null);
+					depLinks.push(target.__imp_link === true ? target.overrides : null);
 				} else {
 					throw new Error(
 						"dep must be a target handle or { target, mode }, got: " +
@@ -100,10 +122,12 @@ export class Target {
 			}
 		} else {
 			const found = [];
-			_collect_dep_handles(attrs, found);
-			for (const h of found) {
-				depIds.push(h.__id);
+			_collect_dependencies(attrs, found);
+			for (const dep of found) {
+				const handle = dep.__imp_link === true ? dep.handle : dep;
+				depIds.push(handle.__id);
 				depModes.push(null);
+				depLinks.push(dep.__imp_link === true ? dep.overrides : null);
 			}
 		}
 		const id = __host_target(
@@ -112,6 +136,9 @@ export class Target {
 			JSON.stringify(sources),
 			depIds,
 			depModes,
+			depLinks.map((overrides) =>
+				overrides === null ? null : JSON.stringify(_serialize_attrs(overrides)),
+			),
 		);
 
 		this.__imp = true;
@@ -597,7 +624,8 @@ export function modeAxis(name) {
 			`modeAxis: axis "${name}" was not declared via defineModeAxis, or has not been resolved yet`,
 		);
 	}
-	return cfg[name];
+	const overrides = _effective_context_entry(true).ctx.modeOverrides;
+	return overrides && name in overrides ? overrides[name] : cfg[name];
 }
 
 /**
@@ -837,7 +865,13 @@ export function hydrateTarget(handle) {
 	const hydrated = JSON.parse(__host_hydrate_target(handle.__id));
 	hydrated.deps = (hydrated.deps || []).map((dep) => ({
 		...dep,
-		handle: globalThis.__imp_resolve_handle(dep.handle.__id) || dep.handle,
+		handle:
+			dep.overrides === null || dep.overrides === undefined
+				? globalThis.__imp_resolve_handle(dep.handle.__id) || dep.handle
+				: link(
+						globalThis.__imp_resolve_handle(dep.handle.__id) || dep.handle,
+						dep.overrides,
+					),
 	}));
 	return hydrated;
 }
@@ -975,14 +1009,43 @@ export function resolveProducts(entry) {
  * resolve a capability (linker, link driver, ...) off a handle without
  * statically importing every module that might supply it.
  *
- * @param {object} handle Target handle whose kind determines which product resolves.
+ * @param {object} handle Target handle or link() edge reference whose kind determines which product resolves.
  * @param {object} nameToken Product-name token, e.g. ODIN_LINKER or TOOLCHAIN.
  * @returns {*} Whatever the registered product function returns (often a Promise).
  */
 export function productFor(handle, nameToken) {
 	const { name } = _product_name_of(nameToken, "productFor()");
-	if (!handle || handle.__imp !== true) {
+	if (!handle || (handle.__imp !== true && handle.__imp_link !== true)) {
 		throw new Error(`productFor(handle, "${name}") expects a target handle`);
+	}
+	let modeOverrides = null;
+	if (handle.__imp_link === true) {
+		modeOverrides = handle.overrides;
+		__host_validate_link_overrides(JSON.stringify(modeOverrides));
+		const kindClass = _kind_class_by_name.get(handle.handle.kind);
+		if (typeof kindClass?.derive !== "function") {
+			throw new Error(
+				`target kind '${handle.handle.kind}' does not participate in link(); ` +
+					"define static derive(base, overrides) on its Target class",
+			);
+		}
+		let derived = _linked_variant_cache.get(handle);
+		if (derived === undefined) {
+			derived = _with_mode_overrides(modeOverrides, () =>
+				kindClass.derive(handle.handle, modeOverrides),
+			);
+			if (
+				!derived ||
+				derived.__imp !== true ||
+				derived.__id === handle.handle.__id
+			) {
+				throw new Error(
+					`target kind '${handle.handle.kind}' static derive(base, overrides) must return a distinct Target handle`,
+				);
+			}
+			_linked_variant_cache.set(handle, derived);
+		}
+		handle = derived;
 	}
 	const by_tool = _products_by_kind_name.get(`${handle.kind}:${name}`);
 	if (by_tool === undefined || by_tool.size === 0) {
@@ -999,7 +1062,9 @@ export function productFor(handle, nameToken) {
 		);
 	}
 	const fn = by_tool.values().next().value;
-	return fn(handle);
+	return modeOverrides === null
+		? fn(handle)
+		: _with_mode_overrides(modeOverrides, () => fn(handle));
 }
 
 /**
@@ -1239,6 +1304,64 @@ export function targetKind(name) {
 	return cls;
 }
 
+const _linked_edge_cache = new Map();
+const _linked_variant_cache = new WeakMap();
+
+function _canonical_link_overrides(overrides) {
+	if (
+		overrides === null ||
+		typeof overrides !== "object" ||
+		Array.isArray(overrides)
+	) {
+		throw new Error(
+			"link(handle, overrides) requires an object of axis=value entries",
+		);
+	}
+	const result = {};
+	for (const name of Object.keys(overrides).sort()) {
+		const value = overrides[name];
+		if (typeof value !== "string") {
+			throw new Error(
+				`link(handle, overrides) requires string values; '${name}' was ${typeof value}`,
+			);
+		}
+		result[name] = value;
+	}
+	return Object.freeze(result);
+}
+
+/**
+ * Annotate one dependency edge with mode-axis overrides. This is declaration
+ * metadata only: the linked variant is reconstructed lazily if a consumer
+ * calls productFor(link(...), productName).
+ *
+ * A participating target kind defines `static derive(base, overrides)`, which
+ * returns the concrete target handle to dispatch. The override is also visible
+ * to that product call through modeAxis().
+ *
+ * @category target
+ * @param {object} handle Base target handle.
+ * @param {object.<string, string>} overrides Per-edge rebuild-axis values.
+ * @returns {object} Immutable linked-edge reference accepted by productFor() and deps.
+ */
+export function link(handle, overrides) {
+	if (!handle || handle.__imp !== true) {
+		throw new Error("link(handle, overrides) expects a Target handle");
+	}
+	const canonical = _canonical_link_overrides(overrides);
+	const key = `${handle.__id}:${JSON.stringify(canonical)}`;
+	const existing = _linked_edge_cache.get(key);
+	if (existing !== undefined) return existing;
+	const reference = Object.freeze({
+		__imp_link: true,
+		handle,
+		kind: handle.kind,
+		overrides: canonical,
+	});
+	_linked_edge_cache.set(key, reference);
+	return reference;
+}
+
 // ---------------------------------------------------------------------------
 // memo() — memoized async build functions (Phase 1)
 // ---------------------------------------------------------------------------
@@ -1291,7 +1414,13 @@ let _current_memo_context_id = 0;
 let _memo_contexts = new Map([
 	[
 		0,
-		{ owner: null, stack: [], stackSet: new Set(), readNamespaces: new Set() },
+		{
+			owner: null,
+			stack: [],
+			stackSet: new Set(),
+			readNamespaces: new Set(),
+			modeOverrides: null,
+		},
 	],
 ]);
 let _active_memo_context_ids = new Set();
@@ -1424,6 +1553,9 @@ function _clone_context(ctx) {
 		// result it returns, so invalidation propagates to the caller via
 		// args_digest without the caller needing the callee's reads too.
 		readNamespaces: new Set(),
+		// Link overrides are ambient for a linked product call and therefore
+		// must flow to all async children of that call.
+		modeOverrides: ctx.modeOverrides,
 	};
 }
 
@@ -1435,6 +1567,7 @@ function _current_context() {
 			stack: [],
 			stackSet: new Set(),
 			readNamespaces: new Set(),
+			modeOverrides: null,
 		};
 		_memo_contexts.set(_current_memo_context_id, ctx);
 	}
@@ -1489,6 +1622,18 @@ function _with_context(contextId, fn) {
 	} finally {
 		_current_memo_context_id = prev;
 	}
+}
+
+function _with_mode_overrides(overrides, fn) {
+	const base = _effective_context_entry(true).ctx;
+	const contextId = ++_memo_context_counter;
+	const ctx = _clone_context(base);
+	ctx.modeOverrides = Object.freeze({
+		...(base.modeOverrides || {}),
+		...overrides,
+	});
+	_memo_contexts.set(contextId, ctx);
+	return _with_context(contextId, fn);
 }
 
 function _is_object_key(value) {
@@ -1775,7 +1920,7 @@ export function memo(fn) {
 		const key_string = JSON.stringify({
 			fn_id,
 			args_digest: _stable_digest(args),
-			config_digest: __host_configuration_digest(undefined),
+			config_digest: __host_configuration_digest(undefined, undefined),
 		});
 		if (!_key_display.has(key_string)) {
 			const label = fn.name + "(" + args.map(display_arg).join(", ") + ")";
@@ -1847,6 +1992,7 @@ export function resetMemoState() {
 				stack: [],
 				stackSet: new Set(),
 				readNamespaces: new Set(),
+				modeOverrides: null,
 			},
 		],
 	]);
@@ -2265,6 +2411,7 @@ export function run(opts) {
 		env: opts.env,
 		configDigest: __host_configuration_digest(
 			JSON.stringify(Array.from(contextEntry.ctx.readNamespaces)),
+			JSON.stringify(contextEntry.ctx.modeOverrides || {}),
 		),
 		inputs,
 		outputs,

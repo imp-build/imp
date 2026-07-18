@@ -153,7 +153,10 @@ other axes from the profile).
 axes that genuinely need a differently-invoked build.
 
 - `link(handle, overrides)` — takes a dependency handle and an axis-overrides
-  object, returns a handle for the requested variant.
+  object, returns immutable **edge metadata**, not an eagerly-created target.
+  A consumer passes that reference to `productFor()`; only then does imp
+  reconstruct and dispatch the requested variant. Linked variants are not
+  standalone selectors in a fresh invocation.
 - **Opt-in per kind**, not generic reflection over `attrs`: a rule kind that
   wants to be `link()`-able exposes an explicit reconstruction hook (e.g. a
   static `deriveXxx(handle, overrides)` alongside its constructor). Calling
@@ -162,30 +165,24 @@ axes that genuinely need a differently-invoked build.
   leaky — constructor opts and stored attrs don't always shape-match, e.g.
   Odin's `toolchain` opt vs. `attrs.toolchainVersion` split,
   `rules/odin/index.js:875-886`.)
-- Memoization: `link()` itself is `memo()`-wrapped, keyed on `(handle identity,
-  overrides)` via the *existing* `args_digest` mechanism — since `overrides`
-  is an explicit argument, Phase 0's read-tracking isn't even needed for
-  `link()`'s own cache key (that mechanism is for functions that read
-  `modeAxis()` *ambiently* inside their body; `link()` always receives its
-  inputs explicitly). This collapses repeated `link()` calls for the same
-  variant from different call sites onto one derived target, avoiding
-  duplicate declarations.
-- Addressing: synthesize a deterministic derived address from the base
-  address + overrides (e.g. `${baseAddress}+opt=release`) and call
-  `registerTarget(handle, address)` (`src/imp_core.js:1648-1654`) — the same
-  primitive `expand()`-discovered dynamic targets already use, so selection
-  (`//...` wildcards, exact-address selectors) needs no changes on the
-  Rust/selector side (`src/selector.rs:144-238` already merges dynamically
-  registered targets into selection).
-- For a `kind: "rebuild"` axis, the derive hook actually reconstructs and
-  re-declares the target. For a `kind: "output-select"` axis (Phase 4),
-  `link()` doesn't derive anything — it returns an annotated reference telling
-  the consuming edge which existing output to request.
+- Memoization: `link()` uses a synchronous per-load identity cache keyed by
+  `(handle identity, canonical overrides)` — `memo()` cannot be used because
+  it returns an async thenable and a linked reference must be valid in a
+  declared `deps` array. Repeated links therefore share one lazy derived
+  target once consumed.
+- A participating kind exposes `static derive(base, overrides)` beside its
+  constructor. `productFor(link(...), product)` invokes the hook lazily and
+  runs the resulting product under an async-local mode overlay. `modeAxis()`
+  therefore sees the edge override while omitted axes retain the invocation
+  profile/CLI/default value; the overlay is included in a mode-reading
+  `run()` action's cache salt.
+- Phase 3 accepts `kind: "rebuild"` axes only. `output-select` overrides are
+  rejected until Phase 4 supplies their artifact-selection semantics.
 
-**Verification:** derivation+memoization test (two `link()` calls with
-identical overrides from different call sites resolve to the same derived
-target/address); address-collision/format test; error test for a
-non-participating kind.
+**Verification:** derivation+memoization test (two identical linked edges
+consumed from different call sites resolve to one derived target); mode-overlay
+and cache-salt test; metadata hydration test; error tests for output-select
+axes and non-participating kinds.
 
 ## Phase 4 — Output-selecting axes (pattern, not a concrete rule module)
 
