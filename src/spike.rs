@@ -1907,19 +1907,22 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_define_profile", host_define_profile)?;
 
-    // __host_validate_link_overrides(overridesJson) — validates the
-    // declaration metadata carried by link(handle, overrides) when a linked
-    // edge is actually consumed through productFor(). Output-selection axes
-    // deliberately remain deferred to Phase 4.
+    // __host_classify_link_overrides(overridesJson) → JSON
+    // `{ rebuild: {...}, outputSelect: {...} }`. Validates declaration
+    // metadata carried by link(handle, overrides) when consumed by
+    // productFor(), splitting values that reconstruct the target from values
+    // that select a result after the producer runs.
     let state_link_overrides = Arc::clone(&state);
-    let host_validate_link_overrides = Function::new(
+    let host_classify_link_overrides = Function::new(
         ctx.clone(),
-        move |overrides_json: String| -> rquickjs::Result<()> {
+        move |overrides_json: String| -> rquickjs::Result<String> {
             let overrides: BTreeMap<String, String> = serde_json::from_str(&overrides_json)
                 .map_err(|e| {
                     rquickjs::Error::new_loading_message("link", format!("parse overrides: {e}"))
                 })?;
             let hs = state_link_overrides.lock().unwrap();
+            let mut rebuild = BTreeMap::new();
+            let mut output_select = BTreeMap::new();
             for (axis, value) in &overrides {
                 let Some(def) = hs.mode_axes.get(axis) else {
                     let known: Vec<&str> = hs.mode_axes.keys().map(String::as_str).collect();
@@ -1931,21 +1934,58 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                         ),
                     ));
                 };
-                if def.get("kind").and_then(|kind| kind.as_str()) != Some("rebuild") {
-                    return Err(rquickjs::Error::new_loading_message(
-                        "link",
-                        format!("link() cannot override output-select axis '{axis}' until Phase 4"),
-                    ));
-                }
                 validate_mode_axis_value(axis, value, def, "link()")
                     .map_err(|e| rquickjs::Error::new_loading_message("link", e.to_string()))?;
+                match def.get("kind").and_then(|kind| kind.as_str()) {
+                    Some("rebuild") => {
+                        rebuild.insert(axis.clone(), value.clone());
+                    }
+                    Some("output-select") => {
+                        output_select.insert(axis.clone(), value.clone());
+                    }
+                    _ => unreachable!("defineModeAxis validates axis kinds"),
+                }
             }
-            Ok(())
+            serde_json::to_string(&serde_json::json!({
+                "rebuild": rebuild,
+                "outputSelect": output_select,
+            }))
+            .map_err(|e| rquickjs::Error::new_loading_message("link", e.to_string()))
         },
     )?;
     globals.set(
-        "__host_validate_link_overrides",
-        host_validate_link_overrides,
+        "__host_classify_link_overrides",
+        host_classify_link_overrides,
+    )?;
+
+    // __host_validate_named_output_axis(axis) — namedOutput() may only be
+    // keyed by an output-select axis. Values themselves are product-defined
+    // and intentionally remain opaque to the host.
+    let state_named_output = Arc::clone(&state);
+    let host_validate_named_output_axis =
+        Function::new(ctx.clone(), move |axis: String| -> rquickjs::Result<()> {
+            let hs = state_named_output.lock().unwrap();
+            let Some(def) = hs.mode_axes.get(&axis) else {
+                let known: Vec<&str> = hs.mode_axes.keys().map(String::as_str).collect();
+                return Err(rquickjs::Error::new_loading_message(
+                    "namedOutput",
+                    format!(
+                        "namedOutput() names undeclared mode axis '{axis}'; declared axes: {}",
+                        known.join(", ")
+                    ),
+                ));
+            };
+            if def.get("kind").and_then(|kind| kind.as_str()) != Some("output-select") {
+                return Err(rquickjs::Error::new_loading_message(
+                    "namedOutput",
+                    format!("namedOutput() axis '{axis}' must have kind \"output-select\""),
+                ));
+            }
+            Ok(())
+        })?;
+    globals.set(
+        "__host_validate_named_output_axis",
+        host_validate_named_output_axis,
     )?;
 
     let state_schema = Arc::clone(&state);
@@ -8676,6 +8716,95 @@ export const app = new Consumer({ dep: release });
         );
     }
 
+    fn write_named_output_build_file(p: &Path, producer_marker: &Path) {
+        let marker = producer_marker.display().to_string().replace('\\', "\\\\");
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis, defineProfile } from "imp:core";
+defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
+defineModeAxis("linking", { kind: "output-select", values: ["static", "shared"], default: "static" });
+defineModeAxis("flavor", { kind: "output-select", values: ["plain", "fancy"], default: "plain" });
+defineProfile("release-shared", { opt: "release", linking: "shared" });
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            &format!(
+                r#"
+import {{ Target, BUILD, toolName, product, link, productFor, modeAxis, namedOutput, output, run }} from "imp:core";
+
+const OUTPUT_TOOL = toolName("named-output-test");
+
+class Library extends Target {{
+    static kind = "named-output-library";
+    constructor() {{
+        super({{ kind: Library.kind, attrs: {{}} }});
+    }}
+    static derive(base, overrides) {{
+        if ("linking" in overrides || "flavor" in overrides) {{
+            throw new Error("output-select overrides must not reach derive()");
+        }}
+        return new Library();
+    }}
+}}
+
+class Consumer extends Target {{
+    static kind = "named-output-consumer";
+    constructor({{ base, shared, fancyStatic, releaseShared }}) {{
+        super({{
+            kind: Consumer.kind,
+            attrs: {{ base, shared, fancyStatic, releaseShared }},
+            deps: [base, shared, fancyStatic, releaseShared],
+        }});
+    }}
+}}
+
+export const libraryBuild = product(Library, BUILD, OUTPUT_TOOL, async function libraryBuild() {{
+    const opt = modeAxis("opt");
+    const path = `build/${{opt}}/all.txt`;
+    const result = await run({{
+        argv: ["sh", "-c", "printf %s \"$1\" >> '{marker}'; mkdir -p \"$(dirname \"$2\")\"; printf payload > \"$2\"", "named-output", opt, path],
+        outputs: [output(path)],
+        materialize: true,
+        display: `build all ${{opt}} outputs`,
+    }});
+    return namedOutput("linking", {{
+        static: namedOutput("flavor", {{
+            plain: {{ name: `${{opt}}-static-plain`, outputDigest: result.outputDigest }},
+            fancy: {{ name: `${{opt}}-static-fancy`, outputDigest: result.outputDigest }},
+        }}),
+        shared: {{ name: `${{opt}}-shared`, outputDigest: result.outputDigest }},
+    }});
+}});
+
+export const consumerBuild = product(Consumer, BUILD, OUTPUT_TOOL, async function consumerBuild(handle) {{
+    const [base, shared, fancyStatic, releaseShared] = await Promise.all([
+        productFor(handle.attrs.base, BUILD),
+        productFor(handle.attrs.shared, BUILD),
+        productFor(handle.attrs.fancyStatic, BUILD),
+        productFor(handle.attrs.releaseShared, BUILD),
+    ]);
+    return run({{
+        argv: ["sh", "-c", "mkdir -p build && printf %s \"$1\" > build/selected.txt", "selected", [base.name, shared.name, fancyStatic.name, releaseShared.name].join(",")],
+        outputs: [output("build/selected.txt")],
+        materialize: true,
+        display: "select named outputs",
+    }});
+}});
+
+export const base = new Library();
+export const app = new Consumer({{
+    base,
+    shared: link(base, {{ linking: "shared" }}),
+    fancyStatic: link(base, {{ linking: "static", flavor: "fancy" }}),
+    releaseShared: link(base, {{ opt: "release", linking: "shared" }}),
+}});
+"#,
+            ),
+        );
+    }
+
     #[tokio::test]
     async fn mode_axis_resolves_to_declared_default_when_no_override() {
         let root = tempfile::tempdir().unwrap();
@@ -8739,7 +8868,7 @@ export const app = new Consumer({ dep: release });
     }
 
     #[tokio::test]
-    async fn link_rejects_output_select_axis_until_phase_four() {
+    async fn link_rejects_output_select_axis_when_product_has_no_named_output() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_link_mode_build_file(p);
@@ -8751,8 +8880,26 @@ export const app = new Consumer({ dep: release });
 
         let err = run_mode_axis_test_goal(p, None, &[]).await.unwrap_err();
         let message = format!("{err:#}");
-        assert!(message.contains("output-select"), "{message}");
+        assert!(message.contains("does not return namedOutput"), "{message}");
         assert!(message.contains("linking"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn named_outputs_select_ambient_and_linked_values_without_rebuilding() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let producer_marker = p.join("producer-runs.txt");
+        write_named_output_build_file(p, &producer_marker);
+
+        run_mode_axis_test_goal(p, None, &[]).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/selected.txt")).unwrap(),
+            "debug-static-plain,debug-shared,debug-static-fancy,release-shared"
+        );
+        let runs = std::fs::read_to_string(producer_marker).unwrap();
+        assert_eq!(runs.matches("debug").count(), 1, "{runs}");
+        assert_eq!(runs.matches("release").count(), 1, "{runs}");
     }
 
     #[tokio::test]

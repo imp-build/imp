@@ -1018,34 +1018,43 @@ export function productFor(handle, nameToken) {
 	if (!handle || (handle.__imp !== true && handle.__imp_link !== true)) {
 		throw new Error(`productFor(handle, "${name}") expects a target handle`);
 	}
-	let modeOverrides = null;
+	let rebuildOverrides = null;
+	let outputOverrides = null;
 	if (handle.__imp_link === true) {
-		modeOverrides = handle.overrides;
-		__host_validate_link_overrides(JSON.stringify(modeOverrides));
-		const kindClass = _kind_class_by_name.get(handle.handle.kind);
-		if (typeof kindClass?.derive !== "function") {
-			throw new Error(
-				`target kind '${handle.handle.kind}' does not participate in link(); ` +
-					"define static derive(base, overrides) on its Target class",
-			);
-		}
-		let derived = _linked_variant_cache.get(handle);
-		if (derived === undefined) {
-			derived = _with_mode_overrides(modeOverrides, () =>
-				kindClass.derive(handle.handle, modeOverrides),
-			);
-			if (
-				!derived ||
-				derived.__imp !== true ||
-				derived.__id === handle.handle.__id
-			) {
+		const classified = JSON.parse(
+			__host_classify_link_overrides(JSON.stringify(handle.overrides)),
+		);
+		rebuildOverrides = classified.rebuild;
+		outputOverrides = classified.outputSelect;
+		const baseHandle = handle.handle;
+		if (Object.keys(rebuildOverrides).length > 0) {
+			const kindClass = _kind_class_by_name.get(baseHandle.kind);
+			if (typeof kindClass?.derive !== "function") {
 				throw new Error(
-					`target kind '${handle.handle.kind}' static derive(base, overrides) must return a distinct Target handle`,
+					`target kind '${baseHandle.kind}' does not participate in link(); ` +
+						"define static derive(base, overrides) on its Target class",
 				);
 			}
-			_linked_variant_cache.set(handle, derived);
+			let derived = _linked_variant_cache.get(handle);
+			if (derived === undefined) {
+				derived = _with_mode_overrides(rebuildOverrides, () =>
+					kindClass.derive(baseHandle, rebuildOverrides),
+				);
+				if (
+					!derived ||
+					derived.__imp !== true ||
+					derived.__id === baseHandle.__id
+				) {
+					throw new Error(
+						`target kind '${handle.handle.kind}' static derive(base, overrides) must return a distinct Target handle`,
+					);
+				}
+				_linked_variant_cache.set(handle, derived);
+			}
+			handle = derived;
+		} else {
+			handle = baseHandle;
 		}
-		handle = derived;
 	}
 	const by_tool = _products_by_kind_name.get(`${handle.kind}:${name}`);
 	if (by_tool === undefined || by_tool.size === 0) {
@@ -1062,9 +1071,16 @@ export function productFor(handle, nameToken) {
 		);
 	}
 	const fn = by_tool.values().next().value;
-	return modeOverrides === null
-		? fn(handle)
-		: _with_mode_overrides(modeOverrides, () => fn(handle));
+	const result =
+		rebuildOverrides === null || Object.keys(rebuildOverrides).length === 0
+			? fn(handle)
+			: _with_mode_overrides(rebuildOverrides, () => fn(handle));
+	return _resolve_named_output_result(
+		result,
+		outputOverrides || {},
+		new Set(Object.keys(outputOverrides || {})),
+		`target kind '${handle.kind}' product '${name}'`,
+	);
 }
 
 /**
@@ -1360,6 +1376,74 @@ export function link(handle, overrides) {
 	});
 	_linked_edge_cache.set(key, reference);
 	return reference;
+}
+
+/**
+ * Return a product result with values selected by an output-select mode axis.
+ * `productFor()` resolves the wrapper after the producer has completed, so
+ * selecting a different output never rebuilds that producer.
+ *
+ * @category product
+ * @param {string} axis Declared mode axis whose kind is "output-select".
+ * @param {object} values Non-empty map from axis values to product results.
+ * @returns {object} Opaque result resolved automatically by productFor().
+ */
+export function namedOutput(axis, values) {
+	if (typeof axis !== "string" || axis.length === 0) {
+		throw new Error("namedOutput(axis, values) requires a non-empty axis name");
+	}
+	if (
+		values === null ||
+		typeof values !== "object" ||
+		Array.isArray(values) ||
+		Object.keys(values).length === 0
+	) {
+		throw new Error(
+			"namedOutput(axis, values) requires a non-empty object of output values",
+		);
+	}
+	__host_validate_named_output_axis(axis);
+	return Object.freeze({
+		__imp_named_output: true,
+		axis,
+		values: Object.freeze({ ...values }),
+	});
+}
+
+function _select_named_output(value, requiredAxes, source) {
+	while (value && value.__imp_named_output === true) {
+		const selected = modeAxis(value.axis);
+		if (!(selected in value.values)) {
+			throw new Error(
+				`${source} has no named output for ${value.axis}=${selected}; ` +
+					`available values: ${Object.keys(value.values).join(", ")}`,
+			);
+		}
+		requiredAxes.delete(value.axis);
+		value = value.values[selected];
+	}
+	if (requiredAxes.size > 0) {
+		throw new Error(
+			`${source} does not return namedOutput() for linked output-select axis/axes: ` +
+				[...requiredAxes].join(", "),
+		);
+	}
+	return value;
+}
+
+function _resolve_named_output_result(
+	result,
+	outputOverrides,
+	requiredAxes,
+	source,
+) {
+	const select = (value) =>
+		_with_mode_overrides(outputOverrides, () =>
+			_select_named_output(value, new Set(requiredAxes), source),
+		);
+	return result && typeof result.then === "function"
+		? result.then(select)
+		: select(result);
 }
 
 // ---------------------------------------------------------------------------

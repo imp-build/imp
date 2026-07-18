@@ -176,35 +176,42 @@ axes that genuinely need a differently-invoked build.
   therefore sees the edge override while omitted axes retain the invocation
   profile/CLI/default value; the overlay is included in a mode-reading
   `run()` action's cache salt.
-- Phase 3 accepts `kind: "rebuild"` axes only. `output-select` overrides are
-  rejected until Phase 4 supplies their artifact-selection semantics.
+- Phase 4 extends the same metadata with `kind: "output-select"` axes. These
+  do not reconstruct a target; they select a named result after the producer
+  finishes, while rebuild overrides still apply before it runs.
 
 **Verification:** derivation+memoization test (two identical linked edges
 consumed from different call sites resolve to one derived target); mode-overlay
 and cache-salt test; metadata hydration test; error tests for output-select
 axes and non-participating kinds.
 
-## Phase 4 — Output-selecting axes (pattern, not a concrete rule module)
+## Phase 4 — Core named outputs for output-selecting axes
 
-**Goal:** document and land the *pattern* for axes like linking mode, where a
-library-shaped rule exposes multiple named outputs from one target and the
-consumer picks.
+**Goal:** let a library-shaped rule expose multiple named outputs from one
+build, with the consumer selecting one through the ambient mode or a `link()`
+edge override.
 
-- Guidance for rule authors: a "library" rule computes N named outputs (e.g.
-  static archive + shared object) from one target instead of deriving a
-  second target per linking mode.
-- A consuming edge's link step chooses which output to request by reading the
-  ambient `linking` axis (Phase 1/2 default) unless overridden per-edge via
-  `link(handle, { linking: "static" })` (Phase 3's same combinator, `kind:
-  "output-select"` path — no target derivation, just output selection).
-- **Explicitly deferred, per discussion:** wiring this into any real rule
-  module (e.g. adding Odin's missing `-build-mode:dll` shared-library product
-  so Odin can actually participate) is a separate follow-up, not part of this
-  epic. This phase lands the pattern/API only.
+- `namedOutput(axis, values)` is an opaque product result. `axis` must be a
+  `kind: "output-select"` axis and `values` maps its values to arbitrary
+  rule-defined product results. Values may nest another `namedOutput()` for
+  intentional multi-axis selection.
+- A library product builds all artifacts once, then returns e.g.
+  `namedOutput("linking", { static: archive, shared: sharedLibrary })`.
+  `productFor()` unwraps the result after the producer is memoized: the
+  ambient axis chooses the normal default, and
+  `productFor(link(lib, { linking: "shared" }), LINK)` selects the shared
+  result without rebuilding the library.
+- Mixed links split by kind: rebuild values feed `static derive()` and the
+  build's cache salt; output-select values affect only result unwrapping. A
+  linked output-select call whose product has no matching `namedOutput()`
+  fails rather than silently ignoring the edge override.
+- **Explicitly deferred:** wiring this into any real rule module (e.g.
+  Odin's missing `-build-mode:dll`) remains a separate follow-up.
 
-**Verification:** none beyond what Phase 3 already covers for the `link()`
-API surface — no concrete rule module changes in this phase, so nothing new
-to exercise end-to-end yet.
+**Verification:** a test-only library fixture produces static and shared
+named results from one action; ambient and linked selections resolve correctly,
+nested outputs work, and a mixed rebuild/output link creates only the required
+second producer action.
 
 ## End-to-end proof of mechanism (last step of this epic)
 
@@ -223,9 +230,13 @@ adoption of the axis system in any real rule module. Concretely:
    toggling does **not** invalidate unrelated cached targets (the concrete
    scenario Phase 0 exists to prevent) — check via cache hit/miss log lines,
    same technique used earlier this session to verify the Odin toolchain fix.
-4. One `link(handle, { opt: "release" })` call site depending on that example
-   target, confirming a second, correctly-addressed derived target appears
-   and is independently selectable/cacheable.
+4. One consumer calls `productFor(link(handle, { opt: "release" }), BUILD)`;
+   the linked product receives the rebuild overlay and creates an independent
+   cache entry, but remains execution-local metadata rather than a selectable
+   derived address.
+5. The same fixture returns `namedOutput("linking", { static, shared })` from
+   one producer action. Ambient and `link(handle, { linking: "shared" })`
+   calls select the intended result while sharing that producer action.
 
 ## Explicitly out of scope for this epic
 
