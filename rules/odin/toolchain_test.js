@@ -60,69 +60,119 @@ describe("Odin toolchain", () => {
 		});
 	});
 
-	test("installs a missing toolchain into the named cache", () => {
-		return withOdinHost((host) => {
-			const dir = acquireOdinToolchain("dev-2026-03");
-			const key = odinCacheKey("dev-2026-03", { os: "linux", arch: "x86_64" });
+	test("throws when no lockfile entry pins the requested version", async () => {
+		await withOdinHost(async () => {
+			let message = null;
 
-			expect(dir).toBe(`/cache/odin-toolchains/${key}`);
-			expect(
-				host.calls.some(
-					(call) =>
-						call[0] === "download" &&
-						call[1] ===
-							odinDownloadUrl("dev-2026-03", { os: "linux", arch: "x86_64" }),
-				),
-			).toBe(true);
-			expect(
-				host.calls.some(
-					(call) =>
-						call[0] === "extract" &&
-						call[1] === "/downloads/odin-release" &&
-						call[2] === "/tmp/imp-odin-dev-2026-03-x86_64" &&
-						call[3] === "tar.gz" &&
-						call[4] === 1,
-				),
-			).toBe(true);
-			expect(
-				host.calls.some(
-					(call) =>
-						call[0] === "cachePut" &&
-						call[1] === "odin-toolchains" &&
-						call[2] === key &&
-						call[3] === "/tmp/imp-odin-dev-2026-03-x86_64",
-				),
-			).toBe(true);
+			try {
+				await acquireOdinToolchain("dev-2026-03");
+			} catch (error) {
+				message = error.message;
+			}
+
+			expect(message).toContain("no lockfile found");
 		});
 	});
 
-	test("uses an existing toolchain cache entry", () => {
-		return withOdinHost((host) => {
-			acquireOdinToolchain("dev-2026-03");
-			host.clearCalls();
+	test("throws when no version is given and no default is set", async () => {
+		await withOdinHost(async () => {
+			odinToolchain("dev-2026-03");
+			let message = null;
 
-			const dir = acquireOdinToolchain("dev-2026-03");
+			try {
+				await odinBin();
+			} catch (error) {
+				message = error.message;
+			}
 
-			expect(dir).toBe("/cache/odin-toolchains/dev-2026-03/linux-x86_64");
-			expect(host.calls.some((call) => call[0] === "download")).toBe(false);
-			expect(host.calls.some((call) => call[0] === "extract")).toBe(false);
+			expect(message).toContain("no Odin toolchain version specified");
+		});
+	});
+
+	test("uses an existing toolchain cache entry", async () => {
+		await withOdinHost(async (host) => {
+			odinToolchain("dev-2026-03", { default: true });
+			const key = odinCacheKey("dev-2026-03", { os: "linux", arch: "x86_64" });
+			host.install("odin-toolchains", key, "/tmp/imp-odin-dev-2026-03");
+
+			const dir = await acquireOdinToolchain("dev-2026-03");
+
+			expect(dir).toBe("/tmp/imp-odin-dev-2026-03");
+			expect(host.runs.length).toBe(0);
+		});
+	});
+
+	test("downloads, verifies, and extracts a toolchain via two sandboxed runs", async () => {
+		await withOdinHost(async (host) => {
+			const key = odinCacheKey("dev-2026-03", { os: "linux", arch: "x86_64" });
+			host.addFile(
+				"//rules/odin/odin.lock",
+				JSON.stringify({
+					tool: "odin",
+					versions: {
+						"dev-2026-03": {
+							"linux/x86_64": {
+								url: "https://locked.example/odin-linux-amd64-dev-2026-03.tar.gz",
+								artifact: "odin-linux-amd64-dev-2026-03.tar.gz",
+								size: 12345,
+								sha256: "deadbeef",
+							},
+						},
+					},
+				}),
+			);
+
+			odinToolchain("dev-2026-03", { default: true });
+			const path = await acquireOdinToolchain("dev-2026-03");
+
+			expect(path).toBe("/cache/odin-toolchains/dev-2026-03/linux-x86_64");
+			expect(host.runs.length).toBe(2);
+
+			const [download, extract] = host.runs;
+			expect(download.argv[0]).toBe("sh");
+			expect(download.argv).toContain(
+				"https://locked.example/odin-linux-amd64-dev-2026-03.tar.gz",
+			);
+			expect(download.argv).toContain("deadbeef");
+			expect(download.argv[2]).toContain("sha256sum -c -");
+			expect(extract.argv[2]).toContain("--strip-components=1");
+			expect(extract.outputs[0].namedCache.name).toBe("odin-toolchains");
+			expect(extract.outputs[0].namedCache.key).toBe(key);
+
+			expect(
+				host.calls.some(
+					(call) => call[0] === "nativeTool" && call[1] === "curl",
+				),
+			).toBe(true);
 		});
 	});
 
 	test("uses the default version for odin binary lookup", () => {
-		return withOdinHost({ os: "windows", arch: "x86_64" }, () => {
+		return withOdinHost({ os: "windows", arch: "x86_64" }, async (host) => {
 			odinToolchain("dev-2026-03", { default: true });
+			const key = odinCacheKey("dev-2026-03", {
+				os: "windows",
+				arch: "x86_64",
+			});
+			host.install(
+				"odin-toolchains",
+				key,
+				"/cache/odin-toolchains/dev-2026-03/windows-x86_64",
+			);
 
-			expect(odinBin()).toBe(
+			expect(await odinBin()).toBe(
 				"/cache/odin-toolchains/dev-2026-03/windows-x86_64/odin.exe",
 			);
 		});
 	});
 
-	test("describes the named-cache-backed odin tool", () => {
-		return withOdinHost(() => {
+	test("describes the named-cache-backed odin tool", async () => {
+		await withOdinHost(async (host) => {
 			odinToolchain("dev-2026-03", { default: true });
-			const tool = odinTool();
+			const key = odinCacheKey("dev-2026-03", { os: "linux", arch: "x86_64" });
+			host.install("odin-toolchains", key, "/cache/odin-toolchains/" + key);
+
+			const tool = await odinTool();
 
 			expect(tool.kind).toBe("tool");
 			expect(tool.name).toBe("odin");

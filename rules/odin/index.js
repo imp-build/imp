@@ -1033,7 +1033,9 @@ export const odinBuild = product(
 		const toolchainHandle = handle.attrs.toolchain;
 		const odinToolSpec = toolchainHandle
 			? await tool(toolchainHandle)
-			: odinTool(resolveOdinToolchainVersion(handle.attrs.toolchainVersion));
+			: await odinTool(
+					resolveOdinToolchainVersion(handle.attrs.toolchainVersion),
+				);
 		const srcs = await sources(handle);
 		const genInputs = await collect_gen_sets(handle, new Set());
 		const resourceInputs = await resources(handle);
@@ -1088,7 +1090,9 @@ export const odinTest = product(
 		const toolchainHandle = handle.attrs.toolchain;
 		const odinToolSpec = toolchainHandle
 			? await tool(toolchainHandle)
-			: odinTool(resolveOdinToolchainVersion(handle.attrs.toolchainVersion));
+			: await odinTool(
+					resolveOdinToolchainVersion(handle.attrs.toolchainVersion),
+				);
 		const srcs = await sources(handle);
 		const genInputs = await collect_gen_sets(handle, new Set());
 		const resourceInputs = await resources(handle);
@@ -1186,7 +1190,9 @@ export const odinLint = product(
 		const toolchainHandle = handle.attrs.toolchain;
 		const odinToolSpec = toolchainHandle
 			? await tool(toolchainHandle)
-			: odinTool(resolveOdinToolchainVersion(handle.attrs.toolchainVersion));
+			: await odinTool(
+					resolveOdinToolchainVersion(handle.attrs.toolchainVersion),
+				);
 		const srcs = await sources(handle);
 		const genInputs = await collect_gen_sets(handle, new Set());
 		const resourceInputs = await resources(handle);

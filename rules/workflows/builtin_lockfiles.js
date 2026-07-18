@@ -25,6 +25,7 @@ import "//rules/js/node_toolchain";
 import "//rules/js/pnpm_toolchain";
 import "//rules/oci/toolchain";
 import "//rules/odin/toolchain";
+import "//rules/odin/odinfmt/toolchain";
 import "//rules/python/pex_toolchain";
 import "//rules/python/ruff_toolchain";
 import "//rules/python/uv_toolchain";

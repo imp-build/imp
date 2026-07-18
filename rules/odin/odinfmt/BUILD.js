@@ -1,5 +1,15 @@
 import { jsSources } from "//rules/js";
 import { rulesTest } from "//rules/imp/test";
+import { nativeTool } from "//rules/imp/native_tool";
 
-export const rules_test = rulesTest({ root: "//rules/odin/odinfmt" });
+export const rules_test = rulesTest({
+	root: "//rules/odin/odinfmt",
+	tools: [
+		nativeTool("mkdir"),
+		nativeTool("curl"),
+		nativeTool("tar"),
+		nativeTool("wc"),
+		nativeTool("sha256sum"),
+	],
+});
 export const js = jsSources({});

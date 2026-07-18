@@ -10,6 +10,8 @@ export const rules_test = rulesTest({
 		nativeTool("curl"),
 		nativeTool("tar"),
 		nativeTool("gzip"),
+		nativeTool("wc"),
+		nativeTool("sha256sum"),
 	],
 });
 export const js = jsSources({});

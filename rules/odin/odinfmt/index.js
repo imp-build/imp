@@ -48,7 +48,7 @@ async function runOdinFmt(handle, { materialize }) {
 		return { total: 0, changed: [] };
 	}
 	const before = digestOf(srcs);
-	const { tool, command } = odinfmtTool(odinfmt_version(handle));
+	const { tool, command } = await odinfmtTool(odinfmt_version(handle));
 	const result = await run({
 		argv: [
 			"sh",

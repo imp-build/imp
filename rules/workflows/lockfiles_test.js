@@ -297,6 +297,7 @@ describe("generateBuiltinLockfile", () => {
 			"mold",
 			"node-toolchain",
 			"odin",
+			"odinfmt",
 			"pex-toolchain",
 			"pnpm-toolchain",
 			"ruff-toolchain",

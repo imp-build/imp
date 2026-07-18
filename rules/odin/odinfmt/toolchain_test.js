@@ -10,7 +10,9 @@ import {
 } from "//rules/odin/toolchain";
 import {
 	acquireOdinfmt,
+	odinfmtArtifactName,
 	odinfmtBin,
+	odinfmtDownloadUrl,
 	odinfmtTool,
 	odinfmtToolchain,
 	olsTriple,
@@ -32,17 +34,18 @@ function withOdinHost(platOrFn, maybeFn) {
 		: withFakeToolchainHost(platOrFn, run);
 }
 
-describe("odinfmt toolchain", () => {
-	test("uses the default Odin version for odinfmt binary lookup", () => {
-		return withOdinHost(() => {
-			odinToolchain("dev-2026-03", { default: true });
-
-			expect(odinfmtBin()).toBe(
-				"/cache/odinfmt-toolchains/dev-2026-03/linux-x86_64/odinfmt-x86_64-unknown-linux-gnu",
-			);
-		});
+function lockFixture(version, plat, entry) {
+	return JSON.stringify({
+		tool: "odinfmt",
+		versions: {
+			[version]: {
+				[`${plat.os}/${plat.arch}`]: entry,
+			},
+		},
 	});
+}
 
+describe("odinfmt toolchain", () => {
 	test("maps platforms to OLS release triples", () => {
 		expect(olsTriple({ os: "linux", arch: "x86_64" })).toBe(
 			"x86_64-unknown-linux-gnu",
@@ -57,55 +60,104 @@ describe("odinfmt toolchain", () => {
 		expect(() => olsTriple({ os: "freebsd", arch: "x86_64" })).toThrow();
 	});
 
-	test("installs a missing odinfmt from the OLS release zip", () => {
-		return withOdinHost((host) => {
-			const dir = acquireOdinfmt("dev-2026-03");
+	test("formats release artifact names / download URLs", () => {
+		expect(
+			odinfmtArtifactName("dev-2026-03", { os: "linux", arch: "x86_64" }),
+		).toBe("ols-x86_64-unknown-linux-gnu.zip");
+		expect(
+			odinfmtDownloadUrl("dev-2026-03", { os: "linux", arch: "x86_64" }),
+		).toBe(
+			"https://github.com/DanielGavin/ols/releases/download/dev-2026-03/ols-x86_64-unknown-linux-gnu.zip",
+		);
+	});
 
-			expect(dir).toBe("/cache/odinfmt-toolchains/dev-2026-03/linux-x86_64");
-			expect(
-				host.calls.some(
-					(call) =>
-						call[0] === "namedCache" && call[1] === "odinfmt-toolchains",
+	test("uses the default Odin version for odinfmt binary lookup", async () => {
+		await withOdinHost(async (host) => {
+			odinToolchain("dev-2026-03", { default: true });
+			host.addFile(
+				"//rules/odin/odinfmt/odinfmt.lock",
+				lockFixture(
+					"dev-2026-03",
+					{ os: "linux", arch: "x86_64" },
+					{
+						url: "https://locked.example/ols-x86_64-unknown-linux-gnu.zip",
+						artifact: "ols-x86_64-unknown-linux-gnu.zip",
+						size: 1,
+						sha256: "deadbeef",
+					},
 				),
-			).toBe(true);
-			expect(
-				host.calls.some(
-					(call) =>
-						call[0] === "download" &&
-						call[1] ===
-							"https://github.com/DanielGavin/ols/releases/download/dev-2026-03/ols-x86_64-unknown-linux-gnu.zip",
-				),
-			).toBe(true);
-			expect(
-				host.calls.some((call) => call[0] === "extract" && call[3] === "zip"),
-			).toBe(true);
-			expect(
-				host.calls.some(
-					(call) => call[0] === "cachePut" && call[1] === "odinfmt-toolchains",
-				),
-			).toBe(true);
+			);
+
+			expect(await odinfmtBin()).toBe(
+				"/cache/odinfmt-toolchains/dev-2026-03/linux-x86_64/odinfmt-x86_64-unknown-linux-gnu",
+			);
 		});
 	});
 
-	test("describes the named-cache-backed odinfmt tool", () => {
-		return withOdinHost(() => {
+	test("installs a missing odinfmt from the OLS release zip via two sandboxed runs", async () => {
+		await withOdinHost(async (host) => {
 			odinToolchain("dev-2026-03", { default: true });
-			const { tool, command } = odinfmtTool();
+			host.addFile(
+				"//rules/odin/odinfmt/odinfmt.lock",
+				lockFixture(
+					"dev-2026-03",
+					{ os: "linux", arch: "x86_64" },
+					{
+						url: "https://locked.example/ols-x86_64-unknown-linux-gnu.zip",
+						artifact: "ols-x86_64-unknown-linux-gnu.zip",
+						size: 1,
+						sha256: "deadbeef",
+					},
+				),
+			);
+
+			const dir = await acquireOdinfmt("dev-2026-03");
+
+			expect(dir).toBe("/cache/odinfmt-toolchains/dev-2026-03/linux-x86_64");
+			expect(host.runs.length).toBe(2);
+			const [download, extract] = host.runs;
+			expect(download.argv).toContain(
+				"https://locked.example/ols-x86_64-unknown-linux-gnu.zip",
+			);
+			expect(download.argv).toContain("deadbeef");
+			expect(extract.outputs[0].namedCache.name).toBe("odinfmt-toolchains");
+		});
+	});
+
+	test("describes the named-cache-backed odinfmt tool", async () => {
+		await withOdinHost(async (host) => {
+			odinToolchain("dev-2026-03", { default: true });
+			const key = "dev-2026-03/linux-x86_64";
+			host.install(
+				"odinfmt-toolchains",
+				key,
+				"/cache/odinfmt-toolchains/" + key,
+			);
+
+			const { tool, command } = await odinfmtTool();
 
 			expect(tool.kind).toBe("tool");
 			expect(tool.name).toBe("odinfmt");
 			expect(tool.cache).toBe("odinfmt-toolchains");
-			expect(tool.key).toBe("dev-2026-03/linux-x86_64");
+			expect(tool.key).toBe(key);
 			expect(tool.binDirs.join(",")).toBe(".");
 			expect(command).toBe("odinfmt-x86_64-unknown-linux-gnu");
 		});
 	});
 
-	test("suffixes the odinfmt command with .exe on windows", () => {
-		return withOdinHost({ os: "windows", arch: "x86_64" }, () => {
+	test("suffixes the odinfmt command with .exe on windows", async () => {
+		await withOdinHost({ os: "windows", arch: "x86_64" }, async (host) => {
 			odinToolchain("dev-2026-03", { default: true });
+			const key = "dev-2026-03/windows-x86_64";
+			host.install(
+				"odinfmt-toolchains",
+				key,
+				"/cache/odinfmt-toolchains/" + key,
+			);
 
-			expect(odinfmtTool().command).toBe("odinfmt-x86_64-pc-windows-msvc.exe");
+			expect((await odinfmtTool()).command).toBe(
+				"odinfmt-x86_64-pc-windows-msvc.exe",
+			);
 		});
 	});
 
