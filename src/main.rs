@@ -199,6 +199,9 @@ struct GoalArgs {
     /// (repeatable). See defineModeAxis/modeAxis in the JS rule API.
     #[arg(long = "axis", value_name = "KEY=VALUE")]
     axis: Vec<String>,
+    /// Select a named bundle of mode-axis defaults for this invocation.
+    #[arg(long, value_name = "NAME")]
+    profile: Option<String>,
 }
 
 /// Opaque capture of a goal subcommand's argv tail. Goal-declared flags (e.g.
@@ -714,6 +717,7 @@ async fn cmd_execute_live(
         no_cache,
         keep_sandbox: sandbox_retention,
         axis,
+        profile,
     } = args;
     let js_workers = effective_js_workers(&workspace.workspace, js_workers_cli)?;
 
@@ -1087,6 +1091,7 @@ async fn cmd_execute_live(
                         flags: goal_flags.clone(),
                         run_args: &run_args,
                         axis_overrides: &axis,
+                        profile: profile.as_deref(),
                     },
                 )
                 .await
@@ -1398,6 +1403,22 @@ mod tests {
                 "target=x86_64-unknown-linux-gnu".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn parse_goal_args_reads_profile_alongside_axis_overrides() {
+        let raw = vec![
+            "--profile".to_owned(),
+            "windows-release".to_owned(),
+            "--axis".to_owned(),
+            "opt=debug".to_owned(),
+            "//:pkg".to_owned(),
+        ];
+        let matches = parse_goal_args("build", &Default::default(), &raw);
+        let args = GoalArgs::from_arg_matches(&matches).unwrap();
+
+        assert_eq!(args.profile.as_deref(), Some("windows-release"));
+        assert_eq!(args.axis, vec!["opt=debug".to_owned()]);
     }
 
     #[test]

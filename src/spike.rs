@@ -221,6 +221,10 @@ pub(crate) struct HostState {
     /// CLI overrides land in `workspace_config["imp.mode"]`, written only
     /// by `execute_goal_live_selection`; see mode-axis-registry.md.
     mode_axes: BTreeMap<String, serde_json::Value>,
+    /// Named partial mode-axis value bundles declared via `defineProfile`.
+    /// Resolved after every rule module has registered its axes, before goal
+    /// execution; see parametrisation.md Phase 2.
+    mode_profiles: BTreeMap<String, BTreeMap<String, String>>,
     owned_files: BTreeSet<String>,
     named_caches: BTreeMap<String, NamedCache>,
     goals: BTreeMap<String, Goal>,
@@ -287,6 +291,7 @@ impl Default for HostState {
             workspace_config: BTreeMap::new(),
             config_schemas: BTreeMap::new(),
             mode_axes: BTreeMap::new(),
+            mode_profiles: BTreeMap::new(),
             owned_files: BTreeSet::new(),
             named_caches: BTreeMap::new(),
             goals,
@@ -1813,6 +1818,43 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         },
     )?;
     globals.set("__host_define_mode_axis", host_define_mode_axis)?;
+
+    // __host_define_profile(name, valuesJson) — valuesJson is a partial
+    // `{axis: value}` map. Axis/value validation happens after all modules
+    // have loaded, so profiles may be declared before their axes.
+    let state_mode_profiles = Arc::clone(&state);
+    let host_define_profile = Function::new(
+        ctx.clone(),
+        move |name: String, values_json: String| -> rquickjs::Result<()> {
+            validate_config_namespace(&name)?;
+            let values: serde_json::Value = serde_json::from_str(&values_json).map_err(|e| {
+                rquickjs::Error::new_loading_message("defineProfile", format!("parse values: {e}"))
+            })?;
+            let Some(values) = values.as_object() else {
+                return Err(rquickjs::Error::new_loading_message(
+                    "defineProfile",
+                    "values must be an object mapping axis names to strings",
+                ));
+            };
+            let mut profile = BTreeMap::new();
+            for (axis, value) in values {
+                let Some(value) = value.as_str() else {
+                    return Err(rquickjs::Error::new_loading_message(
+                        "defineProfile",
+                        "values must be an object mapping axis names to strings",
+                    ));
+                };
+                profile.insert(axis.clone(), value.to_owned());
+            }
+            state_mode_profiles
+                .lock()
+                .unwrap()
+                .mode_profiles
+                .insert(name, profile);
+            Ok(())
+        },
+    )?;
+    globals.set("__host_define_profile", host_define_profile)?;
 
     let state_schema = Arc::clone(&state);
     let host_configuration_schemas =
@@ -3871,6 +3913,7 @@ pub(crate) async fn execute_goal_live(
             flags,
             run_args: &[],
             axis_overrides: &[],
+            profile: None,
         },
     )
     .await
@@ -3894,15 +3937,65 @@ pub struct GoalExecutionOptions<'a> {
     /// axes and written into the live workspace config before any target
     /// executes. See mode-axis-registry.md.
     pub axis_overrides: &'a [String],
+    /// Optional `--profile NAME`, applied after axis defaults and before
+    /// explicit axis overrides. See parametrisation.md Phase 2.
+    pub profile: Option<&'a str>,
 }
 
 /// Resolve `--axis KEY=VALUE` CLI overrides against the mode axes declared
 /// via `defineModeAxis` and write the fully-defaulted result into the live
 /// `"imp.mode"` config namespace, before any target executes. See
 /// mode-axis-registry.md.
-fn resolve_mode_axes(live: &LiveWorkspace, axis_overrides: &[String]) -> Result<()> {
+fn validate_mode_axis_value(
+    axis: &str,
+    value: &str,
+    def: &serde_json::Value,
+    source: &str,
+) -> Result<()> {
+    if let Some(values) = def.get("values").and_then(|v| v.as_array()) {
+        let valid: Vec<&str> = values.iter().filter_map(|v| v.as_str()).collect();
+        if !valid.contains(&value) {
+            anyhow::bail!(
+                "{source} sets '{axis}={value}', which is not a valid value for '{axis}'; valid values: {}",
+                valid.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
+fn resolve_mode_axes(
+    live: &LiveWorkspace,
+    profile_name: Option<&str>,
+    axis_overrides: &[String],
+) -> Result<()> {
     let mut hs = live.host_state.lock().unwrap();
     let mode_axes = hs.mode_axes.clone();
+    let mode_profiles = hs.mode_profiles.clone();
+
+    for (profile_name, profile) in &mode_profiles {
+        for (axis, value) in profile {
+            let Some(def) = mode_axes.get(axis) else {
+                let known: Vec<&str> = mode_axes.keys().map(String::as_str).collect();
+                anyhow::bail!(
+                    "profile '{profile_name}' sets undeclared mode axis '{axis}'; declared axes: {}",
+                    known.join(", ")
+                );
+            };
+            validate_mode_axis_value(axis, value, def, &format!("profile '{profile_name}'"))?;
+        }
+    }
+
+    let profile = match profile_name {
+        Some(name) => Some(mode_profiles.get(name).ok_or_else(|| {
+            let known: Vec<&str> = mode_profiles.keys().map(String::as_str).collect();
+            anyhow::anyhow!(
+                "--profile '{name}' names an undeclared mode profile; declared profiles: {}",
+                known.join(", ")
+            )
+        })?),
+        None => None,
+    };
 
     let mut overrides: BTreeMap<String, String> = BTreeMap::new();
     for entry in axis_overrides {
@@ -3919,15 +4012,7 @@ fn resolve_mode_axes(live: &LiveWorkspace, axis_overrides: &[String]) -> Result<
                 known.join(", ")
             );
         };
-        if let Some(values) = def.get("values").and_then(|v| v.as_array()) {
-            let valid: Vec<&str> = values.iter().filter_map(|v| v.as_str()).collect();
-            if !valid.contains(&value.as_str()) {
-                anyhow::bail!(
-                    "--axis '{key}={value}' is not a valid value for '{key}'; valid values: {}",
-                    valid.join(", ")
-                );
-            }
-        }
+        validate_mode_axis_value(key, value, def, "--axis")?;
     }
 
     let mut resolved = serde_json::Map::new();
@@ -3935,6 +4020,10 @@ fn resolve_mode_axes(live: &LiveWorkspace, axis_overrides: &[String]) -> Result<
         let value = overrides
             .get(name)
             .map(|v| serde_json::Value::String(v.clone()))
+            .or_else(|| {
+                profile
+                    .and_then(|profile| profile.get(name).cloned().map(serde_json::Value::String))
+            })
             .unwrap_or_else(|| {
                 def.get("default")
                     .cloned()
@@ -3963,6 +4052,7 @@ pub async fn execute_goal_live_selection(
         flags,
         run_args,
         axis_overrides,
+        profile,
     } = options;
     let goal_def = live.workspace.goals.get(goal).ok_or_else(|| {
         let known: Vec<_> = live.workspace.goals.keys().map(String::as_str).collect();
@@ -3978,7 +4068,7 @@ pub async fn execute_goal_live_selection(
     // The caller is required to have installed a scheduler already.
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
     live.exec_no_cache.store(no_cache, Ordering::SeqCst);
-    resolve_mode_axes(live, axis_overrides)?;
+    resolve_mode_axes(live, profile, axis_overrides)?;
 
     // Resolve selectors against the statically-known workspace first, to
     // find the roots that should seed lazy expansion (the common case:
@@ -6058,6 +6148,7 @@ export const run = product(K_run_args, RUN, toolName("run-args-test-tool"), asyn
                 flags: serde_json::json!({}),
                 run_args: &run_args,
                 axis_overrides: &[],
+                profile: None,
             },
         )
         .await
@@ -8270,7 +8361,11 @@ configure("cache_test_unread", {{ mode: {mode} }});
         assert_eq!(runs, ["r", "r", "r"]);
     }
 
-    async fn run_mode_axis_test_goal(p: &Path, axis_overrides: &[String]) -> Result<()> {
+    async fn run_mode_axis_test_goal(
+        p: &Path,
+        profile: Option<&str>,
+        axis_overrides: &[String],
+    ) -> Result<()> {
         let live = load_workspace(p).await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = crate::scheduler::Scheduler::new(
@@ -8291,6 +8386,7 @@ configure("cache_test_unread", {{ mode: {mode} }});
                 flags: serde_json::json!({}),
                 run_args: &[],
                 axis_overrides,
+                profile,
             },
         )
         .await
@@ -8319,6 +8415,40 @@ export const build = product(K, BUILD, toolName("mode-axis-test-tool"), async fu
         outputs: [output("build/marker.txt")],
         materialize: true,
         display: "mode axis test",
+    });
+});
+"#,
+        );
+    }
+
+    fn write_mode_profile_build_file(p: &Path) {
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis, defineProfile } from "imp:core";
+defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
+defineModeAxis("target", { kind: "rebuild", values: ["native", "windows"], default: "native" });
+defineModeAxis("sanitizer", { kind: "rebuild", values: ["none", "address"], default: "none" });
+defineProfile("windows-release", { opt: "release", target: "windows" });
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, run, output, modeAxis, BUILD, targetKind, toolName } from "imp:core";
+const K = targetKind("mode-profile-test");
+
+export const app = target({ kind: "mode-profile-test" });
+
+export const build = product(K, BUILD, toolName("mode-profile-test-tool"), async function build() {
+    const opt = modeAxis("opt");
+    const targetPlatform = modeAxis("target");
+    const sanitizer = modeAxis("sanitizer");
+    return run({
+        argv: ["sh", "-c", `mkdir -p build && printf '%s/%s/%s' "${opt}" "${targetPlatform}" "${sanitizer}" > build/marker.txt`],
+        outputs: [output("build/marker.txt")],
+        materialize: true,
+        display: "mode profile test",
     });
 });
 "#,
@@ -8366,7 +8496,7 @@ export const build = product(K, BUILD, toolName("mode-axis-unread-test-tool"), a
         let p = root.path();
         write_mode_axis_build_file(p);
 
-        run_mode_axis_test_goal(p, &[]).await.unwrap();
+        run_mode_axis_test_goal(p, None, &[]).await.unwrap();
 
         assert_eq!(
             std::fs::read_to_string(p.join("build/marker.txt")).unwrap(),
@@ -8380,7 +8510,7 @@ export const build = product(K, BUILD, toolName("mode-axis-unread-test-tool"), a
         let p = root.path();
         write_mode_axis_build_file(p);
 
-        run_mode_axis_test_goal(p, &["opt=release".to_owned()])
+        run_mode_axis_test_goal(p, None, &["opt=release".to_owned()])
             .await
             .unwrap();
 
@@ -8391,16 +8521,105 @@ export const build = product(K, BUILD, toolName("mode-axis-unread-test-tool"), a
     }
 
     #[tokio::test]
+    async fn mode_profile_overlays_declared_axis_defaults() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_mode_profile_build_file(p);
+
+        run_mode_axis_test_goal(p, Some("windows-release"), &[])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/marker.txt")).unwrap(),
+            "release/windows/none"
+        );
+    }
+
+    #[tokio::test]
+    async fn mode_axis_override_wins_over_selected_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_mode_profile_build_file(p);
+
+        run_mode_axis_test_goal(p, Some("windows-release"), &["opt=debug".to_owned()])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/marker.txt")).unwrap(),
+            "debug/windows/none"
+        );
+    }
+
+    #[tokio::test]
+    async fn mode_profile_rejects_unknown_selected_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_mode_profile_build_file(p);
+
+        let err = run_mode_axis_test_goal(p, Some("linux-debug"), &[])
+            .await
+            .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("linux-debug"), "{message}");
+        assert!(message.contains("windows-release"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn mode_profile_rejects_unknown_axis_before_profile_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis, defineProfile } from "imp:core";
+defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
+defineProfile("broken", { target: "windows" });
+"#,
+        );
+        write_file(&p.join(BUILD_FILE), "export const app = 1;\n");
+
+        let err = run_mode_axis_test_goal(p, None, &[]).await.unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("broken"), "{message}");
+        assert!(message.contains("target"), "{message}");
+        assert!(message.contains("opt"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn mode_profile_rejects_invalid_axis_value() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis, defineProfile } from "imp:core";
+defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
+defineProfile("broken", { opt: "turbo" });
+"#,
+        );
+        write_file(&p.join(BUILD_FILE), "export const app = 1;\n");
+
+        let err = run_mode_axis_test_goal(p, None, &[]).await.unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("broken"), "{message}");
+        assert!(message.contains("turbo"), "{message}");
+        assert!(message.contains("debug"), "{message}");
+        assert!(message.contains("release"), "{message}");
+    }
+
+    #[tokio::test]
     async fn mode_axis_does_not_invalidate_a_product_that_does_not_read_it() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         let marker = p.join("runs.txt");
         write_mode_axis_unread_build_file(p, &marker);
 
-        run_mode_axis_test_goal(p, &["opt=debug".to_owned()])
+        run_mode_axis_test_goal(p, None, &["opt=debug".to_owned()])
             .await
             .unwrap();
-        run_mode_axis_test_goal(p, &["opt=release".to_owned()])
+        run_mode_axis_test_goal(p, None, &["opt=release".to_owned()])
             .await
             .unwrap();
 
@@ -8413,7 +8632,7 @@ export const build = product(K, BUILD, toolName("mode-axis-unread-test-tool"), a
         let p = root.path();
         write_mode_axis_build_file(p);
 
-        let err = run_mode_axis_test_goal(p, &["opt=turbo".to_owned()])
+        let err = run_mode_axis_test_goal(p, None, &["opt=turbo".to_owned()])
             .await
             .unwrap_err();
         let message = format!("{err:#}");
@@ -8428,7 +8647,7 @@ export const build = product(K, BUILD, toolName("mode-axis-unread-test-tool"), a
         let p = root.path();
         write_mode_axis_build_file(p);
 
-        let err = run_mode_axis_test_goal(p, &["bogus=x".to_owned()])
+        let err = run_mode_axis_test_goal(p, None, &["bogus=x".to_owned()])
             .await
             .unwrap_err();
         let message = format!("{err:#}");
@@ -8456,7 +8675,7 @@ export const build = product(K, BUILD, toolName("mode-axis-reserved-test-tool"),
 "#,
         );
 
-        let err = run_mode_axis_test_goal(p, &[]).await.unwrap_err();
+        let err = run_mode_axis_test_goal(p, None, &[]).await.unwrap_err();
         let message = format!("{err:#}");
         assert!(message.contains("reserved"), "{message}");
     }

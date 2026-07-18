@@ -554,6 +554,29 @@ export function defineModeAxis(name, def) {
 }
 
 /**
+ * Declare a named partial bundle of mode-axis defaults, selectable with
+ * `--profile name`. Entries omitted from a profile keep their axis's declared
+ * default; explicit `--axis name=value` overrides the selected profile.
+ *
+ * @category configuration
+ * @param {string} name Profile name, e.g. "windows-release".
+ * @param {object.<string, string>} values Axis values to apply for this profile.
+ * @returns {void}
+ */
+export function defineProfile(name, values) {
+	if (typeof name !== "string" || name.length === 0) {
+		throw new Error("defineProfile(name, values) requires a non-empty name");
+	}
+	const encoded = JSON.stringify(_serialize_attrs(values));
+	if (encoded === undefined) {
+		throw new Error(
+			"defineProfile(name, values) requires JSON-serializable values",
+		);
+	}
+	__host_define_profile(name, encoded);
+}
+
+/**
  * Read the CLI-resolved value of a declared mode axis.
  *
  * Backed by configuration("imp.mode"), so a call frame that reads a mode
