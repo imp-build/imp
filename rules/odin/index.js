@@ -1046,6 +1046,8 @@ export const odinBuild = product(
 			const packagePath = declared_path(handle, handle.attrs.path || ".");
 			throw new Error(empty_package_error(handle, packagePath));
 		}
+		const mode = configuration("imp.mode", {}) || {};
+		const optFlags = mode.opt === "release" ? ["-o:speed"] : ["-debug"];
 		const modeFlags = analysis.hasMainEntrypoint ? [] : ["-build-mode:lib"];
 		const path = analysis.packagePath;
 		const out = handle.attrs.output || default_output_path(handle);
@@ -1059,13 +1061,14 @@ export const odinBuild = product(
 			argv: [
 				"sh",
 				"-c",
-				'out=$1; pkg=$2; dir_count=$3; shift 3; mkdir -p "$(dirname "$out")"; while [ "$dir_count" -gt 0 ]; do mkdir -p "$1"; shift; dir_count=$((dir_count - 1)); done; odin build "$pkg" "-out:$out" "-debug" "$@"',
+				'out=$1; pkg=$2; dir_count=$3; shift 3; mkdir -p "$(dirname "$out")"; while [ "$dir_count" -gt 0 ]; do mkdir -p "$1"; shift; dir_count=$((dir_count - 1)); done; odin build "$pkg" "-out:$out" "$@"',
 				"odin-build",
 				output_path(out),
 				path,
 				String(collectionDirs.length),
 				...collectionDirs,
 				...flags,
+				...optFlags,
 				...modeFlags,
 				...linkerFlags,
 			],

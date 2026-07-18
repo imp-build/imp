@@ -28,6 +28,12 @@ Versions are examples; use versions available for the platforms your
 workspace supports. A target can override the default by passing a toolchain
 handle explicitly.
 
+This repository's workspace imports `//rules/imp/mode`. Its `default`
+profile builds raw C/C++ with `-O0 -g` and configures CMake with
+`CMAKE_BUILD_TYPE=Debug`; `--profile release` uses `-O2 -DNDEBUG` and
+`CMAKE_BUILD_TYPE=Release`. Target `copts` and `cmakeArgs` are appended after
+those defaults and can override them for one target.
+
 ## Declare raw targets
 
 ```js

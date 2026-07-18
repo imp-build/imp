@@ -27,6 +27,10 @@ export const odinfmt = odinfmtToolchain();
 An Odin toolchain may also select managed C linker targets. Keep that choice on
 the toolchain so build, test, run, and lint resolve the same native environment.
 
+This repository's workspace imports `//rules/imp/mode`: the default profile
+keeps Odin's `-debug` build behavior, while `imp build --profile release ...`
+uses Odin's `-o:speed` optimization mode.
+
 ## Declare packages and tests
 
 ```js

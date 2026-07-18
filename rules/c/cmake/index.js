@@ -1,6 +1,7 @@
 import {
 	Target,
 	artifact,
+	configuration,
 	expand,
 	glob,
 	file_set,
@@ -178,7 +179,11 @@ async function resolveCmakeSetup(handle) {
 	const srcPath = declared_path(handle, handle.attrs.src || ".");
 	const buildDirPath =
 		handle.attrs.buildDir || `build/${srcPath === "." ? "cmake" : srcPath}`;
-	const cmakeArgs = handle.attrs.cmakeArgs || [];
+	const mode = configuration("imp.mode", {}) || {};
+	const cmakeArgs = [
+		`-DCMAKE_BUILD_TYPE=${mode.opt === "release" ? "Release" : "Debug"}`,
+		...(handle.attrs.cmakeArgs || []),
+	];
 	const inputFiles = await sources(handle);
 	const dirInputs = (handle.attrs.dirs || []).map((d) => ({
 		kind: "directory",

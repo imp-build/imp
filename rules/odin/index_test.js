@@ -65,6 +65,19 @@ function inputsIncludePath(inputs, path) {
 	);
 }
 
+async function withOptMode(value, fn) {
+	const original = globalThis.__host_configuration;
+	globalThis.__host_configuration = (namespace) =>
+		namespace === "imp.mode"
+			? JSON.stringify({ opt: value })
+			: original(namespace);
+	try {
+		return await fn();
+	} finally {
+		globalThis.__host_configuration = original;
+	}
+}
+
 describe("Odin rules", () => {
 	test("uses the default Odin toolchain target", () => {
 		const toolchain = odinToolchain("dev-2026-03", { default: true });
@@ -263,6 +276,26 @@ describe("Odin rules", () => {
 			expect(
 				inputsIncludePath(runEffect.inputs, "rules/odin/toolchain.js"),
 			).toBe(true);
+		});
+	});
+
+	test("odinBuild uses speed optimization for the release profile", async () => {
+		await withFakeRun(async () => {
+			const app = odinPackage({
+				srcs: ["rules/odin/example/main.odin"],
+				toolchain: LOCKED_TEST_VERSION,
+				output: "build/odin/release-test",
+			});
+			await withOptMode("release", () => odinBuild(app));
+			const { trace } = getMemoTrace();
+			const runEffect = trace.find(
+				(t) =>
+					t.event === "effect" &&
+					t.kind === "run" &&
+					t.display === "odin build rules/odin/example",
+			);
+			expect(runEffect.argv).toContain("-o:speed");
+			expect(runEffect.argv).not.toContain("-debug");
 		});
 	});
 

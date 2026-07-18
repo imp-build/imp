@@ -24,6 +24,19 @@ async function withGccHost(fn) {
 	});
 }
 
+async function withOptMode(value, fn) {
+	const original = globalThis.__host_configuration;
+	globalThis.__host_configuration = (namespace) =>
+		namespace === "imp.mode"
+			? JSON.stringify({ opt: value })
+			: original(namespace);
+	try {
+		return await fn();
+	} finally {
+		globalThis.__host_configuration = original;
+	}
+}
+
 describe("C/C++ rules", () => {
 	test("ccLibrary declares a generic cc_library target", () => {
 		const lib = ccLibrary({ path: "rules/c/cmake/example", srcs: ["hello.c"] });
@@ -78,6 +91,8 @@ describe("C/C++ rules", () => {
 				expect(result.outputPath).toBe("build/c/testlib.a");
 				expect(host.runs.length).toBe(2);
 				expect(host.runs[0].display).toContain("cc compile");
+				expect(host.runs[0].argv).toContain("-O0");
+				expect(host.runs[0].argv).toContain("-g");
 				expect(host.runs[1].display).toContain("cc archive");
 				const { trace } = getMemoTrace();
 				expect(
@@ -88,6 +103,30 @@ describe("C/C++ rules", () => {
 							t.display.includes("cc compile"),
 					),
 				).toBe(true);
+			});
+		});
+	});
+
+	test("raw C/C++ builds use release optimization flags for opt=release", async () => {
+		await withGccHost(async (host) => {
+			await withFakeMergeDigests(async () => {
+				installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
+				const gcc = gccToolchain("2025.08-1", {
+					default: true,
+					unverified: true,
+				});
+				const lib = ccLibrary({
+					path: "rules/c/cmake/example",
+					srcs: ["hello.c"],
+					toolchain: gcc,
+					output: "build/c/release-testlib.a",
+				});
+
+				await withOptMode("release", () => ccBuild(lib));
+
+				expect(host.runs[0].argv).toContain("-O2");
+				expect(host.runs[0].argv).toContain("-DNDEBUG");
+				expect(host.runs[0].argv).not.toContain("-g");
 			});
 		});
 	});

@@ -2,6 +2,7 @@ import {
 	Target,
 	allUnowned,
 	artifact,
+	configuration,
 	defineConfigSchema,
 	field,
 	file_set,
@@ -505,6 +506,8 @@ async function compileRawObjects(handle, toolchain) {
 	const env = toolchain.env();
 	const objects = [];
 	const digests = [];
+	const mode = configuration("imp.mode", {}) || {};
+	const optFlags = mode.opt === "release" ? ["-O2", "-DNDEBUG"] : ["-O0", "-g"];
 
 	for (const source of sourcePaths) {
 		const obj = object_path_for(handle, source);
@@ -515,6 +518,7 @@ async function compileRawObjects(handle, toolchain) {
 			source,
 			"-o",
 			obj,
+			...optFlags,
 			...(handle.attrs.copts || []),
 		];
 		const script = `mkdir -p "$(dirname "$1")" && shift && "$@"`;
