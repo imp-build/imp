@@ -2,6 +2,12 @@ function _serialize_attrs(value) {
 	if (value === null || value === undefined || typeof value !== "object")
 		return value;
 	if (Array.isArray(value)) return value.map(_serialize_attrs);
+	if (value.__imp_profile === true) {
+		return {
+			__imp_profile_ref: value.handle.__id,
+			profiles: value.profiles,
+		};
+	}
 	if (value.__imp_link === true) {
 		return {
 			__imp_link_ref: value.handle.__id,
@@ -17,6 +23,10 @@ function _serialize_attrs(value) {
 function _collect_dependencies(value, out) {
 	if (value === null || value === undefined || typeof value !== "object")
 		return;
+	if (value.__imp_profile === true) {
+		out.push(value);
+		return;
+	}
 	if (value.__imp_link === true) {
 		out.push(value);
 		return;
@@ -87,6 +97,7 @@ export class Target {
 		const depIds = [];
 		const depModes = [];
 		const depLinks = [];
+		const depProfiles = [];
 		const attrs =
 			opts.attrs !== undefined
 				? opts.attrs
@@ -96,14 +107,25 @@ export class Target {
 		const sources = _normalize_source_fields(opts.sources);
 		if (opts.deps != null) {
 			for (const d of opts.deps) {
-				const handle = d && d.__imp_link === true ? d.handle : d;
+				const profile = d && d.__imp_profile === true ? d : null;
+				const handle = profile
+					? profile.handle
+					: d && d.__imp_link === true
+						? d.handle
+						: d;
 				if (handle && handle.__imp === true) {
 					depIds.push(handle.__id);
 					depModes.push(null);
 					depLinks.push(d && d.__imp_link === true ? d.overrides : null);
+					depProfiles.push(profile ? profile.profiles : null);
 				} else if (d && d.target) {
 					const target = d.target;
-					const handle = target.__imp_link === true ? target.handle : target;
+					const profile = target.__imp_profile === true ? target : null;
+					const handle = profile
+						? profile.handle
+						: target.__imp_link === true
+							? target.handle
+							: target;
 					if (!handle || handle.__imp !== true) {
 						throw new Error(
 							"dep must be a target handle or { target, mode }, got: " +
@@ -113,6 +135,7 @@ export class Target {
 					depIds.push(handle.__id);
 					depModes.push(d.mode != null ? String(d.mode) : null);
 					depLinks.push(target.__imp_link === true ? target.overrides : null);
+					depProfiles.push(profile ? profile.profiles : null);
 				} else {
 					throw new Error(
 						"dep must be a target handle or { target, mode }, got: " +
@@ -124,10 +147,16 @@ export class Target {
 			const found = [];
 			_collect_dependencies(attrs, found);
 			for (const dep of found) {
-				const handle = dep.__imp_link === true ? dep.handle : dep;
+				const profile = dep.__imp_profile === true ? dep : null;
+				const handle = profile
+					? profile.handle
+					: dep.__imp_link === true
+						? dep.handle
+						: dep;
 				depIds.push(handle.__id);
 				depModes.push(null);
 				depLinks.push(dep.__imp_link === true ? dep.overrides : null);
+				depProfiles.push(profile ? profile.profiles : null);
 			}
 		}
 		const id = __host_target(
@@ -136,9 +165,16 @@ export class Target {
 			JSON.stringify(sources),
 			depIds,
 			depModes,
-			depLinks.map((overrides) =>
-				overrides === null ? null : JSON.stringify(_serialize_attrs(overrides)),
-			),
+			depLinks.map((overrides, index) => {
+				const profiles = depProfiles[index];
+				return overrides === null && profiles === null
+					? null
+					: JSON.stringify({
+							overrides:
+								overrides === null ? null : _serialize_attrs(overrides),
+							profiles,
+						});
+			}),
 		);
 
 		this.__imp = true;
@@ -604,6 +640,53 @@ export function defineProfile(name, values) {
 }
 
 /**
+ * Apply a named build profile to one dependency edge. The profile overlays
+ * the invocation-wide mode bundle while that dependency and its transitive
+ * work are evaluated.
+ *
+ * @category target
+ * @param {object} handle Target handle.
+ * @param {string} name Declared profile name.
+ * @returns {object} Target-like configured dependency handle.
+ */
+export function profile(handle, name) {
+	if (!handle || handle.__imp !== true) {
+		throw new Error("profile(handle, name) expects a Target handle");
+	}
+	if (typeof name !== "string" || name.length === 0) {
+		throw new Error("profile(handle, name) requires a non-empty profile name");
+	}
+	const base = handle.__imp_profile === true ? handle.handle : handle;
+	const profiles = Object.freeze([
+		...(handle.__imp_profile === true ? handle.profiles : []),
+		name,
+	]);
+	const overrides = Object.freeze(
+		profiles.reduce(
+			(values, profileName) => ({
+				...values,
+				...JSON.parse(__host_mode_profile(profileName)),
+			}),
+			{},
+		),
+	);
+	const configured = {
+		__imp: true,
+		__imp_profile: true,
+		__id: base.__id,
+		kind: base.kind,
+		attrs: base.attrs,
+		handle: base,
+		profiles,
+		overrides,
+	};
+	Object.defineProperty(configured, "label", {
+		get: () => base.label,
+	});
+	return Object.freeze(configured);
+}
+
+/**
  * Read the CLI-resolved value of a declared mode axis.
  *
  * Backed by configuration("imp.mode"), so a call frame that reads a mode
@@ -865,13 +948,17 @@ export function hydrateTarget(handle) {
 	const hydrated = JSON.parse(__host_hydrate_target(handle.__id));
 	hydrated.deps = (hydrated.deps || []).map((dep) => ({
 		...dep,
-		handle:
-			dep.overrides === null || dep.overrides === undefined
-				? globalThis.__imp_resolve_handle(dep.handle.__id) || dep.handle
-				: link(
-						globalThis.__imp_resolve_handle(dep.handle.__id) || dep.handle,
-						dep.overrides,
-					),
+		handle: (function () {
+			let result =
+				globalThis.__imp_resolve_handle(dep.handle.__id) || dep.handle;
+			if (dep.overrides !== null && dep.overrides !== undefined) {
+				result = link(result, dep.overrides);
+			}
+			for (const profileName of dep.profiles || []) {
+				result = profile(result, profileName);
+			}
+			return result;
+		})(),
 	}));
 	return hydrated;
 }
@@ -1473,6 +1560,17 @@ function _stable_digest(args) {
 		if (
 			value !== null &&
 			typeof value === "object" &&
+			value.__imp_profile === true &&
+			typeof value.__id === "number"
+		) {
+			return {
+				__imp_profile_ref: value.__id,
+				overrides: value.overrides,
+			};
+		}
+		if (
+			value !== null &&
+			typeof value === "object" &&
 			value.__imp === true &&
 			typeof value.__id === "number"
 		) {
@@ -2001,6 +2099,9 @@ export function memo(fn) {
 		return JSON.stringify(arg);
 	}
 	return function memoized(...args) {
+		const configured =
+			args[0] && args[0].__imp_profile === true ? args[0] : null;
+		const callArgs = configured ? [configured.handle, ...args.slice(1)] : args;
 		const key_string = JSON.stringify({
 			fn_id,
 			args_digest: _stable_digest(args),
@@ -2035,7 +2136,11 @@ export function memo(fn) {
 					_push_call(key_string);
 					let promise;
 					try {
-						promise = Promise.resolve(fn(...args));
+						promise = configured
+							? _with_mode_overrides(configured.overrides, () =>
+									Promise.resolve(fn(...callArgs)),
+								)
+							: Promise.resolve(fn(...callArgs));
 					} catch (e) {
 						_pop_call(key_string, childContextId);
 						throw e;

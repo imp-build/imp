@@ -321,6 +321,9 @@ struct PendingDependency {
     /// Per-edge mode overrides from link(handle, overrides). These remain
     /// declaration metadata until JS calls productFor() on the hydrated link.
     link_overrides: Option<BTreeMap<String, String>>,
+    /// Named build profiles attached to this edge. They are replayed by
+    /// `hydrateTarget()` so configured handles survive explicit deps.
+    profiles: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1190,9 +1193,9 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     imp_store::usage::record_workspace(&workspace_cache_id(&workspace_root), &workspace_root);
 
     // ------------------------------------------------------------------
-    // __host_target(kind, attrsJson, sourcesJson, depIds, depModes, depLinks) → u32
-    // depIds, depModes, and depLinks are parallel arrays. depLinks contains
-    // either null or a JSON object from link(handle, overrides).
+    // __host_target(kind, attrsJson, sourcesJson, depIds, depModes, depLinks)
+    // → u32. depLinks contains optional JSON metadata for link overrides and
+    // profile names; all dependency arrays are parallel.
     // ------------------------------------------------------------------
     let state_t = Arc::clone(&state);
     let host_target = Function::new(
@@ -1244,28 +1247,72 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                             format!("parse link overrides: {e}"),
                         )
                     })?;
-                    let Some(values) = value.as_object() else {
+                    let Some(metadata) = value.as_object() else {
                         return Err(rquickjs::Error::new_loading_message(
                             "__host_target",
-                            "link overrides must be an object of strings",
+                            "dependency metadata must be an object",
                         ));
                     };
-                    let mut overrides = BTreeMap::new();
-                    for (axis, value) in values {
-                        let Some(value) = value.as_str() else {
+                    let Some(values) = metadata.get("overrides") else {
+                        return Err(rquickjs::Error::new_loading_message(
+                            "__host_target",
+                            "dependency metadata is missing overrides",
+                        ));
+                    };
+                    if values.is_null() {
+                        None
+                    } else {
+                        let Some(values) = values.as_object() else {
                             return Err(rquickjs::Error::new_loading_message(
                                 "__host_target",
                                 "link overrides must be an object of strings",
                             ));
                         };
-                        overrides.insert(axis.clone(), value.to_owned());
+                        let mut overrides = BTreeMap::new();
+                        for (axis, value) in values {
+                            let Some(value) = value.as_str() else {
+                                return Err(rquickjs::Error::new_loading_message(
+                                    "__host_target",
+                                    "link overrides must be an object of strings",
+                                ));
+                            };
+                            overrides.insert(axis.clone(), value.to_owned());
+                        }
+                        Some(overrides)
                     }
-                    Some(overrides)
+                };
+                let profiles = if link_val.is_null() || link_val.is_undefined() {
+                    None
+                } else {
+                    let json = link_val.get::<String>()?;
+                    let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| {
+                        rquickjs::Error::new_loading_message(
+                            "__host_target",
+                            format!("parse dependency metadata: {e}"),
+                        )
+                    })?;
+                    let profiles = value
+                        .get("profiles")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    if profiles.is_null() {
+                        None
+                    } else {
+                        let profiles: Vec<String> =
+                            serde_json::from_value(profiles).map_err(|e| {
+                                rquickjs::Error::new_loading_message(
+                                    "__host_target",
+                                    format!("parse dependency profiles: {e}"),
+                                )
+                            })?;
+                        Some(profiles)
+                    }
                 };
                 dep_id_list.push(PendingDependency {
                     id: dep_id,
                     mode,
                     link_overrides,
+                    profiles,
                 });
             }
 
@@ -1907,6 +1954,31 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_define_profile", host_define_profile)?;
 
+    // __host_mode_profile(name) → JSON object. Profile descriptors are made
+    // while BUILD files load, after workspace imports have registered their
+    // profiles, and the returned values become an async-local overlay when a
+    // memoized dependency is acquired.
+    let state_mode_profile = Arc::clone(&state);
+    let host_mode_profile = Function::new(
+        ctx.clone(),
+        move |name: String| -> rquickjs::Result<String> {
+            let hs = state_mode_profile.lock().unwrap();
+            let profile = hs.mode_profiles.get(&name).ok_or_else(|| {
+                let known: Vec<&str> = hs.mode_profiles.keys().map(String::as_str).collect();
+                rquickjs::Error::new_loading_message(
+                    "profile",
+                    format!(
+                        "profile '{name}' is not declared; declared profiles: {}",
+                        known.join(", ")
+                    ),
+                )
+            })?;
+            serde_json::to_string(profile)
+                .map_err(|e| rquickjs::Error::new_loading_message("profile", e.to_string()))
+        },
+    )?;
+    globals.set("__host_mode_profile", host_mode_profile)?;
+
     // __host_classify_link_overrides(overridesJson) → JSON
     // `{ rebuild: {...}, outputSelect: {...} }`. Validates declaration
     // metadata carried by link(handle, overrides) when consumed by
@@ -2405,6 +2477,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                         "handle": { "__imp": true, "__id": dep.id },
                         "mode": dep.mode,
                         "overrides": dep.link_overrides,
+                        "profiles": dep.profiles,
                     })
                 })
                 .collect();
@@ -8623,6 +8696,67 @@ export const build = product(K, BUILD, toolName("mode-profile-test-tool"), async
         );
     }
 
+    fn write_profiled_dependency_build_file(p: &Path) {
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis, defineProfile } from "imp:core";
+defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
+defineProfile("release", { opt: "release" });
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { Target, BUILD, toolName, product, profile, hydrateTarget, modeAxis, output, run } from "imp:core";
+const TOOL = toolName("profiled-dependency-test");
+
+class Dep extends Target {
+    static kind = "profiled-dependency-dep";
+    constructor(leaf) { super({ kind: Dep.kind, attrs: { leaf }, deps: [leaf] }); }
+}
+class Leaf extends Target {
+    static kind = "profiled-dependency-leaf";
+    constructor() { super({ kind: Leaf.kind, attrs: {} }); }
+}
+class App extends Target {
+    static kind = "profiled-dependency-app";
+    constructor(dep) { super({ kind: App.kind, attrs: { dep }, deps: [dep] }); }
+}
+
+const depBuild = product(Dep, BUILD, TOOL, async function depBuild(handle) {
+    await leafBuild(handle.attrs.leaf);
+    const opt = modeAxis("opt");
+    return run({
+        argv: ["sh", "-c", "mkdir -p build && printf %s \"$1\" > build/dep.txt", "profiled-dep", opt],
+        outputs: [output("build/dep.txt")], materialize: true, display: "profiled dep",
+    });
+});
+
+const leafBuild = product(Leaf, BUILD, TOOL, async function leafBuild() {
+    const opt = modeAxis("opt");
+    return run({
+        argv: ["sh", "-c", "mkdir -p build && printf %s \"$1\" > build/leaf.txt", "profiled-leaf", opt],
+        outputs: [output("build/leaf.txt")], materialize: true, display: "profiled leaf",
+    });
+});
+
+export const build = product(App, BUILD, TOOL, async function build(handle) {
+    await depBuild(hydrateTarget(handle).deps[0].handle);
+    const opt = modeAxis("opt");
+    return run({
+        argv: ["sh", "-c", "mkdir -p build && printf %s \"$1\" > build/app.txt", "profiled-app", opt],
+        outputs: [output("build/app.txt")], materialize: true, display: "profiled app",
+    });
+});
+
+const leaf = new Leaf();
+const dep = new Dep(leaf);
+export const app = new App(profile(dep, "release"));
+"#,
+        );
+    }
+
     fn write_mode_axis_unread_build_file(p: &Path, marker: &Path) {
         let command = format!(
             "printf r >> '{}' && mkdir -p build && printf payload > build/marker.txt",
@@ -8816,6 +8950,28 @@ export const app = new Consumer({{
         assert_eq!(
             std::fs::read_to_string(p.join("build/marker.txt")).unwrap(),
             "debug"
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_overlays_one_dependency_without_affecting_its_consumer() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_profiled_dependency_build_file(p);
+
+        run_mode_axis_test_goal(p, None, &[]).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/dep.txt")).unwrap(),
+            "release"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/app.txt")).unwrap(),
+            "debug"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/leaf.txt")).unwrap(),
+            "release"
         );
     }
 
