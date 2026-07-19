@@ -11,6 +11,7 @@ import {
 	rust_file_sources,
 	rust_toolchain_version,
 	sources,
+	withManifestOverride,
 } from "//rules/rust";
 import { rustTool } from "//rules/rust/toolchain";
 import { digestOf, diffDigests, output, paths, run } from "imp:core";
@@ -35,17 +36,17 @@ export async function cargoFmt(handle) {
 
 	// cargo needs Cargo.toml/Cargo.lock staged too, not just the .rs files
 	// that get reformatted/materialized back.
+	const { files: srcs, manifest } = await sources(handle);
+	const { script, arg: manifestArg } = withManifestOverride(
+		'cargo fmt --manifest-path "$1"',
+		manifest,
+	);
+
 	const result = await run({
-		argv: [
-			"sh",
-			"-c",
-			'cargo fmt --manifest-path "$1"',
-			"cargo-fmt",
-			`${path}/Cargo.toml`,
-		],
+		argv: ["sh", "-c", script, "cargo-fmt", manifestArg, `${path}/Cargo.toml`],
 		tools: toolSpec.tools,
 		env: cargoFmtEnv(toolSpec),
-		inputs: [await sources(handle)],
+		inputs: [srcs],
 		outputs: files.map((f) => output(f)),
 		materialize: true,
 		display: `cargo fmt ${path}`,
@@ -66,17 +67,24 @@ export async function cargoFormatCheck(handle) {
 	const path = declared_path(handle, handle.attrs.path || ".");
 	const toolSpec = await rustTool(rust_toolchain_version(handle));
 
+	const { files: srcs, manifest } = await sources(handle);
+	const { script, arg: manifestArg } = withManifestOverride(
+		'cargo fmt --manifest-path "$1" --check',
+		manifest,
+	);
+
 	await run({
 		argv: [
 			"sh",
 			"-c",
-			'cargo fmt --manifest-path "$1" --check',
+			script,
 			"cargo-fmt-check",
+			manifestArg,
 			`${path}/Cargo.toml`,
 		],
 		tools: toolSpec.tools,
 		env: cargoFmtEnv(toolSpec),
-		inputs: [await sources(handle)],
+		inputs: [srcs],
 		display: `cargo fmt --check ${path}`,
 	});
 

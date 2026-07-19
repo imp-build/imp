@@ -36,6 +36,7 @@ import {
 	rustLinkerTools,
 	rustToolEnv,
 	sources,
+	withManifestOverride,
 } from "//rules/rust";
 import { CargoPackage } from "//rules/rust/cargo_package";
 
@@ -77,13 +78,15 @@ async function buildTestBinaries(handle) {
 	);
 
 	const path = declared_path(handle, handle.attrs.path || ".");
-	const srcs = await sources(handle);
+	const { files: srcs, manifest } = await sources(handle);
 	const resourceInputs = await resources(handle);
 	const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 
-	const script =
+	const { script, arg: manifestArg } = withManifestOverride(
 		"manifest=$1; target_dir=$2; rustflags=$3; shift 3; " +
-		'RUSTFLAGS="$rustflags" cargo test --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
+			'RUSTFLAGS="$rustflags" cargo test --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
+		manifest,
+	);
 
 	const result = await run({
 		argv: [
@@ -91,6 +94,7 @@ async function buildTestBinaries(handle) {
 			"-c",
 			script,
 			"cargo-test-build",
+			manifestArg,
 			`${path}/Cargo.toml`,
 			buildDir,
 			rustflags,

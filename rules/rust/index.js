@@ -39,6 +39,8 @@ import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 
 import { defaultGccToolchain } from "//rules/c/gcc/toolchain";
 
+import { workspaceClosureFor } from "//rules/rust/workspace_closure";
+
 import { resources as resource_package_sources } from "//rules/asset";
 
 // Registers the "build" goal's artifact summary callback for consumers that
@@ -125,28 +127,72 @@ export const rust_file_sources = memo(async function rust_file_sources(handle) {
 //
 // A crate declared with `workspaceMember: true` (set by
 // //rules/rust/generate_build.js when `cargo metadata` reports its
-// workspace_root as an ancestor directory, not itself) globs from the true
-// repo root instead of its own directory: cargo walks up from
-// --manifest-path to find the enclosing `[workspace]`, and — since
-// workspace members here declare real path-dependencies on each other
-// (crates/imp-execution on crates/imp-store, etc.) — needs the whole
-// workspace subtree visible to resolve both the workspace itself and every
-// path dependency. A standalone crate (no `workspaceMember`) must stay
-// scoped to its own directory: including an *unrelated* ancestor
-// `[workspace]` manifest that doesn't list it as a member makes cargo fail
-// with "current package believes it's in a workspace when it's not"
-// (confirmed directly against rules/rust/example, which sits under this
-// repo's own root Cargo.toml but isn't one of its `members`).
+// workspace_root as an ancestor directory, not itself) needs cargo to
+// resolve the real `[workspace]` it belongs to — cargo walks up from
+// --manifest-path to find the enclosing workspace manifest, and (since
+// workspace members here declare real path-dependencies on each other,
+// e.g. crates/imp-execution on crates/imp-store) needs every crate in
+// its transitive path-dependency closure visible too. Rather than glob the
+// *entire* repo (any Rust edit anywhere would invalidate every crate's
+// build/test/lint task), this synthesizes a replacement root manifest whose
+// `members` list is pruned to just that closure — see
+// //rules/rust/workspace_closure for why a straight `members` prune alone
+// isn't enough and how the synthesis works.
+//
+// A standalone crate (no `workspaceMember`) must stay scoped to its own
+// directory: including an *unrelated* ancestor `[workspace]` manifest that
+// doesn't list it as a member makes cargo fail with "current package
+// believes it's in a workspace when it's not" (confirmed directly against
+// rules/rust/example, which sits under this repo's own root Cargo.toml but
+// isn't one of its `members`).
+//
+// @returns {Promise<{ files: FileSet, manifest: string|null }>} `manifest`
+// is the synthesized replacement root Cargo.toml's text for `workspaceMember`
+// crates, or `null` when the real root manifest applies unmodified.
 export const sources = memo(async function sources(handle) {
-	const root = handle.attrs.workspaceMember
-		? "."
-		: declared_path(handle, handle.attrs.path || ".");
-	return glob({
-		root,
-		include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
-		exclude: ["target/**"],
-	});
+	const path = declared_path(handle, handle.attrs.path || ".");
+	if (!handle.attrs.workspaceMember) {
+		return {
+			files: glob({
+				root: path,
+				include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
+				exclude: ["target/**"],
+			}),
+			manifest: null,
+		};
+	}
+
+	const toolchainVersion = rust_toolchain_version(handle);
+	const { dirs, manifest } = await workspaceClosureFor(path, toolchainVersion);
+	const include = dirs.flatMap((dir) => [
+		`${dir}/Cargo.toml`,
+		`${dir}/**/*.rs`,
+	]);
+	include.push("Cargo.lock");
+	return {
+		files: glob({ root: ".", include, exclude: ["target/**"] }),
+		manifest,
+	};
 });
+
+// Wraps a cargo-invoking script so that, when `sources()` narrowed a
+// `workspaceMember` crate's inputs (`manifest` non-null), the synthesized
+// replacement root Cargo.toml is written into place before the script's own
+// cargo invocation runs. A no-op (aside from one harmless extra shell
+// variable) when `manifest` is null, so every callsite can wrap
+// unconditionally instead of branching. Callers must prepend the returned
+// `arg` to their own argv, ahead of their existing positional args — the
+// prelude's own `shift 1` restores the original numbering ($1, $2, ... in
+// the wrapped script) for the rest of the script unchanged.
+export function withManifestOverride(script, manifest) {
+	return {
+		script:
+			"manifest_override=$1; shift 1; " +
+			'if [ -n "$manifest_override" ]; then printf %s "$manifest_override" > Cargo.toml; fi; ' +
+			script,
+		arg: manifest || "",
+	};
+}
 
 // FileSet of a cargoPackage's declared resource-package deps (see
 // //rules/asset's resourcePackage) — same pattern rules/odin/index.js's
@@ -316,7 +362,7 @@ export const cargoBuild = product(
 		);
 
 		const path = declared_path(handle, handle.attrs.path || ".");
-		const srcs = await sources(handle);
+		const { files: srcs, manifest } = await sources(handle);
 		const resourceInputs = await resources(handle);
 
 		// A target-local release opt-in remains authoritative, while a workspace
@@ -333,9 +379,11 @@ export const cargoBuild = product(
 			(name) => `${buildDir}/${profile}/${name}${exeSuffix}`,
 		);
 
-		const script =
+		const { script, arg: manifestArg } = withManifestOverride(
 			"manifest=$1; target_dir=$2; rustflags=$3; shift 3; " +
-			'RUSTFLAGS="$rustflags" cargo build --manifest-path "$manifest" --target-dir "$target_dir" "$@"';
+				'RUSTFLAGS="$rustflags" cargo build --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
+			manifest,
+		);
 
 		const result = await run({
 			argv: [
@@ -343,6 +391,7 @@ export const cargoBuild = product(
 				"-c",
 				script,
 				"cargo-build",
+				manifestArg,
 				`${path}/Cargo.toml`,
 				buildDir,
 				rustflags,
@@ -411,7 +460,7 @@ export const cargoTest = product(
 		);
 
 		const path = declared_path(handle, handle.attrs.path || ".");
-		const srcs = await sources(handle);
+		const { files: srcs, manifest } = await sources(handle);
 		const resourceInputs = await resources(handle);
 		const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 
@@ -429,15 +478,17 @@ export const cargoTest = product(
 		// ("no library targets found in package ...", exit 101) instead of
 		// just finding zero doc-tests — so that specific message is treated
 		// as a benign no-op rather than a real test failure.
-		const script =
+		const { script, arg: manifestArg } = withManifestOverride(
 			"manifest=$1; target_dir=$2; rustflags=$3; shift 3; " +
-			'out=$(RUSTFLAGS="$rustflags" cargo test --doc --manifest-path "$manifest" --target-dir "$target_dir" "$@" 2>&1); ec=$?; ' +
-			'printf "%s\\n" "$out"; ' +
-			'case $ec,"$out" in ' +
-			"0,*) exit 0 ;; " +
-			'*,*"no library targets found"*) exit 0 ;; ' +
-			"esac; " +
-			"exit $ec";
+				'out=$(RUSTFLAGS="$rustflags" cargo test --doc --manifest-path "$manifest" --target-dir "$target_dir" "$@" 2>&1); ec=$?; ' +
+				'printf "%s\\n" "$out"; ' +
+				'case $ec,"$out" in ' +
+				"0,*) exit 0 ;; " +
+				'*,*"no library targets found"*) exit 0 ;; ' +
+				"esac; " +
+				"exit $ec",
+			manifest,
+		);
 
 		// No outputs/materialize: test binaries aren't user-addressable
 		// artifacts. No impure flag: a passing run is cached like any other
@@ -450,6 +501,7 @@ export const cargoTest = product(
 				"-c",
 				script,
 				"cargo-test",
+				manifestArg,
 				`${path}/Cargo.toml`,
 				buildDir,
 				rustflags,

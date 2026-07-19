@@ -28,6 +28,7 @@ import {
 	rustLinkerTools,
 	rustToolEnv,
 	sources,
+	withManifestOverride,
 } from "//rules/rust";
 import { defaultRustToolchain, rustTool } from "//rules/rust/toolchain";
 import { paths, run } from "imp:core";
@@ -55,13 +56,15 @@ export async function cargoClippy(handle) {
 	);
 
 	const path = declared_path(handle, handle.attrs.path || ".");
-	const srcs = await sources(handle);
+	const { files: srcs, manifest } = await sources(handle);
 	const resourceInputs = await resources(handle);
 
-	const script =
+	const { script, arg: manifestArg } = withManifestOverride(
 		"manifest=$1; target_dir=$2; rustflags=$3; shift 3; " +
-		'RUSTFLAGS="$rustflags" cargo clippy --manifest-path "$manifest" --target-dir "$target_dir" ' +
-		'--no-deps --color=always "$@" -- -D warnings';
+			'RUSTFLAGS="$rustflags" cargo clippy --manifest-path "$manifest" --target-dir "$target_dir" ' +
+			'--no-deps --color=always "$@" -- -D warnings',
+		manifest,
+	);
 
 	const result = await run({
 		argv: [
@@ -69,6 +72,7 @@ export async function cargoClippy(handle) {
 			"-c",
 			script,
 			"cargo-clippy",
+			manifestArg,
 			`${path}/Cargo.toml`,
 			`build/rust-clippy/${path === "." ? "root" : path}`,
 			rustflags,
