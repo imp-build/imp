@@ -16,6 +16,7 @@
 import {
 	Target,
 	expand,
+	memo,
 	output,
 	output_path,
 	product,
@@ -56,13 +57,14 @@ function safe_target_address(handle) {
 // Compiles every test binary in the crate (without running any of them) and
 // materializes the whole cargo target-dir, same as cargoBuild/cargoTest's
 // toolchain/linker resolution. Shared by the expander below (to discover
-// binaries from stdout) and by each minted rust_test's own "build" product
-// (a task-cache hit once the discovery call above has already run, since
-// the argv/inputs are identical) — the target-dir is declared as a
-// materialized directory output, so every binary it contains already sits
-// at its normal on-disk path afterwards, with no per-binary staging step
-// needed.
-async function buildTestBinaries(handle) {
+// binaries from stdout) and by each minted rust_test's own "build" product —
+// wrapped in memo() so those two call sites (which build byte-identical
+// run() args for the same handle) share one execution instead of racing on
+// the underlying task cache, which has no lock between its own cache-check
+// and cache-write (#11). The target-dir is declared as a materialized
+// directory output, so every binary it contains already sits at its normal
+// on-disk path afterwards, with no per-binary staging step needed.
+const buildTestBinaries = memo(async function buildTestBinaries(handle) {
 	const toolSpec = await rustTool(rust_toolchain_version(handle));
 	const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
 	const {
@@ -108,7 +110,7 @@ async function buildTestBinaries(handle) {
 	});
 
 	return { result, buildDir, path };
-}
+});
 
 // Parses `cargo test --no-run --message-format=json`'s newline-delimited
 // stdout for compiled test-binary artifacts (reliable across task-cache

@@ -1370,6 +1370,89 @@ mod tests {
     }
 
     #[test]
+    fn exec_run_concurrent_identical_calls_race_on_task_cache() {
+        // Reproduces #11: exec_run_inner_with_start has no mutual exclusion
+        // between concurrent run() calls sharing the same task_key. Two
+        // threads race with byte-for-byte identical opts (so identical
+        // task_key), and the shared shell command embeds the sandbox PID
+        // ($$) in its output — standing in for cargo's nondeterministic
+        // metadata-hashed test-binary name from the real bug report. On a
+        // cold cache both threads should observe "no record yet" and both
+        // actually execute, instead of one single-flighting onto the other.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path().to_path_buf();
+        let marker = p.join("runs.txt");
+        // `sleep` widens the check-cache -> write-record window so the race
+        // is not a hair-trigger timing fluke.
+        let cmd = format!(
+            "printf r >> '{}' && sleep 0.3 && mkdir -p build && printf %s $$ > build/pid.txt",
+            marker.display()
+        );
+        let opts = || run_opts(&["sh", "-c", &cmd], &[], &["build/pid.txt"]);
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let (b1, b2) = (barrier.clone(), barrier.clone());
+        let (p1, p2) = (p.clone(), p.clone());
+        let (o1, o2) = (opts(), opts());
+
+        let t1 = thread::spawn(move || {
+            b1.wait();
+            exec_run_inner(&p1, o1, None).unwrap()
+        });
+        let t2 = thread::spawn(move || {
+            b2.wait();
+            exec_run_inner(&p2, o2, None).unwrap()
+        });
+        let r1 = t1.join().unwrap();
+        let r2 = t2.join().unwrap();
+
+        // The bug: both callers see a cache miss and both actually run the
+        // command, rather than the second single-flighting onto the first.
+        assert_eq!(
+            marker_count(&marker),
+            2,
+            "both racing calls executed the command instead of coalescing on the shared task_key"
+        );
+
+        // Each execution ran in its own sandbox and produced a different PID
+        // in its output, so the two in-memory results disagree.
+        assert_ne!(
+            r1.output_digest, r2.output_digest,
+            "the two racing sandboxes produced different outputs for the identical task_key"
+        );
+
+        // Whichever call's write_task_cache_record landed last "wins" the
+        // shared record, silently discarding the other's outputs — exactly
+        // the cached-record/binary mismatch described in #11.
+        let task_key = digest_json(&serde_json::json!({
+            "version": TASK_CACHE_VERSION,
+            "action_digest": live_action_digest(&opts(), &{
+                let mut env = passthrough_env_snapshot();
+                env.extend(resolve_env(&opts().env).unwrap());
+                env
+            })
+            .unwrap(),
+            "input_digest": merge_digests(Vec::new()).unwrap().digest().to_owned(),
+            "outputs": opts()
+                .outputs
+                .iter()
+                .map(output_key_spec)
+                .collect::<Vec<_>>(),
+        }))
+        .unwrap();
+        let record_path = task_record_path(&task_key).unwrap();
+        let record: TaskCacheRecord =
+            serde_json::from_str(&std::fs::read_to_string(&record_path).unwrap()).unwrap();
+        let winner_matches_r1 = record.output_digest == r1.output_digest.clone().unwrap();
+        let winner_matches_r2 = record.output_digest == r2.output_digest.clone().unwrap();
+        assert!(
+            winner_matches_r1 != winner_matches_r2,
+            "the persisted record must match exactly one racer's output, \
+             stranding the other racer's caller with a digest the cache can no longer serve"
+        );
+    }
+
+    #[test]
     fn exec_run_materialize_false_populates_cas_but_not_workspace() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();

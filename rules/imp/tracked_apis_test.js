@@ -158,6 +158,30 @@ describe("tracked runtime APIs", () => {
 		expect(effects[0].display).toBe("should-not-run");
 	});
 
+	// Regression test for #11: two concurrent run() calls with byte-identical
+	// opts (the shape of the real race — e.g. rules/rust/test.js's
+	// buildTestBinaries, called with different Target handles by sibling
+	// rustTestBuild products for the same crate, producing identical run()
+	// payloads that the Rust task cache has no lock between check and write
+	// for) must coalesce onto one execution instead of both racing.
+	test("run() single-flights concurrent calls with identical opts", async () => {
+		const marker = "/tmp/imp_run_single_flight_test_" + Date.now() + ".txt";
+		const opts = () => ({
+			argv: [
+				"sh",
+				"-c",
+				`printf r >> '${marker}' && sleep 0.3 && printf %s $$`,
+			],
+			display: "single-flight test",
+		});
+
+		const [a, b] = await Promise.all([run(opts()), run(opts())]);
+
+		const fs_read = read_file(marker);
+		expect(fs_read).toBe("r");
+		expect(a.stdout).toBe(b.stdout);
+	});
+
 	test("getMemoTrace includes key_display with function name", async () => {
 		let calls = 0;
 		const fn_ = memo(async function my_fn() {

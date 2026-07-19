@@ -2563,6 +2563,58 @@ function _trace_effect_in_context(entry, ctx) {
 	_memo_trace.push(entry);
 }
 
+// run()'s own single-flight: bare promise-coalescing for concurrent calls
+// with byte-identical host payloads, with none of memo()'s task-tree nodes,
+// cycle detection, or dependency-edge bookkeeping — run() isn't a build
+// function, it's the primitive every build function bottoms out in, so
+// giving every call its own memo node would double the UI/graph overhead for
+// no benefit.
+//
+// Exists to close a real race (#11): the Rust task cache checks for an
+// existing record, executes on a miss, then writes the record — with no
+// lock between check and write. Two concurrent run() calls sharing a
+// task-cache key (e.g. rules/rust/test.js's buildTestBinaries, called by
+// both the test-binary discovery expander and each generated target's own
+// build product) can both observe a miss and both execute in separate
+// sandboxes, and whichever writes its record last silently wins, stranding
+// the other caller's outputs. JS is single-runtime and only yields at
+// `await` (see scheduler.rs), so the check-then-store below is one
+// uninterruptible turn — unlike the Rust side, there is no window for two
+// callers to both miss.
+//
+// Only entries for cacheable calls are tracked, matching the Rust cache's
+// own gate (`!impure || forceCache`): impure/no-cache calls are meant to
+// re-execute every time by design (non-idempotent side effects), so they
+// always bypass this table and call the host directly. Entries are deleted
+// the moment their promise settles — this is single-flight, not memoization;
+// a later, non-overlapping call always goes back through the host (which
+// will itself hit the on-disk task cache on a cache hit).
+let _run_inflight = new Map();
+
+function _run_single_flight_key(hostPayload) {
+	// __owner identifies the calling memo node purely for the task-tree's
+	// UI parent attribution (see spike.rs's `__owner` → job `parent`) — it
+	// is not part of Rust's action/task digest, and two calls that are
+	// otherwise identical routinely come from different callers (that's
+	// exactly the race this exists to close). Every other field does affect
+	// either real behavior (e.g. allowFailure, materialize) or Rust's own
+	// digest (e.g. display), so it stays in the key.
+	const { __owner, ...keyed } = hostPayload;
+	return JSON.stringify(keyed);
+}
+
+function _run_dispatch(hostPayload, cacheable) {
+	if (!cacheable) return __host_run(hostPayload);
+	const key = _run_single_flight_key(hostPayload);
+	const inflight = _run_inflight.get(key);
+	if (inflight) return inflight;
+	const promise = __host_run(hostPayload).finally(() => {
+		_run_inflight.delete(key);
+	});
+	_run_inflight.set(key, promise);
+	return promise;
+}
+
 export function run(opts) {
 	const contextEntry = _effective_context_entry(true);
 	const inputs = _materialise_inputs(opts.inputs);
@@ -2597,7 +2649,7 @@ export function run(opts) {
 	_trace_effect_in_context(effect, contextEntry.ctx);
 	const contextId = contextEntry.id;
 	const owner = contextEntry.ctx.owner;
-	const promise = __host_run({
+	const hostPayload = {
 		argv: opts.argv,
 		display: opts.display,
 		env: opts.env,
@@ -2616,7 +2668,11 @@ export function run(opts) {
 		materialize,
 		stream: opts.stream,
 		__owner: owner,
-	}).then((result) => ({
+	};
+	// Mirrors exec.rs's own cacheable gate exactly: impure calls are meant to
+	// re-execute every time and must never single-flight onto another call.
+	const cacheable = !effect.impure || effect.forceCache;
+	const promise = _run_dispatch(hostPayload, cacheable).then((result) => ({
 		...result,
 		outputs,
 	}));
