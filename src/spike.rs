@@ -40,7 +40,21 @@ use imp_store::cache::{
 };
 
 pub(crate) const WORKSPACE_FILE: &str = "imp.workspace.js";
+/// CI-only overlay, loaded (if present) immediately after `imp.workspace.js`
+/// when running on GitHub Actions. Its config exports (e.g. `export const
+/// imp = ...`) deep-merge over the main workspace file's, letting CI patch
+/// config without branching the main workspace file on environment. Its
+/// target exports are added alongside the main file's; a name already
+/// exported by `imp.workspace.js` is *not* overridden (first export wins),
+/// so give CI-only targets distinct names.
+pub(crate) const CI_WORKSPACE_FILE: &str = "imp.workspace.ci.js";
 pub(crate) const BUILD_FILE: &str = "BUILD.js";
+
+/// Whether we're running as a GitHub Actions job, per GitHub's own
+/// documented convention (`GITHUB_ACTIONS=true` is set on every runner).
+fn is_github_actions() -> bool {
+    std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+}
 
 fn make_execution_service() -> Result<Arc<dyn ExecutionService>> {
     if std::env::var("IMP_DAEMON").ok().as_deref() == Some("1") {
@@ -526,58 +540,23 @@ async fn load_workspace_with_rules_and_service(
     let mut named_exports: Vec<(String, u32)> = Vec::new(); // (address, pending_id)
     let workspace_js = root.join(WORKSPACE_FILE);
     if workspace_js.is_file() {
-        let source = std::fs::read_to_string(&workspace_js)
-            .with_context(|| format!("read {}", workspace_js.display()))?;
-        let exports = ctx
-            .async_with(async |ctx| -> Result<Vec<(String, u32)>> {
-                // The core module owns the built-in `imp` schema. Import it
-                // eagerly so a workspace may use `export const imp = ...`
-                // without an otherwise-useless core import.
-                let core_promise = Module::import(&ctx, "imp:core")
-                    .catch(&ctx)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                core_promise
-                    .into_future::<Object>()
-                    .await
-                    .catch(&ctx)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                let module = Module::declare(ctx.clone(), WORKSPACE_FILE, source)
-                    .catch(&ctx)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                let (module, promise) = module
-                    .eval()
-                    .catch(&ctx)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                promise
-                    .into_future::<rquickjs::Value>()
-                    .await
-                    .catch(&ctx)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                let ns = module
-                    .namespace()
-                    .catch(&ctx)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                let schemas = state.lock().unwrap().config_schemas.clone();
-                let config_exports = collect_config_exports(&ctx, &ns, &schemas)?;
-                for (namespace, value_json) in config_exports {
-                    let value: serde_json::Value = serde_json::from_str(&value_json)
-                        .with_context(|| format!("parse config export '{namespace}'"))?;
-                    let schema = schemas.get(&namespace).expect("schema key was matched");
-                    let validated = validate_config_value(schema, &value, &namespace)?;
-                    let mut hs = state.lock().unwrap();
-                    if let Some(existing) = hs.workspace_config.get_mut(&namespace) {
-                        merge_workspace_config(existing, validated);
-                    } else {
-                        hs.workspace_config.insert(namespace, validated);
-                    }
-                }
-                collect_imp_exports(&ns)
-            })
-            .await
-            .with_context(|| format!("evaluate {}", workspace_js.display()))?;
-
+        let exports = eval_workspace_file(&ctx, &state, &workspace_js).await?;
         for (name, id) in exports {
             named_exports.push((format!("//:{name}"), id));
+        }
+    }
+
+    // ----- CI overlay: imp.workspace.ci.js, evaluated after the main
+    // workspace file (its config exports deep-merge over the main file's; see
+    // CI_WORKSPACE_FILE doc), and only when actually running on GitHub
+    // Actions. -----
+    if is_github_actions() {
+        let ci_workspace_js = root.join(CI_WORKSPACE_FILE);
+        if ci_workspace_js.is_file() {
+            let exports = eval_workspace_file(&ctx, &state, &ci_workspace_js).await?;
+            for (name, id) in exports {
+                named_exports.push((format!("//:{name}"), id));
+            }
         }
     }
 
@@ -706,6 +685,70 @@ pub(crate) async fn load_workspace_rules_test_runtime(root: &Path) -> Result<Liv
         Arc::new(LocalExecutionService::new()),
     )
     .await
+}
+
+/// Evaluate a workspace-level module (`imp.workspace.js` or its
+/// `imp.workspace.ci.js` CI overlay): run it, merge any exported config
+/// values (`export const imp = ...`) into `workspace_config`, and return its
+/// `__imp`-tagged target exports for the caller to address.
+async fn eval_workspace_file(
+    ctx: &JsContext,
+    state: &Arc<Mutex<HostState>>,
+    path: &Path,
+) -> Result<Vec<(String, u32)>> {
+    let source =
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let module_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(WORKSPACE_FILE)
+        .to_string();
+    ctx.async_with(async |ctx| -> Result<Vec<(String, u32)>> {
+        // The core module owns the built-in `imp` schema. Import it
+        // eagerly so a workspace may use `export const imp = ...`
+        // without an otherwise-useless core import.
+        let core_promise = Module::import(&ctx, "imp:core")
+            .catch(&ctx)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        core_promise
+            .into_future::<Object>()
+            .await
+            .catch(&ctx)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let module = Module::declare(ctx.clone(), module_name, source)
+            .catch(&ctx)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (module, promise) = module
+            .eval()
+            .catch(&ctx)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        promise
+            .into_future::<rquickjs::Value>()
+            .await
+            .catch(&ctx)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let ns = module
+            .namespace()
+            .catch(&ctx)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let schemas = state.lock().unwrap().config_schemas.clone();
+        let config_exports = collect_config_exports(&ctx, &ns, &schemas)?;
+        for (namespace, value_json) in config_exports {
+            let value: serde_json::Value = serde_json::from_str(&value_json)
+                .with_context(|| format!("parse config export '{namespace}'"))?;
+            let schema = schemas.get(&namespace).expect("schema key was matched");
+            let validated = validate_config_value(schema, &value, &namespace)?;
+            let mut hs = state.lock().unwrap();
+            if let Some(existing) = hs.workspace_config.get_mut(&namespace) {
+                merge_workspace_config(existing, validated);
+            } else {
+                hs.workspace_config.insert(namespace, validated);
+            }
+        }
+        collect_imp_exports(&ns)
+    })
+    .await
+    .with_context(|| format!("evaluate {}", path.display()))
 }
 
 /// Walk a module namespace object's own properties and return `(export_name,
@@ -6585,6 +6628,65 @@ export const app = target({ kind: "app", attrs: {} });
             .get("//:odin")
             .expect("workspace.js export //:odin");
         assert_eq!(odin.kind, "odin-toolchain");
+    }
+
+    // `GITHUB_ACTIONS` is process-global; serialize the two tests that
+    // toggle it so they don't race each other under the parallel test runner.
+    static GITHUB_ACTIONS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[tokio::test]
+    async fn ci_workspace_overlay_is_ignored_outside_github_actions() {
+        let _guard = GITHUB_ACTIONS_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("GITHUB_ACTIONS");
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), "");
+        write_file(
+            &p.join(CI_WORKSPACE_FILE),
+            r#"
+import { target } from "imp:core";
+export const ci_only = target({ kind: "odin-toolchain", attrs: { version: "ci" } });
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        assert!(!workspace.targets.contains_key("//:ci_only"));
+    }
+
+    #[tokio::test]
+    async fn ci_workspace_overlay_extends_the_main_workspace_on_github_actions() {
+        let _guard = GITHUB_ACTIONS_ENV_LOCK.lock().unwrap();
+        std::env::set_var("GITHUB_ACTIONS", "true");
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { target } from "imp:core";
+export const odin = target({ kind: "odin-toolchain", attrs: { version: "dev-2026-03" } });
+"#,
+        );
+        write_file(
+            &p.join(CI_WORKSPACE_FILE),
+            r#"
+import { target } from "imp:core";
+export const ci_only = target({ kind: "odin-toolchain", attrs: { version: "ci" } });
+"#,
+        );
+
+        let result = load_workspace(p).await;
+        std::env::remove_var("GITHUB_ACTIONS");
+        let workspace = result.unwrap();
+
+        let ci_only = workspace
+            .targets
+            .get("//:ci_only")
+            .expect("workspace.ci.js export //:ci_only");
+        assert_eq!(ci_only.kind, "odin-toolchain");
+
+        // Main workspace export is untouched by the overlay.
+        let odin = workspace.targets.get("//:odin").expect("//:odin");
+        assert_eq!(odin.attrs["version"], "dev-2026-03");
     }
 
     #[tokio::test]

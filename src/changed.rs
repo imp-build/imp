@@ -14,7 +14,8 @@ use anyhow::{bail, Context, Result};
 use regex::Regex;
 
 use crate::spike::{
-    compile_globs, source_field_workspace_root, Workspace, BUILD_FILE, WORKSPACE_FILE,
+    compile_globs, source_field_workspace_root, Workspace, BUILD_FILE, CI_WORKSPACE_FILE,
+    WORKSPACE_FILE,
 };
 
 /// Import edges observed while loading the workspace's JS modules, plus the
@@ -235,7 +236,7 @@ pub(crate) fn owning_targets(
     for path in changed {
         let mut owned = false;
 
-        if path == WORKSPACE_FILE {
+        if path == WORKSPACE_FILE || path == CI_WORKSPACE_FILE {
             select_all = true;
             continue;
         }
@@ -275,7 +276,7 @@ pub(crate) fn owning_targets(
         // imports it.
         if let Some(modules) = graph.module_files.get(path) {
             for module in reverse_importer_closure(graph, modules) {
-                if module == WORKSPACE_FILE {
+                if module == WORKSPACE_FILE || module == CI_WORKSPACE_FILE {
                     select_all = true;
                 } else if let Some(scope) = graph.build_module_scopes.get(&module) {
                     insert_package_targets(workspace, scope, &mut owners);
