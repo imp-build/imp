@@ -16,7 +16,7 @@ pub(crate) const CORE_JS: &str = include_str!("imp_core.js");
 /// imp's own rule library (rules/**), compiled into the binary so an
 /// installed imp works outside a checkout of this repo. `RulesSource::Dev`
 /// bypasses this in favor of a live on-disk directory (see below).
-static EMBEDDED_RULES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/rules");
+static EMBEDDED_RULES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../rules");
 
 /// Environment variable that, when set, points `//rules/...` at a live
 /// on-disk directory instead of the compiled-in copy — for developing

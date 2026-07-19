@@ -1,6 +1,4 @@
-import { cargoPackage } from "//rules/rust";
 import { resourcePackage } from "//rules/asset";
-import { protoAssets } from "//crates/imp-daemon";
 import { nativeTool } from "//rules/imp/native_tool";
 
 import { stampFile } from "//rules/gen";
@@ -13,13 +11,13 @@ export const generated_stamp = stampFile({
     text: "imp build ran",
 });
 
-// src/loader.rs embeds these at compile time (CORE_JS via include_str!, the
-// whole rules/ tree via include_dir!) so the built binary can run standalone
-// without the workspace on disk — cargoPackage's own sources() only globs
-// Cargo.toml/Cargo.lock/**/*.rs, so these need to be declared as a resource
-// dep for the sandboxed build to see them too.
+// crates/imp/src/loader.rs embeds these at compile time (CORE_JS via
+// include_str!, the whole rules/ tree via include_dir!) so the built binary
+// can run standalone without the workspace on disk — cargoPackage's own
+// sources() only globs Cargo.toml/Cargo.lock/**/*.rs, so these need to be
+// declared as a resource dep for the sandboxed build to see them too.
 export const engineAssets = resourcePackage({
-    srcs: ["src/imp_core.js", "rules/**/*"],
+    srcs: ["crates/imp/src/imp_core.js", "rules/**/*"],
 });
 
 export const testTar = nativeTool("tar");
@@ -29,9 +27,3 @@ export const testGzip = nativeTool("gzip");
 // tests fail inside `imp test`'s sandbox with "run git (is git
 // installed?)", even though git is on the host PATH.
 export const testGit = nativeTool("git");
-
-export const imp = cargoPackage({
-    bin: "imp",
-    deps: [engineAssets, protoAssets],
-    testTools: [testTar, testGzip, testGit],
-});

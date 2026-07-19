@@ -13,7 +13,7 @@ use walkdir::{DirEntry, WalkDir};
 
 use crate::spike::WORKSPACE_FILE;
 
-const INIT_CATALOG_JS: &str = include_str!("../../rules/init.js");
+const INIT_CATALOG_JS: &str = include_str!("../../../../rules/init.js");
 const CATALOG_MODULE_NAME: &str = "imp:init";
 const EXCLUDED_DIRECTORIES: &[&str] = &[
     ".git",

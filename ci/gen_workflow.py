@@ -43,7 +43,10 @@ BUILD_STEPS = [
     {"uses": "actions/checkout@v4"},
     {"uses": f"dtolnay/rust-toolchain@{RUST_TOOLCHAIN}"},
     {"uses": "Swatinem/rust-cache@v2"},
-    {"name": "Build imp", "run": "cargo build --release"},
+    {
+        "name": "Build imp",
+        "run": "cargo build --release --manifest-path crates/imp/Cargo.toml",
+    },
     {
         "name": "Upload imp binary",
         "uses": "actions/upload-artifact@v4",
@@ -160,7 +163,7 @@ RELEASE_LINUX_STEPS = [
     {"uses": "taiki-e/install-action@v2", "with": {"tool": "cross"}},
     {
         "name": "Build",
-        "run": f"cross build --release --locked --target {LINUX_TARGET}",
+        "run": f"cross build --release --locked --target {LINUX_TARGET} --manifest-path crates/imp/Cargo.toml",
     },
     {"name": "Smoke test", "run": f"target/{LINUX_TARGET}/release/imp --help"},
     {
@@ -192,7 +195,7 @@ RELEASE_WINDOWS_STEPS = [
     },
     {
         "name": "Build",
-        "run": f"cargo build --release --locked --target {WINDOWS_TARGET}",
+        "run": f"cargo build --release --locked --target {WINDOWS_TARGET} --manifest-path crates/imp/Cargo.toml",
     },
     {
         "name": "Smoke test",
