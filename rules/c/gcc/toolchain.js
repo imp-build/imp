@@ -368,24 +368,32 @@ export class RustGccLinkDriver {
 	}
 
 	/**
-	 * @param {boolean} [sccacheActive] When cc-rs-driven build scripts (e.g.
-	 *   a dependency bundling and compiling its own C sources) see
-	 *   RUSTC_WRAPPER=sccache, they invoke `sccache clang ...` directly —
-	 *   sccache then treats "clang" as its own detected/cached compiler
+	 * @param {boolean} [sccacheActive] cc-rs-driven build scripts (e.g. a
+	 *   dependency bundling and compiling its own C/C++ sources) don't go
+	 *   through cargo/RUSTC_WRAPPER at all — they invoke whatever CC/CXX
+	 *   says directly. So when sccache is active, CC/CXX are prefixed with
+	 *   `sccache ` themselves (cc-rs splits a spaced CC/CXX value into
+	 *   program + leading args, same as its documented `CC="gcc -m32"`
+	 *   support), the same way RUSTC_WRAPPER=sccache fronts rustc. sccache
+	 *   then treats "clang"/"c++" as its own detected/cached compiler
 	 *   identity, hitting the exact same sandbox-symlink-vs-canonicalized-
 	 *   path bug documented on rustToolEnv() in //rules/rust, but for the C
-	 *   compiler instead of rustc. Resolving CC to the real, absolute,
+	 *   compiler instead of rustc. Resolving CC/CXX to the real, absolute,
 	 *   stable toolchain path (bypassing the sandbox "tool" mount, hence no
 	 *   `tools()` entry either) keeps that literal path identical across
-	 *   every sandbox when sccache is active.
+	 *   every sandbox when sccache is active. The `sccache` binary itself
+	 *   is still found via PATH — rustBuildCacheTools() already mounts it
+	 *   as a sandbox tool for RUSTC_WRAPPER, and that same mount covers this
+	 *   invocation too.
 	 * @returns {Promise<string[]>} extra env vars so cc-rs-driven build
-	 * scripts can find a real C compiler too, instead of only rustc's own
-	 * linker knowing about the "clang"-named wrapper via rustflags() above.
+	 * scripts can find a real C/C++ compiler too, instead of only rustc's
+	 * own linker knowing about the "clang"-named wrapper via rustflags()
+	 * above.
 	 */
 	async env(sccacheActive) {
 		if (sccacheActive) {
 			const dir = await acquireGccToolchain(this.handle.attrs.version);
-			return [`CC=${dir}/bin/clang`];
+			return [`CC=sccache ${dir}/bin/clang`, `CXX=sccache ${dir}/bin/c++`];
 		}
 		return ["CC=clang"];
 	}

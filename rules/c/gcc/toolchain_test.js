@@ -204,7 +204,7 @@ describe("gcc toolchain", () => {
 		});
 	});
 
-	test("rust-link-driver's env() resolves CC to a stable absolute path when sccache is active", async () => {
+	test("rust-link-driver's env() wraps CC/CXX with sccache at a stable absolute path when sccache is active", async () => {
 		await withGccHost(async () => {
 			installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
 			const toolchain = gccToolchain("2025.08-1");
@@ -212,7 +212,8 @@ describe("gcc toolchain", () => {
 			const linkDriver = await productFor(toolchain, RUST_LINK_DRIVER);
 
 			expect(await linkDriver.env(true)).toEqual([
-				"CC=/cache/gcc-toolchains/2025.08-1/linux-x86_64/bin/clang",
+				"CC=sccache /cache/gcc-toolchains/2025.08-1/linux-x86_64/bin/clang",
+				"CXX=sccache /cache/gcc-toolchains/2025.08-1/linux-x86_64/bin/c++",
 			]);
 			// Still mounts gcc-toolchain/dirname as sandbox tools: rustc's own
 			// link step resolves "clang" via PATH regardless of CC/sccache.
