@@ -76,6 +76,9 @@ jobs:
       - name: Test
         run: ./imp test //...
 
+      - name: Cache stats
+        run: ./imp cache stats
+
   package:
     needs: build
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'

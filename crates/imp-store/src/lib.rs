@@ -5,4 +5,5 @@
 pub mod cache;
 pub mod digest;
 pub mod gc;
+pub mod stats;
 pub mod usage;

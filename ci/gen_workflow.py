@@ -107,6 +107,7 @@ CHECK_STEPS = [
     {"name": "Check formatting", "run": "./imp fmt --check //..."},
     {"name": "Lint", "run": "./imp lint //..."},
     {"name": "Test", "run": "./imp test //..."},
+    {"name": "Cache stats", "run": "./imp cache stats"},
 ]
 
 PACKAGE_STEPS = [

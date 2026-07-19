@@ -152,6 +152,9 @@ enum CacheCmd {
         #[arg(long)]
         apply: bool,
     },
+    /// Print a summary of what's in the cache root: sizes and counts per
+    /// category, plus how much `cache gc` could reclaim right now
+    Stats,
 }
 
 #[derive(Subcommand)]
@@ -391,6 +394,7 @@ async fn run() -> Result<()> {
     if let Cmd::Cache { command } = &cli.command {
         match command {
             CacheCmd::Gc { max_age, apply } => return cmd_cache_gc(*max_age, *apply),
+            CacheCmd::Stats => return cmd_cache_stats(),
         }
     }
     if let Cmd::Init = &cli.command {
@@ -441,6 +445,48 @@ fn cmd_cache_gc(max_age_days: u64, apply: bool) -> Result<()> {
     );
     for error in &outcome.errors {
         eprintln!("warning: {error}");
+    }
+    Ok(())
+}
+
+fn cmd_cache_stats() -> Result<()> {
+    let stats = imp_store::stats::collect()?;
+    println!("cache root: {}", stats.root.display());
+    println!(
+        "  task records:  {} ({})",
+        stats.task_records.count,
+        human_bytes(stats.task_records.bytes)
+    );
+    println!(
+        "  cas blobs:     {} ({})",
+        stats.cas_blobs.count,
+        human_bytes(stats.cas_blobs.bytes)
+    );
+    println!(
+        "  named caches:  {} scopes ({})",
+        stats.named_scopes,
+        human_bytes(stats.named_bytes)
+    );
+    if stats.legacy_bytes > 0 {
+        println!(
+            "  legacy:        {} (cas/trees; run `cache gc` to remove)",
+            human_bytes(stats.legacy_bytes)
+        );
+    }
+    println!("  usage.db:      {}", human_bytes(stats.db_bytes));
+    println!("total on disk:   {}", human_bytes(stats.total_bytes));
+    println!(
+        "raw disk usage:  {} (allocated blocks, like `du`)",
+        human_bytes(stats.raw_bytes)
+    );
+
+    let reclaimable =
+        imp_store::gc::plan(std::time::Duration::from_secs(30 * 24 * 60 * 60))?.total_bytes();
+    if reclaimable > 0 {
+        println!(
+            "reclaimable now (default 30-day policy): {} — run `cache gc --apply` to free",
+            human_bytes(reclaimable)
+        );
     }
     Ok(())
 }
