@@ -108,6 +108,7 @@ CHECK_STEPS = [
     {"name": "Lint", "run": "./imp lint //..."},
     {"name": "Test", "run": "./imp test //..."},
     {"name": "Cache stats", "run": "./imp cache stats"},
+    {"name": "Cache gc", "run": "./imp cache gc --apply"},
 ]
 
 PACKAGE_STEPS = [

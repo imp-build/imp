@@ -533,6 +533,10 @@ defineConfigSchema("imp", {
 	jobs: field.int({ default: 1 }),
 });
 
+defineConfigSchema("cache", {
+	gcMaxAgeDays: field.int({ default: 30 }),
+});
+
 /**
  * Merge JSON-serializable workspace configuration into a namespace.
  *

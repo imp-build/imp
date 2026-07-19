@@ -145,9 +145,10 @@ enum CacheCmd {
     /// Age out unused cache entries (task records, CAS blobs, named caches).
     /// Dry run by default: prints what would be deleted.
     Gc {
-        /// Delete entries not used within this many days
-        #[arg(long, default_value_t = 30)]
-        max_age: u64,
+        /// Delete entries not used within this many days. Defaults to the
+        /// workspace's `cache.gcMaxAgeDays` config (30 if unset)
+        #[arg(long)]
+        max_age: Option<u64>,
         /// Actually delete; without this only a summary is printed
         #[arg(long)]
         apply: bool,
@@ -388,13 +389,15 @@ async fn run() -> Result<()> {
             }
         }
     }
-    // Cache maintenance is pure host-side work over the cache root — no
-    // workspace load, no JS. Declarations reach gc through the side tables
-    // that normal runs maintain (see imp_store::usage).
+    // Cache maintenance is host-side work over the cache root; declarations
+    // reach gc through the side tables that normal runs maintain (see
+    // imp_store::usage). It loads the workspace only to read the
+    // `cache.gcMaxAgeDays` config (overridable via `--max-age`), so it still
+    // needs a workspace root above the current directory.
     if let Cmd::Cache { command } = &cli.command {
         match command {
-            CacheCmd::Gc { max_age, apply } => return cmd_cache_gc(*max_age, *apply),
-            CacheCmd::Stats => return cmd_cache_stats(),
+            CacheCmd::Gc { max_age, apply } => return cmd_cache_gc(*max_age, *apply).await,
+            CacheCmd::Stats => return cmd_cache_stats().await,
         }
     }
     if let Cmd::Init = &cli.command {
@@ -409,7 +412,25 @@ async fn run() -> Result<()> {
     result
 }
 
-fn cmd_cache_gc(max_age_days: u64, apply: bool) -> Result<()> {
+fn effective_gc_max_age_days(workspace: &spike::Workspace, cli_value: Option<u64>) -> u64 {
+    if let Some(value) = cli_value {
+        return value;
+    }
+
+    workspace
+        .workspace_config
+        .get("cache")
+        .and_then(|config| config.get("gcMaxAgeDays"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(30)
+}
+
+async fn cmd_cache_gc(max_age_cli: Option<u64>, apply: bool) -> Result<()> {
+    let current_dir = std::env::current_dir().context("determine current directory")?;
+    let workspace_root = spike::find_workspace_root(&current_dir)?;
+    let live = runtime::load_workspace(&workspace_root).await?;
+    let max_age_days = effective_gc_max_age_days(&live.workspace, max_age_cli);
+
     let plan = imp_store::gc::plan(std::time::Duration::from_secs(max_age_days * 24 * 60 * 60))?;
     println!(
         "cache gc: {} blobs kept live by recent task records",
@@ -449,7 +470,12 @@ fn cmd_cache_gc(max_age_days: u64, apply: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_cache_stats() -> Result<()> {
+async fn cmd_cache_stats() -> Result<()> {
+    let current_dir = std::env::current_dir().context("determine current directory")?;
+    let workspace_root = spike::find_workspace_root(&current_dir)?;
+    let live = runtime::load_workspace(&workspace_root).await?;
+    let max_age_days = effective_gc_max_age_days(&live.workspace, None);
+
     let stats = imp_store::stats::collect()?;
     println!("cache root: {}", stats.root.display());
     println!(
@@ -481,10 +507,11 @@ fn cmd_cache_stats() -> Result<()> {
     );
 
     let reclaimable =
-        imp_store::gc::plan(std::time::Duration::from_secs(30 * 24 * 60 * 60))?.total_bytes();
+        imp_store::gc::plan(std::time::Duration::from_secs(max_age_days * 24 * 60 * 60))?
+            .total_bytes();
     if reclaimable > 0 {
         println!(
-            "reclaimable now (default 30-day policy): {} — run `cache gc --apply` to free",
+            "reclaimable now ({max_age_days}-day policy): {} — run `cache gc --apply` to free",
             human_bytes(reclaimable)
         );
     }
@@ -1365,6 +1392,30 @@ mod tests {
     fn effective_jobs_cli_overrides_workspace_config() {
         let workspace = workspace_with_imp_config(json!({ "jobs": 4 }));
         assert_eq!(effective_jobs(&workspace, Some(1)).unwrap(), 1);
+    }
+
+    #[test]
+    fn effective_gc_max_age_days_defaults_to_thirty() {
+        let workspace = spike::Workspace::default();
+        assert_eq!(effective_gc_max_age_days(&workspace, None), 30);
+    }
+
+    #[test]
+    fn effective_gc_max_age_days_uses_workspace_config() {
+        let mut workspace = spike::Workspace::default();
+        workspace
+            .workspace_config
+            .insert("cache".to_owned(), json!({ "gcMaxAgeDays": 3 }));
+        assert_eq!(effective_gc_max_age_days(&workspace, None), 3);
+    }
+
+    #[test]
+    fn effective_gc_max_age_days_cli_overrides_workspace_config() {
+        let mut workspace = spike::Workspace::default();
+        workspace
+            .workspace_config
+            .insert("cache".to_owned(), json!({ "gcMaxAgeDays": 3 }));
+        assert_eq!(effective_gc_max_age_days(&workspace, Some(7)), 7);
     }
 
     #[test]
