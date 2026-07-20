@@ -116,12 +116,16 @@ export class Target {
 		const depModes = [];
 		const depLinks = [];
 		const depProfiles = [];
-		const attrs =
+		let attrs =
 			opts.attrs !== undefined
 				? opts.attrs
 				: opts.fields !== undefined
 					? opts.fields
 					: {};
+		const schema = _composed_schema(this.constructor);
+		if (schema !== null) {
+			attrs = _validate_target_attrs(schema, opts.kind, attrs);
+		}
 		const sources = _normalize_source_fields(opts.sources);
 		if (opts.deps != null) {
 			for (const d of opts.deps) {
@@ -476,12 +480,18 @@ export function runArgs() {
 }
 
 /**
- * Builders for declarative workspace configuration schemas.
+ * Builders for declarative schemas — used both for workspace configuration
+ * (`defineConfigSchema`) and Target subclass `static schema` (attrs
+ * validation).
  *
  * Available descriptors are `field.int`, `field.string`, `field.bool`,
- * `field.enum(values)`, `field.object(shape)`, and `field.map(key, value)`.
- * Descriptor options are `default` and `required`; map keys are represented
- * as JSON object property names.
+ * `field.enum(values)`, `field.object(shape)`, `field.map(key, value)`,
+ * `field.array(item)`, and `field.target()`. Descriptor options are
+ * `default` and `required`; map keys are represented as JSON object
+ * property names. `field.target()` accepts a target handle (or dep-edge
+ * wrapper from link()/profile()) and has no `default` — a dependency can't
+ * be synthesized — only `required`. `field.array`/`field.target` are meant
+ * for Target attrs schemas; config schemas have no use for target handles.
  *
  * @category configuration
  */
@@ -497,7 +507,58 @@ export const field = {
 		value,
 		...opts,
 	}),
+	array: (item, opts = {}) => ({ __impField: "array", item, ...opts }),
+	target: (opts = {}) => ({ __impField: "target", ...opts }),
 };
+
+// True for a field.target() descriptor, or a field.array() of one — the
+// only shapes whose attrs value must stay a live JS handle rather than the
+// validated/defaulted JSON __host_validate_target_attrs() returns.
+function _is_target_field(fieldSchema) {
+	if (!fieldSchema || typeof fieldSchema !== "object") return false;
+	if (fieldSchema.__impField === "target") return true;
+	if (fieldSchema.__impField === "array")
+		return _is_target_field(fieldSchema.item);
+	return false;
+}
+
+// cls → its composed schema (or null if no class in its chain declares
+// one), memoized since it's invariant per class and Target construction is
+// hot. `static schema` is a plain static field, so an undeclared subclass
+// simply inherits its nearest ancestor's own `schema` via the prototype
+// chain — walking own-property descriptors from Target down to cls (base
+// first) and merging is what turns that shadow-by-default behavior into
+// composition, later (more-derived) fields winning on conflicts.
+const _composed_schema_cache = new WeakMap();
+function _composed_schema(cls) {
+	if (_composed_schema_cache.has(cls)) return _composed_schema_cache.get(cls);
+	const layers = [];
+	for (let c = cls; typeof c === "function"; c = Object.getPrototypeOf(c)) {
+		const own = Object.getOwnPropertyDescriptor(c, "schema");
+		if (own) layers.unshift(own.value);
+	}
+	const composed = layers.length ? Object.assign({}, ...layers) : null;
+	_composed_schema_cache.set(cls, composed);
+	return composed;
+}
+
+// Validate/default `attrs` against a Target subclass's composed schema,
+// keeping target-typed fields as the original live handles (the host only
+// ever sees their serialized { __imp_ref } / { __imp_dep_ref } form).
+function _validate_target_attrs(schema, kind, attrs) {
+	const encoded = __host_validate_target_attrs(
+		kind,
+		JSON.stringify(_serialize_attrs(schema)),
+		JSON.stringify(_serialize_attrs(attrs)),
+	);
+	const validated = JSON.parse(encoded);
+	const merged = {};
+	for (const key of Object.keys(schema)) {
+		const value = _is_target_field(schema[key]) ? attrs[key] : validated[key];
+		if (value !== undefined) merged[key] = value;
+	}
+	return merged;
+}
 
 /**
  * Register the typed shape for a workspace configuration namespace.
@@ -1359,7 +1420,32 @@ function _kind_of(cls, api) {
 		);
 	}
 	_kind_class_by_name.set(cls.kind, cls);
+	const schema = _composed_schema(cls);
+	if (schema !== null) {
+		__host_register_target_schema(cls.kind, JSON.stringify(schema));
+	}
 	return cls.kind;
+}
+
+/**
+ * Read the composed `static schema` (own schema merged over every
+ * ancestor's, base-first — see _composed_schema) for every Target subclass
+ * seen so far via product()/expand()/targetKind() (i.e. every kind with a
+ * registered implementation), keyed by kind. Mirrors configurationSchemas():
+ * a schema is a plain static class field rather than something registered
+ * through a host call, so this — like configurationSchemas() — only
+ * reflects modules that have actually been loaded.
+ *
+ * @returns {object} Schemas keyed by target kind, omitting kinds with no
+ *   declared schema anywhere in their chain.
+ */
+export function targetSchemas() {
+	const out = {};
+	for (const [kind, cls] of _kind_class_by_name) {
+		const schema = _composed_schema(cls);
+		if (schema !== null) out[kind] = schema;
+	}
+	return out;
 }
 
 /**

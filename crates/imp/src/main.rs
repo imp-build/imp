@@ -65,7 +65,10 @@ enum Cmd {
         selectors: Vec<String>,
     },
     /// List target types and rules in the workspace
-    Rules,
+    Rules {
+        #[command(subcommand)]
+        command: Option<RulesCmd>,
+    },
     /// Generate the Odin module/component/asset registration file
     CodegenRegister {
         /// Output path for the generated file
@@ -166,6 +169,13 @@ enum ConfigCmd {
         #[arg(long)]
         effective: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum RulesCmd {
+    /// Print target kinds' composed attrs schemas (a subclass's `static
+    /// schema` merged over every ancestor's, base-first)
+    Schema,
 }
 
 #[derive(Subcommand)]
@@ -569,8 +579,8 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
         Cmd::Dependencies { selectors } => {
             return cmd_dependencies(selectors, tree).await;
         }
-        Cmd::Rules => {
-            return cmd_rules(tree).await;
+        Cmd::Rules { command } => {
+            return cmd_rules(command.as_ref(), tree).await;
         }
         Cmd::Config { command } => {
             return cmd_config(command).await;
@@ -1330,10 +1340,25 @@ async fn cmd_dependencies(selectors: &[String], tree: &Tree) -> Result<()> {
     })
 }
 
-async fn cmd_rules(tree: &Tree) -> Result<()> {
-    workspace_cmd!(tree, |workspace, out| {
-        spike::format_products(&workspace, &mut out)?;
-    })
+async fn cmd_rules(command: Option<&RulesCmd>, tree: &Tree) -> Result<()> {
+    match command {
+        None => workspace_cmd!(tree, |workspace, out| {
+            spike::format_products(&workspace, &mut out)?;
+        }),
+        Some(RulesCmd::Schema) => {
+            let current_dir = std::env::current_dir().context("determine current directory")?;
+            let workspace_root = spike::find_workspace_root(&current_dir)?;
+            let live = runtime::load_workspace(&workspace_root).await?;
+            let schemas: Vec<_> = live
+                .workspace
+                .target_schemas
+                .iter()
+                .map(|(kind, schema)| serde_json::json!({ "kind": kind, "schema": schema }))
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&schemas)?);
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

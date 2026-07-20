@@ -169,6 +169,12 @@ pub struct Workspace {
     #[allow(dead_code)]
     pub workspace_config: BTreeMap<String, serde_json::Value>,
     pub config_schemas: BTreeMap<String, serde_json::Value>,
+    /// Target kind → composed `static schema` (own schema merged over every
+    /// ancestor's, base-first) for every kind whose class declares one
+    /// anywhere in its chain. Mirrors `config_schemas`, but sourced from
+    /// JS class fields rather than an explicit `defineConfigSchema` call —
+    /// see `__host_register_target_schema`.
+    pub target_schemas: BTreeMap<String, serde_json::Value>,
     pub owned_files: BTreeSet<String>,
     #[allow(dead_code)]
     pub named_caches: BTreeMap<String, NamedCache>,
@@ -230,6 +236,7 @@ pub(crate) struct HostState {
     build_rules: BTreeMap<String, BuildRuleRender>,
     workspace_config: BTreeMap<String, serde_json::Value>,
     config_schemas: BTreeMap<String, serde_json::Value>,
+    target_schemas: BTreeMap<String, serde_json::Value>,
     /// Mode axes declared via `defineModeAxis(name, {kind, values?, default})`
     /// — `{kind, values?, default}` per axis, keyed by axis name. Resolved
     /// CLI overrides land in `workspace_config["imp.mode"]`, written only
@@ -304,6 +311,7 @@ impl Default for HostState {
             build_rules: BTreeMap::new(),
             workspace_config: BTreeMap::new(),
             config_schemas: BTreeMap::new(),
+            target_schemas: BTreeMap::new(),
             mode_axes: BTreeMap::new(),
             mode_profiles: BTreeMap::new(),
             owned_files: BTreeSet::new(),
@@ -491,6 +499,7 @@ async fn create_live_runtime(
             build_rules: hs.build_rules.clone(),
             workspace_config: hs.workspace_config.clone(),
             config_schemas: hs.config_schemas.clone(),
+            target_schemas: hs.target_schemas.clone(),
             owned_files: BTreeSet::new(),
             named_caches: hs.named_caches.clone(),
             goals: hs.goals.clone(),
@@ -644,6 +653,7 @@ async fn load_workspace_with_rules_and_service(
             build_rules: hs.build_rules.clone(),
             workspace_config: hs.workspace_config.clone(),
             config_schemas: hs.config_schemas.clone(),
+            target_schemas: hs.target_schemas.clone(),
             owned_files,
             named_caches: hs.named_caches.clone(),
             goal_callbacks: hs.goal_callbacks.clone(),
@@ -737,7 +747,7 @@ async fn eval_workspace_file(
             let value: serde_json::Value = serde_json::from_str(&value_json)
                 .with_context(|| format!("parse config export '{namespace}'"))?;
             let schema = schemas.get(&namespace).expect("schema key was matched");
-            let validated = validate_config_value(schema, &value, &namespace)?;
+            let validated = validate_field_value(schema, &value, &namespace, "config")?;
             let mut hs = state.lock().unwrap();
             if let Some(existing) = hs.workspace_config.get_mut(&namespace) {
                 merge_workspace_config(existing, validated);
@@ -804,38 +814,42 @@ fn collect_config_exports<'js>(
     Ok(result)
 }
 
-fn validate_config_value(
+// Shared by config schemas (defineConfigSchema) and target-attrs schemas
+// (Target subclass `static schema`) — `label` ("config" / "target") only
+// affects error-message wording, both use the same field.* descriptor shape.
+fn validate_field_value(
     schema: &serde_json::Value,
     value: &serde_json::Value,
     path: &str,
+    label: &str,
 ) -> Result<serde_json::Value> {
     if schema.get("__impField").is_none() {
-        return validate_config_object(schema, value, path);
+        return validate_field_object(schema, value, path, label);
     }
     let kind = schema
         .get("__impField")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("config schema at '{path}' is missing __impField"))?;
+        .ok_or_else(|| anyhow::anyhow!("{label} schema at '{path}' is missing __impField"))?;
     match kind {
         "int" => {
             if value.as_i64().is_some() || value.as_u64().is_some() {
                 Ok(value.clone())
             } else {
-                bail!("config '{path}' must be an integer")
+                bail!("{label} '{path}' must be an integer")
             }
         }
         "string" => {
             if value.is_string() {
                 Ok(value.clone())
             } else {
-                bail!("config '{path}' must be a string")
+                bail!("{label} '{path}' must be a string")
             }
         }
         "bool" => {
             if value.is_boolean() {
                 Ok(value.clone())
             } else {
-                bail!("config '{path}' must be a boolean")
+                bail!("{label} '{path}' must be a boolean")
             }
         }
         "enum" => {
@@ -843,63 +857,92 @@ fn validate_config_value(
                 .get("values")
                 .and_then(serde_json::Value::as_array)
                 .ok_or_else(|| {
-                    anyhow::anyhow!("config schema at '{path}' has invalid enum values")
+                    anyhow::anyhow!("{label} schema at '{path}' has invalid enum values")
                 })?;
             if values.iter().any(|candidate| candidate == value) {
                 Ok(value.clone())
             } else {
-                bail!("config '{path}' must be one of {values:?}")
+                bail!("{label} '{path}' must be one of {values:?}")
             }
         }
         "object" => {
             let shape = schema.get("shape").ok_or_else(|| {
-                anyhow::anyhow!("config schema at '{path}' has invalid object shape")
+                anyhow::anyhow!("{label} schema at '{path}' has invalid object shape")
             })?;
-            validate_config_object(shape, value, path)
+            validate_field_object(shape, value, path, label)
         }
         "map" => {
             let input = value
                 .as_object()
-                .ok_or_else(|| anyhow::anyhow!("config '{path}' must be an object"))?;
+                .ok_or_else(|| anyhow::anyhow!("{label} '{path}' must be an object"))?;
             let key_schema = schema
                 .get("key")
-                .ok_or_else(|| anyhow::anyhow!("config schema at '{path}' has no map key type"))?;
+                .ok_or_else(|| anyhow::anyhow!("{label} schema at '{path}' has no map key type"))?;
             let value_schema = schema.get("value").ok_or_else(|| {
-                anyhow::anyhow!("config schema at '{path}' has no map value type")
+                anyhow::anyhow!("{label} schema at '{path}' has no map value type")
             })?;
             let mut output = serde_json::Map::new();
             for (key, item) in input {
                 let item_path = format!("{path}.{key}");
-                validate_config_value(
+                validate_field_value(
                     key_schema,
                     &serde_json::Value::String(key.clone()),
                     &item_path,
+                    label,
                 )?;
                 output.insert(
                     key.clone(),
-                    validate_config_value(value_schema, item, &item_path)?,
+                    validate_field_value(value_schema, item, &item_path, label)?,
                 );
             }
             Ok(serde_json::Value::Object(output))
         }
-        other => bail!("config schema at '{path}' has unknown field type '{other}'"),
+        "array" => {
+            let item_schema = schema.get("item").ok_or_else(|| {
+                anyhow::anyhow!("{label} schema at '{path}' has no array item type")
+            })?;
+            let items = value
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("{label} '{path}' must be an array"))?;
+            let mut output = Vec::new();
+            for (index, item) in items.iter().enumerate() {
+                let item_path = format!("{path}[{index}]");
+                output.push(validate_field_value(item_schema, item, &item_path, label)?);
+            }
+            Ok(serde_json::Value::Array(output))
+        }
+        // A target handle or dep-edge wrapper, serialized by JS's
+        // _serialize_attrs() to { __imp_ref } / { __imp_dep_ref, ... }.
+        // Passed through as-is: the live handle stays on the JS side, this
+        // only confirms the attrs slot actually holds a target reference.
+        "target" => {
+            let is_ref =
+                value.get("__imp_ref").is_some() || value.get("__imp_dep_ref").is_some();
+            if is_ref {
+                Ok(value.clone())
+            } else {
+                bail!("{label} '{path}' must be a target handle")
+            }
+        }
+        other => bail!("{label} schema at '{path}' has unknown field type '{other}'"),
     }
 }
 
-fn validate_config_object(
+fn validate_field_object(
     shape: &serde_json::Value,
     value: &serde_json::Value,
     path: &str,
+    label: &str,
 ) -> Result<serde_json::Value> {
     let input = value
         .as_object()
-        .ok_or_else(|| anyhow::anyhow!("config '{path}' must be an object"))?;
+        .ok_or_else(|| anyhow::anyhow!("{label} '{path}' must be an object"))?;
     let shape = shape
         .as_object()
-        .ok_or_else(|| anyhow::anyhow!("config schema at '{path}' has invalid object shape"))?;
+        .ok_or_else(|| anyhow::anyhow!("{label} schema at '{path}' has invalid object shape"))?;
     for key in input.keys() {
         if !shape.contains_key(key) {
-            bail!("config '{path}.{key}' is not declared in the schema")
+            bail!("{label} '{path}.{key}' is not declared in the schema")
         }
     }
     let mut output = serde_json::Map::new();
@@ -908,19 +951,19 @@ fn validate_config_object(
         if let Some(field_value) = input.get(key) {
             output.insert(
                 key.clone(),
-                validate_config_value(field_schema, field_value, &field_path)?,
+                validate_field_value(field_schema, field_value, &field_path, label)?,
             );
         } else if let Some(default) = field_schema.get("default") {
             output.insert(
                 key.clone(),
-                validate_config_value(field_schema, default, &field_path)?,
+                validate_field_value(field_schema, default, &field_path, label)?,
             );
         } else if field_schema
             .get("required")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
         {
-            bail!("missing required config field '{field_path}'")
+            bail!("missing required {label} field '{field_path}'")
         }
     }
     Ok(serde_json::Value::Object(output))
@@ -1372,6 +1415,64 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         },
     )?;
     globals.set("__host_target", host_target)?;
+
+    // __host_validate_target_attrs(kind, schemaJson, attrsJson) → validated
+    // attrs JSON. Stateless: Target subclass `static schema` lives entirely
+    // on the JS side (read straight off the class), so unlike config schemas
+    // there's nothing to register here — this just runs the shared field.*
+    // validator against attrs supplied at construction time.
+    let host_validate_target_attrs = Function::new(
+        ctx.clone(),
+        move |kind: String, schema_json: String, attrs_json: String| -> rquickjs::Result<String> {
+            let schema: serde_json::Value = serde_json::from_str(&schema_json).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    "Target",
+                    format!("parse schema for '{kind}': {e}"),
+                )
+            })?;
+            let attrs: serde_json::Value = serde_json::from_str(&attrs_json).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    "Target",
+                    format!("parse attrs for '{kind}': {e}"),
+                )
+            })?;
+            let validated = validate_field_value(&schema, &attrs, &kind, "target")
+                .map_err(|e| rquickjs::Error::new_loading_message("Target", format!("{e:#}")))?;
+            serde_json::to_string(&validated).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    "Target",
+                    format!("serialize validated attrs for '{kind}': {e}"),
+                )
+            })
+        },
+    )?;
+    globals.set("__host_validate_target_attrs", host_validate_target_attrs)?;
+
+    // __host_register_target_schema(kind, composedSchemaJson) — mirrors a
+    // kind's composed `static schema` into HostState so `imp rules schema`
+    // can read it without a live JS call, the same way config_schemas backs
+    // `imp config schema`. Called from _kind_of() on every product()/
+    // expand()/targetKind() registration, so it's idempotent by construction
+    // (same class, same composed schema each time).
+    let state_target_schema = Arc::clone(&state);
+    let host_register_target_schema = Function::new(
+        ctx.clone(),
+        move |kind: String, schema_json: String| -> rquickjs::Result<()> {
+            let schema: serde_json::Value = serde_json::from_str(&schema_json).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    "Target",
+                    format!("parse schema for '{kind}': {e}"),
+                )
+            })?;
+            state_target_schema
+                .lock()
+                .unwrap()
+                .target_schemas
+                .insert(kind, schema);
+            Ok(())
+        },
+    )?;
+    globals.set("__host_register_target_schema", host_register_target_schema)?;
 
     // ------------------------------------------------------------------
     // __host_declare_product_name(name, stack, builtinOk) → u32 id
@@ -5910,7 +6011,7 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
             }
         });
         assert_eq!(
-            validate_config_value(&schema, &serde_json::json!({}), "example").unwrap(),
+            validate_field_value(&schema, &serde_json::json!({}), "example", "config").unwrap(),
             serde_json::json!({ "mode": "debug", "enabled": true })
         );
     }
@@ -5921,11 +6022,21 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
             "__impField": "object",
             "shape": { "count": { "__impField": "int" } }
         });
-        let unknown = validate_config_value(&schema, &serde_json::json!({ "other": 1 }), "example")
-            .unwrap_err();
+        let unknown = validate_field_value(
+            &schema,
+            &serde_json::json!({ "other": 1 }),
+            "example",
+            "config",
+        )
+        .unwrap_err();
         assert!(unknown.to_string().contains("not declared"));
-        let wrong = validate_config_value(&schema, &serde_json::json!({ "count": "1" }), "example")
-            .unwrap_err();
+        let wrong = validate_field_value(
+            &schema,
+            &serde_json::json!({ "count": "1" }),
+            "example",
+            "config",
+        )
+        .unwrap_err();
         assert!(wrong.to_string().contains("must be an integer"));
     }
 
@@ -5938,16 +6049,21 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
                 "name": { "__impField": "string", "required": true }
             }
         });
-        let invalid_enum = validate_config_value(
+        let invalid_enum = validate_field_value(
             &schema,
             &serde_json::json!({ "mode": "other", "name": "x" }),
             "example",
+            "config",
         )
         .unwrap_err();
         assert!(invalid_enum.to_string().contains("must be one of"));
-        let missing =
-            validate_config_value(&schema, &serde_json::json!({ "mode": "debug" }), "example")
-                .unwrap_err();
+        let missing = validate_field_value(
+            &schema,
+            &serde_json::json!({ "mode": "debug" }),
+            "example",
+            "config",
+        )
+        .unwrap_err();
         assert!(missing.to_string().contains("missing required"));
     }
 
@@ -5959,18 +6075,20 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
             "value": { "__impField": "string" }
         });
         assert_eq!(
-            validate_config_value(
+            validate_field_value(
                 &schema,
                 &serde_json::json!({ "lib": "library", "vendor": "vendor/odin" }),
-                "odin.collections"
+                "odin.collections",
+                "config"
             )
             .unwrap(),
             serde_json::json!({ "lib": "library", "vendor": "vendor/odin" })
         );
-        let error = validate_config_value(
+        let error = validate_field_value(
             &schema,
             &serde_json::json!({ "lib": 42 }),
             "odin.collections",
+            "config",
         )
         .unwrap_err();
         assert!(error.to_string().contains("must be a string"));
