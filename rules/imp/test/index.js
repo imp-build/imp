@@ -395,7 +395,11 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 				);
 			}
 		}
-		return { stdout: runStdout.get(opts.display) ?? "", stderr: "", exitCode: 0 };
+		return {
+			stdout: runStdout.get(opts.display) ?? "",
+			stderr: "",
+			exitCode: 0,
+		};
 	};
 	globalThis.__host_worker_start = async (name, opts) => {
 		calls.push(["workerStart", name, opts]);

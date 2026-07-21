@@ -111,35 +111,35 @@ function testTargetsIn(pkg) {
 // self-contained, so a narrow, path-scoped `cargo metadata` sees everything
 // it needs without the workspace-inheritance machinery workspaceClosureFor
 // exists for.
-const standaloneCargoMetadata = memo(async function standaloneCargoMetadata(
-	path,
-) {
-	const toolSpec = await rustTool();
-	const result = await run({
-		argv: [
-			"sh",
-			"-c",
-			'cargo metadata --no-deps --format-version=1 --manifest-path "$1"',
-			"cargo-metadata-test-discovery",
-			`${path}/Cargo.toml`,
-		],
-		tools: toolSpec.tools,
-		env: [
-			`RUSTUP_HOME=${toolSpec.rustupHome}`,
-			`CARGO_HOME=${toolSpec.cargoHome}`,
-		],
-		inputs: [
-			glob({
-				root: path,
-				include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
-				exclude: ["target/**"],
-			}),
-		],
-		materialize: false,
-		display: `cargo metadata ${path}`,
-	});
-	return JSON.parse(result.stdout);
-});
+const standaloneCargoMetadata = memo(
+	async function standaloneCargoMetadata(path) {
+		const toolSpec = await rustTool();
+		const result = await run({
+			argv: [
+				"sh",
+				"-c",
+				'cargo metadata --no-deps --format-version=1 --manifest-path "$1"',
+				"cargo-metadata-test-discovery",
+				`${path}/Cargo.toml`,
+			],
+			tools: toolSpec.tools,
+			env: [
+				`RUSTUP_HOME=${toolSpec.rustupHome}`,
+				`CARGO_HOME=${toolSpec.cargoHome}`,
+			],
+			inputs: [
+				glob({
+					root: path,
+					include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
+					exclude: ["target/**"],
+				}),
+			],
+			materialize: false,
+			display: `cargo metadata ${path}`,
+		});
+		return JSON.parse(result.stdout);
+	},
+);
 
 // Test-binary-producing targets for one cargo-package, discovered without
 // compiling anything (see testTargetsIn/standaloneCargoMetadata above).
