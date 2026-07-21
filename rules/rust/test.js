@@ -34,6 +34,7 @@ import {
 } from "imp:core";
 
 import {
+	cargoInvocationScript,
 	declared_path,
 	defaultRustToolchain,
 	normalize_deps,
@@ -172,16 +173,20 @@ async function discoverTestTargets(handle) {
 const buildTestBinaries = memo(async function buildTestBinaries(handle) {
 	const toolSpec = await rustTool(rust_toolchain_version(handle));
 	const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+	const sccacheActive = !!(toolchainHandle && toolchainHandle.attrs.sccache);
 	const {
 		tools: linkerTools,
 		rustflags,
 		env: linkerEnv,
 	} = await rustLinkerTools(toolchainHandle);
-	const { tools: cacheTools, env: cacheEnv } =
-		await rustBuildCacheTools(toolchainHandle);
+	const {
+		tools: cacheTools,
+		env: cacheEnv,
+		scriptPreamble,
+	} = await rustBuildCacheTools(toolchainHandle);
 	const { tools: rustTools, env: rustEnv } = rustToolEnv(
 		toolSpec,
-		!!(toolchainHandle && toolchainHandle.attrs.sccache),
+		sccacheActive,
 	);
 
 	const path = declared_path(handle, handle.attrs.path || ".");
@@ -190,8 +195,10 @@ const buildTestBinaries = memo(async function buildTestBinaries(handle) {
 	const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 
 	const { script, arg: manifestArg } = withManifestOverride(
-		"manifest=$1; target_dir=$2; rustflags=$3; shift 3; " +
-			'RUSTFLAGS="$rustflags" cargo test --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
+		cargoInvocationScript(
+			'cargo test --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
+			{ scriptPreamble, sccacheActive },
+		),
 		manifest,
 	);
 

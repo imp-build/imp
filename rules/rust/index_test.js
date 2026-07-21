@@ -392,7 +392,20 @@ describe("rust rules", () => {
 			const buildRun = host.runs[host.runs.length - 1];
 			expect(buildRun.env).toContain("RUSTC_WRAPPER=sccache");
 			expect(buildRun.env.some((e) => e.startsWith("SCCACHE_DIR="))).toBe(true);
+			expect(buildRun.env).toContain("SCCACHE_CACHE_SIZE=4G");
 			expect(buildRun.tools.some((t) => t.name === "sccache")).toBe(true);
+			// SCCACHE_BASEDIR/--remap-path-prefix can't be real paths baked into
+			// env:/argv: (the sandbox doesn't exist yet when those are hashed
+			// into the task key) — they're resolved from $imp_sandbox_root,
+			// captured by the script itself once it's actually running inside
+			// the sandbox. See RustSccacheWrapper.scriptPreamble()'s doc comment.
+			expect(buildRun.argv[2]).toContain('imp_sandbox_root="$(pwd)"');
+			expect(buildRun.argv[2]).toContain(
+				'export SCCACHE_BASEDIR="$imp_sandbox_root"',
+			);
+			expect(buildRun.argv[2]).toContain(
+				'--remap-path-prefix="$imp_sandbox_root"=/imp-src',
+			);
 			expect(
 				host.calls.some(
 					(call) => call[0] === "workerStart" && call[1] === "sccache",

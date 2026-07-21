@@ -27,6 +27,12 @@ Toolchains may also select an explicit C link driver, linker, and sccache
 target. Pinning them in the workspace file makes the same tool graph available
 to build, test, and Clippy instead of letting those commands drift apart.
 
+When an sccache target is set, `SCCACHE_BASEDIR` and rustc's
+`--remap-path-prefix` are wired up automatically so cache hits survive
+imp's per-run sandbox paths, and `SCCACHE_CACHE_SIZE` caps the on-disk
+object cache at `4G` by default — override it via
+`sccacheToolchain(version, { cacheSize: "8G" })`.
+
 This repository's workspace also imports `//rules/imp/mode`, which declares
 the `default` (`opt=debug`) and `release` (`opt=release`) profiles. Cargo
 builds follow the selected profile:

@@ -176,10 +176,25 @@ describe("sccache toolchain", () => {
 			expect(await wrapper.env()).toEqual([
 				"SCCACHE_DIR=/cache/sccache-data/linux-x86_64",
 				"RUSTC_WRAPPER=sccache",
+				"SCCACHE_CACHE_SIZE=4G",
 				"CARGO_INCREMENTAL=0",
 			]);
 			const tools = await wrapper.tools();
 			expect(tools.some((t) => t.name === "sccache")).toBe(true);
+			expect(wrapper.scriptPreamble()).toBe(
+				'export SCCACHE_BASEDIR="$imp_sandbox_root"; ',
+			);
+		});
+	});
+
+	test("cacheSize opts into a custom SCCACHE_CACHE_SIZE", async () => {
+		await withSccacheHost(async (host) => {
+			installSccacheToolchain("0.10.0", "/tmp/sccache-0.10.0");
+			const toolchain = sccacheToolchain("0.10.0", { cacheSize: "1G" });
+
+			const wrapper = await productFor(toolchain, RUST_BUILD_CACHE);
+
+			expect(await wrapper.env()).toContain("SCCACHE_CACHE_SIZE=1G");
 		});
 	});
 

@@ -53,6 +53,13 @@ const SCCACHE_TOOLCHAIN_CACHE = "sccache-toolchains";
 const SCCACHE_LOCKFILE = "//rules/rust/sccache/sccache.lock";
 const SCCACHE_DATA_CACHE = "sccache-data";
 
+// sccache's own default (10 GiB, per its README) is the only thing bounding
+// SCCACHE_DIR's growth otherwise — imp's own GC can't prune inside it (see
+// RustSccacheWrapper's doc comment below), so an explicit, smaller cap is
+// set unless a rule author overrides it via sccacheToolchain(version, {
+// cacheSize }).
+const DEFAULT_CACHE_SIZE = "4G";
+
 // sccache ships musl builds for Linux (no glibc-version coupling needed) and
 // native builds for macOS/Windows.
 const TARGET_TRIPLES = {
@@ -147,11 +154,15 @@ function coreToolNames(plat) {
 export class SccacheToolchain extends Toolchain {
 	static kind = "sccache-toolchain";
 	static tool = SCCACHE_TOOL;
-	constructor({ version, unverified }, opts) {
+	constructor({ version, unverified, cacheSize }, opts) {
 		super(
 			{
 				kind: SccacheToolchain.kind,
-				attrs: { version, ...(unverified ? { unverified } : {}) },
+				attrs: {
+					version,
+					cacheSize: cacheSize || DEFAULT_CACHE_SIZE,
+					...(unverified ? { unverified } : {}),
+				},
 			},
 			opts,
 		);
@@ -186,6 +197,10 @@ export function __resetSccacheToolchainStateForTest() {
  * @param {boolean} [opts.default=false]
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
+ * @param {string} [opts.cacheSize="4G"] SCCACHE_CACHE_SIZE — caps
+ *   SCCACHE_DIR's on-disk size (sccache's own LRU eviction otherwise
+ *   defaults to 10 GiB; imp's GC can't prune inside it, only delete it
+ *   wholesale — see RustSccacheWrapper's doc comment).
  * @returns {object} Target handle for this sccache toolchain.
  * @category configuration
  */
@@ -199,7 +214,7 @@ export function sccacheToolchain(version, opts = {}) {
 	}
 
 	return new SccacheToolchain(
-		{ version, unverified: opts.unverified },
+		{ version, unverified: opts.unverified, cacheSize: opts.cacheSize },
 		{ default: opts.default },
 	);
 }
@@ -412,6 +427,30 @@ export class RustSccacheWrapper {
 	}
 
 	/**
+	 * Shell text to run before invoking cargo, once the caller has captured
+	 * `imp_sandbox_root="$(pwd)"` as the first statement of its own script
+	 * (same idiom as rules/c/cmake/index.js's zigEnvExportStmts — see its doc
+	 * comment for why this can't just be one more entry in env()'s array).
+	 *
+	 * SCCACHE_BASEDIR can't be a literal path handed through run()'s env:,
+	 * because the sandbox root doesn't exist yet when env: is hashed into the
+	 * task key (crates/imp-execution/src/exec.rs computes the key before
+	 * creating the sandbox) — only the symbolic shell reference
+	 * `$imp_sandbox_root`, resolved by the shell at actual run time, is
+	 * safe to bake into the hashed script text. Without SCCACHE_BASEDIR at
+	 * all, sccache keys compiles partly off the absolute paths rustc is
+	 * invoked with, which differ on every sandbox — so cache entries almost
+	 * never hit and the cache just grows. SCCACHE_BASEDIR tells sccache which
+	 * prefix is "the sandbox" so it can normalize those paths away before
+	 * hashing.
+	 *
+	 * @returns {string}
+	 */
+	scriptPreamble() {
+		return 'export SCCACHE_BASEDIR="$imp_sandbox_root"; ';
+	}
+
+	/**
 	 * Ensure sccache's background server is running, then return the env
 	 * entries wiring rustc through it.
 	 *
@@ -455,6 +494,7 @@ export class RustSccacheWrapper {
 		return [
 			`SCCACHE_DIR=${dataDir}`,
 			"RUSTC_WRAPPER=sccache",
+			`SCCACHE_CACHE_SIZE=${this.handle.attrs.cacheSize}`,
 			// sccache refuses to cache any compile invoked with rustc's own
 			// -C incremental=<dir> (its cache key model is per-compile-unit,
 			// not per-incremental-fragment) — cargo passes that by default

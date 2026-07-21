@@ -272,13 +272,54 @@ export async function rustLinkerTools(toolchainHandle) {
 export async function rustBuildCacheTools(toolchainHandle) {
 	const sccacheHandle = toolchainHandle && toolchainHandle.attrs.sccache;
 	if (!sccacheHandle) {
-		return { tools: [], env: [] };
+		return { tools: [], env: [], scriptPreamble: "" };
 	}
 	const wrapper = await productFor(sccacheHandle, RUST_BUILD_CACHE);
 	return {
 		tools: await wrapper.tools(),
 		env: await wrapper.env(),
+		scriptPreamble: wrapper.scriptPreamble(),
 	};
+}
+
+// Shared script building blocks for cargoBuild/cargoTest/cargoClippy/
+// buildTestBinaries: all four invoke cargo the same way (a manifest/
+// target-dir/rustflags positional trio, then command-specific args), and all
+// four need the same sandbox-root capture once a build-cache layer (e.g.
+// sccache) needs it — see RustSccacheWrapper.scriptPreamble()'s doc comment
+// for why that capture has to happen in script text rather than via run()'s
+// own env:.
+//
+// `imp_sandbox_root` is captured unconditionally (cheap, and $(pwd) is
+// always the sandbox root here — none of the four callers `cd` before
+// invoking cargo) so scriptPreamble/remap can both stay simple string
+// splices instead of each needing their own conditional capture.
+export function cargoScriptPreamble(scriptPreamble = "") {
+	return (
+		'imp_sandbox_root="$(pwd)"; manifest=$1; target_dir=$2; rustflags=$3; shift 3; ' +
+		scriptPreamble
+	);
+}
+
+// Appended to rustc's args (via RUSTFLAGS) when sccache is active: keeps the
+// volatile sandbox path out of rustc's own diagnostics/debug info, and
+// sccache recognizes --remap-path-prefix and folds it into its own
+// cache-key normalization alongside SCCACHE_BASEDIR.
+export function cargoRemapFlag(sccacheActive) {
+	return sccacheActive
+		? ' --remap-path-prefix="$imp_sandbox_root"=/imp-src'
+		: "";
+}
+
+// The common case: `cargoScriptPreamble` followed by one RUSTFLAGS-prefixed
+// cargo invocation. cargoTest's doc-test script wraps its cargo invocation
+// in extra shell logic, so it composes cargoScriptPreamble/cargoRemapFlag
+// directly instead of using this helper.
+export function cargoInvocationScript(cargoCommand, opts = {}) {
+	return (
+		cargoScriptPreamble(opts.scriptPreamble) +
+		`RUSTFLAGS="$rustflags${cargoRemapFlag(opts.sccacheActive)}" ${cargoCommand}`
+	);
 }
 
 // Resolve RUSTUP_HOME/CARGO_HOME/PATH for invoking cargo/rustc.
@@ -349,16 +390,20 @@ export const cargoBuild = product(
 		}
 		const toolSpec = await rustTool(rust_toolchain_version(handle));
 		const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+		const sccacheActive = !!(toolchainHandle && toolchainHandle.attrs.sccache);
 		const {
 			tools: linkerTools,
 			rustflags,
 			env: linkerEnv,
 		} = await rustLinkerTools(toolchainHandle);
-		const { tools: cacheTools, env: cacheEnv } =
-			await rustBuildCacheTools(toolchainHandle);
+		const {
+			tools: cacheTools,
+			env: cacheEnv,
+			scriptPreamble,
+		} = await rustBuildCacheTools(toolchainHandle);
 		const { tools: rustTools, env: rustEnv } = rustToolEnv(
 			toolSpec,
-			!!(toolchainHandle && toolchainHandle.attrs.sccache),
+			sccacheActive,
 		);
 
 		const path = declared_path(handle, handle.attrs.path || ".");
@@ -380,8 +425,10 @@ export const cargoBuild = product(
 		);
 
 		const { script, arg: manifestArg } = withManifestOverride(
-			"manifest=$1; target_dir=$2; rustflags=$3; shift 3; " +
-				'RUSTFLAGS="$rustflags" cargo build --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
+			cargoInvocationScript(
+				'cargo build --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
+				{ scriptPreamble, sccacheActive },
+			),
 			manifest,
 		);
 
@@ -444,16 +491,20 @@ export const cargoTest = product(
 	async function cargoTest(handle) {
 		const toolSpec = await rustTool(rust_toolchain_version(handle));
 		const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+		const sccacheActive = !!(toolchainHandle && toolchainHandle.attrs.sccache);
 		const {
 			tools: linkerTools,
 			rustflags,
 			env: linkerEnv,
 		} = await rustLinkerTools(toolchainHandle);
-		const { tools: cacheTools, env: cacheEnv } =
-			await rustBuildCacheTools(toolchainHandle);
+		const {
+			tools: cacheTools,
+			env: cacheEnv,
+			scriptPreamble,
+		} = await rustBuildCacheTools(toolchainHandle);
 		const { tools: rustTools, env: rustEnv } = rustToolEnv(
 			toolSpec,
-			!!(toolchainHandle && toolchainHandle.attrs.sccache),
+			sccacheActive,
 		);
 		const testTools = await Promise.all(
 			(handle.attrs.testTools || []).map(nativeToolSpec),
@@ -479,8 +530,8 @@ export const cargoTest = product(
 		// just finding zero doc-tests — so that specific message is treated
 		// as a benign no-op rather than a real test failure.
 		const { script, arg: manifestArg } = withManifestOverride(
-			"manifest=$1; target_dir=$2; rustflags=$3; shift 3; " +
-				'out=$(RUSTFLAGS="$rustflags" cargo test --doc --manifest-path "$manifest" --target-dir "$target_dir" "$@" 2>&1); ec=$?; ' +
+			cargoScriptPreamble(scriptPreamble) +
+				`out=$(RUSTFLAGS="$rustflags${cargoRemapFlag(sccacheActive)}" cargo test --doc --manifest-path "$manifest" --target-dir "$target_dir" "$@" 2>&1); ec=$?; ` +
 				'printf "%s\\n" "$out"; ' +
 				'case $ec,"$out" in ' +
 				"0,*) exit 0 ;; " +

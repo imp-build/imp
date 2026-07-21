@@ -20,6 +20,7 @@
 // without also being re-linted here.
 
 import {
+	cargoInvocationScript,
 	declared_path,
 	resources,
 	rust_file_sources,
@@ -43,16 +44,20 @@ export async function cargoClippy(handle) {
 	}
 	const toolSpec = await rustTool(rust_toolchain_version(handle));
 	const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+	const sccacheActive = !!(toolchainHandle && toolchainHandle.attrs.sccache);
 	const {
 		tools: linkerTools,
 		rustflags,
 		env: linkerEnv,
 	} = await rustLinkerTools(toolchainHandle);
-	const { tools: cacheTools, env: cacheEnv } =
-		await rustBuildCacheTools(toolchainHandle);
+	const {
+		tools: cacheTools,
+		env: cacheEnv,
+		scriptPreamble,
+	} = await rustBuildCacheTools(toolchainHandle);
 	const { tools: rustTools, env: rustEnv } = rustToolEnv(
 		toolSpec,
-		!!(toolchainHandle && toolchainHandle.attrs.sccache),
+		sccacheActive,
 	);
 
 	const path = declared_path(handle, handle.attrs.path || ".");
@@ -60,9 +65,11 @@ export async function cargoClippy(handle) {
 	const resourceInputs = await resources(handle);
 
 	const { script, arg: manifestArg } = withManifestOverride(
-		"manifest=$1; target_dir=$2; rustflags=$3; shift 3; " +
-			'RUSTFLAGS="$rustflags" cargo clippy --manifest-path "$manifest" --target-dir "$target_dir" ' +
-			'--no-deps --color=always "$@" -- -D warnings',
+		cargoInvocationScript(
+			'cargo clippy --manifest-path "$manifest" --target-dir "$target_dir" ' +
+				'--no-deps --color=always "$@" -- -D warnings',
+			{ scriptPreamble, sccacheActive },
+		),
 		manifest,
 	);
 
