@@ -490,6 +490,23 @@ async fn cmd_cache_stats(details: bool) -> Result<()> {
     let live = runtime::load_workspace(&workspace_root).await?;
     let max_age_days = effective_gc_max_age_days(&live.workspace, None);
 
+    // A namedCache() details() callback may shell out via run({ impure:
+    // true, sandbox: false }), which needs an execution context — install
+    // a minimal, UI-less one (same pattern as resolve_workspace_tool_bin)
+    // only when there's actually a callback that might use it.
+    if details && !live.workspace.named_cache_details.is_empty() {
+        *live.exec_root.lock().unwrap() = Some(workspace_root.clone());
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel::<scheduler::TaskEvent>();
+        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sched = scheduler::Scheduler::new(
+            std::thread::available_parallelism().map_or(4, |n| n.get()),
+            cancellation,
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(sched);
+        tokio::spawn(async move { while events.recv().await.is_some() {} });
+    }
+
     let stats = imp_store::stats::collect()?;
     println!("cache root: {}", stats.root.display());
     println!(
@@ -516,6 +533,11 @@ async fn cmd_cache_stats(details: bool) -> Result<()> {
                 entry.count,
                 human_bytes(entry.bytes)
             );
+            if let Some(text) = spike::named_cache_details(&live, &entry.name).await? {
+                for line in text.lines() {
+                    println!("      {line}");
+                }
+            }
         }
     }
     if stats.legacy_bytes > 0 {

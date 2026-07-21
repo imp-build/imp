@@ -296,6 +296,7 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 	const originals = {
 		target: globalThis.__host_target,
 		namedCache: globalThis.__host_named_cache,
+		namedCacheDetails: globalThis.__host_named_cache_details,
 		platformInfo: globalThis.__host_platform_info,
 		cacheHas: globalThis.__host_cache_has,
 		cacheGet: globalThis.__host_cache_get,
@@ -312,11 +313,13 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 	const workers = new Map();
 	const files = new Map();
 	const runStdout = new Map();
+	const namedCacheDetails = new Map();
 
 	const host = {
 		calls,
 		runs,
 		workers,
+		namedCacheDetails,
 		install(name, key, path) {
 			cache.set(`${name}/${key}`, path);
 		},
@@ -357,6 +360,10 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 	};
 	globalThis.__host_named_cache = (name) => {
 		calls.push(["namedCache", name]);
+	};
+	globalThis.__host_named_cache_details = (name, fn) => {
+		calls.push(["namedCacheDetails", name, fn]);
+		namedCacheDetails.set(name, fn);
 	};
 	globalThis.__host_platform_info = () => {
 		calls.push(["platformInfo"]);
@@ -426,6 +433,7 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 	} finally {
 		globalThis.__host_target = originals.target;
 		globalThis.__host_named_cache = originals.namedCache;
+		globalThis.__host_named_cache_details = originals.namedCacheDetails;
 		globalThis.__host_platform_info = originals.platformInfo;
 		globalThis.__host_cache_has = originals.cacheHas;
 		globalThis.__host_cache_get = originals.cacheGet;

@@ -13,6 +13,7 @@ import {
 	defaultSccacheToolchainVersion,
 	installSccacheToolchain,
 	sccacheCacheKey,
+	sccacheDataCacheKey,
 	sccacheDataDir,
 	sccacheTool,
 	sccacheToolchain,
@@ -223,6 +224,53 @@ describe("sccache toolchain", () => {
 			expect(opts.argv).toContain("--start-server");
 			expect(opts.healthCheckArgv).toContain("--show-stats");
 			expect(opts.env.some((e) => e.startsWith("SCCACHE_DIR="))).toBe(true);
+		});
+	});
+
+	test("namedCache details callback returns null when neither cache is seeded yet", async () => {
+		await withSccacheHost(async (host) => {
+			sccacheToolchain("0.10.0", { default: true });
+
+			const details = host.namedCacheDetails.get("sccache-data");
+			expect(await details()).toBe(null);
+			expect(host.runs.length).toBe(0);
+		});
+	});
+
+	test("namedCache details callback shells out to sccache --show-stats once both caches are seeded", async () => {
+		await withSccacheHost(async (host) => {
+			const toolKey = sccacheCacheKey("0.10.0", {
+				os: "linux",
+				arch: "x86_64",
+			});
+			const dataKey = sccacheDataCacheKey({ os: "linux", arch: "x86_64" });
+			host.install(
+				"sccache-toolchains",
+				toolKey,
+				"/cache/sccache-toolchains/0.10.0/linux-x86_64",
+			);
+			host.install("sccache-data", dataKey, "/cache/sccache-data/linux-x86_64");
+			host.setRunStdout(
+				"sccache --show-stats",
+				"Compile requests  10\nCache hits  8\n",
+			);
+
+			sccacheToolchain("0.10.0", { default: true });
+
+			const details = host.namedCacheDetails.get("sccache-data");
+			const result = await details();
+
+			expect(result).toBe("Compile requests  10\nCache hits  8");
+			expect(host.runs.length).toBe(1);
+			expect(host.runs[0].argv).toEqual([
+				"/cache/sccache-toolchains/0.10.0/linux-x86_64/sccache",
+				"--show-stats",
+			]);
+			expect(host.runs[0].env).toContain(
+				"SCCACHE_DIR=/cache/sccache-data/linux-x86_64",
+			);
+			expect(host.runs[0].impure).toBe(true);
+			expect(host.runs[0].sandbox).toBe(false);
 		});
 	});
 });

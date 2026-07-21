@@ -206,7 +206,33 @@ export function __resetSccacheToolchainStateForTest() {
  */
 export function sccacheToolchain(version, opts = {}) {
 	namedCache({ name: SCCACHE_TOOLCHAIN_CACHE, shared: true });
-	namedCache({ name: SCCACHE_DATA_CACHE });
+	namedCache({
+		name: SCCACHE_DATA_CACHE,
+		details: async () => {
+			const plat = platformInfo();
+			const toolKey = sccacheCacheKey(version, plat);
+			const dataKey = sccacheDataCacheKey(plat);
+			if (
+				!cacheHas(SCCACHE_TOOLCHAIN_CACHE, toolKey) ||
+				!cacheHas(SCCACHE_DATA_CACHE, dataKey)
+			) {
+				// Never acquired/seeded in this workspace — nothing to report.
+				return null;
+			}
+			const exe = plat.os === "windows" ? "sccache.exe" : "sccache";
+			const bin = `${cacheGet(SCCACHE_TOOLCHAIN_CACHE, toolKey)}/${exe}`;
+			const dataDir = cacheGet(SCCACHE_DATA_CACHE, dataKey);
+			const result = await run({
+				argv: [bin, "--show-stats"],
+				env: [`SCCACHE_DIR=${dataDir}`],
+				impure: true,
+				sandbox: false,
+				allowFailure: true,
+				display: "sccache --show-stats",
+			});
+			return result.exitCode === 0 ? result.stdout.trim() : null;
+		},
+	});
 	if (!coreToolHandles) {
 		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
 			nativeTool(name),

@@ -31,7 +31,10 @@ When an sccache target is set, `SCCACHE_BASEDIR` and rustc's
 `--remap-path-prefix` are wired up automatically so cache hits survive
 imp's per-run sandbox paths, and `SCCACHE_CACHE_SIZE` caps the on-disk
 object cache at `4G` by default — override it via
-`sccacheToolchain(version, { cacheSize: "8G" })`.
+`sccacheToolchain(version, { cacheSize: "8G" })`. Once sccache has been used
+at least once, `imp cache stats --details` also prints its own
+`--show-stats` output (hit rate, compile counts, …) alongside the on-disk
+size for the `sccache-data` cache.
 
 This repository's workspace also imports `//rules/imp/mode`, which declares
 the `default` (`opt=debug`) and `release` (`opt=release`) profiles. Cargo

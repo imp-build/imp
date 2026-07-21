@@ -27,8 +27,8 @@ use anyhow::{bail, Context, Result};
 use regex::Regex;
 use rquickjs::{
     function::Async, promise::MaybePromise, promise::PromiseHookType, Array,
-    AsyncContext as JsContext, AsyncRuntime as Runtime, CatchResultExt, Ctx, Filter, Function,
-    Module, Object, Value,
+    AsyncContext as JsContext, AsyncRuntime as Runtime, CatchResultExt, Ctx, Filter, FromJs,
+    Function, Module, Object, Value,
 };
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -178,6 +178,10 @@ pub struct Workspace {
     pub owned_files: BTreeSet<String>,
     #[allow(dead_code)]
     pub named_caches: BTreeMap<String, NamedCache>,
+    /// Named-cache name -> global function name for an optional
+    /// `namedCache({ name, details })` stats callback. Invoked by `imp
+    /// cache stats --details` to print the cache's own self-reported stats.
+    pub named_cache_details: BTreeMap<String, String>,
     pub goals: BTreeMap<String, Goal>,
     /// Goal name -> global function name for an optional pre-flight
     /// callback registered via `goal(name, fn)`. Invoked once per goal
@@ -248,6 +252,7 @@ pub(crate) struct HostState {
     mode_profiles: BTreeMap<String, BTreeMap<String, String>>,
     owned_files: BTreeSet<String>,
     named_caches: BTreeMap<String, NamedCache>,
+    named_cache_details: BTreeMap<String, String>,
     goals: BTreeMap<String, Goal>,
     id_to_address: BTreeMap<u32, String>,
     goal_callbacks: BTreeMap<String, String>,
@@ -316,6 +321,7 @@ impl Default for HostState {
             mode_profiles: BTreeMap::new(),
             owned_files: BTreeSet::new(),
             named_caches: BTreeMap::new(),
+            named_cache_details: BTreeMap::new(),
             goals,
             id_to_address: BTreeMap::new(),
             goal_callbacks: BTreeMap::new(),
@@ -502,6 +508,7 @@ async fn create_live_runtime(
             target_schemas: hs.target_schemas.clone(),
             owned_files: BTreeSet::new(),
             named_caches: hs.named_caches.clone(),
+            named_cache_details: hs.named_cache_details.clone(),
             goals: hs.goals.clone(),
             goal_callbacks: hs.goal_callbacks.clone(),
             expanders: hs.expanders.clone(),
@@ -656,6 +663,7 @@ async fn load_workspace_with_rules_and_service(
             target_schemas: hs.target_schemas.clone(),
             owned_files,
             named_caches: hs.named_caches.clone(),
+            named_cache_details: hs.named_cache_details.clone(),
             goal_callbacks: hs.goal_callbacks.clone(),
             expanders: hs.expanders.clone(),
             goals: hs.goals.clone(),
@@ -1836,6 +1844,34 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         },
     )?;
     globals.set("__host_named_cache", host_named_cache)?;
+
+    // ------------------------------------------------------------------
+    // __host_named_cache_details(name, fn) — registers an optional stats
+    // callback for a named cache, invoked by `imp cache stats --details`
+    // (see spike::named_cache_details). Same "stash under __imp_exec_N"
+    // idiom as __host_goal_callback above.
+    // ------------------------------------------------------------------
+    let state_ncd = Arc::clone(&state);
+    let host_named_cache_details = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, name: String, fn_val: Value<'js>| -> rquickjs::Result<()> {
+            let mut hs = state_ncd.lock().unwrap();
+            if !hs.named_caches.contains_key(&name) {
+                return Err(action_spec_error(format!(
+                    "namedCache '{name}' details callback registered before namedCache({{ name: '{name}' }}) declared it"
+                )));
+            }
+            let exec_name = {
+                let n = format!("__imp_exec_{}", hs.next_exec);
+                hs.next_exec += 1;
+                n
+            };
+            ctx.globals().set(exec_name.as_str(), fn_val)?;
+            hs.named_cache_details.insert(name, exec_name);
+            Ok(())
+        },
+    )?;
+    globals.set("__host_named_cache_details", host_named_cache_details)?;
 
     // ------------------------------------------------------------------
     // __host_goal(name, productPolicy, flagsJson, selectorless, stack) → u32 product-name id
@@ -4703,6 +4739,50 @@ pub async fn execute_goal_live_selection(
     *live.goal_flags.lock().unwrap() = None;
     *live.run_args.lock().unwrap() = None;
     result
+}
+
+/// Invoke a named cache's `details` callback (registered via
+/// `namedCache({ name, details })`), if one was declared, and return its
+/// stringified result. Used by `imp cache stats --details`.
+///
+/// A JS exception or a non-string/null/undefined result is treated as "no
+/// details available" rather than a hard error — a broken or not-yet-
+/// populated hook shouldn't break `cache stats` as a whole.
+pub async fn named_cache_details(live: &LiveWorkspace, name: &str) -> Result<Option<String>> {
+    let Some(exec_name) = live.workspace.named_cache_details.get(name).cloned() else {
+        return Ok(None);
+    };
+    let name_owned = name.to_owned();
+    let result =
+        live.ctx
+            .async_with(async move |ctx| -> rquickjs::Result<Option<String>> {
+                let callback_fn: Function = ctx.globals().get(exec_name.as_str())?;
+                let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
+                let result_value: Value = callback_fn
+                    .call(())
+                    .catch(&ctx)
+                    .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("{e}")))?;
+                let promise: MaybePromise = promise_resolve
+                    .call((result_value,))
+                    .catch(&ctx)
+                    .map_err(|e| rquickjs::Error::new_loading_message("cache", format!("{e}")))?;
+                let value: Value =
+                    promise.into_future().await.catch(&ctx).map_err(|e| {
+                        rquickjs::Error::new_loading_message("cache", format!("{e}"))
+                    })?;
+                if value.is_null() || value.is_undefined() {
+                    return Ok(None);
+                }
+                Ok(Some(String::from_js(&ctx, value)?))
+            })
+            .await;
+    match result {
+        Ok(details) => Ok(details),
+        Err(e) => {
+            eprintln!("warning: namedCache '{name_owned}' details callback failed: {e}");
+            Ok(None)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

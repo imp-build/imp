@@ -379,10 +379,23 @@ export function target(opts) {
  * scoping it to this checkout. Only for immutable, version-keyed content
  * (toolchains): every workspace resolves the same slot, so nothing may ever
  * rewrite an existing key in place.
+ * @param {() => (string | null | Promise<string | null>)} [opts.details]
+ *   Optional callback returning this cache's own self-reported stats text
+ *   (or null/undefined when there's nothing to report yet), invoked by
+ *   `imp cache stats --details` and printed alongside the on-disk
+ *   size/count line. Typically shells out via `run({ impure: true, sandbox:
+ *   false })` to a long-lived tool's own stats command (e.g. `sccache
+ *   --show-stats`).
  * @returns {void}
  */
 export function namedCache(opts) {
 	__host_named_cache(opts.name, opts.shared === true);
+	if (opts.details !== undefined) {
+		if (typeof opts.details !== "function") {
+			throw new Error("namedCache 'details' must be a function");
+		}
+		__host_named_cache_details(opts.name, opts.details);
+	}
 }
 
 /**
