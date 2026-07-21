@@ -176,7 +176,6 @@ describe("sccache toolchain", () => {
 			expect(await wrapper.env()).toEqual([
 				"SCCACHE_DIR=/cache/sccache-data/linux-x86_64",
 				"RUSTC_WRAPPER=sccache",
-				"SCCACHE_CACHE_SIZE=4G",
 				"CARGO_INCREMENTAL=0",
 			]);
 			const tools = await wrapper.tools();
@@ -187,14 +186,24 @@ describe("sccache toolchain", () => {
 		});
 	});
 
-	test("cacheSize opts into a custom SCCACHE_CACHE_SIZE", async () => {
+	test("cacheSize opts into a custom SCCACHE_CACHE_SIZE on the server's own startup env", async () => {
 		await withSccacheHost(async (host) => {
 			installSccacheToolchain("0.10.0", "/tmp/sccache-0.10.0");
 			const toolchain = sccacheToolchain("0.10.0", { cacheSize: "1G" });
 
 			const wrapper = await productFor(toolchain, RUST_BUILD_CACHE);
+			await wrapper.env();
 
-			expect(await wrapper.env()).toContain("SCCACHE_CACHE_SIZE=1G");
+			const [, opts] = host.calls
+				.find((call) => call[0] === "workerStart")
+				.slice(1);
+			expect(opts.env).toContain("SCCACHE_CACHE_SIZE=1G");
+			// Not on the client-facing env — each individual compile doesn't
+			// need it, only the server's own cache-open call does.
+			const clientEnv = await wrapper.env();
+			expect(clientEnv.some((e) => e.startsWith("SCCACHE_CACHE_SIZE"))).toBe(
+				false,
+			);
 		});
 	});
 

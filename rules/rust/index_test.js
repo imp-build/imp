@@ -392,7 +392,6 @@ describe("rust rules", () => {
 			const buildRun = host.runs[host.runs.length - 1];
 			expect(buildRun.env).toContain("RUSTC_WRAPPER=sccache");
 			expect(buildRun.env.some((e) => e.startsWith("SCCACHE_DIR="))).toBe(true);
-			expect(buildRun.env).toContain("SCCACHE_CACHE_SIZE=4G");
 			expect(buildRun.tools.some((t) => t.name === "sccache")).toBe(true);
 			// SCCACHE_BASEDIR/--remap-path-prefix can't be real paths baked into
 			// env:/argv: (the sandbox doesn't exist yet when those are hashed
@@ -406,11 +405,13 @@ describe("rust rules", () => {
 			expect(buildRun.argv[2]).toContain(
 				'--remap-path-prefix="$imp_sandbox_root"=/imp-src',
 			);
-			expect(
-				host.calls.some(
-					(call) => call[0] === "workerStart" && call[1] === "sccache",
-				),
-			).toBe(true);
+			const workerStartCall = host.calls.find(
+				(call) => call[0] === "workerStart" && call[1] === "sccache",
+			);
+			expect(workerStartCall).toBeTruthy();
+			// SCCACHE_CACHE_SIZE bounds the server's own LRU disk cache, so it
+			// has to reach the daemon's startup env, not each compile's env.
+			expect(workerStartCall[2].env).toContain("SCCACHE_CACHE_SIZE=4G");
 			// RUSTUP_HOME/CARGO_HOME must be real, stable absolute paths (not
 			// sandbox-relative "tool" mount aliases) when sccache is active —
 			// see rustToolEnv()'s doc comment for why.

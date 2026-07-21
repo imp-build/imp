@@ -485,16 +485,24 @@ export class RustSccacheWrapper {
 		const bin = `${cacheGet(SCCACHE_TOOLCHAIN_CACHE, sccacheCacheKey(version, plat))}/sccache`;
 		const dataDir = await sccacheDataDir();
 
+		// SCCACHE_CACHE_SIZE bounds the LRU disk cache the *server* manages —
+		// it has to be in the server's own startup env (workerStart's env:),
+		// not the client's. The client-facing env below is what each
+		// `sccache rustc ...` invocation gets; the server reads its cache-size
+		// limit once, at the moment the daemon (not any individual compile)
+		// starts.
 		await workerStart("sccache", {
 			argv: [bin, "--start-server"],
-			env: [`SCCACHE_DIR=${dataDir}`],
+			env: [
+				`SCCACHE_DIR=${dataDir}`,
+				`SCCACHE_CACHE_SIZE=${this.handle.attrs.cacheSize}`,
+			],
 			healthCheckArgv: [bin, "--show-stats"],
 		});
 
 		return [
 			`SCCACHE_DIR=${dataDir}`,
 			"RUSTC_WRAPPER=sccache",
-			`SCCACHE_CACHE_SIZE=${this.handle.attrs.cacheSize}`,
 			// sccache refuses to cache any compile invoked with rustc's own
 			// -C incremental=<dir> (its cache key model is per-compile-unit,
 			// not per-incremental-fragment) — cargo passes that by default
