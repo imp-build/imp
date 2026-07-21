@@ -10,6 +10,7 @@ import {
 	rustTestRun,
 	RustTest,
 } from "//rules/rust/test";
+import { CargoPackage } from "//rules/rust/cargo_package";
 import {
 	__resetRustToolchainStateForTest,
 	rustToolchain,
@@ -91,14 +92,39 @@ describe("rust test fan-out", () => {
 		expect(binaries.length).toBe(1);
 	});
 
+	// The fake host's run() always returns empty stdout unless a test
+	// registers one via host.setRunStdout(display, stdout) — rustTestBuild
+	// now parses buildTestBinaries' stdout to find its own binary (see
+	// //rules/rust/test), so every test below has to supply a plausible
+	// compiler-artifact line for the name/kind it constructs RustTest with.
+	function fakeCompilerArtifactStdout(buildDir, name, kind, executable) {
+		return JSON.stringify({
+			reason: "compiler-artifact",
+			target: { name, kind: [kind] },
+			profile: { test: true },
+			executable: `/sandbox/xyz/${buildDir}/${executable}`,
+		});
+	}
+
 	test("rustTestBuild builds via `cargo test --no-run --message-format=json`", async () => {
 		await withRustHost(async (host) => {
 			gccToolchain("2025.08-1", { default: true, unverified: true });
 			rustToolchain("1.93.0", { default: true, unverified: true });
+			const cargoPackage = new CargoPackage({ path: "rules/rust/example" });
+			host.setRunStdout(
+				"cargo test --no-run rules/rust/example",
+				fakeCompilerArtifactStdout(
+					"build/rust/rules/rust/example",
+					"hello",
+					"bin",
+					"debug/deps/hello-abc123",
+				),
+			);
 			const rustTest = new RustTest({
+				cargoPackage,
 				path: "rules/rust/example",
-				buildDir: "build/rust/rules/rust/example",
-				executable: "build/rust/rules/rust/example/debug/deps/hello-abc123",
+				testName: "hello",
+				testKind: "bin",
 			});
 
 			await rustTestBuild(rustTest);
@@ -115,10 +141,21 @@ describe("rust test fan-out", () => {
 		await withRustHost(async (host) => {
 			gccToolchain("2025.08-1", { default: true, unverified: true });
 			rustToolchain("1.93.0", { default: true, unverified: true });
+			const cargoPackage = new CargoPackage({ path: "rules/rust/example" });
+			host.setRunStdout(
+				"cargo test --no-run rules/rust/example",
+				fakeCompilerArtifactStdout(
+					"build/rust/rules/rust/example",
+					"hello",
+					"bin",
+					"debug/deps/hello-abc123",
+				),
+			);
 			const rustTest = new RustTest({
+				cargoPackage,
 				path: "rules/rust/example",
-				buildDir: "build/rust/rules/rust/example",
-				executable: "build/rust/rules/rust/example/debug/deps/hello-abc123",
+				testName: "hello",
+				testKind: "bin",
 				testArgs: ["--nocapture"],
 			});
 
@@ -138,10 +175,21 @@ describe("rust test fan-out", () => {
 		await withRustHost(async (host) => {
 			gccToolchain("2025.08-1", { default: true, unverified: true });
 			rustToolchain("1.93.0", { default: true, unverified: true });
+			const cargoPackage = new CargoPackage({ path: "rules/rust/example" });
+			host.setRunStdout(
+				"cargo test --no-run rules/rust/example",
+				fakeCompilerArtifactStdout(
+					"build/rust/rules/rust/example",
+					"hello",
+					"bin",
+					"debug/deps/hello-abc123",
+				),
+			);
 			const rustTest = new RustTest({
+				cargoPackage,
 				path: "rules/rust/example",
-				buildDir: "build/rust/rules/rust/example",
-				executable: "build/rust/rules/rust/example/debug/deps/hello-abc123",
+				testName: "hello",
+				testKind: "bin",
 				testTools: [nativeTool("tar")],
 			});
 
@@ -153,10 +201,15 @@ describe("rust test fan-out", () => {
 	});
 
 	test("RustTest preserves workspace-member source scope", () => {
-		const rustTest = new RustTest({
+		const cargoPackage = new CargoPackage({
 			path: "crates/imp-store",
-			buildDir: "build/rust/crates/imp-store",
-			executable: "build/rust/crates/imp-store/debug/deps/imp_store-abc123",
+			workspaceMember: true,
+		});
+		const rustTest = new RustTest({
+			cargoPackage,
+			path: "crates/imp-store",
+			testName: "imp_store",
+			testKind: "lib",
 			workspaceMember: true,
 		});
 

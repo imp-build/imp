@@ -311,6 +311,7 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 
 	const workers = new Map();
 	const files = new Map();
+	const runStdout = new Map();
 
 	const host = {
 		calls,
@@ -321,6 +322,12 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		},
 		addFile(address, content) {
 			files.set(address, content);
+		},
+		// Opt-in stdout for a run() call, matched by its `display`. Everything
+		// not registered here keeps the default empty stdout, so this is
+		// additive — only tests that actually parse run() stdout need it.
+		setRunStdout(display, stdout) {
+			runStdout.set(display, stdout);
 		},
 		clearCalls() {
 			calls.length = 0;
@@ -388,7 +395,7 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 				);
 			}
 		}
-		return { stdout: "", stderr: "", exitCode: 0 };
+		return { stdout: runStdout.get(opts.display) ?? "", stderr: "", exitCode: 0 };
 	};
 	globalThis.__host_worker_start = async (name, opts) => {
 		calls.push(["workerStart", name, opts]);

@@ -159,11 +159,9 @@ describe("tracked runtime APIs", () => {
 	});
 
 	// Regression test for #11: two concurrent run() calls with byte-identical
-	// opts (the shape of the real race — e.g. rules/rust/test.js's
-	// buildTestBinaries, called with different Target handles by sibling
-	// rustTestBuild products for the same crate, producing identical run()
-	// payloads that the Rust task cache has no lock between check and write
-	// for) must coalesce onto one execution instead of both racing.
+	// opts (the Rust task cache has no lock between its own check and write,
+	// see imp-execution's exec_run_inner_with_start) must coalesce onto one
+	// execution instead of both racing and stranding one caller's outputs.
 	test("run() single-flights concurrent calls with identical opts", async () => {
 		const marker = "/tmp/imp_run_single_flight_test_" + Date.now() + ".txt";
 		const opts = () => ({

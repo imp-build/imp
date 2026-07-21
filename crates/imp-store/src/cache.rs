@@ -312,7 +312,9 @@ pub fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
 pub fn store_file_blob(path: &Path, kind: &str) -> Result<(String, u64)> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let size = bytes.len() as u64;
-    Ok((store_blob(&bytes, kind)?, size))
+    let digest = store_blob(&bytes, kind)?;
+    crate::artifact_trace!("capture {} -> digest={digest} size={size}", path.display());
+    Ok((digest, size))
 }
 
 pub fn artifact_relative_path(path: &str) -> Result<PathBuf> {
@@ -399,6 +401,17 @@ pub fn write_task_cache_record(record: &TaskCacheRecord) -> Result<()> {
         crate::usage::UsageKind::Task,
         &record.task_key,
         Some(encoded.len() as u64),
+    );
+    crate::artifact_trace!(
+        "write-record task_key={} output_digest={} outputs=[{}]",
+        record.task_key,
+        record.output_digest,
+        record
+            .outputs
+            .iter()
+            .map(|o| format!("{}:{}", o.artifact_id, o.digest))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     Ok(())
 }

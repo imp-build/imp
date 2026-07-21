@@ -1,12 +1,16 @@
 // Fans a cargoPackage out into one separately-addressable, separately-
-// runnable `rust_test` target per compiled test binary (a lib's
-// `#[cfg(test)]` unit tests, each bin's unit tests, each `tests/*.rs`
-// integration-test file) — mirrors how rules/c/cmake/index.js's
-// expandCmakeProject fans a CMake project out into per-executable cc_test
-// targets, using `cargo test --no-run --message-format=json` as the
-// structural equivalent of CMake's generated Ninja graph: it compiles every
-// test binary without running any of them, and reports each one's compiled
-// path as a JSON message on stdout.
+// runnable `rust_test` target per test binary (a lib's `#[cfg(test)]` unit
+// tests, each bin's unit tests, each `tests/*.rs` integration-test file) —
+// mirrors how rules/c/cmake/index.js's expandCmakeProject fans a CMake
+// project out into per-executable cc_test targets. Discovery is driven by
+// `cargo metadata --no-deps` (see discoverTestTargets), not by compiling:
+// metadata's per-target `kind`/`test` fields report exactly which targets
+// `cargo test --no-run` would produce a binary for, straight from the
+// manifest/on-disk layout. The actual `cargo test --no-run --message-
+// format=json` compile (see buildTestBinaries) only happens lazily, once per
+// crate, the first time some rust_test's own build/run product needs it —
+// each minted target then matches its own name/kind against that one
+// shared compile's stdout to find its compiled path (see rustTestBuild).
 //
 // Doc-tests aren't discoverable this way (they only ever run through a real
 // `cargo test`, never `--no-run`) — they're still covered by the existing,
@@ -16,6 +20,8 @@
 import {
 	Target,
 	expand,
+	glob,
+	hydrateTarget,
 	memo,
 	output,
 	output_path,
@@ -40,6 +46,7 @@ import {
 	withManifestOverride,
 } from "//rules/rust";
 import { CargoPackage } from "//rules/rust/cargo_package";
+import { workspaceMetadataFor } from "//rules/rust/workspace_closure";
 
 import { rustTool } from "//rules/rust/toolchain";
 import { nativeToolSpec } from "//rules/imp/native_tool";
@@ -54,14 +61,112 @@ function safe_target_address(handle) {
 	}
 }
 
+// The cargo-package a rust_test was fanned out from (see expandCargoTests),
+// recovered from the rust_test's own deps rather than threaded through as a
+// plain attr — a plain attr would get re-serialized/re-digested every time
+// *this* target's own attrs are hashed, and (more importantly) every
+// rust_test sibling would still be a distinct memo() key from the
+// cargo-package itself, defeating buildTestBinaries' sharing below. Going
+// through the real dep edge means every sibling's rustTestBuild resolves the
+// exact same handle object the expander used, so buildTestBinaries(...) is a
+// genuine memo() hit for every sibling but the first (imp#12).
+function parentCargoPackage(handle) {
+	const parent = (hydrateTarget(handle).deps || [])
+		.map((dep) => dep.handle)
+		.find((dep) => dep && dep.kind === CargoPackage.kind);
+	if (!parent) {
+		throw new Error(
+			`${targetAddress(handle)}: rust_test has no cargo-package dependency — ` +
+				"rust_test targets must be minted by expandCargoTests, not constructed directly",
+		);
+	}
+	return parent;
+}
+
+// cargo test --no-run --message-format=json message shapes let us recover
+// which target kinds produce test-profile binaries, but discovering that by
+// running `--no-run` costs a full compile. `cargo metadata --no-deps` reports
+// the same information (each package target's `kind` and `test` flag)
+// straight from the manifest/on-disk layout, with no compilation at all —
+// confirmed experimentally against real cargo: `kind`/`name`/`test` line up
+// exactly with what a compiler-artifact message's `target` field reports.
+// Doc-tests and build scripts never produce a `--no-run` binary, so they're
+// excluded here the same way parseTestBinaries excludes them below.
+function testTargetsIn(pkg) {
+	if (!pkg) return [];
+	return (pkg.targets || [])
+		.filter(
+			(t) =>
+				t.test &&
+				(t.kind.includes("lib") ||
+					t.kind.includes("bin") ||
+					t.kind.includes("test")),
+		)
+		.map((t) => ({ name: t.name, kind: t.kind[0] }));
+}
+
+// Standalone (non-workspaceMember) crates aren't covered by the shared,
+// root-rooted workspaceMetadataFor() below — mirrors sources()'s own
+// workspaceMember branch (//rules/rust): a standalone crate's manifest is
+// self-contained, so a narrow, path-scoped `cargo metadata` sees everything
+// it needs without the workspace-inheritance machinery workspaceClosureFor
+// exists for.
+const standaloneCargoMetadata = memo(async function standaloneCargoMetadata(
+	path,
+) {
+	const toolSpec = await rustTool();
+	const result = await run({
+		argv: [
+			"sh",
+			"-c",
+			'cargo metadata --no-deps --format-version=1 --manifest-path "$1"',
+			"cargo-metadata-test-discovery",
+			`${path}/Cargo.toml`,
+		],
+		tools: toolSpec.tools,
+		env: [
+			`RUSTUP_HOME=${toolSpec.rustupHome}`,
+			`CARGO_HOME=${toolSpec.cargoHome}`,
+		],
+		inputs: [
+			glob({
+				root: path,
+				include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
+				exclude: ["target/**"],
+			}),
+		],
+		materialize: false,
+		display: `cargo metadata ${path}`,
+	});
+	return JSON.parse(result.stdout);
+});
+
+// Test-binary-producing targets for one cargo-package, discovered without
+// compiling anything (see testTargetsIn/standaloneCargoMetadata above).
+async function discoverTestTargets(handle) {
+	const path = declared_path(handle, handle.attrs.path || ".");
+	if (!handle.attrs.workspaceMember) {
+		const metadata = await standaloneCargoMetadata(path);
+		const manifestPath = `${metadata.workspace_root}/Cargo.toml`;
+		const pkg = (metadata.packages || []).find(
+			(p) => p.manifest_path === manifestPath,
+		);
+		return testTargetsIn(pkg);
+	}
+	const metadata = await workspaceMetadataFor(rust_toolchain_version(handle));
+	const manifestPath = `${metadata.workspace_root}/${path}/Cargo.toml`;
+	const pkg = (metadata.packages || []).find(
+		(p) => p.manifest_path === manifestPath,
+	);
+	return testTargetsIn(pkg);
+}
+
 // Compiles every test binary in the crate (without running any of them) and
 // materializes the whole cargo target-dir, same as cargoBuild/cargoTest's
-// toolchain/linker resolution. Shared by the expander below (to discover
-// binaries from stdout) and by each minted rust_test's own "build" product —
-// wrapped in memo() so those two call sites (which build byte-identical
-// run() args for the same handle) share one execution instead of racing on
-// the underlying task cache, which has no lock between its own cache-check
-// and cache-write (#11). The target-dir is declared as a materialized
+// toolchain/linker resolution. Always called with the cargo-package's own
+// handle (see parentCargoPackage above) — every rust_test sibling shares one
+// memo() entry and one execution instead of each independently recompiling
+// the whole crate (imp#12). The target-dir is declared as a materialized
 // directory output, so every binary it contains already sits at its normal
 // on-disk path afterwards, with no per-binary staging step needed.
 const buildTestBinaries = memo(async function buildTestBinaries(handle) {
@@ -148,11 +253,12 @@ export function parseTestBinaries(stdout, buildDir) {
 export class RustTest extends Target {
 	static kind = "rust_test";
 	constructor({
+		cargoPackage,
 		path = ".",
-		buildDir,
 		toolchain,
 		toolchainVersion,
-		executable,
+		testName,
+		testKind,
 		testArgs = [],
 		testTools = [],
 		deps = [],
@@ -169,8 +275,8 @@ export class RustTest extends Target {
 			kind: RustTest.kind,
 			attrs: {
 				path,
-				buildDir,
-				executable,
+				testName,
+				testKind,
 				testArgs,
 				testTools: normalizedTestTools,
 				workspaceMember,
@@ -179,6 +285,10 @@ export class RustTest extends Target {
 				...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
 			},
 			deps: [
+				// See parentCargoPackage above — this is how rustTestBuild finds
+				// its way back to the exact handle buildTestBinaries is memo()'d
+				// on, so every sibling shares one build.
+				...(cargoPackage ? [{ target: cargoPackage }] : []),
 				...(toolchain ? [{ target: toolchain }] : []),
 				...normalizedDeps.map((target) => ({ target })),
 				...normalizedTestTools.map((target) => ({ target, mode: "tool" })),
@@ -192,9 +302,23 @@ export const rustTestBuild = product(
 	BUILD,
 	RUST_TOOL,
 	async function rustTestBuild(handle) {
-		const { result } = await buildTestBinaries(handle);
+		const cargoPackage = parentCargoPackage(handle);
+		const { result, buildDir } = await buildTestBinaries(cargoPackage);
+		const binaries = parseTestBinaries(result.stdout, buildDir);
+		const match = binaries.find(
+			(bin) =>
+				bin.name === handle.attrs.testName &&
+				bin.kind === handle.attrs.testKind,
+		);
+		if (!match) {
+			throw new Error(
+				`${targetAddress(handle)}: cargo test --no-run didn't produce a ` +
+					`"${handle.attrs.testKind}" binary named "${handle.attrs.testName}" ` +
+					`(built: ${binaries.map((b) => `${b.kind}:${b.name}`).join(", ") || "none"})`,
+			);
+		}
 		return {
-			outputPath: handle.attrs.executable,
+			outputPath: match.executable,
 			outputDigest: result.outputDigest,
 		};
 	},
@@ -215,40 +339,37 @@ export const rustTestRun = product(
 	TEST,
 	RUST_TOOL,
 	async function rustTestRun(handle) {
-		const { outputDigest } = await rustTestBuild(handle);
+		const { outputPath, outputDigest } = await rustTestBuild(handle);
 		const testTools = await Promise.all(
 			(handle.attrs.testTools || []).map(nativeToolSpec),
 		);
 		return run({
-			argv: [
-				handle.attrs.executable,
-				"--test-threads=1",
-				...handle.attrs.testArgs,
-			],
+			argv: [outputPath, "--test-threads=1", ...handle.attrs.testArgs],
 			tools: testTools,
 			inputs: [{ kind: "digest", digest: outputDigest }],
-			display: `cargo test binary ${handle.attrs.executable}`,
+			display: `cargo test binary ${outputPath}`,
 		});
 	},
 );
 
 // Runs at most once per invocation, only for cargo-package targets actually
 // reachable from the current goal's selection (see `ensure_expanded` in
-// spike.rs) — buildTestBinaries' `cargo test --no-run` is itself a normal
-// content-keyed task-cache entry, so this doesn't recompile on every build
-// once a crate's tests are unchanged.
+// spike.rs). Pure `cargo metadata` — no compilation — so expansion itself
+// never triggers a build; the crate is compiled exactly once, lazily, the
+// first time any of its rust_test siblings' rustTestBuild actually runs
+// (shared via buildTestBinaries' memo() on the cargo-package handle, see
+// above).
 //
 // Minted addresses are prefixed with the parent cargoPackage's own target
 // name (`${parentName}_tests_${discoveredName}`) to avoid collisions: a
-// discovered binary's name (crate name for lib unit tests, bin name for bin
+// discovered target's name (crate name for lib unit tests, bin name for bin
 // unit tests, file stem for integration tests) can otherwise collide with
 // the parent's own hand-declared name, or with a sibling cargoPackage's
 // discovered binaries in the same directory.
 export const expandCargoTests = expand(
 	CargoPackage,
 	async function expandCargoTests(handle) {
-		const { result, buildDir } = await buildTestBinaries(handle);
-		const binaries = parseTestBinaries(result.stdout, buildDir);
+		const targets = await discoverTestTargets(handle);
 
 		const parentAddress = safe_target_address(handle);
 		if (!parentAddress) return;
@@ -257,20 +378,21 @@ export const expandCargoTests = expand(
 			parentAddress.split(":")[1],
 		];
 
-		for (const bin of binaries) {
+		for (const target of targets) {
 			registerTarget(
 				new RustTest({
+					cargoPackage: handle,
 					path: handle.attrs.path,
-					buildDir,
 					toolchain: handle.attrs.toolchain,
 					toolchainVersion: handle.attrs.toolchainVersion,
-					executable: bin.executable,
+					testName: target.name,
+					testKind: target.kind,
 					testArgs: [],
 					testTools: handle.attrs.testTools || [],
 					deps: handle.attrs.deps || [],
 					workspaceMember: handle.attrs.workspaceMember,
 				}),
-				`${scope}:${parentName}_tests_${bin.name}`,
+				`${scope}:${parentName}_tests_${target.name}`,
 			);
 		}
 	},

@@ -890,11 +890,23 @@ fn materialize_file(digest: &str, dest: &Path, link_files: bool) -> Result<()> {
     }
     if link_files {
         match std::fs::hard_link(&source, dest) {
-            Ok(()) => return Ok(()),
-            Err(_) => return copy_file(&source, dest),
+            Ok(()) => {
+                crate::artifact_trace!("materialize {} <- digest={digest} (link)", dest.display());
+                return Ok(());
+            }
+            Err(_) => {
+                copy_file(&source, dest)?;
+                crate::artifact_trace!(
+                    "materialize {} <- digest={digest} (copy, link failed)",
+                    dest.display()
+                );
+                return Ok(());
+            }
         }
     }
-    copy_file(&source, dest)
+    copy_file(&source, dest)?;
+    crate::artifact_trace!("materialize {} <- digest={digest} (copy)", dest.display());
+    Ok(())
 }
 
 #[cfg(test)]

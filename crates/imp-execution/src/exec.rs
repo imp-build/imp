@@ -712,6 +712,10 @@ fn exec_run_inner_with_start(
                     let digest = input.digest.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("run() digest input is missing its digest")
                     })?;
+                    imp_store::artifact_trace!(
+                        "consume-digest-input display={:?} digest={digest}",
+                        opts.display
+                    );
                     DirectoryDigest::from_digest(digest.clone())
                 }
                 "file" | "manifest" => {
@@ -760,6 +764,10 @@ fn exec_run_inner_with_start(
         "input_digest": input_digest,
         "outputs": out_specs,
     }))?;
+    imp_store::artifact_trace!(
+        "task-key display={:?} task_key={task_key} action_digest={action_digest} input_digest={input_digest}",
+        opts.display
+    );
 
     // Check cache.
     let cacheable = !opts.impure || opts.force_cache;
@@ -786,7 +794,13 @@ fn exec_run_inner_with_start(
                         );
                         Some(record)
                     }
-                    Err(_) => None,
+                    Err(e) => {
+                        imp_store::artifact_trace!(
+                            "cache-record-rejected task_key={task_key} display={:?} reason={e:#}",
+                            opts.display
+                        );
+                        None
+                    }
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -799,6 +813,11 @@ fn exec_run_inner_with_start(
     };
 
     if let Some(record) = cached_record_opt {
+        imp_store::artifact_trace!(
+            "cache-hit task_key={task_key} display={:?} output_digest={}",
+            opts.display,
+            record.output_digest
+        );
         if opts.materialize && !opts.outputs.is_empty() {
             eprintln!(
                 "warning: run() materialize:true for '{}' — writes directly to the workspace; \
@@ -822,6 +841,11 @@ fn exec_run_inner_with_start(
     // Cache miss — build the sandbox and run the command. The guard removes the
     // sandbox on drop (per the retention policy), covering every exit path below.
     let sandbox_root = create_sandbox_root()?;
+    imp_store::artifact_trace!(
+        "cache-miss task_key={task_key} display={:?} sandbox={}",
+        opts.display,
+        sandbox_root.display()
+    );
     let mut sandbox_guard = SandboxGuard::new(sandbox_root.clone(), opts.sandbox_retention);
     let tool_path_entries = materialize_tools_into_sandbox(&opts.tools, &sandbox_root)?;
 

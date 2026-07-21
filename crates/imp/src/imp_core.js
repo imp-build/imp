@@ -2006,6 +2006,21 @@ function _active_memo_key() {
 	return stack[stack.length - 1];
 }
 
+// Opt-in artifact-provenance tracing (imp#12) — mirrors the Rust-side
+// IMP_TRACE_ARTIFACTS gate (see imp-store's `artifact_trace!`), read
+// directly via __host_env rather than the tracked env() wrapper so enabling
+// it doesn't itself perturb the effect trace. Cached after the first check
+// since the env var can't change mid-run.
+let _artifactTraceEnabled;
+function _artifactTrace(...args) {
+	if (_artifactTraceEnabled === undefined) {
+		_artifactTraceEnabled = __host_env("IMP_TRACE_ARTIFACTS") === "1";
+	}
+	if (_artifactTraceEnabled) {
+		logDebug("[artifact-trace]", ...args);
+	}
+}
+
 function _trace_effect(entry) {
 	const owner = _active_memo_key();
 	if (owner !== null) entry.owner = owner;
@@ -2039,12 +2054,14 @@ function _memo_eval(key_string, owner, label, thunk) {
 	// stack-cycle checks.
 	if (_memo_table.has(key_string)) {
 		_memo_trace.push({ event: "hit", key: key_string });
+		_artifactTrace("memo-hit", label);
 		return _memo_table.get(key_string);
 	}
 	if (_effective_context().stackSet.has(key_string)) {
 		throw new Error(_memo_cycle_message(key_string));
 	}
 	_memo_trace.push({ event: "miss", key: key_string });
+	_artifactTrace("memo-miss", label);
 	// A fresh node for this evaluation, parented at the caller captured at the
 	// call site. Created on miss only, so a memo appears once (concurrent
 	// reusers just await it). The thunk runs when a cooperative JS lane is
@@ -2693,7 +2710,11 @@ function _run_dispatch(hostPayload, cacheable) {
 	if (!cacheable) return __host_run(hostPayload);
 	const key = _run_single_flight_key(hostPayload);
 	const inflight = _run_inflight.get(key);
-	if (inflight) return inflight;
+	if (inflight) {
+		_artifactTrace("run-singleflight-join", hostPayload.display, key);
+		return inflight;
+	}
+	_artifactTrace("run-singleflight-new", hostPayload.display, key);
 	const promise = __host_run(hostPayload).finally(() => {
 		_run_inflight.delete(key);
 	});
