@@ -158,7 +158,11 @@ enum CacheCmd {
     },
     /// Print a summary of what's in the cache root: sizes and counts per
     /// category, plus how much `cache gc` could reclaim right now
-    Stats,
+    Stats {
+        /// Also break named caches down per workspace/scope and cache name
+        #[arg(long)]
+        details: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -407,7 +411,7 @@ async fn run() -> Result<()> {
     if let Cmd::Cache { command } = &cli.command {
         match command {
             CacheCmd::Gc { max_age, apply } => return cmd_cache_gc(*max_age, *apply).await,
-            CacheCmd::Stats => return cmd_cache_stats().await,
+            CacheCmd::Stats { details } => return cmd_cache_stats(*details).await,
         }
     }
     if let Cmd::Init = &cli.command {
@@ -480,7 +484,7 @@ async fn cmd_cache_gc(max_age_cli: Option<u64>, apply: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_cache_stats() -> Result<()> {
+async fn cmd_cache_stats(details: bool) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let live = runtime::load_workspace(&workspace_root).await?;
@@ -503,6 +507,17 @@ async fn cmd_cache_stats() -> Result<()> {
         stats.named_scopes,
         human_bytes(stats.named_bytes)
     );
+    if details {
+        for entry in imp_store::stats::collect_named_details()? {
+            println!(
+                "    {} / {}: {} ({})",
+                entry.scope_label,
+                entry.name,
+                entry.count,
+                human_bytes(entry.bytes)
+            );
+        }
+    }
     if stats.legacy_bytes > 0 {
         println!(
             "  legacy:        {} (cas/trees; run `cache gc` to remove)",

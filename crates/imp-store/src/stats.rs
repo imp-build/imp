@@ -36,6 +36,103 @@ pub fn collect() -> Result<CacheStats> {
     Ok(collect_at(&root))
 }
 
+/// One `named/<scope>/<name>` cache directory: `scope_label` is the
+/// checkout path recorded for the scope in `usage.db` (or the raw scope hash
+/// if unrecorded), `"shared"` for the cross-workspace namespace.
+#[derive(Debug, Clone)]
+pub struct NamedCacheDetail {
+    pub scope_label: String,
+    pub name: String,
+    pub count: usize,
+    pub bytes: u64,
+}
+
+/// Per-scope, per-name breakdown of `named/`, largest first. A second level
+/// of detail beyond `collect`'s single `named_scopes`/`named_bytes` total.
+pub fn collect_named_details() -> Result<Vec<NamedCacheDetail>> {
+    let root = crate::cache::cache_root()?;
+    Ok(collect_named_details_at(&root))
+}
+
+fn collect_named_details_at(root: &std::path::Path) -> Vec<NamedCacheDetail> {
+    let workspace_labels = load_workspace_labels(root);
+    let named_root = root.join("named");
+    let Ok(scope_entries) = std::fs::read_dir(&named_root) else {
+        return Vec::new();
+    };
+
+    let mut details = Vec::new();
+    for scope_entry in scope_entries.flatten() {
+        if !scope_entry.path().is_dir() {
+            continue;
+        }
+        let Ok(scope) = scope_entry.file_name().into_string() else {
+            continue;
+        };
+        let scope_label = if scope == "shared" {
+            scope.clone()
+        } else {
+            workspace_labels
+                .get(&scope)
+                .cloned()
+                .unwrap_or_else(|| scope.clone())
+        };
+
+        let Ok(name_entries) = std::fs::read_dir(scope_entry.path()) else {
+            continue;
+        };
+        for name_entry in name_entries.flatten() {
+            if !name_entry.path().is_dir() {
+                continue;
+            }
+            let Ok(name) = name_entry.file_name().into_string() else {
+                continue;
+            };
+            details.push(NamedCacheDetail {
+                scope_label: scope_label.clone(),
+                name,
+                count: count_files_recursive(&name_entry.path()),
+                bytes: crate::usage::dir_size_bytes(&name_entry.path()).unwrap_or(0),
+            });
+        }
+    }
+    details.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    details
+}
+
+/// Workspace id → recorded checkout path, straight from `usage.db`. Missing
+/// db or table just means every scope falls back to its raw hash label.
+fn load_workspace_labels(root: &std::path::Path) -> std::collections::HashMap<String, String> {
+    let Ok(conn) = rusqlite::Connection::open(root.join("usage.db")) else {
+        return Default::default();
+    };
+    let Ok(mut statement) = conn.prepare("SELECT id, path FROM workspaces") else {
+        return Default::default();
+    };
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+}
+
+/// Recursive file count under `path` (named-cache slots can nest, unlike the
+/// flat `tasks/`/`cas/blobs/` dirs `count_bytes` handles).
+fn count_files_recursive(path: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            count += count_files_recursive(&entry_path);
+        } else {
+            count += 1;
+        }
+    }
+    count
+}
+
 fn collect_at(root: &std::path::Path) -> CacheStats {
     let task_records = count_bytes(&root.join("tasks"));
     let cas_blobs = count_bytes(&root.join("cas").join("blobs"));
@@ -165,5 +262,39 @@ mod tests {
         assert!(stats.total_bytes >= stats.task_records.bytes + stats.cas_blobs.bytes);
         // Block-rounded disk usage is at least the apparent file content size.
         assert!(stats.raw_bytes >= stats.task_records.bytes + stats.cas_blobs.bytes);
+    }
+
+    #[test]
+    fn named_details_break_down_per_scope_and_name_largest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        std::fs::create_dir_all(root.join("named/shared/small/v1")).unwrap();
+        std::fs::write(root.join("named/shared/small/v1/f"), b"12").unwrap();
+        std::fs::create_dir_all(root.join("named/deadbeef/big/v1")).unwrap();
+        std::fs::write(root.join("named/deadbeef/big/v1/f"), b"1234567890").unwrap();
+
+        let conn = rusqlite::Connection::open(root.join("usage.db")).unwrap();
+        conn.execute(
+            "CREATE TABLE workspaces (id TEXT PRIMARY KEY, path TEXT NOT NULL, last_seen_at INTEGER NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (id, path, last_seen_at) VALUES ('deadbeef', '/checkout/a', 0)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let details = collect_named_details_at(root);
+        assert_eq!(details.len(), 2);
+        assert_eq!(details[0].scope_label, "/checkout/a");
+        assert_eq!(details[0].name, "big");
+        assert_eq!(details[0].count, 1);
+        assert_eq!(details[0].bytes, 10);
+        assert_eq!(details[1].scope_label, "shared");
+        assert_eq!(details[1].name, "small");
+        assert_eq!(details[1].bytes, 2);
     }
 }
