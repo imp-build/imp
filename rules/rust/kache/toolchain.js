@@ -212,6 +212,7 @@ export function __resetKacheToolchainStateForTest() {
  * @category configuration
  */
 export function kacheToolchain(version, opts = {}) {
+	const cacheSize = opts.cacheSize || DEFAULT_CACHE_SIZE;
 	namedCache({ name: KACHE_TOOLCHAIN_CACHE, shared: true });
 	namedCache({
 		name: KACHE_DATA_CACHE,
@@ -237,9 +238,21 @@ export function kacheToolchain(version, opts = {}) {
 			// idempotent/singleton (see workerStart's own doc comment), so
 			// calling it from a standalone `imp cache stats --details`
 			// invocation that never ran a build first still works.
+			//
+			// KACHE_MAX_SIZE must be set here too, on the daemon's own start
+			// env, not just on client (rustc wrapper) invocations below: the
+			// daemon is a singleton per workspace (see worker.rs) — whichever
+			// caller reaches workerStart() first fixes its env for the
+			// process's whole lifetime, so if this were the first caller (a
+			// standalone `cache stats` before any build) the daemon would
+			// otherwise start with kache's own 50GiB default and stay there.
 			await workerStart("kache", {
 				argv: [bin, "daemon", "run"],
-				env: [`KACHE_CACHE_DIR=${dataDir}`, "KACHE_LOCAL_ONLY=1"],
+				env: [
+					`KACHE_CACHE_DIR=${dataDir}`,
+					`KACHE_MAX_SIZE=${cacheSize}`,
+					"KACHE_LOCAL_ONLY=1",
+				],
 				healthCheckArgv: [bin, "daemon", "status"],
 			});
 
@@ -523,25 +536,31 @@ export class RustKacheWrapper {
 		const exe = plat.os === "windows" ? "kache.exe" : "kache";
 		const bin = `${cacheGet(KACHE_TOOLCHAIN_CACHE, kacheCacheKey(version, plat))}/${exe}`;
 		const dataDir = await kacheDataDir();
+		const cacheSize = this.handle.attrs.cacheSize;
 
+		// KACHE_MAX_SIZE goes on the daemon's own start env, not just the
+		// client env returned below: the daemon is a singleton per workspace
+		// (see worker.rs) that fixes its env at first start, so it must carry
+		// the real limit itself rather than relying on whichever client
+		// happens to start it. It's set on the client env too (below) since
+		// kache's own docs describe size-pressure GC as triggered by "the
+		// wrapper" — each individual `kache rustc ...` client invocation
+		// checks the store size against KACHE_MAX_SIZE and spawns a `kache
+		// gc` subprocess when needed — so both sides need it.
 		await workerStart("kache", {
 			argv: [bin, "daemon", "run"],
-			env: [`KACHE_CACHE_DIR=${dataDir}`, "KACHE_LOCAL_ONLY=1"],
+			env: [
+				`KACHE_CACHE_DIR=${dataDir}`,
+				`KACHE_MAX_SIZE=${cacheSize}`,
+				"KACHE_LOCAL_ONLY=1",
+			],
 			healthCheckArgv: [bin, "daemon", "status"],
 		});
 
 		return [
 			`KACHE_CACHE_DIR=${dataDir}`,
 			"RUSTC_WRAPPER=kache",
-			// Unlike sccache's SCCACHE_CACHE_SIZE (server-only: only the
-			// long-lived server process ever reads it), kache's own docs
-			// describe size-pressure GC as triggered by "the wrapper" — i.e.
-			// each individual `kache rustc ...` client invocation checks the
-			// store size against KACHE_MAX_SIZE itself and spawns a `kache
-			// gc` subprocess when needed, rather than the daemon owning
-			// eviction. So this has to be in the client-facing env too, not
-			// just the daemon's startup env above.
-			`KACHE_MAX_SIZE=${this.handle.attrs.cacheSize}`,
+			`KACHE_MAX_SIZE=${cacheSize}`,
 			// User-requested: never let kache reach for S3/planner remote
 			// caching, even if a config file elsewhere on the host enables
 			// it — env wins over the config file for this setting.

@@ -206,6 +206,11 @@ describe("kache toolchain", () => {
 			const [, opts] = host.calls
 				.find((call) => call[0] === "workerStart")
 				.slice(1);
+			// The daemon is a singleton per workspace: whichever caller starts
+			// it first fixes its env for the process's lifetime, so the
+			// configured limit must reach the daemon's own start env too, not
+			// just the client-facing one above.
+			expect(opts.env).toContain("KACHE_MAX_SIZE=1GiB");
 			expect(opts.env).toContain("KACHE_LOCAL_ONLY=1");
 		});
 	});
@@ -228,6 +233,7 @@ describe("kache toolchain", () => {
 			expect(opts.healthCheckArgv).toContain("daemon");
 			expect(opts.healthCheckArgv).toContain("status");
 			expect(opts.env.some((e) => e.startsWith("KACHE_CACHE_DIR="))).toBe(true);
+			expect(opts.env).toContain("KACHE_MAX_SIZE=4GiB");
 			expect(opts.env).toContain("KACHE_LOCAL_ONLY=1");
 		});
 	});
@@ -264,13 +270,16 @@ describe("kache toolchain", () => {
 
 			expect(result).toBe("Compile requests  10\nCache hits  8");
 			// Requires the daemon running (see toolchain.js's details
-			// callback doc comment) — assert it's started before stats runs.
+			// callback doc comment) — assert it's started before stats runs,
+			// and that it carries the configured limit even when this is the
+			// first caller to spawn the (singleton) daemon.
 			expect(
 				host.calls.some(
 					(call) =>
 						call[0] === "workerStart" &&
 						call[1] === "kache" &&
-						call[2].argv.some((arg) => arg.endsWith("/kache")),
+						call[2].argv.some((arg) => arg.endsWith("/kache")) &&
+						call[2].env.includes("KACHE_MAX_SIZE=4GiB"),
 				),
 			).toBe(true);
 			expect(host.runs.length).toBe(1);
