@@ -18,5 +18,5 @@ pass/fail summary.
 
 Clippy performs a real compilation, including build scripts. It consequently
 uses the package's managed Rust compiler, C link driver, linker, resource
-inputs, and sccache setup just like `build` and `test`; a successful Cargo build
+inputs, and kache setup just like `build` and `test`; a successful Cargo build
 is not evidence that an undeclared host linker will be available to lint.

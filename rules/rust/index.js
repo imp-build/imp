@@ -252,7 +252,7 @@ export async function rustLinkerTools(toolchainHandle) {
 		? await productFor(linkerHandle, RUST_LINKER)
 		: null;
 
-	const sccacheActive = !!(toolchainHandle && toolchainHandle.attrs.sccache);
+	const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
 	const tools = [
 		...(await linkDriver.tools()),
 		...(linker ? await linker.tools() : []),
@@ -261,20 +261,20 @@ export async function rustLinkerTools(toolchainHandle) {
 		...(await linkDriver.rustflags()),
 		...(linker ? await linker.rustflags() : []),
 	].join(" ");
-	const env = await linkDriver.env(sccacheActive);
+	const env = await linkDriver.env(kacheActive);
 	return { tools, rustflags, env };
 }
 
-// Optional rustc build-caching layer (e.g. sccache, //rules/rust/sccache),
+// Optional rustc build-caching layer (e.g. kache, //rules/rust/kache),
 // wired independently of the linker abstraction above since it wraps rustc
 // itself rather than the link step. Opt in via
-// rustToolchain({ sccache: sccacheToolchain() }); no-ops otherwise.
+// rustToolchain({ kache: kacheToolchain() }); no-ops otherwise.
 export async function rustBuildCacheTools(toolchainHandle) {
-	const sccacheHandle = toolchainHandle && toolchainHandle.attrs.sccache;
-	if (!sccacheHandle) {
+	const kacheHandle = toolchainHandle && toolchainHandle.attrs.kache;
+	if (!kacheHandle) {
 		return { tools: [], env: [], scriptPreamble: "" };
 	}
-	const wrapper = await productFor(sccacheHandle, RUST_BUILD_CACHE);
+	const wrapper = await productFor(kacheHandle, RUST_BUILD_CACHE);
 	return {
 		tools: await wrapper.tools(),
 		env: await wrapper.env(),
@@ -286,7 +286,7 @@ export async function rustBuildCacheTools(toolchainHandle) {
 // buildTestBinaries: all four invoke cargo the same way (a manifest/
 // target-dir/rustflags positional trio, then command-specific args), and all
 // four need the same sandbox-root capture once a build-cache layer (e.g.
-// sccache) needs it — see RustSccacheWrapper.scriptPreamble()'s doc comment
+// kache) needs it — see RustKacheWrapper.scriptPreamble()'s doc comment
 // for why that capture has to happen in script text rather than via run()'s
 // own env:.
 //
@@ -301,12 +301,12 @@ export function cargoScriptPreamble(scriptPreamble = "") {
 	);
 }
 
-// Appended to rustc's args (via RUSTFLAGS) when sccache is active: keeps the
+// Appended to rustc's args (via RUSTFLAGS) when kache is active: keeps the
 // volatile sandbox path out of rustc's own diagnostics/debug info, and
-// sccache recognizes --remap-path-prefix and folds it into its own
-// cache-key normalization alongside SCCACHE_BASEDIR.
-export function cargoRemapFlag(sccacheActive) {
-	return sccacheActive
+// kache recognizes --remap-path-prefix and folds it into its own
+// cache-key normalization alongside KACHE_BASE_DIR.
+export function cargoRemapFlag(kacheActive) {
+	return kacheActive
 		? ' --remap-path-prefix="$imp_sandbox_root"=/imp-src'
 		: "";
 }
@@ -318,7 +318,7 @@ export function cargoRemapFlag(sccacheActive) {
 export function cargoInvocationScript(cargoCommand, opts = {}) {
 	return (
 		cargoScriptPreamble(opts.scriptPreamble) +
-		`RUSTFLAGS="$rustflags${cargoRemapFlag(opts.sccacheActive)}" ${cargoCommand}`
+		`RUSTFLAGS="$rustflags${cargoRemapFlag(opts.kacheActive)}" ${cargoCommand}`
 	);
 }
 
@@ -328,28 +328,29 @@ export function cargoInvocationScript(cargoCommand, opts = {}) {
 // toolSpec.rustupHome/cargoHome) — reproducible and explicitly tracked as
 // build inputs, per the sandbox's usual hermeticity model.
 //
-// When sccache is wrapping rustc, that per-sandbox aliasing itself becomes a
-// bug: sccache's long-lived server caches detected "compiler info" keyed by
-// the *canonicalized* exe path (resolving the sandbox symlink down to the
-// same real, stable toolchain directory every time — see
-// mozilla/sccache's src/server.rs `compiler_info()`), but the *literal*
-// (uncanonicalized) exe path embedded in that cached entry — the one
-// actually used to spawn the compiler on a cache miss — is whichever
-// sandbox's path happened to be seen first. Once that first sandbox is torn
-// down, every later build sharing the same server fails with "No such file
-// or directory" trying to invoke a compiler at a path that no longer
-// exists, even though the exact same toolchain is trivially reachable via
-// the *current* sandbox's own (different) symlink.
+// When kache is wrapping rustc, that per-sandbox aliasing itself becomes a
+// risk: a long-lived compiler-cache daemon like kache's can cache detected
+// "compiler info" keyed by the *canonicalized* exe path (resolving the
+// sandbox symlink down to the same real, stable toolchain directory every
+// time — this is exactly the class of bug sccache had in its own
+// src/server.rs `compiler_info()`), but the *literal* (uncanonicalized) exe
+// path embedded in that cached entry — the one actually used to spawn the
+// compiler on a cache miss — would be whichever sandbox's path happened to
+// be seen first. Once that first sandbox is torn down, every later build
+// sharing the same daemon would fail with "No such file or directory" trying
+// to invoke a compiler at a path that no longer exists, even though the
+// exact same toolchain is trivially reachable via the *current* sandbox's
+// own (different) symlink.
 //
 // The fix is to make the literal exe path identical across every sandbox in
-// the first place: when sccache is active, resolve cargo/rustc through the
+// the first place: when kache is active, resolve cargo/rustc through the
 // real, absolute, stable named-cache directory (toolSpec.rustupHomeAbs/
 // cargoHomeAbs) instead of the sandbox-relative alias, and skip mounting
 // the sandbox "tool" copies at all — mirroring the same real-path-over-
-// sandbox-mount tradeoff already made for sccache's own data directory (see
-// sccacheDataDir() in //rules/rust/sccache/toolchain).
-export function rustToolEnv(toolSpec, sccacheActive) {
-	if (!sccacheActive) {
+// sandbox-mount tradeoff already made for kache's own data directory (see
+// kacheDataDir() in //rules/rust/kache/toolchain).
+export function rustToolEnv(toolSpec, kacheActive) {
+	if (!kacheActive) {
 		return {
 			tools: toolSpec.tools,
 			env: [
@@ -390,7 +391,7 @@ export const cargoBuild = product(
 		}
 		const toolSpec = await rustTool(rust_toolchain_version(handle));
 		const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-		const sccacheActive = !!(toolchainHandle && toolchainHandle.attrs.sccache);
+		const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
 		const {
 			tools: linkerTools,
 			rustflags,
@@ -403,7 +404,7 @@ export const cargoBuild = product(
 		} = await rustBuildCacheTools(toolchainHandle);
 		const { tools: rustTools, env: rustEnv } = rustToolEnv(
 			toolSpec,
-			sccacheActive,
+			kacheActive,
 		);
 
 		const path = declared_path(handle, handle.attrs.path || ".");
@@ -427,7 +428,7 @@ export const cargoBuild = product(
 		const { script, arg: manifestArg } = withManifestOverride(
 			cargoInvocationScript(
 				'cargo build --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
-				{ scriptPreamble, sccacheActive },
+				{ scriptPreamble, kacheActive },
 			),
 			manifest,
 		);
@@ -491,7 +492,7 @@ export const cargoTest = product(
 	async function cargoTest(handle) {
 		const toolSpec = await rustTool(rust_toolchain_version(handle));
 		const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-		const sccacheActive = !!(toolchainHandle && toolchainHandle.attrs.sccache);
+		const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
 		const {
 			tools: linkerTools,
 			rustflags,
@@ -504,7 +505,7 @@ export const cargoTest = product(
 		} = await rustBuildCacheTools(toolchainHandle);
 		const { tools: rustTools, env: rustEnv } = rustToolEnv(
 			toolSpec,
-			sccacheActive,
+			kacheActive,
 		);
 		const testTools = await Promise.all(
 			(handle.attrs.testTools || []).map(nativeToolSpec),
@@ -531,7 +532,7 @@ export const cargoTest = product(
 		// as a benign no-op rather than a real test failure.
 		const { script, arg: manifestArg } = withManifestOverride(
 			cargoScriptPreamble(scriptPreamble) +
-				`out=$(RUSTFLAGS="$rustflags${cargoRemapFlag(sccacheActive)}" cargo test --doc --manifest-path "$manifest" --target-dir "$target_dir" "$@" 2>&1); ec=$?; ` +
+				`out=$(RUSTFLAGS="$rustflags${cargoRemapFlag(kacheActive)}" cargo test --doc --manifest-path "$manifest" --target-dir "$target_dir" "$@" 2>&1); ec=$?; ` +
 				'printf "%s\\n" "$out"; ' +
 				'case $ec,"$out" in ' +
 				"0,*) exit 0 ;; " +

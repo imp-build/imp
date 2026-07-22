@@ -29,7 +29,7 @@ import "//rules/odin/odinfmt/toolchain";
 import "//rules/python/pex_toolchain";
 import "//rules/python/ruff_toolchain";
 import "//rules/python/uv_toolchain";
-import "//rules/rust/sccache/toolchain";
+import "//rules/rust/kache/toolchain";
 import "//rules/rust/toolchain";
 import "//rules/zola/toolchain";
 

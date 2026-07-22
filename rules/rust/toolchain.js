@@ -144,7 +144,7 @@ function coreToolNames(plat) {
 export class RustToolchain extends Toolchain {
 	static kind = "rust-toolchain";
 	static tool = RUST_TOOL;
-	constructor({ version, linkDriver, linker, sccache, unverified }, opts) {
+	constructor({ version, linkDriver, linker, kache, unverified }, opts) {
 		super(
 			{
 				kind: RustToolchain.kind,
@@ -152,7 +152,7 @@ export class RustToolchain extends Toolchain {
 					version,
 					...(linkDriver ? { linkDriver } : {}),
 					...(linker ? { linker } : {}),
-					...(sccache ? { sccache } : {}),
+					...(kache ? { kache } : {}),
 					...(unverified ? { unverified } : {}),
 				},
 			},
@@ -194,9 +194,9 @@ function declareBothCaches() {
  * @param {object} [opts.linker] Linker toolchain handle (e.g. moldToolchain())
  *   registering a "rust-linker" product. No extra backend flag is added if
  *   omitted.
- * @param {object} [opts.sccache] sccache toolchain handle (e.g.
- *   sccacheToolchain(), see //rules/rust/sccache) registering a
- *   "rust-build-cache" product. Wraps rustc with sccache and points it at a
+ * @param {object} [opts.kache] kache toolchain handle (e.g.
+ *   kacheToolchain(), see //rules/rust/kache) registering a
+ *   "rust-build-cache" product. Wraps rustc with kache and points it at a
  *   persistent on-disk object cache; no build caching beyond cargo's own
  *   (mtime-defeated, sandbox-fresh) incremental state is added if omitted.
  * @returns {object} Target handle for this Rust toolchain.
@@ -216,7 +216,7 @@ export function rustToolchain(version, opts = {}) {
 			version,
 			linkDriver: opts.linkDriver,
 			linker: opts.linker,
-			sccache: opts.sccache,
+			kache: opts.kache,
 			unverified: opts.unverified,
 		},
 		{ default: opts.default },
@@ -392,7 +392,7 @@ export async function rustTool(version) {
 		cargoHome: `.imp/tools/${CARGO_HOME_CACHE}`,
 		// Real, absolute, stable on-disk paths for the same two named
 		// caches — bypassing the sandbox "tool" mount above. Only needed
-		// when sccache is wrapping rustc: see rustToolEnv() in
+		// when kache is wrapping rustc: see rustToolEnv() in
 		// //rules/rust for why the literal (not just canonically-equal)
 		// rustc exe path must stay identical across sandboxes in that case.
 		rustupHomeAbs: cacheGet(RUSTUP_HOME_CACHE, key),

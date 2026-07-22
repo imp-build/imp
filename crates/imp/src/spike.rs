@@ -6195,7 +6195,7 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
             Some("rust")
         );
         assert_eq!(
-            product_group("//rules/rust/sccache/toolchain.js").as_deref(),
+            product_group("//rules/rust/kache/toolchain.js").as_deref(),
             Some("rust")
         );
         assert_eq!(

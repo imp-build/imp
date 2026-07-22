@@ -540,10 +540,10 @@ function displayName(slug) {
         c: "C",
         cmake: "CMake",
         gcc: "GCC",
+        kache: "kache",
         oci: "OCI",
         odinfmt: "odinfmt",
         rustfmt: "rustfmt",
-        sccache: "sccache",
     };
     if (names[slug]) return names[slug];
     return slug.charAt(0).toUpperCase() + slug.slice(1);

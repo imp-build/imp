@@ -352,9 +352,9 @@ export class RustGccLinkDriver {
 	}
 
 	async tools() {
-		// Always mounted, even when sccache is active: rustc still resolves
+		// Always mounted, even when kache is active: rustc still resolves
 		// "clang" via PATH itself for the *link* step (its own direct
-		// subprocess spawn, not something sccache wraps/caches), regardless
+		// subprocess spawn, not something kache wraps/caches), regardless
 		// of what CC is set to below.
 		return [
 			await nativeToolSpec(nativeTool("dirname")),
@@ -368,20 +368,20 @@ export class RustGccLinkDriver {
 	}
 
 	/**
-	 * @param {boolean} [sccacheActive] cc-rs-driven build scripts (e.g. a
+	 * @param {boolean} [kacheActive] cc-rs-driven build scripts (e.g. a
 	 *   dependency bundling and compiling its own C/C++ sources) don't go
 	 *   through cargo/RUSTC_WRAPPER at all — they invoke whatever CC/CXX
-	 *   says directly. So when sccache is active, CC/CXX are prefixed with
-	 *   `sccache ` themselves (cc-rs splits a spaced CC/CXX value into
+	 *   says directly. So when kache is active, CC/CXX are prefixed with
+	 *   `kache ` themselves (cc-rs splits a spaced CC/CXX value into
 	 *   program + leading args, same as its documented `CC="gcc -m32"`
-	 *   support), the same way RUSTC_WRAPPER=sccache fronts rustc. sccache
+	 *   support), the same way RUSTC_WRAPPER=kache fronts rustc. kache
 	 *   then treats "clang"/"c++" as its own detected/cached compiler
 	 *   identity, hitting the exact same sandbox-symlink-vs-canonicalized-
-	 *   path bug documented on rustToolEnv() in //rules/rust, but for the C
+	 *   path risk documented on rustToolEnv() in //rules/rust, but for the C
 	 *   compiler instead of rustc. Resolving CC/CXX to the real, absolute,
 	 *   stable toolchain path (bypassing the sandbox "tool" mount, hence no
 	 *   `tools()` entry either) keeps that literal path identical across
-	 *   every sandbox when sccache is active. The `sccache` binary itself
+	 *   every sandbox when kache is active. The `kache` binary itself
 	 *   is still found via PATH — rustBuildCacheTools() already mounts it
 	 *   as a sandbox tool for RUSTC_WRAPPER, and that same mount covers this
 	 *   invocation too.
@@ -390,10 +390,10 @@ export class RustGccLinkDriver {
 	 * own linker knowing about the "clang"-named wrapper via rustflags()
 	 * above.
 	 */
-	async env(sccacheActive) {
-		if (sccacheActive) {
+	async env(kacheActive) {
+		if (kacheActive) {
 			const dir = await acquireGccToolchain(this.handle.attrs.version);
-			return [`CC=sccache ${dir}/bin/clang`, `CXX=sccache ${dir}/bin/c++`];
+			return [`CC=kache ${dir}/bin/clang`, `CXX=kache ${dir}/bin/c++`];
 		}
 		return ["CC=clang"];
 	}

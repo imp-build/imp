@@ -28,17 +28,17 @@ import {
 	moldToolchain,
 } from "//rules/c/mold/toolchain";
 import {
-	__resetSccacheToolchainStateForTest,
-	installSccacheToolchain,
-	sccacheToolchain,
-} from "//rules/rust/sccache/toolchain";
+	__resetKacheToolchainStateForTest,
+	installKacheToolchain,
+	kacheToolchain,
+} from "//rules/rust/kache/toolchain";
 
 function withRustHost(platOrFn, maybeFn) {
 	const run = async (host) => {
 		__resetRustToolchainStateForTest();
 		__resetGccToolchainStateForTest();
 		__resetMoldToolchainStateForTest();
-		__resetSccacheToolchainStateForTest();
+		__resetKacheToolchainStateForTest();
 		const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;
 		try {
 			return await fn(host);
@@ -46,7 +46,7 @@ function withRustHost(platOrFn, maybeFn) {
 			__resetRustToolchainStateForTest();
 			__resetGccToolchainStateForTest();
 			__resetMoldToolchainStateForTest();
-			__resetSccacheToolchainStateForTest();
+			__resetKacheToolchainStateForTest();
 		}
 	};
 	return typeof platOrFn === "function"
@@ -379,41 +379,43 @@ describe("rust rules", () => {
 		});
 	});
 
-	test("cargoBuild wires RUSTC_WRAPPER/SCCACHE_DIR when the toolchain configures sccache", async () => {
+	test("cargoBuild wires RUSTC_WRAPPER/KACHE_CACHE_DIR when the toolchain configures kache", async () => {
 		await withRustHost(async (host) => {
 			gccToolchain("2025.08-1", { default: true, unverified: true });
-			installSccacheToolchain("0.10.0", "/tmp/sccache-0.10.0");
-			const sccache = sccacheToolchain("0.10.0", { unverified: true });
-			rustToolchain("1.93.0", { default: true, unverified: true, sccache });
+			installKacheToolchain("0.11.0", "/tmp/kache-0.11.0");
+			const kache = kacheToolchain("0.11.0", { unverified: true });
+			rustToolchain("1.93.0", { default: true, unverified: true, kache });
 			const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
 
 			await cargoBuild(pkg);
 
 			const buildRun = host.runs[host.runs.length - 1];
-			expect(buildRun.env).toContain("RUSTC_WRAPPER=sccache");
-			expect(buildRun.env.some((e) => e.startsWith("SCCACHE_DIR="))).toBe(true);
-			expect(buildRun.tools.some((t) => t.name === "sccache")).toBe(true);
-			// SCCACHE_BASEDIR/--remap-path-prefix can't be real paths baked into
+			expect(buildRun.env).toContain("RUSTC_WRAPPER=kache");
+			expect(buildRun.env.some((e) => e.startsWith("KACHE_CACHE_DIR="))).toBe(
+				true,
+			);
+			expect(buildRun.env).toContain("KACHE_MAX_SIZE=4GiB");
+			expect(buildRun.env).toContain("KACHE_LOCAL_ONLY=1");
+			expect(buildRun.tools.some((t) => t.name === "kache")).toBe(true);
+			// KACHE_BASE_DIR/--remap-path-prefix can't be real paths baked into
 			// env:/argv: (the sandbox doesn't exist yet when those are hashed
 			// into the task key) — they're resolved from $imp_sandbox_root,
 			// captured by the script itself once it's actually running inside
-			// the sandbox. See RustSccacheWrapper.scriptPreamble()'s doc comment.
+			// the sandbox. See RustKacheWrapper.scriptPreamble()'s doc comment.
 			expect(buildRun.argv[2]).toContain('imp_sandbox_root="$(pwd)"');
 			expect(buildRun.argv[2]).toContain(
-				'export SCCACHE_BASEDIR="$imp_sandbox_root"',
+				'export KACHE_BASE_DIR="$imp_sandbox_root"',
 			);
 			expect(buildRun.argv[2]).toContain(
 				'--remap-path-prefix="$imp_sandbox_root"=/imp-src',
 			);
 			const workerStartCall = host.calls.find(
-				(call) => call[0] === "workerStart" && call[1] === "sccache",
+				(call) => call[0] === "workerStart" && call[1] === "kache",
 			);
 			expect(workerStartCall).toBeTruthy();
-			// SCCACHE_CACHE_SIZE bounds the server's own LRU disk cache, so it
-			// has to reach the daemon's startup env, not each compile's env.
-			expect(workerStartCall[2].env).toContain("SCCACHE_CACHE_SIZE=4G");
+			expect(workerStartCall[2].env).toContain("KACHE_LOCAL_ONLY=1");
 			// RUSTUP_HOME/CARGO_HOME must be real, stable absolute paths (not
-			// sandbox-relative "tool" mount aliases) when sccache is active —
+			// sandbox-relative "tool" mount aliases) when kache is active —
 			// see rustToolEnv()'s doc comment for why.
 			expect(
 				buildRun.env.some((e) => e.startsWith("RUSTUP_HOME=/cache/")),
@@ -429,7 +431,7 @@ describe("rust rules", () => {
 		});
 	});
 
-	test("rustToolEnv uses sandbox-relative tool mounts without sccache, and absolute paths with it", () => {
+	test("rustToolEnv uses sandbox-relative tool mounts without kache, and absolute paths with it", () => {
 		const toolSpec = {
 			tools: [
 				{ kind: "tool", name: "rustup-home" },
@@ -449,16 +451,16 @@ describe("rust rules", () => {
 			"CARGO_HOME=.imp/tools/cargo-home",
 		]);
 
-		const withSccache = rustToolEnv(toolSpec, true);
-		expect(withSccache.tools).toEqual([]);
-		expect(withSccache.env).toEqual([
+		const withKache = rustToolEnv(toolSpec, true);
+		expect(withKache.tools).toEqual([]);
+		expect(withKache.env).toEqual([
 			"RUSTUP_HOME=/cache/rustup-home/1.93.0/linux-x86_64",
 			"CARGO_HOME=/cache/cargo-home/1.93.0/linux-x86_64",
 			"PATH=/cache/rustup-home/1.93.0/linux-x86_64/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin:/cache/cargo-home/1.93.0/linux-x86_64/bin",
 		]);
 	});
 
-	test("cargoBuild has no sccache env/tools without an opted-in toolchain", async () => {
+	test("cargoBuild has no kache env/tools without an opted-in toolchain", async () => {
 		await withRustHost(async (host) => {
 			rustToolchain("1.93.0", { default: true, unverified: true });
 			gccToolchain("2025.08-1", { default: true, unverified: true });
@@ -470,7 +472,7 @@ describe("rust rules", () => {
 			expect(buildRun.env.some((e) => e.startsWith("RUSTC_WRAPPER="))).toBe(
 				false,
 			);
-			expect(buildRun.tools.some((t) => t.name === "sccache")).toBe(false);
+			expect(buildRun.tools.some((t) => t.name === "kache")).toBe(false);
 		});
 	});
 

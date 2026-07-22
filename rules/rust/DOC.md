@@ -23,18 +23,21 @@ import "//rules/workflows/test";
 export const rust = rustToolchain("1.93.0", { default: true });
 ```
 
-Toolchains may also select an explicit C link driver, linker, and sccache
+Toolchains may also select an explicit C link driver, linker, and kache
 target. Pinning them in the workspace file makes the same tool graph available
 to build, test, and Clippy instead of letting those commands drift apart.
 
-When an sccache target is set, `SCCACHE_BASEDIR` and rustc's
+When a kache target is set, `KACHE_BASE_DIR` and rustc's
 `--remap-path-prefix` are wired up automatically so cache hits survive
-imp's per-run sandbox paths, and `SCCACHE_CACHE_SIZE` caps the on-disk
-object cache at `4G` by default — override it via
-`sccacheToolchain(version, { cacheSize: "8G" })`. Once sccache has been used
-at least once, `imp cache stats --details` also prints its own
-`--show-stats` output (hit rate, compile counts, …) alongside the on-disk
-size for the `sccache-data` cache.
+imp's per-run sandbox paths, and `KACHE_MAX_SIZE` caps the on-disk object
+cache at `4GiB` by default — override it via
+`kacheToolchain(version, { cacheSize: "8GiB" })`. Caching stays strictly
+local: `KACHE_LOCAL_ONLY=1` is always set, so no S3/remote cache config kache
+supports is ever reached. Once kache has been used at least once, `imp
+cache stats --details` also prints its own `kache stats` output (hit rate,
+compile counts, …) alongside the on-disk size for the `kache-data` cache —
+this starts kache's background daemon if it isn't already running, since
+kache (unlike sccache) needs the daemon up to report stats at all.
 
 This repository's workspace also imports `//rules/imp/mode`, which declares
 the `default` (`opt=debug`) and `release` (`opt=release`) profiles. Cargo

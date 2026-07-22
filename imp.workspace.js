@@ -12,7 +12,7 @@ import { ruffToolchain } from "//rules/python/ruff_toolchain";
 import { pythonToolchain } from "//rules/python";
 import { rustToolchain } from "//rules/rust";
 import "//rules/rust/generate_build";
-import { sccacheToolchain } from "//rules/rust/sccache/toolchain";
+import { kacheToolchain } from "//rules/rust/kache/toolchain";
 import "//rules/workflows/build_workflow";
 import "//rules/workflows/builtin_lockfiles";
 import "//rules/workflows/fmt";
@@ -36,14 +36,14 @@ export const odin = odinToolchain("dev-2026-03", { default: true, linker: mold }
 export const odinfmt = odinfmtToolchain();
 export const ruff = ruffToolchain("0.15.21", { default: true });
 export const python = pythonToolchain("3.13.0", { default: true });
-// sccache wraps rustc with a content-keyed compiler cache backed by a
+// kache wraps rustc with a content-keyed compiler cache backed by a
 // host-managed persistent worker (see src/worker.rs) — sidesteps cargo's own
 // mtime-based incremental compilation, which imp's fresh-per-sandbox
 // builds otherwise always defeat.
-export const sccache = sccacheToolchain("0.10.0", { default: true });
+export const kache = kacheToolchain("0.11.0", { default: true });
 // Rust binaries link via cargo/rustc, which shell out to a C link driver;
 // see rules/rust/index.js's rustLinkerTools for why this reuses gcc.
-export const rust = rustToolchain("1.93.0", { default: true, linkDriver: gcc, linker: mold, sccache });
+export const rust = rustToolchain("1.93.0", { default: true, linkDriver: gcc, linker: mold, kache });
 
 // This repo dogfoods generate-build for all three rules groups; a fresh
 // workspace defaults to none (see each package's own `buildGenerate` config

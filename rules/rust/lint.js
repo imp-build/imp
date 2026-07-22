@@ -44,7 +44,7 @@ export async function cargoClippy(handle) {
 	}
 	const toolSpec = await rustTool(rust_toolchain_version(handle));
 	const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-	const sccacheActive = !!(toolchainHandle && toolchainHandle.attrs.sccache);
+	const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
 	const {
 		tools: linkerTools,
 		rustflags,
@@ -55,10 +55,7 @@ export async function cargoClippy(handle) {
 		env: cacheEnv,
 		scriptPreamble,
 	} = await rustBuildCacheTools(toolchainHandle);
-	const { tools: rustTools, env: rustEnv } = rustToolEnv(
-		toolSpec,
-		sccacheActive,
-	);
+	const { tools: rustTools, env: rustEnv } = rustToolEnv(toolSpec, kacheActive);
 
 	const path = declared_path(handle, handle.attrs.path || ".");
 	const { files: srcs, manifest } = await sources(handle);
@@ -68,7 +65,7 @@ export async function cargoClippy(handle) {
 		cargoInvocationScript(
 			'cargo clippy --manifest-path "$manifest" --target-dir "$target_dir" ' +
 				'--no-deps --color=always "$@" -- -D warnings',
-			{ scriptPreamble, sccacheActive },
+			{ scriptPreamble, kacheActive },
 		),
 		manifest,
 	);

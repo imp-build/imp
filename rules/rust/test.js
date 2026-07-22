@@ -173,7 +173,7 @@ async function discoverTestTargets(handle) {
 const buildTestBinaries = memo(async function buildTestBinaries(handle) {
 	const toolSpec = await rustTool(rust_toolchain_version(handle));
 	const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-	const sccacheActive = !!(toolchainHandle && toolchainHandle.attrs.sccache);
+	const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
 	const {
 		tools: linkerTools,
 		rustflags,
@@ -184,10 +184,7 @@ const buildTestBinaries = memo(async function buildTestBinaries(handle) {
 		env: cacheEnv,
 		scriptPreamble,
 	} = await rustBuildCacheTools(toolchainHandle);
-	const { tools: rustTools, env: rustEnv } = rustToolEnv(
-		toolSpec,
-		sccacheActive,
-	);
+	const { tools: rustTools, env: rustEnv } = rustToolEnv(toolSpec, kacheActive);
 
 	const path = declared_path(handle, handle.attrs.path || ".");
 	const { files: srcs, manifest } = await sources(handle);
@@ -197,7 +194,7 @@ const buildTestBinaries = memo(async function buildTestBinaries(handle) {
 	const { script, arg: manifestArg } = withManifestOverride(
 		cargoInvocationScript(
 			'cargo test --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
-			{ scriptPreamble, sccacheActive },
+			{ scriptPreamble, kacheActive },
 		),
 		manifest,
 	);
