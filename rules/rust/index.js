@@ -15,6 +15,7 @@ import {
 	run,
 	sourcesField,
 	targetAddress,
+	workspaceTargets,
 	BUILD,
 	PACKAGE,
 	TEST,
@@ -39,7 +40,10 @@ import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 
 import { defaultGccToolchain } from "//rules/c/gcc/toolchain";
 
-import { workspaceClosureFor } from "//rules/rust/workspace_closure";
+import {
+	wholeWorkspaceFor,
+	workspaceClosureFor,
+} from "//rules/rust/workspace_closure";
 
 import { resources as resource_package_sources } from "//rules/asset";
 
@@ -122,8 +126,7 @@ export const rust_file_sources = memo(async function rust_file_sources(handle) {
 	return glob({ root, include: ["**/*.rs"], exclude: ["target/**"] });
 });
 
-// Everything cargo build needs to see: manifests, lockfile (if present), and
-// sources.
+// Everything cargo build needs to see: manifests, lockfile, and sources.
 //
 // A crate declared with `workspaceMember: true` (set by
 // //rules/rust/generate_build.js when `cargo metadata` reports its
@@ -132,12 +135,14 @@ export const rust_file_sources = memo(async function rust_file_sources(handle) {
 // --manifest-path to find the enclosing workspace manifest, and (since
 // workspace members here declare real path-dependencies on each other,
 // e.g. crates/imp-execution on crates/imp-store) needs every crate in
-// its transitive path-dependency closure visible too. Rather than glob the
-// *entire* repo (any Rust edit anywhere would invalidate every crate's
-// build/test/lint task), this synthesizes a replacement root manifest whose
-// `members` list is pruned to just that closure — see
-// //rules/rust/workspace_closure for why a straight `members` prune alone
-// isn't enough and how the synthesis works.
+// its transitive path-dependency closure visible too, plus enough of every
+// *other* real member to resolve the workspace at all: a manifest + its
+// declared targets' entry-point files (see
+// //rules/rust/workspace_closure's docstring for why this "shallow" set is
+// enough, and why it replaced synthesizing a narrowed manifest — the real,
+// unmodified root Cargo.toml/Cargo.lock stay valid input as-is, so
+// `--locked` on cargoBuild/cargoTest/cargoClippy/buildTestBinaries is never
+// fighting a lockfile trim cargo would otherwise want to do).
 //
 // A standalone crate (no `workspaceMember`) must stay scoped to its own
 // directory: including an *unrelated* ancestor `[workspace]` manifest that
@@ -146,9 +151,7 @@ export const rust_file_sources = memo(async function rust_file_sources(handle) {
 // rules/rust/example, which sits under this repo's own root Cargo.toml but
 // isn't one of its `members`).
 //
-// @returns {Promise<{ files: FileSet, manifest: string|null }>} `manifest`
-// is the synthesized replacement root Cargo.toml's text for `workspaceMember`
-// crates, or `null` when the real root manifest applies unmodified.
+// @returns {Promise<{ files: FileSet }>}
 export const sources = memo(async function sources(handle) {
 	const path = declared_path(handle, handle.attrs.path || ".");
 	if (!handle.attrs.workspaceMember) {
@@ -158,39 +161,46 @@ export const sources = memo(async function sources(handle) {
 				include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
 				exclude: ["target/**"],
 			}),
-			manifest: null,
 		};
 	}
 
 	const toolchainVersion = rust_toolchain_version(handle);
-	const { dirs, manifest } = await workspaceClosureFor(path, toolchainVersion);
+	const { dirs, shallowFiles, workspaceRootRelative } =
+		await workspaceClosureFor(path, toolchainVersion);
+	const prefix =
+		workspaceRootRelative === "." ? "" : `${workspaceRootRelative}/`;
 	const include = dirs.flatMap((dir) => [
-		`${dir}/Cargo.toml`,
-		`${dir}/**/*.rs`,
+		`${prefix}${dir}/Cargo.toml`,
+		`${prefix}${dir}/**/*.rs`,
 	]);
-	include.push("Cargo.lock");
+	include.push(`${prefix}Cargo.toml`, `${prefix}Cargo.lock`, ...shallowFiles);
 	return {
 		files: glob({ root: ".", include, exclude: ["target/**"] }),
-		manifest,
 	};
 });
 
-// Wraps a cargo-invoking script so that, when `sources()` narrowed a
-// `workspaceMember` crate's inputs (`manifest` non-null), the synthesized
-// replacement root Cargo.toml is written into place before the script's own
-// cargo invocation runs. A no-op (aside from one harmless extra shell
-// variable) when `manifest` is null, so every callsite can wrap
-// unconditionally instead of branching. Callers must prepend the returned
-// `arg` to their own argv, ahead of their existing positional args — the
-// prelude's own `shift 1` restores the original numbering ($1, $2, ... in
-// the wrapped script) for the rest of the script unchanged.
-export function withManifestOverride(script, manifest) {
+// Full source for every real member of the same workspace, not just one
+// crate's own closure — for the shared whole-workspace lint/test-build
+// tasks (see wholeWorkspaceFor's docstring, //rules/rust/workspace_closure,
+// for why lint/test stopped fanning out one cargo invocation per crate).
+export async function wholeWorkspaceSources(
+	workspaceRootRelative,
+	toolchainVersion,
+) {
+	const { memberDirs } = await wholeWorkspaceFor(
+		workspaceRootRelative,
+		toolchainVersion,
+	);
+	const prefix =
+		workspaceRootRelative === "." ? "" : `${workspaceRootRelative}/`;
+	const include = memberDirs.flatMap((dir) => [
+		`${prefix}${dir}/Cargo.toml`,
+		`${prefix}${dir}/**/*.rs`,
+	]);
+	include.push(`${prefix}Cargo.toml`, `${prefix}Cargo.lock`);
 	return {
-		script:
-			"manifest_override=$1; shift 1; " +
-			'if [ -n "$manifest_override" ]; then printf %s "$manifest_override" > Cargo.toml; fi; ' +
-			script,
-		arg: manifest || "",
+		files: glob({ root: ".", include, exclude: ["target/**"] }),
+		memberDirs,
 	};
 }
 
@@ -208,6 +218,22 @@ export const resources = memo(async function resources(handle) {
 	const resolved = await Promise.all(sets.map(resource_package_sources));
 	return resolved.length === 1 ? resolved[0] : file_set.union(...resolved);
 });
+
+// Union of resources() across every declared cargo-package target whose
+// own directory is one of `dirs` — used by the shared whole-workspace
+// lint/test-build tasks (rules/rust/lint.js, rules/rust/test.js), which
+// compile every member of a real workspace in one cargo invocation and so
+// need every member's resource-package inputs, not just the one crate that
+// happened to trigger the shared task.
+export async function resourcesForDirs(dirs) {
+	const dirSet = new Set(dirs);
+	const handles = workspaceTargets("cargo-package")
+		.map(({ handle }) => handle)
+		.filter((h) => dirSet.has(declared_path(h, h.attrs.path || ".")));
+	if (handles.length === 0) return file_set.literal([]);
+	const sets = await Promise.all(handles.map(resources));
+	return sets.length === 1 ? sets[0] : file_set.union(...sets);
+}
 
 export function rust_toolchain_version(handle) {
 	const toolchainHandle = handle.attrs.toolchain;
@@ -408,7 +434,7 @@ export const cargoBuild = product(
 		);
 
 		const path = declared_path(handle, handle.attrs.path || ".");
-		const { files: srcs, manifest } = await sources(handle);
+		const { files: srcs } = await sources(handle);
 		const resourceInputs = await resources(handle);
 
 		// A target-local release opt-in remains authoritative, while a workspace
@@ -425,12 +451,9 @@ export const cargoBuild = product(
 			(name) => `${buildDir}/${profile}/${name}${exeSuffix}`,
 		);
 
-		const { script, arg: manifestArg } = withManifestOverride(
-			cargoInvocationScript(
-				'cargo build --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
-				{ scriptPreamble, kacheActive },
-			),
-			manifest,
+		const script = cargoInvocationScript(
+			'cargo build --locked --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
+			{ scriptPreamble, kacheActive },
 		);
 
 		const result = await run({
@@ -439,7 +462,6 @@ export const cargoBuild = product(
 				"-c",
 				script,
 				"cargo-build",
-				manifestArg,
 				`${path}/Cargo.toml`,
 				buildDir,
 				rustflags,
@@ -512,7 +534,7 @@ export const cargoTest = product(
 		);
 
 		const path = declared_path(handle, handle.attrs.path || ".");
-		const { files: srcs, manifest } = await sources(handle);
+		const { files: srcs } = await sources(handle);
 		const resourceInputs = await resources(handle);
 		const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 
@@ -530,17 +552,15 @@ export const cargoTest = product(
 		// ("no library targets found in package ...", exit 101) instead of
 		// just finding zero doc-tests — so that specific message is treated
 		// as a benign no-op rather than a real test failure.
-		const { script, arg: manifestArg } = withManifestOverride(
+		const script =
 			cargoScriptPreamble(scriptPreamble) +
-				`out=$(RUSTFLAGS="$rustflags${cargoRemapFlag(kacheActive)}" cargo test --doc --manifest-path "$manifest" --target-dir "$target_dir" "$@" 2>&1); ec=$?; ` +
-				'printf "%s\\n" "$out"; ' +
-				'case $ec,"$out" in ' +
-				"0,*) exit 0 ;; " +
-				'*,*"no library targets found"*) exit 0 ;; ' +
-				"esac; " +
-				"exit $ec",
-			manifest,
-		);
+			`out=$(RUSTFLAGS="$rustflags${cargoRemapFlag(kacheActive)}" cargo test --locked --doc --manifest-path "$manifest" --target-dir "$target_dir" "$@" 2>&1); ec=$?; ` +
+			'printf "%s\\n" "$out"; ' +
+			'case $ec,"$out" in ' +
+			"0,*) exit 0 ;; " +
+			'*,*"no library targets found"*) exit 0 ;; ' +
+			"esac; " +
+			"exit $ec";
 
 		// No outputs/materialize: test binaries aren't user-addressable
 		// artifacts. No impure flag: a passing run is cached like any other
@@ -553,7 +573,6 @@ export const cargoTest = product(
 				"-c",
 				script,
 				"cargo-test",
-				manifestArg,
 				`${path}/Cargo.toml`,
 				buildDir,
 				rustflags,

@@ -241,13 +241,14 @@ describe("rust rules", () => {
 			// `sources()` now resolves a `workspaceMember` crate's own
 			// transitive path-dependency closure via `cargo metadata
 			// --no-deps` (//rules/rust/workspace_closure) before it can build
-			// the narrowed inputs/synthesized manifest cargoTest needs —
-			// fake that one `run()` call's stdout, and the real root
-			// Cargo.toml's text, rather than the default empty-stdout stub.
+			// the full/shallow inputs cargoTest needs — fake that one
+			// `run()` call's stdout, rather than the default empty-stdout stub.
 			const originalRun = globalThis.__host_run;
-			const originalReadFile = globalThis.__host_read_file;
 			globalThis.__host_run = async (opts) => {
-				if (opts.display === "cargo metadata (workspace closure)") {
+				if (
+					opts.display ===
+					"cargo metadata (workspace closure) crates/imp-store"
+				) {
 					return {
 						stdout: JSON.stringify({
 							workspace_root: "/workspace",
@@ -256,8 +257,10 @@ describe("rust rules", () => {
 									name: "imp-store",
 									manifest_path: "/workspace/crates/imp-store/Cargo.toml",
 									dependencies: [],
+									targets: [],
 								},
 							],
+							workspace_members: [],
 						}),
 						stderr: "",
 						exitCode: 0,
@@ -265,8 +268,6 @@ describe("rust rules", () => {
 				}
 				return originalRun(opts);
 			};
-			globalThis.__host_read_file = (path) =>
-				path === "Cargo.toml" ? '[workspace]\nmembers = ["crates/*"]\n' : null;
 
 			const pkg = cargoPackage({
 				path: "crates/imp-store",
@@ -276,7 +277,6 @@ describe("rust rules", () => {
 			await cargoTest(pkg);
 
 			globalThis.__host_run = originalRun;
-			globalThis.__host_read_file = originalReadFile;
 
 			const testRun = host.runs[host.runs.length - 1];
 			expect(testRun.argv).not.toContain("--workspace");

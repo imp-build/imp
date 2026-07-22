@@ -39,15 +39,19 @@ import {
 	defaultRustToolchain,
 	normalize_deps,
 	resources,
+	resourcesForDirs,
 	rust_toolchain_version,
 	rustBuildCacheTools,
 	rustLinkerTools,
 	rustToolEnv,
 	sources,
-	withManifestOverride,
+	wholeWorkspaceSources,
 } from "//rules/rust";
 import { CargoPackage } from "//rules/rust/cargo_package";
-import { workspaceMetadataFor } from "//rules/rust/workspace_closure";
+import {
+	workspaceMetadataFor,
+	workspaceRootRelativeFor,
+} from "//rules/rust/workspace_closure";
 
 import { rustTool } from "//rules/rust/toolchain";
 import { nativeToolSpec } from "//rules/imp/native_tool";
@@ -119,7 +123,7 @@ const standaloneCargoMetadata = memo(
 			argv: [
 				"sh",
 				"-c",
-				'cargo metadata --no-deps --format-version=1 --manifest-path "$1"',
+				'cargo metadata --locked --no-deps --format-version=1 --manifest-path "$1"',
 				"cargo-metadata-test-discovery",
 				`${path}/Cargo.toml`,
 			],
@@ -154,7 +158,10 @@ async function discoverTestTargets(handle) {
 		);
 		return testTargetsIn(pkg);
 	}
-	const metadata = await workspaceMetadataFor(rust_toolchain_version(handle));
+	const metadata = await workspaceMetadataFor(
+		path,
+		rust_toolchain_version(handle),
+	);
 	const manifestPath = `${metadata.workspace_root}/${path}/Cargo.toml`;
 	const pkg = (metadata.packages || []).find(
 		(p) => p.manifest_path === manifestPath,
@@ -162,62 +169,151 @@ async function discoverTestTargets(handle) {
 	return testTargetsIn(pkg);
 }
 
+// Shared, memoized `cargo test --no-run --workspace` build for one real
+// workspace root + toolchain configuration — replaces a per-crate build for
+// workspaceMember crates (see buildTestBinaries below), same reasoning as
+// runWorkspaceClippy (rules/rust/lint.js) and wholeWorkspaceFor's docstring
+// (//rules/rust/workspace_closure): most crates' own closures already cover
+// most or all of a typical workspace, so per-crate scoping bought little,
+// and it required a narrowed manifest that fought `--locked` over lockfile
+// trims. Unlike clippy's `-D warnings`, plain `cargo test --no-run` never
+// artificially turns a lint into a hard error, so there's no cascading
+// "sibling's issue starves this crate of any result" concern here — a
+// compile error genuinely blocking a dependent is real, unavoidable cargo
+// behavior, not something this rework introduces.
+const buildWorkspaceTestBinaries = memo(
+	async function buildWorkspaceTestBinaries(
+		workspaceRootRelative,
+		toolchainVersion,
+		toolchainHandle,
+	) {
+		const toolSpec = await rustTool(toolchainVersion);
+		const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
+		const {
+			tools: linkerTools,
+			rustflags,
+			env: linkerEnv,
+		} = await rustLinkerTools(toolchainHandle);
+		const {
+			tools: cacheTools,
+			env: cacheEnv,
+			scriptPreamble,
+		} = await rustBuildCacheTools(toolchainHandle);
+		const { tools: rustTools, env: rustEnv } = rustToolEnv(
+			toolSpec,
+			kacheActive,
+		);
+
+		const { files: srcs, memberDirs } = await wholeWorkspaceSources(
+			workspaceRootRelative,
+			toolchainVersion,
+		);
+		const resourceInputs = await resourcesForDirs(memberDirs);
+		const buildDir = output_path(
+			`build/rust/${workspaceRootRelative === "." ? "root" : workspaceRootRelative}`,
+		);
+
+		const prefix =
+			workspaceRootRelative === "." ? "" : `${workspaceRootRelative}/`;
+		const script = cargoInvocationScript(
+			'cargo test --locked --no-run --workspace --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
+			{ scriptPreamble, kacheActive },
+		);
+
+		const result = await run({
+			argv: [
+				"sh",
+				"-c",
+				script,
+				"cargo-test-build-workspace",
+				`${prefix}Cargo.toml`,
+				buildDir,
+				rustflags,
+			],
+			tools: [...rustTools, ...linkerTools, ...cacheTools],
+			env: [...rustEnv, ...linkerEnv, ...cacheEnv],
+			inputs: [srcs, resourceInputs],
+			outputs: [output(output_path(buildDir), { kind: "directory" })],
+			materialize: false,
+			display: `cargo test --no-run --workspace ${workspaceRootRelative}`,
+		});
+
+		return { result, buildDir };
+	},
+);
+
 // Compiles every test binary in the crate (without running any of them) and
 // materializes the whole cargo target-dir, same as cargoBuild/cargoTest's
 // toolchain/linker resolution. Always called with the cargo-package's own
 // handle (see parentCargoPackage above) — every rust_test sibling shares one
-// memo() entry and one execution instead of each independently recompiling
-// the whole crate (imp#12). The target-dir is declared as a materialized
-// directory output, so every binary it contains already sits at its normal
-// on-disk path afterwards, with no per-binary staging step needed.
+// memo() entry (and, for a workspaceMember crate, one shared
+// buildWorkspaceTestBinaries() execution across the whole real workspace,
+// not just this crate) instead of each independently recompiling the whole
+// crate (imp#12). The target-dir is declared as a materialized directory
+// output, so every binary it contains already sits at its normal on-disk
+// path afterwards, with no per-binary staging step needed.
 const buildTestBinaries = memo(async function buildTestBinaries(handle) {
-	const toolSpec = await rustTool(rust_toolchain_version(handle));
-	const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-	const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
-	const {
-		tools: linkerTools,
-		rustflags,
-		env: linkerEnv,
-	} = await rustLinkerTools(toolchainHandle);
-	const {
-		tools: cacheTools,
-		env: cacheEnv,
-		scriptPreamble,
-	} = await rustBuildCacheTools(toolchainHandle);
-	const { tools: rustTools, env: rustEnv } = rustToolEnv(toolSpec, kacheActive);
-
 	const path = declared_path(handle, handle.attrs.path || ".");
-	const { files: srcs, manifest } = await sources(handle);
-	const resourceInputs = await resources(handle);
-	const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 
-	const { script, arg: manifestArg } = withManifestOverride(
-		cargoInvocationScript(
-			'cargo test --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
-			{ scriptPreamble, kacheActive },
-		),
-		manifest,
-	);
-
-	const result = await run({
-		argv: [
-			"sh",
-			"-c",
-			script,
-			"cargo-test-build",
-			manifestArg,
-			`${path}/Cargo.toml`,
-			buildDir,
+	if (!handle.attrs.workspaceMember) {
+		const toolSpec = await rustTool(rust_toolchain_version(handle));
+		const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+		const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
+		const {
+			tools: linkerTools,
 			rustflags,
-		],
-		tools: [...rustTools, ...linkerTools, ...cacheTools],
-		env: [...rustEnv, ...linkerEnv, ...cacheEnv],
-		inputs: [srcs, resourceInputs],
-		outputs: [output(output_path(buildDir), { kind: "directory" })],
-		materialize: false,
-		display: `cargo test --no-run ${path}`,
-	});
+			env: linkerEnv,
+		} = await rustLinkerTools(toolchainHandle);
+		const {
+			tools: cacheTools,
+			env: cacheEnv,
+			scriptPreamble,
+		} = await rustBuildCacheTools(toolchainHandle);
+		const { tools: rustTools, env: rustEnv } = rustToolEnv(
+			toolSpec,
+			kacheActive,
+		);
+		const { files: srcs } = await sources(handle);
+		const resourceInputs = await resources(handle);
+		const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 
+		const script = cargoInvocationScript(
+			'cargo test --locked --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
+			{ scriptPreamble, kacheActive },
+		);
+
+		const result = await run({
+			argv: [
+				"sh",
+				"-c",
+				script,
+				"cargo-test-build",
+				`${path}/Cargo.toml`,
+				buildDir,
+				rustflags,
+			],
+			tools: [...rustTools, ...linkerTools, ...cacheTools],
+			env: [...rustEnv, ...linkerEnv, ...cacheEnv],
+			inputs: [srcs, resourceInputs],
+			outputs: [output(output_path(buildDir), { kind: "directory" })],
+			materialize: false,
+			display: `cargo test --no-run ${path}`,
+		});
+
+		return { result, buildDir, path };
+	}
+
+	const toolchainVersion = rust_toolchain_version(handle);
+	const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+	const workspaceRootRelative = await workspaceRootRelativeFor(
+		path,
+		toolchainVersion,
+	);
+	const { result, buildDir } = await buildWorkspaceTestBinaries(
+		workspaceRootRelative,
+		toolchainVersion,
+		toolchainHandle,
+	);
 	return { result, buildDir, path };
 });
 
@@ -225,7 +321,12 @@ const buildTestBinaries = memo(async function buildTestBinaries(handle) {
 // stdout for compiled test-binary artifacts (reliable across task-cache
 // hits — run()'s stdout is itself part of the persisted cache record, not
 // miss-only) and rebases each absolute executable path onto the
-// workspace-relative buildDir it was compiled under.
+// workspace-relative buildDir it was compiled under. Includes each binary's
+// own `manifestPath` (cargo's absolute `manifest_path` for the package that
+// produced it) — a shared, whole-workspace build (buildWorkspaceTestBinaries
+// above) makes a same-named test target in two different crates a real (if
+// unlikely) possibility that a single crate's own build never had to
+// consider, so name+kind alone is no longer enough to disambiguate.
 export function parseTestBinaries(stdout, buildDir) {
 	const binaries = [];
 	for (const line of stdout.split("\n")) {
@@ -249,6 +350,7 @@ export function parseTestBinaries(stdout, buildDir) {
 			name: msg.target.name,
 			kind: (msg.target.kind && msg.target.kind[0]) || "test",
 			executable,
+			manifestPath: msg.manifest_path || null,
 		});
 	}
 	return binaries;
@@ -309,11 +411,25 @@ export const rustTestBuild = product(
 		const cargoPackage = parentCargoPackage(handle);
 		const { result, buildDir } = await buildTestBinaries(cargoPackage);
 		const binaries = parseTestBinaries(result.stdout, buildDir);
-		const match = binaries.find(
+		// A shared, whole-workspace build (buildWorkspaceTestBinaries) means
+		// binaries from every crate share one stdout stream — disambiguate by
+		// this rust_test's own crate directory (its manifest path's suffix),
+		// not just name+kind, in case two different crates happen to declare
+		// a same-named test target.
+		const ownSuffix = `/${declared_path(cargoPackage, cargoPackage.attrs.path || ".")}/Cargo.toml`;
+		const candidates = binaries.filter(
 			(bin) =>
 				bin.name === handle.attrs.testName &&
 				bin.kind === handle.attrs.testKind,
 		);
+		const match =
+			candidates.length <= 1
+				? candidates[0]
+				: candidates.find(
+						(bin) =>
+							typeof bin.manifestPath === "string" &&
+							bin.manifestPath.endsWith(ownSuffix),
+					);
 		if (!match) {
 			throw new Error(
 				`${targetAddress(handle)}: cargo test --no-run didn't produce a ` +

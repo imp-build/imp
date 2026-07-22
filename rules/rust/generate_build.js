@@ -133,7 +133,7 @@ async function cargoMetadataFor(manifestPath) {
 		argv: [
 			"sh",
 			"-c",
-			'cargo metadata --no-deps --format-version=1 --manifest-path "$1"',
+			'cargo metadata --locked --no-deps --format-version=1 --manifest-path "$1"',
 			"cargo-metadata",
 			manifestPath,
 		],
