@@ -12,7 +12,6 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use crate::exec_bridge::{parse_io_specs, parse_tool_specs};
 use crate::loader::{
     resolve_workspace_module, validate_workspace_module_path, ModuleForm, ModuleKind, ModuleSource,
     RulesSource, ImpLoader, ImpResolver,
@@ -34,12 +33,13 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 use imp_daemon::client::RemoteExecutionService;
 use imp_exec_api::{ExecAction, ExecRunOpts, ExecutionService, SandboxRetention, WorkerSpec};
+use imp_exec_bridge::{parse_io_specs, parse_tool_specs};
 use imp_execution::service::LocalExecutionService;
 use imp_store::cache::{
     artifact_relative_path, digest_json, named_cache_scope_id, store_file_blob, workspace_cache_id,
 };
 
-pub(crate) const WORKSPACE_FILE: &str = "imp.workspace.js";
+pub const WORKSPACE_FILE: &str = "imp.workspace.js";
 /// CI-only overlay, loaded (if present) immediately after `imp.workspace.js`
 /// when running on GitHub Actions. Its config exports (e.g. `export const
 /// imp = ...`) deep-merge over the main workspace file's, letting CI patch
@@ -47,8 +47,8 @@ pub(crate) const WORKSPACE_FILE: &str = "imp.workspace.js";
 /// target exports are added alongside the main file's; a name already
 /// exported by `imp.workspace.js` is *not* overridden (first export wins),
 /// so give CI-only targets distinct names.
-pub(crate) const CI_WORKSPACE_FILE: &str = "imp.workspace.ci.js";
-pub(crate) const BUILD_FILE: &str = "BUILD.js";
+pub const CI_WORKSPACE_FILE: &str = "imp.workspace.ci.js";
+pub const BUILD_FILE: &str = "BUILD.js";
 
 /// Whether we're running as a GitHub Actions job, per GitHub's own
 /// documented convention (`GITHUB_ACTIONS=true` is set on every runner).
@@ -228,7 +228,7 @@ pub struct NamedCache {
 // Internal host state
 // ---------------------------------------------------------------------------
 
-pub(crate) struct HostState {
+pub struct HostState {
     next_id: u32,
     next_exec: u32,
     pending: BTreeMap<u32, PendingTarget>,
@@ -402,7 +402,7 @@ pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
 /// reading `IMP_RULES_DIR` from the process environment — lets tests
 /// exercise the built-in-rules fallback without mutating global state.
 #[allow(dead_code)]
-pub(crate) async fn load_workspace_with_rules(
+pub async fn load_workspace_with_rules(
     root: &Path,
     rules_source: RulesSource,
 ) -> Result<LiveWorkspace> {
@@ -415,7 +415,7 @@ async fn create_live_runtime(
     rules_source: RulesSource,
     service: Arc<dyn ExecutionService>,
 ) -> Result<LiveWorkspace> {
-    crate::logging::ensure_installed();
+    imp_logging::ensure_installed();
 
     let root = root
         .canonicalize()
@@ -425,8 +425,7 @@ async fn create_live_runtime(
     let exec_root: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
     let exec_no_cache = Arc::new(AtomicBool::new(false));
     let exec_sandbox_retention = Arc::new(AtomicU8::new(SandboxRetention::default().as_u8()));
-    let scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>> =
-        Arc::new(Mutex::new(None));
+    let scheduler: Arc<Mutex<Option<Arc<imp_scheduler::Scheduler>>>> = Arc::new(Mutex::new(None));
     let ui_multi: Arc<Mutex<Option<indicatif::MultiProgress>>> = Arc::new(Mutex::new(None));
     let selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(None));
     let goal_flags: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
@@ -685,7 +684,7 @@ async fn load_workspace_with_rules_and_service(
 
 /// Create a rules-test runtime with no workspace or BUILD modules preloaded.
 /// The test module's own imports define the complete rule graph for the test.
-pub(crate) async fn load_minimal_rules_test_runtime(root: &Path) -> Result<LiveWorkspace> {
+pub async fn load_minimal_rules_test_runtime(root: &Path) -> Result<LiveWorkspace> {
     create_live_runtime(
         root,
         RulesSource::from_env(),
@@ -696,7 +695,7 @@ pub(crate) async fn load_minimal_rules_test_runtime(root: &Path) -> Result<LiveW
 
 /// Load the real workspace for a rules test while still giving the test its
 /// own in-process execution service rather than attaching to a daemon.
-pub(crate) async fn load_workspace_rules_test_runtime(root: &Path) -> Result<LiveWorkspace> {
+pub async fn load_workspace_rules_test_runtime(root: &Path) -> Result<LiveWorkspace> {
     load_workspace_with_rules_and_service(
         root,
         RulesSource::from_env(),
@@ -1210,7 +1209,7 @@ fn compute_owned_files(
     Ok(owned)
 }
 
-pub(crate) fn source_field_workspace_root(address: &str, root: &str) -> Result<String> {
+pub fn source_field_workspace_root(address: &str, root: &str) -> Result<String> {
     let source_root = root.trim();
     if let Some(workspace_rooted) = source_root.strip_prefix("//") {
         let relative = workspace_relative_directory(workspace_rooted)?;
@@ -1225,7 +1224,7 @@ pub(crate) fn source_field_workspace_root(address: &str, root: &str) -> Result<S
     Ok(path_to_workspace_string(&base))
 }
 
-pub(crate) fn target_scope_path(address: &str) -> Result<PathBuf> {
+pub fn target_scope_path(address: &str) -> Result<PathBuf> {
     let (scope, _) = address
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("target address '{address}' must include ':'"))?;
@@ -1235,7 +1234,7 @@ pub(crate) fn target_scope_path(address: &str) -> Result<PathBuf> {
     workspace_relative_directory(scope)
 }
 
-pub(crate) fn path_to_workspace_string(path: &Path) -> String {
+pub fn path_to_workspace_string(path: &Path) -> String {
     if path.as_os_str().is_empty() {
         ".".to_owned()
     } else {
@@ -1256,7 +1255,7 @@ struct RegisterGlobalsArgs {
     exec_root: Arc<Mutex<Option<PathBuf>>>,
     exec_no_cache: Arc<AtomicBool>,
     exec_sandbox_retention: Arc<AtomicU8>,
-    scheduler: Arc<Mutex<Option<Arc<crate::scheduler::Scheduler>>>>,
+    scheduler: Arc<Mutex<Option<Arc<imp_scheduler::Scheduler>>>>,
     ui_multi: Arc<Mutex<Option<indicatif::MultiProgress>>>,
     selected_roots: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
     goal_flags: Arc<Mutex<Option<serde_json::Value>>>,
@@ -3088,7 +3087,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                     .run(
                         parent,
                         display,
-                        crate::scheduler::TaskKind::Sandbox,
+                        imp_scheduler::TaskKind::Sandbox,
                         move |run_context| {
                             if !run_opts.sandbox || run_opts.workspace_cwd {
                                 if !run_opts.sandbox && !run_opts.impure {
@@ -3189,21 +3188,21 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
             if let Some(sched) = scheduler_ev.lock().unwrap().clone() {
                 let id = id as u64;
                 let event = match state.as_str() {
-                    "pending" => crate::scheduler::TaskEvent::Pending {
+                    "pending" => imp_scheduler::TaskEvent::Pending {
                         id,
                         parent: parent.map(|n| n as u64),
                         display: display.unwrap_or_default(),
-                        kind: crate::scheduler::TaskKind::Memo,
+                        kind: imp_scheduler::TaskKind::Memo,
                     },
-                    "running" => crate::scheduler::TaskEvent::Running { id, detail: None },
-                    "done" => crate::scheduler::TaskEvent::Done {
+                    "running" => imp_scheduler::TaskEvent::Running { id, detail: None },
+                    "done" => imp_scheduler::TaskEvent::Done {
                         id,
-                        outcome: crate::scheduler::TaskOutcome::Ok,
+                        outcome: imp_scheduler::TaskOutcome::Ok,
                         cached: None,
                     },
-                    "fail" => crate::scheduler::TaskEvent::Done {
+                    "fail" => imp_scheduler::TaskEvent::Done {
                         id,
-                        outcome: crate::scheduler::TaskOutcome::Err(display.unwrap_or_default()),
+                        outcome: imp_scheduler::TaskOutcome::Err(display.unwrap_or_default()),
                         cached: None,
                     },
                     _ => return Ok(()),
@@ -3223,14 +3222,14 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                 let id = id as u64;
                 let slot = slot as usize;
                 let event = match state.as_str() {
-                    "start" => crate::scheduler::TaskEvent::LaneStarted {
-                        kind: crate::scheduler::LaneKind::Js,
+                    "start" => imp_scheduler::TaskEvent::LaneStarted {
+                        kind: imp_scheduler::LaneKind::Js,
                         slot,
                         id,
                         display: display.unwrap_or_default(),
                     },
-                    "clear" => crate::scheduler::TaskEvent::LaneCleared {
-                        kind: crate::scheduler::LaneKind::Js,
+                    "clear" => imp_scheduler::TaskEvent::LaneCleared {
+                        kind: imp_scheduler::LaneKind::Js,
                         slot,
                         id,
                     },
@@ -3276,7 +3275,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                     .run(
                         parent,
                         display.clone(),
-                        crate::scheduler::TaskKind::Workspace,
+                        imp_scheduler::TaskKind::Workspace,
                         move |run_context| -> Result<_> {
                             let pre = watch
                                 .as_deref()
@@ -3537,7 +3536,7 @@ fn workspace_source_files(
     matching_workspace_source_paths(workspace_root, root, include, exclude)
 }
 
-pub(crate) fn workspace_glob_files(
+pub fn workspace_glob_files(
     workspace_root: &Path,
     root: &str,
     include: &[String],
@@ -3589,12 +3588,12 @@ pub(crate) fn workspace_glob_files(
 /// `workspace_glob_files`. Used wherever the caller may go on to feed the result
 /// into `run()` (which needs content, not just names), not by callers that only
 /// need the path list (target ownership, unowned-file checks).
-pub(crate) struct GlobResult {
-    pub(crate) files: Vec<String>,
-    pub(crate) digest: imp_store::digest::DirectoryDigest,
+pub struct GlobResult {
+    pub files: Vec<String>,
+    pub digest: imp_store::digest::DirectoryDigest,
 }
 
-pub(crate) fn workspace_glob_files_captured(
+pub fn workspace_glob_files_captured(
     workspace_root: &Path,
     root: &str,
     include: &[String],
@@ -3696,7 +3695,7 @@ fn compile_regexes(label: &str, patterns: &[String]) -> Result<Vec<Regex>> {
         .collect()
 }
 
-pub(crate) fn compile_globs(label: &str, patterns: &[String]) -> Result<Vec<Regex>> {
+pub fn compile_globs(label: &str, patterns: &[String]) -> Result<Vec<Regex>> {
     patterns
         .iter()
         .map(|pattern| {
@@ -3793,7 +3792,7 @@ fn glob_char_class_to_regex(chars: &[char], start: usize) -> Option<(String, usi
     None
 }
 
-pub(crate) fn workspace_relative_directory(path: &str) -> Result<PathBuf> {
+pub fn workspace_relative_directory(path: &str) -> Result<PathBuf> {
     if path.is_empty() || path == "." {
         return Ok(PathBuf::new());
     }
@@ -4312,8 +4311,8 @@ pub async fn evaluate_product_json(
 /// Selector-string convenience wrapper around
 /// [`execute_goal_live_selection`]; production callers go through the
 /// selection-typed entry point, so this survives only for tests.
-#[cfg(test)]
-pub(crate) async fn execute_goal_live(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn execute_goal_live(
     live: &LiveWorkspace,
     workspace_root: &Path,
     goal: &str,
@@ -4787,7 +4786,7 @@ pub async fn named_cache_details(live: &LiveWorkspace, name: &str) -> Result<Opt
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct RulesTestCase {
+pub struct RulesTestCase {
     pub ordinal: usize,
     pub name: String,
     pub fixture: String,
@@ -4803,7 +4802,7 @@ async fn run_rules_test_script(
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
     let local_cancellation = Arc::new(AtomicBool::new(false));
     let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
-    let scheduler = crate::scheduler::Scheduler::new(1, Arc::clone(&local_cancellation), tx);
+    let scheduler = imp_scheduler::Scheduler::new(1, Arc::clone(&local_cancellation), tx);
     *live.scheduler.lock().unwrap() = Some(Arc::clone(&scheduler));
 
     let mirror_cancel = {
@@ -4900,7 +4899,7 @@ async fn load_rules_test_fixture(workspace_root: &Path, fixture: &str) -> Result
     }
 }
 
-pub(crate) async fn run_rules_test_case(
+pub async fn run_rules_test_case(
     workspace_root: &Path,
     module: &str,
     ordinal: usize,
@@ -5570,7 +5569,7 @@ mod tests {
         selectors: &[String],
     ) -> Result<()> {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -5844,7 +5843,7 @@ export const app = target({ kind: "sample" });
 "#,
         );
 
-        let lines = crate::logging::capture();
+        let lines = imp_logging::capture();
         let _workspace = load_workspace(p).await.unwrap();
 
         let rendered = lines.lock().unwrap().join("\n");
@@ -6611,7 +6610,7 @@ export const run = product(K_run_args, RUN, toolName("run-args-test-tool"), asyn
         );
         let live = load_workspace(p).await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -7196,7 +7195,7 @@ export const ok = 1;
         let live = load_workspace(p).await.unwrap();
         *live.exec_root.lock().unwrap() = Some(p.to_owned());
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             4,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -7243,7 +7242,7 @@ if (!results[0].stdout.endsWith("a\n") || !results[1].stdout.endsWith("b\n")) {
         *live.exec_root.lock().unwrap() = Some(p.to_owned());
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let cancellation = Arc::new(AtomicBool::new(false));
-        let scheduler = crate::scheduler::Scheduler::new(1, Arc::clone(&cancellation), tx);
+        let scheduler = imp_scheduler::Scheduler::new(1, Arc::clone(&cancellation), tx);
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let cancellation_thread = Arc::clone(&cancellation);
@@ -7304,7 +7303,7 @@ await run({{
         *live.exec_root.lock().unwrap() = Some(p.to_owned());
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let cancellation = Arc::new(AtomicBool::new(false));
-        let scheduler = crate::scheduler::Scheduler::new(1, Arc::clone(&cancellation), tx);
+        let scheduler = imp_scheduler::Scheduler::new(1, Arc::clone(&cancellation), tx);
         *live.scheduler.lock().unwrap() = Some(scheduler);
 
         let cancellation_thread = Arc::clone(&cancellation);
@@ -7385,7 +7384,7 @@ await run({{
         let live = load_workspace(p).await.unwrap();
         *live.exec_root.lock().unwrap() = Some(p.to_owned());
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             4,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -7453,7 +7452,7 @@ export const build = product(K_root_nesting_test, BUILD, toolName("root-nesting-
 
         let live = load_workspace(p).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             2,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -7477,7 +7476,7 @@ export const build = product(K_root_nesting_test, BUILD, toolName("root-nesting-
         let mut memo_parents = BTreeMap::new();
         let mut run_parents = BTreeMap::new();
         while let Ok(event) = rx.try_recv() {
-            if let crate::scheduler::TaskEvent::Pending {
+            if let imp_scheduler::TaskEvent::Pending {
                 id,
                 parent,
                 display,
@@ -7544,7 +7543,7 @@ export const build = product(K_promise_all_context_test, BUILD, toolName("promis
 
         let live = load_workspace(p).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             4,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -7568,7 +7567,7 @@ export const build = product(K_promise_all_context_test, BUILD, toolName("promis
         let mut memo_parents = BTreeMap::new();
         let mut run_parents = BTreeMap::new();
         while let Ok(event) = rx.try_recv() {
-            if let crate::scheduler::TaskEvent::Pending {
+            if let imp_scheduler::TaskEvent::Pending {
                 id,
                 parent,
                 display,
@@ -7625,7 +7624,7 @@ export const build = product(K_sequential_sibling_context_test, BUILD, toolName(
 
         let live = load_workspace(p).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             2,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -7649,7 +7648,7 @@ export const build = product(K_sequential_sibling_context_test, BUILD, toolName(
         let mut memo_parents = BTreeMap::new();
         let mut run_parents = BTreeMap::new();
         while let Ok(event) = rx.try_recv() {
-            if let crate::scheduler::TaskEvent::Pending {
+            if let imp_scheduler::TaskEvent::Pending {
                 id,
                 parent,
                 display,
@@ -7693,7 +7692,7 @@ export const build = product(K_fail_test, BUILD, toolName("fail-test-tool"), asy
 
         let live = load_workspace(p).await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -7755,7 +7754,7 @@ export const build = product(K_shared_fail_test, BUILD, toolName("shared-fail-te
 
         let live = load_workspace(p).await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -7812,7 +7811,7 @@ export const build = product(K_concurrent_root_test, BUILD, toolName("concurrent
 
         let live = load_workspace(p).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             2,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -7835,7 +7834,7 @@ export const build = product(K_concurrent_root_test, BUILD, toolName("concurrent
         let mut job_ids = BTreeSet::new();
         let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            if let crate::scheduler::TaskEvent::Pending { id, display, .. } = &event {
+            if let imp_scheduler::TaskEvent::Pending { id, display, .. } = &event {
                 if display == "run a" || display == "run b" {
                     job_ids.insert(*id);
                 }
@@ -7847,11 +7846,11 @@ export const build = product(K_concurrent_root_test, BUILD, toolName("concurrent
         let mut max_active = 0;
         for event in events {
             match event {
-                crate::scheduler::TaskEvent::Running { id, .. } if job_ids.contains(&id) => {
+                imp_scheduler::TaskEvent::Running { id, .. } if job_ids.contains(&id) => {
                     active.insert(id);
                     max_active = max_active.max(active.len());
                 }
-                crate::scheduler::TaskEvent::Done { id, .. } if job_ids.contains(&id) => {
+                imp_scheduler::TaskEvent::Done { id, .. } if job_ids.contains(&id) => {
                     active.remove(&id);
                 }
                 _ => {}
@@ -7894,7 +7893,7 @@ export const build = product(K_selected_targets_test, BUILD, toolName("selected-
 
         let live = load_workspace(p).await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -7996,7 +7995,7 @@ export const build = product(K_selected_targets_reset_test, BUILD, toolName("sel
 
         let live = load_workspace(p).await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -8055,7 +8054,7 @@ export const build = product(K_callback_test, P_custom_goal, toolName("callback-
 
         let live = load_workspace(p).await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -8117,7 +8116,7 @@ export const build = product(K_callback_test, P_custom_goal, toolName("callback-
 
         let live = load_workspace(p).await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -8170,7 +8169,7 @@ export const build = product(K_plain_goal_test, P_plain_goal, toolName("plain-go
 
         let live = load_workspace(p).await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -8215,7 +8214,7 @@ export const build = product(K_js_lane_slot_test, BUILD, toolName("js-lane-slot-
 
         let live = load_workspace(p).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -8237,8 +8236,8 @@ export const build = product(K_js_lane_slot_test, BUILD, toolName("js-lane-slot-
 
         let mut slots = BTreeSet::new();
         while let Ok(event) = rx.try_recv() {
-            if let crate::scheduler::TaskEvent::LaneStarted {
-                kind: crate::scheduler::LaneKind::Js,
+            if let imp_scheduler::TaskEvent::LaneStarted {
+                kind: imp_scheduler::LaneKind::Js,
                 slot,
                 display,
                 ..
@@ -8283,7 +8282,7 @@ export const build = product(K_js_lane_bound_test, BUILD, toolName("js-lane-boun
 
         let live = load_workspace(p).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             3,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -8308,11 +8307,11 @@ export const build = product(K_js_lane_bound_test, BUILD, toolName("js-lane-boun
         let mut saw_memo_running = false;
         for event in std::iter::from_fn(|| rx.try_recv().ok()) {
             match event {
-                crate::scheduler::TaskEvent::Running { detail: None, .. } => {
+                imp_scheduler::TaskEvent::Running { detail: None, .. } => {
                     saw_memo_running = true;
                 }
-                crate::scheduler::TaskEvent::LaneStarted {
-                    kind: crate::scheduler::LaneKind::Js,
+                imp_scheduler::TaskEvent::LaneStarted {
+                    kind: imp_scheduler::LaneKind::Js,
                     slot,
                     id,
                     ..
@@ -8325,8 +8324,8 @@ export const build = product(K_js_lane_bound_test, BUILD, toolName("js-lane-boun
                         "active JS lanes exceeded configured worker count"
                     );
                 }
-                crate::scheduler::TaskEvent::LaneCleared {
-                    kind: crate::scheduler::LaneKind::Js,
+                imp_scheduler::TaskEvent::LaneCleared {
+                    kind: imp_scheduler::LaneKind::Js,
                     slot,
                     id,
                 } => {
@@ -8374,7 +8373,7 @@ export const build = product(K_single_js_worker_inflight_test, BUILD, toolName("
 
         let live = load_workspace(p).await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -8428,7 +8427,7 @@ export const build = product(K_interleaved_root_context_test, BUILD, toolName("i
 
         let live = load_workspace(p).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             2,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -8451,7 +8450,7 @@ export const build = product(K_interleaved_root_context_test, BUILD, toolName("i
         let mut memo_ids = BTreeMap::new();
         let mut run_parents = BTreeMap::new();
         while let Ok(event) = rx.try_recv() {
-            if let crate::scheduler::TaskEvent::Pending {
+            if let imp_scheduler::TaskEvent::Pending {
                 id,
                 parent,
                 display,
@@ -8515,7 +8514,7 @@ export const build = product(K_deferred_run_context_test, BUILD, toolName("defer
 
         let live = load_workspace(p).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             2,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -8538,7 +8537,7 @@ export const build = product(K_deferred_run_context_test, BUILD, toolName("defer
         let mut memo_ids = BTreeMap::new();
         let mut run_parents = BTreeMap::new();
         while let Ok(event) = rx.try_recv() {
-            if let crate::scheduler::TaskEvent::Pending {
+            if let imp_scheduler::TaskEvent::Pending {
                 id,
                 parent,
                 display,
@@ -8604,7 +8603,7 @@ export const build = product(K_live_cache_test, BUILD, toolName("live-cache-test
 
         let live = load_workspace(p).await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,
@@ -8731,7 +8730,7 @@ configure("cache_test", {{ mode: {mode} }});
             );
             let live = load_workspace(p).await.unwrap();
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-            let scheduler = crate::scheduler::Scheduler::new(
+            let scheduler = imp_scheduler::Scheduler::new(
                 1,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 tx,
@@ -8807,7 +8806,7 @@ configure("cache_test_unread", {{ mode: {mode} }});
             );
             let live = load_workspace(p).await.unwrap();
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-            let scheduler = crate::scheduler::Scheduler::new(
+            let scheduler = imp_scheduler::Scheduler::new(
                 1,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 tx,
@@ -8880,7 +8879,7 @@ configure("cache_test_unread", {{ mode: {mode} }});
             );
             let live = load_workspace(p).await.unwrap();
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-            let scheduler = crate::scheduler::Scheduler::new(
+            let scheduler = imp_scheduler::Scheduler::new(
                 1,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 tx,
@@ -8909,7 +8908,7 @@ configure("cache_test_unread", {{ mode: {mode} }});
     ) -> Result<()> {
         let live = load_workspace(p).await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = crate::scheduler::Scheduler::new(
+        let scheduler = imp_scheduler::Scheduler::new(
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx,

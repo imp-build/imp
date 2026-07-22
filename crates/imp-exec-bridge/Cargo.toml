@@ -1,0 +1,9 @@
+[package]
+name = "imp-exec-bridge"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rquickjs.workspace = true
+imp-execution = { path = "../imp-execution" }
+imp-store = { path = "../imp-store" }

@@ -1,13 +1,5 @@
-mod changed;
 mod codegen;
 mod commands;
-mod exec_bridge;
-mod loader;
-mod logging;
-mod runtime;
-mod scheduler;
-mod selector;
-mod spike;
 mod ui;
 
 use std::path::PathBuf;
@@ -19,6 +11,8 @@ use std::sync::{
 use anyhow::{Context, Result};
 use clap::{Arg, ArgAction, Args, Command, FromArgMatches, Parser, Subcommand};
 use rquickjs::{promise::MaybePromise, CatchResultExt, FromJs, Function, Module, Object, Value};
+use imp_engine::{changed, runtime, selector, spike};
+use imp_scheduler as scheduler;
 
 type Tree = ui::Tree;
 

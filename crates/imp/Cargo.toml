@@ -9,9 +9,11 @@ path = "src/main.rs"
 
 [dependencies]
 imp-store = { path = "../imp-store" }
-imp-exec-api = { path = "../imp-exec-api" }
 imp-execution = { path = "../imp-execution", features = ["clap"] }
 imp-daemon = { path = "../imp-daemon" }
+imp-engine = { path = "../imp-engine" }
+imp-logging = { path = "../imp-logging" }
+imp-scheduler = { path = "../imp-scheduler" }
 tokio.workspace = true
 clap.workspace = true
 indicatif.workspace = true
@@ -20,11 +22,11 @@ serde.workspace = true
 serde_json.workspace = true
 walkdir.workspace = true
 regex.workspace = true
-sha2.workspace = true
 tempfile.workspace = true
-futures.workspace = true
 rquickjs.workspace = true
 signal-hook.workspace = true
 log.workspace = true
-include_dir.workspace = true
 dialoguer.workspace = true
+
+[dev-dependencies]
+imp-engine = { path = "../imp-engine", features = ["test-support"] }

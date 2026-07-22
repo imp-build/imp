@@ -11,7 +11,7 @@ use rquickjs::{
 use serde::{Deserialize, Serialize};
 use walkdir::{DirEntry, WalkDir};
 
-use crate::spike::WORKSPACE_FILE;
+use imp_engine::spike::WORKSPACE_FILE;
 
 const INIT_CATALOG_JS: &str = include_str!("../../../../rules/init.js");
 const CATALOG_MODULE_NAME: &str = "imp:init";
@@ -591,7 +591,9 @@ mod tests {
             .unwrap();
         std::fs::write(root.path().join(WORKSPACE_FILE), source).unwrap();
         std::fs::write(root.path().join("BUILD.js"), "").unwrap();
-        let workspace = crate::runtime::load_workspace(root.path()).await.unwrap();
+        let workspace = imp_engine::runtime::load_workspace(root.path())
+            .await
+            .unwrap();
         for goal in ["build", "fmt", "lint", "package", "run", "test"] {
             assert!(
                 workspace.workspace.goals.contains_key(goal),

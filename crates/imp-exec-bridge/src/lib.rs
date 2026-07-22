@@ -10,7 +10,7 @@ use rquickjs::Object;
 use imp_execution::exec::{ExecIoSpec, ExecToolSpec};
 use imp_store::cache::{named_cache_key_path_by_id, named_cache_scope_id, workspace_cache_id};
 
-pub(crate) fn parse_io_specs<'js>(
+pub fn parse_io_specs<'js>(
     vals: Vec<Object<'js>>,
     shared_caches: &HashSet<String>,
 ) -> rquickjs::Result<Vec<ExecIoSpec>> {
@@ -48,7 +48,7 @@ pub(crate) fn parse_io_specs<'js>(
     Ok(specs)
 }
 
-pub(crate) fn parse_tool_specs<'js>(
+pub fn parse_tool_specs<'js>(
     vals: Vec<Object<'js>>,
     workspace_root: &Path,
     shared_caches: &HashSet<String>,

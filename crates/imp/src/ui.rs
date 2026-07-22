@@ -11,7 +11,7 @@ pub struct Tree {
 impl Tree {
     fn new() -> Self {
         let multi = MultiProgress::new();
-        crate::logging::init_live(multi.clone());
+        imp_logging::init_live(multi.clone());
         Self { multi }
     }
 

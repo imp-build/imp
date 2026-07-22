@@ -24,21 +24,21 @@ use crate::spike::{
 /// edge, even for already-cached modules) and seeded with the BUILD.js roots
 /// that are loaded directly rather than imported.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct ImportGraph {
+pub struct ImportGraph {
     /// Importee module name -> importer module names.
-    pub(crate) importers: BTreeMap<String, BTreeSet<String>>,
+    pub importers: BTreeMap<String, BTreeSet<String>>,
     /// Workspace-relative file path (forward slashes) -> module names that
     /// resolve to it (several specifier forms may name the same file).
-    pub(crate) module_files: BTreeMap<String, BTreeSet<String>>,
+    pub module_files: BTreeMap<String, BTreeSet<String>>,
     /// BUILD module name -> the package scope it defines (`//dir`, or `//`
     /// for the workspace root package).
-    pub(crate) build_module_scopes: BTreeMap<String, String>,
+    pub build_module_scopes: BTreeMap<String, String>,
 }
 
 impl ImportGraph {
     /// Associate a workspace-relative file with a module name, marking it as
     /// a BUILD module for `scope` when given.
-    pub(crate) fn record_module_file(&mut self, path: String, module: &str, scope: Option<&str>) {
+    pub fn record_module_file(&mut self, path: String, module: &str, scope: Option<&str>) {
         self.module_files
             .entry(path)
             .or_default()
@@ -51,7 +51,7 @@ impl ImportGraph {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum DependentsMode {
+pub enum DependentsMode {
     /// Only the targets owning changed files.
     #[default]
     None,
@@ -61,13 +61,13 @@ pub(crate) enum DependentsMode {
     Transitive,
 }
 
-pub(crate) struct ChangedTargets {
-    pub(crate) addresses: BTreeSet<String>,
+pub struct ChangedTargets {
+    pub addresses: BTreeSet<String>,
     /// Changed files no target/module accounts for, for a caller-side warning.
-    pub(crate) unowned: Vec<String>,
+    pub unowned: Vec<String>,
 }
 
-pub(crate) fn changed_target_addresses(
+pub fn changed_target_addresses(
     workspace_root: &Path,
     workspace: &Workspace,
     graph: &ImportGraph,
@@ -88,7 +88,7 @@ pub(crate) fn changed_target_addresses(
 /// working tree (committed, staged, unstaged, deleted), plus untracked
 /// non-ignored files — Pants `--changed-since` semantics. Paths outside the
 /// workspace root (when it sits below the git toplevel) are dropped.
-pub(crate) fn git_changed_files(workspace_root: &Path, since: &str) -> Result<Vec<String>> {
+pub fn git_changed_files(workspace_root: &Path, since: &str) -> Result<Vec<String>> {
     let git = |args: &[&str]| -> Result<std::process::Output> {
         Command::new("git")
             .arg("-C")
@@ -200,7 +200,7 @@ pub(crate) fn git_changed_files(workspace_root: &Path, since: &str) -> Result<Ve
 /// deleted files still find their owners), by BUILD.js package membership,
 /// and by the JS module import graph. Returns the owner set plus the paths
 /// nothing accounted for.
-pub(crate) fn owning_targets(
+pub fn owning_targets(
     workspace: &Workspace,
     graph: &ImportGraph,
     changed: &[String],
@@ -332,7 +332,7 @@ fn reverse_importer_closure(graph: &ImportGraph, seeds: &BTreeSet<String>) -> BT
 // Dependents
 // ---------------------------------------------------------------------------
 
-pub(crate) fn expand_dependents(
+pub fn expand_dependents(
     workspace: &Workspace,
     seeds: BTreeSet<String>,
     mode: DependentsMode,

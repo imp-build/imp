@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -6,18 +6,18 @@ static LOGGER: HostLogger = HostLogger {
     destination: Mutex::new(LogDestination::Stderr),
 };
 
-pub(crate) fn ensure_installed() {
+pub fn ensure_installed() {
     let _ = log::set_logger(&LOGGER);
     log::set_max_level(log::LevelFilter::Trace);
 }
 
-pub(crate) fn init_live(multi: indicatif::MultiProgress) {
+pub fn init_live(multi: indicatif::MultiProgress) {
     LOGGER.set_destination(LogDestination::Live(multi));
     ensure_installed();
 }
 
-#[cfg(test)]
-pub(crate) fn capture() -> Arc<Mutex<Vec<String>>> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn capture() -> Arc<Mutex<Vec<String>>> {
     let lines = Arc::new(Mutex::new(Vec::new()));
     LOGGER.set_destination(LogDestination::Buffer(Arc::clone(&lines)));
     ensure_installed();
@@ -31,7 +31,7 @@ struct HostLogger {
 enum LogDestination {
     Stderr,
     Live(indicatif::MultiProgress),
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Buffer(Arc<Mutex<Vec<String>>>),
 }
 
@@ -46,7 +46,7 @@ impl HostLogger {
         match &*self.destination.lock().unwrap() {
             LogDestination::Stderr => eprintln!("{text}"),
             LogDestination::Live(multi) => multi.suspend(|| eprintln!("{text}")),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             LogDestination::Buffer(lines) => lines.lock().unwrap().push(text),
         }
     }

@@ -1,0 +1,12 @@
+[package]
+name = "imp-logging"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Exposes capture(), the in-memory log sink used by imp-engine's tests.
+test-support = []
+
+[dependencies]
+log.workspace = true
+indicatif.workspace = true

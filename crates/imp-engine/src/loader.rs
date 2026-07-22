@@ -11,7 +11,7 @@ use crate::changed::ImportGraph;
 use crate::spike::{BUILD_FILE, WORKSPACE_FILE};
 
 /// The built-in `imp:core` module exposed to every plugin and BUILD file.
-pub(crate) const CORE_JS: &str = include_str!("imp_core.js");
+pub const CORE_JS: &str = include_str!("imp_core.js");
 
 /// imp's own rule library (rules/**), compiled into the binary so an
 /// installed imp works outside a checkout of this repo. `RulesSource::Dev`
@@ -21,37 +21,37 @@ static EMBEDDED_RULES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../ru
 /// Environment variable that, when set, points `//rules/...` at a live
 /// on-disk directory instead of the compiled-in copy — for developing
 /// against a checked-out copy of imp's rules from an external project.
-pub(crate) const RULES_DIR_ENV: &str = "IMP_RULES_DIR";
+pub const RULES_DIR_ENV: &str = "IMP_RULES_DIR";
 
 // ---------------------------------------------------------------------------
 // QuickJS module resolver / loader
 // ---------------------------------------------------------------------------
 
-pub(crate) struct ImpResolver {
-    pub(crate) workspace_root: PathBuf,
-    pub(crate) rules_source: RulesSource,
+pub struct ImpResolver {
+    pub workspace_root: PathBuf,
+    pub rules_source: RulesSource,
     /// Import edges recorded for changed-target detection. QuickJS calls
     /// `resolve` for every import statement, including ones whose module is
     /// already cached, so the recorded graph is complete.
-    pub(crate) import_graph: Arc<Mutex<ImportGraph>>,
+    pub import_graph: Arc<Mutex<ImportGraph>>,
 }
 
-pub(crate) struct ImpLoader {
-    pub(crate) workspace_root: PathBuf,
-    pub(crate) rules_source: RulesSource,
+pub struct ImpLoader {
+    pub workspace_root: PathBuf,
+    pub rules_source: RulesSource,
 }
 
 /// Where imp's built-in `//rules/...` modules come from. Only consulted
 /// as a fallback when a `//rules/...` specifier isn't found under the
 /// workspace root itself (e.g. a project vendoring/overriding its own copy).
 #[derive(Debug, Clone)]
-pub(crate) enum RulesSource {
+pub enum RulesSource {
     Embedded,
     Dev(PathBuf),
 }
 
 impl RulesSource {
-    pub(crate) fn from_env() -> Self {
+    pub fn from_env() -> Self {
         match std::env::var_os(RULES_DIR_ENV) {
             Some(value) if !value.is_empty() => RulesSource::Dev(PathBuf::from(value)),
             _ => RulesSource::Embedded,
@@ -199,7 +199,7 @@ impl Loader for ImpLoader {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ModuleKind {
+pub enum ModuleKind {
     BuiltIn,
     Build,
     Extension,
@@ -208,26 +208,26 @@ pub(crate) enum ModuleKind {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum ModuleSource {
+pub enum ModuleSource {
     File(PathBuf),
     Embedded(&'static str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ModuleForm {
+pub enum ModuleForm {
     Direct,
     Index,
     Build,
 }
 
-pub(crate) struct WorkspaceModuleResolution {
-    pub(crate) name: String,
-    pub(crate) source: ModuleSource,
-    pub(crate) kind: ModuleKind,
-    pub(crate) form: ModuleForm,
+pub struct WorkspaceModuleResolution {
+    pub name: String,
+    pub source: ModuleSource,
+    pub kind: ModuleKind,
+    pub form: ModuleForm,
 }
 
-pub(crate) fn resolve_workspace_module(
+pub fn resolve_workspace_module(
     root: &Path,
     rules: &RulesSource,
     name: &str,
@@ -403,7 +403,7 @@ fn embedded_module(
 /// a file under the workspace root wins, with the built-in rules tree as a
 /// fallback for `//rules/...` addresses. Returns `Ok(None)` when no source
 /// has the file.
-pub(crate) fn resolve_workspace_file(
+pub fn resolve_workspace_file(
     root: &Path,
     rules: &RulesSource,
     name: &str,
@@ -450,10 +450,7 @@ pub(crate) fn resolve_workspace_file(
     Ok(None)
 }
 
-pub(crate) fn validate_workspace_module_path(
-    name: &str,
-    rel: &str,
-) -> std::result::Result<(), String> {
+pub fn validate_workspace_module_path(name: &str, rel: &str) -> std::result::Result<(), String> {
     if rel.starts_with('/') {
         return Err(format!("workspace module '{name}' must be relative to //"));
     }
@@ -471,7 +468,7 @@ pub(crate) fn validate_workspace_module_path(
     Ok(())
 }
 
-pub(crate) fn module_kind(root: &Path, rules: &RulesSource, name: &str) -> ModuleKind {
+pub fn module_kind(root: &Path, rules: &RulesSource, name: &str) -> ModuleKind {
     if name == "imp:core" {
         ModuleKind::BuiltIn
     } else if name == WORKSPACE_FILE {
@@ -485,7 +482,7 @@ pub(crate) fn module_kind(root: &Path, rules: &RulesSource, name: &str) -> Modul
     }
 }
 
-pub(crate) fn module_location(root: &Path, rules: &RulesSource, name: &str) -> String {
+pub fn module_location(root: &Path, rules: &RulesSource, name: &str) -> String {
     if name == "imp:core" {
         return "built-in imp:core".to_owned();
     }

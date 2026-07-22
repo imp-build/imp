@@ -1,0 +1,34 @@
+[package]
+name = "imp-engine"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Exposes test-only helpers (execute_goal_live, SelectorContext::root) used by
+# imp's own tests, without linking them into the production binary.
+test-support = []
+
+[dependencies]
+imp-store = { path = "../imp-store" }
+imp-exec-api = { path = "../imp-exec-api" }
+imp-execution = { path = "../imp-execution" }
+imp-daemon = { path = "../imp-daemon" }
+imp-scheduler = { path = "../imp-scheduler" }
+imp-exec-bridge = { path = "../imp-exec-bridge" }
+imp-logging = { path = "../imp-logging" }
+anyhow.workspace = true
+clap.workspace = true
+regex.workspace = true
+walkdir.workspace = true
+include_dir.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rquickjs.workspace = true
+tokio.workspace = true
+log.workspace = true
+indicatif.workspace = true
+
+[dev-dependencies]
+imp-logging = { path = "../imp-logging", features = ["test-support"] }
+tempfile.workspace = true
+sha2.workspace = true

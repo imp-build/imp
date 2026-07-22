@@ -16,12 +16,12 @@ use anyhow::{bail, Context, Result};
 /// Selectors without a leading `//` are relative to `package`; `//`-prefixed
 /// selectors are always workspace-relative.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct SelectorContext {
+pub struct SelectorContext {
     package: String,
 }
 
 impl SelectorContext {
-    pub(crate) fn for_invocation(workspace_root: &Path, current_dir: &Path) -> Result<Self> {
+    pub fn for_invocation(workspace_root: &Path, current_dir: &Path) -> Result<Self> {
         let relative = current_dir.strip_prefix(workspace_root).with_context(|| {
             format!(
                 "invocation directory {} is outside workspace {}",
@@ -44,8 +44,8 @@ impl SelectorContext {
         Ok(Self { package })
     }
 
-    #[cfg(test)]
-    pub(crate) fn root() -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn root() -> Self {
         Self::default()
     }
 
@@ -141,7 +141,7 @@ impl ParsedSelector {
     }
 }
 
-pub(crate) fn select_roots_in<'a>(
+pub fn select_roots_in<'a>(
     workspace: &'a Workspace,
     dynamic: &'a BTreeMap<String, Target>,
     goal: &Goal,
@@ -238,7 +238,7 @@ pub(crate) fn select_roots_in<'a>(
 }
 
 #[cfg(test)]
-pub(crate) fn select_roots<'a>(
+pub fn select_roots<'a>(
     workspace: &'a Workspace,
     dynamic: &'a BTreeMap<String, Target>,
     goal: &Goal,
@@ -259,7 +259,7 @@ pub(crate) fn select_roots<'a>(
 /// error. Unknown addresses are ignored — the caller derived them from the
 /// same workspace, so a miss only means an expander-owned address that never
 /// materialized.
-pub(crate) fn select_roots_for_addresses<'a>(
+pub fn select_roots_for_addresses<'a>(
     workspace: &'a Workspace,
     dynamic: &'a BTreeMap<String, Target>,
     goal: &Goal,
@@ -291,7 +291,7 @@ fn goal_product_for_kind(workspace: &Workspace, goal: &Goal, kind: &str) -> Opti
         .then(|| goal.product.clone())
 }
 
-pub(crate) fn select_targets_in<'a>(
+pub fn select_targets_in<'a>(
     workspace: &'a Workspace,
     selectors: &[String],
     context: &SelectorContext,
