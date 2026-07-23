@@ -177,6 +177,17 @@ function zigEnvExportStmts(compilerEnv) {
 // we're building or (re-)running ctest.
 async function resolveCmakeSetup(handle) {
 	const srcPath = declared_path(handle, handle.attrs.src || ".");
+	// Deliberately keyed off srcPath, not targetOutputSlug(handle) (unlike
+	// odin/c/rust's own default output paths) — expandCmakeProject mints one
+	// cc_library/cc_binary/cc_test child per discovered CMake target, each
+	// under its own address, but only forwards the parent's *explicit*
+	// attrs.buildDir (see expandCmakeProject below); when that's unset, every
+	// child must independently re-derive the exact same buildDirPath the
+	// parent's own configure/build already populated, or a child's own
+	// buildCmakeArtifact() would look for its (already-built) outputs under a
+	// build directory that was never actually configured. srcPath is the one
+	// value every expanded child shares with its parent (all pass the same
+	// `src`), so it's the only safe default key here.
 	const buildDirPath =
 		handle.attrs.buildDir || `build/${srcPath === "." ? "cmake" : srcPath}`;
 	const mode = configuration("imp.mode", {}) || {};

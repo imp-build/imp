@@ -445,9 +445,15 @@ describe("Odin rules", () => {
 		}
 	});
 
-	test("default_output_path(handle) derives build/odin/<name> from the handle's label", () => {
-		const fakeHandle = { label: { name: "hello" } };
-		expect(default_output_path(fakeHandle)).toBe("build/odin/hello");
+	test("default_output_path(handle) derives build/odin/<slug> from the handle's address", () => {
+		const pkg = odinPackage({
+			srcs: ["rules/odin/index.js"],
+			toolchain: LOCKED_TEST_VERSION,
+		});
+		// Anonymous in this test (never exported from a BUILD.js), so it falls
+		// back to the handle id slug — same fallback default_output_path shares
+		// with every other rule's own targetOutputSlug()-derived output path.
+		expect(default_output_path(pkg)).toBe(`build/odin/anon-${pkg.__id}`);
 	});
 
 	test("odin_output_path appends .a for library build mode, leaves binaries alone", () => {

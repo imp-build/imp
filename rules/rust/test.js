@@ -29,6 +29,7 @@ import {
 	registerTarget,
 	run,
 	targetAddress,
+	targetOutputSlug,
 	BUILD,
 	TEST,
 } from "imp:core";
@@ -275,7 +276,7 @@ const buildTestBinaries = memo(async function buildTestBinaries(handle) {
 		);
 		const { files: srcs } = await sources(handle);
 		const resourceInputs = await resources(handle);
-		const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
+		const buildDir = output_path(`build/rust/${targetOutputSlug(handle)}`);
 
 		const script = cargoInvocationScript(
 			'cargo test --locked --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
@@ -395,7 +396,7 @@ export class RustTest extends Target {
 				// its way back to the exact handle buildTestBinaries is memo()'d
 				// on, so every sibling shares one build.
 				...(cargoPackage ? [{ target: cargoPackage }] : []),
-				...(toolchain ? [{ target: toolchain }] : []),
+				...(toolchain ? [{ target: toolchain, mode: "tool" }] : []),
 				...normalizedDeps.map((target) => ({ target })),
 				...normalizedTestTools.map((target) => ({ target, mode: "tool" })),
 			],

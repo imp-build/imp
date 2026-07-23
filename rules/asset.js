@@ -67,7 +67,11 @@ export const sources = memo(async function sources(handle) {
 export class Asset extends Target {
 	static kind = "asset";
 	constructor({ srcs }) {
-		super({ kind: Asset.kind, attrs: { sources: srcs } });
+		super({
+			kind: Asset.kind,
+			attrs: { sources: srcs },
+			sources: sourcesField({ root: ".", include: srcs }),
+		});
 	}
 }
 

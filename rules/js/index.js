@@ -3,6 +3,7 @@ import {
 	glob,
 	memo,
 	registerBuildRule,
+	sourcesField,
 	targetAddress,
 } from "imp:core";
 
@@ -67,6 +68,15 @@ export function declared_path(handle, path = ".") {
 // Memo functions
 // ---------------------------------------------------------------------------
 
+const JS_SOURCE_INCLUDES = [
+	"package.json",
+	"*.js",
+	"*.jsx",
+	"*.ts",
+	"*.tsx",
+	"*.json",
+];
+
 // Single-directory level only, never `**/` — a JsSources target owns
 // exactly the files in its own declared directory, not any nested
 // directory's files. Nested directories with their own sources are always
@@ -76,10 +86,7 @@ export function declared_path(handle, path = ".") {
 // would.
 export const sources = memo(async function sources(handle) {
 	const root = declared_path(handle, handle.attrs.src || ".");
-	return glob({
-		root,
-		include: ["package.json", "*.js", "*.jsx", "*.ts", "*.tsx", "*.json"],
-	});
+	return glob({ root, include: JS_SOURCE_INCLUDES });
 });
 
 // Just the files a formatter rewrites, scoped to this target's own
@@ -98,7 +105,12 @@ export const js_file_sources = memo(async function js_file_sources(handle) {
 export class JsSources extends Target {
 	static kind = "js-sources";
 	constructor({ src = ".", deps = [] } = {}) {
-		super({ kind: JsSources.kind, attrs: { src }, deps });
+		super({
+			kind: JsSources.kind,
+			attrs: { src },
+			sources: sourcesField({ root: src, include: JS_SOURCE_INCLUDES }),
+			deps,
+		});
 	}
 }
 

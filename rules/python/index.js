@@ -8,6 +8,7 @@ import {
 	product,
 	registerBuildRule,
 	run,
+	sourcesField,
 	targetAddress,
 	BUILD,
 	PACKAGE,
@@ -137,9 +138,15 @@ export function declared_path(handle, path = ".") {
 // Memo/product functions
 // ---------------------------------------------------------------------------
 
+export const PYTHON_PROJECT_SOURCE_INCLUDES = [
+	"pyproject.toml",
+	"uv.lock",
+	"**/*.py",
+];
+
 export const sources = memo(async function sources(handle) {
 	const root = declared_path(handle, handle.attrs.src || ".");
-	return glob({ root, include: ["pyproject.toml", "uv.lock", "**/*.py"] });
+	return glob({ root, include: PYTHON_PROJECT_SOURCE_INCLUDES });
 });
 
 // Just the .py files a formatter rewrites, scoped to this target's own
@@ -223,6 +230,10 @@ export class PythonApp extends Target {
 					? { deps: allDeps.map((dep) => dep.target || dep) }
 					: {}),
 			},
+			sources: sourcesField({
+				root: src,
+				include: PYTHON_PROJECT_SOURCE_INCLUDES,
+			}),
 			deps: allDeps,
 		});
 	}

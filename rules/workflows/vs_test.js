@@ -32,8 +32,12 @@ describe("vs workflow", () => {
 			expect(labels).toEqual(["Build hello (Debug)", "Build hello (Release)"]);
 			// rules/odin/example:hello has a main entrypoint, so its real output
 			// path (via odinPackageAnalysis + odin_output_path, not guessed) has
-			// no ".a" suffix.
-			expect(tasks[0].output).toBe("${workspaceRoot}\\build\\odin\\hello.exe");
+			// no ".a" suffix. The directory component is the target's own
+			// address slug (rules/odin/example:hello), not just its bare name —
+			// see targetOutputSlug in imp:core.
+			expect(tasks[0].output).toBe(
+				"${workspaceRoot}\\build\\odin\\rules_odin_example_hello.exe",
+			);
 		});
 	});
 });

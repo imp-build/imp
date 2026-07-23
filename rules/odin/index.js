@@ -20,6 +20,7 @@ import {
 	configuration,
 	hydrateTarget,
 	targetAddress,
+	targetOutputSlug,
 	targetRef,
 	workspaceTargets,
 	logInfo,
@@ -171,6 +172,19 @@ function normalize_deps(deps) {
 	return deps
 		.map((d) => (d && d.__imp ? d : d && d.target ? d.target : null))
 		.filter(Boolean);
+}
+
+// `collections` may be target handles (see package_collection_entries)
+// instead of plain `{ name, path }` config entries — when it is, those
+// handles are real dependency edges (the collection's own package/sources
+// must be built/present), so they need to be listed explicitly alongside
+// toolchain/deps rather than left for attrs auto-discovery to find.
+function collection_dep_handles(collections) {
+	return Array.isArray(collections) &&
+		collections.length > 0 &&
+		collections.every((col) => col && col.__imp === true)
+		? collections
+		: [];
 }
 
 /**
@@ -688,7 +702,7 @@ export const tool = memo(async function tool(handle) {
 });
 
 export function default_output_path(handle) {
-	return `build/odin/${handle.label.name}`;
+	return `build/odin/${targetOutputSlug(handle)}`;
 }
 
 export function odin_output_path(out, analysis) {
@@ -872,6 +886,12 @@ export class OdinPackage extends Target {
 			exclude = ["*_test.odin", "test_*.odin"];
 		}
 
+		const allDeps = [
+			...(toolchainHandle ? [{ target: toolchainHandle, mode: "tool" }] : []),
+			...normalizedDeps.map((target) => ({ target })),
+			...collection_dep_handles(collections).map((target) => ({ target })),
+		];
+
 		super({
 			kind: OdinPackage.kind,
 			attrs: {
@@ -889,6 +909,7 @@ export class OdinPackage extends Target {
 				include: srcs,
 				exclude,
 			}),
+			deps: allDeps,
 		});
 	}
 }
@@ -952,6 +973,12 @@ export class OdinTestPackage extends Target {
 		srcs = package_srcs({ srcs });
 		exclude = exclude || [];
 
+		const allDeps = [
+			...(toolchainHandle ? [{ target: toolchainHandle, mode: "tool" }] : []),
+			...normalizedDeps.map((target) => ({ target })),
+			...collection_dep_handles(collections).map((target) => ({ target })),
+		];
+
 		super({
 			kind: OdinTestPackage.kind,
 			attrs: {
@@ -968,6 +995,7 @@ export class OdinTestPackage extends Target {
 				include: srcs,
 				exclude,
 			}),
+			deps: allDeps,
 		});
 	}
 }

@@ -36,7 +36,7 @@ export class CargoPackage extends Target {
 		const normalizedDeps = normalize_deps(deps);
 		const normalizedTestTools = normalize_deps(testTools);
 		const allDeps = [
-			...(toolchainHandle ? [{ target: toolchainHandle }] : []),
+			...(toolchainHandle ? [{ target: toolchainHandle, mode: "tool" }] : []),
 			...normalizedDeps.map((target) => ({ target })),
 			...normalizedTestTools.map((target) => ({ target, mode: "tool" })),
 		];

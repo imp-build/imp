@@ -1063,6 +1063,29 @@ export function targetAddress(handle) {
 }
 
 /**
+ * Stable, path-safe slug derived from a target's own address — the shared
+ * basis for a buildable target's default output path, so two same-named
+ * targets declared in different directories never collide (e.g.
+ * `//foo:app` and `//bar:app` produce `foo_app` and `bar_app`, not `app`
+ * twice). Falls back to the numeric handle id for anonymous (unaddressed)
+ * handles, e.g. in tests that build targets without exporting them from a
+ * BUILD.js.
+ *
+ * @param {object} handle A target handle returned by target().
+ * @returns {string}
+ */
+export function targetOutputSlug(handle) {
+	let address;
+	try {
+		address = targetAddress(handle);
+	} catch (_) {
+		address = null;
+	}
+	if (!address) return `anon-${handle.__id}`;
+	return address.replace(/^\/\//, "").replace(/[:/]/g, "_");
+}
+
+/**
  * List loaded workspace targets.
  *
  * Anonymous target handles created outside BUILD exports are omitted because

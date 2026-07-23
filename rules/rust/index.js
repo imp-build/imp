@@ -15,6 +15,7 @@ import {
 	run,
 	sourcesField,
 	targetAddress,
+	targetOutputSlug,
 	workspaceTargets,
 	BUILD,
 	PACKAGE,
@@ -472,7 +473,7 @@ export const cargoBuild = product(
 		const mode = configuration("imp.mode", {}) || {};
 		const release = handle.attrs.release || mode.opt === "release";
 		const profile = release ? "release" : "debug";
-		const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
+		const buildDir = output_path(`build/rust/${targetOutputSlug(handle)}`);
 		const plat = platformInfo();
 		const exeSuffix = plat.os === "windows" ? ".exe" : "";
 		const outPaths = handle.attrs.bins.map(

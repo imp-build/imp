@@ -4,6 +4,7 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
+import { targetOutputSlug } from "imp:core";
 import {
 	parseTestBinaries,
 	rustTestBuild,
@@ -114,7 +115,7 @@ describe("rust test fan-out", () => {
 			host.setRunStdout(
 				"cargo test --no-run rules/rust/example",
 				fakeCompilerArtifactStdout(
-					"build/rust/rules/rust/example",
+					`build/rust/${targetOutputSlug(cargoPackage)}`,
 					"hello",
 					"bin",
 					"debug/deps/hello-abc123",
@@ -145,7 +146,7 @@ describe("rust test fan-out", () => {
 			host.setRunStdout(
 				"cargo test --no-run rules/rust/example",
 				fakeCompilerArtifactStdout(
-					"build/rust/rules/rust/example",
+					`build/rust/${targetOutputSlug(cargoPackage)}`,
 					"hello",
 					"bin",
 					"debug/deps/hello-abc123",
@@ -163,7 +164,7 @@ describe("rust test fan-out", () => {
 
 			const testRun = host.runs[host.runs.length - 1];
 			expect(testRun.argv[0]).toBe(
-				"build/rust/rules/rust/example/debug/deps/hello-abc123",
+				`build/rust/${targetOutputSlug(cargoPackage)}/debug/deps/hello-abc123`,
 			);
 			expect(testRun.argv).toContain("--test-threads=1");
 			expect(testRun.argv).toContain("--nocapture");
@@ -179,7 +180,7 @@ describe("rust test fan-out", () => {
 			host.setRunStdout(
 				"cargo test --no-run rules/rust/example",
 				fakeCompilerArtifactStdout(
-					"build/rust/rules/rust/example",
+					`build/rust/${targetOutputSlug(cargoPackage)}`,
 					"hello",
 					"bin",
 					"debug/deps/hello-abc123",

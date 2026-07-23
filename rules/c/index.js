@@ -19,6 +19,7 @@ import {
 	run,
 	sourcesField,
 	targetAddress,
+	targetOutputSlug,
 	workspaceTargets,
 	toolName,
 	BUILD,
@@ -168,21 +169,12 @@ function is_cxx_source(path) {
 }
 
 function object_path_for(handle, source) {
-	const label = safe_target_address(handle)
-		? targetAddress(handle)
-				.slice(2)
-				.replace(/[^A-Za-z0-9_.-]/g, "_")
-		: `target_${handle.__id}`;
 	const name = source.replace(/[^A-Za-z0-9_.-]/g, "_");
-	return `build/c/${label}/${name}.o`;
+	return `build/c/${targetOutputSlug(handle)}/${name}.o`;
 }
 
 function default_output_path(handle, extension) {
-	const address = safe_target_address(handle);
-	const name = address
-		? address.slice(address.lastIndexOf(":") + 1)
-		: `target_${handle.__id}`;
-	return `build/c/${name}${extension}`;
+	return `build/c/${targetOutputSlug(handle)}${extension}`;
 }
 
 function shell_quote(value) {

@@ -5,9 +5,14 @@
 // pythonApp, a test run never needs to be packaged first, so this syncs its
 // own throwaway venv directly via uv, independent of PythonApp.
 
-import { Target, glob, product, run, TEST } from "imp:core";
+import { Target, glob, product, run, sourcesField, TEST } from "imp:core";
 
-import { declared_path, sandboxRootEnvExports, sources } from "//rules/python";
+import {
+	declared_path,
+	PYTHON_PROJECT_SOURCE_INCLUDES,
+	sandboxRootEnvExports,
+	sources,
+} from "//rules/python";
 
 import {
 	defaultUvToolchain,
@@ -48,6 +53,10 @@ export class PythonTest extends Target {
 					? { deps: allDeps.map((dep) => dep.target || dep) }
 					: {}),
 			},
+			sources: sourcesField({
+				root: src,
+				include: PYTHON_PROJECT_SOURCE_INCLUDES,
+			}),
 			deps: allDeps,
 		});
 	}

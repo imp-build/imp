@@ -11,7 +11,9 @@ import {
 	product,
 	productFor,
 	run,
+	sourcesField,
 	targetAddress,
+	targetOutputSlug,
 	BUILD,
 	PACKAGE,
 } from "imp:core";
@@ -76,14 +78,11 @@ function declared_path(handle, path = ".") {
 	return normalize_workspace_path(`${base}/${local}`);
 }
 
-// Stable, path-safe slug for a target's own scratch-output directory. Falls
-// back to the numeric handle id for anonymous (unaddressed) handles, e.g. in
-// tests that build targets without exporting them from a BUILD.js.
-function target_output_slug(handle) {
-	const address = safe_target_address(handle);
-	if (!address) return `anon-${handle.__id}`;
-	return address.replace(/^\/\//, "").replace(/[:/]/g, "_");
-}
+// Every other rule module's default output path is now keyed the same way
+// (see targetOutputSlug in imp:core) — kept as a local alias since this
+// file's own scratch-output paths (oci-build/oci-package) were already using
+// this scheme before the others caught up.
+const target_output_slug = targetOutputSlug;
 
 // Best-effort registry host extraction from a "repo" or "repo:tag" string,
 // for threading into craneAuthTools(). Mirrors crane's own default-registry
@@ -427,6 +426,18 @@ export class OciBuild extends Target {
 				...(user ? { user } : {}),
 				...(workdir ? { workdir } : {}),
 			},
+			sources: layers
+				.filter(
+					(layer) =>
+						layer && Array.isArray(layer.srcs) && layer.srcs.length > 0,
+				)
+				.map((layer) =>
+					sourcesField({
+						root: path,
+						include: layer.srcs,
+						exclude: layer.exclude || [],
+					}),
+				),
 			deps: baseHandle ? [{ target: baseHandle }] : [],
 		});
 	}

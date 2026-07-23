@@ -171,17 +171,23 @@ export class PythonSources extends Target {
 		) {
 			throw new Error("pythonSources source patterns must be direct (no '**')");
 		}
+		const normalizedRoot = normalize_workspace_path(root);
 		super({
 			kind: PythonSources.kind,
 			attrs: {
-				root: normalize_workspace_path(root),
+				root: normalizedRoot,
 				sources,
 				runtime,
 				uvVersion,
 				deps,
 				...(project ? { project } : {}),
 			},
-			deps: [runtime, ...deps, ...(project ? [project] : [])],
+			sources: sourcesField({ root: `//${normalizedRoot}`, include: sources }),
+			deps: [
+				{ target: runtime, mode: "tool" },
+				...deps.map((target) => ({ target })),
+				...(project ? [{ target: project }] : []),
+			],
 		});
 	}
 }
@@ -232,7 +238,11 @@ export class PythonSource extends Target {
 				...(project ? { projectPath: project.attrs.path } : {}),
 			},
 			sources: sourcesField({ root: "//", include: [file] }),
-			deps: [runtime, ...deps, ...(project ? [project] : [])],
+			deps: [
+				{ target: runtime, mode: "tool" },
+				...deps.map((target) => ({ target })),
+				...(project ? [{ target: project }] : []),
+			],
 		});
 	}
 }
