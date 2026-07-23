@@ -43,6 +43,7 @@ import { defaultGccToolchain } from "//rules/c/gcc/toolchain";
 import {
 	wholeWorkspaceFor,
 	workspaceClosureFor,
+	workspaceRootRelativeFor,
 } from "//rules/rust/workspace_closure";
 
 import { resources as resource_package_sources } from "//rules/asset";
@@ -233,6 +234,33 @@ export async function resourcesForDirs(dirs) {
 	if (handles.length === 0) return file_set.literal([]);
 	const sets = await Promise.all(handles.map(resources));
 	return sets.length === 1 ? sets[0] : file_set.union(...sets);
+}
+
+// Union of every declared cargo-package target's own testTools within
+// `dirs` — same rationale as resourcesForDirs above, for the shared
+// whole-workspace doc-test run (runWorkspaceDocTests below), which actually
+// *runs* every member's doc-tests in one process and so needs every
+// member's own testTools on PATH, not just the one crate that happened to
+// trigger the shared task. Deduplicated by target handle identity: a
+// testTools entry is always a shared target-constant reference (e.g.
+// rules/imp/native_tool's testTar/testGzip/testGit, imported by every
+// BUILD.js that uses them), so reference equality is enough — no two
+// distinct nativeTool() targets are ever meant to collapse into one mount.
+async function testToolsForDirs(dirs) {
+	const dirSet = new Set(dirs);
+	const handles = workspaceTargets("cargo-package")
+		.map(({ handle }) => handle)
+		.filter((h) => dirSet.has(declared_path(h, h.attrs.path || ".")));
+	const seen = new Set();
+	const specs = [];
+	for (const h of handles) {
+		for (const toolHandle of h.attrs.testTools || []) {
+			if (seen.has(toolHandle)) continue;
+			seen.add(toolHandle);
+			specs.push(await nativeToolSpec(toolHandle));
+		}
+	}
+	return specs;
 }
 
 export function rust_toolchain_version(handle) {
@@ -493,6 +521,129 @@ export const cargoDistPackage = product(
 	},
 );
 
+// Parses `cargo test --doc --workspace --no-fail-fast` stderr for per-crate
+// attribution. Doc-tests have no `--message-format=json` equivalent (an
+// upstream cargo limitation — unlike clippy, there's no structured output
+// mode for `--doc`), so this relies on two distinct textual markers cargo
+// prints instead:
+//
+//   - a `   Doc-tests <lib_name>` status header once per package cargo
+//     actually attempted (confirmed directly: cargo pads every status verb
+//     to the same column, so leading whitespace varies — 3 spaces for
+//     "Doc-tests", 4 for "Finished", etc. — hence the flexible `\s*`).
+//     `lib_name` is the lib/proc-macro target's own name, always
+//     underscored (e.g. "imp_daemon"), NOT the package name.
+//   - a `` `-p <package_name> --doc` `` reference once per package whose
+//     doc-tests failed — printed both inline right after that package's own
+//     failure and again in the trailing "N targets failed" summary, so a
+//     global match naturally dedupes via the Set. `package_name` here is
+//     the literal package name (hyphens intact, as declared in Cargo.toml)
+//     — never interchangeable with the header's underscored lib_name.
+//
+// @param {string} stderr
+// @returns {{ attemptedLibNames: Set<string>, failedPackageNames: Set<string> }}
+export function parseDocTestOutput(stderr) {
+	const attemptedLibNames = new Set(
+		[...stderr.matchAll(/^\s*Doc-tests (\S+)\s*$/gm)].map((m) => m[1]),
+	);
+	const failedPackageNames = new Set(
+		[...stderr.matchAll(/`-p (\S+) --doc`/g)].map((m) => m[1]),
+	);
+	return { attemptedLibNames, failedPackageNames };
+}
+
+// Shared, memoized `cargo test --doc --workspace --no-fail-fast` run for one
+// real workspace root + toolchain configuration — same collapsing rationale
+// as runWorkspaceClippy (rules/rust/lint.js) and buildWorkspaceTestBinaries
+// (rules/rust/test.js): every workspaceMember crate's own doc-test
+// invocation would otherwise independently recompile the same internal
+// dependency graph from an empty per-sandbox target-dir, once per crate
+// that (transitively) depends on it, instead of once for the whole real
+// workspace.
+//
+// `--no-fail-fast` is load-bearing, not cosmetic: plain `cargo test --doc
+// --workspace` stops at the very first package whose doc-tests fail and
+// never even attempts any package ordered after it — confirmed directly
+// against real cargo (1.94), not assumed. Without it, one crate's doctest
+// failure would silently swallow every later crate's doctest result for
+// that run: a real regression from today's fully independent per-crate
+// invocations, not just lost signal.
+//
+// Uses its own `build/rust-doctest/` tree rather than reusing
+// buildWorkspaceTestBinaries'/cargoBuild's `build/rust/` — purely for
+// output-path/log hygiene (matching runWorkspaceClippy's own
+// `build/rust-clippy/` tree), not to avoid any lock contention: every
+// run() executes in its own ephemeral sandbox (see
+// crates/imp-execution/src/exec.rs), so a `target_dir` argument is never
+// actually shared storage between concurrent invocations unless explicitly
+// bound through a `named_cache` — which none of these are.
+const runWorkspaceDocTests = memo(
+	async function runWorkspaceDocTests(
+		workspaceRootRelative,
+		toolchainVersion,
+		toolchainHandle,
+	) {
+		const toolSpec = await rustTool(toolchainVersion);
+		const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
+		const {
+			tools: linkerTools,
+			rustflags,
+			env: linkerEnv,
+		} = await rustLinkerTools(toolchainHandle);
+		const {
+			tools: cacheTools,
+			env: cacheEnv,
+			scriptPreamble,
+		} = await rustBuildCacheTools(toolchainHandle);
+		const { tools: rustTools, env: rustEnv } = rustToolEnv(
+			toolSpec,
+			kacheActive,
+		);
+
+		const { memberDirs, docTestNames } = await wholeWorkspaceFor(
+			workspaceRootRelative,
+			toolchainVersion,
+		);
+		const { files: srcs } = await wholeWorkspaceSources(
+			workspaceRootRelative,
+			toolchainVersion,
+		);
+		const resourceInputs = await resourcesForDirs(memberDirs);
+		const testTools = await testToolsForDirs(memberDirs);
+
+		const prefix =
+			workspaceRootRelative === "." ? "" : `${workspaceRootRelative}/`;
+		const script = cargoInvocationScript(
+			'cargo test --locked --doc --workspace --no-fail-fast --manifest-path "$manifest" ' +
+				'--target-dir "$target_dir"',
+			{ scriptPreamble, kacheActive },
+		);
+
+		const result = await run({
+			argv: [
+				"sh",
+				"-c",
+				script,
+				"cargo-doctest-workspace",
+				`${prefix}Cargo.toml`,
+				`build/rust-doctest/${workspaceRootRelative === "." ? "root" : workspaceRootRelative}`,
+				rustflags,
+			],
+			tools: [...rustTools, ...linkerTools, ...cacheTools, ...testTools],
+			env: [...rustEnv, ...linkerEnv, ...cacheEnv],
+			inputs: [srcs, resourceInputs],
+			allowFailure: true,
+			display: `cargo test --doc --workspace ${workspaceRootRelative}`,
+		});
+
+		const { attemptedLibNames, failedPackageNames } = parseDocTestOutput(
+			result.stderr,
+		);
+
+		return { result, docTestNames, attemptedLibNames, failedPackageNames };
+	},
+);
+
 /**
  * Run a Cargo binary crate's doc-tests.
  *
@@ -504,6 +655,13 @@ export const cargoDistPackage = product(
  * through a real `cargo test`), so this stays scoped to `--doc` as the one
  * piece the fan-out can't cover.
  *
+ * A `workspaceMember` crate's doc-tests run as one shared, memoized `cargo
+ * test --doc --workspace` invocation per real workspace root (see
+ * runWorkspaceDocTests above), attributed back to this one crate by name —
+ * same reasoning and precedent as cargoClippy/runWorkspaceClippy
+ * (rules/rust/lint.js). A standalone crate has no workspace to share a run
+ * with, so it keeps the simple per-crate `cargo test --doc` invocation.
+ *
  * @param {object} handle Target handle returned by cargoPackage().
  * @returns {Promise<object>} Run result from `cargo test --doc`.
  */
@@ -512,8 +670,60 @@ export const cargoTest = product(
 	TEST,
 	RUST_TOOL,
 	async function cargoTest(handle) {
-		const toolSpec = await rustTool(rust_toolchain_version(handle));
+		const path = declared_path(handle, handle.attrs.path || ".");
+		const toolchainVersion = rust_toolchain_version(handle);
 		const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+
+		if (handle.attrs.workspaceMember) {
+			const workspaceRootRelative = await workspaceRootRelativeFor(
+				path,
+				toolchainVersion,
+			);
+			const { result, docTestNames, attemptedLibNames, failedPackageNames } =
+				await runWorkspaceDocTests(
+					workspaceRootRelative,
+					toolchainVersion,
+					toolchainHandle,
+				);
+
+			const info = docTestNames.get(path);
+			if (!info || !info.libName) {
+				// No lib/proc-macro target (e.g. a bin-only crate) — cargo
+				// silently skips it under `--workspace` (confirmed directly;
+				// unlike naming it explicitly via a standalone `--doc`
+				// invocation, which hard-errors — see the standalone branch
+				// below), so there's nothing to attribute and nothing failed.
+				return result;
+			}
+
+			const context =
+				`cargo test --doc --workspace ${workspaceRootRelative} ` +
+				`(shared run, covers every workspace member):\n\n` +
+				`${result.stdout}\n${result.stderr}`;
+
+			if (failedPackageNames.has(info.packageName)) {
+				throw new Error(
+					`doc-tests failed for ${info.packageName} (//${path}):\n\n${context}`,
+				);
+			}
+			if (!attemptedLibNames.has(info.libName)) {
+				// Has a lib target but never got its own "Doc-tests" header —
+				// the shared run hit a real compile error before reaching this
+				// crate. Don't claim a clean pass; surface the whole run so the
+				// actual problem is visible (mirrors cargoClippy's same
+				// fallback for an unattributed non-zero exit).
+				throw new Error(
+					`doc-tests for ${info.packageName} (//${path}) were never reached — ` +
+						`likely a compile error elsewhere in the shared workspace run:\n\n${context}`,
+				);
+			}
+			return result;
+		}
+
+		// Standalone (non-workspaceMember) crate: no workspace to share a run
+		// with, so this stays a simple per-crate `cargo test --doc`
+		// invocation.
+		const toolSpec = await rustTool(toolchainVersion);
 		const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
 		const {
 			tools: linkerTools,
@@ -533,19 +743,14 @@ export const cargoTest = product(
 			(handle.attrs.testTools || []).map(nativeToolSpec),
 		);
 
-		const path = declared_path(handle, handle.attrs.path || ".");
 		const { files: srcs } = await sources(handle);
 		const resourceInputs = await resources(handle);
 		const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
 
-		// --workspace so member-crate doc-tests run too when the manifest is a
-		// workspace root; on a plain single crate it's a no-op. A generated
-		// workspace-member target must test only its own package, otherwise
-		// every member target redundantly retests the entire workspace using
-		// that member's narrower resources and test-tool declarations.
-		//
-		// --doc: see cargoTest's docstring above — everything else is covered
-		// by the rust_test fan-out in //rules/rust/test.js.
+		// --workspace: this standalone crate's own manifest may itself be a
+		// workspace root (e.g. rules/rust/example), in which case its own
+		// members' doc-tests should run too; on a plain single-package
+		// manifest it's a no-op.
 		//
 		// A bin-only crate (no `[lib]` target) has no doc-tests by
 		// definition, but `cargo test --doc` still hard-errors on it
@@ -576,7 +781,7 @@ export const cargoTest = product(
 				`${path}/Cargo.toml`,
 				buildDir,
 				rustflags,
-				...(handle.attrs.workspaceMember ? [] : ["--workspace"]),
+				"--workspace",
 				...handle.attrs.testArgs,
 			],
 			tools: [...rustTools, ...linkerTools, ...cacheTools, ...testTools],

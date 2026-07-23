@@ -10,6 +10,7 @@ import {
 	cargoPackage,
 	cargoTest,
 	declared_path,
+	parseDocTestOutput,
 	resources,
 	rustToolEnv,
 } from "//rules/rust";
@@ -233,41 +234,80 @@ describe("rust rules", () => {
 		});
 	});
 
-	test("cargoTest does not retest the whole workspace from a member target", async () => {
+	// A workspaceMember crate's cargoTest delegates to one shared, memoized
+	// `cargo test --doc --workspace --no-fail-fast` run per real workspace
+	// root (runWorkspaceDocTests, //rules/rust) instead of its own per-crate
+	// invocation — same collapsing rationale as runWorkspaceClippy
+	// (//rules/rust/lint). These tests fake both `cargo metadata` calls that
+	// path needs: `workspaceRootRelativeFor`'s "workspace closure" call
+	// (finds *which* real workspace this crate belongs to) and
+	// `wholeWorkspaceFor`'s "whole workspace" call (every real member, with
+	// each one's lib/package name for attribution).
+	function fakeWorkspaceMetadata(host) {
+		const originalRun = globalThis.__host_run;
+		globalThis.__host_run = async (opts) => {
+			const closureMatch = /^cargo metadata \(workspace closure\) (.+)$/.exec(
+				opts.display,
+			);
+			if (closureMatch) {
+				const path = closureMatch[1];
+				return {
+					stdout: JSON.stringify({
+						workspace_root: "/workspace",
+						packages: [
+							{
+								name: path.split("/").pop(),
+								manifest_path: `/workspace/${path}/Cargo.toml`,
+								dependencies: [],
+								targets: [],
+							},
+						],
+						workspace_members: [],
+					}),
+					stderr: "",
+					exitCode: 0,
+				};
+			}
+			if (opts.display === "cargo metadata (whole workspace) .") {
+				return {
+					stdout: JSON.stringify({
+						workspace_root: "/workspace",
+						workspace_members: ["store-id", "imp-id"],
+						packages: [
+							{
+								id: "store-id",
+								name: "imp-store",
+								manifest_path: "/workspace/crates/imp-store/Cargo.toml",
+								targets: [{ name: "imp_store", kind: ["lib"] }],
+							},
+							{
+								id: "imp-id",
+								name: "imp",
+								manifest_path: "/workspace/crates/imp/Cargo.toml",
+								targets: [{ name: "imp", kind: ["bin"] }],
+							},
+						],
+					}),
+					stderr: "",
+					exitCode: 0,
+				};
+			}
+			return originalRun(opts);
+		};
+		return () => {
+			globalThis.__host_run = originalRun;
+		};
+	}
+
+	test("cargoTest runs one shared, workspace-wide doc-test invocation for a member target", async () => {
 		await withRustHost(async (host) => {
 			rustToolchain("1.93.0", { default: true, unverified: true });
 			gccToolchain("2025.08-1", { default: true, unverified: true });
-
-			// `sources()` now resolves a `workspaceMember` crate's own
-			// transitive path-dependency closure via `cargo metadata
-			// --no-deps` (//rules/rust/workspace_closure) before it can build
-			// the full/shallow inputs cargoTest needs — fake that one
-			// `run()` call's stdout, rather than the default empty-stdout stub.
-			const originalRun = globalThis.__host_run;
-			globalThis.__host_run = async (opts) => {
-				if (
-					opts.display ===
-					"cargo metadata (workspace closure) crates/imp-store"
-				) {
-					return {
-						stdout: JSON.stringify({
-							workspace_root: "/workspace",
-							packages: [
-								{
-									name: "imp-store",
-									manifest_path: "/workspace/crates/imp-store/Cargo.toml",
-									dependencies: [],
-									targets: [],
-								},
-							],
-							workspace_members: [],
-						}),
-						stderr: "",
-						exitCode: 0,
-					};
-				}
-				return originalRun(opts);
-			};
+			const restore = fakeWorkspaceMetadata(host);
+			host.setRunStderr(
+				"cargo test --doc --workspace .",
+				"   Doc-tests imp_store\n",
+			);
 
 			const pkg = cargoPackage({
 				path: "crates/imp-store",
@@ -275,11 +315,90 @@ describe("rust rules", () => {
 			});
 
 			await cargoTest(pkg);
-
-			globalThis.__host_run = originalRun;
+			restore();
 
 			const testRun = host.runs[host.runs.length - 1];
-			expect(testRun.argv).not.toContain("--workspace");
+			expect(testRun.argv[2]).toContain("cargo test");
+			expect(testRun.argv[2]).toContain("--doc");
+			expect(testRun.argv[2]).toContain("--workspace");
+			expect(testRun.argv[2]).toContain("--no-fail-fast");
+			expect(testRun.argv).toContain("Cargo.toml");
+			expect(
+				testRun.argv.some((a) => a.startsWith("build/rust-doctest/")),
+			).toBe(true);
+		});
+	});
+
+	test("cargoTest passes for a member crate whose doc-tests ran and none of its own failed", async () => {
+		await withRustHost(async (host) => {
+			rustToolchain("1.93.0", { default: true, unverified: true });
+			gccToolchain("2025.08-1", { default: true, unverified: true });
+			const restore = fakeWorkspaceMetadata(host);
+			host.setRunStderr(
+				"cargo test --doc --workspace .",
+				"   Doc-tests imp_store\n",
+			);
+
+			const pkg = cargoPackage({
+				path: "crates/imp-store",
+				workspaceMember: true,
+			});
+
+			await cargoTest(pkg);
+			restore();
+		});
+	});
+
+	test("cargoTest fails for a member crate whose package name is in the shared run's failed-targets list", async () => {
+		await withRustHost(async (host) => {
+			rustToolchain("1.93.0", { default: true, unverified: true });
+			gccToolchain("2025.08-1", { default: true, unverified: true });
+			const restore = fakeWorkspaceMetadata(host);
+			host.setRunStderr(
+				"cargo test --doc --workspace .",
+				"   Doc-tests imp_store\n" +
+					"error: doctest failed, to rerun pass `-p imp-store --doc`\n" +
+					"error: 1 target failed:\n" +
+					"    `-p imp-store --doc`\n",
+			);
+
+			const pkg = cargoPackage({
+				path: "crates/imp-store",
+				workspaceMember: true,
+			});
+
+			let message = null;
+			try {
+				await cargoTest(pkg);
+			} catch (error) {
+				message = error.message;
+			}
+			restore();
+
+			expect(message).toContain("imp-store");
+		});
+	});
+
+	test("cargoTest is a no-op for a bin-only member crate (no lib target)", async () => {
+		await withRustHost(async (host) => {
+			rustToolchain("1.93.0", { default: true, unverified: true });
+			gccToolchain("2025.08-1", { default: true, unverified: true });
+			const restore = fakeWorkspaceMetadata(host);
+			// Shared run's stderr never mentions "imp" at all — cargo
+			// silently skips lib-less packages under `--workspace`.
+			host.setRunStderr(
+				"cargo test --doc --workspace .",
+				"   Doc-tests imp_store\n",
+			);
+
+			const pkg = cargoPackage({
+				path: "crates/imp",
+				bin: "imp",
+				workspaceMember: true,
+			});
+
+			await cargoTest(pkg);
+			restore();
 		});
 	});
 
@@ -523,5 +642,67 @@ describe("rust rules", () => {
 			);
 			expect(includesPath).toBe(true);
 		});
+	});
+});
+
+// Fixtures below are verbatim stderr captured from real `cargo test --doc
+// --workspace --no-fail-fast` runs (cargo 1.94.1), not hand-written
+// approximations — confirmed directly that cargo pads status verbs to a
+// shared column (hence the varying leading whitespace) and that the
+// "Doc-tests <name>" header uses the underscored lib/crate name while the
+// `-p <name> --doc` failure references use the literal (hyphenated)
+// package name.
+describe("parseDocTestOutput", () => {
+	test("all-passing run: every header is attempted, nothing failed", () => {
+		const stderr =
+			"    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s\n" +
+			"   Doc-tests crate_a\n" +
+			"   Doc-tests crate_d\n";
+		const { attemptedLibNames, failedPackageNames } =
+			parseDocTestOutput(stderr);
+		expect([...attemptedLibNames]).toEqual(["crate_a", "crate_d"]);
+		expect(failedPackageNames.size).toBe(0);
+	});
+
+	test("one failing package: attempted still includes it, and it's marked failed", () => {
+		const stderr =
+			"   Doc-tests crate_a\n" +
+			"   Doc-tests crate_b\n" +
+			"error: doctest failed, to rerun pass `-p crate_b --doc`\n" +
+			"   Doc-tests crate_d\n" +
+			"error: 1 target failed:\n" +
+			"    `-p crate_b --doc`\n";
+		const { attemptedLibNames, failedPackageNames } =
+			parseDocTestOutput(stderr);
+		expect([...attemptedLibNames]).toEqual(["crate_a", "crate_b", "crate_d"]);
+		expect([...failedPackageNames]).toEqual(["crate_b"]);
+	});
+
+	test("package name (hyphenated) and lib name (underscored) are kept distinct", () => {
+		const stderr =
+			"   Doc-tests crate_e\n" +
+			"error: doctest failed, to rerun pass `-p crate-e --doc`\n" +
+			"   Doc-tests crate_a\n" +
+			"   Doc-tests crate_b\n" +
+			"error: doctest failed, to rerun pass `-p crate_b --doc`\n" +
+			"   Doc-tests crate_d\n" +
+			"error: 2 targets failed:\n" +
+			"    `-p crate-e --doc`\n" +
+			"    `-p crate_b --doc`\n";
+		const { attemptedLibNames, failedPackageNames } =
+			parseDocTestOutput(stderr);
+		expect([...attemptedLibNames]).toEqual([
+			"crate_e",
+			"crate_a",
+			"crate_b",
+			"crate_d",
+		]);
+		expect([...failedPackageNames]).toEqual(["crate-e", "crate_b"]);
+	});
+
+	test("no doc-tests anywhere: empty sets, no crash", () => {
+		const { attemptedLibNames, failedPackageNames } = parseDocTestOutput("");
+		expect(attemptedLibNames.size).toBe(0);
+		expect(failedPackageNames.size).toBe(0);
 	});
 });

@@ -268,13 +268,37 @@ export async function wholeWorkspaceFor(
 		toolchainVersion,
 	);
 	const byId = new Map((metadata.packages || []).map((pkg) => [pkg.id, pkg]));
-	const memberDirs = (metadata.workspace_members || [])
+	const members = (metadata.workspace_members || [])
 		.map((id) => byId.get(id))
-		.filter(Boolean)
+		.filter(Boolean);
+	const memberDirs = members
 		.map((pkg) =>
 			manifestDirRelativeTo(pkg.manifest_path, metadata.workspace_root),
 		)
 		.sort();
 
-	return { memberDirs };
+	// Per-member name pair for doc-test attribution (see
+	// rules/rust/index.js's runWorkspaceDocTests): cargo's own `Doc-tests
+	// <name>` status header uses the lib/proc-macro target's name (always
+	// underscored), while its `-p <name> --doc` failure references use the
+	// package name (hyphens intact, as declared) — the two are never
+	// interchangeable. Keyed by the same repo-relative dir memberDirs
+	// reports. `libName` is null for a lib-less (bin-only) package, which
+	// `cargo test --doc --workspace` silently skips rather than erroring.
+	const docTestNames = new Map();
+	for (const pkg of members) {
+		const dir = manifestDirRelativeTo(
+			pkg.manifest_path,
+			metadata.workspace_root,
+		);
+		const libTarget = (pkg.targets || []).find((t) =>
+			(t.kind || []).some((k) => k === "lib" || k === "proc-macro"),
+		);
+		docTestNames.set(dir, {
+			packageName: pkg.name,
+			libName: libTarget ? libTarget.name : null,
+		});
+	}
+
+	return { memberDirs, docTestNames };
 }

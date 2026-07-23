@@ -313,6 +313,7 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 	const workers = new Map();
 	const files = new Map();
 	const runStdout = new Map();
+	const runStderr = new Map();
 	const namedCacheDetails = new Map();
 
 	const host = {
@@ -331,6 +332,12 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		// additive — only tests that actually parse run() stdout need it.
 		setRunStdout(display, stdout) {
 			runStdout.set(display, stdout);
+		},
+		// Same as setRunStdout, but for stderr — some run() callers (e.g.
+		// rules/rust/index.js's runWorkspaceDocTests) attribute results from
+		// cargo's stderr specifically, not stdout.
+		setRunStderr(display, stderr) {
+			runStderr.set(display, stderr);
 		},
 		clearCalls() {
 			calls.length = 0;
@@ -404,7 +411,7 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		}
 		return {
 			stdout: runStdout.get(opts.display) ?? "",
-			stderr: "",
+			stderr: runStderr.get(opts.display) ?? "",
 			exitCode: 0,
 		};
 	};
