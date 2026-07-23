@@ -23,10 +23,16 @@ describe("generate-build workflow", () => {
 
 	test("a registered generator is skipped when its namespace's buildGenerate config is unset", async () => {
 		let called = false;
-		product(K_generate_build_test_off, GENERATE_BUILD, TEST_TOOL, async () => {
-			called = true;
-			return {};
-		});
+		product(
+			K_generate_build_test_off,
+			GENERATE_BUILD,
+			TEST_TOOL,
+			async () => {
+				called = true;
+				return {};
+			},
+			{ display: "generate build {0}", level: "info" },
+		);
 		registerBuildGenerator({
 			namespace: "generate-build-test-off-ns",
 			kind: "generate-build-test-off",
@@ -50,6 +56,7 @@ describe("generate-build workflow", () => {
 				called = true;
 				return {};
 			},
+			{ display: "generate build {0}", level: "info" },
 		);
 		registerBuildGenerator({
 			namespace: "generate-build-test-false-ns",
@@ -67,10 +74,16 @@ describe("generate-build workflow", () => {
 
 	test("a registered generator runs when its namespace's buildGenerate config is true", async () => {
 		let called = false;
-		product(K_generate_build_test_on, GENERATE_BUILD, TEST_TOOL, async () => {
-			called = true;
-			return {};
-		});
+		product(
+			K_generate_build_test_on,
+			GENERATE_BUILD,
+			TEST_TOOL,
+			async () => {
+				called = true;
+				return {};
+			},
+			{ display: "generate build {0}", level: "info" },
+		);
 		registerBuildGenerator({
 			namespace: "generate-build-test-on-ns",
 			kind: "generate-build-test-on",

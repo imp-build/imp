@@ -32,7 +32,27 @@ export const file = product(StampFile, BUILD, GEN_TOOL, async function file(hand
         outputs: [output(handle.attrs.entrypoint)],
         display: `write ${handle.attrs.entrypoint}`,
     });
+}, {
+    display: "build {0}",
+    level: "info",
 });
 ```
 
 Every real subprocess runs through `run()`, hermetically sandboxed and cached by the content-addressed digest of its declared inputs, tools, and configuration. The parent directories of declared `outputs` (and directory outputs themselves) are created in the sandbox before the command runs, so scripts don't need to `mkdir` them. See the [JS code reference](../../reference/js-api/) for the full exported implementation surface.
+
+Memoized functions use the same metadata object:
+
+```js
+const sources = memo(async function sources(handle) {
+    // ...
+}, {
+    display: "sources {0}",
+    level: "debug",
+});
+```
+
+Display templates use positional placeholders. Targets render as addresses,
+scalars render plainly, and collections or objects use bounded summaries such
+as `[8 targets]` and `{…}`. User-facing products and toolchain acquisition
+normally use `info`; internal source, resource, and metadata computations use
+`debug`. Memo failures are always reported at `error`.

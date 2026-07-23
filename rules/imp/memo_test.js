@@ -1,5 +1,5 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { memo, resetMemoState, getMemoTrace } from "imp:core";
+import { getMemoTrace, memo, resetMemoState, target } from "imp:core";
 
 describe("memo", () => {
 	test("calls the underlying function once for identical args", async () => {
@@ -175,5 +175,67 @@ describe("memo", () => {
 		await fn();
 
 		expect(calls).toBe(1);
+	});
+
+	test("uses explicit compact display templates", async () => {
+		const handle = target({ kind: "memo-display-test", attrs: {} });
+		const fn = memo(async function display() {}, {
+			display: "inspect {0}: {1}, {2}, {3}, {{literal}}",
+			level: "debug",
+		});
+
+		await fn(handle, "value", [handle, handle], { large: "object" });
+
+		const { key_display } = getMemoTrace();
+		expect(Object.values(key_display)[0]).toContain(
+			": value, [2 targets], {…}, {literal}",
+		);
+	});
+
+	test("legacy display fallback compacts nested values", async () => {
+		const fn = memo(async function legacy(value) {});
+
+		await fn([{ deeply: { nested: true } }]);
+
+		const { key_display } = getMemoTrace();
+		expect(Object.values(key_display)[0]).toBe("legacy([1 items])");
+	});
+
+	test("rejects invalid display metadata", () => {
+		let invalidLevel = false;
+		try {
+			memo(async function invalid() {}, {
+				display: "invalid",
+				level: "verbose",
+			});
+		} catch (error) {
+			invalidLevel = error.message.includes("level must be one of");
+		}
+		expect(invalidLevel).toBe(true);
+
+		let invalidTemplate = false;
+		try {
+			memo(async function invalid() {}, {
+				display: "invalid {name}",
+				level: "debug",
+			});
+		} catch (error) {
+			invalidTemplate = error.message.includes("positional placeholder");
+		}
+		expect(invalidTemplate).toBe(true);
+	});
+
+	test("rejects a display placeholder for a missing argument", async () => {
+		const fn = memo(async function missing() {}, {
+			display: "missing {1}",
+			level: "debug",
+		});
+		let threw = false;
+		try {
+			await fn("only");
+		} catch (error) {
+			threw = error.message.includes("missing argument {1}");
+		}
+		expect(threw).toBe(true);
 	});
 });

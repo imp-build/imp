@@ -327,6 +327,7 @@ export const acquireRustToolchain = memo(
 
 		return cacheGet(RUSTUP_HOME_CACHE, key);
 	},
+	{ display: "acquire Rust Toolchain {0}", level: "info" },
 );
 
 /**
@@ -429,6 +430,10 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["1.93.0"],
 );
-product(RustToolchain, GEN_LOCKFILES, RUST_TOOL, (handle) =>
-	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+product(
+	RustToolchain,
+	GEN_LOCKFILES,
+	RUST_TOOL,
+	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	{ display: "gen lockfiles {0}", level: "info" },
 );

@@ -11,4 +11,5 @@ export const cargoPackageLint = product(
 	LINT,
 	CLIPPY_TOOL,
 	cargoClippy,
+	{ display: "lint {0}", level: "info" },
 );

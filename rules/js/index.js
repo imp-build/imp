@@ -84,19 +84,28 @@ const JS_SOURCE_INCLUDES = [
 // `*.odin` package glob in rules/odin/index.js), so a glob here never
 // crosses into another target's territory the way a recursive `**/*.js`
 // would.
-export const sources = memo(async function sources(handle) {
-	const root = declared_path(handle, handle.attrs.src || ".");
-	return glob({ root, include: JS_SOURCE_INCLUDES });
-});
+export const sources = memo(
+	async function sources(handle) {
+		const root = declared_path(handle, handle.attrs.src || ".");
+		return glob({ root, include: JS_SOURCE_INCLUDES });
+	},
+	{ display: "sources {0}", level: "debug" },
+);
 
 // Just the files a formatter rewrites, scoped to this target's own
 // directory — narrower than sources() above, which also pulls in
 // package.json as a build-time sandbox input. Same split as
 // python_file_sources vs sources() in rules/python/index.js.
-export const js_file_sources = memo(async function js_file_sources(handle) {
-	const root = declared_path(handle, handle.attrs.src || ".");
-	return glob({ root, include: ["*.js", "*.jsx", "*.ts", "*.tsx", "*.json"] });
-});
+export const js_file_sources = memo(
+	async function js_file_sources(handle) {
+		const root = declared_path(handle, handle.attrs.src || ".");
+		return glob({
+			root,
+			include: ["*.js", "*.jsx", "*.ts", "*.tsx", "*.json"],
+		});
+	},
+	{ display: "js file sources {0}", level: "debug" },
+);
 
 // ---------------------------------------------------------------------------
 // Target constructor

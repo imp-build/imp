@@ -77,6 +77,7 @@ const workspaceMetadata = memo(
 		});
 		return JSON.parse(result.stdout);
 	},
+	{ display: "workspace metadata {0}", level: "debug" },
 );
 
 export async function workspaceMetadataFor(path, toolchainVersion) {
@@ -244,6 +245,7 @@ const wholeWorkspaceMetadata = memo(
 		});
 		return JSON.parse(result.stdout);
 	},
+	{ display: "whole-workspace metadata {0}", level: "debug" },
 );
 
 // Every real member of the same workspace, in full (not shallow) — for the

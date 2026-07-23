@@ -123,10 +123,13 @@ export function declared_path(handle, path = ".") {
 
 // Just the crate's .rs files — used by fmt, which only ever reformats source
 // files (not Cargo.toml/Cargo.lock).
-export const rust_file_sources = memo(async function rust_file_sources(handle) {
-	const root = declared_path(handle, handle.attrs.path || ".");
-	return glob({ root, include: ["**/*.rs"], exclude: ["target/**"] });
-});
+export const rust_file_sources = memo(
+	async function rust_file_sources(handle) {
+		const root = declared_path(handle, handle.attrs.path || ".");
+		return glob({ root, include: ["**/*.rs"], exclude: ["target/**"] });
+	},
+	{ display: "Rust file sources {0}", level: "debug" },
+);
 
 // Everything cargo build needs to see: manifests, lockfile, and sources.
 //
@@ -154,32 +157,35 @@ export const rust_file_sources = memo(async function rust_file_sources(handle) {
 // isn't one of its `members`).
 //
 // @returns {Promise<{ files: FileSet }>}
-export const sources = memo(async function sources(handle) {
-	const path = declared_path(handle, handle.attrs.path || ".");
-	if (!handle.attrs.workspaceMember) {
-		return {
-			files: glob({
-				root: path,
-				include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
-				exclude: ["target/**"],
-			}),
-		};
-	}
+export const sources = memo(
+	async function sources(handle) {
+		const path = declared_path(handle, handle.attrs.path || ".");
+		if (!handle.attrs.workspaceMember) {
+			return {
+				files: glob({
+					root: path,
+					include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
+					exclude: ["target/**"],
+				}),
+			};
+		}
 
-	const toolchainVersion = rust_toolchain_version(handle);
-	const { dirs, shallowFiles, workspaceRootRelative } =
-		await workspaceClosureFor(path, toolchainVersion);
-	const prefix =
-		workspaceRootRelative === "." ? "" : `${workspaceRootRelative}/`;
-	const include = dirs.flatMap((dir) => [
-		`${prefix}${dir}/Cargo.toml`,
-		`${prefix}${dir}/**/*.rs`,
-	]);
-	include.push(`${prefix}Cargo.toml`, `${prefix}Cargo.lock`, ...shallowFiles);
-	return {
-		files: glob({ root: ".", include, exclude: ["target/**"] }),
-	};
-});
+		const toolchainVersion = rust_toolchain_version(handle);
+		const { dirs, shallowFiles, workspaceRootRelative } =
+			await workspaceClosureFor(path, toolchainVersion);
+		const prefix =
+			workspaceRootRelative === "." ? "" : `${workspaceRootRelative}/`;
+		const include = dirs.flatMap((dir) => [
+			`${prefix}${dir}/Cargo.toml`,
+			`${prefix}${dir}/**/*.rs`,
+		]);
+		include.push(`${prefix}Cargo.toml`, `${prefix}Cargo.lock`, ...shallowFiles);
+		return {
+			files: glob({ root: ".", include, exclude: ["target/**"] }),
+		};
+	},
+	{ display: "sources {0}", level: "debug" },
+);
 
 // Full source for every real member of the same workspace, not just one
 // crate's own closure — for the shared whole-workspace lint/test-build
@@ -212,14 +218,17 @@ export async function wholeWorkspaceSources(
 // cargoPackage has no notion of depending on another cargoPackage the way
 // an odinPackage depends on other odin-package targets; Cargo itself owns
 // crate-to-crate deps via Cargo.toml/the registry).
-export const resources = memo(async function resources(handle) {
-	const sets = (hydrateTarget(handle).deps || [])
-		.map((dep) => dep.handle)
-		.filter((dep) => dep && dep.kind === "resource-package");
-	if (sets.length === 0) return file_set.literal([]);
-	const resolved = await Promise.all(sets.map(resource_package_sources));
-	return resolved.length === 1 ? resolved[0] : file_set.union(...resolved);
-});
+export const resources = memo(
+	async function resources(handle) {
+		const sets = (hydrateTarget(handle).deps || [])
+			.map((dep) => dep.handle)
+			.filter((dep) => dep && dep.kind === "resource-package");
+		if (sets.length === 0) return file_set.literal([]);
+		const resolved = await Promise.all(sets.map(resource_package_sources));
+		return resolved.length === 1 ? resolved[0] : file_set.union(...resolved);
+	},
+	{ display: "Rust resources {0}", level: "debug" },
+);
 
 // Union of resources() across every declared cargo-package target whose
 // own directory is one of `dirs` — used by the shared whole-workspace
@@ -507,6 +516,7 @@ export const cargoBuild = product(
 
 		return { ...result, outputPaths: outPaths, buildDir };
 	},
+	{ display: "build {0}", level: "info" },
 );
 
 export const cargoDistPackage = product(
@@ -520,6 +530,7 @@ export const cargoDistPackage = product(
 		}
 		return artifact(result.outputDigest, { from: result.buildDir });
 	},
+	{ display: "package {0}", level: "info" },
 );
 
 // Parses `cargo test --doc --workspace --no-fail-fast` stderr for per-crate
@@ -643,6 +654,7 @@ const runWorkspaceDocTests = memo(
 
 		return { result, docTestNames, attemptedLibNames, failedPackageNames };
 	},
+	{ display: "workspace doc tests {0}", level: "debug" },
 );
 
 /**
@@ -791,6 +803,7 @@ export const cargoTest = product(
 			display: `Run cargo doc-tests for ${path}`,
 		});
 	},
+	{ display: "test {0}", level: "info" },
 );
 
 // ---------------------------------------------------------------------------

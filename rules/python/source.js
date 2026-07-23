@@ -271,7 +271,11 @@ export const expandPythonSources = expand(
 			);
 		}
 	},
-	{ goals: ["run"] },
+	{
+		goals: ["run"],
+		display: "expand Python sources {0}",
+		level: "info",
+	},
 );
 
 export const pythonSourceRun = product(
@@ -321,6 +325,7 @@ export const pythonSourceRun = product(
 			display: `python run ${file}`,
 		});
 	},
+	{ display: "run {0}", level: "info" },
 );
 
 registerBuildRule({

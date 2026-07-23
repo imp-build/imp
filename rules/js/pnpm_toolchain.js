@@ -268,6 +268,7 @@ export const acquirePnpmToolchain = memo(
 
 		return cacheGet(PNPM_TOOLCHAIN_CACHE, key);
 	},
+	{ display: "acquire Pnpm Toolchain {0}", level: "info" },
 );
 
 /**
@@ -375,6 +376,10 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["11.13.0"],
 );
-product(PnpmToolchain, GEN_LOCKFILES, PNPM_TOOL, (handle) =>
-	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+product(
+	PnpmToolchain,
+	GEN_LOCKFILES,
+	PNPM_TOOL,
+	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	{ display: "gen lockfiles {0}", level: "info" },
 );

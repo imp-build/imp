@@ -144,10 +144,13 @@ export const PYTHON_PROJECT_SOURCE_INCLUDES = [
 	"**/*.py",
 ];
 
-export const sources = memo(async function sources(handle) {
-	const root = declared_path(handle, handle.attrs.src || ".");
-	return glob({ root, include: PYTHON_PROJECT_SOURCE_INCLUDES });
-});
+export const sources = memo(
+	async function sources(handle) {
+		const root = declared_path(handle, handle.attrs.src || ".");
+		return glob({ root, include: PYTHON_PROJECT_SOURCE_INCLUDES });
+	},
+	{ display: "sources {0}", level: "debug" },
+);
 
 // Just the .py files a formatter rewrites, scoped to this target's own
 // directory — narrower than sources() above, which also pulls in
@@ -158,6 +161,7 @@ export const python_file_sources = memo(
 		const root = declared_path(handle, handle.attrs.src || ".");
 		return glob({ root, include: ["**/*.py"] });
 	},
+	{ display: "python file sources {0}", level: "debug" },
 );
 
 // Both uv sync and pex build need $UV_CACHE_DIR/$PEX_ROOT exported as
@@ -322,6 +326,7 @@ export const python_app_build = product(
 		});
 		return { ...result, pexOutPath };
 	},
+	{ display: "build {0}", level: "info" },
 );
 
 export const python_app_package = product(
@@ -336,6 +341,7 @@ export const python_app_package = product(
 		);
 		return artifact(result.outputDigest, { from: pexOutDir });
 	},
+	{ display: "package {0}", level: "info" },
 );
 
 // ---------------------------------------------------------------------------

@@ -43,9 +43,9 @@ export const docs_workflow = target({ kind: "ci-workflow", attrs: {} });
 export const generate = product(CiWorkflow, GENERATE, CI_TOOL, async function generate() {
     const { changed } = await runGenerator(true);
     return { generated: changed.length };
-});
+}, { display: "generate {0}", level: "info" });
 
 export const generate_check = product(CiWorkflow, GENERATE_CHECK, CI_TOOL, async function generate_check() {
     const { changed } = await runGenerator(false);
     return { checked: 1, stale: changed };
-});
+}, { display: "generate check {0}", level: "info" });

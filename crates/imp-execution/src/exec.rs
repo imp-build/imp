@@ -1015,8 +1015,11 @@ fn exec_run_inner_with_start(
     }
     let output_digest = merge_digests(output_trees)?.digest().to_owned();
 
-    // Cache record and materialize.
-    if cacheable {
+    // Cache record and materialize. `allow_failure` makes a nonzero exit
+    // available to the caller as data; it does not make that result a
+    // successful, replayable task. In particular, cache hits have no stored
+    // exit status and are therefore returned as exit code 0.
+    if cacheable && status.success() {
         let record = TaskCacheRecord {
             version: TASK_CACHE_VERSION,
             task_id: task_key.clone(),
@@ -1390,6 +1393,45 @@ mod tests {
             std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
             "payload",
             "cache hit must rematerialize declared outputs"
+        );
+    }
+
+    #[test]
+    fn exec_run_allow_failure_does_not_cache_nonzero_exit() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker = p.join("runs.txt");
+        let cmd = format!(
+            "if test -f '{0}'; then printf r >> '{0}'; printf success; else printf r > '{0}'; printf failure; exit 7; fi",
+            marker.display()
+        );
+        let opts = || {
+            let mut opts = run_opts(&["sh", "-c", &cmd], &[], &[]);
+            opts.allow_failure = true;
+            opts
+        };
+
+        let first = exec_run_inner(p, opts(), None).unwrap();
+        assert_eq!(first.exit_code, 7);
+        assert_eq!(first.stdout, "failure\n");
+        assert_eq!(marker_count(&marker), 1);
+
+        let second = exec_run_inner(p, opts(), None).unwrap();
+        assert_eq!(second.exit_code, 0);
+        assert_eq!(second.stdout, "success\n");
+        assert_eq!(
+            marker_count(&marker),
+            2,
+            "a nonzero allowed failure must rerun instead of hitting the cache"
+        );
+
+        let third = exec_run_inner(p, opts(), None).unwrap();
+        assert_eq!(third.exit_code, 0);
+        assert_eq!(third.stdout, "success\n");
+        assert_eq!(
+            marker_count(&marker),
+            2,
+            "the subsequent successful result should still be cached"
         );
     }
 

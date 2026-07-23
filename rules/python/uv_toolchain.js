@@ -265,6 +265,7 @@ export const acquireUvToolchain = memo(
 
 		return cacheGet(UV_TOOLCHAIN_CACHE, key);
 	},
+	{ display: "acquire Uv Toolchain {0}", level: "info" },
 );
 
 /**
@@ -386,6 +387,10 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["0.11.16"],
 );
-product(UvToolchain, GEN_LOCKFILES, UV_TOOL, (handle) =>
-	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+product(
+	UvToolchain,
+	GEN_LOCKFILES,
+	UV_TOOL,
+	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	{ display: "gen lockfiles {0}", level: "info" },
 );

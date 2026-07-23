@@ -385,19 +385,25 @@ export function ccBinary(opts = {}) {
 	return new CcBinary(opts);
 }
 
-export const own_sources = memo(async function own_sources(handle) {
-	return glob({
-		root: declared_path(handle, handle.attrs.path || "."),
-		include: handle.attrs.srcs || DEFAULT_CPP_SRCS,
-	});
-});
+export const own_sources = memo(
+	async function own_sources(handle) {
+		return glob({
+			root: declared_path(handle, handle.attrs.path || "."),
+			include: handle.attrs.srcs || DEFAULT_CPP_SRCS,
+		});
+	},
+	{ display: "own sources {0}", level: "debug" },
+);
 
-const headers = memo(async function headers(handle) {
-	return glob({
-		root: declared_path(handle, handle.attrs.path || "."),
-		include: handle.attrs.hdrs || DEFAULT_CPP_HDRS,
-	});
-});
+const headers = memo(
+	async function headers(handle) {
+		return glob({
+			root: declared_path(handle, handle.attrs.path || "."),
+			include: handle.attrs.hdrs || DEFAULT_CPP_HDRS,
+		});
+	},
+	{ display: "headers {0}", level: "debug" },
+);
 
 class GccCcToolchain {
 	constructor(handle) {
@@ -465,12 +471,14 @@ product(
 	CC_TOOLCHAIN,
 	GCC_TOOL,
 	(handle) => new GccCcToolchain(handle),
+	{ display: "cc toolchain {0}", level: "info" },
 );
 product(
 	ZigToolchain,
 	CC_TOOLCHAIN,
 	ZIG_TOOL,
 	(handle) => new ZigCcToolchain(handle),
+	{ display: "cc toolchain {0}", level: "info" },
 );
 
 async function ccToolchainFor(handle) {
@@ -536,16 +544,19 @@ async function compileRawObjects(handle, toolchain) {
 // digest (already known from the dependency's own run() result — no
 // filesystem capture needed, unlike a FileSet, which would require the
 // artifact to already be materialized on disk).
-export const cc_link_artifacts = memo(async function cc_link_artifacts(handle) {
-	if (handle.attrs.backend === "cmake") {
-		const cmake = await import("//rules/c/cmake");
-		return cmake.cmake_link_artifacts(handle);
-	}
-	const result = await ccBuild(handle);
-	return result && result.outputPath
-		? { paths: [result.outputPath], digest: result.outputDigest }
-		: { paths: [], digest: null };
-});
+export const cc_link_artifacts = memo(
+	async function cc_link_artifacts(handle) {
+		if (handle.attrs.backend === "cmake") {
+			const cmake = await import("//rules/c/cmake");
+			return cmake.cmake_link_artifacts(handle);
+		}
+		const result = await ccBuild(handle);
+		return result && result.outputPath
+			? { paths: [result.outputPath], digest: result.outputDigest }
+			: { paths: [], digest: null };
+	},
+	{ display: "cc link artifacts {0}", level: "debug" },
+);
 
 async function buildRawLibrary(handle) {
 	const toolchain = await ccToolchainFor(handle);
@@ -629,23 +640,36 @@ export const ccBuild = product(
 		}
 		return buildRawLibrary(handle);
 	},
+	{ display: "build {0}", level: "info" },
 );
 
-product(CcBinary, BUILD, CC_TOOL, async function ccBinaryBuild(handle) {
-	if (handle.attrs.backend === "cmake") {
-		const cmake = await import("//rules/c/cmake");
-		return cmake.buildCmakeArtifact(handle);
-	}
-	return buildRawBinary(handle);
-});
+product(
+	CcBinary,
+	BUILD,
+	CC_TOOL,
+	async function ccBinaryBuild(handle) {
+		if (handle.attrs.backend === "cmake") {
+			const cmake = await import("//rules/c/cmake");
+			return cmake.buildCmakeArtifact(handle);
+		}
+		return buildRawBinary(handle);
+	},
+	{ display: "build {0}", level: "info" },
+);
 
-product(CcTest, BUILD, CC_TOOL, async function ccTestBuild(handle) {
-	if (handle.attrs.backend === "cmake") {
-		const cmake = await import("//rules/c/cmake");
-		return cmake.buildCmakeArtifact(handle);
-	}
-	return buildRawBinary(handle);
-});
+product(
+	CcTest,
+	BUILD,
+	CC_TOOL,
+	async function ccTestBuild(handle) {
+		if (handle.attrs.backend === "cmake") {
+			const cmake = await import("//rules/c/cmake");
+			return cmake.buildCmakeArtifact(handle);
+		}
+		return buildRawBinary(handle);
+	},
+	{ display: "build {0}", level: "info" },
+);
 
 export const ccLibraryPackage = product(
 	CcLibrary,
@@ -659,24 +683,37 @@ export const ccLibraryPackage = product(
 		const result = await buildRawLibrary(handle);
 		return artifact(result.outputDigest, { from: dirname(result.outputPath) });
 	},
+	{ display: "package {0}", level: "info" },
 );
 
-product(CcBinary, PACKAGE, CC_TOOL, async function ccBinaryPackage(handle) {
-	if (handle.attrs.backend === "cmake") {
-		const cmake = await import("//rules/c/cmake");
-		return cmake.packageCmakeArtifact(handle);
-	}
-	const result = await buildRawBinary(handle);
-	return artifact(result.outputDigest, { from: dirname(result.outputPath) });
-});
+product(
+	CcBinary,
+	PACKAGE,
+	CC_TOOL,
+	async function ccBinaryPackage(handle) {
+		if (handle.attrs.backend === "cmake") {
+			const cmake = await import("//rules/c/cmake");
+			return cmake.packageCmakeArtifact(handle);
+		}
+		const result = await buildRawBinary(handle);
+		return artifact(result.outputDigest, { from: dirname(result.outputPath) });
+	},
+	{ display: "package {0}", level: "info" },
+);
 
-product(CcTest, TEST, CC_TOOL, async function ccTestRun(handle) {
-	if (handle.attrs.backend === "cmake") {
-		const cmake = await import("//rules/c/cmake");
-		return cmake.runCTest(handle);
-	}
-	throw new Error("raw cc_test is not implemented");
-});
+product(
+	CcTest,
+	TEST,
+	CC_TOOL,
+	async function ccTestRun(handle) {
+		if (handle.attrs.backend === "cmake") {
+			const cmake = await import("//rules/c/cmake");
+			return cmake.runCTest(handle);
+		}
+		throw new Error("raw cc_test is not implemented");
+	},
+	{ display: "test {0}", level: "info" },
+);
 
 function path_is_under(path, root) {
 	const normalizedPath = normalize_workspace_path(path);
@@ -764,6 +801,7 @@ export const generateBuild = product(
 
 		return result;
 	},
+	{ display: "generate build {0}", level: "info" },
 );
 
 registerBuildGenerator({ namespace: "c", kind: CppBuildGenerator });

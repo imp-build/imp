@@ -60,9 +60,12 @@ function declared_path(handle, path = ".") {
 // Memo/product functions for asset targets
 // ---------------------------------------------------------------------------
 
-export const sources = memo(async function sources(handle) {
-	return glob({ root: ".", include: handle.attrs.sources || [] });
-});
+export const sources = memo(
+	async function sources(handle) {
+		return glob({ root: ".", include: handle.attrs.sources || [] });
+	},
+	{ display: "asset sources {0}", level: "debug" },
+);
 
 export class Asset extends Target {
 	static kind = "asset";
@@ -88,6 +91,7 @@ export const bundle = product(
 			impure: true,
 		});
 	},
+	{ display: "build {0}", level: "info" },
 );
 
 // ---------------------------------------------------------------------------
@@ -106,13 +110,16 @@ export function asset({ srcs }) {
 	return new Asset({ srcs });
 }
 
-export const resources = memo(async function resources(handle) {
-	return glob({
-		root: declared_path(handle, handle.attrs.path || "."),
-		include: handle.attrs.srcs || [],
-		exclude: handle.attrs.exclude || [],
-	});
-});
+export const resources = memo(
+	async function resources(handle) {
+		return glob({
+			root: declared_path(handle, handle.attrs.path || "."),
+			include: handle.attrs.srcs || [],
+			exclude: handle.attrs.exclude || [],
+		});
+	},
+	{ display: "asset resources {0}", level: "debug" },
+);
 
 export class ResourcePackage extends Target {
 	static kind = "resource-package";

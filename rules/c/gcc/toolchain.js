@@ -259,6 +259,7 @@ export const acquireGccToolchain = memo(
 
 		return cacheGet(GCC_TOOLCHAIN_CACHE, key);
 	},
+	{ display: "acquire Gcc Toolchain {0}", level: "info" },
 );
 
 /**
@@ -333,8 +334,12 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["2025.08-1"],
 );
-product(GccToolchain, GEN_LOCKFILES, GCC_TOOL, (handle) =>
-	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+product(
+	GccToolchain,
+	GEN_LOCKFILES,
+	GCC_TOOL,
+	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	{ display: "gen lockfiles {0}", level: "info" },
 );
 
 /**
@@ -404,4 +409,5 @@ product(
 	RUST_LINK_DRIVER,
 	GCC_TOOL,
 	(handle) => new RustGccLinkDriver(handle),
+	{ display: "rust link driver {0}", level: "info" },
 );

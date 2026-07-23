@@ -40,6 +40,7 @@ use imp_store::cache::{
 };
 
 pub const WORKSPACE_FILE: &str = "imp.workspace.js";
+static MEMO_DEPRECATION_WARNED: AtomicBool = AtomicBool::new(false);
 /// CI-only overlay, loaded (if present) immediately after `imp.workspace.js`
 /// when running on GitHub Actions. Its config exports (e.g. `export const
 /// imp = ...`) deep-merge over the main workspace file's, letting CI patch
@@ -3173,7 +3174,21 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_run", host_run)?;
 
-    // __host_task_event(state, id, parent, display)
+    // __host_memo_deprecation()
+    let host_memo_deprecation = Function::new(
+        ctx.clone(),
+        move |name: String| -> rquickjs::Result<()> {
+            if !MEMO_DEPRECATION_WARNED.swap(true, Ordering::SeqCst) {
+                log::warn!(
+                "memo(fn) without display metadata is deprecated (first seen on {name}); use memo(fn, {{ display: \"...\", level: \"...\" }})"
+            );
+            }
+            Ok(())
+        },
+    )?;
+    globals.set("__host_memo_deprecation", host_memo_deprecation)?;
+
+    // __host_task_event(state, id, parent, display, level)
     // Lets the JS memo layer report memo nodes onto the same task-event stream
     // the scheduler uses, so both live in one tree. No-op without a scheduler
     // (e.g. plain workspace loading).
@@ -3183,7 +3198,8 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         move |state: String,
               id: f64,
               parent: Option<f64>,
-              display: Option<String>|
+              display: Option<String>,
+              level: Option<String>|
               -> rquickjs::Result<()> {
             if let Some(sched) = scheduler_ev.lock().unwrap().clone() {
                 let id = id as u64;
@@ -3193,6 +3209,13 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                         parent: parent.map(|n| n as u64),
                         display: display.unwrap_or_default(),
                         kind: imp_scheduler::TaskKind::Memo,
+                        log_level: match level.as_deref() {
+                            Some("trace") => imp_scheduler::TaskLogLevel::Trace,
+                            Some("debug") => imp_scheduler::TaskLogLevel::Debug,
+                            Some("warn") => imp_scheduler::TaskLogLevel::Warn,
+                            Some("error") => imp_scheduler::TaskLogLevel::Error,
+                            _ => imp_scheduler::TaskLogLevel::Info,
+                        },
                     },
                     "running" => imp_scheduler::TaskEvent::Running { id, detail: None },
                     "done" => imp_scheduler::TaskEvent::Done {
@@ -7446,7 +7469,7 @@ export const build = product(K_root_nesting_test, BUILD, toolName("root-nesting-
         display: `run ${handle.label.address}`,
         impure: true,
     });
-});
+}, { display: "build {0}", level: "debug" });
 "#,
         );
 
@@ -7474,38 +7497,36 @@ export const build = product(K_root_nesting_test, BUILD, toolName("root-nesting-
 
         let mut memo_ids = BTreeMap::new();
         let mut memo_parents = BTreeMap::new();
+        let mut memo_levels = BTreeMap::new();
         let mut run_parents = BTreeMap::new();
         while let Ok(event) = rx.try_recv() {
             if let imp_scheduler::TaskEvent::Pending {
                 id,
                 parent,
                 display,
+                log_level,
                 ..
             } = event
             {
-                if display.starts_with("do_build(//:") {
+                if display.starts_with("build //:") {
                     memo_ids.insert(display.clone(), id);
-                    memo_parents.insert(display, parent);
+                    memo_parents.insert(display.clone(), parent);
+                    memo_levels.insert(display, log_level);
                 } else if display.starts_with("run //:") {
                     run_parents.insert(display, parent);
                 }
             }
         }
         assert_eq!(memo_parents.len(), 2);
-        assert_eq!(memo_parents["do_build(//:app)"], None);
+        assert_eq!(memo_parents["build //:app"], None);
+        assert_eq!(memo_parents["build //:lib"], Some(memo_ids["build //:app"]));
         assert_eq!(
-            memo_parents["do_build(//:lib)"],
-            Some(memo_ids["do_build(//:app)"])
+            memo_levels["build //:app"],
+            imp_scheduler::TaskLogLevel::Debug
         );
         assert_eq!(run_parents.len(), 2);
-        assert_eq!(
-            run_parents["run //:app"],
-            Some(memo_ids["do_build(//:app)"])
-        );
-        assert_eq!(
-            run_parents["run //:lib"],
-            Some(memo_ids["do_build(//:lib)"])
-        );
+        assert_eq!(run_parents["run //:app"], Some(memo_ids["build //:app"]));
+        assert_eq!(run_parents["run //:lib"], Some(memo_ids["build //:lib"]));
     }
 
     #[tokio::test]
@@ -7586,10 +7607,10 @@ export const build = product(K_promise_all_context_test, BUILD, toolName("promis
 
         let root_id = memo_ids["build(//:app)"];
         assert_eq!(memo_parents["build(//:app)"], None);
-        assert_eq!(memo_parents["child(\"a\")"], Some(root_id));
-        assert_eq!(memo_parents["child(\"b\")"], Some(root_id));
-        assert_eq!(run_parents["child a"], Some(memo_ids["child(\"a\")"]));
-        assert_eq!(run_parents["child b"], Some(memo_ids["child(\"b\")"]));
+        assert_eq!(memo_parents["child(a)"], Some(root_id));
+        assert_eq!(memo_parents["child(b)"], Some(root_id));
+        assert_eq!(run_parents["child a"], Some(memo_ids["child(a)"]));
+        assert_eq!(run_parents["child b"], Some(memo_ids["child(b)"]));
         assert_eq!(run_parents["after fanout"], Some(root_id));
     }
 
@@ -7665,10 +7686,10 @@ export const build = product(K_sequential_sibling_context_test, BUILD, toolName(
         }
 
         let root_id = memo_ids["build(//:app)"];
-        assert_eq!(memo_parents["child(\"a\")"], Some(root_id));
-        assert_eq!(memo_parents["child(\"b\")"], Some(root_id));
-        assert_eq!(run_parents["child a"], Some(memo_ids["child(\"a\")"]));
-        assert_eq!(run_parents["child b"], Some(memo_ids["child(\"b\")"]));
+        assert_eq!(memo_parents["child(a)"], Some(root_id));
+        assert_eq!(memo_parents["child(b)"], Some(root_id));
+        assert_eq!(run_parents["child a"], Some(memo_ids["child(a)"]));
+        assert_eq!(run_parents["child b"], Some(memo_ids["child(b)"]));
     }
 
     #[tokio::test]

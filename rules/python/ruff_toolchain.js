@@ -240,6 +240,7 @@ export const acquireRuffToolchain = memo(
 
 		return cacheGet(RUFF_TOOLCHAIN_CACHE, key);
 	},
+	{ display: "acquire Ruff Toolchain {0}", level: "info" },
 );
 
 /**
@@ -312,10 +313,15 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["0.15.20", "0.15.21"],
 );
-product(RuffToolchain, GEN_LOCKFILES, RUFF_TOOL, (handle) =>
-	generateToolLockfile({
-		handle,
-		...LOCKFILE_SPEC,
-		lockfile: handle.attrs.lockfile ?? DEFAULT_LOCKFILE,
-	}),
+product(
+	RuffToolchain,
+	GEN_LOCKFILES,
+	RUFF_TOOL,
+	(handle) =>
+		generateToolLockfile({
+			handle,
+			...LOCKFILE_SPEC,
+			lockfile: handle.attrs.lockfile ?? DEFAULT_LOCKFILE,
+		}),
+	{ display: "gen lockfiles {0}", level: "info" },
 );

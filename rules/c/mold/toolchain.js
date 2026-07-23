@@ -222,6 +222,7 @@ export const acquireMoldToolchain = memo(
 
 		return cacheGet(MOLD_TOOLCHAIN_CACHE, key);
 	},
+	{ display: "acquire Mold Toolchain {0}", level: "info" },
 );
 
 /**
@@ -293,8 +294,12 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["2.41.0"],
 );
-product(MoldToolchain, GEN_LOCKFILES, MOLD_TOOL, (handle) =>
-	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+product(
+	MoldToolchain,
+	GEN_LOCKFILES,
+	MOLD_TOOL,
+	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	{ display: "gen lockfiles {0}", level: "info" },
 );
 
 /**
@@ -324,6 +329,7 @@ product(
 	ODIN_LINKER,
 	MOLD_TOOL,
 	(handle) => new OdinMoldLinker(handle),
+	{ display: "odin linker {0}", level: "info" },
 );
 
 /**
@@ -352,4 +358,5 @@ product(
 	RUST_LINKER,
 	MOLD_TOOL,
 	(handle) => new RustMoldLinker(handle),
+	{ display: "rust linker {0}", level: "info" },
 );

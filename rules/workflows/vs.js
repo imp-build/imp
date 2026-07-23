@@ -151,6 +151,7 @@ export const vs = product(
 
 		return { generated: Object.keys(files) };
 	},
+	{ display: "vs {0}", level: "info" },
 );
 
 /**

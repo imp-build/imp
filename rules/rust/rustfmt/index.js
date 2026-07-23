@@ -12,10 +12,12 @@ export const cargoPackageFmt = product(
 	FMT,
 	RUSTFMT_TOOL,
 	cargoFmt,
+	{ display: "fmt {0}", level: "info" },
 );
 export const cargoPackageFormatCheck = product(
 	CargoPackage,
 	FORMAT_CHECK,
 	RUSTFMT_TOOL,
 	cargoFormatCheck,
+	{ display: "format check {0}", level: "info" },
 );

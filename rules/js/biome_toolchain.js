@@ -239,6 +239,7 @@ export const acquireBiomeToolchain = memo(
 
 		return cacheGet(BIOME_TOOLCHAIN_CACHE, key);
 	},
+	{ display: "acquire Biome Toolchain {0}", level: "info" },
 );
 
 /**
@@ -311,6 +312,10 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["2.5.4"],
 );
-product(BiomeToolchain, GEN_LOCKFILES, BIOME_TOOL, (handle) =>
-	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+product(
+	BiomeToolchain,
+	GEN_LOCKFILES,
+	BIOME_TOOL,
+	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	{ display: "gen lockfiles {0}", level: "info" },
 );

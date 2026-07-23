@@ -346,6 +346,7 @@ export const acquireKacheToolchain = memo(
 
 		return cacheGet(KACHE_TOOLCHAIN_CACHE, key);
 	},
+	{ display: "acquire Kache Toolchain {0}", level: "info" },
 );
 
 /**
@@ -466,8 +467,12 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["0.11.0"],
 );
-product(KacheToolchain, GEN_LOCKFILES, KACHE_TOOL, (handle) =>
-	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+product(
+	KacheToolchain,
+	GEN_LOCKFILES,
+	KACHE_TOOL,
+	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	{ display: "gen lockfiles {0}", level: "info" },
 );
 
 /**
@@ -581,4 +586,5 @@ product(
 	RUST_BUILD_CACHE,
 	KACHE_TOOL,
 	(handle) => new RustKacheWrapper(handle),
+	{ display: "rust build cache {0}", level: "info" },
 );

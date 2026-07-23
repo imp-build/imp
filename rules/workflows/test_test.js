@@ -8,12 +8,24 @@ const TEST_TOOL = toolName("test-test-tool");
 describe("test workflow", () => {
 	test("testGoal dispatches every selected target, regardless of kind", async () => {
 		const ran = [];
-		product(K_test_workflow_test_a, TEST, TEST_TOOL, async (handle) => {
-			ran.push(handle.kind);
-		});
-		product(K_test_workflow_test_b, TEST, TEST_TOOL, async (handle) => {
-			ran.push(handle.kind);
-		});
+		product(
+			K_test_workflow_test_a,
+			TEST,
+			TEST_TOOL,
+			async (handle) => {
+				ran.push(handle.kind);
+			},
+			{ display: "test {0}", level: "info" },
+		);
+		product(
+			K_test_workflow_test_b,
+			TEST,
+			TEST_TOOL,
+			async (handle) => {
+				ran.push(handle.kind);
+			},
+			{ display: "test {0}", level: "info" },
+		);
 		const a = target({ kind: "test-workflow-test-a" });
 		const b = target({ kind: "test-workflow-test-b" });
 

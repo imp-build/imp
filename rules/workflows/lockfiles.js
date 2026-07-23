@@ -200,7 +200,7 @@ export function builtinLockfiles() {
 
 /**
  * Register a toolchain's builtin (checked-in) lockfile and return the spec
- * for the caller's own `product(SomeToolchain, GEN_LOCKFILES, tool, ...)`
+ * for the caller's own `product(SomeToolchain, GEN_LOCKFILES, tool, ..., { display: "gen lockfiles {0}", level: "info" })`
  * registration — every toolchain rule module otherwise repeats the
  * `registerBuiltinLockfile({ ...spec, versions })` line verbatim.
  *

@@ -43,18 +43,21 @@ describe("generate workflow", () => {
 			GENERATE_CHECK,
 			TEST_TOOL,
 			async () => ({ checked: 1, stale: [] }),
+			{ display: "generate check {0}", level: "info" },
 		);
 		product(
 			K_generate_goal_test_stale_a,
 			GENERATE_CHECK,
 			TEST_TOOL,
 			async () => ({ checked: 1, stale: ["a/gen.h"] }),
+			{ display: "generate check {0}", level: "info" },
 		);
 		product(
 			K_generate_goal_test_stale_b,
 			GENERATE_CHECK,
 			TEST_TOOL,
 			async () => ({ checked: 2, stale: ["b/gen.h", "b/gen.rs"] }),
+			{ display: "generate check {0}", level: "info" },
 		);
 		const clean = target({ kind: "generate-goal-test-clean" });
 		const staleA = target({ kind: "generate-goal-test-stale-a" });
@@ -113,6 +116,7 @@ describe("generate workflow", () => {
 			GENERATE_CHECK,
 			TEST_TOOL,
 			async () => ({ checked: 1, stale: [] }),
+			{ display: "generate check {0}", level: "info" },
 		);
 		const clean = target({ kind: "generate-goal-test-all-clean" });
 
@@ -129,9 +133,15 @@ describe("generate workflow", () => {
 	});
 
 	test("generateGoal without --check writes and reports change counts, never throws on its own", async () => {
-		product(K_generate_goal_test_write, GENERATE, TEST_TOOL, async () => ({
-			generated: 2,
-		}));
+		product(
+			K_generate_goal_test_write,
+			GENERATE,
+			TEST_TOOL,
+			async () => ({
+				generated: 2,
+			}),
+			{ display: "generate {0}", level: "info" },
+		);
 		const pkg = target({ kind: "generate-goal-test-write" });
 
 		await withFakeGoalFlags({ check: false }, async () => {

@@ -520,12 +520,15 @@ export class RulesTest extends Target {
 // discovered *_test.js files plus any fixtures/data they load. Combined in
 // test_product with the constant "rules/**/*" glob, which stages the shared
 // rule library every test module transitively imports from.
-export const sources = memo(async function sources(handle) {
-	const root = handle.attrs.root.startsWith("//")
-		? handle.attrs.root.slice(2)
-		: handle.attrs.root;
-	return glob({ root, include: ["**/*"] });
-});
+export const sources = memo(
+	async function sources(handle) {
+		const root = handle.attrs.root.startsWith("//")
+			? handle.attrs.root.slice(2)
+			: handle.attrs.root;
+		return glob({ root, include: ["**/*"] });
+	},
+	{ display: "sources {0}", level: "debug" },
+);
 
 export const test_product = product(
 	RulesTest,
@@ -564,6 +567,7 @@ export const test_product = product(
 			impure: false,
 		});
 	},
+	{ display: "test {0}", level: "info" },
 );
 
 /**

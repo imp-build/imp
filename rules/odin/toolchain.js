@@ -222,6 +222,7 @@ export const acquireOdinToolchain = memo(
 
 		return cacheGet(ODIN_TOOLCHAIN_CACHE, key);
 	},
+	{ display: "acquire Odin Toolchain {0}", level: "info" },
 );
 
 /**
@@ -298,6 +299,10 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["dev-2026-03"],
 );
-product(OdinToolchain, GEN_LOCKFILES, ODIN_TOOL, (handle) =>
-	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+product(
+	OdinToolchain,
+	GEN_LOCKFILES,
+	ODIN_TOOL,
+	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	{ display: "gen lockfiles {0}", level: "info" },
 );

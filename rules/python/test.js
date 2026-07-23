@@ -118,4 +118,5 @@ export const pythonTestRun = product(
 			display: `python test ${srcPath}`,
 		});
 	},
+	{ display: "test {0}", level: "info" },
 );

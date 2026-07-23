@@ -1,6 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "embedded-rules")]
 use include_dir::{include_dir, Dir};
 use rquickjs::{
     loader::{ImportAttributes, Loader, Resolver},
@@ -13,9 +14,10 @@ use crate::spike::{BUILD_FILE, WORKSPACE_FILE};
 /// The built-in `imp:core` module exposed to every plugin and BUILD file.
 pub const CORE_JS: &str = include_str!("imp_core.js");
 
-/// imp's own rule library (rules/**), compiled into the binary so an
-/// installed imp works outside a checkout of this repo. `RulesSource::Dev`
-/// bypasses this in favor of a live on-disk directory (see below).
+/// imp's own rule library (rules/**), compiled into standalone binaries
+/// through the default `embedded-rules` feature. `RulesSource::Dev` bypasses
+/// this in favor of a live on-disk directory (see below).
+#[cfg(feature = "embedded-rules")]
 static EMBEDDED_RULES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../rules");
 
 /// Environment variable that, when set, points `//rules/...` at a live
@@ -350,32 +352,44 @@ fn resolve_embedded_rules_module(
     name: &str,
     rel: &str,
 ) -> std::result::Result<WorkspaceModuleResolution, String> {
-    let mut tried = Vec::new();
-
-    let js_path = format!("{rel}.js");
-    tried.push(js_path.clone());
-    if let Some(file) = EMBEDDED_RULES.get_file(&js_path) {
-        return embedded_module(name, file, ModuleKind::Extension, ModuleForm::Direct);
+    #[cfg(not(feature = "embedded-rules"))]
+    {
+        let _ = rel;
+        return Err(format!(
+            "cannot resolve built-in rules module '{name}': this imp binary was built without embedded rules; set {RULES_DIR_ENV} to a rules directory"
+        ));
     }
 
-    let index_path = format!("{rel}/index.js");
-    tried.push(index_path.clone());
-    if let Some(file) = EMBEDDED_RULES.get_file(&index_path) {
-        return embedded_module(name, file, ModuleKind::Extension, ModuleForm::Index);
-    }
+    #[cfg(feature = "embedded-rules")]
+    {
+        let mut tried = Vec::new();
 
-    let build_path = format!("{rel}/{BUILD_FILE}");
-    tried.push(build_path.clone());
-    if let Some(file) = EMBEDDED_RULES.get_file(&build_path) {
-        return embedded_module(name, file, ModuleKind::Build, ModuleForm::Build);
-    }
+        let js_path = format!("{rel}.js");
+        tried.push(js_path.clone());
+        if let Some(file) = EMBEDDED_RULES.get_file(&js_path) {
+            return embedded_module(name, file, ModuleKind::Extension, ModuleForm::Direct);
+        }
 
-    Err(format!(
-        "cannot resolve built-in rules module '{name}'; tried embedded rules/{}",
-        tried.join(", embedded rules/")
-    ))
+        let index_path = format!("{rel}/index.js");
+        tried.push(index_path.clone());
+        if let Some(file) = EMBEDDED_RULES.get_file(&index_path) {
+            return embedded_module(name, file, ModuleKind::Extension, ModuleForm::Index);
+        }
+
+        let build_path = format!("{rel}/{BUILD_FILE}");
+        tried.push(build_path.clone());
+        if let Some(file) = EMBEDDED_RULES.get_file(&build_path) {
+            return embedded_module(name, file, ModuleKind::Build, ModuleForm::Build);
+        }
+
+        Err(format!(
+            "cannot resolve built-in rules module '{name}'; tried embedded rules/{}",
+            tried.join(", embedded rules/")
+        ))
+    }
 }
 
+#[cfg(feature = "embedded-rules")]
 fn embedded_module(
     name: &str,
     file: &'static include_dir::File<'static>,
@@ -433,7 +447,9 @@ pub fn resolve_workspace_file(
                         .map_err(|e| format!("read {}: {e}", dev_path.display()));
                 }
             }
-            RulesSource::Embedded => {
+            RulesSource::Embedded =>
+            {
+                #[cfg(feature = "embedded-rules")]
                 if let Some(file) = EMBEDDED_RULES.get_file(builtin_rel) {
                     let contents = file.contents_utf8().ok_or_else(|| {
                         format!(

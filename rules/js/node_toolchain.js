@@ -226,6 +226,7 @@ export const acquireNodeToolchain = memo(
 
 		return cacheGet(NODE_TOOLCHAIN_CACHE, key);
 	},
+	{ display: "acquire Node Toolchain {0}", level: "info" },
 );
 
 /**
@@ -301,6 +302,10 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["22.11.0"],
 );
-product(NodeToolchain, GEN_LOCKFILES, NODE_TOOL, (handle) =>
-	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+product(
+	NodeToolchain,
+	GEN_LOCKFILES,
+	NODE_TOOL,
+	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	{ display: "gen lockfiles {0}", level: "info" },
 );

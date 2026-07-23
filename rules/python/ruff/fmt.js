@@ -7,10 +7,14 @@ import { PythonApp } from "//rules/python";
 import { ruffFmt, ruffFormatCheck } from "//rules/python/fmt";
 import { RUFF_TOOL } from "//rules/python/ruff_toolchain";
 
-export const pythonAppFmt = product(PythonApp, FMT, RUFF_TOOL, ruffFmt);
+export const pythonAppFmt = product(PythonApp, FMT, RUFF_TOOL, ruffFmt, {
+	display: "fmt {0}",
+	level: "info",
+});
 export const pythonAppFormatCheck = product(
 	PythonApp,
 	FORMAT_CHECK,
 	RUFF_TOOL,
 	ruffFormatCheck,
+	{ display: "format check {0}", level: "info" },
 );

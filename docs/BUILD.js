@@ -62,7 +62,7 @@ export const api_reference_build = product(JsApiReference, BUILD, IMP_TOOL, asyn
         materialize: false,
         display: "extract JS API reference",
     });
-});
+}, { display: "build {0}", level: "info" });
 
 export const site = target({ kind: "zola-site", attrs: {} });
 
@@ -100,12 +100,12 @@ export const site_build = product(ZolaSite, BUILD, ZOLA_TOOL, async function sit
         materialize: false,
         display: "build docs site with zola",
     });
-});
+}, { display: "build {0}", level: "info" });
 
 export const site_package = product(ZolaSite, PACKAGE, ZOLA_TOOL, async function site_package(handle) {
     const built = await site_build(handle);
     return artifact(built.outputDigest, { from: SITE_OUT });
-});
+}, { display: "package {0}", level: "info" });
 
 // `imp run //docs:site` supervises a "serve while editing" loop: every
 // second it re-invokes the fully-sandboxed, cache-backed `package` goal
@@ -150,4 +150,4 @@ export const site_serve = product(ZolaSite, RUN, ZOLA_TOOL, async function site_
         impure: true,
         display: "watch + serve docs site with zola",
     });
-});
+}, { display: "run {0}", level: "info" });

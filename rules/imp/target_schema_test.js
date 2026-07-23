@@ -22,7 +22,10 @@ class Widget extends Target {
 		super({ kind: Widget.kind, attrs });
 	}
 }
-product(Widget, BUILD, WIDGET_TOOL, () => {});
+product(Widget, BUILD, WIDGET_TOOL, () => {}, {
+	display: "build {0}",
+	level: "info",
+});
 
 describe("Target attrs schema", () => {
 	test("fills declared defaults", () => {
@@ -70,7 +73,10 @@ class BaseGadget extends Target {
 		super({ kind: new.target.kind, attrs });
 	}
 }
-product(BaseGadget, BUILD, BASE_GADGET_TOOL, () => {});
+product(BaseGadget, BUILD, BASE_GADGET_TOOL, () => {}, {
+	display: "build {0}",
+	level: "info",
+});
 
 // Declares no schema of its own for `mode` — should inherit BaseGadget's
 // unchanged — but overrides `name`'s constraints and adds `version`.
@@ -81,7 +87,10 @@ class Gadget extends BaseGadget {
 		version: field.int({ required: true }),
 	};
 }
-product(Gadget, BUILD, GADGET_TOOL, () => {});
+product(Gadget, BUILD, GADGET_TOOL, () => {}, {
+	display: "build {0}",
+	level: "info",
+});
 
 describe("Target attrs schema composition", () => {
 	test("a subclass without its own schema inherits its ancestor's", () => {

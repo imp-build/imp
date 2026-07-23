@@ -48,18 +48,36 @@ describe("fmt workflow", () => {
 	}
 
 	test("fmtGoal --check runs and reports every target before throwing", async () => {
-		product(K_fmt_goal_test_clean, FORMAT_CHECK, TEST_TOOL, async () => ({
-			checked: 1,
-			unformatted: [],
-		}));
-		product(K_fmt_goal_test_dirty_a, FORMAT_CHECK, TEST_TOOL, async () => ({
-			checked: 1,
-			unformatted: ["a/one.odin"],
-		}));
-		product(K_fmt_goal_test_dirty_b, FORMAT_CHECK, TEST_TOOL, async () => ({
-			checked: 2,
-			unformatted: ["b/one.odin", "b/two.odin"],
-		}));
+		product(
+			K_fmt_goal_test_clean,
+			FORMAT_CHECK,
+			TEST_TOOL,
+			async () => ({
+				checked: 1,
+				unformatted: [],
+			}),
+			{ display: "format check {0}", level: "info" },
+		);
+		product(
+			K_fmt_goal_test_dirty_a,
+			FORMAT_CHECK,
+			TEST_TOOL,
+			async () => ({
+				checked: 1,
+				unformatted: ["a/one.odin"],
+			}),
+			{ display: "format check {0}", level: "info" },
+		);
+		product(
+			K_fmt_goal_test_dirty_b,
+			FORMAT_CHECK,
+			TEST_TOOL,
+			async () => ({
+				checked: 2,
+				unformatted: ["b/one.odin", "b/two.odin"],
+			}),
+			{ display: "format check {0}", level: "info" },
+		);
 		const clean = target({ kind: "fmt-goal-test-clean" });
 		const dirtyA = target({ kind: "fmt-goal-test-dirty-a" });
 		const dirtyB = target({ kind: "fmt-goal-test-dirty-b" });
@@ -112,10 +130,16 @@ describe("fmt workflow", () => {
 	});
 
 	test("fmtGoal --check does not throw when every target is already formatted", async () => {
-		product(K_fmt_goal_test_all_clean, FORMAT_CHECK, TEST_TOOL, async () => ({
-			checked: 1,
-			unformatted: [],
-		}));
+		product(
+			K_fmt_goal_test_all_clean,
+			FORMAT_CHECK,
+			TEST_TOOL,
+			async () => ({
+				checked: 1,
+				unformatted: [],
+			}),
+			{ display: "format check {0}", level: "info" },
+		);
 		const clean = target({ kind: "fmt-goal-test-all-clean" });
 
 		await withFakeGoalFlags({ check: true }, async () => {
@@ -131,9 +155,15 @@ describe("fmt workflow", () => {
 	});
 
 	test("fmtGoal without --check reformats and reports change counts, never throws on its own", async () => {
-		product(K_fmt_goal_test_reformat, FMT, TEST_TOOL, async () => ({
-			formatted: 3,
-		}));
+		product(
+			K_fmt_goal_test_reformat,
+			FMT,
+			TEST_TOOL,
+			async () => ({
+				formatted: 3,
+			}),
+			{ display: "fmt {0}", level: "info" },
+		);
 		const pkg = target({ kind: "fmt-goal-test-reformat" });
 
 		await withFakeGoalFlags({ check: false }, async () => {

@@ -39,6 +39,7 @@ export const file = product(
 			display: `write ${handle.attrs.entrypoint}`,
 		});
 	},
+	{ display: "build {0}", level: "info" },
 );
 
 /**

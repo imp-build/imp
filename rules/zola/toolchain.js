@@ -227,6 +227,7 @@ export const acquireZolaToolchain = memo(
 
 		return cacheGet(ZOLA_TOOLCHAIN_CACHE, key);
 	},
+	{ display: "acquire Zola Toolchain {0}", level: "info" },
 );
 
 /**
@@ -299,6 +300,10 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["0.22.1"],
 );
-product(ZolaToolchain, GEN_LOCKFILES, ZOLA_TOOL, (handle) =>
-	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+product(
+	ZolaToolchain,
+	GEN_LOCKFILES,
+	ZOLA_TOOL,
+	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	{ display: "gen lockfiles {0}", level: "info" },
 );

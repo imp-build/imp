@@ -138,6 +138,7 @@ const runWorkspaceClippy = memo(
 
 		return { result, messages };
 	},
+	{ display: "workspace clippy {0}", level: "debug" },
 );
 
 // Check a crate's own sources with clippy, without writing anything back.

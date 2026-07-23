@@ -339,7 +339,10 @@ export class Toolchain extends Target {
 			);
 		}
 		_toolchain_registered.add(cls);
-		product(cls, TOOLCHAIN, cls.tool, (handle) => handle.bin());
+		product(cls, TOOLCHAIN, cls.tool, (handle) => handle.bin(), {
+			display: "toolchain {0}",
+			level: "info",
+		});
 	}
 }
 
@@ -2025,13 +2028,14 @@ globalThis.__imp_promise_context_after = function () {
 	}
 };
 
-function _emit_task(state, id, parent, label) {
+function _emit_task(state, id, parent, label, level) {
 	if (typeof globalThis.__host_task_event === "function") {
 		globalThis.__host_task_event(
 			state,
 			id,
 			parent === null ? undefined : parent,
 			label,
+			level,
 		);
 	}
 }
@@ -2083,7 +2087,7 @@ function _memo_cycle_message(key_string) {
 	return lines.join("\n");
 }
 
-function _memo_eval(key_string, owner, label, thunk) {
+function _memo_eval(key_string, owner, label, level, thunk) {
 	// A concurrent branch that reaches the same in-flight memo must receive the
 	// pending promise. A call from a context that already has this key on its
 	// stack can still be a non-awaiting promise touch, so hits must win over
@@ -2105,7 +2109,7 @@ function _memo_eval(key_string, owner, label, thunk) {
 	// share the same work.
 	const nodeId = ++_memo_node_counter;
 	_memo_node_labels.set(nodeId, label);
-	_emit_task("pending", nodeId, owner, label);
+	_emit_task("pending", nodeId, owner, label, level);
 	const promise = _with_js_lane(nodeId, label, () => thunk(nodeId));
 	_memo_table.set(key_string, promise);
 	promise.then(
@@ -2154,13 +2158,16 @@ function _pop_call(key_string, contextId) {
  *   class's `static tool` — the tool this registration attributes to in
  *   capability docs and multi-tool dispatch labels.
  * @param {function} fn Async function taking a target handle and returning a result.
+ * @param {{display:string, level:"trace"|"debug"|"info"|"warn"|"error"}} [opts]
+ *   Task display template and completion log level. Positional placeholders
+ *   such as `{0}` interpolate compactly formatted call arguments.
  * @returns {function} The same function, wrapped in memo().
  */
-export function product(kindClass, nameToken, toolToken, fn) {
+export function product(kindClass, nameToken, toolToken, fn, opts) {
 	const kind = _kind_of(kindClass, "product()");
 	const { name, pid } = _product_name_of(nameToken, "product()");
 	const { name: tool, tid } = _tool_name_of(toolToken, "product()");
-	const memoized = memo(fn);
+	const memoized = memo(fn, opts);
 	const registrationStack = new Error("product registration").stack || "";
 	__host_product(
 		JSON.stringify({ kind, name, nameId: pid, tool, toolId: tid }),
@@ -2194,11 +2201,16 @@ export function product(kindClass, nameToken, toolToken, fn) {
  *   calls `registerTarget()` for each target it discovers.
  * @param {object} [opts] Optional goal scope for expanders that are only
  *   needed by a particular graph traversal, such as test-binary discovery.
+ * @param {string} [opts.display] Task display template.
+ * @param {"trace"|"debug"|"info"|"warn"|"error"} [opts.level] Completion log level.
  * @returns {function} The same function, wrapped in memo().
  */
 export function expand(kindClass, fn, opts = {}) {
 	const kind = _kind_of(kindClass, "expand()");
-	const memoized = memo(fn);
+	const memoized = memo(
+		fn,
+		opts.display !== undefined || opts.level !== undefined ? opts : undefined,
+	);
 	__host_register_expander(kind, memoized, opts.goals ?? null);
 	return memoized;
 }
@@ -2226,20 +2238,126 @@ export function registerTarget(handle, address) {
  * Call getMemoTrace() for hit/miss events and dependency edges.
  *
  * @param {function} fn Named async function to memoize.
+ * @param {{display:string, level:"trace"|"debug"|"info"|"warn"|"error"}} [opts]
+ *   Task display template and completion log level. `{0}`, `{1}`, etc.
+ *   interpolate compact argument summaries; `{{` and `}}` emit literal braces.
+ *   Omitting this object is deprecated.
  * @returns {function}
  */
-export function memo(fn) {
-	const fn_id = _stable_function_id(fn);
-	function display_arg(arg) {
-		if (arg && arg.__imp === true) {
-			try {
-				return targetAddress(arg);
-			} catch (_) {
-				return "#" + arg.__id;
-			}
+const _MEMO_LEVELS = new Set(["trace", "debug", "info", "warn", "error"]);
+
+function _compact_memo_arg(arg) {
+	const unwrapped = _unwrap_dep_edge(arg);
+	if (unwrapped?.handle?.__imp === true) {
+		try {
+			return targetAddress(unwrapped.handle);
+		} catch (_) {
+			return "#" + unwrapped.handle.__id;
 		}
-		return JSON.stringify(arg);
 	}
+	if (arg && arg.__imp === true) {
+		try {
+			return targetAddress(arg);
+		} catch (_) {
+			return "#" + arg.__id;
+		}
+	}
+	if (Array.isArray(arg)) {
+		const allTargets =
+			arg.length > 0 &&
+			arg.every((item) => {
+				const value = _unwrap_dep_edge(item);
+				return value?.handle?.__imp === true || item?.__imp === true;
+			});
+		return `[${arg.length} ${allTargets ? "targets" : "items"}]`;
+	}
+	if (arg === null) return "null";
+	if (arg === undefined) return "undefined";
+	if (typeof arg === "object") return "{…}";
+	return String(arg);
+}
+
+function _memo_display(template, args, validateOnly = false) {
+	let display = "";
+	for (let index = 0; index < template.length; ) {
+		if (template.startsWith("{{", index)) {
+			display += "{";
+			index += 2;
+			continue;
+		}
+		if (template.startsWith("}}", index)) {
+			display += "}";
+			index += 2;
+			continue;
+		}
+		if (template[index] === "{") {
+			const close = template.indexOf("}", index + 1);
+			if (close < 0) {
+				throw new Error(`invalid memo display template '${template}': unmatched '{'`);
+			}
+			const placeholder = template.slice(index + 1, close);
+			if (!/^\d+$/.test(placeholder)) {
+				throw new Error(
+					`invalid memo display template '${template}': expected a positional placeholder such as {0}`,
+				);
+			}
+			const argIndex = Number(placeholder);
+			if (argIndex >= args.length) {
+				if (validateOnly) {
+					index = close + 1;
+					continue;
+				}
+				throw new Error(
+					`memo display template '${template}' references missing argument {${argIndex}}`,
+				);
+			}
+			display += _compact_memo_arg(args[argIndex]);
+			index = close + 1;
+			continue;
+		}
+		if (template[index] === "}") {
+			throw new Error(`invalid memo display template '${template}': unmatched '}'`);
+		}
+		display += template[index];
+		index++;
+	}
+	return display;
+}
+
+function _memo_metadata(fn, opts) {
+	if (opts === undefined) {
+		if (typeof globalThis.__host_memo_deprecation === "function") {
+			globalThis.__host_memo_deprecation(fn.name || "<anonymous>");
+		}
+		return {
+			display: null,
+			level: "info",
+		};
+	}
+	if (
+		opts === null ||
+		typeof opts !== "object" ||
+		typeof opts.display !== "string" ||
+		opts.display.length === 0
+	) {
+		throw new Error(
+			`memo(${fn.name || "<anonymous>"}) expects options with a non-empty display template`,
+		);
+	}
+	const level = String(opts.level || "").toLowerCase();
+	if (!_MEMO_LEVELS.has(level)) {
+		throw new Error(
+			`memo(${fn.name || "<anonymous>"}) level must be one of trace, debug, info, warn, error`,
+		);
+	}
+	// Validate syntax at declaration time. Argument bounds are checked per call.
+	_memo_display(opts.display, [], true);
+	return { display: opts.display, level };
+}
+
+export function memo(fn, opts) {
+	const fn_id = _stable_function_id(fn);
+	const metadata = _memo_metadata(fn, opts);
 	return function memoized(...args) {
 		const unwrapped = args.length > 0 ? _unwrap_dep_edge(args[0]) : null;
 		const hasProfile = !!(unwrapped?.profiles && unwrapped.profiles.length > 0);
@@ -2250,7 +2368,10 @@ export function memo(fn) {
 			config_digest: __host_configuration_digest(undefined, undefined),
 		});
 		if (!_key_display.has(key_string)) {
-			const label = fn.name + "(" + args.map(display_arg).join(", ") + ")";
+			const label =
+				metadata.display === null
+					? fn.name + "(" + args.map(_compact_memo_arg).join(", ") + ")"
+					: _memo_display(metadata.display, args);
 			_key_display.set(key_string, label);
 			const product_name = _product_fn_info.get(fn_id);
 			if (
@@ -2271,7 +2392,7 @@ export function memo(fn) {
 		const callerContextId = callerContext.id;
 		const owner = callerContext.ctx.owner;
 		return _contextual_thenable(
-			_memo_eval(key_string, owner, label, (nodeId) => {
+			_memo_eval(key_string, owner, label, metadata.level, (nodeId) => {
 				const childContextId = _fork_context(nodeId, callerContext.ctx, label);
 				return _with_context(childContextId, () => {
 					_emit_task("running", nodeId, owner, label);

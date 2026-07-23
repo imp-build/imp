@@ -899,7 +899,7 @@ async fn cmd_execute_live(
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     let render = tokio::spawn(async move {
         use indicatif::ProgressBar;
-        use scheduler::{LaneKind, TaskEvent, TaskKind, TaskOutcome};
+        use scheduler::{LaneKind, TaskEvent, TaskKind, TaskLogLevel, TaskOutcome};
 
         // Bars live in a single flat `MultiProgress`; nesting is conveyed only
         // by insertion order and message indentation below.
@@ -1013,6 +1013,8 @@ async fn cmd_execute_live(
         // logic above already clears at Done) purely to print a summary line.
         let mut started_at: std::collections::HashMap<u64, std::time::Instant> =
             std::collections::HashMap::new();
+        let mut task_log_levels: std::collections::HashMap<u64, TaskLogLevel> =
+            std::collections::HashMap::new();
         let wall_start = std::time::Instant::now();
         let mut cached_count: usize = 0;
         let mut fresh_count: usize = 0;
@@ -1033,7 +1035,11 @@ async fn cmd_execute_live(
             };
             match event {
                 TaskEvent::Pending {
-                    id, display, kind, ..
+                    id,
+                    display,
+                    kind,
+                    log_level,
+                    ..
                 } => {
                     if kind == TaskKind::Sandbox {
                         sandbox_tasks.insert(id);
@@ -1045,6 +1051,7 @@ async fn cmd_execute_live(
                         ));
                     }
                     render_labels.lock().unwrap().insert(id, display);
+                    task_log_levels.insert(id, log_level);
                     // Fallback start time, in case this task is satisfied by
                     // cache and never reaches `Running` (see below).
                     started_at.insert(id, std::time::Instant::now());
@@ -1075,6 +1082,7 @@ async fn cmd_execute_live(
                         .remove(&id)
                         .unwrap_or_else(|| format!("task {id}"));
                     let elapsed = started_at.remove(&id);
+                    let log_level = task_log_levels.remove(&id).unwrap_or(TaskLogLevel::Info);
                     done_count += 1;
                     match &outcome {
                         TaskOutcome::Ok => {
@@ -1092,11 +1100,17 @@ async fn cmd_execute_live(
                             let timing = elapsed
                                 .map(|e| format!(" ({:.2?})", e.elapsed()))
                                 .unwrap_or_default();
-                            log::info!("[ok] {tag}{label}{timing}");
+                            match log_level {
+                                TaskLogLevel::Trace => log::trace!("[ok] {tag}{label}{timing}"),
+                                TaskLogLevel::Debug => log::debug!("[ok] {tag}{label}{timing}"),
+                                TaskLogLevel::Info => log::info!("[ok] {tag}{label}{timing}"),
+                                TaskLogLevel::Warn => log::warn!("[ok] {tag}{label}{timing}"),
+                                TaskLogLevel::Error => log::error!("[ok] {tag}{label}{timing}"),
+                            }
                         }
                         TaskOutcome::Err(error) => {
                             failed_count += 1;
-                            log::info!("[fail] {label}: {error}");
+                            log::error!("[fail] {label}: {error}");
                         }
                         TaskOutcome::Canceled => {
                             // No per-line print: cancellation fans out to every

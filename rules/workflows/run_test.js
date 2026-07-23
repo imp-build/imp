@@ -42,9 +42,15 @@ describe("run workflow", () => {
 
 	test("runGoal rejects a multi-target odin-package selection before dispatching anything", async () => {
 		let ran = false;
-		product(K_run_test_reject_kind, RUN, TEST_TOOL, async () => {
-			ran = true;
-		});
+		product(
+			K_run_test_reject_kind,
+			RUN,
+			TEST_TOOL,
+			async () => {
+				ran = true;
+			},
+			{ display: "run {0}", level: "info" },
+		);
 
 		let message = "";
 		try {
@@ -62,10 +68,16 @@ describe("run workflow", () => {
 	test("runGoal dispatches the sole selected target's registered product", async () => {
 		await withFakeToolchainHost(async (host) => {
 			let ranWith = null;
-			product(K_run_test_dispatch_kind, RUN, TEST_TOOL, async (handle) => {
-				ranWith = handle;
-				return runTemplate({ argv: ["program", "template-arg"] });
-			});
+			product(
+				K_run_test_dispatch_kind,
+				RUN,
+				TEST_TOOL,
+				async (handle) => {
+					ranWith = handle;
+					return runTemplate({ argv: ["program", "template-arg"] });
+				},
+				{ display: "run {0}", level: "info" },
+			);
 			const fake = target({ kind: "run-test-dispatch-kind" });
 
 			await runGoal([

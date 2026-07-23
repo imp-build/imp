@@ -44,4 +44,5 @@ export const nativeToolSpec = product(
 			binDirs: ["."],
 		};
 	},
+	{ display: "tool {0}", level: "info" },
 );

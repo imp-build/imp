@@ -44,7 +44,7 @@ import {
  *         materialize: true,
  *     });
  *     return { generated: changed.length };
- * });
+ * }, { display: "generate {0}", level: "info" });
  *
  * export const generateCheck = product(SomeKind, GENERATE_CHECK, MY_TOOL, async (handle) => {
  *     const built = await buildGenerator(handle);
@@ -57,7 +57,7 @@ import {
  *         materialize: false,
  *     });
  *     return { checked: 2, stale: changed };
- * });
+ * }, { display: "generate check {0}", level: "info" });
  * ```
  *
  * @param {object} opts

@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [features]
+default = ["embedded-rules"]
+embedded-rules = ["dep:include_dir"]
 # Exposes test-only helpers (execute_goal_live, SelectorContext::root) used by
 # imp's own tests, without linking them into the production binary.
 test-support = []
@@ -20,7 +22,7 @@ anyhow.workspace = true
 clap.workspace = true
 regex.workspace = true
 walkdir.workspace = true
-include_dir.workspace = true
+include_dir = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 rquickjs.workspace = true

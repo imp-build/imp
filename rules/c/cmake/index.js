@@ -131,12 +131,16 @@ export const tool = product(
 		await acquireCmakeToolchain(handle.attrs.version);
 		return { name: "cmake", version: handle.attrs.version };
 	},
+	{ display: "build {0}", level: "info" },
 );
 
-export const sources = memo(async function sources(handle) {
-	const root = declared_path(handle, handle.attrs.src || ".");
-	return glob({ root, include: handle.attrs.srcs || DEFAULT_CPP_SRCS });
-});
+export const sources = memo(
+	async function sources(handle) {
+		const root = declared_path(handle, handle.attrs.src || ".");
+		return glob({ root, include: handle.attrs.srcs || DEFAULT_CPP_SRCS });
+	},
+	{ display: "sources {0}", level: "debug" },
+);
 
 // Conservative header-change safety net for the per-edge graph replay below:
 // Ninja's static build graph doesn't expose header dependencies (those are
@@ -148,10 +152,16 @@ export const sources = memo(async function sources(handle) {
 // conservatively invalidates every compile edge — safe, if coarser than a
 // real per-header dependency scan (a `cc -MM`-based follow-up would narrow
 // this further).
-const headerSources = memo(async function headerSources(handle) {
-	const root = declared_path(handle, handle.attrs.src || ".");
-	return glob({ root, include: ["**/*.h", "**/*.hh", "**/*.hpp", "**/*.hxx"] });
-});
+const headerSources = memo(
+	async function headerSources(handle) {
+		const root = declared_path(handle, handle.attrs.src || ".");
+		return glob({
+			root,
+			include: ["**/*.h", "**/*.hh", "**/*.hpp", "**/*.hxx"],
+		});
+	},
+	{ display: "header Sources {0}", level: "debug" },
+);
 
 // compilerEnv's values (e.g. ZIG_GLOBAL_CACHE_DIR) are relative to the
 // sandbox root (that's where their "tool" mount lands — see
@@ -740,6 +750,7 @@ export const native_link_library = product(
 	BUILD,
 	CMAKE_TOOL,
 	buildCmakeArtifact,
+	{ display: "build {0}", level: "info" },
 );
 
 /**
@@ -767,6 +778,7 @@ export const cmakeLibPackage = product(
 	PACKAGE,
 	CMAKE_TOOL,
 	packageCmakeArtifact,
+	{ display: "package {0}", level: "info" },
 );
 
 // Regex-escapes and `-R`-joins a set of correlated CTest test names, scoping
@@ -848,7 +860,10 @@ export async function runCTest(handle) {
 	});
 }
 
-export const ctest = product(CmakeLib, TEST, CMAKE_TOOL, runCTest);
+export const ctest = product(CmakeLib, TEST, CMAKE_TOOL, runCTest, {
+	display: "test {0}",
+	level: "info",
+});
 
 // Returns link artifacts at their staged locations as a resource file set for
 // odin package sandboxing. Also ensures the cmake build is a plan prerequisite.
@@ -857,10 +872,13 @@ export const ctest = product(CmakeLib, TEST, CMAKE_TOOL, runCTest);
 // staged .so/.dylib/etc. files straight from this digest rather than a
 // physical path) — not a FileSet, since the files it names were never
 // captured from the real workspace.
-export const cmake_resources = memo(async function cmake_resources(handle) {
-	const result = await native_link_library(handle);
-	return { kind: "digest", digest: result.outputDigest };
-});
+export const cmake_resources = memo(
+	async function cmake_resources(handle) {
+		const result = await native_link_library(handle);
+		return { kind: "digest", digest: result.outputDigest };
+	},
+	{ display: "cmake resources {0}", level: "debug" },
+);
 
 // Returns `{ paths, digest }` — same contract as rules/c/index.js's
 // cc_link_artifacts, so a raw cc_binary/cc_library can depend on a
@@ -882,6 +900,7 @@ export const cmake_link_artifacts = memo(
 			.map((name) => `${outputBase}/${name}`);
 		return { paths: linkFiles, digest: result.outputDigest };
 	},
+	{ display: "cmake link artifacts {0}", level: "debug" },
 );
 
 // Lazily expands a CmakeLib into one separately-addressable, separately-
@@ -990,6 +1009,7 @@ export const expandCmakeProject = expand(
 			);
 		}
 	},
+	{ display: "expand CMake project {0}", level: "info" },
 );
 
 // ---------------------------------------------------------------------------

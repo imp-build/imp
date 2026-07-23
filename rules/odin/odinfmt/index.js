@@ -84,22 +84,28 @@ export async function odinFormatCheck(handle) {
 	return { checked: total, unformatted: changed };
 }
 
-export const odinPackageFmt = product(OdinPackage, FMT, ODINFMT_TOOL, odinFmt);
+export const odinPackageFmt = product(OdinPackage, FMT, ODINFMT_TOOL, odinFmt, {
+	display: "fmt {0}",
+	level: "info",
+});
 export const odinTestPackageFmt = product(
 	OdinTestPackage,
 	FMT,
 	ODINFMT_TOOL,
 	odinFmt,
+	{ display: "fmt {0}", level: "info" },
 );
 export const odinPackageFormatCheck = product(
 	OdinPackage,
 	FORMAT_CHECK,
 	ODINFMT_TOOL,
 	odinFormatCheck,
+	{ display: "format check {0}", level: "info" },
 );
 export const odinTestPackageFormatCheck = product(
 	OdinTestPackage,
 	FORMAT_CHECK,
 	ODINFMT_TOOL,
 	odinFormatCheck,
+	{ display: "format check {0}", level: "info" },
 );

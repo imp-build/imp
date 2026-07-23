@@ -25,18 +25,30 @@ async function withFakeLog(fn) {
 
 describe("build workflow", () => {
 	test("buildGoal logs a plain count after successful builds, not artifact paths", async () => {
-		product(K_build_workflow_artifact_a, BUILD, TEST_TOOL, async () => ({
-			stdout: "hello\nworld\n",
-			stderr: "",
-			exitCode: 0,
-			outputs: [{ kind: "file", path: "build/app.txt" }],
-		}));
-		product(K_build_workflow_artifact_b, BUILD, TEST_TOOL, async () => ({
-			stdout: "",
-			stderr: "",
-			exitCode: 0,
-			outputs: [{ kind: "directory", path: "build/assets" }],
-		}));
+		product(
+			K_build_workflow_artifact_a,
+			BUILD,
+			TEST_TOOL,
+			async () => ({
+				stdout: "hello\nworld\n",
+				stderr: "",
+				exitCode: 0,
+				outputs: [{ kind: "file", path: "build/app.txt" }],
+			}),
+			{ display: "build {0}", level: "info" },
+		);
+		product(
+			K_build_workflow_artifact_b,
+			BUILD,
+			TEST_TOOL,
+			async () => ({
+				stdout: "",
+				stderr: "",
+				exitCode: 0,
+				outputs: [{ kind: "directory", path: "build/assets" }],
+			}),
+			{ display: "build {0}", level: "info" },
+		);
 		const a = target({ kind: "build-workflow-artifact-a" });
 		const b = target({ kind: "build-workflow-artifact-b" });
 
@@ -66,9 +78,15 @@ describe("build workflow", () => {
 	});
 
 	test("buildGoal fails with the target label when a build product throws", async () => {
-		product(K_build_workflow_broken, BUILD, TEST_TOOL, async () => {
-			throw new Error("boom");
-		});
+		product(
+			K_build_workflow_broken,
+			BUILD,
+			TEST_TOOL,
+			async () => {
+				throw new Error("boom");
+			},
+			{ display: "build {0}", level: "info" },
+		);
 		const broken = target({ kind: "build-workflow-broken" });
 
 		let message = "";

@@ -233,6 +233,7 @@ export const acquireCmakeToolchain = memo(
 
 		return cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
 	},
+	{ display: "acquire Cmake Toolchain {0}", level: "info" },
 );
 
 /**
@@ -309,6 +310,10 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["3.31.0"],
 );
-product(CmakeToolchain, GEN_LOCKFILES, CMAKE_TOOL, (handle) =>
-	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+product(
+	CmakeToolchain,
+	GEN_LOCKFILES,
+	CMAKE_TOOL,
+	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	{ display: "gen lockfiles {0}", level: "info" },
 );

@@ -398,6 +398,7 @@ export const acquireZigToolchain = memo(
 
 		return cacheGet(ZIG_TOOLCHAIN_CACHE, key);
 	},
+	{ display: "acquire Zig Toolchain {0}", level: "info" },
 );
 
 /**
@@ -528,6 +529,10 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["0.16.0"],
 );
-product(ZigToolchain, GEN_LOCKFILES, ZIG_TOOL, (handle) =>
-	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+product(
+	ZigToolchain,
+	GEN_LOCKFILES,
+	ZIG_TOOL,
+	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	{ display: "gen lockfiles {0}", level: "info" },
 );

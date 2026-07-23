@@ -29,6 +29,7 @@ describe("product", () => {
 				calls++;
 				return x * 3;
 			},
+			{ display: "test product {0}", level: "info" },
 		);
 
 		const a = await fn(4);
@@ -49,6 +50,7 @@ describe("product", () => {
 				calls++;
 				return x + 10;
 			},
+			{ display: "other product {0}", level: "info" },
 		);
 
 		const a = await fn(1);
@@ -66,7 +68,10 @@ describe("product", () => {
 			return x;
 		}
 
-		const p = product(TestKind, P_PRODUCT, TEST_TOOL, shared);
+		const p = product(TestKind, P_PRODUCT, TEST_TOOL, shared, {
+			display: "p product {0}",
+			level: "info",
+		});
 		const m = memo(shared);
 
 		await p(5);
@@ -79,22 +84,40 @@ describe("product", () => {
 
 	test("requires a declared tool token", () => {
 		expect(() =>
-			product(TestKind, TEST_PRODUCT, "bare-string", async () => {}),
+			product(TestKind, TEST_PRODUCT, "bare-string", async () => {}, {
+				display: "test product {0}",
+				level: "info",
+			}),
 		).toThrow("requires a tool-name token");
 		expect(() =>
-			product(TestKind, TEST_PRODUCT, undefined, async () => {}),
+			product(TestKind, TEST_PRODUCT, undefined, async () => {}, {
+				display: "test product {0}",
+				level: "info",
+			}),
 		).toThrow("requires a tool-name token");
 	});
 
 	test("two tools can register the same product and both dispatch", async () => {
 		const OTHER_TOOL = toolName("product-test-other-tool");
 		const ran = [];
-		product(TestKind, MULTI_PRODUCT, TEST_TOOL, async function multiA() {
-			ran.push("a");
-		});
-		product(TestKind, MULTI_PRODUCT, OTHER_TOOL, async function multiB() {
-			ran.push("b");
-		});
+		product(
+			TestKind,
+			MULTI_PRODUCT,
+			TEST_TOOL,
+			async function multiA() {
+				ran.push("a");
+			},
+			{ display: "multi product {0}", level: "info" },
+		);
+		product(
+			TestKind,
+			MULTI_PRODUCT,
+			OTHER_TOOL,
+			async function multiB() {
+				ran.push("b");
+			},
+			{ display: "multi product {0}", level: "info" },
+		);
 
 		const handle = target({ kind: "test-kind" });
 		const resolved = resolveProducts({
@@ -116,11 +139,17 @@ describe("product", () => {
 
 	test("productFor rejects a role registered by several tools", async () => {
 		const OTHER_TOOL = toolName("product-test-other-tool");
-		product(TestKind, ROLE_PRODUCT, TEST_TOOL, async () => "one");
+		product(TestKind, ROLE_PRODUCT, TEST_TOOL, async () => "one", {
+			display: "role product {0}",
+			level: "info",
+		});
 		const handle = target({ kind: "test-kind" });
 		expect(await productFor(handle, ROLE_PRODUCT)).toBe("one");
 
-		product(TestKind, ROLE_PRODUCT, OTHER_TOOL, async () => "two");
+		product(TestKind, ROLE_PRODUCT, OTHER_TOOL, async () => "two", {
+			display: "role product {0}",
+			level: "info",
+		});
 		expect(() => productFor(handle, ROLE_PRODUCT)).toThrow(
 			"products from several tools",
 		);

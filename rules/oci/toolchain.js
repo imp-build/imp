@@ -239,6 +239,7 @@ export const acquireCraneToolchain = memo(
 
 		return cacheGet(CRANE_TOOLCHAIN_CACHE, key);
 	},
+	{ display: "acquire Crane Toolchain {0}", level: "info" },
 );
 
 /**
@@ -311,6 +312,10 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["0.20.6"],
 );
-product(CraneToolchain, GEN_LOCKFILES, CRANE_TOOL, (handle) =>
-	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+product(
+	CraneToolchain,
+	GEN_LOCKFILES,
+	CRANE_TOOL,
+	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	{ display: "gen lockfiles {0}", level: "info" },
 );

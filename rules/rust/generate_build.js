@@ -209,6 +209,7 @@ export const generateBuild = product(
 		}
 		return result;
 	},
+	{ display: "generate build {0}", level: "info" },
 );
 
 registerBuildGenerator({ namespace: "rust", kind: CargoBuildGenerator });

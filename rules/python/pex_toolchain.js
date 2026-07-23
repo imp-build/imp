@@ -225,6 +225,7 @@ export const acquirePexToolchain = memo(
 
 		return cacheGet(PEX_TOOLCHAIN_CACHE, key);
 	},
+	{ display: "acquire Pex Toolchain {0}", level: "info" },
 );
 
 /**
@@ -337,6 +338,10 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["2.97.1"],
 );
-product(PexToolchain, GEN_LOCKFILES, PEX_TOOL, (handle) =>
-	generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+product(
+	PexToolchain,
+	GEN_LOCKFILES,
+	PEX_TOOL,
+	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	{ display: "gen lockfiles {0}", level: "info" },
 );

@@ -13,6 +13,7 @@ use walkdir::{DirEntry, WalkDir};
 
 use imp_engine::spike::WORKSPACE_FILE;
 
+#[cfg(feature = "embedded-rules")]
 const INIT_CATALOG_JS: &str = include_str!("../../../../rules/init.js");
 const CATALOG_MODULE_NAME: &str = "imp:init";
 const EXCLUDED_DIRECTORIES: &[&str] = &[
@@ -147,6 +148,20 @@ async fn render_workspace(
 }
 
 async fn call_catalog_export(export: &str, argument: &serde_json::Value) -> Result<String> {
+    #[cfg(feature = "embedded-rules")]
+    let catalog_source = INIT_CATALOG_JS.to_owned();
+    #[cfg(not(feature = "embedded-rules"))]
+    let catalog_source = {
+        let rules_dir = std::env::var_os(imp_engine::loader::RULES_DIR_ENV).ok_or_else(|| {
+            anyhow::anyhow!(
+                "this imp binary was built without embedded rules; set {} to a rules directory",
+                imp_engine::loader::RULES_DIR_ENV
+            )
+        })?;
+        let path = PathBuf::from(rules_dir).join("init.js");
+        std::fs::read_to_string(&path)
+            .with_context(|| format!("read init catalog {}", path.display()))?
+    };
     let runtime = JsRuntime::new().context("create init JavaScript runtime")?;
     let context = JsContext::full(&runtime)
         .await
@@ -155,7 +170,7 @@ async fn call_catalog_export(export: &str, argument: &serde_json::Value) -> Resu
 
     context
         .async_with(async |ctx| -> Result<String> {
-            let module = Module::declare(ctx.clone(), CATALOG_MODULE_NAME, INIT_CATALOG_JS)
+            let module = Module::declare(ctx.clone(), CATALOG_MODULE_NAME, catalog_source.as_str())
                 .catch(&ctx)
                 .map_err(|error| anyhow::anyhow!("declare init catalog: {error}"))?;
             let (module, promise) = module

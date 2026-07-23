@@ -3,21 +3,25 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/imp-build/imp/main/install.sh | sh
 #   curl -fsSL https://raw.githubusercontent.com/imp-build/imp/main/install.sh | sh -s -- --draft
+#   ./install.sh --local
 
 set -eu
 
 repo="imp-build/imp"
 install_dir="${IMP_INSTALL_DIR:-$HOME/.local/bin}"
 draft=false
+local_install=false
 
 usage() {
-    echo "usage: install.sh [--draft]"
+    echo "usage: install.sh [--draft | --local]"
     echo "  --draft  install the rolling main-preview draft (requires authenticated gh)"
+    echo "  --local  build this checkout in release mode and install a live-rules shim"
 }
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --draft) draft=true ;;
+        --local) local_install=true ;;
         -h|--help)
             usage
             exit 0
@@ -30,6 +34,51 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+
+if [ "$draft" = true ] && [ "$local_install" = true ]; then
+    echo "--draft and --local cannot be used together" >&2
+    exit 2
+fi
+
+if [ "$local_install" = true ]; then
+    if ! command -v cargo >/dev/null 2>&1; then
+        echo "--local requires cargo" >&2
+        exit 1
+    fi
+
+    repo_dir="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
+    manifest="$repo_dir/crates/imp/Cargo.toml"
+    rules_dir="$repo_dir/rules"
+    binary="$repo_dir/target/release/imp"
+
+    if [ ! -f "$manifest" ] || [ ! -d "$rules_dir" ]; then
+        echo "--local must be run from a checked-out imp repository" >&2
+        exit 1
+    fi
+
+    echo "Building optimized local imp without embedded rules"
+    CARGO_TARGET_DIR="$repo_dir/target" cargo build \
+        --release \
+        --manifest-path "$manifest" \
+        --no-default-features
+
+    mkdir -p "$install_dir"
+    shim_tmp="$(mktemp "$install_dir/.imp-local.XXXXXX")"
+    trap 'rm -f "$shim_tmp"' EXIT
+    {
+        echo '#!/bin/sh'
+        printf "export IMP_RULES_DIR='%s'\n" "$(printf '%s' "$rules_dir" | sed "s/'/'\\\\''/g")"
+        printf "exec '%s' \"\$@\"\n" "$(printf '%s' "$binary" | sed "s/'/'\\\\''/g")"
+    } > "$shim_tmp"
+    chmod +x "$shim_tmp"
+    mv -f "$shim_tmp" "$install_dir/imp"
+    trap - EXIT
+
+    echo "Installed local imp shim to $install_dir/imp"
+    echo "Binary: $binary"
+    echo "Rules:  $rules_dir"
+    exit 0
+fi
 
 arch="$(uname -m)"
 os="$(uname -s)"

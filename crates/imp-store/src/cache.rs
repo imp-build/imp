@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use walkdir::WalkDir;
 
-pub const TASK_CACHE_VERSION: u32 = 6;
+pub const TASK_CACHE_VERSION: u32 = 7;
 
 // ---------------------------------------------------------------------------
 // Cache types

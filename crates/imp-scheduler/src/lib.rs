@@ -45,6 +45,15 @@ pub enum TaskKind {
     Workspace,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskLogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
 /// One transition in the task tree. A node goes `Pending` → `Running` → `Done`;
 /// the renderer creates it under `parent` on `Pending` and removes it on `Done`.
 #[derive(Debug, Clone)]
@@ -58,6 +67,7 @@ pub enum TaskEvent {
         parent: Option<u64>,
         display: String,
         kind: TaskKind,
+        log_level: TaskLogLevel,
     },
     Running {
         id: u64,
@@ -229,6 +239,7 @@ impl Scheduler {
             parent,
             display: display.clone(),
             kind,
+            log_level: TaskLogLevel::Info,
         });
 
         if self.cancellation.load(Ordering::SeqCst) {

@@ -6,4 +6,7 @@ import { PythonApp } from "//rules/python";
 import { ruffCheck } from "//rules/python/lint";
 import { RUFF_TOOL } from "//rules/python/ruff_toolchain";
 
-export const pythonAppLint = product(PythonApp, LINT, RUFF_TOOL, ruffCheck);
+export const pythonAppLint = product(PythonApp, LINT, RUFF_TOOL, ruffCheck, {
+	display: "lint {0}",
+	level: "info",
+});

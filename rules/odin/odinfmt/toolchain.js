@@ -160,44 +160,47 @@ export async function odinfmtBin(version) {
  * @param {string} version
  * @returns {Promise<string>}
  */
-export const acquireOdinfmt = memo(async function acquireOdinfmt(version) {
-	declareOdinfmtCache();
-	ensureCoreTools();
-	const plat = platformInfo();
-	const key = odinfmtCacheKey(version, plat);
+export const acquireOdinfmt = memo(
+	async function acquireOdinfmt(version) {
+		declareOdinfmtCache();
+		ensureCoreTools();
+		const plat = platformInfo();
+		const key = odinfmtCacheKey(version, plat);
 
-	if (cacheHas(ODINFMT_CACHE, key)) {
+		if (cacheHas(ODINFMT_CACHE, key)) {
+			return cacheGet(ODINFMT_CACHE, key);
+		}
+
+		const coreTools = await Promise.all(
+			coreToolHandles.map((handle) => nativeToolSpec(handle)),
+		);
+
+		const downloadPath = `.imp/odinfmt-downloads/${key}/${odinfmtArtifactName(version, plat)}`;
+		await downloadToolArtifact({
+			lockfile: ODINFMT_LOCKFILE,
+			tool: "odinfmt",
+			version,
+			plat,
+			url: odinfmtDownloadUrl(version, plat),
+			downloadPath,
+			tools: coreTools,
+			display: `download odinfmt ${version} (${plat.os}/${plat.arch})`,
+			unverified: OdinfmtToolchain.resolveUnverified(version),
+		});
+
+		await extractArchive({
+			archive: downloadPath,
+			dest: `.imp/odinfmt-toolchains/${key}`,
+			format: plat.os === "windows" ? "zip" : "zip-unix",
+			tools: coreTools,
+			namedCache: { name: ODINFMT_CACHE, key },
+			display: `install odinfmt ${version} (${plat.os}/${plat.arch})`,
+		});
+
 		return cacheGet(ODINFMT_CACHE, key);
-	}
-
-	const coreTools = await Promise.all(
-		coreToolHandles.map((handle) => nativeToolSpec(handle)),
-	);
-
-	const downloadPath = `.imp/odinfmt-downloads/${key}/${odinfmtArtifactName(version, plat)}`;
-	await downloadToolArtifact({
-		lockfile: ODINFMT_LOCKFILE,
-		tool: "odinfmt",
-		version,
-		plat,
-		url: odinfmtDownloadUrl(version, plat),
-		downloadPath,
-		tools: coreTools,
-		display: `download odinfmt ${version} (${plat.os}/${plat.arch})`,
-		unverified: OdinfmtToolchain.resolveUnverified(version),
-	});
-
-	await extractArchive({
-		archive: downloadPath,
-		dest: `.imp/odinfmt-toolchains/${key}`,
-		format: plat.os === "windows" ? "zip" : "zip-unix",
-		tools: coreTools,
-		namedCache: { name: ODINFMT_CACHE, key },
-		display: `install odinfmt ${version} (${plat.os}/${plat.arch})`,
-	});
-
-	return cacheGet(ODINFMT_CACHE, key);
-});
+	},
+	{ display: "acquire Odinfmt {0}", level: "info" },
+);
 
 export class OdinfmtToolchain extends Toolchain {
 	static kind = "odinfmt-toolchain";
@@ -248,11 +251,16 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 // odinfmt's version tracks the workspace's default Odin toolchain when
 // declared without one of its own (the common case), so the handle's raw
 // attrs.version — possibly null — must be resolved before locking.
-product(OdinfmtToolchain, GEN_LOCKFILES, ODINFMT_TOOL, (handle) =>
-	generateToolLockfile({
-		handle: {
-			attrs: { version: resolveOdinToolchainVersion(handle.attrs.version) },
-		},
-		...LOCKFILE_SPEC,
-	}),
+product(
+	OdinfmtToolchain,
+	GEN_LOCKFILES,
+	ODINFMT_TOOL,
+	(handle) =>
+		generateToolLockfile({
+			handle: {
+				attrs: { version: resolveOdinToolchainVersion(handle.attrs.version) },
+			},
+			...LOCKFILE_SPEC,
+		}),
+	{ display: "gen lockfiles {0}", level: "info" },
 );

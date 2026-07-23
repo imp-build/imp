@@ -192,6 +192,7 @@ export const ociPullBuild = product(
 
 		return { ociLayoutPath: cacheGet(OCI_STORAGE_CACHE, key), digest };
 	},
+	{ display: "build {0}", level: "info" },
 );
 
 // An OCI-layout directory referenced by another rule may live outside the
@@ -291,6 +292,7 @@ export const ociPullPackage = product(
 		const { ociLayoutPath, digest } = await ociPullBuild(handle);
 		return packageOciLayoutAsTar(handle, ociLayoutPath, digest, null);
 	},
+	{ display: "package {0}", level: "info" },
 );
 
 // ---------------------------------------------------------------------------
@@ -674,6 +676,7 @@ export const ociBuildBuild = product(
 			outputDigest: result.outputDigest,
 		};
 	},
+	{ display: "build {0}", level: "info" },
 );
 
 /**
@@ -693,6 +696,7 @@ export const ociBuildPackage = product(
 		const { ociLayoutPath, digest, outputDigest } = await ociBuildBuild(handle);
 		return packageOciLayoutAsTar(handle, ociLayoutPath, digest, outputDigest);
 	},
+	{ display: "package {0}", level: "info" },
 );
 
 // ---------------------------------------------------------------------------
@@ -770,6 +774,7 @@ export const ociPushBuild = product(
 			display: `push ${ref}`,
 		});
 	},
+	{ display: "build {0}", level: "info" },
 );
 
 // ---------------------------------------------------------------------------
@@ -830,4 +835,5 @@ export const ociMirrorBuild = product(
 			display: `mirror ${srcRef} -> ${dstRef}`,
 		});
 	},
+	{ display: "build {0}", level: "info" },
 );

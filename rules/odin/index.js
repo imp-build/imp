@@ -201,9 +201,12 @@ function own_sources_value(handle) {
 	});
 }
 
-export const own_sources = memo(async function own_sources(handle) {
-	return own_sources_value(handle);
-});
+export const own_sources = memo(
+	async function own_sources(handle) {
+		return own_sources_value(handle);
+	},
+	{ display: "own sources {0}", level: "debug" },
+);
 
 /**
  * Return a FileSet of the package's own sources plus all transitive odin-package dep sources.
@@ -211,10 +214,13 @@ export const own_sources = memo(async function own_sources(handle) {
  * @param {object} handle Target handle returned by odinPackage().
  * @returns {Promise<object>} FileSet descriptor.
  */
-export const sources = memo(async function sources(handle) {
-	const sets = await collect_source_sets(handle, new Set());
-	return sets.length === 1 ? sets[0] : file_set.union(...sets);
-});
+export const sources = memo(
+	async function sources(handle) {
+		const sets = await collect_source_sets(handle, new Set());
+		return sets.length === 1 ? sets[0] : file_set.union(...sets);
+	},
+	{ display: "sources {0}", level: "debug" },
+);
 
 async function collect_source_sets(handle, seen) {
 	const key = dep_key(handle);
@@ -237,9 +243,12 @@ async function collect_source_sets(handle, seen) {
  * objects (cmake-lib deps, whose build output is never materialized) — to
  * be spread directly into a run()'s own `inputs` array.
  */
-export const resources = memo(async function resources(handle) {
-	return collect_resource_sets(handle, new Set());
-});
+export const resources = memo(
+	async function resources(handle) {
+		return collect_resource_sets(handle, new Set());
+	},
+	{ display: "Odin resources {0}", level: "debug" },
+);
 
 async function collect_resource_sets(handle, seen) {
 	const key = dep_key(handle);
@@ -338,24 +347,30 @@ function has_collection_config(collections) {
  * @param {object} handle Target handle returned by odinPackage().
  * @returns {Promise<string[]>}
  */
-export const collection_flags = memo(async function collection_flags(handle) {
-	return Array.from(
-		collection_map(handle),
-		([name, path]) => `-collection:${name}=${path}`,
-	);
-});
+export const collection_flags = memo(
+	async function collection_flags(handle) {
+		return Array.from(
+			collection_map(handle),
+			([name, path]) => `-collection:${name}=${path}`,
+		);
+	},
+	{ display: "collection flags {0}", level: "debug" },
+);
 
-export const collection_dirs = memo(async function collection_dirs(handle) {
-	const seen = new Set();
-	const dirs = [];
-	for (const path of collection_map(handle).values()) {
-		const normalized = normalize_workspace_path(path);
-		if (normalized === "." || seen.has(normalized)) continue;
-		seen.add(normalized);
-		dirs.push(normalized);
-	}
-	return dirs;
-});
+export const collection_dirs = memo(
+	async function collection_dirs(handle) {
+		const seen = new Set();
+		const dirs = [];
+		for (const path of collection_map(handle).values()) {
+			const normalized = normalize_workspace_path(path);
+			if (normalized === "." || seen.has(normalized)) continue;
+			seen.add(normalized);
+			dirs.push(normalized);
+		}
+		return dirs;
+	},
+	{ display: "collection dirs {0}", level: "debug" },
+);
 
 function strip_odin_comments(input) {
 	let out = "";
@@ -599,21 +614,28 @@ function build_package_index(packages) {
 	return index;
 }
 
-export const imports = memo(async function imports(handle) {
-	return (await odinPackageAnalysis(handle)).imports;
-});
+export const imports = memo(
+	async function imports(handle) {
+		return (await odinPackageAnalysis(handle)).imports;
+	},
+	{ display: "imports {0}", level: "debug" },
+);
 
 export const odinPackageAnalysis = memo(
 	async function odinPackageAnalysis(handle) {
 		return analysis_for_package(package_spec_from_handle(handle));
 	},
+	{ display: "odin Package Analysis {0}", level: "debug" },
 );
 
-export const package_index = memo(async function package_index() {
-	return build_package_index(
-		workspaceTargets("odin-package").map(package_spec_from_workspace_target),
-	);
-});
+export const package_index = memo(
+	async function package_index() {
+		return build_package_index(
+			workspaceTargets("odin-package").map(package_spec_from_workspace_target),
+		);
+	},
+	{ display: "package index", level: "debug" },
+);
 
 function same_package(left, right) {
 	if (!left || !right) return false;
@@ -664,32 +686,38 @@ function infer_dep_entries(
 	);
 }
 
-export const inferred_deps = memo(async function inferred_deps(handle) {
-	const index = await package_index();
-	const pkg = package_spec_from_handle(handle);
-	const analysis = await odinPackageAnalysis(handle);
-	return infer_dep_entries(pkg, index, collection_map(handle), analysis)
-		.map((dep) => dep.handle)
-		.filter(Boolean);
-});
+export const inferred_deps = memo(
+	async function inferred_deps(handle) {
+		const index = await package_index();
+		const pkg = package_spec_from_handle(handle);
+		const analysis = await odinPackageAnalysis(handle);
+		return infer_dep_entries(pkg, index, collection_map(handle), analysis)
+			.map((dep) => dep.handle)
+			.filter(Boolean);
+	},
+	{ display: "inferred deps {0}", level: "debug" },
+);
 
 function dep_key(handle) {
 	const address = safe_target_address(handle);
 	return address || `#${handle.__id}`;
 }
 
-export const effective_deps = memo(async function effective_deps(handle) {
-	const deps = new Map();
-	for (const dep of (handle.attrs.deps || []).filter(
-		(h) => h && h.kind === "odin-package",
-	)) {
-		deps.set(dep_key(dep), dep);
-	}
-	for (const dep of await inferred_deps(handle)) {
-		deps.set(dep_key(dep), dep);
-	}
-	return Array.from(deps.values());
-});
+export const effective_deps = memo(
+	async function effective_deps(handle) {
+		const deps = new Map();
+		for (const dep of (handle.attrs.deps || []).filter(
+			(h) => h && h.kind === "odin-package",
+		)) {
+			deps.set(dep_key(dep), dep);
+		}
+		for (const dep of await inferred_deps(handle)) {
+			deps.set(dep_key(dep), dep);
+		}
+		return Array.from(deps.values());
+	},
+	{ display: "effective deps {0}", level: "debug" },
+);
 
 /**
  * Acquire the Odin toolchain and return a tool spec for sandbox use.
@@ -697,9 +725,12 @@ export const effective_deps = memo(async function effective_deps(handle) {
  * @param {object} handle Target handle returned by odinToolchain().
  * @returns {Promise<object>} Tool spec.
  */
-export const tool = memo(async function tool(handle) {
-	return odinTool(handle.attrs.version);
-});
+export const tool = memo(
+	async function tool(handle) {
+		return odinTool(handle.attrs.version);
+	},
+	{ display: "tool {0}", level: "debug" },
+);
 
 export function default_output_path(handle) {
 	return `build/odin/${targetOutputSlug(handle)}`;
@@ -1111,6 +1142,7 @@ export const odinBuild = product(
 		});
 		return { ...result, outputPath: declaredOut };
 	},
+	{ display: "build {0}", level: "info" },
 );
 
 export const odinTest = product(
@@ -1162,6 +1194,7 @@ export const odinTest = product(
 		logInfo(`Test finished: ${path}`);
 		return outcome;
 	},
+	{ display: "test {0}", level: "info" },
 );
 
 /**
@@ -1200,6 +1233,7 @@ export const odinRun = product(
 			display: `run ${buildResult.outputPath}`,
 		});
 	},
+	{ display: "run {0}", level: "info" },
 );
 
 /**
@@ -1261,6 +1295,7 @@ export const odinLint = product(
 			output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
 		};
 	},
+	{ display: "lint {0}", level: "info" },
 );
 
 export const odinDistPackage = product(
@@ -1275,20 +1310,24 @@ export const odinDistPackage = product(
 		);
 		return artifact(buildResult.outputDigest, { from: outDir });
 	},
+	{ display: "package {0}", level: "info" },
 );
 
 // ---------------------------------------------------------------------------
 // Odin source generation
 // ---------------------------------------------------------------------------
 
-export const gen_input_sources = memo(async function gen_input_sources(handle) {
-	const outPath = declared_path(handle, handle.attrs.out);
-	return glob({
-		root: ".",
-		include: handle.attrs.srcs || [],
-		exclude: [outPath],
-	});
-});
+export const gen_input_sources = memo(
+	async function gen_input_sources(handle) {
+		const outPath = declared_path(handle, handle.attrs.out);
+		return glob({
+			root: ".",
+			include: handle.attrs.srcs || [],
+			exclude: [outPath],
+		});
+	},
+	{ display: "gen input sources {0}", level: "debug" },
+);
 
 export const odinGenRun = product(
 	OdinGen,
@@ -1328,6 +1367,7 @@ export const odinGenRun = product(
 			display: `generate ${outPath}`,
 		});
 	},
+	{ display: "build {0}", level: "info" },
 );
 
 async function collect_gen_sets(handle, seen) {
@@ -1439,6 +1479,7 @@ export const generateBuild = product(
 		}
 		return result;
 	},
+	{ display: "generate build {0}", level: "info" },
 );
 
 registerBuildGenerator({ namespace: "odin", kind: OdinBuildGenerator });

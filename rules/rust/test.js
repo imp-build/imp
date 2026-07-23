@@ -145,6 +145,7 @@ const standaloneCargoMetadata = memo(
 		});
 		return JSON.parse(result.stdout);
 	},
+	{ display: "standalone Cargo Metadata {0}", level: "debug" },
 );
 
 // Test-binary-producing targets for one cargo-package, discovered without
@@ -241,6 +242,7 @@ const buildWorkspaceTestBinaries = memo(
 
 		return { result, buildDir };
 	},
+	{ display: "workspace test binaries {0}", level: "debug" },
 );
 
 // Compiles every test binary in the crate (without running any of them) and
@@ -253,70 +255,73 @@ const buildWorkspaceTestBinaries = memo(
 // crate (imp#12). The target-dir is declared as a materialized directory
 // output, so every binary it contains already sits at its normal on-disk
 // path afterwards, with no per-binary staging step needed.
-const buildTestBinaries = memo(async function buildTestBinaries(handle) {
-	const path = declared_path(handle, handle.attrs.path || ".");
+const buildTestBinaries = memo(
+	async function buildTestBinaries(handle) {
+		const path = declared_path(handle, handle.attrs.path || ".");
 
-	if (!handle.attrs.workspaceMember) {
-		const toolSpec = await rustTool(rust_toolchain_version(handle));
-		const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-		const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
-		const {
-			tools: linkerTools,
-			rustflags,
-			env: linkerEnv,
-		} = await rustLinkerTools(toolchainHandle);
-		const {
-			tools: cacheTools,
-			env: cacheEnv,
-			scriptPreamble,
-		} = await rustBuildCacheTools(toolchainHandle);
-		const { tools: rustTools, env: rustEnv } = rustToolEnv(
-			toolSpec,
-			kacheActive,
-		);
-		const { files: srcs } = await sources(handle);
-		const resourceInputs = await resources(handle);
-		const buildDir = output_path(`build/rust/${targetOutputSlug(handle)}`);
-
-		const script = cargoInvocationScript(
-			'cargo test --locked --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
-			{ scriptPreamble, kacheActive },
-		);
-
-		const result = await run({
-			argv: [
-				"sh",
-				"-c",
-				script,
-				"cargo-test-build",
-				`${path}/Cargo.toml`,
-				buildDir,
+		if (!handle.attrs.workspaceMember) {
+			const toolSpec = await rustTool(rust_toolchain_version(handle));
+			const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+			const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
+			const {
+				tools: linkerTools,
 				rustflags,
-			],
-			tools: [...rustTools, ...linkerTools, ...cacheTools],
-			env: [...rustEnv, ...linkerEnv, ...cacheEnv],
-			inputs: [srcs, resourceInputs],
-			outputs: [output(output_path(buildDir), { kind: "directory" })],
-			materialize: false,
-			display: `cargo test --no-run ${path}`,
-		});
+				env: linkerEnv,
+			} = await rustLinkerTools(toolchainHandle);
+			const {
+				tools: cacheTools,
+				env: cacheEnv,
+				scriptPreamble,
+			} = await rustBuildCacheTools(toolchainHandle);
+			const { tools: rustTools, env: rustEnv } = rustToolEnv(
+				toolSpec,
+				kacheActive,
+			);
+			const { files: srcs } = await sources(handle);
+			const resourceInputs = await resources(handle);
+			const buildDir = output_path(`build/rust/${targetOutputSlug(handle)}`);
 
+			const script = cargoInvocationScript(
+				'cargo test --locked --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
+				{ scriptPreamble, kacheActive },
+			);
+
+			const result = await run({
+				argv: [
+					"sh",
+					"-c",
+					script,
+					"cargo-test-build",
+					`${path}/Cargo.toml`,
+					buildDir,
+					rustflags,
+				],
+				tools: [...rustTools, ...linkerTools, ...cacheTools],
+				env: [...rustEnv, ...linkerEnv, ...cacheEnv],
+				inputs: [srcs, resourceInputs],
+				outputs: [output(output_path(buildDir), { kind: "directory" })],
+				materialize: false,
+				display: `cargo test --no-run ${path}`,
+			});
+
+			return { result, buildDir, path };
+		}
+
+		const toolchainVersion = rust_toolchain_version(handle);
+		const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+		const workspaceRootRelative = await workspaceRootRelativeFor(
+			path,
+			toolchainVersion,
+		);
+		const { result, buildDir } = await buildWorkspaceTestBinaries(
+			workspaceRootRelative,
+			toolchainVersion,
+			toolchainHandle,
+		);
 		return { result, buildDir, path };
-	}
-
-	const toolchainVersion = rust_toolchain_version(handle);
-	const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-	const workspaceRootRelative = await workspaceRootRelativeFor(
-		path,
-		toolchainVersion,
-	);
-	const { result, buildDir } = await buildWorkspaceTestBinaries(
-		workspaceRootRelative,
-		toolchainVersion,
-		toolchainHandle,
-	);
-	return { result, buildDir, path };
-});
+	},
+	{ display: "build Test Binaries {0}", level: "debug" },
+);
 
 // Parses `cargo test --no-run --message-format=json`'s newline-delimited
 // stdout for compiled test-binary artifacts (reliable across task-cache
@@ -443,6 +448,7 @@ export const rustTestBuild = product(
 			outputDigest: result.outputDigest,
 		};
 	},
+	{ display: "build {0}", level: "info" },
 );
 
 // No outputs/materialize on this final step: test results aren't
@@ -471,6 +477,7 @@ export const rustTestRun = product(
 			display: `cargo test binary ${outputPath}`,
 		});
 	},
+	{ display: "test {0}", level: "info" },
 );
 
 // Runs at most once per invocation, only for cargo-package targets actually
@@ -517,5 +524,9 @@ export const expandCargoTests = expand(
 			);
 		}
 	},
-	{ goals: ["test"] },
+	{
+		goals: ["test"],
+		display: "expand Cargo tests {0}",
+		level: "info",
+	},
 );
