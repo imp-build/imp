@@ -2252,6 +2252,9 @@ function _compact_memo_arg(arg) {
 		try {
 			return targetAddress(unwrapped.handle);
 		} catch (_) {
+			if (typeof unwrapped.handle.attrs?.name === "string") {
+				return unwrapped.handle.attrs.name;
+			}
 			return "#" + unwrapped.handle.__id;
 		}
 	}
@@ -2259,6 +2262,9 @@ function _compact_memo_arg(arg) {
 		try {
 			return targetAddress(arg);
 		} catch (_) {
+			if (typeof arg.attrs?.name === "string") {
+				return arg.attrs.name;
+			}
 			return "#" + arg.__id;
 		}
 	}

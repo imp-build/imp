@@ -192,6 +192,22 @@ describe("memo", () => {
 		);
 	});
 
+	test("uses the name of an unaddressed named target in displays", async () => {
+		const handle = target({
+			kind: "memo-display-test",
+			attrs: { name: "example-tool" },
+		});
+		const fn = memo(async function display() {}, {
+			display: "tool {0}",
+			level: "debug",
+		});
+
+		await fn(handle);
+
+		const { key_display } = getMemoTrace();
+		expect(Object.values(key_display)[0]).toBe("tool example-tool");
+	});
+
 	test("legacy display fallback compacts nested values", async () => {
 		const fn = memo(async function legacy(value) {});
 
