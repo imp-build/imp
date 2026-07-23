@@ -15,7 +15,7 @@ local_install=false
 usage() {
     echo "usage: install.sh [--draft | --local]"
     echo "  --draft  install the rolling main-preview draft (requires authenticated gh)"
-    echo "  --local  build this checkout in release mode and install a live-rules shim"
+    echo "  --local  install a shim that rebuilds and runs this checkout"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -67,7 +67,11 @@ if [ "$local_install" = true ]; then
     trap 'rm -f "$shim_tmp"' EXIT
     {
         echo '#!/bin/sh'
+        echo 'set -e'
         printf "export IMP_RULES_DIR='%s'\n" "$(printf '%s' "$rules_dir" | sed "s/'/'\\\\''/g")"
+        printf "CARGO_TARGET_DIR='%s' cargo build --release --manifest-path '%s' --no-default-features\n" \
+            "$(printf '%s' "$repo_dir/target" | sed "s/'/'\\\\''/g")" \
+            "$(printf '%s' "$manifest" | sed "s/'/'\\\\''/g")"
         printf "exec '%s' \"\$@\"\n" "$(printf '%s' "$binary" | sed "s/'/'\\\\''/g")"
     } > "$shim_tmp"
     chmod +x "$shim_tmp"
@@ -77,6 +81,7 @@ if [ "$local_install" = true ]; then
     echo "Installed local imp shim to $install_dir/imp"
     echo "Binary: $binary"
     echo "Rules:  $rules_dir"
+    echo "The shim will rebuild changed Rust code before each run."
     exit 0
 fi
 
