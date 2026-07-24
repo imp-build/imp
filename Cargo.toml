@@ -32,6 +32,9 @@ protox       = "0.7"
 tokio-stream = { version = "0.1", features = ["net"] }
 hyper-util   = { version = "0.1", features = ["tokio"] }
 tower        = "0.5"
+tree-sitter  = "0.26"
+tree-sitter-language = "0.1"
+libloading   = "0.9"
 
 [profile.dev]
 opt-level = 1

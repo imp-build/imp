@@ -1,0 +1,12 @@
+[package]
+name = "imp-treesitter"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tree-sitter.workspace = true
+tree-sitter-language.workspace = true
+libloading.workspace = true
+serde.workspace = true
+serde_json.workspace = true

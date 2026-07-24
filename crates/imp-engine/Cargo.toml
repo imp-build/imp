@@ -18,6 +18,7 @@ imp-daemon = { path = "../imp-daemon" }
 imp-scheduler = { path = "../imp-scheduler" }
 imp-exec-bridge = { path = "../imp-exec-bridge" }
 imp-logging = { path = "../imp-logging" }
+imp-treesitter = { path = "../imp-treesitter" }
 anyhow.workspace = true
 clap.workspace = true
 regex.workspace = true

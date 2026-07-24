@@ -433,6 +433,7 @@ async fn create_live_runtime(
     let run_args: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
     let import_graph: Arc<Mutex<crate::changed::ImportGraph>> =
         Arc::new(Mutex::new(crate::changed::ImportGraph::default()));
+    let grammar_registry = Arc::new(imp_treesitter::GrammarRegistry::new());
     let rt = Runtime::new().context("create QuickJS runtime")?;
     rt.set_loader(
         ImpResolver {
@@ -490,6 +491,7 @@ async fn create_live_runtime(
                     goal_flags: Arc::clone(&goal_flags),
                     run_args: Arc::clone(&run_args),
                     service: Arc::clone(&service),
+                    grammar_registry: Arc::clone(&grammar_registry),
                 },
             )
         })
@@ -533,6 +535,7 @@ async fn create_live_runtime(
         dynamic_targets: Arc::new(Mutex::new(BTreeMap::new())),
         expansion_children: Arc::new(Mutex::new(BTreeMap::new())),
         service,
+        grammar_registry,
     })
 }
 
@@ -1262,6 +1265,7 @@ struct RegisterGlobalsArgs {
     goal_flags: Arc<Mutex<Option<serde_json::Value>>>,
     run_args: Arc<Mutex<Option<Vec<String>>>>,
     service: Arc<dyn ExecutionService>,
+    grammar_registry: Arc<imp_treesitter::GrammarRegistry>,
 }
 
 /// Register host globals on `ctx`.
@@ -1279,6 +1283,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         goal_flags,
         run_args,
         service,
+        grammar_registry,
     } = args;
     let globals = ctx.globals();
 
@@ -2384,6 +2389,68 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         },
     )?;
     globals.set("__host_extract", host_extract)?;
+
+    // ------------------------------------------------------------------
+    // __host_ts_load_grammar(path, symbolName) → handle
+    // __host_ts_parse(grammarHandle, source) → handle
+    // __host_ts_tree_sexp(treeHandle) → String
+    // __host_ts_query(grammarHandle, treeHandle, querySource) → JSON string
+    //
+    // Loads tree-sitter grammar shared libraries in-process via dlopen (see
+    // `imp_treesitter::ffi` for the trust tradeoff this implies — unlike
+    // every other native integration here, there is no subprocess boundary).
+    // ------------------------------------------------------------------
+    let grammar_registry_load = Arc::clone(&grammar_registry);
+    let host_ts_load_grammar = Function::new(
+        ctx.clone(),
+        move |path: String, symbol_name: Option<String>| -> rquickjs::Result<f64> {
+            grammar_registry_load
+                .load_grammar(Path::new(&path), symbol_name.as_deref())
+                .map(|id| id as f64)
+                .map_err(|e| rquickjs::Error::new_loading_message("loadGrammar", format!("{e:#}")))
+        },
+    )?;
+    globals.set("__host_ts_load_grammar", host_ts_load_grammar)?;
+
+    let grammar_registry_parse = Arc::clone(&grammar_registry);
+    let host_ts_parse = Function::new(
+        ctx.clone(),
+        move |grammar_handle: f64, source: String| -> rquickjs::Result<f64> {
+            grammar_registry_parse
+                .parse(grammar_handle as u32, source)
+                .map(|id| id as f64)
+                .map_err(|e| rquickjs::Error::new_loading_message("parseSource", format!("{e:#}")))
+        },
+    )?;
+    globals.set("__host_ts_parse", host_ts_parse)?;
+
+    let grammar_registry_sexp = Arc::clone(&grammar_registry);
+    let host_ts_tree_sexp = Function::new(
+        ctx.clone(),
+        move |tree_handle: f64| -> rquickjs::Result<String> {
+            grammar_registry_sexp
+                .tree_sexp(tree_handle as u32)
+                .map_err(|e| rquickjs::Error::new_loading_message("treeSexp", format!("{e:#}")))
+        },
+    )?;
+    globals.set("__host_ts_tree_sexp", host_ts_tree_sexp)?;
+
+    let grammar_registry_query = Arc::clone(&grammar_registry);
+    let host_ts_query = Function::new(
+        ctx.clone(),
+        move |grammar_handle: f64,
+              tree_handle: f64,
+              query_source: String|
+              -> rquickjs::Result<String> {
+            let matches = grammar_registry_query
+                .run_query(grammar_handle as u32, tree_handle as u32, &query_source)
+                .map_err(|e| rquickjs::Error::new_loading_message("tsQuery", format!("{e:#}")))?;
+            serde_json::to_string(&matches).map_err(|e| {
+                rquickjs::Error::new_loading_message("tsQuery", format!("serialize matches: {e}"))
+            })
+        },
+    )?;
+    globals.set("__host_ts_query", host_ts_query)?;
 
     // ------------------------------------------------------------------
     // __host_platform_info() → JSON string { "os": "...", "arch": "..." }

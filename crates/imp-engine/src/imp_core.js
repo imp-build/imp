@@ -903,6 +903,67 @@ export function cacheHas(name, key) {
 	return __host_cache_has(name, key);
 }
 
+// ---------------------------------------------------------------------------
+// Tree-sitter grammar parsing primitives
+//
+// Grammars are native shared libraries (.so/.dylib/.dll, as produced by the
+// Tree-sitter CLI) loaded in-process via dlopen — there is no subprocess
+// boundary the way there is for run(). A loaded grammar runs with the same
+// privileges as imp itself and can corrupt or crash the process if
+// malicious or buggy, so only load grammars you trust (the same standard as
+// run()/download() today).
+// ---------------------------------------------------------------------------
+
+/**
+ * Load a tree-sitter grammar shared library, or return its existing handle if
+ * the same path was already loaded (grammars are never unloaded once loaded).
+ *
+ * @param {string} path Path to a compiled grammar shared library.
+ * @param {string} [symbolName] The grammar's C symbol, e.g. "tree_sitter_json".
+ *   Inferred from `path`'s file name when omitted (e.g. "tree-sitter-json.so"
+ *   -> "tree_sitter_json").
+ * @returns {number} Opaque grammar handle, for passing to parseSource()/tsQuery().
+ */
+export function loadGrammar(path, symbolName) {
+	return __host_ts_load_grammar(path, symbolName ?? null);
+}
+
+/**
+ * Parse source text with a loaded grammar.
+ *
+ * @param {number} grammarHandle Handle returned by loadGrammar().
+ * @param {string} source Source text to parse.
+ * @returns {number} Opaque tree handle, for passing to treeSexp()/tsQuery().
+ */
+export function parseSource(grammarHandle, source) {
+	return __host_ts_parse(grammarHandle, source);
+}
+
+/**
+ * Dump a parsed tree's root node as a tree-sitter S-expression, e.g. for
+ * debugging or simple structural assertions in tests.
+ *
+ * @param {number} treeHandle Handle returned by parseSource().
+ * @returns {string}
+ */
+export function treeSexp(treeHandle) {
+	return __host_ts_tree_sexp(treeHandle);
+}
+
+/**
+ * Run a tree-sitter query against a parsed tree.
+ *
+ * @param {number} grammarHandle Handle returned by loadGrammar() (the same
+ *   grammar the tree was parsed with).
+ * @param {number} treeHandle Handle returned by parseSource().
+ * @param {string} querySource Tree-sitter query language source, e.g.
+ *   `"(string (string_content) @key)"`.
+ * @returns {Array<{pattern_index: number, captures: Array<{name: string, text: string, start_byte: number, end_byte: number, start_position: {row: number, column: number}, end_position: {row: number, column: number}}>}>}
+ */
+export function tsQuery(grammarHandle, treeHandle, querySource) {
+	return JSON.parse(__host_ts_query(grammarHandle, treeHandle, querySource));
+}
+
 /**
  * Start a named, host-managed persistent worker process (e.g. a build-cache
  * daemon like sccache), or return its existing handle if one is already
