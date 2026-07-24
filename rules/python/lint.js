@@ -10,30 +10,50 @@ import {
 	resolveRuffToolchainVersion,
 	ruffTool,
 } from "//rules/python/ruff_toolchain";
-import { paths, run } from "imp:core";
+import { digestOf, diffDigests, output, paths, run } from "imp:core";
 
 // Check a target's own Python sources with ruff, without writing anything
-// back. `--color=always` forces ruff's diagnostic colors even though stdout/
-// stderr are piped rather than a tty.
-export async function ruffCheck(handle) {
+// back unless `fix` is requested. `--color=always` forces ruff's diagnostic
+// colors even though stdout/stderr are piped rather than a tty. `ruff check
+// --fix` still exits nonzero when unsafe/unfixable violations remain, so
+// `ok` keeps coming straight from `exitCode` either way.
+export async function ruffCheck(handle, { fix = false } = {}) {
 	const srcs = await python_file_sources(handle);
 	const files = paths(srcs);
 	if (files.length === 0) {
-		return { ok: true, output: "" };
+		return {
+			ok: true,
+			output: "",
+			fixSupported: true,
+			fixApplied: false,
+			outputDigest: null,
+		};
 	}
 	const path = declared_path(handle, handle.attrs.src || ".");
 	const tool = await ruffTool(resolveRuffToolchainVersion());
+	const before = fix ? digestOf(srcs) : null;
 
 	const result = await run({
-		argv: ["ruff", "check", "--color=always", ...files],
+		argv: [
+			"ruff",
+			"check",
+			"--color=always",
+			...(fix ? ["--fix"] : []),
+			...files,
+		],
 		tools: [tool],
 		inputs: [srcs],
+		...(fix ? { outputs: files.map((f) => output(f)), materialize: true } : {}),
 		allowFailure: true,
-		display: `ruff check ${path}`,
+		display: `ruff check ${fix ? "--fix " : ""}${path}`,
 	});
 
+	const changed = fix ? diffDigests(before, result.outputDigest) : [];
 	return {
 		ok: result.exitCode === 0,
 		output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
+		fixSupported: true,
+		fixApplied: changed.length > 0,
+		outputDigest: fix ? result.outputDigest : null,
 	};
 }

@@ -1,8 +1,6 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { generateGoal } from "//rules/workflows/generate";
+import { generateGoal, GENERATE } from "//rules/workflows/generate";
 import { product, target, targetKind, toolName } from "imp:core";
-import { GENERATE_CHECK } from "//rules/workflows/products";
-import { GENERATE } from "//rules/workflows/generate";
 const TEST_TOOL = toolName("generate-test-tool");
 const K_generate_goal_test_clean = targetKind("generate-goal-test-clean");
 const K_generate_goal_test_stale_a = targetKind("generate-goal-test-stale-a");
@@ -40,24 +38,29 @@ describe("generate workflow", () => {
 	test("generateGoal --check runs and reports every target before throwing", async () => {
 		product(
 			K_generate_goal_test_clean,
-			GENERATE_CHECK,
+			GENERATE,
 			TEST_TOOL,
-			async () => ({ checked: 1, stale: [] }),
-			{ display: "generate check {0}", level: "info" },
+			async (handle, { check } = {}) =>
+				check ? { checked: 1, stale: [] } : { generated: 0 },
+			{ display: "generate {0}", level: "info" },
 		);
 		product(
 			K_generate_goal_test_stale_a,
-			GENERATE_CHECK,
+			GENERATE,
 			TEST_TOOL,
-			async () => ({ checked: 1, stale: ["a/gen.h"] }),
-			{ display: "generate check {0}", level: "info" },
+			async (handle, { check } = {}) =>
+				check ? { checked: 1, stale: ["a/gen.h"] } : { generated: 0 },
+			{ display: "generate {0}", level: "info" },
 		);
 		product(
 			K_generate_goal_test_stale_b,
-			GENERATE_CHECK,
+			GENERATE,
 			TEST_TOOL,
-			async () => ({ checked: 2, stale: ["b/gen.h", "b/gen.rs"] }),
-			{ display: "generate check {0}", level: "info" },
+			async (handle, { check } = {}) =>
+				check
+					? { checked: 2, stale: ["b/gen.h", "b/gen.rs"] }
+					: { generated: 0 },
+			{ display: "generate {0}", level: "info" },
 		);
 		const clean = target({ kind: "generate-goal-test-clean" });
 		const staleA = target({ kind: "generate-goal-test-stale-a" });
@@ -92,20 +95,20 @@ describe("generate workflow", () => {
 				}
 				// Both stale targets are named, not just the first one hit — the
 				// loop finishes checking every target before deciding to throw.
-				expect(message).toContain("//:a#generate-check");
+				expect(message).toContain("//:a#generate");
 				expect(message).toContain("a/gen.h");
-				expect(message).toContain("//:b#generate-check");
+				expect(message).toContain("//:b#generate");
 				expect(message).toContain("b/gen.h");
 				expect(message).toContain("b/gen.rs");
-				expect(
-					logs.some((l) => l.message.includes("//:a#generate-check")),
-				).toBe(true);
-				expect(
-					logs.some((l) => l.message.includes("//:b#generate-check")),
-				).toBe(true);
-				expect(
-					logs.some((l) => l.message.includes("//:clean#generate-check")),
-				).toBe(false);
+				expect(logs.some((l) => l.message.includes("//:a#generate"))).toBe(
+					true,
+				);
+				expect(logs.some((l) => l.message.includes("//:b#generate"))).toBe(
+					true,
+				);
+				expect(logs.some((l) => l.message.includes("//:clean#generate"))).toBe(
+					false,
+				);
 			});
 		});
 	});
@@ -113,10 +116,11 @@ describe("generate workflow", () => {
 	test("generateGoal --check does not throw when every target is already up to date", async () => {
 		product(
 			K_generate_goal_test_all_clean,
-			GENERATE_CHECK,
+			GENERATE,
 			TEST_TOOL,
-			async () => ({ checked: 1, stale: [] }),
-			{ display: "generate check {0}", level: "info" },
+			async (handle, { check } = {}) =>
+				check ? { checked: 1, stale: [] } : { generated: 0 },
+			{ display: "generate {0}", level: "info" },
 		);
 		const clean = target({ kind: "generate-goal-test-all-clean" });
 

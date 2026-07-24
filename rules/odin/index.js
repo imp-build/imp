@@ -1240,18 +1240,21 @@ export const odinRun = product(
  * Lint an Odin package via `odin check -vet` (type-checks the package and
  * flags unused declarations/imports, variable shadowing, and `using`
  * statement misuse — no build output is produced). Mirrors cargoClippy /
- * ruffCheck: reports a structured `{ ok, output }` instead of throwing, so
- * `imp lint` can run every selected target to completion and print a
- * summary at the end.
+ * ruffCheck: reports a structured `{ ok, output, fixSupported, fixApplied,
+ * outputDigest }` instead of throwing, so `imp lint` can run every
+ * selected target to completion and print a summary at the end.
+ * `odin check` has no autofix mode, so `fix` is accepted (for a uniform
+ * call signature across every lint product) but always a no-op here.
  *
  * @param {object} handle Target handle returned by odinPackage().
- * @returns {Promise<{ok: boolean, output: string}>}
+ * @param {{fix?: boolean}} [opts]
+ * @returns {Promise<{ok: boolean, output: string, fixSupported: boolean, fixApplied: boolean, outputDigest: string|null}>}
  */
 export const odinLint = product(
 	OdinPackage,
 	LINT,
 	ODIN_TOOL,
-	async function odinLint(handle) {
+	async function odinLint(handle, { fix = false } = {}) {
 		const toolchainHandle = handle.attrs.toolchain;
 		const odinToolSpec = toolchainHandle
 			? await tool(toolchainHandle)
@@ -1290,9 +1293,16 @@ export const odinLint = product(
 			allowFailure: true,
 			display: `odin check -vet ${path}`,
 		});
+		let out = [result.stdout, result.stderr].filter(Boolean).join("\n");
+		if (fix) {
+			out = `note: --fix is not supported for odin check -vet; ran plain lint.\n${out}`;
+		}
 		return {
 			ok: result.exitCode === 0,
-			output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
+			output: out,
+			fixSupported: false,
+			fixApplied: false,
+			outputDigest: null,
 		};
 	},
 	{ display: "lint {0}", level: "info" },

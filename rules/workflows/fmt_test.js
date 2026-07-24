@@ -2,12 +2,9 @@ import { describe, expect, test } from "//rules/imp/test";
 import {
 	odinPackageFmt,
 	odinTestPackageFmt,
-	odinPackageFormatCheck,
-	odinTestPackageFormatCheck,
 	fmtGoal,
 } from "//rules/workflows/fmt";
 import { product, target, FMT, targetKind, toolName } from "imp:core";
-import { FORMAT_CHECK } from "//rules/workflows/products";
 const TEST_TOOL = toolName("fmt-test-tool");
 const K_fmt_goal_test_clean = targetKind("fmt-goal-test-clean");
 const K_fmt_goal_test_dirty_a = targetKind("fmt-goal-test-dirty-a");
@@ -16,11 +13,9 @@ const K_fmt_goal_test_all_clean = targetKind("fmt-goal-test-all-clean");
 const K_fmt_goal_test_reformat = targetKind("fmt-goal-test-reformat");
 
 describe("fmt workflow", () => {
-	test("fmt/format-check products are declared for odin-package and odin-test-package", () => {
+	test("fmt products are declared for odin-package and odin-test-package", () => {
 		expect(typeof odinPackageFmt).toBe("function");
 		expect(typeof odinTestPackageFmt).toBe("function");
-		expect(typeof odinPackageFormatCheck).toBe("function");
-		expect(typeof odinTestPackageFormatCheck).toBe("function");
 	});
 
 	async function withFakeGoalFlags(flags, fn) {
@@ -50,33 +45,29 @@ describe("fmt workflow", () => {
 	test("fmtGoal --check runs and reports every target before throwing", async () => {
 		product(
 			K_fmt_goal_test_clean,
-			FORMAT_CHECK,
+			FMT,
 			TEST_TOOL,
-			async () => ({
-				checked: 1,
-				unformatted: [],
-			}),
-			{ display: "format check {0}", level: "info" },
+			async (handle, { check } = {}) =>
+				check ? { checked: 1, unformatted: [] } : { formatted: 0 },
+			{ display: "fmt {0}", level: "info" },
 		);
 		product(
 			K_fmt_goal_test_dirty_a,
-			FORMAT_CHECK,
+			FMT,
 			TEST_TOOL,
-			async () => ({
-				checked: 1,
-				unformatted: ["a/one.odin"],
-			}),
-			{ display: "format check {0}", level: "info" },
+			async (handle, { check } = {}) =>
+				check ? { checked: 1, unformatted: ["a/one.odin"] } : { formatted: 0 },
+			{ display: "fmt {0}", level: "info" },
 		);
 		product(
 			K_fmt_goal_test_dirty_b,
-			FORMAT_CHECK,
+			FMT,
 			TEST_TOOL,
-			async () => ({
-				checked: 2,
-				unformatted: ["b/one.odin", "b/two.odin"],
-			}),
-			{ display: "format check {0}", level: "info" },
+			async (handle, { check } = {}) =>
+				check
+					? { checked: 2, unformatted: ["b/one.odin", "b/two.odin"] }
+					: { formatted: 0 },
+			{ display: "fmt {0}", level: "info" },
 		);
 		const clean = target({ kind: "fmt-goal-test-clean" });
 		const dirtyA = target({ kind: "fmt-goal-test-dirty-a" });
@@ -111,20 +102,16 @@ describe("fmt workflow", () => {
 				}
 				// Both unformatted targets are named, not just the first one hit —
 				// the loop finishes checking every target before deciding to throw.
-				expect(message).toContain("//:a#format-check");
+				expect(message).toContain("//:a#fmt");
 				expect(message).toContain("a/one.odin");
-				expect(message).toContain("//:b#format-check");
+				expect(message).toContain("//:b#fmt");
 				expect(message).toContain("b/one.odin");
 				expect(message).toContain("b/two.odin");
-				expect(logs.some((l) => l.message.includes("//:a#format-check"))).toBe(
-					true,
+				expect(logs.some((l) => l.message.includes("//:a#fmt"))).toBe(true);
+				expect(logs.some((l) => l.message.includes("//:b#fmt"))).toBe(true);
+				expect(logs.some((l) => l.message.includes("//:clean#fmt"))).toBe(
+					false,
 				);
-				expect(logs.some((l) => l.message.includes("//:b#format-check"))).toBe(
-					true,
-				);
-				expect(
-					logs.some((l) => l.message.includes("//:clean#format-check")),
-				).toBe(false);
 			});
 		});
 	});
@@ -132,13 +119,11 @@ describe("fmt workflow", () => {
 	test("fmtGoal --check does not throw when every target is already formatted", async () => {
 		product(
 			K_fmt_goal_test_all_clean,
-			FORMAT_CHECK,
+			FMT,
 			TEST_TOOL,
-			async () => ({
-				checked: 1,
-				unformatted: [],
-			}),
-			{ display: "format check {0}", level: "info" },
+			async (handle, { check } = {}) =>
+				check ? { checked: 1, unformatted: [] } : { formatted: 0 },
+			{ display: "fmt {0}", level: "info" },
 		);
 		const clean = target({ kind: "fmt-goal-test-all-clean" });
 

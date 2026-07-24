@@ -6,7 +6,7 @@ import {
 	withFakeToolchainHost,
 } from "//rules/imp/test";
 import { cargoPackage } from "//rules/rust";
-import { cargoFmt, cargoFormatCheck } from "//rules/rust/fmt";
+import { cargoFmt } from "//rules/rust/fmt";
 import {
 	__resetRustToolchainStateForTest,
 	rustToolchain,
@@ -25,12 +25,12 @@ function withRustHost(fn) {
 }
 
 describe("rust fmt", () => {
-	test("cargoFormatCheck runs cargo fmt --check against the manifest", async () => {
+	test("cargoFmt check mode runs cargo fmt --check against the manifest", async () => {
 		await withRustHost(async (host) => {
 			rustToolchain("1.93.0", { default: true, unverified: true });
 			const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
 
-			await cargoFormatCheck(pkg);
+			await cargoFmt(pkg, { check: true });
 
 			const fmtRun = host.runs[host.runs.length - 1];
 			expect(fmtRun.argv[0]).toBe("sh");
@@ -39,7 +39,7 @@ describe("rust fmt", () => {
 		});
 	});
 
-	test("cargoFmt runs cargo fmt without --check and declares source outputs", async () => {
+	test("cargoFmt write mode runs cargo fmt without --check and declares source outputs", async () => {
 		await withRustHost(async (host) => {
 			rustToolchain("1.93.0", { default: true, unverified: true });
 			const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });

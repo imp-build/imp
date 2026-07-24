@@ -58,7 +58,7 @@ import {
 	workspaceRootRelativeFor,
 } from "//rules/rust/workspace_closure";
 import { defaultRustToolchain, rustTool } from "//rules/rust/toolchain";
-import { memo, paths, run } from "imp:core";
+import { digestOf, diffDigests, memo, output, paths, run } from "imp:core";
 
 // Shared, memoized `cargo clippy --workspace` run for one real workspace
 // root + toolchain configuration. A single cargo invocation is inherently
@@ -66,11 +66,14 @@ import { memo, paths, run } from "imp:core";
 // ever called with values consistent for a given real workspace — crates
 // declaring genuinely different toolchains couldn't share one real
 // `cargo build/clippy --workspace` invocation either, memoized or not.
+// `fix` is part of the memo key (an extra argument), so a fix run and a
+// plain-check run of the same workspace never collide in the memo cache.
 const runWorkspaceClippy = memo(
 	async function runWorkspaceClippy(
 		workspaceRootRelative,
 		toolchainVersion,
 		toolchainHandle,
+		fix,
 	) {
 		const toolSpec = await rustTool(toolchainVersion);
 		const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
@@ -94,12 +97,14 @@ const runWorkspaceClippy = memo(
 			toolchainVersion,
 		);
 		const resourceInputs = await resourcesForDirs(memberDirs);
+		const before = fix ? digestOf(srcs) : null;
 
 		const prefix =
 			workspaceRootRelative === "." ? "" : `${workspaceRootRelative}/`;
 		// No `-D warnings` here — see module docstring for why.
 		const script = cargoInvocationScript(
-			'cargo clippy --locked --workspace --message-format=json --manifest-path "$manifest" ' +
+			`cargo clippy ${fix ? "--fix --allow-dirty --allow-no-vcs " : ""}` +
+				'--locked --workspace --message-format=json --manifest-path "$manifest" ' +
 				'--target-dir "$target_dir" --color=always',
 			{ scriptPreamble, kacheActive },
 		);
@@ -117,8 +122,11 @@ const runWorkspaceClippy = memo(
 			tools: [...rustTools, ...linkerTools, ...cacheTools],
 			env: [...rustEnv, ...linkerEnv, ...cacheEnv],
 			inputs: [srcs, resourceInputs],
+			...(fix
+				? { outputs: paths(srcs).map((f) => output(f)), materialize: true }
+				: {}),
 			allowFailure: true,
-			display: `cargo clippy --workspace ${workspaceRootRelative}`,
+			display: `cargo clippy ${fix ? "--fix " : ""}--workspace ${workspaceRootRelative}`,
 		});
 
 		// One JSON object per line (compiler messages, artifact notifications,
@@ -136,18 +144,31 @@ const runWorkspaceClippy = memo(
 			}
 		}
 
-		return { result, messages };
+		const changedPaths = fix
+			? diffDigests(before, result.outputDigest).map((c) => c.path)
+			: [];
+
+		return { result, messages, changedPaths };
 	},
 	{ display: "workspace clippy {0}", level: "debug" },
 );
 
-// Check a crate's own sources with clippy, without writing anything back.
-// `--color=always` forces clippy's diagnostic colors even though stdout/
-// stderr are piped rather than a tty.
-export async function cargoClippy(handle) {
-	const files = paths(await rust_file_sources(handle));
+// Check a crate's own sources with clippy, writing fixes back in place when
+// `fix` is requested. `--color=always` forces clippy's diagnostic colors
+// even though stdout/stderr are piped rather than a tty. `-D warnings` keeps
+// promoting remaining warnings to errors even in fix mode, so a lint clippy
+// can't machine-apply still reports `ok: false` after fixing what it could.
+export async function cargoClippy(handle, { fix = false } = {}) {
+	const rustSrcs = await rust_file_sources(handle);
+	const files = paths(rustSrcs);
 	if (files.length === 0) {
-		return { ok: true, output: "" };
+		return {
+			ok: true,
+			output: "",
+			fixSupported: true,
+			fixApplied: false,
+			outputDigest: null,
+		};
 	}
 	const path = declared_path(handle, handle.attrs.path || ".");
 	const toolchainVersion = rust_toolchain_version(handle);
@@ -172,9 +193,11 @@ export async function cargoClippy(handle) {
 		);
 		const { files: srcs } = await sources(handle);
 		const resourceInputs = await resources(handle);
+		const before = fix ? digestOf(rustSrcs) : null;
 
 		const script = cargoInvocationScript(
-			'cargo clippy --locked --manifest-path "$manifest" --target-dir "$target_dir" ' +
+			`cargo clippy ${fix ? "--fix --allow-dirty --allow-no-vcs " : ""}` +
+				'--locked --manifest-path "$manifest" --target-dir "$target_dir" ' +
 				'--no-deps --color=always "$@" -- -D warnings',
 			{ scriptPreamble, kacheActive },
 		);
@@ -192,13 +215,20 @@ export async function cargoClippy(handle) {
 			tools: [...rustTools, ...linkerTools, ...cacheTools],
 			env: [...rustEnv, ...linkerEnv, ...cacheEnv],
 			inputs: [srcs, resourceInputs],
+			...(fix
+				? { outputs: files.map((f) => output(f)), materialize: true }
+				: {}),
 			allowFailure: true,
-			display: `cargo clippy ${path}`,
+			display: `cargo clippy ${fix ? "--fix " : ""}${path}`,
 		});
 
+		const changed = fix ? diffDigests(before, result.outputDigest) : [];
 		return {
 			ok: result.exitCode === 0,
 			output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
+			fixSupported: true,
+			fixApplied: changed.length > 0,
+			outputDigest: fix ? result.outputDigest : null,
 		};
 	}
 
@@ -206,10 +236,11 @@ export async function cargoClippy(handle) {
 		path,
 		toolchainVersion,
 	);
-	const { result, messages } = await runWorkspaceClippy(
+	const { result, messages, changedPaths } = await runWorkspaceClippy(
 		workspaceRootRelative,
 		toolchainVersion,
 		toolchainHandle,
+		fix,
 	);
 
 	// Attribute the shared run's diagnostics back to this one crate by path
@@ -217,7 +248,9 @@ export async function cargoClippy(handle) {
 	// (`target.src_path` for compiler-message/artifact, `manifest_path`
 	// otherwise) — absolute paths are sandbox-specific, so this can't match
 	// against anything computed from a *different* run's sandbox, only
-	// against this crate's own known repo-relative directory.
+	// against this crate's own known repo-relative directory. The same
+	// substring match attributes the shared fix run's changed-file digest
+	// diff back to this crate.
 	const ownMessages = messages.filter((msg) => {
 		const p = (msg.target && msg.target.src_path) || msg.manifest_path;
 		return typeof p === "string" && p.includes(`/${path}/`);
@@ -232,6 +265,7 @@ export async function cargoClippy(handle) {
 			msg.message &&
 			(msg.message.level === "warning" || msg.message.level === "error"),
 	);
+	const ownFixApplied = changedPaths.some((p) => p.includes(`/${path}/`));
 
 	if (result.exitCode !== 0 && ownDiagnostics.length === 0) {
 		// The shared run failed for a reason not attributed to this crate — a
@@ -242,11 +276,17 @@ export async function cargoClippy(handle) {
 		return {
 			ok: false,
 			output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
+			fixSupported: true,
+			fixApplied: ownFixApplied,
+			outputDigest: fix ? result.outputDigest : null,
 		};
 	}
 
 	return {
 		ok: !ownWarnOrError,
 		output: ownDiagnostics.join("\n"),
+		fixSupported: true,
+		fixApplied: ownFixApplied,
+		outputDigest: fix ? result.outputDigest : null,
 	};
 }

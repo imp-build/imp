@@ -2,6 +2,7 @@ import {
 	describe,
 	expect,
 	test,
+	withFakeDiff,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
 import { pythonApp } from "//rules/python";
@@ -71,6 +72,60 @@ describe("python lint", () => {
 				const result = await ruffCheck(app);
 				expect(result.ok).toBe(false);
 				expect(result.output).toContain("line too long");
+			} finally {
+				globalThis.__host_run = originalRun;
+			}
+		});
+	});
+
+	test("ruffCheck fix mode passes --fix and declares source outputs", async () => {
+		await withRuffHost(async (host) => {
+			ruffToolchain("0.15.21", { default: true });
+			const app = pythonApp({ src: "rules/python/example" });
+
+			await withFakeDiff(
+				[{ type: "modified", path: "rules/python/example/app.py" }],
+				async () => {
+					const result = await ruffCheck(app, { fix: true });
+					expect(result.ok).toBe(true);
+					expect(result.fixSupported).toBe(true);
+					expect(result.fixApplied).toBe(true);
+					expect(result.outputDigest).not.toBe(null);
+				},
+			);
+
+			const checkRun = host.runs[host.runs.length - 1];
+			expect(checkRun.argv).toContain("--fix");
+			expect(checkRun.materialize).toBe(true);
+			expect(Array.isArray(checkRun.outputs)).toBe(true);
+		});
+	});
+
+	test("ruffCheck fix mode still reports ok:false when unfixable violations remain", async () => {
+		await withRuffHost(async (host) => {
+			ruffToolchain("0.15.21", { default: true });
+			const app = pythonApp({ src: "rules/python/example" });
+
+			const originalRun = globalThis.__host_run;
+			globalThis.__host_run = async (opts) => {
+				host.runs.push(opts);
+				return {
+					stdout: "F821 undefined name\n",
+					stderr: "",
+					exitCode: 1,
+					outputDigest: "fake-digest",
+				};
+			};
+			try {
+				await withFakeDiff(
+					[{ type: "modified", path: "rules/python/example/app.py" }],
+					async () => {
+						const result = await ruffCheck(app, { fix: true });
+						expect(result.ok).toBe(false);
+						expect(result.fixApplied).toBe(true);
+						expect(result.output).toContain("undefined name");
+					},
+				);
 			} finally {
 				globalThis.__host_run = originalRun;
 			}

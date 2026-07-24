@@ -1,12 +1,19 @@
 // Goal-only lint workflow. //rules/workflows/lint additionally imports all
 // built-in lint products for backwards compatibility.
-import { goal, resolveProducts, logInfo } from "imp:core";
+import { goal, resolveProducts, goalFlags, logInfo } from "imp:core";
 
+// `fix` is passed straight through to each product function as a second
+// argument (`fn(handle, {fix})`) rather than registering a second product —
+// same convention fmtGoal uses for `--check` (//rules/workflows/fmt_goal.js).
+// Not every lint tool has a fix mode, so the decision of what (if anything)
+// to do with `fix` belongs to each linter, not to a product-lookup fallback
+// here.
 export async function lintGoal(selection) {
+	const { fix } = goalFlags();
 	const resolved = selection.flatMap(resolveProducts);
 	const calls = resolved.map(({ label, fn, handle }) => ({
 		label,
-		promise: fn(handle),
+		promise: fn(handle, { fix }),
 	}));
 
 	const results = [];
@@ -18,6 +25,15 @@ export async function lintGoal(selection) {
 		if (output) logInfo(`${label}:\n${output}`);
 	}
 
+	if (fix) {
+		const fixed = results.filter((r) => r.fixApplied);
+		if (fixed.length > 0) {
+			logInfo(
+				`lint --fix: ${fixed.map((r) => r.label).join(", ")} had fixes applied`,
+			);
+		}
+	}
+
 	const failed = results.filter((r) => !r.ok);
 	logInfo(
 		`lint: ${results.length - failed.length}/${results.length} target(s) clean`,
@@ -27,4 +43,6 @@ export async function lintGoal(selection) {
 	}
 }
 
-goal("lint", lintGoal);
+goal("lint", lintGoal, {
+	flags: { fix: { description: "Automatically fix what can be fixed" } },
+});

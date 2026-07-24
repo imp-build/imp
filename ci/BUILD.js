@@ -9,7 +9,6 @@
 //   imp goal generate //ci:docs_workflow --check   # CI drift gate, no writes
 import { target, product, file_set, targetKind, toolName } from "imp:core";
 import { GENERATE } from "//rules/workflows/generate";
-import { GENERATE_CHECK } from "//rules/workflows/products";
 
 const CiWorkflow = targetKind("ci-workflow");
 const CI_TOOL = toolName("ci");
@@ -40,12 +39,7 @@ async function runGenerator(materialize) {
 
 export const docs_workflow = target({ kind: "ci-workflow", attrs: {} });
 
-export const generate = product(CiWorkflow, GENERATE, CI_TOOL, async function generate() {
-    const { changed } = await runGenerator(true);
-    return { generated: changed.length };
+export const generate = product(CiWorkflow, GENERATE, CI_TOOL, async function generate(handle, { check = false } = {}) {
+    const { changed } = await runGenerator(!check);
+    return check ? { checked: 1, stale: changed } : { generated: changed.length };
 }, { display: "generate {0}", level: "info" });
-
-export const generate_check = product(CiWorkflow, GENERATE_CHECK, CI_TOOL, async function generate_check() {
-    const { changed } = await runGenerator(false);
-    return { checked: 1, stale: changed };
-}, { display: "generate check {0}", level: "info" });

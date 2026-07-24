@@ -1,10 +1,10 @@
 // Python formatting: like rustfmt, ruff format has a native `--check` mode,
-// so format-check doesn't need the digest-diff workaround odinfmt requires —
+// so check mode doesn't need the digest-diff workaround odinfmt requires —
 // a nonzero exit from `ruff format --check` is enough for run() to fail the
-// product, which fmtGoal (rules/workflows/fmt.js) already turns into a goal
-// error. The write path (`ruffFmt`) still uses digestOf/diffDigests, the same
-// generic before/after comparison cargoFmt/odinFmt use, to report an accurate
-// count of files actually changed.
+// product, which fmtGoal (rules/workflows/fmt_goal.js) already turns into a
+// goal error. The write path still uses digestOf/diffDigests, the same
+// generic before/after comparison cargoFmt/odinFmt use, to report an
+// accurate count of files actually changed.
 
 import { declared_path, python_file_sources } from "//rules/python";
 import {
@@ -13,15 +13,30 @@ import {
 } from "//rules/python/ruff_toolchain";
 import { digestOf, diffDigests, output, paths, run } from "imp:core";
 
-// Reformat a target's own Python sources in place.
-export async function ruffFmt(handle) {
+// Reformat a target's own Python sources in place, or (when `check` is
+// true) verify they're already formatted without writing anything back.
+// `ruff format --check` exits nonzero on unformatted files, which run()
+// surfaces as a thrown error — no per-file parsing needed.
+export async function ruffFmt(handle, { check = false } = {}) {
 	const srcs = await python_file_sources(handle);
 	const files = paths(srcs);
 	if (files.length === 0) {
-		return { formatted: 0 };
+		return check ? { checked: 0 } : { formatted: 0 };
 	}
 	const path = declared_path(handle, handle.attrs.src || ".");
 	const tool = await ruffTool(resolveRuffToolchainVersion());
+
+	if (check) {
+		await run({
+			argv: ["ruff", "format", "--check", ...files],
+			tools: [tool],
+			inputs: [srcs],
+			display: `ruff format --check ${path}`,
+		});
+
+		return { checked: files.length };
+	}
+
 	const before = digestOf(srcs);
 
 	const result = await run({
@@ -35,26 +50,4 @@ export async function ruffFmt(handle) {
 
 	const changes = diffDigests(before, result.outputDigest);
 	return { formatted: changes.length };
-}
-
-// Verify a target's own Python sources are already formatted, without
-// writing anything back. `ruff format --check` exits nonzero on unformatted
-// files, which run() surfaces as a thrown error — no per-file parsing needed.
-export async function ruffFormatCheck(handle) {
-	const srcs = await python_file_sources(handle);
-	const files = paths(srcs);
-	if (files.length === 0) {
-		return { checked: 0 };
-	}
-	const path = declared_path(handle, handle.attrs.src || ".");
-	const tool = await ruffTool(resolveRuffToolchainVersion());
-
-	await run({
-		argv: ["ruff", "format", "--check", ...files],
-		tools: [tool],
-		inputs: [srcs],
-		display: `ruff format --check ${path}`,
-	});
-
-	return { checked: files.length };
 }

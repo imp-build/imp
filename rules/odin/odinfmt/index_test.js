@@ -5,7 +5,7 @@ import {
 	withFakeRun,
 	withFakeDiff,
 } from "//rules/imp/test";
-import { odinFmt, odinFormatCheck } from "//rules/odin/odinfmt";
+import { odinFmt } from "//rules/odin/odinfmt";
 import { odinPackage } from "//rules/odin";
 import { getMemoTrace } from "imp:core";
 
@@ -13,7 +13,7 @@ const MAIN_ODIN = "rules/odin/example/main.odin";
 const LOCKED_TEST_VERSION = "dev-2026-03";
 
 describe("Odin fmt mechanics", () => {
-	test("odinFmt runs odinfmt -w over the package's own sources, declares them as materialized outputs, no changes", async () => {
+	test("odinFmt write mode runs odinfmt -w over the package's own sources, declares them as materialized outputs, no changes", async () => {
 		await withFakeRun(async () => {
 			// __host_diff_digests is stubbed (not the real digest comparison —
 			// withFakeRun doesn't actually run odinfmt, so there's no real
@@ -40,7 +40,7 @@ describe("Odin fmt mechanics", () => {
 		});
 	});
 
-	test("odinFmt reports every file the digest diff flags as changed", async () => {
+	test("odinFmt write mode reports every file the digest diff flags as changed", async () => {
 		await withFakeRun(async () => {
 			await withFakeDiff([{ type: "modified", path: MAIN_ODIN }], async () => {
 				const pkg = odinPackage({
@@ -54,7 +54,7 @@ describe("Odin fmt mechanics", () => {
 		});
 	});
 
-	test("odinFormatCheck runs the same batched -w invocation without materializing, no changes", async () => {
+	test("odinFmt check mode runs the same batched -w invocation without materializing, no changes", async () => {
 		await withFakeRun(async () => {
 			await withFakeDiff([], async () => {
 				const pkg = odinPackage({
@@ -62,7 +62,7 @@ describe("Odin fmt mechanics", () => {
 					srcs: ["**/*.odin"],
 					toolchain: LOCKED_TEST_VERSION,
 				});
-				const result = await odinFormatCheck(pkg);
+				const result = await odinFmt(pkg, { check: true });
 				const { trace } = getMemoTrace();
 				const runEffect = trace.find(
 					(t) =>
@@ -77,7 +77,7 @@ describe("Odin fmt mechanics", () => {
 		});
 	});
 
-	test("odinFormatCheck reports unformatted files without throwing", async () => {
+	test("odinFmt check mode reports unformatted files without throwing", async () => {
 		await withFakeRun(async () => {
 			await withFakeDiff([{ type: "modified", path: MAIN_ODIN }], async () => {
 				const pkg = odinPackage({
@@ -85,13 +85,13 @@ describe("Odin fmt mechanics", () => {
 					srcs: ["**/*.odin"],
 					toolchain: LOCKED_TEST_VERSION,
 				});
-				const result = await odinFormatCheck(pkg);
+				const result = await odinFmt(pkg, { check: true });
 				expect(result).toEqual({ checked: 1, unformatted: [MAIN_ODIN] });
 			});
 		});
 	});
 
-	test("odinFmt returns formatted: 0 without invoking run when there are no sources", async () => {
+	test("odinFmt write mode returns formatted: 0 without invoking run when there are no sources", async () => {
 		await withFakeRun(async () => {
 			const pkg = odinPackage({
 				path: "rules/odin/example",
@@ -107,14 +107,14 @@ describe("Odin fmt mechanics", () => {
 		});
 	});
 
-	test("odinFormatCheck returns checked: 0 without invoking run when there are no sources", async () => {
+	test("odinFmt check mode returns checked: 0 without invoking run when there are no sources", async () => {
 		await withFakeRun(async () => {
 			const pkg = odinPackage({
 				path: "rules/odin/example",
 				srcs: ["missing*.odin"],
 				toolchain: "dev-2026-04",
 			});
-			const result = await odinFormatCheck(pkg);
+			const result = await odinFmt(pkg, { check: true });
 			const { trace } = getMemoTrace();
 			expect(trace.some((t) => t.event === "effect" && t.kind === "run")).toBe(
 				false,

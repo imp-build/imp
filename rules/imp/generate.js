@@ -28,12 +28,14 @@ import {
  * its own "prefer materialize:false" warning and is meant for the dist/
  * package pattern, not for scattered per-file codegen outputs.
  *
- * Call this once with `materialize: true` for a target's `generate` product
- * (writes into the workspace) and once with `materialize: false` for its
- * `generate-check` product (CAS-only, safe for CI drift checks):
+ * Call this with `materialize: !check` inside a target's single `generate`
+ * product, branching on the `check` flag `generateGoal` passes as the
+ * product function's second argument (//rules/workflows/generate.js) —
+ * `materialize: true` writes into the workspace, `materialize: false` keeps
+ * the result CAS-only for a CI drift check:
  *
  * ```js
- * export const generate = product(SomeKind, GENERATE, MY_TOOL, async (handle) => {
+ * export const generate = product(SomeKind, GENERATE, MY_TOOL, async (handle, { check = false } = {}) => {
  *     const built = await buildGenerator(handle);
  *     const { changed } = await generatedFiles({
  *         display: `generate ${handle.label.address}`,
@@ -41,23 +43,10 @@ import {
  *         tools: [built],
  *         inputs: [...],
  *         outputPaths: ["src/kernels/kernels_gen.h", "src/kernels/kernels_gen.rs"],
- *         materialize: true,
+ *         materialize: !check,
  *     });
- *     return { generated: changed.length };
+ *     return check ? { checked: 2, stale: changed } : { generated: changed.length };
  * }, { display: "generate {0}", level: "info" });
- *
- * export const generateCheck = product(SomeKind, GENERATE_CHECK, MY_TOOL, async (handle) => {
- *     const built = await buildGenerator(handle);
- *     const { changed } = await generatedFiles({
- *         display: `generate --check ${handle.label.address}`,
- *         argv: [built.path, ...args],
- *         tools: [built],
- *         inputs: [...],
- *         outputPaths: ["src/kernels/kernels_gen.h", "src/kernels/kernels_gen.rs"],
- *         materialize: false,
- *     });
- *     return { checked: 2, stale: changed };
- * }, { display: "generate check {0}", level: "info" });
  * ```
  *
  * @param {object} opts

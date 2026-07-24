@@ -2,18 +2,22 @@
 // in their own rule modules so callers such as `imp init` can enable only
 // the integrations a workspace selected. //rules/workflows/fmt remains the
 // compatibility aggregator that enables every built-in formatter.
+//
+// `check` is passed straight through to each product function as a second
+// argument (`fn(handle, {check})`) rather than remapping to a second
+// registered product — same convention as lintGoal's `--fix`
+// (//rules/workflows/lint_goal.js). Unlike lint, the two modes return
+// genuinely different result shapes (`unformatted` vs. `formatted`), so this
+// callback still needs its own summary/throw logic rather than lint's
+// simpler loop.
 import { goal, resolveProducts, goalFlags, logInfo } from "imp:core";
-import { FORMAT_CHECK } from "//rules/workflows/products";
 
 export async function fmtGoal(selection) {
 	const { check } = goalFlags();
-	const targets = check
-		? selection.map((entry) => ({ ...entry, product: FORMAT_CHECK }))
-		: selection;
-	const resolved = targets.flatMap(resolveProducts);
+	const resolved = selection.flatMap(resolveProducts);
 	const calls = resolved.map(({ label, fn, handle }) => ({
 		label,
-		promise: fn(handle),
+		promise: fn(handle, { check }),
 	}));
 
 	const summaryLines = [];

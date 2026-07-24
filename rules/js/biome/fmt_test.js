@@ -6,7 +6,7 @@ import {
 	withFakeToolchainHost,
 } from "//rules/imp/test";
 import { jsSources } from "//rules/js";
-import { biomeFmt, biomeFormatCheck } from "//rules/js/biome/fmt";
+import { biomeFmt } from "//rules/js/biome/fmt";
 import {
 	__resetBiomeToolchainStateForTest,
 	biomeToolchain,
@@ -43,12 +43,12 @@ function withBiomeHost(fn) {
 }
 
 describe("js fmt", () => {
-	test("biomeFormatCheck runs biome format without --write against the target's sources", async () => {
+	test("biomeFmt check mode runs biome format without --write against the target's sources", async () => {
 		await withBiomeHost(async (host) => {
 			biomeToolchain("2.5.4", { default: true });
 			const target = jsSources({ src: "rules/js/example" });
 
-			await biomeFormatCheck(target);
+			await biomeFmt(target, { check: true });
 
 			const fmtRun = host.runs[host.runs.length - 1];
 			expect(fmtRun.argv[0]).toBe("biome");
@@ -58,7 +58,7 @@ describe("js fmt", () => {
 		});
 	});
 
-	test("biomeFmt runs biome format --write and declares source outputs", async () => {
+	test("biomeFmt write mode runs biome format --write and declares source outputs", async () => {
 		await withBiomeHost(async (host) => {
 			biomeToolchain("2.5.4", { default: true });
 			const target = jsSources({ src: "rules/js/example" });

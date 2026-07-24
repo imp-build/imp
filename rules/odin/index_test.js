@@ -586,6 +586,37 @@ describe("Odin rules", () => {
 		}
 	});
 
+	test("odinLint --fix has no autofix mode: runs plain lint and reports fixSupported:false", async () => {
+		configure("odin", null);
+		try {
+			await withFakeRun(async () => {
+				const pkg = odinPackage({
+					path: "rules/odin/example",
+					toolchain: LOCKED_TEST_VERSION,
+				});
+				const result = await odinLint(pkg, { fix: true });
+				expect(result.ok).toBe(true);
+				expect(result.fixSupported).toBe(false);
+				expect(result.fixApplied).toBe(false);
+				expect(result.outputDigest).toBe(null);
+				expect(result.output).toContain("--fix is not supported");
+				const { trace } = getMemoTrace();
+				const runEffect = trace.find(
+					(t) =>
+						t.event === "effect" &&
+						t.kind === "run" &&
+						t.display.startsWith("odin check"),
+				);
+				// The underlying invocation is unaffected by `fix` — no autofix flag
+				// exists for `odin check -vet` to pass.
+				expect(runEffect.argv[2]).toContain("odin check");
+				expect(runEffect.argv[2]).toContain("-vet");
+			});
+		} finally {
+			configure("odin", null);
+		}
+	});
+
 	// odinDistPackage just returns artifact(buildResult.outputDigest, {from}) —
 	// publishing to dist/ now happens in the `package` goal (packageGoal,
 	// rules/workflows/package.js), not here. But that digest comes from

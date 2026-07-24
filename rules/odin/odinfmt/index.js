@@ -3,10 +3,10 @@
 // pre-run digest of the same files, rather than scraping stdout — odinfmt has
 // no dry-run/check mode, and shelling out to a sandboxed `diff` isn't an
 // option (undeclared host binaries aren't visible on the sandbox's hermetic
-// PATH; see resolve_program/sandbox_command_env in src/exec.rs). `odinFmt`
-// and `odinFormatCheck` share the same run, differing only in whether the
-// result is materialized back into the workspace.
-// Exposed to the build graph as products by //rules/workflows/fmt.
+// PATH; see resolve_program/sandbox_command_env in src/exec.rs). Write mode
+// and check mode share the same run, differing only in whether the result is
+// materialized back into the workspace.
+// Exposed to the build graph as a product by //rules/workflows/fmt.
 
 import {
 	own_sources,
@@ -25,7 +25,6 @@ import {
 	product,
 	FMT,
 } from "imp:core";
-import { FORMAT_CHECK } from "//rules/workflows/products";
 import { ODINFMT_TOOL } from "//rules/odin/odinfmt/toolchain";
 
 function odinfmt_version(handle) {
@@ -37,10 +36,10 @@ function odinfmt_version(handle) {
 
 // Runs odinfmt -w over a package's own sources inside the sandbox, and
 // returns the set of files whose content actually changed (by digest, not by
-// timestamp/existence). When `materialize` is true (the `fmt` product), the
-// formatted files are copied back into the real workspace; when false (the
-// `format-check` product), the sandboxed result is captured into CAS and
-// diffed, but the workspace is left untouched.
+// timestamp/existence). When `materialize` is true (write mode), the
+// formatted files are copied back into the real workspace; when false (check
+// mode), the sandboxed result is captured into CAS and diffed, but the
+// workspace is left untouched.
 async function runOdinFmt(handle, { materialize }) {
 	const srcs = await own_sources(handle);
 	const files = paths(srcs);
@@ -67,21 +66,20 @@ async function runOdinFmt(handle, { materialize }) {
 	return { total: files.length, changed: changes.map((c) => c.path) };
 }
 
-// Reformat a package's own sources in place. Only the package's own sources
-// are touched; dependencies are formatted by their own targets.
-export async function odinFmt(handle) {
-	const { changed } = await runOdinFmt(handle, { materialize: true });
-	return { formatted: changed.length };
-}
-
-// Verify a package's own sources are already formatted, without writing
-// anything back to the workspace. Does not throw on its own — the fmt goal
-// callback (rules/workflows/fmt.js) decides whether unformatted files are a
+// Reformat a package's own sources in place, or (when `check` is true)
+// verify they're already formatted without writing anything back. Only the
+// package's own sources are touched; dependencies are formatted by their own
+// targets. Check mode does not throw on its own — the fmt goal callback
+// (rules/workflows/fmt_goal.js) decides whether unformatted files are a
 // failure, so every selected target gets checked and reported before any
 // error is raised.
-export async function odinFormatCheck(handle) {
-	const { total, changed } = await runOdinFmt(handle, { materialize: false });
-	return { checked: total, unformatted: changed };
+export async function odinFmt(handle, { check = false } = {}) {
+	const { total, changed } = await runOdinFmt(handle, {
+		materialize: !check,
+	});
+	return check
+		? { checked: total, unformatted: changed }
+		: { formatted: changed.length };
 }
 
 export const odinPackageFmt = product(OdinPackage, FMT, ODINFMT_TOOL, odinFmt, {
@@ -94,18 +92,4 @@ export const odinTestPackageFmt = product(
 	ODINFMT_TOOL,
 	odinFmt,
 	{ display: "fmt {0}", level: "info" },
-);
-export const odinPackageFormatCheck = product(
-	OdinPackage,
-	FORMAT_CHECK,
-	ODINFMT_TOOL,
-	odinFormatCheck,
-	{ display: "format check {0}", level: "info" },
-);
-export const odinTestPackageFormatCheck = product(
-	OdinTestPackage,
-	FORMAT_CHECK,
-	ODINFMT_TOOL,
-	odinFormatCheck,
-	{ display: "format check {0}", level: "info" },
 );

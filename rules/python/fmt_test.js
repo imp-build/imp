@@ -6,7 +6,7 @@ import {
 	withFakeToolchainHost,
 } from "//rules/imp/test";
 import { pythonApp } from "//rules/python";
-import { ruffFmt, ruffFormatCheck } from "//rules/python/fmt";
+import { ruffFmt } from "//rules/python/fmt";
 import {
 	__resetRuffToolchainStateForTest,
 	ruffToolchain,
@@ -43,12 +43,12 @@ function withRuffHost(fn) {
 }
 
 describe("python fmt", () => {
-	test("ruffFormatCheck runs ruff format --check against the target's sources", async () => {
+	test("ruffFmt check mode runs ruff format --check against the target's sources", async () => {
 		await withRuffHost(async (host) => {
 			ruffToolchain("0.15.21", { default: true });
 			const app = pythonApp({ src: "rules/python/example" });
 
-			await ruffFormatCheck(app);
+			await ruffFmt(app, { check: true });
 
 			const fmtRun = host.runs[host.runs.length - 1];
 			expect(fmtRun.argv[0]).toBe("ruff");
@@ -57,7 +57,7 @@ describe("python fmt", () => {
 		});
 	});
 
-	test("ruffFmt runs ruff format without --check and declares source outputs", async () => {
+	test("ruffFmt write mode runs ruff format without --check and declares source outputs", async () => {
 		await withRuffHost(async (host) => {
 			ruffToolchain("0.15.21", { default: true });
 			const app = pythonApp({ src: "rules/python/example" });

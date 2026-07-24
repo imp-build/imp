@@ -1,25 +1,23 @@
-// Generic `generate` / `generate-check` goal, wiring //rules/imp/generate's
-// `generatedFiles()` helper into the build graph the same way //rules/workflows/fmt
-// wires `fmt` / `format-check` for odin/cargo packages: `generate` writes a target's
-// generated files into the workspace, `generate-check` verifies they're already up
-// to date without writing — for CI drift gates on committed codegen (see
+// Generic `generate` goal, wiring //rules/imp/generate's `generatedFiles()`
+// helper into the build graph: `generate` writes a target's generated files
+// into the workspace, `generate --check` verifies they're already up to date
+// without writing — for CI drift gates on committed codegen (see
 // //rules/imp/generate.js's doc comment for the product-authoring pattern).
+// `check` is passed straight through to each product function as a second
+// argument (`fn(handle, {check})`) rather than registering a second product —
+// same convention fmtGoal uses (//rules/workflows/fmt_goal.js).
 //
-// No target kind registers `generate`/`generate-check` products yet — this module
-// only provides the shared dispatch goal; a rule package adds the products for its
-// own target kind following the pattern documented in generate.js.
+// This module only provides the shared dispatch goal; a rule package adds a
+// `generate` product for its own target kind following the pattern
+// documented in generate.js (e.g. //ci:docs_workflow).
 import { goal, resolveProducts, goalFlags, logInfo } from "imp:core";
-import { GENERATE_CHECK } from "//rules/workflows/products";
 
 export async function generateGoal(selection) {
 	const { check } = goalFlags();
-	const targets = check
-		? selection.map((entry) => ({ ...entry, product: GENERATE_CHECK }))
-		: selection;
-	const resolved = targets.flatMap(resolveProducts);
+	const resolved = selection.flatMap(resolveProducts);
 	const calls = resolved.map(({ label, fn, handle }) => ({
 		label,
-		promise: fn(handle),
+		promise: fn(handle, { check }),
 	}));
 
 	const summaryLines = [];

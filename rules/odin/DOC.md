@@ -52,6 +52,10 @@ An `odinPackage` defaults to `*.odin` and excludes `*_test.odin` and
 `test` goal through `odin test`. Override `srcs` and `exclude` with globs
 relative to `path` when a package uses another layout.
 
+`imp lint --fix` is accepted goal-wide but has no effect for Odin packages:
+`odin check -vet` has no autofix mode, so `--fix` just runs the same plain
+lint.
+
 Set `output` when a package needs a stable workspace-relative executable path.
 `package` publishes the built result below `dist/` according to the target
 address. `run` executes one selected package and rejects ambiguous
