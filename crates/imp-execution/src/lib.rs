@@ -4,6 +4,7 @@
 //! about the JS rule graph.
 pub mod exec;
 pub mod fetch;
+mod remote_cache;
 pub mod service;
 pub mod staging;
 pub mod worker;

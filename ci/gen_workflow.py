@@ -109,7 +109,15 @@ CHECK_STEPS = [
     },
     {"name": "Check formatting", "run": "./imp fmt --check //..."},
     {"name": "Lint", "run": "./imp lint //..."},
-    {"name": "Test", "run": "./imp test //..."},
+    {
+        "name": "Test",
+        "run": "./imp test //...",
+        # Opt imp-execution's task-cache lookup into the GitHub Actions
+        # cache as a remote tier (see crates/imp-remote-cache) — purely an
+        # accelerator, read directly via std::env::var and never folded into
+        # any task's action digest, so this cannot invalidate cache entries.
+        "env": {"IMP_REMOTE_CACHE": "ghac"},
+    },
     {"name": "Cache stats", "run": "./imp cache stats --details"},
     {"name": "Cache gc", "run": "./imp cache gc --apply"},
 ]
@@ -345,6 +353,10 @@ def render_step(step, indent):
                 lines.extend(f"{pad}      {line}" for line in v.splitlines())
             else:
                 lines.append(f"{pad}    {k}: {render_value(v)}")
+    if "env" in step:
+        lines.append(f"{pad}  env:")
+        for k, v in step["env"].items():
+            lines.append(f"{pad}    {k}: {render_value(v)}")
     return lines
 
 

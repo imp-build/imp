@@ -78,6 +78,8 @@ jobs:
 
       - name: Test
         run: ./imp test //...
+        env:
+          IMP_REMOTE_CACHE: ghac
 
       - name: Cache stats
         run: ./imp cache stats --details

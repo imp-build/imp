@@ -35,6 +35,7 @@ tower        = "0.5"
 tree-sitter  = "0.26"
 tree-sitter-language = "0.1"
 libloading   = "0.9"
+opendal      = { version = "0.57", default-features = false }
 
 [profile.dev]
 opt-level = 1

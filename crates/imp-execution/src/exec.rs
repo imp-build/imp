@@ -803,7 +803,17 @@ fn exec_run_inner_with_start(
                     }
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                crate::remote_cache::try_remote_hit(&task_key).inspect(|record| {
+                    // Persist locally so a repeat of this task hits the local
+                    // disk cache without another remote round-trip.
+                    if let Err(e) = write_task_cache_record(record) {
+                        imp_store::artifact_trace!(
+                            "failed to persist remote cache hit locally task_key={task_key}: {e:#}"
+                        );
+                    }
+                })
+            }
             Err(e) => {
                 return Err(e).with_context(|| format!("read {}", record_path.display()));
             }
@@ -1034,6 +1044,7 @@ fn exec_run_inner_with_start(
         };
         if !opts.no_cache {
             write_task_cache_record(&record)?;
+            crate::remote_cache::push_remote(&record);
         }
         if opts.materialize && !opts.outputs.is_empty() {
             eprintln!(

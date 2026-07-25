@@ -12,6 +12,7 @@ clap = ["imp-exec-api/clap"]
 async-trait.workspace = true
 imp-store = { path = "../imp-store" }
 imp-exec-api = { path = "../imp-exec-api" }
+imp-remote-cache = { path = "../imp-remote-cache" }
 anyhow.workspace = true
 indicatif.workspace = true
 serde.workspace = true
@@ -21,5 +22,6 @@ tokio.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+opendal = { workspace = true, features = ["services-memory"] }
 rusqlite.workspace = true
 tempfile.workspace = true
