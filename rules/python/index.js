@@ -15,6 +15,7 @@ import {
 } from "imp:core";
 import { UV_TOOL } from "//rules/python/uv_toolchain";
 import { PEX_TOOL } from "//rules/python/pex_toolchain";
+import { pythonResolveSyncArgs } from "//rules/python/resolve";
 
 import {
 	defaultUvToolchain,
@@ -45,6 +46,12 @@ export {
 	pythonSources,
 	pythonToolchain,
 } from "//rules/python/source";
+
+export {
+	PythonResolve,
+	pythonResolve,
+	pythonResolveSyncArgs,
+} from "//rules/python/resolve";
 
 // Registers the "build" goal's artifact summary callback for consumers that
 // import Python build rules without importing the workflows layer explicitly.
@@ -146,7 +153,9 @@ export const PYTHON_PROJECT_SOURCE_INCLUDES = [
 
 export const sources = memo(
 	async function sources(handle) {
-		const root = declared_path(handle, handle.attrs.src || ".");
+		const root =
+			handle.attrs.resolve?.attrs?.path ??
+			declared_path(handle, handle.attrs.src || ".");
 		return glob({ root, include: PYTHON_PROJECT_SOURCE_INCLUDES });
 	},
 	{ display: "sources {0}", level: "debug" },
@@ -158,7 +167,9 @@ export const sources = memo(
 // rust_file_sources vs sources() in rules/rust/index.js.
 export const python_file_sources = memo(
 	async function python_file_sources(handle) {
-		const root = declared_path(handle, handle.attrs.src || ".");
+		const root =
+			handle.attrs.resolve?.attrs?.path ??
+			declared_path(handle, handle.attrs.src || ".");
 		return glob({ root, include: ["**/*.py"] });
 	},
 	{ display: "python file sources {0}", level: "debug" },
@@ -180,16 +191,36 @@ export function sandboxRootEnvExports(envEntries) {
 	});
 }
 
+function shellArg(value) {
+	return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 export class PythonApp extends Target {
 	static kind = "python-app";
 	constructor({
-		src = ".",
+		src,
 		entryPoint,
 		uvVersion,
 		pexVersion,
 		extraPexArgs = [],
+		resolve,
 		deps = [],
 	}) {
+		if (resolve && resolve.__imp !== true) {
+			throw new Error(
+				"pythonApp({ resolve }) expects a pythonResolve() target",
+			);
+		}
+		const resolvePath = resolve?.attrs?.path;
+		if (resolve && resolve.kind !== "python-resolve") {
+			throw new Error(
+				"pythonApp({ resolve }) expects a pythonResolve() target",
+			);
+		}
+		if (src !== undefined && resolvePath) {
+			throw new Error("pythonApp accepts either src or resolve, not both");
+		}
+		const projectSrc = src ?? ".";
 		const explicitUvTarget =
 			uvVersion && uvVersion.__imp === true ? uvVersion : null;
 		const explicitUvVersion =
@@ -211,6 +242,7 @@ export class PythonApp extends Target {
 			(pexToolchainTarget && pexToolchainTarget.attrs?.version);
 
 		const allDeps = [
+			...(resolve ? [{ target: resolve }] : []),
 			...(uvToolchainTarget
 				? [{ target: uvToolchainTarget, mode: "tool" }]
 				: []),
@@ -223,7 +255,8 @@ export class PythonApp extends Target {
 		super({
 			kind: PythonApp.kind,
 			attrs: {
-				src,
+				src: projectSrc,
+				...(resolve ? { resolve } : {}),
 				...(entryPoint ? { entryPoint } : {}),
 				...(resolvedUvVersion ? { uvVersion: resolvedUvVersion } : {}),
 				...(uvToolchainTarget ? { uvToolchainTarget } : {}),
@@ -235,7 +268,7 @@ export class PythonApp extends Target {
 					: {}),
 			},
 			sources: sourcesField({
-				root: src,
+				root: resolvePath ?? projectSrc,
 				include: PYTHON_PROJECT_SOURCE_INCLUDES,
 			}),
 			deps: allDeps,
@@ -248,7 +281,9 @@ export const python_app_build = product(
 	BUILD,
 	UV_TOOL,
 	async function python_app_build(handle) {
-		const srcPath = declared_path(handle, handle.attrs.src || ".");
+		const srcPath =
+			handle.attrs.resolve?.attrs?.path ??
+			declared_path(handle, handle.attrs.src || ".");
 		const inputFiles = await sources(handle);
 		// attrs.uvVersion/pexVersion hold the *resolved version string* fixed at
 		// construction time (see PythonApp's constructor) — never re-resolved
@@ -260,6 +295,9 @@ export const python_app_build = product(
 		const pexToolSpec = await pexTool(handle.attrs.pexVersion);
 		const uvCacheToolSpec = uvCacheDirTool();
 		const pexRootToolSpec = pexRootTool();
+		const syncArgs = pythonResolveSyncArgs(handle.attrs.resolve)
+			.map(shellArg)
+			.join(" ");
 
 		const venvPath = `${srcPath}/.venv`;
 		const pexOutPath = `${srcPath}/.imp-out/app.pex`;
@@ -278,7 +316,7 @@ export const python_app_build = product(
 		// uv.lock can't skip re-running `uv sync` when only source files
 		// change — an accepted cost for correctness here.
 		//
-		// `uv sync --frozen` fails rather than silently re-resolving if uv.lock
+		// `uv sync --locked` fails rather than silently re-resolving if uv.lock
 		// is stale relative to pyproject.toml: a build must never mutate the
 		// lock as a side effect. pex then packs directly from the synced venv
 		// via --venv-repository (--no-transitive: no resolution of its own, no
@@ -303,7 +341,7 @@ export const python_app_build = product(
 		const script =
 			`src=$1; venv=$2; python=$3; pex=$4; shift 4; ` +
 			`imp_sandbox_root="$(pwd)" && ${envExports.join(" && ")} && ` +
-			'uv sync --project "$src" --frozen --no-progress && ' +
+			`uv sync --project "$src" --locked --no-progress${syncArgs ? ` ${syncArgs}` : ""} && ` +
 			'"$venv/bin/python" "$pex" "$@"';
 
 		const result = await run({
@@ -358,6 +396,7 @@ export const python_app_package = product(
  * @param {object|string} [opts.uvVersion] uv toolchain target handle or version string.
  * @param {object|string} [opts.pexVersion] PEX toolchain target handle or version string.
  * @param {string[]} [opts.extraPexArgs=[]] Extra arguments appended to PEX.
+ * @param {object} [opts.resolve] Locked Python resolve supplying the project path; exclusive with `src`.
  * @param {Array} [opts.deps=[]] Additional dependencies.
  * @returns {object} Target handle.
  */
@@ -367,6 +406,7 @@ export function pythonApp({
 	uvVersion,
 	pexVersion,
 	extraPexArgs,
+	resolve,
 	deps,
 }) {
 	return new PythonApp({
@@ -375,6 +415,7 @@ export function pythonApp({
 		uvVersion,
 		pexVersion,
 		extraPexArgs,
+		resolve,
 		deps,
 	});
 }

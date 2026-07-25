@@ -27,6 +27,11 @@ import {
 	uvTool,
 	UV_TOOL,
 } from "//rules/python/uv_toolchain";
+import {
+	PythonResolve,
+	pythonResolve,
+	pythonResolveSyncArgs,
+} from "//rules/python/resolve";
 
 import { TOOL } from "//rules/imp/native_tool";
 
@@ -111,26 +116,23 @@ export function defaultPythonToolchain() {
 	return default_python_toolchain;
 }
 
-export class PythonProject extends Target {
-	static kind = "python-project";
-	constructor({ path }) {
-		super({
-			kind: PythonProject.kind,
-			attrs: { path },
-			sources: sourcesField({
-				root: path,
-				include: ["pyproject.toml", "uv.lock"],
-			}),
-		});
-	}
-}
+// Compatibility aliases for the earlier source-run-only API. New code should
+// use pythonResolve(), which is shared by source runs, tests, and PEX builds.
+export const PythonProject = PythonResolve;
 
 /**
  * Declare the optional workspace-default locked uv project used to supply
  * third-party dependencies for Python source runs.
  */
-export function pythonProject({ path = ".", default: isDefault = false } = {}) {
-	const handle = new PythonProject({ path: normalize_workspace_path(path) });
+export function pythonProject({
+	path = ".",
+	flavors,
+	default: isDefault = false,
+} = {}) {
+	const handle = pythonResolve({
+		path: normalize_workspace_path(path),
+		flavors,
+	});
 	if (isDefault) {
 		if (default_python_project) {
 			throw new Error("only one default pythonProject() may be declared");
@@ -151,6 +153,7 @@ export class PythonSources extends Target {
 		sources = ["*.py"],
 		runtime,
 		project,
+		resolve,
 		uvVersion,
 		deps = [],
 	}) {
@@ -171,6 +174,21 @@ export class PythonSources extends Target {
 		) {
 			throw new Error("pythonSources source patterns must be direct (no '**')");
 		}
+		if (project && resolve) {
+			throw new Error(
+				"pythonSources accepts either project or resolve, not both",
+			);
+		}
+		const resolvedProject = resolve || project || default_python_project;
+		if (
+			resolvedProject &&
+			(resolvedProject.__imp !== true ||
+				resolvedProject.kind !== "python-resolve")
+		) {
+			throw new Error(
+				"pythonSources({ resolve }) expects a pythonResolve() target",
+			);
+		}
 		const normalizedRoot = normalize_workspace_path(root);
 		super({
 			kind: PythonSources.kind,
@@ -180,13 +198,13 @@ export class PythonSources extends Target {
 				runtime,
 				uvVersion,
 				deps,
-				...(project ? { project } : {}),
+				...(resolvedProject ? { project: resolvedProject } : {}),
 			},
 			sources: sourcesField({ root: `//${normalizedRoot}`, include: sources }),
 			deps: [
 				{ target: runtime, mode: "tool" },
 				...deps.map((target) => ({ target })),
-				...(project ? [{ target: project }] : []),
+				...(resolvedProject ? [{ target: resolvedProject }] : []),
 			],
 		});
 	}
@@ -199,17 +217,19 @@ export class PythonSources extends Target {
  * @param {object} opts
  * @param {string} opts.root Workspace-relative directory to scan (no recursion).
  * @param {string[]} [opts.sources=["*.py"]] Direct glob patterns matched under root.
+ * @param {object} [opts.resolve] Locked Python resolve supplying third-party dependencies.
  * @param {Array} [opts.deps=[]] Extra target handles made available on PATH
  *   inside each source's run — anything whose kind registers a `TOOL`
  *   product, e.g. `nativeTool()` handles for scripts that shell out to host
  *   programs (`git`, comparison-language interpreters, ...).
  */
-export function pythonSources({ root, sources, deps } = {}) {
+export function pythonSources({ root, sources, project, resolve, deps } = {}) {
 	return new PythonSources({
 		root,
 		sources,
 		runtime: require_default_python_toolchain(),
-		project: default_python_project,
+		project,
+		resolve,
 		uvVersion: require_default_uv_version(),
 		deps,
 	});
@@ -235,7 +255,9 @@ export class PythonSource extends Target {
 				pythonVersion: runtime.attrs.version,
 				uvVersion,
 				deps,
-				...(project ? { projectPath: project.attrs.path } : {}),
+				...(project
+					? { project: project, projectPath: project.attrs.path }
+					: {}),
 			},
 			sources: sourcesField({ root: "//", include: [file] }),
 			deps: [
@@ -286,6 +308,9 @@ export const pythonSourceRun = product(
 		const file = handle.attrs.file;
 		const root = handle.attrs.root;
 		const project = handle.attrs.projectPath || "";
+		const syncArgs = pythonResolveSyncArgs(handle.attrs.project)
+			.map((value) => `'${value.replaceAll("'", `'"'"'`)}'`)
+			.join(" ");
 		const venv = project ? `${project}/.venv` : "";
 		const uvToolSpec = await uvTool(handle.attrs.uvVersion);
 		const uvCacheToolSpec = uvCacheDirTool();
@@ -304,7 +329,7 @@ export const pythonSourceRun = product(
 			`${envExports.join(" && ")} && ` +
 			'export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" && ' +
 			'if [ -n "$project" ]; then ' +
-			'uv sync --project "$project" --frozen --no-progress --no-install-project --managed-python --python "$version" && ' +
+			`uv sync --project "$project" --locked --no-progress --no-install-project --managed-python --python "$version"${syncArgs ? ` ${syncArgs}` : ""} && ` +
 			'"$venv/bin/python" "$file" "$@"; ' +
 			'else uv run --no-project --managed-python --python "$version" -- "$file" "$@"; fi';
 

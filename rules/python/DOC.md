@@ -24,9 +24,49 @@ export const pex = pexToolchain("2.97.1", { default: true });
 export const ruff = ruffToolchain("0.15.21", { default: true });
 ```
 
-Projects are built with `uv sync --frozen`. Keep `uv.lock` checked in and in
+Projects are built with `uv sync --locked`. Keep `uv.lock` checked in and in
 sync with `pyproject.toml`; builds and tests fail rather than resolving or
 mutating a stale lock file.
+
+## Select a dependency resolve
+
+Declare a `pythonResolve()` for a locked project when applications or tests
+need optional dependency flavors. A resolve uses uv's checked-in `uv.lock` as
+the source of truth; each flavor selects one project extra at sync time.
+
+```js
+import { pythonResolve } from "//rules/python";
+
+export const ml = pythonResolve({
+    path: "services/ml",
+    flavors: {
+        default: { extra: "cpu" },
+        cpu: { extra: "cpu" },
+        cu124: { extra: "cu124" },
+    },
+});
+```
+
+Then attach it to targets; the resolve supplies their project path (so do not
+also set `src`):
+
+```js
+export const app = pythonApp({ resolve: ml, entryPoint: "acme.__main__" });
+export const tests = pythonTest({ resolve: ml });
+```
+
+Choose a flavor with `--axis python=cu124`. A workspace can also define a
+named `--profile` containing `python: "cu124"`. The resolve's `pyproject.toml`
+must declare the matching uv extra and use uv's explicit indexes/sources to
+bind PyTorch packages to the CPU or CUDA index. Flavors are deliberately
+extras rather than package-version syntax: uv locks the real PyTorch local
+version (for example `+cu124`) and PEX packages the resulting synced venv.
+
+```js
+// imp.workspace.js
+import { defineProfile } from "imp:core";
+defineProfile("cu124", { python: "cu124" });
+```
 
 ## Declare an application and tests
 
@@ -90,14 +130,26 @@ the standard library by default. A workspace may declare one optional locked
 project to supply third-party dependencies:
 
 ```js
-import { pythonProject } from "//rules/python";
+import { pythonResolve } from "//rules/python";
 
-export const project = pythonProject({ path: "python", default: true });
+export const project = pythonResolve({ path: "python" });
 ```
 
-That project is synchronized from its checked-in `pyproject.toml` and
-`uv.lock` without becoming the source owner. Import/dependency inference and
-multiple project resolutions are intentionally future work.
+Pass that resolve to a source set when it needs third-party dependencies:
+
+```js
+export const scripts = pythonSources({
+    root: "tools",
+    sources: ["*.py"],
+    resolve: project,
+});
+```
+
+The resolve is synchronized from its checked-in `pyproject.toml` and `uv.lock`
+without becoming the source owner. `pythonProject({ default: true })` remains
+as a compatibility alias for the previous single-default-project source-run
+API. Import/dependency inference and multiple project resolutions are
+intentionally future work.
 
 ## Run goals and find outputs
 

@@ -12,6 +12,7 @@ import {
 	pythonToolchain,
 	pythonSourceRun,
 } from "//rules/python/source";
+import { pythonResolve } from "//rules/python/resolve";
 import {
 	__resetUvToolchainStateForTest,
 	uvToolchain,
@@ -91,6 +92,25 @@ describe("python sources", () => {
 			expect(template.opts.argv[2]).toContain("uv sync --project");
 			expect(template.opts.argv[2]).toContain("--no-install-project");
 			expect(template.opts.argv).toContain("rules/python/example/.venv");
+		});
+	});
+
+	test("attaches an explicit resolve to a source set", async () => {
+		await withPythonHost(async () => {
+			uvToolchain("0.11.16", { default: true, unverified: true });
+			pythonToolchain("3.13.0", { default: true });
+			const resolve = pythonResolve({
+				path: "rules/python/example",
+				flavors: { default: { extra: "cpu" } },
+			});
+
+			const sources = pythonSources({
+				root: "rules/python/example/src",
+				sources: ["*.py"],
+				resolve,
+			});
+
+			expect(sources.attrs.project).toBe(resolve);
 		});
 	});
 });

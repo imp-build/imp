@@ -21,10 +21,28 @@ import {
 	uvTool,
 	UV_TOOL,
 } from "//rules/python/uv_toolchain";
+import { pythonResolveSyncArgs } from "//rules/python/resolve";
+
+function shellArg(value) {
+	return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
 
 export class PythonTest extends Target {
 	static kind = "python-test";
-	constructor({ src = ".", testArgs = [], uvVersion, deps = [] }) {
+	constructor({ src, testArgs = [], uvVersion, resolve, deps = [] }) {
+		if (
+			resolve &&
+			(resolve.__imp !== true || resolve.kind !== "python-resolve")
+		) {
+			throw new Error(
+				"pythonTest({ resolve }) expects a pythonResolve() target",
+			);
+		}
+		const resolvePath = resolve?.attrs?.path;
+		if (src !== undefined && resolvePath) {
+			throw new Error("pythonTest accepts either src or resolve, not both");
+		}
+		const projectSrc = src ?? ".";
 		const explicitUvTarget =
 			uvVersion && uvVersion.__imp === true ? uvVersion : null;
 		const explicitUvVersion =
@@ -36,6 +54,7 @@ export class PythonTest extends Target {
 			(uvToolchainTarget && uvToolchainTarget.attrs?.version);
 
 		const allDeps = [
+			...(resolve ? [{ target: resolve }] : []),
 			...(uvToolchainTarget
 				? [{ target: uvToolchainTarget, mode: "tool" }]
 				: []),
@@ -45,7 +64,8 @@ export class PythonTest extends Target {
 		super({
 			kind: PythonTest.kind,
 			attrs: {
-				src,
+				src: projectSrc,
+				...(resolve ? { resolve } : {}),
 				...(testArgs.length ? { testArgs } : {}),
 				...(resolvedUvVersion ? { uvVersion: resolvedUvVersion } : {}),
 				...(uvToolchainTarget ? { uvToolchainTarget } : {}),
@@ -54,7 +74,7 @@ export class PythonTest extends Target {
 					: {}),
 			},
 			sources: sourcesField({
-				root: src,
+				root: resolvePath ?? projectSrc,
 				include: PYTHON_PROJECT_SOURCE_INCLUDES,
 			}),
 			deps: allDeps,
@@ -70,11 +90,12 @@ export class PythonTest extends Target {
  * @param {string} [opts.src="."] Workspace-relative Python project directory.
  * @param {string[]} [opts.testArgs=[]] Extra arguments appended to pytest.
  * @param {object|string} [opts.uvVersion] uv toolchain target handle or version string.
+ * @param {object} [opts.resolve] Locked Python resolve supplying the project path; exclusive with `src`.
  * @param {Array} [opts.deps=[]] Additional dependencies.
  * @returns {object} Target handle.
  */
-export function pythonTest({ src, testArgs, uvVersion, deps }) {
-	return new PythonTest({ src, testArgs, uvVersion, deps });
+export function pythonTest({ src, testArgs, uvVersion, resolve, deps }) {
+	return new PythonTest({ src, testArgs, uvVersion, resolve, deps });
 }
 
 // No outputs/materialize on this final step: test results aren't
@@ -86,17 +107,22 @@ export const pythonTestRun = product(
 	TEST,
 	UV_TOOL,
 	async function pythonTestRun(handle) {
-		const srcPath = declared_path(handle, handle.attrs.src || ".");
+		const srcPath =
+			handle.attrs.resolve?.attrs?.path ??
+			declared_path(handle, handle.attrs.src || ".");
 		const inputFiles = await sources(handle);
 		const uvToolSpec = await uvTool(handle.attrs.uvVersion);
 		const uvCacheToolSpec = uvCacheDirTool();
+		const syncArgs = pythonResolveSyncArgs(handle.attrs.resolve)
+			.map(shellArg)
+			.join(" ");
 
 		const venvPath = `${srcPath}/.venv`;
 		const envExports = sandboxRootEnvExports(uvCacheDirEnv());
 		const script =
 			`src=$1; venv=$2; shift 2; ` +
 			`imp_sandbox_root="$(pwd)" && ${envExports.join(" && ")} && ` +
-			'uv sync --project "$src" --frozen --no-progress && ' +
+			`uv sync --project "$src" --locked --no-progress${syncArgs ? ` ${syncArgs}` : ""} && ` +
 			// Scope pytest's own collection to $src explicitly — the sandbox
 			// root also holds tool mounts (.imp/tools/...) that pytest would
 			// otherwise try to walk for test discovery.

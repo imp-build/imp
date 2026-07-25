@@ -1,5 +1,8 @@
 // Workspace root marker. Import plugin modules here to register their rules
 // before any BUILD.js is evaluated.
+
+export const cache = { gcMaxAgeDays: 7 };
+
 import "//rules/c";
 import "//rules/c/cmake";
 import { gccToolchain } from "//rules/c/gcc/toolchain";
