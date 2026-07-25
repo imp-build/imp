@@ -45,6 +45,15 @@ pub enum TaskKind {
     Workspace,
 }
 
+/// Where a job's result came from, when it was satisfied by a cache
+/// (`cached == Some(true)`). Reported via [`RunContext::report_cache_source`];
+/// left unset (`None` on the event) for fresh runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheSource {
+    Local,
+    Remote,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskLogLevel {
     Trace,
@@ -83,6 +92,15 @@ pub enum TaskEvent {
         /// (JS memo nodes) — a memo cache hit never reaches `Done` at all, so a
         /// memo's `Done` is always a fresh evaluation and "cached" doesn't apply.
         cached: Option<bool>,
+        /// Set alongside `cached: Some(true)` via
+        /// [`RunContext::report_cache_source`] to say whether the hit was
+        /// served from the local disk cache or a remote cache. `None` for
+        /// fresh runs and for nodes emitted via `Scheduler::emit`.
+        cache_source: Option<CacheSource>,
+        /// Set via [`RunContext::report_remote_cache_write`] when a fresh run
+        /// was pushed to a configured remote cache. Always `false` for cache
+        /// hits and for nodes emitted via `Scheduler::emit`.
+        remote_cache_write: bool,
     },
     LaneStarted {
         kind: LaneKind,
@@ -130,6 +148,8 @@ struct RunState {
     slot: Mutex<Option<usize>>,
     permit: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
     started: AtomicBool,
+    cache_source: Mutex<Option<CacheSource>>,
+    remote_cache_write: AtomicBool,
 }
 
 impl RunContext {
@@ -163,6 +183,19 @@ impl RunContext {
             id: self.id,
             detail: Some(format!("slot {assigned}")),
         });
+    }
+
+    /// Report that this job's result was served from a cache, and which one.
+    /// Meaningless (and never read) unless the job also never calls
+    /// [`RunContext::started`].
+    pub fn report_cache_source(&self, source: CacheSource) {
+        *self.state.cache_source.lock().unwrap() = Some(source);
+    }
+
+    /// Report that this job's fresh result was pushed to a configured remote
+    /// cache.
+    pub fn report_remote_cache_write(&self) {
+        self.state.remote_cache_write.store(true, Ordering::SeqCst);
     }
 }
 
@@ -247,6 +280,8 @@ impl Scheduler {
                 id,
                 outcome: TaskOutcome::Canceled,
                 cached: None,
+                cache_source: None,
+                remote_cache_write: false,
             });
             self.bump_outstanding(-1);
             bail!("canceled before execution");
@@ -256,6 +291,8 @@ impl Scheduler {
             slot: Mutex::new(None),
             permit: Mutex::new(None),
             started: AtomicBool::new(false),
+            cache_source: Mutex::new(None),
+            remote_cache_write: AtomicBool::new(false),
         });
         let context = RunContext {
             events: self.events.clone(),
@@ -282,10 +319,14 @@ impl Scheduler {
             Err(join) => TaskOutcome::Err(format!("worker panicked: {join}")),
         };
         let cached = Some(!state.started.load(Ordering::SeqCst));
+        let cache_source = *state.cache_source.lock().unwrap();
+        let remote_cache_write = state.remote_cache_write.load(Ordering::SeqCst);
         let _ = self.events.send(TaskEvent::Done {
             id,
             outcome,
             cached,
+            cache_source,
+            remote_cache_write,
         });
         self.bump_outstanding(-1);
 

@@ -774,7 +774,10 @@ async fn cmd_rules_test_case(
 /// one-line summary once a goal finishes.
 struct GoalSummary {
     cached: usize,
+    cached_local: usize,
+    cached_remote: usize,
     fresh: usize,
+    remote_pushed: usize,
     failed: usize,
     canceled: usize,
     total: usize,
@@ -899,7 +902,7 @@ async fn cmd_execute_live(
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     let render = tokio::spawn(async move {
         use indicatif::ProgressBar;
-        use scheduler::{LaneKind, TaskEvent, TaskKind, TaskLogLevel, TaskOutcome};
+        use scheduler::{CacheSource, LaneKind, TaskEvent, TaskKind, TaskLogLevel, TaskOutcome};
 
         // Bars live in a single flat `MultiProgress`; nesting is conveyed only
         // by insertion order and message indentation below.
@@ -1017,7 +1020,10 @@ async fn cmd_execute_live(
             std::collections::HashMap::new();
         let wall_start = std::time::Instant::now();
         let mut cached_count: usize = 0;
+        let mut cached_local_count: usize = 0;
+        let mut cached_remote_count: usize = 0;
         let mut fresh_count: usize = 0;
+        let mut remote_pushed_count: usize = 0;
         let mut failed_count: usize = 0;
         let mut canceled_count: usize = 0;
         let mut done_count: usize = 0;
@@ -1075,6 +1081,8 @@ async fn cmd_execute_live(
                     id,
                     outcome,
                     cached,
+                    cache_source,
+                    remote_cache_write,
                 } => {
                     let label = render_labels
                         .lock()
@@ -1089,10 +1097,18 @@ async fn cmd_execute_live(
                             let tag = match cached {
                                 Some(true) => {
                                     cached_count += 1;
+                                    match cache_source {
+                                        Some(CacheSource::Local) => cached_local_count += 1,
+                                        Some(CacheSource::Remote) => cached_remote_count += 1,
+                                        None => {}
+                                    }
                                     "cached "
                                 }
                                 Some(false) => {
                                     fresh_count += 1;
+                                    if remote_cache_write {
+                                        remote_pushed_count += 1;
+                                    }
                                     "fresh "
                                 }
                                 None => "",
@@ -1201,7 +1217,10 @@ async fn cmd_execute_live(
 
         GoalSummary {
             cached: cached_count,
+            cached_local: cached_local_count,
+            cached_remote: cached_remote_count,
             fresh: fresh_count,
+            remote_pushed: remote_pushed_count,
             failed: failed_count,
             canceled: canceled_count,
             total: done_count,
@@ -1300,8 +1319,25 @@ async fn cmd_execute_live(
         .map_err(|error| format!("{error:#}"));
     let _ = shutdown_tx.send(shutdown_result);
     if let Ok(summary) = render.await {
+        // Only break out local vs. remote cache activity when there was any —
+        // keeps the line unchanged for the common case of no remote cache
+        // configured.
+        let has_remote_activity = summary.cached_remote > 0 || summary.remote_pushed > 0;
+        let cache_breakdown = if has_remote_activity {
+            format!(
+                " ({} local, {} remote)",
+                summary.cached_local, summary.cached_remote
+            )
+        } else {
+            String::new()
+        };
+        let remote_pushed_suffix = if has_remote_activity {
+            format!(", {} pushed to remote cache", summary.remote_pushed)
+        } else {
+            String::new()
+        };
         log::info!(
-            "execute {what}: {} cached, {} fresh, {} failed, {} canceled ({} tasks) in {:.2}s",
+            "execute {what}: {} cached{cache_breakdown}, {} fresh, {} failed, {} canceled ({} tasks) in {:.2}s{remote_pushed_suffix}",
             summary.cached,
             summary.fresh,
             summary.failed,

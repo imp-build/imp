@@ -160,6 +160,23 @@ impl SandboxRetention {
     }
 }
 
+/// Where an action's result came from — purely informational cache/remote-cache
+/// telemetry that never affects the result itself. `Fresh`/`FreshPushed` cover a
+/// genuine miss (the command ran); `HitLocal`/`HitRemote` cover a cache replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CacheOutcome {
+    /// Ran fresh; not pushed to a remote cache (none configured, or the push
+    /// failed).
+    #[default]
+    Fresh,
+    /// Ran fresh and was successfully pushed to a configured remote cache.
+    FreshPushed,
+    /// Replayed from the local on-disk cache.
+    HitLocal,
+    /// Replayed from a remote cache (and persisted locally for next time).
+    HitRemote,
+}
+
 /// The outcome of one action — REv2 `ActionResult`.
 #[derive(Serialize)]
 pub struct ExecRunResult {
@@ -172,6 +189,7 @@ pub struct ExecRunResult {
     /// as a `{kind:"digest"}` entry, without materializing to the workspace first.
     pub output_digest: Option<String>,
     pub outputs: Vec<imp_store::cache::CachedArtifact>,
+    pub cache_outcome: CacheOutcome,
 }
 
 #[derive(Serialize)]
@@ -181,6 +199,7 @@ pub struct ExecOutcome {
     pub exit_code: i32,
     pub output_digest: String,
     pub outputs: Vec<imp_store::cache::CachedArtifact>,
+    pub cache_outcome: CacheOutcome,
 }
 
 // ---------------------------------------------------------------------------

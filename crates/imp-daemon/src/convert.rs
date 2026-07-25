@@ -1,7 +1,27 @@
 use anyhow::Result;
-use imp_exec_api::{ExecAction, ExecIoSpec, ExecOutcome, ExecToolSpec, SandboxRetention};
+use imp_exec_api::{
+    CacheOutcome, ExecAction, ExecIoSpec, ExecOutcome, ExecToolSpec, SandboxRetention,
+};
 
 use crate::proto;
+
+fn cache_outcome_to_proto(outcome: CacheOutcome) -> u32 {
+    match outcome {
+        CacheOutcome::Fresh => 0,
+        CacheOutcome::FreshPushed => 1,
+        CacheOutcome::HitLocal => 2,
+        CacheOutcome::HitRemote => 3,
+    }
+}
+
+fn cache_outcome_from_proto(value: u32) -> CacheOutcome {
+    match value {
+        1 => CacheOutcome::FreshPushed,
+        2 => CacheOutcome::HitLocal,
+        3 => CacheOutcome::HitRemote,
+        _ => CacheOutcome::Fresh,
+    }
+}
 
 pub fn action_to_proto(action: ExecAction) -> proto::ExecAction {
     proto::ExecAction {
@@ -122,6 +142,7 @@ pub fn outcome_to_proto(outcome: ExecOutcome) -> proto::Outcome {
                 named_cache_shared: o.named_cache.as_ref().map(|x| x.shared).unwrap_or_default(),
             })
             .collect(),
+        cache_outcome: cache_outcome_to_proto(outcome.cache_outcome),
     }
 }
 
@@ -131,6 +152,7 @@ pub fn outcome_from_proto(o: proto::Outcome) -> ExecOutcome {
         stderr: o.stderr,
         exit_code: o.exit_code,
         output_digest: o.output_digest,
+        cache_outcome: cache_outcome_from_proto(o.cache_outcome),
         outputs: o
             .outputs
             .into_iter()

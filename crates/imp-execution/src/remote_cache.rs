@@ -166,15 +166,21 @@ fn try_remote_hit_inner(
 /// Best-effort push of a freshly-written local record (and the CAS blobs it
 /// references) to the remote store. Failures are logged and swallowed — never
 /// propagated to the caller, which has already completed its real work.
-pub fn push_remote(record: &TaskCacheRecord) {
+/// Returns whether the push actually happened (`false` if no remote store is
+/// configured, or the push failed), so callers can report write telemetry.
+pub fn push_remote(record: &TaskCacheRecord) -> bool {
     let Some(store) = remote_store() else {
-        return;
+        return false;
     };
-    if let Err(error) = push_remote_inner(store, record) {
-        eprintln!(
-            "warning: failed to push task {} to remote cache: {error:#}",
-            record.task_key
-        );
+    match push_remote_inner(store, record) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!(
+                "warning: failed to push task {} to remote cache: {error:#}",
+                record.task_key
+            );
+            false
+        }
     }
 }
 

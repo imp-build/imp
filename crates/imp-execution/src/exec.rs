@@ -111,6 +111,7 @@ pub fn exec_run_hermetic_with_start(
         exit_code: result.exit_code,
         output_digest: result.output_digest.unwrap_or_default(),
         outputs,
+        cache_outcome: result.cache_outcome,
     })
 }
 
@@ -717,12 +718,13 @@ pub fn exec_run_local_with_start(
 }
 
 /// Turn a resolved cache record (local or remote) into the `ExecRunResult` a
-/// cache hit returns.
+/// cache hit returns. `source` says which tier answered, for telemetry.
 fn cache_hit_result(
     record: &TaskCacheRecord,
     workspace_root: &Path,
     workspace_id: &str,
     opts: &ExecRunOpts,
+    source: imp_exec_api::CacheOutcome,
 ) -> Result<ExecRunResult> {
     if opts.materialize && !opts.outputs.is_empty() {
         eprintln!(
@@ -741,6 +743,7 @@ fn cache_hit_result(
         exit_code: 0,
         output_digest: Some(record.output_digest.clone()),
         outputs: record.outputs.clone(),
+        cache_outcome: source,
     })
 }
 
@@ -759,7 +762,13 @@ fn remote_win_result(
             "failed to persist remote cache hit locally task_key={task_key}: {e:#}"
         );
     }
-    cache_hit_result(&record, workspace_root, workspace_id, opts)
+    cache_hit_result(
+        &record,
+        workspace_root,
+        workspace_id,
+        opts,
+        imp_exec_api::CacheOutcome::HitRemote,
+    )
 }
 
 fn exec_run_inner_with_start(
@@ -903,7 +912,13 @@ fn exec_run_inner_with_start(
             opts.display,
             record.output_digest
         );
-        return cache_hit_result(&record, workspace_root, workspace_id, &opts);
+        return cache_hit_result(
+            &record,
+            workspace_root,
+            workspace_id,
+            &opts,
+            imp_exec_api::CacheOutcome::HitLocal,
+        );
     }
 
     // Cache miss — build the sandbox and run the command. The guard removes the
@@ -1113,6 +1128,7 @@ fn exec_run_inner_with_start(
     // available to the caller as data; it does not make that result a
     // successful, replayable task. In particular, cache hits have no stored
     // exit status and are therefore returned as exit code 0.
+    let mut cache_outcome = imp_exec_api::CacheOutcome::Fresh;
     if cacheable && status.success() {
         let record = TaskCacheRecord {
             version: TASK_CACHE_VERSION,
@@ -1128,7 +1144,9 @@ fn exec_run_inner_with_start(
         };
         if !opts.no_cache {
             write_task_cache_record(&record)?;
-            crate::remote_cache::push_remote(&record);
+            if crate::remote_cache::push_remote(&record) {
+                cache_outcome = imp_exec_api::CacheOutcome::FreshPushed;
+            }
         }
         if opts.materialize && !opts.outputs.is_empty() {
             eprintln!(
@@ -1152,6 +1170,7 @@ fn exec_run_inner_with_start(
         exit_code,
         output_digest: Some(output_digest),
         outputs: cached_outputs,
+        cache_outcome,
     })
 }
 
@@ -1296,6 +1315,7 @@ pub fn exec_run_unsandboxed(
         exit_code,
         output_digest: None,
         outputs: Vec::new(),
+        cache_outcome: imp_exec_api::CacheOutcome::Fresh,
     })
 }
 

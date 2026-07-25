@@ -99,19 +99,27 @@ FREE_DISK_SPACE_STEP = {
 }
 
 # actions/cache's underlying GitHub Actions cache service is reachable via
-# ACTIONS_CACHE_URL/ACTIONS_RUNTIME_TOKEN, but the runner only ever hands
-# those to JS-toolkit actions (via @actions/core) — plain `run:` steps don't
-# inherit them. `imp-remote-cache`'s `ghac` backend (see
-# crates/imp-remote-cache/src/ghac.rs) needs them as real env vars, so
-# re-export them into $GITHUB_ENV once, up front, for every later step in the
-# job to pick up.
+# ACTIONS_CACHE_URL/ACTIONS_RUNTIME_TOKEN (cache service v1) or
+# ACTIONS_RESULTS_URL/ACTIONS_CACHE_SERVICE_V2 (v1's replacement), but the
+# runner only ever hands those to JS-toolkit actions (via @actions/core) —
+# plain `run:` steps don't inherit them. `imp-remote-cache`'s `ghac` backend
+# (see crates/imp-remote-cache/src/ghac.rs, via opendal's `services-ghac`)
+# needs them as real env vars, so re-export them into $GITHUB_ENV once, up
+# front, for every later step in the job to pick up.
+#
+# All four matter: opendal's ghac backend defaults to the v1 protocol unless
+# ACTIONS_CACHE_SERVICE_V2 is a non-empty string, and v1's endpoints have
+# since been retired — without this var forwarded too, every remote-cache
+# request silently 400s against the dead v1 API instead of using v2.
 EXPORT_GHAC_ENV_STEP = {
     "name": "Export GitHub Actions cache credentials",
     "uses": "actions/github-script@v7",
     "with": {
         "script": (
             "core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '')\n"
-            "core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')"
+            "core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')\n"
+            "core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '')\n"
+            "core.exportVariable('ACTIONS_CACHE_SERVICE_V2', process.env.ACTIONS_CACHE_SERVICE_V2 || '')"
         ),
     },
 }

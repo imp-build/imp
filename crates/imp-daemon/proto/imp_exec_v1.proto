@@ -7,7 +7,7 @@ message ExecAction { repeated string argv = 1; string display = 2; map<string,st
 message ExecuteRequest { string workspace_id = 1; ExecAction action = 2; }
 message CachedArtifact { string artifact_id = 1; string kind = 2; string path = 3; string digest = 4; uint64 bytes = 5; uint32 mode = 6; string tree_digest = 7; string named_cache_name = 8; string named_cache_key = 9; bool named_cache_shared = 10; }
 message Started { string display = 1; }
-message Outcome { int32 exit_code = 1; string stdout = 2; string stderr = 3; string output_digest = 4; repeated CachedArtifact outputs = 5; }
+message Outcome { int32 exit_code = 1; string stdout = 2; string stderr = 3; string output_digest = 4; repeated CachedArtifact outputs = 5; uint32 cache_outcome = 6; }
 message Failure { string message = 1; }
 message Finished { oneof result { Outcome outcome = 1; Failure failure = 2; } }
 message ExecuteEvent { oneof event { Started started = 1; Finished finished = 2; } }
