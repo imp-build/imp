@@ -40,8 +40,17 @@ jobs:
   check:
     needs: build
     runs-on: ubuntu-latest
+    env:
+      IMP_REMOTE_CACHE: ghac
     steps:
       - uses: actions/checkout@v4
+
+      - name: Export GitHub Actions cache credentials
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '')
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
 
       - name: Free disk space
         run: |
@@ -78,8 +87,6 @@ jobs:
 
       - name: Test
         run: ./imp test //...
-        env:
-          IMP_REMOTE_CACHE: ghac
 
       - name: Cache stats
         run: ./imp cache stats --details

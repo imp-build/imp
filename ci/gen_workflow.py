@@ -98,8 +98,27 @@ FREE_DISK_SPACE_STEP = {
     ),
 }
 
+# actions/cache's underlying GitHub Actions cache service is reachable via
+# ACTIONS_CACHE_URL/ACTIONS_RUNTIME_TOKEN, but the runner only ever hands
+# those to JS-toolkit actions (via @actions/core) — plain `run:` steps don't
+# inherit them. `imp-remote-cache`'s `ghac` backend (see
+# crates/imp-remote-cache/src/ghac.rs) needs them as real env vars, so
+# re-export them into $GITHUB_ENV once, up front, for every later step in the
+# job to pick up.
+EXPORT_GHAC_ENV_STEP = {
+    "name": "Export GitHub Actions cache credentials",
+    "uses": "actions/github-script@v7",
+    "with": {
+        "script": (
+            "core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '')\n"
+            "core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')"
+        ),
+    },
+}
+
 CHECK_STEPS = [
     {"uses": "actions/checkout@v4"},
+    EXPORT_GHAC_ENV_STEP,
     FREE_DISK_SPACE_STEP,
     *DOWNLOAD_IMP_STEPS,
     cache_imp_step("check"),
@@ -109,15 +128,7 @@ CHECK_STEPS = [
     },
     {"name": "Check formatting", "run": "./imp fmt --check //..."},
     {"name": "Lint", "run": "./imp lint //..."},
-    {
-        "name": "Test",
-        "run": "./imp test //...",
-        # Opt imp-execution's task-cache lookup into the GitHub Actions
-        # cache as a remote tier (see crates/imp-remote-cache) — purely an
-        # accelerator, read directly via std::env::var and never folded into
-        # any task's action digest, so this cannot invalidate cache entries.
-        "env": {"IMP_REMOTE_CACHE": "ghac"},
-    },
+    {"name": "Test", "run": "./imp test //..."},
     {"name": "Cache stats", "run": "./imp cache stats --details"},
     {"name": "Cache gc", "run": "./imp cache gc --apply"},
 ]
@@ -137,7 +148,19 @@ DEPLOY_STEPS = [
 
 JOBS = [
     {"id": "build", "runs_on": "ubuntu-latest", "steps": BUILD_STEPS},
-    {"id": "check", "needs": "build", "runs_on": "ubuntu-latest", "steps": CHECK_STEPS},
+    {
+        "id": "check",
+        "needs": "build",
+        "runs_on": "ubuntu-latest",
+        # Opt imp-execution's task-cache lookup into the GitHub Actions
+        # cache as a remote tier (see crates/imp-remote-cache) for every
+        # step in this job — purely an accelerator, read directly via
+        # std::env::var and never folded into any task's action digest, so
+        # this cannot invalidate cache entries. Requires
+        # EXPORT_GHAC_ENV_STEP to have run first so the backend can auth.
+        "env": {"IMP_REMOTE_CACHE": "ghac"},
+        "steps": CHECK_STEPS,
+    },
     {
         "id": "package",
         "needs": "build",
@@ -379,6 +402,10 @@ def render_job(job):
         lines.append("    environment:")
         for k, v in job["environment"].items():
             lines.append(f"      {k}: {v}")
+    if "env" in job:
+        lines.append("    env:")
+        for k, v in job["env"].items():
+            lines.append(f"      {k}: {render_value(v)}")
     lines.append("    steps:")
     lines.append(render_steps(job["steps"], 6))
     return "\n".join(lines)
