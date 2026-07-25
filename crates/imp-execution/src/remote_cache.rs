@@ -11,7 +11,7 @@
 //! change `action_digest`/`task_key` for any task, and does not invalidate
 //! existing cache entries.
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{mpsc, OnceLock};
 
 use anyhow::{bail, Context, Result};
 use imp_remote_cache::{Digest, RemoteStore};
@@ -95,6 +95,24 @@ pub fn try_remote_hit(task_key: &str) -> Option<TaskCacheRecord> {
             None
         }
     }
+}
+
+/// Non-blocking counterpart to [`try_remote_hit`]: if a remote store is
+/// configured, kicks off the lookup on a tokio blocking-pool thread and
+/// returns immediately with a receiver for the eventual answer, so a caller
+/// can race it against real execution instead of waiting on it. Returns
+/// `None` (no thread spawned) if no remote store is configured, mirroring
+/// `try_remote_hit`'s own `remote_store()?` short-circuit.
+pub fn spawn_remote_hit(task_key: &str) -> Option<mpsc::Receiver<Option<TaskCacheRecord>>> {
+    remote_store()?;
+    let (tx, rx) = mpsc::channel();
+    let task_key = task_key.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let record = try_remote_hit(&task_key);
+        // A safe no-op if the sandbox side already won and dropped its receiver.
+        let _ = tx.send(record);
+    });
+    Some(rx)
 }
 
 fn try_remote_hit_inner(

@@ -269,12 +269,22 @@ pub fn report_process_failure(progress: Option<&ProgressBar>, stdout: &str, stde
 // Child process lifecycle
 // ---------------------------------------------------------------------------
 
+/// Outcome of racing a spawned child against an in-flight remote cache
+/// lookup. `RemoteHit` means the remote side answered first — the child was
+/// killed and its output discarded rather than joined.
+#[derive(Debug)]
+pub enum ChildRaceOutcome<T> {
+    Exited(T),
+    RemoteHit(Box<TaskCacheRecord>),
+}
+
 pub fn wait_for_child_output(
     child: &mut Child,
     display: &str,
     cancellation: Option<&AtomicBool>,
     mut progress: Option<&mut ProgressBar>,
-) -> Result<(ExitStatus, String, String)> {
+    remote_hit: Option<&mpsc::Receiver<Option<TaskCacheRecord>>>,
+) -> Result<ChildRaceOutcome<(ExitStatus, String, String)>> {
     let stdout = child
         .stdout
         .take()
@@ -286,6 +296,10 @@ pub fn wait_for_child_output(
     let (sender, receiver) = mpsc::channel();
     let stdout_thread = spawn_output_reader(stdout, ProcessStream::Stdout, sender.clone());
     let stderr_thread = spawn_output_reader(stderr, ProcessStream::Stderr, sender);
+
+    // Cleared to `None` once the remote side resolves (hit, miss, or
+    // disconnect) so the rest of the loop stops polling it.
+    let mut remote_hit = remote_hit;
 
     let mut stdout = String::new();
     let mut stderr = String::new();
@@ -301,6 +315,24 @@ pub fn wait_for_child_output(
             // wait for unrelated work instead of returning promptly.
             drain_process_lines(&receiver, &mut stdout, &mut stderr, progress.as_deref_mut());
             bail!("{display} canceled");
+        }
+        if let Some(rx) = remote_hit {
+            match rx.try_recv() {
+                Ok(Some(record)) => {
+                    terminate_child_and_wait(child);
+                    // Same rationale as cancellation above: don't join the
+                    // reader threads, a descendant may be holding the pipes open.
+                    return Ok(ChildRaceOutcome::RemoteHit(Box::new(record)));
+                }
+                Ok(None) => {
+                    // Genuine remote miss — nothing left to race, stop polling.
+                    remote_hit = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    remote_hit = None;
+                }
+            }
         }
         drain_process_lines(&receiver, &mut stdout, &mut stderr, progress.as_deref_mut());
         if let Some(status) = child
@@ -321,7 +353,7 @@ pub fn wait_for_child_output(
     let _ = stdout_thread.join();
     let _ = stderr_thread.join();
     drain_process_lines(&receiver, &mut stdout, &mut stderr, progress);
-    Ok((status, stdout, stderr))
+    Ok(ChildRaceOutcome::Exited((status, stdout, stderr)))
 }
 
 /// Like [`wait_for_child_output`], but for a child whose stdout/stderr were
@@ -684,6 +716,52 @@ pub fn exec_run_local_with_start(
     )
 }
 
+/// Turn a resolved cache record (local or remote) into the `ExecRunResult` a
+/// cache hit returns.
+fn cache_hit_result(
+    record: &TaskCacheRecord,
+    workspace_root: &Path,
+    workspace_id: &str,
+    opts: &ExecRunOpts,
+) -> Result<ExecRunResult> {
+    if opts.materialize && !opts.outputs.is_empty() {
+        eprintln!(
+            "warning: run() materialize:true for '{}' — writes directly to the workspace; \
+             prefer materialize:false and a package() product for dist output",
+            opts.display
+        );
+    }
+    if opts.materialize {
+        materialize_cached_outputs(record, workspace_root)?;
+    }
+    materialize_named_cache_artifacts(&record.outputs, workspace_id)?;
+    Ok(ExecRunResult {
+        stdout: record.stdout.clone(),
+        stderr: record.stderr.clone(),
+        exit_code: 0,
+        output_digest: Some(record.output_digest.clone()),
+        outputs: record.outputs.clone(),
+    })
+}
+
+/// Like [`cache_hit_result`], but for a record that just won the remote race
+/// and isn't on local disk yet: persists it locally first so a repeat of
+/// this task hits the local disk cache without another remote round-trip.
+fn remote_win_result(
+    record: TaskCacheRecord,
+    task_key: &str,
+    workspace_root: &Path,
+    workspace_id: &str,
+    opts: &ExecRunOpts,
+) -> Result<ExecRunResult> {
+    if let Err(e) = write_task_cache_record(&record) {
+        imp_store::artifact_trace!(
+            "failed to persist remote cache hit locally task_key={task_key}: {e:#}"
+        );
+    }
+    cache_hit_result(&record, workspace_root, workspace_id, opts)
+}
+
 fn exec_run_inner_with_start(
     workspace_root: &Path,
     workspace_id: &str,
@@ -778,6 +856,10 @@ fn exec_run_inner_with_start(
         );
     }
     let record_path = task_record_path(&task_key)?;
+    // Set when the local cache misses and a remote cache is configured: the
+    // remote lookup runs concurrently with sandbox execution below, and
+    // whichever resolves first wins (see the checkpoints further down).
+    let mut remote_rx: Option<mpsc::Receiver<Option<TaskCacheRecord>>> = None;
     let cached_record_opt: Option<TaskCacheRecord> = if cacheable && !opts.no_cache {
         match std::fs::read_to_string(&record_path) {
             Ok(encoded) => {
@@ -804,15 +886,8 @@ fn exec_run_inner_with_start(
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                crate::remote_cache::try_remote_hit(&task_key).inspect(|record| {
-                    // Persist locally so a repeat of this task hits the local
-                    // disk cache without another remote round-trip.
-                    if let Err(e) = write_task_cache_record(record) {
-                        imp_store::artifact_trace!(
-                            "failed to persist remote cache hit locally task_key={task_key}: {e:#}"
-                        );
-                    }
-                })
+                remote_rx = crate::remote_cache::spawn_remote_hit(&task_key);
+                None
             }
             Err(e) => {
                 return Err(e).with_context(|| format!("read {}", record_path.display()));
@@ -828,24 +903,7 @@ fn exec_run_inner_with_start(
             opts.display,
             record.output_digest
         );
-        if opts.materialize && !opts.outputs.is_empty() {
-            eprintln!(
-                "warning: run() materialize:true for '{}' — writes directly to the workspace; \
-                 prefer materialize:false and a package() product for dist output",
-                opts.display
-            );
-        }
-        if opts.materialize {
-            materialize_cached_outputs(&record, workspace_root)?;
-        }
-        materialize_named_cache_artifacts(&record.outputs, workspace_id)?;
-        return Ok(ExecRunResult {
-            stdout: record.stdout,
-            stderr: record.stderr,
-            exit_code: 0,
-            output_digest: Some(record.output_digest),
-            outputs: record.outputs,
-        });
+        return cache_hit_result(&record, workspace_root, workspace_id, &opts);
     }
 
     // Cache miss — build the sandbox and run the command. The guard removes the
@@ -931,6 +989,20 @@ fn exec_run_inner_with_start(
     #[cfg(unix)]
     command.process_group(0);
 
+    // The remote race may already have resolved during sandbox staging above —
+    // check once before taking a job-slot permit or spawning, so a fast
+    // remote hit never counts against `--jobs` for work we're about to abandon.
+    if let Some(rx) = remote_rx.as_ref() {
+        if let Ok(Some(record)) = rx.try_recv() {
+            imp_store::artifact_trace!(
+                "remote-cache-won-race task_key={task_key} display={:?} before sandbox spawn",
+                opts.display
+            );
+            sandbox_guard.succeed();
+            return remote_win_result(record, &task_key, workspace_root, workspace_id, &opts);
+        }
+    }
+
     if let Some(started) = started {
         started();
     }
@@ -951,7 +1023,19 @@ fn exec_run_inner_with_start(
         let mut child = command
             .spawn()
             .with_context(|| format!("run() command in {}", command_cwd.display()))?;
-        wait_for_child_output(&mut child, &opts.display, cancellation, None)?
+        match wait_for_child_output(
+            &mut child,
+            &opts.display,
+            cancellation,
+            None,
+            remote_rx.as_ref(),
+        )? {
+            ChildRaceOutcome::Exited(triple) => triple,
+            ChildRaceOutcome::RemoteHit(record) => {
+                sandbox_guard.succeed();
+                return remote_win_result(*record, &task_key, workspace_root, workspace_id, &opts);
+            }
+        }
     };
 
     let exit_code = status.code().unwrap_or(-1);
@@ -1177,12 +1261,20 @@ pub fn exec_run_unsandboxed(
         .spawn()
         .with_context(|| format!("run() unsandboxed command in {}", workspace_root.display()))?;
 
-    let (status, stdout, stderr) = wait_for_child_output(
+    let (status, stdout, stderr) = match wait_for_child_output(
         &mut child,
         &opts.display,
         cancellation,
         progress.as_deref_mut(),
-    )?;
+        None,
+    )? {
+        ChildRaceOutcome::Exited(triple) => triple,
+        ChildRaceOutcome::RemoteHit(_) => {
+            unreachable!(
+                "wait_for_child_output only returns RemoteHit when passed Some(remote_hit)"
+            )
+        }
+    };
 
     let exit_code = status.code().unwrap_or(-1);
     if !status.success() && !opts.allow_failure {
@@ -1527,6 +1619,114 @@ mod tests {
             "the persisted record must match exactly one racer's output, \
              stranding the other racer's caller with a digest the cache can no longer serve"
         );
+    }
+
+    fn probe_record(task_key: &str) -> TaskCacheRecord {
+        TaskCacheRecord {
+            version: TASK_CACHE_VERSION,
+            task_id: task_key.to_owned(),
+            task_key: task_key.to_owned(),
+            action_digest: "test-action".to_owned(),
+            input_digest: "test-input".to_owned(),
+            output_digest: "test-output".to_owned(),
+            named_caches: vec![],
+            stdout: String::new(),
+            stderr: String::new(),
+            outputs: vec![],
+        }
+    }
+
+    fn spawn_probe_child(script: &str) -> Child {
+        Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    fn wait_for_child_output_remote_hit_wins_and_kills_child() {
+        // A remote answer arriving mid-execution must win the race: the
+        // sandboxed child is killed before its long sleep completes, and the
+        // caller gets the remote record back instead of waiting it out.
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("marker");
+        let mut child = spawn_probe_child(&format!("sleep 5 && touch '{}'", marker.display()));
+
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            let _ = tx.send(Some(probe_record("remote-win")));
+        });
+
+        let start = Instant::now();
+        let outcome = wait_for_child_output(&mut child, "probe", None, None, Some(&rx)).unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "a remote hit should short-circuit the child's 5s sleep"
+        );
+        match outcome {
+            ChildRaceOutcome::RemoteHit(record) => assert_eq!(record.task_key, "remote-win"),
+            ChildRaceOutcome::Exited(_) => panic!("expected the remote side to win the race"),
+        }
+        assert!(
+            !marker.exists(),
+            "the child should have been killed before its sleep could finish"
+        );
+    }
+
+    #[test]
+    fn wait_for_child_output_sandbox_wins_when_remote_channel_disconnects() {
+        // The remote lookup can resolve to "no such record" (sender sends
+        // then drops) or its thread can vanish without ever sending — both
+        // must fall through to the child's own exit, unchanged from today.
+        let (tx, rx) = mpsc::channel::<Option<TaskCacheRecord>>();
+        drop(tx);
+        let mut child = spawn_probe_child("printf out");
+        match wait_for_child_output(&mut child, "probe", None, None, Some(&rx)).unwrap() {
+            ChildRaceOutcome::Exited((status, stdout, _)) => {
+                assert!(status.success());
+                assert_eq!(stdout, "out\n");
+            }
+            ChildRaceOutcome::RemoteHit(_) => panic!("expected the sandbox side to win the race"),
+        }
+    }
+
+    #[test]
+    fn wait_for_child_output_sandbox_wins_when_remote_channel_never_resolves() {
+        let (tx, rx) = mpsc::channel::<Option<TaskCacheRecord>>();
+        let mut child = spawn_probe_child("printf out");
+        match wait_for_child_output(&mut child, "probe", None, None, Some(&rx)).unwrap() {
+            ChildRaceOutcome::Exited((status, stdout, _)) => {
+                assert!(status.success());
+                assert_eq!(stdout, "out\n");
+            }
+            ChildRaceOutcome::RemoteHit(_) => panic!("expected the sandbox side to win the race"),
+        }
+        drop(tx); // kept alive (silent) through the wait above, exercising the Empty arm
+    }
+
+    #[test]
+    fn wait_for_child_output_none_receiver_matches_pre_race_behavior() {
+        let mut child = spawn_probe_child("printf out");
+        match wait_for_child_output(&mut child, "probe", None, None, None).unwrap() {
+            ChildRaceOutcome::Exited((status, stdout, _)) => {
+                assert!(status.success());
+                assert_eq!(stdout, "out\n");
+            }
+            ChildRaceOutcome::RemoteHit(_) => unreachable!("no receiver was passed"),
+        }
+    }
+
+    #[test]
+    fn wait_for_child_output_cancellation_still_bails_with_no_remote_hit_receiver() {
+        let cancellation = AtomicBool::new(true);
+        let mut child = spawn_probe_child("sleep 5");
+        let result = wait_for_child_output(&mut child, "probe", Some(&cancellation), None, None);
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("canceled"), "{err:#}");
     }
 
     #[test]
