@@ -161,15 +161,18 @@ impl SandboxRetention {
 }
 
 /// Where an action's result came from — purely informational cache/remote-cache
-/// telemetry that never affects the result itself. `Fresh`/`FreshPushed` cover a
-/// genuine miss (the command ran); `HitLocal`/`HitRemote` cover a cache replay.
+/// telemetry that never affects the result itself. `Fresh` covers a genuine
+/// miss (the command ran); `HitLocal`/`HitRemote` cover a cache replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum CacheOutcome {
-    /// Ran fresh; not pushed to a remote cache (none configured, or the push
-    /// failed).
+    /// Ran fresh. A remote-cache write, if configured, is scheduled separately
+    /// and is intentionally not part of this command's completion result.
     #[default]
     Fresh,
-    /// Ran fresh and was successfully pushed to a configured remote cache.
+    /// Ran fresh and synchronously confirmed a remote-cache write. The local
+    /// executor schedules writes in the background and therefore never returns
+    /// this variant, but it remains part of the execution-service wire surface
+    /// for implementations that do wait for a confirmed push.
     FreshPushed,
     /// Replayed from the local on-disk cache.
     HitLocal,

@@ -1128,7 +1128,7 @@ fn exec_run_inner_with_start(
     // available to the caller as data; it does not make that result a
     // successful, replayable task. In particular, cache hits have no stored
     // exit status and are therefore returned as exit code 0.
-    let mut cache_outcome = imp_exec_api::CacheOutcome::Fresh;
+    let cache_outcome = imp_exec_api::CacheOutcome::Fresh;
     if cacheable && status.success() {
         let record = TaskCacheRecord {
             version: TASK_CACHE_VERSION,
@@ -1142,11 +1142,9 @@ fn exec_run_inner_with_start(
             stderr: stderr.clone(),
             outputs: cached_outputs.clone(),
         };
-        if !opts.no_cache {
+        let write_remote = !opts.no_cache;
+        if write_remote {
             write_task_cache_record(&record)?;
-            if crate::remote_cache::push_remote(&record) {
-                cache_outcome = imp_exec_api::CacheOutcome::FreshPushed;
-            }
         }
         if opts.materialize && !opts.outputs.is_empty() {
             eprintln!(
@@ -1159,6 +1157,9 @@ fn exec_run_inner_with_start(
             materialize_cached_outputs(&record, workspace_root)?;
         }
         materialize_named_cache_artifacts(&record.outputs, workspace_id)?;
+        if write_remote {
+            crate::remote_cache::spawn_remote_push(record);
+        }
     }
 
     // Command and output ingestion succeeded — let the guard delete the sandbox.

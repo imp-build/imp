@@ -163,33 +163,35 @@ fn try_remote_hit_inner(
     Ok(Some(record))
 }
 
-/// Best-effort push of a freshly-written local record (and the CAS blobs it
-/// references) to the remote store. Failures are logged and swallowed — never
-/// propagated to the caller, which has already completed its real work.
-/// Returns whether the push actually happened (`false` if no remote store is
-/// configured, or the push failed), so callers can report write telemetry.
-pub fn push_remote(record: &TaskCacheRecord) -> bool {
+/// Schedule a best-effort push of a freshly-written local record (and the CAS
+/// blobs it references) to the remote store.
+///
+/// Remote writes are an accelerator for *later* invocations, never a
+/// prerequisite for the command that just completed. The task record has
+/// already been persisted locally before this is called, and failures remain
+/// diagnostic-only.
+///
+/// This deliberately provides no completion result. The scheduler reports a
+/// task as fresh as soon as its real work is done; claiming `FreshPushed`
+/// before a background upload finishes would make completion telemetry lie.
+pub fn spawn_remote_push(record: TaskCacheRecord) {
     let Some(store) = remote_store() else {
-        return false;
+        return;
     };
-    match push_remote_inner(store, record) {
-        Ok(()) => true,
-        Err(error) => {
+    tokio::spawn(async move {
+        if let Err(error) = push_remote_inner(store, &record).await {
             eprintln!(
                 "warning: failed to push task {} to remote cache: {error:#}",
                 record.task_key
             );
-            false
         }
-    }
+    });
 }
 
-fn push_remote_inner(store: &dyn RemoteStore, record: &TaskCacheRecord) -> Result<()> {
-    let handle = tokio::runtime::Handle::current();
-
+async fn push_remote_inner(store: &dyn RemoteStore, record: &TaskCacheRecord) -> Result<()> {
     let blobs = output_blob_digests(record)?;
     let blob_digests: Vec<Digest> = blobs.iter().map(|(digest, _)| digest.clone()).collect();
-    let missing = handle.block_on(store.find_missing_blobs(&blob_digests))?;
+    let missing = store.find_missing_blobs(&blob_digests).await?;
     if !missing.is_empty() {
         let mut uploads = Vec::with_capacity(missing.len());
         for digest in &missing {
@@ -197,10 +199,12 @@ fn push_remote_inner(store: &dyn RemoteStore, record: &TaskCacheRecord) -> Resul
                 .iter()
                 .find(|(candidate, _)| candidate == digest)
                 .expect("missing digest came from blobs");
-            let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+            let bytes = tokio::fs::read(path)
+                .await
+                .with_context(|| format!("read {}", path.display()))?;
             uploads.push((digest.clone(), bytes));
         }
-        let results = handle.block_on(store.batch_update_blobs(uploads))?;
+        let results = store.batch_update_blobs(uploads).await?;
         for (digest, result) in results {
             if let Err(error) = result {
                 return Err(error).with_context(|| format!("upload blob {}", digest.hash));
@@ -210,7 +214,7 @@ fn push_remote_inner(store: &dyn RemoteStore, record: &TaskCacheRecord) -> Resul
 
     let encoded = serde_json::to_vec(record).context("serialize task cache record")?;
     let action_digest = action_result_digest(&record.task_key, encoded.len() as u64);
-    handle.block_on(store.update_action_result(&action_digest, encoded))?;
+    store.update_action_result(&action_digest, encoded).await?;
     Ok(())
 }
 
@@ -399,7 +403,7 @@ mod tests {
         let record = file_record(&task_key, &content);
         assert_eq!(record.outputs[0].digest, digest);
 
-        push_remote_inner(&store, &record).unwrap();
+        rt.block_on(push_remote_inner(&store, &record)).unwrap();
 
         let fetched = rt
             .block_on(store.get_action_result(&Digest::new(task_key.clone(), 0)))
@@ -425,7 +429,7 @@ mod tests {
         let digest = store_blob(&content, "file").unwrap();
         let record = file_record(&task_key, &content);
 
-        let error = push_remote_inner(&store, &record).unwrap_err();
+        let error = rt.block_on(push_remote_inner(&store, &record)).unwrap_err();
         assert!(error.to_string().contains(&digest));
         assert!(store.action_updates.lock().unwrap().is_empty());
     }
