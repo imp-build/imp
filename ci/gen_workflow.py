@@ -47,7 +47,7 @@ FULL_HISTORY_CHECKOUT = {
 BUILD_STEPS = [
     {"uses": "actions/checkout@v4"},
     {"uses": f"dtolnay/rust-toolchain@{RUST_TOOLCHAIN}"},
-    {"uses": "Swatinem/rust-cache@v2"},
+    {"uses": "kunobi-ninja/kache-action@v1"},
     {
         "name": "Build imp",
         "run": "cargo build --release --manifest-path crates/imp/Cargo.toml",
@@ -216,8 +216,7 @@ RELEASE_LINUX_STEPS = [
         "with": {"targets": LINUX_TARGET},
     },
     {
-        "uses": "Swatinem/rust-cache@v2",
-        "with": {"save-if": "${{ github.ref == 'refs/heads/main' }}"},
+        "uses": "kunobi-ninja/kache-action@v1",
     },
     {"uses": "taiki-e/install-action@v2", "with": {"tool": "cross"}},
     {
@@ -249,8 +248,7 @@ RELEASE_WINDOWS_STEPS = [
         "with": {"targets": WINDOWS_TARGET},
     },
     {
-        "uses": "Swatinem/rust-cache@v2",
-        "with": {"save-if": "${{ github.ref == 'refs/heads/main' }}"},
+        "uses": "kunobi-ninja/kache-action@v1",
     },
     {
         "name": "Build",

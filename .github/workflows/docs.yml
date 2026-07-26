@@ -25,7 +25,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: kunobi-ninja/kache-action@v1
 
       - name: Build imp
         run: cargo build --release --manifest-path crates/imp/Cargo.toml
