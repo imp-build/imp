@@ -8,24 +8,23 @@ flags, native link inputs, and managed tools needed by the sandboxed command.
 
 ## Set up the workspace
 
-Pin the compiler and formatter in `imp.workspace.js`, then load the workflows
-you use:
+Import the compiler and formatter rules in `imp.workspace.js`, then load the
+workflows you use. The rules provide pinned defaults:
 
 ```js
-import { odinToolchain } from "//rules/odin";
-import { odinfmtToolchain } from "//rules/odin/odinfmt/toolchain";
+import "//rules/odin";
+import "//rules/odin/odinfmt";
 import "//rules/workflows/fmt";
 import "//rules/workflows/lint";
 import "//rules/workflows/package";
 import "//rules/workflows/run";
 import "//rules/workflows/test";
 
-export const odin = odinToolchain("dev-2026-03", { default: true });
-export const odinfmt = odinfmtToolchain();
 ```
 
-An Odin toolchain may also select managed C linker targets. Keep that choice on
-the toolchain so build, test, run, and lint resolve the same native environment.
+Override a default only when needed, for example to select a managed linker.
+Keep that choice on the Odin toolchain so build, test, run, and lint resolve
+the same native environment.
 
 This repository's workspace imports `//rules/imp/mode`: the default profile
 keeps Odin's `-debug` build behavior, while `imp build --profile release ...`

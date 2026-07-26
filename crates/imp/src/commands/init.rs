@@ -499,11 +499,11 @@ mod tests {
         assert!(!source.contains("//rules/workflows/fmt\""));
         assert!(!source.contains("ruffToolchain"));
         assert!(!source.contains("//rules/python/ruff/fmt"));
-        assert_eq!(source.matches("gccToolchain").count(), 2);
+        assert!(!source.contains("Toolchain("));
     }
 
     #[tokio::test]
-    async fn combined_render_deduplicates_shared_workflows_and_toolchains() {
+    async fn combined_render_deduplicates_shared_workflows_without_toolchains() {
         let catalog = load_catalog(&linux()).await.unwrap();
         let selected: Vec<String> = catalog
             .groups
@@ -520,7 +520,7 @@ mod tests {
             source.matches("import \"//rules/workflows/test\";").count(),
             1
         );
-        assert_eq!(source.matches("export const gcc =").count(), 1);
+        assert!(!source.contains("Toolchain("));
         assert!(source.contains("export const cConfig = { buildGenerate: true };"));
         assert!(source.contains("export const odinConfig = { buildGenerate: true };"));
         assert!(source.contains("export const rustConfig = { buildGenerate: true };"));

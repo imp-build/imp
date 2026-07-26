@@ -306,7 +306,7 @@ export async function rustLinkerTools(toolchainHandle) {
 		defaultGccToolchain();
 	if (!linkDriverHandle) {
 		throw new Error(
-			"cargo builds need a declared gccToolchain() default, or a rustToolchain({ linkDriver }) — see //rules/c/gcc",
+			"cargo builds need the GCC rule default or a rustToolchain({ linkDriver }) — see //rules/c/gcc",
 		);
 	}
 	const linkDriver = await productFor(linkDriverHandle, RUST_LINK_DRIVER);

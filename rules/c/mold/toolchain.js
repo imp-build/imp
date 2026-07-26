@@ -284,6 +284,10 @@ export function defaultMoldToolchain() {
 	return MoldToolchain.default();
 }
 
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another moldToolchain(..., { default: true }).
+moldToolchain("2.41.0", { default: true });
+
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "mold",

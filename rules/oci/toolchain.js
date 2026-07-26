@@ -302,6 +302,10 @@ export function defaultCraneToolchain() {
 	return CraneToolchain.default();
 }
 
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another craneToolchain(..., { default: true }).
+craneToolchain("0.20.6", { default: true });
+
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "crane",

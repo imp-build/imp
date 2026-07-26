@@ -457,6 +457,10 @@ export function defaultKacheToolchain() {
 	return KacheToolchain.default();
 }
 
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another kacheToolchain(..., { default: true }).
+kacheToolchain("0.11.0", { default: true });
+
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "kache",

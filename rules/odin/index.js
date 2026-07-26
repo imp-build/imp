@@ -818,12 +818,12 @@ function empty_package_error(handle, path) {
 // (rules/c/cmake), unaffected.
 //
 // gcc is downloaded/pinned (rules/c/gcc) rather than resolved from ambient
-// PATH — a project using Odin must declare a default gccToolchain().
+// PATH — importing the C/Odin rules provisions the default GCC toolchain.
 async function odinScriptTools(handle, { needsDirname, isExecutable }) {
 	const gcc = defaultGccToolchain();
 	if (!gcc) {
 		throw new Error(
-			"Odin builds need a declared gccToolchain() default — see //rules/c/gcc",
+			"Odin builds need the GCC rule default or an explicit linker — see //rules/c/gcc",
 		);
 	}
 	const base = [

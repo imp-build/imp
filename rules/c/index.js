@@ -486,7 +486,7 @@ async function ccToolchainFor(handle) {
 		handle.attrs.toolchain || defaultZigToolchain() || defaultGccToolchain();
 	if (!toolchain) {
 		throw new Error(
-			"C/C++ builds need an explicit toolchain or a declared default zigToolchain()/gccToolchain()",
+			"C/C++ builds need an explicit toolchain or an imported zig/gcc rule default",
 		);
 	}
 	return productFor(toolchain, CC_TOOLCHAIN);

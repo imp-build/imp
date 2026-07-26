@@ -420,6 +420,10 @@ export function defaultRustToolchain() {
 	return RustToolchain.default();
 }
 
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another rustToolchain(..., { default: true }).
+rustToolchain("1.93.0", { default: true });
+
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "rust",

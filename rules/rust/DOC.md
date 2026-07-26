@@ -9,18 +9,17 @@ requirements.
 
 ## Set up the workspace
 
-Register a default Rust toolchain in `imp.workspace.js`. Importing the
-workflow modules enables their high-level commands and loads the formatter and
-linter integrations:
+Import the Rust rules in `imp.workspace.js`. They provide the default Rust
+toolchain and C link driver; workflow modules enable their high-level commands
+and load the formatter and linter integrations:
 
 ```js
-import { rustToolchain } from "//rules/rust";
+import "//rules/rust";
 import "//rules/workflows/fmt";
 import "//rules/workflows/lint";
 import "//rules/workflows/package";
 import "//rules/workflows/test";
 
-export const rust = rustToolchain("1.93.0", { default: true });
 ```
 
 Toolchains may also select an explicit C link driver, linker, and kache

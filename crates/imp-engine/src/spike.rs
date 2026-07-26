@@ -6668,16 +6668,14 @@ export const parent = target({{ kind: "expandable", attrs: {{}} }});
     }
 
     #[tokio::test]
-    async fn python_source_set_expands_one_leaf_per_direct_file() {
+    async fn python_rule_defaults_power_source_sets_and_can_be_reexported() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(
             &p.join(WORKSPACE_FILE),
             r#"
-import { uvToolchain } from "//rules/python/uv_toolchain";
-import { pythonToolchain } from "//rules/python";
-export const uv = uvToolchain("0.11.16", { default: true, unverified: true });
-export const python = pythonToolchain("3.13.0", { default: true });
+import { defaultPythonToolchain } from "//rules/python";
+export const python = defaultPythonToolchain();
 "#,
         );
         write_file(
@@ -6691,6 +6689,7 @@ export const scripts = pythonSources({ root: "scripts" });
         write_file(&p.join("scripts/nested/ignored.py"), "print('ignored')\n");
 
         let live = load_workspace(p).await.unwrap();
+        assert_eq!(live.workspace.targets["//:python"].kind, "python-toolchain");
         ensure_expanded(&live, &["//:scripts".to_owned()], Some("run"))
             .await
             .unwrap();

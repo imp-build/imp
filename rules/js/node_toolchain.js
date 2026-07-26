@@ -292,6 +292,10 @@ export function defaultNodeToolchain() {
 	return NodeToolchain.default();
 }
 
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another nodeToolchain(..., { default: true }).
+nodeToolchain("22.11.0", { default: true });
+
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "node-toolchain",

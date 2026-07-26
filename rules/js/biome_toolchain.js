@@ -302,6 +302,10 @@ export function defaultBiomeToolchain() {
 	return BiomeToolchain.default();
 }
 
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another biomeToolchain(..., { default: true }).
+biomeToolchain("2.5.4", { default: true });
+
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "biome-toolchain",

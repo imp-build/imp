@@ -9,6 +9,7 @@ import {
 	odinToolchain,
 } from "//rules/odin/toolchain";
 import {
+	__resetOdinfmtToolchainStateForTest,
 	acquireOdinfmt,
 	odinfmtArtifactName,
 	odinfmtBin,
@@ -23,9 +24,11 @@ function withOdinHost(platOrFn, maybeFn) {
 	const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;
 	const run = async (host) => {
 		__resetOdinToolchainStateForTest();
+		__resetOdinfmtToolchainStateForTest();
 		try {
 			return await fn(host);
 		} finally {
+			__resetOdinfmtToolchainStateForTest();
 			__resetOdinToolchainStateForTest();
 		}
 	};

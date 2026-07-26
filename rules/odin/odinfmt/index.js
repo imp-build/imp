@@ -27,6 +27,11 @@ import {
 } from "imp:core";
 import { ODINFMT_TOOL } from "//rules/odin/odinfmt/toolchain";
 
+export {
+	defaultOdinfmtToolchain,
+	odinfmtToolchain,
+} from "//rules/odin/odinfmt/toolchain";
+
 function odinfmt_version(handle) {
 	const toolchainHandle = handle.attrs.toolchain;
 	return toolchainHandle

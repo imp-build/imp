@@ -7,21 +7,18 @@ format and lint products for application targets.
 
 ## Set up the workspace
 
-Declare default uv and PEX toolchains in `imp.workspace.js`. Add Ruff when
-Python targets should participate in formatting and linting:
+Import the Python rules in `imp.workspace.js`; they provide default uv, PEX,
+and CPython toolchains. Add Ruff when Python targets should participate in
+formatting and linting:
 
 ```js
-import { uvToolchain } from "//rules/python/uv_toolchain";
-import { pexToolchain } from "//rules/python/pex_toolchain";
-import { ruffToolchain } from "//rules/python/ruff_toolchain";
+import "//rules/python";
+import "//rules/python/ruff_toolchain";
 import "//rules/workflows/fmt";
 import "//rules/workflows/lint";
 import "//rules/workflows/package";
 import "//rules/workflows/test";
 
-export const uv = uvToolchain("0.11.16", { default: true });
-export const pex = pexToolchain("2.97.1", { default: true });
-export const ruff = ruffToolchain("0.15.21", { default: true });
 ```
 
 Projects are built with `uv sync --locked`. Keep `uv.lock` checked in and in
@@ -96,14 +93,11 @@ result.
 
 ## Run source files
 
-For direct script execution, declare a pinned runtime and one shallow source
-set rather than an application target per file:
+For direct script execution, declare one shallow source set rather than an
+application target per file. It uses the Python rule's pinned runtime:
 
 ```js
-import { pythonSources, pythonToolchain } from "//rules/python";
-
-// imp.workspace.js
-export const python = pythonToolchain("3.13.0", { default: true });
+import { pythonSources } from "//rules/python";
 
 // BUILD.js
 export const scripts = pythonSources({

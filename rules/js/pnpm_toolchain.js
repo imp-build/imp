@@ -366,6 +366,10 @@ export function defaultPnpmToolchain() {
 	return PnpmToolchain.default();
 }
 
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another pnpmToolchain(..., { default: true }).
+pnpmToolchain("11.13.0", { default: true });
+
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "pnpm-toolchain",

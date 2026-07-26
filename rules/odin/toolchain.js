@@ -289,6 +289,10 @@ export function defaultOdinToolchain() {
 	return OdinToolchain.default();
 }
 
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another odinToolchain(..., { default: true }).
+odinToolchain("dev-2026-03", { default: true });
+
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "odin",

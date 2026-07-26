@@ -303,6 +303,10 @@ export function defaultRuffToolchain() {
 	return RuffToolchain.default();
 }
 
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another ruffToolchain(..., { default: true }).
+ruffToolchain("0.15.21", { default: true });
+
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "ruff-toolchain",

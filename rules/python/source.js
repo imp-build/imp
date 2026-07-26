@@ -72,7 +72,7 @@ function sandboxRootEnvExports(envEntries) {
 function require_default_python_toolchain() {
 	if (!default_python_toolchain) {
 		throw new Error(
-			"pythonSources() requires a default pythonToolchain(); declare one in imp.workspace.js",
+			"pythonSources() requires the Python rule default or an explicit pythonToolchain() override",
 		);
 	}
 	return default_python_toolchain;
@@ -82,7 +82,7 @@ function require_default_uv_version() {
 	const version = resolveUvToolchainVersion();
 	if (!version) {
 		throw new Error(
-			"pythonSources() requires a default uvToolchain(); declare one in imp.workspace.js",
+			"pythonSources() requires the uv rule default or an explicit uvToolchain() override",
 		);
 	}
 	return version;
@@ -115,6 +115,11 @@ export function pythonToolchain(version, { default: isDefault = false } = {}) {
 export function defaultPythonToolchain() {
 	return default_python_toolchain;
 }
+
+// Importing the Python rules provisions the CPython runtime used by source
+// execution. A workspace can replace it with pythonToolchain(..., { default:
+// true }) when it needs another interpreter version.
+pythonToolchain("3.13.0", { default: true });
 
 // Compatibility aliases for the earlier source-run-only API. New code should
 // use pythonResolve(), which is shared by source runs, tests, and PEX builds.

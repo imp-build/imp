@@ -3,8 +3,8 @@ are registered by separate modules: importing `//rules/python/ruff/fmt`
 enables the `fmt` product, importing `//rules/python/ruff/lint` enables the
 `lint` product. The fmt and lint workflows each import their own half, so a
 workspace can enable one without the other. The tool version comes from the
-workspace's default `ruffToolchain()` declaration, so local and CI runs use
-the same formatter and rule set.
+rule-provided default Ruff toolchain, so local and CI runs use the same
+formatter and rule set.
 
 ```sh
 # Rewrite Python files owned by the selected application.

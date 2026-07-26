@@ -519,6 +519,10 @@ export function defaultZigToolchain() {
 	return ZigToolchain.default();
 }
 
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another zigToolchain(..., { default: true }).
+zigToolchain("0.16.0", { default: true });
+
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "zig",

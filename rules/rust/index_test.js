@@ -108,7 +108,7 @@ describe("rust rules", () => {
 		});
 	});
 
-	test("cargoBuild throws without a declared gcc toolchain default", async () => {
+	test("cargoBuild throws without the GCC rule default", async () => {
 		await withRustHost(async () => {
 			rustToolchain("1.93.0", { default: true, unverified: true });
 			const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
@@ -119,7 +119,7 @@ describe("rust rules", () => {
 			} catch (error) {
 				message = error.message;
 			}
-			expect(message).toContain("gccToolchain() default");
+			expect(message).toContain("GCC rule default");
 		});
 	});
 
@@ -195,7 +195,7 @@ describe("rust rules", () => {
 		});
 	});
 
-	test("cargoTest throws without a declared gcc toolchain default", async () => {
+	test("cargoTest throws without the GCC rule default", async () => {
 		await withRustHost(async () => {
 			rustToolchain("1.93.0", { default: true, unverified: true });
 			const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
@@ -206,7 +206,7 @@ describe("rust rules", () => {
 			} catch (error) {
 				message = error.message;
 			}
-			expect(message).toContain("gccToolchain() default");
+			expect(message).toContain("GCC rule default");
 		});
 	});
 

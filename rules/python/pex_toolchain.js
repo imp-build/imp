@@ -323,6 +323,10 @@ export function defaultPexToolchain() {
 	return PexToolchain.default();
 }
 
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another pexToolchain(..., { default: true }).
+pexToolchain("2.97.1", { default: true });
+
 // pex has exactly one artifact for all platforms, so generateToolLockfile
 // (which expects a per-platform downloadUrl/artifactName) is given a single
 // degenerate platform entry; downloadUrl/artifactName below ignore their

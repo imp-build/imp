@@ -324,6 +324,10 @@ export function defaultGccToolchain() {
 	return GccToolchain.default();
 }
 
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another gccToolchain(..., { default: true }).
+gccToolchain("2025.08-1", { default: true });
+
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "gcc",

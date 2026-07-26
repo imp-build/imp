@@ -4,16 +4,13 @@ weight = 2
 template = "page.html"
 +++
 
-`imp.workspace.js` is the root marker imp looks for when finding the workspace root. It's evaluated once, before any `BUILD.js` file, and does two things: imports rule modules (registering their `product()`s so `BUILD.js` files can use them) and declares workspace-wide singletons — most commonly toolchains:
+`imp.workspace.js` is the root marker imp looks for when finding the workspace root. It's evaluated once, before any `BUILD.js` file. Import rule modules here to register their `product()`s so `BUILD.js` files can use them; each rule supplies its pinned default toolchain when imported.
 
 ```js
 import "//rules/c/cmake";
 import "//rules/workflows/build";
-import { odinToolchain } from "//rules/odin";
-import { odinfmtToolchain } from "//rules/odin/odinfmt/toolchain";
-
-export const odin = odinToolchain("dev-2026-03", { default: true });
-export const odinfmt = odinfmtToolchain();
+import "//rules/odin";
+import "//rules/odin/odinfmt";
 
 ```
 
@@ -30,7 +27,6 @@ When the namespace is also used by another workspace export, use the
 `<namespace>Config` form instead:
 
 ```js
-export const odin = odinToolchain("dev-2026-03", { default: true });
 export const odinConfig = {
     collections: { lib: "library" },
 };
@@ -40,7 +36,24 @@ export const odinConfig = {
 
 An `export const name = ...` at the top level of `imp.workspace.js` gets a stable address, `//:name`, exactly like an export from a root `BUILD.js` file. `workspaceTargets()` and the target graph see it; nothing about it is workspace-file-specific beyond where it's declared.
 
-Declaring `odinToolchain(...)` without exporting it (the old style) still works for anything that reaches it through the module's own API — `defaultOdinToolchain()`, `resolveOdinToolchainVersion()`, and so on — but it has no address, so nothing outside that module can look it up by name.
+Rule-owned default toolchains have no workspace address until you export their
+getter result. This is optional for normal targets, which use the default
+automatically:
+
+```js
+import { defaultOdinToolchain } from "//rules/odin";
+
+export const odin = defaultOdinToolchain();
+```
+
+Use an explicit `{ default: true }` declaration only when a workspace needs a
+different version or toolchain options:
+
+```js
+import { odinToolchain } from "//rules/odin";
+
+export const odin = odinToolchain("dev-2026-04", { default: true });
+```
 
 ## `imp @TOOL` resolves exported toolchains automatically
 

@@ -290,6 +290,10 @@ export function defaultZolaToolchain() {
 	return ZolaToolchain.default();
 }
 
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another zolaToolchain(..., { default: true }).
+zolaToolchain("0.22.1", { default: true });
+
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "zola",

@@ -373,6 +373,10 @@ export function defaultUvToolchain() {
 	return UvToolchain.default();
 }
 
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another uvToolchain(..., { default: true }).
+uvToolchain("0.11.16", { default: true });
+
 // Passing name: "uv" here would collide with a real project's own uv.lock
 // (uv's native per-project dependency lock — not ours to name), so
 // "uv-toolchain" is used instead for both the `tool` field and the lockfile

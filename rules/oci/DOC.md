@@ -8,13 +8,10 @@ handles registry operations.
 
 ## Set up Crane
 
-Registry operations use a pinned Crane release. Declare the default in
-`imp.workspace.js`:
+Registry operations use the pinned Crane release provided by the OCI rule:
 
 ```js
-import { craneToolchain } from "//rules/oci/toolchain";
-
-export const crane = craneToolchain("0.20.6", { default: true });
+import "//rules/oci";
 ```
 
 The release is downloaded into a shared named cache on first use. Pure local

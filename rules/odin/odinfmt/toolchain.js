@@ -223,6 +223,11 @@ export class OdinfmtToolchain extends Toolchain {
 	}
 }
 
+export function __resetOdinfmtToolchainStateForTest() {
+	OdinfmtToolchain.clearDefault();
+	coreToolHandles = null;
+}
+
 /**
  * Declare an odinfmt toolchain, pinned to an Odin toolchain version. Omit
  * `version` to track the workspace's default Odin toolchain version.
@@ -230,13 +235,31 @@ export class OdinfmtToolchain extends Toolchain {
  * @category configuration
  * @param {string} [version]
  * @param {object} [opts]
+ * @param {boolean} [opts.default=false] Set as the default odinfmt target.
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
  * @returns {object} Target handle for this odinfmt toolchain.
  */
 export function odinfmtToolchain(version, opts = {}) {
-	return new OdinfmtToolchain({ version, unverified: opts.unverified });
+	return new OdinfmtToolchain(
+		{ version, unverified: opts.unverified },
+		{ default: opts.default },
+	);
 }
+
+/**
+ * Return the currently configured default odinfmt toolchain target handle.
+ *
+ * @returns {object|null}
+ */
+export function defaultOdinfmtToolchain() {
+	return OdinfmtToolchain.default();
+}
+
+// Odinfmt follows the default Odin compiler version when no explicit version
+// is provided. A workspace can replace this target with an explicit
+// odinfmtToolchain(..., { default: true }) declaration.
+odinfmtToolchain(undefined, { default: true });
 
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{

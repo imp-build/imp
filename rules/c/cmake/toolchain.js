@@ -300,6 +300,10 @@ export function defaultCmakeToolchain() {
 	return CmakeToolchain.default();
 }
 
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another cmakeToolchain(..., { default: true }).
+cmakeToolchain("3.31.0", { default: true });
+
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "cmake",

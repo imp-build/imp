@@ -1,14 +1,23 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { CmakeLib, cmakeLib, cmakeToolchain } from "//rules/c/cmake";
-import { zigToolchain } from "//rules/c/zig/toolchain";
+import {
+	CmakeLib,
+	cmakeLib,
+	cmakeToolchain,
+	defaultCmakeToolchain,
+} from "//rules/c/cmake";
+import { defaultZigToolchain, zigToolchain } from "//rules/c/zig/toolchain";
 
 describe("CMake rules", () => {
-	test("keeps system cmake fallback without a toolchain", () => {
+	test("uses imported CMake and Zig defaults without configuration", () => {
 		const lib = cmakeLib({ src: "build/default", deps: [] });
+		const cmake = defaultCmakeToolchain();
+		const zig = defaultZigToolchain();
 
-		expect(lib.attrs.toolchain ?? null).toBe(null);
-		expect(lib.attrs.toolchainTarget ?? null).toBe(null);
-		expect(lib.attrs.deps ? lib.attrs.deps.length : 0).toBe(0);
+		expect(lib.attrs.toolchain).toBe(cmake.attrs.version);
+		expect(lib.attrs.toolchainTarget).toBe(cmake);
+		expect(lib.attrs.compiler).toBe(zig.attrs.version);
+		expect(lib.attrs.compilerTarget).toBe(zig);
+		expect(lib.attrs.deps.length).toBe(2);
 	});
 
 	test("adds an explicit CMake toolchain target dependency", () => {
@@ -17,10 +26,10 @@ describe("CMake rules", () => {
 
 		expect(lib.attrs.toolchain).toBe("3.31.0");
 		expect(lib.attrs.toolchainTarget).toBe(toolchain);
-		expect(lib.attrs.deps.length).toBe(1);
+		expect(lib.attrs.deps.length).toBe(2);
 	});
 
-	test("keeps explicit string versions dependency-free", () => {
+	test("keeps explicit CMake string versions detached from the default target", () => {
 		const lib = cmakeLib({
 			src: "build/string",
 			toolchain: "3.32.0",
@@ -29,7 +38,7 @@ describe("CMake rules", () => {
 
 		expect(lib.attrs.toolchain).toBe("3.32.0");
 		expect(lib.attrs.toolchainTarget ?? null).toBe(null);
-		expect(lib.attrs.deps ? lib.attrs.deps.length : 0).toBe(0);
+		expect(lib.attrs.deps.length).toBe(1);
 	});
 
 	test("expanded CMake cc targets are selected by output artifacts", () => {
@@ -46,12 +55,13 @@ describe("CMake rules", () => {
 		expect(lib.attrs.outputsInBuildDir).toBe(true);
 	});
 
-	test("keeps no compiler set without one declared", () => {
+	test("uses the imported Zig compiler default", () => {
 		const lib = cmakeLib({ src: "build/no-compiler", deps: [] });
+		const compiler = defaultZigToolchain();
 
-		expect(lib.attrs.compiler ?? null).toBe(null);
-		expect(lib.attrs.compilerTarget ?? null).toBe(null);
-		expect(lib.attrs.deps ? lib.attrs.deps.length : 0).toBe(0);
+		expect(lib.attrs.compiler).toBe(compiler.attrs.version);
+		expect(lib.attrs.compilerTarget).toBe(compiler);
+		expect(lib.attrs.deps.length).toBe(2);
 	});
 
 	test("adds an explicit Zig compiler target dependency", () => {
@@ -64,10 +74,10 @@ describe("CMake rules", () => {
 
 		expect(lib.attrs.compiler).toBe("0.16.0");
 		expect(lib.attrs.compilerTarget).toBe(compiler);
-		expect(lib.attrs.deps.length).toBe(1);
+		expect(lib.attrs.deps.length).toBe(2);
 	});
 
-	test("keeps explicit compiler string versions dependency-free", () => {
+	test("keeps explicit compiler string versions detached from the default target", () => {
 		const lib = cmakeLib({
 			src: "build/compiler-string",
 			compiler: "0.16.1",
@@ -76,7 +86,7 @@ describe("CMake rules", () => {
 
 		expect(lib.attrs.compiler).toBe("0.16.1");
 		expect(lib.attrs.compilerTarget ?? null).toBe(null);
-		expect(lib.attrs.deps ? lib.attrs.deps.length : 0).toBe(0);
+		expect(lib.attrs.deps.length).toBe(1);
 	});
 
 	test("uses the default CMake toolchain target", () => {
@@ -85,7 +95,7 @@ describe("CMake rules", () => {
 
 		expect(lib.attrs.toolchain).toBe("3.30.5");
 		expect(lib.attrs.toolchainTarget).toBe(toolchain);
-		expect(lib.attrs.deps.length).toBe(1);
+		expect(lib.attrs.deps.length).toBe(2);
 	});
 
 	test("uses the default Zig compiler target", () => {
@@ -94,7 +104,7 @@ describe("CMake rules", () => {
 
 		expect(lib.attrs.compiler).toBe("0.16.2");
 		expect(lib.attrs.compilerTarget).toBe(compiler);
-		expect(lib.attrs.deps.length).toBe(1);
+		expect(lib.attrs.deps.length).toBe(2);
 	});
 
 	test("wires both a CMake toolchain and a Zig compiler together", () => {

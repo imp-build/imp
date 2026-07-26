@@ -8,25 +8,19 @@ their artifacts to downstream native or Odin targets.
 
 ## Set up a compiler
 
-Register a default compiler toolchain in `imp.workspace.js`. Raw C targets
-prefer a default Zig toolchain and otherwise fall back to GCC; CMake targets
-also need their managed CMake toolchain.
+Import the C rules in `imp.workspace.js`. Raw C targets prefer the default
+Zig toolchain and otherwise fall back to GCC; CMake targets use the managed
+CMake default.
 
 ```js
 import "//rules/c";
 import "//rules/c/cmake";
-import { gccToolchain } from "//rules/c/gcc/toolchain";
-import { cmakeToolchain } from "//rules/c/cmake/toolchain";
 import "//rules/workflows/package";
 import "//rules/workflows/test";
-
-export const gcc = gccToolchain("2025.08-1", { default: true });
-export const cmake = cmakeToolchain("3.31.0", { default: true });
 ```
 
-Versions are examples; use versions available for the platforms your
-workspace supports. A target can override the default by passing a toolchain
-handle explicitly.
+Override a rule default only when needed by declaring a replacement with
+`{ default: true }`, or pass a toolchain handle explicitly on one target.
 
 This repository's workspace imports `//rules/imp/mode`. Its `default`
 profile builds raw C/C++ with `-O0 -g` and configures CMake with
