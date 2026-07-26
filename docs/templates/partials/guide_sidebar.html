@@ -8,8 +8,8 @@
     <a class="docs-sidebar__title" href="{{ first_page.permalink }}">{{ root.title }}</a>
     <ul>
         {% for p in root.pages %}
-        {% if p.title == "Extending Imp" %}
-        <li class="docs-sidebar__heading"><a href="{{ p.permalink }}"{% if current_path is defined and current_path == p.path %} class="is-active"{% endif %}><code>Extending Imp</code></a></li>
+        {% if p.extra.sidebar_heading | default(value=false) %}
+        <li class="docs-sidebar__heading"><a href="{{ p.permalink }}"{% if current_path is defined and current_path == p.path %} class="is-active"{% endif %}><code>{{ p.title }}</code></a></li>
         {% else %}
         <li><a href="{{ p.permalink }}"{% if current_path is defined and current_path == p.path %} class="is-active"{% endif %}>{{ p.title }}</a></li>
         {% endif %}

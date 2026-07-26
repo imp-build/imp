@@ -17,11 +17,12 @@ use crate::loader::{
     RulesSource, ImpLoader, ImpResolver,
 };
 use crate::runtime::LiveWorkspace;
+use crate::selector::{
+    filter_changed_addresses_in, select_roots_for_addresses, select_roots_in, select_targets_in,
+    SelectorContext,
+};
 #[cfg(test)]
 use crate::selector::{select_roots, select_targets};
-use crate::selector::{
-    select_roots_for_addresses, select_roots_in, select_targets_in, SelectorContext,
-};
 use anyhow::{bail, Context, Result};
 use regex::Regex;
 use rquickjs::{
@@ -4461,11 +4462,16 @@ pub async fn execute_goal_live(
 
 /// How `execute_goal_live_selection` picks its root targets: user-typed
 /// selector strings (normal CLI path), or an exact address set precomputed by
-/// changed-target detection — resolved with wildcard semantics, where an
-/// empty selection is a successful no-op rather than an error.
+/// changed-target detection, optionally narrowed by path selectors. Changed
+/// selections use wildcard product semantics, where an empty selection is a
+/// successful no-op rather than an error.
 pub enum GoalSelection<'a> {
     Selectors(&'a [String]),
-    ChangedAddresses(&'a BTreeSet<String>),
+    ChangedAddresses {
+        addresses: &'a BTreeSet<String>,
+        /// Optional path selectors which scope the precomputed changed set.
+        selectors: &'a [String],
+    },
 }
 
 pub struct GoalExecutionOptions<'a> {
@@ -4618,6 +4624,18 @@ pub async fn execute_goal_live_selection(
     // to expanding every statically-declared target whose kind can produce
     // more targets, then retry selector resolution below.
     let empty_dynamic: BTreeMap<String, Target> = BTreeMap::new();
+    let changed_addresses = match &selection {
+        GoalSelection::Selectors(_) => None,
+        GoalSelection::ChangedAddresses {
+            addresses,
+            selectors,
+        } => Some(filter_changed_addresses_in(
+            &live.workspace,
+            addresses,
+            selectors,
+            selector_context,
+        )?),
+    };
     let seed_addresses: Vec<String> = match &selection {
         GoalSelection::Selectors(selectors) => {
             match select_roots_in(
@@ -4638,7 +4656,12 @@ pub async fn execute_goal_live_selection(
             }
         }
         // Changed addresses are statically known — no fallback needed.
-        GoalSelection::ChangedAddresses(addresses) => addresses.iter().cloned().collect(),
+        GoalSelection::ChangedAddresses { .. } => changed_addresses
+            .as_ref()
+            .expect("changed selection has an address set")
+            .iter()
+            .cloned()
+            .collect(),
     };
     ensure_expanded(live, &seed_addresses, Some(goal)).await?;
 
@@ -4667,14 +4690,33 @@ pub async fn execute_goal_live_selection(
             }
             Err(error) => return Err(error),
         },
-        GoalSelection::ChangedAddresses(addresses) => {
-            let roots =
-                select_roots_for_addresses(&live.workspace, &dynamic_snapshot, goal_def, addresses);
-            if roots.is_empty() {
-                eprintln!("no changed target has a '{}' product; nothing to do", goal);
-                return Ok(());
+        GoalSelection::ChangedAddresses { selectors, .. } => {
+            // A selection-independent goal owns its callback, so VCS filtering
+            // must not suppress its selector-less invocation.
+            if goal_def.selectorless {
+                Vec::new()
+            } else {
+                let roots = select_roots_for_addresses(
+                    &live.workspace,
+                    &dynamic_snapshot,
+                    goal_def,
+                    changed_addresses
+                        .as_ref()
+                        .expect("changed selection has an address set"),
+                );
+                if roots.is_empty() {
+                    if selectors.is_empty() {
+                        eprintln!("no changed target has a '{}' product; nothing to do", goal);
+                    } else {
+                        eprintln!(
+                            "no changed target matching the requested selectors has a '{}' product; nothing to do",
+                            goal
+                        );
+                    }
+                    return Ok(());
+                }
+                roots
             }
-            roots
         }
     };
 
@@ -9918,6 +9960,55 @@ goal("nosel", async function noselGoal(selection) {}, { selection: "none" });
         assert!(nosel_goal.selectorless);
         let roots = select_roots(&live.workspace, &no_dynamic, nosel_goal, &[]).unwrap();
         assert!(roots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn changed_selection_runs_selectorless_goal_callback() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { goal } from "imp:core";
+goal("selectorless-changed", () => {
+    throw new Error("selectorless callback reached");
+}, { selection: "none" });
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = imp_scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+        let addresses = BTreeSet::new();
+
+        let err = execute_goal_live_selection(
+            &live,
+            p,
+            &SelectorContext::root(),
+            "selectorless-changed",
+            GoalSelection::ChangedAddresses {
+                addresses: &addresses,
+                selectors: &[],
+            },
+            GoalExecutionOptions {
+                no_cache: false,
+                js_workers: 1,
+                flags: serde_json::json!({}),
+                run_args: &[],
+                axis_overrides: &[],
+                profile: None,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("selectorless callback reached"), "{err}");
     }
 
     #[tokio::test]

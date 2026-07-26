@@ -1,6 +1,7 @@
 +++
 title = "Extending Imp"
 weight = 20
+extra = { sidebar_heading = true }
 +++
 
 Imp is extended in JavaScript. A rule package declares the targets and

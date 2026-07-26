@@ -281,6 +281,39 @@ pub fn select_roots_for_addresses<'a>(
     selected.into_values().collect()
 }
 
+/// Intersect a changed address set with user-supplied path selectors. Unlike
+/// goal-root selection, this validates only target addressing: the caller
+/// applies the goal's product policy afterwards.
+pub fn filter_changed_addresses_in(
+    workspace: &Workspace,
+    addresses: &std::collections::BTreeSet<String>,
+    selectors: &[String],
+    context: &SelectorContext,
+) -> Result<std::collections::BTreeSet<String>> {
+    if selectors.is_empty() {
+        return Ok(addresses.clone());
+    }
+
+    let mut selected = std::collections::BTreeSet::new();
+    for selector in selectors {
+        let parsed = context.parse(selector)?;
+        let matches: Vec<_> = workspace
+            .targets
+            .values()
+            .filter(|target| parsed.matches(target))
+            .collect();
+        if matches.is_empty() {
+            bail!("no target matches selector '{selector}'");
+        }
+        for target in matches {
+            if addresses.contains(&target.address) {
+                selected.insert(target.address.clone());
+            }
+        }
+    }
+    Ok(selected)
+}
+
 /// Return the product a goal would request for a given target kind, or `None`
 /// if the goal has nothing to produce for that kind.
 fn goal_product_for_kind(workspace: &Workspace, goal: &Goal, kind: &str) -> Option<String> {
@@ -519,6 +552,45 @@ mod tests {
         let roots = select_roots_for_addresses(&workspace, &dynamic, &goal, &addresses);
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].0.address, "//dyn:d");
+    }
+
+    #[test]
+    fn changed_addresses_can_be_scoped_by_valid_target_selectors() {
+        let mut workspace = Workspace::default();
+        for address in ["//app:app", "//app/sub:sub", "//lib:lib"] {
+            workspace
+                .targets
+                .insert(address.to_owned(), target(address));
+        }
+        let addresses =
+            std::collections::BTreeSet::from(["//app:app".to_owned(), "//lib:lib".to_owned()]);
+        let context = SelectorContext::root();
+
+        assert_eq!(
+            filter_changed_addresses_in(
+                &workspace,
+                &addresses,
+                &["//app/...".to_owned()],
+                &context,
+            )
+            .unwrap(),
+            std::collections::BTreeSet::from(["//app:app".to_owned()])
+        );
+        assert!(filter_changed_addresses_in(
+            &workspace,
+            &addresses,
+            &["//app/sub".to_owned()],
+            &context,
+        )
+        .unwrap()
+        .is_empty());
+        assert!(filter_changed_addresses_in(
+            &workspace,
+            &addresses,
+            &["//missing".to_owned()],
+            &context,
+        )
+        .is_err());
     }
 
     #[test]

@@ -47,7 +47,7 @@ enum Cmd {
         selectors: Vec<String>,
         /// List only targets owning files changed since this git ref
         /// (merge-base against the working tree, like `git diff <ref>`)
-        #[arg(long, value_name = "REF", conflicts_with = "selectors")]
+        #[arg(long, value_name = "REF")]
         changed_since: Option<String>,
         /// Also list targets that depend on the changed targets
         #[arg(long, value_enum, default_value_t, requires = "changed_since")]
@@ -189,7 +189,7 @@ struct GoalArgs {
     selectors: Vec<String>,
     /// Select the targets owning files changed since this git ref
     /// (merge-base against the working tree, like `git diff <ref>`)
-    #[arg(long, value_name = "REF", conflicts_with = "selectors")]
+    #[arg(long, value_name = "REF")]
     changed_since: Option<String>,
     /// Also select targets that depend on the changed targets
     #[arg(long, value_enum, default_value_t, requires = "changed_since")]
@@ -252,6 +252,18 @@ fn parse_goal_args(
         Ok(matches) => matches,
         Err(e) => e.exit(),
     }
+}
+
+fn validate_changed_selector_overrides(
+    changed_since: Option<&str>,
+    selectors: &[String],
+) -> Result<()> {
+    if changed_since.is_some() && selectors.iter().any(|selector| selector.contains('#')) {
+        anyhow::bail!(
+            "--changed-since does not support '#product' selector overrides; it always runs the goal's product"
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -850,11 +862,13 @@ async fn cmd_execute_live(
         axis,
         profile,
     } = args;
+    validate_changed_selector_overrides(changed_since.as_deref(), &selectors)?;
     let js_workers = effective_js_workers(&workspace.workspace, js_workers_cli)?;
     let jobs = effective_jobs(&workspace.workspace, jobs_cli)?;
 
     // Resolve --changed-since into an exact address set before any execution
-    // machinery spins up; "nothing changed" is a successful no-op.
+    // machinery spins up. Even an empty set continues through selection so
+    // scoped selectors are validated and selection-independent goals run.
     let changed_addresses = match &changed_since {
         Some(since) => {
             let graph = workspace.import_graph.lock().unwrap().clone();
@@ -866,10 +880,6 @@ async fn cmd_execute_live(
                 changed_dependents,
             )?;
             warn_unowned_changed_files(&unowned);
-            if addresses.is_empty() {
-                eprintln!("nothing changed since '{since}'; nothing to do");
-                return Ok(());
-            }
             Some(addresses)
         }
         None => None,
@@ -1246,7 +1256,10 @@ async fn cmd_execute_live(
         match invocation {
             LiveInvocation::Goal { goal, .. } => {
                 let selection = match &changed_addresses {
-                    Some(addresses) => spike::GoalSelection::ChangedAddresses(addresses),
+                    Some(addresses) => spike::GoalSelection::ChangedAddresses {
+                        addresses,
+                        selectors: &selectors,
+                    },
                     None => spike::GoalSelection::Selectors(&selectors),
                 };
                 spike::execute_goal_live_selection(
@@ -1383,6 +1396,12 @@ async fn cmd_targets(
                 changed_dependents,
             )?;
             warn_unowned_changed_files(&unowned);
+            let addresses = selector::filter_changed_addresses_in(
+                &workspace.workspace,
+                &addresses,
+                selectors,
+                &selector_context,
+            )?;
             for address in &addresses {
                 use std::fmt::Write as _;
                 writeln!(out, "{address}")?;
@@ -1525,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_since_flags_parse_and_enforce_exclusivity() {
+    fn changed_since_flags_parse_and_allow_selector_scoping() {
         // The same Command shape parse_goal_args builds (minus process exit).
         let cmd = || GoalArgs::augment_args(Command::new("build"));
 
@@ -1548,10 +1567,19 @@ mod tests {
             changed::DependentsMode::None
         );
 
-        // Explicit selectors conflict with --changed-since.
-        assert!(cmd()
-            .try_get_matches_from(["build", "//:app", "--changed-since", "main"])
-            .is_err());
+        let args = GoalArgs::from_arg_matches(
+            &cmd()
+                .try_get_matches_from(["build", "//:app", "--changed-since", "main"])
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(args.selectors, ["//:app"]);
+        assert_eq!(args.changed_since.as_deref(), Some("main"));
+        assert!(
+            validate_changed_selector_overrides(Some("main"), &["//:app#check".to_owned()],)
+                .is_err()
+        );
+        assert!(validate_changed_selector_overrides(None, &["//:app#check".to_owned()],).is_ok());
         // --changed-dependents needs --changed-since.
         assert!(cmd()
             .try_get_matches_from(["build", "--changed-dependents", "direct"])
@@ -1559,15 +1587,15 @@ mod tests {
     }
 
     #[test]
-    fn targets_subcommand_accepts_changed_since() {
-        let cli = Cli::parse_from(["imp", "targets", "--changed-since", "HEAD~1"]);
+    fn targets_subcommand_accepts_changed_since_with_selector_scope() {
+        let cli = Cli::parse_from(["imp", "targets", "//pkg/...", "--changed-since", "HEAD~1"]);
         match cli.command {
             Cmd::Targets {
                 selectors,
                 changed_since,
                 changed_dependents,
             } => {
-                assert!(selectors.is_empty());
+                assert_eq!(selectors, ["//pkg/..."]);
                 assert_eq!(changed_since.as_deref(), Some("HEAD~1"));
                 assert_eq!(changed_dependents, changed::DependentsMode::None);
             }
