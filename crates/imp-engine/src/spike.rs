@@ -5884,9 +5884,10 @@ import "//rules/asset";
         let rules = p.join("rules");
         std::fs::create_dir_all(&rules).unwrap();
         std::fs::create_dir_all(rules.join("c/cmake")).unwrap();
+        std::fs::create_dir_all(rules.join("asset")).unwrap();
         std::fs::write(rules.join("c/cmake/index.js"), CPP_RULES_JS).unwrap();
         std::fs::write(rules.join("odin.js"), ODIN_RULES_JS).unwrap();
-        std::fs::write(rules.join("asset.js"), ASSET_RULES_JS).unwrap();
+        std::fs::write(rules.join("asset/index.js"), ASSET_RULES_JS).unwrap();
 
         // src/cpp/joltphysics/BUILD.js
         let cpp = p.join("src/cpp/joltphysics");
@@ -6363,7 +6364,10 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
             product_group("//rules/odin/index.js").as_deref(),
             Some("odin")
         );
-        assert_eq!(product_group("//rules/asset.js").as_deref(), Some("asset"));
+        assert_eq!(
+            product_group("//rules/asset/index.js").as_deref(),
+            Some("asset")
+        );
         assert_eq!(product_group("//src/tool.js"), None);
     }
 
@@ -7057,7 +7061,7 @@ export const ci_only = target({ kind: "odin-toolchain", attrs: { version: "ci" }
 import "//rules/asset";
 "#,
         );
-        write_file(&p.join("rules/asset.js"), ASSET_RULES_JS);
+        write_file(&p.join("rules/asset/index.js"), ASSET_RULES_JS);
         write_file(
             &p.join(BUILD_FILE),
             r#"

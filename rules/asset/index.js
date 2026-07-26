@@ -11,6 +11,8 @@ import {
 	BUILD,
 } from "imp:core";
 
+// Importing //rules/asset provides asset and resource-package target declarations.
+
 const ASSET_TOOL = toolName("asset");
 
 registerBuildRule({

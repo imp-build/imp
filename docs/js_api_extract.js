@@ -281,7 +281,7 @@ function renderEntry(entry) {
 
 /**
  * Return the directory a source path lives in, e.g.
- * "rules/c/zig/toolchain.js" -> "rules/c/zig", "rules/asset.js" -> "rules".
+ * "rules/c/zig/toolchain.js" -> "rules/c/zig", "rules/asset/index.js" -> "rules/asset".
  *
  * @param {string} sourcePath
  * @returns {string}

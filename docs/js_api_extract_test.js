@@ -213,7 +213,7 @@ test("skips internal double-underscore exports", () => {
 test("derives the directory a source path lives in", () => {
     expect(directoryForSourcePath("src/imp_core.js")).toBe("src");
     expect(directoryForSourcePath("rules/c/zig/toolchain.js")).toBe("rules/c/zig");
-    expect(directoryForSourcePath("rules/asset.js")).toBe("rules");
+    expect(directoryForSourcePath("rules/asset/index.js")).toBe("rules/asset");
 });
 
 test("parses a @category tag", () => {
@@ -438,7 +438,7 @@ test("extractUserApiReference emits curated language pages for target/configurat
             ].join("\n"),
         },
         {
-            sourcePath: "rules/asset.js",
+            sourcePath: "rules/asset/index.js",
             sourceText: "export function asset(opts) {}",
         },
     ];
@@ -556,13 +556,13 @@ test("extractUserApiReference tags every top-level section with a weight and cor
 test("extractApiReference is the exhaustive code-reference compatibility wrapper", () => {
     const pages = extractApiReference([
         {
-            sourcePath: "rules/asset.js",
+            sourcePath: "rules/asset/index.js",
             sourceText: "export function asset(opts) {}",
         },
     ]);
     const byPath = new Map(pages.map(p => [p.path, p.markdown]));
 
-    expect(byPath.has("rules/asset.md")).toBe(true);
-    expect(byPath.get("rules/asset.md")).toContain("### asset()");
+    expect(byPath.has("asset/_index.md")).toBe(true);
+    expect(byPath.get("asset/_index.md")).toContain("### asset()");
 });
 });
