@@ -10,9 +10,9 @@ Jobs chain: `build` compiles the imp binary once and uploads it as an
 artifact; `check`, `package`, and `deploy` download that artifact and run it
 "installed" instead of each doing their own cargo build/run.
 
-The release workflow builds packaged Linux and Windows binaries on regular CI
-runs. Main pushes update one rolling draft release, while version tags create a
-separate versioned draft release from the same artifacts.
+The release workflow builds packaged Linux and Windows binaries for main pushes
+and version tags. Main pushes update one rolling draft release, while version
+tags create a separate versioned draft release from the same artifacts.
 """
 
 import sys
@@ -38,6 +38,11 @@ DOWNLOAD_IMP_STEPS = [
     },
     {"name": "Make imp executable", "run": "chmod +x imp"},
 ]
+
+FULL_HISTORY_CHECKOUT = {
+    "uses": "actions/checkout@v4",
+    "with": {"fetch-depth": 0},
+}
 
 BUILD_STEPS = [
     {"uses": "actions/checkout@v4"},
@@ -125,18 +130,30 @@ EXPORT_GHAC_ENV_STEP = {
 }
 
 CHECK_STEPS = [
-    {"uses": "actions/checkout@v4"},
+    FULL_HISTORY_CHECKOUT,
     EXPORT_GHAC_ENV_STEP,
     FREE_DISK_SPACE_STEP,
     *DOWNLOAD_IMP_STEPS,
     cache_imp_step("check"),
     {
         "name": "Check generated files",
-        "run": f"./imp goal generate {SITE_CHECK_TARGET} --check",
+        "run": (
+            f'./imp goal generate {SITE_CHECK_TARGET} '
+            '--changed-since "$IMP_CHANGED_SINCE" --check'
+        ),
     },
-    {"name": "Check formatting", "run": "./imp fmt --check //..."},
-    {"name": "Lint", "run": "./imp lint //..."},
-    {"name": "Test", "run": "./imp test //..."},
+    {
+        "name": "Check formatting",
+        "run": './imp fmt --check //... --changed-since "$IMP_CHANGED_SINCE"',
+    },
+    {
+        "name": "Lint",
+        "run": './imp lint //... --changed-since "$IMP_CHANGED_SINCE"',
+    },
+    {
+        "name": "Test",
+        "run": './imp test //... --changed-since "$IMP_CHANGED_SINCE"',
+    },
     {"name": "Cache stats", "run": "./imp cache stats --details"},
     {"name": "Cache gc", "run": "./imp cache gc --apply"},
 ]
@@ -166,7 +183,10 @@ JOBS = [
         # std::env::var and never folded into any task's action digest, so
         # this cannot invalidate cache entries. Requires
         # EXPORT_GHAC_ENV_STEP to have run first so the backend can auth.
-        "env": {"IMP_REMOTE_CACHE": "ghac"},
+        "env": {
+            "IMP_REMOTE_CACHE": "ghac",
+            "IMP_CHANGED_SINCE": "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}",
+        },
         "steps": CHECK_STEPS,
     },
     {
@@ -435,7 +455,6 @@ def render_workflow():
         "  push:",
         "    branches: [main]",
         "  pull_request:",
-        "  workflow_dispatch:",
         "",
         "permissions:",
         "  contents: read",
@@ -461,8 +480,6 @@ def render_release_workflow():
         "  push:",
         "    branches: [main]",
         '    tags: ["v*"]',
-        "  pull_request:",
-        "  workflow_dispatch:",
         "",
         "permissions:",
         "  contents: read",

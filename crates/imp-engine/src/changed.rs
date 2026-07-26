@@ -269,7 +269,11 @@ pub fn owning_targets(
                 format!("//{dir}")
             };
             insert_package_targets(workspace, &scope, &mut owners);
-            owned = true;
+            // BUILD.js files define their package rather than reusable rule
+            // modules. Their import edges are dependency declarations, not
+            // reverse invalidation edges, so a BUILD.js change must stay
+            // package-scoped.
+            continue;
         }
 
         // A changed JS module invalidates every package that (transitively)
@@ -457,7 +461,7 @@ mod tests {
             target("//app/sub:nested", vec![], &[]),
             target("//:root", vec![], &[]),
         ]);
-        let graph = ImportGraph::default();
+        let mut graph = ImportGraph::default();
         assert_eq!(
             owners_of(&ws, &graph, &["app/BUILD.js"]),
             BTreeSet::from(["//app:app".to_owned(), "//app:extra".to_owned()])
@@ -465,6 +469,19 @@ mod tests {
         assert_eq!(
             owners_of(&ws, &graph, &["BUILD.js"]),
             BTreeSet::from(["//:root".to_owned()])
+        );
+
+        // A BUILD module can import rule modules, but changing the BUILD file
+        // itself must not follow those importer edges into the whole workspace.
+        graph.record_module_file("app/BUILD.js".to_owned(), "//app", Some("//app"));
+        graph
+            .importers
+            .entry("//app".to_owned())
+            .or_default()
+            .insert(WORKSPACE_FILE.to_owned());
+        assert_eq!(
+            owners_of(&ws, &graph, &["app/BUILD.js"]),
+            BTreeSet::from(["//app:app".to_owned(), "//app:extra".to_owned()])
         );
     }
 

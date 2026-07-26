@@ -7,7 +7,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -42,8 +41,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       IMP_REMOTE_CACHE: ghac
+      IMP_CHANGED_SINCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Export GitHub Actions cache credentials
         uses: actions/github-script@v7
@@ -79,16 +81,16 @@ jobs:
             imp-store-v4-check-${{ runner.os }}-
 
       - name: Check generated files
-        run: ./imp goal generate //ci:docs_workflow --check
+        run: ./imp goal generate //ci:docs_workflow --changed-since "$IMP_CHANGED_SINCE" --check
 
       - name: Check formatting
-        run: ./imp fmt --check //...
+        run: ./imp fmt --check //... --changed-since "$IMP_CHANGED_SINCE"
 
       - name: Lint
-        run: ./imp lint //...
+        run: ./imp lint //... --changed-since "$IMP_CHANGED_SINCE"
 
       - name: Test
-        run: ./imp test //...
+        run: ./imp test //... --changed-since "$IMP_CHANGED_SINCE"
 
       - name: Cache stats
         run: ./imp cache stats --details
