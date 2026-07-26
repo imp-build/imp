@@ -66,7 +66,8 @@ pub trait RemoteStore: Send + Sync {
     /// REv2 returns a per-blob status in `BatchUpdateBlobsResponse` rather
     /// than failing the whole RPC, and this mirrors that: the outer `Result`
     /// is reserved for failures that mean no blob could be attempted (e.g.
-    /// the backend is unreachable).
+    /// the backend is unreachable). Implementations must report a duplicate
+    /// write of an immutable, content-addressed blob as success.
     async fn batch_update_blobs(
         &self,
         blobs: Vec<(Digest, Vec<u8>)>,

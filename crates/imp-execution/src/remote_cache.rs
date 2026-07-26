@@ -203,10 +203,7 @@ fn push_remote_inner(store: &dyn RemoteStore, record: &TaskCacheRecord) -> Resul
         let results = handle.block_on(store.batch_update_blobs(uploads))?;
         for (digest, result) in results {
             if let Err(error) = result {
-                eprintln!(
-                    "warning: failed to upload blob {} to remote cache: {error:#}",
-                    digest.hash
-                );
+                return Err(error).with_context(|| format!("upload blob {}", digest.hash));
             }
         }
     }
@@ -219,8 +216,10 @@ fn push_remote_inner(store: &dyn RemoteStore, record: &TaskCacheRecord) -> Resul
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use async_trait::async_trait;
     use opendal::services::Memory;
     use opendal::Operator;
     use imp_remote_cache::OpendalRemoteStore;
@@ -267,6 +266,51 @@ mod tests {
                 tree_digest: None,
                 named_cache: None,
             }],
+        }
+    }
+
+    #[derive(Default)]
+    struct BlobUploadFails {
+        action_updates: Mutex<Vec<Digest>>,
+    }
+
+    #[async_trait]
+    impl RemoteStore for BlobUploadFails {
+        async fn find_missing_blobs(&self, digests: &[Digest]) -> Result<Vec<Digest>> {
+            Ok(digests.to_vec())
+        }
+
+        async fn batch_update_blobs(
+            &self,
+            blobs: Vec<(Digest, Vec<u8>)>,
+        ) -> Result<Vec<(Digest, Result<()>)>> {
+            Ok(blobs
+                .into_iter()
+                .map(|(digest, _)| (digest, Err(anyhow::anyhow!("upload unavailable"))))
+                .collect())
+        }
+
+        async fn batch_read_blobs(
+            &self,
+            _digests: &[Digest],
+        ) -> Result<Vec<(Digest, Result<Vec<u8>>)>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_action_result(&self, _action_digest: &Digest) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        async fn update_action_result(
+            &self,
+            action_digest: &Digest,
+            _result: Vec<u8>,
+        ) -> Result<()> {
+            self.action_updates
+                .lock()
+                .unwrap()
+                .push(action_digest.clone());
+            Ok(())
         }
     }
 
@@ -368,5 +412,21 @@ mod tests {
             .block_on(store.batch_read_blobs(&[Digest::new(digest, 0)]))
             .unwrap();
         assert_eq!(blobs[0].1.as_ref().unwrap().as_slice(), content.as_slice());
+    }
+
+    #[test]
+    fn push_remote_inner_does_not_publish_an_action_after_a_blob_upload_failure() {
+        let store = BlobUploadFails::default();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let task_key = format!("failed-push-{}", unique_nanos());
+        let content = unique_bytes("failed-push");
+        let digest = store_blob(&content, "file").unwrap();
+        let record = file_record(&task_key, &content);
+
+        let error = push_remote_inner(&store, &record).unwrap_err();
+        assert!(error.to_string().contains(&digest));
+        assert!(store.action_updates.lock().unwrap().is_empty());
     }
 }

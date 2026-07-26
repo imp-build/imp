@@ -31,6 +31,18 @@ fn is_not_found(error: &OpendalError) -> bool {
     error.kind() == ErrorKind::NotFound
 }
 
+/// CAS entries are immutable. A concurrent writer may create the same
+/// content-addressed key after `find_missing_blobs` reports it absent but
+/// before this write reaches the backend; that is an equally successful
+/// outcome for the caller.
+fn immutable_write_outcome(outcome: std::result::Result<(), OpendalError>) -> Result<()> {
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[async_trait]
 impl RemoteStore for OpendalRemoteStore {
     async fn find_missing_blobs(&self, digests: &[Digest]) -> Result<Vec<Digest>> {
@@ -54,11 +66,8 @@ impl RemoteStore for OpendalRemoteStore {
     ) -> Result<Vec<(Digest, Result<()>)>> {
         let mut results = Vec::with_capacity(blobs.len());
         for (digest, bytes) in blobs {
-            let outcome = self
-                .op
-                .write(&cas_path(&digest), bytes)
-                .await
-                .map(|_| ())
+            let write = self.op.write(&cas_path(&digest), bytes).await.map(|_| ());
+            let outcome = immutable_write_outcome(write)
                 .with_context(|| format!("upload blob {}", digest.hash));
             results.push((digest, outcome));
         }
@@ -113,6 +122,15 @@ mod tests {
 
     fn digest(hash: &str, bytes: &[u8]) -> Digest {
         Digest::new(hash, bytes.len() as u64)
+    }
+
+    #[test]
+    fn immutable_write_accepts_a_concurrent_create() {
+        let duplicate = OpendalError::new(ErrorKind::AlreadyExists, "already exists");
+        assert!(immutable_write_outcome(Err(duplicate)).is_ok());
+
+        let failure = OpendalError::new(ErrorKind::PermissionDenied, "denied");
+        assert!(immutable_write_outcome(Err(failure)).is_err());
     }
 
     #[tokio::test]
