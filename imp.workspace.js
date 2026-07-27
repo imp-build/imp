@@ -42,6 +42,7 @@ export const python = defaultPythonToolchain();
 // mtime-based incremental compilation, which imp's fresh-per-sandbox
 // builds otherwise always defeat.
 export const kache = defaultKacheToolchain();
+export const kacheConfig = { cacheExecutables: true };
 // Rust binaries link via cargo/rustc, which shell out to a C link driver;
 // the default is gcc, while mold and kache remain explicit opt-ins.
 export const rust = rustToolchain("1.93.0", { default: true, linker: mold, kache });
@@ -49,7 +50,7 @@ export const rust = rustToolchain("1.93.0", { default: true, linker: mold, kache
 // This repo dogfoods generate-build for all three rules groups; a fresh
 // workspace defaults to none (see each package's own `buildGenerate` config
 // field, off by default).
-export const rustConfig = { buildGenerate: true };
+export const rustConfig = { buildGenerate: true, doctest: false };
 export const cConfig = { buildGenerate: true };
 export const odinConfig = { buildGenerate: true };
 

@@ -117,6 +117,57 @@ export function declared_path(handle, path = ".") {
 	return normalize_workspace_path(`${base}/${local}`);
 }
 
+function declared_workspace_target_path(target) {
+	const address = target.address || "//";
+	const scope = address.slice(2).split(":")[0] || ".";
+	const path = target.attrs.path || ".";
+	if (scope === ".") return normalize_workspace_path(path);
+	if (path === ".") return scope;
+	return normalize_workspace_path(`${scope}/${path}`);
+}
+
+function cargo_doctest_enabled(handle) {
+	if (typeof handle.attrs.doctest === "boolean") {
+		return handle.attrs.doctest;
+	}
+	const rust = configuration("rust", {}) || {};
+	return rust.doctest !== false;
+}
+
+// Resolve enabled doc-test package names for one Cargo workspace. Package
+// settings override the workspace default. Unrepresented Cargo members use
+// that default too, so generated/partially-declared workspaces retain Cargo's
+// ordinary `--workspace` coverage.
+function workspace_doctest_packages(workspaceRootRelative, docTestNames) {
+	const rust = configuration("rust", {}) || {};
+	const workspaceDefault = rust.doctest !== false;
+	const settings = new Map(
+		workspaceTargets(CargoPackage.kind).map((target) => [
+			declared_workspace_target_path(target),
+			target.attrs.doctest,
+		]),
+	);
+	const prefix =
+		workspaceRootRelative === "." ? "" : `${workspaceRootRelative}/`;
+	const enabled = [];
+	let hasDisabledPackage = false;
+	for (const [memberDir, info] of docTestNames) {
+		const setting = settings.get(
+			normalize_workspace_path(`${prefix}${memberDir}`),
+		);
+		const isEnabled = typeof setting === "boolean" ? setting : workspaceDefault;
+		if (!isEnabled) {
+			hasDisabledPackage = true;
+			continue;
+		}
+		// `cargo test --doc -p` errors for a bin-only package, while
+		// `--workspace` silently skips it. Only select packages with a lib or
+		// proc-macro target when we need an explicit subset.
+		if (info.libName) enabled.push(info.packageName);
+	}
+	return { enabled, hasDisabledPackage };
+}
+
 // ---------------------------------------------------------------------------
 // Source discovery
 // ---------------------------------------------------------------------------
@@ -565,7 +616,8 @@ export function parseDocTestOutput(stderr) {
 }
 
 // Shared, memoized `cargo test --doc --workspace --no-fail-fast` run for one
-// real workspace root + toolchain configuration — same collapsing rationale
+// real workspace root + toolchain configuration — or the enabled package
+// subset when a package opts out — same collapsing rationale
 // as runWorkspaceClippy (rules/rust/lint.js) and buildWorkspaceTestBinaries
 // (rules/rust/test.js): every workspaceMember crate's own doc-test
 // invocation would otherwise independently recompile the same internal
@@ -616,6 +668,18 @@ const runWorkspaceDocTests = memo(
 			workspaceRootRelative,
 			toolchainVersion,
 		);
+		const { enabled, hasDisabledPackage } = workspace_doctest_packages(
+			workspaceRootRelative,
+			docTestNames,
+		);
+		if (hasDisabledPackage && enabled.length === 0) {
+			return {
+				result: null,
+				docTestNames,
+				attemptedLibNames: new Set(),
+				failedPackageNames: new Set(),
+			};
+		}
 		const { files: srcs } = await wholeWorkspaceSources(
 			workspaceRootRelative,
 			toolchainVersion,
@@ -625,9 +689,12 @@ const runWorkspaceDocTests = memo(
 
 		const prefix =
 			workspaceRootRelative === "." ? "" : `${workspaceRootRelative}/`;
+		const cargoArgs = hasDisabledPackage
+			? enabled.flatMap((packageName) => ["-p", packageName])
+			: ["--workspace"];
 		const script = cargoInvocationScript(
-			'cargo test --locked --doc --workspace --no-fail-fast --manifest-path "$manifest" ' +
-				'--target-dir "$target_dir"',
+			'cargo test --locked --doc --no-fail-fast --manifest-path "$manifest" ' +
+				'--target-dir "$target_dir" "$@"',
 			{ scriptPreamble, kacheActive },
 		);
 
@@ -640,12 +707,13 @@ const runWorkspaceDocTests = memo(
 				`${prefix}Cargo.toml`,
 				`build/rust-doctest/${workspaceRootRelative === "." ? "root" : workspaceRootRelative}`,
 				rustflags,
+				...cargoArgs,
 			],
 			tools: [...rustTools, ...linkerTools, ...cacheTools, ...testTools],
 			env: [...rustEnv, ...linkerEnv, ...cacheEnv],
 			inputs: [srcs, resourceInputs],
 			allowFailure: true,
-			display: `cargo test --doc --workspace ${workspaceRootRelative}`,
+			display: `cargo test --doc ${cargoArgs.join(" ")} ${workspaceRootRelative}`,
 		});
 
 		const { attemptedLibNames, failedPackageNames } = parseDocTestOutput(
@@ -683,6 +751,9 @@ export const cargoTest = product(
 	TEST,
 	RUST_TOOL,
 	async function cargoTest(handle) {
+		if (!cargo_doctest_enabled(handle)) {
+			return null;
+		}
 		const path = declared_path(handle, handle.attrs.path || ".");
 		const toolchainVersion = rust_toolchain_version(handle);
 		const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
@@ -700,7 +771,7 @@ export const cargoTest = product(
 				);
 
 			const info = docTestNames.get(path);
-			if (!info || !info.libName) {
+			if (!info || !info.libName || result === null) {
 				// No lib/proc-macro target (e.g. a bin-only crate) — cargo
 				// silently skips it under `--workspace` (confirmed directly;
 				// unlike naming it explicitly via a standalone `--doc`
@@ -710,8 +781,7 @@ export const cargoTest = product(
 			}
 
 			const context =
-				`cargo test --doc --workspace ${workspaceRootRelative} ` +
-				`(shared run, covers every workspace member):\n\n` +
+				`cargo test --doc ${workspaceRootRelative} (shared run):\n\n` +
 				`${result.stdout}\n${result.stderr}`;
 
 			if (failedPackageNames.has(info.packageName)) {
@@ -828,6 +898,8 @@ export const cargoTest = product(
  * @param {string[]} [opts.testArgs=[]] Extra arguments appended to `cargo test`.
  * @param {Array<object>} [opts.testTools=[]] nativeTool() handles exposed on PATH while running `cargo test`.
  * @param {Array<object>} [opts.deps=[]] Extra deps, e.g. a resourcePackage() (see //rules/asset) providing non-.rs files an `include_str!`/`include_bytes!` needs.
+ * @param {boolean} [opts.doctest] Override the workspace `rustConfig.doctest`
+ *   setting for this package.
  * @param {boolean} [opts.workspaceMember=false] This package is a member of
  *   a cargo workspace rooted in an ancestor directory (not this one) — build/
  *   test/fmt sandbox inputs glob from the repo root instead of just `path`,
@@ -845,6 +917,7 @@ export function cargoPackage({
 	testArgs = [],
 	testTools = [],
 	deps = [],
+	doctest,
 	workspaceMember = false,
 }) {
 	return new CargoPackage({
@@ -856,6 +929,7 @@ export function cargoPackage({
 		testArgs,
 		testTools,
 		deps,
+		doctest,
 		workspaceMember,
 	});
 }

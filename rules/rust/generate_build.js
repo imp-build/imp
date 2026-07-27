@@ -45,6 +45,9 @@ registerBuildRule({
  */
 export const rustConfigSchema = {
 	buildGenerate: field.bool({ default: false }),
+	// The workspace default for cargoPackage() doc-tests. A package can
+	// override this with its own `doctest` option.
+	doctest: field.bool({ default: true }),
 };
 
 defineConfigSchema("rust", rustConfigSchema);

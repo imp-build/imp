@@ -68,6 +68,28 @@ async function withOptMode(value, fn) {
 	}
 }
 
+async function withRustConfig(config, fn) {
+	const original = globalThis.__host_configuration;
+	globalThis.__host_configuration = (namespace) =>
+		namespace === "rust" ? JSON.stringify(config) : original(namespace);
+	try {
+		return await fn();
+	} finally {
+		globalThis.__host_configuration = original;
+	}
+}
+
+async function withWorkspaceCargoPackages(targets, fn) {
+	const original = globalThis.__host_workspace_targets;
+	globalThis.__host_workspace_targets = (kind) =>
+		kind === "cargo-package" ? JSON.stringify(targets) : original(kind);
+	try {
+		return await fn();
+	} finally {
+		globalThis.__host_workspace_targets = original;
+	}
+}
+
 describe("rust rules", () => {
 	test("cargoPackage is valid without a bin name (lib-only package)", () => {
 		const pkg = cargoPackage({});
@@ -80,6 +102,11 @@ describe("rust rules", () => {
 
 		const multi = cargoPackage({ bin: ["a", "b"], toolchain: "1.93.0" });
 		expect(multi.attrs.bins).toEqual(["a", "b"]);
+	});
+
+	test("cargoPackage preserves a doctest override", () => {
+		expect(cargoPackage({ doctest: false }).attrs.doctest).toBe(false);
+		expect(cargoPackage({}).attrs.doctest).toBe(undefined);
 	});
 
 	test("cargoPackage keeps explicit string versions free of toolchain target deps", () => {
@@ -234,6 +261,29 @@ describe("rust rules", () => {
 		});
 	});
 
+	test("cargoTest skips a package with doctest disabled", async () => {
+		await withRustHost(async (host) => {
+			const pkg = cargoPackage({
+				path: "rules/rust/example",
+				doctest: false,
+			});
+
+			expect(await cargoTest(pkg)).toBe(null);
+			expect(host.runs.length).toBe(0);
+		});
+	});
+
+	test("cargoTest follows the workspace doctest default", async () => {
+		await withRustHost(async (host) => {
+			await withRustConfig({ doctest: false }, async () => {
+				const pkg = cargoPackage({ path: "rules/rust/example" });
+
+				expect(await cargoTest(pkg)).toBe(null);
+				expect(host.runs.length).toBe(0);
+			});
+		});
+	});
+
 	// A workspaceMember crate's cargoTest delegates to one shared, memoized
 	// `cargo test --doc --workspace --no-fail-fast` run per real workspace
 	// root (runWorkspaceDocTests, //rules/rust) instead of its own per-crate
@@ -320,12 +370,53 @@ describe("rust rules", () => {
 			const testRun = host.runs[host.runs.length - 1];
 			expect(testRun.argv[2]).toContain("cargo test");
 			expect(testRun.argv[2]).toContain("--doc");
-			expect(testRun.argv[2]).toContain("--workspace");
+			expect(testRun.argv).toContain("--workspace");
 			expect(testRun.argv[2]).toContain("--no-fail-fast");
 			expect(testRun.argv).toContain("Cargo.toml");
 			expect(
 				testRun.argv.some((a) => a.startsWith("build/rust-doctest/")),
 			).toBe(true);
+		});
+	});
+
+	test("cargoTest excludes disabled packages from a shared workspace doc-test run", async () => {
+		await withRustHost(async (host) => {
+			rustToolchain("1.93.0", { default: true, unverified: true });
+			gccToolchain("2025.08-1", { default: true, unverified: true });
+			const restoreMetadata = fakeWorkspaceMetadata(host);
+			host.setRunStderr(
+				"cargo test --doc -p imp-store .",
+				"   Doc-tests imp_store\n",
+			);
+			await withWorkspaceCargoPackages(
+				[
+					{
+						id: 1,
+						address: "//crates/imp-store:imp_store",
+						kind: "cargo-package",
+						attrs: { path: "." },
+					},
+					{
+						id: 2,
+						address: "//crates/imp:imp",
+						kind: "cargo-package",
+						attrs: { path: ".", doctest: false },
+					},
+				],
+				async () => {
+					const pkg = cargoPackage({
+						path: "crates/imp-store",
+						workspaceMember: true,
+					});
+					await cargoTest(pkg);
+				},
+			);
+			restoreMetadata();
+
+			const testRun = host.runs[host.runs.length - 1];
+			expect(testRun.argv).toContain("-p");
+			expect(testRun.argv).toContain("imp-store");
+			expect(testRun.argv).not.toContain("--workspace");
 		});
 	});
 

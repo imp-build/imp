@@ -18,6 +18,9 @@
 //     src/exec.rs.
 import {
 	Toolchain,
+	configuration,
+	defineConfigSchema,
+	field,
 	product,
 	namedCache,
 	memo,
@@ -58,6 +61,17 @@ const KACHE_DATA_CACHE = "kache-data";
 // RustKacheWrapper's doc comment below), so an explicit, smaller cap is set
 // unless a rule author overrides it via kacheToolchain(version, { cacheSize }).
 const DEFAULT_CACHE_SIZE = "4GiB";
+
+export const kacheConfigSchema = {
+	cacheExecutables: field.bool({ default: false }),
+};
+
+defineConfigSchema("kache", kacheConfigSchema);
+
+function cache_executables_env() {
+	const config = configuration("kache", {}) || {};
+	return config.cacheExecutables === true ? "1" : "0";
+}
 
 // kache ships musl builds for Linux (no glibc-version coupling needed) and
 // native builds for macOS/Windows. Unlike sccache, kache's Windows release
@@ -230,6 +244,7 @@ export function kacheToolchain(version, opts = {}) {
 			const exe = plat.os === "windows" ? "kache.exe" : "kache";
 			const bin = `${cacheGet(KACHE_TOOLCHAIN_CACHE, toolKey)}/${exe}`;
 			const dataDir = cacheGet(KACHE_DATA_CACHE, dataKey);
+			const cacheExecutables = cache_executables_env();
 
 			// Unlike sccache's --show-stats (which auto-spawns its own
 			// transient server if none is running), kache's `stats` command
@@ -251,6 +266,7 @@ export function kacheToolchain(version, opts = {}) {
 				env: [
 					`KACHE_CACHE_DIR=${dataDir}`,
 					`KACHE_MAX_SIZE=${cacheSize}`,
+					`KACHE_CACHE_EXECUTABLES=${cacheExecutables}`,
 					"KACHE_LOCAL_ONLY=1",
 				],
 				healthCheckArgv: [bin, "daemon", "status"],
@@ -258,7 +274,11 @@ export function kacheToolchain(version, opts = {}) {
 
 			const result = await run({
 				argv: [bin, "stats"],
-				env: [`KACHE_CACHE_DIR=${dataDir}`, "KACHE_LOCAL_ONLY=1"],
+				env: [
+					`KACHE_CACHE_DIR=${dataDir}`,
+					`KACHE_CACHE_EXECUTABLES=${cacheExecutables}`,
+					"KACHE_LOCAL_ONLY=1",
+				],
 				impure: true,
 				sandbox: false,
 				allowFailure: true,
@@ -546,6 +566,7 @@ export class RustKacheWrapper {
 		const bin = `${cacheGet(KACHE_TOOLCHAIN_CACHE, kacheCacheKey(version, plat))}/${exe}`;
 		const dataDir = await kacheDataDir();
 		const cacheSize = this.handle.attrs.cacheSize;
+		const cacheExecutables = cache_executables_env();
 
 		// KACHE_MAX_SIZE goes on the daemon's own start env, not just the
 		// client env returned below: the daemon is a singleton per workspace
@@ -561,6 +582,7 @@ export class RustKacheWrapper {
 			env: [
 				`KACHE_CACHE_DIR=${dataDir}`,
 				`KACHE_MAX_SIZE=${cacheSize}`,
+				`KACHE_CACHE_EXECUTABLES=${cacheExecutables}`,
 				"KACHE_LOCAL_ONLY=1",
 			],
 			healthCheckArgv: [bin, "daemon", "status"],
@@ -570,6 +592,7 @@ export class RustKacheWrapper {
 			`KACHE_CACHE_DIR=${dataDir}`,
 			"RUSTC_WRAPPER=kache",
 			`KACHE_MAX_SIZE=${cacheSize}`,
+			`KACHE_CACHE_EXECUTABLES=${cacheExecutables}`,
 			// User-requested: never let kache reach for S3/planner remote
 			// caching, even if a config file elsewhere on the host enables
 			// it — env wins over the config file for this setting.

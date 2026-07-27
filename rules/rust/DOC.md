@@ -38,6 +38,13 @@ compile counts, …) alongside the on-disk size for the `kache-data` cache —
 this starts kache's background daemon if it isn't already running, since
 kache (unlike sccache) needs the daemon up to report stats at all.
 
+Kache does not cache user-facing executable links by default. Enable that
+workspace-wide when those links dominate builds:
+
+```js
+export const kacheConfig = { cacheExecutables: true };
+```
+
 This repository's workspace also imports `//rules/imp/mode`, which declares
 the `default` (`opt=debug`) and `release` (`opt=release`) profiles. Cargo
 builds follow the selected profile:
@@ -59,6 +66,8 @@ import { cargoPackage } from "//rules/rust";
 export const server = cargoPackage({
     bin: "server",
     release: true,
+    // This package has no Rust documentation examples to execute.
+    doctest: false,
 });
 ```
 
@@ -92,7 +101,8 @@ the test invocation can still use the normal task and compiler caches.
 Use `testTools` for host programs that tests invoke: they become declared tool
 dependencies and are placed on the sandbox's `PATH`. Use `deps` for additional
 target inputs such as resources referenced by `include_str!` or
-`include_bytes!`.
+`include_bytes!`. `doctest` overrides the workspace default for that package;
+set `rustConfig.doctest: false` to disable Cargo doc-tests workspace-wide.
 
 ## Generate missing BUILD files
 
@@ -104,6 +114,8 @@ import "//rules/rust/generate_build";
 
 export const rustConfig = {
     buildGenerate: true,
+    // Defaults to true; turn it off for a workspace with no Rust doc-tests.
+    doctest: false,
 };
 ```
 

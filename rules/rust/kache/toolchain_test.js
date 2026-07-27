@@ -34,6 +34,17 @@ function withKacheHost(platOrFn, maybeFn) {
 		: withFakeToolchainHost(platOrFn, run);
 }
 
+async function withKacheConfig(config, fn) {
+	const original = globalThis.__host_configuration;
+	globalThis.__host_configuration = (namespace) =>
+		namespace === "kache" ? JSON.stringify(config) : original(namespace);
+	try {
+		return await fn();
+	} finally {
+		globalThis.__host_configuration = original;
+	}
+}
+
 describe("kache toolchain", () => {
 	test("declares a default kache toolchain", () => {
 		return withKacheHost((host) => {
@@ -177,6 +188,7 @@ describe("kache toolchain", () => {
 				"KACHE_CACHE_DIR=/cache/kache-data/linux-x86_64",
 				"RUSTC_WRAPPER=kache",
 				"KACHE_MAX_SIZE=4GiB",
+				"KACHE_CACHE_EXECUTABLES=0",
 				"KACHE_LOCAL_ONLY=1",
 				"CARGO_INCREMENTAL=0",
 			]);
@@ -185,6 +197,24 @@ describe("kache toolchain", () => {
 			expect(wrapper.scriptPreamble()).toBe(
 				'export KACHE_BASE_DIR="$imp_sandbox_root"; ',
 			);
+		});
+	});
+
+	test("kacheConfig enables executable caching for both client and daemon", async () => {
+		await withKacheHost(async (host) => {
+			installKacheToolchain("0.11.0", "/tmp/kache-0.11.0");
+			const toolchain = kacheToolchain("0.11.0");
+
+			await withKacheConfig({ cacheExecutables: true }, async () => {
+				const wrapper = await productFor(toolchain, RUST_BUILD_CACHE);
+				const clientEnv = await wrapper.env();
+				expect(clientEnv).toContain("KACHE_CACHE_EXECUTABLES=1");
+
+				const [, opts] = host.calls
+					.find((call) => call[0] === "workerStart")
+					.slice(1);
+				expect(opts.env).toContain("KACHE_CACHE_EXECUTABLES=1");
+			});
 		});
 	});
 
@@ -234,6 +264,7 @@ describe("kache toolchain", () => {
 			expect(opts.healthCheckArgv).toContain("status");
 			expect(opts.env.some((e) => e.startsWith("KACHE_CACHE_DIR="))).toBe(true);
 			expect(opts.env).toContain("KACHE_MAX_SIZE=4GiB");
+			expect(opts.env).toContain("KACHE_CACHE_EXECUTABLES=0");
 			expect(opts.env).toContain("KACHE_LOCAL_ONLY=1");
 		});
 	});

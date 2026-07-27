@@ -21,6 +21,7 @@ export class CargoPackage extends Target {
 		testArgs = [],
 		testTools = [],
 		deps = [],
+		doctest,
 		workspaceMember = false,
 	}) {
 		const bins = bin ? (Array.isArray(bin) ? bin : [bin]) : [];
@@ -51,6 +52,7 @@ export class CargoPackage extends Target {
 				testArgs,
 				testTools: normalizedTestTools,
 				workspaceMember,
+				...(doctest === undefined ? {} : { doctest }),
 				...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
 				...(toolchainVersion ? { toolchainVersion } : {}),
 				...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
