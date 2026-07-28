@@ -5,6 +5,7 @@
 pub mod cache;
 pub mod digest;
 pub mod gc;
+pub mod memo;
 pub mod stats;
 pub mod trace;
 pub mod usage;

@@ -1760,9 +1760,35 @@ function _stable_function_id(fn) {
 }
 
 // Serialize args to a stable string. Target handles ({ __imp: true, __id })
-// are replaced with { __imp_ref: <id> } so identity is by numeric ID.
+// are replaced with { __imp_ref_addr: <address> } rather than the raw
+// numeric id: an address is derived from the exporting module + export name
+// (see targetAddress()/__host_target_address), so it's stable across
+// processes, whereas __id is a process-local counter. A handle with no
+// registered address (constructed but never exported/registered — anonymous,
+// e.g. a bare `new NativeTool(name)` or mid-expand() before registerTarget()
+// runs) can't be digested this way; it falls back to { __imp_ref_id: __id }
+// instead — still unique per distinct handle (so two different anonymous
+// handles never collide into the same digest, and thus the same memo key),
+// just not restart-stable. `unaddressed` is set on the returned object so
+// memo() knows this call can't be persisted this time (see the
+// "memo-unaddressed-skip" trace event).
 function _stable_digest(args) {
-	return JSON.stringify(args, function (key, value) {
+	let unaddressed = false;
+	// `dep` distinguishes a link()-with-profiles wrapper's ref from a bare
+	// handle's ref via key name, same as the original __imp_dep_ref vs
+	// __imp_ref split — kept even though "profiles" being present already
+	// disambiguates structurally, so the two branches stay as distinguishable
+	// as they were before this change.
+	const refOf = (id, dep) => {
+		try {
+			const addr = __host_target_address(id);
+			return dep ? { __imp_dep_ref_addr: addr } : { __imp_ref_addr: addr };
+		} catch (_) {
+			unaddressed = true;
+			return dep ? { __imp_dep_ref_id: id } : { __imp_ref_id: id };
+		}
+	};
+	const digest = JSON.stringify(args, function (key, value) {
 		if (
 			value !== null &&
 			typeof value === "object" &&
@@ -1775,8 +1801,8 @@ function _stable_digest(args) {
 			// (which does overlay modeAxis() reads) is digest-relevant.
 			const { handle, profiles } = _unwrap_dep_edge(value);
 			return profiles && profiles.length > 0
-				? { __imp_dep_ref: handle.__id, profiles }
-				: { __imp_ref: handle.__id };
+				? { ...refOf(handle.__id, true), profiles }
+				: refOf(handle.__id, false);
 		}
 		if (
 			value !== null &&
@@ -1784,10 +1810,11 @@ function _stable_digest(args) {
 			value.__imp === true &&
 			typeof value.__id === "number"
 		) {
-			return { __imp_ref: value.__id };
+			return refOf(value.__id, false);
 		}
 		return value;
 	});
+	return { digest, unaddressed };
 }
 
 let _memo_table = new Map();
@@ -1811,6 +1838,8 @@ let _memo_contexts = new Map([
 			stack: [],
 			stackSet: new Set(),
 			readNamespaces: new Set(),
+			readFiles: new Set(),
+			readFilesets: [],
 			modeOverrides: null,
 		},
 	],
@@ -1940,11 +1969,13 @@ function _clone_context(ctx) {
 		stack: ctx.stack.slice(),
 		stackSet: new Set(ctx.stackSet),
 		// Deliberately NOT inherited from the parent: each frame tracks only
-		// the configuration namespaces its own body reads directly. A
+		// the configuration namespaces/files its own body reads directly. A
 		// callee's config-dependent behavior is already captured in the
 		// result it returns, so invalidation propagates to the caller via
 		// args_digest without the caller needing the callee's reads too.
 		readNamespaces: new Set(),
+		readFiles: new Set(),
+		readFilesets: [],
 		// Link overrides are ambient for a linked product call and therefore
 		// must flow to all async children of that call.
 		modeOverrides: ctx.modeOverrides,
@@ -1959,6 +1990,8 @@ function _current_context() {
 			stack: [],
 			stackSet: new Set(),
 			readNamespaces: new Set(),
+			readFiles: new Set(),
+			readFilesets: [],
 			modeOverrides: null,
 		};
 		_memo_contexts.set(_current_memo_context_id, ctx);
@@ -2443,18 +2476,208 @@ function _memo_metadata(fn, opts) {
 	return { display: opts.display, level };
 }
 
+// ---------------------------------------------------------------------------
+// Persisted memo layer (Phase 2, #50)
+//
+// The in-process key above (fn_id + args_digest + whole-map config_digest)
+// stays as-is — it's a cheap dedup/cycle-detection key computed up front,
+// unaffected by persistence. A persisted entry needs a different key: it
+// can't be scoped to "what this call reads" (readNamespaces/readFiles/
+// readFilesets) the way run()'s configDigest is, because those reads only
+// happen once the call's body actually executes — after a cache *lookup*
+// would already need a key to look up with. So the persisted bucket key is
+// just (fn_id, args_digest), and each record stores what it actually read
+// (input_specs) plus each read's digest at write time; a lookup validates
+// the candidate by re-checking those recorded reads against current state,
+// rather than by comparing a config digest computed in advance.
+// ---------------------------------------------------------------------------
+
+// A fn_id is either "<label>@<module>:<line>:<col>" (call-site identity, see
+// _stable_function_id) or, only when call-site resolution failed, the
+// non-restart-stable "<label>#<counter>" fallback. Only the former can be
+// resolved back to a module to digest, and is the only form worth persisting
+// against — mirroring the same "not restart-stable, don't persist" reasoning
+// as an unaddressed target-ref arg.
+function _memo_module_digest(fn_id) {
+	const at = fn_id.indexOf("@");
+	if (at < 0) return null;
+	try {
+		return __host_module_digest(fn_id.slice(at + 1));
+	} catch (_) {
+		return null;
+	}
+}
+
+// Recursively finds a live handle, function, or promise nested in a would-be
+// persisted result — none of these survive a process restart, so a call
+// whose result contains one is skipped for persistence (soft-fail, not a
+// throw: nothing should break the day this lands just because some
+// not-yet-migrated memoized function returns a live handle). A FileSet spec
+// (`__fileset: true`) is plain data by construction and always allowed.
+function _find_unpersistable(value, path = "$") {
+	if (value === null || value === undefined) return null;
+	const t = typeof value;
+	if (t === "function") return path;
+	if (t !== "object") return null;
+	if (typeof value.then === "function") return path;
+	if (value.__fileset === true) return null;
+	if (value.__imp === true) return path;
+	if (Array.isArray(value)) {
+		for (let i = 0; i < value.length; i++) {
+			const bad = _find_unpersistable(value[i], `${path}[${i}]`);
+			if (bad !== null) return bad;
+		}
+		return null;
+	}
+	for (const key of Object.keys(value)) {
+		const bad = _find_unpersistable(value[key], `${path}.${key}`);
+		if (bad !== null) return bad;
+	}
+	return null;
+}
+
+function _memo_input_spec_still_valid(spec, ctx) {
+	try {
+		if (spec.kind === "config_namespaces") {
+			const current = __host_configuration_digest(
+				JSON.stringify(spec.spec),
+				JSON.stringify((ctx && ctx.modeOverrides) || {}),
+			);
+			return current === spec.resolved_digest;
+		}
+		if (spec.kind === "read_file") {
+			const current = __host_capture_paths(JSON.stringify([spec.spec]));
+			return current === spec.resolved_digest;
+		}
+		if (spec.kind === "fileset") {
+			if (spec.resolved_digest === null || spec.resolved_digest === undefined) {
+				// Returned but never resolved during the recorded call — the
+				// spec itself is the input, not its (unresolved) content.
+				return true;
+			}
+			const evaluated = _eval_fileset(JSON.parse(JSON.stringify(spec.spec)));
+			return evaluated.digest === spec.resolved_digest;
+		}
+	} catch (_) {
+		return false;
+	}
+	return true;
+}
+
+function _load_persisted_memo(persistKey, moduleDigest, ctx) {
+	let raw;
+	try {
+		raw = __host_memo_read(persistKey);
+	} catch (_) {
+		return null;
+	}
+	if (raw === undefined || raw === null) return null;
+	let record;
+	try {
+		record = JSON.parse(raw);
+	} catch (_) {
+		return null;
+	}
+	if (record.module_digest !== moduleDigest) return null;
+	for (const spec of record.input_specs || []) {
+		if (!_memo_input_spec_still_valid(spec, ctx)) return null;
+	}
+	// Deep-cloned so a persisted hit never aliases the stored record (or a
+	// prior hit's reconstruction) the way a live in-process hit shares one
+	// promise's resolved value across callers.
+	return JSON.parse(JSON.stringify(record.result));
+}
+
+function _persist_memo_result(
+	persistKey,
+	fn_id,
+	moduleDigest,
+	result,
+	childContextId,
+	key_string,
+) {
+	const badPath = _find_unpersistable(result);
+	if (badPath !== null) {
+		_memo_trace.push({
+			event: "memo-unpersistable",
+			key: key_string,
+			path: badPath,
+		});
+		return;
+	}
+	const ctx = _memo_contexts.get(childContextId);
+	const input_specs = [];
+	if (ctx && ctx.readNamespaces.size > 0) {
+		const namespaces = Array.from(ctx.readNamespaces).sort();
+		input_specs.push({
+			kind: "config_namespaces",
+			spec: namespaces,
+			resolved_digest: __host_configuration_digest(
+				JSON.stringify(namespaces),
+				JSON.stringify(ctx.modeOverrides || {}),
+			),
+		});
+	}
+	if (ctx) {
+		for (const path of ctx.readFiles) {
+			input_specs.push({
+				kind: "read_file",
+				spec: path,
+				resolved_digest: __host_capture_paths(JSON.stringify([path])),
+			});
+		}
+		for (const entry of ctx.readFilesets) {
+			input_specs.push({
+				kind: "fileset",
+				spec: entry.spec,
+				resolved_digest: entry.resolved_digest ?? null,
+			});
+		}
+	}
+	const deps = Array.from(
+		new Set(
+			_memo_deps
+				.filter((edge) => edge.caller === key_string)
+				.map((edge) => edge.callee),
+		),
+	);
+	const record = {
+		version: 1, // MEMO_CACHE_VERSION in imp-store/src/memo.rs
+		key: persistKey,
+		fn_id,
+		module_digest: moduleDigest,
+		result,
+		input_specs,
+		deps,
+	};
+	try {
+		__host_memo_write(JSON.stringify(record));
+	} catch (_) {
+		// Best-effort: a write failure must not break the build.
+	}
+}
+
 export function memo(fn, opts) {
 	const fn_id = _stable_function_id(fn);
 	const metadata = _memo_metadata(fn, opts);
+	const moduleDigest = _memo_module_digest(fn_id);
 	return function memoized(...args) {
 		const unwrapped = args.length > 0 ? _unwrap_dep_edge(args[0]) : null;
 		const hasProfile = !!(unwrapped?.profiles && unwrapped.profiles.length > 0);
 		const callArgs = unwrapped ? [unwrapped.handle, ...args.slice(1)] : args;
+		const { digest: args_digest, unaddressed } = _stable_digest(args);
 		const key_string = JSON.stringify({
 			fn_id,
-			args_digest: _stable_digest(args),
+			args_digest,
 			config_digest: __host_configuration_digest(undefined, undefined),
 		});
+		const persistKey =
+			moduleDigest !== null && !unaddressed
+				? JSON.stringify({ fn_id, args_digest })
+				: null;
+		if (persistKey === null && unaddressed) {
+			_memo_trace.push({ event: "memo-unaddressed-skip", key: key_string });
+		}
 		if (!_key_display.has(key_string)) {
 			const label =
 				metadata.display === null
@@ -2485,6 +2708,21 @@ export function memo(fn, opts) {
 				return _with_context(childContextId, () => {
 					_emit_task("running", nodeId, owner, label);
 					_push_call(key_string);
+					if (persistKey !== null) {
+						const cached = _load_persisted_memo(
+							persistKey,
+							moduleDigest,
+							_memo_contexts.get(childContextId),
+						);
+						if (cached !== null) {
+							_pop_call(key_string, childContextId);
+							_memo_trace.push({
+								event: "persisted-hit",
+								key: key_string,
+							});
+							return Promise.resolve(cached);
+						}
+					}
 					let promise;
 					try {
 						promise = hasProfile
@@ -2500,7 +2738,19 @@ export function memo(fn, opts) {
 						_promise_contexts.set(promise, childContextId);
 					}
 					promise.then(
-						() => _pop_call(key_string, childContextId),
+						(result) => {
+							_pop_call(key_string, childContextId);
+							if (persistKey !== null) {
+								_persist_memo_result(
+									persistKey,
+									fn_id,
+									moduleDigest,
+									result,
+									childContextId,
+									key_string,
+								);
+							}
+						},
 						() => _pop_call(key_string, childContextId),
 					);
 					return promise;
@@ -2533,6 +2783,8 @@ export function resetMemoState() {
 				stack: [],
 				stackSet: new Set(),
 				readNamespaces: new Set(),
+				readFiles: new Set(),
+				readFilesets: [],
 				modeOverrides: null,
 			},
 		],
@@ -2593,10 +2845,25 @@ export function glob(opts) {
 // the flattened path list. Memoized onto the FileSet object itself: root/include/
 // exclude (or a literal path list) are immutable inputs, so repeat evaluation
 // (e.g. paths() followed by using the same FileSet in run({inputs})) is free.
+// Strip the memoized `__files`/`__digest` fields _eval_fileset adds to a
+// FileSet object, leaving the plain spec it was constructed from — this is
+// what gets recorded as an input spec (see readFilesets below) and what a
+// persisted memo record's FileSet-shaped `result` stores, since a spec is
+// cheap/deterministic to re-resolve but the fields _eval_fileset caches onto
+// it are process-local decoration, not part of the spec's own identity.
+function _fileset_spec_only(fs) {
+	const { __files, __digest, ...spec } = fs;
+	return spec;
+}
+
 function _eval_fileset(fs) {
 	if (!fs || fs.__fileset !== true)
 		throw new Error("paths() requires a FileSet");
 	if (fs.__digest !== undefined) {
+		_effective_context_entry(true).ctx.readFilesets.push({
+			spec: _fileset_spec_only(fs),
+			resolved_digest: fs.__digest,
+		});
 		return { files: fs.__files, digest: fs.__digest };
 	}
 	let result;
@@ -2639,6 +2906,10 @@ function _eval_fileset(fs) {
 	}
 	fs.__files = result.files;
 	fs.__digest = result.digest;
+	_effective_context_entry(true).ctx.readFilesets.push({
+		spec: _fileset_spec_only(fs),
+		resolved_digest: result.digest,
+	});
 	return result;
 }
 
@@ -2888,6 +3159,10 @@ export function nativeToolArtifact(name) {
 
 export function read_file(path) {
 	const result = __host_read_file(path);
+	// Same shape as configuration()'s readNamespaces recording — lets a
+	// persisted memo entry's input_specs include exactly the files this
+	// call frame read. See config-digest-scoping.md.
+	_effective_context_entry(true).ctx.readFiles.add(path);
 	_trace_effect({ event: "effect", kind: "read_file", path });
 	return result;
 }

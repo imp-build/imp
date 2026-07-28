@@ -37,7 +37,8 @@ use imp_exec_api::{ExecAction, ExecRunOpts, ExecutionService, SandboxRetention, 
 use imp_exec_bridge::{parse_io_specs, parse_tool_specs};
 use imp_execution::service::LocalExecutionService;
 use imp_store::cache::{
-    artifact_relative_path, digest_json, named_cache_scope_id, store_file_blob, workspace_cache_id,
+    artifact_relative_path, digest_bytes, digest_json, named_cache_scope_id, store_file_blob,
+    workspace_cache_id,
 };
 
 pub const WORKSPACE_FILE: &str = "imp.workspace.js";
@@ -2787,6 +2788,104 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
             })
         })?;
     globals.set("__host_target_address", host_target_address)?;
+
+    // ------------------------------------------------------------------
+    // __host_module_digest(site) → hex digest of the declaring module's
+    // source content, backing the persisted-memo-record staleness check in
+    // memo() (imp_core.js). `site` is a call-site string of the form
+    // `<module>:<line>:<col>` (as minted by _stable_function_id, see
+    // call_site_location); only the `<module>` portion is resolved.
+    // Embedded (builtin) rule modules digest their bundled source text
+    // directly rather than reading from disk.
+    // ------------------------------------------------------------------
+    let workspace_root_md = workspace_root.clone();
+    let rules_source_md = rules_source.clone();
+    let host_module_digest = Function::new(
+        ctx.clone(),
+        move |site: String| -> rquickjs::Result<String> {
+            let module = site
+                .rsplit_once(':')
+                .and_then(|(prefix, suffix)| {
+                    suffix
+                        .chars()
+                        .all(|c| c.is_ascii_digit())
+                        .then(|| prefix.rsplit_once(':').map_or(prefix, |(p, _)| p))
+                })
+                .unwrap_or(&site);
+            let resolution = resolve_workspace_module(&workspace_root_md, &rules_source_md, module)
+                .map_err(|e| rquickjs::Error::new_loading_message("moduleDigest", e))?;
+            let bytes = match resolution.source {
+                ModuleSource::File(path) => std::fs::read(&path).map_err(|e| {
+                    rquickjs::Error::new_loading_message(
+                        "moduleDigest",
+                        format!("read {}: {e}", path.display()),
+                    )
+                })?,
+                ModuleSource::Embedded(text) => text.as_bytes().to_vec(),
+            };
+            Ok(digest_bytes(&bytes))
+        },
+    )?;
+    globals.set("__host_module_digest", host_module_digest)?;
+
+    // ------------------------------------------------------------------
+    // __host_memo_read(key) → JSON MemoCacheRecord | undefined
+    // __host_memo_write(key, recordJson) → ()
+    //
+    // Backs the persisted memo layer (imp_core.js's memo()) — thin
+    // wrappers over imp_store::memo, no engine-side bookkeeping.
+    // ------------------------------------------------------------------
+    // IMP_DISABLE_MEMO_CACHE opts a whole invocation out of persisted memo
+    // records — set by the rules-test sandbox (see rules/imp/test/index.js)
+    // since rules tests assert call counts on functions declared at a fixed
+    // test-file call site, which a persisted record from a previous test run
+    // would otherwise silently short-circuit. A handful of this crate's own
+    // #[test]s are vulnerable to the same cross-run leakage (they share the
+    // real, unscoped cache_root() across `cargo test` invocations, unlike
+    // run()'s task cache whose key embeds each test's own tempdir-unique
+    // argv) and set this env var directly at their start. Checked fresh on
+    // every call (not captured once at registration time): register_globals
+    // may run once per test's own LiveWorkspace, but if it ever ran earlier
+    // than a test's own env::set_var, a value captured up front would miss
+    // it.
+    fn memo_cache_disabled() -> bool {
+        std::env::var_os("IMP_DISABLE_MEMO_CACHE").is_some()
+    }
+
+    let host_memo_read = Function::new(
+        ctx.clone(),
+        move |key: String| -> rquickjs::Result<Option<String>> {
+            if memo_cache_disabled() {
+                return Ok(None);
+            }
+            let record = imp_store::memo::read_memo_record(&key)
+                .map_err(|e| rquickjs::Error::new_loading_message("memoRead", format!("{e:#}")))?;
+            record
+                .map(|r| {
+                    serde_json::to_string(&r).map_err(|e| {
+                        rquickjs::Error::new_loading_message("memoRead", e.to_string())
+                    })
+                })
+                .transpose()
+        },
+    )?;
+    globals.set("__host_memo_read", host_memo_read)?;
+
+    let host_memo_write = Function::new(
+        ctx.clone(),
+        move |record_json: String| -> rquickjs::Result<()> {
+            if memo_cache_disabled() {
+                return Ok(());
+            }
+            let record: imp_store::memo::MemoCacheRecord = serde_json::from_str(&record_json)
+                .map_err(|e| {
+                    rquickjs::Error::new_loading_message("memoWrite", format!("parse record: {e}"))
+                })?;
+            imp_store::memo::write_memo_record(&record)
+                .map_err(|e| rquickjs::Error::new_loading_message("memoWrite", format!("{e:#}")))
+        },
+    )?;
+    globals.set("__host_memo_write", host_memo_write)?;
 
     // ------------------------------------------------------------------
     // __host_workspace_targets(kind) → JSON [{ id, address, kind, attrs }]
@@ -8773,6 +8872,12 @@ export const build = product(K_deferred_run_context_test, BUILD, toolName("defer
 
     #[tokio::test]
     async fn live_goal_no_cache_bypasses_run_task_cache() {
+        // Unlike run()'s task cache, whose key embeds this test's own
+        // tempdir-unique argv, a persisted memo record keys on fn_id +
+        // args_digest alone — a prior `cargo test` run's persisted record
+        // for this same build() function would otherwise short-circuit the
+        // second call this test relies on running for real.
+        std::env::set_var("IMP_DISABLE_MEMO_CACHE", "1");
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         let marker = p.join("runs.txt");
@@ -10328,6 +10433,11 @@ export const a = mkTarget();
 
     #[tokio::test]
     async fn generate_build_product_creates_raw_build_files() {
+        // See live_goal_no_cache_bypasses_run_task_cache: generateBuild's
+        // scan is a plain memoized function whose args don't vary between
+        // runs of this test, so a persisted record from an earlier `cargo
+        // test` invocation would otherwise leak in as a stale hit.
+        std::env::set_var("IMP_DISABLE_MEMO_CACHE", "1");
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/odin";"#);
