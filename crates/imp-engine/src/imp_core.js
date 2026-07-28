@@ -2284,8 +2284,19 @@ export function product(kindClass, nameToken, toolToken, fn, opts) {
 	const { name: tool, tid } = _tool_name_of(toolToken, "product()");
 	const memoized = memo(fn, opts);
 	const registrationStack = new Error("product registration").stack || "";
+	// fnId lets the host recompute this product's persisted memo key for a
+	// given target address without calling back into JS (trace_changed.rs's
+	// TraceIndex::target_is_stale) — it's the same identity memo() itself
+	// keys persisted records on.
 	__host_product(
-		JSON.stringify({ kind, name, nameId: pid, tool, toolId: tid }),
+		JSON.stringify({
+			kind,
+			name,
+			nameId: pid,
+			tool,
+			toolId: tid,
+			fnId: _stable_function_id(fn),
+		}),
 		memoized,
 		registrationStack,
 	);

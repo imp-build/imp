@@ -68,6 +68,35 @@ pub fn read_memo_record(key: &str) -> Result<Option<MemoCacheRecord>> {
     Ok(Some(record))
 }
 
+/// Every persisted memo record, for building a change-detection index over
+/// their `input_specs`/`deps` (see `imp-engine::trace_changed`). Unparsable
+/// or version-mismatched entries are skipped rather than failing the scan —
+/// a stale or partially written cache directory shouldn't block detection.
+pub fn list_memo_records() -> Result<Vec<MemoCacheRecord>> {
+    let dir = cache_root()?.join("memo");
+    let mut records = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(records);
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<MemoCacheRecord>(&bytes) else {
+            continue;
+        };
+        if record.version != MEMO_CACHE_VERSION {
+            continue;
+        }
+        records.push(record);
+    }
+    Ok(records)
+}
+
 pub fn write_memo_record(record: &MemoCacheRecord) -> Result<()> {
     let path = memo_record_path(&record.key)?;
     if let Some(parent) = path.parent() {
@@ -94,6 +123,7 @@ mod tests {
         std::env::set_var("IMP_CACHE_DIR", dir.path());
 
         assert!(read_memo_record("nope").unwrap().is_none());
+        assert!(list_memo_records().unwrap().is_empty());
 
         let record = MemoCacheRecord {
             version: MEMO_CACHE_VERSION,
@@ -112,6 +142,16 @@ mod tests {
         write_memo_record(&record).unwrap();
         let loaded = read_memo_record(&record.key).unwrap().unwrap();
         assert_eq!(loaded, record);
+
+        let listed = list_memo_records().unwrap();
+        assert_eq!(listed, vec![record.clone()]);
+
+        // Garbage alongside a real record is skipped, not fatal.
+        let memo_dir = dir.path().join("memo");
+        std::fs::write(memo_dir.join("not-json.txt"), b"ignore me").unwrap();
+        std::fs::write(memo_dir.join("garbage.json"), b"{ not valid").unwrap();
+        let listed = list_memo_records().unwrap();
+        assert_eq!(listed, vec![record]);
 
         std::env::remove_var("IMP_CACHE_DIR");
     }

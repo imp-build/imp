@@ -1,22 +1,30 @@
-//! Changed-target detection (`--changed-since` / `--changed-dependents`).
+//! Changed-target detection (`--changed-since`).
 //!
 //! Maps the files git reports as changed since a ref onto the targets that
-//! own them: source-glob ownership, BUILD.js package membership, and the
-//! recorded JS module import graph (a changed rule module invalidates every
-//! package that transitively imports it). The changed set can then be
-//! expanded along reverse dependency edges.
+//! own them. Two mechanisms, both provenance rather than declaration:
+//!
+//! - The recorded JS module import graph (a changed rule module invalidates
+//!   every package that transitively imports it; a changed BUILD.js
+//!   re-selects exactly its own package).
+//! - The persisted memo trace (#51, `trace_changed::TraceIndex`): a target's
+//!   own goal action is itself a memoized call, so "is target T stale for
+//!   goal G" reduces to walking T's own persisted record — and its
+//!   `input_specs` — for staleness, transitively through `deps`. This
+//!   replaces declared `sources:` glob ownership and `--changed-dependents`:
+//!   staleness is inherently transitive once ownership comes from the real
+//!   call graph, so there is no separate direct-vs-transitive mode anymore.
+//!
+//! Cold start (no persisted records yet) selects everything for the goal
+//! being run — correct and honest, not a bug to work around.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
-use regex::Regex;
 
-use crate::spike::{
-    compile_globs, source_field_workspace_root, Workspace, BUILD_FILE, CI_WORKSPACE_FILE,
-    WORKSPACE_FILE,
-};
+use crate::spike::{Workspace, BUILD_FILE, CI_WORKSPACE_FILE, WORKSPACE_FILE};
+use crate::trace_changed::TraceIndex;
 
 /// Import edges observed while loading the workspace's JS modules, plus the
 /// file/package identity needed to map a changed file back into the graph.
@@ -50,33 +58,39 @@ impl ImportGraph {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
-pub enum DependentsMode {
-    /// Only the targets owning changed files.
-    #[default]
-    None,
-    /// Also targets directly depending on a changed target.
-    Direct,
-    /// Also the full reverse dependency closure of the changed targets.
-    Transitive,
-}
-
 pub struct ChangedTargets {
     pub addresses: BTreeSet<String>,
-    /// Changed files no target/module accounts for, for a caller-side warning.
+    /// Changed files no target/module/persisted computation accounts for,
+    /// for a caller-side warning.
     pub unowned: Vec<String>,
 }
 
+/// Checked against every registered product of a target's kind (build, test,
+/// fmt, lint, package, ...), not scoped to any one goal — see
+/// `TraceIndex::target_is_stale` for why a goal-scoped check is unsound.
 pub fn changed_target_addresses(
     workspace_root: &Path,
     workspace: &Workspace,
     graph: &ImportGraph,
     since: &str,
-    dependents: DependentsMode,
 ) -> Result<ChangedTargets> {
     let files = git_changed_files(workspace_root, since)?;
-    let (owners, unowned) = owning_targets(workspace, graph, &files)?;
-    let addresses = expand_dependents(workspace, owners, dependents);
+    let (mut addresses, module_owned) = module_graph_targets(workspace, graph, &files);
+
+    let trace = TraceIndex::build().context("build persisted-memo change-detection index")?;
+    let stale = trace.stale_keys(workspace_root, &files, &workspace.workspace_config);
+    for target in workspace.targets.values() {
+        if trace.target_is_stale(workspace, target, &stale) {
+            addresses.insert(target.address.clone());
+        }
+    }
+
+    let trace_covered = trace.covered_paths(&files);
+    let unowned = files
+        .into_iter()
+        .filter(|path| !module_owned.contains(path) && !trace_covered.contains(path))
+        .collect();
+
     Ok(ChangedTargets { addresses, unowned })
 }
 
@@ -191,69 +205,33 @@ pub fn git_changed_files(workspace_root: &Path, since: &str) -> Result<Vec<Strin
 }
 
 // ---------------------------------------------------------------------------
-// Ownership
+// JS module/package graph
 // ---------------------------------------------------------------------------
 
-/// Map changed workspace-relative paths to the addresses of the targets that
-/// own them. Ownership is decided by matching each path against every
-/// target's source globs (pattern match only — no filesystem walk — so
-/// deleted files still find their owners), by BUILD.js package membership,
-/// and by the JS module import graph. Returns the owner set plus the paths
-/// nothing accounted for.
-pub fn owning_targets(
+/// Map changed workspace-relative paths to target addresses via BUILD.js
+/// package membership and the JS module import graph — a changed rule
+/// module invalidates every package that (transitively) imports it; a
+/// changed `imp.workspace.js` invalidates everything. Returns the address
+/// set plus the subset of `changed` this mechanism accounted for (the
+/// complement, minus whatever the persisted memo trace separately covers,
+/// is reported to the caller as `unowned`).
+pub(crate) fn module_graph_targets(
     workspace: &Workspace,
     graph: &ImportGraph,
     changed: &[String],
-) -> Result<(BTreeSet<String>, Vec<String>)> {
-    struct SourceMatcher<'a> {
-        address: &'a str,
-        root: String,
-        include: Vec<Regex>,
-        exclude: Vec<Regex>,
-    }
-    let mut matchers = Vec::new();
-    for target in workspace.targets.values() {
-        for source in &target.sources {
-            if source.include.is_empty() {
-                continue;
-            }
-            matchers.push(SourceMatcher {
-                address: &target.address,
-                root: source_field_workspace_root(&target.address, &source.root)?,
-                include: compile_globs("include", &source.include)?,
-                exclude: compile_globs("exclude", &source.exclude)?,
-            });
-        }
-    }
-
+) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut owners: BTreeSet<String> = BTreeSet::new();
-    let mut unowned: Vec<String> = Vec::new();
+    let mut owned_paths: BTreeSet<String> = BTreeSet::new();
     // Set when a change invalidates the whole workspace (imp.workspace.js,
     // directly or as a transitive importer of a changed module). The loop
-    // still finishes so `unowned` reporting stays complete.
+    // still finishes so `owned_paths` reporting stays complete.
     let mut select_all = false;
 
     for path in changed {
-        let mut owned = false;
-
         if path == WORKSPACE_FILE || path == CI_WORKSPACE_FILE {
             select_all = true;
+            owned_paths.insert(path.clone());
             continue;
-        }
-
-        for matcher in &matchers {
-            let root_relative = if matcher.root == "." {
-                Some(path.as_str())
-            } else {
-                path.strip_prefix(&format!("{}/", matcher.root))
-            };
-            let Some(rel) = root_relative else { continue };
-            if matcher.include.iter().any(|glob| glob.is_match(rel))
-                && !matcher.exclude.iter().any(|glob| glob.is_match(rel))
-            {
-                owners.insert(matcher.address.to_owned());
-                owned = true;
-            }
         }
 
         // A changed BUILD.js re-declares its whole package.
@@ -269,6 +247,7 @@ pub fn owning_targets(
                 format!("//{dir}")
             };
             insert_package_targets(workspace, &scope, &mut owners);
+            owned_paths.insert(path.clone());
             // BUILD.js files define their package rather than reusable rule
             // modules. Their import edges are dependency declarations, not
             // reverse invalidation edges, so a BUILD.js change must stay
@@ -286,18 +265,14 @@ pub fn owning_targets(
                     insert_package_targets(workspace, scope, &mut owners);
                 }
             }
-            owned = true;
-        }
-
-        if !owned {
-            unowned.push(path.clone());
+            owned_paths.insert(path.clone());
         }
     }
 
     if select_all {
         owners = workspace.targets.keys().cloned().collect();
     }
-    Ok((owners, unowned))
+    (owners, owned_paths)
 }
 
 fn insert_package_targets(workspace: &Workspace, scope: &str, owners: &mut BTreeSet<String>) {
@@ -332,66 +307,18 @@ fn reverse_importer_closure(graph: &ImportGraph, seeds: &BTreeSet<String>) -> BT
     reached
 }
 
-// ---------------------------------------------------------------------------
-// Dependents
-// ---------------------------------------------------------------------------
-
-pub fn expand_dependents(
-    workspace: &Workspace,
-    seeds: BTreeSet<String>,
-    mode: DependentsMode,
-) -> BTreeSet<String> {
-    if mode == DependentsMode::None || seeds.is_empty() {
-        return seeds;
-    }
-    let mut reverse: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for target in workspace.targets.values() {
-        for dep in &target.dependencies {
-            reverse
-                .entry(dep.address.as_str())
-                .or_default()
-                .push(target.address.as_str());
-        }
-    }
-
-    let mut result = seeds.clone();
-    let mut queue: VecDeque<String> = seeds.into_iter().collect();
-    while let Some(address) = queue.pop_front() {
-        for dependent in reverse.get(address.as_str()).into_iter().flatten() {
-            if result.insert((*dependent).to_owned()) && mode == DependentsMode::Transitive {
-                queue.push_back((*dependent).to_owned());
-            }
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spike::{Dependency, DependencyMode, SourceField, Target};
+    use crate::spike::Target;
 
-    fn source(root: &str, include: &[&str], exclude: &[&str]) -> SourceField {
-        SourceField {
-            root: root.to_owned(),
-            include: include.iter().map(|s| (*s).to_owned()).collect(),
-            exclude: exclude.iter().map(|s| (*s).to_owned()).collect(),
-        }
-    }
-
-    fn target(address: &str, sources: Vec<SourceField>, deps: &[&str]) -> Target {
+    fn target(address: &str) -> Target {
         Target {
             address: address.to_owned(),
             kind: "dummy".to_owned(),
             attrs: serde_json::Value::Null,
-            sources,
-            dependencies: deps
-                .iter()
-                .map(|address| Dependency {
-                    address: (*address).to_owned(),
-                    mode: DependencyMode::Auto,
-                })
-                .collect(),
+            sources: Vec::new(),
+            dependencies: Vec::new(),
             js_id: 0,
         }
     }
@@ -408,58 +335,16 @@ mod tests {
 
     fn owners_of(ws: &Workspace, graph: &ImportGraph, changed: &[&str]) -> BTreeSet<String> {
         let changed: Vec<String> = changed.iter().map(|s| (*s).to_owned()).collect();
-        owning_targets(ws, graph, &changed).unwrap().0
-    }
-
-    #[test]
-    fn source_globs_own_files_without_touching_the_filesystem() {
-        // None of these paths exist on disk — ownership is pure pattern
-        // matching, which is what makes deleted files still find owners.
-        let ws = workspace(vec![
-            target(
-                "//app:app",
-                vec![source(".", &["**/*.c"], &["gen/**"])],
-                &[],
-            ),
-            target("//lib:lib", vec![source("src", &["*.odin"], &[])], &[]),
-        ]);
-        let graph = ImportGraph::default();
-
-        assert_eq!(
-            owners_of(&ws, &graph, &["app/main.c", "app/sub/util.c"]),
-            BTreeSet::from(["//app:app".to_owned()])
-        );
-        // Excluded within the field's root.
-        assert!(owners_of(&ws, &graph, &["app/gen/parser.c"]).is_empty());
-        // Rooted at the package's `src` subdirectory.
-        assert_eq!(
-            owners_of(&ws, &graph, &["lib/src/lib.odin"]),
-            BTreeSet::from(["//lib:lib".to_owned()])
-        );
-        // Same file name outside the source root.
-        assert!(owners_of(&ws, &graph, &["lib/lib.odin"]).is_empty());
-    }
-
-    #[test]
-    fn workspace_rooted_source_fields_own_files_outside_the_package() {
-        let ws = workspace(vec![target(
-            "//tools/gen:gen",
-            vec![source("//shared", &["**/*.json"], &[])],
-            &[],
-        )]);
-        assert_eq!(
-            owners_of(&ws, &ImportGraph::default(), &["shared/schema.json"]),
-            BTreeSet::from(["//tools/gen:gen".to_owned()])
-        );
+        module_graph_targets(ws, graph, &changed).0
     }
 
     #[test]
     fn changed_build_js_owns_exactly_its_package() {
         let ws = workspace(vec![
-            target("//app:app", vec![], &[]),
-            target("//app:extra", vec![], &[]),
-            target("//app/sub:nested", vec![], &[]),
-            target("//:root", vec![], &[]),
+            target("//app:app"),
+            target("//app:extra"),
+            target("//app/sub:nested"),
+            target("//:root"),
         ]);
         let mut graph = ImportGraph::default();
         assert_eq!(
@@ -487,34 +372,14 @@ mod tests {
 
     #[test]
     fn changed_workspace_file_owns_everything() {
-        let ws = workspace(vec![
-            target("//app:app", vec![], &[]),
-            target("//lib:lib", vec![], &[]),
-        ]);
+        let ws = workspace(vec![target("//app:app"), target("//lib:lib")]);
         let owners = owners_of(&ws, &ImportGraph::default(), &["imp.workspace.js"]);
         assert_eq!(owners.len(), 2);
     }
 
     #[test]
-    fn unowned_files_are_reported_not_errors() {
-        let ws = workspace(vec![target(
-            "//app:app",
-            vec![source(".", &["*.c"], &[])],
-            &[],
-        )]);
-        let changed = vec!["docs/README.md".to_owned(), "app/main.c".to_owned()];
-        let (owners, unowned) = owning_targets(&ws, &ImportGraph::default(), &changed).unwrap();
-        assert_eq!(owners, BTreeSet::from(["//app:app".to_owned()]));
-        assert_eq!(unowned, vec!["docs/README.md".to_owned()]);
-    }
-
-    #[test]
     fn changed_rule_module_owns_transitively_importing_packages() {
-        let ws = workspace(vec![
-            target("//a:a", vec![], &[]),
-            target("//b:b", vec![], &[]),
-            target("//c:c", vec![], &[]),
-        ]);
+        let ws = workspace(vec![target("//a:a"), target("//b:b"), target("//c:c")]);
         // c/BUILD.js imports //tools/macros, which imports //tools/base;
         // a/BUILD.js imports //tools/base directly; b imports nothing.
         let mut graph = ImportGraph::default();
@@ -550,29 +415,6 @@ mod tests {
             .or_default()
             .insert(WORKSPACE_FILE.to_owned());
         assert_eq!(owners_of(&ws, &graph, &["tools/base.js"]).len(), 3);
-    }
-
-    #[test]
-    fn dependents_expansion_modes() {
-        // c depends on b depends on a.
-        let ws = workspace(vec![
-            target("//x:a", vec![], &[]),
-            target("//x:b", vec![], &["//x:a"]),
-            target("//x:c", vec![], &["//x:b"]),
-        ]);
-        let seeds = BTreeSet::from(["//x:a".to_owned()]);
-        assert_eq!(
-            expand_dependents(&ws, seeds.clone(), DependentsMode::None),
-            seeds
-        );
-        assert_eq!(
-            expand_dependents(&ws, seeds.clone(), DependentsMode::Direct),
-            BTreeSet::from(["//x:a".to_owned(), "//x:b".to_owned()])
-        );
-        assert_eq!(
-            expand_dependents(&ws, seeds, DependentsMode::Transitive),
-            BTreeSet::from(["//x:a".to_owned(), "//x:b".to_owned(), "//x:c".to_owned()])
-        );
     }
 
     // ---- git ------------------------------------------------------------

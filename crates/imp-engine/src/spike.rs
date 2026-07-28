@@ -163,6 +163,9 @@ pub struct Workspace {
     /// `(kind, product)` → tool → product-fn exec name; see
     /// [`HostState::products`].
     pub products: BTreeMap<(String, String), BTreeMap<String, String>>,
+    /// `(kind, product, tool)` → the registered function's stable identity;
+    /// see [`HostState::product_fn_ids`].
+    pub product_fn_ids: BTreeMap<(String, String, String), String>,
     // Only read by generate_build_files, a #[cfg(test)]-only integration
     // harness for apply_build_edits (production reaches that via
     // HostState.build_rules through the __host_apply_build_edits JS bridge
@@ -240,6 +243,11 @@ pub struct HostState {
     /// formatters); dispatch fans out over the inner map.
     products: BTreeMap<(String, String), BTreeMap<String, String>>,
     product_modules: BTreeMap<(String, String, String), String>,
+    /// `(kind, product, tool)` → the registered function's stable identity
+    /// (`_stable_function_id`), the same one `memo()` persists records under.
+    /// Lets change detection recompute a product's persisted key for a given
+    /// target address without calling back into JS; see `trace_changed.rs`.
+    product_fn_ids: BTreeMap<(String, String, String), String>,
     build_rules: BTreeMap<String, BuildRuleRender>,
     workspace_config: BTreeMap<String, serde_json::Value>,
     config_schemas: BTreeMap<String, serde_json::Value>,
@@ -316,6 +324,7 @@ impl Default for HostState {
             pending: BTreeMap::new(),
             products: BTreeMap::new(),
             product_modules: BTreeMap::new(),
+            product_fn_ids: BTreeMap::new(),
             build_rules: BTreeMap::new(),
             workspace_config: BTreeMap::new(),
             config_schemas: BTreeMap::new(),
@@ -506,6 +515,7 @@ async fn create_live_runtime(
         Workspace {
             targets: BTreeMap::new(),
             products: hs.products.clone(),
+            product_fn_ids: hs.product_fn_ids.clone(),
             build_rules: hs.build_rules.clone(),
             workspace_config: hs.workspace_config.clone(),
             config_schemas: hs.config_schemas.clone(),
@@ -662,6 +672,7 @@ async fn load_workspace_with_rules_and_service(
         let ws = Workspace {
             targets,
             products: hs.products.clone(),
+            product_fn_ids: hs.product_fn_ids.clone(),
             build_rules: hs.build_rules.clone(),
             workspace_config: hs.workspace_config.clone(),
             config_schemas: hs.config_schemas.clone(),
@@ -1654,6 +1665,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                 tool_id: u32,
                 #[serde(default)]
                 module: Option<String>,
+                fn_id: String,
             }
             let ProductSpec {
                 kind,
@@ -1662,6 +1674,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                 tool,
                 tool_id,
                 module: declared_module,
+                fn_id,
             } = serde_json::from_str(&spec_json)
                 .map_err(|e| action_spec_error(format!("malformed __host_product spec: {e}")))?;
             {
@@ -1695,6 +1708,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
             ctx.globals().set(exec_name.as_str(), fn_val)?;
             let module_key = (kind.clone(), name.clone(), tool.clone());
             let mut hs = state_p.lock().unwrap();
+            hs.product_fn_ids.insert(module_key.clone(), fn_id);
             hs.products
                 .entry((kind, name))
                 .or_default()
@@ -2332,67 +2346,42 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     // (nothing read) digests to a fixed constant, independent of any
     // configure() call anywhere.
     let state_cfg = Arc::clone(&state);
-    let host_configuration_digest =
-        Function::new(
-            ctx.clone(),
-            move |namespaces_json: Option<String>,
-                  mode_overrides_json: Option<String>|
-                  -> rquickjs::Result<String> {
-                let hs = state_cfg.lock().unwrap();
-                let digest_error = |e: anyhow::Error| {
-                    rquickjs::Error::new_loading_message("configurationDigest", format!("{e:#}"))
-                };
-                match namespaces_json {
-                    None => digest_json(&hs.workspace_config).map_err(digest_error),
-                    Some(json) => {
-                        let namespaces: Vec<String> = serde_json::from_str(&json).map_err(|e| {
+    let host_configuration_digest = Function::new(
+        ctx.clone(),
+        move |namespaces_json: Option<String>,
+              mode_overrides_json: Option<String>|
+              -> rquickjs::Result<String> {
+            let hs = state_cfg.lock().unwrap();
+            let digest_error = |e: anyhow::Error| {
+                rquickjs::Error::new_loading_message("configurationDigest", format!("{e:#}"))
+            };
+            match namespaces_json {
+                None => digest_json(&hs.workspace_config).map_err(digest_error),
+                Some(json) => {
+                    let namespaces: Vec<String> = serde_json::from_str(&json).map_err(|e| {
+                        rquickjs::Error::new_loading_message(
+                            "configurationDigest",
+                            format!("parse namespaces: {e}"),
+                        )
+                    })?;
+                    let overrides: BTreeMap<String, String> = mode_overrides_json
+                        .as_deref()
+                        .filter(|json| !json.is_empty())
+                        .map(serde_json::from_str)
+                        .transpose()
+                        .map_err(|e| {
                             rquickjs::Error::new_loading_message(
                                 "configurationDigest",
-                                format!("parse namespaces: {e}"),
+                                format!("parse mode overrides: {e}"),
                             )
-                        })?;
-                        let mut scoped: BTreeMap<String, serde_json::Value> = namespaces
-                            .iter()
-                            .filter_map(|ns| {
-                                hs.workspace_config
-                                    .get(ns)
-                                    .map(|value| (ns.clone(), value.clone()))
-                            })
-                            .collect();
-                        if namespaces.iter().any(|ns| ns == MODE_AXIS_NAMESPACE) {
-                            let overrides: BTreeMap<String, String> = mode_overrides_json
-                                .as_deref()
-                                .filter(|json| !json.is_empty())
-                                .map(serde_json::from_str)
-                                .transpose()
-                                .map_err(|e| {
-                                    rquickjs::Error::new_loading_message(
-                                        "configurationDigest",
-                                        format!("parse mode overrides: {e}"),
-                                    )
-                                })?
-                                .unwrap_or_default();
-                            if !overrides.is_empty() {
-                                let mode =
-                                    scoped.entry(MODE_AXIS_NAMESPACE.to_owned()).or_insert_with(
-                                        || serde_json::Value::Object(serde_json::Map::new()),
-                                    );
-                                let Some(mode) = mode.as_object_mut() else {
-                                    return Err(rquickjs::Error::new_loading_message(
-                                        "configurationDigest",
-                                        "imp.mode must be an object",
-                                    ));
-                                };
-                                for (axis, value) in overrides {
-                                    mode.insert(axis, serde_json::Value::String(value));
-                                }
-                            }
-                        }
-                        digest_json(&scoped).map_err(digest_error)
-                    }
+                        })?
+                        .unwrap_or_default();
+                    scoped_configuration_digest(&hs.workspace_config, &namespaces, &overrides)
+                        .map_err(digest_error)
                 }
-            },
-        )?;
+            }
+        },
+    )?;
     globals.set("__host_configuration_digest", host_configuration_digest)?;
 
     // ------------------------------------------------------------------
@@ -2803,27 +2792,8 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     let host_module_digest = Function::new(
         ctx.clone(),
         move |site: String| -> rquickjs::Result<String> {
-            let module = site
-                .rsplit_once(':')
-                .and_then(|(prefix, suffix)| {
-                    suffix
-                        .chars()
-                        .all(|c| c.is_ascii_digit())
-                        .then(|| prefix.rsplit_once(':').map_or(prefix, |(p, _)| p))
-                })
-                .unwrap_or(&site);
-            let resolution = resolve_workspace_module(&workspace_root_md, &rules_source_md, module)
-                .map_err(|e| rquickjs::Error::new_loading_message("moduleDigest", e))?;
-            let bytes = match resolution.source {
-                ModuleSource::File(path) => std::fs::read(&path).map_err(|e| {
-                    rquickjs::Error::new_loading_message(
-                        "moduleDigest",
-                        format!("read {}: {e}", path.display()),
-                    )
-                })?,
-                ModuleSource::Embedded(text) => text.as_bytes().to_vec(),
-            };
-            Ok(digest_bytes(&bytes))
+            module_digest_for_site(&workspace_root_md, &rules_source_md, &site)
+                .map_err(|e| rquickjs::Error::new_loading_message("moduleDigest", format!("{e:#}")))
         },
     )?;
     globals.set("__host_module_digest", host_module_digest)?;
@@ -4077,7 +4047,75 @@ fn action_spec_error(message: String) -> rquickjs::Error {
 /// `execute_goal_live_selection` may write it (directly on `HostState`,
 /// bypassing `__host_configure`'s guard below); JS code reads it indirectly
 /// via `modeAxis()`. See mode-axis-registry.md.
-const MODE_AXIS_NAMESPACE: &str = "imp.mode";
+pub(crate) const MODE_AXIS_NAMESPACE: &str = "imp.mode";
+
+/// Digest `workspace_config` restricted to `namespaces`, with `imp.mode`
+/// (if read) overlaid by `mode_overrides` — the same scoping
+/// `__host_configuration_digest`'s namespaced branch performs, factored out
+/// so `trace_changed::directly_stale` can recompute a `"config_namespaces"`
+/// input spec's current digest without going through JS.
+pub(crate) fn scoped_configuration_digest(
+    workspace_config: &BTreeMap<String, serde_json::Value>,
+    namespaces: &[String],
+    mode_overrides: &BTreeMap<String, String>,
+) -> Result<String> {
+    let mut scoped: BTreeMap<String, serde_json::Value> = namespaces
+        .iter()
+        .filter_map(|ns| {
+            workspace_config
+                .get(ns)
+                .map(|value| (ns.clone(), value.clone()))
+        })
+        .collect();
+    if namespaces.iter().any(|ns| ns == MODE_AXIS_NAMESPACE) && !mode_overrides.is_empty() {
+        let mode = scoped
+            .entry(MODE_AXIS_NAMESPACE.to_owned())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        let mode = mode
+            .as_object_mut()
+            .context("imp.mode must be an object")?;
+        for (axis, value) in mode_overrides {
+            mode.insert(axis.clone(), serde_json::Value::String(value.clone()));
+        }
+    }
+    digest_json(&scoped)
+}
+
+/// `<module>:<line>:<col>` (as minted by `_stable_function_id`) → the bare
+/// `<module>` portion. Shared by `__host_module_digest` and
+/// `trace_changed::directly_stale`'s `module_digest` recheck.
+pub(crate) fn module_name_from_site(site: &str) -> &str {
+    site.rsplit_once(':')
+        .and_then(|(prefix, suffix)| {
+            suffix
+                .chars()
+                .all(|c| c.is_ascii_digit())
+                .then(|| prefix.rsplit_once(':').map_or(prefix, |(p, _)| p))
+        })
+        .unwrap_or(site)
+}
+
+/// Content digest of the module a `<module>:<line>:<col>` call-site site
+/// string names — the same digest a persisted `MemoCacheRecord.module_digest`
+/// is compared against. Embedded (builtin) rule modules digest their bundled
+/// source text directly rather than reading from disk.
+pub(crate) fn module_digest_for_site(
+    workspace_root: &Path,
+    rules_source: &RulesSource,
+    site: &str,
+) -> Result<String> {
+    let module = module_name_from_site(site);
+    let resolution = resolve_workspace_module(workspace_root, rules_source, module)
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("resolve module for digest")?;
+    let bytes = match resolution.source {
+        ModuleSource::File(path) => {
+            std::fs::read(&path).with_context(|| format!("read {}", path.display()))?
+        }
+        ModuleSource::Embedded(text) => text.as_bytes().to_vec(),
+    };
+    Ok(digest_bytes(&bytes))
+}
 
 fn validate_config_namespace(namespace: &str) -> rquickjs::Result<()> {
     if namespace.is_empty()
@@ -10425,10 +10463,10 @@ export const a = mkTarget();
 
         // A change to the transitively imported module owns //a:a.
         let changed = vec!["tools/base.js".to_owned()];
-        let (owners, unowned) =
-            crate::changed::owning_targets(&live.workspace, &graph, &changed).unwrap();
+        let (owners, owned_paths) =
+            crate::changed::module_graph_targets(&live.workspace, &graph, &changed);
         assert_eq!(owners, BTreeSet::from(["//a:a".to_owned()]));
-        assert!(unowned.is_empty());
+        assert_eq!(owned_paths, BTreeSet::from(["tools/base.js".to_owned()]));
     }
 
     #[tokio::test]

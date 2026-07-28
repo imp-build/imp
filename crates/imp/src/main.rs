@@ -49,9 +49,6 @@ enum Cmd {
         /// (merge-base against the working tree, like `git diff <ref>`)
         #[arg(long, value_name = "REF")]
         changed_since: Option<String>,
-        /// Also list targets that depend on the changed targets
-        #[arg(long, value_enum, default_value_t, requires = "changed_since")]
-        changed_dependents: changed::DependentsMode,
     },
     /// List target dependencies
     Dependencies {
@@ -191,9 +188,6 @@ struct GoalArgs {
     /// (merge-base against the working tree, like `git diff <ref>`)
     #[arg(long, value_name = "REF")]
     changed_since: Option<String>,
-    /// Also select targets that depend on the changed targets
-    #[arg(long, value_enum, default_value_t, requires = "changed_since")]
-    changed_dependents: changed::DependentsMode,
     /// Maximum number of ready tasks to execute concurrently
     #[arg(long)]
     jobs: Option<usize>,
@@ -609,15 +603,8 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
         Cmd::Targets {
             selectors,
             changed_since,
-            changed_dependents,
         } => {
-            return cmd_targets(
-                selectors,
-                changed_since.as_deref(),
-                *changed_dependents,
-                tree,
-            )
-            .await;
+            return cmd_targets(selectors, changed_since.as_deref(), tree).await;
         }
         Cmd::Dependencies { selectors } => {
             return cmd_dependencies(selectors, tree).await;
@@ -854,7 +841,6 @@ async fn cmd_execute_live(
     let GoalArgs {
         selectors,
         changed_since,
-        changed_dependents,
         jobs: jobs_cli,
         js_workers: js_workers_cli,
         no_cache,
@@ -877,7 +863,6 @@ async fn cmd_execute_live(
                 &workspace.workspace,
                 &graph,
                 since,
-                changed_dependents,
             )?;
             warn_unowned_changed_files(&unowned);
             Some(addresses)
@@ -1375,12 +1360,7 @@ macro_rules! workspace_cmd {
     }};
 }
 
-async fn cmd_targets(
-    selectors: &[String],
-    changed_since: Option<&str>,
-    changed_dependents: changed::DependentsMode,
-    tree: &Tree,
-) -> Result<()> {
+async fn cmd_targets(selectors: &[String], changed_since: Option<&str>, tree: &Tree) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let selector_context =
@@ -1393,7 +1373,6 @@ async fn cmd_targets(
                 &workspace.workspace,
                 &graph,
                 since,
-                changed_dependents,
             )?;
             warn_unowned_changed_files(&unowned);
             let addresses = selector::filter_changed_addresses_in(
@@ -1549,23 +1528,10 @@ mod tests {
         let cmd = || GoalArgs::augment_args(Command::new("build"));
 
         let matches = cmd()
-            .try_get_matches_from([
-                "build",
-                "--changed-since",
-                "origin/main",
-                "--changed-dependents",
-                "transitive",
-            ])
+            .try_get_matches_from(["build", "--changed-since", "origin/main"])
             .unwrap();
         let args = GoalArgs::from_arg_matches(&matches).unwrap();
         assert_eq!(args.changed_since.as_deref(), Some("origin/main"));
-        assert_eq!(args.changed_dependents, changed::DependentsMode::Transitive);
-        assert_eq!(
-            GoalArgs::from_arg_matches(&cmd().try_get_matches_from(["build"]).unwrap())
-                .unwrap()
-                .changed_dependents,
-            changed::DependentsMode::None
-        );
 
         let args = GoalArgs::from_arg_matches(
             &cmd()
@@ -1580,10 +1546,6 @@ mod tests {
                 .is_err()
         );
         assert!(validate_changed_selector_overrides(None, &["//:app#check".to_owned()],).is_ok());
-        // --changed-dependents needs --changed-since.
-        assert!(cmd()
-            .try_get_matches_from(["build", "--changed-dependents", "direct"])
-            .is_err());
     }
 
     #[test]
@@ -1593,11 +1555,9 @@ mod tests {
             Cmd::Targets {
                 selectors,
                 changed_since,
-                changed_dependents,
             } => {
                 assert_eq!(selectors, ["//pkg/..."]);
                 assert_eq!(changed_since.as_deref(), Some("HEAD~1"));
-                assert_eq!(changed_dependents, changed::DependentsMode::None);
             }
             _ => panic!("expected targets subcommand"),
         }
