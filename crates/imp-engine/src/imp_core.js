@@ -1727,13 +1727,34 @@ let _memo_fn_counter = 0;
 const _fn_id_names = new Map(); // fn_id → fn.name; persists across resetMemoState
 const _product_fn_info = new Map(); // fn_id → product_name; persists across resetMemoState
 const _products_by_kind_name = new Map(); // "kind:name" → Map(tool → memoized fn); persists across resetMemoState
+const _fn_by_call_site = new Map(); // call site → fn, to detect a site minting more than one function
 
+// Identity is derived from where memo()/product()/expand() was called
+// (module + line + col from the call stack), not evaluation order, so it's
+// stable across separate processes given the same source tree. The WeakMap
+// above still dedupes by function reference first, so the same fn reused
+// across call sites (or across resetMemoState) keeps its original id.
 function _stable_function_id(fn) {
 	let id = _memo_fn_ids.get(fn);
 	if (id === undefined) {
-		id = (fn.name || "<anonymous>") + "#" + ++_memo_fn_counter;
+		const stack = new Error().stack || "";
+		const site = __host_call_site_identity(stack);
+		const label = fn.name || "<anonymous>";
+		if (site !== undefined && site !== null) {
+			const existing = _fn_by_call_site.get(site);
+			if (existing !== undefined && existing !== fn) {
+				throw new Error(
+					`memo()/product()/expand() called from ${site} with more than one function — ` +
+						"call it once at module scope and export the result",
+				);
+			}
+			_fn_by_call_site.set(site, fn);
+			id = `${label}@${site}`;
+		} else {
+			id = `${label}#${++_memo_fn_counter}`;
+		}
 		_memo_fn_ids.set(fn, id);
-		_fn_id_names.set(id, fn.name || "<anonymous>");
+		_fn_id_names.set(id, label);
 	}
 	return id;
 }
@@ -2492,8 +2513,9 @@ export function memo(fn, opts) {
 
 /**
  * Reset all memo state. Call between test runs to start with a clean slate.
- * Does NOT reset function identity — the same function reference always maps
- * to the same ID even across resets.
+ * Does NOT reset function identity — identity is derived from each
+ * function's module + call-site location, so it's stable by construction
+ * across resets (and across separate processes on the same source tree).
  */
 export function resetMemoState() {
 	_memo_table = new Map();

@@ -1616,6 +1616,19 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_declare_tool_name", host_declare_tool_name)?;
 
     // ------------------------------------------------------------------
+    // __host_call_site_identity(stack) → module:line:col | undefined
+    //
+    // Backs _stable_function_id() in imp_core.js: a durable, cross-process
+    // identity for memoized functions derived from where memo()/product()/
+    // expand() was called, not from evaluation order.
+    // ------------------------------------------------------------------
+    let host_call_site_identity = Function::new(
+        ctx.clone(),
+        move |stack: String| -> rquickjs::Result<Option<String>> { Ok(call_site_location(&stack)) },
+    )?;
+    globals.set("__host_call_site_identity", host_call_site_identity)?;
+
+    // ------------------------------------------------------------------
     // __host_product(specJson, fn, registrationStack) — specJson carries
     // { kind, name, nameId, tool, toolId, module? } (one JSON param keeps
     // the closure within rquickjs's argument-tuple arity).
@@ -4023,6 +4036,40 @@ fn declaration_module(stack: &str) -> Option<String> {
             }
         }
         if location.is_empty() || location == "imp:core" || !location.contains('/') {
+            continue;
+        }
+        return Some(location.to_owned());
+    }
+    None
+}
+
+/// Extract the calling source location (module specifier plus `:line:col`)
+/// from a JS stack, for call-site-based function identity (see
+/// `_stable_function_id` in imp_core.js). Frame selection (skipping
+/// `imp:core` and non-workspace frames) mirrors `declaration_module`, but
+/// the trailing `:line:col` is kept rather than stripped, so distinct calls
+/// within the same module resolve to distinct identities.
+fn call_site_location(stack: &str) -> Option<String> {
+    for line in stack.lines() {
+        let line = line.trim();
+        let rest = line.strip_prefix("at ").unwrap_or(line);
+        let location = match rest.rfind('(') {
+            Some(open) => rest[open + 1..].trim_end_matches(')'),
+            None => rest,
+        }
+        .trim();
+        let mut module = location;
+        for _ in 0..2 {
+            match module.rsplit_once(':') {
+                Some((prefix, suffix))
+                    if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) =>
+                {
+                    module = prefix;
+                }
+                _ => break,
+            }
+        }
+        if module.is_empty() || module == "imp:core" || !module.contains('/') {
             continue;
         }
         return Some(location.to_owned());
