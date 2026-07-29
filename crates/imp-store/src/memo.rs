@@ -15,12 +15,13 @@ pub const MEMO_CACHE_VERSION: u32 = 1;
 /// read-scoped digest can't be computed before the call has actually run).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputSpecRecord {
-    /// "config_namespaces" | "read_file" | "fileset"
+    /// "config_namespaces" | "read_file" | "fileset" | "run_input"
     pub kind: String,
     /// For "config_namespaces": the sorted namespace list read this call.
     /// For "read_file": the path read. For "fileset": the FileSet spec
     /// object (`{__fileset, kind, root, include, exclude}` or union/literal
-    /// form) that was resolved during the call.
+    /// form) that was resolved during the call. For "run_input": the
+    /// `{kind, path}` declaration passed to `run({inputs})`.
     pub spec: serde_json::Value,
     /// The digest of this input's value at the time the record was written.
     /// `None` for a "fileset" spec that was returned but never resolved

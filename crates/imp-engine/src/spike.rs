@@ -33,7 +33,9 @@ use rquickjs::{
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 use imp_daemon::client::RemoteExecutionService;
-use imp_exec_api::{ExecAction, ExecRunOpts, ExecutionService, SandboxRetention, WorkerSpec};
+use imp_exec_api::{
+    ExecAction, ExecIoSpec, ExecRunOpts, ExecutionService, SandboxRetention, WorkerSpec,
+};
 use imp_exec_bridge::{parse_io_specs, parse_tool_specs};
 use imp_execution::service::LocalExecutionService;
 use imp_store::cache::{
@@ -482,6 +484,7 @@ async fn create_live_runtime(
     let state: Arc<Mutex<HostState>> = Arc::new(Mutex::new(HostState::default()));
     let exec_root: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
     let exec_no_cache = Arc::new(AtomicBool::new(false));
+    let trace_inputs = Arc::new(AtomicBool::new(false));
     let exec_sandbox_retention = Arc::new(AtomicU8::new(SandboxRetention::default().as_u8()));
     let scheduler: Arc<Mutex<Option<Arc<imp_scheduler::Scheduler>>>> = Arc::new(Mutex::new(None));
     let ui_multi: Arc<Mutex<Option<indicatif::MultiProgress>>> = Arc::new(Mutex::new(None));
@@ -541,6 +544,7 @@ async fn create_live_runtime(
                     rules_source: rules_source.clone(),
                     exec_root: Arc::clone(&exec_root),
                     exec_no_cache: Arc::clone(&exec_no_cache),
+                    trace_inputs: Arc::clone(&trace_inputs),
                     exec_sandbox_retention: Arc::clone(&exec_sandbox_retention),
                     scheduler: Arc::clone(&scheduler),
                     ui_multi: Arc::clone(&ui_multi),
@@ -585,6 +589,7 @@ async fn create_live_runtime(
         ctx,
         exec_root,
         exec_no_cache,
+        trace_inputs,
         exec_sandbox_retention,
         scheduler,
         ui_multi,
@@ -1401,6 +1406,7 @@ struct RegisterGlobalsArgs {
     rules_source: RulesSource,
     exec_root: Arc<Mutex<Option<PathBuf>>>,
     exec_no_cache: Arc<AtomicBool>,
+    trace_inputs: Arc<AtomicBool>,
     exec_sandbox_retention: Arc<AtomicU8>,
     scheduler: Arc<Mutex<Option<Arc<imp_scheduler::Scheduler>>>>,
     ui_multi: Arc<Mutex<Option<indicatif::MultiProgress>>>,
@@ -1439,6 +1445,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         rules_source,
         exec_root,
         exec_no_cache,
+        trace_inputs,
         exec_sandbox_retention,
         scheduler,
         ui_multi,
@@ -1449,6 +1456,14 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         grammar_registry,
     } = args;
     let globals = ctx.globals();
+
+    let trace_inputs_enabled = Arc::clone(&trace_inputs);
+    globals.set(
+        "__host_trace_inputs_enabled",
+        Function::new(ctx.clone(), move || {
+            trace_inputs_enabled.load(Ordering::SeqCst)
+        })?,
+    )?;
 
     // GC side table: map this checkout's hashed cache namespace back to its
     // path, so `cache gc` can prune namespaces whose checkout is gone.
@@ -3285,6 +3300,31 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_capture_paths", host_capture_paths)?;
 
+    // __host_capture_run_input(kind, path) → digest string
+    // Content-addresses one explicit run() input using the exact same
+    // file/manifest/directory semantics as frontend action staging.
+    let run_input_root = workspace_root.clone();
+    let host_capture_run_input = Function::new(
+        ctx.clone(),
+        move |kind: String, path: String| -> rquickjs::Result<String> {
+            let input = ExecIoSpec {
+                path: Some(path),
+                kind,
+                digest: None,
+                named_cache: None,
+            };
+            imp_execution::staging::resolve_input_digest(&run_input_root, &[input]).map_err(
+                |error| {
+                    rquickjs::Error::new_loading_message(
+                        "captureRunInput",
+                        format!("{error:#}"),
+                    )
+                },
+            )
+        },
+    )?;
+    globals.set("__host_capture_run_input", host_capture_run_input)?;
+
     // __host_write_workspace(path, digest, from) → null
     // Materializes `digest` (optionally narrowed to the subtree at `from`)
     // directly into the workspace at `path` — no sandbox, no cache record, no
@@ -4927,6 +4967,7 @@ pub async fn execute_goal_live(
         GoalSelection::Selectors(selectors),
         GoalExecutionOptions {
             no_cache,
+            trace_inputs: false,
             js_workers,
             flags,
             run_args: &[],
@@ -4953,6 +4994,7 @@ pub enum GoalSelection<'a> {
 
 pub struct GoalExecutionOptions<'a> {
     pub no_cache: bool,
+    pub trace_inputs: bool,
     pub js_workers: usize,
     pub flags: serde_json::Value,
     pub run_args: &'a [String],
@@ -5072,6 +5114,7 @@ pub async fn execute_goal_live_selection(
 ) -> Result<()> {
     let GoalExecutionOptions {
         no_cache,
+        trace_inputs,
         js_workers,
         flags,
         run_args,
@@ -5092,6 +5135,7 @@ pub async fn execute_goal_live_selection(
     // The caller is required to have installed a scheduler already.
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
     live.exec_no_cache.store(no_cache, Ordering::SeqCst);
+    live.trace_inputs.store(trace_inputs, Ordering::SeqCst);
     resolve_mode_axes(live, profile, axis_overrides)?;
 
     // Resolve selectors against the statically-known workspace first, to
@@ -5512,11 +5556,17 @@ pub async fn execute_goal_live_selection(
                         })?;
                 }
             }
+            if trace_inputs {
+                let assert_trace_inputs: Function =
+                    ctx.globals().get("__imp_assert_trace_inputs")?;
+                assert_trace_inputs.call::<_, ()>(())?;
+            }
             Ok(())
         })
         .await
         .map_err(|e| anyhow::anyhow!("execute goal '{goal}' failed: {e}"));
     live.exec_no_cache.store(false, Ordering::SeqCst);
+    live.trace_inputs.store(false, Ordering::SeqCst);
     live.exec_sandbox_retention
         .store(SandboxRetention::default().as_u8(), Ordering::SeqCst);
     *live.selected_roots.lock().unwrap() = None;
@@ -7413,6 +7463,7 @@ export const run = product(K_run_args, RUN, toolName("run-args-test-tool"), asyn
             GoalSelection::Selectors(&[":app".to_owned()]),
             GoalExecutionOptions {
                 no_cache: false,
+                trace_inputs: false,
                 js_workers: 1,
                 flags: serde_json::json!({}),
                 run_args: &run_args,
@@ -9474,6 +9525,94 @@ export const build = product(K_live_cache_test, BUILD, toolName("live-cache-test
     }
 
     #[tokio::test]
+    async fn traced_run_inputs_invalidate_persisted_memo_across_runtimes() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(&p.join("input.txt"), &format!("first-{}", p.display()));
+        write_file(&p.join("config/nested.txt"), "-directory-one");
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, run, output, BUILD, targetKind, toolName } from "imp:core";
+const K_trace_input_test = targetKind("trace-input-test");
+
+export const app = target({ kind: "trace-input-test" });
+
+export const build = product(K_trace_input_test, BUILD, toolName("trace-input-test-tool"), async function build() {
+    return run({
+        argv: ["sh", "-c", "cat input.txt config/nested.txt > build/result.txt"],
+        inputs: [
+            { kind: "file", path: "input.txt" },
+            { kind: "directory", path: "config" },
+        ],
+        outputs: [output("build/result.txt")],
+        materialize: true,
+        display: "trace explicit input",
+    });
+});
+"#,
+        );
+
+        let selectors = [":app".to_owned()];
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        *live.scheduler.lock().unwrap() = Some(imp_scheduler::Scheduler::new(
+            1,
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        ));
+        execute_goal_live_selection(
+            &live,
+            p,
+            &SelectorContext::root(),
+            "build",
+            GoalSelection::Selectors(&selectors),
+            GoalExecutionOptions {
+                no_cache: false,
+                trace_inputs: true,
+                js_workers: 1,
+                flags: serde_json::json!({}),
+                run_args: &[],
+                axis_overrides: &[],
+                profile: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/result.txt")).unwrap(),
+            format!("first-{}-directory-one", p.display())
+        );
+
+        write_file(&p.join("config/nested.txt"), "-directory-two");
+        std::fs::remove_file(p.join("build/result.txt")).unwrap();
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        *live.scheduler.lock().unwrap() = Some(imp_scheduler::Scheduler::new(
+            1,
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        ));
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/result.txt")).unwrap(),
+            format!("first-{}-directory-two", p.display())
+        );
+    }
+
+    #[tokio::test]
     async fn live_config_digest_change_invalidates_run_cache() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
@@ -9714,6 +9853,7 @@ configure("cache_test_unread", {{ mode: {mode} }});
             GoalSelection::Selectors(&[":app".to_owned()]),
             GoalExecutionOptions {
                 no_cache: false,
+                trace_inputs: false,
                 js_workers: 1,
                 flags: serde_json::json!({}),
                 run_args: &[],
@@ -10631,6 +10771,7 @@ goal("selectorless-changed", () => {
             },
             GoalExecutionOptions {
                 no_cache: false,
+                trace_inputs: false,
                 js_workers: 1,
                 flags: serde_json::json!({}),
                 run_args: &[],

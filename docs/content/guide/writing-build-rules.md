@@ -57,6 +57,22 @@ as `[8 targets]` and `{…}`. User-facing products and toolchain acquisition
 normally use `info`; internal source, resource, and metadata computations use
 `debug`. Memo failures are always reported at `error`.
 
+## Validate persisted memo inputs
+
+`imp <goal> --trace-inputs` re-runs memoized computations instead of serving
+persisted memo hits, then checks that the record written for each computation
+covers its tracked `run({ inputs })` declarations. FileSet inputs and explicit
+file, manifest, and directory inputs are content-digested; changing one
+invalidates the persisted result on a later invocation.
+
+```sh
+imp build //apps/server:server --trace-inputs
+```
+
+This validates dependencies visible through the imp rule API. It does not
+trace arbitrary filesystem calls made by a subprocess or direct use of
+untracked JavaScript APIs.
+
 ## Parsing source with tree-sitter
 
 `loadGrammar`/`parseSource`/`treeSexp`/`tsQuery` let rule code parse source

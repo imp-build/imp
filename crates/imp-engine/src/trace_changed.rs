@@ -140,10 +140,11 @@ impl TraceIndex {
     }
 
     /// The changed paths matched by at least one persisted record's
-    /// `"fileset"`/`"read_file"` input spec — i.e. paths some computation is
-    /// already known to read. Used to distinguish "no computation owns this
-    /// file" (worth a warning) from "this file is read, but the computation
-    /// that reads it isn't stale for the goal being run" (routine).
+    /// `"fileset"`/`"read_file"`/`"run_input"` input spec — i.e. paths some
+    /// computation is already known to read. Used to distinguish "no
+    /// computation owns this file" (worth a warning) from "this file is read,
+    /// but the computation that reads it isn't stale for the goal being run"
+    /// (routine).
     pub fn covered_paths(&self, changed_paths: &[String]) -> BTreeSet<String> {
         let mut covered = BTreeSet::new();
         for record in self.records.values() {
@@ -153,6 +154,16 @@ impl TraceIndex {
                         if let Some(path) = spec.spec.as_str() {
                             if changed_paths.iter().any(|c| c == path) {
                                 covered.insert(path.to_owned());
+                            }
+                        }
+                    }
+                    "run_input" => {
+                        for path in changed_paths {
+                            if run_input_spec_is_stale(
+                                &spec.spec,
+                                std::slice::from_ref(path),
+                            ) {
+                                covered.insert(path.clone());
                             }
                         }
                     }
@@ -379,8 +390,28 @@ fn input_spec_is_stale(
             .spec
             .as_str()
             .is_some_and(|path| changed_paths.iter().any(|c| c == path)),
+        "run_input" => run_input_spec_is_stale(&spec.spec, changed_paths),
         "fileset" => fileset_spec_is_stale(&spec.spec, changed_paths),
         "config_namespaces" => config_namespaces_spec_is_stale(spec, workspace_config),
+        _ => false,
+    }
+}
+
+fn run_input_spec_is_stale(spec: &serde_json::Value, changed_paths: &[String]) -> bool {
+    let Some(path) = spec.get("path").and_then(|value| value.as_str()) else {
+        return false;
+    };
+    match spec.get("kind").and_then(|value| value.as_str()) {
+        Some("directory") => {
+            if path == "." {
+                return !changed_paths.is_empty();
+            }
+            let prefix = format!("{}/", path.trim_end_matches('/'));
+            changed_paths
+                .iter()
+                .any(|changed| changed == path || changed.starts_with(&prefix))
+        }
+        Some("file" | "manifest") => changed_paths.iter().any(|changed| changed == path),
         _ => false,
     }
 }
@@ -609,6 +640,35 @@ mod tests {
 
         let union = serde_json::json!({"kind": "union", "sets": [literal.clone()]});
         assert!(fileset_spec_is_stale(&union, &["a.txt".to_owned()]));
+    }
+
+    #[test]
+    fn run_input_specs_match_files_and_directory_descendants() {
+        let file = serde_json::json!({"kind": "file", "path": "src/main.rs"});
+        assert!(run_input_spec_is_stale(
+            &file,
+            &["src/main.rs".to_owned()]
+        ));
+        assert!(!run_input_spec_is_stale(
+            &file,
+            &["src/lib.rs".to_owned()]
+        ));
+
+        let directory = serde_json::json!({"kind": "directory", "path": "src"});
+        assert!(run_input_spec_is_stale(
+            &directory,
+            &["src/nested/module.rs".to_owned()]
+        ));
+        assert!(!run_input_spec_is_stale(
+            &directory,
+            &["tests/example.rs".to_owned()]
+        ));
+
+        let workspace = serde_json::json!({"kind": "directory", "path": "."});
+        assert!(run_input_spec_is_stale(
+            &workspace,
+            &["anywhere/file.txt".to_owned()]
+        ));
     }
 
     #[test]

@@ -200,6 +200,10 @@ struct GoalArgs {
     /// Run actions without reading or writing the task cache
     #[arg(long)]
     no_cache: bool,
+    /// Re-run memoized computations and validate their persisted input specs
+    /// against tracked run() input declarations
+    #[arg(long)]
+    trace_inputs: bool,
     /// When to delete per-run sandboxes: never, on-failure (keep only failed
     /// sandboxes for debugging, the default), or always (keep every sandbox)
     #[arg(long, value_enum, default_value_t = imp_execution::exec::SandboxRetention::default())]
@@ -847,6 +851,7 @@ async fn cmd_execute_live(
         jobs: jobs_cli,
         js_workers: js_workers_cli,
         no_cache,
+        trace_inputs,
         keep_sandbox: sandbox_retention,
         axis,
         profile,
@@ -1276,6 +1281,7 @@ async fn cmd_execute_live(
                     selection,
                     spike::GoalExecutionOptions {
                         no_cache,
+                        trace_inputs,
                         js_workers,
                         flags: goal_flags.clone(),
                         run_args: &run_args,
@@ -1717,7 +1723,12 @@ mod tests {
 
     #[test]
     fn parse_goal_args_resolves_static_fields_and_declared_flags() {
-        let raw = vec!["//:pkg".to_owned(), "--jobs".to_owned(), "2".to_owned()];
+        let raw = vec![
+            "//:pkg".to_owned(),
+            "--jobs".to_owned(),
+            "2".to_owned(),
+            "--trace-inputs".to_owned(),
+        ];
         let flag_defs = std::collections::BTreeMap::from([(
             "check".to_owned(),
             spike::GoalFlagDef {
@@ -1728,6 +1739,7 @@ mod tests {
         let args = GoalArgs::from_arg_matches(&matches).unwrap();
         assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
         assert_eq!(args.jobs, Some(2));
+        assert!(args.trace_inputs);
         assert!(!matches.get_flag("check"));
     }
 

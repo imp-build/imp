@@ -1840,6 +1840,8 @@ let _memo_contexts = new Map([
 			readNamespaces: new Set(),
 			readFiles: new Set(),
 			readFilesets: [],
+			runInputs: new Map(),
+			runFilesets: new Map(),
 			modeOverrides: null,
 		},
 	],
@@ -1976,6 +1978,8 @@ function _clone_context(ctx) {
 		readNamespaces: new Set(),
 		readFiles: new Set(),
 		readFilesets: [],
+		runInputs: new Map(),
+		runFilesets: new Map(),
 		// Link overrides are ambient for a linked product call and therefore
 		// must flow to all async children of that call.
 		modeOverrides: ctx.modeOverrides,
@@ -1992,6 +1996,8 @@ function _current_context() {
 			readNamespaces: new Set(),
 			readFiles: new Set(),
 			readFilesets: [],
+			runInputs: new Map(),
+			runFilesets: new Map(),
 			modeOverrides: null,
 		};
 		_memo_contexts.set(_current_memo_context_id, ctx);
@@ -3009,6 +3015,13 @@ function _memo_input_spec_still_valid(spec, ctx) {
 			const current = __host_capture_paths(JSON.stringify([spec.spec]));
 			return current === spec.resolved_digest;
 		}
+		if (spec.kind === "run_input") {
+			const current = __host_capture_run_input(
+				spec.spec.kind,
+				spec.spec.path,
+			);
+			return current === spec.resolved_digest;
+		}
 		if (spec.kind === "fileset") {
 			if (spec.resolved_digest === null || spec.resolved_digest === undefined) {
 				// Returned but never resolved during the recorded call — the
@@ -3046,6 +3059,60 @@ function _load_persisted_memo(persistKey, moduleDigest, ctx) {
 	// prior hit's reconstruction) the way a live in-process hit shares one
 	// promise's resolved value across callers.
 	return JSON.parse(JSON.stringify(record.result));
+}
+
+function _trace_inputs_enabled() {
+	return (
+		typeof globalThis.__host_trace_inputs_enabled === "function" &&
+		globalThis.__host_trace_inputs_enabled()
+	);
+}
+
+function _run_input_spec_key(spec) {
+	return `${spec.kind}:${spec.path}`;
+}
+
+function _validate_run_input_specs(ctx, input_specs, key_string) {
+	if (!_trace_inputs_enabled() || !ctx) return true;
+	if (ctx.runInputs.size === 0 && ctx.runFilesets.size === 0) return true;
+	const persistedPaths = new Set(
+		input_specs
+			.filter((entry) => entry.kind === "run_input")
+			.map((entry) => _run_input_spec_key(entry.spec)),
+	);
+	const persistedFilesets = new Set(
+		input_specs
+			.filter((entry) => entry.kind === "fileset")
+			.map((entry) => JSON.stringify(entry.spec)),
+	);
+	const missing = Array.from(ctx.runInputs.values()).filter(
+		(spec) => !persistedPaths.has(_run_input_spec_key(spec)),
+	);
+	for (const spec of ctx.runFilesets.values()) {
+		if (!persistedFilesets.has(JSON.stringify(spec))) {
+			missing.push({ kind: "fileset", spec });
+		}
+	}
+	if (missing.length === 0) {
+		_memo_trace.push({
+			event: "memo-inputs-validated",
+			key: key_string,
+			inputs: [
+				...ctx.runInputs.values(),
+				...Array.from(ctx.runFilesets.values()).map((spec) => ({
+					kind: "fileset",
+					spec,
+				})),
+			],
+		});
+		return true;
+	}
+	_memo_trace.push({
+		event: "memo-input-mismatch",
+		key: key_string,
+		missing,
+	});
+	return false;
 }
 
 function _persist_memo_result(
@@ -3093,7 +3160,15 @@ function _persist_memo_result(
 				resolved_digest: entry.resolved_digest ?? null,
 			});
 		}
+		for (const input of ctx.runInputs.values()) {
+			input_specs.push({
+				kind: "run_input",
+				spec: input,
+				resolved_digest: __host_capture_run_input(input.kind, input.path),
+			});
+		}
 	}
+	if (!_validate_run_input_specs(ctx, input_specs, key_string)) return;
 	const deps = Array.from(
 		new Set(
 			_memo_deps
@@ -3168,7 +3243,7 @@ export function memo(fn, opts) {
 				return _with_context(childContextId, () => {
 					_emit_task("running", nodeId, owner, label);
 					_push_call(key_string);
-					if (persistKey !== null) {
+					if (persistKey !== null && !_trace_inputs_enabled()) {
 						const cached = _load_persisted_memo(
 							persistKey,
 							moduleDigest,
@@ -3245,6 +3320,8 @@ export function resetMemoState() {
 				readNamespaces: new Set(),
 				readFiles: new Set(),
 				readFilesets: [],
+				runInputs: new Map(),
+				runFilesets: new Map(),
 				modeOverrides: null,
 			},
 		],
@@ -3273,6 +3350,24 @@ export function getMemoTrace() {
 		key_product_calls: Object.fromEntries(_key_product_call),
 	};
 }
+
+globalThis.__imp_assert_trace_inputs = function () {
+	const mismatch = _memo_trace.find(
+		(entry) => entry.event === "memo-input-mismatch",
+	);
+	if (!mismatch) return;
+	const label = _key_display.get(mismatch.key) || mismatch.key;
+	const inputs = mismatch.missing
+		.map((input) =>
+			input.kind === "fileset"
+				? `fileset:${JSON.stringify(input.spec)}`
+				: `${input.kind}:${input.path}`,
+		)
+		.join(", ");
+	throw new Error(
+		`trace-input validation failed for ${label}: persisted memo input specs omit ${inputs}`,
+	);
+};
 
 // ---------------------------------------------------------------------------
 // Tracked runtime APIs (Phase 3)
@@ -3567,8 +3662,11 @@ export const file_set = {
 // are passed through unchanged.
 function _materialise_inputs(inputs) {
 	const result = [];
+	const context = _effective_context_entry(true).ctx;
 	for (const input of inputs || []) {
 		if (input && input.__fileset === true) {
+			const spec = _fileset_spec_only(input);
+			context.runFilesets.set(JSON.stringify(spec), spec);
 			const { files, digest } = _eval_fileset(input);
 			_trace_effect({
 				event: "effect",
@@ -3578,6 +3676,15 @@ function _materialise_inputs(inputs) {
 			});
 			result.push({ kind: "digest", digest });
 		} else if (input != null) {
+			if (
+				(input.kind === "file" ||
+					input.kind === "manifest" ||
+					input.kind === "directory") &&
+				typeof input.path === "string"
+			) {
+				const spec = { kind: input.kind, path: input.path };
+				context.runInputs.set(_run_input_spec_key(spec), spec);
+			}
 			result.push(input);
 		}
 	}
