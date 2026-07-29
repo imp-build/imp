@@ -135,6 +135,20 @@ pub struct Goal {
     pub selectorless: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabelHandler {
+    /// Durable identity derived from the attachment's workspace call site.
+    /// The per-label ordinal distinguishes several handlers attached from
+    /// the same source location without rejecting factory-created closures.
+    pub identity: String,
+    /// Workspace module and source position that attached the handler.
+    pub origin: String,
+    /// Factory/extension provenance when attachment happened during
+    /// `extensible()` replay. Direct attachments leave these unset.
+    pub factory: Option<String>,
+    pub extension: Option<String>,
+}
+
 /// A product name declared exactly once (via `productName()`/`goal()` in JS,
 /// or pre-declared as a builtin). Product registrations must present the
 /// declaration's id, so every product name provably originates from a single
@@ -207,12 +221,14 @@ pub struct Workspace {
     /// and this map holds every address (including aliases) it was exported
     /// under.
     pub label_addresses: BTreeMap<String, u32>,
-    /// `(label id, goal name)` pairs with at least one handler attached.
-    /// Populated by `attach()`/`build()`/`test()`/... via `__host_attach`.
-    /// The live handler functions themselves stay JS-side (see
-    /// `_label_handlers` in imp_core.js); this is selection bookkeeping
-    /// only — "does this label have a handler for this goal at all".
-    pub label_handlers: BTreeSet<(u32, String)>,
+    /// Stable first-export address for each label id. Aliases remain
+    /// selectable, but persisted trace ownership and changed selection use
+    /// one canonical address so a label is never dispatched twice.
+    pub label_primary_addresses: BTreeMap<u32, String>,
+    /// Ordered handler metadata for each `(label id, goal name)`. The live
+    /// functions remain JS-side; this sealed metadata supports selection,
+    /// persisted trace identity, progress attribution, and introspection.
+    pub label_handlers: BTreeMap<(u32, String), Vec<LabelHandler>>,
 }
 
 #[derive(Debug, Clone)]
@@ -296,9 +312,9 @@ pub struct HostState {
     /// `pending` since labels have no kind/attrs/deps/schema and never go
     /// through `materialize_pending_target`.
     labels: BTreeSet<u32>,
-    /// `(label id, goal name)` pairs with at least one attached handler; see
-    /// [`Workspace::label_handlers`]. Populated by `__host_attach`.
-    label_handlers: BTreeSet<(u32, String)>,
+    /// Ordered metadata for every attached label handler; see
+    /// [`Workspace::label_handlers`].
+    label_handlers: BTreeMap<(u32, String), Vec<LabelHandler>>,
     /// True once workspace module-graph evaluation has finished and the
     /// label/attachment surfaces are sealed (imperative-model.md Phase 4,
     /// "Lifecycle: sealing") — the same moment `id_to_address` is finalized,
@@ -371,7 +387,7 @@ impl Default for HostState {
             next_tool_name_id: 0,
             dynamic_registrations: Vec::new(),
             labels: BTreeSet::new(),
-            label_handlers: BTreeSet::new(),
+            label_handlers: BTreeMap::new(),
             labels_sealed: false,
         }
     }
@@ -558,6 +574,7 @@ async fn create_live_runtime(
             expanders: hs.expanders.clone(),
             declared_product_names: hs.declared_product_names.clone(),
             label_addresses: BTreeMap::new(),
+            label_primary_addresses: BTreeMap::new(),
             label_handlers: hs.label_handlers.clone(),
         }
     };
@@ -680,7 +697,13 @@ async fn load_workspace_with_rules_and_service(
     }
 
     // ----- Resolve dep IDs to addresses -----
-    let (targets, label_addresses, id_to_address_final, owned_files) = {
+    let (
+        targets,
+        label_addresses,
+        label_primary_addresses,
+        id_to_address_final,
+        owned_files,
+    ) = {
         let hs = state.lock().unwrap();
         // First-address-wins: a label may legitimately be exported under
         // more than one name (see the label loop below), and the primary
@@ -733,8 +756,19 @@ async fn load_workspace_with_rules_and_service(
             label_addresses.insert(address.clone(), *id);
         }
 
+        let label_primary_addresses = hs
+            .labels
+            .iter()
+            .filter_map(|id| id_to_address.get(id).cloned().map(|address| (*id, address)))
+            .collect();
         let owned_files = compute_owned_files(&root, &targets)?;
-        (targets, label_addresses, id_to_address, owned_files)
+        (
+            targets,
+            label_addresses,
+            label_primary_addresses,
+            id_to_address,
+            owned_files,
+        )
     };
 
     // Publish resolved addresses while attachments are still open, then replay
@@ -779,6 +813,7 @@ async fn load_workspace_with_rules_and_service(
             goals: hs.goals.clone(),
             declared_product_names: hs.declared_product_names.clone(),
             label_addresses,
+            label_primary_addresses,
             label_handlers: hs.label_handlers.clone(),
         };
         hs.labels_sealed = true;
@@ -1583,23 +1618,21 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_label", host_label)?;
 
     // ------------------------------------------------------------------
-    // __host_attach(labelId, goalName) — records that at least one handler
-    // is attached to (labelId, goalName), for select_label_roots_in's
-    // "labels with no handler are skipped/error" filtering. The live
-    // handler function stays JS-side (see `_label_handlers` in
-    // imp_core.js); attach()'s own same-fn-twice dedupe check also runs
-    // JS-side, before this is called, since it must compare live function
-    // identity rather than any host-visible id (a reusable factory like
-    // cargoPackage() legitimately creates a fresh closure per label
-    // instance at the same call site, which the call-site-derived identity
-    // `_stable_function_id` uses elsewhere would wrongly flag as a
-    // rebinding — see imperative-model.md Phase 4 and this function's call
-    // site in imp_core.js for the reasoning).
+    // __host_attach(labelId, goalName, identity, origin, provenanceJson) —
+    // records ordered, durable metadata for selection, tracing, and
+    // introspection. The live function stays JS-side. Duplicate live
+    // function detection also stays JS-side because factory-created closures
+    // legitimately share one source site.
     // ------------------------------------------------------------------
     let state_att = Arc::clone(&state);
     let host_attach = Function::new(
         ctx.clone(),
-        move |label_id: u32, goal_name: String| -> rquickjs::Result<()> {
+        move |label_id: u32,
+              goal_name: String,
+              identity: String,
+              origin: String,
+              provenance_json: String|
+              -> rquickjs::Result<()> {
             let mut hs = state_att.lock().unwrap();
             if hs.labels_sealed {
                 return Err(rquickjs::Error::new_loading_message(
@@ -1615,7 +1648,28 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                     format!("id {label_id} is not a label — attach() requires a label() handle"),
                 ));
             }
-            hs.label_handlers.insert((label_id, goal_name));
+            let provenance: serde_json::Value =
+                serde_json::from_str(&provenance_json).map_err(|error| {
+                    rquickjs::Error::new_loading_message(
+                        "attach",
+                        format!("invalid handler provenance: {error}"),
+                    )
+                })?;
+            hs.label_handlers
+                .entry((label_id, goal_name))
+                .or_default()
+                .push(LabelHandler {
+                    identity,
+                    origin,
+                    factory: provenance
+                        .get("factory")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    extension: provenance
+                        .get("extension")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                });
             Ok(())
         },
     )?;
@@ -4493,6 +4547,33 @@ pub fn format_targets(targets: &[&Target], w: &mut String) -> std::fmt::Result {
     Ok(())
 }
 
+pub fn format_labels(
+    workspace: &Workspace,
+    labels: &[(u32, String)],
+    w: &mut String,
+) -> std::fmt::Result {
+    use std::fmt::Write;
+    for (label_id, address) in labels {
+        writeln!(w, "{address} (label)")?;
+        for ((id, goal), handlers) in &workspace.label_handlers {
+            if id != label_id {
+                continue;
+            }
+            writeln!(w, "  {goal}:")?;
+            for handler in handlers {
+                write!(w, "    - {} (attached at {})", handler.identity, handler.origin)?;
+                if let (Some(factory), Some(extension)) =
+                    (&handler.factory, &handler.extension)
+                {
+                    write!(w, " via {factory}.{extension}")?;
+                }
+                writeln!(w)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn format_dependencies(
     workspace: &Workspace,
     selectors: &[String],
@@ -4510,6 +4591,59 @@ pub fn format_dependencies(
             edge_mode: None,
         };
         format_dep_tree(workspace, target, pos, &mut visited, w)?;
+    }
+    Ok(())
+}
+
+pub fn format_label_dependencies(
+    workspace: &Workspace,
+    labels: &[(u32, String)],
+    goal: &str,
+    trace: &crate::trace_changed::TraceIndex,
+    w: &mut String,
+) -> Result<()> {
+    use std::fmt::Write;
+    for (label_id, address) in labels {
+        let Some(handlers) = workspace
+            .label_handlers
+            .get(&(*label_id, goal.to_owned()))
+        else {
+            bail!("label '{address}' has no '{goal}' handler attached");
+        };
+        for handler in handlers {
+            writeln!(
+                w,
+                "{address}#{goal}@{} (observed memo trace)",
+                handler.identity
+            )?;
+            let fn_id = format!("label-handler:{goal}:{}", handler.identity);
+            let records = trace.records_for_function(&fn_id);
+            if records.is_empty() {
+                writeln!(w, "└── <unobserved: run this goal to record dependencies>")?;
+                continue;
+            }
+            for (record_index, record) in records.iter().enumerate() {
+                if records.len() > 1 {
+                    writeln!(w, "├── invocation {}", record_index + 1)?;
+                }
+                if record.deps.is_empty() {
+                    writeln!(w, "└── <no observed memo calls>")?;
+                } else {
+                    for (index, dep) in record.deps.iter().enumerate() {
+                        let branch = if index + 1 == record.deps.len() {
+                            "└──"
+                        } else {
+                            "├──"
+                        };
+                        let observed = trace
+                            .record(dep)
+                            .map(|record| record.fn_id.as_str())
+                            .unwrap_or(dep);
+                        writeln!(w, "{branch} {observed}")?;
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -4853,11 +4987,11 @@ fn validate_mode_axis_value(
     Ok(())
 }
 
-fn resolve_mode_axes(
+pub fn resolve_mode_axes(
     live: &LiveWorkspace,
     profile_name: Option<&str>,
     axis_overrides: &[String],
-) -> Result<()> {
+) -> Result<serde_json::Value> {
     let mut hs = live.host_state.lock().unwrap();
     let mode_axes = hs.mode_axes.clone();
     let mode_profiles = hs.mode_profiles.clone();
@@ -4920,11 +5054,12 @@ fn resolve_mode_axes(
             });
         resolved.insert(name.clone(), value);
     }
+    let resolved = serde_json::Value::Object(resolved);
     hs.workspace_config.insert(
         MODE_AXIS_NAMESPACE.to_owned(),
-        serde_json::Value::Object(resolved),
+        resolved.clone(),
     );
-    Ok(())
+    Ok(resolved)
 }
 
 pub async fn execute_goal_live_selection(
@@ -5042,13 +5177,25 @@ pub async fn execute_goal_live_selection(
     // table with targets, not the (kind, product) table, so a selector that
     // names a label-only address (no matching target at all) must not be
     // treated as an error by the target-selection fallback below. Changed-
-    // address selection (`--changed-since`) doesn't have a label side in
-    // this prototype — labels aren't tracked by change detection yet.
+    // Changed-address selection uses each label's canonical primary address;
+    // aliases remain explicit selector spellings but never cause duplicate
+    // changed dispatch.
     let label_roots: Vec<(u32, String)> = match &selection {
         GoalSelection::Selectors(selectors) => {
             select_label_roots_in(&live.workspace, goal, selectors, selector_context)?
         }
-        GoalSelection::ChangedAddresses { .. } => Vec::new(),
+        GoalSelection::ChangedAddresses { .. } => changed_addresses
+            .as_ref()
+            .expect("changed selection has an address set")
+            .iter()
+            .filter_map(|address| {
+                let label_id = live.workspace.label_addresses.get(address)?;
+                live.workspace
+                    .label_handlers
+                    .contains_key(&(*label_id, goal.to_owned()))
+                    .then(|| (*label_id, address.clone()))
+            })
+            .collect(),
     };
 
     let mut roots = match &selection {
@@ -5122,12 +5269,15 @@ pub async fn execute_goal_live_selection(
                         .as_ref()
                         .expect("changed selection has an address set"),
                 );
-                if roots.is_empty() {
+                if roots.is_empty() && label_roots.is_empty() {
                     if selectors.is_empty() {
-                        eprintln!("no changed target has a '{}' product; nothing to do", goal);
+                        eprintln!(
+                            "no changed target or label can run goal '{}'; nothing to do",
+                            goal
+                        );
                     } else {
                         eprintln!(
-                            "no changed target matching the requested selectors has a '{}' product; nothing to do",
+                            "no changed target or label matching the requested selectors can run goal '{}'; nothing to do",
                             goal
                         );
                     }
@@ -11288,6 +11438,36 @@ export const generated = makeGenerated();
             .unwrap();
         let marks = read_test_marks(&workspace).await;
         assert_eq!(marks, vec!["generated-build://:generated".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn label_trace_root_never_caches_effectful_handler_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), "");
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { build, label } from "imp:core";
+const effect = label();
+build(effect, async function runEffect() {
+    globalThis.__imp_test_marks = globalThis.__imp_test_marks || [];
+    globalThis.__imp_test_marks.push("ran");
+});
+export { effect };
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        for _ in 0..2 {
+            run_goal_live(&workspace, p, "build", &["//:effect".to_owned()])
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            read_test_marks(&workspace).await,
+            vec!["ran".to_owned(), "ran".to_owned()]
+        );
     }
 
     #[tokio::test]

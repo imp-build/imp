@@ -24,7 +24,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::spike::{Workspace, BUILD_FILE, CI_WORKSPACE_FILE, WORKSPACE_FILE};
-use crate::trace_changed::TraceIndex;
+use crate::trace_changed::{LabelChangeContext, TraceIndex};
 
 /// Import edges observed while loading the workspace's JS modules, plus the
 /// file/package identity needed to map a changed file back into the graph.
@@ -60,6 +60,10 @@ impl ImportGraph {
 
 pub struct ChangedTargets {
     pub addresses: BTreeSet<String>,
+    /// Human-readable selection explanations keyed by root address. Kept
+    /// separate from addresses so goal execution can ignore them while
+    /// `imp targets --changed-since` remains honest.
+    pub reasons: BTreeMap<String, Vec<String>>,
     /// Changed files no target/module/persisted computation accounts for,
     /// for a caller-side warning.
     pub unowned: Vec<String>,
@@ -73,15 +77,40 @@ pub fn changed_target_addresses(
     workspace: &Workspace,
     graph: &ImportGraph,
     since: &str,
+    label_context: Option<&LabelChangeContext<'_>>,
 ) -> Result<ChangedTargets> {
     let files = git_changed_files(workspace_root, since)?;
     let (mut addresses, module_owned) = module_graph_targets(workspace, graph, &files);
+    let mut reasons: BTreeMap<String, Vec<String>> = addresses
+        .iter()
+        .map(|address| {
+            (
+                address.clone(),
+                vec!["changed BUILD file or imported workspace module".to_owned()],
+            )
+        })
+        .collect();
 
     let trace = TraceIndex::build().context("build persisted-memo change-detection index")?;
     let stale = trace.stale_keys(workspace_root, &files, &workspace.workspace_config);
     for target in workspace.targets.values() {
         if trace.target_is_stale(workspace, target, &stale) {
             addresses.insert(target.address.clone());
+            reasons
+                .entry(target.address.clone())
+                .or_default()
+                .push("persisted target trace is stale or missing".to_owned());
+        }
+    }
+    for (&label_id, address) in &workspace.label_primary_addresses {
+        let handler_reasons =
+            trace.label_stale_reasons(workspace, label_id, label_context, &stale);
+        if !handler_reasons.is_empty() {
+            addresses.insert(address.clone());
+            reasons
+                .entry(address.clone())
+                .or_default()
+                .extend(handler_reasons);
         }
     }
 
@@ -91,7 +120,11 @@ pub fn changed_target_addresses(
         .filter(|path| !module_owned.contains(path) && !trace_covered.contains(path))
         .collect();
 
-    Ok(ChangedTargets { addresses, unowned })
+    Ok(ChangedTargets {
+        addresses,
+        reasons,
+        unowned,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +279,7 @@ pub(crate) fn module_graph_targets(
             } else {
                 format!("//{dir}")
             };
-            insert_package_targets(workspace, &scope, &mut owners);
+            insert_package_roots(workspace, &scope, &mut owners);
             owned_paths.insert(path.clone());
             // BUILD.js files define their package rather than reusable rule
             // modules. Their import edges are dependency declarations, not
@@ -262,7 +295,7 @@ pub(crate) fn module_graph_targets(
                 if module == WORKSPACE_FILE || module == CI_WORKSPACE_FILE {
                     select_all = true;
                 } else if let Some(scope) = graph.build_module_scopes.get(&module) {
-                    insert_package_targets(workspace, scope, &mut owners);
+                    insert_package_roots(workspace, scope, &mut owners);
                 }
             }
             owned_paths.insert(path.clone());
@@ -270,12 +303,17 @@ pub(crate) fn module_graph_targets(
     }
 
     if select_all {
-        owners = workspace.targets.keys().cloned().collect();
+        owners = workspace
+            .targets
+            .keys()
+            .chain(workspace.label_primary_addresses.values())
+            .cloned()
+            .collect();
     }
     (owners, owned_paths)
 }
 
-fn insert_package_targets(workspace: &Workspace, scope: &str, owners: &mut BTreeSet<String>) {
+fn insert_package_roots(workspace: &Workspace, scope: &str, owners: &mut BTreeSet<String>) {
     let prefix = if scope == "//" {
         "//:".to_owned()
     } else {
@@ -284,6 +322,11 @@ fn insert_package_targets(workspace: &Workspace, scope: &str, owners: &mut BTree
     // Addresses contain exactly one ':', so a prefix match implies the target
     // lives in exactly this package (no sub-directory can slip through).
     for address in workspace.targets.keys() {
+        if address.starts_with(&prefix) {
+            owners.insert(address.clone());
+        }
+    }
+    for address in workspace.label_primary_addresses.values() {
         if address.starts_with(&prefix) {
             owners.insert(address.clone());
         }
@@ -367,6 +410,34 @@ mod tests {
         assert_eq!(
             owners_of(&ws, &graph, &["app/BUILD.js"]),
             BTreeSet::from(["//app:app".to_owned(), "//app:extra".to_owned()])
+        );
+    }
+
+    #[test]
+    fn changed_build_js_and_workspace_modules_include_label_roots() {
+        let mut ws = workspace(vec![target("//app:legacy"), target("//lib:legacy")]);
+        ws.label_addresses.insert("//app:generated".to_owned(), 1);
+        ws.label_addresses.insert("//lib:generated".to_owned(), 2);
+        ws.label_primary_addresses
+            .insert(1, "//app:generated".to_owned());
+        ws.label_primary_addresses
+            .insert(2, "//lib:generated".to_owned());
+
+        assert_eq!(
+            owners_of(&ws, &ImportGraph::default(), &["app/BUILD.js"]),
+            BTreeSet::from([
+                "//app:generated".to_owned(),
+                "//app:legacy".to_owned(),
+            ])
+        );
+        assert_eq!(
+            owners_of(&ws, &ImportGraph::default(), &[WORKSPACE_FILE]),
+            BTreeSet::from([
+                "//app:generated".to_owned(),
+                "//app:legacy".to_owned(),
+                "//lib:generated".to_owned(),
+                "//lib:legacy".to_owned(),
+            ])
         );
     }
 

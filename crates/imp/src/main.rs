@@ -41,19 +41,22 @@ struct Cli {
 enum Cmd {
     /// Initialize an imp workspace in the current directory
     Init,
-    /// List targets in the workspace
+    /// List selectable targets and exported labels in the workspace
     Targets {
-        /// Target or package selectors, e.g. :app, dir, dir/..., or //...
+        /// Target, label, or package selectors, e.g. :app, dir, dir/..., or //...
         selectors: Vec<String>,
-        /// List only targets owning files changed since this git ref
+        /// List only roots owning files changed since this git ref
         /// (merge-base against the working tree, like `git diff <ref>`)
         #[arg(long, value_name = "REF")]
         changed_since: Option<String>,
     },
-    /// List target dependencies
+    /// List declared target dependencies or observed label-handler memo calls
     Dependencies {
-        /// Target or package selectors, e.g. :app, dir, dir/..., or //...
+        /// Target, label, or package selectors, e.g. :app, dir, dir/..., or //...
         selectors: Vec<String>,
+        /// Goal whose observed handler trace should be shown for labels
+        #[arg(long, value_name = "NAME")]
+        goal: Option<String>,
     },
     /// List target types and rules in the workspace
     Rules {
@@ -808,8 +811,8 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
         } => {
             return cmd_targets(selectors, changed_since.as_deref(), tree).await;
         }
-        Cmd::Dependencies { selectors } => {
-            return cmd_dependencies(selectors, tree).await;
+        Cmd::Dependencies { selectors, goal } => {
+            return cmd_dependencies(selectors, goal.as_deref(), tree).await;
         }
         Cmd::Rules { command } => {
             return cmd_rules(command.as_ref(), tree).await;
@@ -1053,6 +1056,19 @@ async fn cmd_execute_live(
     validate_changed_selector_overrides(changed_since.as_deref(), &selectors)?;
     let js_workers = effective_js_workers(&workspace.workspace, js_workers_cli)?;
     let jobs = effective_jobs(&workspace.workspace, jobs_cli)?;
+    let goal_name = match invocation {
+        LiveInvocation::Goal { goal, .. } => goal,
+    };
+    // Label trace roots include the resolved mode in their invocation key.
+    // Resolve it before changed selection, then execute_goal_live_selection
+    // applies the same deterministic resolution again before dispatch.
+    let resolved_mode = spike::resolve_mode_axes(&workspace, profile.as_deref(), &axis)?;
+    let label_context = imp_engine::trace_changed::LabelChangeContext {
+        goal: goal_name,
+        flags: &goal_flags,
+        args: &run_args,
+        mode: &resolved_mode,
+    };
 
     // Resolve --changed-since into an exact address set before any execution
     // machinery spins up. Even an empty set continues through selection so
@@ -1060,11 +1076,16 @@ async fn cmd_execute_live(
     let changed_addresses = match &changed_since {
         Some(since) => {
             let graph = workspace.import_graph.lock().unwrap().clone();
-            let changed::ChangedTargets { addresses, unowned } = changed::changed_target_addresses(
+            let changed::ChangedTargets {
+                addresses,
+                unowned,
+                ..
+            } = changed::changed_target_addresses(
                 &workspace_root,
                 &workspace.workspace,
                 &graph,
                 since,
+                Some(&label_context),
             )?;
             warn_unowned_changed_files(&unowned);
             Some(addresses)
@@ -1570,11 +1591,16 @@ async fn cmd_targets(selectors: &[String], changed_since: Option<&str>, tree: &T
     workspace_cmd!(tree, |workspace, out| {
         if let Some(since) = changed_since {
             let graph = workspace.import_graph.lock().unwrap().clone();
-            let changed::ChangedTargets { addresses, unowned } = changed::changed_target_addresses(
+            let changed::ChangedTargets {
+                addresses,
+                reasons,
+                unowned,
+            } = changed::changed_target_addresses(
                 &workspace_root,
                 &workspace.workspace,
                 &graph,
                 since,
+                None,
             )?;
             warn_unowned_changed_files(&unowned);
             let addresses = selector::filter_changed_addresses_in(
@@ -1586,15 +1612,45 @@ async fn cmd_targets(selectors: &[String], changed_since: Option<&str>, tree: &T
             for address in &addresses {
                 use std::fmt::Write as _;
                 writeln!(out, "{address}")?;
+                if let Some(reasons) = reasons.get(address) {
+                    for reason in reasons {
+                        writeln!(out, "  selected because: {reason}")?;
+                    }
+                }
             }
         } else {
-            let targets = selector::select_targets_in(&workspace, selectors, &selector_context)?;
+            let labels =
+                selector::select_labels_in(&workspace, selectors, &selector_context)?;
+            let mut targets_by_address = std::collections::BTreeMap::new();
+            for selector in selectors {
+                let single = std::slice::from_ref(selector);
+                match selector::select_targets_in(&workspace, single, &selector_context) {
+                    Ok(targets) => {
+                        for target in targets {
+                            targets_by_address.insert(target.address.as_str(), target);
+                        }
+                    }
+                    Err(error) => {
+                        if selector::select_labels_in(
+                            &workspace,
+                            single,
+                            &selector_context,
+                        )?
+                        .is_empty()
+                        {
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+            let targets = targets_by_address.into_values().collect::<Vec<_>>();
             spike::format_targets(&targets, &mut out)?;
+            spike::format_labels(&workspace, &labels, &mut out)?;
         }
     })
 }
 
-/// One consolidated stderr warning for changed files no target or module
+/// One consolidated stderr warning for changed files no selectable root/module
 /// accounts for; not an error — unowned files are common (docs, CI config).
 fn warn_unowned_changed_files(unowned: &[String]) {
     if unowned.is_empty() {
@@ -1606,18 +1662,49 @@ fn warn_unowned_changed_files(unowned: &[String]) {
         listed.push_str(&format!(", and {} more", unowned.len() - SHOWN));
     }
     eprintln!(
-        "warning: {} changed file(s) owned by no target: {listed}",
+        "warning: {} changed file(s) owned by no selectable root: {listed}",
         unowned.len()
     );
 }
 
-async fn cmd_dependencies(selectors: &[String], tree: &Tree) -> Result<()> {
+async fn cmd_dependencies(selectors: &[String], goal: Option<&str>, tree: &Tree) -> Result<()> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let selector_context =
         selector::SelectorContext::for_invocation(&workspace_root, &current_dir)?;
     workspace_cmd!(tree, |workspace, out| {
-        spike::format_dependencies(&workspace, selectors, &selector_context, &mut out)?;
+        let labels = selector::select_labels_in(&workspace, selectors, &selector_context)?;
+        let mut target_selectors = Vec::new();
+        for selector in selectors {
+            let single = std::slice::from_ref(selector);
+            match selector::select_targets_in(&workspace, single, &selector_context) {
+                Ok(_) => target_selectors.push(selector.clone()),
+                Err(error) => {
+                    if selector::select_labels_in(&workspace, single, &selector_context)?
+                        .is_empty()
+                    {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        if !target_selectors.is_empty() {
+            spike::format_dependencies(
+                &workspace,
+                &target_selectors,
+                &selector_context,
+                &mut out,
+            )?;
+        }
+        if !labels.is_empty() {
+            let goal = goal.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "label dependency introspection requires --goal <name>; attached goals are shown by 'imp targets'"
+                )
+            })?;
+            let trace = imp_engine::trace_changed::TraceIndex::build()?;
+            spike::format_label_dependencies(&workspace, &labels, goal, &trace, &mut out)?;
+        }
     })
 }
 
@@ -1762,6 +1849,24 @@ mod tests {
                 assert_eq!(changed_since.as_deref(), Some("HEAD~1"));
             }
             _ => panic!("expected targets subcommand"),
+        }
+    }
+
+    #[test]
+    fn dependencies_subcommand_accepts_observed_label_goal() {
+        let cli = Cli::parse_from([
+            "imp",
+            "dependencies",
+            "//pkg:item",
+            "--goal",
+            "build",
+        ]);
+        match cli.command {
+            Cmd::Dependencies { selectors, goal } => {
+                assert_eq!(selectors, ["//pkg:item"]);
+                assert_eq!(goal.as_deref(), Some("build"));
+            }
+            _ => panic!("expected dependencies subcommand"),
         }
     }
 

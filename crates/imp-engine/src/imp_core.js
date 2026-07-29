@@ -2356,11 +2356,12 @@ export function label(opts) {
 // handler plus a separately-shipped fmt rule's `fmt` handler — is not a
 // conflict either way; both simply run.
 const _label_handler_fns = new Map();
-// "labelId::goalName" -> fn[] in attachment order; the live handler
-// functions invoked at dispatch time. The host (__host_attach) only tracks
-// that *some* handler exists per (label, goal) pair, for selection — see
-// _dispatch_label_handlers below and select_label_roots_in in selector.rs.
+// "labelId::goalName" -> {fn, identity, origin}[] in attachment order.
+// Host-side metadata mirrors these entries after sealing; functions remain
+// live-only in this table.
 const _label_handlers = new Map();
+let _label_handler_fallback_id = 0;
+let _active_extension_provenance = null;
 
 function _label_key(label, goalName, caller) {
 	if (!label || label.__imp_label !== true) {
@@ -2413,8 +2414,22 @@ export function attach(label, goalName, fn, opts) {
 		handlers = [];
 		_label_handlers.set(key, handlers);
 	}
-	handlers.push(fn);
-	__host_attach(label.__id, goalName);
+	const stack = new Error("label handler attachment").stack || "";
+	const site = __host_call_site_identity(stack);
+	const origin =
+		site === undefined || site === null
+			? `<runtime attachment ${++_label_handler_fallback_id}>`
+			: site;
+	const ordinal = handlers.length;
+	const identity = `${fn.name || "<anonymous>"}#${ordinal}@${origin}`;
+	handlers.push({ fn, identity, origin });
+	__host_attach(
+		label.__id,
+		goalName,
+		identity,
+		origin,
+		JSON.stringify(_active_extension_provenance || {}),
+	);
 	return label;
 }
 
@@ -2560,7 +2575,17 @@ function _finalize_factory_extensions() {
 				if (seen.has(extension)) continue;
 				seen.add(extension);
 				try {
-					const result = extension(instance.label);
+					const previousProvenance = _active_extension_provenance;
+					_active_extension_provenance = {
+						factory: state.name,
+						extension: _extension_name(extension),
+					};
+					let result;
+					try {
+						result = extension(instance.label);
+					} finally {
+						_active_extension_provenance = previousProvenance;
+					}
 					if (
 						result !== null &&
 						result !== undefined &&
@@ -2638,6 +2663,86 @@ export const packageGoal = _goal_sugar("package");
 // mode-axis-registry.md). Runs every attached handler concurrently and
 // waits for all of them, mirroring how several tools implementing one
 // product are dispatched today.
+function _trace_label_handler(handler, goalName, selectorAddress, ctx) {
+	const fn_id = `label-handler:${goalName}:${handler.identity}`;
+	const moduleDigest = _memo_module_digest(fn_id);
+	const { digest: args_digest, unaddressed } = _stable_digest([
+		selectorAddress,
+		ctx,
+	]);
+	const key_string = JSON.stringify({
+		fn_id,
+		args_digest,
+		config_digest: __host_configuration_digest(undefined, undefined),
+	});
+	const persistKey =
+		moduleDigest !== null && !unaddressed
+			? JSON.stringify({ fn_id, args_digest })
+			: null;
+	const display = `${selectorAddress}#${goalName}@${handler.identity.split("@")[0]}`;
+	_key_display.set(key_string, display);
+
+	const callerContext = _effective_context_entry(true);
+	const callerContextId = callerContext.id;
+	const owner = callerContext.ctx.owner;
+	const nodeId = ++_memo_node_counter;
+	_memo_node_labels.set(nodeId, display);
+	_emit_task("pending", nodeId, owner, display, "info");
+	const promise = _with_js_lane(nodeId, display, () => {
+		const childContextId = _fork_context(
+			nodeId,
+			callerContext.ctx,
+			display,
+		);
+		return _with_context(childContextId, () => {
+			_emit_task("running", nodeId, owner, display);
+			_push_call(key_string);
+			let result;
+			try {
+				result = Promise.resolve(handler.fn(ctx));
+			} catch (error) {
+				_pop_call(key_string, childContextId);
+				throw error;
+			}
+			if (_is_object_key(result)) {
+				_promise_contexts.set(result, childContextId);
+			}
+			result.then(
+				() => {
+					_pop_call(key_string, childContextId);
+					if (persistKey !== null) {
+						// Handler roots deliberately persist only their observed
+						// inputs and memo edges. Their result is never reused:
+						// top-level handlers may publish or otherwise perform
+						// effects that must happen on every invocation.
+						_persist_memo_result(
+							persistKey,
+							fn_id,
+							moduleDigest,
+							null,
+							childContextId,
+							key_string,
+						);
+					}
+				},
+				() => _pop_call(key_string, childContextId),
+			);
+			return result;
+		});
+	});
+	promise.then(
+		() => _emit_task("done", nodeId, owner, display),
+		(error) =>
+			_emit_task(
+				"fail",
+				nodeId,
+				owner,
+				(error && error.message) || String(error),
+			),
+	);
+	return _contextual_thenable(promise, callerContextId);
+}
+
 function _dispatch_label_handlers(labelId, goalName, selectorAddress) {
 	const handlers = _label_handlers.get(`${labelId}::${goalName}`) || [];
 	const ctx = {
@@ -2646,7 +2751,11 @@ function _dispatch_label_handlers(labelId, goalName, selectorAddress) {
 		args: runArgs(),
 		mode: configuration("imp.mode", {}),
 	};
-	return Promise.all(handlers.map((fn) => fn(ctx)));
+	return Promise.all(
+		handlers.map((handler) =>
+			_trace_label_handler(handler, goalName, selectorAddress, ctx),
+		),
+	);
 }
 globalThis.__imp_dispatch_label_handlers = _dispatch_label_handlers;
 

@@ -286,7 +286,9 @@ pub fn select_label_roots_in(
             .filter(|(address, _)| parsed.matches_address(address))
             .collect();
         for (address, &id) in matches {
-            let has_handler = workspace.label_handlers.contains(&(id, goal.to_owned()));
+            let has_handler = workspace
+                .label_handlers
+                .contains_key(&(id, goal.to_owned()));
             if !has_handler {
                 if multi {
                     continue;
@@ -364,17 +366,29 @@ pub fn filter_changed_addresses_in(
     let mut selected = std::collections::BTreeSet::new();
     for selector in selectors {
         let parsed = context.parse(selector)?;
-        let matches: Vec<_> = workspace
+        let target_matches: Vec<_> = workspace
             .targets
             .values()
             .filter(|target| parsed.matches(target))
             .collect();
-        if matches.is_empty() {
-            bail!("no target matches selector '{selector}'");
+        let label_matches: Vec<_> = workspace
+            .label_addresses
+            .iter()
+            .filter(|(address, _)| parsed.matches_address(address))
+            .collect();
+        if target_matches.is_empty() && label_matches.is_empty() {
+            bail!("no target or label matches selector '{selector}'");
         }
-        for target in matches {
+        for target in target_matches {
             if addresses.contains(&target.address) {
                 selected.insert(target.address.clone());
+            }
+        }
+        for (_, &label_id) in label_matches {
+            if let Some(primary) = workspace.label_primary_addresses.get(&label_id) {
+                if addresses.contains(primary) {
+                    selected.insert(primary.clone());
+                }
             }
         }
     }
@@ -415,6 +429,38 @@ pub fn select_targets_in<'a>(
         }
     }
     Ok(selected.into_values().collect())
+}
+
+/// Resolve selectors over exported labels without filtering by goal. Used by
+/// workspace introspection, where the attached goals are the information
+/// being requested rather than an input to selection.
+pub fn select_labels_in(
+    workspace: &Workspace,
+    selectors: &[String],
+    context: &SelectorContext,
+) -> Result<Vec<(u32, String)>> {
+    if selectors.is_empty() {
+        bail!("a target or label selector is required; use '//...' to select every root");
+    }
+    let mut selected = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    for selector in selectors {
+        let parsed = context.parse(selector)?;
+        let matches: Vec<_> = workspace
+            .label_addresses
+            .iter()
+            .filter(|(address, _)| parsed.matches_address(address))
+            .collect();
+        for (address, &id) in matches {
+            if seen.insert(id) {
+                selected.insert(address.clone(), id);
+            }
+        }
+    }
+    Ok(selected
+        .into_iter()
+        .map(|(address, id)| (id, address))
+        .collect())
 }
 
 #[cfg(test)]
@@ -698,13 +744,25 @@ mod tests {
         workspace
             .label_addresses
             .insert("//pkg:hasher".to_owned(), 1);
-        workspace.label_handlers.insert((1, "build".to_owned()));
-        workspace.label_handlers.insert((1, "test".to_owned()));
+        workspace
+            .label_primary_addresses
+            .insert(1, "//pkg:hasher".to_owned());
+        workspace
+            .label_handlers
+            .insert((1, "build".to_owned()), Vec::new());
+        workspace
+            .label_handlers
+            .insert((1, "test".to_owned()), Vec::new());
         // id 2: //pkg/nested:docs, only a "fmt" handler (no "build").
         workspace
             .label_addresses
             .insert("//pkg/nested:docs".to_owned(), 2);
-        workspace.label_handlers.insert((2, "fmt".to_owned()));
+        workspace
+            .label_primary_addresses
+            .insert(2, "//pkg/nested:docs".to_owned());
+        workspace
+            .label_handlers
+            .insert((2, "fmt".to_owned()), Vec::new());
         // id 3: //pkg:aliased and //pkg:also_aliased both name the same
         // label, which has a "build" handler — additive aliasing.
         workspace
@@ -713,8 +771,27 @@ mod tests {
         workspace
             .label_addresses
             .insert("//pkg:also_aliased".to_owned(), 3);
-        workspace.label_handlers.insert((3, "build".to_owned()));
         workspace
+            .label_primary_addresses
+            .insert(3, "//pkg:aliased".to_owned());
+        workspace
+            .label_handlers
+            .insert((3, "build".to_owned()), Vec::new());
+        workspace
+    }
+
+    #[test]
+    fn changed_label_addresses_scope_aliases_to_the_primary_root() {
+        let workspace = label_workspace();
+        let addresses = BTreeSet::from(["//pkg:aliased".to_owned()]);
+        let selected = filter_changed_addresses_in(
+            &workspace,
+            &addresses,
+            &["//pkg:also_aliased".to_owned()],
+            &SelectorContext::root(),
+        )
+        .unwrap();
+        assert_eq!(selected, addresses);
     }
 
     #[test]

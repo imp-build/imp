@@ -44,6 +44,13 @@ pub struct TraceIndex {
     reverse_deps: HashMap<String, Vec<String>>,
 }
 
+pub struct LabelChangeContext<'a> {
+    pub goal: &'a str,
+    pub flags: &'a serde_json::Value,
+    pub args: &'a [String],
+    pub mode: &'a serde_json::Value,
+}
+
 impl TraceIndex {
     pub fn build() -> Result<Self> {
         let records = list_memo_records().context("enumerate persisted memo records")?;
@@ -62,6 +69,20 @@ impl TraceIndex {
             records: by_key,
             reverse_deps,
         })
+    }
+
+    pub fn records_for_function(&self, fn_id: &str) -> Vec<&MemoCacheRecord> {
+        let mut records = self
+            .records
+            .values()
+            .filter(|record| record.fn_id == fn_id)
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| left.key.cmp(&right.key));
+        records
+    }
+
+    pub fn record(&self, key: &str) -> Option<&MemoCacheRecord> {
+        self.records.get(key)
     }
 
     /// Keys whose own declaring module changed, or whose recorded
@@ -191,6 +212,87 @@ impl TraceIndex {
             .any(|(_, product)| self.target_product_is_stale(workspace, target, product, stale))
     }
 
+    /// Whether any handler attached to a label is cold or stale. Goal
+    /// execution supplies its exact context so flags/args/mode participate
+    /// in the persisted root key. Context-free introspection checks every
+    /// registered handler and every context observed for it.
+    pub fn label_is_stale(
+        &self,
+        workspace: &Workspace,
+        label_id: u32,
+        context: Option<&LabelChangeContext<'_>>,
+        stale: &BTreeSet<String>,
+    ) -> bool {
+        !self
+            .label_stale_reasons(workspace, label_id, context, stale)
+            .is_empty()
+    }
+
+    pub fn label_stale_reasons(
+        &self,
+        workspace: &Workspace,
+        label_id: u32,
+        context: Option<&LabelChangeContext<'_>>,
+        stale: &BTreeSet<String>,
+    ) -> Vec<String> {
+        let Some(address) = workspace.label_primary_addresses.get(&label_id) else {
+            return vec!["label has no canonical exported address".to_owned()];
+        };
+        workspace
+            .label_handlers
+            .iter()
+            .filter(|((id, goal), _)| {
+                *id == label_id && context.is_none_or(|context| goal == context.goal)
+            })
+            .flat_map(|((_, goal), handlers)| {
+                handlers
+                    .iter()
+                    .map(move |handler| (goal.as_str(), handler))
+            })
+            .filter_map(|(goal, handler)| {
+                let fn_id = format!("label-handler:{goal}:{}", handler.identity);
+                if let Some(context) = context {
+                    let args = LabelHandlerArgs {
+                        flags: context.flags,
+                        selector: address,
+                        args: context.args,
+                        mode: context.mode,
+                    };
+                    return match persisted_key_for_args(&fn_id, &(address, args)) {
+                        Err(_) => Some(format!(
+                            "{goal}@{} has no stable trace key",
+                            handler.identity
+                        )),
+                        Ok(key) if !self.records.contains_key(&key) => Some(format!(
+                            "{goal}@{} has no trace for this invocation",
+                            handler.identity
+                        )),
+                        Ok(key) if stale.contains(&key) => Some(format!(
+                            "{goal}@{} has changed observed inputs or memo dependencies",
+                            handler.identity
+                        )),
+                        Ok(_) => None,
+                    };
+                }
+                let records: Vec<_> = self
+                    .records
+                    .values()
+                    .filter(|record| record.fn_id == fn_id)
+                    .collect();
+                if records.is_empty() {
+                    Some(format!("{goal}@{} has no observed trace", handler.identity))
+                } else if records.iter().any(|record| stale.contains(&record.key)) {
+                    Some(format!(
+                        "{goal}@{} has changed observed inputs or memo dependencies",
+                        handler.identity
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// Whether `target`'s `product` action (e.g. "build") needs to run:
     /// any tool registered for `(target.kind, product)` either has no
     /// persisted record for this target's address (never built, or the
@@ -243,13 +345,28 @@ struct PersistKeyParts<'a> {
 /// serialize in declaration order regardless of serde_json's map-ordering
 /// feature, so this doesn't depend on any Cargo feature flag.
 fn persisted_key(fn_id: &str, address: &str) -> Result<String> {
-    let args_digest = serde_json::to_string(&[RefOnlyArg {
+    persisted_key_for_args(
+        fn_id,
+        &[RefOnlyArg {
         __imp_ref_addr: address,
-    }])?;
+        }],
+    )
+}
+
+fn persisted_key_for_args(fn_id: &str, args: &impl Serialize) -> Result<String> {
+    let args_digest = serde_json::to_string(args)?;
     Ok(serde_json::to_string(&PersistKeyParts {
         fn_id,
         args_digest: &args_digest,
     })?)
+}
+
+#[derive(Serialize)]
+struct LabelHandlerArgs<'a> {
+    flags: &'a serde_json::Value,
+    selector: &'a str,
+    args: &'a [String],
+    mode: &'a serde_json::Value,
 }
 
 fn input_spec_is_stale(
@@ -383,6 +500,89 @@ mod tests {
             key,
             r#"{"fn_id":"cargoBuild@rules/rust/index.js:503:2","args_digest":"[{\"__imp_ref_addr\":\"//app:app\"}]"}"#
         );
+    }
+
+    #[test]
+    fn label_handler_roots_are_context_keyed_and_additive() {
+        let handler = crate::spike::LabelHandler {
+            identity: "buildLabel#0@//rules/example:10:2".to_owned(),
+            origin: "//rules/example:10:2".to_owned(),
+            factory: None,
+            extension: None,
+        };
+        let mut workspace = Workspace::default();
+        workspace
+            .label_primary_addresses
+            .insert(7, "//pkg:item".to_owned());
+        workspace
+            .label_addresses
+            .insert("//pkg:item".to_owned(), 7);
+        workspace
+            .label_handlers
+            .insert((7, "build".to_owned()), vec![handler.clone()]);
+
+        let flags = serde_json::json!({"check": false});
+        let mode = serde_json::json!({"opt": "debug"});
+        let context = LabelChangeContext {
+            goal: "build",
+            flags: &flags,
+            args: &[],
+            mode: &mode,
+        };
+        let fn_id = format!("label-handler:build:{}", handler.identity);
+        let args = LabelHandlerArgs {
+            flags: &flags,
+            selector: "//pkg:item",
+            args: &[],
+            mode: &mode,
+        };
+        let key = persisted_key_for_args(&fn_id, &("//pkg:item", args)).unwrap();
+        let root_record = record(&key, &fn_id, Vec::new(), Vec::new());
+        let index = TraceIndex {
+            records: HashMap::from([(key.clone(), root_record)]),
+            reverse_deps: HashMap::new(),
+        };
+
+        assert!(!index.label_is_stale(
+            &workspace,
+            7,
+            Some(&context),
+            &BTreeSet::new()
+        ));
+        assert!(index.label_is_stale(
+            &workspace,
+            7,
+            Some(&context),
+            &BTreeSet::from([key])
+        ));
+
+        let other_flags = serde_json::json!({"check": true});
+        let other_context = LabelChangeContext {
+            goal: "build",
+            flags: &other_flags,
+            args: &[],
+            mode: &mode,
+        };
+        assert!(index.label_is_stale(
+            &workspace,
+            7,
+            Some(&other_context),
+            &BTreeSet::new()
+        ));
+
+        let mut second = handler;
+        second.identity = "auditLabel#1@//rules/example:11:2".to_owned();
+        workspace
+            .label_handlers
+            .get_mut(&(7, "build".to_owned()))
+            .unwrap()
+            .push(second);
+        assert!(index.label_is_stale(
+            &workspace,
+            7,
+            Some(&context),
+            &BTreeSet::new()
+        ));
     }
 
     #[test]
