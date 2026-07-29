@@ -5,7 +5,7 @@
 //! resolve from the invocation package; `//` anchors them at the workspace.
 //! Goal selectors may also carry a product override (`selector#product`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::spike::{Goal, Target, Workspace};
@@ -118,20 +118,26 @@ enum ParsedSelector {
 
 impl ParsedSelector {
     fn matches(&self, target: &Target) -> bool {
+        self.matches_address(&target.address)
+    }
+
+    /// Pure address-pattern match, factored out of `matches` so label
+    /// selection (`select_label_roots_in`, imperative-model.md Phase 4) can
+    /// reuse the exact same exact/package/recursive semantics `Target`
+    /// selection uses, without needing a `Target` to match against.
+    fn matches_address(&self, address: &str) -> bool {
         match self {
-            Self::Exact(address) => target.address == *address,
+            Self::Exact(selector_address) => address == *selector_address,
             Self::Package { package, recursive } => {
-                let Some((target_package, _)) = target
-                    .address
-                    .strip_prefix("//")
-                    .and_then(|address| address.split_once(':'))
+                let Some((address_package, _)) =
+                    address.strip_prefix("//").and_then(|a| a.split_once(':'))
                 else {
                     return false;
                 };
-                target_package == package
+                address_package == package
                     || (*recursive
                         && (package.is_empty()
-                            || target_package.starts_with(&format!("{package}/"))))
+                            || address_package.starts_with(&format!("{package}/"))))
             }
         }
     }
@@ -235,6 +241,67 @@ pub fn select_roots_in<'a>(
         }
     }
     Ok(selected.into_values().collect())
+}
+
+/// Resolve selectors against sealed label addresses (imperative-model.md
+/// Phase 4), filtered to labels with at least one handler attached for
+/// `goal`. Parallels `select_roots_in`'s exact/package/recursive/`//...`
+/// semantics, but over `workspace.label_addresses` instead of
+/// `workspace.targets`, and "has the goal's product" becomes "has ≥1
+/// attached handler for the goal".
+///
+/// An empty `selectors` list returns no roots (the caller — target
+/// selection via `select_roots_in` — already owns the
+/// selector-required/selectorless error for the goal as a whole). An
+/// address pattern that matches no label at all is not an error here either:
+/// it may simply be a target address instead, which `select_roots_in`
+/// already validates. Once a selector *does* match one or more labels,
+/// package/`//...` selectors silently skip the ones with no handler for
+/// `goal`, while an exact selector on a handler-less label is a hard error
+/// (mirroring `select_roots_in`'s exact-selector product-mismatch error).
+pub fn select_label_roots_in(
+    workspace: &Workspace,
+    goal: &str,
+    selectors: &[String],
+    context: &SelectorContext,
+) -> Result<Vec<(u32, String)>> {
+    if selectors.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Keyed by address, not label id: this both dedupes a label exported
+    // under more than one alias (a `seen` id set below keeps only its first
+    // matching address) and, crucially, makes the returned order
+    // address-sorted rather than allocation-order-sorted — label ids are
+    // assigned in evaluation order, which is not a stable or meaningful
+    // dispatch order, and target selection (`select_roots_in` above) is
+    // already address-sorted for the same reason.
+    let mut selected: BTreeMap<&str, u32> = BTreeMap::new();
+    let mut seen: BTreeSet<u32> = BTreeSet::new();
+    for selector in selectors {
+        let parsed = context.parse(selector)?;
+        let multi = parsed.selects_multiple();
+        let matches: Vec<(&String, &u32)> = workspace
+            .label_addresses
+            .iter()
+            .filter(|(address, _)| parsed.matches_address(address))
+            .collect();
+        for (address, &id) in matches {
+            let has_handler = workspace.label_handlers.contains(&(id, goal.to_owned()));
+            if !has_handler {
+                if multi {
+                    continue;
+                }
+                bail!("label '{address}' has no '{goal}' handler attached");
+            }
+            if seen.insert(id) {
+                selected.insert(address.as_str(), id);
+            }
+        }
+    }
+    Ok(selected
+        .into_iter()
+        .map(|(address, id)| (id, address.to_owned()))
+        .collect())
 }
 
 #[cfg(test)]
@@ -619,5 +686,167 @@ mod tests {
 
         // Prefixes match whole path components, not substrings.
         assert!(!context.parse("//lib/...").unwrap().matches(&nested));
+    }
+
+    // -----------------------------------------------------------------
+    // select_label_roots_in (imperative-model.md Phase 4)
+    // -----------------------------------------------------------------
+
+    fn label_workspace() -> Workspace {
+        let mut workspace = Workspace::default();
+        // id 1: //pkg:hasher, build+test handlers attached.
+        workspace
+            .label_addresses
+            .insert("//pkg:hasher".to_owned(), 1);
+        workspace.label_handlers.insert((1, "build".to_owned()));
+        workspace.label_handlers.insert((1, "test".to_owned()));
+        // id 2: //pkg/nested:docs, only a "fmt" handler (no "build").
+        workspace
+            .label_addresses
+            .insert("//pkg/nested:docs".to_owned(), 2);
+        workspace.label_handlers.insert((2, "fmt".to_owned()));
+        // id 3: //pkg:aliased and //pkg:also_aliased both name the same
+        // label, which has a "build" handler — additive aliasing.
+        workspace
+            .label_addresses
+            .insert("//pkg:aliased".to_owned(), 3);
+        workspace
+            .label_addresses
+            .insert("//pkg:also_aliased".to_owned(), 3);
+        workspace.label_handlers.insert((3, "build".to_owned()));
+        workspace
+    }
+
+    #[test]
+    fn select_label_roots_in_supports_exact_package_recursive_and_relative_selectors() {
+        let workspace = label_workspace();
+        let root_context = SelectorContext::root();
+
+        // Exact, absolute.
+        let exact = select_label_roots_in(
+            &workspace,
+            "build",
+            &["//pkg:hasher".to_owned()],
+            &root_context,
+        )
+        .unwrap();
+        assert_eq!(exact, vec![(1, "//pkg:hasher".to_owned())]);
+
+        // Package selector, non-recursive: matches ids 1 and 3 (both in
+        // package "pkg" with a "build" handler) but not id 2 (nested
+        // package, different address).
+        let mut package =
+            select_label_roots_in(&workspace, "build", &["pkg".to_owned()], &root_context).unwrap();
+        package.sort();
+        assert_eq!(
+            package,
+            vec![
+                (1, "//pkg:hasher".to_owned()),
+                (3, "//pkg:aliased".to_owned()),
+            ]
+        );
+
+        // Recursive selector picks up both packages, but only labels with a
+        // "build" handler — id 2 (fmt-only) is silently skipped.
+        let mut recursive =
+            select_label_roots_in(&workspace, "build", &["pkg/...".to_owned()], &root_context)
+                .unwrap();
+        recursive.sort();
+        assert_eq!(
+            recursive,
+            vec![
+                (1, "//pkg:hasher".to_owned()),
+                (3, "//pkg:aliased".to_owned()),
+            ]
+        );
+
+        // `//...` matches every label in the workspace with the requested
+        // handler.
+        let mut everything =
+            select_label_roots_in(&workspace, "build", &["//...".to_owned()], &root_context)
+                .unwrap();
+        everything.sort();
+        assert_eq!(
+            everything,
+            vec![
+                (1, "//pkg:hasher".to_owned()),
+                (3, "//pkg:aliased".to_owned()),
+            ]
+        );
+
+        // Relative selector, resolved from an invocation package.
+        let relative_context = SelectorContext {
+            package: "pkg".to_owned(),
+        };
+        let relative = select_label_roots_in(
+            &workspace,
+            "build",
+            &[":hasher".to_owned()],
+            &relative_context,
+        )
+        .unwrap();
+        assert_eq!(relative, vec![(1, "//pkg:hasher".to_owned())]);
+
+        // Either alias of id 3 resolves to the same label id.
+        let via_other_alias = select_label_roots_in(
+            &workspace,
+            "build",
+            &["//pkg:also_aliased".to_owned()],
+            &root_context,
+        )
+        .unwrap();
+        assert_eq!(via_other_alias, vec![(3, "//pkg:also_aliased".to_owned())]);
+    }
+
+    #[test]
+    fn select_label_roots_in_package_selector_silently_skips_handlerless_labels() {
+        let workspace = label_workspace();
+        let context = SelectorContext::root();
+
+        // id 2 exists (address matches) but has no "build" handler; a
+        // package/recursive selector must silently omit it rather than
+        // erroring, so a goal like `imp build //...` still succeeds when
+        // some labels in scope don't implement that goal.
+        let roots =
+            select_label_roots_in(&workspace, "build", &["pkg/nested".to_owned()], &context)
+                .unwrap();
+        assert!(roots.is_empty());
+
+        let recursive =
+            select_label_roots_in(&workspace, "build", &["//...".to_owned()], &context).unwrap();
+        assert!(!recursive.iter().any(|(id, _)| *id == 2));
+    }
+
+    #[test]
+    fn select_label_roots_in_exact_selector_errors_on_handlerless_goal() {
+        let workspace = label_workspace();
+        let context = SelectorContext::root();
+
+        // id 2's address matches exactly, but it has no "build" handler —
+        // this is a clear, distinct error from "no label matches".
+        let error = select_label_roots_in(
+            &workspace,
+            "build",
+            &["//pkg/nested:docs".to_owned()],
+            &context,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("//pkg/nested:docs"), "{error}");
+        assert!(error.contains("build"), "{error}");
+    }
+
+    #[test]
+    fn select_label_roots_in_returns_empty_for_address_that_matches_no_label() {
+        // An address that isn't a label at all (e.g. it's a target, or
+        // doesn't exist) is not this function's error to raise — that's
+        // select_roots_in's job; select_label_roots_in just contributes
+        // nothing.
+        let workspace = label_workspace();
+        let context = SelectorContext::root();
+        let roots =
+            select_label_roots_in(&workspace, "build", &["//not/a:label".to_owned()], &context)
+                .unwrap();
+        assert!(roots.is_empty());
     }
 }

@@ -18,8 +18,8 @@ use crate::loader::{
 };
 use crate::runtime::LiveWorkspace;
 use crate::selector::{
-    filter_changed_addresses_in, select_roots_for_addresses, select_roots_in, select_targets_in,
-    SelectorContext,
+    filter_changed_addresses_in, select_label_roots_in, select_roots_for_addresses,
+    select_roots_in, select_targets_in, SelectorContext,
 };
 #[cfg(test)]
 use crate::selector::{select_roots, select_targets};
@@ -199,6 +199,20 @@ pub struct Workspace {
     /// Every declared product name, for resolving user-typed CLI strings
     /// (`#product` overrides) against and for diagnostics.
     pub declared_product_names: BTreeMap<String, DeclaredProductName>,
+    /// Label address (primary or any alias) -> label id. Labels are a
+    /// strictly parallel, additive selectable-root mechanism to
+    /// Target/product() (imperative-model.md Phase 4): no kind, no schema,
+    /// no attrs. They share only the id/address table with targets —
+    /// `id_to_address` holds a label's primary (first-encountered) address,
+    /// and this map holds every address (including aliases) it was exported
+    /// under.
+    pub label_addresses: BTreeMap<String, u32>,
+    /// `(label id, goal name)` pairs with at least one handler attached.
+    /// Populated by `attach()`/`build()`/`test()`/... via `__host_attach`.
+    /// The live handler functions themselves stay JS-side (see
+    /// `_label_handlers` in imp_core.js); this is selection bookkeeping
+    /// only — "does this label have a handler for this goal at all".
+    pub label_handlers: BTreeSet<(u32, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -278,6 +292,19 @@ pub struct HostState {
     /// `(pending id, address)` pairs appended by `__host_register_dynamic_target`
     /// as a rule's expander mints new targets. Drained by `ensure_expanded`.
     dynamic_registrations: Vec<(u32, String)>,
+    /// Ids allocated via `__host_label` (`label()`), tracked separately from
+    /// `pending` since labels have no kind/attrs/deps/schema and never go
+    /// through `materialize_pending_target`.
+    labels: BTreeSet<u32>,
+    /// `(label id, goal name)` pairs with at least one attached handler; see
+    /// [`Workspace::label_handlers`]. Populated by `__host_attach`.
+    label_handlers: BTreeSet<(u32, String)>,
+    /// True once workspace module-graph evaluation has finished and the
+    /// label/attachment surfaces are sealed (imperative-model.md Phase 4,
+    /// "Lifecycle: sealing") — the same moment `id_to_address` is finalized,
+    /// before any goal dispatch. `__host_label`/`__host_attach` reject calls
+    /// once this is set.
+    labels_sealed: bool,
 }
 
 impl Default for HostState {
@@ -343,6 +370,9 @@ impl Default for HostState {
             declared_tool_names: BTreeMap::new(),
             next_tool_name_id: 0,
             dynamic_registrations: Vec::new(),
+            labels: BTreeSet::new(),
+            label_handlers: BTreeSet::new(),
+            labels_sealed: false,
         }
     }
 }
@@ -527,6 +557,8 @@ async fn create_live_runtime(
             goal_callbacks: hs.goal_callbacks.clone(),
             expanders: hs.expanders.clone(),
             declared_product_names: hs.declared_product_names.clone(),
+            label_addresses: BTreeMap::new(),
+            label_handlers: hs.label_handlers.clone(),
         }
     };
 
@@ -650,14 +682,21 @@ async fn load_workspace_with_rules_and_service(
     // ----- Resolve dep IDs to addresses -----
     let (workspace, id_to_address_final) = {
         let hs = state.lock().unwrap();
-        let mut id_to_address: BTreeMap<u32, String> = named_exports
-            .iter()
-            .map(|(addr, id)| (*id, addr.clone()))
-            .collect();
+        // First-address-wins: a label may legitimately be exported under
+        // more than one name (see the label loop below), and the primary
+        // address (used by __host_target_address / targetAddress() / error
+        // messages) is whichever export was encountered first, not last.
+        let mut id_to_address: BTreeMap<u32, String> = BTreeMap::new();
+        for (address, id) in &named_exports {
+            id_to_address.entry(*id).or_insert_with(|| address.clone());
+        }
 
         let mut targets = BTreeMap::new();
         let mut visiting = BTreeSet::new();
         for (address, id) in &named_exports {
+            if hs.labels.contains(id) {
+                continue; // labels materialize separately below
+            }
             materialize_pending_target(
                 &hs,
                 &mut id_to_address,
@@ -666,6 +705,32 @@ async fn load_workspace_with_rules_and_service(
                 *id,
                 address.clone(),
             )?;
+        }
+
+        // ----- Materialize labels (imperative-model.md Phase 4) -----
+        // Labels are opaque selectable roots with no kind/attrs/deps, so
+        // unlike targets they don't need materialize_pending_target's
+        // `pending` lookup — every named export whose id was allocated via
+        // `__host_label` becomes an address entry directly. A label may be
+        // exported under more than one name; duplicate-address collisions
+        // (two different ids claiming one address) are checked across both
+        // labels and targets, generalizing the existing dynamic-target hard
+        // error (see `__host_register_dynamic_target` below).
+        let mut label_addresses: BTreeMap<String, u32> = BTreeMap::new();
+        for (address, id) in &named_exports {
+            if !hs.labels.contains(id) {
+                continue;
+            }
+            if let Some(&existing_id) = label_addresses.get(address) {
+                if existing_id != *id {
+                    bail!("address '{address}' is already claimed by another label");
+                }
+                continue;
+            }
+            if targets.contains_key(address) {
+                bail!("address '{address}' is already claimed by a target");
+            }
+            label_addresses.insert(address.clone(), *id);
         }
 
         let owned_files = compute_owned_files(&root, &targets)?;
@@ -684,15 +749,21 @@ async fn load_workspace_with_rules_and_service(
             expanders: hs.expanders.clone(),
             goals: hs.goals.clone(),
             declared_product_names: hs.declared_product_names.clone(),
+            label_addresses,
+            label_handlers: hs.label_handlers.clone(),
         };
         (ws, id_to_address)
     };
 
-    // Store resolved addresses in HostState so __host_target_address can read them.
+    // Store resolved addresses in HostState so __host_target_address can read
+    // them, and seal labels/attachments (imperative-model.md Phase 4,
+    // "Lifecycle: sealing") — this is the same moment id_to_address itself
+    // finalizes, before any goal is dispatched.
     {
         let mut hs = state.lock().unwrap();
         hs.id_to_address = id_to_address_final;
         hs.owned_files = workspace.owned_files.clone();
+        hs.labels_sealed = true;
     }
 
     live.workspace = workspace;
@@ -794,7 +865,12 @@ fn collect_imp_exports(ns: &Object) -> Result<Vec<(String, u32)>> {
     for entry in ns.own_props::<String, Value>(Filter::default()) {
         let (key, val) = entry.map_err(|e| anyhow::anyhow!("{e}"))?;
         if let Some(obj) = val.as_object() {
-            if let Ok(true) = obj.get::<_, bool>("__imp") {
+            // Target handles carry `__imp`; label() handles (Phase 4,
+            // imperative-model.md) carry `__imp_label` instead — both are
+            // addressed by the same post-eval named-export scan.
+            let is_addressable = matches!(obj.get::<_, bool>("__imp"), Ok(true))
+                || matches!(obj.get::<_, bool>("__imp_label"), Ok(true));
+            if is_addressable {
                 if let Ok(id) = obj.get::<_, u32>("__id") {
                     result.push((key, id));
                 }
@@ -1461,6 +1537,70 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         },
     )?;
     globals.set("__host_target", host_target)?;
+
+    // ------------------------------------------------------------------
+    // __host_label() → u32 (imperative-model.md Phase 4). Allocates a
+    // selectable root with no kind/attrs/schema, sharing the id counter and
+    // id_to_address table with __host_target so the two mechanisms can never
+    // collide on an address. Rejected once labels are sealed (end of
+    // workspace module-graph evaluation, before goal dispatch).
+    // ------------------------------------------------------------------
+    let state_lbl = Arc::clone(&state);
+    let host_label = Function::new(ctx.clone(), move || -> rquickjs::Result<u32> {
+        let mut hs = state_lbl.lock().unwrap();
+        if hs.labels_sealed {
+            return Err(rquickjs::Error::new_loading_message(
+                "label",
+                "label() called after workspace evaluation completed; labels seal before goal \
+                 dispatch, the same moment target addresses do"
+                    .to_owned(),
+            ));
+        }
+        let id = hs.next_id;
+        hs.next_id += 1;
+        hs.labels.insert(id);
+        Ok(id)
+    })?;
+    globals.set("__host_label", host_label)?;
+
+    // ------------------------------------------------------------------
+    // __host_attach(labelId, goalName) — records that at least one handler
+    // is attached to (labelId, goalName), for select_label_roots_in's
+    // "labels with no handler are skipped/error" filtering. The live
+    // handler function stays JS-side (see `_label_handlers` in
+    // imp_core.js); attach()'s own same-fn-twice dedupe check also runs
+    // JS-side, before this is called, since it must compare live function
+    // identity rather than any host-visible id (a reusable factory like
+    // cargoPackage() legitimately creates a fresh closure per label
+    // instance at the same call site, which the call-site-derived identity
+    // `_stable_function_id` uses elsewhere would wrongly flag as a
+    // rebinding — see imperative-model.md Phase 4 and this function's call
+    // site in imp_core.js for the reasoning).
+    // ------------------------------------------------------------------
+    let state_att = Arc::clone(&state);
+    let host_attach = Function::new(
+        ctx.clone(),
+        move |label_id: u32, goal_name: String| -> rquickjs::Result<()> {
+            let mut hs = state_att.lock().unwrap();
+            if hs.labels_sealed {
+                return Err(rquickjs::Error::new_loading_message(
+                    "attach",
+                    "attach() called after workspace evaluation completed; labels seal before \
+                     goal dispatch, the same moment target addresses do"
+                        .to_owned(),
+                ));
+            }
+            if !hs.labels.contains(&label_id) {
+                return Err(rquickjs::Error::new_loading_message(
+                    "attach",
+                    format!("id {label_id} is not a label — attach() requires a label() handle"),
+                ));
+            }
+            hs.label_handlers.insert((label_id, goal_name));
+            Ok(())
+        },
+    )?;
+    globals.set("__host_attach", host_attach)?;
 
     // __host_validate_target_attrs(kind, schemaJson, attrsJson) → validated
     // attrs JSON. Stateless: Target subclass `static schema` lives entirely
@@ -4850,30 +4990,78 @@ pub async fn execute_goal_live_selection(
     ensure_expanded(live, &seed_addresses, Some(goal)).await?;
 
     let dynamic_snapshot: BTreeMap<String, Target> = live.dynamic_targets.lock().unwrap().clone();
+
+    // Label selection (imperative-model.md Phase 4) runs strictly in
+    // parallel with target selection above: labels share only the address
+    // table with targets, not the (kind, product) table, so a selector that
+    // names a label-only address (no matching target at all) must not be
+    // treated as an error by the target-selection fallback below. Changed-
+    // address selection (`--changed-since`) doesn't have a label side in
+    // this prototype — labels aren't tracked by change detection yet.
+    let label_roots: Vec<(u32, String)> = match &selection {
+        GoalSelection::Selectors(selectors) => {
+            select_label_roots_in(&live.workspace, goal, selectors, selector_context)?
+        }
+        GoalSelection::ChangedAddresses { .. } => Vec::new(),
+    };
+
     let mut roots = match &selection {
-        GoalSelection::Selectors(selectors) => match select_roots_in(
-            &live.workspace,
-            &dynamic_snapshot,
-            goal_def,
-            selectors,
-            selector_context,
-        ) {
-            Ok(roots) => roots,
-            Err(error) if goal == "run" => {
-                let kinds = live
-                    .workspace
-                    .products
-                    .keys()
-                    .filter(|(_, product)| product == "run")
-                    .map(|(kind, _)| kind.as_str())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(anyhow::anyhow!("{error}; runnable target kinds: {kinds}"));
+        GoalSelection::Selectors(selectors) => {
+            // Resolve target selection per-selector rather than for the
+            // whole list at once: a selector that names a label-only
+            // address (no matching target at all, e.g. a package selector
+            // whose only members are labels) is expected to fail target
+            // selection and is tolerated below — but only for *that*
+            // selector. A mixed invocation like `imp build
+            // //some/target:ok //pkg:label_only` must still select and
+            // dispatch `//some/target:ok`'s target work; folding every
+            // selector's target resolution into one call and swallowing
+            // the whole result on any error would silently drop it.
+            let mut selected: BTreeMap<&str, (&Target, String)> = BTreeMap::new();
+            for selector in selectors.iter() {
+                let single = std::slice::from_ref(selector);
+                match select_roots_in(
+                    &live.workspace,
+                    &dynamic_snapshot,
+                    goal_def,
+                    single,
+                    selector_context,
+                ) {
+                    Ok(found) => {
+                        for (target, product) in found {
+                            selected.insert(target.address.as_str(), (target, product));
+                        }
+                    }
+                    Err(error) => {
+                        let matched_a_label = !select_label_roots_in(
+                            &live.workspace,
+                            goal,
+                            single,
+                            selector_context,
+                        )?
+                        .is_empty();
+                        if matched_a_label {
+                            continue;
+                        }
+                        if goal == "run" {
+                            let kinds = live
+                                .workspace
+                                .products
+                                .keys()
+                                .filter(|(_, product)| product == "run")
+                                .map(|(kind, _)| kind.as_str())
+                                .collect::<BTreeSet<_>>()
+                                .into_iter()
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            return Err(anyhow::anyhow!("{error}; runnable target kinds: {kinds}"));
+                        }
+                        return Err(error);
+                    }
+                }
             }
-            Err(error) => return Err(error),
-        },
+            selected.into_values().collect()
+        }
         GoalSelection::ChangedAddresses { selectors, .. } => {
             // A selection-independent goal owns its callback, so VCS filtering
             // must not suppress its selector-less invocation.
@@ -5072,6 +5260,54 @@ pub async fn execute_goal_live_selection(
                     .map_err(|e| {
                         rquickjs::Error::new_loading_message("execute", format!("{label}: {e}"))
                     })?;
+            }
+
+            // Label handler dispatch (imperative-model.md Phase 4) runs
+            // after every target-based call above has fully completed —
+            // "target-based calls first, then label-based calls" is the
+            // simplest correct coexistence rule for a goal that selects
+            // both, chosen because it's deterministic and needs no cross-
+            // system ordering knob; see the doc comment on
+            // `execute_goal_live_selection`. Skipped when a goal callback
+            // owns the invocation, mirroring native product dispatch above.
+            if !label_roots.is_empty() {
+                let dispatch_label: Function =
+                    ctx.globals().get("__imp_dispatch_label_handlers")?;
+                let mut label_promises = Vec::with_capacity(label_roots.len());
+                for (label_id, address) in &label_roots {
+                    let call_label = format!("{address}#{goal_owned}");
+                    let result_value: Value = dispatch_label
+                        .call((*label_id, goal_owned.as_str(), address.as_str()))
+                        .catch(&ctx)
+                        .map_err(|e| {
+                            rquickjs::Error::new_loading_message(
+                                "execute",
+                                format!("{call_label}: {e}"),
+                            )
+                        })?;
+                    let promise: MaybePromise = promise_resolve
+                        .call((result_value,))
+                        .catch(&ctx)
+                        .map_err(|e| {
+                        rquickjs::Error::new_loading_message(
+                            "execute",
+                            format!("{call_label}: {e}"),
+                        )
+                    })?;
+                    label_promises.push((call_label, promise));
+                }
+                for (call_label, promise) in label_promises {
+                    promise
+                        .into_future::<Value>()
+                        .await
+                        .catch(&ctx)
+                        .map_err(|e| {
+                            rquickjs::Error::new_loading_message(
+                                "execute",
+                                format!("{call_label}: {e}"),
+                            )
+                        })?;
+                }
             }
             Ok(())
         })
@@ -10810,5 +11046,416 @@ add_executable(cmake_app main.c)
         assert!(content.contains(r#"import { spall } from "//library/spall";"#));
         assert!(content.contains("deps: [spall]"));
         assert!(!content.contains("imp generated"));
+    }
+
+    // -----------------------------------------------------------------
+    // label() / attach() — exported labels and lazy goal handlers
+    // (imperative-model.md Phase 4). Handler invocation is observed through
+    // a `globalThis.__imp_test_marks` order log written by the handler
+    // itself (pushed as "key"), read back after dispatch via `read_test_marks`
+    // — this avoids depending on run()'s sandboxed process execution (already
+    // covered by other tests) to prove dispatch reached the right handler(s)
+    // in the right order.
+    // -----------------------------------------------------------------
+
+    async fn read_test_marks(live: &LiveWorkspace) -> Vec<String> {
+        live.ctx
+            .async_with(async |ctx| -> rquickjs::Result<Vec<String>> {
+                let json: String =
+                    ctx.eval("JSON.stringify(globalThis.__imp_test_marks || [])")?;
+                Ok(serde_json::from_str(&json).unwrap())
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn clear_test_marks(live: &LiveWorkspace) {
+        live.ctx
+            .async_with(async |ctx| -> rquickjs::Result<()> {
+                ctx.eval::<(), _>("globalThis.__imp_test_marks = []")
+            })
+            .await
+            .unwrap();
+    }
+
+    const LABEL_RULES_JS: &str = r#"
+import { label, build, test, fmt } from "imp:core";
+
+function mark(key) {
+    globalThis.__imp_test_marks = globalThis.__imp_test_marks || [];
+    globalThis.__imp_test_marks.push(key);
+}
+
+// One-off style: a label with build+test handlers, data-dependent branching,
+// mirroring imperative-model.md's "one-off C or workflow build" example.
+export function makeHasher(opts = {}) {
+    const h = label({ data: opts });
+    build(h, async function buildHasher(ctx) {
+        mark("build:" + (h.data.variant || "default") + ":" + ctx.selector);
+    });
+    test(h, async function testHasher(ctx) {
+        mark("test:" + ctx.selector);
+    });
+    return h;
+}
+
+// Factory style: build(fn) one-arg shorthand, mirroring cargoPackage()'s
+// `build(crate, ctx => ...)` pattern but via the shorthand instead.
+export function makeGenerated() {
+    return build(async function generatedBuild(ctx) {
+        mark("generated-build:" + ctx.selector);
+    });
+}
+
+// A second, independent handler attached to an existing label's "build" —
+// mirrors a separately-shipped fmt rule attaching to a language rule's
+// label without either module importing the other in a specific order.
+export function attachSecondBuildHandler(target) {
+    build(target, async function secondBuildHandler(ctx) {
+        mark("second-build:" + ctx.selector);
+    });
+}
+"#;
+
+    fn label_fixture() -> TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "import \"//rules/labeled\";\n").unwrap();
+        std::fs::create_dir_all(p.join("rules")).unwrap();
+        std::fs::write(p.join("rules/labeled.js"), LABEL_RULES_JS).unwrap();
+        std::fs::create_dir_all(p.join("pkg")).unwrap();
+        write_file(
+            &p.join("pkg").join(BUILD_FILE),
+            r#"
+import { makeHasher } from "//rules/labeled";
+
+export const hasher = makeHasher({ variant: "release" });
+"#,
+        );
+        root
+    }
+
+    #[tokio::test]
+    async fn label_dispatches_only_the_selected_goals_handler() {
+        let root = label_fixture();
+        let p = root.path();
+        let workspace = load_workspace(p).await.unwrap();
+
+        run_goal_live(&workspace, p, "build", &["//pkg:hasher".to_owned()])
+            .await
+            .unwrap();
+        let marks = read_test_marks(&workspace).await;
+        assert_eq!(marks, vec!["build:release://pkg:hasher".to_owned()]);
+
+        // The "test" handler must not have run as a side effect of "build" —
+        // unselected handlers perform no reads/effects.
+        assert!(!marks.iter().any(|m| m.starts_with("test:")));
+
+        clear_test_marks(&workspace).await;
+        reset_js_memo_state(&workspace).await;
+        run_goal_live(&workspace, p, "test", &["//pkg:hasher".to_owned()])
+            .await
+            .unwrap();
+        let marks = read_test_marks(&workspace).await;
+        assert_eq!(marks, vec!["test://pkg:hasher".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn label_one_arg_shorthand_creates_and_selects_a_label() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "import \"//rules/labeled\";\n").unwrap();
+        std::fs::create_dir_all(p.join("rules")).unwrap();
+        std::fs::write(p.join("rules/labeled.js"), LABEL_RULES_JS).unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { makeGenerated } from "//rules/labeled";
+
+export const generated = makeGenerated();
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        run_goal_live(&workspace, p, "build", &["//...".to_owned()])
+            .await
+            .unwrap();
+        let marks = read_test_marks(&workspace).await;
+        assert_eq!(marks, vec!["generated-build://:generated".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn label_runs_every_additive_handler_attached_to_one_goal() {
+        let root = label_fixture();
+        let p = root.path();
+        write_file(
+            &p.join("pkg").join(BUILD_FILE),
+            r#"
+import { makeHasher, attachSecondBuildHandler } from "//rules/labeled";
+
+export const hasher = makeHasher({ variant: "release" });
+attachSecondBuildHandler(hasher);
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        run_goal_live(&workspace, p, "build", &["//pkg:hasher".to_owned()])
+            .await
+            .unwrap();
+        let mut marks = read_test_marks(&workspace).await;
+        marks.sort();
+        assert_eq!(
+            marks,
+            vec![
+                "build:release://pkg:hasher".to_owned(),
+                "second-build://pkg:hasher".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn label_attaching_the_same_handler_fn_twice_is_a_hard_error() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { label, build } from "imp:core";
+
+const h = label();
+async function shared(ctx) {}
+build(h, shared);
+build(h, shared);
+export { h };
+"#,
+        );
+
+        let error = format!("{:?}", load_workspace(p).await.unwrap_err());
+        assert!(error.contains("already attached"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn label_addresses_are_stable_across_separate_runtime_creations() {
+        let root = label_fixture();
+        let p = root.path();
+
+        let workspace_a = load_workspace(p).await.unwrap();
+        run_goal_live(&workspace_a, p, "build", &["//pkg:hasher".to_owned()])
+            .await
+            .unwrap();
+        let marks_a = read_test_marks(&workspace_a).await;
+
+        // A fresh runtime built from the same source tree — simulating a
+        // process restart — must resolve the same address to a working
+        // label with the same attached handlers, even though the
+        // underlying numeric id is freshly (and independently) allocated.
+        let workspace_b = load_workspace(p).await.unwrap();
+        run_goal_live(&workspace_b, p, "build", &["//pkg:hasher".to_owned()])
+            .await
+            .unwrap();
+        let marks_b = read_test_marks(&workspace_b).await;
+
+        assert_eq!(marks_a, marks_b);
+        assert_eq!(marks_a, vec!["build:release://pkg:hasher".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn label_and_target_goals_coexist_with_targets_dispatched_first() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(
+            p.join(WORKSPACE_FILE),
+            "import \"//rules/asset\";\nimport \"//rules/labeled\";\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(p.join("rules")).unwrap();
+        std::fs::write(p.join("rules").join("labeled.js"), LABEL_RULES_JS).unwrap();
+        std::fs::write(
+            p.join("rules").join("asset.js"),
+            r#"
+import { target, glob, memo, product, BUILD, targetKind, toolName } from "imp:core";
+const K_asset = targetKind("asset");
+
+export const sources = memo(async function sources(handle) {
+    return glob({ root: ".", include: handle.attrs.sources || [] });
+});
+
+export const bundle = product(K_asset, BUILD, toolName("asset-tool"), async function bundle(handle) {
+    await sources(handle);
+    globalThis.__imp_test_marks = globalThis.__imp_test_marks || [];
+    globalThis.__imp_test_marks.push("target-build:" + handle.__id);
+});
+
+export function asset({ srcs }) {
+    return target({ kind: "asset", attrs: { sources: srcs } });
+}
+"#,
+        )
+        .unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { asset } from "//rules/asset";
+import { makeGenerated } from "//rules/labeled";
+
+export const ui = asset({ srcs: ["**/*.png"] });
+export const generated = makeGenerated();
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        run_goal_live(&workspace, p, "build", &["//...".to_owned()])
+            .await
+            .unwrap();
+        let marks = read_test_marks(&workspace).await;
+        assert_eq!(marks.len(), 2, "{marks:?}");
+        let target_index = marks.iter().position(|m| m.starts_with("target-build:"));
+        let label_index = marks.iter().position(|m| m.starts_with("generated-build:"));
+        assert!(target_index.is_some() && label_index.is_some(), "{marks:?}");
+        // Documented coexistence order: every target-based call dispatches
+        // (and completes) before any label-based call — see the doc
+        // comment in execute_goal_live_selection.
+        assert!(target_index < label_index, "{marks:?}");
+    }
+
+    /// Regression test for a Copilot review finding on PR #80: selecting an
+    /// explicit target address *and* an explicit label-only address in one
+    /// invocation (`imp build //some/target:ok //pkg:label_only`) must
+    /// dispatch both, not silently drop the target's work. The original
+    /// implementation resolved all selectors through a single
+    /// `select_roots_in` call and, on any error (e.g. "no target matches
+    /// selector '//:generated'", since a label address has no target),
+    /// discarded every already-resolved target root from that same call —
+    /// not just the one selector that legitimately failed target
+    /// resolution. `execute_goal_live_selection` now resolves target
+    /// selection per-selector so a label-only selector's expected target-
+    /// selection failure can't erase a sibling selector's real target match.
+    #[tokio::test]
+    async fn mixed_target_and_label_only_selectors_both_dispatch() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(
+            p.join(WORKSPACE_FILE),
+            "import \"//rules/asset\";\nimport \"//rules/labeled\";\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(p.join("rules")).unwrap();
+        std::fs::write(p.join("rules").join("labeled.js"), LABEL_RULES_JS).unwrap();
+        std::fs::write(
+            p.join("rules").join("asset.js"),
+            r#"
+import { target, glob, memo, product, BUILD, targetKind, toolName } from "imp:core";
+const K_asset = targetKind("asset");
+
+export const sources = memo(async function sources(handle) {
+    return glob({ root: ".", include: handle.attrs.sources || [] });
+});
+
+export const bundle = product(K_asset, BUILD, toolName("asset-tool"), async function bundle(handle) {
+    await sources(handle);
+    globalThis.__imp_test_marks = globalThis.__imp_test_marks || [];
+    globalThis.__imp_test_marks.push("target-build:" + handle.__id);
+});
+
+export function asset({ srcs }) {
+    return target({ kind: "asset", attrs: { sources: srcs } });
+}
+"#,
+        )
+        .unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { asset } from "//rules/asset";
+import { makeGenerated } from "//rules/labeled";
+
+export const ui = asset({ srcs: ["**/*.png"] });
+export const generated = makeGenerated();
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        // Explicit target selector first, explicit label-only selector
+        // second — the ordering that used to trip the bug, since
+        // select_roots_in bailed on the *second* selector after already
+        // accumulating (and then discarding) the first's match.
+        run_goal_live(
+            &workspace,
+            p,
+            "build",
+            &["//:ui".to_owned(), "//:generated".to_owned()],
+        )
+        .await
+        .unwrap();
+        let marks = read_test_marks(&workspace).await;
+        assert!(
+            marks.iter().any(|m| m.starts_with("target-build:")),
+            "target selector's work must not be dropped: {marks:?}"
+        );
+        assert!(
+            marks.iter().any(|m| m.starts_with("generated-build:")),
+            "{marks:?}"
+        );
+        assert_eq!(marks.len(), 2, "{marks:?}");
+    }
+
+    /// Mirrors imperative-model.md's "Worked example: one-off C or workflow
+    /// build" verbatim: a single BUILD.js defines and attaches everything
+    /// inline (`const hasher = label(); build(hasher, ...); test(hasher,
+    /// ...); export { hasher };`) with no separate factory/rules module —
+    /// the on-disk-fixture counterpart to `label_fixture()`'s factory-style
+    /// `makeHasher()` above. This repo's Rust-level tests have no on-disk
+    /// fixture-workspace directory convention (every existing test writes
+    /// its BUILD.js/rule source into a fresh tempdir at test time, e.g.
+    /// `fixture()` above); this test follows that same convention.
+    #[tokio::test]
+    async fn label_one_off_inline_build_and_test_handlers_no_factory() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
+        write_file(
+            &p.join("tools/hasher").join(BUILD_FILE),
+            r#"
+import { label, build, test } from "imp:core";
+
+function mark(key) {
+    globalThis.__imp_test_marks = globalThis.__imp_test_marks || [];
+    globalThis.__imp_test_marks.push(key);
+}
+
+const hasher = label();
+
+build(hasher, async function buildHasher(ctx) {
+    mark("build:" + ctx.selector);
+});
+
+test(hasher, async function testHasher(ctx) {
+    mark("test:" + ctx.selector);
+});
+
+export { hasher };
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        run_goal_live(
+            &workspace,
+            p,
+            "build",
+            &["//tools/hasher:hasher".to_owned()],
+        )
+        .await
+        .unwrap();
+        let marks = read_test_marks(&workspace).await;
+        assert_eq!(marks, vec!["build://tools/hasher:hasher".to_owned()]);
+
+        clear_test_marks(&workspace).await;
+        reset_js_memo_state(&workspace).await;
+        run_goal_live(&workspace, p, "test", &["//tools/hasher:hasher".to_owned()])
+            .await
+            .unwrap();
+        let marks = read_test_marks(&workspace).await;
+        assert_eq!(marks, vec!["test://tools/hasher:hasher".to_owned()]);
     }
 }

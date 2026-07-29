@@ -2310,6 +2310,172 @@ export function product(kindClass, nameToken, toolToken, fn, opts) {
 	return memoized;
 }
 
+// ---------------------------------------------------------------------------
+// label() / attach() — exported labels and lazy goal handlers (Phase 4,
+// imperative-model.md). Strictly additive/parallel to Target/product()/
+// goal() above: a label has no kind, no schema, no attrs, and is never a
+// dependency edge. It shares only the id→address table with targets (the
+// same post-eval named-export scan that resolves `new Target()` addresses
+// resolves label() addresses) — not the (kind, product, tool) table.
+// ---------------------------------------------------------------------------
+
+/**
+ * Allocate a selectable root with no kind, schema, or attrs.
+ *
+ * @param {object} [opts]
+ * @param {*} [opts.data] Opaque data a reusable factory wants to close over
+ *   (e.g. `cargoPackage()` stashing its derived cargo options for its own
+ *   handlers to read back via `label.data`). Nothing here is schema-checked
+ *   or read by the host.
+ * @returns {object} A label handle. Give it a workspace address by exporting
+ *   it (`export const foo = label()`), the same way `new Target()` gets one.
+ *   A label may be exported under more than one name — every export becomes
+ *   a valid address for the same underlying label (additive aliasing).
+ */
+export function label(opts) {
+	const id = __host_label();
+	const handle = {
+		__imp_label: true,
+		__id: id,
+		data: opts && opts.data !== undefined ? opts.data : undefined,
+	};
+	if (globalThis.__imp_handle_by_id)
+		globalThis.__imp_handle_by_id.set(id, handle);
+	return handle;
+}
+
+// "labelId::goalName" -> Set<fn>, used only to detect the exact same
+// handler function attached twice to one (label, goal) pair. Deliberately
+// keyed on live function-reference identity rather than call-site-derived
+// identity (`_stable_function_id`): a reusable factory like `cargoPackage()`
+// legitimately calls `build(crate, ctx => ...)` once per label instance,
+// creating a fresh closure at the *same* call site every time, which
+// `_stable_function_id`'s "one function per call site" rule (see below)
+// would wrongly flag as a rebinding. Two different handlers attached to one
+// (label, goal) pair — the common case for e.g. a language rule's `build`
+// handler plus a separately-shipped fmt rule's `fmt` handler — is not a
+// conflict either way; both simply run.
+const _label_handler_fns = new Map();
+// "labelId::goalName" -> fn[] in attachment order; the live handler
+// functions invoked at dispatch time. The host (__host_attach) only tracks
+// that *some* handler exists per (label, goal) pair, for selection — see
+// _dispatch_label_handlers below and select_label_roots_in in selector.rs.
+const _label_handlers = new Map();
+
+function _label_key(label, goalName, caller) {
+	if (!label || label.__imp_label !== true) {
+		throw new Error(`${caller} expects a label() handle`);
+	}
+	return `${label.__id}::${goalName}`;
+}
+
+/**
+ * Attach a lazy handler to a label for a goal — the core attachment
+ * primitive. `build`, `test`, `fmt`, `lint`, `runGoal`, `packageGoal` are
+ * thin per-goal wrappers over this (kept as distinct call sites, like
+ * `product()`'s callers, rather than one arity-overloaded function).
+ * Additive: multiple handlers may attach to the same (label, goal) pair —
+ * e.g. a language rule's `build` handler and a separately-shipped fmt rule's
+ * `fmt` handler attaching to the same label from different modules, with no
+ * import-order requirement. Dispatch runs every attached handler.
+ *
+ * @param {object} label A label() handle.
+ * @param {string} goalName
+ * @param {(ctx: {flags: Record<string, boolean>, selector: string, args: string[], mode: Record<string, string>}) => any} fn
+ *   Invoked only when a selected goal dispatches this (label, goal) pair —
+ *   never during definition/evaluation.
+ * @param {object} [opts] Reserved; no options are read yet.
+ * @returns {object} The label, so callers like `build(label, fn)` can chain.
+ */
+export function attach(label, goalName, fn, opts) {
+	if (typeof goalName !== "string" || goalName === "") {
+		throw new Error("attach(label, goalName, fn) requires a non-empty goal name");
+	}
+	if (typeof fn !== "function") {
+		throw new Error("attach(label, goalName, fn) expects fn to be a function");
+	}
+	const key = _label_key(label, goalName, "attach(label, goalName, fn)");
+	let fns = _label_handler_fns.get(key);
+	if (fns === undefined) {
+		fns = new Set();
+		_label_handler_fns.set(key, fns);
+	}
+	if (fns.has(fn)) {
+		throw new Error(
+			`attach(): this handler function is already attached to label id ${label.__id} for goal '${goalName}' — ` +
+				"attaching the same function twice is almost always a double-import; " +
+				"two different functions attached to the same (label, goal) is fine and both run",
+		);
+	}
+	fns.add(fn);
+	let handlers = _label_handlers.get(key);
+	if (handlers === undefined) {
+		handlers = [];
+		_label_handlers.set(key, handlers);
+	}
+	handlers.push(fn);
+	__host_attach(label.__id, goalName);
+	return label;
+}
+
+function _goal_sugar(goalName) {
+	return function (labelOrFn, fn, opts) {
+		if (typeof labelOrFn === "function") {
+			// One-arg shorthand: build(fn) === build(label(), fn), returns the
+			// label it created.
+			const created = label();
+			attach(created, goalName, labelOrFn);
+			return created;
+		}
+		attach(labelOrFn, goalName, fn, opts);
+		return labelOrFn;
+	};
+}
+
+/** `attach(label, "build", fn)`; `build(fn)` is shorthand for `build(label(), fn)`. */
+export const build = _goal_sugar("build");
+/** `attach(label, "test", fn)`; `test(fn)` is shorthand for `test(label(), fn)`. */
+export const test = _goal_sugar("test");
+/** `attach(label, "fmt", fn)`; `fmt(fn)` is shorthand for `fmt(label(), fn)`. */
+export const fmt = _goal_sugar("fmt");
+/** `attach(label, "lint", fn)`; `lint(fn)` is shorthand for `lint(label(), fn)`. */
+export const lint = _goal_sugar("lint");
+// Named `runGoal`, not `run`: `run()` is already exported above as the core
+// action-execution primitive (`run({argv, inputs, outputs, ...})`), used
+// throughout every rule module including inside label handlers themselves —
+// reusing the name here would silently shadow it. `package` is also
+// unavailable (reserved word in strict-mode/ES modules), hence
+// `packageGoal`; `runGoal` follows the same naming pattern for the same
+// kind of unavailability.
+/** `attach(label, "run", fn)`; `runGoal(fn)` is shorthand for `runGoal(label(), fn)`. */
+export const runGoal = _goal_sugar("run");
+/** `attach(label, "package", fn)`; `packageGoal(fn)` is shorthand for `packageGoal(label(), fn)`. */
+export const packageGoal = _goal_sugar("package");
+
+// Host entry point for execute_goal_live_selection (spike.rs) to invoke a
+// selected (label, goal) pair's attached handlers. Not exported — reached
+// only via globalThis, mirroring how resetMemoState/getMemoTrace are wired
+// up for the Rust side at the bottom of this file. Builds the same ctx
+// shape documented on attach() above, reusing the goal's already-resolved
+// flags/args (goalFlags()/runArgs(), which read the same live-workspace
+// state a product() function reads today) and the resolved mode-axis
+// overlay (configuration("imp.mode", {}) — the same namespace
+// resolve_mode_axes() writes before any target or label runs; see
+// mode-axis-registry.md). Runs every attached handler concurrently and
+// waits for all of them, mirroring how several tools implementing one
+// product are dispatched today.
+function _dispatch_label_handlers(labelId, goalName, selectorAddress) {
+	const handlers = _label_handlers.get(`${labelId}::${goalName}`) || [];
+	const ctx = {
+		flags: goalFlags(),
+		selector: selectorAddress,
+		args: runArgs(),
+		mode: configuration("imp.mode", {}),
+	};
+	return Promise.all(handlers.map((fn) => fn(ctx)));
+}
+globalThis.__imp_dispatch_label_handlers = _dispatch_label_handlers;
+
 /**
  * Register a lazy target expander for a target kind: a rule can run a
  * discovery step (e.g. `cmake configure`) and mint additional, separately
