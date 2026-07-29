@@ -14,6 +14,9 @@ import { defaultOdinfmtToolchain } from "//rules/odin/odinfmt/toolchain";
 import { defaultRuffToolchain } from "//rules/python/ruff_toolchain";
 import { defaultPythonToolchain } from "//rules/python";
 import { rustToolchain } from "//rules/rust";
+import { clippy as cargoLabelClippy } from "//rules/rust/clippy/label_pilot";
+import { cargoPackage as cargoLabelPackage } from "//rules/rust/label_pilot";
+import { rustfmt as cargoLabelRustfmt } from "//rules/rust/rustfmt/label_pilot";
 import "//rules/rust/generate_build";
 import { defaultKacheToolchain } from "//rules/rust/kache/toolchain";
 import "//rules/workflows/build_workflow";
@@ -33,7 +36,10 @@ import "//rules/imp/test";
 export const biome = defaultBiomeToolchain();
 export const gcc = defaultGccToolchain();
 export const mold = defaultMoldToolchain();
-export const odin = odinToolchain("dev-2026-03", { default: true, linker: mold });
+export const odin = odinToolchain("dev-2026-03", {
+	default: true,
+	linker: mold,
+});
 export const odinfmt = defaultOdinfmtToolchain();
 export const ruff = defaultRuffToolchain();
 export const python = defaultPythonToolchain();
@@ -45,7 +51,16 @@ export const kache = defaultKacheToolchain();
 export const kacheConfig = { cacheExecutables: true };
 // Rust binaries link via cargo/rustc, which shell out to a C link driver;
 // the default is gcc, while mold and kache remain explicit opt-ins.
-export const rust = rustToolchain("1.93.0", { default: true, linker: mold, kache });
+export const rust = rustToolchain("1.93.0", {
+	default: true,
+	linker: mold,
+	kache,
+});
+
+// Issue #76 pilot: downstream integrations attach to the conventional label
+// factory independently of where its BUILD declarations are evaluated.
+cargoLabelPackage.attach(cargoLabelRustfmt);
+cargoLabelPackage.attach(cargoLabelClippy);
 
 // This repo dogfoods generate-build for all three rules groups; a fresh
 // workspace defaults to none (see each package's own `buildGenerate` config

@@ -1,7 +1,5 @@
-import { cargoPackage } from "//rules/rust";
+import { cargoPackage } from "//rules/rust/label_pilot";
 import { jsSources } from "//rules/js";
 
-export const hello = cargoPackage({
-	bin: "hello",
-});
+export const hello = cargoPackage();
 export const js = jsSources({});

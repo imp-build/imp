@@ -4981,22 +4981,49 @@ pub async fn execute_goal_live_selection(
     };
     let seed_addresses: Vec<String> = match &selection {
         GoalSelection::Selectors(selectors) => {
-            match select_roots_in(
-                &live.workspace,
-                &empty_dynamic,
-                goal_def,
-                selectors,
-                selector_context,
-            ) {
-                Ok(roots) => roots.iter().map(|(t, _)| t.address.clone()).collect(),
-                Err(_) => live
-                    .workspace
-                    .targets
-                    .values()
-                    .filter(|t| live.workspace.expanders.contains_key(&t.kind))
-                    .map(|t| t.address.clone())
-                    .collect(),
+            // Resolve independently so a label-only selector does not make
+            // target selection fail wholesale and trigger every target
+            // expander in the workspace. A genuinely unresolved selector
+            // may still name a dynamic target, so preserve the broad
+            // expansion fallback for that selector.
+            let mut seeds = BTreeSet::new();
+            let mut needs_dynamic_fallback = false;
+            for selector in selectors.iter() {
+                let single = std::slice::from_ref(selector);
+                match select_roots_in(
+                    &live.workspace,
+                    &empty_dynamic,
+                    goal_def,
+                    single,
+                    selector_context,
+                ) {
+                    Ok(roots) => {
+                        seeds.extend(roots.iter().map(|(target, _)| target.address.clone()));
+                    }
+                    Err(_) => {
+                        let matched_a_label = !select_label_roots_in(
+                            &live.workspace,
+                            goal,
+                            single,
+                            selector_context,
+                        )?
+                        .is_empty();
+                        if !matched_a_label {
+                            needs_dynamic_fallback = true;
+                        }
+                    }
+                }
             }
+            if needs_dynamic_fallback {
+                seeds.extend(
+                    live.workspace
+                        .targets
+                        .values()
+                        .filter(|target| live.workspace.expanders.contains_key(&target.kind))
+                        .map(|target| target.address.clone()),
+                );
+            }
+            seeds.into_iter().collect()
         }
         // Changed addresses are statically known — no fallback needed.
         GoalSelection::ChangedAddresses { .. } => changed_addresses
@@ -5157,6 +5184,13 @@ pub async fn execute_goal_live_selection(
     }
 
     let goal_callback_name = live.workspace.goal_callbacks.get(goal).cloned();
+    // Goal callbacks belong to the legacy target/product side of coexistence.
+    // A label-only selection must not invoke one with an empty target
+    // selection (and produce e.g. a misleading "0/0 targets" summary), while
+    // selectorless callbacks still retain their selection-independent
+    // behavior. Label handlers dispatch after the callback below.
+    let run_goal_callback =
+        goal_callback_name.is_some() && (!roots.is_empty() || goal_def.selectorless);
 
     // Resolve owned (js_id, product fn name, label) triples so nothing borrows
     // the workspace across the JS await below. Only needed when there's no
@@ -5217,7 +5251,10 @@ pub async fn execute_goal_live_selection(
             let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
             let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
 
-            if let Some(callback_fn_name) = goal_callback_name {
+            if run_goal_callback {
+                let callback_fn_name = goal_callback_name
+                    .as_ref()
+                    .expect("run_goal_callback requires a registered callback");
                 let json_parse: Function = ctx.eval("(s) => JSON.parse(s)")?;
                 let selection_value: Value = json_parse.call((selection_json.as_str(),))?;
                 let callback_fn: Function = ctx.globals().get(callback_fn_name.as_str())?;
@@ -5249,10 +5286,6 @@ pub async fn execute_goal_live_selection(
                             format!("goal '{goal_owned}' callback: {e}"),
                         )
                     })?;
-                // The callback owns the goal entirely on success — the native
-                // per-target dispatch loop below never runs for a goal with a
-                // registered callback (see doc comment above).
-                return Ok(());
             }
 
             let mut promises = Vec::with_capacity(calls.len());
@@ -5287,8 +5320,9 @@ pub async fn execute_goal_live_selection(
             // simplest correct coexistence rule for a goal that selects
             // both, chosen because it's deterministic and needs no cross-
             // system ordering knob; see the doc comment on
-            // `execute_goal_live_selection`. Skipped when a goal callback
-            // owns the invocation, mirroring native product dispatch above.
+            // `execute_goal_live_selection`. A callback owns only the legacy
+            // target side of dispatch; selected label handlers remain
+            // additive and run after it completes.
             if !label_roots.is_empty() {
                 let dispatch_label: Function =
                     ctx.globals().get("__imp_dispatch_label_handlers")?;
@@ -11529,6 +11563,168 @@ export { hasher };
             .unwrap();
         let marks = read_test_marks(&workspace).await;
         assert_eq!(marks, vec!["test://tools/hasher:hasher".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn callback_goal_skips_empty_target_callback_for_label_only_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { attach, goal, label } from "imp:core";
+
+function mark(key) {
+    globalThis.__imp_test_marks = globalThis.__imp_test_marks || [];
+    globalThis.__imp_test_marks.push(key);
+}
+
+goal("audit", async function auditGoal(selection) {
+    mark("callback:" + selection.length);
+});
+
+const checked = label();
+attach(checked, "audit", async function auditLabel(ctx) {
+    mark("label:" + ctx.selector);
+});
+export { checked };
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        run_goal_live(&workspace, p, "audit", &["//:checked".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(
+            read_test_marks(&workspace).await,
+            vec!["label://:checked".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_goal_runs_target_callback_before_additive_label_handlers() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import {
+    attach,
+    goal,
+    label,
+    product,
+    target,
+    targetKind,
+    toolName,
+} from "imp:core";
+
+function mark(key) {
+    globalThis.__imp_test_marks = globalThis.__imp_test_marks || [];
+    globalThis.__imp_test_marks.push(key);
+}
+
+const AuditTarget = targetKind("audit-target");
+const AUDIT = goal("audit", async function auditGoal(selection) {
+    mark("callback:" + selection.length);
+});
+product(
+    AuditTarget,
+    AUDIT,
+    toolName("audit-tool"),
+    async function auditTarget() {},
+    { display: "audit target {0}", level: "info" },
+);
+
+export const legacy = target({ kind: "audit-target", attrs: {} });
+const checked = label();
+attach(checked, "audit", async function auditLabel(ctx) {
+    mark("label:" + ctx.selector);
+});
+export { checked };
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        run_goal_live(&workspace, p, "audit", &["//...".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(
+            read_test_marks(&workspace).await,
+            vec!["callback:1".to_owned(), "label://:checked".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn label_only_selector_does_not_trigger_unrelated_target_expanders() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import {
+    build,
+    expand,
+    label,
+    target,
+    targetKind,
+} from "imp:core";
+
+const Expandable = targetKind("unrelated-expandable");
+export const unrelated = target({ kind: "unrelated-expandable", attrs: {} });
+expand(
+    Expandable,
+    async function shouldNotExpand() {
+        throw new Error("unrelated expander ran");
+    },
+    { display: "expand unrelated {0}", level: "info" },
+);
+
+const selected = label();
+build(selected, async function buildSelected() {
+    globalThis.__imp_test_marks = ["selected"];
+});
+export { selected };
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        run_goal_live(&workspace, p, "build", &["//:selected".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(
+            read_test_marks(&workspace).await,
+            vec!["selected".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn label_handler_failure_names_the_selected_address_and_goal() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { build, label } from "imp:core";
+
+const broken = label();
+build(broken, async function buildBroken() {
+    throw new Error("handler exploded");
+});
+export { broken };
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        let error = run_goal_live(&workspace, p, "build", &["//:broken".to_owned()])
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("//:broken#build"), "{message}");
+        assert!(message.contains("handler exploded"), "{message}");
     }
 
     #[tokio::test]
