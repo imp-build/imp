@@ -22,7 +22,7 @@ import {
 } from "imp:core";
 
 import {
-	build as cargoBuildPath,
+	cargoBuildPath,
 	cargoInvocationScript,
 	defaultRustToolchain,
 	rustBuildCacheTools,
@@ -220,10 +220,20 @@ function distPath(selector) {
 }
 
 export const cargoPackage = extensible(function cargoPackage(opts = {}) {
-	const packageLabel = label({ data: { path: opts.path || "." } });
+	const packageLabel = label({
+		data: {
+			path: opts.path || ".",
+			bins: opts.bins,
+			cargoArgs: opts.cargoArgs,
+			release: opts.release,
+		},
+	});
 
 	attachBuild(packageLabel, async function buildCargoPackage(ctx) {
-		return cargoBuildPath(cargoPackagePath(packageLabel, ctx));
+		return cargoBuildPath(
+			cargoPackagePath(packageLabel, ctx),
+			packageLabel.data,
+		);
 	});
 
 	attachTest(packageLabel, async function testCargoPackage(ctx) {
@@ -231,7 +241,10 @@ export const cargoPackage = extensible(function cargoPackage(opts = {}) {
 	});
 
 	packageGoal(packageLabel, async function packageCargoPackage(ctx) {
-		const built = await cargoBuildPath(cargoPackagePath(packageLabel, ctx));
+		const built = await cargoBuildPath(
+			cargoPackagePath(packageLabel, ctx),
+			packageLabel.data,
+		);
 		if (!built.outputDigest || built.outputPaths.length === 0) return null;
 		const packaged = artifact(built.outputDigest, { from: built.buildDir });
 		const destination = distPath(ctx.selector);

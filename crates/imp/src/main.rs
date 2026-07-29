@@ -285,212 +285,10 @@ async fn main() {
         std::process::exit(code);
     }
 
-    if let Some(address) = args
-        .get(1)
-        .and_then(|a| a.to_str())
-        .filter(|a| a.starts_with("//"))
-    {
-        let address = address.to_owned();
-        let call_args: Vec<String> = args[2..]
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        if let Err(e) = run_address_call(&address, &call_args).await {
-            eprintln!("error: {e:#}");
-            std::process::exit(1);
-        }
-        return;
-    }
-
     if let Err(e) = run().await {
         eprintln!("error: {e:#}");
         std::process::exit(1);
     }
-}
-
-/// Call a `//module/path:exportName` address directly with a single path
-/// argument, bypassing the target/goal/selector system entirely — the Phase
-/// 4 pilot (`module:export` addressing, #52), e.g.
-/// `imp //rules/rust:build crates/imp-store`. Bypasses clap the same way
-/// `@TOOL` does (see `main()` above): a goal name never starts with `//`, so
-/// checking `args[1]`'s shape is enough to route without ambiguity against
-/// existing `//pkg:name` exact-target selectors, which only ever appear as
-/// arguments *to* a goal, never in the goal position itself.
-async fn run_address_call(address: &str, args: &[String]) -> Result<()> {
-    let (module_path, export_name) = address.split_once(':').ok_or_else(|| {
-        anyhow::anyhow!("invalid address '{address}': expected '//module/path:exportName'")
-    })?;
-    let [arg] = args else {
-        anyhow::bail!(
-            "'{address}' expects exactly one path argument, got {}",
-            args.len()
-        );
-    };
-
-    let cancellation = install_termination_signal_flag()?;
-    let ui = ui::Session::start();
-    let result = cmd_call_address_live(
-        module_path,
-        export_name,
-        arg,
-        Arc::clone(&cancellation),
-        ui.tree(),
-    )
-    .await;
-    ui.shutdown();
-    result
-}
-
-/// Load the workspace, install a scheduler, and drive
-/// [`spike::call_address_live`] to completion, rendering a single spinner
-/// and a one-line cache/fresh/failed summary — the address-call counterpart
-/// of `cmd_execute_live`'s much richer multi-slot renderer, appropriately
-/// simpler since a single address call has no per-target fan-out to display.
-async fn cmd_call_address_live(
-    module_path: &str,
-    export_name: &str,
-    arg: &str,
-    cancellation: Arc<AtomicBool>,
-    tree: &Tree,
-) -> Result<()> {
-    let current_dir = std::env::current_dir().context("determine current directory")?;
-    let workspace_root = spike::find_workspace_root(&current_dir)?;
-    let workspace = load_workspace_with_messages(&workspace_root, tree).await?;
-    let jobs = effective_jobs(&workspace.workspace, None)?;
-
-    if cancellation.load(Ordering::SeqCst) {
-        anyhow::bail!("execution canceled");
-    }
-
-    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel::<scheduler::TaskEvent>();
-    let scheduler = scheduler::Scheduler::new(jobs, Arc::clone(&cancellation), tx);
-    *workspace.scheduler.lock().unwrap() = Some(Arc::clone(&scheduler));
-
-    let multi = tree.multi();
-    let label = format!("{module_path}:{export_name}");
-    let call_label = format!("call {label}");
-
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-    let render = tokio::spawn({
-        let call_label = call_label.clone();
-        async move {
-            use indicatif::ProgressBar;
-            use scheduler::{TaskEvent, TaskOutcome};
-
-            let progress = multi.add(ProgressBar::new_spinner());
-            progress.set_message(call_label.clone());
-            ui::init_idle_task(&progress);
-
-            let mut cached_count = 0usize;
-            let mut fresh_count = 0usize;
-            let mut failed_count = 0usize;
-            let mut canceled_count = 0usize;
-            let mut done_count = 0usize;
-            let wall_start = std::time::Instant::now();
-            let mut completion: Option<Result<(), String>> = None;
-
-            loop {
-                let event = tokio::select! {
-                    ev = events.recv() => match ev {
-                        Some(ev) => ev,
-                        None => break,
-                    },
-                    signal = &mut shutdown_rx => {
-                        completion = signal.ok();
-                        break;
-                    },
-                };
-                match event {
-                    TaskEvent::Pending { display, .. } => {
-                        ui::init_timed_task(&progress);
-                        progress.set_message(display);
-                    }
-                    TaskEvent::Running { .. } => {}
-                    TaskEvent::Done {
-                        outcome, cached, ..
-                    } => {
-                        done_count += 1;
-                        match &outcome {
-                            TaskOutcome::Ok => match cached {
-                                Some(true) => cached_count += 1,
-                                Some(false) => fresh_count += 1,
-                                None => {}
-                            },
-                            TaskOutcome::Err(_) => failed_count += 1,
-                            TaskOutcome::Canceled => canceled_count += 1,
-                        }
-                        progress.set_message(call_label.clone());
-                        ui::init_idle_task(&progress);
-                    }
-                    TaskEvent::LaneStarted { .. } | TaskEvent::LaneCleared { .. } => {}
-                }
-            }
-
-            match completion {
-                Some(Ok(())) => progress.finish_with_message("done"),
-                Some(Err(error)) => progress.abandon_with_message(error),
-                None => progress.abandon_with_message("canceled".to_owned()),
-            }
-
-            (
-                cached_count,
-                fresh_count,
-                failed_count,
-                canceled_count,
-                done_count,
-                wall_start.elapsed(),
-            )
-        }
-    });
-
-    *workspace.ui_multi.lock().unwrap() = Some(tree.multi());
-
-    const STALL_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
-    let drive =
-        spike::call_address_live(&workspace, &workspace_root, module_path, export_name, arg);
-    let watchdog = async {
-        loop {
-            if scheduler.outstanding() == 0 {
-                tokio::select! {
-                    _ = scheduler.wait_for_activity() => {}
-                    _ = tokio::time::sleep(STALL_GRACE) => {
-                        if scheduler.outstanding() == 0 {
-                            return;
-                        }
-                    }
-                }
-            } else {
-                scheduler.wait_for_activity().await;
-            }
-        }
-    };
-    let result = tokio::select! {
-        biased;
-        r = drive => r,
-        _ = watchdog => Err(anyhow::anyhow!(
-            "{label} stalled with no runnable work for {STALL_GRACE:?} — likely a dependency cycle"
-        )),
-    };
-
-    if result.is_err() {
-        cancellation.store(true, Ordering::SeqCst);
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    }
-    *workspace.scheduler.lock().unwrap() = None;
-    *workspace.ui_multi.lock().unwrap() = None;
-    drop(scheduler);
-    let shutdown_result = result
-        .as_ref()
-        .map(|_| ())
-        .map_err(|error| format!("{error:#}"));
-    let _ = shutdown_tx.send(shutdown_result);
-    if let Ok((cached, fresh, failed, canceled, total, wall)) = render.await {
-        log::info!(
-            "call {label}: {cached} cached, {fresh} fresh, {failed} failed, {canceled} canceled ({total} tasks) in {:.2}s",
-            wall.as_secs_f64()
-        );
-    }
-    result
 }
 
 /// Run a managed toolchain binary directly, passing all remaining args through
@@ -1868,6 +1666,16 @@ mod tests {
             }
             _ => panic!("expected dependencies subcommand"),
         }
+    }
+
+    #[test]
+    fn direct_module_address_is_not_a_cli_command() {
+        assert!(Cli::try_parse_from([
+            "imp",
+            "//rules/rust:cargoBuildPath",
+            "rules/rust/example",
+        ])
+        .is_err());
     }
 
     #[test]

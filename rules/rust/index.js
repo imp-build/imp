@@ -497,11 +497,6 @@ export function rustToolEnv(toolSpec, kacheActive) {
  * binaries' workspace-relative paths, one per `bin` entry.
  */
 
-// Shared by `cargoBuild` (target-based dispatch) and `build` (Phase 4 pilot
-// path-addressed dispatch, #52) — the two differ only in how they arrive at
-// bins/cargoArgs/toolchain/release/inputs (a target handle's attrs vs.
-// derived defaults + a `build.js` override), not in what `cargo build` does
-// with them once resolved.
 async function runCargoBuild({
 	path,
 	bins,
@@ -598,8 +593,6 @@ export const cargoBuild = product(
 	{ display: "build {0}", level: "info" },
 );
 
-// read_file() throws (rather than returning null) when the path doesn't
-// exist, so an existence check needs its own try/catch.
 function readFileOrNull(path) {
 	try {
 		return read_file(path);
@@ -608,10 +601,6 @@ function readFileOrNull(path) {
 	}
 }
 
-// Best-effort `[[bin]]`/`[package]` name extraction from a Cargo.toml's text
-// — a regex/line-scan in the same spirit as parseDocTestOutput above, not a
-// real TOML parser. Good enough for the Phase 4 pilot's one fixture crate;
-// revisit if/when path-addressed dispatch grows past a single language.
 function deriveBinsFromCargoToml(path) {
 	const text = readFileOrNull(`${path}/Cargo.toml`);
 	if (text == null) {
@@ -633,64 +622,38 @@ function deriveBinsFromCargoToml(path) {
 			packageName = nameMatch[1];
 	}
 	if (explicitBins.length > 0) return explicitBins;
-	// Cargo's own implicit-binary rule: with no `[[bin]]` table, a package
-	// still gets one bin named after itself if `src/main.rs` exists — a
-	// lib-only crate (`src/lib.rs`, no `src/main.rs`) gets none. Getting this
-	// wrong would make every lib-only crate falsely appear to have a binary
-	// named after its package.
 	if (packageName && readFileOrNull(`${path}/src/main.rs`) != null) {
 		return [packageName];
 	}
 	return [];
 }
 
-// `//module/path:exportName` addressing pilot (Phase 4, #52) for Rust,
-// running strictly alongside `cargoBuild`/`CargoPackage`/BUILD.js — nothing
-// about the target-based path changes. `path` is a bare workspace-relative
-// directory with no declared target; bins are derived from its Cargo.toml,
-// optionally overridden by a `${path}/build.js` default export (`{ bins,
-// cargoArgs, release }` — no schema, just an object spread). Only standalone
-// (non-workspace-member) crates are supported for now — workspaceMember
-// support, `test`/`fmt`/other goals, and other languages are deferred to a
-// follow-up alongside `//...` enumeration and the workspace routing function
-// (see imperative-model.md's Phase 4 section).
-export const build = memo(
-	async function build(path) {
-		const overrides = (await tryImportBuildOverrides(path))?.default ?? {};
-		const bins = overrides.bins || deriveBinsFromCargoToml(path);
-		const cargoArgs = overrides.cargoArgs || [];
+// Plain-data action used by the exported-label Rust factory. It is not a CLI
+// entry point: command-line selection goes through a label and its goal
+// handler. Explicit options come from the factory declaration; there is no
+// parallel path-keyed build.js configuration.
+export const cargoBuildPath = memo(
+	async function cargoBuildPath(path, opts = {}) {
 		const mode = configuration("imp.mode", {}) || {};
-		const release = overrides.release || mode.opt === "release";
 		const toolchainHandle = defaultRustToolchain();
-
-		const srcs = glob({
-			root: path,
-			include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
-			exclude: ["target/**"],
-		});
-
 		return runCargoBuild({
 			path,
-			bins,
-			cargoArgs,
-			release,
+			bins: opts.bins || deriveBinsFromCargoToml(path),
+			cargoArgs: opts.cargoArgs || [],
+			release: opts.release ?? mode.opt === "release",
 			toolchainHandle,
 			toolchainVersion: toolchainHandle.attrs.version,
 			outputSlug: path.replace(/\//g, "_"),
-			srcs,
+			srcs: glob({
+				root: path,
+				include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
+				exclude: ["target/**"],
+			}),
 			resourceInputs: file_set.literal([]),
 		});
 	},
 	{ display: "build {0}", level: "info" },
 );
-
-async function tryImportBuildOverrides(path) {
-	try {
-		return await import(`//${path}/build`);
-	} catch {
-		return null;
-	}
-}
 
 export const cargoDistPackage = product(
 	CargoPackage,

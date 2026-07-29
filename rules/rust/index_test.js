@@ -7,6 +7,7 @@ import {
 } from "//rules/imp/test";
 import {
 	cargoBuild,
+	cargoBuildPath,
 	cargoPackage,
 	cargoTest,
 	declared_path,
@@ -205,6 +206,25 @@ describe("rust rules", () => {
 			expect(buildRun.argv).toContain("--release");
 		});
 	});
+
+	test("cargoBuildPath lets an explicit debug option override release mode", async () => {
+		await withRustHost(async (host) => {
+			rustToolchain("1.93.0", { default: true, unverified: true });
+			gccToolchain("2025.08-1", { default: true, unverified: true });
+
+			await withOptMode("release", async () => {
+				const result = await cargoBuildPath("rules/rust/example", {
+					bins: ["hello"],
+					release: false,
+				});
+				expect(result.outputPaths[0].endsWith("/debug/hello")).toBe(true);
+			});
+
+			const buildRun = host.runs[host.runs.length - 1];
+			expect(buildRun.argv).not.toContain("--release");
+		});
+	});
+
 	test("cargoBuild uses native gcc as the linker on windows", async () => {
 		await withRustHost({ os: "windows", arch: "x86_64" }, async (host) => {
 			rustToolchain("1.93.0", { default: true, unverified: true });
