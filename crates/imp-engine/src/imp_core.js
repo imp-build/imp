@@ -2418,6 +2418,180 @@ export function attach(label, goalName, fn, opts) {
 	return label;
 }
 
+// Factories registered through extensible(). Extensions are replayed once,
+// after every workspace/BUILD module has evaluated and exported label
+// addresses have been resolved, but before label attachments seal. Keeping
+// replay at that boundary makes labels created before and after package.attach()
+// indistinguishable without introducing an engine-side kind/trait registry.
+const _extensible_factories = [];
+let _factory_extensions_sealed = false;
+
+function _extension_name(extension) {
+	return extension.name || "<anonymous extension>";
+}
+
+function _validate_extension(extension, caller) {
+	if (typeof extension !== "function") {
+		throw new Error(`${caller} expects an extension function`);
+	}
+}
+
+function _factory_variant(state, localExtensions, allowAttach) {
+	const variant = function (...args) {
+		if (_factory_extensions_sealed) {
+			throw new Error(
+				`extensible factory '${state.name}' called after workspace evaluation completed; ` +
+					"factories and their extensions seal before goal dispatch",
+			);
+		}
+		const created = state.factory.apply(this, args);
+		if (!created || created.__imp_label !== true) {
+			throw new Error(
+				`extensible factory '${state.name}' must synchronously return a label() handle`,
+			);
+		}
+		state.instances.push({ label: created, localExtensions });
+		return created;
+	};
+
+	variant.with = function (...extensions) {
+		if (_factory_extensions_sealed) {
+			throw new Error(
+				`extensible factory '${state.name}'.with() called after workspace evaluation completed; ` +
+					"factories and their extensions seal before goal dispatch",
+			);
+		}
+		if (extensions.length === 0) {
+			throw new Error(
+				`extensible factory '${state.name}'.with() expects at least one extension function`,
+			);
+		}
+		for (const extension of extensions) {
+			_validate_extension(
+				extension,
+				`extensible factory '${state.name}'.with()`,
+			);
+		}
+		const combined = [];
+		const seen = new Set();
+		for (const extension of [...localExtensions, ...extensions]) {
+			if (!seen.has(extension)) {
+				seen.add(extension);
+				combined.push(extension);
+			}
+		}
+		return _factory_variant(state, combined, false);
+	};
+
+	if (allowAttach) {
+		variant.attach = function (extension) {
+			if (_factory_extensions_sealed) {
+				throw new Error(
+					`extensible factory '${state.name}'.attach() called after workspace evaluation completed; ` +
+						"factories and their extensions seal before goal dispatch",
+				);
+			}
+			_validate_extension(
+				extension,
+				`extensible factory '${state.name}'.attach()`,
+			);
+			if (!state.globalExtensionSet.has(extension)) {
+				state.globalExtensionSet.add(extension);
+				state.globalExtensions.push(extension);
+			}
+			return variant;
+		};
+	}
+
+	return variant;
+}
+
+/**
+ * Make a reusable label factory extensible by downstream integrations.
+ *
+ * `factory.attach(extension)` applies an extension to every instance created
+ * by the factory, regardless of whether the instance was created before or
+ * after the attachment. `factory.with(extension)` returns a callable variant
+ * that applies the extension only to instances created through that variant.
+ * Extensions are additive, synchronous definition-phase functions receiving
+ * the created label; they normally call build()/test()/fmt()/lint()/attach().
+ *
+ * @param {(...args: any[]) => object} factory A synchronous function returning
+ *   one label() handle.
+ * @returns {Function} The callable root factory with attach() and with().
+ */
+export function extensible(factory) {
+	if (typeof factory !== "function") {
+		throw new Error("extensible(factory) expects a factory function");
+	}
+	if (_factory_extensions_sealed) {
+		throw new Error(
+			"extensible(factory) called after workspace evaluation completed; " +
+				"factories and their extensions seal before goal dispatch",
+		);
+	}
+	const state = {
+		factory,
+		name: factory.name || "<anonymous factory>",
+		globalExtensions: [],
+		globalExtensionSet: new Set(),
+		instances: [],
+	};
+	_extensible_factories.push(state);
+	return _factory_variant(state, [], true);
+}
+
+// Called by load_workspace after it has published id→address mappings but
+// before HostState.labels_sealed is set. The host must not hold HostState's
+// mutex while calling this: extensions attach handlers through __host_attach.
+function _finalize_factory_extensions() {
+	if (_factory_extensions_sealed) return;
+	// Freeze factory creation/composition before invoking user extensions.
+	// Goal-handler attachment remains open host-side until replay completes,
+	// but an extension must not mutate the registry being replayed.
+	_factory_extensions_sealed = true;
+	for (const state of _extensible_factories) {
+		for (const instance of state.instances) {
+			const seen = new Set();
+			for (const extension of [
+				...state.globalExtensions,
+				...instance.localExtensions,
+			]) {
+				if (seen.has(extension)) continue;
+				seen.add(extension);
+				try {
+					const result = extension(instance.label);
+					if (
+						result !== null &&
+						result !== undefined &&
+						(typeof result === "object" || typeof result === "function") &&
+						typeof result.then === "function"
+					) {
+						throw new Error(
+							"returned a Promise; extensions must finish synchronously during workspace definition",
+						);
+					}
+				} catch (error) {
+					let address;
+					try {
+						address = __host_target_address(instance.label.__id);
+					} catch (_) {
+						address = `<unexported label id ${instance.label.__id}>`;
+					}
+					throw new Error(
+						`extensible factory '${state.name}' extension '${_extension_name(extension)}' ` +
+							`failed for ${address}: ${error}`,
+					);
+				}
+			}
+		}
+		state.instances.length = 0;
+	}
+	_extensible_factories.length = 0;
+}
+globalThis.__imp_finalize_factory_extensions =
+	_finalize_factory_extensions;
+
 function _goal_sugar(goalName) {
 	return function (labelOrFn, fn, opts) {
 		if (typeof labelOrFn === "function") {

@@ -680,7 +680,7 @@ async fn load_workspace_with_rules_and_service(
     }
 
     // ----- Resolve dep IDs to addresses -----
-    let (workspace, id_to_address_final) = {
+    let (targets, label_addresses, id_to_address_final, owned_files) = {
         let hs = state.lock().unwrap();
         // First-address-wins: a label may legitimately be exported under
         // more than one name (see the label loop below), and the primary
@@ -734,7 +734,36 @@ async fn load_workspace_with_rules_and_service(
         }
 
         let owned_files = compute_owned_files(&root, &targets)?;
-        let ws = Workspace {
+        (targets, label_addresses, id_to_address, owned_files)
+    };
+
+    // Publish resolved addresses while attachments are still open, then replay
+    // extensions registered through extensible(). The JS finalizer may call
+    // attach(), so never hold HostState's mutex while invoking it.
+    {
+        let mut hs = state.lock().unwrap();
+        hs.id_to_address = id_to_address_final;
+        hs.owned_files = owned_files.clone();
+    }
+    live.ctx
+        .async_with(async |ctx| -> rquickjs::Result<()> {
+            let finalize: Function = ctx.globals().get("__imp_finalize_factory_extensions")?;
+            finalize.call::<_, ()>(()).catch(&ctx).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    "extensible",
+                    format!("finalize factory extensions: {e}"),
+                )
+            })
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("finalize extensible factories")?;
+
+    // Snapshot the replayed handler set and seal labels/attachments before
+    // returning the live workspace.
+    let workspace = {
+        let mut hs = state.lock().unwrap();
+        let workspace = Workspace {
             targets,
             products: hs.products.clone(),
             product_fn_ids: hs.product_fn_ids.clone(),
@@ -752,19 +781,9 @@ async fn load_workspace_with_rules_and_service(
             label_addresses,
             label_handlers: hs.label_handlers.clone(),
         };
-        (ws, id_to_address)
-    };
-
-    // Store resolved addresses in HostState so __host_target_address can read
-    // them, and seal labels/attachments (imperative-model.md Phase 4,
-    // "Lifecycle: sealing") — this is the same moment id_to_address itself
-    // finalizes, before any goal is dispatched.
-    {
-        let mut hs = state.lock().unwrap();
-        hs.id_to_address = id_to_address_final;
-        hs.owned_files = workspace.owned_files.clone();
         hs.labels_sealed = true;
-    }
+        workspace
+    };
 
     live.workspace = workspace;
     Ok(live)
@@ -11117,6 +11136,59 @@ export function attachSecondBuildHandler(target) {
 }
 "#;
 
+    const EXTENSIBLE_RULES_JS: &str = r#"
+import { attach, build, extensible, label, lint } from "imp:core";
+
+function mark(key) {
+    globalThis.__imp_test_marks = globalThis.__imp_test_marks || [];
+    globalThis.__imp_test_marks.push(key);
+}
+
+export const packageFactory = extensible(function packageFactory(opts = {}) {
+    const packageLabel = label({ data: opts });
+    build(packageLabel, async function packageBuild(ctx) {
+        mark("build:" + packageLabel.data.name + ":" + ctx.selector);
+    });
+    return packageLabel;
+});
+
+export function globalLint(packageLabel) {
+    lint(packageLabel, async function globalLintHandler(ctx) {
+        mark("global:" + packageLabel.data.name + ":" + ctx.selector);
+    });
+}
+
+export function localLintA(packageLabel) {
+    lint(packageLabel, async function localLintAHandler(ctx) {
+        mark("local-a:" + packageLabel.data.name + ":" + ctx.selector);
+    });
+}
+
+export function localLintB(packageLabel) {
+    lint(packageLabel, async function localLintBHandler(ctx) {
+        mark("local-b:" + packageLabel.data.name + ":" + ctx.selector);
+    });
+}
+
+export function failingExtension(packageLabel) {
+    throw new Error("extension exploded");
+}
+
+export async function asyncExtension(packageLabel) {}
+
+export function mutatingExtension(packageLabel) {
+    packageFactory.attach(globalLint);
+}
+
+export function makeLateMutation() {
+    const late = label();
+    build(late, async function mutateAfterSeal() {
+        packageFactory.attach(globalLint);
+    });
+    return late;
+}
+"#;
+
     fn label_fixture() -> TempDir {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
@@ -11457,5 +11529,205 @@ export { hasher };
             .unwrap();
         let marks = read_test_marks(&workspace).await;
         assert_eq!(marks, vec!["test://tools/hasher:hasher".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn extensible_factory_replays_global_extensions_before_and_after_attach() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
+        std::fs::create_dir_all(p.join("rules")).unwrap();
+        std::fs::write(p.join("rules").join("extensible.js"), EXTENSIBLE_RULES_JS).unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { globalLint, packageFactory } from "//rules/extensible";
+
+export const before = packageFactory({ name: "before" });
+packageFactory.attach(globalLint);
+packageFactory.attach(globalLint);
+export const after = packageFactory({ name: "after" });
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        run_goal_live(&workspace, p, "lint", &["//...".to_owned()])
+            .await
+            .unwrap();
+        let mut marks = read_test_marks(&workspace).await;
+        marks.sort();
+        assert_eq!(
+            marks,
+            vec![
+                "global:after://:after".to_owned(),
+                "global:before://:before".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn extensible_factory_with_is_selective_composable_and_ordered() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
+        std::fs::create_dir_all(p.join("rules")).unwrap();
+        std::fs::write(p.join("rules").join("extensible.js"), EXTENSIBLE_RULES_JS).unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import {
+    localLintA,
+    localLintB,
+    packageFactory,
+} from "//rules/extensible";
+
+const checkedFactory = packageFactory
+    .with(localLintA, localLintA)
+    .with(localLintB);
+
+packageFactory.attach(localLintA);
+export const plain = packageFactory({ name: "plain" });
+export const checked = checkedFactory({ name: "checked" });
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        run_goal_live(&workspace, p, "lint", &["//:checked".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(
+            read_test_marks(&workspace).await,
+            vec![
+                "local-a:checked://:checked".to_owned(),
+                "local-b:checked://:checked".to_owned(),
+            ]
+        );
+
+        clear_test_marks(&workspace).await;
+        reset_js_memo_state(&workspace).await;
+        run_goal_live(&workspace, p, "lint", &["//:plain".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(
+            read_test_marks(&workspace).await,
+            vec!["local-a:plain://:plain".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn extensible_factory_failure_names_factory_extension_and_label() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
+        std::fs::create_dir_all(p.join("rules")).unwrap();
+        std::fs::write(p.join("rules").join("extensible.js"), EXTENSIBLE_RULES_JS).unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import {
+    failingExtension,
+    packageFactory,
+} from "//rules/extensible";
+
+packageFactory.attach(failingExtension);
+export const broken = packageFactory({ name: "broken" });
+"#,
+        );
+
+        let error = load_workspace(p).await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("packageFactory"), "{message}");
+        assert!(message.contains("failingExtension"), "{message}");
+        assert!(message.contains("//:broken"), "{message}");
+        assert!(message.contains("extension exploded"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn extensible_factory_rejects_async_extensions_during_finalization() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
+        std::fs::create_dir_all(p.join("rules")).unwrap();
+        std::fs::write(p.join("rules").join("extensible.js"), EXTENSIBLE_RULES_JS).unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import {
+    asyncExtension,
+    packageFactory,
+} from "//rules/extensible";
+
+packageFactory.attach(asyncExtension);
+export const broken = packageFactory({ name: "broken" });
+"#,
+        );
+
+        let error = load_workspace(p).await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("asyncExtension"), "{message}");
+        assert!(message.contains("//:broken"), "{message}");
+        assert!(message.contains("returned a Promise"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn extensible_factory_rejects_registry_mutation_during_replay() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
+        std::fs::create_dir_all(p.join("rules")).unwrap();
+        std::fs::write(
+            p.join("rules").join("extensible.js"),
+            EXTENSIBLE_RULES_JS,
+        )
+        .unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import {
+    mutatingExtension,
+    packageFactory,
+} from "//rules/extensible";
+
+packageFactory.attach(mutatingExtension);
+export const broken = packageFactory({ name: "broken" });
+"#,
+        );
+
+        let error = load_workspace(p).await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("mutatingExtension"), "{message}");
+        assert!(message.contains("//:broken"), "{message}");
+        assert!(
+            message.contains("attach() called after workspace evaluation completed"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn extensible_factory_rejects_attachment_after_sealing() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
+        std::fs::create_dir_all(p.join("rules")).unwrap();
+        std::fs::write(p.join("rules").join("extensible.js"), EXTENSIBLE_RULES_JS).unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { makeLateMutation } from "//rules/extensible";
+
+export const late = makeLateMutation();
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        let error = run_goal_live(&workspace, p, "build", &["//:late".to_owned()])
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("packageFactory"), "{message}");
+        assert!(
+            message.contains("called after workspace evaluation completed"),
+            "{message}"
+        );
     }
 }

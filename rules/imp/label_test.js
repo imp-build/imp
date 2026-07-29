@@ -1,5 +1,11 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { attach, build, label, test as attachTest } from "imp:core";
+import {
+	attach,
+	build,
+	extensible,
+	label,
+	test as attachTest,
+} from "imp:core";
 
 describe("label/attach", () => {
 	test("label() allocates a handle carrying opts.data", () => {
@@ -69,5 +75,52 @@ describe("label/attach", () => {
 		expect(typeof attachTest).toBe("function");
 		const h = label();
 		attachTest(h, async () => {});
+	});
+
+	test("extensible() exposes global attach and selective with composition", () => {
+		const packageFactory = extensible(function packageFactory(opts = {}) {
+			return label({ data: opts });
+		});
+		function lintExtension() {}
+
+		expect(packageFactory.attach(lintExtension)).toBe(packageFactory);
+		// Re-attaching the same live extension is idempotent.
+		expect(packageFactory.attach(lintExtension)).toBe(packageFactory);
+
+		const checked = packageFactory.with(lintExtension).with(lintExtension);
+		expect(typeof checked).toBe("function");
+		expect(typeof checked.with).toBe("function");
+		expect(checked.attach).toBe(undefined);
+		expect(checked({ checked: true }).data).toEqual({ checked: true });
+	});
+
+	test("one extension may attach explicitly to several factories", () => {
+		const first = extensible(function first() {
+			return label();
+		});
+		const second = extensible(function second() {
+			return label();
+		});
+		function sharedExtension() {}
+
+		expect(first.attach(sharedExtension)).toBe(first);
+		expect(second.attach(sharedExtension)).toBe(second);
+	});
+
+	test("extensible() validates factories, extensions, and label results", () => {
+		expect(() => extensible({})).toThrow("expects a factory function");
+
+		const invalid = extensible(function invalid() {
+			return {};
+		});
+		expect(() => invalid()).toThrow(
+			"must synchronously return a label() handle",
+		);
+
+		const valid = extensible(function valid() {
+			return label();
+		});
+		expect(() => valid.attach({})).toThrow("expects an extension function");
+		expect(() => valid.with()).toThrow("at least one extension function");
 	});
 });
