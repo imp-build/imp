@@ -32,6 +32,9 @@ pub struct LiveWorkspace {
     /// Cache bypass for live `run()` execution. Set by command entry points for
     /// the duration of live execution.
     pub exec_no_cache: Arc<AtomicBool>,
+    /// Persisted memo-cache bypass for workspace evaluation, discovery, and
+    /// live goal execution.
+    pub memo_cache_disabled: Arc<AtomicBool>,
     /// Whether persisted memo input specs should be rebuilt and checked against
     /// the tracked inputs declared by live `run()` calls.
     pub trace_inputs: Arc<AtomicBool>,
@@ -105,6 +108,7 @@ impl std::fmt::Debug for LiveWorkspace {
             .field("ctx", &"AsyncContext { .. }")
             .field("exec_root", &"Arc<Mutex<..>>")
             .field("exec_no_cache", &"Arc<AtomicBool>")
+            .field("memo_cache_disabled", &"Arc<AtomicBool>")
             .field("trace_inputs", &"Arc<AtomicBool>")
             .field("exec_sandbox_retention", &"Arc<AtomicU8>")
             .field("selected_roots", &"Arc<Mutex<..>>")
@@ -127,4 +131,4 @@ impl std::ops::Deref for LiveWorkspace {
     }
 }
 
-pub use crate::spike::load_workspace;
+pub use crate::spike::{load_workspace, load_workspace_with_memo_cache};

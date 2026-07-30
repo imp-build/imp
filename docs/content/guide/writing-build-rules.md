@@ -112,6 +112,11 @@ This validates dependencies visible through the imp rule API. It does not
 trace arbitrary filesystem calls made by a subprocess or direct use of
 untracked JavaScript APIs.
 
+Use `--no-cache` to bypass the action cache while still allowing valid
+persisted memo hits. Use `--no-memo-cache` to recompute memoized rule logic
+without reading or writing persisted memo records; actions reached by that
+recomputation still use the action cache unless both flags are supplied.
+
 ## Parsing source with tree-sitter
 
 `loadGrammar`/`parseSource`/`treeSexp`/`tsQuery` let rule code parse source

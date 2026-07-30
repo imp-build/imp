@@ -484,7 +484,23 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
 /// `exec` functions can be invoked during task execution.
 #[allow(dead_code)]
 pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
-    load_workspace_with_rules(root, RulesSource::from_env()).await
+    load_workspace_with_memo_cache(root, false).await
+}
+
+/// Load a workspace while optionally bypassing persisted memo reads and
+/// writes for the complete workspace/goal lifecycle.
+pub async fn load_workspace_with_memo_cache(
+    root: &Path,
+    memo_cache_disabled: bool,
+) -> Result<LiveWorkspace> {
+    let service = make_execution_service()?;
+    load_workspace_with_rules_and_service(
+        root,
+        RulesSource::from_env(),
+        service,
+        memo_cache_disabled,
+    )
+    .await
 }
 
 /// Like [`load_workspace`], but with an explicit [`RulesSource`] instead of
@@ -496,13 +512,14 @@ pub async fn load_workspace_with_rules(
     rules_source: RulesSource,
 ) -> Result<LiveWorkspace> {
     let service = make_execution_service()?;
-    load_workspace_with_rules_and_service(root, rules_source, service).await
+    load_workspace_with_rules_and_service(root, rules_source, service, false).await
 }
 
 async fn create_live_runtime(
     root: &Path,
     rules_source: RulesSource,
     service: Arc<dyn ExecutionService>,
+    memo_cache_disabled: bool,
 ) -> Result<LiveWorkspace> {
     imp_logging::ensure_installed();
 
@@ -513,6 +530,7 @@ async fn create_live_runtime(
     let state: Arc<Mutex<HostState>> = Arc::new(Mutex::new(HostState::default()));
     let exec_root: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
     let exec_no_cache = Arc::new(AtomicBool::new(false));
+    let memo_cache_disabled = Arc::new(AtomicBool::new(memo_cache_disabled));
     let trace_inputs = Arc::new(AtomicBool::new(false));
     let exec_sandbox_retention = Arc::new(AtomicU8::new(SandboxRetention::default().as_u8()));
     let scheduler: Arc<Mutex<Option<Arc<imp_scheduler::Scheduler>>>> = Arc::new(Mutex::new(None));
@@ -573,6 +591,7 @@ async fn create_live_runtime(
                     rules_source: rules_source.clone(),
                     exec_root: Arc::clone(&exec_root),
                     exec_no_cache: Arc::clone(&exec_no_cache),
+                    memo_cache_disabled: Arc::clone(&memo_cache_disabled),
                     trace_inputs: Arc::clone(&trace_inputs),
                     exec_sandbox_retention: Arc::clone(&exec_sandbox_retention),
                     scheduler: Arc::clone(&scheduler),
@@ -620,6 +639,7 @@ async fn create_live_runtime(
         ctx,
         exec_root,
         exec_no_cache,
+        memo_cache_disabled,
         trace_inputs,
         exec_sandbox_retention,
         scheduler,
@@ -641,11 +661,12 @@ async fn load_workspace_with_rules_and_service(
     root: &Path,
     rules_source: RulesSource,
     service: Arc<dyn ExecutionService>,
+    memo_cache_disabled: bool,
 ) -> Result<LiveWorkspace> {
     let root = root
         .canonicalize()
         .with_context(|| format!("canonicalize workspace root {}", root.display()))?;
-    let mut live = create_live_runtime(&root, rules_source, service).await?;
+    let mut live = create_live_runtime(&root, rules_source, service, memo_cache_disabled).await?;
     let state = Arc::clone(&live.host_state);
     let ctx = live.ctx.clone();
 
@@ -864,6 +885,7 @@ pub async fn load_minimal_rules_test_runtime(root: &Path) -> Result<LiveWorkspac
         root,
         RulesSource::from_env(),
         Arc::new(LocalExecutionService::new()),
+        true,
     )
     .await
 }
@@ -875,6 +897,7 @@ pub async fn load_workspace_rules_test_runtime(root: &Path) -> Result<LiveWorksp
         root,
         RulesSource::from_env(),
         Arc::new(LocalExecutionService::new()),
+        true,
     )
     .await
 }
@@ -1761,6 +1784,7 @@ struct RegisterGlobalsArgs {
     rules_source: RulesSource,
     exec_root: Arc<Mutex<Option<PathBuf>>>,
     exec_no_cache: Arc<AtomicBool>,
+    memo_cache_disabled: Arc<AtomicBool>,
     trace_inputs: Arc<AtomicBool>,
     exec_sandbox_retention: Arc<AtomicU8>,
     scheduler: Arc<Mutex<Option<Arc<imp_scheduler::Scheduler>>>>,
@@ -1800,6 +1824,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         rules_source,
         exec_root,
         exec_no_cache,
+        memo_cache_disabled,
         trace_inputs,
         exec_sandbox_retention,
         scheduler,
@@ -3521,14 +3546,13 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     // may run once per test's own LiveWorkspace, but if it ever ran earlier
     // than a test's own env::set_var, a value captured up front would miss
     // it.
-    fn memo_cache_disabled() -> bool {
-        std::env::var_os("IMP_DISABLE_MEMO_CACHE").is_some()
-    }
-
+    let memo_cache_disabled_read = Arc::clone(&memo_cache_disabled);
     let host_memo_read = Function::new(
         ctx.clone(),
         move |key: String| -> rquickjs::Result<Option<String>> {
-            if memo_cache_disabled() {
+            if memo_cache_disabled_read.load(Ordering::SeqCst)
+                || std::env::var_os("IMP_DISABLE_MEMO_CACHE").is_some()
+            {
                 return Ok(None);
             }
             let record = imp_store::memo::read_memo_record(&key)
@@ -3544,10 +3568,13 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_memo_read", host_memo_read)?;
 
+    let memo_cache_disabled_write = Arc::clone(&memo_cache_disabled);
     let host_memo_write = Function::new(
         ctx.clone(),
         move |record_json: String| -> rquickjs::Result<()> {
-            if memo_cache_disabled() {
+            if memo_cache_disabled_write.load(Ordering::SeqCst)
+                || std::env::var_os("IMP_DISABLE_MEMO_CACHE").is_some()
+            {
                 return Ok(());
             }
             let record: imp_store::memo::MemoCacheRecord = serde_json::from_str(&record_json)
@@ -6901,6 +6928,57 @@ mod tests {
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
         execute_goal_live(live, root, goal, selectors, false, 1, serde_json::json!({})).await
+    }
+
+    #[tokio::test]
+    async fn persisted_memo_hit_revalidates_transitive_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let nonce = p
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .replace(|ch: char| !ch.is_ascii_alphanumeric(), "_");
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            &format!(
+                r#"
+import {{ build, label, memo, read_file }} from "imp:core";
+
+const child = memo(async function child_{nonce}() {{
+    return read_file("input.txt");
+}}, {{ display: "memo child", level: "debug" }});
+const parent = memo(async function parent_{nonce}() {{
+    return child();
+}}, {{ display: "memo parent", level: "debug" }});
+
+const app = label();
+build(app, async function verify_{nonce}() {{
+    const actual = await parent();
+    const expected = read_file("expected.txt");
+    if (actual !== expected) throw new Error(`stale memo result: ${{actual}}`);
+}});
+export {{ app }};
+"#
+            ),
+        );
+        write_file(&p.join("input.txt"), "one");
+        write_file(&p.join("expected.txt"), "one");
+
+        let first = load_workspace(p).await.unwrap();
+        run_goal_live(&first, p, "build", &[":app".to_owned()])
+            .await
+            .unwrap();
+        drop(first);
+
+        write_file(&p.join("input.txt"), "two");
+        write_file(&p.join("expected.txt"), "two");
+
+        let second = load_workspace(p).await.unwrap();
+        run_goal_live(&second, p, "build", &[":app".to_owned()])
+            .await
+            .unwrap();
     }
     use std::sync::{
         atomic::{AtomicBool, Ordering},

@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::{cache_root, digest_bytes, temp_sibling_path};
 
-pub const MEMO_CACHE_VERSION: u32 = 1;
+// Version 2 stores dependency edges as persisted-record keys. Version 1
+// accidentally stored the in-process memo key, which cannot be resolved back
+// to a record and therefore cannot participate in cache-hit validation.
+pub const MEMO_CACHE_VERSION: u32 = 2;
 
 /// One declared read a persisted memo call made while it ran, recorded so a
 /// later process can decide whether the cached `result` is still valid

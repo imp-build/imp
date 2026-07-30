@@ -1836,6 +1836,9 @@ function _stable_digest(args) {
 
 let _memo_table = new Map();
 let _memo_deps = [];
+// In-process key -> persisted-record key. Dependency traces keep using the
+// richer in-process keys, while persisted records need resolvable record keys.
+let _memo_persist_keys = new Map();
 let _memo_trace = [];
 let _key_display = new Map(); // key_string → "fnName(arg, ...)"
 let _key_product_call = new Map(); // key_string → {target_id, product_name} for product calls
@@ -2257,7 +2260,7 @@ function _memo_eval(key_string, owner, label, level, thunk) {
 	return promise;
 }
 
-function _push_call(key_string) {
+function _record_memo_dependency(key_string) {
 	const ctx = _effective_context();
 	if (ctx.stack.length > 0) {
 		_memo_deps.push({
@@ -2265,6 +2268,11 @@ function _push_call(key_string) {
 			callee: key_string,
 		});
 	}
+}
+
+function _push_call(key_string, recordDependency = true) {
+	const ctx = _effective_context();
+	if (recordDependency) _record_memo_dependency(key_string);
 	ctx.stack.push(key_string);
 	ctx.stackSet.add(key_string);
 }
@@ -2770,6 +2778,7 @@ function _trace_label_handler(handler, goalName, selectorAddress, ctx) {
 		moduleDigest !== null && !unaddressed
 			? JSON.stringify({ fn_id, args_digest })
 			: null;
+	_memo_persist_keys.set(key_string, persistKey);
 	const display = `${selectorAddress}#${goalName}@${handler.identity.split("@")[0]}`;
 	_key_display.set(key_string, display);
 
@@ -3129,7 +3138,7 @@ function _memo_input_spec_still_valid(spec, ctx) {
 	return true;
 }
 
-function _load_persisted_memo(persistKey, moduleDigest, ctx) {
+function _read_persisted_memo_record(persistKey) {
 	let raw;
 	try {
 		raw = __host_memo_read(persistKey);
@@ -3137,16 +3146,43 @@ function _load_persisted_memo(persistKey, moduleDigest, ctx) {
 		return null;
 	}
 	if (raw === undefined || raw === null) return null;
-	let record;
 	try {
-		record = JSON.parse(raw);
+		return JSON.parse(raw);
 	} catch (_) {
 		return null;
 	}
-	if (record.module_digest !== moduleDigest) return null;
+}
+
+function _validate_persisted_memo_record(persistKey, ctx, visiting) {
+	if (visiting.has(persistKey)) return null;
+	const record = _read_persisted_memo_record(persistKey);
+	if (record === null) return null;
+	const moduleDigest = _memo_module_digest(record.fn_id);
+	if (moduleDigest === null || record.module_digest !== moduleDigest) return null;
 	for (const spec of record.input_specs || []) {
 		if (!_memo_input_spec_still_valid(spec, ctx)) return null;
 	}
+	visiting.add(persistKey);
+	for (const dep of record.deps || []) {
+		if (
+			typeof dep !== "string" ||
+			_validate_persisted_memo_record(dep, ctx, visiting) === null
+		) {
+			visiting.delete(persistKey);
+			return null;
+		}
+	}
+	visiting.delete(persistKey);
+	return record;
+}
+
+function _load_persisted_memo(persistKey, moduleDigest, ctx) {
+	const record = _validate_persisted_memo_record(
+		persistKey,
+		ctx,
+		new Set(),
+	);
+	if (record === null || record.module_digest !== moduleDigest) return null;
 	// Deep-cloned so a persisted hit never aliases the stored record (or a
 	// prior hit's reconstruction) the way a live in-process hit shares one
 	// promise's resolved value across callers.
@@ -3261,15 +3297,32 @@ function _persist_memo_result(
 		}
 	}
 	if (!_validate_run_input_specs(ctx, input_specs, key_string)) return;
-	const deps = Array.from(
-		new Set(
-			_memo_deps
-				.filter((edge) => edge.caller === key_string)
-				.map((edge) => edge.callee),
-		),
-	);
+	const depsSeen = new Set();
+	const deps = [];
+	for (const edge of _memo_deps.filter(
+		(edge) => edge.caller === key_string,
+	)) {
+		const dep = _memo_persist_keys.get(edge.callee);
+		if (dep == null) {
+			_memo_trace.push({
+				event: "memo-unpersistable-dependency",
+				key: key_string,
+				dependency: edge.callee,
+			});
+			_artifactTrace(
+				"memo-unpersistable-dependency",
+				_memo_label(key_string),
+				_memo_label(edge.callee),
+			);
+			return;
+		}
+		if (!depsSeen.has(dep)) {
+			depsSeen.add(dep);
+			deps.push(dep);
+		}
+	}
 	const record = {
-		version: 1, // MEMO_CACHE_VERSION in imp-store/src/memo.rs
+		version: 2, // MEMO_CACHE_VERSION in imp-store/src/memo.rs
 		key: persistKey,
 		fn_id,
 		module_digest: moduleDigest,
@@ -3302,6 +3355,7 @@ export function memo(fn, opts) {
 			moduleDigest !== null && !unaddressed
 				? JSON.stringify({ fn_id, args_digest })
 				: null;
+		_memo_persist_keys.set(key_string, persistKey);
 		if (persistKey === null && unaddressed) {
 			_memo_trace.push({ event: "memo-unaddressed-skip", key: key_string });
 		}
@@ -3329,12 +3383,15 @@ export function memo(fn, opts) {
 		const callerContext = _effective_context_entry(true);
 		const callerContextId = callerContext.id;
 		const owner = callerContext.ctx.owner;
+		// Record the edge before consulting the in-process table. A callee hit
+		// still forms a real persisted dependency of its current caller.
+		_record_memo_dependency(key_string);
 		return _contextual_thenable(
 			_memo_eval(key_string, owner, label, metadata.level, (nodeId) => {
 				const childContextId = _fork_context(nodeId, callerContext.ctx, label);
 				return _with_context(childContextId, () => {
 					_emit_task("running", nodeId, owner, label);
-					_push_call(key_string);
+					_push_call(key_string, false);
 					if (persistKey !== null && !_trace_inputs_enabled()) {
 						const cached = _load_persisted_memo(
 							persistKey,
@@ -3397,6 +3454,7 @@ export function memo(fn, opts) {
 export function resetMemoState() {
 	_memo_table = new Map();
 	_memo_deps = [];
+	_memo_persist_keys = new Map();
 	_memo_trace = [];
 	_key_display = new Map();
 	_key_product_call = new Map();

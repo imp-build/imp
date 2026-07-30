@@ -200,6 +200,9 @@ struct GoalArgs {
     /// Run actions without reading or writing the task cache
     #[arg(long)]
     no_cache: bool,
+    /// Re-run memoized computations without reading or writing persisted memo records
+    #[arg(long)]
+    no_memo_cache: bool,
     /// Re-run memoized computations and validate their persisted input specs
     /// against tracked run() input declarations
     #[arg(long)]
@@ -799,9 +802,24 @@ async fn cmd_execute_live(
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let selector_context =
         selector::SelectorContext::for_invocation(&workspace_root, &current_dir)?;
+    // Workspace loading can itself execute memoized rule code. Detect this
+    // static flag before the second-phase clap parse so the bypass covers
+    // module evaluation as well as discovery and goal handlers. For `run`,
+    // arguments after `--` belong to the launched program.
+    let no_memo_cache_requested = match invocation {
+        LiveInvocation::Goal { goal, raw } => {
+            let goal_raw = if goal == "run" {
+                &raw[..raw.iter().position(|arg| arg == "--").unwrap_or(raw.len())]
+            } else {
+                raw
+            };
+            goal_raw.iter().any(|arg| arg == "--no-memo-cache")
+        }
+    };
     let workspace = {
         let start = std::time::Instant::now();
-        let ws = load_workspace_with_messages(&workspace_root, tree).await?;
+        let ws = runtime::load_workspace_with_memo_cache(&workspace_root, no_memo_cache_requested)
+            .await?;
         log::info!("loaded workspace in {:.2}s", start.elapsed().as_secs_f64());
         ws
     };
@@ -851,11 +869,13 @@ async fn cmd_execute_live(
         jobs: jobs_cli,
         js_workers: js_workers_cli,
         no_cache,
+        no_memo_cache,
         trace_inputs,
         keep_sandbox: sandbox_retention,
         axis,
         profile,
     } = args;
+    debug_assert_eq!(no_memo_cache, no_memo_cache_requested);
     validate_changed_selector_overrides(changed_since.as_deref(), &selectors)?;
     let js_workers = effective_js_workers(&workspace.workspace, js_workers_cli)?;
     let jobs = effective_jobs(&workspace.workspace, jobs_cli)?;
@@ -1783,6 +1803,7 @@ mod tests {
             "--jobs".to_owned(),
             "2".to_owned(),
             "--trace-inputs".to_owned(),
+            "--no-memo-cache".to_owned(),
         ];
         let flag_defs = std::collections::BTreeMap::from([(
             "check".to_owned(),
@@ -1795,6 +1816,7 @@ mod tests {
         assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
         assert_eq!(args.jobs, Some(2));
         assert!(args.trace_inputs);
+        assert!(args.no_memo_cache);
         assert!(!matches.get_flag("check"));
     }
 
