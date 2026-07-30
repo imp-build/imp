@@ -27,7 +27,7 @@ import {
 export const NODE_TOOL = toolName("node");
 
 const NODE_TOOLCHAIN_CACHE = "node-toolchains";
-const NODE_LOCKFILE = "//rules/js/node-toolchain.lock";
+const NODE_LOCKFILE = "//rules/js/node/node-toolchain.lock";
 
 // nodejs.org's own os/arch tokens (https://nodejs.org/dist/), distinct from
 // both imp's plat.os/plat.arch vocabulary and every other toolchain's

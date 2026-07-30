@@ -29,7 +29,7 @@ import {
 export const BIOME_TOOL = toolName("biome");
 
 const BIOME_TOOLCHAIN_CACHE = "biome-toolchains";
-const BIOME_LOCKFILE = "//rules/js/biome-toolchain.lock";
+const BIOME_LOCKFILE = "//rules/js/biome/biome-toolchain.lock";
 
 // biome's own os/arch tokens (github.com/biomejs/biome releases), distinct
 // from imp's plat.os/plat.arch vocabulary — "darwin"/"win32" not

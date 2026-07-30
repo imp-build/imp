@@ -18,7 +18,7 @@ import {
 	pnpmStoreDirTool,
 	pnpmTool,
 	pnpmToolchain,
-} from "//rules/js/pnpm_toolchain";
+} from "//rules/js/pnpm/toolchain";
 
 function withPnpmHost(platOrFn, maybeFn) {
 	const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;
@@ -129,7 +129,7 @@ describe("pnpm toolchain", () => {
 	test("downloads, verifies, and extracts pnpm via two sandboxed runs when not cached, with no strip-components", async () => {
 		await withPnpmHost(async (host) => {
 			host.addFile(
-				"//rules/js/pnpm-toolchain.lock",
+				"//rules/js/pnpm/pnpm-toolchain.lock",
 				JSON.stringify({
 					tool: "pnpm-toolchain",
 					versions: {

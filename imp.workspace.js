@@ -8,7 +8,7 @@ import "//rules/c/cmake";
 import { defaultGccToolchain } from "//rules/c/gcc";
 import { defaultMoldToolchain } from "//rules/c/mold";
 import "//rules/gen";
-import { defaultBiomeToolchain } from "//rules/js/biome_toolchain";
+import { defaultBiomeToolchain } from "//rules/js/biome";
 import { odinToolchain } from "//rules/odin";
 import { defaultOdinfmtToolchain } from "//rules/odin/odinfmt/toolchain";
 import { defaultRuffToolchain } from "//rules/python/ruff_toolchain";

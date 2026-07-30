@@ -10,7 +10,7 @@ import { biomeFmt } from "//rules/js/biome/fmt";
 import {
 	__resetBiomeToolchainStateForTest,
 	biomeToolchain,
-} from "//rules/js/biome_toolchain";
+} from "//rules/js/biome/toolchain";
 
 function withBiomeHost(fn) {
 	const run = async (host) => {
@@ -18,7 +18,7 @@ function withBiomeHost(fn) {
 		// Cold acquires verify against the lockfile, so the fake host needs
 		// a matching entry for the toolchain the tests declare.
 		host.addFile(
-			"//rules/js/biome-toolchain.lock",
+			"//rules/js/biome/biome-toolchain.lock",
 			JSON.stringify({
 				tool: "biome-toolchain",
 				versions: {

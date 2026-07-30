@@ -16,7 +16,7 @@ import {
 	nodeDownloadUrl,
 	nodeTool,
 	nodeToolchain,
-} from "//rules/js/node_toolchain";
+} from "//rules/js/node/toolchain";
 
 function withNodeHost(platOrFn, maybeFn) {
 	const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;
@@ -110,7 +110,7 @@ describe("node toolchain", () => {
 	test("downloads, verifies, and extracts node via two sandboxed runs when not cached", async () => {
 		await withNodeHost(async (host) => {
 			host.addFile(
-				"//rules/js/node-toolchain.lock",
+				"//rules/js/node/node-toolchain.lock",
 				JSON.stringify({
 					tool: "node-toolchain",
 					versions: {

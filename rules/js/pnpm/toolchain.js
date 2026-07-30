@@ -30,7 +30,7 @@ import {
 export const PNPM_TOOL = toolName("pnpm");
 
 const PNPM_TOOLCHAIN_CACHE = "pnpm-toolchains";
-const PNPM_LOCKFILE = "//rules/js/pnpm-toolchain.lock";
+const PNPM_LOCKFILE = "//rules/js/pnpm/pnpm-toolchain.lock";
 
 // pnpm's own content-addressed package store — internally addressed by
 // package identity, never by sandbox identity, so sharing one directory

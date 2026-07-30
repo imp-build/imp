@@ -16,7 +16,7 @@ import {
 	defaultBiomeToolchain,
 	defaultBiomeToolchainVersion,
 	installBiomeToolchain,
-} from "//rules/js/biome_toolchain";
+} from "//rules/js/biome/toolchain";
 
 function withBiomeHost(platOrFn, maybeFn) {
 	const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;
@@ -108,7 +108,7 @@ describe("biome toolchain", () => {
 	test("downloads and installs biome via two sandboxed runs when not cached, with no archive extraction", async () => {
 		await withBiomeHost(async (host) => {
 			host.addFile(
-				"//rules/js/biome-toolchain.lock",
+				"//rules/js/biome/biome-toolchain.lock",
 				JSON.stringify({
 					tool: "biome-toolchain",
 					versions: {

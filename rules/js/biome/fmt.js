@@ -7,11 +7,15 @@
 // comparison ruffFmt/cargoFmt/odinFmt use, to report an accurate count of
 // files actually changed.
 
-import { declared_path, js_file_sources } from "//rules/js";
+import {
+	declared_path,
+	js_file_sources,
+	jsSourcesActionHandle,
+} from "//rules/js";
 import {
 	biomeTool,
 	resolveBiomeToolchainVersion,
-} from "//rules/js/biome_toolchain";
+} from "//rules/js/biome/toolchain";
 import { digestOf, diffDigests, output, paths, run } from "imp:core";
 
 // Reformat a target's own JS/TS sources in place, or (when `check` is
@@ -20,6 +24,7 @@ import { digestOf, diffDigests, output, paths, run } from "imp:core";
 // reformatting — verified against a real 2.5.4 binary, not assumed from
 // docs alone.
 export async function biomeFmt(handle, { check = false } = {}) {
+	handle = jsSourcesActionHandle(handle);
 	const srcs = await js_file_sources(handle);
 	const files = paths(srcs);
 	if (files.length === 0) {

@@ -16,5 +16,5 @@
 export { odinPackageFmt, odinTestPackageFmt } from "//rules/odin/odinfmt";
 export { rustfmt } from "//rules/rust/rustfmt";
 export { pythonAppFmt } from "//rules/python/ruff/fmt";
-export { jsSourcesFmt } from "//rules/js/biome/index";
+export { jsSourcesFmt } from "//rules/js/biome";
 export { fmtGoal } from "//rules/workflows/fmt_goal";
