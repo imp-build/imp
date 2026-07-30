@@ -21,14 +21,11 @@ import {
 	installRustToolchain,
 	rustToolchain,
 } from "//rules/rust/toolchain";
-import {
-	__resetGccToolchainStateForTest,
-	gccToolchain,
-} from "//rules/c/gcc/toolchain";
+import { __resetGccToolchainStateForTest, gccToolchain } from "//rules/c/gcc";
 import {
 	__resetMoldToolchainStateForTest,
 	moldToolchain,
-} from "//rules/c/mold/toolchain";
+} from "//rules/c/mold";
 import {
 	__resetKacheToolchainStateForTest,
 	installKacheToolchain,
@@ -118,7 +115,7 @@ describe("rust rules", () => {
 
 	test("cargoBuild no-ops for a lib-only package (no bin)", async () => {
 		await withRustHost(async (host) => {
-			const pkg = cargoPackage({ path: "crates/imp-store" });
+			const pkg = cargoPackage({ path: "crates/imp-store", bin: [] });
 			const result = await cargoBuild(pkg);
 			expect(result.outputPaths).toEqual([]);
 			expect(host.runs.length).toBe(0);

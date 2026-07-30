@@ -1,13 +1,13 @@
 The CMake integration is for projects whose CMake model should remain the
-source of truth. A `cmakeLib()` target configures the project with Ninja and
-then expands the generated graph into separately selectable libraries,
+source of truth. A `cmakeLib()` label configures the project with Ninja and
+then discovers separately selectable libraries,
 executables, and CTest-backed tests.
 
 ## Declare the project root
 
 ```js
 import { cmakeLib } from "//rules/c/cmake";
-import { zigToolchain } from "//rules/c/zig/toolchain";
+import { zigToolchain } from "//rules/c/zig";
 
 const compiler = zigToolchain("0.16.0");
 
@@ -27,13 +27,13 @@ source directory. `stageOutputs` can copy explicitly named files to other
 workspace paths, but such scattered outputs cannot currently be packaged as
 one `dist/` artifact.
 
-## Lazy target discovery
+## Lazy label discovery
 
 CMake configuration is deferred until the selected graph reaches the project.
 The generated Ninja graph is inspected for named libraries and executables;
-each becomes an imp target in the same address scope. Executables referenced
-by `add_test()` are classified as test targets and their `imp test` product
-runs the correlated CTest cases. The parent `cmakeLib` target can still run the
+each becomes an imp label in the same address scope. Executables referenced
+by `add_test()` receive test handlers that run the correlated CTest cases. The
+parent `cmakeLib` label can still run the
 whole CTest suite.
 
 ```sh

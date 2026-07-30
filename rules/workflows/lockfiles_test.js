@@ -9,10 +9,10 @@ import {
 // the goal module's import list stays complete.
 import "//rules/workflows/builtin_lockfiles";
 import { odinSupportedPlatforms } from "//rules/odin/toolchain";
-import { cmakeSupportedPlatforms } from "//rules/c/cmake/toolchain";
-import { gccSupportedPlatforms } from "//rules/c/gcc/toolchain";
-import { moldSupportedPlatforms } from "//rules/c/mold/toolchain";
-import { zigSupportedPlatforms } from "//rules/c/zig/toolchain";
+import { cmakeSupportedPlatforms } from "//rules/c/cmake";
+import { gccSupportedPlatforms } from "//rules/c/gcc";
+import { moldSupportedPlatforms } from "//rules/c/mold";
+import { zigSupportedPlatforms } from "//rules/c/zig";
 import { zolaSupportedPlatforms } from "//rules/zola/toolchain";
 import { rustSupportedPlatforms } from "//rules/rust/toolchain";
 

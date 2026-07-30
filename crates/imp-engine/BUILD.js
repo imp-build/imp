@@ -17,6 +17,11 @@ import {
     testCtest,
     testFind,
     testSed,
+    testSha256sum,
+    testCurl,
+    testWc,
+    testXz,
+    testChmod,
 } from "//";
 
 export const imp_engine = cargoPackage({
@@ -37,6 +42,11 @@ export const imp_engine = cargoPackage({
         testCtest,
         testFind,
         testSed,
+        testSha256sum,
+        testCurl,
+        testWc,
+        testXz,
+        testChmod,
     ],
     workspaceMember: true,
 });

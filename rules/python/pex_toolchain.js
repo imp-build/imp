@@ -40,7 +40,7 @@ const PEX_LOCK_PLATFORM = { os: "any", arch: "any" };
 // real, persistent, shared directory across sandboxes for that caching to
 // ever pay off — left unpinned, every sandboxed pex invocation gets a fresh
 // empty PEX_ROOT and re-extracts every wheel every time, the same failure
-// mode ZIG_BUILD_CACHE's doc comment (rules/c/zig/toolchain.js) describes
+// mode ZIG_BUILD_CACHE's doc comment (rules/c/zig/index.js) describes
 // for ZIG_GLOBAL_CACHE_DIR. Fixed "shared" key: PEX_ROOT's content is
 // addressed by what it's caching (wheel hashes, venv fingerprints), not by
 // which pex version is reading it.
@@ -206,7 +206,7 @@ export const acquirePexToolchain = memo(
 		// in src/exec.rs bails otherwise — so seed it with an empty directory
 		// here, guarded independently of the toolchain cacheHas() above since
 		// this cache is keyed "shared", not per-version (same independent-guard
-		// pattern as ZIG_BUILD_CACHE's seeding in rules/c/zig/toolchain.js).
+		// pattern as ZIG_BUILD_CACHE's seeding in rules/c/zig/index.js).
 		if (!cacheHas(PEX_ROOT_CACHE, PEX_ROOT_KEY)) {
 			const seedPath = ".imp/pex-root-seed";
 			await run({
@@ -296,7 +296,7 @@ export function pexRootTool() {
  * tool, or the path won't exist in the sandbox. Values are relative to the
  * sandbox root — callers must export them as absolute paths (capturing
  * `$(pwd)` before any `cd`) rather than passing them via run()'s own `env:`,
- * exactly as zigGlobalCacheEnv()'s doc comment in rules/c/zig/toolchain.js
+ * exactly as zigGlobalCacheEnv()'s doc comment in rules/c/zig/index.js
  * explains for ZIG_GLOBAL_CACHE_DIR.
  *
  * @returns {string[]}

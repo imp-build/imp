@@ -29,8 +29,8 @@ import {
 	OdinPackage,
 } from "//rules/odin";
 import { resourcePackage } from "//rules/asset";
-import { gccToolchain } from "//rules/c/gcc/toolchain";
-import { moldToolchain } from "//rules/c/mold/toolchain";
+import { gccToolchain } from "//rules/c/gcc";
+import { moldToolchain } from "//rules/c/mold";
 
 // odinBuild/odinTest's build/link path always needs a declared default gcc
 // toolchain (see odinScriptTools() in //rules/odin) — declare it once, up

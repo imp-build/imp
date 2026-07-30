@@ -1,30 +1,27 @@
 import {
-	Target,
 	artifact,
 	build,
 	configuration,
 	discoverLabels,
-	expand,
+	extensible,
 	glob,
 	label,
 	labelAddress,
-	file_set,
+	logInfo,
 	memo,
 	mergeDigests,
 	output,
 	output_path,
+	packageGoal,
 	pathsInDigest,
 	product,
 	readFileInDigest,
-	registerTarget,
 	registerLabel,
 	run,
-	sourcesField,
 	targetAddress,
 	test,
+	writeWorkspace,
 	BUILD,
-	PACKAGE,
-	TEST,
 } from "imp:core";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import {
@@ -40,7 +37,7 @@ import {
 	zigGlobalCacheEnv,
 	zigCMakeArgs,
 	defaultZigToolchain,
-} from "//rules/c/zig/toolchain";
+} from "//rules/c/zig";
 import {
 	extractCopyDestinations,
 	listNamedCmakeTargets,
@@ -54,7 +51,7 @@ import { parseCTestTestfile } from "//rules/c/cmake/ctest_testfile";
 
 // Registers generic cc_library/cc_binary build dispatch and generated-build
 // metadata. CMake remains a backend that can mint generic C/C++ targets.
-import "//rules/c";
+import { registerCmakeProjectLabel } from "//rules/c";
 
 // Registers the "build" goal's artifact summary callback for consumers that
 // import CMake build rules without importing the workflows layer explicitly.
@@ -62,11 +59,13 @@ import "//rules/workflows/build_workflow";
 import { CMAKE_TOOL } from "//rules/c/cmake/toolchain";
 
 export {
+	__resetCmakeToolchainStateForTest,
 	acquireCmakeToolchain,
 	cmakeBin,
 	cmakeCacheKey,
 	cmakeTool,
 	cmakeToolchain,
+	cmakeSupportedPlatforms,
 	defaultCmakeToolchain,
 	defaultCmakeToolchainVersion,
 	installCmakeToolchain,
@@ -102,12 +101,12 @@ function normalize_workspace_path(path) {
 }
 
 function safe_target_address(handle) {
-	if (!handle || (handle.__imp !== true && handle.__imp_label !== true))
-		return null;
+	if (!handle) return null;
 	try {
-		return handle.__imp_label === true
-			? labelAddress(handle)
-			: targetAddress(handle);
+		if (handle.__imp_label === true) return labelAddress(handle);
+		if (handle.label?.__imp_label === true) return labelAddress(handle.label);
+		if (handle.__imp === true) return targetAddress(handle);
+		return null;
 	} catch (_) {
 		return null;
 	}
@@ -128,6 +127,36 @@ function declared_path(handle, path = ".") {
 	return normalize_workspace_path(`${base}/${local}`);
 }
 
+const _cmakeProjectLabels = [];
+
+export function cmakeActionHandle(handle) {
+	if (!handle || handle.__imp_label !== true) return handle;
+	return {
+		__id: handle.__id,
+		label: handle,
+		attrs: handle.data,
+		deps: [
+			...(handle.data.deps || []).map((dep) => ({ handle: dep })),
+			...(handle.data.toolchainTarget
+				? [{ handle: handle.data.toolchainTarget, mode: "tool" }]
+				: []),
+			...(handle.data.compilerTarget
+				? [{ handle: handle.data.compilerTarget, mode: "tool" }]
+				: []),
+		],
+	};
+}
+
+export function cmakeProjectHandles() {
+	return _cmakeProjectLabels
+		.map(cmakeActionHandle)
+		.sort((a, b) =>
+			(safe_target_address(a) || "").localeCompare(
+				safe_target_address(b) || "",
+			),
+		);
+}
+
 // ---------------------------------------------------------------------------
 // Memo/product functions for C/CMake targets
 // ---------------------------------------------------------------------------
@@ -145,6 +174,7 @@ export const tool = product(
 
 export const sources = memo(
 	async function sources(handle) {
+		handle = cmakeActionHandle(handle);
 		const root = declared_path(handle, handle.attrs.src || ".");
 		return glob({ root, include: handle.attrs.srcs || DEFAULT_CPP_SRCS });
 	},
@@ -163,6 +193,7 @@ export const sources = memo(
 // this further).
 const headerSources = memo(
 	async function headerSources(handle) {
+		handle = cmakeActionHandle(handle);
 		const root = declared_path(handle, handle.attrs.src || ".");
 		return glob({
 			root,
@@ -195,6 +226,7 @@ function zigEnvExportStmts(compilerEnv) {
 // products below — factors out everything that doesn't depend on whether
 // we're building or (re-)running ctest.
 async function resolveCmakeSetup(handle) {
+	handle = cmakeActionHandle(handle);
 	const srcPath = declared_path(handle, handle.attrs.src || ".");
 	// Deliberately keyed off srcPath, not targetOutputSlug(handle) (unlike
 	// odin/c/rust's own default output paths) — expandCmakeProject mints one
@@ -214,7 +246,7 @@ async function resolveCmakeSetup(handle) {
 		`-DCMAKE_BUILD_TYPE=${mode.opt === "release" ? "Release" : "Debug"}`,
 		...(handle.attrs.cmakeArgs || []),
 	];
-	const inputFiles = await sources(handle);
+	const inputFiles = await sources(handle.label || handle);
 	const dirInputs = (handle.attrs.dirs || []).map((d) => ({
 		kind: "directory",
 		path: declared_path(handle, d),
@@ -228,7 +260,7 @@ async function resolveCmakeSetup(handle) {
 		: await nativeToolSpec(nativeTool("cmake"));
 	// zigBuildCacheTool/zigGlobalCacheEnv pair a mounted, shared, named-
 	// cache directory with the env var pointing Zig at it — see
-	// ZIG_BUILD_CACHE's doc comment in rules/c/zig/toolchain.js for why
+	// ZIG_BUILD_CACHE's doc comment in rules/c/zig/index.js for why
 	// sharing this across sandboxes is both safe (content-addressed by what
 	// Zig is compiling, never by sandbox identity) and necessary (without
 	// it, every sandbox re-pays Zig's own compiler-rt build and bakes a
@@ -271,6 +303,7 @@ async function resolveCmakeSetup(handle) {
 // (inputs: sources + dirs), so an unchanged project skips reconfiguring
 // entirely rather than paying for it on every build/test.
 async function configureNinjaGraph(handle, setup) {
+	handle = cmakeActionHandle(handle);
 	const {
 		srcPath,
 		buildDirPath,
@@ -365,6 +398,7 @@ async function configureNinjaGraph(handle, setup) {
 // digest, covering everything the replay produced (the digest-chained
 // analog of "the build directory, fully built").
 async function replayReachableGraph(handle, setup, graph, targetNames) {
+	handle = cmakeActionHandle(handle);
 	const { buildDirPath, cmakeToolSpec, compilerTools, compilerEnv, dirInputs } =
 		setup;
 	const { rules, edges, topVars, sandboxRoot } = graph;
@@ -394,7 +428,7 @@ async function replayReachableGraph(handle, setup, graph, targetNames) {
 		(edge) =>
 			edge.rule !== "phony" && rules[edge.rule] && rules[edge.rule].command,
 	);
-	const headerFiles = await headerSources(handle);
+	const headerFiles = await headerSources(handle.label || handle);
 
 	// Edges must still run in topological waves — even though dependency
 	// *content* now flows through accumulatedDigest rather than physical
@@ -524,7 +558,7 @@ async function replayReachableGraph(handle, setup, graph, targetNames) {
 		// runtime bits under the sandbox root too (e.g. Zig compiling
 		// compiler-rt/libstd into "$HOME/.cache/zig/..." on first use, which
 		// bakes that same ephemeral root into *their* debug info) — see
-		// compilerEnv/ZIG_BUILD_CACHE in rules/c/zig/toolchain.js, which
+		// compilerEnv/ZIG_BUILD_CACHE in rules/c/zig/index.js, which
 		// pins that cache to a stable, shared, named-cache mount instead.
 		//
 		// compilerEnv (e.g. ZIG_GLOBAL_CACHE_DIR) points at a tool mounted
@@ -592,6 +626,14 @@ function replayTargetNames(handle) {
 // cmake-lib — identical regardless of kind, since a target's kind only ever
 // affects which products get *dispatched*, never what building one means.
 export async function buildCmakeArtifact(handle) {
+	handle = cmakeActionHandle(handle);
+	const workloadDeps = (handle.attrs.deps || []).filter(
+		(dep) => dep?.__imp_label === true && dep.data?.backend,
+	);
+	if (workloadDeps.length > 0) {
+		const c = await import("//rules/c");
+		await Promise.all(workloadDeps.map(c.ccBuild));
+	}
 	const setup = await resolveCmakeSetup(handle);
 	const { srcPath, buildDirPath } = setup;
 	const stageOutputs = handle.attrs.stageOutputs || [];
@@ -657,112 +699,10 @@ export async function buildCmakeArtifact(handle) {
 	return { ...result, outputBase, hasStageOutputs: stageOutputs.length > 0 };
 }
 
-export class CppSources extends Target {
-	static kind = "cpp-sources";
-	constructor({ srcs }) {
-		super({
-			kind: CppSources.kind,
-			attrs: { sources: srcs },
-			sources: sourcesField({
-				root: ".",
-				include: srcs,
-				exclude: [],
-			}),
-		});
-	}
-}
-
-export class CmakeLib extends Target {
-	static kind = "cmake-lib";
-	constructor({
-		src = ".",
-		buildDir,
-		srcs,
-		dirs = [],
-		cmakeArgs = [],
-		ctestArgs = [],
-		outputs = [],
-		stageOutputs = [],
-		outputsInBuildDir = false,
-		toolchain,
-		compiler,
-		deps = [],
-		kind = CmakeLib.kind,
-		testNames = [],
-	}) {
-		const explicitToolchainTarget =
-			toolchain && toolchain.__imp === true ? toolchain : null;
-		const explicitVersion =
-			toolchain && toolchain.__imp !== true ? toolchain : null;
-		const toolchainTarget =
-			explicitToolchainTarget ||
-			(!explicitVersion ? defaultCmakeToolchain() : null);
-		const toolchainVersion =
-			explicitVersion || (toolchainTarget && toolchainTarget.attrs?.version);
-
-		const explicitCompilerTarget =
-			compiler && compiler.__imp === true ? compiler : null;
-		const explicitCompilerVersion =
-			compiler && compiler.__imp !== true ? compiler : null;
-		const compilerTarget =
-			explicitCompilerTarget ||
-			(!explicitCompilerVersion ? defaultZigToolchain() : null);
-		const compilerVersion =
-			explicitCompilerVersion ||
-			(compilerTarget && compilerTarget.attrs?.version);
-
-		const allDeps = [
-			...(toolchainTarget ? [{ target: toolchainTarget, mode: "tool" }] : []),
-			...(compilerTarget ? [{ target: compilerTarget, mode: "tool" }] : []),
-			...deps,
-		];
-
-		super({
-			kind,
-			attrs: {
-				src, // stored as user-provided; resolved by declared_path in product/memo
-				srcs: srcs || DEFAULT_CPP_SRCS,
-				...(kind !== CmakeLib.kind ? { backend: "cmake" } : {}),
-				...(dirs.length ? { dirs } : {}),
-				cmakeArgs,
-				...(ctestArgs.length ? { ctestArgs } : {}),
-				outputs,
-				...(stageOutputs.length ? { stageOutputs } : {}),
-				...(outputsInBuildDir ? { outputsInBuildDir } : {}),
-				...(testNames.length ? { testNames } : {}),
-				...(buildDir ? { buildDir } : {}),
-				...(toolchainVersion ? { toolchain: toolchainVersion } : {}),
-				...(toolchainTarget ? { toolchainTarget } : {}),
-				...(compilerVersion ? { compiler: compilerVersion } : {}),
-				...(compilerTarget ? { compilerTarget } : {}),
-				...(allDeps.length
-					? { deps: allDeps.map((dep) => dep.target || dep) }
-					: {}),
-			},
-			sources: [
-				sourcesField({
-					root: src,
-					include: srcs || DEFAULT_CPP_SRCS,
-					exclude: [],
-				}),
-				...dirs.map((dir) =>
-					sourcesField({
-						root: dir,
-						include: ["**/*"],
-						exclude: [],
-					}),
-				),
-			],
-			deps: allDeps,
-		});
-	}
-}
-
-export const native_link_library = product(
-	CmakeLib,
-	BUILD,
-	CMAKE_TOOL,
-	buildCmakeArtifact,
+export const native_link_library = memo(
+	async function native_link_library(handle) {
+		return buildCmakeArtifact(handle);
+	},
 	{ display: "build {0}", level: "info" },
 );
 
@@ -777,6 +717,7 @@ export const native_link_library = product(
  * @returns {Promise<object>} An artifact(...) built from the cmake result.
  */
 export async function packageCmakeArtifact(handle) {
+	handle = cmakeActionHandle(handle);
 	const result = await buildCmakeArtifact(handle);
 	if (result.hasStageOutputs) {
 		throw new Error(
@@ -786,11 +727,10 @@ export async function packageCmakeArtifact(handle) {
 	return artifact(result.outputDigest, { from: result.outputBase });
 }
 
-export const cmakeLibPackage = product(
-	CmakeLib,
-	PACKAGE,
-	CMAKE_TOOL,
-	packageCmakeArtifact,
+export const cmakeLibPackage = memo(
+	async function cmakeLibPackage(handle) {
+		return packageCmakeArtifact(handle);
+	},
 	{ display: "package {0}", level: "info" },
 );
 
@@ -820,6 +760,7 @@ function ctestNameFilterArgs(testNames) {
 // expandCmakeProject) — unscoped (whole suite) otherwise, matching the
 // existing cmake-lib behavior.
 export async function runCTest(handle) {
+	handle = cmakeActionHandle(handle);
 	const setup = await resolveCmakeSetup(handle);
 	const { srcPath, buildDirPath } = setup;
 	const ctestArgs = [
@@ -873,10 +814,12 @@ export async function runCTest(handle) {
 	});
 }
 
-export const ctest = product(CmakeLib, TEST, CMAKE_TOOL, runCTest, {
-	display: "test {0}",
-	level: "info",
-});
+export const ctest = memo(
+	async function ctest(handle) {
+		return runCTest(handle);
+	},
+	{ display: "test {0}", level: "info" },
+);
 
 // Returns link artifacts at their staged locations as a resource file set for
 // odin package sandboxing. Also ensures the cmake build is a plan prerequisite.
@@ -903,6 +846,7 @@ export const cmake_resources = memo(
 // on physical presence.
 export const cmake_link_artifacts = memo(
 	async function cmake_link_artifacts(handle) {
+		handle = cmakeActionHandle(handle);
 		const result = await buildCmakeArtifact(handle);
 		const setup = await resolveCmakeSetup(handle);
 		const outputBase = handle.attrs.outputsInBuildDir
@@ -940,12 +884,10 @@ export const cmake_link_artifacts = memo(
 // more CTestTestfile.cmake add_test() cases becomes "cc_test" — mirroring
 // Bazel's cc_test, which is simultaneously buildable and runnable-as-a-test
 // (both a "build" and a "test" product are registered for it below).
-const CMAKE_TYPE_TO_KIND = {
-	STATIC_LIBRARY: "cc_library",
-	SHARED_LIBRARY: "cc_library",
-	MODULE_LIBRARY: "cc_library",
-	// EXECUTABLE deliberately absent: it's "cc_binary" by default, or
-	// "cc_test" when correlated to an add_test() case below.
+const CMAKE_TYPE_TO_WORKLOAD = {
+	STATIC_LIBRARY: "library",
+	SHARED_LIBRARY: "library",
+	MODULE_LIBRARY: "library",
 };
 
 function basename(path) {
@@ -980,86 +922,19 @@ function correlateCTestEntries(graph, buildDirPath) {
 	return testsByBasename;
 }
 
-export const expandCmakeProject = expand(
-	CmakeLib,
-	async function expandCmakeProject(handle) {
-		const setup = await resolveCmakeSetup(handle);
-		const graph = await configureNinjaGraph(handle, setup);
-		const parentAddress = safe_target_address(handle);
-		const scope = parentAddress ? parentAddress.split(":")[0] : "//";
-		const testsByBasename = correlateCTestEntries(graph, setup.buildDirPath);
-
-		for (const cmakeTarget of listNamedCmakeTargets(graph)) {
-			const matchedTestNames = new Set();
-			if (cmakeTarget.type === "EXECUTABLE") {
-				for (const candidate of [cmakeTarget.name, ...cmakeTarget.outputs]) {
-					for (const name of testsByBasename.get(basename(candidate)) || []) {
-						matchedTestNames.add(name);
-					}
-				}
-			}
-			const testNames = Array.from(matchedTestNames);
-			const kind =
-				testNames.length > 0
-					? "cc_test"
-					: CMAKE_TYPE_TO_KIND[cmakeTarget.type] || "cc_binary";
-
-			registerTarget(
-				new CmakeLib({
-					src: handle.attrs.src,
-					buildDir: handle.attrs.buildDir,
-					srcs: handle.attrs.srcs,
-					dirs: handle.attrs.dirs,
-					cmakeArgs: handle.attrs.cmakeArgs,
-					toolchain: handle.attrs.toolchainTarget || handle.attrs.toolchain,
-					compiler: handle.attrs.compilerTarget || handle.attrs.compiler,
-					outputs: cmakeTarget.outputs,
-					outputsInBuildDir: true,
-					kind,
-					testNames,
-				}),
-				`${scope}:${cmakeTarget.name}`,
-			);
-		}
-	},
-	{ display: "expand CMake project {0}", level: "info" },
-);
-
-// ---------------------------------------------------------------------------
-// Target constructors
-// ---------------------------------------------------------------------------
-
-/**
- * Declare a target that owns C/C++ source files.
- *
- * @category target
- * @param {object} opts
- * @param {string[]} opts.srcs Source glob patterns.
- * @returns {object} Target handle.
- */
 export function cppSources({ srcs }) {
-	return new CppSources({ srcs });
+	return glob({ root: ".", include: srcs });
 }
 
-/**
- * Declare a CMake-backed native library, binary, or test target.
- *
- * @category target
- * @param {object} opts
- * @param {string} [opts.src="."] Workspace-relative CMake source directory.
- * @param {string} [opts.buildDir] Workspace-relative build directory.
- * @param {string[]} [opts.srcs] Source glob patterns staged for CMake.
- * @param {string[]} [opts.dirs=[]] Additional directories staged for CMake.
- * @param {string[]} [opts.cmakeArgs=[]] Extra arguments passed to CMake configure.
- * @param {string[]} [opts.ctestArgs=[]] Extra arguments passed to ctest.
- * @param {string[]} [opts.outputs=[]] Output paths produced by the CMake build.
- * @param {string[]} [opts.stageOutputs=[]] Output paths to stage from the build directory.
- * @param {object|string} [opts.toolchain] CMake toolchain target handle or version string.
- * @param {object|string} [opts.compiler] Compiler toolchain target handle or version string.
- * @param {Array} [opts.deps=[]] Additional dependencies.
- * @returns {object} Target handle.
- */
-export function cmakeLib({
+function normalizeCmakeDeps(deps) {
+	return deps
+		.map((dep) =>
+			dep && (dep.__imp || dep.__imp_label) ? dep : dep?.target || null,
+		)
+		.filter(Boolean);
+}
+
+function cmakeProjectData({
 	src = ".",
 	buildDir,
 	srcs,
@@ -1072,68 +947,77 @@ export function cmakeLib({
 	compiler,
 	deps = [],
 }) {
-	return new CmakeLib({
+	const explicitToolchainTarget =
+		toolchain && toolchain.__imp === true ? toolchain : null;
+	const explicitVersion =
+		toolchain && toolchain.__imp !== true ? toolchain : null;
+	const toolchainTarget =
+		explicitToolchainTarget ||
+		(!explicitVersion ? defaultCmakeToolchain() : null);
+	const toolchainVersion =
+		explicitVersion || toolchainTarget?.attrs?.version || null;
+	const explicitCompilerTarget =
+		compiler && compiler.__imp === true ? compiler : null;
+	const explicitCompilerVersion =
+		compiler && compiler.__imp !== true ? compiler : null;
+	const compilerTarget =
+		explicitCompilerTarget ||
+		(!explicitCompilerVersion ? defaultZigToolchain() : null);
+	const compilerVersion =
+		explicitCompilerVersion || compilerTarget?.attrs?.version || null;
+	return {
+		type: "project",
+		backend: "cmake",
 		src,
-		buildDir,
-		srcs,
-		dirs,
-		cmakeArgs,
-		ctestArgs,
-		outputs,
-		stageOutputs,
-		toolchain,
-		compiler,
-		deps,
-	});
+		srcs: srcs || DEFAULT_CPP_SRCS,
+		dirs: [...dirs],
+		cmakeArgs: [...cmakeArgs],
+		...(ctestArgs.length ? { ctestArgs: [...ctestArgs] } : {}),
+		outputs: [...outputs],
+		stageOutputs: [...stageOutputs],
+		deps: normalizeCmakeDeps(deps),
+		...(buildDir ? { buildDir } : {}),
+		...(toolchainVersion ? { toolchain: toolchainVersion } : {}),
+		...(toolchainTarget ? { toolchainTarget } : {}),
+		...(compilerVersion ? { compiler: compilerVersion } : {}),
+		...(compilerTarget ? { compilerTarget } : {}),
+	};
 }
 
-/**
- * Issue #90 integration probe. It deliberately remains unsupported/private;
- * #32 will replace cmakeLib() with the production label factory.
- */
-export function __cmakeLabelProbe({
-	src = ".",
-	buildDir,
-	srcs,
-	dirs = [],
-	cmakeArgs = [],
-	ctestArgs = [],
-	toolchain,
-	compiler,
-}) {
-	const project = label({
-		data: {
-			src,
-			srcs: srcs || DEFAULT_CPP_SRCS,
-			dirs,
-			cmakeArgs,
-			ctestArgs,
-			...(toolchain
-				? {
-						toolchain:
-							toolchain.__imp === true ? toolchain.attrs.version : toolchain,
-					}
-				: {}),
-			...(compiler
-				? {
-						compiler:
-							compiler.__imp === true ? compiler.attrs.version : compiler,
-					}
-				: {}),
-			...(buildDir ? { buildDir } : {}),
-		},
+async function publishCmakePackage(workload, artifactResult) {
+	if (artifactResult == null) return null;
+	const address = labelAddress(workload);
+	const withoutSlashes = address.replace(/^\/\//, "");
+	const [dir, name] = withoutSlashes.split(":");
+	const destination = dir ? `dist/${dir}/${name}` : `dist/${name}`;
+	writeWorkspace(destination, artifactResult.digest, {
+		from: artifactResult.from,
 	});
-	project.attrs = project.data;
+	logInfo(`${address}#package -> ${destination}`);
+	return artifactResult;
+}
+
+/** Declare a CMake-backed exported project label. */
+export const cmakeLib = extensible(function cmakeLib(opts = {}) {
+	const project = label({ data: cmakeProjectData(opts) });
+	_cmakeProjectLabels.push(project);
+	registerCmakeProjectLabel(project);
+	build(project, async function buildCmakeProject() {
+		return buildCmakeArtifact(project);
+	});
+	test(project, async function testCmakeProject() {
+		return runCTest(project);
+	});
+	packageGoal(project, async function packageCmakeProject() {
+		return publishCmakePackage(project, await packageCmakeArtifact(project));
+	});
 	discoverLabels(
 		project,
 		async function discoverCmakeLabels(owner) {
 			const setup = await resolveCmakeSetup(owner);
 			const graph = await configureNinjaGraph(owner, setup);
 			const scope = labelAddress(owner).split(":")[0];
-			const testsByBasename = correlateCTestEntries(
-				graph,
-				setup.buildDirPath,
-			);
+			const testsByBasename = correlateCTestEntries(graph, setup.buildDirPath);
 			for (const cmakeTarget of listNamedCmakeTargets(graph)) {
 				const matchedTestNames = new Set();
 				if (cmakeTarget.type === "EXECUTABLE") {
@@ -1143,27 +1027,38 @@ export function __cmakeLabelProbe({
 						}
 					}
 				}
+				const testNames = Array.from(matchedTestNames);
 				const child = label({
 					data: {
 						...owner.data,
+						type:
+							testNames.length > 0
+								? "test"
+								: CMAKE_TYPE_TO_WORKLOAD[cmakeTarget.type] || "binary",
 						outputs: cmakeTarget.outputs,
 						outputsInBuildDir: true,
-						testNames: Array.from(matchedTestNames),
+						testNames,
 					},
 				});
-				child.attrs = child.data;
 				build(child, async function buildDiscoveredCmakeTarget() {
 					return buildCmakeArtifact(child);
 				});
-				if (child.data.testNames.length > 0) {
+				if (testNames.length > 0) {
 					test(child, async function testDiscoveredCmakeTarget() {
 						return runCTest(child);
+					});
+				} else {
+					packageGoal(child, async function packageDiscoveredCmakeTarget() {
+						return publishCmakePackage(
+							child,
+							await packageCmakeArtifact(child),
+						);
 					});
 				}
 				registerLabel(child, `${scope}:${cmakeTarget.name}`);
 			}
 		},
-		{ goals: ["build", "test"] },
+		{ goals: ["build", "test", "package"] },
 	);
 	return project;
-}
+});

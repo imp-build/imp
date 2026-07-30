@@ -37,7 +37,7 @@ const UV_LOCKFILE = "//rules/python/uv-toolchain.lock";
 // addressed by uv itself (by package/interpreter identity, never by sandbox
 // identity), so sharing a single directory across every sandbox and uv
 // version is safe — same reasoning as ZIG_BUILD_CACHE in
-// rules/c/zig/toolchain.js. Left unpinned, uv would instead default under the
+// rules/c/zig/index.js. Left unpinned, uv would instead default under the
 // sandbox's fresh-every-run HOME, paying a full re-download on every build.
 // Keyed by a fixed "shared" key (not per-version) rather than per-toolchain-
 // version/platform like UV_TOOLCHAIN_CACHE below, since this cache's content
@@ -46,7 +46,7 @@ const UV_CACHE_DIR_CACHE = "uv-cache-dir";
 const UV_CACHE_KEY = "shared";
 
 // uv's release target triples: https://github.com/astral-sh/uv/releases.
-// Broader than Zig's linux+windows-only matrix (rules/c/zig/toolchain.js) —
+// Broader than Zig's linux+windows-only matrix (rules/c/zig/index.js) —
 // uv publishes macOS builds too.
 const TARGET_TRIPLES = {
 	"linux-x86_64": "x86_64-unknown-linux-gnu",
@@ -246,7 +246,7 @@ export const acquireUvToolchain = memo(
 		// directory here, guarded independently of the toolchain cacheHas()
 		// above since this cache is keyed "shared", not per-version (same
 		// independent-guard pattern as ZIG_BUILD_CACHE's seeding in
-		// rules/c/zig/toolchain.js).
+		// rules/c/zig/index.js).
 		if (!cacheHas(UV_CACHE_DIR_CACHE, UV_CACHE_KEY)) {
 			const seedPath = ".imp/uv-cache-dir-seed";
 			await run({
@@ -334,7 +334,7 @@ export function uvCacheDirTool() {
  * tool, or the path won't exist in the sandbox. Values are relative to the
  * sandbox root — callers must export them as absolute paths (capturing
  * `$(pwd)` before any `cd`) rather than passing them via run()'s own `env:`,
- * exactly as zigGlobalCacheEnv()'s doc comment in rules/c/zig/toolchain.js
+ * exactly as zigGlobalCacheEnv()'s doc comment in rules/c/zig/index.js
  * explains for ZIG_GLOBAL_CACHE_DIR.
  *
  * Also pins UV_PYTHON_INSTALL_DIR alongside UV_CACHE_DIR: left at its

@@ -16,7 +16,7 @@ import {
 	gccTool,
 	gccToolchain,
 	installGccToolchain,
-} from "//rules/c/gcc/toolchain";
+} from "//rules/c/gcc";
 
 function withGccHost(platOrFn, maybeFn) {
 	const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;

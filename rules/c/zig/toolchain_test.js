@@ -16,7 +16,7 @@ import {
 	zigCMakeArgs,
 	zigTool,
 	zigToolchain,
-} from "//rules/c/zig/toolchain";
+} from "//rules/c/zig";
 
 function withZigHost(platOrFn, maybeFn) {
 	const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;

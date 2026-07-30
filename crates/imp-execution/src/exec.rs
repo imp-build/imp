@@ -1800,7 +1800,7 @@ mod tests {
         // Named caches live under cache_root(), not the workspace, so
         // populating one isn't "writing to the workspace" and must not
         // require materialize: true. Regression test for toolchain
-        // acquisition rules (e.g. rules/c/gcc/toolchain.js) that only set
+        // acquisition rules (e.g. rules/c/gcc/index.js) that only set
         // materialize: true to get their named cache populated, which used
         // to also leak the same content into the workspace as a side effect.
         let root = tempfile::tempdir().unwrap();

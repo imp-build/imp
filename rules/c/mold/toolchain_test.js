@@ -17,7 +17,7 @@ import {
 	moldCacheKey,
 	moldTool,
 	moldToolchain,
-} from "//rules/c/mold/toolchain";
+} from "//rules/c/mold";
 
 function withMoldHost(platOrFn, maybeFn) {
 	const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;

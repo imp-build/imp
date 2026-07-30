@@ -5,8 +5,8 @@ export const cache = { gcMaxAgeDays: 7 };
 
 import "//rules/c";
 import "//rules/c/cmake";
-import { defaultGccToolchain } from "//rules/c/gcc/toolchain";
-import { defaultMoldToolchain } from "//rules/c/mold/toolchain";
+import { defaultGccToolchain } from "//rules/c/gcc";
+import { defaultMoldToolchain } from "//rules/c/mold";
 import "//rules/gen";
 import { defaultBiomeToolchain } from "//rules/js/biome_toolchain";
 import { odinToolchain } from "//rules/odin";

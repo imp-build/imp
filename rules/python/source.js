@@ -434,7 +434,9 @@ async function buildPythonSourceRunTemplate(handle, resolveUvTool = uvTool) {
 	const envExports = sandboxRootEnvExports(uvCacheDirEnv());
 	const inputs = [file_set.literal(handle.attrs.sourceFiles)];
 	if (project) {
-		inputs.push(glob({ root: project, include: ["pyproject.toml", "uv.lock"] }));
+		inputs.push(
+			glob({ root: project, include: ["pyproject.toml", "uv.lock"] }),
+		);
 	}
 	const script =
 		`file=$1; root=$2; project=$3; venv=$4; version=$5; shift 5; ` +

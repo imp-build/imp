@@ -11,10 +11,7 @@ import {
 	__resetRustToolchainStateForTest,
 	rustToolchain,
 } from "//rules/rust/toolchain";
-import {
-	gccToolchain,
-	__resetGccToolchainStateForTest,
-} from "//rules/c/gcc/toolchain";
+import { gccToolchain, __resetGccToolchainStateForTest } from "//rules/c/gcc";
 import { nativeTool } from "//rules/imp/native_tool";
 
 function withRustHost(fn) {

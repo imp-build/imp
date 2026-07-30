@@ -1,44 +1,34 @@
 import {
-	Target,
 	allUnowned,
 	artifact,
+	build,
 	configuration,
 	defineConfigSchema,
+	extensible,
 	field,
-	file_set,
 	glob,
+	label,
+	labelAddress,
+	logInfo,
 	memo,
 	mergeDigests,
 	output,
 	output_path,
+	packageGoal,
 	paths,
 	product,
 	productFor,
 	read_file,
 	registerBuildRule,
 	run,
-	sourcesField,
 	targetAddress,
-	targetOutputSlug,
-	workspaceTargets,
-	toolName,
-	BUILD,
-	PACKAGE,
-	TEST,
+	writeWorkspace,
 } from "imp:core";
 
-// The cc products drive whichever CC toolchain the workspace defaults to
-// (gcc or zig, via the CC_TOOLCHAIN role), so they carry a toolchain-neutral
-// "cc" tool identity.
-const CC_TOOL = toolName("cc");
-
-import {
-	registerBuildGenerator,
-	GENERATE_BUILD,
-} from "//rules/workflows/generate_build";
+import { registerBuildGenerator } from "//rules/workflows/generate_build";
 import { CC_TOOLCHAIN } from "//rules/c/products";
-import { GCC_TOOL } from "//rules/c/gcc/toolchain";
-import { ZIG_TOOL } from "//rules/c/zig/toolchain";
+import { GCC_TOOL } from "//rules/c/gcc";
+import { ZIG_TOOL } from "//rules/c/zig";
 
 /**
  * Declarative workspace configuration schema for C/C++.
@@ -53,18 +43,14 @@ export const cConfigSchema = {
 defineConfigSchema("c", cConfigSchema);
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
-import {
-	defaultGccToolchain,
-	gccTool,
-	GccToolchain,
-} from "//rules/c/gcc/toolchain";
+import { defaultGccToolchain, gccTool, GccToolchain } from "//rules/c/gcc";
 import {
 	defaultZigToolchain,
 	zigBuildCacheTool,
 	zigGlobalCacheEnv,
 	zigTool,
 	ZigToolchain,
-} from "//rules/c/zig/toolchain";
+} from "//rules/c/zig";
 
 // Generated BUILD.js files can reference these rule names regardless of which
 // module implements the target constructor.
@@ -99,9 +85,12 @@ function normalize_workspace_path(path) {
 }
 
 function safe_target_address(handle) {
-	if (!handle || handle.__imp !== true) return null;
+	if (!handle) return null;
 	try {
-		return targetAddress(handle);
+		if (handle.__imp_label === true) return labelAddress(handle);
+		if (handle.label?.__imp_label === true) return labelAddress(handle.label);
+		if (handle.__imp === true) return targetAddress(handle);
+		return null;
 	} catch (_) {
 		return null;
 	}
@@ -155,7 +144,9 @@ function append_build_target(result, file, target) {
 
 function normalize_deps(deps) {
 	return deps
-		.map((d) => (d && d.__imp ? d : d && d.target ? d.target : null))
+		.map((d) =>
+			d && (d.__imp || d.__imp_label) ? d : d && d.target ? d.target : null,
+		)
 		.filter(Boolean);
 }
 
@@ -170,11 +161,18 @@ function is_cxx_source(path) {
 
 function object_path_for(handle, source) {
 	const name = source.replace(/[^A-Za-z0-9_.-]/g, "_");
-	return `build/c/${targetOutputSlug(handle)}/${name}.o`;
+	return `build/c/obj/${c_output_slug(handle)}/${name}.o`;
 }
 
 function default_output_path(handle, extension) {
-	return `build/c/${targetOutputSlug(handle)}${extension}`;
+	return `build/c/${c_output_slug(handle)}${extension}`;
+}
+
+function c_output_slug(handle) {
+	const address = safe_target_address(handle);
+	return address
+		? address.replace(/^\/\//, "").replace(/[:/]/g, "_")
+		: `anon-${handle.__id}`;
 }
 
 function shell_quote(value) {
@@ -271,9 +269,53 @@ export function has_c_main_entrypoint(sourceText) {
 	return /(?:^|[^\w])main\s*\(/m.test(text);
 }
 
-export class CcTarget extends Target {
-	constructor({
-		kind,
+const _ccLabels = [];
+const _cmakeProjectLabels = [];
+
+export function registerCmakeProjectLabel(project) {
+	_cmakeProjectLabels.push(project);
+}
+
+export function ccActionHandle(handle) {
+	if (!handle || handle.__imp_label !== true) return handle;
+	return {
+		__id: handle.__id,
+		label: handle,
+		attrs: handle.data,
+		deps: [
+			...(handle.data.deps || []).map((dep) => ({ handle: dep })),
+			...(handle.data.toolchain
+				? [{ handle: handle.data.toolchain, mode: "tool" }]
+				: []),
+		],
+	};
+}
+
+export function ccWorkloadHandles() {
+	return _ccLabels
+		.map(ccActionHandle)
+		.sort((a, b) =>
+			(safe_target_address(a) || "").localeCompare(
+				safe_target_address(b) || "",
+			),
+		);
+}
+
+async function publishCcPackage(workload, artifactResult) {
+	if (artifactResult == null) return null;
+	const address = labelAddress(workload);
+	const withoutSlashes = address.replace(/^\/\//, "");
+	const [dir, name] = withoutSlashes.split(":");
+	const destination = dir ? `dist/${dir}/${name}` : `dist/${name}`;
+	writeWorkspace(destination, artifactResult.digest, {
+		from: artifactResult.from,
+	});
+	logInfo(`${address}#package -> ${destination}`);
+	return artifactResult;
+}
+
+function createCcWorkload(type, opts = {}) {
+	const {
 		path = ".",
 		srcs = DEFAULT_CPP_SRCS,
 		hdrs = DEFAULT_CPP_HDRS,
@@ -282,111 +324,51 @@ export class CcTarget extends Target {
 		copts = [],
 		linkopts = [],
 		output: out,
-		backend = "raw",
-		backendAttrs = {},
-	}) {
-		if (toolchain && toolchain.__imp !== true) {
-			throw new Error(
-				"ccLibrary/ccBinary toolchain must be a target handle providing cc-toolchain",
-			);
-		}
-		const normalizedDeps = normalize_deps(deps);
-		const toolchainHandle =
-			toolchain && toolchain.__imp === true
-				? toolchain
-				: !toolchain
-					? defaultZigToolchain() || defaultGccToolchain()
-					: null;
-		const allDeps = [
-			...(toolchainHandle ? [{ target: toolchainHandle, mode: "tool" }] : []),
-			...normalizedDeps.map((target) => ({ target })),
-		];
-
-		super({
-			kind,
-			attrs: {
-				path,
-				srcs,
-				hdrs,
-				deps: normalizedDeps,
-				copts,
-				linkopts,
-				backend,
-				...(out ? { output: out } : {}),
-				...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
-				...backendAttrs,
-			},
-			sources: sourcesField({
-				root: path,
-				include: [...srcs, ...hdrs],
-				exclude: [],
-			}),
-			deps: allDeps,
-		});
+	} = opts;
+	if (toolchain && toolchain.__imp !== true) {
+		throw new Error(
+			"ccLibrary/ccBinary toolchain must be a target handle providing cc-toolchain",
+		);
 	}
+	const toolchainHandle =
+		toolchain || defaultZigToolchain() || defaultGccToolchain() || null;
+	const workload = label({
+		data: {
+			type,
+			backend: "raw",
+			path,
+			srcs: [...srcs],
+			hdrs: [...hdrs],
+			deps: normalize_deps(deps),
+			copts: [...copts],
+			linkopts: [...linkopts],
+			...(out ? { output: out } : {}),
+			...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
+		},
+	});
+	_ccLabels.push(workload);
+	build(workload, async function buildCcWorkload() {
+		return ccBuild(workload);
+	});
+	packageGoal(workload, async function packageCcWorkload() {
+		return publishCcPackage(workload, await ccPackage(workload));
+	});
+	return workload;
 }
 
-export class CcLibrary extends CcTarget {
-	static kind = "cc_library";
-	constructor(opts = {}) {
-		super({ ...opts, kind: CcLibrary.kind });
-	}
-}
+/** Declare a raw C/C++ library label. */
+export const ccLibrary = extensible(function ccLibrary(opts = {}) {
+	return createCcWorkload("library", opts);
+});
 
-export class CcBinary extends CcTarget {
-	static kind = "cc_binary";
-	constructor(opts = {}) {
-		super({ ...opts, kind: CcBinary.kind });
-	}
-}
-
-// Kind carrier for cc_test product registration. cc_test targets are minted
-// by the cmake expander (see //rules/c/cmake) rather than constructed
-// through a dedicated factory here.
-export class CcTest extends CcTarget {
-	static kind = "cc_test";
-}
-
-/**
- * Declare a raw C/C++ library target.
- *
- * @category target
- * @param {object} opts
- * @param {string} [opts.path="."]
- * @param {string[]} [opts.srcs]
- * @param {string[]} [opts.hdrs]
- * @param {Array} [opts.deps=[]]
- * @param {object} [opts.toolchain] Toolchain handle providing the cc-toolchain product.
- * @param {string[]} [opts.copts=[]]
- * @param {string[]} [opts.linkopts=[]]
- * @param {string} [opts.output]
- * @returns {object} Target handle.
- */
-export function ccLibrary(opts = {}) {
-	return new CcLibrary(opts);
-}
-
-/**
- * Declare a raw C/C++ binary target.
- *
- * @category target
- * @param {object} opts
- * @param {string} [opts.path="."]
- * @param {string[]} [opts.srcs]
- * @param {string[]} [opts.hdrs]
- * @param {Array} [opts.deps=[]]
- * @param {object} [opts.toolchain] Toolchain handle providing the cc-toolchain product.
- * @param {string[]} [opts.copts=[]]
- * @param {string[]} [opts.linkopts=[]]
- * @param {string} [opts.output]
- * @returns {object} Target handle.
- */
-export function ccBinary(opts = {}) {
-	return new CcBinary(opts);
-}
+/** Declare a raw C/C++ binary label. */
+export const ccBinary = extensible(function ccBinary(opts = {}) {
+	return createCcWorkload("binary", opts);
+});
 
 export const own_sources = memo(
 	async function own_sources(handle) {
+		handle = ccActionHandle(handle);
 		return glob({
 			root: declared_path(handle, handle.attrs.path || "."),
 			include: handle.attrs.srcs || DEFAULT_CPP_SRCS,
@@ -397,6 +379,7 @@ export const own_sources = memo(
 
 const headers = memo(
 	async function headers(handle) {
+		handle = ccActionHandle(handle);
 		return glob({
 			root: declared_path(handle, handle.attrs.path || "."),
 			include: handle.attrs.hdrs || DEFAULT_CPP_HDRS,
@@ -482,6 +465,7 @@ product(
 );
 
 async function ccToolchainFor(handle) {
+	handle = ccActionHandle(handle);
 	const toolchain =
 		handle.attrs.toolchain || defaultZigToolchain() || defaultGccToolchain();
 	if (!toolchain) {
@@ -500,8 +484,9 @@ async function ccToolchainFor(handle) {
 // (staged at each object's original declared path) instead of depending on
 // the objects being physically present on disk.
 async function compileRawObjects(handle, toolchain) {
-	const sourcePaths = paths(await own_sources(handle));
-	const headerInputs = await headers(handle);
+	const memoHandle = handle.label || handle;
+	const sourcePaths = paths(await own_sources(memoHandle));
+	const headerInputs = await headers(memoHandle);
 	const tools = await toolchain.tools();
 	const env = toolchain.env();
 	const objects = [];
@@ -546,11 +531,12 @@ async function compileRawObjects(handle, toolchain) {
 // artifact to already be materialized on disk).
 export const cc_link_artifacts = memo(
 	async function cc_link_artifacts(handle) {
+		handle = ccActionHandle(handle);
 		if (handle.attrs.backend === "cmake") {
 			const cmake = await import("//rules/c/cmake");
 			return cmake.cmake_link_artifacts(handle);
 		}
-		const result = await ccBuild(handle);
+		const result = await ccBuild(handle.label || handle);
 		return result && result.outputPath
 			? { paths: [result.outputPath], digest: result.outputDigest }
 			: { paths: [], digest: null };
@@ -559,6 +545,7 @@ export const cc_link_artifacts = memo(
 );
 
 async function buildRawLibrary(handle) {
+	handle = ccActionHandle(handle);
 	const toolchain = await ccToolchainFor(handle);
 	const { objects, digest } = await compileRawObjects(handle, toolchain);
 	const outPath = handle.attrs.output || default_output_path(handle, ".a");
@@ -584,9 +571,13 @@ async function buildRawLibrary(handle) {
 // `{paths, digest}` — the digest-chained analog of the old file_set.union()
 // over each dep's materialized archive.
 async function depLinkArtifacts(handle) {
+	handle = ccActionHandle(handle);
 	const artifacts = [];
 	for (const dep of (handle.attrs.deps || []).filter(
-		(h) => h && h.kind === "cc_library",
+		(h) =>
+			h &&
+			((h.__imp_label && h.data?.type === "library") ||
+				h.kind === "cc_library"),
 	)) {
 		artifacts.push(await cc_link_artifacts(dep));
 	}
@@ -599,6 +590,7 @@ async function depLinkArtifacts(handle) {
 }
 
 async function buildRawBinary(handle) {
+	handle = ccActionHandle(handle);
 	const toolchain = await ccToolchainFor(handle);
 	const { objects, digest } = await compileRawObjects(handle, toolchain);
 	const linkInputs = await depLinkArtifacts(handle);
@@ -629,90 +621,34 @@ async function buildRawBinary(handle) {
 	return result;
 }
 
-export const ccBuild = product(
-	CcLibrary,
-	BUILD,
-	CC_TOOL,
+export const ccBuild = memo(
 	async function ccBuild(handle) {
+		handle = ccActionHandle(handle);
 		if (handle.attrs.backend === "cmake") {
 			const cmake = await import("//rules/c/cmake");
 			return cmake.buildCmakeArtifact(handle);
 		}
-		return buildRawLibrary(handle);
+		return handle.attrs.type === "library"
+			? buildRawLibrary(handle)
+			: buildRawBinary(handle);
 	},
 	{ display: "build {0}", level: "info" },
 );
 
-product(
-	CcBinary,
-	BUILD,
-	CC_TOOL,
-	async function ccBinaryBuild(handle) {
-		if (handle.attrs.backend === "cmake") {
-			const cmake = await import("//rules/c/cmake");
-			return cmake.buildCmakeArtifact(handle);
-		}
-		return buildRawBinary(handle);
-	},
-	{ display: "build {0}", level: "info" },
-);
-
-product(
-	CcTest,
-	BUILD,
-	CC_TOOL,
-	async function ccTestBuild(handle) {
-		if (handle.attrs.backend === "cmake") {
-			const cmake = await import("//rules/c/cmake");
-			return cmake.buildCmakeArtifact(handle);
-		}
-		return buildRawBinary(handle);
-	},
-	{ display: "build {0}", level: "info" },
-);
-
-export const ccLibraryPackage = product(
-	CcLibrary,
-	PACKAGE,
-	CC_TOOL,
-	async function ccLibraryPackage(handle) {
+export const ccPackage = memo(
+	async function ccPackage(handle) {
+		handle = ccActionHandle(handle);
 		if (handle.attrs.backend === "cmake") {
 			const cmake = await import("//rules/c/cmake");
 			return cmake.packageCmakeArtifact(handle);
 		}
-		const result = await buildRawLibrary(handle);
+		const result =
+			handle.attrs.type === "library"
+				? await buildRawLibrary(handle)
+				: await buildRawBinary(handle);
 		return artifact(result.outputDigest, { from: dirname(result.outputPath) });
 	},
 	{ display: "package {0}", level: "info" },
-);
-
-product(
-	CcBinary,
-	PACKAGE,
-	CC_TOOL,
-	async function ccBinaryPackage(handle) {
-		if (handle.attrs.backend === "cmake") {
-			const cmake = await import("//rules/c/cmake");
-			return cmake.packageCmakeArtifact(handle);
-		}
-		const result = await buildRawBinary(handle);
-		return artifact(result.outputDigest, { from: dirname(result.outputPath) });
-	},
-	{ display: "package {0}", level: "info" },
-);
-
-product(
-	CcTest,
-	TEST,
-	CC_TOOL,
-	async function ccTestRun(handle) {
-		if (handle.attrs.backend === "cmake") {
-			const cmake = await import("//rules/c/cmake");
-			return cmake.runCTest(handle);
-		}
-		throw new Error("raw cc_test is not implemented");
-	},
-	{ display: "test {0}", level: "info" },
 );
 
 function path_is_under(path, root) {
@@ -729,79 +665,63 @@ function source_has_main(path) {
 	return has_c_main_entrypoint(read_file(path));
 }
 
-// Phantom kind: never declared as a workspace target; carries the kind for
-// the generate-build generator product and registerBuildGenerator().
-class CppBuildGenerator extends Target {
-	static kind = "cpp-build-generator";
+export async function generateBuild({
+	root = ".",
+	exclude = DEFAULT_GENERATE_BUILD_EXCLUDES,
+} = {}) {
+	const files = allUnowned({
+		root,
+		include: ["**/CMakeLists.txt", ...DEFAULT_CPP_SRCS, ...DEFAULT_CPP_HDRS],
+		exclude,
+	});
+
+	const existingPaths = new Set([
+		...ccWorkloadHandles().map((h) =>
+			normalize_workspace_path(declared_path(h, h.attrs.path || ".")),
+		),
+		..._cmakeProjectLabels
+			.map((project) => ccActionHandle(project))
+			.map((h) =>
+				normalize_workspace_path(declared_path(h, h.attrs.src || ".")),
+			),
+	]);
+
+	const cmakeDirs = Array.from(
+		new Set(
+			files.filter((path) => basename(path) === "CMakeLists.txt").map(dirname),
+		),
+	).sort();
+
+	const result = {};
+	for (const dir of cmakeDirs) {
+		if (existingPaths.has(normalize_workspace_path(dir))) continue;
+		append_build_target(result, build_file_for_dir(dir), {
+			name: `${target_name_for_dir(dir)}_cmake`,
+			rule: "cmakeLib",
+			props: {},
+		});
+	}
+
+	const cmakeRoots = cmakeDirs.filter(
+		(dir) => !existingPaths.has(normalize_workspace_path(dir)),
+	);
+	const rawSources = files
+		.filter((path) => ["c", "cc", "cpp", "cxx"].includes(source_ext(path)))
+		.filter((path) => !cmakeRoots.some((root) => path_is_under(path, root)));
+
+	const rawDirs = Array.from(new Set(rawSources.map(dirname))).sort();
+	for (const dir of rawDirs) {
+		if (existingPaths.has(normalize_workspace_path(dir))) continue;
+		const dirSources = rawSources.filter((path) => dirname(path) === dir);
+		const hasMain = dirSources.some(source_has_main);
+		append_build_target(result, build_file_for_dir(dir), {
+			name: target_name_for_dir(dir),
+			rule: hasMain ? "ccBinary" : "ccLibrary",
+			props: {},
+		});
+	}
+
+	return result;
 }
 
-export const generateBuild = product(
-	CppBuildGenerator,
-	GENERATE_BUILD,
-	CC_TOOL,
-	async function generateBuild(handle) {
-		const root = handle.attrs.root || ".";
-		const exclude = handle.attrs.exclude || DEFAULT_GENERATE_BUILD_EXCLUDES;
-		const files = allUnowned({
-			root,
-			include: ["**/CMakeLists.txt", ...DEFAULT_CPP_SRCS, ...DEFAULT_CPP_HDRS],
-			exclude,
-		});
-
-		const existingPaths = new Set(
-			[
-				...workspaceTargets("cc_library").map(({ handle: h }) =>
-					declared_path(h, h.attrs.path || "."),
-				),
-				...workspaceTargets("cc_binary").map(({ handle: h }) =>
-					declared_path(h, h.attrs.path || "."),
-				),
-				...workspaceTargets("cmake-lib").map(({ handle: h }) =>
-					declared_path(h, h.attrs.src || "."),
-				),
-			].map(normalize_workspace_path),
-		);
-
-		const cmakeDirs = Array.from(
-			new Set(
-				files
-					.filter((path) => basename(path) === "CMakeLists.txt")
-					.map(dirname),
-			),
-		).sort();
-
-		const result = {};
-		for (const dir of cmakeDirs) {
-			if (existingPaths.has(normalize_workspace_path(dir))) continue;
-			append_build_target(result, build_file_for_dir(dir), {
-				name: `${target_name_for_dir(dir)}_cmake`,
-				rule: "cmakeLib",
-				props: {},
-			});
-		}
-
-		const cmakeRoots = cmakeDirs.filter(
-			(dir) => !existingPaths.has(normalize_workspace_path(dir)),
-		);
-		const rawSources = files
-			.filter((path) => ["c", "cc", "cpp", "cxx"].includes(source_ext(path)))
-			.filter((path) => !cmakeRoots.some((root) => path_is_under(path, root)));
-
-		const rawDirs = Array.from(new Set(rawSources.map(dirname))).sort();
-		for (const dir of rawDirs) {
-			if (existingPaths.has(normalize_workspace_path(dir))) continue;
-			const dirSources = rawSources.filter((path) => dirname(path) === dir);
-			const hasMain = dirSources.some(source_has_main);
-			append_build_target(result, build_file_for_dir(dir), {
-				name: target_name_for_dir(dir),
-				rule: hasMain ? "ccBinary" : "ccLibrary",
-				props: {},
-			});
-		}
-
-		return result;
-	},
-	{ display: "generate build {0}", level: "info" },
-);
-
-registerBuildGenerator({ namespace: "c", kind: CppBuildGenerator });
+registerBuildGenerator({ namespace: "c", generate: generateBuild });

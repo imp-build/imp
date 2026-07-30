@@ -16,10 +16,10 @@ import {
 	generateBuiltinLockfile,
 } from "//rules/workflows/lockfiles";
 
-import "//rules/c/cmake/toolchain";
-import "//rules/c/gcc/toolchain";
-import "//rules/c/mold/toolchain";
-import "//rules/c/zig/toolchain";
+import "//rules/c/cmake";
+import "//rules/c/gcc";
+import "//rules/c/mold";
+import "//rules/c/zig";
 import "//rules/js/biome_toolchain";
 import "//rules/js/node_toolchain";
 import "//rules/js/pnpm_toolchain";

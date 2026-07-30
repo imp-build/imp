@@ -11,7 +11,7 @@ import {
 	__resetGccToolchainStateForTest,
 	gccToolchain,
 	installGccToolchain,
-} from "//rules/c/gcc/toolchain";
+} from "//rules/c/gcc";
 
 async function withGccHost(fn) {
 	return withFakeToolchainHost(async (host) => {
@@ -38,19 +38,21 @@ async function withOptMode(value, fn) {
 }
 
 describe("C/C++ rules", () => {
-	test("ccLibrary declares a generic cc_library target", () => {
+	test("ccLibrary declares a raw library label", () => {
 		const lib = ccLibrary({ path: "rules/c/cmake/example", srcs: ["hello.c"] });
 
-		expect(lib.kind).toBe("cc_library");
-		expect(lib.attrs.backend).toBe("raw");
-		expect(lib.attrs.path).toBe("rules/c/cmake/example");
+		expect(lib.__imp_label).toBe(true);
+		expect(lib.data.type).toBe("library");
+		expect(lib.data.backend).toBe("raw");
+		expect(lib.data.path).toBe("rules/c/cmake/example");
 	});
 
-	test("ccBinary declares a generic cc_binary target", () => {
+	test("ccBinary declares a raw binary label", () => {
 		const bin = ccBinary({ path: "rules/c/cmake/example", srcs: ["main.c"] });
 
-		expect(bin.kind).toBe("cc_binary");
-		expect(bin.attrs.backend).toBe("raw");
+		expect(bin.__imp_label).toBe(true);
+		expect(bin.data.type).toBe("binary");
+		expect(bin.data.backend).toBe("raw");
 	});
 
 	test("has_c_main_entrypoint ignores comments and strings", () => {

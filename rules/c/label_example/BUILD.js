@@ -1,4 +1,4 @@
-// Issue #76 pilot: a bespoke build lives entirely in its BUILD file. Source
+// A bespoke build can live entirely in its BUILD file. Source
 // discovery and branching happen lazily below the selected label; compile and
 // link are ordinary memoized functions rather than target products.
 import {
@@ -16,7 +16,7 @@ import {
 	test,
 	writeWorkspace,
 } from "imp:core";
-import { defaultGccToolchainVersion, gccTool } from "//rules/c/gcc/toolchain";
+import { defaultGccToolchainVersion, gccTool } from "//rules/c/gcc";
 import { jsSources } from "//rules/js";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 

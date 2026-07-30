@@ -34,6 +34,11 @@ export const testCp = nativeTool("cp");
 export const testCtest = nativeTool("ctest");
 export const testFind = nativeTool("find");
 export const testSed = nativeTool("sed");
+export const testSha256sum = nativeTool("sha256sum");
+export const testCurl = nativeTool("curl");
+export const testWc = nativeTool("wc");
+export const testXz = nativeTool("xz");
+export const testChmod = nativeTool("chmod");
 // changed.rs's tests shell out to `git` directly (Command::new("git")), so
 // it needs the same hermetic sandbox mount as tar/gzip — without it those
 // tests fail inside `imp test`'s sandbox with "run git (is git

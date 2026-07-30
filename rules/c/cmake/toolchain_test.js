@@ -14,7 +14,7 @@ import {
 	defaultCmakeToolchain,
 	defaultCmakeToolchainVersion,
 	installCmakeToolchain,
-} from "//rules/c/cmake/toolchain";
+} from "//rules/c/cmake";
 
 function withCmakeHost(platOrFn, maybeFn) {
 	const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;

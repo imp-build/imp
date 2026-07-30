@@ -35,7 +35,7 @@ import {
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 
-import { defaultGccToolchain } from "//rules/c/gcc/toolchain";
+import { defaultGccToolchain } from "//rules/c/gcc";
 
 import {
 	wholeWorkspaceFor,

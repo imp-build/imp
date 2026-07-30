@@ -339,7 +339,7 @@ product(
 /**
  * Adapter exposing a mold toolchain as Rust/rustc's backend linker via
  * `-fuse-ld=mold`, layered on whatever C link driver rustc uses (see
- * RustGccLinkDriver in //rules/c/gcc/toolchain). Registered as the
+ * RustGccLinkDriver in //rules/c/gcc). Registered as the
  * "rust-linker" product for the "mold-toolchain" kind.
  */
 export class RustMoldLinker {

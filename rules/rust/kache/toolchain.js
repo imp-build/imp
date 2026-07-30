@@ -8,7 +8,7 @@
 //
 // Two named caches are used for two different reasons:
 //   - KACHE_TOOLCHAIN_CACHE holds the downloaded kache binary itself, keyed
-//     by version+platform, exactly like rules/c/mold/toolchain.js.
+//     by version+platform, exactly like rules/c/mold/index.js.
 //   - KACHE_DATA_CACHE holds kache's own object cache (what KACHE_CACHE_DIR
 //     points at), keyed by platform only (not kache version) since it's a
 //     content-addressed object store kache manages incrementally, not a

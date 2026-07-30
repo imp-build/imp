@@ -11685,7 +11685,13 @@ export const spall = odinPackage({ srcs: ["*.odin"] });
     async fn generate_build_creates_cmake_and_raw_cc_targets() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
-        write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/c";"#);
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/c";
+export const cConfig = { buildGenerate: true };
+"#,
+        );
         write_file(
             &p.join(BUILD_FILE),
             r#"
@@ -11711,15 +11717,9 @@ add_executable(cmake_app main.c)
         );
 
         let live = load_workspace(p).await.unwrap();
-        let report = generate_build_files(&live, p, &[], false).await.unwrap();
-        assert_eq!(
-            report.changed_files,
-            vec![
-                "cmake_app/BUILD.js".to_owned(),
-                "raw_app/BUILD.js".to_owned(),
-                "raw_lib/BUILD.js".to_owned(),
-            ]
-        );
+        run_goal_live(&live, p, "generate-build", &[])
+            .await
+            .unwrap();
 
         let cmake_build = std::fs::read_to_string(p.join("cmake_app/BUILD.js")).unwrap();
         assert!(cmake_build.contains(r#"import { cmakeLib } from "//rules/c/cmake";"#));
@@ -11738,7 +11738,13 @@ add_executable(cmake_app main.c)
     async fn generate_build_skips_existing_cmake_owned_cc_files() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
-        write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/c/cmake";"#);
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/c/cmake";
+export const cConfig = { buildGenerate: true };
+"#,
+        );
         write_file(
             &p.join(BUILD_FILE),
             r#"
@@ -11768,9 +11774,12 @@ add_executable(cmake_app main.c)
         write_file(&p.join("raw_app/main.c"), "int main(void) { return 0; }\n");
 
         let live = load_workspace(p).await.unwrap();
-        assert!(live.workspace.owned_files.contains("cmake_app/main.c"));
-        let report = generate_build_files(&live, p, &[], false).await.unwrap();
-        assert_eq!(report.changed_files, vec!["raw_app/BUILD.js".to_owned()]);
+        run_goal_live(&live, p, "generate-build", &[])
+            .await
+            .unwrap();
+        assert!(p.join("raw_app/BUILD.js").is_file());
+        let cmake_build = std::fs::read_to_string(p.join("cmake_app/BUILD.js")).unwrap();
+        assert_eq!(cmake_build.matches("export const cmake_app").count(), 1);
     }
 
     #[tokio::test]
@@ -12260,16 +12269,16 @@ export { taken };
     }
 
     #[tokio::test]
-    async fn cmake_discovery_probe_builds_and_tests_real_children() {
+    async fn cmake_label_factory_builds_and_tests_discovered_children() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/c/cmake";"#);
         write_file(
             &p.join("native/BUILD.js"),
             r#"
-import { __cmakeLabelProbe } from "//rules/c/cmake";
+import { cmakeLib } from "//rules/c/cmake";
 
-export const project = __cmakeLabelProbe({});
+export const project = cmakeLib({});
 "#,
         );
         write_file(

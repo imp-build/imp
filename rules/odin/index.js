@@ -79,7 +79,7 @@ import { resources as resource_package_sources } from "//rules/asset";
 
 import { cmake_resources } from "//rules/c/cmake";
 
-import { defaultGccToolchain, gccTool } from "//rules/c/gcc/toolchain";
+import { defaultGccToolchain, gccTool } from "//rules/c/gcc";
 
 // Registers the "run" goal's single-target pre-flight callback
 // (rules/workflows/run.js). Imported here — not just from this repo's own
