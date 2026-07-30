@@ -13,12 +13,9 @@ import { odinToolchain } from "//rules/odin";
 import { defaultOdinfmtToolchain } from "//rules/odin/odinfmt/toolchain";
 import { defaultRuffToolchain } from "//rules/python/ruff_toolchain";
 import { defaultPythonToolchain } from "//rules/python";
-import { rustToolchain } from "//rules/rust";
-import { clippy as cargoLabelClippy } from "//rules/rust/clippy/label_pilot";
-import { cargoPackage as cargoLabelPackage } from "//rules/rust/label_pilot";
-import { rustfmt as cargoLabelRustfmt } from "//rules/rust/rustfmt/label_pilot";
 import "//rules/rust/generate_build";
-import { defaultKacheToolchain } from "//rules/rust/kache/toolchain";
+import { defaultKacheToolchain } from "//rules/rust/kache";
+import { rustToolchain } from "//rules/rust/toolchain";
 import "//rules/workflows/build_workflow";
 import "//rules/workflows/builtin_lockfiles";
 import "//rules/workflows/fmt";
@@ -56,11 +53,6 @@ export const rust = rustToolchain("1.93.0", {
 	linker: mold,
 	kache,
 });
-
-// Issue #76 pilot: downstream integrations attach to the conventional label
-// factory independently of where its BUILD declarations are evaluated.
-cargoLabelPackage.attach(cargoLabelRustfmt);
-cargoLabelPackage.attach(cargoLabelClippy);
 
 // This repo dogfoods generate-build for all three rules groups; a fresh
 // workspace defaults to none (see each package's own `buildGenerate` config

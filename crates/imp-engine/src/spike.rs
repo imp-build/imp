@@ -702,13 +702,7 @@ async fn load_workspace_with_rules_and_service(
     }
 
     // ----- Resolve dep IDs to addresses -----
-    let (
-        targets,
-        label_addresses,
-        label_primary_addresses,
-        id_to_address_final,
-        owned_files,
-    ) = {
+    let (targets, label_addresses, label_primary_addresses, id_to_address_final, owned_files) = {
         let hs = state.lock().unwrap();
         // First-address-wins: a label may legitimately be exported under
         // more than one name (see the label loop below), and the primary
@@ -3315,10 +3309,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
             };
             imp_execution::staging::resolve_input_digest(&run_input_root, &[input]).map_err(
                 |error| {
-                    rquickjs::Error::new_loading_message(
-                        "captureRunInput",
-                        format!("{error:#}"),
-                    )
+                    rquickjs::Error::new_loading_message("captureRunInput", format!("{error:#}"))
                 },
             )
         },
@@ -4601,10 +4592,12 @@ pub fn format_labels(
             }
             writeln!(w, "  {goal}:")?;
             for handler in handlers {
-                write!(w, "    - {} (attached at {})", handler.identity, handler.origin)?;
-                if let (Some(factory), Some(extension)) =
-                    (&handler.factory, &handler.extension)
-                {
+                write!(
+                    w,
+                    "    - {} (attached at {})",
+                    handler.identity, handler.origin
+                )?;
+                if let (Some(factory), Some(extension)) = (&handler.factory, &handler.extension) {
                     write!(w, " via {factory}.{extension}")?;
                 }
                 writeln!(w)?;
@@ -4644,10 +4637,7 @@ pub fn format_label_dependencies(
 ) -> Result<()> {
     use std::fmt::Write;
     for (label_id, address) in labels {
-        let Some(handlers) = workspace
-            .label_handlers
-            .get(&(*label_id, goal.to_owned()))
-        else {
+        let Some(handlers) = workspace.label_handlers.get(&(*label_id, goal.to_owned())) else {
             bail!("label '{address}' has no '{goal}' handler attached");
         };
         for handler in handlers {
@@ -5097,10 +5087,8 @@ pub fn resolve_mode_axes(
         resolved.insert(name.clone(), value);
     }
     let resolved = serde_json::Value::Object(resolved);
-    hs.workspace_config.insert(
-        MODE_AXIS_NAMESPACE.to_owned(),
-        resolved.clone(),
-    );
+    hs.workspace_config
+        .insert(MODE_AXIS_NAMESPACE.to_owned(), resolved.clone());
     Ok(resolved)
 }
 
@@ -12115,11 +12103,7 @@ export const broken = packageFactory({ name: "broken" });
         let p = root.path();
         std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
         std::fs::create_dir_all(p.join("rules")).unwrap();
-        std::fs::write(
-            p.join("rules").join("extensible.js"),
-            EXTENSIBLE_RULES_JS,
-        )
-        .unwrap();
+        std::fs::write(p.join("rules").join("extensible.js"), EXTENSIBLE_RULES_JS).unwrap();
         write_file(
             &p.join(BUILD_FILE),
             r#"

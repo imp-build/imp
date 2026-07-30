@@ -41,6 +41,7 @@
 // plain-compiled, never themselves clippy-driven, in this invocation.
 
 import {
+	cargoPackageActionHandle,
 	cargoInvocationScript,
 	declared_path,
 	resources,
@@ -159,6 +160,7 @@ const runWorkspaceClippy = memo(
 // promoting remaining warnings to errors even in fix mode, so a lint clippy
 // can't machine-apply still reports `ok: false` after fixing what it could.
 export async function cargoClippy(handle, { fix = false } = {}) {
+	handle = cargoPackageActionHandle(handle);
 	const rustSrcs = await rust_file_sources(handle);
 	const files = paths(rustSrcs);
 	if (files.length === 0) {

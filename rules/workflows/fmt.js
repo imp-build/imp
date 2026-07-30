@@ -14,7 +14,7 @@
 // single formatter failing to compile shouldn't hide the report for every
 // other target.
 export { odinPackageFmt, odinTestPackageFmt } from "//rules/odin/odinfmt";
-export { cargoPackageFmt } from "//rules/rust/rustfmt";
+export { rustfmt } from "//rules/rust/rustfmt";
 export { pythonAppFmt } from "//rules/python/ruff/fmt";
 export { jsSourcesFmt } from "//rules/js/biome/index";
 export { fmtGoal } from "//rules/workflows/fmt_goal";

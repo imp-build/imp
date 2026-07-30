@@ -72,14 +72,12 @@ describe("generate-build workflow", () => {
 		expect(called).toBe(false);
 	});
 
-	test("a registered generator runs when its namespace's buildGenerate config is true", async () => {
-		let called = false;
+	test("a registered legacy product generator remains dispatchable", async () => {
 		product(
 			K_generate_build_test_on,
 			GENERATE_BUILD,
 			TEST_TOOL,
 			async () => {
-				called = true;
 				return {};
 			},
 			{ display: "generate build {0}", level: "info" },
@@ -90,6 +88,24 @@ describe("generate-build workflow", () => {
 		});
 		configure("generate-build-test-on-ns", null);
 		configure("generate-build-test-on-ns", { buildGenerate: true });
+
+		await withFakeGoalFlags({ check: true }, async () => {
+			await generateBuildGoal([]);
+		});
+	});
+
+	test("a direct generator runs without target/product registration", async () => {
+		let called = false;
+		registerBuildGenerator({
+			namespace: "generate-build-test-direct-ns",
+			generate: async () => {
+				called = true;
+				return {};
+			},
+		});
+		configure("generate-build-test-direct-ns", {
+			buildGenerate: true,
+		});
 
 		await withFakeGoalFlags({ check: true }, async () => {
 			await generateBuildGoal([]);

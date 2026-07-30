@@ -4,6 +4,7 @@ import {
 	build,
 	extensible,
 	label,
+	labelAddress,
 	test as attachTest,
 } from "imp:core";
 
@@ -11,6 +12,35 @@ describe("label/attach", () => {
 	test("label() allocates a handle carrying opts.data", () => {
 		const h = label({ data: { variant: "release" } });
 		expect(h.data).toEqual({ variant: "release" });
+	});
+
+	test("labelAddress rejects non-label handles", () => {
+		expect(() => labelAddress({})).toThrow("expected a label handle");
+	});
+
+	test("labelAddress returns the host-published canonical address", () => {
+		const h = label();
+		const original = globalThis.__host_target_address;
+		globalThis.__host_target_address = (id) =>
+			id === h.__id ? "//pkg:item" : original(id);
+		try {
+			expect(labelAddress(h)).toBe("//pkg:item");
+		} finally {
+			globalThis.__host_target_address = original;
+		}
+	});
+
+	test("labelAddress propagates unresolved and unexported address errors", () => {
+		const h = label();
+		const original = globalThis.__host_target_address;
+		globalThis.__host_target_address = () => {
+			throw new Error("label has no published address");
+		};
+		try {
+			expect(() => labelAddress(h)).toThrow("no published address");
+		} finally {
+			globalThis.__host_target_address = original;
+		}
 	});
 
 	test("attach() runs a handler only when dispatched, not at attach time", () => {

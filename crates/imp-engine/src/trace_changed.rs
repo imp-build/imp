@@ -159,10 +159,7 @@ impl TraceIndex {
                     }
                     "run_input" => {
                         for path in changed_paths {
-                            if run_input_spec_is_stale(
-                                &spec.spec,
-                                std::slice::from_ref(path),
-                            ) {
+                            if run_input_spec_is_stale(&spec.spec, std::slice::from_ref(path)) {
                                 covered.insert(path.clone());
                             }
                         }
@@ -256,9 +253,7 @@ impl TraceIndex {
                 *id == label_id && context.is_none_or(|context| goal == context.goal)
             })
             .flat_map(|((_, goal), handlers)| {
-                handlers
-                    .iter()
-                    .map(move |handler| (goal.as_str(), handler))
+                handlers.iter().map(move |handler| (goal.as_str(), handler))
             })
             .filter_map(|(goal, handler)| {
                 let fn_id = format!("label-handler:{goal}:{}", handler.identity);
@@ -359,7 +354,7 @@ fn persisted_key(fn_id: &str, address: &str) -> Result<String> {
     persisted_key_for_args(
         fn_id,
         &[RefOnlyArg {
-        __imp_ref_addr: address,
+            __imp_ref_addr: address,
         }],
     )
 }
@@ -545,9 +540,7 @@ mod tests {
         workspace
             .label_primary_addresses
             .insert(7, "//pkg:item".to_owned());
-        workspace
-            .label_addresses
-            .insert("//pkg:item".to_owned(), 7);
+        workspace.label_addresses.insert("//pkg:item".to_owned(), 7);
         workspace
             .label_handlers
             .insert((7, "build".to_owned()), vec![handler.clone()]);
@@ -574,18 +567,8 @@ mod tests {
             reverse_deps: HashMap::new(),
         };
 
-        assert!(!index.label_is_stale(
-            &workspace,
-            7,
-            Some(&context),
-            &BTreeSet::new()
-        ));
-        assert!(index.label_is_stale(
-            &workspace,
-            7,
-            Some(&context),
-            &BTreeSet::from([key])
-        ));
+        assert!(!index.label_is_stale(&workspace, 7, Some(&context), &BTreeSet::new()));
+        assert!(index.label_is_stale(&workspace, 7, Some(&context), &BTreeSet::from([key])));
 
         let other_flags = serde_json::json!({"check": true});
         let other_context = LabelChangeContext {
@@ -594,12 +577,7 @@ mod tests {
             args: &[],
             mode: &mode,
         };
-        assert!(index.label_is_stale(
-            &workspace,
-            7,
-            Some(&other_context),
-            &BTreeSet::new()
-        ));
+        assert!(index.label_is_stale(&workspace, 7, Some(&other_context), &BTreeSet::new()));
 
         let mut second = handler;
         second.identity = "auditLabel#1@//rules/example:11:2".to_owned();
@@ -608,12 +586,7 @@ mod tests {
             .get_mut(&(7, "build".to_owned()))
             .unwrap()
             .push(second);
-        assert!(index.label_is_stale(
-            &workspace,
-            7,
-            Some(&context),
-            &BTreeSet::new()
-        ));
+        assert!(index.label_is_stale(&workspace, 7, Some(&context), &BTreeSet::new()));
     }
 
     #[test]
@@ -645,14 +618,8 @@ mod tests {
     #[test]
     fn run_input_specs_match_files_and_directory_descendants() {
         let file = serde_json::json!({"kind": "file", "path": "src/main.rs"});
-        assert!(run_input_spec_is_stale(
-            &file,
-            &["src/main.rs".to_owned()]
-        ));
-        assert!(!run_input_spec_is_stale(
-            &file,
-            &["src/lib.rs".to_owned()]
-        ));
+        assert!(run_input_spec_is_stale(&file, &["src/main.rs".to_owned()]));
+        assert!(!run_input_spec_is_stale(&file, &["src/lib.rs".to_owned()]));
 
         let directory = serde_json::json!({"kind": "directory", "path": "src"});
         assert!(run_input_spec_is_stale(

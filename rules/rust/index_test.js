@@ -7,7 +7,6 @@ import {
 } from "//rules/imp/test";
 import {
 	cargoBuild,
-	cargoBuildPath,
 	cargoPackage,
 	cargoTest,
 	declared_path,
@@ -19,6 +18,7 @@ import { resourcePackage } from "//rules/asset";
 import { nativeTool } from "//rules/imp/native_tool";
 import {
 	__resetRustToolchainStateForTest,
+	installRustToolchain,
 	rustToolchain,
 } from "//rules/rust/toolchain";
 import {
@@ -80,40 +80,29 @@ async function withRustConfig(config, fn) {
 	}
 }
 
-async function withWorkspaceCargoPackages(targets, fn) {
-	const original = globalThis.__host_workspace_targets;
-	globalThis.__host_workspace_targets = (kind) =>
-		kind === "cargo-package" ? JSON.stringify(targets) : original(kind);
-	try {
-		return await fn();
-	} finally {
-		globalThis.__host_workspace_targets = original;
-	}
-}
-
 describe("rust rules", () => {
 	test("cargoPackage is valid without a bin name (lib-only package)", () => {
 		const pkg = cargoPackage({});
-		expect(pkg.attrs.bins).toEqual([]);
+		expect(pkg.data.bins).toBe(null);
 	});
 
 	test("cargoPackage accepts a single bin name or an array", () => {
 		const single = cargoPackage({ bin: "hello", toolchain: "1.93.0" });
-		expect(single.attrs.bins).toEqual(["hello"]);
+		expect(single.data.bins).toEqual(["hello"]);
 
 		const multi = cargoPackage({ bin: ["a", "b"], toolchain: "1.93.0" });
-		expect(multi.attrs.bins).toEqual(["a", "b"]);
+		expect(multi.data.bins).toEqual(["a", "b"]);
 	});
 
 	test("cargoPackage preserves a doctest override", () => {
-		expect(cargoPackage({ doctest: false }).attrs.doctest).toBe(false);
-		expect(cargoPackage({}).attrs.doctest).toBe(undefined);
+		expect(cargoPackage({ doctest: false }).data.doctest).toBe(false);
+		expect(cargoPackage({}).data.doctest).toBe(undefined);
 	});
 
 	test("cargoPackage keeps explicit string versions free of toolchain target deps", () => {
 		const pkg = cargoPackage({ bin: "hello", toolchain: "1.93.0" });
-		expect(pkg.attrs.toolchainVersion).toBe("1.93.0");
-		expect(pkg.attrs.toolchain).toBe(undefined);
+		expect(pkg.data.toolchainVersion).toBe("1.93.0");
+		expect(pkg.data.toolchain).toBe(undefined);
 	});
 
 	test("cargoPackage uses the default Rust toolchain target when none is given", () => {
@@ -123,7 +112,7 @@ describe("rust rules", () => {
 				unverified: true,
 			});
 			const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
-			expect(pkg.attrs.toolchain).toBe(toolchain);
+			expect(pkg.data.toolchain).toBe(toolchain);
 		});
 	});
 
@@ -159,7 +148,7 @@ describe("rust rules", () => {
 
 			const result = await cargoBuild(pkg);
 
-			const path = declared_path(pkg, pkg.attrs.path);
+			const path = declared_path(pkg, pkg.data.path);
 			const buildRun = host.runs[host.runs.length - 1];
 			expect(buildRun.argv[0]).toBe("sh");
 			expect(buildRun.argv).toContain(`${path}/Cargo.toml`);
@@ -207,24 +196,6 @@ describe("rust rules", () => {
 		});
 	});
 
-	test("cargoBuildPath lets an explicit debug option override release mode", async () => {
-		await withRustHost(async (host) => {
-			rustToolchain("1.93.0", { default: true, unverified: true });
-			gccToolchain("2025.08-1", { default: true, unverified: true });
-
-			await withOptMode("release", async () => {
-				const result = await cargoBuildPath("rules/rust/example", {
-					bins: ["hello"],
-					release: false,
-				});
-				expect(result.outputPaths[0].endsWith("/debug/hello")).toBe(true);
-			});
-
-			const buildRun = host.runs[host.runs.length - 1];
-			expect(buildRun.argv).not.toContain("--release");
-		});
-	});
-
 	test("cargoBuild uses native gcc as the linker on windows", async () => {
 		await withRustHost({ os: "windows", arch: "x86_64" }, async (host) => {
 			rustToolchain("1.93.0", { default: true, unverified: true });
@@ -265,7 +236,7 @@ describe("rust rules", () => {
 
 			await cargoTest(pkg);
 
-			const path = declared_path(pkg, pkg.attrs.path);
+			const path = declared_path(pkg, pkg.data.path);
 			const testRun = host.runs[host.runs.length - 1];
 			expect(testRun.argv[0]).toBe("sh");
 			expect(testRun.argv[2]).toContain("cargo test");
@@ -401,36 +372,25 @@ describe("rust rules", () => {
 
 	test("cargoTest excludes disabled packages from a shared workspace doc-test run", async () => {
 		await withRustHost(async (host) => {
-			rustToolchain("1.93.0", { default: true, unverified: true });
+			// Use a distinct version so focused/repeated rule-test runs cannot
+			// reuse another workspace-metadata fixture's persisted memo entry.
+			rustToolchain("1.93.1", { default: true, unverified: true });
 			gccToolchain("2025.08-1", { default: true, unverified: true });
 			const restoreMetadata = fakeWorkspaceMetadata(host);
 			host.setRunStderr(
 				"cargo test --doc -p imp-store .",
 				"   Doc-tests imp_store\n",
 			);
-			await withWorkspaceCargoPackages(
-				[
-					{
-						id: 1,
-						address: "//crates/imp-store:imp_store",
-						kind: "cargo-package",
-						attrs: { path: "." },
-					},
-					{
-						id: 2,
-						address: "//crates/imp:imp",
-						kind: "cargo-package",
-						attrs: { path: ".", doctest: false },
-					},
-				],
-				async () => {
-					const pkg = cargoPackage({
-						path: "crates/imp-store",
-						workspaceMember: true,
-					});
-					await cargoTest(pkg);
-				},
-			);
+			cargoPackage({
+				path: "crates/imp",
+				doctest: false,
+				workspaceMember: true,
+			});
+			const pkg = cargoPackage({
+				path: "crates/imp-store",
+				workspaceMember: true,
+			});
+			await cargoTest(pkg);
 			restoreMetadata();
 
 			const testRun = host.runs[host.runs.length - 1];
@@ -560,7 +520,7 @@ describe("rust rules", () => {
 				linker: mold,
 			});
 			const pkg = cargoPackage({ bin: "hello", path: "rules/rust/example" });
-			expect(pkg.attrs.toolchain).toBe(toolchain);
+			expect(pkg.data.toolchain).toBe(toolchain);
 
 			await cargoBuild(pkg);
 
@@ -612,6 +572,7 @@ describe("rust rules", () => {
 	test("cargoBuild wires RUSTC_WRAPPER/KACHE_CACHE_DIR when the toolchain configures kache", async () => {
 		await withRustHost(async (host) => {
 			gccToolchain("2025.08-1", { default: true, unverified: true });
+			installRustToolchain("1.93.0", "/tmp/rust-1.93.0");
 			installKacheToolchain("0.11.0", "/tmp/kache-0.11.0");
 			const kache = kacheToolchain("0.11.0", { unverified: true });
 			rustToolchain("1.93.0", { default: true, unverified: true, kache });
@@ -713,8 +674,8 @@ describe("rust rules", () => {
 
 	test("resources(pkg) with a resource-package dep includes its files", async () => {
 		const assets = resourcePackage({
-			path: "rules/rust",
-			srcs: ["toolchain.js"],
+			path: "rules/rust/toolchain",
+			srcs: ["index.js"],
 		});
 		const pkg = cargoPackage({
 			bin: "hello",
@@ -722,7 +683,7 @@ describe("rust rules", () => {
 			deps: [assets],
 		});
 		const result = paths(await resources(pkg));
-		expect(result).toContain("rules/rust/toolchain.js");
+		expect(result).toContain("rules/rust/toolchain/index.js");
 	});
 
 	test("cargoBuild declares resource-package files as sandbox inputs", async () => {
@@ -730,8 +691,8 @@ describe("rust rules", () => {
 			rustToolchain("1.93.0", { default: true, unverified: true });
 			gccToolchain("2025.08-1", { default: true, unverified: true });
 			const assets = resourcePackage({
-				path: "rules/rust",
-				srcs: ["toolchain.js"],
+				path: "rules/rust/toolchain",
+				srcs: ["index.js"],
 			});
 			const pkg = cargoPackage({
 				bin: "hello",
@@ -749,7 +710,9 @@ describe("rust rules", () => {
 			const includesPath = buildRun.inputs.some(
 				(input) =>
 					input.kind === "digest" &&
-					pathsInDigest(input.digest).includes("rules/rust/toolchain.js"),
+					pathsInDigest(input.digest).includes(
+						"rules/rust/toolchain/index.js",
+					),
 			);
 			expect(includesPath).toBe(true);
 		});

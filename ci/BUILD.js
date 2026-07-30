@@ -7,12 +7,7 @@
 //
 //   imp goal generate //ci:docs_workflow          # regenerate the file
 //   imp goal generate //ci:docs_workflow --check   # CI drift gate, no writes
-import {
-	attach,
-	file_set,
-	label,
-	logInfo,
-} from "imp:core";
+import { attach, file_set, label, logInfo } from "imp:core";
 import { jsSources } from "//rules/js";
 import "//rules/workflows/generate";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
@@ -43,25 +38,19 @@ async function runGenerator(materialize) {
 export const js = jsSources({});
 
 const docs_workflow = label();
-attach(
-	docs_workflow,
-	"generate",
-	async function generateDocsWorkflow(ctx) {
-		const check = !!ctx.flags.check;
-		const { changed } = await runGenerator(!check);
-		if (check && changed.length > 0) {
-			throw new Error(
-				`generated workflows are out of date:\n${changed
-					.map((path) => `  ${path}`)
-					.join("\n")}`,
-			);
-		}
-		if (!check && changed.length > 0) {
-			logInfo(`generated ${changed.length} workflow file(s)`);
-		}
-		return check
-			? { checked: 1, stale: changed }
-			: { generated: changed.length };
-	},
-);
+attach(docs_workflow, "generate", async function generateDocsWorkflow(ctx) {
+	const check = !!ctx.flags.check;
+	const { changed } = await runGenerator(!check);
+	if (check && changed.length > 0) {
+		throw new Error(
+			`generated workflows are out of date:\n${changed
+				.map((path) => `  ${path}`)
+				.join("\n")}`,
+		);
+	}
+	if (!check && changed.length > 0) {
+		logInfo(`generated ${changed.length} workflow file(s)`);
+	}
+	return check ? { checked: 1, stale: changed } : { generated: changed.length };
+});
 export { docs_workflow };

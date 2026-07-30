@@ -7,6 +7,7 @@
 // of files actually changed.
 
 import {
+	cargoPackageActionHandle,
 	declared_path,
 	rust_file_sources,
 	rust_toolchain_version,
@@ -27,6 +28,7 @@ function cargoFmtEnv(toolSpec) {
 // --check` exits nonzero on unformatted files, which run() surfaces as a
 // thrown error — no per-file parsing needed.
 export async function cargoFmt(handle, { check = false } = {}) {
+	handle = cargoPackageActionHandle(handle);
 	const rustSrcs = await rust_file_sources(handle);
 	const files = paths(rustSrcs);
 	if (files.length === 0) {

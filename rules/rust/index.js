@@ -1,26 +1,25 @@
 import {
-	Target,
 	artifact,
+	build as attachBuild,
 	configuration,
+	extensible,
 	file_set,
 	glob,
-	hydrateTarget,
+	label,
+	labelAddress,
+	logInfo,
 	memo,
 	output,
 	output_path,
+	packageGoal as attachPackage,
 	paths,
 	platformInfo,
-	product,
 	productFor,
 	read_file,
 	run,
-	sourcesField,
 	targetAddress,
-	targetOutputSlug,
-	workspaceTargets,
-	BUILD,
-	PACKAGE,
-	TEST,
+	test as attachTest,
+	writeWorkspace,
 } from "imp:core";
 
 import {
@@ -28,14 +27,10 @@ import {
 	RUST_LINK_DRIVER,
 	RUST_BUILD_CACHE,
 } from "//rules/rust/products";
-import { CargoPackage, normalize_deps } from "//rules/rust/cargo_package";
-export { CargoPackage, normalize_deps } from "//rules/rust/cargo_package";
-
 import {
 	defaultRustToolchain,
 	resolveRustToolchainVersion,
 	rustTool,
-	rustToolchain,
 } from "//rules/rust/toolchain";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
@@ -54,29 +49,12 @@ import { resources as resource_package_sources } from "//rules/asset";
 // import Rust build rules without importing the workflows layer explicitly.
 import "//rules/workflows/build_workflow";
 
-// Registers the rust_test fan-out (expandCargoTests + rust_test's build/test
-// products) for consumers that import Rust build rules without importing
-// //rules/rust/test explicitly — same reasoning as the build_workflow import
-// above. Side-effect only; nothing exported from it is used in this file.
-import "//rules/rust/test";
+// The package test handler delegates to the production lazy test actions.
+import { cargoPackageTests } from "//rules/rust/test";
 
-// Registers the "generate-build" product (auto-declaring cargoPackage()
-// targets for unowned Cargo.toml files) for the same reason.
+// Registers the direct "generate-build" callback (declaring cargoPackage()
+// labels for unowned Cargo.toml files) for the same reason.
 import "//rules/rust/generate_build";
-import { RUST_TOOL } from "//rules/rust/toolchain";
-
-export {
-	acquireRustToolchain,
-	defaultRustToolchain,
-	defaultRustToolchainVersion,
-	resolveRustToolchainVersion,
-	rustArtifactName,
-	rustBin,
-	rustCacheKey,
-	rustDownloadUrl,
-	rustTool,
-	rustToolchain,
-} from "//rules/rust/toolchain";
 
 // ---------------------------------------------------------------------------
 // Path helpers (same pattern as rules/odin/index.js, rules/c/cmake/index.js)
@@ -94,9 +72,12 @@ function normalize_workspace_path(path) {
 	return parts.length === 0 ? "." : parts.join("/");
 }
 
-function safe_target_address(handle) {
-	if (!handle || handle.__imp !== true) return null;
+export function cargoPackageAddress(handle) {
 	try {
+		if (handle && handle.__imp_label) return labelAddress(handle);
+		if (handle && handle.label && handle.label.__imp_label) {
+			return labelAddress(handle.label);
+		}
 		return targetAddress(handle);
 	} catch (_) {
 		return null;
@@ -104,7 +85,7 @@ function safe_target_address(handle) {
 }
 
 function declaring_directory(handle) {
-	const address = safe_target_address(handle);
+	const address = cargoPackageAddress(handle);
 	if (!address || !address.startsWith("//")) return ".";
 	const scope = address.slice(2).split(":")[0];
 	return scope.length === 0 ? "." : scope;
@@ -118,13 +99,46 @@ export function declared_path(handle, path = ".") {
 	return normalize_workspace_path(`${base}/${local}`);
 }
 
-function declared_workspace_target_path(target) {
-	const address = target.address || "//";
-	const scope = address.slice(2).split(":")[0] || ".";
-	const path = target.attrs.path || ".";
-	if (scope === ".") return normalize_workspace_path(path);
-	if (path === ".") return scope;
-	return normalize_workspace_path(`${scope}/${path}`);
+export function normalize_deps(deps) {
+	return (deps || [])
+		.map((d) => (d && d.__imp ? d : d && d.target ? d.target : null))
+		.filter(Boolean);
+}
+
+const _cargoPackageLabels = [];
+
+function package_handle(packageLabel) {
+	if (!packageLabel || packageLabel.__imp_label !== true) return packageLabel;
+	return {
+		__id: packageLabel.__id,
+		label: packageLabel,
+		attrs: packageLabel.data,
+		deps: [
+			...(packageLabel.data.deps || []).map((target) => ({ handle: target })),
+			...(packageLabel.data.testTools || []).map((target) => ({
+				handle: target,
+				mode: "tool",
+			})),
+		],
+	};
+}
+
+export const cargoPackageActionHandle = package_handle;
+
+export function cargoPackageOutputSlug(handle) {
+	const address = cargoPackageAddress(handle);
+	if (!address) return `anon-${handle.__id}`;
+	return address.replace(/^\/\//, "").replace(/[:/]/g, "_");
+}
+
+export function cargoPackageHandles() {
+	return _cargoPackageLabels
+		.map(package_handle)
+		.sort((a, b) =>
+			(cargoPackageAddress(a) || "").localeCompare(
+				cargoPackageAddress(b) || "",
+			),
+		);
 }
 
 function cargo_doctest_enabled(handle) {
@@ -143,9 +157,9 @@ function workspace_doctest_packages(workspaceRootRelative, docTestNames) {
 	const rust = configuration("rust", {}) || {};
 	const workspaceDefault = rust.doctest !== false;
 	const settings = new Map(
-		workspaceTargets(CargoPackage.kind).map((target) => [
-			declared_workspace_target_path(target),
-			target.attrs.doctest,
+		cargoPackageHandles().map((handle) => [
+			declared_path(handle, handle.attrs.path || "."),
+			handle.attrs.doctest,
 		]),
 	);
 	const prefix =
@@ -177,6 +191,7 @@ function workspace_doctest_packages(workspaceRootRelative, docTestNames) {
 // files (not Cargo.toml/Cargo.lock).
 export const rust_file_sources = memo(
 	async function rust_file_sources(handle) {
+		handle = package_handle(handle);
 		const root = declared_path(handle, handle.attrs.path || ".");
 		return glob({ root, include: ["**/*.rs"], exclude: ["target/**"] });
 	},
@@ -211,6 +226,7 @@ export const rust_file_sources = memo(
 // @returns {Promise<{ files: FileSet }>}
 export const sources = memo(
 	async function sources(handle) {
+		handle = package_handle(handle);
 		const path = declared_path(handle, handle.attrs.path || ".");
 		if (!handle.attrs.workspaceMember) {
 			return {
@@ -272,7 +288,8 @@ export async function wholeWorkspaceSources(
 // crate-to-crate deps via Cargo.toml/the registry).
 export const resources = memo(
 	async function resources(handle) {
-		const sets = (hydrateTarget(handle).deps || [])
+		handle = package_handle(handle);
+		const sets = (handle.deps || [])
 			.map((dep) => dep.handle)
 			.filter((dep) => dep && dep.kind === "resource-package");
 		if (sets.length === 0) return file_set.literal([]);
@@ -282,7 +299,7 @@ export const resources = memo(
 	{ display: "Rust resources {0}", level: "debug" },
 );
 
-// Union of resources() across every declared cargo-package target whose
+// Union of resources() across every declared Cargo package label whose
 // own directory is one of `dirs` — used by the shared whole-workspace
 // lint/test-build tasks (rules/rust/lint.js, rules/rust/test.js), which
 // compile every member of a real workspace in one cargo invocation and so
@@ -290,15 +307,14 @@ export const resources = memo(
 // happened to trigger the shared task.
 export async function resourcesForDirs(dirs) {
 	const dirSet = new Set(dirs);
-	const handles = workspaceTargets("cargo-package")
-		.map(({ handle }) => handle)
+	const handles = cargoPackageHandles()
 		.filter((h) => dirSet.has(declared_path(h, h.attrs.path || ".")));
 	if (handles.length === 0) return file_set.literal([]);
 	const sets = await Promise.all(handles.map(resources));
 	return sets.length === 1 ? sets[0] : file_set.union(...sets);
 }
 
-// Union of every declared cargo-package target's own testTools within
+// Union of every declared Cargo package label's own testTools within
 // `dirs` — same rationale as resourcesForDirs above, for the shared
 // whole-workspace doc-test run (runWorkspaceDocTests below), which actually
 // *runs* every member's doc-tests in one process and so needs every
@@ -310,8 +326,7 @@ export async function resourcesForDirs(dirs) {
 // distinct nativeTool() targets are ever meant to collapse into one mount.
 async function testToolsForDirs(dirs) {
 	const dirSet = new Set(dirs);
-	const handles = workspaceTargets("cargo-package")
-		.map(({ handle }) => handle)
+	const handles = cargoPackageHandles()
 		.filter((h) => dirSet.has(declared_path(h, h.attrs.path || ".")));
 	const seen = new Set();
 	const specs = [];
@@ -326,6 +341,7 @@ async function testToolsForDirs(dirs) {
 }
 
 export function rust_toolchain_version(handle) {
+	handle = package_handle(handle);
 	const toolchainHandle = handle.attrs.toolchain;
 	return toolchainHandle
 		? toolchainHandle.attrs.version
@@ -561,15 +577,17 @@ async function runCargoBuild({
 	return { ...result, outputPaths: outPaths, buildDir };
 }
 
-export const cargoBuild = product(
-	CargoPackage,
-	BUILD,
-	RUST_TOOL,
+export const cargoBuild = memo(
 	async function cargoBuild(handle) {
+		handle = package_handle(handle);
 		const path = declared_path(handle, handle.attrs.path || ".");
 		const { files: srcs } = await sources(handle);
 		const resourceInputs = await resources(handle);
 		const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
+		const bins =
+			handle.attrs.bins === null
+				? deriveBinsFromCargoToml(path)
+				: handle.attrs.bins;
 
 		// A target-local release opt-in remains authoritative, while a workspace
 		// may supply the ordinary debug/release default through its opt axis.
@@ -580,12 +598,12 @@ export const cargoBuild = product(
 
 		return runCargoBuild({
 			path,
-			bins: handle.attrs.bins,
+			bins,
 			cargoArgs: handle.attrs.cargoArgs,
 			release,
 			toolchainHandle,
 			toolchainVersion: rust_toolchain_version(handle),
-			outputSlug: targetOutputSlug(handle),
+			outputSlug: cargoPackageOutputSlug(handle),
 			srcs,
 			resourceInputs,
 		});
@@ -628,40 +646,11 @@ function deriveBinsFromCargoToml(path) {
 	return [];
 }
 
-// Plain-data action used by the exported-label Rust factory. It is not a CLI
-// entry point: command-line selection goes through a label and its goal
-// handler. Explicit options come from the factory declaration; there is no
-// parallel path-keyed build.js configuration.
-export const cargoBuildPath = memo(
-	async function cargoBuildPath(path, opts = {}) {
-		const mode = configuration("imp.mode", {}) || {};
-		const toolchainHandle = defaultRustToolchain();
-		return runCargoBuild({
-			path,
-			bins: opts.bins || deriveBinsFromCargoToml(path),
-			cargoArgs: opts.cargoArgs || [],
-			release: opts.release ?? mode.opt === "release",
-			toolchainHandle,
-			toolchainVersion: toolchainHandle.attrs.version,
-			outputSlug: path.replace(/\//g, "_"),
-			srcs: glob({
-				root: path,
-				include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
-				exclude: ["target/**"],
-			}),
-			resourceInputs: file_set.literal([]),
-		});
-	},
-	{ display: "build {0}", level: "info" },
-);
-
-export const cargoDistPackage = product(
-	CargoPackage,
-	PACKAGE,
-	RUST_TOOL,
+export const cargoDistPackage = memo(
 	async function cargoDistPackage(handle) {
+		handle = package_handle(handle);
 		const result = await cargoBuild(handle);
-		if (handle.attrs.bins.length === 0) {
+		if (result.outputPaths.length === 0) {
 			return null;
 		}
 		return artifact(result.outputDigest, { from: result.buildDir });
@@ -731,6 +720,7 @@ const runWorkspaceDocTests = memo(
 		workspaceRootRelative,
 		toolchainVersion,
 		toolchainHandle,
+		doctestSelection,
 	) {
 		const toolSpec = await rustTool(toolchainVersion);
 		const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
@@ -753,10 +743,7 @@ const runWorkspaceDocTests = memo(
 			workspaceRootRelative,
 			toolchainVersion,
 		);
-		const { enabled, hasDisabledPackage } = workspace_doctest_packages(
-			workspaceRootRelative,
-			docTestNames,
-		);
+		const { enabled, hasDisabledPackage } = doctestSelection;
 		if (hasDisabledPackage && enabled.length === 0) {
 			return {
 				result: null,
@@ -813,10 +800,9 @@ const runWorkspaceDocTests = memo(
 /**
  * Run a Cargo binary crate's doc-tests.
  *
- * //rules/rust/test.js's expandCargoTests fan-out already discovers and runs
- * every unit/integration test binary (via `cargo test --no-run`, one
- * `rust_test` target per binary) — running the whole crate's tests again
- * here would duplicate all of that work under a package/recursive selector.
+ * //rules/rust/test.js discovers and runs every unit/integration test binary
+ * beneath the package label via `cargo test --no-run`; running the whole
+ * crate's tests again here would duplicate that work.
  * Doc-tests aren't discoverable via `--no-run` though (they only ever run
  * through a real `cargo test`), so this stays scoped to `--doc` as the one
  * piece the fan-out can't cover.
@@ -831,11 +817,9 @@ const runWorkspaceDocTests = memo(
  * @param {object} handle Target handle returned by cargoPackage().
  * @returns {Promise<object>} Run result from `cargo test --doc`.
  */
-export const cargoTest = product(
-	CargoPackage,
-	TEST,
-	RUST_TOOL,
+export const cargoTest = memo(
 	async function cargoTest(handle) {
+		handle = package_handle(handle);
 		if (!cargo_doctest_enabled(handle)) {
 			return null;
 		}
@@ -848,11 +832,20 @@ export const cargoTest = product(
 				path,
 				toolchainVersion,
 			);
+			const { docTestNames: workspaceDocTestNames } = await wholeWorkspaceFor(
+				workspaceRootRelative,
+				toolchainVersion,
+			);
+			const doctestSelection = workspace_doctest_packages(
+				workspaceRootRelative,
+				workspaceDocTestNames,
+			);
 			const { result, docTestNames, attemptedLibNames, failedPackageNames } =
 				await runWorkspaceDocTests(
 					workspaceRootRelative,
 					toolchainVersion,
 					toolchainHandle,
+					doctestSelection,
 				);
 
 			const info = docTestNames.get(path);
@@ -962,7 +955,7 @@ export const cargoTest = product(
 );
 
 // ---------------------------------------------------------------------------
-// Target constructor
+// Exported Cargo package label factory
 // ---------------------------------------------------------------------------
 
 /**
@@ -991,9 +984,9 @@ export const cargoTest = product(
  *   so cargo can resolve the enclosing `[workspace]` and any path-deps on
  *   sibling members. Leave false for a self-contained crate or a workspace
  *   root itself.
- * @returns {object} Target handle.
+ * @returns {object} Exported label handle.
  */
-export function cargoPackage({
+export const cargoPackage = extensible(function cargoPackage({
 	path = ".",
 	bin,
 	release = false,
@@ -1004,17 +997,56 @@ export function cargoPackage({
 	deps = [],
 	doctest,
 	workspaceMember = false,
-}) {
-	return new CargoPackage({
-		path,
-		bin,
-		release,
-		toolchain,
-		cargoArgs,
-		testArgs,
-		testTools,
-		deps,
-		doctest,
-		workspaceMember,
+} = {}) {
+	const toolchainHandle =
+		toolchain && toolchain.__imp === true
+			? toolchain
+			: typeof toolchain === "string"
+				? null
+				: defaultRustToolchain();
+	const packageLabel = label({
+		data: {
+			path,
+			bins:
+				bin === undefined ? null : Array.isArray(bin) ? [...bin] : [bin],
+			release,
+			cargoArgs: [...cargoArgs],
+			testArgs: [...testArgs],
+			testTools: normalize_deps(testTools),
+			deps: normalize_deps(deps),
+			doctest,
+			workspaceMember,
+			...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
+			...(typeof toolchain === "string"
+				? { toolchainVersion: toolchain }
+				: {}),
+		},
 	});
-}
+	_cargoPackageLabels.push(packageLabel);
+
+	attachBuild(packageLabel, async function buildCargoPackage() {
+		return cargoBuild(packageLabel);
+	});
+	attachTest(packageLabel, async function testCargoPackage() {
+		const [tests, doctests] = await Promise.all([
+			cargoPackageTests(packageLabel),
+			cargoTest(packageLabel),
+		]);
+		return { tests, doctests };
+	});
+	attachPackage(packageLabel, async function packageCargoPackage() {
+		const artifactResult = await cargoDistPackage(packageLabel);
+		if (artifactResult === null) return null;
+		const address = labelAddress(packageLabel);
+		const withoutSlashes = address.replace(/^\/\//, "");
+		const [dir, name] = withoutSlashes.split(":");
+		const destination = dir ? `dist/${dir}/${name}` : `dist/${name}`;
+		writeWorkspace(destination, artifactResult.digest, {
+			from: artifactResult.from,
+		});
+		logInfo(`${address}#package -> ${destination}`);
+		return artifactResult;
+	});
+
+	return packageLabel;
+});

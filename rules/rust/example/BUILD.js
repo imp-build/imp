@@ -1,4 +1,4 @@
-import { cargoPackage } from "//rules/rust/label_pilot";
+import { cargoPackage } from "//rules/rust";
 import { jsSources } from "//rules/js";
 
 export const hello = cargoPackage();

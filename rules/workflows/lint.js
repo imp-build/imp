@@ -16,6 +16,6 @@
 // ...} contract as cargoClippy/ruffCheck, running `odin check -vet` (which
 // has no autofix mode, so it always reports fixSupported: false).
 
-export { cargoPackageLint } from "//rules/rust/clippy";
+export { clippy } from "//rules/rust/clippy";
 export { pythonAppLint } from "//rules/python/ruff/lint";
 export { lintGoal } from "//rules/workflows/lint_goal";

@@ -50,12 +50,27 @@ const _registeredGenerators = [];
  *
  * @param {object} opts
  * @param {string} opts.namespace Configuration namespace whose `buildGenerate` field gates this generator.
- * @param {Function} opts.kind Target subclass the "generate-build" product is registered under.
+ * @param {Function|string} [opts.kind] Target kind whose legacy
+ *   "generate-build" product should run.
+ * @param {Function} [opts.generate] Direct async generator callback. New
+ *   label-based rules should prefer this form.
  * @returns {void}
  */
-export function registerBuildGenerator({ namespace, kind }) {
-	const kindName = typeof kind === "function" ? kind.kind : kind;
-	_registeredGenerators.push({ namespace, kind: kindName });
+export function registerBuildGenerator({ namespace, kind, generate }) {
+	if (typeof namespace !== "string" || namespace === "") {
+		throw new Error("registerBuildGenerator() requires a namespace");
+	}
+	if (generate !== undefined && typeof generate !== "function") {
+		throw new Error("registerBuildGenerator() generate must be a function");
+	}
+	if (generate === undefined && kind === undefined) {
+		throw new Error(
+			"registerBuildGenerator() requires either generate or kind",
+		);
+	}
+	const kindName =
+		kind === undefined ? undefined : typeof kind === "function" ? kind.kind : kind;
+	_registeredGenerators.push({ namespace, kind: kindName, generate });
 }
 
 function mergeEdits(target, edits) {
@@ -69,18 +84,20 @@ export async function generateBuildGoal(selection) {
 	const { check } = goalFlags();
 
 	const edits = {};
-	for (const { namespace, kind } of _registeredGenerators) {
+	for (const { namespace, kind, generate } of _registeredGenerators) {
 		const config = configuration(namespace, {}) || {};
 		if (!config.buildGenerate) continue;
 		let result;
 		try {
-			result = await productFor(
-				{ __imp: true, kind, attrs: {} },
-				GENERATE_BUILD,
-			);
+			result = generate
+				? await generate()
+				: await productFor(
+						{ __imp: true, kind, attrs: {} },
+						GENERATE_BUILD,
+					);
 		} catch (e) {
 			throw new Error(
-				`${kind}#generate-build: ${e && e.message ? e.message : e}`,
+				`${kind || namespace}#generate-build: ${e && e.message ? e.message : e}`,
 			);
 		}
 		mergeEdits(edits, result);

@@ -1127,6 +1127,24 @@ export function targetAddress(handle) {
 }
 
 /**
+ * Return the canonical first-export workspace address for a label handle.
+ *
+ * Label addresses are published after workspace and BUILD module evaluation,
+ * so this accessor is intended for lazy goal handlers and extension replay.
+ * Calling it while the label is still unresolved, or for an unexported label,
+ * surfaces the host's address-resolution error.
+ *
+ * @param {object} handle A handle returned by label().
+ * @returns {string}
+ */
+export function labelAddress(handle) {
+	if (!handle || handle.__imp_label !== true) {
+		throw new Error("labelAddress: expected a label handle");
+	}
+	return __host_target_address(handle.__id);
+}
+
+/**
  * Stable, path-safe slug derived from a target's own address — the shared
  * basis for a buildable target's default output path, so two same-named
  * targets declared in different directories never collide (e.g.
@@ -1759,19 +1777,10 @@ function _stable_function_id(fn) {
 	return id;
 }
 
-// Serialize args to a stable string. Target handles ({ __imp: true, __id })
-// are replaced with { __imp_ref_addr: <address> } rather than the raw
-// numeric id: an address is derived from the exporting module + export name
-// (see targetAddress()/__host_target_address), so it's stable across
-// processes, whereas __id is a process-local counter. A handle with no
-// registered address (constructed but never exported/registered — anonymous,
-// e.g. a bare `new NativeTool(name)` or mid-expand() before registerTarget()
-// runs) can't be digested this way; it falls back to { __imp_ref_id: __id }
-// instead — still unique per distinct handle (so two different anonymous
-// handles never collide into the same digest, and thus the same memo key),
-// just not restart-stable. `unaddressed` is set on the returned object so
-// memo() knows this call can't be persisted this time (see the
-// "memo-unaddressed-skip" trace event).
+// Serialize args to a stable string. Target and label handles are replaced
+// with address references rather than raw numeric ids: workspace addresses
+// are stable across processes, whereas __id is evaluation-local. Unaddressed
+// handles fall back to their numeric id and mark the call unpersistable.
 function _stable_digest(args) {
 	let unaddressed = false;
 	// `dep` distinguishes a link()-with-profiles wrapper's ref from a bare
@@ -1803,6 +1812,14 @@ function _stable_digest(args) {
 			return profiles && profiles.length > 0
 				? { ...refOf(handle.__id, true), profiles }
 				: refOf(handle.__id, false);
+		}
+		if (
+			value !== null &&
+			typeof value === "object" &&
+			value.__imp_label === true &&
+			typeof value.__id === "number"
+		) {
+			return refOf(value.__id, false);
 		}
 		if (
 			value !== null &&
@@ -2829,6 +2846,13 @@ const _MEMO_LEVELS = new Set(["trace", "debug", "info", "warn", "error"]);
 
 function _compact_memo_arg(arg) {
 	const unwrapped = _unwrap_dep_edge(arg);
+	if (arg && arg.__imp_label === true) {
+		try {
+			return labelAddress(arg);
+		} catch (_) {
+			return "#label-" + arg.__id;
+		}
+	}
 	if (unwrapped?.handle?.__imp === true) {
 		try {
 			return targetAddress(unwrapped.handle);

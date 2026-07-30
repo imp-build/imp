@@ -1,3 +1,4 @@
+// Canonical Rust BUILD-generation entrypoint.
 // Auto-generates a cargoPackage() declaration for every unowned Cargo.toml
 // in the workspace, for the `imp generate-build` goal. Mirrors
 // rules/odin/index.js's generateBuild ("odin-build-generator"), but Cargo
@@ -17,20 +18,17 @@ import {
 	defineConfigSchema,
 	field,
 	glob,
-	product,
+	memo,
 	registerBuildRule,
 	run,
-	workspaceTargets,
-	Target,
 } from "imp:core";
 
-import { declared_path } from "//rules/rust";
-import { rustTool } from "//rules/rust/toolchain";
 import {
-	registerBuildGenerator,
-	GENERATE_BUILD,
-} from "//rules/workflows/generate_build";
-import { RUST_TOOL } from "//rules/rust/toolchain";
+	cargoPackageHandles,
+	declared_path,
+} from "//rules/rust";
+import { rustTool } from "//rules/rust/toolchain";
+import { registerBuildGenerator } from "//rules/workflows/generate_build";
 
 registerBuildRule({
 	rule: "cargoPackage",
@@ -105,10 +103,14 @@ function append_build_target(result, file, target) {
 // directory component (bare top-level "Cargo.toml" manifests are always
 // pre-owned by a declared target in practice), so the suffix is unambiguous.
 export function package_for_manifest(metadata, manifestPath) {
+	const root = String(metadata.workspace_root || "").replace(/\/+$/, "");
 	const suffix = `/${manifestPath}`;
 	return (
-		(metadata.packages || []).find((pkg) =>
-			pkg.manifest_path.endsWith(suffix),
+		(metadata.packages || []).find(
+			(pkg) =>
+				manifestPath === "Cargo.toml"
+					? pkg.manifest_path === `${root}/Cargo.toml`
+					: pkg.manifest_path.endsWith(suffix),
 		) || null
 	);
 }
@@ -164,25 +166,16 @@ async function cargoMetadataFor(manifestPath) {
 	return JSON.parse(result.stdout);
 }
 
-// Phantom kind: never declared as a workspace target; carries the kind for
-// the generate-build generator product and registerBuildGenerator().
-class CargoBuildGenerator extends Target {
-	static kind = "cargo-build-generator";
-}
-
-export const generateBuild = product(
-	CargoBuildGenerator,
-	GENERATE_BUILD,
-	RUST_TOOL,
-	async function generateBuild(handle) {
+export const generateBuild = memo(
+	async function generateBuild() {
 		const manifests = allUnowned({
-			root: handle.attrs.root || ".",
+			root: ".",
 			include: ["**/Cargo.toml"],
-			exclude: handle.attrs.exclude || DEFAULT_GENERATE_BUILD_EXCLUDES,
+			exclude: DEFAULT_GENERATE_BUILD_EXCLUDES,
 		});
 
 		const existingPaths = new Set(
-			workspaceTargets("cargo-package").map(({ handle: h }) =>
+			cargoPackageHandles().map((h) =>
 				normalize_workspace_path(declared_path(h, h.attrs.path || ".")),
 			),
 		);
@@ -212,7 +205,7 @@ export const generateBuild = product(
 		}
 		return result;
 	},
-	{ display: "generate build {0}", level: "info" },
+	{ display: "generate Rust BUILD files", level: "info" },
 );
 
-registerBuildGenerator({ namespace: "rust", kind: CargoBuildGenerator });
+registerBuildGenerator({ namespace: "rust", generate: generateBuild });

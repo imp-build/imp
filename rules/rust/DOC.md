@@ -1,11 +1,19 @@
-The Rust rules turn Cargo packages into imp targets without replacing Cargo's
-package model. A target can build one or more binaries, run the package's test
+The Rust rules expose Cargo packages as selectable imp labels without
+replacing Cargo's package model. A label can build one or more binaries, run the package's test
 suite, publish binaries under `dist/`, and participate in workspace-wide
 formatting and linting. Rust, Cargo, the C link driver, linker, and optional
 compiler cache are all declared tool dependencies rather than ambient host
 requirements.
 
-<!-- capabilities -->
+## Available goals
+
+| Goal | Integration | Module |
+| --- | --- | --- |
+| `imp build` | Cargo | `//rules/rust` |
+| `imp test` | Cargo | `//rules/rust` |
+| `imp package` | Cargo | `//rules/rust` |
+| `imp fmt` | rustfmt | `//rules/rust/rustfmt` |
+| `imp lint` | Clippy | `//rules/rust/clippy` |
 
 ## Set up the workspace
 
@@ -23,7 +31,7 @@ import "//rules/workflows/test";
 ```
 
 Toolchains may also select an explicit C link driver, linker, and kache
-target. Pinning them in the workspace file makes the same tool graph available
+tool handle. Pinning them in the workspace file makes the same tool graph available
 to build, test, and Clippy instead of letting those commands drift apart.
 
 When a kache target is set, `KACHE_BASE_DIR` and rustc's
@@ -71,11 +79,12 @@ export const server = cargoPackage({
 });
 ```
 
-The export name forms the target address, so this declaration is selected as
+The export name forms the label address, so this declaration is selected as
 `//path/to/package:server`. Set `path` when the manifest is below the declaring
-`BUILD.js`. `bin` accepts a string or a list and must name the binaries Cargo
-produces. A library-only crate omits `bin`; it can still be formatted, linted,
-and tested, but has no binary artifact for `build` or `package`.
+`BUILD.js`. `bin` accepts a string or a list and can explicitly name the
+binaries Cargo produces. When omitted, the rule derives binary targets from
+`Cargo.toml`; a library-only crate can still be formatted, linted, and tested,
+but has no binary artifact for `build` or `package`.
 
 For a package declared inside an enclosing Cargo workspace, set
 `workspaceMember: true`. That stages the workspace root and sibling path
@@ -98,9 +107,9 @@ executed rather than replaying a cached successful run; compilation work below
 the test invocation can still use the normal task and compiler caches.
 
 `cargoArgs` and `testArgs` append arguments to the corresponding Cargo command.
-Use `testTools` for host programs that tests invoke: they become declared tool
-dependencies and are placed on the sandbox's `PATH`. Use `deps` for additional
-target inputs such as resources referenced by `include_str!` or
+Use `testTools` for host programs that tests invoke: they are resolved
+imperatively and placed on the sandbox's `PATH`. Use `deps` for additional
+resource inputs such as files referenced by `include_str!` or
 `include_bytes!`. `doctest` overrides the workspace default for that package;
 set `rustConfig.doctest: false` to disable Cargo doc-tests workspace-wide.
 

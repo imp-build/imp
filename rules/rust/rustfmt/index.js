@@ -1,15 +1,26 @@
-// Rustfmt product registration lives under its tool directory so product
-// provenance can derive both the Rust group and the rustfmt implementation.
-import { product, FMT, toolName } from "imp:core";
-import { CargoPackage } from "//rules/rust";
+// Rustfmt is an additive extension on the reusable Cargo package label
+// factory. Importing this canonical entrypoint installs it for packages
+// declared before or after the import.
+import { fmt, logInfo } from "imp:core";
+import {
+	cargoPackage,
+	cargoPackageActionHandle,
+} from "//rules/rust";
 import { cargoFmt } from "//rules/rust/fmt";
 
-const RUSTFMT_TOOL = toolName("rustfmt");
+export function rustfmt(packageLabel) {
+	fmt(packageLabel, async function fmtCargoPackage(ctx) {
+		const result = await cargoFmt(
+			cargoPackageActionHandle(packageLabel),
+			{ check: !!ctx.flags.check },
+		);
+		logInfo(
+			ctx.flags.check
+				? `${ctx.selector}#fmt checked ${result.checked} Rust source(s)`
+				: `${ctx.selector}#fmt formatted ${result.formatted} Rust source(s)`,
+		);
+		return result;
+	});
+}
 
-export const cargoPackageFmt = product(
-	CargoPackage,
-	FMT,
-	RUSTFMT_TOOL,
-	cargoFmt,
-	{ display: "fmt {0}", level: "info" },
-);
+cargoPackage.attach(rustfmt);

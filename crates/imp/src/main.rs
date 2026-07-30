@@ -880,9 +880,7 @@ async fn cmd_execute_live(
         Some(since) => {
             let graph = workspace.import_graph.lock().unwrap().clone();
             let changed::ChangedTargets {
-                addresses,
-                unowned,
-                ..
+                addresses, unowned, ..
             } = changed::changed_target_addresses(
                 &workspace_root,
                 &workspace.workspace,
@@ -1423,8 +1421,7 @@ async fn cmd_targets(selectors: &[String], changed_since: Option<&str>, tree: &T
                 }
             }
         } else {
-            let labels =
-                selector::select_labels_in(&workspace, selectors, &selector_context)?;
+            let labels = selector::select_labels_in(&workspace, selectors, &selector_context)?;
             let mut targets_by_address = std::collections::BTreeMap::new();
             for selector in selectors {
                 let single = std::slice::from_ref(selector);
@@ -1435,12 +1432,8 @@ async fn cmd_targets(selectors: &[String], changed_since: Option<&str>, tree: &T
                         }
                     }
                     Err(error) => {
-                        if selector::select_labels_in(
-                            &workspace,
-                            single,
-                            &selector_context,
-                        )?
-                        .is_empty()
+                        if selector::select_labels_in(&workspace, single, &selector_context)?
+                            .is_empty()
                         {
                             return Err(error);
                         }
@@ -1484,8 +1477,7 @@ async fn cmd_dependencies(selectors: &[String], goal: Option<&str>, tree: &Tree)
             match selector::select_targets_in(&workspace, single, &selector_context) {
                 Ok(_) => target_selectors.push(selector.clone()),
                 Err(error) => {
-                    if selector::select_labels_in(&workspace, single, &selector_context)?
-                        .is_empty()
+                    if selector::select_labels_in(&workspace, single, &selector_context)?.is_empty()
                     {
                         return Err(error);
                     }
@@ -1493,12 +1485,7 @@ async fn cmd_dependencies(selectors: &[String], goal: Option<&str>, tree: &Tree)
             }
         }
         if !target_selectors.is_empty() {
-            spike::format_dependencies(
-                &workspace,
-                &target_selectors,
-                &selector_context,
-                &mut out,
-            )?;
+            spike::format_dependencies(&workspace, &target_selectors, &selector_context, &mut out)?;
         }
         if !labels.is_empty() {
             let goal = goal.ok_or_else(|| {
@@ -1658,13 +1645,7 @@ mod tests {
 
     #[test]
     fn dependencies_subcommand_accepts_observed_label_goal() {
-        let cli = Cli::parse_from([
-            "imp",
-            "dependencies",
-            "//pkg:item",
-            "--goal",
-            "build",
-        ]);
+        let cli = Cli::parse_from(["imp", "dependencies", "//pkg:item", "--goal", "build"]);
         match cli.command {
             Cmd::Dependencies { selectors, goal } => {
                 assert_eq!(selectors, ["//pkg:item"]);

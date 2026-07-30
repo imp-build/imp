@@ -103,8 +103,7 @@ pub fn changed_target_addresses(
         }
     }
     for (&label_id, address) in &workspace.label_primary_addresses {
-        let handler_reasons =
-            trace.label_stale_reasons(workspace, label_id, label_context, &stale);
+        let handler_reasons = trace.label_stale_reasons(workspace, label_id, label_context, &stale);
         if !handler_reasons.is_empty() {
             addresses.insert(address.clone());
             reasons
@@ -425,10 +424,7 @@ mod tests {
 
         assert_eq!(
             owners_of(&ws, &ImportGraph::default(), &["app/BUILD.js"]),
-            BTreeSet::from([
-                "//app:generated".to_owned(),
-                "//app:legacy".to_owned(),
-            ])
+            BTreeSet::from(["//app:generated".to_owned(), "//app:legacy".to_owned(),])
         );
         assert_eq!(
             owners_of(&ws, &ImportGraph::default(), &[WORKSPACE_FILE]),

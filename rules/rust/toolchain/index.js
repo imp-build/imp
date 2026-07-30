@@ -1,3 +1,4 @@
+// Canonical Rust toolchain entrypoint.
 import {
 	Toolchain,
 	product,
