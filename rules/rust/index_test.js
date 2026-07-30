@@ -710,9 +710,7 @@ describe("rust rules", () => {
 			const includesPath = buildRun.inputs.some(
 				(input) =>
 					input.kind === "digest" &&
-					pathsInDigest(input.digest).includes(
-						"rules/rust/toolchain/index.js",
-					),
+					pathsInDigest(input.digest).includes("rules/rust/toolchain/index.js"),
 			);
 			expect(includesPath).toBe(true);
 		});

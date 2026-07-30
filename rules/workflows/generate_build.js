@@ -69,7 +69,11 @@ export function registerBuildGenerator({ namespace, kind, generate }) {
 		);
 	}
 	const kindName =
-		kind === undefined ? undefined : typeof kind === "function" ? kind.kind : kind;
+		kind === undefined
+			? undefined
+			: typeof kind === "function"
+				? kind.kind
+				: kind;
 	_registeredGenerators.push({ namespace, kind: kindName, generate });
 }
 
@@ -91,10 +95,7 @@ export async function generateBuildGoal(selection) {
 		try {
 			result = generate
 				? await generate()
-				: await productFor(
-						{ __imp: true, kind, attrs: {} },
-						GENERATE_BUILD,
-					);
+				: await productFor({ __imp: true, kind, attrs: {} }, GENERATE_BUILD);
 		} catch (e) {
 			throw new Error(
 				`${kind || namespace}#generate-build: ${e && e.message ? e.message : e}`,

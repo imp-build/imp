@@ -307,8 +307,9 @@ export const resources = memo(
 // happened to trigger the shared task.
 export async function resourcesForDirs(dirs) {
 	const dirSet = new Set(dirs);
-	const handles = cargoPackageHandles()
-		.filter((h) => dirSet.has(declared_path(h, h.attrs.path || ".")));
+	const handles = cargoPackageHandles().filter((h) =>
+		dirSet.has(declared_path(h, h.attrs.path || ".")),
+	);
 	if (handles.length === 0) return file_set.literal([]);
 	const sets = await Promise.all(handles.map(resources));
 	return sets.length === 1 ? sets[0] : file_set.union(...sets);
@@ -326,8 +327,9 @@ export async function resourcesForDirs(dirs) {
 // distinct nativeTool() targets are ever meant to collapse into one mount.
 async function testToolsForDirs(dirs) {
 	const dirSet = new Set(dirs);
-	const handles = cargoPackageHandles()
-		.filter((h) => dirSet.has(declared_path(h, h.attrs.path || ".")));
+	const handles = cargoPackageHandles().filter((h) =>
+		dirSet.has(declared_path(h, h.attrs.path || ".")),
+	);
 	const seen = new Set();
 	const specs = [];
 	for (const h of handles) {
@@ -1007,8 +1009,7 @@ export const cargoPackage = extensible(function cargoPackage({
 	const packageLabel = label({
 		data: {
 			path,
-			bins:
-				bin === undefined ? null : Array.isArray(bin) ? [...bin] : [bin],
+			bins: bin === undefined ? null : Array.isArray(bin) ? [...bin] : [bin],
 			release,
 			cargoArgs: [...cargoArgs],
 			testArgs: [...testArgs],
@@ -1017,9 +1018,7 @@ export const cargoPackage = extensible(function cargoPackage({
 			doctest,
 			workspaceMember,
 			...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
-			...(typeof toolchain === "string"
-				? { toolchainVersion: toolchain }
-				: {}),
+			...(typeof toolchain === "string" ? { toolchainVersion: toolchain } : {}),
 		},
 	});
 	_cargoPackageLabels.push(packageLabel);

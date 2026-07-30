@@ -141,8 +141,8 @@ describe("rust package tests", () => {
 
 			await cargoPackageTests(packageLabel);
 
-			const buildRun = host.runs.find((run) =>
-				run.argv[2] && run.argv[2].includes("--no-run"),
+			const buildRun = host.runs.find(
+				(run) => run.argv[2] && run.argv[2].includes("--no-run"),
 			);
 			expect(buildRun.argv[0]).toBe("sh");
 			expect(buildRun.argv[2]).toContain("--no-run");
