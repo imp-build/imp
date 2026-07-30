@@ -13,7 +13,7 @@ use std::sync::{
 use rquickjs::{AsyncContext as JsContext, AsyncRuntime as Runtime};
 
 use crate::changed::ImportGraph;
-use crate::spike::{HostState, Target, Workspace};
+use crate::spike::{DiscoveredLabels, HostState, Target, Workspace};
 use imp_scheduler::Scheduler;
 
 /// A loaded workspace with a live QuickJS runtime.
@@ -80,6 +80,9 @@ pub struct LiveWorkspace {
     /// it expanded into — an exact address match alone can't, since minted
     /// children live at different addresses.
     pub expansion_children: Arc<Mutex<BTreeMap<String, Vec<String>>>>,
+    /// Labels materialized by async discovery callbacks. Kept separate from
+    /// the immutable definition-phase workspace and merged for selection.
+    pub discovered_labels: Arc<Mutex<DiscoveredLabels>>,
     /// The execution service live `run()`/worker/toolchain host functions go
     /// through — the in-process local executor today, a daemon client later.
     /// Owns the persistent-worker registry and all other live execution
@@ -110,6 +113,7 @@ impl std::fmt::Debug for LiveWorkspace {
             .field("import_graph", &"Arc<Mutex<..>>")
             .field("dynamic_targets", &"Arc<Mutex<..>>")
             .field("expansion_children", &"Arc<Mutex<..>>")
+            .field("discovered_labels", &"Arc<Mutex<..>>")
             .field("service", &"Arc<dyn ExecutionService>")
             .field("grammar_registry", &"Arc<GrammarRegistry>")
             .finish()

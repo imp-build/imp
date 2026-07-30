@@ -81,6 +81,22 @@ pub fn changed_target_addresses(
 ) -> Result<ChangedTargets> {
     let files = git_changed_files(workspace_root, since)?;
     let (mut addresses, module_owned) = module_graph_targets(workspace, graph, &files);
+    let changed_owners: Vec<u32> = workspace
+        .label_primary_addresses
+        .iter()
+        .filter(|(_, address)| addresses.contains(*address))
+        .map(|(id, _)| *id)
+        .collect();
+    for owner_id in changed_owners {
+        addresses.extend(
+            workspace
+                .label_discovery_children
+                .get(&owner_id)
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
+    }
     let mut reasons: BTreeMap<String, Vec<String>> = addresses
         .iter()
         .map(|address| {

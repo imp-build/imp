@@ -49,7 +49,7 @@ impl SelectorContext {
         Self::default()
     }
 
-    fn parse(&self, selector: &str) -> Result<ParsedSelector> {
+    pub(crate) fn parse(&self, selector: &str) -> Result<ParsedSelector> {
         if selector.is_empty() {
             bail!("target selector cannot be empty");
         }
@@ -111,7 +111,7 @@ impl SelectorContext {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum ParsedSelector {
+pub(crate) enum ParsedSelector {
     Exact(String),
     Package { package: String, recursive: bool },
 }
@@ -125,7 +125,7 @@ impl ParsedSelector {
     /// selection (`select_label_roots_in`, imperative-model.md Phase 4) can
     /// reuse the exact same exact/package/recursive semantics `Target`
     /// selection uses, without needing a `Target` to match against.
-    fn matches_address(&self, address: &str) -> bool {
+    pub(crate) fn matches_address(&self, address: &str) -> bool {
         match self {
             Self::Exact(selector_address) => address == *selector_address,
             Self::Package { package, recursive } => {
@@ -142,7 +142,7 @@ impl ParsedSelector {
         }
     }
 
-    fn selects_multiple(&self) -> bool {
+    pub(crate) fn selects_multiple(&self) -> bool {
         matches!(self, Self::Package { .. })
     }
 }

@@ -6,14 +6,19 @@
 
 import {
 	Target,
+	discoverLabels,
 	expand,
 	file_set,
 	glob,
+	label,
 	paths,
 	product,
 	productFor,
 	registerBuildRule,
 	registerTarget,
+	registerLabel,
+	runFromTemplate,
+	runGoal,
 	runTemplate,
 	sourcesField,
 	toolName,
@@ -240,6 +245,104 @@ export function pythonSources({ root, sources, project, resolve, deps } = {}) {
 	});
 }
 
+/**
+ * Issue #90 integration probe. It uses the real source discovery and run
+ * implementation; #36 will replace pythonSources() with the public label
+ * factory and remove this temporary private entrypoint.
+ */
+export function __pythonSourcesLabelProbe({
+	root,
+	sources = ["*.py"],
+	project,
+	resolve,
+	deps = [],
+	execute = runFromTemplate,
+	resolveUvTool = uvTool,
+} = {}) {
+	if (typeof root !== "string" || root === "") {
+		throw new Error(
+			"__pythonSourcesLabelProbe({ root, ... }) requires a workspace-relative root",
+		);
+	}
+	if (
+		!Array.isArray(sources) ||
+		sources.length === 0 ||
+		sources.some(
+			(pattern) => typeof pattern !== "string" || pattern.includes("**"),
+		)
+	) {
+		throw new Error(
+			"__pythonSourcesLabelProbe source patterns must be direct (no '**')",
+		);
+	}
+	if (project && resolve) {
+		throw new Error(
+			"__pythonSourcesLabelProbe accepts either project or resolve, not both",
+		);
+	}
+	const resolvedProject = resolve || project || default_python_project;
+	const runtime = require_default_python_toolchain();
+	const uvVersion = require_default_uv_version();
+	const normalizedRoot = normalize_workspace_path(root);
+	const owner = label({
+		data: {
+			root: normalizedRoot,
+			sources,
+			runtime,
+			project: resolvedProject,
+			uvVersion,
+			deps,
+		},
+	});
+	owner.attrs = owner.data;
+	discoverLabels(
+		owner,
+		async function discoverPythonSourceLabels(sourceSet) {
+			const sourceFiles = await paths(
+				glob({
+					root: sourceSet.data.root,
+					include: sourceSet.data.sources,
+					exclude: [],
+				}),
+			);
+			for (const file of sourceFiles) {
+				const child = label({
+					data: {
+						file,
+						root: sourceSet.data.root,
+						sourceFiles,
+						runtime,
+						pythonVersion: runtime.attrs.version,
+						project: resolvedProject,
+						...(resolvedProject
+							? { projectPath: resolvedProject.attrs.path }
+							: {}),
+						uvVersion,
+						deps,
+					},
+				});
+				child.attrs = child.data;
+				runGoal(child, async function runPythonSource(ctx) {
+					const template = await buildPythonSourceRunTemplate(
+						child,
+						resolveUvTool,
+					);
+					return execute(template, {
+						args: ctx.args,
+						sandbox: true,
+						workspaceCwd: true,
+						impure: true,
+						stream: true,
+					});
+				});
+				registerLabel(child, `//${file}:python`);
+			}
+		},
+		{ goals: ["run"] },
+	);
+	return owner;
+}
+
 export class PythonSource extends Target {
 	static kind = "python-source";
 	constructor({
@@ -310,53 +413,55 @@ export const pythonSourceRun = product(
 	RUN,
 	PYTHON_TOOL,
 	async function pythonSourceRun(handle) {
-		const file = handle.attrs.file;
-		const root = handle.attrs.root;
-		const project = handle.attrs.projectPath || "";
-		const syncArgs = pythonResolveSyncArgs(handle.attrs.project)
-			.map((value) => `'${value.replaceAll("'", `'"'"'`)}'`)
-			.join(" ");
-		const venv = project ? `${project}/.venv` : "";
-		const uvToolSpec = await uvTool(handle.attrs.uvVersion);
-		const uvCacheToolSpec = uvCacheDirTool();
-		const depToolSpecs = await Promise.all(
-			(handle.attrs.deps || []).map((dep) => productFor(dep, TOOL)),
-		);
-		const envExports = sandboxRootEnvExports(uvCacheDirEnv());
-		const inputs = [file_set.literal(handle.attrs.sourceFiles)];
-		if (project) {
-			inputs.push(
-				glob({ root: project, include: ["pyproject.toml", "uv.lock"] }),
-			);
-		}
-		const script =
-			`file=$1; root=$2; project=$3; venv=$4; version=$5; shift 5; ` +
-			`${envExports.join(" && ")} && ` +
-			'export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" && ' +
-			'if [ -n "$project" ]; then ' +
-			`uv sync --project "$project" --locked --no-progress --no-install-project --managed-python --python "$version"${syncArgs ? ` ${syncArgs}` : ""} && ` +
-			'"$venv/bin/python" "$file" "$@"; ' +
-			'else uv run --no-project --managed-python --python "$version" -- "$file" "$@"; fi';
-
-		return runTemplate({
-			argv: [
-				"sh",
-				"-c",
-				script,
-				"python-source-run",
-				file,
-				root,
-				project,
-				venv,
-				handle.attrs.pythonVersion,
-			],
-			tools: [uvToolSpec, uvCacheToolSpec, ...depToolSpecs],
-			inputs,
-			display: `python run ${file}`,
-		});
+		return buildPythonSourceRunTemplate(handle);
 	},
 	{ display: "run {0}", level: "info" },
 );
+
+async function buildPythonSourceRunTemplate(handle, resolveUvTool = uvTool) {
+	const file = handle.attrs.file;
+	const root = handle.attrs.root;
+	const project = handle.attrs.projectPath || "";
+	const syncArgs = pythonResolveSyncArgs(handle.attrs.project)
+		.map((value) => `'${value.replaceAll("'", `'"'"'`)}'`)
+		.join(" ");
+	const venv = project ? `${project}/.venv` : "";
+	const uvToolSpec = await resolveUvTool(handle.attrs.uvVersion);
+	const uvCacheToolSpec = uvCacheDirTool();
+	const depToolSpecs = await Promise.all(
+		(handle.attrs.deps || []).map((dep) => productFor(dep, TOOL)),
+	);
+	const envExports = sandboxRootEnvExports(uvCacheDirEnv());
+	const inputs = [file_set.literal(handle.attrs.sourceFiles)];
+	if (project) {
+		inputs.push(glob({ root: project, include: ["pyproject.toml", "uv.lock"] }));
+	}
+	const script =
+		`file=$1; root=$2; project=$3; venv=$4; version=$5; shift 5; ` +
+		`${envExports.join(" && ")} && ` +
+		'export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" && ' +
+		'if [ -n "$project" ]; then ' +
+		`uv sync --project "$project" --locked --no-progress --no-install-project --managed-python --python "$version"${syncArgs ? ` ${syncArgs}` : ""} && ` +
+		'"$venv/bin/python" "$file" "$@"; ' +
+		'else uv run --no-project --managed-python --python "$version" -- "$file" "$@"; fi';
+
+	return runTemplate({
+		argv: [
+			"sh",
+			"-c",
+			script,
+			"python-source-run",
+			file,
+			root,
+			project,
+			venv,
+			handle.attrs.pythonVersion,
+		],
+		tools: [uvToolSpec, uvCacheToolSpec, ...depToolSpecs],
+		inputs,
+		display: `python run ${file}`,
+	});
+}
 
 registerBuildRule({
 	rule: "pythonSources",

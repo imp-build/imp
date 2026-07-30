@@ -22,6 +22,18 @@ export const engineAssets = resourcePackage({
 
 export const testTar = nativeTool("tar");
 export const testGzip = nativeTool("gzip");
+export const testCmake = nativeTool("cmake");
+export const testCc = nativeTool("cc");
+export const testAs = nativeTool("as");
+export const testLd = nativeTool("ld");
+export const testAr = nativeTool("ar");
+export const testMkdir = nativeTool("mkdir");
+export const testNinja = nativeTool("ninja");
+export const testDirname = nativeTool("dirname");
+export const testCp = nativeTool("cp");
+export const testCtest = nativeTool("ctest");
+export const testFind = nativeTool("find");
+export const testSed = nativeTool("sed");
 // changed.rs's tests shell out to `git` directly (Command::new("git")), so
 // it needs the same hermetic sandbox mount as tar/gzip — without it those
 // tests fail inside `imp test`'s sandbox with "run git (is git

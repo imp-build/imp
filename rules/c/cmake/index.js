@@ -1,9 +1,13 @@
 import {
 	Target,
 	artifact,
+	build,
 	configuration,
+	discoverLabels,
 	expand,
 	glob,
+	label,
+	labelAddress,
 	file_set,
 	memo,
 	mergeDigests,
@@ -13,9 +17,11 @@ import {
 	product,
 	readFileInDigest,
 	registerTarget,
+	registerLabel,
 	run,
 	sourcesField,
 	targetAddress,
+	test,
 	BUILD,
 	PACKAGE,
 	TEST,
@@ -96,9 +102,12 @@ function normalize_workspace_path(path) {
 }
 
 function safe_target_address(handle) {
-	if (!handle || handle.__imp !== true) return null;
+	if (!handle || (handle.__imp !== true && handle.__imp_label !== true))
+		return null;
 	try {
-		return targetAddress(handle);
+		return handle.__imp_label === true
+			? labelAddress(handle)
+			: targetAddress(handle);
 	} catch (_) {
 		return null;
 	}
@@ -231,7 +240,11 @@ async function resolveCmakeSetup(handle) {
 				await zigTool(handle.attrs.compiler),
 				await zigBuildCacheTool(handle.attrs.compiler),
 			]
-		: [];
+		: await Promise.all(
+				["cc", "as", "ld", "ar"].map((name) =>
+					nativeToolSpec(nativeTool(name)),
+				),
+			);
 	const compilerArgs = handle.attrs.compiler
 		? await zigCMakeArgs(handle.attrs.compiler)
 		: [];
@@ -1072,4 +1085,85 @@ export function cmakeLib({
 		compiler,
 		deps,
 	});
+}
+
+/**
+ * Issue #90 integration probe. It deliberately remains unsupported/private;
+ * #32 will replace cmakeLib() with the production label factory.
+ */
+export function __cmakeLabelProbe({
+	src = ".",
+	buildDir,
+	srcs,
+	dirs = [],
+	cmakeArgs = [],
+	ctestArgs = [],
+	toolchain,
+	compiler,
+}) {
+	const project = label({
+		data: {
+			src,
+			srcs: srcs || DEFAULT_CPP_SRCS,
+			dirs,
+			cmakeArgs,
+			ctestArgs,
+			...(toolchain
+				? {
+						toolchain:
+							toolchain.__imp === true ? toolchain.attrs.version : toolchain,
+					}
+				: {}),
+			...(compiler
+				? {
+						compiler:
+							compiler.__imp === true ? compiler.attrs.version : compiler,
+					}
+				: {}),
+			...(buildDir ? { buildDir } : {}),
+		},
+	});
+	project.attrs = project.data;
+	discoverLabels(
+		project,
+		async function discoverCmakeLabels(owner) {
+			const setup = await resolveCmakeSetup(owner);
+			const graph = await configureNinjaGraph(owner, setup);
+			const scope = labelAddress(owner).split(":")[0];
+			const testsByBasename = correlateCTestEntries(
+				graph,
+				setup.buildDirPath,
+			);
+			for (const cmakeTarget of listNamedCmakeTargets(graph)) {
+				const matchedTestNames = new Set();
+				if (cmakeTarget.type === "EXECUTABLE") {
+					for (const candidate of [cmakeTarget.name, ...cmakeTarget.outputs]) {
+						for (const name of testsByBasename.get(basename(candidate)) || []) {
+							matchedTestNames.add(name);
+						}
+					}
+				}
+				const child = label({
+					data: {
+						...owner.data,
+						outputs: cmakeTarget.outputs,
+						outputsInBuildDir: true,
+						testNames: Array.from(matchedTestNames),
+					},
+				});
+				child.attrs = child.data;
+				build(child, async function buildDiscoveredCmakeTarget() {
+					return buildCmakeArtifact(child);
+				});
+				if (child.data.testNames.length > 0) {
+					test(child, async function testDiscoveredCmakeTarget() {
+						return runCTest(child);
+					});
+				}
+				registerLabel(child, `${scope}:${cmakeTarget.name}`);
+			}
+		},
+		{ goals: ["build", "test"] },
+	);
+	return project;
 }

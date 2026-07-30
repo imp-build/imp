@@ -873,27 +873,6 @@ async fn cmd_execute_live(
         mode: &resolved_mode,
     };
 
-    // Resolve --changed-since into an exact address set before any execution
-    // machinery spins up. Even an empty set continues through selection so
-    // scoped selectors are validated and selection-independent goals run.
-    let changed_addresses = match &changed_since {
-        Some(since) => {
-            let graph = workspace.import_graph.lock().unwrap().clone();
-            let changed::ChangedTargets {
-                addresses, unowned, ..
-            } = changed::changed_target_addresses(
-                &workspace_root,
-                &workspace.workspace,
-                &graph,
-                since,
-                Some(&label_context),
-            )?;
-            warn_unowned_changed_files(&unowned);
-            Some(addresses)
-        }
-        None => None,
-    };
-
     if cancellation.load(Ordering::SeqCst) {
         anyhow::bail!("execution canceled");
     }
@@ -904,6 +883,43 @@ async fn cmd_execute_live(
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel::<scheduler::TaskEvent>();
     let scheduler = scheduler::Scheduler::new(jobs, Arc::clone(&cancellation), tx);
     *workspace.scheduler.lock().unwrap() = Some(Arc::clone(&scheduler));
+
+    // Discovery-backed labels must exist before changed-address ownership and
+    // persisted handler traces are evaluated. Discovery may itself call
+    // memo()/run(), so it uses the same scheduler as goal execution.
+    let changed_addresses = match &changed_since {
+        Some(since) => {
+            workspace
+                .exec_no_cache
+                .store(no_cache, std::sync::atomic::Ordering::SeqCst);
+            workspace
+                .trace_inputs
+                .store(trace_inputs, std::sync::atomic::Ordering::SeqCst);
+            spike::ensure_discovered_labels(
+                &workspace,
+                &workspace_root,
+                &selectors,
+                Some(goal_name),
+                &selector_context,
+                true,
+            )
+            .await?;
+            let discovered_workspace = spike::workspace_with_discovered_labels(&workspace);
+            let graph = workspace.import_graph.lock().unwrap().clone();
+            let changed::ChangedTargets {
+                addresses, unowned, ..
+            } = changed::changed_target_addresses(
+                &workspace_root,
+                &discovered_workspace,
+                &graph,
+                since,
+                Some(&label_context),
+            )?;
+            warn_unowned_changed_files(&unowned);
+            Some(addresses)
+        }
+        None => None,
+    };
 
     let multi = tree.multi();
     let what = match invocation {
@@ -1390,61 +1406,87 @@ async fn cmd_targets(selectors: &[String], changed_since: Option<&str>, tree: &T
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let selector_context =
         selector::SelectorContext::for_invocation(&workspace_root, &current_dir)?;
-    workspace_cmd!(tree, |workspace, out| {
-        if let Some(since) = changed_since {
-            let graph = workspace.import_graph.lock().unwrap().clone();
-            let changed::ChangedTargets {
-                addresses,
-                reasons,
-                unowned,
-            } = changed::changed_target_addresses(
-                &workspace_root,
-                &workspace.workspace,
-                &graph,
-                since,
-                None,
-            )?;
-            warn_unowned_changed_files(&unowned);
-            let addresses = selector::filter_changed_addresses_in(
-                &workspace.workspace,
-                &addresses,
-                selectors,
-                &selector_context,
-            )?;
-            for address in &addresses {
-                use std::fmt::Write as _;
-                writeln!(out, "{address}")?;
-                if let Some(reasons) = reasons.get(address) {
-                    for reason in reasons {
-                        writeln!(out, "  selected because: {reason}")?;
-                    }
+    let workspace = load_workspace_with_messages(&workspace_root, tree).await?;
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel::<scheduler::TaskEvent>();
+    let scheduler =
+        scheduler::Scheduler::new(1, Arc::new(std::sync::atomic::AtomicBool::new(false)), tx);
+    *workspace.scheduler.lock().unwrap() = Some(scheduler);
+    tokio::spawn(async move { while events.recv().await.is_some() {} });
+    spike::ensure_discovered_labels(
+        &workspace,
+        &workspace_root,
+        selectors,
+        None,
+        &selector_context,
+        changed_since.is_some(),
+    )
+    .await?;
+    let discovered_workspace = spike::workspace_with_discovered_labels(&workspace);
+    let mut out = String::new();
+    if let Some(since) = changed_since {
+        let graph = workspace.import_graph.lock().unwrap().clone();
+        let changed::ChangedTargets {
+            addresses,
+            reasons,
+            unowned,
+        } = changed::changed_target_addresses(
+            &workspace_root,
+            &discovered_workspace,
+            &graph,
+            since,
+            None,
+        )?;
+        warn_unowned_changed_files(&unowned);
+        let addresses = selector::filter_changed_addresses_in(
+            &discovered_workspace,
+            &addresses,
+            selectors,
+            &selector_context,
+        )?;
+        for address in &addresses {
+            use std::fmt::Write as _;
+            writeln!(out, "{address}")?;
+            if let Some(reasons) = reasons.get(address) {
+                for reason in reasons {
+                    writeln!(out, "  selected because: {reason}")?;
                 }
             }
-        } else {
-            let labels = selector::select_labels_in(&workspace, selectors, &selector_context)?;
-            let mut targets_by_address = std::collections::BTreeMap::new();
-            for selector in selectors {
-                let single = std::slice::from_ref(selector);
-                match selector::select_targets_in(&workspace, single, &selector_context) {
-                    Ok(targets) => {
-                        for target in targets {
-                            targets_by_address.insert(target.address.as_str(), target);
-                        }
-                    }
-                    Err(error) => {
-                        if selector::select_labels_in(&workspace, single, &selector_context)?
-                            .is_empty()
-                        {
-                            return Err(error);
-                        }
-                    }
-                }
-            }
-            let targets = targets_by_address.into_values().collect::<Vec<_>>();
-            spike::format_targets(&targets, &mut out)?;
-            spike::format_labels(&workspace, &labels, &mut out)?;
         }
-    })
+    } else {
+        let labels = spike::select_labels_with_discovered_children_in(
+            &discovered_workspace,
+            selectors,
+            &selector_context,
+        )?;
+        let mut targets_by_address = std::collections::BTreeMap::new();
+        for selector in selectors {
+            let single = std::slice::from_ref(selector);
+            match selector::select_targets_in(&discovered_workspace, single, &selector_context) {
+                Ok(targets) => {
+                    for target in targets {
+                        targets_by_address.insert(target.address.as_str(), target);
+                    }
+                }
+                Err(error) => {
+                    if spike::select_labels_with_discovered_children_in(
+                        &discovered_workspace,
+                        single,
+                        &selector_context,
+                    )?
+                    .is_empty()
+                    {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        let targets = targets_by_address.into_values().collect::<Vec<_>>();
+        spike::format_targets(&targets, &mut out)?;
+        spike::format_labels(&discovered_workspace, &labels, &mut out)?;
+    }
+    *workspace.scheduler.lock().unwrap() = None;
+    print!("{out}");
+    Ok(())
 }
 
 /// One consolidated stderr warning for changed files no selectable root/module
@@ -1469,34 +1511,66 @@ async fn cmd_dependencies(selectors: &[String], goal: Option<&str>, tree: &Tree)
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let selector_context =
         selector::SelectorContext::for_invocation(&workspace_root, &current_dir)?;
-    workspace_cmd!(tree, |workspace, out| {
-        let labels = selector::select_labels_in(&workspace, selectors, &selector_context)?;
-        let mut target_selectors = Vec::new();
-        for selector in selectors {
-            let single = std::slice::from_ref(selector);
-            match selector::select_targets_in(&workspace, single, &selector_context) {
-                Ok(_) => target_selectors.push(selector.clone()),
-                Err(error) => {
-                    if selector::select_labels_in(&workspace, single, &selector_context)?.is_empty()
-                    {
-                        return Err(error);
-                    }
+    let workspace = load_workspace_with_messages(&workspace_root, tree).await?;
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel::<scheduler::TaskEvent>();
+    let scheduler =
+        scheduler::Scheduler::new(1, Arc::new(std::sync::atomic::AtomicBool::new(false)), tx);
+    *workspace.scheduler.lock().unwrap() = Some(scheduler);
+    tokio::spawn(async move { while events.recv().await.is_some() {} });
+    spike::ensure_discovered_labels(
+        &workspace,
+        &workspace_root,
+        selectors,
+        goal,
+        &selector_context,
+        false,
+    )
+    .await?;
+    let discovered_workspace = spike::workspace_with_discovered_labels(&workspace);
+    let labels = spike::select_labels_with_discovered_children_in(
+        &discovered_workspace,
+        selectors,
+        &selector_context,
+    )?;
+    let mut out = String::new();
+    let mut target_selectors = Vec::new();
+    for selector in selectors {
+        let single = std::slice::from_ref(selector);
+        match selector::select_targets_in(&discovered_workspace, single, &selector_context) {
+            Ok(_) => target_selectors.push(selector.clone()),
+            Err(error) => {
+                if spike::select_labels_with_discovered_children_in(
+                    &discovered_workspace,
+                    single,
+                    &selector_context,
+                )?
+                .is_empty()
+                {
+                    return Err(error);
                 }
             }
         }
-        if !target_selectors.is_empty() {
-            spike::format_dependencies(&workspace, &target_selectors, &selector_context, &mut out)?;
-        }
-        if !labels.is_empty() {
-            let goal = goal.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "label dependency introspection requires --goal <name>; attached goals are shown by 'imp targets'"
-                )
-            })?;
-            let trace = imp_engine::trace_changed::TraceIndex::build()?;
-            spike::format_label_dependencies(&workspace, &labels, goal, &trace, &mut out)?;
-        }
-    })
+    }
+    if !target_selectors.is_empty() {
+        spike::format_dependencies(
+            &discovered_workspace,
+            &target_selectors,
+            &selector_context,
+            &mut out,
+        )?;
+    }
+    if !labels.is_empty() {
+        let goal = goal.ok_or_else(|| {
+            anyhow::anyhow!(
+                "label dependency introspection requires --goal <name>; attached goals are shown by 'imp targets'"
+            )
+        })?;
+        let trace = imp_engine::trace_changed::TraceIndex::build()?;
+        spike::format_label_dependencies(&discovered_workspace, &labels, goal, &trace, &mut out)?;
+    }
+    *workspace.scheduler.lock().unwrap() = None;
+    print!("{out}");
+    Ok(())
 }
 
 async fn cmd_rules(command: Option<&RulesCmd>, tree: &Tree) -> Result<()> {

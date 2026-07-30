@@ -48,6 +48,35 @@ workspace address. The attached build handler does not run during module
 evaluation; it runs only when that label is selected for `imp build`.
 `extensible()` lets integrations attach additional handlers replayably.
 
+Factories whose selectable children are only known after async metadata
+discovery can register them beneath a statically exported owner:
+
+```js
+import {
+	build,
+	discoverLabels,
+	label,
+	registerLabel,
+} from "imp:core";
+
+export function generatedProject(opts) {
+	const project = label({ data: opts });
+	discoverLabels(project, async owner => {
+		for (const item of await discoverItems(owner.data)) {
+			const child = label({ data: item });
+			build(child, () => buildItem(child.data));
+			registerLabel(child, `//generated:${item.name}`);
+		}
+	}, { goals: ["build"] });
+	return project;
+}
+```
+
+The discovery callback replays once per live runtime so registrations are
+never cached away. Put expensive discovery beneath `memo()`. Addresses passed
+to `registerLabel()` must be absolute and canonical; handlers remain lazy and
+run only when their child is selected.
+
 Every real subprocess runs through `run()`, hermetically sandboxed and cached by the content-addressed digest of its declared inputs, tools, and configuration. The parent directories of declared `outputs` (and directory outputs themselves) are created in the sandbox before the command runs, so scripts don't need to `mkdir` them. See the [JS code reference](../../reference/js-api/) for the full exported implementation surface.
 
 Memoized functions use the same metadata object:

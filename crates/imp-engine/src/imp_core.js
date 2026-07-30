@@ -2463,6 +2463,8 @@ export function attach(label, goalName, fn, opts) {
 // indistinguishable without introducing an engine-side kind/trait registry.
 const _extensible_factories = [];
 let _factory_extensions_sealed = false;
+let _active_label_discovery = false;
+const _discovered_factory_instances = new Map();
 
 function _extension_name(extension) {
 	return extension.name || "<anonymous extension>";
@@ -2476,7 +2478,7 @@ function _validate_extension(extension, caller) {
 
 function _factory_variant(state, localExtensions, allowAttach) {
 	const variant = function (...args) {
-		if (_factory_extensions_sealed) {
+		if (_factory_extensions_sealed && !_active_label_discovery) {
 			throw new Error(
 				`extensible factory '${state.name}' called after workspace evaluation completed; ` +
 					"factories and their extensions seal before goal dispatch",
@@ -2488,7 +2490,12 @@ function _factory_variant(state, localExtensions, allowAttach) {
 				`extensible factory '${state.name}' must synchronously return a label() handle`,
 			);
 		}
-		state.instances.push({ label: created, localExtensions });
+		const instance = { label: created, localExtensions };
+		if (_factory_extensions_sealed) {
+			_discovered_factory_instances.set(created.__id, { state, instance });
+		} else {
+			state.instances.push(instance);
+		}
 		return created;
 	};
 
@@ -2590,48 +2597,7 @@ function _finalize_factory_extensions() {
 	_factory_extensions_sealed = true;
 	for (const state of _extensible_factories) {
 		for (const instance of state.instances) {
-			const seen = new Set();
-			for (const extension of [
-				...state.globalExtensions,
-				...instance.localExtensions,
-			]) {
-				if (seen.has(extension)) continue;
-				seen.add(extension);
-				try {
-					const previousProvenance = _active_extension_provenance;
-					_active_extension_provenance = {
-						factory: state.name,
-						extension: _extension_name(extension),
-					};
-					let result;
-					try {
-						result = extension(instance.label);
-					} finally {
-						_active_extension_provenance = previousProvenance;
-					}
-					if (
-						result !== null &&
-						result !== undefined &&
-						(typeof result === "object" || typeof result === "function") &&
-						typeof result.then === "function"
-					) {
-						throw new Error(
-							"returned a Promise; extensions must finish synchronously during workspace definition",
-						);
-					}
-				} catch (error) {
-					let address;
-					try {
-						address = __host_target_address(instance.label.__id);
-					} catch (_) {
-						address = `<unexported label id ${instance.label.__id}>`;
-					}
-					throw new Error(
-						`extensible factory '${state.name}' extension '${_extension_name(extension)}' ` +
-							`failed for ${address}: ${error}`,
-					);
-				}
-			}
+			_apply_factory_extensions(state, instance);
 		}
 		state.instances.length = 0;
 	}
@@ -2639,6 +2605,108 @@ function _finalize_factory_extensions() {
 }
 globalThis.__imp_finalize_factory_extensions =
 	_finalize_factory_extensions;
+
+function _apply_factory_extensions(state, instance) {
+	const seen = new Set();
+	for (const extension of [
+		...state.globalExtensions,
+		...instance.localExtensions,
+	]) {
+		if (seen.has(extension)) continue;
+		seen.add(extension);
+		try {
+			const previousProvenance = _active_extension_provenance;
+			_active_extension_provenance = {
+				factory: state.name,
+				extension: _extension_name(extension),
+			};
+			let result;
+			try {
+				result = extension(instance.label);
+			} finally {
+				_active_extension_provenance = previousProvenance;
+			}
+			if (
+				result !== null &&
+				result !== undefined &&
+				(typeof result === "object" || typeof result === "function") &&
+				typeof result.then === "function"
+			) {
+				throw new Error(
+					"returned a Promise; extensions must finish synchronously during label definition",
+				);
+			}
+		} catch (error) {
+			let address;
+			try {
+				address = __host_target_address(instance.label.__id);
+			} catch (_) {
+				address = `<unexported label id ${instance.label.__id}>`;
+			}
+			throw new Error(
+				`extensible factory '${state.name}' extension '${_extension_name(extension)}' ` +
+					`failed for ${address}: ${error}`,
+			);
+		}
+	}
+}
+
+/**
+ * Register an async metadata-discovery callback owned by an exported label.
+ * The callback may create labels and publish them with registerLabel().
+ * Expensive work beneath the callback should use memo(); the callback itself
+ * intentionally replays so registration side effects are never cached away.
+ */
+export function discoverLabels(owner, fn, opts = {}) {
+	if (!owner || owner.__imp_label !== true) {
+		throw new Error("discoverLabels(owner, fn) expects a label() owner");
+	}
+	if (typeof fn !== "function") {
+		throw new Error("discoverLabels(owner, fn) expects fn to be a function");
+	}
+	const goals = opts.goals ?? null;
+	if (
+		goals !== null &&
+		(!Array.isArray(goals) ||
+			goals.length === 0 ||
+			goals.some((goal) => typeof goal !== "string" || goal === ""))
+	) {
+		throw new Error("discoverLabels({ goals }) expects non-empty goal names");
+	}
+	const stack = new Error("label discoverer registration").stack || "";
+	const origin = __host_call_site_identity(stack) || "<unknown discoverer>";
+	__host_register_label_discoverer(owner.__id, fn, goals, origin);
+	return fn;
+}
+
+/**
+ * Give a label created by the active discoverLabels() callback one canonical
+ * absolute address. Existing extensible-factory attachments replay only after
+ * the address is published.
+ */
+export function registerLabel(handle, address) {
+	if (!handle || handle.__imp_label !== true) {
+		throw new Error("registerLabel(handle, address) expects a label() handle");
+	}
+	__host_register_dynamic_label(handle.__id, address);
+	const pending = _discovered_factory_instances.get(handle.__id);
+	if (pending !== undefined) {
+		_discovered_factory_instances.delete(handle.__id);
+		_apply_factory_extensions(pending.state, pending.instance);
+	}
+	return handle;
+}
+
+globalThis.__imp_set_label_discovery_active = function (active) {
+	_active_label_discovery = Boolean(active);
+	if (!_active_label_discovery && _discovered_factory_instances.size > 0) {
+		const ids = Array.from(_discovered_factory_instances.keys()).join(", ");
+		_discovered_factory_instances.clear();
+		throw new Error(
+			`discoverLabels() created extensible label(s) without registerLabel(): ${ids}`,
+		);
+	}
+};
 
 function _goal_sugar(goalName) {
 	return function (labelOrFn, fn, opts) {

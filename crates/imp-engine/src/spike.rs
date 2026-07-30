@@ -151,6 +151,23 @@ pub struct LabelHandler {
     pub extension: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct LabelDiscoverer {
+    pub owner_id: u32,
+    pub exec_name: String,
+    pub goals: Option<BTreeSet<String>>,
+    pub origin: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DiscoveredLabels {
+    pub addresses: BTreeMap<String, u32>,
+    pub primary_addresses: BTreeMap<u32, String>,
+    pub handlers: BTreeMap<(u32, String), Vec<LabelHandler>>,
+    pub children: BTreeMap<u32, Vec<String>>,
+    pub completed_owners: BTreeSet<u32>,
+}
+
 /// A product name declared exactly once (via `productName()`/`goal()` in JS,
 /// or pre-declared as a builtin). Product registrations must present the
 /// declaration's id, so every product name provably originates from a single
@@ -231,6 +248,12 @@ pub struct Workspace {
     /// functions remain JS-side; this sealed metadata supports selection,
     /// persisted trace identity, progress attribution, and introspection.
     pub label_handlers: BTreeMap<(u32, String), Vec<LabelHandler>>,
+    /// Async definition callbacks that may publish additional labels before
+    /// selection. Their owners are ordinary statically exported labels.
+    pub label_discoverers: Vec<LabelDiscoverer>,
+    /// Discovery owner id -> canonical child addresses, populated in merged
+    /// live snapshots used by change detection and introspection.
+    pub label_discovery_children: BTreeMap<u32, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -317,6 +340,9 @@ pub struct HostState {
     /// Ordered metadata for every attached label handler; see
     /// [`Workspace::label_handlers`].
     label_handlers: BTreeMap<(u32, String), Vec<LabelHandler>>,
+    label_discoverers: Vec<LabelDiscoverer>,
+    dynamic_label_registrations: Vec<(u32, String)>,
+    active_label_discovery: Option<u32>,
     /// True once workspace module-graph evaluation has finished and the
     /// label/attachment surfaces are sealed (imperative-model.md Phase 4,
     /// "Lifecycle: sealing") — the same moment `id_to_address` is finalized,
@@ -390,6 +416,9 @@ impl Default for HostState {
             dynamic_registrations: Vec::new(),
             labels: BTreeSet::new(),
             label_handlers: BTreeMap::new(),
+            label_discoverers: Vec::new(),
+            dynamic_label_registrations: Vec::new(),
+            active_label_discovery: None,
             labels_sealed: false,
         }
     }
@@ -580,6 +609,8 @@ async fn create_live_runtime(
             label_addresses: BTreeMap::new(),
             label_primary_addresses: BTreeMap::new(),
             label_handlers: hs.label_handlers.clone(),
+            label_discoverers: hs.label_discoverers.clone(),
+            label_discovery_children: BTreeMap::new(),
         }
     };
 
@@ -600,6 +631,7 @@ async fn create_live_runtime(
         import_graph,
         dynamic_targets: Arc::new(Mutex::new(BTreeMap::new())),
         expansion_children: Arc::new(Mutex::new(BTreeMap::new())),
+        discovered_labels: Arc::new(Mutex::new(DiscoveredLabels::default())),
         service,
         grammar_registry,
     })
@@ -814,6 +846,8 @@ async fn load_workspace_with_rules_and_service(
             label_addresses,
             label_primary_addresses,
             label_handlers: hs.label_handlers.clone(),
+            label_discoverers: hs.label_discoverers.clone(),
+            label_discovery_children: BTreeMap::new(),
         };
         hs.labels_sealed = true;
         workspace
@@ -1333,6 +1367,333 @@ async fn ensure_expanded(
     Ok(())
 }
 
+pub fn workspace_with_discovered_labels(live: &LiveWorkspace) -> Workspace {
+    let mut workspace = live.workspace.clone();
+    let discovered = live.discovered_labels.lock().unwrap();
+    workspace
+        .label_addresses
+        .extend(discovered.addresses.clone());
+    workspace
+        .label_primary_addresses
+        .extend(discovered.primary_addresses.clone());
+    workspace.label_handlers.extend(discovered.handlers.clone());
+    workspace.label_discovery_children = discovered.children.clone();
+    workspace
+}
+
+fn select_label_roots_with_discovered_children(
+    workspace: &Workspace,
+    discovered: &DiscoveredLabels,
+    goal: &str,
+    selectors: &[String],
+    context: &SelectorContext,
+) -> Result<Vec<(u32, String)>> {
+    let mut selected = BTreeMap::new();
+    for selector in selectors {
+        let single = std::slice::from_ref(selector);
+        let parsed = context.parse(selector)?;
+        let mut owner_children = Vec::new();
+        if !parsed.selects_multiple() {
+            let owners: BTreeSet<u32> = workspace
+                .label_addresses
+                .iter()
+                .filter(|(address, _)| parsed.matches_address(address))
+                .map(|(_, id)| *id)
+                .collect();
+            for owner in owners {
+                for address in discovered.children.get(&owner).into_iter().flatten() {
+                    let Some(&id) = workspace.label_addresses.get(address) else {
+                        continue;
+                    };
+                    if workspace
+                        .label_handlers
+                        .contains_key(&(id, goal.to_owned()))
+                    {
+                        owner_children.push((id, address.clone()));
+                    }
+                }
+            }
+        }
+        match select_label_roots_in(workspace, goal, single, context) {
+            Ok(roots) => {
+                for (id, address) in roots {
+                    selected.insert(address, id);
+                }
+            }
+            Err(error) if !owner_children.is_empty() => {
+                let _ = error;
+            }
+            Err(error) => return Err(error),
+        }
+        for (id, address) in owner_children {
+            selected.insert(address, id);
+        }
+    }
+    Ok(selected
+        .into_iter()
+        .map(|(address, id)| (id, address))
+        .collect())
+}
+
+pub fn select_labels_with_discovered_children_in(
+    workspace: &Workspace,
+    selectors: &[String],
+    context: &SelectorContext,
+) -> Result<Vec<(u32, String)>> {
+    let mut selected = BTreeMap::new();
+    for selector in selectors {
+        let single = std::slice::from_ref(selector);
+        for (id, address) in crate::selector::select_labels_in(workspace, single, context)? {
+            selected.insert(address, id);
+        }
+        let parsed = context.parse(selector)?;
+        if parsed.selects_multiple() {
+            continue;
+        }
+        let owners: Vec<u32> = workspace
+            .label_addresses
+            .iter()
+            .filter(|(address, _)| parsed.matches_address(address))
+            .map(|(_, id)| *id)
+            .collect();
+        for owner in owners {
+            for address in workspace
+                .label_discovery_children
+                .get(&owner)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(&id) = workspace.label_addresses.get(address) {
+                    selected.insert(address.clone(), id);
+                }
+            }
+        }
+    }
+    Ok(selected
+        .into_iter()
+        .map(|(address, id)| (id, address))
+        .collect())
+}
+
+/// Materialize the discovery owners needed to resolve `selectors`. Multi-root
+/// selectors and explicit introspection/change-detection requests use
+/// `force_all`; an exact known non-owner remains cheap.
+pub async fn ensure_discovered_labels(
+    live: &LiveWorkspace,
+    workspace_root: &Path,
+    selectors: &[String],
+    goal: Option<&str>,
+    context: &SelectorContext,
+    force_all: bool,
+) -> Result<()> {
+    if live.workspace.label_discoverers.is_empty() {
+        return Ok(());
+    }
+    *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
+
+    let completed = live
+        .discovered_labels
+        .lock()
+        .unwrap()
+        .completed_owners
+        .clone();
+    let relevant: Vec<LabelDiscoverer> = live
+        .workspace
+        .label_discoverers
+        .iter()
+        .filter(|discoverer| !completed.contains(&discoverer.owner_id))
+        .filter(|discoverer| {
+            discoverer
+                .goals
+                .as_ref()
+                .is_none_or(|goals| goal.is_none_or(|name| goals.contains(name)))
+        })
+        .cloned()
+        .collect();
+    if relevant.is_empty() {
+        return Ok(());
+    }
+
+    let mut owner_ids = BTreeSet::new();
+    if force_all || selectors.is_empty() {
+        owner_ids.extend(relevant.iter().map(|discoverer| discoverer.owner_id));
+    } else {
+        for selector in selectors {
+            let parsed = context.parse(selector)?;
+            if parsed.selects_multiple() {
+                owner_ids.extend(relevant.iter().map(|discoverer| discoverer.owner_id));
+                continue;
+            }
+            let matching_owners: Vec<u32> = relevant
+                .iter()
+                .filter(|discoverer| {
+                    live.workspace.label_addresses.iter().any(|(address, id)| {
+                        *id == discoverer.owner_id && parsed.matches_address(address)
+                    })
+                })
+                .map(|discoverer| discoverer.owner_id)
+                .collect();
+            if matching_owners.is_empty() {
+                let known_static = live
+                    .workspace
+                    .label_addresses
+                    .keys()
+                    .any(|address| parsed.matches_address(address))
+                    || live
+                        .workspace
+                        .targets
+                        .keys()
+                        .any(|address| parsed.matches_address(address));
+                if !known_static {
+                    owner_ids.extend(relevant.iter().map(|discoverer| discoverer.owner_id));
+                }
+            } else {
+                owner_ids.extend(matching_owners);
+            }
+        }
+    }
+
+    for discoverer in relevant
+        .into_iter()
+        .filter(|discoverer| owner_ids.contains(&discoverer.owner_id))
+    {
+        let owner_address = live
+            .workspace
+            .label_primary_addresses
+            .get(&discoverer.owner_id)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "discoverLabels owner declared at {} is not exported",
+                    discoverer.origin
+                )
+            })?;
+        let first_new_id = {
+            let mut hs = live.host_state.lock().unwrap();
+            hs.active_label_discovery = Some(discoverer.owner_id);
+            hs.next_id
+        };
+        let call_result = live
+            .ctx
+            .async_with(async |ctx| -> rquickjs::Result<()> {
+                let set_active: Function =
+                    ctx.globals().get("__imp_set_label_discovery_active")?;
+                set_active.call::<_, ()>((true,))?;
+                let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
+                let owner: Object = resolve_fn.call((discoverer.owner_id,))?;
+                let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
+                let discover_fn: Function = ctx.globals().get(discoverer.exec_name.as_str())?;
+                let value: Value = discover_fn.call((owner,)).catch(&ctx).map_err(|error| {
+                    rquickjs::Error::new_loading_message("discoverLabels", format!("{error}"))
+                })?;
+                let promise: MaybePromise =
+                    promise_resolve
+                        .call((value,))
+                        .catch(&ctx)
+                        .map_err(|error| {
+                            rquickjs::Error::new_loading_message(
+                                "discoverLabels",
+                                format!("{error}"),
+                            )
+                        })?;
+                promise
+                    .into_future::<Value>()
+                    .await
+                    .catch(&ctx)
+                    .map_err(|error| {
+                        rquickjs::Error::new_loading_message("discoverLabels", format!("{error}"))
+                    })?;
+                set_active
+                    .call::<_, ()>((false,))
+                    .catch(&ctx)
+                    .map_err(|error| {
+                        rquickjs::Error::new_loading_message("discoverLabels", format!("{error}"))
+                    })?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"));
+
+        // Always close the host/JS discovery window, including failures.
+        live.host_state.lock().unwrap().active_label_discovery = None;
+        if call_result.is_err() {
+            let _ = live
+                .ctx
+                .async_with(async |ctx| -> rquickjs::Result<()> {
+                    let set_active: Function =
+                        ctx.globals().get("__imp_set_label_discovery_active")?;
+                    set_active.call::<_, ()>((false,))
+                })
+                .await;
+        }
+        call_result.with_context(|| {
+            format!(
+                "discover labels for {owner_address} (declared at {}) while resolving {}",
+                discoverer.origin,
+                if selectors.is_empty() {
+                    "<all roots>".to_owned()
+                } else {
+                    selectors.join(", ")
+                }
+            )
+        })?;
+
+        let (registrations, handlers, unregistered) = {
+            let mut hs = live.host_state.lock().unwrap();
+            let registrations = std::mem::take(&mut hs.dynamic_label_registrations);
+            let registered_ids: BTreeSet<u32> = registrations.iter().map(|(id, _)| *id).collect();
+            let unregistered: Vec<u32> = hs
+                .labels
+                .range(first_new_id..)
+                .copied()
+                .filter(|id| !registered_ids.contains(id))
+                .collect();
+            let handlers = hs.label_handlers.clone();
+            (registrations, handlers, unregistered)
+        };
+        if !unregistered.is_empty() {
+            bail!(
+                "discoverLabels callback for {owner_address} created label(s) without registerLabel(): {}",
+                unregistered
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+
+        let mut discovered = live.discovered_labels.lock().unwrap();
+        for (id, address) in registrations {
+            if live.workspace.targets.contains_key(&address)
+                || live.workspace.label_addresses.contains_key(&address)
+                || discovered.addresses.contains_key(&address)
+            {
+                bail!("discovered address '{address}' from {owner_address} is already claimed");
+            }
+            discovered.addresses.insert(address.clone(), id);
+            discovered.primary_addresses.insert(id, address.clone());
+            discovered
+                .children
+                .entry(discoverer.owner_id)
+                .or_default()
+                .push(address);
+            for ((handler_id, handler_goal), metadata) in &handlers {
+                if *handler_id == id {
+                    discovered
+                        .handlers
+                        .insert((*handler_id, handler_goal.clone()), metadata.clone());
+                }
+            }
+        }
+        if let Some(children) = discovered.children.get_mut(&discoverer.owner_id) {
+            children.sort();
+            children.dedup();
+        }
+        discovered.completed_owners.insert(discoverer.owner_id);
+    }
+    Ok(())
+}
+
 fn compute_owned_files(
     workspace_root: &Path,
     targets: &BTreeMap<String, Target>,
@@ -1611,7 +1972,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     let state_lbl = Arc::clone(&state);
     let host_label = Function::new(ctx.clone(), move || -> rquickjs::Result<u32> {
         let mut hs = state_lbl.lock().unwrap();
-        if hs.labels_sealed {
+        if hs.labels_sealed && hs.active_label_discovery.is_none() {
             return Err(rquickjs::Error::new_loading_message(
                 "label",
                 "label() called after workspace evaluation completed; labels seal before goal \
@@ -1643,7 +2004,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
               provenance_json: String|
               -> rquickjs::Result<()> {
             let mut hs = state_att.lock().unwrap();
-            if hs.labels_sealed {
+            if hs.labels_sealed && hs.active_label_discovery.is_none() {
                 return Err(rquickjs::Error::new_loading_message(
                     "attach",
                     "attach() called after workspace evaluation completed; labels seal before \
@@ -1683,6 +2044,126 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         },
     )?;
     globals.set("__host_attach", host_attach)?;
+
+    // Definition-phase registration of an async label discoverer. The
+    // callback itself runs later, in an engine-controlled window before
+    // selector resolution.
+    let state_discover = Arc::clone(&state);
+    let host_register_label_discoverer = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>,
+              owner_id: u32,
+              fn_val: Value<'js>,
+              goals: Option<Vec<String>>,
+              origin: String|
+              -> rquickjs::Result<()> {
+            let exec_name = {
+                let mut hs = state_discover.lock().unwrap();
+                if hs.labels_sealed {
+                    return Err(rquickjs::Error::new_loading_message(
+                        "discoverLabels",
+                        "discoverLabels() must be registered during workspace evaluation"
+                            .to_owned(),
+                    ));
+                }
+                if !hs.labels.contains(&owner_id) {
+                    return Err(rquickjs::Error::new_loading_message(
+                        "discoverLabels",
+                        format!("owner id {owner_id} is not a label"),
+                    ));
+                }
+                if hs
+                    .label_discoverers
+                    .iter()
+                    .any(|discoverer| discoverer.owner_id == owner_id)
+                {
+                    return Err(rquickjs::Error::new_loading_message(
+                        "discoverLabels",
+                        format!("owner id {owner_id} already has a discovery callback"),
+                    ));
+                }
+                let name = format!("__imp_exec_{}", hs.next_exec);
+                hs.next_exec += 1;
+                hs.label_discoverers.push(LabelDiscoverer {
+                    owner_id,
+                    exec_name: name.clone(),
+                    goals: goals.map(|values| values.into_iter().collect()),
+                    origin,
+                });
+                name
+            };
+            ctx.globals().set(exec_name.as_str(), fn_val)?;
+            Ok(())
+        },
+    )?;
+    globals.set(
+        "__host_register_label_discoverer",
+        host_register_label_discoverer,
+    )?;
+
+    // Publish a label allocated inside the currently active discovery
+    // callback. Discovered labels deliberately have one canonical address;
+    // aliases remain a definition-time exported-label feature.
+    let state_register_label = Arc::clone(&state);
+    let host_register_dynamic_label = Function::new(
+        ctx.clone(),
+        move |label_id: u32, address: String| -> rquickjs::Result<()> {
+            let mut hs = state_register_label.lock().unwrap();
+            if hs.active_label_discovery.is_none() {
+                return Err(rquickjs::Error::new_loading_message(
+                    "registerLabel",
+                    "registerLabel() is only valid inside a discoverLabels() callback".to_owned(),
+                ));
+            }
+            if !hs.labels.contains(&label_id) {
+                return Err(rquickjs::Error::new_loading_message(
+                    "registerLabel",
+                    format!("id {label_id} is not a label"),
+                ));
+            }
+            let valid = address.starts_with("//")
+                && address
+                    .strip_prefix("//")
+                    .and_then(|value| value.split_once(':'))
+                    .is_some_and(|(_, name)| {
+                        !name.is_empty() && !name.contains(':') && !name.contains('/')
+                    });
+            if !valid {
+                return Err(rquickjs::Error::new_loading_message(
+                    "registerLabel",
+                    format!(
+                        "discovered label address '{address}' must be an absolute exact address such as '//pkg:name'"
+                    ),
+                ));
+            }
+            match hs.id_to_address.get(&label_id) {
+                Some(existing) if existing == &address => return Ok(()),
+                Some(existing) => {
+                    return Err(rquickjs::Error::new_loading_message(
+                        "registerLabel",
+                        format!(
+                            "label id {label_id} is already registered as '{existing}', cannot register it as '{address}'"
+                        ),
+                    ))
+                }
+                None => {}
+            }
+            if hs
+                .id_to_address
+                .values()
+                .any(|existing| existing == &address)
+            {
+                return Err(rquickjs::Error::new_loading_message(
+                    "registerLabel",
+                    format!("address '{address}' is already claimed by another label or target"),
+                ));
+            }
+            hs.id_to_address.insert(label_id, address.clone());
+            hs.dynamic_label_registrations.push((label_id, address));
+            Ok(())
+        },
+    )?;
+    globals.set("__host_register_dynamic_label", host_register_dynamic_label)?;
 
     // __host_validate_target_attrs(kind, schemaJson, attrsJson) → validated
     // attrs JSON. Stateless: Target subclass `static schema` lives entirely
@@ -5125,6 +5606,21 @@ pub async fn execute_goal_live_selection(
     live.exec_no_cache.store(no_cache, Ordering::SeqCst);
     live.trace_inputs.store(trace_inputs, Ordering::SeqCst);
     resolve_mode_axes(live, profile, axis_overrides)?;
+    let discovery_selectors: &[String] = match &selection {
+        GoalSelection::Selectors(selectors) => selectors,
+        GoalSelection::ChangedAddresses { selectors, .. } => selectors,
+    };
+    ensure_discovered_labels(
+        live,
+        workspace_root,
+        discovery_selectors,
+        Some(goal),
+        selector_context,
+        matches!(selection, GoalSelection::ChangedAddresses { .. }),
+    )
+    .await?;
+    let label_workspace = workspace_with_discovered_labels(live);
+    let discovered_snapshot = live.discovered_labels.lock().unwrap().clone();
 
     // Resolve selectors against the statically-known workspace first, to
     // find the roots that should seed lazy expansion (the common case:
@@ -5168,8 +5664,9 @@ pub async fn execute_goal_live_selection(
                         seeds.extend(roots.iter().map(|(target, _)| target.address.clone()));
                     }
                     Err(_) => {
-                        let matched_a_label = !select_label_roots_in(
-                            &live.workspace,
+                        let matched_a_label = !select_label_roots_with_discovered_children(
+                            &label_workspace,
+                            &discovered_snapshot,
                             goal,
                             single,
                             selector_context,
@@ -5213,16 +5710,20 @@ pub async fn execute_goal_live_selection(
     // aliases remain explicit selector spellings but never cause duplicate
     // changed dispatch.
     let label_roots: Vec<(u32, String)> = match &selection {
-        GoalSelection::Selectors(selectors) => {
-            select_label_roots_in(&live.workspace, goal, selectors, selector_context)?
-        }
+        GoalSelection::Selectors(selectors) => select_label_roots_with_discovered_children(
+            &label_workspace,
+            &discovered_snapshot,
+            goal,
+            selectors,
+            selector_context,
+        )?,
         GoalSelection::ChangedAddresses { .. } => changed_addresses
             .as_ref()
             .expect("changed selection has an address set")
             .iter()
             .filter_map(|address| {
-                let label_id = live.workspace.label_addresses.get(address)?;
-                live.workspace
+                let label_id = label_workspace.label_addresses.get(address)?;
+                label_workspace
                     .label_handlers
                     .contains_key(&(*label_id, goal.to_owned()))
                     .then(|| (*label_id, address.clone()))
@@ -5258,8 +5759,9 @@ pub async fn execute_goal_live_selection(
                         }
                     }
                     Err(error) => {
-                        let matched_a_label = !select_label_roots_in(
-                            &live.workspace,
+                        let matched_a_label = !select_label_roots_with_discovered_children(
+                            &label_workspace,
+                            &discovered_snapshot,
                             goal,
                             single,
                             selector_context,
@@ -11596,6 +12098,287 @@ export { h };
 
         assert_eq!(marks_a, marks_b);
         assert_eq!(marks_a, vec!["build:release://pkg:hasher".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn discovered_labels_are_selectable_lazy_and_extension_replayed() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), "");
+        write_file(
+            &p.join("rules/discovered.js"),
+            r#"
+import {
+    build,
+    discoverLabels,
+    extensible,
+    label,
+    registerLabel,
+} from "imp:core";
+
+const child = extensible(function child(data) {
+    const handle = label({ data });
+    build(handle, async function childBuild(ctx) {
+        globalThis.__imp_test_marks = globalThis.__imp_test_marks || [];
+        globalThis.__imp_test_marks.push(`build:${handle.data.name}:${ctx.selector}`);
+    });
+    return handle;
+});
+
+child.attach(function discoveredExtension(handle) {
+    build(handle, async function extensionBuild(ctx) {
+        globalThis.__imp_test_marks.push(`extension:${handle.data.name}:${ctx.selector}`);
+    });
+});
+
+export function discover(owner) {
+    discoverLabels(owner, async function discoverChildren() {
+        globalThis.__imp_test_marks = globalThis.__imp_test_marks || [];
+        globalThis.__imp_test_marks.push("discover");
+        registerLabel(child({ name: "one" }), "//pkg:one");
+    }, { goals: ["build"] });
+}
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { build, label } from "imp:core";
+import { discover } from "//rules/discovered";
+
+const root = label();
+discover(root);
+export { root };
+
+const known = label();
+build(known, async function knownBuild() {
+    globalThis.__imp_test_marks = globalThis.__imp_test_marks || [];
+    globalThis.__imp_test_marks.push("known");
+});
+export { known };
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        run_goal_live(&workspace, p, "build", &["//:known".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(read_test_marks(&workspace).await, vec!["known".to_owned()]);
+
+        run_goal_live(&workspace, p, "build", &["//pkg:one".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(
+            read_test_marks(&workspace).await,
+            vec![
+                "known".to_owned(),
+                "discover".to_owned(),
+                "build:one://pkg:one".to_owned(),
+                "extension:one://pkg:one".to_owned(),
+            ]
+        );
+
+        let snapshot = workspace_with_discovered_labels(&workspace);
+        assert_eq!(snapshot.label_addresses["//pkg:one"], 2);
+        let labels = select_labels_with_discovered_children_in(
+            &snapshot,
+            &["//:root".to_owned()],
+            &SelectorContext::root(),
+        )
+        .unwrap();
+        assert!(labels.iter().any(|(_, address)| address == "//pkg:one"));
+
+        let fresh = load_workspace(p).await.unwrap();
+        run_goal_live(&fresh, p, "build", &["//pkg:one".to_owned()])
+            .await
+            .unwrap();
+        let fresh_snapshot = workspace_with_discovered_labels(&fresh);
+        let original_id = snapshot.label_addresses["//pkg:one"];
+        let fresh_id = fresh_snapshot.label_addresses["//pkg:one"];
+        assert_eq!(
+            snapshot.label_handlers[&(original_id, "build".to_owned())],
+            fresh_snapshot.label_handlers[&(fresh_id, "build".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn discovered_labels_reject_unregistered_handles_and_address_collisions() {
+        let unregistered = tempfile::tempdir().unwrap();
+        let p = unregistered.path();
+        write_file(&p.join(WORKSPACE_FILE), "");
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { discoverLabels, label } from "imp:core";
+const owner = label();
+discoverLabels(owner, async function forgetChild() { label(); }, { goals: ["build"] });
+export { owner };
+"#,
+        );
+        let live = load_workspace(p).await.unwrap();
+        let error = format!(
+            "{:#}",
+            run_goal_live(&live, p, "build", &["//:owner".to_owned()])
+                .await
+                .unwrap_err()
+        );
+        assert!(error.contains("without registerLabel"), "{error}");
+
+        let collision = tempfile::tempdir().unwrap();
+        let p = collision.path();
+        write_file(&p.join(WORKSPACE_FILE), "");
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import {
+    build,
+    discoverLabels,
+    label,
+    registerLabel,
+} from "imp:core";
+const owner = label();
+discoverLabels(owner, async function collide() {
+    const child = label();
+    build(child, async function childBuild() {});
+    registerLabel(child, "//:taken");
+}, { goals: ["build"] });
+export { owner };
+const taken = label();
+build(taken, async function takenBuild() {});
+export { taken };
+"#,
+        );
+        let live = load_workspace(p).await.unwrap();
+        let error = format!(
+            "{:#}",
+            run_goal_live(&live, p, "build", &["//:owner".to_owned()])
+                .await
+                .unwrap_err()
+        );
+        assert!(error.contains("already claimed"), "{error}");
+        assert!(error.contains("//:owner"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn cmake_discovery_probe_builds_and_tests_real_children() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/c/cmake";"#);
+        write_file(
+            &p.join("native/BUILD.js"),
+            r#"
+import { __cmakeLabelProbe } from "//rules/c/cmake";
+
+export const project = __cmakeLabelProbe({});
+"#,
+        );
+        write_file(
+            &p.join("native/CMakeLists.txt"),
+            r#"
+cmake_minimum_required(VERSION 3.20)
+project(hello_cmake C)
+add_library(hello_cmake SHARED hello.c)
+add_executable(hello_cmake_main main.c)
+target_link_libraries(hello_cmake_main PRIVATE hello_cmake)
+enable_testing()
+add_test(NAME hello_cmake_main_test COMMAND hello_cmake_main)
+"#,
+        );
+        write_file(
+            &p.join("native/hello.c"),
+            "int hello_cmake_add(int a, int b) { return a + b; }\n",
+        );
+        write_file(
+            &p.join("native/main.c"),
+            "int hello_cmake_add(int, int);\nint main(void) { return hello_cmake_add(1, 2) == 3 ? 0 : 1; }\n",
+        );
+
+        let live = load_workspace_with_rules(p, RulesSource::Embedded)
+            .await
+            .unwrap();
+        run_goal_live(&live, p, "build", &["//native:hello_cmake".to_owned()])
+            .await
+            .unwrap();
+        run_goal_live(&live, p, "test", &["//native:hello_cmake_main".to_owned()])
+            .await
+            .unwrap();
+
+        let snapshot = workspace_with_discovered_labels(&live);
+        assert!(snapshot
+            .label_addresses
+            .contains_key("//native:hello_cmake"));
+        assert!(snapshot
+            .label_addresses
+            .contains_key("//native:hello_cmake_main"));
+    }
+
+    #[tokio::test]
+    async fn python_discovery_probe_preserves_path_selection_and_arguments() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/python";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { __pythonSourcesLabelProbe } from "//rules/python/source";
+async function captureRun(template, policy) {
+    globalThis.__imp_test_marks = globalThis.__imp_test_marks || [];
+    globalThis.__imp_test_marks.push(
+        `${template.opts.argv[template.opts.argv.length - 1]}:${policy.args.join(",")}`,
+    );
+}
+async function fakeUvTool() {
+    return { kind: "tool", name: "uv-test", path: "." };
+}
+export const scripts = __pythonSourcesLabelProbe({
+    root: "tools",
+    execute: captureRun,
+    resolveUvTool: fakeUvTool,
+});
+"#,
+        );
+        write_file(
+            &p.join("tools/demo.py"),
+            r#"
+print("probe")
+"#,
+        );
+
+        let live = load_workspace_with_rules(p, RulesSource::Embedded)
+            .await
+            .unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = imp_scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+        execute_goal_live_selection(
+            &live,
+            p,
+            &SelectorContext::root(),
+            "run",
+            GoalSelection::Selectors(&["tools/demo.py".to_owned()]),
+            GoalExecutionOptions {
+                no_cache: false,
+                trace_inputs: false,
+                js_workers: 1,
+                flags: serde_json::json!({}),
+                run_args: &["argument-ok".to_owned()],
+                axis_overrides: &[],
+                profile: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_test_marks(&live).await,
+            vec!["3.13.0:argument-ok".to_owned()]
+        );
+        assert!(workspace_with_discovered_labels(&live)
+            .label_addresses
+            .contains_key("//tools/demo.py:python"));
     }
 
     #[tokio::test]
