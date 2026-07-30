@@ -6,11 +6,10 @@ import {
 } from "//rules/imp/test";
 import {
 	__resetPythonSourceStateForTest,
-	PythonSource,
+	buildPythonSourceRunTemplate,
 	pythonProject,
 	pythonSources,
 	pythonToolchain,
-	pythonSourceRun,
 } from "//rules/python/source";
 import { pythonResolve } from "//rules/python/resolve";
 import {
@@ -47,17 +46,19 @@ describe("python sources", () => {
 		await withPythonHost(async () => {
 			uvToolchain("0.11.16", { default: true, unverified: true });
 			const runtime = pythonToolchain("3.13.0", { default: true });
-			const source = new PythonSource({
-				file: "rules/python/example/src/hello/__main__.py",
-				root: "rules/python/example/src",
-				sourceFiles: [
-					"rules/python/example/src/hello/__init__.py",
-					"rules/python/example/src/hello/__main__.py",
-				],
-				runtime,
-			});
+			const source = {
+				attrs: {
+					file: "rules/python/example/src/hello/__main__.py",
+					root: "rules/python/example/src",
+					sourceFiles: [
+						"rules/python/example/src/hello/__init__.py",
+						"rules/python/example/src/hello/__main__.py",
+					],
+					pythonVersion: runtime.attrs.version,
+				},
+			};
 
-			const template = await pythonSourceRun(source);
+			const template = await buildPythonSourceRunTemplate(source);
 
 			expect(template.opts.argv[2]).toContain(
 				"uv run --no-project --managed-python",
@@ -79,15 +80,18 @@ describe("python sources", () => {
 				path: "rules/python/example",
 				default: true,
 			});
-			const source = new PythonSource({
-				file: "rules/python/example/src/hello/__main__.py",
-				root: "rules/python/example/src",
-				sourceFiles: ["rules/python/example/src/hello/__main__.py"],
-				runtime,
-				project,
-			});
+			const source = {
+				attrs: {
+					file: "rules/python/example/src/hello/__main__.py",
+					root: "rules/python/example/src",
+					sourceFiles: ["rules/python/example/src/hello/__main__.py"],
+					pythonVersion: runtime.attrs.version,
+					project,
+					projectPath: project.data.path,
+				},
+			};
 
-			const template = await pythonSourceRun(source);
+			const template = await buildPythonSourceRunTemplate(source);
 
 			expect(template.opts.argv[2]).toContain("uv sync --project");
 			expect(template.opts.argv[2]).toContain("--no-install-project");

@@ -8,7 +8,7 @@ describe("python resolve", () => {
 			flavors: { default: { extra: "cpu" } },
 		});
 
-		expect(resolve.kind).toBe("python-resolve");
+		expect(resolve.data.path).toBe("rules/python/example");
 		expect(pythonResolveSyncArgs(resolve)).toEqual(["--extra", "cpu"]);
 	});
 

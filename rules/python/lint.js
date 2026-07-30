@@ -5,7 +5,11 @@
 // `allowFailure: true` and the pass/fail decision is made from the returned
 // exitCode instead of a thrown exception.
 
-import { declared_path, python_file_sources } from "//rules/python";
+import {
+	declared_path,
+	pythonAppActionHandle,
+	python_file_sources,
+} from "//rules/python";
 import {
 	resolveRuffToolchainVersion,
 	ruffTool,
@@ -18,6 +22,7 @@ import { digestOf, diffDigests, output, paths, run } from "imp:core";
 // --fix` still exits nonzero when unsafe/unfixable violations remain, so
 // `ok` keeps coming straight from `exitCode` either way.
 export async function ruffCheck(handle, { fix = false } = {}) {
+	handle = pythonAppActionHandle(handle);
 	const srcs = await python_file_sources(handle);
 	const files = paths(srcs);
 	if (files.length === 0) {

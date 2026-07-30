@@ -1,28 +1,22 @@
 // File-granular Python execution rules. `pythonSources()` is a deliberately
-// shallow target generator: each direct match becomes one PythonSource leaf
-// when a run selector needs it. The generated address uses the source file as
-// its scope (`//tools/hello.py:python`), making `imp run tools/hello.py`
-// work with the normal package-selector parser.
+// shallow discovery-backed label generator: each direct match under `root`
+// becomes one selectable child label when a run selector needs it. The
+// generated address uses the source file as its scope
+// (`//tools/hello.py:python`), making `imp run tools/hello.py` work with
+// the normal package-selector parser.
 
 import {
-	Target,
 	discoverLabels,
-	expand,
 	file_set,
 	glob,
 	label,
 	paths,
-	product,
 	productFor,
 	registerBuildRule,
-	registerTarget,
 	registerLabel,
 	runFromTemplate,
 	runGoal,
 	runTemplate,
-	sourcesField,
-	toolName,
-	RUN,
 } from "imp:core";
 
 import {
@@ -30,20 +24,14 @@ import {
 	uvCacheDirEnv,
 	uvCacheDirTool,
 	uvTool,
-	UV_TOOL,
 } from "//rules/python/uv_toolchain";
-import {
-	PythonResolve,
-	pythonResolve,
-	pythonResolveSyncArgs,
-} from "//rules/python/resolve";
+import { pythonResolve, pythonResolveSyncArgs } from "//rules/python/resolve";
 
 import { TOOL } from "//rules/imp/native_tool";
 
 // Keep `run`'s single-program contract available to consumers that import
 // Python rules without separately importing the workflows layer.
 import "//rules/workflows/run";
-const PYTHON_TOOL = toolName("python");
 
 let default_python_toolchain = null;
 let default_python_project = null;
@@ -93,18 +81,13 @@ function require_default_uv_version() {
 	return version;
 }
 
-export class PythonToolchain extends Target {
-	static kind = "python-toolchain";
-	constructor({ version }) {
-		super({ kind: PythonToolchain.kind, attrs: { version } });
-	}
-}
-
 /**
  * Declare a pinned CPython runtime used by source-file runs.
  *
  * The interpreter is provisioned by uv into its existing shared cache; this
- * target intentionally models the selected version, not a second downloader.
+ * label intentionally models the selected version, not a second downloader.
+ * A handleless label, like pythonResolve() — addressable, referenced by
+ * `pythonSources()`-discovered children via `.data`, no goal handlers.
  */
 export function pythonToolchain(version, { default: isDefault = false } = {}) {
 	if (typeof version !== "string" || version === "") {
@@ -112,7 +95,8 @@ export function pythonToolchain(version, { default: isDefault = false } = {}) {
 			"pythonToolchain(version) requires a non-empty version string",
 		);
 	}
-	const handle = new PythonToolchain({ version });
+	const handle = label({ data: { version } });
+	handle.attrs = handle.data;
 	if (isDefault) default_python_toolchain = handle;
 	return handle;
 }
@@ -125,10 +109,6 @@ export function defaultPythonToolchain() {
 // execution. A workspace can replace it with pythonToolchain(..., { default:
 // true }) when it needs another interpreter version.
 pythonToolchain("3.13.0", { default: true });
-
-// Compatibility aliases for the earlier source-run-only API. New code should
-// use pythonResolve(), which is shared by source runs, tests, and PEX builds.
-export const PythonProject = PythonResolve;
 
 /**
  * Declare the optional workspace-default locked uv project used to supply
@@ -156,112 +136,34 @@ export function defaultPythonProject() {
 	return default_python_project;
 }
 
-export class PythonSources extends Target {
-	static kind = "python-sources";
-	constructor({
-		root,
-		sources = ["*.py"],
-		runtime,
-		project,
-		resolve,
-		uvVersion,
-		deps = [],
-	}) {
-		if (typeof root !== "string" || root === "") {
-			throw new Error(
-				"pythonSources({ root, ... }) requires a workspace-relative root",
-			);
-		}
-		if (!Array.isArray(sources) || sources.length === 0) {
-			throw new Error(
-				"pythonSources({ sources }) requires at least one source pattern",
-			);
-		}
-		if (
-			sources.some(
-				(pattern) => typeof pattern !== "string" || pattern.includes("**"),
-			)
-		) {
-			throw new Error("pythonSources source patterns must be direct (no '**')");
-		}
-		if (project && resolve) {
-			throw new Error(
-				"pythonSources accepts either project or resolve, not both",
-			);
-		}
-		const resolvedProject = resolve || project || default_python_project;
-		if (
-			resolvedProject &&
-			(resolvedProject.__imp !== true ||
-				resolvedProject.kind !== "python-resolve")
-		) {
-			throw new Error(
-				"pythonSources({ resolve }) expects a pythonResolve() target",
-			);
-		}
-		const normalizedRoot = normalize_workspace_path(root);
-		super({
-			kind: PythonSources.kind,
-			attrs: {
-				root: normalizedRoot,
-				sources,
-				runtime,
-				uvVersion,
-				deps,
-				...(resolvedProject ? { project: resolvedProject } : {}),
-			},
-			sources: sourcesField({ root: `//${normalizedRoot}`, include: sources }),
-			deps: [
-				{ target: runtime, mode: "tool" },
-				...deps.map((target) => ({ target })),
-				...(resolvedProject ? [{ target: resolvedProject }] : []),
-			],
-		});
-	}
-}
-
 /**
- * Declare a shallow Python source-set generator. Every matching file is made
- * into an internal `python-source` target when it is selected for `run`.
+ * Declare a shallow Python source-set generator. Every matching file under
+ * `root` becomes a separately selectable, discovery-backed `run` label
+ * (`//<file>:python`), minted lazily the first time a selection needs it —
+ * not eagerly at BUILD-load time.
  *
  * @param {object} opts
  * @param {string} opts.root Workspace-relative directory to scan (no recursion).
  * @param {string[]} [opts.sources=["*.py"]] Direct glob patterns matched under root.
  * @param {object} [opts.resolve] Locked Python resolve supplying third-party dependencies.
+ * @param {object} [opts.project] Deprecated alias for `resolve`, kept for the
+ *   previous single-default-project source-run API; exclusive with `resolve`.
  * @param {Array} [opts.deps=[]] Extra target handles made available on PATH
  *   inside each source's run — anything whose kind registers a `TOOL`
  *   product, e.g. `nativeTool()` handles for scripts that shell out to host
  *   programs (`git`, comparison-language interpreters, ...).
+ * @returns {object} Label handle owning the discovered per-file run labels.
  */
-export function pythonSources({ root, sources, project, resolve, deps } = {}) {
-	return new PythonSources({
-		root,
-		sources,
-		runtime: require_default_python_toolchain(),
-		project,
-		resolve,
-		uvVersion: require_default_uv_version(),
-		deps,
-	});
-}
-
-/**
- * Issue #90 integration probe. It uses the real source discovery and run
- * implementation; #36 will replace pythonSources() with the public label
- * factory and remove this temporary private entrypoint.
- */
-export function __pythonSourcesLabelProbe({
+export function pythonSources({
 	root,
 	sources = ["*.py"],
 	project,
 	resolve,
 	deps = [],
-	execute = runFromTemplate,
-	resolveUvTool = uvTool,
 } = {}) {
 	if (typeof root !== "string" || root === "") {
 		throw new Error(
-			"__pythonSourcesLabelProbe({ root, ... }) requires a workspace-relative root",
+			"pythonSources({ root, ... }) requires a workspace-relative root",
 		);
 	}
 	if (
@@ -271,13 +173,11 @@ export function __pythonSourcesLabelProbe({
 			(pattern) => typeof pattern !== "string" || pattern.includes("**"),
 		)
 	) {
-		throw new Error(
-			"__pythonSourcesLabelProbe source patterns must be direct (no '**')",
-		);
+		throw new Error("pythonSources source patterns must be direct (no '**')");
 	}
 	if (project && resolve) {
 		throw new Error(
-			"__pythonSourcesLabelProbe accepts either project or resolve, not both",
+			"pythonSources accepts either project or resolve, not both",
 		);
 	}
 	const resolvedProject = resolve || project || default_python_project;
@@ -315,7 +215,7 @@ export function __pythonSourcesLabelProbe({
 						pythonVersion: runtime.attrs.version,
 						project: resolvedProject,
 						...(resolvedProject
-							? { projectPath: resolvedProject.attrs.path }
+							? { projectPath: resolvedProject.data.path }
 							: {}),
 						uvVersion,
 						deps,
@@ -323,11 +223,8 @@ export function __pythonSourcesLabelProbe({
 				});
 				child.attrs = child.data;
 				runGoal(child, async function runPythonSource(ctx) {
-					const template = await buildPythonSourceRunTemplate(
-						child,
-						resolveUvTool,
-					);
-					return execute(template, {
+					const template = await buildPythonSourceRunTemplate(child);
+					return runFromTemplate(template, {
 						args: ctx.args,
 						sandbox: true,
 						workspaceCwd: true,
@@ -343,82 +240,10 @@ export function __pythonSourcesLabelProbe({
 	return owner;
 }
 
-export class PythonSource extends Target {
-	static kind = "python-source";
-	constructor({
-		file,
-		root,
-		sourceFiles,
-		runtime,
-		project,
-		uvVersion,
-		deps = [],
-	}) {
-		super({
-			kind: PythonSource.kind,
-			attrs: {
-				file,
-				root,
-				sourceFiles,
-				pythonVersion: runtime.attrs.version,
-				uvVersion,
-				deps,
-				...(project
-					? { project: project, projectPath: project.attrs.path }
-					: {}),
-			},
-			sources: sourcesField({ root: "//", include: [file] }),
-			deps: [
-				{ target: runtime, mode: "tool" },
-				...deps.map((target) => ({ target })),
-				...(project ? [{ target: project }] : []),
-			],
-		});
-	}
-}
-
-// A source-set itself has no run product. It is only the declaration that
-// establishes ownership and source-root metadata for the leaf targets.
-export const expandPythonSources = expand(
-	PythonSources,
-	async function expandPythonSources(handle) {
-		const root = handle.attrs.root;
-		const sourceFiles = await paths(
-			glob({ root, include: handle.attrs.sources, exclude: [] }),
-		);
-		for (const file of sourceFiles) {
-			registerTarget(
-				new PythonSource({
-					file,
-					root,
-					sourceFiles,
-					runtime: handle.attrs.runtime,
-					project: handle.attrs.project,
-					uvVersion: handle.attrs.uvVersion,
-					deps: handle.attrs.deps,
-				}),
-				`//${file}:python`,
-			);
-		}
-	},
-	{
-		goals: ["run"],
-		display: "expand Python sources {0}",
-		level: "info",
-	},
-);
-
-export const pythonSourceRun = product(
-	PythonSource,
-	RUN,
-	PYTHON_TOOL,
-	async function pythonSourceRun(handle) {
-		return buildPythonSourceRunTemplate(handle);
-	},
-	{ display: "run {0}", level: "info" },
-);
-
-async function buildPythonSourceRunTemplate(handle, resolveUvTool = uvTool) {
+export async function buildPythonSourceRunTemplate(
+	handle,
+	resolveUvTool = uvTool,
+) {
 	const file = handle.attrs.file;
 	const root = handle.attrs.root;
 	const project = handle.attrs.projectPath || "";

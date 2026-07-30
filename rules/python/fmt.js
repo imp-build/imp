@@ -6,7 +6,11 @@
 // generic before/after comparison cargoFmt/odinFmt use, to report an
 // accurate count of files actually changed.
 
-import { declared_path, python_file_sources } from "//rules/python";
+import {
+	declared_path,
+	pythonAppActionHandle,
+	python_file_sources,
+} from "//rules/python";
 import {
 	resolveRuffToolchainVersion,
 	ruffTool,
@@ -18,6 +22,7 @@ import { digestOf, diffDigests, output, paths, run } from "imp:core";
 // `ruff format --check` exits nonzero on unformatted files, which run()
 // surfaces as a thrown error — no per-file parsing needed.
 export async function ruffFmt(handle, { check = false } = {}) {
+	handle = pythonAppActionHandle(handle);
 	const srcs = await python_file_sources(handle);
 	const files = paths(srcs);
 	if (files.length === 0) {

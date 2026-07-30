@@ -1,18 +1,21 @@
 import {
-	Target,
 	artifact,
+	build as attachBuild,
+	extensible,
 	glob,
+	label,
+	labelAddress,
+	logInfo,
 	memo,
 	output,
 	output_path,
-	product,
+	packageGoal as attachPackage,
+	productFor,
 	registerBuildRule,
 	run,
-	sourcesField,
-	targetAddress,
-	BUILD,
-	PACKAGE,
+	writeWorkspace,
 } from "imp:core";
+import { TOOL } from "//rules/imp/native_tool";
 import { UV_TOOL } from "//rules/python/uv_toolchain";
 import { PEX_TOOL } from "//rules/python/pex_toolchain";
 import { pythonResolveSyncArgs } from "//rules/python/resolve";
@@ -32,32 +35,24 @@ import {
 } from "//rules/python/pex_toolchain";
 
 // File-granular source execution is intentionally separate from pythonApp's
-// PEX packaging model. Import for its target/product registrations.
+// PEX packaging model. Import for its label registrations.
 import "//rules/python/source";
 
 export {
-	PythonProject,
-	PythonSource,
-	PythonSources,
-	PythonToolchain,
-	defaultPythonProject,
-	defaultPythonToolchain,
 	pythonProject,
 	pythonSources,
 	pythonToolchain,
+	defaultPythonProject,
+	defaultPythonToolchain,
 } from "//rules/python/source";
 
-export {
-	PythonResolve,
-	pythonResolve,
-	pythonResolveSyncArgs,
-} from "//rules/python/resolve";
+export { pythonResolve, pythonResolveSyncArgs } from "//rules/python/resolve";
 
 // Registers the "build" goal's artifact summary callback for consumers that
 // import Python build rules without importing the workflows layer explicitly.
 import "//rules/workflows/build_workflow";
 
-// Registers the "test" product (pythonTest / pytest) for consumers that
+// Registers the "test" goal handler (pythonTest / pytest) for consumers that
 // import Python build rules without importing //rules/python/test explicitly
 // — same reasoning as the build_workflow import above. Side-effect only;
 // nothing exported from it is used in this file.
@@ -102,7 +97,7 @@ registerBuildRule({
 });
 
 // ---------------------------------------------------------------------------
-// Path helpers (same pattern as rules/odin/index.js and rules/c/cmake/index.js)
+// Path helpers (same pattern as rules/rust/index.js, rules/c/cmake/index.js)
 // ---------------------------------------------------------------------------
 
 function normalize_workspace_path(path) {
@@ -117,17 +112,20 @@ function normalize_workspace_path(path) {
 	return parts.length === 0 ? "." : parts.join("/");
 }
 
-function safe_target_address(handle) {
-	if (!handle || handle.__imp !== true) return null;
+export function pythonAppAddress(handle) {
 	try {
-		return targetAddress(handle);
+		if (handle && handle.__imp_label) return labelAddress(handle);
+		if (handle && handle.label && handle.label.__imp_label) {
+			return labelAddress(handle.label);
+		}
+		return null;
 	} catch (_) {
 		return null;
 	}
 }
 
 function declaring_directory(handle) {
-	const address = safe_target_address(handle);
+	const address = pythonAppAddress(handle);
 	if (!address || !address.startsWith("//")) return ".";
 	const scope = address.slice(2).split(":")[0];
 	return scope.length === 0 ? "." : scope;
@@ -142,6 +140,22 @@ export function declared_path(handle, path = ".") {
 }
 
 // ---------------------------------------------------------------------------
+// Action-handle shim — lets code written against `handle.attrs.*` (fmt/lint,
+// pythonTest) keep working against a label's `.data` unchanged.
+// ---------------------------------------------------------------------------
+
+function package_handle(appLabel) {
+	if (!appLabel || appLabel.__imp_label !== true) return appLabel;
+	return {
+		__id: appLabel.__id,
+		label: appLabel,
+		attrs: appLabel.data,
+	};
+}
+
+export const pythonAppActionHandle = package_handle;
+
+// ---------------------------------------------------------------------------
 // Memo/product functions
 // ---------------------------------------------------------------------------
 
@@ -153,8 +167,9 @@ export const PYTHON_PROJECT_SOURCE_INCLUDES = [
 
 export const sources = memo(
 	async function sources(handle) {
+		handle = package_handle(handle);
 		const root =
-			handle.attrs.resolve?.attrs?.path ??
+			handle.attrs.resolve?.data?.path ??
 			declared_path(handle, handle.attrs.src || ".");
 		return glob({ root, include: PYTHON_PROJECT_SOURCE_INCLUDES });
 	},
@@ -167,8 +182,9 @@ export const sources = memo(
 // rust_file_sources vs sources() in rules/rust/index.js.
 export const python_file_sources = memo(
 	async function python_file_sources(handle) {
+		handle = package_handle(handle);
 		const root =
-			handle.attrs.resolve?.attrs?.path ??
+			handle.attrs.resolve?.data?.path ??
 			declared_path(handle, handle.attrs.src || ".");
 		return glob({ root, include: ["**/*.py"] });
 	},
@@ -195,106 +211,26 @@ function shellArg(value) {
 	return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-export class PythonApp extends Target {
-	static kind = "python-app";
-	constructor({
-		src,
-		entryPoint,
-		uvVersion,
-		pexVersion,
-		extraPexArgs = [],
-		resolve,
-		deps = [],
-	}) {
-		if (resolve && resolve.__imp !== true) {
-			throw new Error(
-				"pythonApp({ resolve }) expects a pythonResolve() target",
-			);
-		}
-		const resolvePath = resolve?.attrs?.path;
-		if (resolve && resolve.kind !== "python-resolve") {
-			throw new Error(
-				"pythonApp({ resolve }) expects a pythonResolve() target",
-			);
-		}
-		if (src !== undefined && resolvePath) {
-			throw new Error("pythonApp accepts either src or resolve, not both");
-		}
-		const projectSrc = src ?? ".";
-		const explicitUvTarget =
-			uvVersion && uvVersion.__imp === true ? uvVersion : null;
-		const explicitUvVersion =
-			uvVersion && uvVersion.__imp !== true ? uvVersion : null;
-		const uvToolchainTarget =
-			explicitUvTarget || (!explicitUvVersion ? defaultUvToolchain() : null);
-		const resolvedUvVersion =
-			explicitUvVersion ||
-			(uvToolchainTarget && uvToolchainTarget.attrs?.version);
-
-		const explicitPexTarget =
-			pexVersion && pexVersion.__imp === true ? pexVersion : null;
-		const explicitPexVersion =
-			pexVersion && pexVersion.__imp !== true ? pexVersion : null;
-		const pexToolchainTarget =
-			explicitPexTarget || (!explicitPexVersion ? defaultPexToolchain() : null);
-		const resolvedPexVersion =
-			explicitPexVersion ||
-			(pexToolchainTarget && pexToolchainTarget.attrs?.version);
-
-		const allDeps = [
-			...(resolve ? [{ target: resolve }] : []),
-			...(uvToolchainTarget
-				? [{ target: uvToolchainTarget, mode: "tool" }]
-				: []),
-			...(pexToolchainTarget
-				? [{ target: pexToolchainTarget, mode: "tool" }]
-				: []),
-			...deps,
-		];
-
-		super({
-			kind: PythonApp.kind,
-			attrs: {
-				src: projectSrc,
-				...(resolve ? { resolve } : {}),
-				...(entryPoint ? { entryPoint } : {}),
-				...(resolvedUvVersion ? { uvVersion: resolvedUvVersion } : {}),
-				...(uvToolchainTarget ? { uvToolchainTarget } : {}),
-				...(resolvedPexVersion ? { pexVersion: resolvedPexVersion } : {}),
-				...(pexToolchainTarget ? { pexToolchainTarget } : {}),
-				...(extraPexArgs.length ? { extraPexArgs } : {}),
-				...(allDeps.length
-					? { deps: allDeps.map((dep) => dep.target || dep) }
-					: {}),
-			},
-			sources: sourcesField({
-				root: resolvePath ?? projectSrc,
-				include: PYTHON_PROJECT_SOURCE_INCLUDES,
-			}),
-			deps: allDeps,
-		});
-	}
-}
-
-export const python_app_build = product(
-	PythonApp,
-	BUILD,
-	UV_TOOL,
+export const python_app_build = memo(
 	async function python_app_build(handle) {
+		handle = package_handle(handle);
 		const srcPath =
-			handle.attrs.resolve?.attrs?.path ??
+			handle.attrs.resolve?.data?.path ??
 			declared_path(handle, handle.attrs.src || ".");
 		const inputFiles = await sources(handle);
 		// attrs.uvVersion/pexVersion hold the *resolved version string* fixed at
-		// construction time (see PythonApp's constructor) — never re-resolved
-		// against defaultUvToolchain()/defaultPexToolchain() here, so the
-		// toolchain a build uses can't drift from what was in effect when the
-		// target was declared (same pattern as CmakeLib's attrs.toolchain in
+		// construction time (see pythonApp's factory), never re-resolved against
+		// defaultUvToolchain()/defaultPexToolchain() here, so the toolchain a
+		// build uses can't drift from what was in effect when the label was
+		// declared (same pattern as CmakeLib's attrs.toolchain in
 		// rules/c/cmake/index.js).
 		const uvToolSpec = await uvTool(handle.attrs.uvVersion);
 		const pexToolSpec = await pexTool(handle.attrs.pexVersion);
 		const uvCacheToolSpec = uvCacheDirTool();
 		const pexRootToolSpec = pexRootTool();
+		const depToolSpecs = await Promise.all(
+			(handle.attrs.deps || []).map((dep) => productFor(dep, TOOL)),
+		);
 		const syncArgs = pythonResolveSyncArgs(handle.attrs.resolve)
 			.map(shellArg)
 			.join(" ");
@@ -356,7 +292,13 @@ export const python_app_build = product(
 				".imp/tools/pex/pex",
 				...pexArgs,
 			],
-			tools: [uvToolSpec, pexToolSpec, uvCacheToolSpec, pexRootToolSpec],
+			tools: [
+				uvToolSpec,
+				pexToolSpec,
+				uvCacheToolSpec,
+				pexRootToolSpec,
+				...depToolSpecs,
+			],
 			inputs: [inputFiles],
 			outputs: [output(output_path(pexOutPath))],
 			materialize: false,
@@ -367,11 +309,9 @@ export const python_app_build = product(
 	{ display: "build {0}", level: "info" },
 );
 
-export const python_app_package = product(
-	PythonApp,
-	PACKAGE,
-	PEX_TOOL,
+export const python_app_package = memo(
 	async function python_app_package(handle) {
+		handle = package_handle(handle);
 		const result = await python_app_build(handle);
 		const pexOutDir = result.pexOutPath.slice(
 			0,
@@ -382,14 +322,28 @@ export const python_app_package = product(
 	{ display: "package {0}", level: "info" },
 );
 
+async function publishPythonAppPackage(appLabel) {
+	const artifactResult = await python_app_package(appLabel);
+	if (artifactResult == null) return null;
+	const address = labelAddress(appLabel);
+	const withoutSlashes = address.replace(/^\/\//, "");
+	const [dir, name] = withoutSlashes.split(":");
+	const destination = dir ? `dist/${dir}/${name}` : `dist/${name}`;
+	writeWorkspace(destination, artifactResult.digest, {
+		from: artifactResult.from,
+	});
+	logInfo(`${address}#package -> ${destination}`);
+	return artifactResult;
+}
+
 // ---------------------------------------------------------------------------
-// Target constructor
+// Label factory
 // ---------------------------------------------------------------------------
 
 /**
  * Declare a Python application packaged as a PEX file.
  *
- * @category target
+ * @category label
  * @param {object} opts
  * @param {string} [opts.src="."] Workspace-relative Python project directory.
  * @param {string} [opts.entryPoint] PEX entry point.
@@ -397,25 +351,69 @@ export const python_app_package = product(
  * @param {object|string} [opts.pexVersion] PEX toolchain target handle or version string.
  * @param {string[]} [opts.extraPexArgs=[]] Extra arguments appended to PEX.
  * @param {object} [opts.resolve] Locked Python resolve supplying the project path; exclusive with `src`.
- * @param {Array} [opts.deps=[]] Additional dependencies.
- * @returns {object} Target handle.
+ * @param {Array} [opts.deps=[]] Extra target handles made available on PATH
+ *   inside the build/package sandbox — anything whose kind registers a
+ *   `TOOL` product, e.g. `nativeTool()` handles for scripts the PEX build
+ *   shells out to.
+ * @returns {object} Label handle.
  */
-export function pythonApp({
+export const pythonApp = extensible(function pythonApp({
 	src,
 	entryPoint,
 	uvVersion,
 	pexVersion,
-	extraPexArgs,
+	extraPexArgs = [],
 	resolve,
-	deps,
-}) {
-	return new PythonApp({
-		src,
-		entryPoint,
-		uvVersion,
-		pexVersion,
-		extraPexArgs,
-		resolve,
-		deps,
+	deps = [],
+} = {}) {
+	if (resolve && resolve.__imp_label !== true) {
+		throw new Error("pythonApp({ resolve }) expects a pythonResolve() label");
+	}
+	const resolvePath = resolve?.data?.path;
+	if (src !== undefined && resolvePath) {
+		throw new Error("pythonApp accepts either src or resolve, not both");
+	}
+	const projectSrc = src ?? ".";
+	const explicitUvTarget =
+		uvVersion && uvVersion.__imp === true ? uvVersion : null;
+	const explicitUvVersion =
+		uvVersion && uvVersion.__imp !== true ? uvVersion : null;
+	const uvToolchainTarget =
+		explicitUvTarget || (!explicitUvVersion ? defaultUvToolchain() : null);
+	const resolvedUvVersion =
+		explicitUvVersion ||
+		(uvToolchainTarget && uvToolchainTarget.attrs?.version);
+
+	const explicitPexTarget =
+		pexVersion && pexVersion.__imp === true ? pexVersion : null;
+	const explicitPexVersion =
+		pexVersion && pexVersion.__imp !== true ? pexVersion : null;
+	const pexToolchainTarget =
+		explicitPexTarget || (!explicitPexVersion ? defaultPexToolchain() : null);
+	const resolvedPexVersion =
+		explicitPexVersion ||
+		(pexToolchainTarget && pexToolchainTarget.attrs?.version);
+
+	const appLabel = label({
+		data: {
+			src: projectSrc,
+			...(resolve ? { resolve } : {}),
+			...(entryPoint ? { entryPoint } : {}),
+			...(resolvedUvVersion ? { uvVersion: resolvedUvVersion } : {}),
+			...(uvToolchainTarget ? { uvToolchainTarget } : {}),
+			...(resolvedPexVersion ? { pexVersion: resolvedPexVersion } : {}),
+			...(pexToolchainTarget ? { pexToolchainTarget } : {}),
+			...(extraPexArgs.length ? { extraPexArgs } : {}),
+			deps,
+		},
 	});
-}
+
+	attachBuild(appLabel, async function buildPythonApp() {
+		return python_app_build(appLabel);
+	});
+	attachPackage(appLabel, async function packagePythonApp() {
+		return publishPythonAppPackage(appLabel);
+	});
+
+	return appLabel;
+});

@@ -4,7 +4,7 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
-import { PythonTest, pythonTest, pythonTestRun } from "//rules/python/test";
+import { pythonTest, pythonTestRun } from "//rules/python/test";
 import { pythonResolve } from "//rules/python/resolve";
 import {
 	__resetUvToolchainStateForTest,
@@ -27,7 +27,7 @@ describe("python test", () => {
 	test("pythonTestRun syncs via uv --locked then runs pytest scoped to src, impure", async () => {
 		await withUvHost(async (host) => {
 			uvToolchain("0.11.16", { default: true, unverified: true });
-			const suite = new PythonTest({ src: "rules/python/example" });
+			const suite = pythonTest({ src: "rules/python/example" });
 
 			await pythonTestRun(suite);
 
@@ -50,7 +50,7 @@ describe("python test", () => {
 				flavors: { default: { extra: "cpu" }, cu124: { extra: "cu124" } },
 			});
 			const suite = pythonTest({ resolve });
-			expect(suite.attrs.resolve).toBe(resolve);
+			expect(suite.data.resolve).toBe(resolve);
 			const original = globalThis.__host_configuration;
 			globalThis.__host_configuration = (namespace) =>
 				namespace === "imp.mode"
