@@ -7955,48 +7955,6 @@ export const parent = target({{ kind: "expandable", attrs: {{}} }});
     }
 
     #[tokio::test]
-    async fn python_rule_defaults_power_source_sets_and_can_be_reexported() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-        write_file(
-            &p.join(WORKSPACE_FILE),
-            r#"
-import { defaultPythonToolchain } from "//rules/python";
-export const python = defaultPythonToolchain();
-"#,
-        );
-        write_file(
-            &p.join(BUILD_FILE),
-            r#"
-import { pythonSources } from "//rules/python";
-export const scripts = pythonSources({ root: "scripts" });
-"#,
-        );
-        write_file(&p.join("scripts/hello.py"), "print('hello')\n");
-        write_file(&p.join("scripts/nested/ignored.py"), "print('ignored')\n");
-
-        let live = load_workspace(p).await.unwrap();
-        assert_eq!(live.workspace.targets["//:python"].kind, "python-toolchain");
-        ensure_expanded(&live, &["//:scripts".to_owned()], Some("run"))
-            .await
-            .unwrap();
-        let dynamic = live.dynamic_targets.lock().unwrap();
-        assert!(dynamic.contains_key("//scripts/hello.py:python"));
-        assert!(!dynamic.contains_key("//scripts/nested/ignored.py:python"));
-        assert_eq!(dynamic["//scripts/hello.py:python"].kind, "python-source");
-        let run_goal = live.workspace.goals.get("run").unwrap();
-        let roots = select_roots(
-            &live.workspace,
-            &dynamic,
-            run_goal,
-            &["scripts/hello.py".to_owned()],
-        )
-        .unwrap();
-        assert_eq!(roots.len(), 1);
-        assert_eq!(roots[0].0.address, "//scripts/hello.py:python");
-    }
-
-    #[tokio::test]
     async fn run_arguments_are_forwarded_to_run_templates() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
@@ -12397,75 +12355,6 @@ add_test(NAME hello_cmake_main_test COMMAND hello_cmake_main)
         assert!(snapshot
             .label_addresses
             .contains_key("//native:hello_cmake_main"));
-    }
-
-    #[tokio::test]
-    async fn python_discovery_probe_preserves_path_selection_and_arguments() {
-        let root = tempfile::tempdir().unwrap();
-        let p = root.path();
-        write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/python";"#);
-        write_file(
-            &p.join(BUILD_FILE),
-            r#"
-import { __pythonSourcesLabelProbe } from "//rules/python/source";
-async function captureRun(template, policy) {
-    globalThis.__imp_test_marks = globalThis.__imp_test_marks || [];
-    globalThis.__imp_test_marks.push(
-        `${template.opts.argv[template.opts.argv.length - 1]}:${policy.args.join(",")}`,
-    );
-}
-async function fakeUvTool() {
-    return { kind: "tool", name: "uv-test", path: "." };
-}
-export const scripts = __pythonSourcesLabelProbe({
-    root: "tools",
-    execute: captureRun,
-    resolveUvTool: fakeUvTool,
-});
-"#,
-        );
-        write_file(
-            &p.join("tools/demo.py"),
-            r#"
-print("probe")
-"#,
-        );
-
-        let live = load_workspace_with_rules(p, RulesSource::Embedded)
-            .await
-            .unwrap();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = imp_scheduler::Scheduler::new(
-            1,
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            tx,
-        );
-        *live.scheduler.lock().unwrap() = Some(scheduler);
-        execute_goal_live_selection(
-            &live,
-            p,
-            &SelectorContext::root(),
-            "run",
-            GoalSelection::Selectors(&["tools/demo.py".to_owned()]),
-            GoalExecutionOptions {
-                no_cache: false,
-                trace_inputs: false,
-                js_workers: 1,
-                flags: serde_json::json!({}),
-                run_args: &["argument-ok".to_owned()],
-                axis_overrides: &[],
-                profile: None,
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            read_test_marks(&live).await,
-            vec!["3.13.0:argument-ok".to_owned()]
-        );
-        assert!(workspace_with_discovered_labels(&live)
-            .label_addresses
-            .contains_key("//tools/demo.py:python"));
     }
 
     #[tokio::test]

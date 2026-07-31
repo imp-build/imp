@@ -43,21 +43,28 @@ fn remote_store() -> Option<&'static dyn RemoteStore> {
 }
 
 /// The CAS-blob digests a record's outputs reference, paired with their local
-/// blob path — mirrors `cached_outputs_present`'s shallow, root-only
-/// treatment of directory outputs (see that function's doc comment): a blob
-/// missing deeper in a directory tree is an existing, accepted local-cache
-/// risk, not one this module introduces.
+/// blob path — for `directory` outputs, every subdirectory node blob and
+/// every leaf file, not just the root tree node. This assumes the whole tree
+/// is already present *locally* (true for the push path, which is uploading
+/// blobs this process just produced or already hydrated) — it is NOT safe to
+/// use for a cold remote pull, where the tree may not exist locally yet; see
+/// `fetch_tree_file_digests` for that case.
 ///
 /// Sizes come from the record itself rather than statting the local blob —
-/// this must work before a remote-hit blob exists locally at all, and
 /// `Digest::size_bytes` is purely descriptive here (`OpendalRemoteStore`
-/// looks blobs up by hash alone). Directory outputs carry no size in the
-/// record, so their digest is sized `0`.
+/// looks blobs up by hash alone). Directory-tree blobs (node blobs and
+/// files alike) carry no size in the record, so they're sized `0`.
 fn output_blob_digests(record: &TaskCacheRecord) -> Result<Vec<(Digest, PathBuf)>> {
     let mut out = Vec::new();
     for output in &record.outputs {
-        let (hash, size) = match output.kind.as_str() {
-            "file" | "manifest" => (output.digest.clone(), output.bytes.unwrap_or(0)),
+        match output.kind.as_str() {
+            "file" | "manifest" => {
+                let path = cas_blob_path(&output.digest)?;
+                out.push((
+                    Digest::new(output.digest.clone(), output.bytes.unwrap_or(0)),
+                    path,
+                ));
+            }
             "directory" => {
                 let tree_digest = output.tree_digest.clone().ok_or_else(|| {
                     anyhow::anyhow!(
@@ -65,22 +72,83 @@ fn output_blob_digests(record: &TaskCacheRecord) -> Result<Vec<(Digest, PathBuf)
                         output.artifact_id
                     )
                 })?;
-                (tree_digest, 0)
+                for hash in imp_store::digest::tree_all_digests(&tree_digest)? {
+                    let path = cas_blob_path(&hash)?;
+                    out.push((Digest::new(hash, 0), path));
+                }
             }
             "value" => continue,
             other => bail!(
                 "{} has unsupported cached artifact kind {other}",
                 output.artifact_id
             ),
-        };
-        let path = cas_blob_path(&hash)?;
-        out.push((Digest::new(hash, size), path));
+        }
     }
     Ok(out)
 }
 
 fn action_result_digest(task_key: &str, size_bytes: u64) -> Digest {
     Digest::new(task_key.to_owned(), size_bytes)
+}
+
+/// Fetch a directory tree's node blobs from the remote store as needed to
+/// walk it, returning every leaf file's digest. Unlike a `file`/`manifest`
+/// output (whose single digest is known upfront from the record), a
+/// directory tree's full blob set can only be discovered by walking the tree
+/// itself — and on a cold pull, even the root tree blob may not exist
+/// locally yet.
+///
+/// Walks breadth-first, one `batch_read_blobs` call per tree depth rather
+/// than one per node: sequential per-node round-trips made a cold pull of a
+/// deep tree (e.g. a toolchain install) pay one network latency per
+/// directory, serialized. Batching by level turns that into one round-trip
+/// per level, all of that level's nodes fetched concurrently by the store.
+fn fetch_tree_file_digests(
+    store: &dyn RemoteStore,
+    handle: &tokio::runtime::Handle,
+    root_digest: &str,
+    out: &mut Vec<Digest>,
+) -> Result<()> {
+    let mut frontier = vec![root_digest.to_owned()];
+    while !frontier.is_empty() {
+        let mut seen = std::collections::HashSet::new();
+        let missing: Vec<Digest> = frontier
+            .iter()
+            .filter(|hash| seen.insert(hash.as_str()))
+            .filter(|hash| !cas_blob_path(hash).is_ok_and(|path| path.is_file()))
+            .map(|hash| Digest::new(hash.clone(), 0))
+            .collect();
+        if !missing.is_empty() {
+            let fetched = handle.block_on(store.batch_read_blobs(&missing))?;
+            for (digest, result) in fetched {
+                let bytes = result.with_context(|| format!("download blob {}", digest.hash))?;
+                if digest_bytes(&bytes) != digest.hash {
+                    bail!(
+                        "remote blob {} content does not match its digest",
+                        digest.hash
+                    );
+                }
+                store_blob(&bytes, "remote-cache-blob")?;
+            }
+        }
+        let mut next_frontier = Vec::new();
+        for node_digest in &frontier {
+            let trie = imp_store::digest::DigestTrie::load(node_digest)?;
+            for entry in trie.entries() {
+                match entry {
+                    imp_store::digest::Entry::File(f) => {
+                        out.push(Digest::new(f.digest.clone(), 0));
+                    }
+                    imp_store::digest::Entry::Directory(d) => {
+                        next_frontier.push(d.digest.clone());
+                    }
+                    imp_store::digest::Entry::Symlink(_) => {}
+                }
+            }
+        }
+        frontier = next_frontier;
+    }
+    Ok(())
 }
 
 /// On a local task-cache miss, try to hydrate one from the remote store. Any
@@ -138,11 +206,50 @@ fn try_remote_hit_inner(
     // What's missing *locally* (not remotely — `find_missing_blobs` answers
     // the opposite question, "what does the remote not have", which is what
     // the push path needs instead) determines what to download here.
-    let wanted = output_blob_digests(&record)?;
+    //
+    // `directory` outputs are handled separately: their tree structure (and
+    // thus their full blob set) can only be discovered by walking it, which
+    // itself may require fetching node blobs from the remote store — unlike
+    // `file`/`manifest` outputs, whose single digest is already known from
+    // the record.
+    let mut wanted: Vec<Digest> = Vec::new();
+    for output in &record.outputs {
+        match output.kind.as_str() {
+            "file" | "manifest" => {
+                wanted.push(Digest::new(
+                    output.digest.clone(),
+                    output.bytes.unwrap_or(0),
+                ));
+            }
+            "directory" => {
+                let tree_digest = output.tree_digest.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{} is a directory output with no tree_digest",
+                        output.artifact_id
+                    )
+                })?;
+                // `fetch_tree_file_digests` already ensures the root (and
+                // every subdirectory) node blob is fetched and stored as
+                // part of walking it, so only the leaf file digests it
+                // collects need to go through the locally-missing check
+                // below.
+                fetch_tree_file_digests(store, &handle, &tree_digest, &mut wanted)?;
+            }
+            "value" => {}
+            other => bail!(
+                "{} has unsupported cached artifact kind {other}",
+                output.artifact_id
+            ),
+        }
+    }
+    // Identical content (e.g. two equal files in the same tree) can produce
+    // the same digest more than once — dedupe before checking/downloading so
+    // a large directory tree doesn't redundantly re-fetch a repeated blob.
+    let mut seen = std::collections::HashSet::new();
     let locally_missing: Vec<Digest> = wanted
         .into_iter()
-        .filter(|(_, path)| !path.is_file())
-        .map(|(digest, _)| digest)
+        .filter(|digest| seen.insert(digest.hash.clone()))
+        .filter(|digest| !cas_blob_path(&digest.hash).is_ok_and(|path| path.is_file()))
         .collect();
     if !locally_missing.is_empty() {
         let fetched = handle.block_on(store.batch_read_blobs(&locally_missing))?;
@@ -190,14 +297,26 @@ pub fn spawn_remote_push(record: TaskCacheRecord) {
 
 async fn push_remote_inner(store: &dyn RemoteStore, record: &TaskCacheRecord) -> Result<()> {
     let blobs = output_blob_digests(record)?;
-    let blob_digests: Vec<Digest> = blobs.iter().map(|(digest, _)| digest.clone()).collect();
+    // Keyed by hash (not the full `Digest`, which also carries a size) so a
+    // repeated digest — e.g. two equal files in the same tree — collapses to
+    // one entry instead of duplicating upload work, and so path lookup below
+    // is O(1) rather than an O(n) scan per missing blob (large directory
+    // trees, like toolchains, can have many entries).
+    let mut by_hash: std::collections::HashMap<&str, (&Digest, &PathBuf)> =
+        std::collections::HashMap::new();
+    for (digest, path) in &blobs {
+        by_hash.entry(&digest.hash).or_insert((digest, path));
+    }
+    let blob_digests: Vec<Digest> = by_hash
+        .values()
+        .map(|(digest, _)| (*digest).clone())
+        .collect();
     let missing = store.find_missing_blobs(&blob_digests).await?;
     if !missing.is_empty() {
         let mut uploads = Vec::with_capacity(missing.len());
         for digest in &missing {
-            let (_, path) = blobs
-                .iter()
-                .find(|(candidate, _)| candidate == digest)
+            let (_, path) = by_hash
+                .get(digest.hash.as_str())
                 .expect("missing digest came from blobs");
             let bytes = tokio::fs::read(path)
                 .await
@@ -271,6 +390,51 @@ mod tests {
                 named_cache: None,
             }],
         }
+    }
+
+    /// Builds a nested directory (`dir/nested.txt` under a temp root),
+    /// captures it into CAS via `capture_directory`, and returns a
+    /// `directory`-kind `TaskCacheRecord` output referencing its tree, along
+    /// with every digest reachable in that tree (root node, subdirectory
+    /// node, leaf file) — the exact set the fixed `output_blob_digests`/
+    /// `fetch_tree_file_digests` must fetch or push, not just the root.
+    fn directory_record(task_key: &str, leaf_content: &[u8]) -> (TaskCacheRecord, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("dir");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("nested.txt"), leaf_content).unwrap();
+
+        let directory_digest = imp_store::digest::capture_directory(dir.path()).unwrap();
+        let tree_digest = directory_digest.digest().to_owned();
+        let all_digests = imp_store::digest::tree_all_digests(&tree_digest).unwrap();
+        // A root containing one "dir" subdirectory with one file means at
+        // least the root node, the "dir" subdirectory node, and the leaf
+        // file — three distinct blobs, none of which is the leaf alone.
+        assert!(all_digests.len() >= 3);
+
+        let record = TaskCacheRecord {
+            version: 1,
+            task_id: task_key.to_owned(),
+            task_key: task_key.to_owned(),
+            action_digest: "test-action".to_owned(),
+            input_digest: "test-input".to_owned(),
+            output_digest: tree_digest.clone(),
+            named_caches: vec![],
+            stdout: String::new(),
+            stderr: String::new(),
+            outputs: vec![CachedArtifact {
+                artifact_id: "out_dir".to_owned(),
+                kind: "directory".to_owned(),
+                path: Some("out_dir".to_owned()),
+                value: None,
+                digest: String::new(),
+                bytes: None,
+                mode: None,
+                tree_digest: Some(tree_digest),
+                named_cache: None,
+            }],
+        };
+        (record, all_digests)
     }
 
     #[derive(Default)]
@@ -432,5 +596,87 @@ mod tests {
         let error = rt.block_on(push_remote_inner(&store, &record)).unwrap_err();
         assert!(error.to_string().contains(&digest));
         assert!(store.action_updates.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn try_remote_hit_inner_hydrates_every_blob_in_a_nested_directory_tree() {
+        let store = memory_store();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let task_key = format!("directory-hydrate-{}", unique_nanos());
+        let leaf_content = unique_bytes("directory-hydrate");
+        let (record, all_digests) = directory_record(&task_key, &leaf_content);
+
+        // Push every blob the tree references to the remote store, then
+        // delete them all locally — simulating a cold pull on a fresh
+        // runner, where nothing but the action result is fetched yet.
+        for hash in &all_digests {
+            let path = cas_blob_path(hash).unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            rt.block_on(
+                store.batch_update_blobs(vec![(
+                    Digest::new(hash.clone(), bytes.len() as u64),
+                    bytes,
+                )]),
+            )
+            .unwrap();
+            std::fs::remove_file(&path).unwrap();
+        }
+        for hash in &all_digests {
+            assert!(!cas_blob_path(hash).unwrap().is_file());
+        }
+
+        let encoded = serde_json::to_vec(&record).unwrap();
+        rt.block_on(store.update_action_result(
+            &Digest::new(task_key.clone(), encoded.len() as u64),
+            encoded,
+        ))
+        .unwrap();
+
+        let hit = try_remote_hit_inner(&store, &task_key).unwrap().unwrap();
+
+        // Every blob in the tree — not just the root — must now be present
+        // locally; this is exactly the gap that let a remote hit reach
+        // materialization with a leaf file blob missing.
+        for hash in &all_digests {
+            assert!(
+                cas_blob_path(hash).unwrap().is_file(),
+                "blob {hash} was not hydrated from the remote store"
+            );
+        }
+
+        let workspace_root = tempfile::tempdir().unwrap();
+        imp_store::cache::materialize_cached_artifacts(&hit.outputs, workspace_root.path())
+            .unwrap();
+        assert_eq!(
+            std::fs::read(workspace_root.path().join("out_dir/dir/nested.txt")).unwrap(),
+            leaf_content
+        );
+    }
+
+    #[test]
+    fn push_remote_inner_uploads_every_blob_in_a_nested_directory_tree() {
+        let store = memory_store();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let task_key = format!("directory-push-{}", unique_nanos());
+        let leaf_content = unique_bytes("directory-push");
+        let (record, all_digests) = directory_record(&task_key, &leaf_content);
+
+        rt.block_on(push_remote_inner(&store, &record)).unwrap();
+
+        // Every blob in the tree must have reached the remote store, not
+        // just the root tree node.
+        let wanted: Vec<Digest> = all_digests
+            .iter()
+            .map(|hash| Digest::new(hash.clone(), 0))
+            .collect();
+        let missing = rt.block_on(store.find_missing_blobs(&wanted)).unwrap();
+        assert!(
+            missing.is_empty(),
+            "remote store is missing blobs after push: {missing:?}"
+        );
     }
 }

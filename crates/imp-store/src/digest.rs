@@ -180,6 +180,24 @@ pub fn tree_reachable_digests(root_digest: &str, mark: &mut impl FnMut(&str)) {
     }
 }
 
+/// Recursively collect every CAS digest reachable from a directory tree
+/// root: the node blobs themselves (root + every subdirectory) plus every
+/// file's digest. Unlike `tree_reachable_digests` (GC's best-effort,
+/// silent-skip walk), this propagates errors — used where a missing node
+/// blob must be a hard failure rather than a silently partial mark.
+pub fn tree_all_digests(root_digest: &str) -> Result<Vec<String>> {
+    let mut out = vec![root_digest.to_owned()];
+    let trie = DigestTrie::load(root_digest)?;
+    for entry in trie.entries() {
+        match entry {
+            Entry::File(f) => out.push(f.digest.clone()),
+            Entry::Directory(d) => out.extend(tree_all_digests(&d.digest)?),
+            Entry::Symlink(_) => {}
+        }
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // CAS-serialized form
 // ---------------------------------------------------------------------------
