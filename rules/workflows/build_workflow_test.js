@@ -3,7 +3,7 @@ import { product, target, BUILD, targetKind, toolName } from "imp:core";
 const K_build_workflow_artifact_a = targetKind("build-workflow-artifact-a");
 const K_build_workflow_artifact_b = targetKind("build-workflow-artifact-b");
 const K_build_workflow_broken = targetKind("build-workflow-broken");
-import { buildGoal } from "//rules/workflows/build_workflow";
+import { buildGoal } from "//rules/workflows/build";
 const TEST_TOOL = toolName("build-workflow-test-tool");
 
 async function withFakeLog(fn) {

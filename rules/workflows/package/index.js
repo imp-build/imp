@@ -5,15 +5,12 @@
 // A `package` product describes what to publish rather than publishing it:
 // it builds with materialize:false, then returns artifact(digest, {from})
 // (imp:core) — a digest plus an optional subtree path within it.
-// packageGoal below is the only thing that materializes that artifact (via
-// writeWorkspace, no sandbox, no cache record, no run()-level materialize:true
-// warning) and reports on it (via digestStat) — so every package product's
-// output lands under a predictable dist/ path (distPathFor()) and gets the
-// same summary, instead of each rule hand-picking a path and printing nothing.
-// See docs/BUILD.js's site_package for the reference implementation.
+// packageGoal below materializes artifacts returned by legacy target products
+// and reports on them. Label handlers bypass this callback and publish their
+// own artifacts, as docs/BUILD.js's site package handler does.
 //
-// odin-package's package product (odinDistPackage, rules/odin/index.js)
-// publishes the built binary/archive the same way. The legacy Rust command
+// Label-based package handlers still use the same dist/ address convention.
+// The legacy Rust command
 // (src/commands/package.rs, no longer wired into the binary) built a
 // content pak, copied game binaries and license files into a per-platform
 // dist/ directory, and zipped the result, with platform/version as CLI
@@ -31,9 +28,7 @@ import {
 } from "imp:core";
 
 /**
- * Derive a target's dist/ destination from its workspace address (e.g.
- * "//docs:site" → "dist/docs/site"), so package products don't each pick
- * their own ad hoc path.
+ * Derive a legacy target's dist/ destination from its workspace address.
  *
  * @param {object} handle A target handle returned by target().
  * @returns {string} Workspace-relative dist/ path.

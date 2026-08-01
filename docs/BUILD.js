@@ -1,7 +1,28 @@
-import { target, product, run, output, output_path, glob, paths, read_file, artifact, configurationSchemas, ruleCapabilities, targetKind, BUILD, PACKAGE, RUN } from "imp:core";
+import {
+    artifact,
+    build,
+    configurationSchemas,
+    glob,
+    label,
+    labelAddress,
+    logInfo,
+    memo,
+    output,
+    output_path,
+    packageGoal,
+    paths,
+    product,
+    read_file,
+    ruleCapabilities,
+    run,
+    runGoal,
+    target,
+    targetKind,
+    writeWorkspace,
+    BUILD,
+} from "imp:core";
 
 const JsApiReference = targetKind("js-api-reference");
-const ZolaSite = targetKind("zola-site");
 import { rulesTest } from "//rules/imp/test";
 // The reference catalog describes imp's built-in rules, independently of
 // which subset this repository happens to import from imp.workspace.js.
@@ -16,14 +37,20 @@ import "//rules/workflows/fmt";
 import "//rules/workflows/lint";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
 import { extractCodeReference, extractUserApiReference } from "//docs/js_api_extract";
-import { zolaToolchain, zolaTool, zolaBin, ZOLA_TOOL } from "//rules/zola/toolchain";
+import { zolaToolchain, zolaTool, zolaBin } from "//rules/zola";
 import { IMP_TOOL } from "//rules/imp/imp_tool";
-import { distPathFor } from "//rules/workflows/package";
 
 export const rules_test = rulesTest({ root: "//docs" });
 
 const API_REFERENCE_OUT = "generated/docs-api-reference";
 const SITE_OUT = "generated/docs-site";
+
+function distPathForLabel(handle) {
+    const address = labelAddress(handle);
+    const withoutSlashes = address.replace(/^\/\//, "");
+    const [dir, name] = withoutSlashes.split(":");
+    return dir ? `dist/${dir}/${name}` : `dist/${name}`;
+}
 
 const mkdirTool = nativeTool("mkdir");
 const cpTool = nativeTool("cp");
@@ -64,9 +91,9 @@ export const api_reference_build = product(JsApiReference, BUILD, IMP_TOOL, asyn
     });
 }, { display: "build {0}", level: "info" });
 
-export const site = target({ kind: "zola-site", attrs: {} });
+export const site = label();
 
-export const site_build = product(ZolaSite, BUILD, ZOLA_TOOL, async function site_build(handle) {
+export const site_build = memo(async function site_build(handle) {
     const apiRef = await api_reference_build(api_reference);
     const zolaToolSpec = await zolaTool();
 
@@ -102,14 +129,28 @@ export const site_build = product(ZolaSite, BUILD, ZOLA_TOOL, async function sit
     });
 }, { display: "build {0}", level: "info" });
 
-export const site_package = product(ZolaSite, PACKAGE, ZOLA_TOOL, async function site_package(handle) {
+build(site, async function buildSite() {
+    return site_build(site);
+});
+
+export const site_package = memo(async function site_package(handle) {
     const built = await site_build(handle);
     return artifact(built.outputDigest, { from: SITE_OUT });
 }, { display: "package {0}", level: "info" });
 
+packageGoal(site, async function packageSite() {
+    const artifactResult = await site_package(site);
+    const destination = distPathForLabel(site);
+    writeWorkspace(destination, artifactResult.digest, {
+        from: artifactResult.from,
+    });
+    logInfo(`${labelAddress(site)}#package -> ${destination}`);
+    return artifactResult;
+});
+
 // `imp run //docs:site` supervises a "serve while editing" loop: every
 // second it re-invokes the fully-sandboxed, cache-backed `package` goal
-// (which writes the built site to dist/, see site_package above), and
+// (which writes the built site to dist/, see the package handler above), and
 // restarts `zola serve` only when the rebuilt output actually changed. The
 // supervisor itself runs sandbox:false/impure:true (mirroring odinRun,
 // rules/odin/index.js) since it's long-lived and manages a child process —
@@ -121,9 +162,9 @@ export const site_package = product(ZolaSite, PACKAGE, ZOLA_TOOL, async function
 // cancelable background-run handle to restart it from within one sandboxed
 // call — so this restart-on-change loop is the closest fit without new
 // engine primitives.
-export const site_serve = product(ZolaSite, RUN, ZOLA_TOOL, async function site_serve(handle) {
+export const site_serve = memo(async function site_serve(handle) {
     const zolaBinPath = await zolaBin();
-    const distPath = distPathFor(handle);
+    const distPath = distPathForLabel(handle);
 
     const script = [
         'imp_bin=$1; site_root=$2; zola_bin=$3',
@@ -151,3 +192,7 @@ export const site_serve = product(ZolaSite, RUN, ZOLA_TOOL, async function site_
         display: "watch + serve docs site with zola",
     });
 }, { display: "run {0}", level: "info" });
+
+runGoal(site, async function runSite() {
+    return site_serve(site);
+});

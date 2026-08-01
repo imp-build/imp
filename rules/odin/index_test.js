@@ -478,7 +478,7 @@ describe("Odin rules", () => {
 					);
 					// odinRun itself no longer executes the binary — it publishes it
 					// (via writeWorkspace) and returns a runTemplate; the `run` goal
-					// (runFromTemplate, rules/workflows/run.js) is what actually runs
+					// (runFromTemplate, rules/workflows/run/index.js) is what actually runs
 					// it, unsandboxed and impure.
 					expect(calls.length).toBe(1);
 					expect(calls[0].from).toBe(calls[0].path);
@@ -626,7 +626,7 @@ describe("Odin rules", () => {
 
 	// odinDistPackage just returns artifact(buildResult.outputDigest, {from}) —
 	// publishing to dist/ now happens in the `package` goal (packageGoal,
-	// rules/workflows/package.js), not here. But that digest comes from
+	// rules/workflows/package/index.js), not here. But that digest comes from
 	// __host_run's real return value, which withFakeRun doesn't fake (it only
 	// stubs stdout/stderr/exitCode), so this is still covered end-to-end via
 	// `imp package` rather than a unit test here.

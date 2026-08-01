@@ -75,7 +75,7 @@ import { cmake_resources } from "//rules/c/cmake";
 
 import { defaultGccToolchain, gccTool } from "//rules/c/gcc";
 
-// Registers the "run" goal's callback (rules/workflows/run.js) for consumers
+// Registers the "run" goal's callback (rules/workflows/run/index.js) for consumers
 // that import Odin build rules without importing the workflows layer
 // explicitly. Odin's own "run" goal handler is attached directly to each
 // odinPackage() label below (see attachRun) and does not depend on this
@@ -84,7 +84,7 @@ import "//rules/workflows/run";
 
 // Registers the "build" goal's artifact summary callback for consumers that
 // import Odin build rules without importing the workflows layer explicitly.
-import "//rules/workflows/build_workflow";
+import "//rules/workflows/build";
 import { ODIN_TOOL } from "//rules/odin/toolchain";
 
 export {
@@ -1074,7 +1074,7 @@ export const odinTest = memo(
  * workspace (not sandboxed) — the package must have a main entrypoint.
  * Unlike the old Target/product-based "run" goal, a label's "run" handler
  * (attached below, in odinPackage()) is dispatched directly and is not
- * gated by rules/workflows/run.js's single-target pre-flight check —
+ * gated by rules/workflows/run/index.js's single-target pre-flight check —
  * multi-selection rejection is therefore not enforced for label-based run
  * dispatch, matching the precedent set by rules/python/source.js's own
  * runGoal() handler.

@@ -419,7 +419,7 @@ export function namedCache(opts) {
  *   product dispatch is skipped entirely, even on success. Use
  *   `resolveProducts(entry)` from within `fn` to look up each selected
  *   target's registered product function and drive your own resolve/fan-out/
- *   await loop (see build.js/run.js/test.js/fmt.js for the pattern).
+ *   await loop (see the build/run workflow entrypoints and test.js/fmt.js).
  *   Throwing (or rejecting) aborts the whole invocation with that one error.
  *   If `fn` is omitted, the host dispatches every selected target's product
  *   function itself, exactly as before.
@@ -1243,7 +1243,8 @@ export function selectedTargets(kind = undefined) {
  * kind and product — one per tool, since several tools may implement the
  * same product (e.g. two formatters) — without invoking them. For goal
  * callbacks that drive their own resolve/fan-out/await loop
- * (see build.js/run.js/test.js/fmt.js): `selection.flatMap(resolveProducts)`.
+ * (see the build/run workflow entrypoints and test.js/fmt.js):
+ * `selection.flatMap(resolveProducts)`.
  *
  * @param {{id: number, address: string, kind: string, product: string|object}} entry
  *   `product` may be a host-serialized string (as selection entries arrive)
@@ -3579,9 +3580,9 @@ export function readFileInDigest(digest, path) {
  * directly into the workspace at `path` — no sandbox, no cache record, no
  * process spawn. This is the one blessed way to publish a final digest under
  * dist/, bypassing run()'s materialize:true path (and its warning) entirely.
- * The `package` goal (rules/workflows/package.js) is its only caller today —
- * package products themselves just describe what to publish via artifact(),
- * they don't call this directly.
+ * The legacy `package` goal (rules/workflows/package/index.js) is its only
+ * target-product caller today; label handlers publish their own artifacts.
+ * Legacy package products only describe what to publish via artifact().
  *
  * `opts.from` may resolve to a directory (published wholesale at `path`,
  * replacing whatever was there — the dist/ package pattern) or to an
@@ -3608,9 +3609,9 @@ export function writeWorkspace(path, digest, opts) {
 /**
  * Construct the container a `package` product returns: a digest plus the
  * (optional) subtree path within it to publish. Package products describe
- * what to publish — the `package` goal (rules/workflows/package.js) is the
- * only thing that actually materializes it (via writeWorkspace) and reports
- * on it (via digestStat).
+ * what to publish — legacy target products are materialized by the `package`
+ * goal (rules/workflows/package/index.js), while label handlers materialize
+ * their own artifacts via writeWorkspace().
  *
  * @param {string} digest Digest string (e.g. a build product's outputDigest).
  * @param {object} [opts]

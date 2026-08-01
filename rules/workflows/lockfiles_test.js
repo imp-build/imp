@@ -13,7 +13,7 @@ import { cmakeSupportedPlatforms } from "//rules/c/cmake";
 import { gccSupportedPlatforms } from "//rules/c/gcc";
 import { moldSupportedPlatforms } from "//rules/c/mold";
 import { zigSupportedPlatforms } from "//rules/c/zig";
-import { zolaSupportedPlatforms } from "//rules/zola/toolchain";
+import { zolaSupportedPlatforms } from "//rules/zola";
 import { rustSupportedPlatforms } from "//rules/rust/toolchain";
 
 // Records every download/sha256/file_size and captures the run() that writes

@@ -50,11 +50,11 @@ export { pythonResolve, pythonResolveSyncArgs } from "//rules/python/resolve";
 
 // Registers the "build" goal's artifact summary callback for consumers that
 // import Python build rules without importing the workflows layer explicitly.
-import "//rules/workflows/build_workflow";
+import "//rules/workflows/build";
 
 // Registers the "test" goal handler (pythonTest / pytest) for consumers that
 // import Python build rules without importing //rules/python/test explicitly
-// — same reasoning as the build_workflow import above. Side-effect only;
+// — same reasoning as the build workflow import above. Side-effect only;
 // nothing exported from it is used in this file.
 import "//rules/python/test";
 

@@ -22,8 +22,7 @@ import {
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
 
-// Declared tool identity for products this toolchain implements; also
-// consumed by rule modules registering zola-driven products.
+// Declared tool identity for provider products this toolchain implements.
 export const ZOLA_TOOL = toolName("zola");
 
 const ZOLA_TOOLCHAIN_CACHE = "zola-toolchains";

@@ -16,7 +16,7 @@ import { defaultPythonToolchain } from "//rules/python";
 import "//rules/rust/generate_build";
 import { defaultKacheToolchain } from "//rules/rust/kache";
 import { rustToolchain } from "//rules/rust/toolchain";
-import "//rules/workflows/build_workflow";
+import "//rules/workflows/build";
 import "//rules/workflows/builtin_lockfiles";
 import "//rules/workflows/fmt";
 import "//rules/workflows/generate";

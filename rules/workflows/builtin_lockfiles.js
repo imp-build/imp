@@ -31,7 +31,7 @@ import "//rules/python/ruff_toolchain";
 import "//rules/python/uv_toolchain";
 import "//rules/rust/kache/toolchain";
 import "//rules/rust/toolchain";
-import "//rules/zola/toolchain";
+import "//rules/zola";
 
 async function genBuiltinLockfiles() {
 	const specs = builtinLockfiles();

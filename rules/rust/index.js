@@ -47,7 +47,7 @@ import { resources as resource_package_sources } from "//rules/asset";
 
 // Registers the "build" goal's artifact summary callback for consumers that
 // import Rust build rules without importing the workflows layer explicitly.
-import "//rules/workflows/build_workflow";
+import "//rules/workflows/build";
 
 // The package test handler delegates to the production lazy test actions.
 import { cargoPackageTests } from "//rules/rust/test";

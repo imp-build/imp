@@ -16,7 +16,7 @@ import {
 	zolaDownloadUrl,
 	zolaTool,
 	zolaToolchain,
-} from "//rules/zola/toolchain";
+} from "//rules/zola";
 
 function withZolaHost(platOrFn, maybeFn) {
 	const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;

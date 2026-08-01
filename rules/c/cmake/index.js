@@ -55,7 +55,7 @@ import { registerCmakeProjectLabel } from "//rules/c";
 
 // Registers the "build" goal's artifact summary callback for consumers that
 // import CMake build rules without importing the workflows layer explicitly.
-import "//rules/workflows/build_workflow";
+import "//rules/workflows/build";
 import { CMAKE_TOOL } from "//rules/c/cmake/toolchain";
 
 export {

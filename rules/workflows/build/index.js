@@ -8,7 +8,7 @@
 //
 // The callback resolves each selected target's product itself via
 // resolveProducts, driving its own fan-out/await loop directly (the same
-// pattern run.js/test.js/fmt.js use).
+// pattern //rules/workflows/run, test.js, and fmt.js use).
 //
 // `build` is cache-only: it builds and warms the task cache, but (now that
 // every build product is materialize:false) never leaves files in the
