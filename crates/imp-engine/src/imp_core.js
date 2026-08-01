@@ -3103,6 +3103,10 @@ function _find_unpersistable(value, path = "$") {
 	return null;
 }
 
+// TEMPORARY diagnostic (see #98): traces exactly which input-spec kind and
+// which recomputed-vs-recorded digest pair causes a persisted-memo
+// revalidation miss, so a reproducible CI cache miss can be root-caused
+// instead of guessed at from outside. Remove once the miss is understood.
 function _memo_input_spec_still_valid(spec, ctx) {
 	try {
 		if (spec.kind === "config_namespaces") {
@@ -3110,18 +3114,48 @@ function _memo_input_spec_still_valid(spec, ctx) {
 				JSON.stringify(spec.spec),
 				JSON.stringify((ctx && ctx.modeOverrides) || {}),
 			);
-			return current === spec.resolved_digest;
+			const ok = current === spec.resolved_digest;
+			if (!ok) {
+				_artifactTrace(
+					"memo-input-spec-mismatch",
+					"config_namespaces",
+					JSON.stringify(spec.spec),
+					`recorded=${spec.resolved_digest}`,
+					`current=${current}`,
+				);
+			}
+			return ok;
 		}
 		if (spec.kind === "read_file") {
 			const current = __host_capture_paths(JSON.stringify([spec.spec]));
-			return current === spec.resolved_digest;
+			const ok = current === spec.resolved_digest;
+			if (!ok) {
+				_artifactTrace(
+					"memo-input-spec-mismatch",
+					"read_file",
+					JSON.stringify(spec.spec),
+					`recorded=${spec.resolved_digest}`,
+					`current=${current}`,
+				);
+			}
+			return ok;
 		}
 		if (spec.kind === "run_input") {
 			const current = __host_capture_run_input(
 				spec.spec.kind,
 				spec.spec.path,
 			);
-			return current === spec.resolved_digest;
+			const ok = current === spec.resolved_digest;
+			if (!ok) {
+				_artifactTrace(
+					"memo-input-spec-mismatch",
+					"run_input",
+					JSON.stringify(spec.spec),
+					`recorded=${spec.resolved_digest}`,
+					`current=${current}`,
+				);
+			}
+			return ok;
 		}
 		if (spec.kind === "fileset") {
 			if (spec.resolved_digest === null || spec.resolved_digest === undefined) {
@@ -3130,9 +3164,26 @@ function _memo_input_spec_still_valid(spec, ctx) {
 				return true;
 			}
 			const evaluated = _eval_fileset(JSON.parse(JSON.stringify(spec.spec)));
-			return evaluated.digest === spec.resolved_digest;
+			const ok = evaluated.digest === spec.resolved_digest;
+			if (!ok) {
+				_artifactTrace(
+					"memo-input-spec-mismatch",
+					"fileset",
+					JSON.stringify(spec.spec),
+					`recorded=${spec.resolved_digest}`,
+					`current=${evaluated.digest}`,
+					`files=${evaluated.files ? evaluated.files.length : "?"}`,
+				);
+			}
+			return ok;
 		}
-	} catch (_) {
+	} catch (err) {
+		_artifactTrace(
+			"memo-input-spec-error",
+			spec && spec.kind,
+			JSON.stringify(spec && spec.spec),
+			String((err && err.message) || err),
+		);
 		return false;
 	}
 	return true;
@@ -3153,14 +3204,33 @@ function _read_persisted_memo_record(persistKey) {
 	}
 }
 
+// TEMPORARY diagnostic (see #98): traces exactly why a persisted-memo
+// record validation fails — no record on disk, a module-digest mismatch
+// (rule source changed), or which dependency in the chain rejected it.
+// Remove once the miss is understood.
 function _validate_persisted_memo_record(persistKey, ctx, visiting) {
 	if (visiting.has(persistKey)) return null;
 	const record = _read_persisted_memo_record(persistKey);
-	if (record === null) return null;
+	if (record === null) {
+		_artifactTrace("memo-record-missing", persistKey);
+		return null;
+	}
 	const moduleDigest = _memo_module_digest(record.fn_id);
-	if (moduleDigest === null || record.module_digest !== moduleDigest) return null;
+	if (moduleDigest === null || record.module_digest !== moduleDigest) {
+		_artifactTrace(
+			"memo-record-module-digest-mismatch",
+			persistKey,
+			record.fn_id,
+			`recorded=${record.module_digest}`,
+			`current=${moduleDigest}`,
+		);
+		return null;
+	}
 	for (const spec of record.input_specs || []) {
-		if (!_memo_input_spec_still_valid(spec, ctx)) return null;
+		if (!_memo_input_spec_still_valid(spec, ctx)) {
+			_artifactTrace("memo-record-rejected", persistKey, record.fn_id);
+			return null;
+		}
 	}
 	visiting.add(persistKey);
 	for (const dep of record.deps || []) {
@@ -3168,6 +3238,12 @@ function _validate_persisted_memo_record(persistKey, ctx, visiting) {
 			typeof dep !== "string" ||
 			_validate_persisted_memo_record(dep, ctx, visiting) === null
 		) {
+			_artifactTrace(
+				"memo-record-dep-rejected",
+				persistKey,
+				record.fn_id,
+				String(dep),
+			);
 			visiting.delete(persistKey);
 			return null;
 		}
