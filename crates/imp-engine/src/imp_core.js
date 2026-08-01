@@ -1781,6 +1781,25 @@ function _stable_function_id(fn) {
 // with address references rather than raw numeric ids: workspace addresses
 // are stable across processes, whereas __id is evaluation-local. Unaddressed
 // handles fall back to their numeric id and mark the call unpersistable.
+//
+// Decided policy for values passed to memoized computations (#58):
+//   - Exported labels/targets digest by their stable workspace address, plus
+//     any link()/profile() overlay data (itself recursively digested the
+//     same way) needed to distinguish the value — see the wrapper-unwrapping
+//     branch below.
+//   - Anonymous/dynamic handles (never bound to a workspace export — e.g. a
+//     label() minted inside discoverLabels()) are REJECTED from persistence,
+//     not content-addressed as a substitute: `unaddressed` propagates up to
+//     memo()'s persistKey computation, which becomes null for that call.
+//     In-process reuse (this evaluation's own memo table) still works via
+//     `key_string`, which is allowed to embed the raw __id since it never
+//     outlives this process.
+//   - This is deliberately a silent (debug-trace-only) fallback, not a
+//     build-time warning: real, sanctioned anonymous-label patterns exist
+//     (e.g. rules/python/source.js's discoverLabels()-based per-file source
+//     labels) where losing persisted caching is expected, not a bug to flag.
+// Eliminating anonymous handles at their construction sites (so more calls
+// become persistable) is #60's job, not this function's.
 function _stable_digest(args) {
 	let unaddressed = false;
 	// `dep` distinguishes a link()-with-profiles wrapper's ref from a bare
@@ -2765,6 +2784,10 @@ export const packageGoal = _goal_sugar("package");
 function _trace_label_handler(handler, goalName, selectorAddress, ctx) {
 	const fn_id = `label-handler:${goalName}:${handler.identity}`;
 	const moduleDigest = _memo_module_digest(fn_id);
+	// Same address-first/unaddressed-rejects-persistence policy as
+	// _stable_digest's own doc comment (#58) — selectorAddress is already a
+	// resolved address string here, so only ctx's contents can trigger the
+	// unaddressed branch.
 	const { digest: args_digest, unaddressed } = _stable_digest([
 		selectorAddress,
 		ctx,
@@ -3421,6 +3444,10 @@ export function memo(fn, opts) {
 		const unwrapped = args.length > 0 ? _unwrap_dep_edge(args[0]) : null;
 		const hasProfile = !!(unwrapped?.profiles && unwrapped.profiles.length > 0);
 		const callArgs = unwrapped ? [unwrapped.handle, ...args.slice(1)] : args;
+		// See _stable_digest's doc comment (#58) for the decided policy: an
+		// unaddressed handle anywhere in args rejects this call from
+		// persistence (persistKey stays null) rather than using its
+		// process-local __id as a stand-in stable key.
 		const { digest: args_digest, unaddressed } = _stable_digest(args);
 		const key_string = JSON.stringify({
 			fn_id,
@@ -3566,7 +3593,7 @@ export function resetMemoState() {
 
 /**
  * Return a snapshot of the memo trace and dependency graph.
- * @returns {{ trace: Array, deps: Array, key_display: Object, key_product_calls: Object }}
+ * @returns {{ trace: Array, deps: Array, key_display: Object, key_product_calls: Object, persist_keys: Object }}
  */
 export function getMemoTrace() {
 	return {
@@ -3574,6 +3601,11 @@ export function getMemoTrace() {
 		deps: _memo_deps.slice(),
 		key_display: Object.fromEntries(_key_display),
 		key_product_calls: Object.fromEntries(_key_product_call),
+		// persistKey is null for a call whose args include an unaddressed
+		// handle (see _stable_digest's policy comment) — exposed so tests can
+		// assert persistence eligibility directly instead of inferring it from
+		// timing/side effects.
+		persist_keys: Object.fromEntries(_memo_persist_keys),
 	};
 }
 
