@@ -186,6 +186,11 @@ JOBS = [
         "env": {
             "IMP_REMOTE_CACHE": "ghac",
             "IMP_CHANGED_SINCE": "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}",
+            # Temporary diagnostic: surfaces cache-record-rejected /
+            # blob-missing reasons on stderr (crates/imp-store/src/trace.rs)
+            # to root-cause an unexpected local task-cache miss on a
+            # freshly-restored GHAC cache. Remove once confirmed.
+            "IMP_TRACE_ARTIFACTS": "1",
         },
         "steps": CHECK_STEPS,
     },

@@ -141,7 +141,7 @@ describe("oci rules", () => {
 	test("ociBuild requires a valid base", () => {
 		expect(() =>
 			ociBuild({ base: null, layers: [{ srcs: ["*"], path: "/app" }] }),
-		).toThrow("must be an ociPull()/ociBuild() target handle");
+		).toThrow("must be an ociPull()/ociBuild() label handle");
 	});
 
 	test("ociBuild requires at least one layer", () => {
@@ -159,7 +159,7 @@ describe("oci rules", () => {
 				});
 				const target = ociBuild({
 					base,
-					layers: [{ srcs: ["rules/oci/toolchain.js"], path: "/app" }],
+					layers: [{ srcs: ["rules/oci/toolchain/index.js"], path: "/app" }],
 				});
 				const result = await ociBuildBuild(target);
 
@@ -180,7 +180,7 @@ describe("oci rules", () => {
 						(arg) => typeof arg === "string" && arg.includes("--numeric-owner"),
 					),
 				).toBe(true);
-				expect(stageRun.argv).toContain("rules/oci/toolchain.js");
+				expect(stageRun.argv).toContain("rules/oci/toolchain/index.js");
 
 				const composeRun = host.runs[2];
 				expect(composeRun.argv[0]).toBe("sh");
@@ -198,7 +198,7 @@ describe("oci rules", () => {
 			withCraneStdout([["oci-compose", DIGEST_B]], async (host) => {
 				const target = ociBuild({
 					base: "scratch",
-					layers: [{ srcs: ["rules/oci/toolchain.js"], path: "/app" }],
+					layers: [{ srcs: ["rules/oci/toolchain/index.js"], path: "/app" }],
 					entrypoint: ["/app/run"],
 					env: { FOO: "bar" },
 				});

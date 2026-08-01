@@ -42,6 +42,7 @@ jobs:
     env:
       IMP_REMOTE_CACHE: ghac
       IMP_CHANGED_SINCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+      IMP_TRACE_ARTIFACTS: 1
     steps:
       - uses: actions/checkout@v4
         with:

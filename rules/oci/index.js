@@ -1,21 +1,21 @@
 import {
-	Target,
 	artifact,
+	build,
 	cacheGet,
 	cacheHas,
+	extensible,
 	glob,
+	label,
+	labelAddress,
+	logInfo,
+	memo,
 	mergeDigests,
 	output,
 	output_path,
+	packageGoal,
 	paths,
-	product,
-	productFor,
 	run,
-	sourcesField,
-	targetAddress,
-	targetOutputSlug,
-	BUILD,
-	PACKAGE,
+	writeWorkspace,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
@@ -39,7 +39,7 @@ export {
 } from "//rules/oci/toolchain";
 
 // ---------------------------------------------------------------------------
-// Path helpers (same pattern as rules/rust/index.js, rules/c/cmake/index.js)
+// Path helpers (same pattern as rules/rust/index.js, rules/c/index.js)
 // ---------------------------------------------------------------------------
 
 function normalize_workspace_path(path) {
@@ -54,17 +54,19 @@ function normalize_workspace_path(path) {
 	return parts.length === 0 ? "." : parts.join("/");
 }
 
-function safe_target_address(handle) {
-	if (!handle || handle.__imp !== true) return null;
+function safe_label_address(handle) {
+	if (!handle) return null;
 	try {
-		return targetAddress(handle);
+		if (handle.__imp_label === true) return labelAddress(handle);
+		if (handle.label?.__imp_label === true) return labelAddress(handle.label);
+		return null;
 	} catch (_) {
 		return null;
 	}
 }
 
 function declaring_directory(handle) {
-	const address = safe_target_address(handle);
+	const address = safe_label_address(handle);
 	if (!address || !address.startsWith("//")) return ".";
 	const scope = address.slice(2).split(":")[0];
 	return scope.length === 0 ? "." : scope;
@@ -78,11 +80,26 @@ function declared_path(handle, path = ".") {
 	return normalize_workspace_path(`${base}/${local}`);
 }
 
-// Every other rule module's default output path is now keyed the same way
-// (see targetOutputSlug in imp:core) — kept as a local alias since this
-// file's own scratch-output paths (oci-build/oci-package) were already using
-// this scheme before the others caught up.
-const target_output_slug = targetOutputSlug;
+function oci_output_slug(handle) {
+	const address = safe_label_address(handle);
+	return address
+		? address.replace(/^\/\//, "").replace(/[:/]/g, "_")
+		: `anon-${handle.__id}`;
+}
+
+// Converts an exported label handle ({__imp_label, data}) into the old
+// {__id, label, attrs} shape so the bulk of the pre-existing build/package
+// logic below (written against `handle.attrs.*`) needs no changes. A no-op
+// on handles that are already in this shape (or aren't labels at all), so
+// build/package functions can call this unconditionally as their first line.
+function oci_action_handle(handle) {
+	if (!handle || handle.__imp_label !== true) return handle;
+	return {
+		__id: handle.__id,
+		label: handle,
+		attrs: handle.data,
+	};
+}
 
 // Best-effort registry host extraction from a "repo" or "repo:tag" string,
 // for threading into craneAuthTools(). Mirrors crane's own default-registry
@@ -96,29 +113,42 @@ function registryHost(repo) {
 	return "index.docker.io";
 }
 
+// Publishes a package() handler's artifact() result to dist/, the way the
+// old product()-based PACKAGE resolver used to do generically for every
+// rule. Label handlers run outside that resolver, so each migrated rule
+// publishes its own package result the same way (see rules/rust/index.js,
+// rules/c/index.js).
+async function publishOciPackage(imageLabel, artifactResult) {
+	if (artifactResult == null) return null;
+	const address = labelAddress(imageLabel);
+	const withoutSlashes = address.replace(/^\/\//, "");
+	const [dir, name] = withoutSlashes.split(":");
+	const destination = dir ? `dist/${dir}/${name}` : `dist/${name}`;
+	writeWorkspace(destination, artifactResult.digest, {
+		from: artifactResult.from,
+	});
+	logInfo(`${address}#package -> ${destination}`);
+	return artifactResult;
+}
+
+// Dispatches to the right build function for an ociPull()/ociBuild() label
+// referenced as another label's base/image — the label-model replacement
+// for the old productFor(handle, BUILD) indirection, keyed on each label's
+// own `data.kind` discriminator instead of a (kind, product, tool) table.
+async function ociImageBuildResult(imageLabel) {
+	const handle = oci_action_handle(imageLabel);
+	return handle.attrs.kind === "build"
+		? ociBuildBuild(imageLabel)
+		: ociPullBuild(imageLabel);
+}
+
 // ---------------------------------------------------------------------------
 // oci-pull: fetch an image (by tag or digest) into the shared OCI storage
 // named cache, as an OCI-layout directory.
 // ---------------------------------------------------------------------------
 
-export class OciPull extends Target {
-	static kind = "oci-pull";
-	constructor({ repo, tag, digest }) {
-		if (!repo) {
-			throw new Error("ociPull requires 'repo'");
-		}
-		if (!tag === !digest) {
-			throw new Error("ociPull requires exactly one of 'tag' or 'digest'");
-		}
-		super({
-			kind: OciPull.kind,
-			attrs: { repo, ...(tag ? { tag } : {}), ...(digest ? { digest } : {}) },
-		});
-	}
-}
-
 /**
- * Declare an OCI image pull target: fetches `repo:tag` (or `repo@digest`)
+ * Declare an OCI image pull label: fetches `repo:tag` (or `repo@digest`)
  * into the shared `oci-storage` named cache as an OCI-layout directory, for
  * use as an `ociBuild()` base or an `ociPush()` source.
  *
@@ -127,25 +157,43 @@ export class OciPull extends Target {
  * @param {string} opts.repo Image repository, e.g. "docker.io/library/alpine" or "ghcr.io/org/image".
  * @param {string} [opts.tag] Mutable tag — resolved to a digest at build time via `crane digest`.
  * @param {string} [opts.digest] Immutable `sha256:...` digest — skips the resolve step entirely.
- * @returns {object} Target handle.
+ * @returns {object} Exported label handle.
  */
-export function ociPull({ repo, tag, digest }) {
-	return new OciPull({ repo, tag, digest });
-}
+export const ociPull = extensible(function ociPull({ repo, tag, digest }) {
+	if (!repo) {
+		throw new Error("ociPull requires 'repo'");
+	}
+	if (!tag === !digest) {
+		throw new Error("ociPull requires exactly one of 'tag' or 'digest'");
+	}
+	const pullLabel = label({
+		data: {
+			kind: "pull",
+			repo,
+			...(tag ? { tag } : {}),
+			...(digest ? { digest } : {}),
+		},
+	});
+	build(pullLabel, async function buildOciPull() {
+		return ociPullBuild(pullLabel);
+	});
+	packageGoal(pullLabel, async function packageOciPull() {
+		return publishOciPackage(pullLabel, await ociPullPackage(pullLabel));
+	});
+	return pullLabel;
+});
 
 /**
- * Resolve/pull an ociPull() target: an immutable digest, resolved once
+ * Resolve/pull an ociPull() label: an immutable digest, resolved once
  * (impurely — a tag can move) if only a tag was given, then a cached fetch
  * of that digest's OCI-layout directory into `oci-storage`.
  *
- * @param {object} handle Target handle returned by ociPull().
+ * @param {object} handle Label handle returned by ociPull().
  * @returns {Promise<{ ociLayoutPath: string, digest: string }>}
  */
-export const ociPullBuild = product(
-	OciPull,
-	BUILD,
-	CRANE_TOOL,
+export const ociPullBuild = memo(
 	async function ociPullBuild(handle) {
+		handle = oci_action_handle(handle);
 		declareOciStorage();
 		const craneToolSpec = await craneTool();
 		const registry = registryHost(handle.attrs.repo);
@@ -237,7 +285,7 @@ async function packageOciLayoutAsTar(
 	manifestDigest,
 	treeDigest,
 ) {
-	const slug = target_output_slug(handle);
+	const slug = oci_output_slug(handle);
 	const dir = `.imp/oci-package/${slug}`;
 	const mount = mountOciLayout(
 		"oci-layout",
@@ -276,19 +324,17 @@ async function packageOciLayoutAsTar(
 }
 
 /**
- * Package an ociPull() target: writes the pulled image's OCI-layout
+ * Package an ociPull() label: writes the pulled image's OCI-layout
  * directory out as a `dist/.../image.tar` oci-archive tarball, loadable via
  * `podman load` / `docker load`.
  *
- * @param {object} handle Target handle returned by ociPull().
+ * @param {object} handle Label handle returned by ociPull().
  * @returns {Promise<object>} An artifact(...) whose published dist/ path
  *   will contain an `image.tar`.
  */
-export const ociPullPackage = product(
-	OciPull,
-	PACKAGE,
-	CRANE_TOOL,
+export const ociPullPackage = memo(
 	async function ociPullPackage(handle) {
+		handle = oci_action_handle(handle);
 		const { ociLayoutPath, digest } = await ociPullBuild(handle);
 		return packageOciLayoutAsTar(handle, ociLayoutPath, digest, null);
 	},
@@ -338,7 +384,7 @@ async function buildLayerTarball(handle, packageRoot, layerSpec, index, tools) {
 	const gid = String(layerSpec.gid ?? 0);
 	const mode = layerSpec.mode ? String(layerSpec.mode) : "";
 
-	const slug = target_output_slug(handle);
+	const slug = oci_output_slug(handle);
 	const stageDir = `.imp/oci-build/${slug}/layer-${index}-stage`;
 	const tarPath = `.imp/oci-build/${slug}/layer-${index}.tar`;
 
@@ -383,70 +429,8 @@ async function buildLayerTarball(handle, packageRoot, layerSpec, index, tools) {
 	return { tarPath, digest: result.outputDigest };
 }
 
-export class OciBuild extends Target {
-	static kind = "oci-build";
-	// `base`: an ociPull()/ociBuild() target handle, or the literal string
-	// "scratch" for a from-empty image.
-	//
-	// `layers`: [{ srcs: string[], path: string, exclude?: string[], uid?: number, gid?: number, mode?: string }].
-	//
-	// Deliberately no `platforms`/multi-arch surface yet — single-manifest
-	// only for this pass. When multi-arch support is added, it attaches here
-	// (an OCI index assembled via `crane index append` over one build per
-	// platform) without needing to change `layers`'/`base`'s shape.
-	constructor({
-		path = ".",
-		base,
-		layers = [],
-		entrypoint,
-		cmd,
-		env = {},
-		labels = {},
-		user,
-		workdir,
-	}) {
-		if (base !== "scratch" && !(base && base.__imp === true)) {
-			throw new Error(
-				"ociBuild's 'base' must be an ociPull()/ociBuild() target handle, or the string \"scratch\"",
-			);
-		}
-		if (!Array.isArray(layers) || layers.length === 0) {
-			throw new Error("ociBuild requires one or more 'layers'");
-		}
-		const baseHandle = base === "scratch" ? null : base;
-		super({
-			kind: OciBuild.kind,
-			attrs: {
-				path,
-				base: baseHandle,
-				baseIsScratch: base === "scratch",
-				layers,
-				...(entrypoint ? { entrypoint } : {}),
-				...(cmd ? { cmd } : {}),
-				...(Object.keys(env).length ? { env } : {}),
-				...(Object.keys(labels).length ? { labels } : {}),
-				...(user ? { user } : {}),
-				...(workdir ? { workdir } : {}),
-			},
-			sources: layers
-				.filter(
-					(layer) =>
-						layer && Array.isArray(layer.srcs) && layer.srcs.length > 0,
-				)
-				.map((layer) =>
-					sourcesField({
-						root: path,
-						include: layer.srcs,
-						exclude: layer.exclude || [],
-					}),
-				),
-			deps: baseHandle ? [{ target: baseHandle }] : [],
-		});
-	}
-}
-
 /**
- * Declare an OCI image build target: composes `base` plus `layers` into a
+ * Declare an OCI image build label: composes `base` plus `layers` into a
  * new image by hand-assembling its OCI layout (layer blobs, config blob,
  * manifest blob, index.json) — no Dockerfile, no commands executed inside a
  * container.
@@ -454,7 +438,7 @@ export class OciBuild extends Target {
  * @category target
  * @param {object} opts
  * @param {string} [opts.path="."] Directory (relative to the declaring BUILD.js) `layers[].srcs` glob against.
- * @param {object|"scratch"} opts.base An ociPull()/ociBuild() handle, or "scratch" for an empty base.
+ * @param {object|"scratch"} opts.base An ociPull()/ociBuild() label handle, or "scratch" for an empty base.
  * @param {Array<{srcs: string[], path: string, exclude?: string[], uid?: number, gid?: number, mode?: string}>} opts.layers
  *   One or more file-staging specs; each becomes one deterministic layer tarball.
  * @param {string[]} [opts.entrypoint] Image ENTRYPOINT.
@@ -463,9 +447,14 @@ export class OciBuild extends Target {
  * @param {Record<string,string>} [opts.labels] Image labels.
  * @param {string} [opts.user] Image USER.
  * @param {string} [opts.workdir] Image WORKDIR.
- * @returns {object} Target handle.
+ * @returns {object} Exported label handle.
+ *
+ * Deliberately no `platforms`/multi-arch surface yet — single-manifest only
+ * for this pass. When multi-arch support is added, it attaches here (an OCI
+ * index assembled via `crane index append` over one build per platform)
+ * without needing to change `layers`'/`base`'s shape.
  */
-export function ociBuild({
+export const ociBuild = extensible(function ociBuild({
 	path = ".",
 	base,
 	layers = [],
@@ -476,18 +465,38 @@ export function ociBuild({
 	user,
 	workdir,
 }) {
-	return new OciBuild({
-		path,
-		base,
-		layers,
-		entrypoint,
-		cmd,
-		env,
-		labels,
-		user,
-		workdir,
+	if (base !== "scratch" && !(base && base.__imp_label === true)) {
+		throw new Error(
+			"ociBuild's 'base' must be an ociPull()/ociBuild() label handle, or the string \"scratch\"",
+		);
+	}
+	if (!Array.isArray(layers) || layers.length === 0) {
+		throw new Error("ociBuild requires one or more 'layers'");
+	}
+	const baseHandle = base === "scratch" ? null : base;
+	const buildLabel = label({
+		data: {
+			kind: "build",
+			path,
+			base: baseHandle,
+			baseIsScratch: base === "scratch",
+			layers,
+			...(entrypoint ? { entrypoint } : {}),
+			...(cmd ? { cmd } : {}),
+			...(Object.keys(env).length ? { env } : {}),
+			...(Object.keys(labels).length ? { labels } : {}),
+			...(user ? { user } : {}),
+			...(workdir ? { workdir } : {}),
+		},
 	});
-}
+	build(buildLabel, async function buildOciBuild() {
+		return ociBuildBuild(buildLabel);
+	});
+	packageGoal(buildLabel, async function packageOciBuild() {
+		return publishOciPackage(buildLabel, await ociBuildPackage(buildLabel));
+	});
+	return buildLabel;
+});
 
 // Assembles an OCI-layout directory by hand: no crane. `crane append --base`
 // and `crane mutate` were confirmed (empirically, against the pinned 0.20.6
@@ -568,11 +577,9 @@ const COMPOSE_OCI_IMAGE_SCRIPT = [
 	'printf "sha256:%s" "$manifest_digest"',
 ].join("\n");
 
-export const ociBuildBuild = product(
-	OciBuild,
-	BUILD,
-	CRANE_TOOL,
+export const ociBuildBuild = memo(
 	async function ociBuildBuild(handle) {
+		handle = oci_action_handle(handle);
 		declareOciStorage();
 		const stageTools = [
 			await nativeToolSpec(nativeTool("mkdir")),
@@ -585,7 +592,7 @@ export const ociBuildBuild = product(
 		let baseManifestDigest = null;
 		let baseTreeDigest = null;
 		if (!handle.attrs.baseIsScratch) {
-			const baseResult = await productFor(handle.attrs.base, BUILD);
+			const baseResult = await ociImageBuildResult(handle.attrs.base);
 			baseLayoutPath = baseResult.ociLayoutPath;
 			baseManifestDigest = baseResult.digest;
 			baseTreeDigest = baseResult.outputDigest;
@@ -610,7 +617,7 @@ export const ociBuildBuild = product(
 		const layerTreeDigest =
 			layerDigests.length > 0 ? mergeDigests(layerDigests) : null;
 
-		const slug = target_output_slug(handle);
+		const slug = oci_output_slug(handle);
 		const builtDir = `.imp/oci-build/${slug}/image`;
 
 		const mount = baseLayoutPath
@@ -624,7 +631,7 @@ export const ociBuildBuild = product(
 
 		// No explicit platform option yet (ociBuild() has none) — hardcoded to
 		// linux/amd64 for this first pass, same slot the multi-arch comment on
-		// OciBuild's constructor already earmarks for a future `platforms` list.
+		// ociBuild()'s docs already earmarks for a future `platforms` list.
 		const os = "linux";
 		const arch = "amd64";
 		const envList = Object.entries(handle.attrs.env || {}).map(
@@ -680,19 +687,17 @@ export const ociBuildBuild = product(
 );
 
 /**
- * Package an ociBuild() target: writes the composed image's OCI-layout
+ * Package an ociBuild() label: writes the composed image's OCI-layout
  * directory out as a `dist/.../image.tar` oci-archive tarball, loadable via
  * `podman load` / `docker load`.
  *
- * @param {object} handle Target handle returned by ociBuild().
+ * @param {object} handle Label handle returned by ociBuild().
  * @returns {Promise<object>} An artifact(...) whose published dist/ path
  *   will contain an `image.tar`.
  */
-export const ociBuildPackage = product(
-	OciBuild,
-	PACKAGE,
-	CRANE_TOOL,
+export const ociBuildPackage = memo(
 	async function ociBuildPackage(handle) {
+		handle = oci_action_handle(handle);
 		const { ociLayoutPath, digest, outputDigest } = await ociBuildBuild(handle);
 		return packageOciLayoutAsTar(handle, ociLayoutPath, digest, outputDigest);
 	},
@@ -703,51 +708,41 @@ export const ociBuildPackage = product(
 // oci-push: publish an ociPull()/ociBuild() image to a registry.
 // ---------------------------------------------------------------------------
 
-export class OciPush extends Target {
-	static kind = "oci-push";
-	constructor({ image, repo, tag }) {
-		if (!image || image.__imp !== true) {
-			throw new Error(
-				"ociPush requires 'image' (an ociPull()/ociBuild() target handle)",
-			);
-		}
-		if (!repo) {
-			throw new Error("ociPush requires 'repo'");
-		}
-		if (!tag) {
-			throw new Error("ociPush requires 'tag'");
-		}
-		super({
-			kind: OciPush.kind,
-			attrs: { image, repo, tag },
-			deps: [{ target: image }],
-		});
-	}
-}
-
 /**
- * Declare an OCI image push target: publishes an ociPull()/ociBuild() image
+ * Declare an OCI image push label: publishes an ociPull()/ociBuild() image
  * to `repo:tag`.
  *
  * @category target
  * @param {object} opts
- * @param {object} opts.image An ociPull()/ociBuild() target handle.
+ * @param {object} opts.image An ociPull()/ociBuild() label handle.
  * @param {string} opts.repo Destination repository.
  * @param {string} opts.tag Destination tag.
- * @returns {object} Target handle.
+ * @returns {object} Exported label handle.
  */
-export function ociPush({ image, repo, tag }) {
-	return new OciPush({ image, repo, tag });
-}
+export const ociPush = extensible(function ociPush({ image, repo, tag }) {
+	if (!image || image.__imp_label !== true) {
+		throw new Error(
+			"ociPush requires 'image' (an ociPull()/ociBuild() label handle)",
+		);
+	}
+	if (!repo) {
+		throw new Error("ociPush requires 'repo'");
+	}
+	if (!tag) {
+		throw new Error("ociPush requires 'tag'");
+	}
+	const pushLabel = label({ data: { image, repo, tag } });
+	build(pushLabel, async function buildOciPush() {
+		return ociPushBuild(pushLabel);
+	});
+	return pushLabel;
+});
 
-export const ociPushBuild = product(
-	OciPush,
-	BUILD,
-	CRANE_TOOL,
+export const ociPushBuild = memo(
 	async function ociPushBuild(handle) {
-		const { ociLayoutPath, digest, outputDigest } = await productFor(
+		handle = oci_action_handle(handle);
+		const { ociLayoutPath, digest, outputDigest } = await ociImageBuildResult(
 			handle.attrs.image,
-			BUILD,
 		);
 		const craneToolSpec = await craneTool();
 		const registry = registryHost(handle.attrs.repo);
@@ -783,21 +778,8 @@ export const ociPushBuild = product(
 // above, not built from ociPull()+ociPush().
 // ---------------------------------------------------------------------------
 
-export class OciMirror extends Target {
-	static kind = "oci-mirror";
-	constructor({ from, to }) {
-		if (!from || !from.repo || !(from.tag || from.digest)) {
-			throw new Error("ociMirror requires 'from: { repo, tag|digest }'");
-		}
-		if (!to || !to.repo || !to.tag) {
-			throw new Error("ociMirror requires 'to: { repo, tag }'");
-		}
-		super({ kind: OciMirror.kind, attrs: { from, to } });
-	}
-}
-
 /**
- * Declare an OCI mirror target: re-hosts an image from one registry ref to
+ * Declare an OCI mirror label: re-hosts an image from one registry ref to
  * another via `crane copy` (registry-to-registry, no local disk
  * materialization) — e.g. mirroring a public upstream image into an internal
  * registry without a Dockerfile.
@@ -806,17 +788,25 @@ export class OciMirror extends Target {
  * @param {object} opts
  * @param {object} opts.from Source ref: `{ repo, tag }` or `{ repo, digest }`.
  * @param {object} opts.to Destination ref: `{ repo, tag }`.
- * @returns {object} Target handle.
+ * @returns {object} Exported label handle.
  */
-export function ociMirror({ from, to }) {
-	return new OciMirror({ from, to });
-}
+export const ociMirror = extensible(function ociMirror({ from, to }) {
+	if (!from || !from.repo || !(from.tag || from.digest)) {
+		throw new Error("ociMirror requires 'from: { repo, tag|digest }'");
+	}
+	if (!to || !to.repo || !to.tag) {
+		throw new Error("ociMirror requires 'to: { repo, tag }'");
+	}
+	const mirrorLabel = label({ data: { from, to } });
+	build(mirrorLabel, async function buildOciMirror() {
+		return ociMirrorBuild(mirrorLabel);
+	});
+	return mirrorLabel;
+});
 
-export const ociMirrorBuild = product(
-	OciMirror,
-	BUILD,
-	CRANE_TOOL,
+export const ociMirrorBuild = memo(
 	async function ociMirrorBuild(handle) {
+		handle = oci_action_handle(handle);
 		const craneToolSpec = await craneTool();
 		const { from, to } = handle.attrs;
 		const srcRef = from.digest
