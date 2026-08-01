@@ -1,18 +1,18 @@
 //! Trace-based change detection (#51).
 //!
 //! Replaces the glob-matching half of `changed::owning_targets` and all of
-//! `changed::expand_dependents` with an index built from the persisted memo
-//! layer (#50, `imp-store::memo`): every memoized call's recorded
+//! `changed::expand_dependents` with an index built from the workspace-scoped
+//! memo trace: every memoized call's recorded
 //! `input_specs` (config namespaces, files, FileSets it read) and `deps`
 //! (callee keys it invoked).
 //!
 //! A target's own per-goal action is itself a memoized call — `product()`
 //! (`imp_core.js`) wraps every registered product function in `memo()`
 //! before registering it. So "is target T stale for goal G" reduces to "is
-//! T's own persisted record for G's product function stale, transitively
+//! T's own trace record for G's product function stale, transitively
 //! through its `deps`" — no separate target-to-call mapping is needed,
-//! just recomputing that memoized call's persisted key for T's address,
-//! exactly as `memo()` computes it at call time (see `persisted_key`).
+//! just recomputing that memoized call's trace key for T's address,
+//! exactly as `memo()` computes it at call time (see `trace_key`).
 //!
 //! Matching is predictive, not retrospective: a FileSet's `input_specs` entry
 //! stores the glob/union/literal *spec*, and changed git paths are matched
@@ -31,15 +31,15 @@ use crate::loader::RulesSource;
 use crate::spike::{
     compile_globs, module_digest_for_site, scoped_configuration_digest, Target, Workspace,
 };
-use imp_store::memo::{list_memo_records, InputSpecRecord, MemoCacheRecord};
+use imp_store::memo_trace::{list_memo_trace_records, InputSpecRecord, MemoTraceRecord};
 
-/// In-memory index over every persisted memo record, rebuilt fresh each
-/// invocation by scanning `memo/*.json` (see `list_memo_records`) — there is
+/// In-memory index over every workspace memo trace, rebuilt fresh each
+/// invocation from the active workspace's trace scope — there is
 /// no separate on-disk index file. A cold cache (no records) yields an empty
 /// index, so every target is conservatively treated as stale (`target_is_stale`
 /// returns `true` for a key with no record) — "cold start runs everything".
 pub struct TraceIndex {
-    records: HashMap<String, MemoCacheRecord>,
+    records: HashMap<String, MemoTraceRecord>,
     /// Callee key -> caller keys, inverted from each record's own `deps`.
     reverse_deps: HashMap<String, Vec<String>>,
 }
@@ -52,8 +52,8 @@ pub struct LabelChangeContext<'a> {
 }
 
 impl TraceIndex {
-    pub fn build() -> Result<Self> {
-        let records = list_memo_records().context("enumerate persisted memo records")?;
+    pub fn build(workspace_root: &Path) -> Result<Self> {
+        let records = list_memo_trace_records(workspace_root).context("enumerate memo traces")?;
         let mut by_key = HashMap::with_capacity(records.len());
         let mut reverse_deps: HashMap<String, Vec<String>> = HashMap::new();
         for record in records {
@@ -71,7 +71,7 @@ impl TraceIndex {
         })
     }
 
-    pub fn records_for_function(&self, fn_id: &str) -> Vec<&MemoCacheRecord> {
+    pub fn records_for_function(&self, fn_id: &str) -> Vec<&MemoTraceRecord> {
         let mut records = self
             .records
             .values()
@@ -81,7 +81,7 @@ impl TraceIndex {
         records
     }
 
-    pub fn record(&self, key: &str) -> Option<&MemoCacheRecord> {
+    pub fn record(&self, key: &str) -> Option<&MemoTraceRecord> {
         self.records.get(key)
     }
 
@@ -124,7 +124,7 @@ impl TraceIndex {
     }
 
     /// BFS over `reverse_deps` from a directly-stale seed set: every
-    /// transitive caller is stale too, since its own persisted result was
+    /// transitive caller is stale too, since its own recorded computation was
     /// computed by calling (at least) this now-stale callee.
     fn stale_closure(&self, seeds: BTreeSet<String>) -> BTreeSet<String> {
         let mut reached = seeds.clone();
@@ -139,7 +139,7 @@ impl TraceIndex {
         reached
     }
 
-    /// The changed paths matched by at least one persisted record's
+    /// The changed paths matched by at least one trace record's
     /// `"fileset"`/`"read_file"`/`"run_input"` input spec — i.e. paths some
     /// computation is already known to read. Used to distinguish "no
     /// computation owns this file" (worth a warning) from "this file is read,
@@ -178,7 +178,7 @@ impl TraceIndex {
         covered
     }
 
-    /// The full stale set for this invocation: every persisted key that is
+    /// The full stale set for this invocation: every trace key that is
     /// itself invalidated by a changed path/config/module, plus every
     /// transitive caller of one.
     pub fn stale_keys(
@@ -199,7 +199,7 @@ impl TraceIndex {
     /// necessarily read the target's real inputs itself. For example
     /// `cargoTest` on a `workspaceMember: true` `CargoPackage` delegates
     /// entirely to a shared doc-test runner and never calls `sources(handle)`
-    /// — its own persisted record has no FileSet input spec covering the
+    /// — its own trace record has no FileSet input spec covering the
     /// crate's `.rs` files at all, while `cargoBuild`'s does. The real unit
     /// test binaries live on a separately `expand()`-minted target that
     /// doesn't exist in `workspace.targets` yet when this runs (expansion
@@ -264,7 +264,7 @@ impl TraceIndex {
                         args: context.args,
                         mode: context.mode,
                     };
-                    return match persisted_key_for_args(&fn_id, &(address, args)) {
+                    return match trace_key_for_args(&fn_id, &(address, args)) {
                         Err(_) => Some(format!(
                             "{goal}@{} has no stable trace key",
                             handler.identity
@@ -301,7 +301,7 @@ impl TraceIndex {
 
     /// Whether `target`'s `product` action (e.g. "build") needs to run:
     /// any tool registered for `(target.kind, product)` either has no
-    /// persisted record for this target's address (never built, or the
+    /// trace record for this target's address (never built, or the
     /// cache was cleared — conservatively selected) or its key is in `stale`.
     fn target_product_is_stale(
         &self,
@@ -322,7 +322,7 @@ impl TraceIndex {
                 product.to_owned(),
                 tool.clone(),
             ));
-            match fn_id.and_then(|fn_id| persisted_key(fn_id, &target.address).ok()) {
+            match fn_id.and_then(|fn_id| trace_key(fn_id, &target.address).ok()) {
                 // Key couldn't be recomputed (missing fn_id registration,
                 // which shouldn't happen for a live product) — conservatively stale.
                 None => true,
@@ -343,15 +343,15 @@ struct PersistKeyParts<'a> {
     args_digest: &'a str,
 }
 
-/// Recomputes the exact persisted-record key `memo()` (`imp_core.js`)
+/// Recomputes the exact trace-record key `memo()` (`imp_core.js`)
 /// writes for a call whose sole argument is the addressed target handle
 /// `address` — `JSON.stringify({fn_id, args_digest})` where `args_digest` is
 /// `_stable_digest([handle]).digest`, i.e. `[{"__imp_ref_addr":address}]`.
 /// Field order matters (must byte-match what JS wrote): both structs here
 /// serialize in declaration order regardless of serde_json's map-ordering
 /// feature, so this doesn't depend on any Cargo feature flag.
-fn persisted_key(fn_id: &str, address: &str) -> Result<String> {
-    persisted_key_for_args(
+fn trace_key(fn_id: &str, address: &str) -> Result<String> {
+    trace_key_for_args(
         fn_id,
         &[RefOnlyArg {
             __imp_ref_addr: address,
@@ -359,7 +359,7 @@ fn persisted_key(fn_id: &str, address: &str) -> Result<String> {
     )
 }
 
-fn persisted_key_for_args(fn_id: &str, args: &impl Serialize) -> Result<String> {
+fn trace_key_for_args(fn_id: &str, args: &impl Serialize) -> Result<String> {
     let args_digest = serde_json::to_string(args)?;
     Ok(serde_json::to_string(&PersistKeyParts {
         fn_id,
@@ -472,7 +472,7 @@ fn string_array(value: Option<&serde_json::Value>) -> Vec<String> {
 /// set). Recomputed with no mode-axis overrides — a record persisted from
 /// inside a `profile()`/`link()` overlay will therefore compare unequal
 /// here and be (safely, conservatively) treated as stale; reproducing the
-/// exact per-call overlay from a persisted record alone is unresolved, left
+/// exact per-call overlay from a trace record alone is unresolved, left
 /// as a known limitation rather than a blocker (over-selection, not under-).
 fn config_namespaces_spec_is_stale(
     spec: &InputSpecRecord,
@@ -507,21 +507,20 @@ mod tests {
         fn_id: &str,
         deps: Vec<&str>,
         input_specs: Vec<InputSpecRecord>,
-    ) -> MemoCacheRecord {
-        MemoCacheRecord {
-            version: imp_store::memo::MEMO_CACHE_VERSION,
+    ) -> MemoTraceRecord {
+        MemoTraceRecord {
+            version: imp_store::memo_trace::MEMO_TRACE_VERSION,
             key: key.to_owned(),
             fn_id: fn_id.to_owned(),
             module_digest: "unused-in-these-tests".to_owned(),
-            result: serde_json::Value::Null,
             input_specs,
             deps: deps.into_iter().map(str::to_owned).collect(),
         }
     }
 
     #[test]
-    fn persisted_key_matches_js_field_order_and_shape() {
-        let key = persisted_key("cargoBuild@rules/rust/index.js:503:2", "//app:app").unwrap();
+    fn trace_key_matches_js_field_order_and_shape() {
+        let key = trace_key("cargoBuild@rules/rust/index.js:503:2", "//app:app").unwrap();
         assert_eq!(
             key,
             r#"{"fn_id":"cargoBuild@rules/rust/index.js:503:2","args_digest":"[{\"__imp_ref_addr\":\"//app:app\"}]"}"#
@@ -560,7 +559,7 @@ mod tests {
             args: &[],
             mode: &mode,
         };
-        let key = persisted_key_for_args(&fn_id, &("//pkg:item", args)).unwrap();
+        let key = trace_key_for_args(&fn_id, &("//pkg:item", args)).unwrap();
         let root_record = record(&key, &fn_id, Vec::new(), Vec::new());
         let index = TraceIndex {
             records: HashMap::from([(key.clone(), root_record)]),

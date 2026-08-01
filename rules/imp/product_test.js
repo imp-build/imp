@@ -78,7 +78,7 @@ describe("product", () => {
 		await m(5);
 
 		// Both wrap the same function reference, so they share the same fn_id
-		// and share the same memo cache entry — second call is a hit.
+		// and share the same in-process memo entry — second call is a hit.
 		expect(calls).toBe(1);
 	});
 

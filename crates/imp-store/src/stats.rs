@@ -17,6 +17,7 @@ pub struct CountBytes {
 pub struct CacheStats {
     pub root: PathBuf,
     pub task_records: CountBytes,
+    pub memo_traces: CountBytes,
     pub cas_blobs: CountBytes,
     pub named_scopes: usize,
     pub named_bytes: u64,
@@ -135,6 +136,11 @@ fn count_files_recursive(path: &std::path::Path) -> usize {
 
 fn collect_at(root: &std::path::Path) -> CacheStats {
     let task_records = count_bytes(&root.join("tasks"));
+    let memo_trace_root = root.join("memo-traces");
+    let memo_traces = CountBytes {
+        count: count_files_recursive(&memo_trace_root),
+        bytes: crate::usage::dir_size_bytes(&memo_trace_root).unwrap_or(0),
+    };
     let cas_blobs = count_bytes(&root.join("cas").join("blobs"));
 
     let named_root = root.join("named");
@@ -143,7 +149,8 @@ fn collect_at(root: &std::path::Path) -> CacheStats {
         .unwrap_or(0);
     let named_bytes = crate::usage::dir_size_bytes(&named_root).unwrap_or(0);
 
-    let legacy_bytes = crate::usage::dir_size_bytes(&root.join("cas").join("trees")).unwrap_or(0);
+    let legacy_bytes = crate::usage::dir_size_bytes(&root.join("cas").join("trees")).unwrap_or(0)
+        + crate::usage::dir_size_bytes(&root.join("memo")).unwrap_or(0);
 
     let db_bytes = ["usage.db", "usage.db-wal", "usage.db-shm"]
         .iter()
@@ -160,6 +167,7 @@ fn collect_at(root: &std::path::Path) -> CacheStats {
     CacheStats {
         root: root.to_path_buf(),
         task_records,
+        memo_traces,
         cas_blobs,
         named_scopes,
         named_bytes,
@@ -223,6 +231,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let stats = collect_at(dir.path());
         assert_eq!(stats.task_records.count, 0);
+        assert_eq!(stats.memo_traces.count, 0);
         assert_eq!(stats.cas_blobs.count, 0);
         assert_eq!(stats.named_scopes, 0);
         assert_eq!(stats.named_bytes, 0);
@@ -242,6 +251,9 @@ mod tests {
         std::fs::write(root.join("tasks/a.json"), b"12345").unwrap();
         std::fs::write(root.join("tasks/b.json"), b"12").unwrap();
 
+        std::fs::create_dir_all(root.join("memo-traces/workspace-a")).unwrap();
+        std::fs::write(root.join("memo-traces/workspace-a/a.json"), b"123").unwrap();
+
         std::fs::create_dir_all(root.join("cas/blobs")).unwrap();
         std::fs::write(root.join("cas/blobs/deadbeef"), b"1234567").unwrap();
 
@@ -254,6 +266,8 @@ mod tests {
         let stats = collect_at(root);
         assert_eq!(stats.task_records.count, 2);
         assert_eq!(stats.task_records.bytes, 7);
+        assert_eq!(stats.memo_traces.count, 1);
+        assert_eq!(stats.memo_traces.bytes, 3);
         assert_eq!(stats.cas_blobs.count, 1);
         assert_eq!(stats.cas_blobs.bytes, 7);
         assert_eq!(stats.named_scopes, 2);

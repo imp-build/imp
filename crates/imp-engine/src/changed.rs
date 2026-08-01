@@ -6,15 +6,15 @@
 //! - The recorded JS module import graph (a changed rule module invalidates
 //!   every package that transitively imports it; a changed BUILD.js
 //!   re-selects exactly its own package).
-//! - The persisted memo trace (#51, `trace_changed::TraceIndex`): a target's
+//! - The workspace-scoped memo trace (#51, `trace_changed::TraceIndex`): a target's
 //!   own goal action is itself a memoized call, so "is target T stale for
-//!   goal G" reduces to walking T's own persisted record — and its
+//!   goal G" reduces to walking T's own trace record — and its
 //!   `input_specs` — for staleness, transitively through `deps`. This
 //!   replaces declared `sources:` glob ownership and `--changed-dependents`:
 //!   staleness is inherently transitive once ownership comes from the real
 //!   call graph, so there is no separate direct-vs-transitive mode anymore.
 //!
-//! Cold start (no persisted records yet) selects everything for the goal
+//! Cold start (no trace records yet) selects everything for the goal
 //! being run — correct and honest, not a bug to work around.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -107,7 +107,8 @@ pub fn changed_target_addresses(
         })
         .collect();
 
-    let trace = TraceIndex::build().context("build persisted-memo change-detection index")?;
+    let trace =
+        TraceIndex::build(workspace_root).context("build memo-trace change-detection index")?;
     let stale = trace.stale_keys(workspace_root, &files, &workspace.workspace_config);
     for target in workspace.targets.values() {
         if trace.target_is_stale(workspace, target, &stale) {
@@ -261,7 +262,7 @@ pub fn git_changed_files(workspace_root: &Path, since: &str) -> Result<Vec<Strin
 /// module invalidates every package that (transitively) imports it; a
 /// changed `imp.workspace.js` invalidates everything. Returns the address
 /// set plus the subset of `changed` this mechanism accounted for (the
-/// complement, minus whatever the persisted memo trace separately covers,
+/// complement, minus whatever the memo trace separately covers,
 /// is reported to the caller as `unowned`).
 pub(crate) fn module_graph_targets(
     workspace: &Workspace,

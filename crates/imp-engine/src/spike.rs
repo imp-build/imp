@@ -299,8 +299,8 @@ pub struct HostState {
     products: BTreeMap<(String, String), BTreeMap<String, String>>,
     product_modules: BTreeMap<(String, String, String), String>,
     /// `(kind, product, tool)` → the registered function's stable identity
-    /// (`_stable_function_id`), the same one `memo()` persists records under.
-    /// Lets change detection recompute a product's persisted key for a given
+    /// (`_stable_function_id`), the same one `memo()` traces records under.
+    /// Lets change detection recompute a product's trace key for a given
     /// target address without calling back into JS; see `trace_changed.rs`.
     product_fn_ids: BTreeMap<(String, String, String), String>,
     build_rules: BTreeMap<String, BuildRuleRender>,
@@ -484,23 +484,8 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
 /// `exec` functions can be invoked during task execution.
 #[allow(dead_code)]
 pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
-    load_workspace_with_memo_cache(root, false).await
-}
-
-/// Load a workspace while optionally bypassing persisted memo reads and
-/// writes for the complete workspace/goal lifecycle.
-pub async fn load_workspace_with_memo_cache(
-    root: &Path,
-    memo_cache_disabled: bool,
-) -> Result<LiveWorkspace> {
     let service = make_execution_service()?;
-    load_workspace_with_rules_and_service(
-        root,
-        RulesSource::from_env(),
-        service,
-        memo_cache_disabled,
-    )
-    .await
+    load_workspace_with_rules_and_service(root, RulesSource::from_env(), service).await
 }
 
 /// Like [`load_workspace`], but with an explicit [`RulesSource`] instead of
@@ -512,14 +497,13 @@ pub async fn load_workspace_with_rules(
     rules_source: RulesSource,
 ) -> Result<LiveWorkspace> {
     let service = make_execution_service()?;
-    load_workspace_with_rules_and_service(root, rules_source, service, false).await
+    load_workspace_with_rules_and_service(root, rules_source, service).await
 }
 
 async fn create_live_runtime(
     root: &Path,
     rules_source: RulesSource,
     service: Arc<dyn ExecutionService>,
-    memo_cache_disabled: bool,
 ) -> Result<LiveWorkspace> {
     imp_logging::ensure_installed();
 
@@ -530,7 +514,6 @@ async fn create_live_runtime(
     let state: Arc<Mutex<HostState>> = Arc::new(Mutex::new(HostState::default()));
     let exec_root: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
     let exec_no_cache = Arc::new(AtomicBool::new(false));
-    let memo_cache_disabled = Arc::new(AtomicBool::new(memo_cache_disabled));
     let trace_inputs = Arc::new(AtomicBool::new(false));
     let exec_sandbox_retention = Arc::new(AtomicU8::new(SandboxRetention::default().as_u8()));
     let scheduler: Arc<Mutex<Option<Arc<imp_scheduler::Scheduler>>>> = Arc::new(Mutex::new(None));
@@ -591,7 +574,6 @@ async fn create_live_runtime(
                     rules_source: rules_source.clone(),
                     exec_root: Arc::clone(&exec_root),
                     exec_no_cache: Arc::clone(&exec_no_cache),
-                    memo_cache_disabled: Arc::clone(&memo_cache_disabled),
                     trace_inputs: Arc::clone(&trace_inputs),
                     exec_sandbox_retention: Arc::clone(&exec_sandbox_retention),
                     scheduler: Arc::clone(&scheduler),
@@ -639,7 +621,6 @@ async fn create_live_runtime(
         ctx,
         exec_root,
         exec_no_cache,
-        memo_cache_disabled,
         trace_inputs,
         exec_sandbox_retention,
         scheduler,
@@ -661,12 +642,11 @@ async fn load_workspace_with_rules_and_service(
     root: &Path,
     rules_source: RulesSource,
     service: Arc<dyn ExecutionService>,
-    memo_cache_disabled: bool,
 ) -> Result<LiveWorkspace> {
     let root = root
         .canonicalize()
         .with_context(|| format!("canonicalize workspace root {}", root.display()))?;
-    let mut live = create_live_runtime(&root, rules_source, service, memo_cache_disabled).await?;
+    let mut live = create_live_runtime(&root, rules_source, service).await?;
     let state = Arc::clone(&live.host_state);
     let ctx = live.ctx.clone();
 
@@ -705,8 +685,11 @@ async fn load_workspace_with_rules_and_service(
     // same target set on a clean clone and on a working copy with ignored
     // paths present (#55). This also respects nested/global gitignore rules
     // and skips hidden directories (covering the old ".git"/".toolchain"/
-    // ".claude" denylist) for free.
+    // ".claude" denylist) for free. Hermetic execution supplies a source
+    // tree without `.git`, so workspace `.gitignore` files must not depend on
+    // repository metadata being present.
     let mut build_files: Vec<PathBuf> = ignore::WalkBuilder::new(&root)
+        .require_git(false)
         .build()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()) && e.file_name() == BUILD_FILE)
@@ -886,7 +869,6 @@ pub async fn load_minimal_rules_test_runtime(root: &Path) -> Result<LiveWorkspac
         root,
         RulesSource::from_env(),
         Arc::new(LocalExecutionService::new()),
-        true,
     )
     .await
 }
@@ -898,7 +880,6 @@ pub async fn load_workspace_rules_test_runtime(root: &Path) -> Result<LiveWorksp
         root,
         RulesSource::from_env(),
         Arc::new(LocalExecutionService::new()),
-        true,
     )
     .await
 }
@@ -1785,7 +1766,6 @@ struct RegisterGlobalsArgs {
     rules_source: RulesSource,
     exec_root: Arc<Mutex<Option<PathBuf>>>,
     exec_no_cache: Arc<AtomicBool>,
-    memo_cache_disabled: Arc<AtomicBool>,
     trace_inputs: Arc<AtomicBool>,
     exec_sandbox_retention: Arc<AtomicU8>,
     scheduler: Arc<Mutex<Option<Arc<imp_scheduler::Scheduler>>>>,
@@ -1825,7 +1805,6 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         rules_source,
         exec_root,
         exec_no_cache,
-        memo_cache_disabled,
         trace_inputs,
         exec_sandbox_retention,
         scheduler,
@@ -3509,7 +3488,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
 
     // ------------------------------------------------------------------
     // __host_module_digest(site) → hex digest of the declaring module's
-    // source content, backing the persisted-memo-record staleness check in
+    // source content, backing memo-trace staleness checks in
     // memo() (imp_core.js). `site` is a call-site string of the form
     // `<module>:<line>:<col>` (as minted by _stable_function_id, see
     // call_site_location); only the `<module>` portion is resolved.
@@ -3528,65 +3507,29 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_module_digest", host_module_digest)?;
 
     // ------------------------------------------------------------------
-    // __host_memo_read(key) → JSON MemoCacheRecord | undefined
-    // __host_memo_write(key, recordJson) → ()
+    // __host_memo_trace_write(recordJson) → ()
     //
-    // Backs the persisted memo layer (imp_core.js's memo()) — thin
-    // wrappers over imp_store::memo, no engine-side bookkeeping.
+    // Persists successful memo-call provenance for change detection. There is
+    // deliberately no read bridge: memo results are never replayed.
     // ------------------------------------------------------------------
-    // IMP_DISABLE_MEMO_CACHE opts a whole invocation out of persisted memo
-    // records — set by the rules-test sandbox (see rules/imp/test/index.js)
-    // since rules tests assert call counts on functions declared at a fixed
-    // test-file call site, which a persisted record from a previous test run
-    // would otherwise silently short-circuit. A handful of this crate's own
-    // #[test]s are vulnerable to the same cross-run leakage (they share the
-    // real, unscoped cache_root() across `cargo test` invocations, unlike
-    // run()'s task cache whose key embeds each test's own tempdir-unique
-    // argv) and set this env var directly at their start. Checked fresh on
-    // every call (not captured once at registration time): register_globals
-    // may run once per test's own LiveWorkspace, but if it ever ran earlier
-    // than a test's own env::set_var, a value captured up front would miss
-    // it.
-    let memo_cache_disabled_read = Arc::clone(&memo_cache_disabled);
-    let host_memo_read = Function::new(
-        ctx.clone(),
-        move |key: String| -> rquickjs::Result<Option<String>> {
-            if memo_cache_disabled_read.load(Ordering::SeqCst)
-                || std::env::var_os("IMP_DISABLE_MEMO_CACHE").is_some()
-            {
-                return Ok(None);
-            }
-            let record = imp_store::memo::read_memo_record(&key)
-                .map_err(|e| rquickjs::Error::new_loading_message("memoRead", format!("{e:#}")))?;
-            record
-                .map(|r| {
-                    serde_json::to_string(&r).map_err(|e| {
-                        rquickjs::Error::new_loading_message("memoRead", e.to_string())
-                    })
-                })
-                .transpose()
-        },
-    )?;
-    globals.set("__host_memo_read", host_memo_read)?;
-
-    let memo_cache_disabled_write = Arc::clone(&memo_cache_disabled);
-    let host_memo_write = Function::new(
+    let workspace_root_trace = workspace_root.clone();
+    let host_memo_trace_write = Function::new(
         ctx.clone(),
         move |record_json: String| -> rquickjs::Result<()> {
-            if memo_cache_disabled_write.load(Ordering::SeqCst)
-                || std::env::var_os("IMP_DISABLE_MEMO_CACHE").is_some()
-            {
-                return Ok(());
-            }
-            let record: imp_store::memo::MemoCacheRecord = serde_json::from_str(&record_json)
-                .map_err(|e| {
-                    rquickjs::Error::new_loading_message("memoWrite", format!("parse record: {e}"))
+            let record: imp_store::memo_trace::MemoTraceRecord =
+                serde_json::from_str(&record_json).map_err(|error| {
+                    rquickjs::Error::new_loading_message(
+                        "memoTraceWrite",
+                        format!("parse record: {error}"),
+                    )
                 })?;
-            imp_store::memo::write_memo_record(&record)
-                .map_err(|e| rquickjs::Error::new_loading_message("memoWrite", format!("{e:#}")))
+            imp_store::memo_trace::write_memo_trace_record(&workspace_root_trace, &record)
+                .map_err(|error| {
+                    rquickjs::Error::new_loading_message("memoTraceWrite", format!("{error:#}"))
+                })
         },
     )?;
-    globals.set("__host_memo_write", host_memo_write)?;
+    globals.set("__host_memo_trace_write", host_memo_trace_write)?;
 
     // ------------------------------------------------------------------
     // __host_workspace_targets(kind) → JSON [{ id, address, kind, attrs }]
@@ -4849,7 +4792,7 @@ pub(crate) fn module_name_from_site(site: &str) -> &str {
 }
 
 /// Content digest of the module a `<module>:<line>:<col>` call-site site
-/// string names — the same digest a persisted `MemoCacheRecord.module_digest`
+/// string names — the same digest stored in `MemoTraceRecord.module_digest`
 /// is compared against. Embedded (builtin) rule modules digest their bundled
 /// source text directly rather than reading from disk.
 pub(crate) fn module_digest_for_site(
@@ -6932,7 +6875,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persisted_memo_hit_revalidates_transitive_inputs() {
+    async fn memo_recomputation_observes_changed_transitive_inputs() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         let nonce = p
@@ -8181,6 +8124,68 @@ export const generated = toolUser();
             std::fs::read_to_string(p.join("out.txt")).unwrap(),
             "from-tool"
         );
+    }
+
+    #[tokio::test]
+    async fn memo_reentry_rematerializes_a_missing_named_cache_from_cas() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let marker = p.join("producer-runs.txt");
+        let marker_js = marker.display().to_string().replace('\\', "\\\\");
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            &format!(
+                r#"
+import {{ BUILD, cacheGet, cacheHas, memo, namedCache, output, product, run, target, targetKind, toolName }} from "imp:core";
+const K_acquire = targetKind("memo-named-cache-acquire");
+const TOOL = toolName("memo-named-cache-tool");
+namedCache({{ name: "memo-acquired-tool" }});
+
+const acquire = memo(async function acquire() {{
+    if (cacheHas("memo-acquired-tool", "v1")) {{
+        return cacheGet("memo-acquired-tool", "v1");
+    }}
+    await run({{
+        argv: ["sh", "-c", "printf x >> '{marker_js}'; mkdir -p .imp/acquired/bin; printf tool > .imp/acquired/bin/tool"],
+        outputs: [output(".imp/acquired", {{ kind: "directory", namedCache: {{ name: "memo-acquired-tool", key: "v1" }} }})],
+        materialize: false,
+        display: "install memo acquired tool",
+    }});
+    return cacheGet("memo-acquired-tool", "v1");
+}}, {{ display: "acquire test tool", level: "debug" }});
+
+export const build = product(K_acquire, BUILD, TOOL, async function build() {{
+    const path = await acquire();
+    if (!path || !cacheHas("memo-acquired-tool", "v1")) {{
+        throw new Error("acquire returned a missing named-cache path");
+    }}
+    return path;
+}});
+
+export const app = target({{ kind: "memo-named-cache-acquire", attrs: {{}} }});
+"#,
+            ),
+        );
+
+        let first = load_workspace(p).await.unwrap();
+        run_goal_live(&first, p, "build", &[":app".to_owned()])
+            .await
+            .unwrap();
+        drop(first);
+
+        let slot = imp_store::cache::named_cache_key_path(p, "memo-acquired-tool", "v1").unwrap();
+        assert!(slot.join("bin/tool").is_file());
+        std::fs::remove_dir_all(&slot).unwrap();
+
+        let second = load_workspace(p).await.unwrap();
+        run_goal_live(&second, p, "build", &[":app".to_owned()])
+            .await
+            .unwrap();
+
+        assert!(slot.join("bin/tool").is_file());
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "x");
     }
 
     #[tokio::test]
@@ -9980,12 +9985,6 @@ export const build = product(K_deferred_run_context_test, BUILD, toolName("defer
 
     #[tokio::test]
     async fn live_goal_no_cache_bypasses_run_task_cache() {
-        // Unlike run()'s task cache, whose key embeds this test's own
-        // tempdir-unique argv, a persisted memo record keys on fn_id +
-        // args_digest alone — a prior `cargo test` run's persisted record
-        // for this same build() function would otherwise short-circuit the
-        // second call this test relies on running for real.
-        std::env::set_var("IMP_DISABLE_MEMO_CACHE", "1");
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         let marker = p.join("runs.txt");
@@ -10105,7 +10104,7 @@ export const build = product(K_live_cache_test, BUILD, toolName("live-cache-test
     }
 
     #[tokio::test]
-    async fn traced_run_inputs_invalidate_persisted_memo_across_runtimes() {
+    async fn traced_run_inputs_are_recomputed_across_runtimes() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
@@ -11631,11 +11630,6 @@ export const a = mkTarget();
 
     #[tokio::test]
     async fn generate_build_product_creates_raw_build_files() {
-        // See live_goal_no_cache_bypasses_run_task_cache: generateBuild's
-        // scan is a plain memoized function whose args don't vary between
-        // runs of this test, so a persisted record from an earlier `cargo
-        // test` invocation would otherwise leak in as a stale hit.
-        std::env::set_var("IMP_DISABLE_MEMO_CACHE", "1");
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/odin";"#);

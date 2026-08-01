@@ -89,7 +89,7 @@ pub enum TaskEvent {
         /// `Some(true)`/`Some(false)` for jobs submitted via [`Scheduler::run`],
         /// based on whether [`RunContext::started`] was ever called (a cache
         /// hit never calls it). `None` for nodes emitted via [`Scheduler::emit`]
-        /// (JS memo nodes) — a memo cache hit never reaches `Done` at all, so a
+        /// (JS memo nodes) — an in-process memo hit never reaches `Done`, so a
         /// memo's `Done` is always a fresh evaluation and "cached" doesn't apply.
         cached: Option<bool>,
         /// Set alongside `cached: Some(true)` via

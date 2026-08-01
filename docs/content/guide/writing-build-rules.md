@@ -96,13 +96,12 @@ as `[8 targets]` and `{…}`. User-facing products and toolchain acquisition
 normally use `info`; internal source, resource, and metadata computations use
 `debug`. Memo failures are always reported at `error`.
 
-## Validate persisted memo inputs
+## Validate memo-trace inputs
 
-`imp <goal> --trace-inputs` re-runs memoized computations instead of serving
-persisted memo hits, then checks that the record written for each computation
-covers its tracked `run({ inputs })` declarations. FileSet inputs and explicit
-file, manifest, and directory inputs are content-digested; changing one
-invalidates the persisted result on a later invocation.
+`imp <goal> --trace-inputs` checks that the provenance record written for
+each memoized computation covers its tracked `run({ inputs })` declarations.
+FileSet inputs and explicit file, manifest, and directory inputs are
+content-digested so `--changed-since` can identify stale computations.
 
 ```sh
 imp build //apps/server:server --trace-inputs
@@ -112,10 +111,9 @@ This validates dependencies visible through the imp rule API. It does not
 trace arbitrary filesystem calls made by a subprocess or direct use of
 untracked JavaScript APIs.
 
-Use `--no-cache` to bypass the action cache while still allowing valid
-persisted memo hits. Use `--no-memo-cache` to recompute memoized rule logic
-without reading or writing persisted memo records; actions reached by that
-recomputation still use the action cache unless both flags are supplied.
+`memo()` deduplicates calls only within the current process. Every new
+invocation re-enters rule logic; expensive `run()` work is reused through the
+task cache and CAS. Use `--no-cache` to bypass that action cache.
 
 ## Parsing source with tree-sitter
 

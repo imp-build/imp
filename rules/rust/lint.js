@@ -68,7 +68,7 @@ import { digestOf, diffDigests, memo, output, paths, run } from "imp:core";
 // declaring genuinely different toolchains couldn't share one real
 // `cargo build/clippy --workspace` invocation either, memoized or not.
 // `fix` is part of the memo key (an extra argument), so a fix run and a
-// plain-check run of the same workspace never collide in the memo cache.
+// plain-check run of the same workspace never collide in the in-process memo table.
 const runWorkspaceClippy = memo(
 	async function runWorkspaceClippy(
 		workspaceRootRelative,

@@ -11,7 +11,8 @@
 //!
 //! Ordering matters: task records decide first, then live records *mark* the
 //! CAS blobs they can reach (outputs, tree nodes, output tree), and only
-//! unmarked blobs past the cutoff are swept. The cutoff doubles as the grace
+//! unmarked blobs past the cutoff are swept. Memo traces age independently
+//! and never pin artifacts. The cutoff doubles as the grace
 //! window: anything used (or created) more recently than `max_age` is never
 //! touched, which keeps concurrent builds safe without a lock. The residual
 //! race — a build re-using a blob that aged past the cutoff at the exact
@@ -56,7 +57,9 @@ pub struct GcPlan {
     pub undeclared_names: Vec<Candidate>,
     /// Individual expired `named/<scope>/<name>/<key>` slots.
     pub named_slots: Vec<Candidate>,
-    /// Known-legacy directories deleted outright (currently `cas/trees`).
+    /// Expired memo-trace records and trace scopes for vanished workspaces.
+    pub memo_traces: Vec<Candidate>,
+    /// Known-legacy directories deleted outright (`cas/trees` and `memo`).
     pub legacy: Vec<Candidate>,
     /// Already-empty scope/name container dirs under `named/` (left behind
     /// by an interrupted gc or pre-gc deletions). Containers emptied *by*
@@ -67,13 +70,14 @@ pub struct GcPlan {
 }
 
 impl GcPlan {
-    pub fn categories(&self) -> [(&'static str, &[Candidate]); 7] {
+    pub fn categories(&self) -> [(&'static str, &[Candidate]); 8] {
         [
             ("task records", self.task_records.as_slice()),
             ("cas blobs", self.cas_blobs.as_slice()),
             ("orphaned workspace scopes", self.orphaned_scopes.as_slice()),
             ("undeclared named caches", self.undeclared_names.as_slice()),
             ("stale named-cache slots", self.named_slots.as_slice()),
+            ("stale memo traces", self.memo_traces.as_slice()),
             ("legacy dirs", self.legacy.as_slice()),
             ("empty dirs", self.empty_dirs.as_slice()),
         ]
@@ -139,6 +143,7 @@ impl GcPlan {
             .iter()
             .chain(&self.undeclared_names)
             .chain(&self.named_slots)
+            .chain(&self.memo_traces)
             .chain(&self.legacy)
             .chain(&self.empty_dirs)
         {
@@ -150,6 +155,10 @@ impl GcPlan {
         let named = self.root.join("named");
         for candidate in &self.named_slots {
             remove_empty_ancestors(&candidate.path, &named);
+        }
+        let memo_traces = self.root.join("memo-traces");
+        for candidate in &self.memo_traces {
+            remove_empty_ancestors(&candidate.path, &memo_traces);
         }
         // Scope and name dirs, by contrast, are pure containers — slots only
         // exist at key depth — so empty ones are always safe to drop, however
@@ -267,6 +276,7 @@ fn plan_at(root: &Path, cutoff: i64) -> Result<GcPlan> {
     plan.marked_blobs = marked.len();
     plan_cas(root, &db, cutoff, &marked, &mut plan)?;
     plan_named(root, &db, cutoff, &mut plan)?;
+    plan_memo_traces(root, &db, cutoff, &mut plan);
 
     let trees = root.join("cas").join("trees");
     if trees.is_dir() {
@@ -278,16 +288,92 @@ fn plan_at(root: &Path, cutoff: i64) -> Result<GcPlan> {
         });
     }
 
+    let old_memo = root.join("memo");
+    if old_memo.is_dir() {
+        plan.legacy.push(Candidate {
+            id: "memo (legacy persisted-result cache)".to_owned(),
+            path: old_memo.clone(),
+            last_used_at: 0,
+            size_bytes: crate::usage::dir_size_bytes(&old_memo).unwrap_or(0),
+        });
+    }
+
     for candidates in [
         &mut plan.task_records,
         &mut plan.cas_blobs,
         &mut plan.orphaned_scopes,
         &mut plan.undeclared_names,
         &mut plan.named_slots,
+        &mut plan.memo_traces,
     ] {
         candidates.sort_by_key(|c| c.last_used_at);
     }
     Ok(plan)
+}
+
+/// Age result-free memo provenance independently from CAS and named caches.
+/// Losing a trace only makes change detection conservatively select more
+/// work, so traces never act as reachability roots for either store.
+fn plan_memo_traces(root: &Path, db: &Database, cutoff: i64, plan: &mut GcPlan) {
+    let traces = root.join("memo-traces");
+    let Ok(scopes) = std::fs::read_dir(&traces) else {
+        return;
+    };
+    for scope_entry in scopes.flatten() {
+        let scope_path = scope_entry.path();
+        if !scope_path.is_dir() {
+            continue;
+        }
+        let Ok(scope) = scope_entry.file_name().into_string() else {
+            continue;
+        };
+        if db
+            .workspaces
+            .get(&scope)
+            .is_some_and(|workspace| !Path::new(workspace).exists())
+        {
+            plan.memo_traces.push(Candidate {
+                id: format!("memo-traces/{scope}"),
+                last_used_at: 0,
+                size_bytes: crate::usage::dir_size_bytes(&scope_path).unwrap_or(0),
+                path: scope_path,
+            });
+            continue;
+        }
+        let Ok(records) = std::fs::read_dir(&scope_path) else {
+            continue;
+        };
+        let records: Vec<_> = records.flatten().collect();
+        if records.is_empty() {
+            plan.memo_traces.push(Candidate {
+                id: format!("memo-traces/{scope} (empty)"),
+                path: scope_path,
+                last_used_at: 0,
+                size_bytes: 0,
+            });
+            continue;
+        }
+        for record in records {
+            let path = record.path();
+            if path.is_file() {
+                let last_used_at = mtime_unix(&path);
+                if last_used_at < cutoff {
+                    plan.memo_traces.push(Candidate {
+                        id: format!(
+                            "memo-traces/{scope}/{}",
+                            record.file_name().to_string_lossy()
+                        ),
+                        path,
+                        last_used_at,
+                        size_bytes: record
+                            .metadata()
+                            .map(|metadata| metadata.len())
+                            .unwrap_or(0),
+                    });
+                }
+            }
+        }
+    }
 }
 
 /// usage.db contents, loaded once. Missing db or tables mean empty maps —
@@ -827,11 +913,53 @@ mod tests {
     }
 
     #[test]
+    fn memo_traces_age_independently_and_legacy_results_are_removed() {
+        let f = Fixture::new();
+        let scope = f.root.join("memo-traces/workspace-a");
+        std::fs::create_dir_all(&scope).unwrap();
+        std::fs::write(scope.join("old.json"), b"trace").unwrap();
+        std::fs::create_dir_all(f.root.join("memo")).unwrap();
+        std::fs::write(f.root.join("memo/old.json"), b"result").unwrap();
+
+        let plan = plan_at(&f.root, i64::MAX).unwrap();
+        assert_eq!(plan.memo_traces.len(), 1);
+        assert!(plan
+            .legacy
+            .iter()
+            .any(|candidate| candidate.id.contains("persisted-result")));
+
+        let outcome = plan.execute();
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        assert!(!f.root.join("memo-traces/workspace-a").exists());
+        assert!(!f.root.join("memo").exists());
+    }
+
+    #[test]
+    fn fresh_memo_trace_survives_and_does_not_pin_cas() {
+        let f = Fixture::new();
+        let scope = f.root.join("memo-traces/workspace-a");
+        std::fs::create_dir_all(&scope).unwrap();
+        std::fs::write(scope.join("fresh.json"), b"trace").unwrap();
+        let dead = f.blob(b"not referenced by traces", OLD);
+
+        let plan = plan_at(&f.root, 0).unwrap();
+        assert!(plan.memo_traces.is_empty());
+        assert!(plan.cas_blobs.is_empty());
+
+        let plan = f.plan();
+        assert_eq!(plan.cas_blobs.len(), 1);
+        assert_eq!(plan.cas_blobs[0].id, dead);
+    }
+
+    #[test]
     fn orphaned_workspace_scope_deletes_wholesale() {
         let f = Fixture::new();
         let slot = f.root.join("named/deadbeef/tool-cache/v1");
         std::fs::create_dir_all(&slot).unwrap();
         std::fs::write(slot.join("bin"), b"x").unwrap();
+        let trace_scope = f.root.join("memo-traces/deadbeef");
+        std::fs::create_dir_all(&trace_scope).unwrap();
+        std::fs::write(trace_scope.join("record.json"), b"trace").unwrap();
         f.conn
             .execute(
                 "INSERT INTO workspaces VALUES ('deadbeef', '/nonexistent/checkout', ?1)",
@@ -842,8 +970,10 @@ mod tests {
 
         let plan = f.plan();
         assert_eq!(plan.orphaned_scopes.len(), 1);
+        assert_eq!(plan.memo_traces.len(), 1);
         plan.execute();
         assert!(!f.root.join("named/deadbeef").exists());
+        assert!(!f.root.join("memo-traces/deadbeef").exists());
         let rows: i64 = f
             .conn
             .query_row("SELECT COUNT(*) FROM workspaces", [], |row| row.get(0))

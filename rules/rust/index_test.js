@@ -370,7 +370,7 @@ describe("rust rules", () => {
 	test("cargoTest excludes disabled packages from a shared workspace doc-test run", async () => {
 		await withRustHost(async (host) => {
 			// Use a distinct version so focused/repeated rule-test runs cannot
-			// reuse another workspace-metadata fixture's persisted memo entry.
+			// share in-process workspace-metadata state with another fixture.
 			rustToolchain("1.93.1", { default: true, unverified: true });
 			gccToolchain("2025.08-1", { default: true, unverified: true });
 			const restoreMetadata = fakeWorkspaceMetadata(host);

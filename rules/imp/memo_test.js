@@ -276,13 +276,13 @@ describe("memo", () => {
 		expect(threw).toBe(true);
 	});
 
-	// #58: stable label/target reference identity in persisted memo keys.
+	// #58: stable label/target reference identity in durable trace keys.
 	// _stable_digest already implements the decided policy (exported handles
 	// digest by workspace address; anonymous/dynamic handles are rejected
-	// from persistence, never content-addressed as a substitute) — these
+	// from durable traces, never content-addressed as a substitute) — these
 	// tests lock that behavior in, since nothing previously asserted on it.
 	describe("stable label/target reference identity (#58)", () => {
-		test("reordering unrelated target construction does not change an addressed handle's persisted key", async () => {
+		test("reordering unrelated target construction does not change an addressed handle's trace key", async () => {
 			const fn = memo(
 				async function subjectFn(h) {
 					return h.__id;
@@ -290,7 +290,7 @@ describe("memo", () => {
 				{ display: "subjectFn {0}", level: "debug" },
 			);
 
-			async function persistKeyFor(buildSubjectLast) {
+			async function traceKeyFor(buildSubjectLast) {
 				resetMemoState();
 				const others = [
 					target({ kind: "memo-stable-test", attrs: {} }),
@@ -306,19 +306,19 @@ describe("memo", () => {
 				}
 				return withStubbedAddress(addresses, async () => {
 					await fn(subject);
-					const { persist_keys } = getMemoTrace();
-					return Object.values(persist_keys)[0];
+					const { trace_keys } = getMemoTrace();
+					return Object.values(trace_keys)[0];
 				});
 			}
 
-			const keyConstructedFirst = await persistKeyFor(false);
-			const keyConstructedLast = await persistKeyFor(true);
+			const keyConstructedFirst = await traceKeyFor(false);
+			const keyConstructedLast = await traceKeyFor(true);
 
 			expect(keyConstructedFirst).not.toBe(null);
 			expect(keyConstructedFirst).toBe(keyConstructedLast);
 		});
 
-		test("an anonymous (unaddressed) handle disables persistence but not in-process reuse", async () => {
+		test("an anonymous handle disables durable tracing but not in-process reuse", async () => {
 			resetMemoState();
 			let calls = 0;
 			const fn = memo(
@@ -334,8 +334,8 @@ describe("memo", () => {
 			await fn(anon);
 			expect(calls).toBe(1); // in-process reuse still works
 
-			const { persist_keys, trace } = getMemoTrace();
-			expect(Object.values(persist_keys)[0]).toBe(null);
+			const { trace_keys, trace } = getMemoTrace();
+			expect(Object.values(trace_keys)[0]).toBe(null);
 			expect(trace.some((e) => e.event === "memo-unaddressed-skip")).toBe(true);
 		});
 
@@ -364,7 +364,7 @@ describe("memo", () => {
 				{ [addressed.__id]: "//pkg:addressed" },
 				async () => {
 					await fn(wrap(addressed));
-					return Object.values(getMemoTrace().persist_keys)[0];
+					return Object.values(getMemoTrace().trace_keys)[0];
 				},
 			);
 			expect(key1).not.toBe(null);
@@ -374,33 +374,21 @@ describe("memo", () => {
 				{ [addressed.__id]: "//pkg:addressed" },
 				async () => {
 					await fn(wrap(addressed));
-					return Object.values(getMemoTrace().persist_keys)[0];
+					return Object.values(getMemoTrace().trace_keys)[0];
 				},
 			);
 			expect(key2).toBe(key1);
 
 			resetMemoState();
 			await fn(wrap(anon));
-			expect(Object.values(getMemoTrace().persist_keys)[0]).toBe(null);
+			expect(Object.values(getMemoTrace().trace_keys)[0]).toBe(null);
 		});
 
-		test("resetMemoState() plus an independently-constructed, equivalently-addressed handle yields a persisted-cache hit", async () => {
-			// rules-test sandboxes run with IMP_DISABLE_MEMO_CACHE=1 (see
-			// rules/imp/test/index.js's test_product) so persisted records
-			// from one test file's run never leak into another's call-count
-			// assertions — real __host_memo_read/write are no-ops here. Stub
-			// them directly (same technique as withStubbedAddress) with an
-			// in-memory store, so this test exercises the real
-			// _load_persisted_memo/_persist_memo_result/
-			// _validate_persisted_memo_record logic under test, independent of
-			// that sandbox-wide opt-out.
-			const memoStore = new Map();
-			const originalRead = globalThis.__host_memo_read;
-			const originalWrite = globalThis.__host_memo_write;
-			globalThis.__host_memo_read = (key) => memoStore.get(key);
-			globalThis.__host_memo_write = (recordJson) => {
-				const record = JSON.parse(recordJson);
-				memoStore.set(record.key, recordJson);
+		test("resetMemoState() recomputes an equivalently-addressed call and rewrites the same trace key", async () => {
+			const records = [];
+			const originalWrite = globalThis.__host_memo_trace_write;
+			globalThis.__host_memo_trace_write = (recordJson) => {
+				records.push(JSON.parse(recordJson));
 			};
 
 			try {
@@ -421,9 +409,7 @@ describe("memo", () => {
 				);
 				expect(calls).toBe(1);
 
-				// Simulates a fresh process: clears the in-process table/trace,
-				// but leaves persisted records (the fake store above) untouched
-				// — resetMemoState() never touches __host_memo_read/write.
+				// Simulates a fresh process by clearing the in-process table.
 				resetMemoState();
 
 				// A different object/id (as a separate process would allocate),
@@ -434,15 +420,39 @@ describe("memo", () => {
 					() => fn(handleB),
 				);
 
-				// The persisted record from the first call is keyed on the
-				// address, not the process-local __id, so the underlying fn
-				// must not re-run.
-				expect(calls).toBe(1);
-				const { trace } = getMemoTrace();
-				expect(trace.some((e) => e.event === "persisted-hit")).toBe(true);
+				// Cross-process result replay is deliberately absent, but the
+				// durable trace key still follows the stable address.
+				expect(calls).toBe(2);
+				expect(records.length).toBe(2);
+				expect(records[1].key).toBe(records[0].key);
+				expect(records[0].result).toBe(undefined);
 			} finally {
-				globalThis.__host_memo_read = originalRead;
-				globalThis.__host_memo_write = originalWrite;
+				globalThis.__host_memo_trace_write = originalWrite;
+			}
+		});
+
+		test("trace records do not serialize memoized results", async () => {
+			const records = [];
+			const originalWrite = globalThis.__host_memo_trace_write;
+			globalThis.__host_memo_trace_write = (recordJson) => {
+				records.push(JSON.parse(recordJson));
+			};
+			try {
+				resetMemoState();
+				const fn = memo(
+					async function liveResult() {
+						return {
+							map: new Map([["key", "value"]]),
+							handle: target({ kind: "memo-live-result", attrs: {} }),
+						};
+					},
+					{ display: "live result", level: "debug" },
+				);
+				await fn();
+				expect(records.length).toBe(1);
+				expect(records[0].result).toBe(undefined);
+			} finally {
+				globalThis.__host_memo_trace_write = originalWrite;
 			}
 		});
 	});

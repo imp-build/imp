@@ -560,15 +560,8 @@ export const test_product = product(
 			// PATH at all (see sandbox_command_env, imp-execution/src/exec.rs).
 			tools,
 			// Share the host cache so toolchain named-cache lookups hit instead of
-			// re-downloading into the sandbox's pinned HOME. Persisted memo
-			// records are disabled here specifically: rules tests assert
-			// call counts on functions declared at a fixed test-file call
-			// site, so a persisted record from a previous test run would
-			// silently short-circuit a "fresh" run's first call.
-			env: [
-				`IMP_CACHE_DIR=${globalThis.__imp_cache_dir}`,
-				"IMP_DISABLE_MEMO_CACHE=1",
-			],
+			// re-downloading into the sandbox's pinned HOME.
+			env: [`IMP_CACHE_DIR=${globalThis.__imp_cache_dir}`],
 			display: `test JS rules ${handle.attrs.root}`,
 			sandbox: true,
 			impure: false,
