@@ -1,9 +1,5 @@
 import { describe, expect, test } from "//rules/imp/test";
-import {
-	odinPackageFmt,
-	odinTestPackageFmt,
-	fmtGoal,
-} from "//rules/workflows/fmt";
+import { odinfmt, fmtGoal } from "//rules/workflows/fmt";
 import { product, target, FMT, targetKind, toolName } from "imp:core";
 const TEST_TOOL = toolName("fmt-test-tool");
 const K_fmt_goal_test_clean = targetKind("fmt-goal-test-clean");
@@ -13,9 +9,8 @@ const K_fmt_goal_test_all_clean = targetKind("fmt-goal-test-all-clean");
 const K_fmt_goal_test_reformat = targetKind("fmt-goal-test-reformat");
 
 describe("fmt workflow", () => {
-	test("fmt products are declared for odin-package and odin-test-package", () => {
-		expect(typeof odinPackageFmt).toBe("function");
-		expect(typeof odinTestPackageFmt).toBe("function");
+	test("odinfmt attaches fmt to odinPackage/odinTestPackage labels", () => {
+		expect(typeof odinfmt).toBe("function");
 	});
 
 	async function withFakeGoalFlags(flags, fn) {

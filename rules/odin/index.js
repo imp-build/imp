@@ -2,7 +2,8 @@ import {
 	field,
 	defineConfigSchema,
 	allUnowned,
-	Target,
+	label,
+	extensible,
 	artifact,
 	glob,
 	file_set,
@@ -11,26 +12,22 @@ import {
 	memo,
 	output,
 	output_path,
-	product,
 	productFor,
 	registerBuildRule,
 	run,
-	sourcesField,
-	logDebug,
 	configuration,
-	hydrateTarget,
+	labelAddress,
 	targetAddress,
-	targetOutputSlug,
 	targetRef,
-	workspaceTargets,
 	logInfo,
 	writeWorkspace,
 	runTemplate,
-	BUILD,
-	TEST,
-	RUN,
-	LINT,
-	PACKAGE,
+	runFromTemplate,
+	build as attachBuild,
+	test as attachTest,
+	lint as attachLint,
+	runGoal as attachRun,
+	packageGoal as attachPackage,
 } from "imp:core";
 import { ODIN_LINKER } from "//rules/odin/products";
 
@@ -62,10 +59,7 @@ export const odinConfigSchema = {
 
 defineConfigSchema("odin", odinConfigSchema);
 
-import {
-	registerBuildGenerator,
-	GENERATE_BUILD,
-} from "//rules/workflows/generate_build";
+import { registerBuildGenerator } from "//rules/workflows/generate_build";
 
 import {
 	defaultOdinToolchain,
@@ -81,12 +75,11 @@ import { cmake_resources } from "//rules/c/cmake";
 
 import { defaultGccToolchain, gccTool } from "//rules/c/gcc";
 
-// Registers the "run" goal's single-target pre-flight callback
-// (rules/workflows/run.js). Imported here — not just from this repo's own
-// imp.workspace.js — so odinRun's safety guard is always wired up for any
-// consumer that imports //rules/odin, regardless of whether they also
-// happen to import the workflows layer. Side-effect only; nothing exported
-// from it is used in this file.
+// Registers the "run" goal's callback (rules/workflows/run.js) for consumers
+// that import Odin build rules without importing the workflows layer
+// explicitly. Odin's own "run" goal handler is attached directly to each
+// odinPackage() label below (see attachRun) and does not depend on this
+// registration, but other, still-Target-based run products may.
 import "//rules/workflows/run";
 
 // Registers the "build" goal's artifact summary callback for consumers that
@@ -118,7 +111,7 @@ registerBuildRule({
 });
 
 // ---------------------------------------------------------------------------
-// Memo functions — source discovery
+// Label handle helpers
 // ---------------------------------------------------------------------------
 
 function normalize_workspace_path(path) {
@@ -133,20 +126,29 @@ function normalize_workspace_path(path) {
 	return parts.length === 0 ? "." : parts.join("/");
 }
 
+// Returns the workspace address for either a label() handle, an
+// odin_package_handle() action-handle wrapper around one, or a real Target
+// handle (e.g. odinToolchain()) — or null when the handle is anonymous/
+// unaddressed. Mirrors rules/rust/index.js's cargoPackageAddress.
+function safe_address(handle) {
+	if (!handle) return null;
+	try {
+		if (handle.__imp_label === true) return labelAddress(handle);
+		if (handle.label && handle.label.__imp_label === true) {
+			return labelAddress(handle.label);
+		}
+		if (handle.__imp === true) return targetAddress(handle);
+	} catch (_) {
+		// fall through
+	}
+	return null;
+}
+
 function declaring_directory(handle) {
-	const address = safe_target_address(handle);
+	const address = safe_address(handle);
 	if (!address || !address.startsWith("//")) return ".";
 	const scope = address.slice(2).split(":")[0];
 	return scope.length === 0 ? "." : scope;
-}
-
-function safe_target_address(handle) {
-	if (!handle || handle.__imp !== true) return null;
-	try {
-		return targetAddress(handle);
-	} catch (_) {
-		return null;
-	}
 }
 
 export function declared_path(handle, path = ".") {
@@ -170,7 +172,13 @@ function package_exclude(attrs) {
 
 function normalize_deps(deps) {
 	return deps
-		.map((d) => (d && d.__imp ? d : d && d.target ? d.target : null))
+		.map((d) =>
+			d && (d.__imp === true || d.__imp_label === true)
+				? d
+				: d && d.target
+					? d.target
+					: null,
+		)
 		.filter(Boolean);
 }
 
@@ -187,10 +195,46 @@ function collection_dep_handles(collections) {
 		: [];
 }
 
+// odinPackage()/odinTestPackage()/odinGen() return bare label() handles,
+// which carry no .kind and no dependency-edge list of their own (unlike the
+// Target handles they replace). This wraps a label into an "action handle"
+// shape — { __id, label, kind, attrs, deps } — that every helper below can
+// keep reading the same way it read a Target handle's { attrs, deps, kind }.
+// `kind` is synthesized from the label's own private __odinKind marker so
+// that dependency-graph code walking a package's deps can keep comparing
+// `dep.kind === "odin-package"` etc, unchanged, for both raw Target deps
+// (resource-package, cmake-lib — untouched by this migration) and Odin's own
+// label deps. Idempotent: passing an already-wrapped handle, or a real
+// Target handle, returns it unchanged. Mirrors rules/rust/index.js's
+// package_handle().
+export function odin_package_handle(handle) {
+	if (!handle || handle.__imp_label !== true) return handle;
+	const data = handle.data;
+	const kind =
+		data.__odinKind === "package"
+			? "odin-package"
+			: data.__odinKind === "testPackage"
+				? "odin-test-package"
+				: "odin-gen";
+	return {
+		__id: handle.__id,
+		label: handle,
+		kind,
+		attrs: data,
+		deps: [
+			...(data.toolchain ? [{ handle: data.toolchain, mode: "tool" }] : []),
+			...(data.deps || []).map((target) => ({ handle: target })),
+			...collection_dep_handles(data.collections).map((target) => ({
+				handle: target,
+			})),
+		],
+	};
+}
+
 /**
  * Return a FileSet of the package's own source files.
  *
- * @param {object} handle Target handle returned by odinPackage().
+ * @param {object} handle Label handle returned by odinPackage().
  * @returns {Promise<object>} FileSet descriptor.
  */
 function own_sources_value(handle) {
@@ -203,7 +247,7 @@ function own_sources_value(handle) {
 
 export const own_sources = memo(
 	async function own_sources(handle) {
-		return own_sources_value(handle);
+		return own_sources_value(odin_package_handle(handle));
 	},
 	{ display: "own sources {0}", level: "debug" },
 );
@@ -211,18 +255,22 @@ export const own_sources = memo(
 /**
  * Return a FileSet of the package's own sources plus all transitive odin-package dep sources.
  *
- * @param {object} handle Target handle returned by odinPackage().
+ * @param {object} handle Label handle returned by odinPackage().
  * @returns {Promise<object>} FileSet descriptor.
  */
 export const sources = memo(
 	async function sources(handle) {
-		const sets = await collect_source_sets(handle, new Set());
+		const sets = await collect_source_sets(
+			odin_package_handle(handle),
+			new Set(),
+		);
 		return sets.length === 1 ? sets[0] : file_set.union(...sets);
 	},
 	{ display: "sources {0}", level: "debug" },
 );
 
 async function collect_source_sets(handle, seen) {
+	handle = odin_package_handle(handle);
 	const key = dep_key(handle);
 	if (seen.has(key)) return [];
 	seen.add(key);
@@ -237,7 +285,7 @@ async function collect_source_sets(handle, seen) {
 /**
  * Return a FileSet of all resource-package dep files reachable from an Odin package.
  *
- * @param {object} handle Target handle returned by odinPackage().
+ * @param {object} handle Label handle returned by odinPackage().
  * @returns {Promise<Array>} A list of run()-inputs entries — FileSets
  * (resource-package deps, real workspace files) and/or `{kind:"digest"}`
  * objects (cmake-lib deps, whose build output is never materialized) — to
@@ -245,19 +293,21 @@ async function collect_source_sets(handle, seen) {
  */
 export const resources = memo(
 	async function resources(handle) {
-		return collect_resource_sets(handle, new Set());
+		return collect_resource_sets(odin_package_handle(handle), new Set());
 	},
 	{ display: "Odin resources {0}", level: "debug" },
 );
 
 async function collect_resource_sets(handle, seen) {
+	handle = odin_package_handle(handle);
 	const key = dep_key(handle);
 	if (seen.has(key)) return [];
 	seen.add(key);
 
 	const sets = [];
-	for (const dep of hydrateTarget(handle).deps.map((dep) => dep.handle)) {
-		if (!dep) continue;
+	for (const rawDep of handle.deps.map((dep) => dep.handle)) {
+		if (!rawDep) continue;
+		const dep = odin_package_handle(rawDep);
 		if (dep.kind === "resource-package") {
 			sets.push(await resource_package_sources(dep));
 		} else if (dep.kind === "cmake-lib") {
@@ -344,11 +394,12 @@ function has_collection_config(collections) {
 /**
  * Return the `-collection:name=path` flags configured for an Odin package.
  *
- * @param {object} handle Target handle returned by odinPackage().
+ * @param {object} handle Label handle returned by odinPackage().
  * @returns {Promise<string[]>}
  */
 export const collection_flags = memo(
 	async function collection_flags(handle) {
+		handle = odin_package_handle(handle);
 		return Array.from(
 			collection_map(handle),
 			([name, path]) => `-collection:${name}=${path}`,
@@ -359,6 +410,7 @@ export const collection_flags = memo(
 
 export const collection_dirs = memo(
 	async function collection_dirs(handle) {
+		handle = odin_package_handle(handle);
 		const seen = new Set();
 		const dirs = [];
 		for (const path of collection_map(handle).values()) {
@@ -563,24 +615,13 @@ function infer_package_path(pkg, sourceFiles) {
 }
 
 function package_spec_from_handle(handle) {
+	handle = odin_package_handle(handle);
 	return {
-		address: safe_target_address(handle),
+		address: safe_address(handle),
 		handle,
 		path: declared_path(handle, handle.attrs.path || "."),
 		srcs: package_srcs(handle.attrs),
 		exclude: package_exclude(handle.attrs),
-	};
-}
-
-function package_spec_from_workspace_target(target) {
-	const handle = target.handle;
-	const attrs = { ...target.attrs, ...handle.attrs };
-	return {
-		address: target.address,
-		handle,
-		path: declared_path(handle, handle.attrs.path || "."),
-		srcs: package_srcs(attrs),
-		exclude: package_exclude(attrs),
 	};
 }
 
@@ -623,15 +664,40 @@ export const imports = memo(
 
 export const odinPackageAnalysis = memo(
 	async function odinPackageAnalysis(handle) {
+		handle = odin_package_handle(handle);
 		return analysis_for_package(package_spec_from_handle(handle));
 	},
 	{ display: "odin Package Analysis {0}", level: "debug" },
 );
 
+// Labels declared so far by odinPackage()/odinTestPackage(), in declaration
+// order. Backs both dependency-inference's package_index() (below) and
+// generate-build's existing-package dedup — labels have no workspace-wide
+// enumeration API of their own (unlike workspaceTargets(kind) for Target
+// subclasses), so each reusable factory tracks its own instances. Mirrors
+// rules/rust/index.js's _cargoPackageLabels/cargoPackageHandles().
+const _odinPackageLabels = [];
+const _odinTestPackageLabels = [];
+
+/**
+ * Every odinPackage() label declared in the workspace so far, as
+ * action-handle wrappers sorted by address. For consumers (e.g.
+ * rules/workflows/vs.js) that used to enumerate `workspaceTargets("odin-package")`.
+ *
+ * @returns {Array<object>}
+ */
+export function odinPackageHandles() {
+	return _odinPackageLabels
+		.map(odin_package_handle)
+		.sort((a, b) =>
+			(safe_address(a) || "").localeCompare(safe_address(b) || ""),
+		);
+}
+
 export const package_index = memo(
 	async function package_index() {
 		return build_package_index(
-			workspaceTargets("odin-package").map(package_spec_from_workspace_target),
+			_odinPackageLabels.map(package_spec_from_handle),
 		);
 	},
 	{ display: "package index", level: "debug" },
@@ -688,6 +754,7 @@ function infer_dep_entries(
 
 export const inferred_deps = memo(
 	async function inferred_deps(handle) {
+		handle = odin_package_handle(handle);
 		const index = await package_index();
 		const pkg = package_spec_from_handle(handle);
 		const analysis = await odinPackageAnalysis(handle);
@@ -699,17 +766,17 @@ export const inferred_deps = memo(
 );
 
 function dep_key(handle) {
-	const address = safe_target_address(handle);
+	const address = safe_address(handle);
 	return address || `#${handle.__id}`;
 }
 
 export const effective_deps = memo(
 	async function effective_deps(handle) {
+		handle = odin_package_handle(handle);
 		const deps = new Map();
-		for (const dep of (handle.attrs.deps || []).filter(
-			(h) => h && h.kind === "odin-package",
-		)) {
-			deps.set(dep_key(dep), dep);
+		for (const raw of handle.attrs.deps || []) {
+			const dep = odin_package_handle(raw);
+			if (dep.kind === "odin-package") deps.set(dep_key(dep), dep);
 		}
 		for (const dep of await inferred_deps(handle)) {
 			deps.set(dep_key(dep), dep);
@@ -732,8 +799,19 @@ export const tool = memo(
 	{ display: "tool {0}", level: "debug" },
 );
 
+// Stable, path-safe slug derived from a package label's own address — same
+// role as the old Target-only targetOutputSlug(), reimplemented locally
+// since labels have no shared engine-side equivalent. Mirrors
+// rules/rust/index.js's cargoPackageOutputSlug.
+function odinPackageOutputSlug(handle) {
+	const address = safe_address(handle);
+	return address
+		? address.replace(/^\/\//, "").replace(/[:/]/g, "_")
+		: `anon-${handle.__id}`;
+}
+
 export function default_output_path(handle) {
-	return `build/odin/${targetOutputSlug(handle)}`;
+	return `build/odin/${odinPackageOutputSlug(odin_package_handle(handle))}`;
 }
 
 export function odin_output_path(out, analysis) {
@@ -753,6 +831,18 @@ const DEFAULT_GENERATE_BUILD_EXCLUDES = [
 function dirname(path) {
 	const index = path.lastIndexOf("/");
 	return index < 0 ? "." : path.slice(0, index);
+}
+
+// The scope to publish/package alongside a built binary: its containing
+// directory (so runtime siblings such as a .so travel with it), or — when
+// the output has no directory component at all (it lands at the workspace
+// root) — the file path itself, since "." is not a valid artifact/write
+// scope and there's no meaningful sibling directory to bundle at the
+// workspace root. Fixes #10 (the previous outDir computation truncated the
+// last character of a directory-less output path instead of finding ".").
+function build_output_scope(outputPath) {
+	const dir = dirname(outputPath);
+	return dir === "." ? outputPath : dir;
 }
 
 function basename(path) {
@@ -792,7 +882,7 @@ function default_package_test_file(path) {
 }
 
 function empty_package_error(handle, path) {
-	const address = safe_target_address(handle) || "odinPackage";
+	const address = safe_address(handle) || "odinPackage";
 	return (
 		`${address} has no Odin source files after applying srcs/exclude filters at '${path}'. ` +
 		"odinPackage excludes *_test.odin and test_*.odin by default; use odinTestPackage for package tests, or pass exclude: [] for a package that intentionally builds test files."
@@ -850,245 +940,21 @@ async function odinScriptTools(handle, { needsDirname, isExecutable }) {
 }
 
 // ---------------------------------------------------------------------------
-// Target constructors
-// ---------------------------------------------------------------------------
-
-export class OdinGen extends Target {
-	static kind = "odin-gen";
-	constructor({ srcs = [], out, cmd, generator, deps = [] }) {
-		if (!out) throw new Error("odinGen requires an 'out' path");
-		if (!generator && (!cmd || cmd.length === 0))
-			throw new Error("odinGen requires either 'cmd' or 'generator'");
-		super({
-			kind: OdinGen.kind,
-			attrs: { srcs, out, ...(generator ? { generator } : { cmd }) },
-			deps,
-		});
-	}
-}
-
-/**
- * Declare an Odin source generation target.
- *
- * The generator command is run with the output path appended as the last argument.
- * Generated files must be excluded from any odinPackage glob that covers the same
- * directory — use the `exclude` option of odinPackage to enforce single ownership.
- *
- * @category target
- * @param {object} opts
- * @param {string[]} [opts.srcs=[]] Glob patterns for input files (for incremental tracking).
- * @param {string} opts.out Output file path, relative to the declaring BUILD.js directory.
- * @param {string[]} opts.cmd Command to run; output path is appended as the final argument.
- * @param {Array} [opts.deps=[]] Additional dependencies.
- * @returns {object} Target handle.
- */
-export function odinGen({ srcs = [], out, cmd, generator, deps = [] }) {
-	return new OdinGen({ srcs, out, cmd, generator, deps });
-}
-
-export class OdinPackage extends Target {
-	static kind = "odin-package";
-	constructor({
-		srcs = undefined,
-		exclude = undefined,
-		path = ".",
-		collections = [],
-		toolchain,
-		output,
-		deps = [],
-	}) {
-		const toolchainHandle =
-			toolchain && toolchain.__imp
-				? toolchain
-				: typeof toolchain === "string"
-					? null
-					: defaultOdinToolchain();
-		const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
-
-		const normalizedDeps = normalize_deps(deps);
-
-		// If sources are not specified, default to all .odin files in the package path.
-		// Empty source lists are not useful for Odin package builds and produce invalid
-		// glob filesets, so treat them like the omitted case.
-		srcs = package_srcs({ srcs });
-
-		if (exclude === undefined) {
-			// exclude test files by default
-			exclude = ["*_test.odin", "test_*.odin"];
-		}
-
-		const allDeps = [
-			...(toolchainHandle ? [{ target: toolchainHandle, mode: "tool" }] : []),
-			...normalizedDeps.map((target) => ({ target })),
-			...collection_dep_handles(collections).map((target) => ({ target })),
-		];
-
-		super({
-			kind: OdinPackage.kind,
-			attrs: {
-				path,
-				srcs,
-				...(exclude.length ? { exclude } : {}),
-				...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
-				...(toolchainVersion ? { toolchainVersion } : {}),
-				...(output ? { output } : {}),
-				...(has_collection_config(collections) ? { collections } : {}),
-				...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
-			},
-			sources: sourcesField({
-				root: path,
-				include: srcs,
-				exclude,
-			}),
-			deps: allDeps,
-		});
-	}
-}
-
-/**
- * Declare an Odin package target.
- *
- * Sources are discovered lazily at build time via own_sources() / sources().
- *
- * @category target
- * @param {object} opts
- * @param {string[]} [opts.srcs=[]] Glob patterns matched against paths relative to opts.path.
- * @param {string[]} [opts.exclude=[]] Glob patterns to exclude from matches.
- * @param {string} [opts.path="."] Workspace-relative package path.
- * @param {object[]|object} [opts.collections=[]] Package-local Odin collection namespace mappings.
- * @param {object|string} [opts.toolchain] Odin toolchain target handle or version string.
- * @param {string} [opts.output] Workspace-relative executable output path.
- * @param {Array} [opts.deps=[]] Odin package and resource package dependencies.
- * @returns {object} Target handle.
- */
-export function odinPackage({
-	srcs = undefined,
-	exclude = undefined,
-	path = ".",
-	collections = [],
-	toolchain,
-	output,
-	deps = [],
-}) {
-	return new OdinPackage({
-		srcs,
-		exclude,
-		path,
-		collections,
-		toolchain,
-		output,
-		deps,
-	});
-}
-
-export class OdinTestPackage extends Target {
-	static kind = "odin-test-package";
-	constructor({
-		srcs = undefined,
-		exclude = undefined,
-		path = ".",
-		collections = [],
-		toolchain,
-		deps = [],
-	}) {
-		const toolchainHandle =
-			toolchain && toolchain.__imp
-				? toolchain
-				: typeof toolchain === "string"
-					? null
-					: defaultOdinToolchain();
-		const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
-
-		const normalizedDeps = normalize_deps(deps);
-
-		srcs = package_srcs({ srcs });
-		exclude = exclude || [];
-
-		const allDeps = [
-			...(toolchainHandle ? [{ target: toolchainHandle, mode: "tool" }] : []),
-			...normalizedDeps.map((target) => ({ target })),
-			...collection_dep_handles(collections).map((target) => ({ target })),
-		];
-
-		super({
-			kind: OdinTestPackage.kind,
-			attrs: {
-				path,
-				srcs,
-				...(exclude.length ? { exclude } : {}),
-				...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
-				...(toolchainVersion ? { toolchainVersion } : {}),
-				...(has_collection_config(collections) ? { collections } : {}),
-				...(normalizedDeps.length ? { deps: normalizedDeps } : {}),
-			},
-			sources: sourcesField({
-				root: path,
-				include: srcs,
-				exclude,
-			}),
-			deps: allDeps,
-		});
-	}
-}
-
-/**
- * Declare an Odin test package target.
- *
- * Test packages participate in the `test` goal and run `odin test`.
- * Unlike odinPackage, they include test files by default.
- *
- * @category target
- * @param {object} opts
- * @param {string[]} [opts.srcs=[]] Glob patterns matched against paths relative to opts.path.
- * @param {string[]} [opts.exclude=[]] Glob patterns to exclude from matches.
- * @param {string} [opts.path="."] Workspace-relative package path.
- * @param {object[]|object} [opts.collections=[]] Package-local Odin collection namespace mappings.
- * @param {object|string} [opts.toolchain] Odin toolchain target handle or version string.
- * @param {Array} [opts.deps=[]] Odin package and resource package dependencies.
- * @returns {object} Target handle.
- */
-export function odinTestPackage({
-	srcs = undefined,
-	exclude = undefined,
-	path = ".",
-	collections = [],
-	toolchain,
-	deps = [],
-}) {
-	return new OdinTestPackage({
-		srcs,
-		exclude,
-		path,
-		collections,
-		toolchain,
-		deps,
-	});
-}
-
-export const odin_test_package = odinTestPackage;
-
-// Phantom kind: never declared as a workspace target; carries the kind for
-// the generate-build generator product and registerBuildGenerator().
-class OdinBuildGenerator extends Target {
-	static kind = "odin-build-generator";
-}
-
-// ---------------------------------------------------------------------------
-// Product functions
+// Build/test/run/lint/package mechanics — ordinary memoized functions taking
+// an odinPackage()/odinTestPackage()/odinGen() label (or its action-handle
+// wrapper). Attached to their label's goal below.
 // ---------------------------------------------------------------------------
 
 /**
  * Build an Odin package.
  *
- * @param {object} handle Target handle returned by odinPackage().
+ * @param {object} handle Label handle returned by odinPackage().
  * @returns {Promise<object>} Run result, plus `outputPath`: the built
  * binary/library's workspace-relative path.
  */
-export const odinBuild = product(
-	OdinPackage,
-	BUILD,
-	ODIN_TOOL,
+export const odinBuild = memo(
 	async function odinBuild(handle) {
+		handle = odin_package_handle(handle);
 		const toolchainHandle = handle.attrs.toolchain;
 		const odinToolSpec = toolchainHandle
 			? await tool(toolchainHandle)
@@ -1111,7 +977,7 @@ export const odinBuild = product(
 		const path = analysis.packagePath;
 		const out = handle.attrs.output || default_output_path(handle);
 		const declaredOut = odin_output_path(out, analysis);
-		const outputDir = out.slice(0, out.lastIndexOf("/"));
+		const outputDir = dirname(out);
 		const { tools: scriptTools, flags: linkerFlags } = await odinScriptTools(
 			handle,
 			{ needsDirname: true, isExecutable: analysis.hasMainEntrypoint },
@@ -1135,8 +1001,16 @@ export const odinBuild = product(
 			inputs: [srcs, ...genInputs, ...resourceInputs],
 			// Keep the executable as the first artifact for callers that use
 			// outputPath, and also capture the complete output directory so
-			// runtime siblings such as libjolt_odin.so travel with it.
-			outputs: [output(declaredOut), output(outputDir, { kind: "directory" })],
+			// runtime siblings such as libjolt_odin.so travel with it — unless
+			// the output has no directory component (it lands at the workspace
+			// root), in which case "." isn't a valid artifact scope and there's
+			// no meaningful sibling directory to bundle beyond the file itself.
+			outputs: [
+				output(declaredOut),
+				...(outputDir === "."
+					? []
+					: [output(outputDir, { kind: "directory" })]),
+			],
 			materialize: false,
 			display: `odin build ${path}`,
 		});
@@ -1145,11 +1019,9 @@ export const odinBuild = product(
 	{ display: "build {0}", level: "info" },
 );
 
-export const odinTest = product(
-	OdinTestPackage,
-	TEST,
-	ODIN_TOOL,
+export const odinTest = memo(
 	async function odinTest(handle) {
+		handle = odin_package_handle(handle);
 		const toolchainHandle = handle.attrs.toolchain;
 		const odinToolSpec = toolchainHandle
 			? await tool(toolchainHandle)
@@ -1199,19 +1071,20 @@ export const odinTest = product(
 
 /**
  * Build and execute an Odin package's binary directly against the real
- * workspace (not sandboxed) — the package must have a main entrypoint. The
- * "run" goal's pre-flight callback (rules/workflows/run.js) rejects
- * multi-target selections before this ever runs, so it doesn't need to
- * check that itself.
+ * workspace (not sandboxed) — the package must have a main entrypoint.
+ * Unlike the old Target/product-based "run" goal, a label's "run" handler
+ * (attached below, in odinPackage()) is dispatched directly and is not
+ * gated by rules/workflows/run.js's single-target pre-flight check —
+ * multi-selection rejection is therefore not enforced for label-based run
+ * dispatch, matching the precedent set by rules/python/source.js's own
+ * runGoal() handler.
  *
- * @param {object} handle Target handle returned by odinPackage().
+ * @param {object} handle Label handle returned by odinPackage().
  * @returns {Promise<object>} Run template.
  */
-export const odinRun = product(
-	OdinPackage,
-	RUN,
-	ODIN_TOOL,
+export const odinRun = memo(
 	async function odinRun(handle) {
+		handle = odin_package_handle(handle);
 		const analysis = await odinPackageAnalysis(handle);
 		if (!analysis.hasMainEntrypoint) {
 			const path = declared_path(handle, handle.attrs.path || ".");
@@ -1223,10 +1096,7 @@ export const odinRun = product(
 		// odinBuild is materialize:false (sandboxed/cached only), so publish the
 		// executable before returning the run template. The run goal starts the
 		// program in the real workspace while retaining its sandboxed environment.
-		const outDir = buildResult.outputPath.slice(
-			0,
-			buildResult.outputPath.lastIndexOf("/"),
-		);
+		const outDir = build_output_scope(buildResult.outputPath);
 		writeWorkspace(outDir, buildResult.outputDigest, { from: outDir });
 		return runTemplate({
 			argv: [buildResult.outputPath],
@@ -1244,17 +1114,15 @@ export const odinRun = product(
  * outputDigest }` instead of throwing, so `imp lint` can run every
  * selected target to completion and print a summary at the end.
  * `odin check` has no autofix mode, so `fix` is accepted (for a uniform
- * call signature across every lint product) but always a no-op here.
+ * call signature across every lint handler) but always a no-op here.
  *
- * @param {object} handle Target handle returned by odinPackage().
+ * @param {object} handle Label handle returned by odinPackage().
  * @param {{fix?: boolean}} [opts]
  * @returns {Promise<{ok: boolean, output: string, fixSupported: boolean, fixApplied: boolean, outputDigest: string|null}>}
  */
-export const odinLint = product(
-	OdinPackage,
-	LINT,
-	ODIN_TOOL,
+export const odinLint = memo(
 	async function odinLint(handle, { fix = false } = {}) {
+		handle = odin_package_handle(handle);
 		const toolchainHandle = handle.attrs.toolchain;
 		const odinToolSpec = toolchainHandle
 			? await tool(toolchainHandle)
@@ -1308,16 +1176,11 @@ export const odinLint = product(
 	{ display: "lint {0}", level: "info" },
 );
 
-export const odinDistPackage = product(
-	OdinPackage,
-	PACKAGE,
-	ODIN_TOOL,
+export const odinDistPackage = memo(
 	async function odinDistPackage(handle) {
+		handle = odin_package_handle(handle);
 		const buildResult = await odinBuild(handle);
-		const outDir = buildResult.outputPath.slice(
-			0,
-			buildResult.outputPath.lastIndexOf("/"),
-		);
+		const outDir = build_output_scope(buildResult.outputPath);
 		return artifact(buildResult.outputDigest, { from: outDir });
 	},
 	{ display: "package {0}", level: "info" },
@@ -1329,6 +1192,7 @@ export const odinDistPackage = product(
 
 export const gen_input_sources = memo(
 	async function gen_input_sources(handle) {
+		handle = odin_package_handle(handle);
 		const outPath = declared_path(handle, handle.attrs.out);
 		return glob({
 			root: ".",
@@ -1339,11 +1203,9 @@ export const gen_input_sources = memo(
 	{ display: "gen input sources {0}", level: "debug" },
 );
 
-export const odinGenRun = product(
-	OdinGen,
-	BUILD,
-	ODIN_TOOL,
+export const odinGenRun = memo(
 	async function odinGenRun(handle) {
+		handle = odin_package_handle(handle);
 		const inputFiles = await gen_input_sources(handle);
 		const outPath = declared_path(handle, handle.attrs.out);
 
@@ -1381,16 +1243,18 @@ export const odinGenRun = product(
 );
 
 async function collect_gen_sets(handle, seen) {
+	handle = odin_package_handle(handle);
 	const key = dep_key(handle);
 	if (seen.has(key)) return [];
 	seen.add(key);
 
 	const sets = [];
-	for (const dep of hydrateTarget(handle).deps.map((dep) => dep.handle)) {
-		if (!dep) continue;
+	for (const rawDep of handle.deps.map((dep) => dep.handle)) {
+		if (!rawDep) continue;
+		const dep = odin_package_handle(rawDep);
 		if (dep.kind === "odin-gen") {
 			await odinGenRun(dep);
-			const addr = targetAddress(dep);
+			const addr = labelAddress(dep.label);
 			const scope = addr.slice(2).split(":")[0];
 			const outPath = scope
 				? normalize_workspace_path(`${scope}/${dep.attrs.out}`)
@@ -1404,15 +1268,216 @@ async function collect_gen_sets(handle, seen) {
 	return sets;
 }
 
-export const generateBuild = product(
-	OdinBuildGenerator,
-	GENERATE_BUILD,
-	ODIN_TOOL,
-	async function generateBuild(handle) {
+/**
+ * Declare an Odin source generation label.
+ *
+ * The generator command is run with the output path appended as the last argument.
+ * Generated files must be excluded from any odinPackage glob that covers the same
+ * directory — use the `exclude` option of odinPackage to enforce single ownership.
+ *
+ * @category target
+ * @param {object} opts
+ * @param {string[]} [opts.srcs=[]] Glob patterns for input files (for incremental tracking).
+ * @param {string} opts.out Output file path, relative to the declaring BUILD.js directory.
+ * @param {string[]} opts.cmd Command to run; output path is appended as the final argument.
+ * @param {Array} [opts.deps=[]] Additional dependencies.
+ * @returns {object} Exported label handle.
+ */
+export const odinGen = extensible(function odinGen({
+	srcs = [],
+	out,
+	cmd,
+	generator,
+	deps = [],
+} = {}) {
+	if (!out) throw new Error("odinGen requires an 'out' path");
+	if (!generator && (!cmd || cmd.length === 0))
+		throw new Error("odinGen requires either 'cmd' or 'generator'");
+
+	const genLabel = label({
+		data: {
+			__odinKind: "gen",
+			srcs,
+			out,
+			...(generator ? { generator } : { cmd }),
+			deps: normalize_deps(deps),
+		},
+	});
+
+	attachBuild(genLabel, async function buildOdinGen() {
+		return odinGenRun(genLabel);
+	});
+
+	return genLabel;
+});
+
+// ---------------------------------------------------------------------------
+// Exported label factories
+// ---------------------------------------------------------------------------
+
+/**
+ * Declare an Odin package target.
+ *
+ * Sources are discovered lazily at build time via own_sources() / sources().
+ *
+ * @category target
+ * @param {object} opts
+ * @param {string[]} [opts.srcs=[]] Glob patterns matched against paths relative to opts.path.
+ * @param {string[]} [opts.exclude=[]] Glob patterns to exclude from matches.
+ * @param {string} [opts.path="."] Workspace-relative package path.
+ * @param {object[]|object} [opts.collections=[]] Package-local Odin collection namespace mappings.
+ * @param {object|string} [opts.toolchain] Odin toolchain target handle or version string.
+ * @param {string} [opts.output] Workspace-relative executable output path.
+ * @param {Array} [opts.deps=[]] Odin package and resource package dependencies.
+ * @returns {object} Exported label handle.
+ */
+export const odinPackage = extensible(function odinPackage({
+	srcs = undefined,
+	exclude = undefined,
+	path = ".",
+	collections = [],
+	toolchain,
+	output,
+	deps = [],
+} = {}) {
+	const toolchainHandle =
+		toolchain && toolchain.__imp
+			? toolchain
+			: typeof toolchain === "string"
+				? null
+				: defaultOdinToolchain();
+	const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
+
+	const normalizedDeps = normalize_deps(deps);
+
+	// If sources are not specified, default to all .odin files in the package path.
+	// Empty source lists are not useful for Odin package builds and produce invalid
+	// glob filesets, so treat them like the omitted case.
+	srcs = package_srcs({ srcs });
+
+	if (exclude === undefined) {
+		// exclude test files by default
+		exclude = ["*_test.odin", "test_*.odin"];
+	}
+
+	const packageLabel = label({
+		data: {
+			__odinKind: "package",
+			path,
+			srcs,
+			exclude,
+			collections,
+			deps: normalizedDeps,
+			output,
+			...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
+			...(toolchainVersion ? { toolchainVersion } : {}),
+		},
+	});
+	_odinPackageLabels.push(packageLabel);
+
+	attachBuild(packageLabel, async function buildOdinPackage() {
+		return odinBuild(packageLabel);
+	});
+	attachRun(packageLabel, async function runOdinPackage(ctx) {
+		const template = await odinRun(packageLabel);
+		return runFromTemplate(template, {
+			args: ctx.args,
+			sandbox: true,
+			workspaceCwd: true,
+			impure: true,
+			stream: true,
+		});
+	});
+	attachLint(packageLabel, async function lintOdinPackage(ctx) {
+		return odinLint(packageLabel, { fix: !!ctx.flags.fix });
+	});
+	attachPackage(packageLabel, async function packageOdinPackage() {
+		const artifactResult = await odinDistPackage(packageLabel);
+		if (artifactResult === null) return null;
+		const address = labelAddress(packageLabel);
+		const withoutSlashes = address.replace(/^\/\//, "");
+		const [dir, name] = withoutSlashes.split(":");
+		const destination = dir ? `dist/${dir}/${name}` : `dist/${name}`;
+		writeWorkspace(destination, artifactResult.digest, {
+			from: artifactResult.from,
+		});
+		logInfo(`${address}#package -> ${destination}`);
+		return artifactResult;
+	});
+
+	return packageLabel;
+});
+
+/**
+ * Declare an Odin test package target.
+ *
+ * Test packages participate in the `test` goal and run `odin test`.
+ * Unlike odinPackage, they include test files by default.
+ *
+ * @category target
+ * @param {object} opts
+ * @param {string[]} [opts.srcs=[]] Glob patterns matched against paths relative to opts.path.
+ * @param {string[]} [opts.exclude=[]] Glob patterns to exclude from matches.
+ * @param {string} [opts.path="."] Workspace-relative package path.
+ * @param {object[]|object} [opts.collections=[]] Package-local Odin collection namespace mappings.
+ * @param {object|string} [opts.toolchain] Odin toolchain target handle or version string.
+ * @param {Array} [opts.deps=[]] Odin package and resource package dependencies.
+ * @returns {object} Exported label handle.
+ */
+export const odinTestPackage = extensible(function odinTestPackage({
+	srcs = undefined,
+	exclude = undefined,
+	path = ".",
+	collections = [],
+	toolchain,
+	deps = [],
+} = {}) {
+	const toolchainHandle =
+		toolchain && toolchain.__imp
+			? toolchain
+			: typeof toolchain === "string"
+				? null
+				: defaultOdinToolchain();
+	const toolchainVersion = typeof toolchain === "string" ? toolchain : null;
+
+	const normalizedDeps = normalize_deps(deps);
+
+	srcs = package_srcs({ srcs });
+	exclude = exclude || [];
+
+	const packageLabel = label({
+		data: {
+			__odinKind: "testPackage",
+			path,
+			srcs,
+			exclude,
+			collections,
+			deps: normalizedDeps,
+			...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
+			...(toolchainVersion ? { toolchainVersion } : {}),
+		},
+	});
+	_odinTestPackageLabels.push(packageLabel);
+
+	attachTest(packageLabel, async function testOdinTestPackage() {
+		return odinTest(packageLabel);
+	});
+
+	return packageLabel;
+});
+
+export const odin_test_package = odinTestPackage;
+
+// ---------------------------------------------------------------------------
+// generate-build
+// ---------------------------------------------------------------------------
+
+export const generateBuild = memo(
+	async function generateBuild() {
 		const files = allUnowned({
-			root: handle.attrs.root || ".",
+			root: ".",
 			include: ["**/*.odin"],
-			exclude: handle.attrs.exclude || DEFAULT_GENERATE_BUILD_EXCLUDES,
+			exclude: DEFAULT_GENERATE_BUILD_EXCLUDES,
 		});
 		const normalDirs = new Set(
 			files.filter(default_package_source_file).map(dirname),
@@ -1421,11 +1486,9 @@ export const generateBuild = product(
 			files.filter(default_package_test_file).map(dirname),
 		);
 		const dirs = Array.from(normalDirs).sort();
-		const existingPackages = workspaceTargets("odin-package").map(
-			package_spec_from_workspace_target,
-		);
-		const existingTestPackages = workspaceTargets("odin-test-package").map(
-			package_spec_from_workspace_target,
+		const existingPackages = _odinPackageLabels.map(package_spec_from_handle);
+		const existingTestPackages = _odinTestPackageLabels.map(
+			package_spec_from_handle,
 		);
 		const existingPaths = new Set(
 			existingPackages.map((pkg) => normalize_workspace_path(pkg.path || ".")),
@@ -1489,7 +1552,7 @@ export const generateBuild = product(
 		}
 		return result;
 	},
-	{ display: "generate build {0}", level: "info" },
+	{ display: "generate Odin BUILD files", level: "info" },
 );
 
-registerBuildGenerator({ namespace: "odin", kind: OdinBuildGenerator });
+registerBuildGenerator({ namespace: "odin", generate: generateBuild });

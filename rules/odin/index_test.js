@@ -26,7 +26,7 @@ import {
 	odinLint,
 	default_output_path,
 	odin_output_path,
-	OdinPackage,
+	odin_package_handle,
 } from "//rules/odin";
 import { resourcePackage } from "//rules/asset";
 import { gccToolchain } from "//rules/c/gcc";
@@ -43,16 +43,7 @@ const moldForTests = moldToolchain("2.41.0", { unverified: true });
 // Product tests below resolve the toolchain before the fake run host takes
 // over, so use a version pinned in the checked-in Odin lockfile.
 const LOCKED_TEST_VERSION = "dev-2026-03";
-import {
-	target,
-	hydrateTarget,
-	gatherTransitiveClosure,
-	glob,
-	paths,
-	getMemoTrace,
-	configure,
-	pathsInDigest,
-} from "imp:core";
+import { paths, getMemoTrace, configure, pathsInDigest } from "imp:core";
 
 // A run() input FileSet gets collapsed into an opaque {kind:"digest", digest}
 // entry (merge_digests, commit 827bd09) rather than one {kind:"file", path}
@@ -83,15 +74,15 @@ describe("Odin rules", () => {
 		const toolchain = odinToolchain("dev-2026-03", { default: true });
 		const pkg = odinPackage({ srcs: ["**/*.odin"] });
 
-		expect(pkg.attrs.toolchain).toBe(toolchain);
-		expect(pkg.attrs.toolchain.attrs.version).toBe("dev-2026-03");
+		expect(pkg.data.toolchain).toBe(toolchain);
+		expect(pkg.data.toolchain.attrs.version).toBe("dev-2026-03");
 	});
 
 	test("keeps explicit string versions free of toolchain target deps", () => {
 		const pkg = odinPackage({ srcs: ["**/*.odin"], toolchain: "dev-2026-04" });
 
-		expect(pkg.attrs.toolchainVersion).toBe("dev-2026-04");
-		expect(pkg.attrs.toolchain).toBe(undefined);
+		expect(pkg.data.toolchainVersion).toBe("dev-2026-04");
+		expect(pkg.data.toolchain).toBe(undefined);
 	});
 
 	test("packages depend on collection config without collection membership", () => {
@@ -104,34 +95,19 @@ describe("Odin rules", () => {
 			],
 		});
 
-		expect((pkg.attrs.collections || []).length).toBe(2);
+		expect((pkg.data.collections || []).length).toBe(2);
 	});
 
-	test("hydrateTarget returns kind, attrs, and dep handles", () => {
+	test("odin_package_handle(pkg) returns kind, attrs, and dep handles", () => {
 		const pkg = odinPackage({
 			srcs: ["rules/odin/index.js"],
 			toolchain: "dev-2026-04",
 		});
-		const hydrated = hydrateTarget(pkg);
+		const handle = odin_package_handle(pkg);
 
-		expect(hydrated.kind).toBe("odin-package");
-		expect(Array.isArray(hydrated.attrs.srcs)).toBeTruthy();
-		expect(Array.isArray(hydrated.deps)).toBeTruthy();
-	});
-
-	test("gatherTransitiveClosure finds all odin-package targets", () => {
-		const lib = odinPackage({
-			srcs: ["rules/odin/index.js"],
-			toolchain: "dev-2026-04",
-		});
-		const app = odinPackage({
-			srcs: ["rules/odin/index_test.js"],
-			toolchain: "dev-2026-04",
-			deps: [lib],
-		});
-		const closure = gatherTransitiveClosure(app, OdinPackage);
-
-		expect(closure.length).toBe(2);
+		expect(handle.kind).toBe("odin-package");
+		expect(Array.isArray(handle.attrs.srcs)).toBeTruthy();
+		expect(Array.isArray(handle.deps)).toBeTruthy();
 	});
 
 	test("own_sources(pkg) returns a FileSet descriptor", async () => {
@@ -142,9 +118,9 @@ describe("Odin rules", () => {
 	});
 
 	test("own_sources defaults missing srcs for odin-package targets", async () => {
-		const pkg = target({
-			kind: "odin-package",
-			attrs: { path: "rules/odin/example", toolchainVersion: "dev-2026-04" },
+		const pkg = odinPackage({
+			path: "rules/odin/example",
+			toolchain: "dev-2026-04",
 		});
 		const result = paths(await own_sources(pkg));
 		expect(result).toContain("rules/odin/example/main.odin");
@@ -535,6 +511,37 @@ describe("Odin rules", () => {
 		expect(message).toContain("no main entrypoint");
 	});
 
+	// Regression test for #10: an `output` with no "/" (the built binary
+	// lands directly at the workspace root) used to compute outDir via
+	// `outputPath.slice(0, outputPath.lastIndexOf("/"))`, which truncates the
+	// last character instead of finding a directory (lastIndexOf returns -1
+	// for a string with no "/"). "." isn't a valid publish/artifact scope
+	// either (rejected as an empty relative path), so odinRun/odinDistPackage/
+	// odinBuild now fall back to the output file's own path in that case —
+	// there's no sibling directory to bundle at the workspace root anyway.
+	// (odinDistPackage's own from: value isn't unit-testable the same way —
+	// see the comment below on artifact(buildResult.outputDigest, ...) —
+	// verified end-to-end via `imp package` instead.)
+	test("odinRun publishes the file itself when output has no '/' component", async () => {
+		configure("odin", null);
+		try {
+			await withFakeRun(async () => {
+				await withFakeWriteWorkspace(async (calls) => {
+					const pkg = odinPackage({
+						path: "rules/odin/example",
+						toolchain: LOCKED_TEST_VERSION,
+						output: "odinscript",
+					});
+					await odinRun(pkg);
+					expect(calls[0].path).toBe("odinscript");
+					expect(calls[0].from).toBe("odinscript");
+				});
+			});
+		} finally {
+			configure("odin", null);
+		}
+	});
+
 	test("odinLint runs odin check -vet against the package", async () => {
 		configure("odin", null);
 		try {
@@ -756,9 +763,9 @@ describe("Odin rules", () => {
 			path: "rules/odin/example",
 			toolchain: "dev-2026-04",
 		});
-		expect(pkg.kind).toBe("odin-test-package");
-		expect(pkg.attrs.path).toBe("rules/odin/example");
-		expect(pkg.attrs.exclude).toBe(undefined);
+		expect(odin_package_handle(pkg).kind).toBe("odin-test-package");
+		expect(pkg.data.path).toBe("rules/odin/example");
+		expect(pkg.data.exclude).toEqual([]);
 	});
 
 	test("odinTest runs odin test with package sources", async () => {

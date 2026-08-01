@@ -20,7 +20,7 @@ import {
 	run,
 	output,
 	output_path,
-	workspaceTargets,
+	labelAddress,
 	platformInfo,
 } from "imp:core";
 import { IMP_TOOL } from "//rules/imp/imp_tool";
@@ -28,6 +28,7 @@ import {
 	default_output_path,
 	odin_output_path,
 	odinPackageAnalysis,
+	odinPackageHandles,
 } from "//rules/odin";
 
 export const VS = goal("vs");
@@ -85,13 +86,14 @@ export const vs = product(
 		const launchVsc = { version: "0.2.0", configurations: [] };
 		const tasksVsc = { version: "2.0.0", tasks: [] };
 
-		for (const entry of workspaceTargets("odin-package")) {
-			const name = targetName(entry.address);
-			const analysis = await odinPackageAnalysis(entry.handle);
-			const out = entry.attrs.output || default_output_path(entry.handle);
+		for (const pkgHandle of odinPackageHandles()) {
+			const address = labelAddress(pkgHandle.label);
+			const name = targetName(address);
+			const analysis = await odinPackageAnalysis(pkgHandle);
+			const out = pkgHandle.attrs.output || default_output_path(pkgHandle);
 			const outRel = odin_output_path(out, analysis);
 			const outWin = windowsOutput(outRel);
-			const buildSelector = `${entry.address}#build`;
+			const buildSelector = `${address}#build`;
 
 			for (const mode of MODES) {
 				const label = `${name} (${mode})`;

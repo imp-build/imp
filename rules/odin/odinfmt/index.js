@@ -6,26 +6,22 @@
 // PATH; see resolve_program/sandbox_command_env in src/exec.rs). Write mode
 // and check mode share the same run, differing only in whether the result is
 // materialized back into the workspace.
-// Exposed to the build graph as a product by //rules/workflows/fmt.
+//
+// odinfmt is an additive extension on the reusable odinPackage/odinTestPackage
+// label factories (see //rules/odin). Importing this canonical entrypoint
+// installs fmt for packages declared before or after the import, mirroring
+// //rules/rust/rustfmt.
 
 import {
 	own_sources,
 	declared_path,
-	OdinPackage,
-	OdinTestPackage,
+	odin_package_handle,
+	odinPackage,
+	odinTestPackage,
 } from "//rules/odin";
 import { resolveOdinToolchainVersion } from "//rules/odin/toolchain";
 import { odinfmtTool } from "//rules/odin/odinfmt/toolchain";
-import {
-	paths,
-	output,
-	run,
-	digestOf,
-	diffDigests,
-	product,
-	FMT,
-} from "imp:core";
-import { ODINFMT_TOOL } from "//rules/odin/odinfmt/toolchain";
+import { fmt, paths, output, run, digestOf, diffDigests } from "imp:core";
 
 export {
 	defaultOdinfmtToolchain,
@@ -46,6 +42,7 @@ function odinfmt_version(handle) {
 // mode), the sandboxed result is captured into CAS and diffed, but the
 // workspace is left untouched.
 async function runOdinFmt(handle, { materialize }) {
+	handle = odin_package_handle(handle);
 	const srcs = await own_sources(handle);
 	const files = paths(srcs);
 	if (files.length === 0) {
@@ -87,14 +84,11 @@ export async function odinFmt(handle, { check = false } = {}) {
 		: { formatted: changed.length };
 }
 
-export const odinPackageFmt = product(OdinPackage, FMT, ODINFMT_TOOL, odinFmt, {
-	display: "fmt {0}",
-	level: "info",
-});
-export const odinTestPackageFmt = product(
-	OdinTestPackage,
-	FMT,
-	ODINFMT_TOOL,
-	odinFmt,
-	{ display: "fmt {0}", level: "info" },
-);
+export function odinfmt(packageLabel) {
+	fmt(packageLabel, async function fmtOdinPackage(ctx) {
+		return odinFmt(packageLabel, { check: !!ctx.flags.check });
+	});
+}
+
+odinPackage.attach(odinfmt);
+odinTestPackage.attach(odinfmt);
