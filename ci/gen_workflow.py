@@ -47,7 +47,10 @@ FULL_HISTORY_CHECKOUT = {
 BUILD_STEPS = [
     {"uses": "actions/checkout@v4"},
     {"uses": f"dtolnay/rust-toolchain@{RUST_TOOLCHAIN}"},
-    {"uses": "kunobi-ninja/kache-action@v1"},
+    {
+        "uses": "kunobi-ninja/kache-action@v1",
+        "with": {"cache-executables": True},
+    },
     {
         "name": "Build imp",
         "run": "cargo build --release --manifest-path crates/imp/Cargo.toml",
