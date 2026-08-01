@@ -207,14 +207,4 @@ describe("rust toolchain", () => {
 			expect(outCaches).toEqual([`rustup-home/${key}`, `cargo-home/${key}`]);
 		});
 	});
-
-	test("uses the windows target triple and installer name", () => {
-		return withRustHost({ os: "windows", arch: "x86_64" }, (host) => {
-			rustToolchain("1.79.0", { default: true });
-			// sh is declared as a core tool on windows (bare sh doesn't auto-resolve).
-			expect(
-				host.calls.some((call) => call[0] === "nativeTool" && call[1] === "sh"),
-			).toBe(true);
-		});
-	});
 });

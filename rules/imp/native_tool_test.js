@@ -1,11 +1,36 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { run, getMemoTrace } from "imp:core";
-import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
+import { Target, getMemoTrace, product, run, toolName } from "imp:core";
+import {
+	TOOL,
+	nativeTool,
+	nativeToolSpec,
+	toolSpec,
+} from "//rules/imp/native-tool";
+
+const LEGACY_TOOL = toolName("native-tool-test-legacy");
+class LegacyToolProvider extends Target {
+	static kind = "native-tool-test-legacy";
+	constructor() {
+		super({ kind: LegacyToolProvider.kind, attrs: {} });
+	}
+}
+product(LegacyToolProvider, TOOL, LEGACY_TOOL, async function legacyToolSpec() {
+	return { name: "legacy", path: "/legacy", binDirs: ["."] };
+});
 
 export const sh_tool = nativeTool("sh");
 const missing_tool = nativeTool("__imp_no_such_binary_xyz");
 
 describe("nativeTool", () => {
+	test("constructs immutable serializable provider data, not a target", () => {
+		expect(Object.isFrozen(sh_tool)).toBe(true);
+		expect(sh_tool.__imp).toBe(undefined);
+		expect(JSON.parse(JSON.stringify(sh_tool))).toEqual({
+			__imp_native_tool: "native-tool",
+			name: "sh",
+		});
+	});
+
 	test("resolves a PATH executable into a tool descriptor", async () => {
 		const spec = await nativeToolSpec(sh_tool);
 		expect(spec.name).toBe("sh");
@@ -36,6 +61,14 @@ describe("nativeTool", () => {
 				t.name === "sh",
 		);
 		expect(effects.length).toBe(1);
+		expect(trace.some((event) => event.event === "memo-unaddressed-skip")).toBe(
+			false,
+		);
+	});
+
+	test("toolSpec resolves native specs and retained target providers", async () => {
+		expect((await toolSpec(sh_tool)).name).toBe("sh");
+		expect((await toolSpec(new LegacyToolProvider())).name).toBe("legacy");
 	});
 
 	test("the resolved tool is reachable via PATH even with an empty base PATH", async () => {

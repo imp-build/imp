@@ -12,7 +12,7 @@ import {
 	rustToolchain,
 } from "//rules/rust/toolchain";
 import { gccToolchain, __resetGccToolchainStateForTest } from "//rules/c/gcc";
-import { nativeTool } from "//rules/imp/native_tool";
+import { nativeTool } from "//rules/imp/native-tool";
 
 function withRustHost(fn) {
 	const run = async (host) => {

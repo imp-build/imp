@@ -1,5 +1,5 @@
 import { resourcePackage } from "//rules/asset";
-import { nativeTool } from "//rules/imp/native_tool";
+import { nativeTool } from "//rules/imp/native-tool";
 
 import { stampFile } from "//rules/gen";
 import { vsWorkspace } from "//rules/workflows/vs";

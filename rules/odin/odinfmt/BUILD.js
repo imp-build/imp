@@ -1,6 +1,6 @@
 import { jsSources } from "//rules/js";
 import { rulesTest } from "//rules/imp/test";
-import { nativeTool } from "//rules/imp/native_tool";
+import { nativeTool } from "//rules/imp/native-tool";
 
 export const rules_test = rulesTest({
 	root: "//rules/odin/odinfmt",

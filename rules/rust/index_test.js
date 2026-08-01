@@ -15,7 +15,7 @@ import {
 	rustToolEnv,
 } from "//rules/rust";
 import { resourcePackage } from "//rules/asset";
-import { nativeTool } from "//rules/imp/native_tool";
+import { nativeTool } from "//rules/imp/native-tool";
 import {
 	__resetRustToolchainStateForTest,
 	installRustToolchain,
@@ -204,7 +204,7 @@ describe("rust rules", () => {
 			expect(buildRun.argv).toContain("-C linker=gcc");
 			expect(
 				host.calls.some(
-					(call) => call[0] === "nativeTool" && call[1] === "gcc",
+					(call) => call[0] === "nativeToolSpec" && call[1] === "gcc",
 				),
 			).toBe(true);
 		});

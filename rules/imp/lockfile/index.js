@@ -1,4 +1,5 @@
-// Toolchain-lockfile resolution and verified-download helpers.
+// Canonical public entrypoint for toolchain-lockfile resolution and
+// verified-download helpers.
 //
 // A tool lockfile (written by `imp goal gen-lockfiles`, see
 // rules/workflows/lockfiles.js) pins per-version, per-platform download URL,

@@ -6,13 +6,7 @@
 // first, so this syncs its own throwaway venv directly via uv, independent
 // of pythonApp.
 
-import {
-	extensible,
-	label,
-	productFor,
-	test as attachTest,
-	run,
-} from "imp:core";
+import { extensible, label, test as attachTest, run } from "imp:core";
 
 import {
 	declared_path,
@@ -21,7 +15,7 @@ import {
 	sandboxRootEnvExports,
 	sources,
 } from "//rules/python";
-import { TOOL } from "//rules/imp/native_tool";
+import { toolSpec } from "//rules/imp/native-tool";
 
 import {
 	defaultUvToolchain,
@@ -48,7 +42,7 @@ export async function pythonTestRun(handle) {
 	const uvToolSpec = await uvTool(handle.attrs.uvVersion);
 	const uvCacheToolSpec = uvCacheDirTool();
 	const depToolSpecs = await Promise.all(
-		(handle.attrs.deps || []).map((dep) => productFor(dep, TOOL)),
+		(handle.attrs.deps || []).map(toolSpec),
 	);
 	const syncArgs = pythonResolveSyncArgs(handle.attrs.resolve)
 		.map(shellArg)
@@ -91,10 +85,9 @@ export async function pythonTestRun(handle) {
  * @param {string[]} [opts.testArgs=[]] Extra arguments appended to pytest.
  * @param {object|string} [opts.uvVersion] uv toolchain target handle or version string.
  * @param {object} [opts.resolve] Locked Python resolve supplying the project path; exclusive with `src`.
- * @param {Array} [opts.deps=[]] Extra target handles made available on PATH
- *   inside the test sandbox — anything whose kind registers a `TOOL`
- *   product, e.g. `nativeTool()` handles for programs the test suite
- *   shells out to.
+ * @param {Array} [opts.deps=[]] Extra tool providers made available on PATH
+ *   inside the test sandbox: nativeTool() specifications or legacy target
+ *   providers whose kind registers a `TOOL` product.
  * @returns {object} Label handle.
  */
 export const pythonTest = extensible(function pythonTest({

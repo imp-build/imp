@@ -136,7 +136,7 @@ describe("rust lint", () => {
 	// fakeWorkspaceMetadata in //rules/rust/index_test.js). Unlike that
 	// helper, this one points at `rules/rust/example` rather than
 	// `crates/imp-store`: the rules-test sandbox only stages `rules/**`
-	// (see test_product, //rules/imp/test), and cargoClippy — unlike
+	// (see the attached handler in //rules/imp/test), and cargoClippy — unlike
 	// cargoTest's workspace path — globs its own crate's `.rs` files
 	// (rust_file_sources) up front for every crate regardless of
 	// workspaceMember, so the fixture path must be real within that sandbox.

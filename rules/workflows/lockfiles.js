@@ -11,7 +11,7 @@
 // already-locked version replaces that version's entries wholly.
 //
 // Acquire paths verify against the lockfile via resolveToolLockfile
-// (rules/imp/lockfile.js); every toolchain here passes a `lockfile` address
+// (//rules/imp/lockfile); every toolchain here passes a `lockfile` address
 // so the lock is checked in next to its rule module and ships embedded in the
 // binary. Omitting `lockfile` falls back to `<name>.lock` at the workspace
 // root — only useful for one-off/test lock generation, not for toolchains

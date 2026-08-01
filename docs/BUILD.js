@@ -35,10 +35,10 @@ import "//rules/python/test";
 import "//rules/rust";
 import "//rules/workflows/fmt";
 import "//rules/workflows/lint";
-import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
+import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
 import { extractCodeReference, extractUserApiReference } from "//docs/js_api_extract";
 import { zolaToolchain, zolaTool, zolaBin } from "//rules/zola";
-import { IMP_TOOL } from "//rules/imp/imp_tool";
+import { IMP_TOOL } from "//rules/imp/self-tool";
 
 export const rules_test = rulesTest({ root: "//docs" });
 

@@ -141,7 +141,7 @@ describe("Odin toolchain", () => {
 
 			expect(
 				host.calls.some(
-					(call) => call[0] === "nativeTool" && call[1] === "curl",
+					(call) => call[0] === "nativeToolSpec" && call[1] === "curl",
 				),
 			).toBe(true);
 		});

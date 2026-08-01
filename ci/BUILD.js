@@ -10,7 +10,7 @@
 import { attach, file_set, label, logInfo } from "imp:core";
 import { jsSources } from "//rules/js";
 import "//rules/workflows/generate";
-import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
+import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
 import { generatedFiles } from "//rules/imp/generate";
 
 const python3 = nativeTool("python3");

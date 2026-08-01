@@ -66,6 +66,16 @@ Rule implementation files and focused unit tests may import a private helper
 when that is necessary to test or compose its implementation. Such imports are
 not examples of the user API and must not be copied into documentation.
 
+The public imp support APIs follow the same rule. Use
+`//rules/imp/test`, `//rules/imp/native-tool`, `//rules/imp/generate`,
+`//rules/imp/mode`, `//rules/imp/archive`, `//rules/imp/lockfile`, and
+`//rules/imp/self-tool` for their respective capabilities. `rulesTest()` is
+the selectable test label; the other modules provide serializable tool
+configuration, workspace configuration, or ordinary rule-author helpers.
+Constructing a `nativeTool()` specification has no effects. Resolving it with
+`nativeToolSpec()` inside a goal handler creates the memoized dependency and
+performs the host `PATH` lookup.
+
 When moving a public module, update all first-party consumers in the same
 change. Remove the old deep import rather than leaving a compatibility shim:
 the canonical directory path is the only supported path.

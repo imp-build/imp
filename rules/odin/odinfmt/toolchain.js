@@ -14,7 +14,7 @@ import {
 	odinSupportedPlatforms,
 	resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
-import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
+import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
 import {
 	downloadToolArtifact,
 	lockedDownloadTools,

@@ -2,7 +2,7 @@
 // helper into the build graph: `generate` writes a target's generated files
 // into the workspace, `generate --check` verifies they're already up to date
 // without writing — for CI drift gates on committed codegen (see
-// //rules/imp/generate.js's doc comment for the product-authoring pattern).
+// //rules/imp/generate's doc comment for the product-authoring pattern).
 // `check` is passed straight through to each product function as a second
 // argument (`fn(handle, {check})`) rather than registering a second product —
 // same convention fmtGoal uses (//rules/workflows/fmt_goal.js).

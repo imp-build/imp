@@ -23,7 +23,7 @@ import {
 	labelAddress,
 	platformInfo,
 } from "imp:core";
-import { IMP_TOOL } from "//rules/imp/imp_tool";
+import { IMP_TOOL } from "//rules/imp/self-tool";
 import {
 	default_output_path,
 	odin_output_path,

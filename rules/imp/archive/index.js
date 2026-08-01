@@ -1,5 +1,5 @@
-// Shared archive-extraction step for toolchain acquire pipelines. Toolchains
-// download with downloadToolArtifact (//rules/imp/lockfile) and compose
+// Canonical public entrypoint for shared archive-extraction helpers.
+// Toolchains download with downloadToolArtifact (//rules/imp/lockfile) and compose
 // this to unpack the artifact — usually straight into a named-cache-keyed
 // directory output. Deliberately a plain helper, not a base-class pipeline:
 // each toolchain owns its acquire flow and adds its own steps (wrapper

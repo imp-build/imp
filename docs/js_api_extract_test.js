@@ -523,7 +523,7 @@ test("extractUserApiReference nests subdirectories as subcategories instead of f
 
 test("extractUserApiReference tags every top-level section with a weight and core/languages group, core first", () => {
     const files = [
-        { sourcePath: "rules/imp/native_tool.js", sourceText: "/** @category configuration */\nexport function impTool() {}" },
+        { sourcePath: "rules/imp/native-tool/index.js", sourceText: "/** @category configuration */\nexport function impTool() {}" },
         { sourcePath: "rules/workflows/fmt.js", sourceText: "/** @category target */\nexport function fmtWorkflow() {}" },
         { sourcePath: "rules/odin/index.js", sourceText: "/** @category target */\nexport function odinPackage() {}" },
         { sourcePath: "rules/c/index.js", sourceText: "/** @category target */\nexport function cLibrary() {}" },

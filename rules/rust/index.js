@@ -33,7 +33,7 @@ import {
 	rustTool,
 } from "//rules/rust/toolchain";
 
-import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
+import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
 
 import { defaultGccToolchain } from "//rules/c/gcc";
 
@@ -320,11 +320,8 @@ export async function resourcesForDirs(dirs) {
 // whole-workspace doc-test run (runWorkspaceDocTests below), which actually
 // *runs* every member's doc-tests in one process and so needs every
 // member's own testTools on PATH, not just the one crate that happened to
-// trigger the shared task. Deduplicated by target handle identity: a
-// testTools entry is always a shared target-constant reference (e.g.
-// rules/imp/native_tool's testTar/testGzip/testGit, imported by every
-// BUILD.js that uses them), so reference equality is enough — no two
-// distinct nativeTool() targets are ever meant to collapse into one mount.
+// trigger the shared task. Native-tool specs deduplicate by executable name;
+// any retained provider handles deduplicate by identity.
 async function testToolsForDirs(dirs) {
 	const dirSet = new Set(dirs);
 	const handles = cargoPackageHandles().filter((h) =>
@@ -333,10 +330,11 @@ async function testToolsForDirs(dirs) {
 	const seen = new Set();
 	const specs = [];
 	for (const h of handles) {
-		for (const toolHandle of h.attrs.testTools || []) {
-			if (seen.has(toolHandle)) continue;
-			seen.add(toolHandle);
-			specs.push(await nativeToolSpec(toolHandle));
+		for (const tool of h.attrs.testTools || []) {
+			const key = tool?.__imp_native_tool ? `native:${tool.name}` : tool;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			specs.push(await nativeToolSpec(tool));
 		}
 	}
 	return specs;
@@ -976,7 +974,7 @@ export const cargoTest = memo(
  * @param {object|string} [opts.toolchain] Rust toolchain target handle or version string.
  * @param {string[]} [opts.cargoArgs=[]] Extra arguments appended to `cargo build`.
  * @param {string[]} [opts.testArgs=[]] Extra arguments appended to `cargo test`.
- * @param {Array<object>} [opts.testTools=[]] nativeTool() handles exposed on PATH while running `cargo test`.
+ * @param {Array<object>} [opts.testTools=[]] nativeTool() specifications exposed on PATH while running `cargo test`.
  * @param {Array<object>} [opts.deps=[]] Extra deps, e.g. a resourcePackage() (see //rules/asset) providing non-.rs files an `include_str!`/`include_bytes!` needs.
  * @param {boolean} [opts.doctest] Override the workspace `rustConfig.doctest`
  *   setting for this package.
@@ -1013,7 +1011,7 @@ export const cargoPackage = extensible(function cargoPackage({
 			release,
 			cargoArgs: [...cargoArgs],
 			testArgs: [...testArgs],
-			testTools: normalize_deps(testTools),
+			testTools: [...testTools],
 			deps: normalize_deps(deps),
 			doctest,
 			workspaceMember,

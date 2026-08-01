@@ -1,5 +1,6 @@
-// Workspace-wide build-mode conventions. Import this module from a workspace
-// file to make the profiles available to every goal in that workspace.
+// Canonical public entrypoint for workspace-wide build-mode conventions.
+// Import this module from a workspace file to make the profiles available to
+// every goal in that workspace.
 import { defineModeAxis, defineProfile } from "imp:core";
 
 defineModeAxis("opt", {

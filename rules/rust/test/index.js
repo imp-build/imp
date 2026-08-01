@@ -36,7 +36,7 @@ import {
 } from "//rules/rust/workspace_closure";
 
 import { defaultRustToolchain, rustTool } from "//rules/rust/toolchain";
-import { nativeToolSpec } from "//rules/imp/native_tool";
+import { nativeToolSpec } from "//rules/imp/native-tool";
 
 // cargo test --no-run --message-format=json message shapes let us recover
 // which target kinds produce test-profile binaries, but discovering that by

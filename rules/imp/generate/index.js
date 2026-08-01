@@ -1,3 +1,4 @@
+// Canonical public entrypoint for generated-file action helpers.
 import {
 	run,
 	output,

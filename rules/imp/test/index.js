@@ -1,15 +1,12 @@
 import {
-	Target,
-	product,
-	run,
 	glob,
-	workspaceFiles,
+	label,
 	memo,
-	hydrateTarget,
-	TEST,
+	run,
+	test as attachTest,
+	workspaceFiles,
 } from "imp:core";
-import { IMP_TOOL } from "//rules/imp/imp_tool";
-import { nativeToolSpec } from "//rules/imp/native_tool";
+import { nativeToolSpec } from "//rules/imp/native-tool";
 
 const suites = [];
 const tests = [];
@@ -488,103 +485,81 @@ export async function runTestCase(testModule, ordinal) {
 	await entry.fn();
 }
 
-// The target subprocess is a coordinator. It discovers these modules and
+// The rules-test subprocess is a coordinator. It discovers these modules and
 // gives every registered test a fresh core-only runtime, execution service,
 // and scheduler; tests can explicitly request the loaded workspace or a
 // fresh OS process. The coordinator remains unsandboxed because suites such
-// as native_tool_test/tracked_apis_test deliberately probe ambient host state.
-export class RulesTest extends Target {
-	static kind = "rules-test";
-	constructor({ root, tools = [] }) {
-		const discoveredTests = workspaceFiles({
-			root,
-			suffix: "_test.js",
-			recursive: false,
-		});
-		if (discoveredTests.length === 0) {
-			throw new Error(`no JS rule tests found directly in ${root}`);
-		}
-
-		super({
-			kind: RulesTest.kind,
-			attrs: {
-				root,
-				tests: discoveredTests.join(","),
-			},
-			deps: tools.map((tool) => ({ target: tool, mode: "tool" })),
-		});
-	}
-}
-
-// Everything a rules-test subprocess needs of its own target's root: the
+// as the native-tool and tracked-API suites deliberately probe ambient host
+// state.
+// Everything a rules-test subprocess needs of its own label's root: the
 // discovered *_test.js files plus any fixtures/data they load. Combined in
-// test_product with the constant "rules/**/*" glob, which stages the shared
+// runRulesTest with the constant "rules/**/*" glob, which stages the shared
 // rule library every test module transitively imports from.
-export const sources = memo(
-	async function sources(handle) {
-		const root = handle.attrs.root.startsWith("//")
-			? handle.attrs.root.slice(2)
-			: handle.attrs.root;
+const rulesTestSources = memo(
+	async function rulesTestSources(addressedRoot) {
+		const root = addressedRoot.startsWith("//")
+			? addressedRoot.slice(2)
+			: addressedRoot;
 		return glob({ root, include: ["**/*"] });
 	},
 	{ display: "sources {0}", level: "debug" },
 );
 
-export const test_product = product(
-	RulesTest,
-	TEST,
-	IMP_TOOL,
-	async function test_product(handle) {
-		const testModules = handle.attrs.tests
-			.split(",")
-			.map((testModule) => testModule.trim())
-			.filter((testModule) => testModule.length > 0);
-		const toolDeps = (hydrateTarget(handle).deps || [])
-			.map((dep) => dep.handle)
-			.filter((dep) => dep && dep.kind === "native-tool");
-		const tools = await Promise.all(toolDeps.map((dep) => nativeToolSpec(dep)));
+async function runRulesTest(testLabel) {
+	const { root, testModules, toolSpecs } = testLabel.data;
+	const tools = await Promise.all(toolSpecs.map(nativeToolSpec));
 
-		return run({
-			argv: [globalThis.__imp_self_bin, "rules-test", ...testModules],
-			// Tests glob example sources and resources, not just modules — stage
-			// the whole rules tree (shared rule library every test imports from)
-			// plus this target's own root (covers roots like //docs that live
-			// outside rules/).
-			inputs: [
-				glob({ include: ["rules/**/*", "imp.workspace.js"] }),
-				await sources(handle),
-			],
-			// Gives the sandboxed subprocess a real PATH containing these
-			// binaries, so tests that do genuine (unstubbed) nativeTool/which/env
-			// PATH lookups against them succeed — sandboxed runs otherwise get no
-			// PATH at all (see sandbox_command_env, imp-execution/src/exec.rs).
-			tools,
-			// Share the host cache so toolchain named-cache lookups hit instead of
-			// re-downloading into the sandbox's pinned HOME.
-			env: [`IMP_CACHE_DIR=${globalThis.__imp_cache_dir}`],
-			display: `test JS rules ${handle.attrs.root}`,
-			sandbox: true,
-			impure: false,
-		});
-	},
-	{ display: "test {0}", level: "info" },
-);
+	return run({
+		argv: [globalThis.__imp_self_bin, "rules-test", ...testModules],
+		// Tests glob example sources and resources, not just modules — stage
+		// the whole rules tree (shared rule library every test imports from)
+		// plus this label's own root (covers roots like //docs that live
+		// outside rules/).
+		inputs: [
+			glob({ include: ["rules/**/*", "imp.workspace.js"] }),
+			await rulesTestSources(root),
+		],
+		// Gives the sandboxed subprocess a real PATH containing these binaries,
+		// so tests that genuinely resolve native tools can find them.
+		tools,
+		// Share the host cache so toolchain named-cache lookups hit instead of
+		// re-downloading into the sandbox's pinned HOME.
+		env: [`IMP_CACHE_DIR=${globalThis.__imp_cache_dir}`],
+		display: `test JS rules ${root}`,
+		sandbox: true,
+		impure: false,
+	});
+}
 
 /**
- * Declare a JS rule-test target for one workspace directory. Only `_test.js`
+ * Declare a JS rule-test label for one workspace directory. Only `_test.js`
  * files directly in `root` are owned; nested directories declare their own
- * rules-test target.
+ * rules-test label.
  *
  * @category target
  * @param {object} opts
  * @param {string} opts.root Workspace-rooted directory, e.g. "//rules/odin".
- * @param {object[]} [opts.tools] `nativeTool(...)` handles this root's test
+ * @param {object[]} [opts.tools] `nativeTool(...)` specifications this root's test
  *   suite genuinely resolves via PATH (not stubbed with withFakeToolchainHost)
  *   — e.g. odin's tests call real `nativeToolSpec(nativeTool("mkdir"))`. The
  *   sandboxed test subprocess otherwise has no PATH at all, so any undeclared
  *   real lookup fails.
- * @returns {object} Target handle.
+ * @returns {object} Label handle.
  */
 export function rulesTest({ root, tools = [] }) {
-	return new RulesTest({ root, tools });
+	const testModules = workspaceFiles({
+		root,
+		suffix: "_test.js",
+		recursive: false,
+	});
+	if (testModules.length === 0) {
+		throw new Error(`no JS rule tests found directly in ${root}`);
+	}
+	const testLabel = label({
+		data: { root, testModules: [...testModules], toolSpecs: [...tools] },
+	});
+	attachTest(testLabel, async function testRules() {
+		return runRulesTest(testLabel);
+	});
+	return testLabel;
 }

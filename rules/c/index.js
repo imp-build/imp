@@ -42,7 +42,7 @@ export const cConfigSchema = {
 
 defineConfigSchema("c", cConfigSchema);
 
-import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
+import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
 import { defaultGccToolchain, gccTool, GccToolchain } from "//rules/c/gcc";
 import {
 	defaultZigToolchain,

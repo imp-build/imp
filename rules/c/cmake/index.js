@@ -23,7 +23,7 @@ import {
 	writeWorkspace,
 	BUILD,
 } from "imp:core";
-import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
+import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
 import {
 	acquireCmakeToolchain,
 	cmakeBin,

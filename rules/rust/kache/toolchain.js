@@ -35,7 +35,7 @@ import {
 	toolName,
 } from "imp:core";
 
-import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
+import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
 import {
 	downloadToolArtifact,
 	lockedDownloadTools,

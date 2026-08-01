@@ -10,12 +10,11 @@ import {
 	output,
 	output_path,
 	packageGoal as attachPackage,
-	productFor,
 	registerBuildRule,
 	run,
 	writeWorkspace,
 } from "imp:core";
-import { TOOL } from "//rules/imp/native_tool";
+import { toolSpec } from "//rules/imp/native-tool";
 import { UV_TOOL } from "//rules/python/uv_toolchain";
 import { PEX_TOOL } from "//rules/python/pex_toolchain";
 import { pythonResolveSyncArgs } from "//rules/python/resolve";
@@ -229,7 +228,7 @@ export const python_app_build = memo(
 		const uvCacheToolSpec = uvCacheDirTool();
 		const pexRootToolSpec = pexRootTool();
 		const depToolSpecs = await Promise.all(
-			(handle.attrs.deps || []).map((dep) => productFor(dep, TOOL)),
+			(handle.attrs.deps || []).map(toolSpec),
 		);
 		const syncArgs = pythonResolveSyncArgs(handle.attrs.resolve)
 			.map(shellArg)
@@ -351,10 +350,9 @@ async function publishPythonAppPackage(appLabel) {
  * @param {object|string} [opts.pexVersion] PEX toolchain target handle or version string.
  * @param {string[]} [opts.extraPexArgs=[]] Extra arguments appended to PEX.
  * @param {object} [opts.resolve] Locked Python resolve supplying the project path; exclusive with `src`.
- * @param {Array} [opts.deps=[]] Extra target handles made available on PATH
- *   inside the build/package sandbox — anything whose kind registers a
- *   `TOOL` product, e.g. `nativeTool()` handles for scripts the PEX build
- *   shells out to.
+ * @param {Array} [opts.deps=[]] Extra tool providers made available on PATH
+ *   inside the build/package sandbox: nativeTool() specifications or legacy
+ *   target providers whose kind registers a `TOOL` product.
  * @returns {object} Label handle.
  */
 export const pythonApp = extensible(function pythonApp({

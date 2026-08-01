@@ -18,7 +18,7 @@ import {
 } from "imp:core";
 import { defaultGccToolchainVersion, gccTool } from "//rules/c/gcc";
 import { jsSources } from "//rules/js";
-import { nativeTool, nativeToolSpec } from "//rules/imp/native_tool";
+import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
 
 function scopeOf(selector) {
 	const address = selector.replace(/^\/\//, "");

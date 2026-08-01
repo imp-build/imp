@@ -11,7 +11,6 @@ import {
 	glob,
 	label,
 	paths,
-	productFor,
 	registerBuildRule,
 	registerLabel,
 	runFromTemplate,
@@ -27,7 +26,7 @@ import {
 } from "//rules/python/uv_toolchain";
 import { pythonResolve, pythonResolveSyncArgs } from "//rules/python/resolve";
 
-import { TOOL } from "//rules/imp/native_tool";
+import { toolSpec } from "//rules/imp/native-tool";
 
 // Keep `run`'s single-program contract available to consumers that import
 // Python rules without separately importing the workflows layer.
@@ -148,10 +147,9 @@ export function defaultPythonProject() {
  * @param {object} [opts.resolve] Locked Python resolve supplying third-party dependencies.
  * @param {object} [opts.project] Deprecated alias for `resolve`, kept for the
  *   previous single-default-project source-run API; exclusive with `resolve`.
- * @param {Array} [opts.deps=[]] Extra target handles made available on PATH
- *   inside each source's run — anything whose kind registers a `TOOL`
- *   product, e.g. `nativeTool()` handles for scripts that shell out to host
- *   programs (`git`, comparison-language interpreters, ...).
+ * @param {Array} [opts.deps=[]] Extra tool providers made available on PATH
+ *   inside each source's run: nativeTool() specifications or legacy target
+ *   providers whose kind registers a `TOOL` product.
  * @returns {object} Label handle owning the discovered per-file run labels.
  */
 export function pythonSources({
@@ -254,7 +252,7 @@ export async function buildPythonSourceRunTemplate(
 	const uvToolSpec = await resolveUvTool(handle.attrs.uvVersion);
 	const uvCacheToolSpec = uvCacheDirTool();
 	const depToolSpecs = await Promise.all(
-		(handle.attrs.deps || []).map((dep) => productFor(dep, TOOL)),
+		(handle.attrs.deps || []).map(toolSpec),
 	);
 	const envExports = sandboxRootEnvExports(uvCacheDirEnv());
 	const inputs = [file_set.literal(handle.attrs.sourceFiles)];
