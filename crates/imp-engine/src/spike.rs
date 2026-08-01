@@ -7204,6 +7204,27 @@ export const ui = asset({ srcs: ["**/*.png"] });
         );
     }
 
+    // Regression test for #56: a non-.js file and a .js file that does not
+    // match the suffix must both be excluded when a suffix is given, and a
+    // non-.js file must be excluded even with the default empty suffix.
+    #[test]
+    fn workspace_files_excludes_non_matching_files() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join("rules/pkg/direct_test.js"), "");
+        write_file(&p.join("rules/pkg/direct.js"), "");
+        write_file(&p.join("rules/pkg/direct.rs"), "");
+
+        assert_eq!(
+            workspace_files(p, "//rules/pkg", "_test.js", false).unwrap(),
+            ["//rules/pkg/direct_test"],
+        );
+        assert_eq!(
+            workspace_files(p, "//rules/pkg", "", false).unwrap(),
+            ["//rules/pkg/direct", "//rules/pkg/direct_test"],
+        );
+    }
+
     #[tokio::test]
     async fn rules_tests_receive_fresh_module_state_per_test() {
         let root = tempfile::tempdir().unwrap();
