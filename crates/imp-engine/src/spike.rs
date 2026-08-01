@@ -699,16 +699,17 @@ async fn load_workspace_with_rules_and_service(
     }
 
     // ----- Collect BUILD.js files -----
-    let mut build_files: Vec<PathBuf> = WalkDir::new(&root)
-        .into_iter()
-        .filter_entry(|e| {
-            !matches!(
-                e.file_name().to_str(),
-                Some(".git" | "target" | ".toolchain" | ".claude")
-            )
-        })
+    // Uses the `ignore` crate rather than a manual denylist so BUILD.js
+    // files under gitignored directories (scratch dirs, generated output,
+    // etc.) never silently join the workspace: `//...` must resolve to the
+    // same target set on a clean clone and on a working copy with ignored
+    // paths present (#55). This also respects nested/global gitignore rules
+    // and skips hidden directories (covering the old ".git"/".toolchain"/
+    // ".claude" denylist) for free.
+    let mut build_files: Vec<PathBuf> = ignore::WalkBuilder::new(&root)
+        .build()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file() && e.file_name() == BUILD_FILE)
+        .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()) && e.file_name() == BUILD_FILE)
         .map(|e| e.into_path())
         .collect();
     build_files.sort();
@@ -7503,6 +7504,38 @@ export const pkg = configured({ srcs: ["**/*.txt"] });
         assert!(roots
             .iter()
             .any(|(t, product)| t.address == "//:pkg" && product == "build"));
+    }
+
+    // Regression test for #55: a BUILD.js under a gitignored directory must
+    // not silently join the workspace, so `//...` resolves to the same
+    // target set regardless of untracked local scratch directories.
+    #[tokio::test]
+    async fn build_files_under_gitignored_directories_are_not_discovered() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), "");
+        write_file(&p.join(".gitignore"), "/examples/\n");
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target } from "imp:core";
+export const tracked = target({ kind: "gitignore-test" });
+"#,
+        );
+        write_file(
+            &p.join("examples/scratch").join(BUILD_FILE),
+            r#"
+import { target } from "imp:core";
+export const untracked = target({ kind: "gitignore-test" });
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        assert!(workspace.workspace.targets.contains_key("//:tracked"));
+        assert!(!workspace
+            .workspace
+            .targets
+            .contains_key("//examples/scratch:untracked"));
     }
 
     #[test]
