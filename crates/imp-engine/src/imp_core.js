@@ -660,7 +660,7 @@ export function configuration(namespace, fallback = undefined) {
 	}
 	// Record the read on the current call frame so run()'s cache-key salt
 	// (see run() below) can be scoped to only the namespaces actually read,
-	// instead of the whole workspace_config map. See config-digest-scoping.md.
+	// instead of the whole workspace_config map.
 	_effective_context_entry(true).ctx.readNamespaces.add(namespace);
 	const encoded = __host_configuration(namespace);
 	_trace_effect({
@@ -779,8 +779,7 @@ export function profile(handle, name) {
  * Read the CLI-resolved value of a declared mode axis.
  *
  * Backed by configuration("imp.mode"), so a call frame that reads a mode
- * axis is automatically tracked for run()'s cache-key scoping — see
- * config-digest-scoping.md.
+ * axis is automatically tracked for run()'s cache-key scoping.
  *
  * @category configuration
  * @param {string} name Axis name, as passed to defineModeAxis.
@@ -2363,8 +2362,8 @@ export function product(kindClass, nameToken, toolToken, fn, opts) {
 }
 
 // ---------------------------------------------------------------------------
-// label() / attach() — exported labels and lazy goal handlers (Phase 4,
-// imperative-model.md). Strictly additive/parallel to Target/product()/
+// label() / attach() — exported labels and lazy goal handlers.
+// Strictly additive/parallel to Target/product()/
 // goal() above: a label has no kind, no schema, no attrs, and is never a
 // dependency edge. It shares only the id→address table with targets (the
 // same post-eval named-export scan that resolves `new Target()` addresses
@@ -2779,8 +2778,8 @@ export const packageGoal = _goal_sugar("package");
 // flags/args (goalFlags()/runArgs(), which read the same live-workspace
 // state a product() function reads today) and the resolved mode-axis
 // overlay (configuration("imp.mode", {}) — the same namespace
-// resolve_mode_axes() writes before any target or label runs; see
-// mode-axis-registry.md). Runs every attached handler concurrently and
+// resolve_mode_axes() writes before any target or label runs). Runs
+// every attached handler concurrently and
 // waits for all of them, mirroring how several tools implementing one
 // product are dispatched today.
 function _trace_label_handler(handler, goalName, selectorAddress, ctx) {
@@ -3755,7 +3754,7 @@ export function read_file(path) {
 	const result = __host_read_file(path);
 	// Same shape as configuration()'s readNamespaces recording — lets a
 	// memo trace's input_specs include exactly the files this
-	// call frame read. See config-digest-scoping.md.
+	// call frame read.
 	_effective_context_entry(true).ctx.readFiles.add(path);
 	_trace_effect({ event: "effect", kind: "read_file", path });
 	return result;

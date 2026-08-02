@@ -234,7 +234,7 @@ pub struct Workspace {
     pub declared_product_names: BTreeMap<String, DeclaredProductName>,
     /// Label address (primary or any alias) -> label id. Labels are a
     /// strictly parallel, additive selectable-root mechanism to
-    /// Target/product() (imperative-model.md Phase 4): no kind, no schema,
+    /// Target/product(): no kind, no schema,
     /// no attrs. They share only the id/address table with targets —
     /// `id_to_address` holds a label's primary (first-encountered) address,
     /// and this map holds every address (including aliases) it was exported
@@ -310,7 +310,7 @@ pub struct HostState {
     /// Mode axes declared via `defineModeAxis(name, {kind, values?, default})`
     /// — `{kind, values?, default}` per axis, keyed by axis name. Resolved
     /// CLI overrides land in `workspace_config["imp.mode"]`, written only
-    /// by `execute_goal_live_selection`; see mode-axis-registry.md.
+    /// by `execute_goal_live_selection`.
     mode_axes: BTreeMap<String, serde_json::Value>,
     /// Named partial mode-axis value bundles declared via `defineProfile`.
     /// Resolved after every rule module has registered its axes, before goal
@@ -344,8 +344,8 @@ pub struct HostState {
     dynamic_label_registrations: Vec<(u32, String)>,
     active_label_discovery: Option<u32>,
     /// True once workspace module-graph evaluation has finished and the
-    /// label/attachment surfaces are sealed (imperative-model.md Phase 4,
-    /// "Lifecycle: sealing") — the same moment `id_to_address` is finalized,
+    /// label/attachment surfaces are sealed — the same moment
+    /// `id_to_address` is finalized,
     /// before any goal dispatch. `__host_label`/`__host_attach` reject calls
     /// once this is set.
     labels_sealed: bool,
@@ -766,7 +766,7 @@ async fn load_workspace_with_rules_and_service(
             )?;
         }
 
-        // ----- Materialize labels (imperative-model.md Phase 4) -----
+        // ----- Materialize labels -----
         // Labels are opaque selectable roots with no kind/attrs/deps, so
         // unlike targets they don't need materialize_pending_target's
         // `pending` lookup — every named export whose id was allocated via
@@ -957,8 +957,8 @@ fn collect_imp_exports(ns: &Object) -> Result<Vec<(String, u32)>> {
     for entry in ns.own_props::<String, Value>(Filter::default()) {
         let (key, val) = entry.map_err(|e| anyhow::anyhow!("{e}"))?;
         if let Some(obj) = val.as_object() {
-            // Target handles carry `__imp`; label() handles (Phase 4,
-            // imperative-model.md) carry `__imp_label` instead — both are
+            // Target handles carry `__imp`; label() handles carry
+            // `__imp_label` instead — both are
             // addressed by the same post-eval named-export scan.
             let is_addressable = matches!(obj.get::<_, bool>("__imp"), Ok(true))
                 || matches!(obj.get::<_, bool>("__imp_label"), Ok(true));
@@ -1968,7 +1968,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_target", host_target)?;
 
     // ------------------------------------------------------------------
-    // __host_label() → u32 (imperative-model.md Phase 4). Allocates a
+    // __host_label() → u32. Allocates a
     // selectable root with no kind/attrs/schema, sharing the id counter and
     // id_to_address table with __host_target so the two mechanisms can never
     // collide on an address. Rejected once labels are sealed (end of
@@ -2797,7 +2797,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     // __host_define_mode_axis(name, defJson) — defJson is
     // `{kind: "rebuild" | "output-select", values?: [...], default: ...}`.
     // Registers the axis's declared shape so `execute_goal_live_selection`
-    // can validate/default `--axis` overrides. See mode-axis-registry.md.
+    // can validate/default `--axis` overrides.
     let state_mode_axes = Arc::clone(&state);
     let host_define_mode_axis = Function::new(
         ctx.clone(),
@@ -3047,8 +3047,8 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     // workspace_config map, as before.
     //
     // Called with a JSON array of namespace names (from run(), whose
-    // configDigest becomes the persistent action-cache salt — see
-    // config-digest-scoping.md): digest only the sub-map restricted to those
+    // configDigest becomes the persistent action-cache salt): digest only
+    // the sub-map restricted to those
     // namespaces, computed automatically from what the calling frame actually
     // read via configuration(), not a caller-maintained list. An empty array
     // (nothing read) digests to a fixed constant, independent of any
@@ -4742,7 +4742,7 @@ fn action_spec_error(message: String) -> rquickjs::Error {
 /// Configuration namespace reserved for mode-axis resolution. Only
 /// `execute_goal_live_selection` may write it (directly on `HostState`,
 /// bypassing `__host_configure`'s guard below); JS code reads it indirectly
-/// via `modeAxis()`. See mode-axis-registry.md.
+/// via `modeAxis()`.
 pub(crate) const MODE_AXIS_NAMESPACE: &str = "imp.mode";
 
 /// Digest `workspace_config` restricted to `namespaces`, with `imp.mode`
@@ -5438,7 +5438,7 @@ pub struct GoalExecutionOptions<'a> {
     pub run_args: &'a [String],
     /// Raw `--axis KEY=VALUE` CLI overrides, resolved against declared mode
     /// axes and written into the live workspace config before any target
-    /// executes. See mode-axis-registry.md.
+    /// executes.
     pub axis_overrides: &'a [String],
     /// Optional `--profile NAME`, applied after axis defaults and before
     /// explicit axis overrides. See parametrisation.md Phase 2.
@@ -5447,8 +5447,7 @@ pub struct GoalExecutionOptions<'a> {
 
 /// Resolve `--axis KEY=VALUE` CLI overrides against the mode axes declared
 /// via `defineModeAxis` and write the fully-defaulted result into the live
-/// `"imp.mode"` config namespace, before any target executes. See
-/// mode-axis-registry.md.
+/// `"imp.mode"` config namespace, before any target executes.
 fn validate_mode_axis_value(
     axis: &str,
     value: &str,
@@ -5668,7 +5667,7 @@ pub async fn execute_goal_live_selection(
 
     let dynamic_snapshot: BTreeMap<String, Target> = live.dynamic_targets.lock().unwrap().clone();
 
-    // Label selection (imperative-model.md Phase 4) runs strictly in
+    // Label selection runs strictly in
     // parallel with target selection above: labels share only the address
     // table with targets, not the (kind, product) table, so a selector that
     // names a label-only address (no matching target at all) must not be
@@ -5965,7 +5964,7 @@ pub async fn execute_goal_live_selection(
                     })?;
             }
 
-            // Label handler dispatch (imperative-model.md Phase 4) runs
+            // Label handler dispatch runs
             // after every target-based call above has fully completed —
             // "target-based calls first, then label-based calls" is the
             // simplest correct coexistence rule for a goal that selects
@@ -10272,8 +10271,8 @@ configure("cache_test", {{ mode: {mode} }});
     async fn live_config_digest_ignores_namespaces_the_product_never_read() {
         // Same shape as live_config_digest_change_invalidates_run_cache, but
         // the product only reads "cache_test_read"; the workspace changes a
-        // different namespace ("cache_test_unread") on every iteration. Per
-        // config-digest-scoping.md, run()'s cache salt is scoped to the
+        // different namespace ("cache_test_unread") on every iteration.
+        // run()'s cache salt is scoped to the
         // namespaces the calling frame actually read via configuration() —
         // an unrelated namespace changing must not invalidate the cache.
         let root = tempfile::tempdir().unwrap();
@@ -11906,7 +11905,7 @@ add_executable(cmake_app main.c)
 
     // -----------------------------------------------------------------
     // label() / attach() — exported labels and lazy goal handlers
-    // (imperative-model.md Phase 4). Handler invocation is observed through
+    // Handler invocation is observed through
     // a `globalThis.__imp_test_marks` order log written by the handler
     // itself (pushed as "key"), read back after dispatch via `read_test_marks`
     // — this avoids depending on run()'s sandboxed process execution (already
@@ -11943,7 +11942,7 @@ function mark(key) {
 }
 
 // One-off style: a label with build+test handlers, data-dependent branching,
-// mirroring imperative-model.md's "one-off C or workflow build" example.
+// mirroring the "one-off C or workflow build" example.
 export function makeHasher(opts = {}) {
     const h = label({ data: opts });
     build(h, async function buildHasher(ctx) {
@@ -12551,8 +12550,8 @@ export const generated = makeGenerated();
         assert_eq!(marks.len(), 2, "{marks:?}");
     }
 
-    /// Mirrors imperative-model.md's "Worked example: one-off C or workflow
-    /// build" verbatim: a single BUILD.js defines and attaches everything
+    /// Mirrors the "worked example: one-off C or workflow build"
+    /// verbatim: a single BUILD.js defines and attaches everything
     /// inline (`const hasher = label(); build(hasher, ...); test(hasher,
     /// ...); export { hasher };`) with no separate factory/rules module —
     /// the on-disk-fixture counterpart to `label_fixture()`'s factory-style

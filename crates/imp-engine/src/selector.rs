@@ -122,7 +122,7 @@ impl ParsedSelector {
     }
 
     /// Pure address-pattern match, factored out of `matches` so label
-    /// selection (`select_label_roots_in`, imperative-model.md Phase 4) can
+    /// selection (`select_label_roots_in`) can
     /// reuse the exact same exact/package/recursive semantics `Target`
     /// selection uses, without needing a `Target` to match against.
     pub(crate) fn matches_address(&self, address: &str) -> bool {
@@ -243,8 +243,8 @@ pub fn select_roots_in<'a>(
     Ok(selected.into_values().collect())
 }
 
-/// Resolve selectors against sealed label addresses (imperative-model.md
-/// Phase 4), filtered to labels with at least one handler attached for
+/// Resolve selectors against sealed label addresses, filtered to labels
+/// with at least one handler attached for
 /// `goal`. Parallels `select_roots_in`'s exact/package/recursive/`//...`
 /// semantics, but over `workspace.label_addresses` instead of
 /// `workspace.targets`, and "has the goal's product" becomes "has ≥1
@@ -735,7 +735,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // select_label_roots_in (imperative-model.md Phase 4)
+    // select_label_roots_in
     // -----------------------------------------------------------------
 
     fn label_workspace() -> Workspace {
