@@ -52,9 +52,9 @@ describe("rust workspace closure", () => {
 	});
 
 	test("transitiveClosureDirs follows path dependencies transitively, excluding unrelated crates", () => {
-		expect(
-			transitiveClosureDirs(METADATA, manifestPath("crates/imp")),
-		).toEqual(["crates/imp", "crates/imp-execution", "crates/imp-store"]);
+		expect(transitiveClosureDirs(METADATA, manifestPath("crates/imp"))).toEqual(
+			["crates/imp", "crates/imp-execution", "crates/imp-store"],
+		);
 	});
 
 	test("transitiveClosureDirs ignores non-path (registry) dependencies", () => {

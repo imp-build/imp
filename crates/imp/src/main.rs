@@ -10,9 +10,9 @@ use std::sync::{
 
 use anyhow::{Context, Result};
 use clap::{Arg, ArgAction, Args, Command, FromArgMatches, Parser, Subcommand};
-use rquickjs::{promise::MaybePromise, CatchResultExt, FromJs, Function, Module, Object, Value};
 use imp_engine::{changed, runtime, selector, spike};
 use imp_scheduler as scheduler;
+use rquickjs::{promise::MaybePromise, CatchResultExt, FromJs, Function, Module, Object, Value};
 
 type Tree = ui::Tree;
 
@@ -1608,9 +1608,7 @@ mod tests {
 
     fn workspace_with_imp_config(config: serde_json::Value) -> spike::Workspace {
         let mut workspace = spike::Workspace::default();
-        workspace
-            .workspace_config
-            .insert("imp".to_owned(), config);
+        workspace.workspace_config.insert("imp".to_owned(), config);
         workspace
     }
 
@@ -1736,12 +1734,10 @@ mod tests {
 
     #[test]
     fn direct_module_address_is_not_a_cli_command() {
-        assert!(Cli::try_parse_from([
-            "imp",
-            "//rules/rust:cargoBuildPath",
-            "rules/rust/example",
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from(["imp", "//rules/rust:cargoBuildPath", "rules/rust/example",])
+                .is_err()
+        );
     }
 
     #[test]

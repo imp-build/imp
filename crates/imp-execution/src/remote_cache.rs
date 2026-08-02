@@ -27,14 +27,11 @@ fn remote_store() -> Option<&'static dyn RemoteStore> {
             if backend != "ghac" {
                 return None;
             }
-            let root =
-                std::env::var("IMP_REMOTE_CACHE_ROOT").unwrap_or_else(|_| "imp".to_owned());
+            let root = std::env::var("IMP_REMOTE_CACHE_ROOT").unwrap_or_else(|_| "imp".to_owned());
             match imp_remote_cache::ghac_remote_store(&root) {
                 Ok(store) => Some(Box::new(store) as Box<dyn RemoteStore>),
                 Err(error) => {
-                    eprintln!(
-                        "warning: IMP_REMOTE_CACHE=ghac but failed to initialize: {error:#}"
-                    );
+                    eprintln!("warning: IMP_REMOTE_CACHE=ghac but failed to initialize: {error:#}");
                     None
                 }
             }
@@ -376,10 +373,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use async_trait::async_trait;
-    use opendal::services::Memory;
-    use opendal::Operator;
     use imp_remote_cache::OpendalRemoteStore;
     use imp_store::cache::CachedArtifact;
+    use opendal::services::Memory;
+    use opendal::Operator;
 
     use super::*;
 

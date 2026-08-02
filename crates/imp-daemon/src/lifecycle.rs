@@ -1,15 +1,14 @@
 use crate::proto::execution_server::ExecutionServer;
 use crate::server::ExecutionServer as Service;
 use anyhow::{bail, Context, Result};
+use imp_execution::service::LocalExecutionService;
 use std::net::SocketAddr;
 use tonic::transport::Server;
-use imp_execution::service::LocalExecutionService;
 
 const DEFAULT_DAEMON_ADDR: &str = "127.0.0.1:49671";
 
 pub fn address() -> Result<SocketAddr> {
-    let value =
-        std::env::var("IMP_DAEMON_ADDR").unwrap_or_else(|_| DEFAULT_DAEMON_ADDR.to_owned());
+    let value = std::env::var("IMP_DAEMON_ADDR").unwrap_or_else(|_| DEFAULT_DAEMON_ADDR.to_owned());
     parse_address(&value)
 }
 

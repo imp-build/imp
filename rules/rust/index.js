@@ -459,9 +459,7 @@ export function cargoScriptPreamble(scriptPreamble = "") {
 // kache recognizes --remap-path-prefix and folds it into its own
 // cache-key normalization alongside KACHE_BASE_DIR.
 export function cargoRemapFlag(kacheActive) {
-	return kacheActive
-		? ' --remap-path-prefix="$imp_sandbox_root"=/imp-src'
-		: "";
+	return kacheActive ? ' --remap-path-prefix="$imp_sandbox_root"=/imp-src' : "";
 }
 
 // The common case: `cargoScriptPreamble` followed by one RUSTFLAGS-prefixed

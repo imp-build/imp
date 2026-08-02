@@ -13,8 +13,8 @@ use std::sync::{
 };
 
 use crate::loader::{
-    resolve_workspace_module, validate_workspace_module_path, ModuleForm, ModuleKind, RulesSource,
-    ImpLoader, ImpResolver,
+    resolve_workspace_module, validate_workspace_module_path, ImpLoader, ImpResolver, ModuleForm,
+    ModuleKind, RulesSource,
 };
 use crate::runtime::LiveWorkspace;
 use crate::selector::{
@@ -24,14 +24,6 @@ use crate::selector::{
 #[cfg(test)]
 use crate::selector::{select_roots, select_targets};
 use anyhow::{bail, Context, Result};
-use regex::Regex;
-use rquickjs::{
-    function::Async, promise::MaybePromise, promise::PromiseHookType, Array,
-    AsyncContext as JsContext, AsyncRuntime as Runtime, CatchResultExt, Ctx, Filter, FromJs,
-    Function, Module, Object, Value,
-};
-use serde::{Deserialize, Serialize};
-use walkdir::WalkDir;
 use imp_daemon::client::RemoteExecutionService;
 use imp_exec_api::{
     ExecAction, ExecIoSpec, ExecRunOpts, ExecutionService, SandboxRetention, WorkerSpec,
@@ -42,6 +34,14 @@ use imp_store::cache::{
     artifact_relative_path, digest_bytes, digest_json, named_cache_scope_id, store_file_blob,
     workspace_cache_id,
 };
+use regex::Regex;
+use rquickjs::{
+    function::Async, promise::MaybePromise, promise::PromiseHookType, Array,
+    AsyncContext as JsContext, AsyncRuntime as Runtime, CatchResultExt, Ctx, Filter, FromJs,
+    Function, Module, Object, Value,
+};
+use serde::{Deserialize, Serialize};
+use walkdir::WalkDir;
 
 pub const WORKSPACE_FILE: &str = "imp.workspace.js";
 static MEMO_DEPRECATION_WARNED: AtomicBool = AtomicBool::new(false);
@@ -1108,8 +1108,7 @@ fn validate_field_value(
         // Passed through as-is: the live handle stays on the JS side, this
         // only confirms the attrs slot actually holds a target reference.
         "target" => {
-            let is_ref =
-                value.get("__imp_ref").is_some() || value.get("__imp_dep_ref").is_some();
+            let is_ref = value.get("__imp_ref").is_some() || value.get("__imp_dep_ref").is_some();
             if is_ref {
                 Ok(value.clone())
             } else {
@@ -1581,8 +1580,7 @@ pub async fn ensure_discovered_labels(
         let call_result = live
             .ctx
             .async_with(async |ctx| -> rquickjs::Result<()> {
-                let set_active: Function =
-                    ctx.globals().get("__imp_set_label_discovery_active")?;
+                let set_active: Function = ctx.globals().get("__imp_set_label_discovery_active")?;
                 set_active.call::<_, ()>((true,))?;
                 let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
                 let owner: Object = resolve_fn.call((discoverer.owner_id,))?;
@@ -3516,17 +3514,18 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     let host_memo_trace_write = Function::new(
         ctx.clone(),
         move |record_json: String| -> rquickjs::Result<()> {
-            let record: imp_store::memo_trace::MemoTraceRecord =
-                serde_json::from_str(&record_json).map_err(|error| {
+            let record: imp_store::memo_trace::MemoTraceRecord = serde_json::from_str(&record_json)
+                .map_err(|error| {
                     rquickjs::Error::new_loading_message(
                         "memoTraceWrite",
                         format!("parse record: {error}"),
                     )
                 })?;
-            imp_store::memo_trace::write_memo_trace_record(&workspace_root_trace, &record)
-                .map_err(|error| {
+            imp_store::memo_trace::write_memo_trace_record(&workspace_root_trace, &record).map_err(
+                |error| {
                     rquickjs::Error::new_loading_message("memoTraceWrite", format!("{error:#}"))
-                })
+                },
+            )
         },
     )?;
     globals.set("__host_memo_trace_write", host_memo_trace_write)?;
@@ -3781,9 +3780,9 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                 rquickjs::Error::new_loading_message("writeWorkspace", format!("{e:#}"))
             })?;
             let destination = wc.join(&relative);
-            imp_store::cache::write_workspace(&digest, from.as_deref(), &destination).map_err(
-                |e| rquickjs::Error::new_loading_message("writeWorkspace", format!("{e:#}")),
-            )
+            imp_store::cache::write_workspace(&digest, from.as_deref(), &destination).map_err(|e| {
+                rquickjs::Error::new_loading_message("writeWorkspace", format!("{e:#}"))
+            })
         },
     )?;
     globals.set("__host_write_workspace", host_write_workspace)?;
@@ -3950,91 +3949,90 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                 let cancellation = sched.cancellation_flag();
                 let workspace_id = workspace_cache_id(&root);
                 let ui_multi = ui_multi_run.lock().unwrap().clone();
-                let result = sched
-                    .run(
-                        parent,
-                        display,
-                        imp_scheduler::TaskKind::Sandbox,
-                        move |run_context| {
-                            if !run_opts.sandbox || run_opts.workspace_cwd {
-                                if !run_opts.sandbox && !run_opts.impure {
-                                    anyhow::bail!(
-                                        "run({{ sandbox: false }}) requires impure: true"
-                                    );
-                                }
-                                if !run_opts.sandbox {
-                                    // exec_run_unsandboxed never calls `started`
-                                    // (it has no cache check at all), so mark
-                                    // this job started immediately — it can
-                                    // never be a cache hit.
-                                    run_context.started();
-                                }
-                                let result = imp_execution::exec::exec_run_local_with_start(
-                                    &root,
-                                    run_opts,
-                                    Some(cancellation.as_ref()),
-                                    Some(&|| run_context.started()),
-                                    ui_multi.as_ref(),
-                                )
-                                .map(|result| {
-                                    imp_exec_api::ExecOutcome {
+                let result =
+                    sched
+                        .run(
+                            parent,
+                            display,
+                            imp_scheduler::TaskKind::Sandbox,
+                            move |run_context| {
+                                if !run_opts.sandbox || run_opts.workspace_cwd {
+                                    if !run_opts.sandbox && !run_opts.impure {
+                                        anyhow::bail!(
+                                            "run({{ sandbox: false }}) requires impure: true"
+                                        );
+                                    }
+                                    if !run_opts.sandbox {
+                                        // exec_run_unsandboxed never calls `started`
+                                        // (it has no cache check at all), so mark
+                                        // this job started immediately — it can
+                                        // never be a cache hit.
+                                        run_context.started();
+                                    }
+                                    let result = imp_execution::exec::exec_run_local_with_start(
+                                        &root,
+                                        run_opts,
+                                        Some(cancellation.as_ref()),
+                                        Some(&|| run_context.started()),
+                                        ui_multi.as_ref(),
+                                    )
+                                    .map(|result| imp_exec_api::ExecOutcome {
                                         stdout: result.stdout,
                                         stderr: result.stderr,
                                         exit_code: result.exit_code,
                                         output_digest: result.output_digest.unwrap_or_default(),
                                         outputs: result.outputs,
                                         cache_outcome: result.cache_outcome,
+                                    });
+                                    if let Ok(outcome) = &result {
+                                        report_cache_telemetry(&run_context, outcome.cache_outcome);
                                     }
-                                });
-                                if let Ok(outcome) = &result {
-                                    report_cache_telemetry(&run_context, outcome.cache_outcome);
+                                    return result;
                                 }
-                                return result;
-                            }
-                            let input_digest = imp_execution::staging::resolve_input_digest(
-                                &root,
-                                &run_opts.inputs,
-                            )?;
-                            let env = imp_execution::staging::resolve_base_env(&run_opts.env)?;
-                            let materialize = run_opts.materialize;
-                            let action = ExecAction {
-                                argv: run_opts.argv,
-                                display: run_opts.display,
-                                env,
-                                config_digest: run_opts.config_digest,
-                                input_digest,
-                                outputs: run_opts.outputs,
-                                tools: run_opts.tools,
-                                impure: run_opts.impure,
-                                force_cache: run_opts.force_cache,
-                                no_cache: run_opts.no_cache,
-                                sandbox_retention: run_opts.sandbox_retention,
-                                allow_failure: run_opts.allow_failure,
-                            };
-                            let result = service.execute_with_start(
-                                &workspace_id,
-                                action,
-                                Some(cancellation.as_ref()),
-                                &|| run_context.started(),
-                            )?;
-                            report_cache_telemetry(&run_context, result.cache_outcome);
-                            if materialize {
-                                imp_execution::staging::materialize_outputs(
-                                    &result.outputs,
+                                let input_digest = imp_execution::staging::resolve_input_digest(
                                     &root,
+                                    &run_opts.inputs,
                                 )?;
-                            }
-                            // Named caches are populated by the executor itself
-                            // (exec_run_hermetic gets workspace_id), including
-                            // repopulation from CAS on task-cache hits.
-                            Ok(result)
-                        },
-                    )
-                    .await
-                    // Throw a real JS Exception: message lives in a JS string
-                    // property, so captured task output survives intact —
-                    // printf-style error constructors truncate at ~256 bytes.
-                    .map_err(|e| rquickjs::Exception::throw_message(&ctx, &format!("{e:#}")))?;
+                                let env = imp_execution::staging::resolve_base_env(&run_opts.env)?;
+                                let materialize = run_opts.materialize;
+                                let action = ExecAction {
+                                    argv: run_opts.argv,
+                                    display: run_opts.display,
+                                    env,
+                                    config_digest: run_opts.config_digest,
+                                    input_digest,
+                                    outputs: run_opts.outputs,
+                                    tools: run_opts.tools,
+                                    impure: run_opts.impure,
+                                    force_cache: run_opts.force_cache,
+                                    no_cache: run_opts.no_cache,
+                                    sandbox_retention: run_opts.sandbox_retention,
+                                    allow_failure: run_opts.allow_failure,
+                                };
+                                let result = service.execute_with_start(
+                                    &workspace_id,
+                                    action,
+                                    Some(cancellation.as_ref()),
+                                    &|| run_context.started(),
+                                )?;
+                                report_cache_telemetry(&run_context, result.cache_outcome);
+                                if materialize {
+                                    imp_execution::staging::materialize_outputs(
+                                        &result.outputs,
+                                        &root,
+                                    )?;
+                                }
+                                // Named caches are populated by the executor itself
+                                // (exec_run_hermetic gets workspace_id), including
+                                // repopulation from CAS on task-cache hits.
+                                Ok(result)
+                            },
+                        )
+                        .await
+                        // Throw a real JS Exception: message lives in a JS string
+                        // property, so captured task output survives intact —
+                        // printf-style error constructors truncate at ~256 bytes.
+                        .map_err(|e| rquickjs::Exception::throw_message(&ctx, &format!("{e:#}")))?;
                 let obj = Object::new(ctx)?;
                 obj.set("stdout", result.stdout)?;
                 obj.set("stderr", result.stderr)?;
@@ -4264,10 +4262,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     // invocations (via IMP_CACHE_DIR) — sandboxed subprocesses see a pinned
     // HOME and would otherwise re-download named-cache contents.
     if let Ok(cache_dir) = imp_store::cache::cache_root() {
-        globals.set(
-            "__imp_cache_dir",
-            cache_dir.to_string_lossy().into_owned(),
-        )?;
+        globals.set("__imp_cache_dir", cache_dir.to_string_lossy().into_owned())?;
     }
 
     Ok(())
@@ -4767,9 +4762,7 @@ pub(crate) fn scoped_configuration_digest(
         let mode = scoped
             .entry(MODE_AXIS_NAMESPACE.to_owned())
             .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-        let mode = mode
-            .as_object_mut()
-            .context("imp.mode must be an object")?;
+        let mode = mode.as_object_mut().context("imp.mode must be an object")?;
         for (axis, value) in mode_overrides {
             mode.insert(axis.clone(), serde_json::Value::String(value.clone()));
         }
@@ -6832,10 +6825,10 @@ fn parse_dependency(scope: &str, value: &str) -> Result<Dependency> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
     use imp_execution::exec::{
         report_process_line, spawn_output_reader, ProcessLine, ProcessStream,
     };
+    use sha2::{Digest, Sha256};
 
     /// Clear runtime-global memo state so a repeated goal invocation on the
     /// same LiveWorkspace re-evaluates its product functions. Production runs
@@ -11916,8 +11909,7 @@ add_executable(cmake_app main.c)
     async fn read_test_marks(live: &LiveWorkspace) -> Vec<String> {
         live.ctx
             .async_with(async |ctx| -> rquickjs::Result<Vec<String>> {
-                let json: String =
-                    ctx.eval("JSON.stringify(globalThis.__imp_test_marks || [])")?;
+                let json: String = ctx.eval("JSON.stringify(globalThis.__imp_test_marks || [])")?;
                 Ok(serde_json::from_str(&json).unwrap())
             })
             .await

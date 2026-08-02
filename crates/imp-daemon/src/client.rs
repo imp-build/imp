@@ -1,12 +1,12 @@
 use crate::{convert, lifecycle, proto, PROTOCOL_VERSION};
 use anyhow::{bail, Result};
+use imp_exec_api::{
+    Capabilities, ExecAction, ExecOutcome, ExecutionService, WorkerHandle, WorkerSpec,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
-use imp_exec_api::{
-    Capabilities, ExecAction, ExecOutcome, ExecutionService, WorkerHandle, WorkerSpec,
-};
 
 pub struct RemoteExecutionService {
     rt: Option<tokio::runtime::Runtime>,
