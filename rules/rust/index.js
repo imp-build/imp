@@ -289,15 +289,36 @@ export async function wholeWorkspaceSources(
 export const resources = memo(
 	async function resources(handle) {
 		handle = package_handle(handle);
-		const sets = (handle.deps || [])
-			.map((dep) => dep.handle)
-			.filter((dep) => dep && dep.kind === "resource-package");
-		if (sets.length === 0) return file_set.literal([]);
-		const resolved = await Promise.all(sets.map(resource_package_sources));
-		return resolved.length === 1 ? resolved[0] : file_set.union(...resolved);
+		return resourceSetFor(handle.deps);
 	},
 	{ display: "Rust resources {0}", level: "debug" },
 );
+
+// The same, for `testDeps` — files the test binaries read at runtime but the
+// crate does not compile against. Keeping these off `deps` is the point: a
+// change to them must re-run the tests without invalidating the library or
+// binary build. (imp's own rules/ tree is the motivating case: `imp init`
+// and the loader read it from disk, and its tests need it present, but no
+// imp crate embeds it any more.)
+export const testResources = memo(
+	async function testResources(handle) {
+		handle = package_handle(handle);
+		return resourceSetFor(handle.attrs.testDeps);
+	},
+	{ display: "Rust test resources {0}", level: "debug" },
+);
+
+// Accepts both dep shapes in play here: package_handle() wraps `data.deps` as
+// `{ handle }`, while `attrs.testDeps` holds the bare handles normalize_deps
+// returned.
+async function resourceSetFor(deps) {
+	const sets = (deps || [])
+		.map((dep) => (dep && dep.handle ? dep.handle : dep))
+		.filter((dep) => dep && dep.kind === "resource-package");
+	if (sets.length === 0) return file_set.literal([]);
+	const resolved = await Promise.all(sets.map(resource_package_sources));
+	return resolved.length === 1 ? resolved[0] : file_set.union(...resolved);
+}
 
 // Union of resources() across every declared Cargo package label whose
 // own directory is one of `dirs` — used by the shared whole-workspace
@@ -976,6 +997,7 @@ export const cargoTest = memo(
  * @param {string[]} [opts.testArgs=[]] Extra arguments appended to `cargo test`.
  * @param {Array<object>} [opts.testTools=[]] nativeTool() specifications exposed on PATH while running `cargo test`.
  * @param {Array<object>} [opts.deps=[]] Extra deps, e.g. a resourcePackage() (see //rules/asset) providing non-.rs files an `include_str!`/`include_bytes!` needs.
+ * @param {Array<object>} [opts.testDeps=[]] resourcePackage() deps the test binaries read at runtime but the crate doesn't compile against — materialized into the test sandbox only, so changing them re-runs tests without invalidating the build.
  * @param {boolean} [opts.doctest] Override the workspace `rustConfig.doctest`
  *   setting for this package.
  * @param {boolean} [opts.workspaceMember=false] This package is a member of
@@ -995,6 +1017,7 @@ export const cargoPackage = extensible(function cargoPackage({
 	testArgs = [],
 	testTools = [],
 	deps = [],
+	testDeps = [],
 	doctest,
 	workspaceMember = false,
 } = {}) {
@@ -1013,6 +1036,7 @@ export const cargoPackage = extensible(function cargoPackage({
 			testArgs: [...testArgs],
 			testTools: [...testTools],
 			deps: normalize_deps(deps),
+			testDeps: normalize_deps(testDeps),
 			doctest,
 			workspaceMember,
 			...(toolchainHandle ? { toolchain: toolchainHandle } : {}),

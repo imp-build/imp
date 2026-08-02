@@ -14,8 +14,8 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: docs-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -23,13 +23,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache imp binary
+        id: imp-binary
+        uses: actions/cache@v4
+        with:
+          path: target/release/imp
+          key: imp-binary-v1-${{ runner.os }}-${{ hashFiles('crates/**/*.rs', 'crates/**/*.js', '**/Cargo.toml', 'Cargo.lock') }}
 
-      - uses: kunobi-ninja/kache-action@v1
+      - if: steps.imp-binary.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - if: steps.imp-binary.outputs.cache-hit != 'true'
+        uses: kunobi-ninja/kache-action@v1
         with:
           cache-executables: true
 
       - name: Build imp
+        if: steps.imp-binary.outputs.cache-hit != 'true'
         run: cargo build --release --manifest-path crates/imp/Cargo.toml
 
       - name: Upload imp binary
@@ -74,14 +84,23 @@ jobs:
       - name: Make imp executable
         run: chmod +x imp
 
+      - name: Cache imp toolchains
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/imp/named/shared
+          key: imp-toolchains-v1-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock', 'Cargo.lock') }}
+          restore-keys: imp-toolchains-v1-check-${{ runner.os }}-
+
       - name: Cache imp store
         uses: actions/cache@v4
         with:
-          path: ~/.cache/imp
-          key: imp-store-v4-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}
+          path: |
+            ~/.cache/imp
+            !~/.cache/imp/named/shared
+          key: imp-store-v5-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}
           restore-keys: |
-            imp-store-v4-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-
-            imp-store-v4-check-${{ runner.os }}-
+            imp-store-v5-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-
+            imp-store-v5-check-${{ runner.os }}-
 
       - name: Check generated files
         run: ./imp goal generate //ci:docs_workflow --changed-since "$IMP_CHANGED_SINCE" --check
@@ -101,6 +120,30 @@ jobs:
       - name: Cache gc
         run: ./imp cache gc --apply
 
+  package_smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download imp binary
+        uses: actions/download-artifact@v4
+        with:
+          name: imp-linux
+          path: .
+
+      - name: Make imp executable
+        run: chmod +x imp
+
+      - name: Stage release tree
+        run: |
+          mkdir -p stage/bin stage/share/imp
+          mv imp stage/bin/imp
+          cp -r rules stage/share/imp/rules
+
+      - name: Smoke test packaged tree
+        run: ci/smoke_package.sh stage
+
   package:
     needs: build
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -117,14 +160,23 @@ jobs:
       - name: Make imp executable
         run: chmod +x imp
 
+      - name: Cache imp toolchains
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/imp/named/shared
+          key: imp-toolchains-v1-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock', 'Cargo.lock') }}
+          restore-keys: imp-toolchains-v1-package-${{ runner.os }}-
+
       - name: Cache imp store
         uses: actions/cache@v4
         with:
-          path: ~/.cache/imp
-          key: imp-store-v4-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}
+          path: |
+            ~/.cache/imp
+            !~/.cache/imp/named/shared
+          key: imp-store-v5-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}
           restore-keys: |
-            imp-store-v4-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-
-            imp-store-v4-package-${{ runner.os }}-
+            imp-store-v5-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-
+            imp-store-v5-package-${{ runner.os }}-
 
       - name: Package docs site
         run: ./imp package //docs:site
@@ -142,6 +194,9 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     steps:
       - name: Deploy
         id: deploy

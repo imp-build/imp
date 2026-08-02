@@ -10,7 +10,7 @@
 // resolved by readAddressedFile with the same precedence as module imports:
 // a file under the workspace root wins, with imp's built-in rules tree as
 // the fallback for `//rules/...` — so a lockfile checked in next to its rule
-// module ships embedded in the binary, and a consumer overrides it by
+// module ships with the rule library, and a consumer overrides it by
 // placing a file at the same address or pointing the toolchain at a
 // different one.
 //

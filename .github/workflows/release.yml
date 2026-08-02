@@ -5,8 +5,8 @@ name: Build release artifacts
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -37,8 +37,17 @@ jobs:
       - name: Smoke test
         run: target/x86_64-unknown-linux-musl/release/imp --help
 
+      - name: Stage release tree
+        run: |
+          mkdir -p imp-x86_64-unknown-linux-musl/bin imp-x86_64-unknown-linux-musl/share/imp
+          cp target/x86_64-unknown-linux-musl/release/imp imp-x86_64-unknown-linux-musl/bin/imp
+          cp -r rules imp-x86_64-unknown-linux-musl/share/imp/rules
+
+      - name: Smoke test packaged tree
+        run: ci/smoke_package.sh imp-x86_64-unknown-linux-musl
+
       - name: Package
-        run: tar -C target/x86_64-unknown-linux-musl/release -czf imp-x86_64-unknown-linux-musl.tar.gz imp
+        run: tar -czf imp-x86_64-unknown-linux-musl.tar.gz imp-x86_64-unknown-linux-musl
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -58,16 +67,27 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - uses: kunobi-ninja/kache-action@v1
+      - if: runner.os != 'Windows'
+        uses: kunobi-ninja/kache-action@v1
 
       - name: Build
         run: cargo build --release --locked --target x86_64-pc-windows-msvc --manifest-path crates/imp/Cargo.toml
 
-      - name: Smoke test
-        run: ./target/x86_64-pc-windows-msvc/release/imp.exe --help
+      - name: Stage release tree
+        run: |
+          New-Item -ItemType Directory -Force -Path imp-x86_64-pc-windows-msvc/bin, imp-x86_64-pc-windows-msvc/share/imp | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/imp.exe imp-x86_64-pc-windows-msvc/bin/imp.exe
+          Copy-Item -Recurse rules imp-x86_64-pc-windows-msvc/share/imp/rules
+
+      - name: Smoke test packaged tree
+        run: |
+          if (-not (Test-Path "imp-x86_64-pc-windows-msvc/share/imp/rules/init.js")) { throw "missing rules/init.js" }
+          if (-not (Test-Path "imp-x86_64-pc-windows-msvc/share/imp/rules/rust/rust.lock")) { throw "missing rules/rust/rust.lock" }
+          if (-not (Test-Path "imp-x86_64-pc-windows-msvc/share/imp/rules/gen/index.js")) { throw "missing rules/gen/index.js" }
+          ./imp-x86_64-pc-windows-msvc/bin/imp.exe --help
 
       - name: Package
-        run: Compress-Archive -Path target/x86_64-pc-windows-msvc/release/imp.exe -DestinationPath imp-x86_64-pc-windows-msvc.zip
+        run: Compress-Archive -Path imp-x86_64-pc-windows-msvc -DestinationPath imp-x86_64-pc-windows-msvc.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -80,7 +100,7 @@ jobs:
 
   rolling_release:
     needs: [linux, windows]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write

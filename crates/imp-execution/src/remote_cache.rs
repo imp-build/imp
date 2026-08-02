@@ -84,7 +84,30 @@ fn output_blob_digests(record: &TaskCacheRecord) -> Result<Vec<(Digest, PathBuf)
             ),
         }
     }
+
+    // The merged output tree is a blob in its own right, and it is *not*
+    // reachable from any single output above — `exec.rs` builds it by merging
+    // every output's tree, and hands its digest to callers as
+    // `ExecRunResult::output_digest`. Downstream tasks consume that value
+    // directly as a `{ kind: "digest" }` input, so a remote hit that restores
+    // every output blob but not this one leaves the next task unable to load
+    // its own input. Pushing it here is what makes the pull side able to
+    // fetch it at all.
+    for hash in merged_tree_digests(record)? {
+        out.push((Digest::new(hash.clone(), 0), cas_blob_path(&hash)?));
+    }
+
     Ok(out)
+}
+
+/// Every blob reachable from `record.output_digest`, or empty when the record
+/// has no merged tree (`output_digest` is defaulted to an empty string for
+/// records that never produced one — see `exec.rs`'s `unwrap_or_default`).
+fn merged_tree_digests(record: &TaskCacheRecord) -> Result<Vec<String>> {
+    if record.output_digest.is_empty() {
+        return Ok(Vec::new());
+    }
+    imp_store::digest::tree_all_digests(&record.output_digest)
 }
 
 fn action_result_digest(task_key: &str, size_bytes: u64) -> Digest {
@@ -242,6 +265,16 @@ fn try_remote_hit_inner(
             ),
         }
     }
+
+    // Mirror of the push side: the merged output tree is what downstream tasks
+    // actually take as a digest input, and it hangs off the record rather than
+    // off any one output, so walking `record.outputs` alone never fetches it.
+    // Without this a remote hit produces a locally-written record whose
+    // consumers fail with "read digest node <output_digest>: No such file".
+    if !record.output_digest.is_empty() {
+        fetch_tree_file_digests(store, &handle, &record.output_digest, &mut wanted)?;
+    }
+
     // Identical content (e.g. two equal files in the same tree) can produce
     // the same digest more than once — dedupe before checking/downloading so
     // a large directory tree doesn't redundantly re-fetch a repeated blob.
@@ -368,13 +401,26 @@ mod tests {
 
     fn file_record(task_key: &str, content: &[u8]) -> TaskCacheRecord {
         let digest = digest_bytes(content);
+        // `output_digest` is a *directory node*, never a bare file digest:
+        // exec.rs nests each output into a tree and merges them. The fixture
+        // used to reuse the file's own digest here, which is a shape
+        // production can't produce — and it hid the merged tree being left
+        // out of the remote round-trip entirely.
+        let merged = imp_store::digest::merge_digests(vec![imp_store::digest::nest_file(
+            "out.txt",
+            digest.clone(),
+            content.len() as u64,
+            None,
+        )
+        .unwrap()])
+        .unwrap();
         TaskCacheRecord {
             version: 1,
             task_id: task_key.to_owned(),
             task_key: task_key.to_owned(),
             action_digest: "test-action".to_owned(),
             input_digest: "test-input".to_owned(),
-            output_digest: digest.clone(),
+            output_digest: merged.digest().to_owned(),
             named_caches: vec![],
             stdout: String::new(),
             stderr: String::new(),
@@ -435,6 +481,164 @@ mod tests {
             }],
         };
         (record, all_digests)
+    }
+
+    /// A record shaped the way `exec.rs` actually builds one: the output's
+    /// own `tree_digest` is the captured directory, while `output_digest` is
+    /// that tree *nested under the output path* and merged — a genuinely
+    /// different blob, plus the nesting nodes above it.
+    ///
+    /// `directory_record` above reuses one digest for both, which is why it
+    /// cannot catch a merged root going unpushed/unhydrated. Returns the
+    /// record, every blob under the output's own tree, and every blob under
+    /// the merged tree.
+    fn merged_record(
+        task_key: &str,
+        leaf_content: &[u8],
+    ) -> (TaskCacheRecord, Vec<String>, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("dir");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("nested.txt"), leaf_content).unwrap();
+
+        let captured = imp_store::digest::capture_directory(dir.path()).unwrap();
+        let tree_digest = captured.digest().to_owned();
+
+        let nested_tree = imp_store::digest::nest_directory("out_dir", &captured).unwrap();
+        let merged = imp_store::digest::merge_digests(vec![nested_tree]).unwrap();
+        let output_digest = merged.digest().to_owned();
+        assert_ne!(
+            output_digest, tree_digest,
+            "fixture must model a merged root distinct from the output's own tree"
+        );
+
+        let output_blobs = imp_store::digest::tree_all_digests(&tree_digest).unwrap();
+        let merged_blobs = imp_store::digest::tree_all_digests(&output_digest).unwrap();
+
+        let record = TaskCacheRecord {
+            version: 1,
+            task_id: task_key.to_owned(),
+            task_key: task_key.to_owned(),
+            action_digest: "test-action".to_owned(),
+            input_digest: "test-input".to_owned(),
+            output_digest,
+            named_caches: vec![],
+            stdout: String::new(),
+            stderr: String::new(),
+            outputs: vec![CachedArtifact {
+                artifact_id: "out_dir".to_owned(),
+                kind: "directory".to_owned(),
+                path: Some("out_dir".to_owned()),
+                value: None,
+                digest: String::new(),
+                bytes: None,
+                mode: None,
+                tree_digest: Some(tree_digest),
+                named_cache: None,
+            }],
+        };
+        (record, output_blobs, merged_blobs)
+    }
+
+    /// A remote hit must hydrate the merged output tree, not just the blobs
+    /// reachable from `record.outputs`. Downstream tasks take the merged
+    /// digest as a `{ kind: "digest" }` input, so missing it produced
+    /// "read digest node <output_digest>: No such file or directory" in the
+    /// *dependent* task — far from the record that caused it.
+    #[test]
+    fn try_remote_hit_inner_hydrates_the_merged_output_tree() {
+        let store = memory_store();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let task_key = format!("merged-hydrate-{}", unique_nanos());
+        let leaf_content = unique_bytes("merged-hydrate");
+        let (record, output_blobs, merged_blobs) = merged_record(&task_key, &leaf_content);
+
+        let mut all: Vec<String> = output_blobs;
+        all.extend(merged_blobs.iter().cloned());
+        all.sort();
+        all.dedup();
+
+        for hash in &all {
+            let path = cas_blob_path(hash).unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            rt.block_on(
+                store.batch_update_blobs(vec![(
+                    Digest::new(hash.clone(), bytes.len() as u64),
+                    bytes,
+                )]),
+            )
+            .unwrap();
+            std::fs::remove_file(&path).unwrap();
+        }
+
+        let encoded = serde_json::to_vec(&record).unwrap();
+        rt.block_on(store.update_action_result(
+            &Digest::new(task_key.clone(), encoded.len() as u64),
+            encoded,
+        ))
+        .unwrap();
+
+        let hit = try_remote_hit_inner(&store, &task_key).unwrap().unwrap();
+
+        for hash in &merged_blobs {
+            assert!(
+                cas_blob_path(hash).unwrap().is_file(),
+                "merged-tree blob {hash} was not hydrated from the remote store"
+            );
+        }
+        // The dependent task's actual operation: load the merged root as an input.
+        imp_store::digest::DigestTrie::load(&hit.output_digest)
+            .expect("merged output tree must be loadable after a remote hit");
+    }
+
+    /// The pull side can only fetch what the push side stored.
+    #[test]
+    fn push_remote_inner_uploads_the_merged_output_tree() {
+        let store = memory_store();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let task_key = format!("merged-push-{}", unique_nanos());
+        let leaf_content = unique_bytes("merged-push");
+        let (record, _output_blobs, merged_blobs) = merged_record(&task_key, &leaf_content);
+
+        rt.block_on(push_remote_inner(&store, &record)).unwrap();
+
+        let wanted: Vec<Digest> = merged_blobs
+            .iter()
+            .map(|hash| Digest::new(hash.clone(), 0))
+            .collect();
+        let missing = rt.block_on(store.find_missing_blobs(&wanted)).unwrap();
+        assert!(
+            missing.is_empty(),
+            "merged-tree blobs were never pushed: {missing:?}"
+        );
+    }
+
+    /// A record whose merged tree is absent locally must read as unusable, so
+    /// the caller falls back to real execution instead of handing a dependent
+    /// task a digest it cannot load.
+    #[test]
+    fn cached_outputs_present_rejects_a_missing_merged_output_tree() {
+        let task_key = format!("merged-guard-{}", unique_nanos());
+        let leaf_content = unique_bytes("merged-guard");
+        let (record, _output_blobs, merged_blobs) = merged_record(&task_key, &leaf_content);
+
+        cached_outputs_present(&record).expect("fully-populated record should pass");
+
+        // Remove only the merged root; every blob reachable from
+        // `record.outputs` stays put, which is precisely the state a remote
+        // hit used to leave behind.
+        std::fs::remove_file(cas_blob_path(&record.output_digest).unwrap()).unwrap();
+        let error = cached_outputs_present(&record).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("merged output tree"),
+            "unexpected error: {error:#}"
+        );
+
+        let _ = merged_blobs;
     }
 
     #[derive(Default)]
@@ -590,11 +794,18 @@ mod tests {
 
         let task_key = format!("failed-push-{}", unique_nanos());
         let content = unique_bytes("failed-push");
-        let digest = store_blob(&content, "file").unwrap();
+        store_blob(&content, "file").unwrap();
         let record = file_record(&task_key, &content);
 
         let error = rt.block_on(push_remote_inner(&store, &record)).unwrap_err();
-        assert!(error.to_string().contains(&digest));
+        // Which blob is reported is incidental — a record pushes several
+        // (the output's own plus the merged tree's nodes) and they're
+        // collected through a HashMap, so iteration order isn't defined.
+        // What matters is that a failed upload aborts before publishing.
+        assert!(
+            format!("{error:#}").contains("upload blob"),
+            "unexpected error: {error:#}"
+        );
         assert!(store.action_updates.lock().unwrap().is_empty());
     }
 

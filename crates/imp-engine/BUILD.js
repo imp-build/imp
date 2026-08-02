@@ -2,6 +2,7 @@ import { cargoPackage } from "//rules/rust";
 import { protoAssets } from "//crates/imp-daemon";
 import {
     engineAssets,
+    rulesTree,
     testTar,
     testGzip,
     testGit,
@@ -25,7 +26,9 @@ import {
 } from "//";
 
 export const imp_engine = cargoPackage({
-    deps: [engineAssets, protoAssets],
+    // rulesTree is a test input, not a build input: the loader reads rules
+    // from disk, and these tests resolve real rules from tempdir workspaces.
+    deps: [engineAssets, rulesTree, protoAssets],
     testTools: [
         testTar,
         testGzip,

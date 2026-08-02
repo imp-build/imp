@@ -11,13 +11,21 @@ export const generated_stamp = stampFile({
     text: "imp build ran",
 });
 
-// crates/imp-engine/src/loader.rs embeds these at compile time (CORE_JS
-// via include_str!, the whole rules/ tree via include_dir!) so the built
-// binary can run standalone without the workspace on disk — cargoPackage's
-// own sources() only globs Cargo.toml/Cargo.lock/**/*.rs, so these need to be
-// declared as a resource dep for the sandboxed build to see them too.
+// crates/imp-engine/src/loader.rs embeds imp_core.js at compile time via
+// include_str! — cargoPackage's own sources() only globs
+// Cargo.toml/Cargo.lock/**/*.rs, so it needs declaring as a resource dep for
+// the sandboxed build to see it too.
 export const engineAssets = resourcePackage({
-    srcs: ["crates/imp-engine/src/imp_core.js", "rules/**/*"],
+    srcs: ["crates/imp-engine/src/imp_core.js"],
+});
+
+// The rule library is NOT compiled into the binary — it ships beside it and is
+// resolved from disk at runtime. It's still declared here because
+// imp-engine's *tests* resolve real rules from tempdir workspaces, so the
+// tree has to exist inside their sandbox. Deliberately kept off
+// //crates/imp, so a rule edit no longer invalidates the release binary.
+export const rulesTree = resourcePackage({
+    srcs: ["rules/**/*"],
 });
 
 export const testTar = nativeTool("tar");

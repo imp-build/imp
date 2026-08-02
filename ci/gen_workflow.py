@@ -23,6 +23,7 @@ SITE_ARTIFACT_PATH = "dist/docs/site/public"
 RUST_TOOLCHAIN = "stable"
 IMP_ARTIFACT = "imp-linux"
 MAIN_PUSH_ONLY = "github.ref == 'refs/heads/main' && github.event_name == 'push'"
+MANUAL_ONLY = "github.event_name == 'workflow_dispatch'"
 LINUX_TARGET = "x86_64-unknown-linux-musl"
 WINDOWS_TARGET = "x86_64-pc-windows-msvc"
 LINUX_ARCHIVE = f"imp-{LINUX_TARGET}.tar.gz"
@@ -44,15 +45,43 @@ FULL_HISTORY_CHECKOUT = {
     "with": {"fetch-depth": 0},
 }
 
+# Everything that ends up inside the compiled binary. Notably NOT `rules/**`:
+# the rule library ships beside the binary and is read from disk at runtime, so
+# a rules-only change doesn't produce a different executable. `crates/**/*.js`
+# stays because imp_core.js is still include_str!'d.
+#
+# kache already makes the *compile* mostly incremental, but a 99% cache hit
+# still costs ~3.5min of rustc replay plus linking. Most pushes touch no Rust
+# at all, so cache the linked artifact itself and skip the job's work outright.
+IMP_BINARY_HASH = (
+    "${{ hashFiles('crates/**/*.rs', 'crates/**/*.js', "
+    "'**/Cargo.toml', 'Cargo.lock') }}"
+)
+IMP_BINARY_CACHE_MISS = "steps.imp-binary.outputs.cache-hit != 'true'"
+
 BUILD_STEPS = [
     {"uses": "actions/checkout@v4"},
-    {"uses": f"dtolnay/rust-toolchain@{RUST_TOOLCHAIN}"},
+    {
+        "name": "Cache imp binary",
+        "id": "imp-binary",
+        "uses": "actions/cache@v4",
+        "with": {
+            "path": "target/release/imp",
+            "key": f"imp-binary-v1-${{{{ runner.os }}}}-{IMP_BINARY_HASH}",
+        },
+    },
+    {
+        "uses": f"dtolnay/rust-toolchain@{RUST_TOOLCHAIN}",
+        "if": IMP_BINARY_CACHE_MISS,
+    },
     {
         "uses": "kunobi-ninja/kache-action@v1",
+        "if": IMP_BINARY_CACHE_MISS,
         "with": {"cache-executables": True},
     },
     {
         "name": "Build imp",
+        "if": IMP_BINARY_CACHE_MISS,
         "run": "cargo build --release --manifest-path crates/imp/Cargo.toml",
     },
     {
@@ -63,36 +92,63 @@ BUILD_STEPS = [
 ]
 
 
-# Everything imp-store persists (downloaded toolchains, the CAS blob store,
-# and cached task results) lives under this one directory; without it every
-# run pays full cold toolchain acquire plus a from-scratch build/test graph.
-# The key always includes run_id, so it's always a miss and this job's
-# additions (new CAS blobs, task results) always get saved back at the end —
-# actions/cache only saves on an exact-key miss, so a stable key would let
-# the very first hit freeze the cache forever. restore-keys falls back first
-# to the newest cache with matching toolchain pins, then to any same-OS
-# cache, so a toolchain bump still starts from the closest prior snapshot
-# instead of from scratch.
+# The `shared` named-cache scope is the acquired-toolchain slice of the store
+# (rustup/cargo homes plus every fetched gcc/zig/odin/cmake/uv/... toolchain,
+# ~2.4GiB). Unlike the CAS it is a pure function of the pins in the lock files,
+# so it gets a *stable* key with no run_id: after the first run the primary key
+# hits exactly, and actions/cache skips saving on an exact hit — which is the
+# whole point. Under the single run_id-keyed cache below, these same immutable
+# bytes were re-tarred and re-uploaded on every run, ~23x/day.
+#
+# The key must cover Cargo.lock as well as the toolchain locks: cargo-home
+# lives in this scope and tracks dependency churn, so a lockfile bump has to
+# rotate the key or newly-vendored crates would never persist.
+TOOLCHAIN_SCOPE_PATH = "~/.cache/imp/named/shared"
+TOOLCHAIN_PINS_HASH = (
+    "${{ hashFiles('imp.workspace.js', 'rules/**/*.lock', 'Cargo.lock') }}"
+)
+
+
+def cache_toolchains_step(job):
+    prefix = f"imp-toolchains-v1-{job}-${{{{ runner.os }}}}"
+    return {
+        "name": "Cache imp toolchains",
+        "uses": "actions/cache@v4",
+        "with": {
+            "path": TOOLCHAIN_SCOPE_PATH,
+            "key": f"{prefix}-{TOOLCHAIN_PINS_HASH}",
+            "restore-keys": f"{prefix}-",
+        },
+    }
+
+
+# The rest of what imp-store persists: the CAS blob store and cached task
+# results. Without it every run pays a from-scratch build/test graph. This half
+# genuinely changes every run, so the key still includes run_id and is always a
+# miss — actions/cache only saves on an exact-key miss, so a stable key would
+# let the very first hit freeze the cache forever. restore-keys falls back
+# first to the newest cache with matching toolchain pins, then to any same-OS
+# cache, so a bump still starts from the closest prior snapshot.
+#
+# The `!` line excludes the toolchain scope handled above; without it the two
+# caches would overlap and the immutable bytes would still ride along in the
+# per-run tarball.
 #
 # Keyed per job (not just per run_id): `check` and `package` both only
 # `needs: build`, so they run concurrently. A shared key means whichever job's
 # restore lands second gets an exact primary-key hit on the first job's
 # already-saved cache — and actions/cache skips saving on an exact hit, so
-# that job's toolchain downloads would silently never persist.
+# that job's additions would silently never persist.
 def cache_imp_step(job):
-    prefix = f"imp-store-v4-{job}-${{{{ runner.os }}}}"
+    prefix = f"imp-store-v5-{job}-${{{{ runner.os }}}}"
+    pins = "${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}"
     return {
         "name": "Cache imp store",
         "uses": "actions/cache@v4",
         "with": {
-            "path": "~/.cache/imp",
-            "key": f"{prefix}-${{{{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}}}-${{{{ github.run_id }}}}",
-            "restore-keys": "\n".join(
-                [
-                    f"{prefix}-${{{{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}}}-",
-                    f"{prefix}-",
-                ]
-            ),
+            "path": f"~/.cache/imp\n!{TOOLCHAIN_SCOPE_PATH}",
+            "key": f"{prefix}-{pins}-${{{{ github.run_id }}}}",
+            "restore-keys": "\n".join([f"{prefix}-{pins}-", f"{prefix}-"]),
         },
     }
 
@@ -137,6 +193,7 @@ CHECK_STEPS = [
     EXPORT_GHAC_ENV_STEP,
     FREE_DISK_SPACE_STEP,
     *DOWNLOAD_IMP_STEPS,
+    cache_toolchains_step("check"),
     cache_imp_step("check"),
     {
         "name": "Check generated files",
@@ -164,6 +221,7 @@ CHECK_STEPS = [
 PACKAGE_STEPS = [
     {"uses": "actions/checkout@v4"},
     *DOWNLOAD_IMP_STEPS,
+    cache_toolchains_step("package"),
     cache_imp_step("package"),
     {"name": "Package docs site", "run": f"./imp package {SITE_TARGET}"},
     {"uses": "actions/configure-pages@v5"},
@@ -172,6 +230,25 @@ PACKAGE_STEPS = [
 
 DEPLOY_STEPS = [
     {"name": "Deploy", "id": "deploy", "uses": "actions/deploy-pages@v4"},
+]
+
+# The release workflow only runs on tags, so without this the first sign that
+# packaging is broken would be a failed release. Reuses the binary `build`
+# already produced, so it costs one short job rather than another compile.
+PACKAGE_SMOKE_STEPS = [
+    {"uses": "actions/checkout@v4"},
+    *DOWNLOAD_IMP_STEPS,
+    {
+        "name": "Stage release tree",
+        "run": "\n".join(
+            [
+                "mkdir -p stage/bin stage/share/imp",
+                "mv imp stage/bin/imp",
+                "cp -r rules stage/share/imp/rules",
+            ]
+        ),
+    },
+    {"name": "Smoke test packaged tree", "run": "ci/smoke_package.sh stage"},
 ]
 
 JOBS = [
@@ -198,6 +275,12 @@ JOBS = [
         "steps": CHECK_STEPS,
     },
     {
+        "id": "package_smoke",
+        "needs": "build",
+        "runs_on": "ubuntu-latest",
+        "steps": PACKAGE_SMOKE_STEPS,
+    },
+    {
         "id": "package",
         "needs": "build",
         "runs_on": "ubuntu-latest",
@@ -213,9 +296,82 @@ JOBS = [
             "name": "github-pages",
             "url": "${{ steps.deploy.outputs.page_url }}",
         },
+        # GitHub Pages allows one in-flight deployment per repo, and a
+        # cancelled deploy can leave the Pages API wedged — so the `pages`
+        # serialization lives here, on the only job that talks to it, rather
+        # than on the whole workflow. Workflow-level it also forced every
+        # `check` run repo-wide through a single queue that never cancels.
+        "concurrency": {"group": "pages", "cancel-in-progress": False},
         "steps": DEPLOY_STEPS,
     },
 ]
+
+# Release archives contain a self-consistent prefix, not a bare binary: the
+# rule library is no longer compiled in, so it has to travel with the
+# executable. `bin/` + `share/imp/rules/` is exactly what RulesSource's
+# exe-relative probe expects (crates/imp-engine/src/loader.rs), which means
+# an unpacked archive runs in place with no install step.
+#
+# Shipped unpruned, deliberately: keeping the packaged tree byte-identical to
+# the in-repo one is what lets the repo's own tests stand in for it. Prune it
+# and you create a divergence nothing can test.
+def stage_dir(target):
+    return f"imp-{target}"
+
+
+def stage_release_steps(target, archive_cmd):
+    """Linux staging. Runs the full scratch-workspace smoke before archiving,
+    so a tree that can't resolve its own rules never reaches Upload."""
+    stage = stage_dir(target)
+    return [
+        {
+            "name": "Stage release tree",
+            "run": "\n".join(
+                [
+                    f"mkdir -p {stage}/bin {stage}/share/imp",
+                    f"cp target/{target}/release/imp {stage}/bin/imp",
+                    f"cp -r rules {stage}/share/imp/rules",
+                ]
+            ),
+        },
+        {
+            "name": "Smoke test packaged tree",
+            "run": f"ci/smoke_package.sh {stage}",
+        },
+        {"name": "Package", "run": archive_cmd},
+    ]
+
+
+def stage_windows_release_steps(target, archive_cmd):
+    """Windows staging. Only checks layout and `--help`, not the full
+    scratch-workspace run: smoke_package.sh is POSIX sh, and driving it through
+    Git Bash needs MSYS_NO_PATHCONV so `//...` selectors aren't rewritten into
+    drive paths. The resolver logic is identical across platforms and is
+    covered on Linux; what's Windows-specific is the archive layout, which is
+    what these assertions check."""
+    stage = stage_dir(target)
+    checks = "\n".join(
+        f'if (-not (Test-Path "{stage}/share/imp/{f}")) {{ throw "missing {f}" }}'
+        for f in ("rules/init.js", "rules/rust/rust.lock", "rules/gen/index.js")
+    )
+    return [
+        {
+            "name": "Stage release tree",
+            "run": "\n".join(
+                [
+                    f"New-Item -ItemType Directory -Force -Path {stage}/bin, {stage}/share/imp | Out-Null",
+                    f"Copy-Item target/{target}/release/imp.exe {stage}/bin/imp.exe",
+                    f"Copy-Item -Recurse rules {stage}/share/imp/rules",
+                ]
+            ),
+        },
+        {
+            "name": "Smoke test packaged tree",
+            "run": f"{checks}\n./{stage}/bin/imp.exe --help",
+        },
+        {"name": "Package", "run": archive_cmd},
+    ]
+
 
 RELEASE_LINUX_STEPS = [
     {"uses": "actions/checkout@v4"},
@@ -232,10 +388,9 @@ RELEASE_LINUX_STEPS = [
         "run": f"cross build --release --locked --target {LINUX_TARGET} --manifest-path crates/imp/Cargo.toml",
     },
     {"name": "Smoke test", "run": f"target/{LINUX_TARGET}/release/imp --help"},
-    {
-        "name": "Package",
-        "run": f"tar -C target/{LINUX_TARGET}/release -czf {LINUX_ARCHIVE} imp",
-    },
+    *stage_release_steps(
+        LINUX_TARGET, f"tar -czf {LINUX_ARCHIVE} {stage_dir(LINUX_TARGET)}"
+    ),
     {
         "name": "Upload artifact",
         "uses": "actions/upload-artifact@v4",
@@ -255,24 +410,23 @@ RELEASE_WINDOWS_STEPS = [
         "uses": f"dtolnay/rust-toolchain@{RUST_TOOLCHAIN}",
         "with": {"targets": WINDOWS_TARGET},
     },
+    # kache-action has no Windows build — it hard-fails the job with
+    # "Unsupported platform: win32-x64" before anything compiles, which is why
+    # every release run since this job was added ended in `windows: failure`
+    # and skipped `rolling_release`. Skipped rather than removed so the step
+    # starts working if upstream ships a win32 binary.
     {
         "uses": "kunobi-ninja/kache-action@v1",
+        "if": "runner.os != 'Windows'",
     },
     {
         "name": "Build",
         "run": f"cargo build --release --locked --target {WINDOWS_TARGET} --manifest-path crates/imp/Cargo.toml",
     },
-    {
-        "name": "Smoke test",
-        "run": f"./target/{WINDOWS_TARGET}/release/imp.exe --help",
-    },
-    {
-        "name": "Package",
-        "run": (
-            f"Compress-Archive -Path target/{WINDOWS_TARGET}/release/imp.exe "
-            f"-DestinationPath {WINDOWS_ARCHIVE}"
-        ),
-    },
+    *stage_windows_release_steps(
+        WINDOWS_TARGET,
+        f"Compress-Archive -Path {stage_dir(WINDOWS_TARGET)} -DestinationPath {WINDOWS_ARCHIVE}",
+    ),
     {
         "name": "Upload artifact",
         "uses": "actions/upload-artifact@v4",
@@ -360,7 +514,7 @@ RELEASE_JOBS = [
     {
         "id": "rolling_release",
         "needs": ["linux", "windows"],
-        "if": MAIN_PUSH_ONLY,
+        "if": MANUAL_ONLY,
         "runs_on": "ubuntu-latest",
         "permissions": {"contents": "write"},
         "steps": ROLLING_RELEASE_STEPS,
@@ -436,6 +590,10 @@ def render_job(job):
         lines.append("    environment:")
         for k, v in job["environment"].items():
             lines.append(f"      {k}: {v}")
+    if "concurrency" in job:
+        lines.append("    concurrency:")
+        for k, v in job["concurrency"].items():
+            lines.append(f"      {k}: {render_value(v)}")
     if "env" in job:
         lines.append("    env:")
         for k, v in job["env"].items():
@@ -467,9 +625,12 @@ def render_workflow():
         "  pages: write",
         "  id-token: write",
         "",
+        # Supersede an in-flight run when a PR gets another push; never cancel
+        # on main, where every commit's docs deploy must actually land. The
+        # `pages` group that used to sit here moved onto the `deploy` job.
         "concurrency:",
-        "  group: pages",
-        "  cancel-in-progress: false",
+        "  group: docs-${{ github.workflow }}-${{ github.ref }}",
+        "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
         "",
         "jobs:",
         "\n\n".join(render_job(job) for job in JOBS),
@@ -482,10 +643,14 @@ def render_release_workflow():
         *GENERATED_HEADER,
         "name: Build release artifacts",
         "",
+        # Was `push: branches: [main]`, which rebuilt both platforms on every
+        # commit — ~92 billed min/day — to feed a rolling draft release nobody
+        # consumes per-commit. Version tags still build automatically; the
+        # rolling `main-preview` draft is now on-demand via workflow_dispatch.
         "on:",
         "  push:",
-        "    branches: [main]",
         '    tags: ["v*"]',
+        "  workflow_dispatch:",
         "",
         "permissions:",
         "  contents: read",

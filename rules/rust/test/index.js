@@ -23,6 +23,7 @@ import {
 	declared_path,
 	resources,
 	resourcesForDirs,
+	testResources,
 	rust_toolchain_version,
 	rustBuildCacheTools,
 	rustLinkerTools,
@@ -343,6 +344,16 @@ export async function cargoPackageTests(handle) {
 	const testTools = await Promise.all(
 		(handle.attrs.testTools || []).map(nativeToolSpec),
 	);
+	// Resource deps are inputs to the test *run*, not just the compile. A
+	// resourcePackage is how a crate declares non-.rs files it needs; some are
+	// consumed at build time via include_str!, but others are read from disk
+	// at runtime — imp-engine's own tests resolve rules/ that way. Compiling
+	// with them and then running without them leaves the binary in a sandbox
+	// that's missing files it was told it had.
+	const [resourceInputs, testResourceInputs] = await Promise.all([
+		resources(handle),
+		testResources(handle),
+	]);
 	return Promise.all(
 		built.map((binary) =>
 			run({
@@ -352,7 +363,11 @@ export async function cargoPackageTests(handle) {
 					...(handle.attrs.testArgs || []),
 				],
 				tools: testTools,
-				inputs: [{ kind: "digest", digest: result.outputDigest }],
+				inputs: [
+					{ kind: "digest", digest: result.outputDigest },
+					resourceInputs,
+					testResourceInputs,
+				],
 				display: `cargo test binary ${binary.executable}`,
 			}),
 		),

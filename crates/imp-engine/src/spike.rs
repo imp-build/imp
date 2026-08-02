@@ -13,8 +13,8 @@ use std::sync::{
 };
 
 use crate::loader::{
-    resolve_workspace_module, validate_workspace_module_path, ModuleForm, ModuleKind, ModuleSource,
-    RulesSource, ImpLoader, ImpResolver,
+    resolve_workspace_module, validate_workspace_module_path, ModuleForm, ModuleKind, RulesSource,
+    ImpLoader, ImpResolver,
 };
 use crate::runtime::LiveWorkspace;
 use crate::selector::{
@@ -485,7 +485,7 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
 #[allow(dead_code)]
 pub async fn load_workspace(root: &Path) -> Result<LiveWorkspace> {
     let service = make_execution_service()?;
-    load_workspace_with_rules_and_service(root, RulesSource::from_env(), service).await
+    load_workspace_with_rules_and_service(root, RulesSource::discover(), service).await
 }
 
 /// Like [`load_workspace`], but with an explicit [`RulesSource`] instead of
@@ -867,7 +867,7 @@ async fn load_workspace_with_rules_and_service(
 pub async fn load_minimal_rules_test_runtime(root: &Path) -> Result<LiveWorkspace> {
     create_live_runtime(
         root,
-        RulesSource::from_env(),
+        RulesSource::discover(),
         Arc::new(LocalExecutionService::new()),
     )
     .await
@@ -878,7 +878,7 @@ pub async fn load_minimal_rules_test_runtime(root: &Path) -> Result<LiveWorkspac
 pub async fn load_workspace_rules_test_runtime(root: &Path) -> Result<LiveWorkspace> {
     load_workspace_with_rules_and_service(
         root,
-        RulesSource::from_env(),
+        RulesSource::discover(),
         Arc::new(LocalExecutionService::new()),
     )
     .await
@@ -3891,7 +3891,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     // only (no .js/index.js candidates): workspace root first, then the
     // built-in rules tree for `//rules/...` — the same precedence module
     // imports use, so a checked-in lockfile next to its rule module ships
-    // embedded and a workspace copy at the same address overrides it.
+    // with the library and a workspace copy at the same address overrides it.
     // Unlike __host_read_file this never consults exec_root; addresses are
     // workspace-rooted by definition.
     let wc_raf = workspace_root.clone();
@@ -4804,12 +4804,8 @@ pub(crate) fn module_digest_for_site(
     let resolution = resolve_workspace_module(workspace_root, rules_source, module)
         .map_err(|e| anyhow::anyhow!(e))
         .context("resolve module for digest")?;
-    let bytes = match resolution.source {
-        ModuleSource::File(path) => {
-            std::fs::read(&path).with_context(|| format!("read {}", path.display()))?
-        }
-        ModuleSource::Embedded(text) => text.as_bytes().to_vec(),
-    };
+    let bytes = std::fs::read(&resolution.path)
+        .with_context(|| format!("read {}", resolution.path.display()))?;
     Ok(digest_bytes(&bytes))
 }
 
@@ -6786,11 +6782,8 @@ fn scope_for(root: &Path, build_file: &Path) -> Result<String> {
 }
 
 fn build_module_name_for(root: &Path, build_file: &Path, scope: &str) -> Result<String> {
-    if resolve_workspace_module(root, &RulesSource::Embedded, scope)
-        .map(|resolution| {
-            resolution.kind == ModuleKind::Build
-                && matches!(resolution.source, ModuleSource::File(ref path) if path == build_file)
-        })
+    if resolve_workspace_module(root, &RulesSource::none(), scope)
+        .map(|resolution| resolution.kind == ModuleKind::Build && resolution.path == build_file)
         .unwrap_or(false)
     {
         return Ok(scope.to_owned());
@@ -7125,6 +7118,13 @@ export const ui = asset({ srcs: ["**/*.png"] });
         std::fs::write(path, contents).unwrap();
     }
 
+    /// imp's own rule library, as an installed binary would see it. Tests
+    /// that import real rules from a tempdir workspace need this because the
+    /// workspace root has no `rules/` of its own to shadow it with.
+    fn repo_rules_dir() -> PathBuf {
+        crate::loader::test_rules_dir().expect("locate the repo's rules/ tree")
+    }
+
     fn js_string_path(path: &Path) -> String {
         path.to_string_lossy()
             .replace('\\', "\\\\")
@@ -7250,7 +7250,7 @@ export const app = target({ kind: "sample" });
     #[tokio::test]
     async fn workspace_falls_back_to_dev_rules_dir_for_builtin_rules() {
         // `//rules/...` isn't found under the workspace root itself, so it
-        // falls back to imp's built-in rules — RulesSource::Dev here
+        // falls back to imp's built-in rules — an explicit directory here
         // stands in for IMP_RULES_DIR, letting the test exercise the
         // fallback without touching process environment state.
         let root = tempfile::tempdir().unwrap();
@@ -7294,7 +7294,7 @@ export const app = externalThing("app");
 "#,
         );
 
-        let workspace = load_workspace_with_rules(p, RulesSource::Dev(dev_rules_dir))
+        let workspace = load_workspace_with_rules(p, RulesSource::directory(dev_rules_dir))
             .await
             .unwrap();
         assert!(workspace
@@ -7353,7 +7353,7 @@ export const app = target({ kind: "asset", attrs: { marker } });
         );
 
         let workspace =
-            load_workspace_with_rules(p, RulesSource::Dev(dev_rules.path().join("rules")))
+            load_workspace_with_rules(p, RulesSource::directory(dev_rules.path().join("rules")))
                 .await
                 .unwrap();
         assert_eq!(
@@ -8379,9 +8379,15 @@ export const ignored = missing;
             normalized.contains("cannot resolve workspace module '//rules/missing'"),
             "{error}"
         );
-        assert!(normalized.contains("rules/missing.js"), "{error}");
-        assert!(normalized.contains("rules/missing/index.js"), "{error}");
-        assert!(normalized.contains(BUILD_FILE), "{error}");
+        // Both roots that were searched are named. The per-root candidate
+        // filenames used to be listed too, but the whole message has to fit
+        // QuickJS's 256-byte error buffer — see the note in
+        // loader::resolve_workspace_module.
+        assert!(
+            normalized.contains(&p.display().to_string().replace('\\', "/")),
+            "{error}"
+        );
+        assert!(normalized.contains("rules"), "{error}");
     }
 
     #[tokio::test]
@@ -12386,7 +12392,7 @@ add_test(NAME hello_cmake_main_test COMMAND hello_cmake_main)
             "int hello_cmake_add(int, int);\nint main(void) { return hello_cmake_add(1, 2) == 3 ? 0 : 1; }\n",
         );
 
-        let live = load_workspace_with_rules(p, RulesSource::Embedded)
+        let live = load_workspace_with_rules(p, RulesSource::directory(repo_rules_dir()))
             .await
             .unwrap();
         run_goal_live(&live, p, "build", &["//native:hello_cmake".to_owned()])

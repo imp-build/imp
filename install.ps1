@@ -38,10 +38,35 @@ try {
 
     Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
 
+    # The archive is a self-contained prefix (bin\ + share\imp\rules\),
+    # because the rule library is no longer compiled into the binary. Install
+    # both, keeping the relative layout so imp finds its rules next to
+    # itself: <installDir>\..\share\imp\rules.
+    $stage = Join-Path $tmpDir "imp-$target"
+    $stagedRules = Join-Path $stage "share\imp\rules"
+    if (-not (Test-Path $stagedRules)) {
+        throw "$asset is missing share\imp\rules; it predates on-disk rules — upgrade install.ps1"
+    }
+
+    $rulesRoot = if ($env:IMP_RULES_INSTALL_DIR) {
+        $env:IMP_RULES_INSTALL_DIR
+    } else {
+        Join-Path (Split-Path -Parent $installDir) "share\imp\rules"
+    }
+
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-    Move-Item -Force (Join-Path $tmpDir "imp.exe") (Join-Path $installDir "imp.exe")
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $rulesRoot) | Out-Null
+
+    # Replace rather than merge: a rule deleted upstream would otherwise
+    # linger and still resolve.
+    if (Test-Path $rulesRoot) {
+        Remove-Item -Recurse -Force $rulesRoot
+    }
+    Move-Item $stagedRules $rulesRoot
+    Move-Item -Force (Join-Path $stage "bin\imp.exe") (Join-Path $installDir "imp.exe")
 
     Write-Host "Installed imp to $installDir\imp.exe"
+    Write-Host "Installed rules to $rulesRoot"
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if (-not ($userPath -split ";" | Where-Object { $_ -eq $installDir })) {

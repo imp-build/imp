@@ -384,6 +384,23 @@ pub fn cached_outputs_present(record: &TaskCacheRecord) -> Result<()> {
             ),
         }
     }
+
+    // The merged output tree is handed to dependents as the task's
+    // `output_digest` and consumed directly as a `{ kind: "digest" }` input,
+    // so a record that can't produce it is unusable no matter how complete
+    // `outputs` looks. Checking it here is what makes an under-hydrated record
+    // degrade to a cache miss (and a real execution) instead of failing the
+    // dependent task with a bare "read digest node ...: No such file".
+    //
+    // Root only, matching the directory case above: a cheap constant-cost
+    // check, with anything deeper surfacing at materialization time.
+    if !record.output_digest.is_empty() {
+        let path = cas_blob_path(&record.output_digest)?;
+        if !path.is_file() {
+            bail!("merged output tree {} is missing", path.display());
+        }
+    }
+
     Ok(())
 }
 

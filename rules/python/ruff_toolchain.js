@@ -27,7 +27,7 @@ import {
 export const RUFF_TOOL = toolName("ruff");
 
 const RUFF_TOOLCHAIN_CACHE = "ruff-toolchains";
-// The bundled lockfile ships embedded in the binary (it lives inside
+// The bundled lockfile ships with the rule library (it lives inside
 // rules/**); a workspace overrides it with a file at the same address, or
 // by declaring the toolchain with a `lockfile` address of its own.
 const DEFAULT_LOCKFILE = "//rules/python/ruff-toolchain.lock";

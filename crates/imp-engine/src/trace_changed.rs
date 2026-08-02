@@ -95,7 +95,7 @@ impl TraceIndex {
         changed_paths: &[String],
         workspace_config: &std::collections::BTreeMap<String, serde_json::Value>,
     ) -> BTreeSet<String> {
-        let rules_source = RulesSource::from_env();
+        let rules_source = RulesSource::discover();
         let mut module_digest_cache: HashMap<String, Option<String>> = HashMap::new();
         let mut stale = BTreeSet::new();
         for (key, record) in &self.records {

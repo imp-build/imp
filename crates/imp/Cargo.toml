@@ -3,10 +3,6 @@ name = "imp"
 version.workspace = true
 edition.workspace = true
 
-[features]
-default = ["embedded-rules"]
-embedded-rules = ["imp-engine/embedded-rules"]
-
 [[bin]]
 name = "imp"
 path = "src/main.rs"
@@ -15,7 +11,7 @@ path = "src/main.rs"
 imp-store = { path = "../imp-store" }
 imp-execution = { path = "../imp-execution", features = ["clap"] }
 imp-daemon = { path = "../imp-daemon" }
-imp-engine = { path = "../imp-engine", default-features = false }
+imp-engine = { path = "../imp-engine" }
 imp-logging = { path = "../imp-logging" }
 imp-scheduler = { path = "../imp-scheduler" }
 tokio.workspace = true

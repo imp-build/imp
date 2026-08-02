@@ -56,11 +56,10 @@ if [ "$local_install" = true ]; then
         exit 1
     fi
 
-    echo "Building optimized local imp without embedded rules"
+    echo "Building optimized local imp"
     CARGO_TARGET_DIR="$repo_dir/target" cargo build \
         --release \
-        --manifest-path "$manifest" \
-        --no-default-features
+        --manifest-path "$manifest"
 
     mkdir -p "$install_dir"
     shim_tmp="$(mktemp "$install_dir/.imp-local.XXXXXX")"
@@ -69,7 +68,7 @@ if [ "$local_install" = true ]; then
         echo '#!/bin/sh'
         echo 'set -e'
         printf "export IMP_RULES_DIR='%s'\n" "$(printf '%s' "$rules_dir" | sed "s/'/'\\\\''/g")"
-        printf "CARGO_TARGET_DIR='%s' cargo build --release --manifest-path '%s' --no-default-features\n" \
+        printf "CARGO_TARGET_DIR='%s' cargo build --release --manifest-path '%s'\n" \
             "$(printf '%s' "$repo_dir/target" | sed "s/'/'\\\\''/g")" \
             "$(printf '%s' "$manifest" | sed "s/'/'\\\\''/g")"
         printf "exec '%s' \"\$@\"\n" "$(printf '%s' "$binary" | sed "s/'/'\\\\''/g")"
@@ -80,7 +79,7 @@ if [ "$local_install" = true ]; then
 
     echo "Installed local imp shim to $install_dir/imp"
     echo "Binary: $binary"
-    echo "Rules:  $rules_dir"
+    echo "Rules:  $rules_dir (live from this checkout, via IMP_RULES_DIR)"
     echo "The shim will rebuild changed Rust code before each run."
     exit 0
 fi
@@ -124,11 +123,36 @@ fi
 
 tar -C "$tmpdir" -xzf "$tmpdir/$asset"
 
-mkdir -p "$install_dir"
-mv "$tmpdir/imp" "$install_dir/imp"
+# The archive is a self-contained prefix (bin/ + share/imp/rules/), because
+# the rule library is no longer compiled into the binary. Install both, keeping
+# the same relative layout so imp finds its rules next to itself.
+stage="$tmpdir/imp-$target"
+if [ ! -d "$stage/share/imp/rules" ]; then
+    echo "$asset is missing share/imp/rules; it predates on-disk rules — upgrade install.sh" >&2
+    exit 1
+fi
+
+rules_root="${IMP_RULES_INSTALL_DIR:-$(dirname "$install_dir")/share/imp/rules}"
+
+# Replace rather than merge: a rule deleted upstream would otherwise linger and
+# still resolve. Guarded so a surprising IMP_RULES_INSTALL_DIR can't take out
+# an unrelated directory.
+case "$rules_root" in
+    */share/imp/rules) ;;
+    *)
+        echo "refusing to install rules to $rules_root (must end in share/imp/rules)" >&2
+        exit 1
+        ;;
+esac
+
+mkdir -p "$install_dir" "$(dirname "$rules_root")"
+rm -rf "$rules_root"
+mv "$stage/share/imp/rules" "$rules_root"
+mv "$stage/bin/imp" "$install_dir/imp"
 chmod +x "$install_dir/imp"
 
 echo "Installed imp to $install_dir/imp"
+echo "Installed rules to $rules_root"
 
 case ":$PATH:" in
     *":$install_dir:"*) ;;

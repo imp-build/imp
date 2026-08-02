@@ -11,10 +11,9 @@ use rquickjs::{
 use serde::{Deserialize, Serialize};
 use walkdir::{DirEntry, WalkDir};
 
+use imp_engine::loader::RulesSource;
 use imp_engine::spike::WORKSPACE_FILE;
 
-#[cfg(feature = "embedded-rules")]
-const INIT_CATALOG_JS: &str = include_str!("../../../../rules/init.js");
 const CATALOG_MODULE_NAME: &str = "imp:init";
 const EXCLUDED_DIRECTORIES: &[&str] = &[
     ".git",
@@ -86,14 +85,18 @@ pub async fn run() -> Result<()> {
         std::io::stderr().is_terminal(),
     )?;
 
+    // `init` runs outside any workspace by construction, so unlike every
+    // other command it has no workspace-root rules to fall back on — the
+    // shipped rule library is the only source for the catalog.
+    let rules = RulesSource::discover();
     let platform = Platform::current();
-    let catalog = load_catalog(&platform).await?;
+    let catalog = load_catalog(&rules, &platform).await?;
     let detected = detect_languages(&current_dir, &catalog);
     let Some(selected) = prompt_for_selection(&catalog, &detected)? else {
         println!("Initialization canceled; no files were written.");
         return Ok(());
     };
-    let source = render_workspace(&platform, &selected, &detected).await?;
+    let source = render_workspace(&rules, &platform, &selected, &detected).await?;
     let output = write_workspace(&current_dir, &source)?;
     println!("Created {}", output.display());
     Ok(())
@@ -125,15 +128,16 @@ fn find_workspace_in_ancestors(start: &Path) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-async fn load_catalog(platform: &Platform) -> Result<Catalog> {
+async fn load_catalog(rules: &RulesSource, platform: &Platform) -> Result<Catalog> {
     let argument = serde_json::json!({ "platform": platform });
-    let json = call_catalog_export("catalog", &argument).await?;
+    let json = call_catalog_export(rules, "catalog", &argument).await?;
     let catalog: Catalog = serde_json::from_str(&json).context("decode init catalog")?;
     validate_catalog(&catalog)?;
     Ok(catalog)
 }
 
 async fn render_workspace(
+    rules: &RulesSource,
     platform: &Platform,
     selected: &[String],
     detected: &BTreeSet<String>,
@@ -143,25 +147,19 @@ async fn render_workspace(
         "selected": selected,
         "detected": detected,
     });
-    let json = call_catalog_export("render", &argument).await?;
+    let json = call_catalog_export(rules, "render", &argument).await?;
     serde_json::from_str(&json).context("decode rendered workspace source")
 }
 
-async fn call_catalog_export(export: &str, argument: &serde_json::Value) -> Result<String> {
-    #[cfg(feature = "embedded-rules")]
-    let catalog_source = INIT_CATALOG_JS.to_owned();
-    #[cfg(not(feature = "embedded-rules"))]
-    let catalog_source = {
-        let rules_dir = std::env::var_os(imp_engine::loader::RULES_DIR_ENV).ok_or_else(|| {
-            anyhow::anyhow!(
-                "this imp binary was built without embedded rules; set {} to a rules directory",
-                imp_engine::loader::RULES_DIR_ENV
-            )
-        })?;
-        let path = PathBuf::from(rules_dir).join("init.js");
-        std::fs::read_to_string(&path)
-            .with_context(|| format!("read init catalog {}", path.display()))?
-    };
+async fn call_catalog_export(
+    rules: &RulesSource,
+    export: &str,
+    argument: &serde_json::Value,
+) -> Result<String> {
+    let catalog_source = rules
+        .read_builtin("init.js")
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("read init catalog")?;
     let runtime = JsRuntime::new().context("create init JavaScript runtime")?;
     let context = JsContext::full(&runtime)
         .await
@@ -459,9 +457,18 @@ mod tests {
         }
     }
 
+    /// The rule library as an installed binary would find it. Passed
+    /// explicitly rather than via `discover()` so these tests don't depend on
+    /// where the test binary happens to sit.
+    fn repo_rules() -> RulesSource {
+        RulesSource::directory(
+            imp_engine::loader::test_rules_dir().expect("locate the repo's rules/ tree"),
+        )
+    }
+
     #[tokio::test]
     async fn built_in_catalog_is_valid() {
-        let catalog = load_catalog(&linux()).await.unwrap();
+        let catalog = load_catalog(&repo_rules(), &linux()).await.unwrap();
         assert_eq!(
             catalog
                 .groups
@@ -475,7 +482,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_selection_renders_only_the_marker() {
-        let source = render_workspace(&linux(), &[], &BTreeSet::new())
+        let source = render_workspace(&repo_rules(), &linux(), &[], &BTreeSet::new())
             .await
             .unwrap();
         assert_eq!(
@@ -491,7 +498,7 @@ mod tests {
             "rust".to_owned(),
             "rust.fmt".to_owned(),
         ];
-        let source = render_workspace(&linux(), &selected, &BTreeSet::new())
+        let source = render_workspace(&repo_rules(), &linux(), &selected, &BTreeSet::new())
             .await
             .unwrap();
         assert!(source.contains("//rules/rust/rustfmt"));
@@ -504,7 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn combined_render_deduplicates_shared_workflows_without_toolchains() {
-        let catalog = load_catalog(&linux()).await.unwrap();
+        let catalog = load_catalog(&repo_rules(), &linux()).await.unwrap();
         let selected: Vec<String> = catalog
             .groups
             .iter()
@@ -513,7 +520,7 @@ mod tests {
                     .chain(group.features.iter().map(|feature| feature.id.clone()))
             })
             .collect();
-        let source = render_workspace(&linux(), &selected, &BTreeSet::new())
+        let source = render_workspace(&repo_rules(), &linux(), &selected, &BTreeSet::new())
             .await
             .unwrap();
         assert_eq!(
@@ -532,7 +539,7 @@ mod tests {
             os: "macos",
             arch: "aarch64",
         };
-        let catalog = load_catalog(&platform).await.unwrap();
+        let catalog = load_catalog(&repo_rules(), &platform).await.unwrap();
         for id in ["c", "odin", "rust"] {
             assert!(catalog
                 .groups
@@ -552,7 +559,7 @@ mod tests {
         std::fs::write(root.path().join("web/package.json"), "{}").unwrap();
         std::fs::create_dir(root.path().join("target")).unwrap();
         std::fs::write(root.path().join("target/ignored.py"), "").unwrap();
-        let catalog = load_catalog(&linux()).await.unwrap();
+        let catalog = load_catalog(&repo_rules(), &linux()).await.unwrap();
         let detected = detect_languages(root.path(), &catalog);
         assert_eq!(
             detected,
@@ -592,7 +599,7 @@ mod tests {
     #[tokio::test]
     async fn fully_generated_workspace_loads_normally() {
         let root = tempfile::tempdir().unwrap();
-        let catalog = load_catalog(&linux()).await.unwrap();
+        let catalog = load_catalog(&repo_rules(), &linux()).await.unwrap();
         let selected: Vec<String> = catalog
             .groups
             .iter()
@@ -601,7 +608,7 @@ mod tests {
                     .chain(group.features.iter().map(|feature| feature.id.clone()))
             })
             .collect();
-        let source = render_workspace(&linux(), &selected, &BTreeSet::new())
+        let source = render_workspace(&repo_rules(), &linux(), &selected, &BTreeSet::new())
             .await
             .unwrap();
         std::fs::write(root.path().join(WORKSPACE_FILE), source).unwrap();

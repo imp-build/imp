@@ -1,8 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-#[cfg(feature = "embedded-rules")]
-use include_dir::{include_dir, Dir};
 use rquickjs::{
     loader::{ImportAttributes, Loader, Resolver},
     Ctx, Module,
@@ -12,16 +10,12 @@ use crate::changed::ImportGraph;
 use crate::spike::{BUILD_FILE, WORKSPACE_FILE};
 
 /// The built-in `imp:core` module exposed to every plugin and BUILD file.
+/// Unlike the rule library this is the engine's own source, so it stays
+/// compiled in.
 pub const CORE_JS: &str = include_str!("imp_core.js");
 
-/// imp's own rule library (rules/**), compiled into standalone binaries
-/// through the default `embedded-rules` feature. `RulesSource::Dev` bypasses
-/// this in favor of a live on-disk directory (see below).
-#[cfg(feature = "embedded-rules")]
-static EMBEDDED_RULES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../rules");
-
-/// Environment variable that, when set, points `//rules/...` at a live
-/// on-disk directory instead of the compiled-in copy — for developing
+/// Environment variable that points `//rules/...` at an on-disk directory,
+/// overriding the tree shipped alongside the executable — for developing
 /// against a checked-out copy of imp's rules from an external project.
 pub const RULES_DIR_ENV: &str = "IMP_RULES_DIR";
 
@@ -43,22 +37,161 @@ pub struct ImpLoader {
     pub rules_source: RulesSource,
 }
 
-/// Where imp's built-in `//rules/...` modules come from. Only consulted
-/// as a fallback when a `//rules/...` specifier isn't found under the
-/// workspace root itself (e.g. a project vendoring/overriding its own copy).
+/// Where imp's built-in `//rules/...` modules come from. Only consulted as
+/// a fallback when a `//rules/...` specifier isn't found under the workspace
+/// root itself (e.g. a project vendoring/overriding its own copy).
+///
+/// Having no rules directory at all is a normal state, not an error: a
+/// workspace that vendors every rule it uses never consults this. So the
+/// absence is carried here and only reported if something actually needs a
+/// built-in rule, together with the locations that were probed.
 #[derive(Debug, Clone)]
-pub enum RulesSource {
-    Embedded,
-    Dev(PathBuf),
+pub struct RulesSource {
+    root: Option<PathBuf>,
+    /// Locations `discover` probed, for the not-found message. Empty when the
+    /// source was named explicitly.
+    searched: Vec<PathBuf>,
 }
 
 impl RulesSource {
-    pub fn from_env() -> Self {
-        match std::env::var_os(RULES_DIR_ENV) {
-            Some(value) if !value.is_empty() => RulesSource::Dev(PathBuf::from(value)),
-            _ => RulesSource::Embedded,
+    /// Locates the rule library: `$IMP_RULES_DIR` if set, otherwise the tree
+    /// shipped alongside the executable.
+    pub fn discover() -> Self {
+        if let Some(value) = std::env::var_os(RULES_DIR_ENV) {
+            if !value.is_empty() {
+                // Used verbatim even when it doesn't exist. Falling through to
+                // an installed tree would make a typo'd override look like it
+                // worked, which is a miserable thing to debug.
+                return Self::directory(PathBuf::from(value));
+            }
+        }
+
+        let probed = std::env::current_exe().ok().map(|exe| {
+            // macOS can hand back a symlink or a relative path; /proc/self/exe
+            // is already resolved. The fallback covers a binary being replaced
+            // underneath us, where canonicalize fails on "... (deleted)".
+            let exe = exe.canonicalize().unwrap_or(exe);
+            probe_exe_relative(&exe)
+        });
+
+        let searched = match probed {
+            Some((Some(root), searched)) => {
+                return Self {
+                    root: Some(root),
+                    searched,
+                }
+            }
+            Some((None, searched)) => searched,
+            None => Vec::new(),
+        };
+
+        // Test binaries live in target/debug/deps/ (or a sandbox), with no
+        // installed layout around them, so fall back to the checkout. Without
+        // this every tempdir test that imports a real rule would fail; the
+        // not-found path is covered by explicit `RulesSource::none()` tests.
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(checkout) = test_rules_dir() {
+            return Self::directory(checkout);
+        }
+
+        Self {
+            root: None,
+            searched,
         }
     }
+
+    /// A rules tree at a known path, used verbatim.
+    pub fn directory(path: impl Into<PathBuf>) -> Self {
+        Self {
+            root: Some(path.into()),
+            searched: Vec::new(),
+        }
+    }
+
+    /// No built-in rules. Correct for a fully-vendored workspace, and for
+    /// callers that only resolve non-`//rules/...` addresses.
+    pub fn none() -> Self {
+        Self {
+            root: None,
+            searched: Vec::new(),
+        }
+    }
+
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    /// One-line "no rule library" note, for errors thrown into JS where the
+    /// whole message must fit QuickJS's 256-byte buffer.
+    pub fn missing_summary(&self) -> String {
+        format!("no rule library (set {RULES_DIR_ENV})")
+    }
+
+    /// The same, with every probed location — for errors surfaced in Rust,
+    /// which have no length limit.
+    pub fn missing_message(&self) -> String {
+        if self.searched.is_empty() {
+            return format!(
+                "no built-in rules directory available; set {RULES_DIR_ENV} to a rules directory"
+            );
+        }
+        let mut message = String::from("no built-in rules directory found; looked in:");
+        for path in &self.searched {
+            message.push_str(&format!("\n  {}", path.display()));
+        }
+        message.push_str(&format!(
+            "\nset {RULES_DIR_ENV}, or reinstall imp with install.sh"
+        ));
+        message
+    }
+
+    /// Reads a file from the rule library by path relative to its root, for
+    /// callers with no workspace to fall back on (see `imp init`).
+    pub fn read_builtin(&self, rel: &str) -> std::result::Result<String, String> {
+        let Some(root) = self.root() else {
+            return Err(self.missing_message());
+        };
+        let path = root.join(rel);
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))
+    }
+}
+
+/// imp's own rule library, located from a test binary.
+///
+/// Deliberately not `env!("CARGO_MANIFEST_DIR")`: that bakes in an absolute
+/// path at compile time, and under `imp test` the crate is compiled in one
+/// ephemeral sandbox and the tests run in another, so it points at a directory
+/// that no longer exists. Walking up from the working directory lands on the
+/// repo root under `cargo test`, and on the sandbox root under `imp test`
+/// (where the rulesTree resource dep is materialized — see BUILD.js).
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_rules_dir() -> Option<PathBuf> {
+    std::env::current_dir()
+        .ok()?
+        .ancestors()
+        .map(|dir| dir.join("rules"))
+        .find(|candidate| candidate.join("init.js").is_file())
+}
+
+/// Candidate rule libraries for an executable at `exe`, in precedence order:
+/// the installed layout (`<prefix>/bin/imp` beside `<prefix>/share/imp/rules`),
+/// then a `rules/` sibling so an unpacked release archive runs in place.
+/// Returns the first that exists plus every path probed, for diagnostics.
+///
+/// Pure so it is testable without touching `current_exe` or the environment.
+fn probe_exe_relative(exe: &Path) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let Some(dir) = exe.parent() else {
+        return (None, Vec::new());
+    };
+
+    let mut candidates = Vec::new();
+    if let Some(prefix) = dir.parent() {
+        candidates.push(prefix.join("share").join("imp").join("rules"));
+    }
+    candidates.push(dir.join("rules"));
+
+    let root = candidates.iter().find(|path| path.is_dir()).cloned();
+    (root, candidates)
 }
 
 impl ImpResolver {
@@ -69,11 +202,11 @@ impl ImpResolver {
             .entry(resolution.name.clone())
             .or_default()
             .insert(base.to_owned());
-        // Only on-disk files under the workspace root can appear in a git
-        // diff; embedded rules and external dev-rules directories can't.
-        let ModuleSource::File(path) = &resolution.source else {
-            return;
-        };
+        // Only files under the workspace root can appear in a git diff; the
+        // built-in rule library normally lives outside it. (Pointing
+        // IMP_RULES_DIR inside a workspace does put built-in rules in the
+        // graph — harmless, and already true before rules moved on-disk.)
+        let path = &resolution.path;
         let Ok(relative) = path.strip_prefix(&self.workspace_root) else {
             return;
         };
@@ -184,15 +317,12 @@ impl Loader for ImpLoader {
             let resolution =
                 resolve_workspace_module(&self.workspace_root, &self.rules_source, name)
                     .map_err(|message| rquickjs::Error::new_loading_message(name, message))?;
-            let source = match resolution.source {
-                ModuleSource::File(path) => std::fs::read_to_string(&path).map_err(|e| {
-                    rquickjs::Error::new_loading_message(
-                        name,
-                        format!("read {}: {e}", path.display()),
-                    )
-                })?,
-                ModuleSource::Embedded(contents) => contents.to_owned(),
-            };
+            let source = std::fs::read_to_string(&resolution.path).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    name,
+                    format!("read {}: {e}", resolution.path.display()),
+                )
+            })?;
             return Module::declare(ctx.clone(), name, source);
         }
 
@@ -209,12 +339,6 @@ pub enum ModuleKind {
     Unknown,
 }
 
-#[derive(Debug, Clone)]
-pub enum ModuleSource {
-    File(PathBuf),
-    Embedded(&'static str),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleForm {
     Direct,
@@ -222,9 +346,10 @@ pub enum ModuleForm {
     Build,
 }
 
+#[derive(Debug, Clone)]
 pub struct WorkspaceModuleResolution {
     pub name: String,
-    pub source: ModuleSource,
+    pub path: PathBuf,
     pub kind: ModuleKind,
     pub form: ModuleForm,
 }
@@ -239,175 +364,92 @@ pub fn resolve_workspace_module(
         .ok_or_else(|| format!("workspace module '{name}' must start with //"))?;
     validate_workspace_module_path(name, rel)?;
 
-    match resolve_workspace_module_in_root(root, name, rel) {
-        Ok(resolution) => Ok(resolution),
-        Err(root_err) => {
-            if rel == "rules" || rel.starts_with("rules/") {
-                let builtin_rel = rel.strip_prefix("rules").unwrap().trim_start_matches('/');
-                resolve_builtin_rules_module(rules, name, builtin_rel)
-                    .map_err(|rules_err| format!("{root_err}; {rules_err}"))
-            } else {
-                Err(root_err)
-            }
+    // `//rules/...` addresses fall back to imp's own rule library, which
+    // lives outside the workspace.
+    let builtin_rel = (rel == "rules" || rel.starts_with("rules/"))
+        .then(|| rel.strip_prefix("rules").unwrap().trim_start_matches('/'));
+
+    let mut tried = Vec::new();
+    if let Some(resolution) = try_resolve_in_root(root, name, rel, &mut tried) {
+        return Ok(resolution);
+    }
+    if let (Some(builtin_rel), Some(rules_root)) = (builtin_rel, rules.root()) {
+        if let Some(resolution) = try_resolve_in_root(rules_root, name, builtin_rel, &mut tried) {
+            return Ok(resolution);
         }
     }
+
+    // QuickJS formats thrown errors through a 256-byte stack buffer, and
+    // rquickjs prepends ~80 bytes of "Error resolving module 'x' from 'y': "
+    // before this reaches it — leaving roughly 180. So this stays one line and
+    // spends the budget on the roots, which is the part a reader can't guess.
+    // The `.js` / `index.js` / `BUILD.js` candidates under each root are a
+    // fixed convention (see try_resolve_in_root) and are deliberately omitted;
+    // listing them twice cost ~100 bytes and pushed the paths off the end.
+    let mut message = format!(
+        "cannot resolve workspace module '{name}' under {}",
+        root.display()
+    );
+    if let (Some(_), Some(rules_root)) = (builtin_rel, rules.root()) {
+        message.push_str(&format!(" or {}", rules_root.display()));
+    }
+    if builtin_rel.is_some() && rules.root().is_none() {
+        message.push_str(&format!("; {}", rules.missing_summary()));
+    }
+    Err(message)
 }
 
-fn resolve_workspace_module_in_root(
+/// Tries the `<rel>.js` / `<rel>/index.js` / `<rel>/BUILD.js` candidates for
+/// `rel` under `root`, appending every path probed to `tried` so the caller
+/// can build one combined not-found message across both roots.
+fn try_resolve_in_root(
     root: &Path,
     name: &str,
     rel: &str,
-) -> std::result::Result<WorkspaceModuleResolution, String> {
+    tried: &mut Vec<PathBuf>,
+) -> Option<WorkspaceModuleResolution> {
     let mut candidates = Vec::new();
 
     if rel.is_empty() {
-        let build_path = root.join(BUILD_FILE);
-        candidates.push(build_path.clone());
-        if build_path.is_file() {
-            return Ok(WorkspaceModuleResolution {
-                name: name.to_owned(),
-                source: ModuleSource::File(build_path),
-                kind: ModuleKind::Build,
-                form: ModuleForm::Build,
-            });
-        }
+        candidates.push((root.join(BUILD_FILE), ModuleKind::Build, ModuleForm::Build));
     } else {
-        if rel == "BUILD" || rel.ends_with("/BUILD") {
-            let build_path = root.join(format!("{rel}.js"));
-            candidates.push(build_path.clone());
-            if build_path.is_file() {
-                return Ok(WorkspaceModuleResolution {
-                    name: name.to_owned(),
-                    source: ModuleSource::File(build_path),
-                    kind: ModuleKind::Build,
-                    form: ModuleForm::Direct,
-                });
-            }
-        }
-
-        let js_path = root.join(format!("{rel}.js"));
-        candidates.push(js_path.clone());
-        if js_path.is_file() {
-            return Ok(WorkspaceModuleResolution {
-                name: name.to_owned(),
-                source: ModuleSource::File(js_path),
-                kind: ModuleKind::Extension,
-                form: ModuleForm::Direct,
-            });
-        }
-
-        let index_path = root.join(rel).join("index.js");
-        candidates.push(index_path.clone());
-        if index_path.is_file() {
-            return Ok(WorkspaceModuleResolution {
-                name: name.to_owned(),
-                source: ModuleSource::File(index_path),
-                kind: ModuleKind::Extension,
-                form: ModuleForm::Index,
-            });
-        }
-
-        let build_path = root.join(rel).join(BUILD_FILE);
-        candidates.push(build_path.clone());
-        if build_path.is_file() {
-            return Ok(WorkspaceModuleResolution {
-                name: name.to_owned(),
-                source: ModuleSource::File(build_path),
-                kind: ModuleKind::Build,
-                form: ModuleForm::Build,
-            });
-        }
-    }
-
-    let tried = candidates
-        .iter()
-        .map(|path| {
-            path.strip_prefix(root)
-                .unwrap_or(path)
-                .display()
-                .to_string()
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(format!(
-        "cannot resolve workspace module '{name}'; tried {tried}"
-    ))
-}
-
-/// Resolves `//rules/<rel>` (where `rel` has the leading `rules/` already
-/// stripped) against imp's built-in rule library: a live on-disk
-/// directory in dev mode, or the compiled-in copy otherwise.
-fn resolve_builtin_rules_module(
-    rules: &RulesSource,
-    name: &str,
-    rel: &str,
-) -> std::result::Result<WorkspaceModuleResolution, String> {
-    match rules {
-        RulesSource::Dev(dir) => resolve_workspace_module_in_root(dir, name, rel),
-        RulesSource::Embedded => resolve_embedded_rules_module(name, rel),
-    }
-}
-
-fn resolve_embedded_rules_module(
-    name: &str,
-    rel: &str,
-) -> std::result::Result<WorkspaceModuleResolution, String> {
-    #[cfg(not(feature = "embedded-rules"))]
-    {
-        let _ = rel;
-        return Err(format!(
-            "cannot resolve built-in rules module '{name}': this imp binary was built without embedded rules; set {RULES_DIR_ENV} to a rules directory"
+        // A `//pkg/BUILD` address names a build file directly; everything
+        // else resolving to `<rel>.js` is a plain extension module.
+        let direct_kind = if rel == "BUILD" || rel.ends_with("/BUILD") {
+            ModuleKind::Build
+        } else {
+            ModuleKind::Extension
+        };
+        candidates.push((
+            root.join(format!("{rel}.js")),
+            direct_kind,
+            ModuleForm::Direct,
+        ));
+        candidates.push((
+            root.join(rel).join("index.js"),
+            ModuleKind::Extension,
+            ModuleForm::Index,
+        ));
+        candidates.push((
+            root.join(rel).join(BUILD_FILE),
+            ModuleKind::Build,
+            ModuleForm::Build,
         ));
     }
 
-    #[cfg(feature = "embedded-rules")]
-    {
-        let mut tried = Vec::new();
-
-        let js_path = format!("{rel}.js");
-        tried.push(js_path.clone());
-        if let Some(file) = EMBEDDED_RULES.get_file(&js_path) {
-            return embedded_module(name, file, ModuleKind::Extension, ModuleForm::Direct);
+    for (path, kind, form) in candidates {
+        let found = path.is_file();
+        tried.push(path.clone());
+        if found {
+            return Some(WorkspaceModuleResolution {
+                name: name.to_owned(),
+                path,
+                kind,
+                form,
+            });
         }
-
-        let index_path = format!("{rel}/index.js");
-        tried.push(index_path.clone());
-        if let Some(file) = EMBEDDED_RULES.get_file(&index_path) {
-            return embedded_module(name, file, ModuleKind::Extension, ModuleForm::Index);
-        }
-
-        let build_path = format!("{rel}/{BUILD_FILE}");
-        tried.push(build_path.clone());
-        if let Some(file) = EMBEDDED_RULES.get_file(&build_path) {
-            return embedded_module(name, file, ModuleKind::Build, ModuleForm::Build);
-        }
-
-        Err(format!(
-            "cannot resolve built-in rules module '{name}'; tried embedded rules/{}",
-            tried.join(", embedded rules/")
-        ))
     }
-}
-
-#[cfg(feature = "embedded-rules")]
-fn embedded_module(
-    name: &str,
-    file: &'static include_dir::File<'static>,
-    kind: ModuleKind,
-    form: ModuleForm,
-) -> std::result::Result<WorkspaceModuleResolution, String> {
-    let contents = file.contents_utf8().ok_or_else(|| {
-        format!(
-            "embedded rules file '{}' is not valid UTF-8",
-            file.path().display()
-        )
-    })?;
-    Ok(WorkspaceModuleResolution {
-        name: name.to_owned(),
-        source: ModuleSource::Embedded(contents),
-        kind,
-        form,
-    })
+    None
 }
 
 /// Resolve a workspace-addressed data file (e.g.
@@ -416,7 +458,8 @@ fn embedded_module(
 /// address names the file exactly. Precedence mirrors module resolution:
 /// a file under the workspace root wins, with the built-in rules tree as a
 /// fallback for `//rules/...` addresses. Returns `Ok(None)` when no source
-/// has the file.
+/// has the file, and `Err` when a `//rules/...` address is asked for but no
+/// rule library exists to look in.
 pub fn resolve_workspace_file(
     root: &Path,
     rules: &RulesSource,
@@ -438,28 +481,18 @@ pub fn resolve_workspace_file(
     }
 
     if let Some(builtin_rel) = rel.strip_prefix("rules/") {
-        match rules {
-            RulesSource::Dev(dir) => {
-                let dev_path = dir.join(builtin_rel);
-                if dev_path.is_file() {
-                    return std::fs::read_to_string(&dev_path)
-                        .map(Some)
-                        .map_err(|e| format!("read {}: {e}", dev_path.display()));
-                }
-            }
-            RulesSource::Embedded =>
-            {
-                #[cfg(feature = "embedded-rules")]
-                if let Some(file) = EMBEDDED_RULES.get_file(builtin_rel) {
-                    let contents = file.contents_utf8().ok_or_else(|| {
-                        format!(
-                            "embedded rules file '{}' is not valid UTF-8",
-                            file.path().display()
-                        )
-                    })?;
-                    return Ok(Some(contents.to_owned()));
-                }
-            }
+        // Distinguish "the rule library doesn't have this file" from "there is
+        // no rule library". Collapsing both into Ok(None) surfaces to the user
+        // as a bogus "regenerate your lockfiles" error from
+        // rules/imp/lockfile/index.js.
+        let Some(rules_root) = rules.root() else {
+            return Err(rules.missing_message());
+        };
+        let builtin_path = rules_root.join(builtin_rel);
+        if builtin_path.is_file() {
+            return std::fs::read_to_string(&builtin_path)
+                .map(Some)
+                .map_err(|e| format!("read {}: {e}", builtin_path.display()));
         }
     }
 
@@ -505,12 +538,9 @@ pub fn module_location(root: &Path, rules: &RulesSource, name: &str) -> String {
     if name == WORKSPACE_FILE {
         return root.join(WORKSPACE_FILE).display().to_string();
     }
-    if let Some(stripped) = name.strip_prefix("//") {
+    if name.starts_with("//") {
         if let Ok(resolution) = resolve_workspace_module(root, rules, name) {
-            return match resolution.source {
-                ModuleSource::File(path) => path.display().to_string(),
-                ModuleSource::Embedded(_) => format!("<embedded {stripped}>"),
-            };
+            return resolution.path.display().to_string();
         }
     }
     name.to_owned()
@@ -520,14 +550,19 @@ pub fn module_location(root: &Path, rules: &RulesSource, name: &str) -> String {
 mod tests {
     use super::*;
 
+    /// imp's own rule library, as an installed binary would see it.
+    fn repo_rules_dir() -> PathBuf {
+        test_rules_dir().expect("locate the repo's rules/ tree")
+    }
+
     #[test]
-    fn workspace_file_wins_over_embedded() {
+    fn workspace_file_wins_over_builtin() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("rules/workflows")).unwrap();
         std::fs::write(root.path().join("rules/workflows/fmt.js"), "sentinel").unwrap();
         let contents = resolve_workspace_file(
             root.path(),
-            &RulesSource::Embedded,
+            &RulesSource::directory(repo_rules_dir()),
             "//rules/workflows/fmt.js",
         )
         .unwrap()
@@ -536,11 +571,11 @@ mod tests {
     }
 
     #[test]
-    fn embedded_rules_fallback() {
+    fn builtin_rules_fallback() {
         let root = tempfile::tempdir().unwrap();
         let contents = resolve_workspace_file(
             root.path(),
-            &RulesSource::Embedded,
+            &RulesSource::directory(repo_rules_dir()),
             "//rules/workflows/fmt.js",
         )
         .unwrap()
@@ -555,7 +590,7 @@ mod tests {
         std::fs::write(dev.path().join("dev.lock"), "{}").unwrap();
         let contents = resolve_workspace_file(
             root.path(),
-            &RulesSource::Dev(dev.path().to_owned()),
+            &RulesSource::directory(dev.path()),
             "//rules/dev.lock",
         )
         .unwrap()
@@ -566,14 +601,140 @@ mod tests {
     #[test]
     fn missing_file_is_none_and_traversal_rejected() {
         let root = tempfile::tempdir().unwrap();
+        let rules = RulesSource::directory(repo_rules_dir());
         assert!(
-            resolve_workspace_file(root.path(), &RulesSource::Embedded, "//no/such.lock")
+            resolve_workspace_file(root.path(), &rules, "//no/such.lock")
                 .unwrap()
                 .is_none()
         );
+        assert!(resolve_workspace_file(root.path(), &rules, "//../etc/passwd").is_err());
+        assert!(resolve_workspace_file(root.path(), &rules, "//").is_err());
+    }
+
+    /// A `//rules/...` read with no rule library must say so, rather than
+    /// reporting the file as merely absent — callers turn `Ok(None)` into
+    /// "your lockfiles are stale", which sends people down the wrong path.
+    #[test]
+    fn addressed_rules_file_without_library_is_an_error() {
+        let root = tempfile::tempdir().unwrap();
+        let err =
+            resolve_workspace_file(root.path(), &RulesSource::none(), "//rules/rust/rust.lock")
+                .unwrap_err();
+        assert!(err.contains("no built-in rules directory"), "{err}");
+
+        // Non-rules addresses are still a plain miss.
         assert!(
-            resolve_workspace_file(root.path(), &RulesSource::Embedded, "//../etc/passwd").is_err()
+            resolve_workspace_file(root.path(), &RulesSource::none(), "//other/thing.lock")
+                .unwrap()
+                .is_none()
         );
-        assert!(resolve_workspace_file(root.path(), &RulesSource::Embedded, "//").is_err());
+    }
+
+    #[test]
+    fn module_resolution_reports_both_roots_and_missing_library() {
+        let root = tempfile::tempdir().unwrap();
+        let rules = tempfile::tempdir().unwrap();
+
+        let err = resolve_workspace_module(
+            root.path(),
+            &RulesSource::directory(rules.path()),
+            "//rules/missing",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("cannot resolve workspace module '//rules/missing'"),
+            "{err}"
+        );
+        // Both the workspace root and the rule library were probed.
+        assert!(err.contains(&root.path().display().to_string()), "{err}");
+        assert!(err.contains(&rules.path().display().to_string()), "{err}");
+        assert!(!err.contains("no rule library"), "{err}");
+
+        let err = resolve_workspace_module(root.path(), &RulesSource::none(), "//rules/missing")
+            .unwrap_err();
+        assert!(err.contains("no rule library"), "{err}");
+        assert!(err.contains(RULES_DIR_ENV), "{err}");
+    }
+
+    /// QuickJS formats thrown errors through a 256-byte stack buffer and
+    /// rquickjs prepends "Error resolving module 'x' from 'y': " before that,
+    /// so a resolution failure has roughly 180 bytes to say anything useful.
+    /// Blow the budget and the tail — which is where the paths live — is
+    /// silently cut off mid-word for the user.
+    #[test]
+    fn resolution_error_fits_the_quickjs_message_buffer() {
+        let root = Path::new("/home/someone/projects/my-service");
+        let rules = Path::new("/home/someone/.local/share/imp/rules");
+
+        for source in [RulesSource::directory(rules), RulesSource::none()] {
+            let err = resolve_workspace_module(root, &source, "//rules/python/ruff_toolchain")
+                .unwrap_err();
+            assert!(
+                err.len() <= 180,
+                "resolution error is {} bytes, over the QuickJS budget:\n{err}",
+                err.len()
+            );
+        }
+    }
+
+    /// `import "//rules"` resolves to the library's own BUILD.js. This never
+    /// worked against the old embedded copy, which only ever probed
+    /// `<rel>.js`/`<rel>/index.js`/`<rel>/BUILD.js` and so skipped the
+    /// top-level BUILD.js when `rel` was empty.
+    #[test]
+    fn bare_rules_address_resolves_to_library_build_file() {
+        let root = tempfile::tempdir().unwrap();
+        let rules = tempfile::tempdir().unwrap();
+        std::fs::write(rules.path().join(BUILD_FILE), "export const x = 1;").unwrap();
+
+        let resolution = resolve_workspace_module(
+            root.path(),
+            &RulesSource::directory(rules.path()),
+            "//rules",
+        )
+        .unwrap();
+        assert_eq!(resolution.path, rules.path().join(BUILD_FILE));
+        assert_eq!(resolution.kind, ModuleKind::Build);
+    }
+
+    #[test]
+    fn exe_relative_probe_prefers_installed_layout() {
+        let prefix = tempfile::tempdir().unwrap();
+        let bin = prefix.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let share = prefix.path().join("share/imp/rules");
+        std::fs::create_dir_all(&share).unwrap();
+
+        let (root, searched) = probe_exe_relative(&bin.join("imp"));
+        assert_eq!(root.unwrap(), share);
+        assert_eq!(searched.len(), 2);
+    }
+
+    /// An unpacked release archive must run in place, without an install step.
+    #[test]
+    fn exe_relative_probe_falls_back_to_sibling_rules() {
+        let stage = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(stage.path().join("rules")).unwrap();
+
+        let (root, _) = probe_exe_relative(&stage.path().join("imp"));
+        assert_eq!(root.unwrap(), stage.path().join("rules"));
+    }
+
+    #[test]
+    fn exe_relative_probe_reports_every_location_it_tried() {
+        let empty = tempfile::tempdir().unwrap();
+        let bin = empty.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+
+        let (root, searched) = probe_exe_relative(&bin.join("imp"));
+        assert!(root.is_none());
+
+        let source = RulesSource {
+            root: None,
+            searched,
+        };
+        let message = source.missing_message();
+        assert!(message.contains("share/imp/rules"), "{message}");
+        assert!(message.contains("bin/rules"), "{message}");
     }
 }
