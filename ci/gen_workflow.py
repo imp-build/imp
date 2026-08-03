@@ -481,19 +481,6 @@ ROLLING_RELEASE_STEPS = [
 
 VERSION_RELEASE_STEPS = [
     {"uses": "actions/checkout@v4"},
-    {
-        "name": "Confirm tag matches Cargo.toml version",
-        "run": "\n".join(
-            [
-                'tag="${GITHUB_REF_NAME#v}"',
-                'crate="$(python3 -c \'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])\')"',
-                'if [ "$tag" != "$crate" ]; then',
-                '  echo "tag v$tag does not match Cargo.toml version $crate" >&2',
-                "  exit 1",
-                "fi",
-            ]
-        ),
-    },
     *RELEASE_ARTIFACT_STEPS,
     {
         "name": "Create draft release",

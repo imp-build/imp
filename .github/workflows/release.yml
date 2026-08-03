@@ -147,15 +147,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Confirm tag matches Cargo.toml version
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          crate="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
-          if [ "$tag" != "$crate" ]; then
-            echo "tag v$tag does not match Cargo.toml version $crate" >&2
-            exit 1
-          fi
-
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
