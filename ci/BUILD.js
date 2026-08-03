@@ -5,8 +5,8 @@
 // imp's build graph), so it belongs in the "workspace-materialized" bucket
 // rather than a plain build product.
 //
-//   imp goal generate //ci:docs_workflow          # regenerate the file
-//   imp goal generate //ci:docs_workflow --check   # CI drift gate, no writes
+//   imp generate //ci:docs_workflow          # regenerate the file
+//   imp generate //ci:docs_workflow --check   # CI drift gate, no writes
 import { attach, file_set, label, logInfo } from "imp:core";
 import { jsSources } from "//rules/js";
 import "//rules/workflows/generate";

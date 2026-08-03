@@ -9,7 +9,7 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result};
-use clap::{Arg, ArgAction, Args, Command, FromArgMatches, Parser, Subcommand};
+use clap::{Arg, ArgAction, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
 use imp_engine::{changed, runtime, selector, spike};
 use imp_scheduler as scheduler;
 use rquickjs::{promise::MaybePromise, CatchResultExt, FromJs, Function, Module, Object, Value};
@@ -68,35 +68,6 @@ enum Cmd {
         /// Output path for the generated file
         output: PathBuf,
     },
-    /// Generate or check BUILD.js files for unowned sources, per rules
-    /// group's `buildGenerate` config
-    GenerateBuild {
-        /// Check that generated BUILD.js files are up to date without writing
-        #[arg(long)]
-        check: bool,
-        /// Accepted for consistency with other goals, but which generators
-        /// run is decided entirely by each rules group's `buildGenerate`
-        /// config flag, not by selectors
-        selectors: Vec<String>,
-    },
-    /// Build the selected targets, e.g. `imp build //...`
-    #[command(disable_help_flag = true)]
-    Build(RawGoalArgs),
-    /// Run tests for the selected targets
-    #[command(disable_help_flag = true)]
-    Test(RawGoalArgs),
-    /// Format the selected targets
-    #[command(disable_help_flag = true)]
-    Fmt(RawGoalArgs),
-    /// Lint the selected targets
-    #[command(disable_help_flag = true)]
-    Lint(RawGoalArgs),
-    /// Package the selected targets
-    #[command(disable_help_flag = true)]
-    Package(RawGoalArgs),
-    /// Run the selected targets
-    #[command(disable_help_flag = true)]
-    Run(RawGoalArgs),
     /// Run any registered goal by name, e.g. `imp goal vs //:target`
     #[command(disable_help_flag = true)]
     Goal {
@@ -105,6 +76,12 @@ enum Cmd {
         #[command(flatten)]
         args: RawGoalArgs,
     },
+    /// Fallback for any first word that isn't one of the fixed commands
+    /// above: treated as a goal name (e.g. `imp generate //:target` runs the
+    /// JS-registered "generate" goal), so new goals never need a matching
+    /// Rust variant here. Equivalent to `imp goal <name> ...`.
+    #[command(external_subcommand)]
+    External(Vec<String>),
     /// Coordinate isolated JS rule tests. Invoked by the rules-test product;
     /// not for direct use.
     #[command(hide = true)]
@@ -385,7 +362,59 @@ async fn resolve_workspace_tool_bin(name: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(path))
 }
 
+/// Print `--help`, extending the derived static `Command` with one real
+/// subcommand entry per goal discovered by greedily loading a workspace from
+/// the current directory. Registered goals (see [`Cmd::External`]) aren't
+/// known statically, so they can't be compiled into the derived `Command`;
+/// this builds them onto it at runtime instead, via the same builder API
+/// (`Command::subcommand`/`Arg`) that clap's derive macro itself generates
+/// into. These entries are display-only — actual parsing still goes through
+/// `Cli::parse()`/`Cmd::External` unchanged — so a missing or unloadable
+/// workspace just falls back to printing the static help alone.
+async fn print_help_with_registered_goals(long: bool) {
+    let mut command = Cli::command();
+    if let Ok(current_dir) = std::env::current_dir() {
+        if let Ok(workspace_root) = spike::find_workspace_root(&current_dir) {
+            if let Ok(live) = runtime::load_workspace(&workspace_root).await {
+                for (name, goal) in &live.workspace.goals {
+                    let mut sub = Command::new(name.clone())
+                        .about(format!("Registered goal: requests \"{}\"", goal.product));
+                    for (flag_name, flag_def) in &goal.flags {
+                        let mut arg = Arg::new(flag_name.clone())
+                            .long(flag_name.clone())
+                            .action(ArgAction::SetTrue);
+                        if let Some(description) = &flag_def.description {
+                            arg = arg.help(description.clone());
+                        }
+                        sub = sub.arg(arg);
+                    }
+                    command = command.subcommand(sub);
+                }
+            }
+        }
+    }
+    let _ = if long {
+        command.print_long_help()
+    } else {
+        command.print_help()
+    };
+    println!();
+}
+
 async fn run() -> Result<()> {
+    if std::env::args().count() == 2 {
+        match std::env::args().nth(1).as_deref() {
+            Some("--help") => {
+                print_help_with_registered_goals(true).await;
+                return Ok(());
+            }
+            Some("-h") => {
+                print_help_with_registered_goals(false).await;
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
     let cli = Cli::parse();
     if cli.daemon {
         std::env::set_var("IMP_DAEMON", "1");
@@ -627,26 +656,12 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
         Cmd::Config { command } => {
             return cmd_config(command).await;
         }
-        Cmd::Build(args) => {
-            return cmd_execute_goal("build", &args.raw, Arc::clone(&cancellation), tree).await;
-        }
-        Cmd::Test(args) => {
-            return cmd_execute_goal("test", &args.raw, Arc::clone(&cancellation), tree).await;
-        }
-        Cmd::Fmt(args) => {
-            return cmd_execute_goal("fmt", &args.raw, Arc::clone(&cancellation), tree).await;
-        }
-        Cmd::Lint(args) => {
-            return cmd_execute_goal("lint", &args.raw, Arc::clone(&cancellation), tree).await;
-        }
-        Cmd::Package(args) => {
-            return cmd_execute_goal("package", &args.raw, Arc::clone(&cancellation), tree).await;
-        }
-        Cmd::Run(args) => {
-            return cmd_execute_goal("run", &args.raw, Arc::clone(&cancellation), tree).await;
-        }
         Cmd::Goal { name, args } => {
             return cmd_execute_goal(name, &args.raw, Arc::clone(&cancellation), tree).await;
+        }
+        Cmd::External(argv) => {
+            let (name, raw) = argv.split_first().expect("clap guarantees non-empty argv");
+            return cmd_execute_goal(name, raw, Arc::clone(&cancellation), tree).await;
         }
         Cmd::RulesTest { modules } => {
             return cmd_rules_test(modules, Arc::clone(&cancellation), tree).await;
@@ -660,13 +675,6 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Resu
         }
         Cmd::Daemon { .. } | Cmd::Cache { .. } => {
             unreachable!("handled before UI setup")
-        }
-        Cmd::GenerateBuild { check, selectors } => {
-            let mut raw = selectors.clone();
-            if *check {
-                raw.push("--check".to_owned());
-            }
-            return cmd_execute_goal("generate-build", &raw, Arc::clone(&cancellation), tree).await;
         }
         Cmd::CodegenRegister { output } => {
             let odinfmt = match std::env::var_os("ODINFMT_BIN") {
@@ -1733,11 +1741,24 @@ mod tests {
     }
 
     #[test]
-    fn direct_module_address_is_not_a_cli_command() {
-        assert!(
-            Cli::try_parse_from(["imp", "//rules/rust:cargoBuildPath", "rules/rust/example",])
-                .is_err()
-        );
+    fn unmatched_first_word_falls_back_to_external_goal_dispatch() {
+        // Anything that isn't a fixed command (including a stray label like
+        // this one) is captured by the `External` fallback and treated as a
+        // goal name; it fails later, once the workspace loads, with "no
+        // '<name>' goal" rather than as a clap parse error.
+        let cli = Cli::parse_from(["imp", "//rules/rust:cargoBuildPath", "rules/rust/example"]);
+        match cli.command {
+            Cmd::External(argv) => {
+                assert_eq!(
+                    argv,
+                    vec![
+                        "//rules/rust:cargoBuildPath".to_owned(),
+                        "rules/rust/example".to_owned(),
+                    ]
+                );
+            }
+            _ => panic!("expected Cmd::External"),
+        }
     }
 
     #[test]
@@ -1759,13 +1780,32 @@ mod tests {
     }
 
     #[test]
+    fn external_subcommand_dispatches_unlisted_goal_by_name() {
+        let cli = Cli::parse_from(["imp", "generate", "//:pkg", "--check"]);
+        match cli.command {
+            Cmd::External(argv) => {
+                assert_eq!(
+                    argv,
+                    vec![
+                        "generate".to_owned(),
+                        "//:pkg".to_owned(),
+                        "--check".to_owned()
+                    ]
+                );
+            }
+            _ => panic!("expected Cmd::External"),
+        }
+    }
+
+    #[test]
     fn run_subcommand_preserves_double_dash_in_raw_tail() {
         let cli = Cli::parse_from(["imp", "run", "//:program", "--", "--script-flag", "value"]);
         match cli.command {
-            Cmd::Run(args) => {
+            Cmd::External(argv) => {
                 assert_eq!(
-                    args.raw,
+                    argv,
                     vec![
+                        "run".to_owned(),
                         "//:program".to_owned(),
                         "--".to_owned(),
                         "--script-flag".to_owned(),
@@ -1773,7 +1813,7 @@ mod tests {
                     ]
                 );
             }
-            _ => panic!("expected run subcommand"),
+            _ => panic!("expected Cmd::External"),
         }
     }
 
