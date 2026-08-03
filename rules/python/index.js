@@ -148,7 +148,7 @@ function package_handle(appLabel) {
 	return {
 		__id: appLabel.__id,
 		label: appLabel,
-		attrs: appLabel.data,
+		attrs: appLabel.attrs,
 	};
 }
 

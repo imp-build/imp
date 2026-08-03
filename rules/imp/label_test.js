@@ -14,6 +14,13 @@ describe("label/attach", () => {
 		expect(h.data).toEqual({ variant: "release" });
 	});
 
+	test("label() also exposes opts.data as .attrs (same reference)", () => {
+		const data = { variant: "release" };
+		const h = label({ data });
+		expect(h.attrs).toBe(data);
+		expect(h.attrs).toBe(h.data);
+	});
+
 	test("labelAddress rejects non-label handles", () => {
 		expect(() => labelAddress({})).toThrow("expected a label handle");
 	});

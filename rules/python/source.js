@@ -95,7 +95,6 @@ export function pythonToolchain(version, { default: isDefault = false } = {}) {
 		);
 	}
 	const handle = label({ data: { version } });
-	handle.attrs = handle.data;
 	if (isDefault) default_python_toolchain = handle;
 	return handle;
 }
@@ -192,7 +191,6 @@ export function pythonSources({
 			deps,
 		},
 	});
-	owner.attrs = owner.data;
 	discoverLabels(
 		owner,
 		async function discoverPythonSourceLabels(sourceSet) {
@@ -219,7 +217,6 @@ export function pythonSources({
 						deps,
 					},
 				});
-				child.attrs = child.data;
 				runGoal(child, async function runPythonSource(ctx) {
 					const template = await buildPythonSourceRunTemplate(child);
 					return runFromTemplate(template, {

@@ -97,7 +97,7 @@ function oci_action_handle(handle) {
 	return {
 		__id: handle.__id,
 		label: handle,
-		attrs: handle.data,
+		attrs: handle.attrs,
 	};
 }
 

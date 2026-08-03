@@ -112,7 +112,7 @@ function package_handle(packageLabel) {
 	return {
 		__id: packageLabel.__id,
 		label: packageLabel,
-		attrs: packageLabel.data,
+		attrs: packageLabel.attrs,
 		deps: [
 			...(packageLabel.data.deps || []).map((target) => ({ handle: target })),
 			...(packageLabel.data.testTools || []).map((target) => ({
