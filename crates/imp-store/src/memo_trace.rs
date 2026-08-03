@@ -91,7 +91,6 @@ mod tests {
     #[test]
     fn records_are_workspace_scoped_and_ignore_invalid_files() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("IMP_CACHE_DIR", dir.path());
         let workspace_a = dir.path().join("workspace-a");
         let workspace_b = dir.path().join("workspace-b");
         std::fs::create_dir_all(&workspace_a).unwrap();
@@ -121,7 +120,5 @@ mod tests {
         std::fs::write(scope.join("garbage.json"), b"{ not valid").unwrap();
         std::fs::write(scope.join("not-json.txt"), b"ignore me").unwrap();
         assert_eq!(list_memo_trace_records(&workspace_a).unwrap(), vec![record]);
-
-        std::env::remove_var("IMP_CACHE_DIR");
     }
 }
