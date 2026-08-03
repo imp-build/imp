@@ -134,7 +134,7 @@ export function cmakeActionHandle(handle) {
 	return {
 		__id: handle.__id,
 		label: handle,
-		attrs: handle.data,
+		attrs: handle.attrs,
 		deps: [
 			...(handle.data.deps || []).map((dep) => ({ handle: dep })),
 			...(handle.data.toolchainTarget

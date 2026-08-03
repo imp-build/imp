@@ -2364,20 +2364,21 @@ export function product(kindClass, nameToken, toolToken, fn, opts) {
 // ---------------------------------------------------------------------------
 // label() / attach() — exported labels and lazy goal handlers.
 // Strictly additive/parallel to Target/product()/
-// goal() above: a label has no kind, no schema, no attrs, and is never a
+// goal() above: a label has no kind, no schema, and is never a
 // dependency edge. It shares only the id→address table with targets (the
 // same post-eval named-export scan that resolves `new Target()` addresses
 // resolves label() addresses) — not the (kind, product, tool) table.
 // ---------------------------------------------------------------------------
 
 /**
- * Allocate a selectable root with no kind, schema, or attrs.
+ * Allocate a selectable root with no kind or schema.
  *
  * @param {object} [opts]
  * @param {*} [opts.data] Opaque data a reusable factory wants to close over
  *   (e.g. `cargoPackage()` stashing its derived cargo options for its own
- *   handlers to read back via `label.data`). Nothing here is schema-checked
- *   or read by the host.
+ *   handlers to read back via `label.data`, or the equivalent `label.attrs`
+ *   — a same-reference alias kept for interop with `Target.attrs`-shaped
+ *   consumers). Nothing here is schema-checked or read by the host.
  * @returns {object} A label handle. Give it a workspace address by exporting
  *   it (`export const foo = label()`), the same way `new Target()` gets one.
  *   A label may be exported under more than one name — every export becomes
@@ -2385,10 +2386,12 @@ export function product(kindClass, nameToken, toolToken, fn, opts) {
  */
 export function label(opts) {
 	const id = __host_label();
+	const data = opts && opts.data !== undefined ? opts.data : undefined;
 	const handle = {
 		__imp_label: true,
 		__id: id,
-		data: opts && opts.data !== undefined ? opts.data : undefined,
+		data,
+		attrs: data,
 	};
 	if (globalThis.__imp_handle_by_id)
 		globalThis.__imp_handle_by_id.set(id, handle);

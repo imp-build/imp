@@ -220,7 +220,7 @@ export function odin_package_handle(handle) {
 		__id: handle.__id,
 		label: handle,
 		kind,
-		attrs: data,
+		attrs: handle.attrs,
 		deps: [
 			...(data.toolchain ? [{ handle: data.toolchain, mode: "tool" }] : []),
 			...(data.deps || []).map((target) => ({ handle: target })),
