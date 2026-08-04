@@ -991,13 +991,22 @@ export function tsQuery(grammarHandle, treeHandle, querySource) {
  *   (workspace, name), handed to the worker as `IMP_WORKER_PORT`, for
  *   sidecars that need a private, collision-free port to listen on.
  */
-export async function workerStart(name, opts) {
-	const json = await __host_worker_start(name, {
-		argv: opts.argv,
-		env: opts.env ?? [],
-		healthCheckArgv: opts.healthCheckArgv ?? [],
-	});
-	return JSON.parse(json);
+export function workerStart(name, opts) {
+	// Captures the caller's context synchronously, before the await below,
+	// and threads it back through _contextual_thenable — same reasoning as
+	// run()/memo(): __host_worker_start() is a raw host async call with no
+	// imp_core-tracked promise of its own, so nothing else restores the
+	// caller's context once this resumes.
+	const contextEntry = _effective_context_entry(true);
+	const promise = (async () => {
+		const json = await __host_worker_start(name, {
+			argv: opts.argv,
+			env: opts.env ?? [],
+			healthCheckArgv: opts.healthCheckArgv ?? [],
+		});
+		return JSON.parse(json);
+	})();
+	return _contextual_thenable(promise, contextEntry.id);
 }
 
 /**

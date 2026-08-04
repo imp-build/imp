@@ -12,6 +12,7 @@ import {
 	cacheGet,
 	cacheHas,
 	toolName,
+	group,
 } from "imp:core";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
 import {
@@ -265,7 +266,7 @@ export const acquireRustToolchain = memo(
 			);
 		}
 
-		const coreTools = await Promise.all(
+		const coreTools = await group(
 			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
 

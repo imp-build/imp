@@ -20,6 +20,7 @@ import {
 	targetAddress,
 	test as attachTest,
 	writeWorkspace,
+	group,
 } from "imp:core";
 
 import {
@@ -316,7 +317,7 @@ async function resourceSetFor(deps) {
 		.map((dep) => (dep && dep.handle ? dep.handle : dep))
 		.filter((dep) => dep && dep.kind === "resource-package");
 	if (sets.length === 0) return file_set.literal([]);
-	const resolved = await Promise.all(sets.map(resource_package_sources));
+	const resolved = await group(sets.map(resource_package_sources));
 	return resolved.length === 1 ? resolved[0] : file_set.union(...resolved);
 }
 
@@ -332,7 +333,7 @@ export async function resourcesForDirs(dirs) {
 		dirSet.has(declared_path(h, h.attrs.path || ".")),
 	);
 	if (handles.length === 0) return file_set.literal([]);
-	const sets = await Promise.all(handles.map(resources));
+	const sets = await group(handles.map(resources));
 	return sets.length === 1 ? sets[0] : file_set.union(...sets);
 }
 
@@ -919,7 +920,7 @@ export const cargoTest = memo(
 			toolSpec,
 			kacheActive,
 		);
-		const testTools = await Promise.all(
+		const testTools = await group(
 			(handle.attrs.testTools || []).map(nativeToolSpec),
 		);
 
@@ -1047,7 +1048,7 @@ export const cargoPackage = extensible(function cargoPackage({
 		return cargoBuild(packageLabel);
 	});
 	attachTest(packageLabel, async function testCargoPackage() {
-		const [tests, doctests] = await Promise.all([
+		const [tests, doctests] = await group([
 			cargoPackageTests(packageLabel),
 			cargoTest(packageLabel),
 		]);

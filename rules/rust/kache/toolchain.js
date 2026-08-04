@@ -33,6 +33,7 @@ import {
 	cacheHas,
 	workerStart,
 	toolName,
+	group,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -335,7 +336,7 @@ export const acquireKacheToolchain = memo(
 			);
 		}
 
-		const coreTools = await Promise.all(
+		const coreTools = await group(
 			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
 
@@ -390,7 +391,7 @@ async function ensureKacheDataDir() {
 			"no kache toolchain declared via kacheToolchain(); nothing to acquire",
 		);
 	}
-	const coreTools = await Promise.all(
+	const coreTools = await group(
 		coreToolHandles.map((handle) => nativeToolSpec(handle)),
 	);
 	const dataDir = `.imp/kache-data/${key}`;

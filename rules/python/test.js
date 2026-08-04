@@ -6,7 +6,7 @@
 // first, so this syncs its own throwaway venv directly via uv, independent
 // of pythonApp.
 
-import { extensible, label, test as attachTest, run } from "imp:core";
+import { extensible, label, test as attachTest, run, group } from "imp:core";
 
 import {
 	declared_path,
@@ -41,9 +41,7 @@ export async function pythonTestRun(handle) {
 	const inputFiles = await sources(handle);
 	const uvToolSpec = await uvTool(handle.attrs.uvVersion);
 	const uvCacheToolSpec = uvCacheDirTool();
-	const depToolSpecs = await Promise.all(
-		(handle.attrs.deps || []).map(toolSpec),
-	);
+	const depToolSpecs = await group((handle.attrs.deps || []).map(toolSpec));
 	const syncArgs = pythonResolveSyncArgs(handle.attrs.resolve)
 		.map(shellArg)
 		.join(" ");

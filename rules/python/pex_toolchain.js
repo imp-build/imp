@@ -11,6 +11,7 @@ import {
 	cacheGet,
 	cacheHas,
 	toolName,
+	group,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -159,7 +160,7 @@ export const acquirePexToolchain = memo(
 				"no pex toolchain declared via pexToolchain(); nothing to acquire",
 			);
 		}
-		const coreTools = await Promise.all(
+		const coreTools = await group(
 			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
 
