@@ -911,10 +911,7 @@ fn print_goal_summary(summary: &GoalSummary) {
     // the overall rate look far worse than the cache is actually doing.
     // So: `tasks` is just how many js functions ran, and cache stats are
     // reported only for the sandbox layer, where they mean something.
-    println!(
-        "{:<SUMMARY_LABEL_WIDTH$}{} js",
-        "tasks:", summary.fresh_js
-    );
+    println!("{:<SUMMARY_LABEL_WIDTH$}{} js", "tasks:", summary.fresh_js);
 
     let sandbox_total = summary.cached + summary.fresh_sandbox;
     if sandbox_total > 0 {
