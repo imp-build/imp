@@ -22,6 +22,7 @@ import {
 	output_path,
 	labelAddress,
 	platformInfo,
+	group,
 } from "imp:core";
 import { IMP_TOOL } from "//rules/imp/self-tool";
 import {
@@ -147,7 +148,7 @@ export const vs = product(
 			".vscode/launch.json": launchVsc,
 			".vscode/tasks.json": tasksVsc,
 		};
-		await Promise.all(
+		await group(
 			Object.entries(files).map(([path, value]) => writeJsonFile(path, value)),
 		);
 

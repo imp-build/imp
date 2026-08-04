@@ -22,6 +22,7 @@ import {
 	test,
 	writeWorkspace,
 	BUILD,
+	group,
 } from "imp:core";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
 import {
@@ -272,7 +273,7 @@ async function resolveCmakeSetup(handle) {
 				await zigTool(handle.attrs.compiler),
 				await zigBuildCacheTool(handle.attrs.compiler),
 			]
-		: await Promise.all(
+		: await group(
 				["cc", "as", "ld", "ar"].map((name) =>
 					nativeToolSpec(nativeTool(name)),
 				),
@@ -603,7 +604,7 @@ async function replayReachableGraph(handle, setup, graph, targetNames) {
 	let accumulatedDigest = graph.outputDigest;
 	for (const wave of waves) {
 		if (!wave) continue;
-		const digests = await Promise.all(
+		const digests = await group(
 			wave.map((edge) => executeEdge(edge, accumulatedDigest)),
 		);
 		const newDigests = digests.filter((d) => d != null);
@@ -632,7 +633,7 @@ export async function buildCmakeArtifact(handle) {
 	);
 	if (workloadDeps.length > 0) {
 		const c = await import("//rules/c");
-		await Promise.all(workloadDeps.map(c.ccBuild));
+		await group(workloadDeps.map(c.ccBuild));
 	}
 	const setup = await resolveCmakeSetup(handle);
 	const { srcPath, buildDirPath } = setup;

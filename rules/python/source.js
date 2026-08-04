@@ -16,6 +16,7 @@ import {
 	runFromTemplate,
 	runGoal,
 	runTemplate,
+	group,
 } from "imp:core";
 
 import {
@@ -248,9 +249,7 @@ export async function buildPythonSourceRunTemplate(
 	const venv = project ? `${project}/.venv` : "";
 	const uvToolSpec = await resolveUvTool(handle.attrs.uvVersion);
 	const uvCacheToolSpec = uvCacheDirTool();
-	const depToolSpecs = await Promise.all(
-		(handle.attrs.deps || []).map(toolSpec),
-	);
+	const depToolSpecs = await group((handle.attrs.deps || []).map(toolSpec));
 	const envExports = sandboxRootEnvExports(uvCacheDirEnv());
 	const inputs = [file_set.literal(handle.attrs.sourceFiles)];
 	if (project) {

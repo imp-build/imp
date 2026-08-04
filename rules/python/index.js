@@ -13,6 +13,7 @@ import {
 	registerBuildRule,
 	run,
 	writeWorkspace,
+	group,
 } from "imp:core";
 import { toolSpec } from "//rules/imp/native-tool";
 import { UV_TOOL } from "//rules/python/uv_toolchain";
@@ -227,9 +228,7 @@ export const python_app_build = memo(
 		const pexToolSpec = await pexTool(handle.attrs.pexVersion);
 		const uvCacheToolSpec = uvCacheDirTool();
 		const pexRootToolSpec = pexRootTool();
-		const depToolSpecs = await Promise.all(
-			(handle.attrs.deps || []).map(toolSpec),
-		);
+		const depToolSpecs = await group((handle.attrs.deps || []).map(toolSpec));
 		const syncArgs = pythonResolveSyncArgs(handle.attrs.resolve)
 			.map(shellArg)
 			.join(" ");

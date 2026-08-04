@@ -11,6 +11,7 @@ import {
 	cacheGet,
 	cacheHas,
 	toolName,
+	group,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -211,7 +212,7 @@ export const acquirePnpmToolchain = memo(
 				"no pnpm toolchain declared via pnpmToolchain(); nothing to acquire",
 			);
 		}
-		const coreTools = await Promise.all(
+		const coreTools = await group(
 			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
 

@@ -8,6 +8,7 @@ import {
 	cacheGet,
 	cacheHas,
 	toolName,
+	group,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -191,7 +192,7 @@ export const acquireNodeToolchain = memo(
 				"no node toolchain declared via nodeToolchain(); nothing to acquire",
 			);
 		}
-		const coreTools = await Promise.all(
+		const coreTools = await group(
 			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
 

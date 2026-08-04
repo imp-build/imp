@@ -13,6 +13,7 @@ import {
 	output,
 	output_path,
 	run,
+	group,
 } from "imp:core";
 
 import {
@@ -341,7 +342,7 @@ export async function cargoPackageTests(handle) {
 		}
 	}
 
-	const testTools = await Promise.all(
+	const testTools = await group(
 		(handle.attrs.testTools || []).map(nativeToolSpec),
 	);
 	// Resource deps are inputs to the test *run*, not just the compile. A
@@ -350,11 +351,11 @@ export async function cargoPackageTests(handle) {
 	// at runtime — imp-engine's own tests resolve rules/ that way. Compiling
 	// with them and then running without them leaves the binary in a sandbox
 	// that's missing files it was told it had.
-	const [resourceInputs, testResourceInputs] = await Promise.all([
+	const [resourceInputs, testResourceInputs] = await group([
 		resources(handle),
 		testResources(handle),
 	]);
-	return Promise.all(
+	return group(
 		built.map((binary) =>
 			run({
 				argv: [
