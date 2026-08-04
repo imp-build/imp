@@ -505,7 +505,7 @@ async fn create_live_runtime(
     rules_source: RulesSource,
     service: Arc<dyn ExecutionService>,
 ) -> Result<LiveWorkspace> {
-    imp_logging::ensure_installed();
+    imp_logging::ensure_installed(log::LevelFilter::Info);
 
     let root = root
         .canonicalize()
@@ -4084,7 +4084,8 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                             Some("debug") => imp_scheduler::TaskLogLevel::Debug,
                             Some("warn") => imp_scheduler::TaskLogLevel::Warn,
                             Some("error") => imp_scheduler::TaskLogLevel::Error,
-                            _ => imp_scheduler::TaskLogLevel::Info,
+                            Some("info") => imp_scheduler::TaskLogLevel::Info,
+                            _ => imp_scheduler::TaskLogLevel::Debug,
                         },
                     },
                     "running" => imp_scheduler::TaskEvent::Running { id, detail: None },

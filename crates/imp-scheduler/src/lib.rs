@@ -272,7 +272,7 @@ impl Scheduler {
             parent,
             display: display.clone(),
             kind,
-            log_level: TaskLogLevel::Info,
+            log_level: TaskLogLevel::Debug,
         });
 
         if self.cancellation.load(Ordering::SeqCst) {

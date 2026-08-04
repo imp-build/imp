@@ -33,8 +33,33 @@ struct Cli {
     /// Route sandboxed execution through the local daemon.
     #[arg(long, global = true)]
     daemon: bool,
+    /// Log verbosity. Defaults to the workspace's `imp.logLevel` config, or
+    /// "info" if unset.
+    #[arg(long, global = true, value_enum)]
+    level: Option<LogLevelArg>,
     #[command(subcommand)]
     command: Cmd,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum LogLevelArg {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl From<LogLevelArg> for log::LevelFilter {
+    fn from(level: LogLevelArg) -> Self {
+        match level {
+            LogLevelArg::Trace => log::LevelFilter::Trace,
+            LogLevelArg::Debug => log::LevelFilter::Debug,
+            LogLevelArg::Info => log::LevelFilter::Info,
+            LogLevelArg::Warn => log::LevelFilter::Warn,
+            LogLevelArg::Error => log::LevelFilter::Error,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -455,11 +480,18 @@ async fn run() -> Result<()> {
     }
     let cancellation = install_termination_signal_flag()?;
 
-    let ui = ui::Session::start();
-    let result = run_inner(cli, ui.tree(), cancellation).await;
+    let level = cli
+        .level
+        .map(log::LevelFilter::from)
+        .unwrap_or(log::LevelFilter::Info);
+    let ui = ui::Session::start(level);
+    let outcome = run_inner(cli, ui.tree(), cancellation).await;
     ui.shutdown();
 
-    result
+    if let Some(goal_summary) = &outcome.summary {
+        print_goal_summary(goal_summary);
+    }
+    outcome.result
 }
 
 fn effective_gc_max_age_days(workspace: &spike::Workspace, cli_value: Option<u64>) -> u64 {
@@ -638,50 +670,84 @@ fn install_termination_signal_flag() -> Result<Arc<AtomicBool>> {
     Ok(cancellation)
 }
 
-async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> Result<()> {
+/// What `run_inner` produced: the command's own result, plus (only for goal
+/// execution) the final summary — kept separate so `run()` can print it as
+/// plain output only after the live progress UI has been shut down.
+struct RunOutcome {
+    result: Result<()>,
+    summary: Option<GoalSummary>,
+}
+
+impl From<Result<()>> for RunOutcome {
+    fn from(result: Result<()>) -> Self {
+        Self {
+            result,
+            summary: None,
+        }
+    }
+}
+
+async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> RunOutcome {
     match &cli.command {
         Cmd::Init => unreachable!("handled before UI setup"),
         Cmd::Targets {
             selectors,
             changed_since,
-        } => {
-            return cmd_targets(selectors, changed_since.as_deref(), tree).await;
-        }
-        Cmd::Dependencies { selectors, goal } => {
-            return cmd_dependencies(selectors, goal.as_deref(), tree).await;
-        }
-        Cmd::Rules { command } => {
-            return cmd_rules(command.as_ref(), tree).await;
-        }
-        Cmd::Config { command } => {
-            return cmd_config(command).await;
-        }
+        } => cmd_targets(selectors, changed_since.as_deref(), tree)
+            .await
+            .into(),
+        Cmd::Dependencies { selectors, goal } => cmd_dependencies(selectors, goal.as_deref(), tree)
+            .await
+            .into(),
+        Cmd::Rules { command } => cmd_rules(command.as_ref(), tree).await.into(),
+        Cmd::Config { command } => cmd_config(command).await.into(),
         Cmd::Goal { name, args } => {
-            return cmd_execute_goal(name, &args.raw, Arc::clone(&cancellation), tree).await;
+            let (result, summary) = cmd_execute_goal(
+                name,
+                &args.raw,
+                Arc::clone(&cancellation),
+                tree,
+                cli.level.map(log::LevelFilter::from),
+            )
+            .await;
+            RunOutcome { result, summary }
         }
         Cmd::External(argv) => {
             let (name, raw) = argv.split_first().expect("clap guarantees non-empty argv");
-            return cmd_execute_goal(name, raw, Arc::clone(&cancellation), tree).await;
+            let (result, summary) = cmd_execute_goal(
+                name,
+                raw,
+                Arc::clone(&cancellation),
+                tree,
+                cli.level.map(log::LevelFilter::from),
+            )
+            .await;
+            RunOutcome { result, summary }
         }
-        Cmd::RulesTest { modules } => {
-            return cmd_rules_test(modules, Arc::clone(&cancellation), tree).await;
-        }
+        Cmd::RulesTest { modules } => cmd_rules_test(modules, Arc::clone(&cancellation), tree)
+            .await
+            .into(),
         Cmd::RulesTestCase {
             module,
             ordinal,
             fixture,
-        } => {
-            return cmd_rules_test_case(module, *ordinal, fixture, Arc::clone(&cancellation)).await;
-        }
+        } => cmd_rules_test_case(module, *ordinal, fixture, Arc::clone(&cancellation))
+            .await
+            .into(),
         Cmd::Daemon { .. } | Cmd::Cache { .. } => {
             unreachable!("handled before UI setup")
         }
         Cmd::CodegenRegister { output } => {
             let odinfmt = match std::env::var_os("ODINFMT_BIN") {
                 Some(path) => PathBuf::from(path),
-                None => resolve_workspace_tool_bin("odinfmt").await?,
+                None => match resolve_workspace_tool_bin("odinfmt").await {
+                    Ok(path) => path,
+                    Err(error) => return Err(error).into(),
+                },
             };
-            return commands::codegen_register::run(output, &odinfmt).await;
+            commands::codegen_register::run(output, &odinfmt)
+                .await
+                .into()
         }
     }
 }
@@ -719,6 +785,23 @@ fn effective_jobs(workspace: &spike::Workspace, cli_value: Option<usize>) -> Res
         .and_then(serde_json::Value::as_u64)
         .and_then(|count| usize::try_from(count).ok())
         .unwrap_or(1))
+}
+
+fn effective_log_level(
+    workspace: &spike::Workspace,
+    cli_value: Option<log::LevelFilter>,
+) -> log::LevelFilter {
+    if let Some(value) = cli_value {
+        return value;
+    }
+
+    workspace
+        .workspace_config
+        .get("imp")
+        .and_then(|config| config.get("logLevel"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|level| level.parse().ok())
+        .unwrap_or(log::LevelFilter::Info)
 }
 
 async fn cmd_config(command: &ConfigCmd) -> Result<()> {
@@ -764,8 +847,15 @@ async fn cmd_execute_goal(
     raw: &[String],
     cancellation: Arc<AtomicBool>,
     tree: &Tree,
-) -> Result<()> {
-    cmd_execute_live(LiveInvocation::Goal { goal, raw }, cancellation, tree).await
+    cli_level: Option<log::LevelFilter>,
+) -> (Result<()>, Option<GoalSummary>) {
+    cmd_execute_live(
+        LiveInvocation::Goal { goal, raw },
+        cancellation,
+        tree,
+        cli_level,
+    )
+    .await
 }
 
 async fn cmd_rules_test(
@@ -789,25 +879,98 @@ async fn cmd_rules_test_case(
     spike::run_rules_test_case(&workspace_root, module, ordinal, fixture, cancellation).await
 }
 
-/// Per-task completion counts accumulated by the render loop, printed as a
-/// one-line summary once a goal finishes.
+/// Per-task completion counts accumulated by the render loop, reported as a
+/// final summary once a goal finishes.
 struct GoalSummary {
     cached: usize,
     cached_local: usize,
     cached_remote: usize,
-    fresh: usize,
+    fresh_js: usize,
+    fresh_sandbox: usize,
     remote_pushed: usize,
     failed: usize,
     canceled: usize,
-    total: usize,
     wall: std::time::Duration,
+}
+
+/// Widest of the fixed labels (with trailing colon) printed by
+/// [`print_goal_summary`], plus one gap space, so every line's values line
+/// up in a column regardless of label length.
+const SUMMARY_LABEL_WIDTH: usize = "sandboxes:".len() + 1;
+
+fn print_goal_summary(summary: &GoalSummary) {
+    println!("imp {}", env!("CARGO_PKG_VERSION"));
+
+    // JS memo nodes never carry a cache verdict at the scheduler-event level
+    // (an in-process memo hit never reaches `Done` at all — see
+    // `imp-scheduler`'s `TaskEvent::Done::cached` doc comment), so every one
+    // that ran shows up as "fresh" regardless of whether its own work was
+    // actually skipped further down. Reporting a cache rate over js+sandbox
+    // together would mix a number that's always ~0% for js in with the one
+    // that's meaningful (sandbox jobs, which do report cache hits) and make
+    // the overall rate look far worse than the cache is actually doing.
+    // So: `tasks` is just how many js functions ran, and cache stats are
+    // reported only for the sandbox layer, where they mean something.
+    println!(
+        "{:<SUMMARY_LABEL_WIDTH$}{} js",
+        "tasks:", summary.fresh_js
+    );
+
+    let sandbox_total = summary.cached + summary.fresh_sandbox;
+    if sandbox_total > 0 {
+        println!(
+            "{:<SUMMARY_LABEL_WIDTH$}{sandbox_total} ({} fresh, {} cached)",
+            "sandboxes:", summary.fresh_sandbox, summary.cached
+        );
+
+        let pct = (summary.cached as f64 / sandbox_total as f64 * 100.0).round();
+        let mut cache = format!("hit {pct}% ({}/{sandbox_total})", summary.cached);
+        let has_remote_activity = summary.cached_remote > 0 || summary.remote_pushed > 0;
+        if has_remote_activity {
+            cache.push_str(&format!(
+                "; {} local, {} remote, {} pushed",
+                summary.cached_local, summary.cached_remote, summary.remote_pushed
+            ));
+        }
+        println!("{:<SUMMARY_LABEL_WIDTH$}{cache}", "cache:");
+    }
+
+    if summary.failed > 0 || summary.canceled > 0 {
+        let mut parts = Vec::new();
+        if summary.failed > 0 {
+            parts.push(format!("{} failed", summary.failed));
+        }
+        if summary.canceled > 0 {
+            parts.push(format!("{} canceled", summary.canceled));
+        }
+        println!("{:<SUMMARY_LABEL_WIDTH$}{}", "failed:", parts.join(", "));
+    }
+
+    println!(
+        "{:<SUMMARY_LABEL_WIDTH$}{:.2}s",
+        "time:",
+        summary.wall.as_secs_f64()
+    );
 }
 
 async fn cmd_execute_live(
     invocation: LiveInvocation<'_>,
     cancellation: Arc<AtomicBool>,
     tree: &Tree,
-) -> Result<()> {
+    cli_level: Option<log::LevelFilter>,
+) -> (Result<()>, Option<GoalSummary>) {
+    match cmd_execute_live_impl(invocation, cancellation, tree, cli_level).await {
+        Ok(outcome) => outcome,
+        Err(error) => (Err(error), None),
+    }
+}
+
+async fn cmd_execute_live_impl(
+    invocation: LiveInvocation<'_>,
+    cancellation: Arc<AtomicBool>,
+    tree: &Tree,
+    cli_level: Option<log::LevelFilter>,
+) -> Result<(Result<()>, Option<GoalSummary>)> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let selector_context =
@@ -815,9 +978,10 @@ async fn cmd_execute_live(
     let workspace = {
         let start = std::time::Instant::now();
         let ws = runtime::load_workspace(&workspace_root).await?;
-        log::info!("loaded workspace in {:.2}s", start.elapsed().as_secs_f64());
+        log::debug!("loaded workspace in {:.2}s", start.elapsed().as_secs_f64());
         ws
     };
+    imp_logging::set_level(effective_log_level(&workspace.workspace, cli_level));
 
     // Phase 2 of goal-subcommand parsing: the workspace has now loaded, so any
     // goal-declared flags (e.g. fmt's --check) are known. Re-parse the raw
@@ -1070,11 +1234,11 @@ async fn cmd_execute_live(
         let mut cached_count: usize = 0;
         let mut cached_local_count: usize = 0;
         let mut cached_remote_count: usize = 0;
-        let mut fresh_count: usize = 0;
+        let mut fresh_js_count: usize = 0;
+        let mut fresh_sandbox_count: usize = 0;
         let mut remote_pushed_count: usize = 0;
         let mut failed_count: usize = 0;
         let mut canceled_count: usize = 0;
-        let mut done_count: usize = 0;
 
         loop {
             let event = tokio::select! {
@@ -1139,7 +1303,6 @@ async fn cmd_execute_live(
                         .unwrap_or_else(|| format!("task {id}"));
                     let elapsed = started_at.remove(&id);
                     let log_level = task_log_levels.remove(&id).unwrap_or(TaskLogLevel::Info);
-                    done_count += 1;
                     match &outcome {
                         TaskOutcome::Ok => {
                             let tag = match cached {
@@ -1153,13 +1316,22 @@ async fn cmd_execute_live(
                                     "cached "
                                 }
                                 Some(false) => {
-                                    fresh_count += 1;
+                                    fresh_sandbox_count += 1;
                                     if remote_cache_write {
                                         remote_pushed_count += 1;
                                     }
                                     "fresh "
                                 }
-                                None => "",
+                                None => {
+                                    // JS memo nodes are emitted via
+                                    // `Scheduler::emit`, not `Scheduler::run`, so
+                                    // they never carry a `cached` verdict — an
+                                    // in-process memo cache hit never reaches
+                                    // `Done` at all, so every memo `Done` here is
+                                    // inherently a fresh evaluation.
+                                    fresh_js_count += 1;
+                                    ""
+                                }
                             };
                             let timing = elapsed
                                 .map(|e| format!(" ({:.2?})", e.elapsed()))
@@ -1267,11 +1439,11 @@ async fn cmd_execute_live(
             cached: cached_count,
             cached_local: cached_local_count,
             cached_remote: cached_remote_count,
-            fresh: fresh_count,
+            fresh_js: fresh_js_count,
+            fresh_sandbox: fresh_sandbox_count,
             remote_pushed: remote_pushed_count,
             failed: failed_count,
             canceled: canceled_count,
-            total: done_count,
             wall: wall_start.elapsed(),
         }
     });
@@ -1370,36 +1542,9 @@ async fn cmd_execute_live(
         .map(|_| ())
         .map_err(|error| format!("{error:#}"));
     let _ = shutdown_tx.send(shutdown_result);
-    if let Ok(summary) = render.await {
-        // Only break out local vs. remote cache activity when there was any —
-        // keeps the line unchanged for the common case of no remote cache
-        // configured.
-        let has_remote_activity = summary.cached_remote > 0 || summary.remote_pushed > 0;
-        let cache_breakdown = if has_remote_activity {
-            format!(
-                " ({} local, {} remote)",
-                summary.cached_local, summary.cached_remote
-            )
-        } else {
-            String::new()
-        };
-        let remote_pushed_suffix = if has_remote_activity {
-            format!(", {} pushed to remote cache", summary.remote_pushed)
-        } else {
-            String::new()
-        };
-        log::info!(
-            "execute {what}: {} cached{cache_breakdown}, {} fresh, {} failed, {} canceled ({} tasks) in {:.2}s{remote_pushed_suffix}",
-            summary.cached,
-            summary.fresh,
-            summary.failed,
-            summary.canceled,
-            summary.total,
-            summary.wall.as_secs_f64()
-        );
-    }
+    let goal_summary = render.await.ok();
 
-    result
+    Ok((result, goal_summary))
 }
 
 macro_rules! workspace_cmd {
@@ -1661,6 +1806,33 @@ mod tests {
     fn effective_jobs_cli_overrides_workspace_config() {
         let workspace = workspace_with_imp_config(json!({ "jobs": 4 }));
         assert_eq!(effective_jobs(&workspace, Some(1)).unwrap(), 1);
+    }
+
+    #[test]
+    fn effective_log_level_defaults_to_info() {
+        let workspace = spike::Workspace::default();
+        assert_eq!(
+            effective_log_level(&workspace, None),
+            log::LevelFilter::Info
+        );
+    }
+
+    #[test]
+    fn effective_log_level_uses_workspace_config() {
+        let workspace = workspace_with_imp_config(json!({ "logLevel": "debug" }));
+        assert_eq!(
+            effective_log_level(&workspace, None),
+            log::LevelFilter::Debug
+        );
+    }
+
+    #[test]
+    fn effective_log_level_cli_overrides_workspace_config() {
+        let workspace = workspace_with_imp_config(json!({ "logLevel": "debug" }));
+        assert_eq!(
+            effective_log_level(&workspace, Some(log::LevelFilter::Warn)),
+            log::LevelFilter::Warn
+        );
     }
 
     #[test]
