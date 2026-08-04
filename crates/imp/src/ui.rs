@@ -9,9 +9,9 @@ pub struct Tree {
 }
 
 impl Tree {
-    fn new() -> Self {
+    fn new(level: log::LevelFilter) -> Self {
         let multi = MultiProgress::new();
-        imp_logging::init_live(multi.clone());
+        imp_logging::init_live(multi.clone(), level);
         Self { multi }
     }
 
@@ -27,8 +27,10 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn start() -> Self {
-        Self { tree: Tree::new() }
+    pub fn start(level: log::LevelFilter) -> Self {
+        Self {
+            tree: Tree::new(level),
+        }
     }
 
     pub fn tree(&self) -> &Tree {

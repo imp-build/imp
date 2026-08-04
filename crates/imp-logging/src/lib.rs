@@ -6,21 +6,34 @@ static LOGGER: HostLogger = HostLogger {
     destination: Mutex::new(LogDestination::Stderr),
 };
 
-pub fn ensure_installed() {
-    let _ = log::set_logger(&LOGGER);
-    log::set_max_level(log::LevelFilter::Trace);
+/// Make sure a logger is installed, at some level. A no-op if one is already
+/// installed (e.g. by [`init_live`] or [`capture`]) — callers that just need
+/// *a* logger present (rather than dictating the level) should use this, so
+/// they don't clobber a level an earlier, more specific caller already chose.
+pub fn ensure_installed(level: log::LevelFilter) {
+    if log::set_logger(&LOGGER).is_ok() {
+        log::set_max_level(level);
+    }
 }
 
-pub fn init_live(multi: indicatif::MultiProgress) {
+/// Change the active log level filter. Logger must already be installed via
+/// [`ensure_installed`] or [`init_live`].
+pub fn set_level(level: log::LevelFilter) {
+    log::set_max_level(level);
+}
+
+pub fn init_live(multi: indicatif::MultiProgress, level: log::LevelFilter) {
     LOGGER.set_destination(LogDestination::Live(multi));
-    ensure_installed();
+    let _ = log::set_logger(&LOGGER);
+    log::set_max_level(level);
 }
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn capture() -> Arc<Mutex<Vec<String>>> {
     let lines = Arc::new(Mutex::new(Vec::new()));
     LOGGER.set_destination(LogDestination::Buffer(Arc::clone(&lines)));
-    ensure_installed();
+    let _ = log::set_logger(&LOGGER);
+    log::set_max_level(log::LevelFilter::Trace);
     lines
 }
 
