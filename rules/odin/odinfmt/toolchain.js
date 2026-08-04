@@ -8,6 +8,7 @@ import {
 	cacheGet,
 	cacheHas,
 	toolName,
+	group,
 } from "imp:core";
 
 import {
@@ -171,7 +172,7 @@ export const acquireOdinfmt = memo(
 			return cacheGet(ODINFMT_CACHE, key);
 		}
 
-		const coreTools = await Promise.all(
+		const coreTools = await group(
 			coreToolHandles.map((handle) => nativeToolSpec(handle)),
 		);
 

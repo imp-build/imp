@@ -15,6 +15,7 @@ import {
 	run,
 	test,
 	writeWorkspace,
+	group,
 } from "imp:core";
 import { defaultGccToolchainVersion, gccTool } from "//rules/c/gcc";
 import { jsSources } from "//rules/js";
@@ -95,9 +96,7 @@ async function buildHasher(ctx) {
 	if (sources.length === 0) {
 		throw new Error(`no C/C++ sources discovered under ${root}`);
 	}
-	const objects = await Promise.all(
-		sources.map((source) => compile(source, root)),
-	);
+	const objects = await group(sources.map((source) => compile(source, root)));
 	return link(objects);
 }
 

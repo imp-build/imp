@@ -8,6 +8,7 @@ import {
 	cacheGet,
 	cacheHas,
 	toolName,
+	group,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -191,7 +192,7 @@ export const acquireOdinToolchain = memo(
 			return cacheGet(ODIN_TOOLCHAIN_CACHE, key);
 		}
 
-		const coreTools = await Promise.all(
+		const coreTools = await group(
 			ensureCoreTools().map((handle) => nativeToolSpec(handle)),
 		);
 

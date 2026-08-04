@@ -5,6 +5,7 @@ import {
 	run,
 	test as attachTest,
 	workspaceFiles,
+	group,
 } from "imp:core";
 import { nativeToolSpec } from "//rules/imp/native-tool";
 
@@ -507,7 +508,7 @@ const rulesTestSources = memo(
 
 async function runRulesTest(testLabel) {
 	const { root, testModules, toolSpecs } = testLabel.data;
-	const tools = await Promise.all(toolSpecs.map(nativeToolSpec));
+	const tools = await group(toolSpecs.map(nativeToolSpec));
 
 	return run({
 		argv: [globalThis.__imp_self_bin, "rules-test", ...testModules],

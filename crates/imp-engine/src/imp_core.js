@@ -991,13 +991,22 @@ export function tsQuery(grammarHandle, treeHandle, querySource) {
  *   (workspace, name), handed to the worker as `IMP_WORKER_PORT`, for
  *   sidecars that need a private, collision-free port to listen on.
  */
-export async function workerStart(name, opts) {
-	const json = await __host_worker_start(name, {
-		argv: opts.argv,
-		env: opts.env ?? [],
-		healthCheckArgv: opts.healthCheckArgv ?? [],
-	});
-	return JSON.parse(json);
+export function workerStart(name, opts) {
+	// Captures the caller's context synchronously, before the await below,
+	// and threads it back through _contextual_thenable — same reasoning as
+	// run()/memo(): __host_worker_start() is a raw host async call with no
+	// imp_core-tracked promise of its own, so nothing else restores the
+	// caller's context once this resumes.
+	const contextEntry = _effective_context_entry(true);
+	const promise = (async () => {
+		const json = await __host_worker_start(name, {
+			argv: opts.argv,
+			env: opts.env ?? [],
+			healthCheckArgv: opts.healthCheckArgv ?? [],
+		});
+		return JSON.parse(json);
+	})();
+	return _contextual_thenable(promise, contextEntry.id);
 }
 
 /**
@@ -1923,9 +1932,37 @@ globalThis.__imp_set_js_workers = function (count) {
 	_reset_js_lanes();
 };
 
+// waiter.run(slot) fires reentrantly here, synchronously, nested inside
+// _release_js_lane — itself called from inside some other, unrelated task's
+// own call stack (its lane's release, right after that task's own
+// synchronous prefix returned). That nesting is deliberate: memo()'s cycle
+// detection (_memo_eval's stackSet check) depends on a mutually-recursive
+// pair of memoized calls actually running back-to-back on one real call
+// stack, the same way plain recursive functions would, so a cycle is caught
+// synchronously instead of deadlocking. See memo_test.js's "detects
+// indirect cycle between two memos".
+//
+// But the context save/restore machinery (_call_with_context, above) only
+// half-manages its own nesting: on success it pushes the granted task's
+// context and leaves restoring it to the engine's PromiseHook "after" event
+// firing on *that task's own* promise reaction — which is correct when the
+// push happens inside a real reaction, but this call isn't one; it's a
+// plain nested function call on the releasing task's stack. Nothing here
+// owns popping it back, so it leaks forward into whatever unrelated
+// promise reaction happens to run next. Snapshotting and restoring the
+// context here, symmetrically around the synchronous reentrant call,
+// closes that gap without touching the synchronous nesting cycle detection
+// relies on.
 function _grant_js_lane(slot, waiter) {
 	_emit_js_lane("start", slot, waiter.id, waiter.label);
-	waiter.run(slot);
+	const prevContextId = _current_memo_context_id;
+	const prevOverride = _promise_context_override;
+	try {
+		waiter.run(slot);
+	} finally {
+		_current_memo_context_id = prevContextId;
+		_promise_context_override = prevOverride;
+	}
 }
 
 function _take_js_lane(id, label) {
@@ -3881,7 +3918,7 @@ export function run(opts) {
 		display: opts.display,
 		env: opts.env,
 		configDigest: __host_configuration_digest(
-			JSON.stringify(Array.from(contextEntry.ctx.readNamespaces)),
+			JSON.stringify(Array.from(contextEntry.ctx.readNamespaces).sort()),
 			JSON.stringify(contextEntry.ctx.modeOverrides || {}),
 		),
 		inputs,
