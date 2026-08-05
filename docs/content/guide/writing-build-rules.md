@@ -48,6 +48,66 @@ workspace address. The attached build handler does not run during module
 evaluation; it runs only when that label is selected for `imp build`.
 `extensible()` lets integrations attach additional handlers replayably.
 
+## Handle graphs
+
+The graph API offers a more direct model for new rules: module evaluation
+always constructs an immutable graph, and exported objects attach workflow
+symbols to output handles. The callback of a `task()` is lazy; it runs only
+when a selected root needs that handle.
+
+```js
+import { BUILD, RUN, file, files, output, task, tool } from "imp:core";
+
+const sources = files({ include: ["src/**/*.rs", "Cargo.toml"] });
+const compiler = tool(file(".tools/rust/bin/rustc"));
+
+const binary = task({
+    inputs: { sources, compiler },
+    outputs: { binary: output.artifact() },
+    async run(exec, { sources, compiler }) {
+        const result = await exec.action({
+            argv: [exec.tool(compiler), "src/main.rs", "-o", "bin/app"],
+            inputs: [sources],
+            outputs: { binary: output.file("bin/app") },
+        });
+        return { binary: result.outputs.binary };
+    },
+});
+
+export const app = {
+    [BUILD]: binary.outputs.binary,
+    [RUN]: task({
+        inputs: { binary: binary.outputs.binary },
+        async run(exec, { binary }) {
+            await exec.action({ argv: [exec.path(binary)] });
+        },
+    }),
+};
+```
+
+Task inputs are the dependency graph. Literal JSON, source handles, artifact
+handles, tool handles, and invocation-scoped `semantic` handles all use the
+same named `inputs` object. A task's identity includes only the handles it
+declares, so a task that does not depend on a mode or flag remains shareable
+across those values.
+
+An action's named files and directories are normalized into independent CAS
+artifact roots. Downstream tasks consume those handles directly; action
+outputs are not materialized into the workspace. Use `cache: false` for an
+intentionally impure task. Calls to the same handle still join one in-flight
+execution during an invocation.
+
+A module's default export defines the directory root (`//pkg`), while named
+exports define `//pkg:name`. A workflow may expose named facets; select one as
+`//pkg:name@facet`. Legacy labels and graph roots can coexist, but exporting
+both for the same address and workflow is an error.
+
+Expansion is a graph node too. `expand({ inputs, create })` discovers a keyed
+set of child objects after its inputs resolve; `.get(key, BUILD)` depends on
+one child's build handle and `.all(BUILD)` depends on all of them. Expansion
+may add tasks but cannot execute actions, keeping discovery separate from
+sandbox work.
+
 Factories whose selectable children are only known after async metadata
 discovery can register them beneath a statically exported owner:
 

@@ -1,6 +1,7 @@
 /target/
 /build/
-/examples/
+/examples/*
+!/examples/proposed-rules/
 /.imp/
 /dist/
 /generated/

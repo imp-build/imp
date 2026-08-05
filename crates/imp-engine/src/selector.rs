@@ -142,8 +142,31 @@ impl ParsedSelector {
         }
     }
 
+    pub(crate) fn matches_graph_address(&self, address: &str, is_default: bool) -> bool {
+        if !is_default {
+            return self.matches_address(address);
+        }
+        let Self::Package { package, recursive } = self else {
+            return false;
+        };
+        let address_package = address.strip_prefix("//").unwrap_or(address);
+        address_package == package.as_str()
+            || (*recursive
+                && (package.is_empty() || address_package.starts_with(&format!("{package}/"))))
+    }
+
     pub(crate) fn selects_multiple(&self) -> bool {
         matches!(self, Self::Package { .. })
+    }
+
+    pub(crate) fn is_recursive(&self) -> bool {
+        matches!(
+            self,
+            Self::Package {
+                recursive: true,
+                ..
+            }
+        )
     }
 }
 

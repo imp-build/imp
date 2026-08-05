@@ -12,6 +12,7 @@ use std::sync::{
     Arc, Mutex,
 };
 
+use crate::graph::{GraphCatalog, GraphRoot};
 use crate::loader::{
     resolve_workspace_module, validate_workspace_module_path, ImpLoader, ImpResolver, ModuleForm,
     ModuleKind, RulesSource,
@@ -21,6 +22,8 @@ use crate::selector::{
     filter_changed_addresses_in, select_label_roots_in, select_roots_for_addresses,
     select_roots_in, select_targets_in, SelectorContext,
 };
+
+type ModuleExports = (Vec<(String, u32)>, Vec<GraphRoot>);
 #[cfg(test)]
 use crate::selector::{select_roots, select_targets};
 use anyhow::{bail, Context, Result};
@@ -32,8 +35,9 @@ use imp_exec_bridge::{parse_io_specs, parse_tool_specs};
 use imp_execution::service::LocalExecutionService;
 use imp_store::cache::{
     artifact_relative_path, digest_bytes, digest_json, named_cache_scope_id, store_file_blob,
-    workspace_cache_id,
+    workspace_cache_id, CachedArtifact,
 };
+use imp_store::digest::{nest_directory, nest_file, DirectoryDigest};
 use regex::Regex;
 use rquickjs::{
     function::Async, promise::MaybePromise, promise::PromiseHookType, Array,
@@ -66,6 +70,35 @@ fn make_execution_service() -> Result<Arc<dyn ExecutionService>> {
         return Ok(Arc::new(RemoteExecutionService::connect()?));
     }
     Ok(Arc::new(LocalExecutionService::new()))
+}
+
+fn normalize_graph_artifact(name: &str, artifact: &CachedArtifact) -> Result<DirectoryDigest> {
+    match artifact.kind.as_str() {
+        "file" | "manifest" => nest_file(
+            name,
+            artifact.digest.clone(),
+            artifact.bytes.unwrap_or_default(),
+            artifact.mode,
+        ),
+        "directory" => {
+            let digest = artifact
+                .tree_digest
+                .as_ref()
+                .with_context(|| {
+                    format!(
+                        "directory output '{}' has no tree digest",
+                        artifact.path.as_deref().unwrap_or("<unknown>")
+                    )
+                })?
+                .clone();
+            nest_directory(name, &DirectoryDigest::from_digest(digest))
+        }
+        other => bail!(
+            "graph action output '{}' has unsupported kind '{}'",
+            artifact.path.as_deref().unwrap_or("<unknown>"),
+            other
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +226,9 @@ type RuleCapabilities = BTreeMap<String, BTreeMap<String, BTreeMap<String, Capab
 #[derive(Debug, Clone, Default)]
 pub struct Workspace {
     pub targets: BTreeMap<String, Target>,
+    /// Exported JavaScript graph roots, selected natively by address,
+    /// workflow, and optional facet.
+    pub graph: GraphCatalog,
     /// `(kind, product)` → tool → product-fn exec name; see
     /// [`HostState::products`].
     pub products: BTreeMap<(String, String), BTreeMap<String, String>>,
@@ -594,6 +630,7 @@ async fn create_live_runtime(
         let hs = state.lock().unwrap();
         Workspace {
             targets: BTreeMap::new(),
+            graph: GraphCatalog::default(),
             products: hs.products.clone(),
             product_fn_ids: hs.product_fn_ids.clone(),
             build_rules: hs.build_rules.clone(),
@@ -656,12 +693,14 @@ async fn load_workspace_with_rules_and_service(
     // becomes a top-level target address `//:odin`, discoverable like any
     // other workspace target. -----
     let mut named_exports: Vec<(String, u32)> = Vec::new(); // (address, pending_id)
+    let mut graph_roots: Vec<GraphRoot> = Vec::new();
     let workspace_js = root.join(WORKSPACE_FILE);
     if workspace_js.is_file() {
-        let exports = eval_workspace_file(&ctx, &state, &workspace_js).await?;
+        let (exports, roots) = eval_workspace_file(&ctx, &state, &workspace_js).await?;
         for (name, id) in exports {
             named_exports.push((format!("//:{name}"), id));
         }
+        graph_roots.extend(roots);
     }
 
     // ----- CI overlay: imp.workspace.ci.js, evaluated after the main
@@ -671,10 +710,11 @@ async fn load_workspace_with_rules_and_service(
     if is_github_actions() {
         let ci_workspace_js = root.join(CI_WORKSPACE_FILE);
         if ci_workspace_js.is_file() {
-            let exports = eval_workspace_file(&ctx, &state, &ci_workspace_js).await?;
+            let (exports, roots) = eval_workspace_file(&ctx, &state, &ci_workspace_js).await?;
             for (name, id) in exports {
                 named_exports.push((format!("//:{name}"), id));
             }
+            graph_roots.extend(roots);
         }
     }
 
@@ -717,8 +757,9 @@ async fn load_workspace_with_rules_and_service(
             graph.record_module_file(relative, &module_name, Some(&scope));
         }
 
-        let exports = ctx
-            .async_with(async |ctx| -> Result<Vec<(String, u32)>> {
+        let scope_for_graph = scope.clone();
+        let (exports, module_graph_roots) = ctx
+            .async_with(async |ctx| -> Result<ModuleExports> {
                 // dynamic import → Promise<namespace>
                 let promise = Module::import(&ctx, module_name.as_str())
                     .catch(&ctx)
@@ -728,7 +769,15 @@ async fn load_workspace_with_rules_and_service(
                     .await
                     .catch(&ctx)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-                collect_imp_exports(&ns)
+                let exports = collect_imp_exports(&ns)?;
+                let collect_graph: Function = ctx.globals().get("__imp_collect_graph_exports")?;
+                let roots_json: String = collect_graph
+                    .call((ns, scope_for_graph.as_str()))
+                    .catch(&ctx)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let roots: Vec<GraphRoot> =
+                    serde_json::from_str(&roots_json).context("decode exported graph roots")?;
+                Ok((exports, roots))
             })
             .await
             .with_context(|| format!("process {}", build_file.display()))?;
@@ -736,6 +785,7 @@ async fn load_workspace_with_rules_and_service(
         for (name, id) in exports {
             named_exports.push((format!("{scope}:{name}"), id));
         }
+        graph_roots.extend(module_graph_roots);
     }
 
     // ----- Resolve dep IDs to addresses -----
@@ -835,6 +885,7 @@ async fn load_workspace_with_rules_and_service(
         let mut hs = state.lock().unwrap();
         let workspace = Workspace {
             targets,
+            graph: GraphCatalog { roots: graph_roots },
             products: hs.products.clone(),
             product_fn_ids: hs.product_fn_ids.clone(),
             build_rules: hs.build_rules.clone(),
@@ -854,6 +905,8 @@ async fn load_workspace_with_rules_and_service(
             label_discoverers: hs.label_discoverers.clone(),
             label_discovery_children: BTreeMap::new(),
         };
+        workspace.graph.validate()?;
+        validate_graph_legacy_collisions(&workspace)?;
         hs.labels_sealed = true;
         workspace
     };
@@ -887,12 +940,12 @@ pub async fn load_workspace_rules_test_runtime(root: &Path) -> Result<LiveWorksp
 /// Evaluate a workspace-level module (`imp.workspace.js` or its
 /// `imp.workspace.ci.js` CI overlay): run it, merge any exported config
 /// values (`export const imp = ...`) into `workspace_config`, and return its
-/// `__imp`-tagged target exports for the caller to address.
+/// `__imp`-tagged target exports and graph roots for the caller to address.
 async fn eval_workspace_file(
     ctx: &JsContext,
     state: &Arc<Mutex<HostState>>,
     path: &Path,
-) -> Result<Vec<(String, u32)>> {
+) -> Result<ModuleExports> {
     let source =
         std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let module_name = path
@@ -900,7 +953,7 @@ async fn eval_workspace_file(
         .and_then(|n| n.to_str())
         .unwrap_or(WORKSPACE_FILE)
         .to_string();
-    ctx.async_with(async |ctx| -> Result<Vec<(String, u32)>> {
+    ctx.async_with(async |ctx| -> Result<ModuleExports> {
         // The core module owns the built-in `imp` schema. Import it
         // eagerly so a workspace may use `export const imp = ...`
         // without an otherwise-useless core import.
@@ -942,7 +995,14 @@ async fn eval_workspace_file(
                 hs.workspace_config.insert(namespace, validated);
             }
         }
-        collect_imp_exports(&ns)
+        let exports = collect_imp_exports(&ns)?;
+        let collect_graph: Function = ctx.globals().get("__imp_collect_graph_exports")?;
+        let roots_json: String = collect_graph
+            .call((ns, "//"))
+            .catch(&ctx)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let roots = serde_json::from_str(&roots_json).context("decode workspace graph roots")?;
+        Ok((exports, roots))
     })
     .await
     .with_context(|| format!("evaluate {}", path.display()))
@@ -970,6 +1030,36 @@ fn collect_imp_exports(ns: &Object) -> Result<Vec<(String, u32)>> {
         }
     }
     Ok(result)
+}
+
+fn validate_graph_legacy_collisions(workspace: &Workspace) -> Result<()> {
+    for root in &workspace.graph.roots {
+        if let Some(target) = workspace.targets.get(&root.address) {
+            if workspace
+                .products
+                .contains_key(&(target.kind.clone(), root.workflow.clone()))
+            {
+                bail!(
+                    "{} is exported both as a graph root and a legacy target for workflow '{}'",
+                    root.address,
+                    root.workflow
+                );
+            }
+        }
+        if let Some(label_id) = workspace.label_addresses.get(&root.address) {
+            if workspace
+                .label_handlers
+                .contains_key(&(*label_id, root.workflow.clone()))
+            {
+                bail!(
+                    "{} is exported both as a graph root and a legacy label for workflow '{}'",
+                    root.address,
+                    root.workflow
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn collect_config_exports<'js>(
@@ -3938,6 +4028,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                         "run() called outside of execution context",
                     )
                 })?;
+                let graph_output_names: Option<String> = opts.get("__graphOutputNames")?;
                 // Owning memo node (if any) so the job nests under it in the UI.
                 let parent: Option<u64> = opts.get::<_, Option<f64>>("__owner")?.map(|n| n as u64);
                 let shared_caches = shared_cache_names(&state_run);
@@ -4033,11 +4124,59 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                         // property, so captured task output survives intact —
                         // printf-style error constructors truncate at ~256 bytes.
                         .map_err(|e| rquickjs::Exception::throw_message(&ctx, &format!("{e:#}")))?;
-                let obj = Object::new(ctx)?;
+                let obj = Object::new(ctx.clone())?;
                 obj.set("stdout", result.stdout)?;
                 obj.set("stderr", result.stderr)?;
                 obj.set("exitCode", result.exit_code)?;
                 obj.set("outputDigest", result.output_digest)?;
+                let graph_outputs = Object::new(ctx.clone())?;
+                if let Some(names_json) = graph_output_names {
+                    let names: BTreeMap<String, String> = serde_json::from_str(&names_json)
+                        .map_err(|error| {
+                            rquickjs::Error::new_loading_message(
+                                "graph action",
+                                format!("decode named outputs: {error}"),
+                            )
+                        })?;
+                    for (name, path) in names {
+                        let artifact = result
+                            .outputs
+                            .iter()
+                            .find(|artifact| artifact.path.as_deref() == Some(path.as_str()))
+                            .ok_or_else(|| {
+                                rquickjs::Error::new_loading_message(
+                                    "graph action",
+                                    format!("executor did not return declared output '{name}'"),
+                                )
+                            })?;
+                        let normalized =
+                            normalize_graph_artifact(&name, artifact).map_err(|error| {
+                                rquickjs::Error::new_loading_message(
+                                    "graph action",
+                                    format!("normalize output '{name}': {error:#}"),
+                                )
+                            })?;
+                        let binding = Object::new(ctx.clone())?;
+                        binding.set("__imp_graph_artifact", true)?;
+                        binding.set("__imp_graph_binding", true)?;
+                        binding.set("type", "artifact")?;
+                        binding.set("kind", artifact.kind.as_str())?;
+                        binding.set("digest", normalized.digest())?;
+                        binding.set("path", name.as_str())?;
+                        binding.set(
+                            "fingerprint",
+                            format!("artifact:{}:{}", artifact.kind, normalized.digest()),
+                        )?;
+                        let inputs = Array::new(ctx.clone())?;
+                        let input = Object::new(ctx.clone())?;
+                        input.set("kind", "digest")?;
+                        input.set("digest", normalized.digest())?;
+                        inputs.set(0, input)?;
+                        binding.set("inputs", inputs)?;
+                        graph_outputs.set(name, binding)?;
+                    }
+                }
+                obj.set("graphOutputs", graph_outputs)?;
                 Ok::<Object<'js>, rquickjs::Error>(obj)
             }
         }),
@@ -5049,6 +5188,32 @@ pub fn format_labels(
     Ok(())
 }
 
+pub fn format_graph_roots(roots: &[&GraphRoot], w: &mut String) -> std::fmt::Result {
+    use std::fmt::Write;
+    let mut by_address: BTreeMap<&str, BTreeMap<&str, Vec<&str>>> = BTreeMap::new();
+    for root in roots {
+        by_address
+            .entry(root.address.as_str())
+            .or_default()
+            .entry(root.workflow.as_str())
+            .or_default()
+            .extend(root.facet.as_deref());
+    }
+    for (address, workflows) in by_address {
+        writeln!(w, "{address} (graph)")?;
+        for (workflow, mut facets) in workflows {
+            facets.sort();
+            facets.dedup();
+            if facets.is_empty() {
+                writeln!(w, "  {workflow}")?;
+            } else {
+                writeln!(w, "  {workflow}: {}", facets.join(", "))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn format_dependencies(
     workspace: &Workspace,
     selectors: &[String],
@@ -5557,6 +5722,24 @@ pub async fn execute_goal_live_selection(
             known.join(", ")
         )
     })?;
+    let selection_selectors: &[String] = match &selection {
+        GoalSelection::Selectors(selectors) => selectors,
+        GoalSelection::ChangedAddresses { selectors, .. } => selectors,
+    };
+    let graph_roots = match &selection {
+        GoalSelection::Selectors(selectors) => {
+            live.workspace
+                .graph
+                .select(goal, selectors, selector_context)?
+        }
+        // Graph-aware changed-file ownership is tracked separately in #7.
+        GoalSelection::ChangedAddresses { .. } => Vec::new(),
+    };
+    let legacy_selectors: Vec<String> = selection_selectors
+        .iter()
+        .filter(|selector| !selector.contains('@'))
+        .cloned()
+        .collect();
 
     // `ensure_expanded` may invoke a rule's expander, which can call `run()`
     // — that requires an execution context (exec_root + scheduler), so it's
@@ -5566,20 +5749,17 @@ pub async fn execute_goal_live_selection(
     live.exec_no_cache.store(no_cache, Ordering::SeqCst);
     live.trace_inputs.store(trace_inputs, Ordering::SeqCst);
     resolve_mode_axes(live, profile, axis_overrides)?;
-    let discovery_selectors: &[String] = match &selection {
-        GoalSelection::Selectors(selectors) => selectors,
-        GoalSelection::ChangedAddresses { selectors, .. } => selectors,
-    };
     ensure_discovered_labels(
         live,
         workspace_root,
-        discovery_selectors,
+        &legacy_selectors,
         Some(goal),
         selector_context,
         matches!(selection, GoalSelection::ChangedAddresses { .. }),
     )
     .await?;
     let label_workspace = workspace_with_discovered_labels(live);
+    validate_graph_legacy_collisions(&label_workspace)?;
     let discovered_snapshot = live.discovered_labels.lock().unwrap().clone();
 
     // Resolve selectors against the statically-known workspace first, to
@@ -5603,7 +5783,7 @@ pub async fn execute_goal_live_selection(
         )?),
     };
     let seed_addresses: Vec<String> = match &selection {
-        GoalSelection::Selectors(selectors) => {
+        GoalSelection::Selectors(_) => {
             // Resolve independently so a label-only selector does not make
             // target selection fail wholesale and trigger every target
             // expander in the workspace. A genuinely unresolved selector
@@ -5611,7 +5791,7 @@ pub async fn execute_goal_live_selection(
             // expansion fallback for that selector.
             let mut seeds = BTreeSet::new();
             let mut needs_dynamic_fallback = false;
-            for selector in selectors.iter() {
+            for selector in &legacy_selectors {
                 let single = std::slice::from_ref(selector);
                 match select_roots_in(
                     &live.workspace,
@@ -5632,7 +5812,7 @@ pub async fn execute_goal_live_selection(
                             selector_context,
                         )?
                         .is_empty();
-                        if !matched_a_label {
+                        if !matched_a_label && graph_roots.is_empty() {
                             needs_dynamic_fallback = true;
                         }
                     }
@@ -5670,11 +5850,11 @@ pub async fn execute_goal_live_selection(
     // aliases remain explicit selector spellings but never cause duplicate
     // changed dispatch.
     let label_roots: Vec<(u32, String)> = match &selection {
-        GoalSelection::Selectors(selectors) => select_label_roots_with_discovered_children(
+        GoalSelection::Selectors(_) => select_label_roots_with_discovered_children(
             &label_workspace,
             &discovered_snapshot,
             goal,
-            selectors,
+            &legacy_selectors,
             selector_context,
         )?,
         GoalSelection::ChangedAddresses { .. } => changed_addresses
@@ -5692,7 +5872,7 @@ pub async fn execute_goal_live_selection(
     };
 
     let mut roots = match &selection {
-        GoalSelection::Selectors(selectors) => {
+        GoalSelection::Selectors(_) => {
             // Resolve target selection per-selector rather than for the
             // whole list at once: a selector that names a label-only
             // address (no matching target at all, e.g. a package selector
@@ -5704,7 +5884,7 @@ pub async fn execute_goal_live_selection(
             // selector's target resolution into one call and swallowing
             // the whole result on any error would silently drop it.
             let mut selected: BTreeMap<&str, (&Target, String)> = BTreeMap::new();
-            for selector in selectors.iter() {
+            for selector in &legacy_selectors {
                 let single = std::slice::from_ref(selector);
                 match select_roots_in(
                     &live.workspace,
@@ -5727,7 +5907,7 @@ pub async fn execute_goal_live_selection(
                             selector_context,
                         )?
                         .is_empty();
-                        if matched_a_label {
+                        if matched_a_label || !graph_roots.is_empty() {
                             continue;
                         }
                         if goal == "run" {
@@ -5763,7 +5943,7 @@ pub async fn execute_goal_live_selection(
                         .as_ref()
                         .expect("changed selection has an address set"),
                 );
-                if roots.is_empty() && label_roots.is_empty() {
+                if roots.is_empty() && label_roots.is_empty() && graph_roots.is_empty() {
                     if selectors.is_empty() {
                         eprintln!(
                             "no changed target or label can run goal '{}'; nothing to do",
@@ -5882,8 +6062,24 @@ pub async fn execute_goal_live_selection(
         .collect();
     let selection_json = serde_json::to_string(&selection).context("serialize goal selection")?;
 
+    let graph_handle_ids: Vec<u32> = graph_roots.iter().map(|root| root.handle_id).collect();
+    let graph_handles_json =
+        serde_json::to_string(&graph_handle_ids).context("serialize graph root handles")?;
+    let resolved_config = live.host_state.lock().unwrap().workspace_config.clone();
+    let resolved_mode = resolved_config
+        .get(MODE_AXIS_NAMESPACE)
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let graph_invocation_json = serde_json::to_string(&serde_json::json!({
+        "args": run_args,
+        "flags": flags,
+        "mode": resolved_mode,
+        "config": resolved_config,
+    }))
+    .context("serialize graph invocation")?;
+
     *live.selected_roots.lock().unwrap() = Some(selection);
-    *live.goal_flags.lock().unwrap() = Some(flags);
+    *live.goal_flags.lock().unwrap() = Some(flags.clone());
     *live.run_args.lock().unwrap() = Some(run_args.to_vec());
 
     let goal_owned = goal.to_owned();
@@ -6005,6 +6201,29 @@ pub async fn execute_goal_live_selection(
                             )
                         })?;
                 }
+            }
+            if !graph_handle_ids.is_empty() {
+                let execute_graph: Function = ctx.globals().get("__imp_execute_graph_handles")?;
+                let result_value: Value = execute_graph
+                    .call((graph_handles_json.as_str(), graph_invocation_json.as_str()))
+                    .catch(&ctx)
+                    .map_err(|error| {
+                        rquickjs::Error::new_loading_message(
+                            "execute graph",
+                            format!("goal '{goal_owned}': {error}"),
+                        )
+                    })?;
+                let promise: MaybePromise = promise_resolve.call((result_value,))?;
+                promise
+                    .into_future::<Value>()
+                    .await
+                    .catch(&ctx)
+                    .map_err(|error| {
+                        rquickjs::Error::new_loading_message(
+                            "execute graph",
+                            format!("goal '{goal_owned}': {error}"),
+                        )
+                    })?;
             }
             if trace_inputs {
                 let assert_trace_inputs: Function =
@@ -6858,6 +7077,290 @@ mod tests {
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
         execute_goal_live(live, root, goal, selectors, false, 1, serde_json::json!({})).await
+    }
+
+    #[tokio::test]
+    async fn exported_graph_roots_execute_shared_static_tasks_once() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, output, task } from "imp:core";
+
+globalThis.graphRuns = 0;
+const produced = task({
+    display: "produce graph value",
+    outputs: { value: output.value() },
+    async run() {
+        globalThis.graphRuns += 1;
+        return { value: { answer: 42 } };
+    },
+});
+
+export const named = { [BUILD]: produced.outputs.value };
+export default { [BUILD]: produced.outputs.value };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        assert_eq!(live.workspace.graph.roots.len(), 2);
+        run_goal_live(&live, p, "build", &["//".to_owned(), "//:named".to_owned()])
+            .await
+            .unwrap();
+        let runs = live
+            .ctx
+            .async_with(async |ctx| ctx.globals().get::<_, i32>("graphRuns"))
+            .await
+            .unwrap();
+        assert_eq!(runs, 1);
+    }
+
+    #[tokio::test]
+    async fn workspace_module_can_export_graph_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { BUILD, task } from "imp:core";
+globalThis.workspaceGraphRuns = 0;
+const build = task({
+    async run() {
+        globalThis.workspaceGraphRuns += 1;
+    },
+});
+export const bootstrap = { [BUILD]: build };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        assert_eq!(live.workspace.graph.roots[0].address, "//:bootstrap");
+        run_goal_live(&live, p, "build", &["//:bootstrap".to_owned()])
+            .await
+            .unwrap();
+        let runs = live
+            .ctx
+            .async_with(async |ctx| ctx.globals().get::<_, i32>("workspaceGraphRuns"))
+            .await
+            .unwrap();
+        assert_eq!(runs, 1);
+    }
+
+    #[tokio::test]
+    async fn graph_action_artifacts_compose_without_workspace_materialization() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, output, task } from "imp:core";
+
+const first = task({
+    display: "first graph action",
+    outputs: { value: output.artifact() },
+    async run(exec) {
+        const result = await exec.action({
+            argv: ["sh", "-c", "mkdir -p scratch && printf hello > scratch/value.txt"],
+            outputs: { value: output.file("scratch/value.txt") },
+        });
+        return { value: result.outputs.value };
+    },
+});
+
+const second = task({
+    display: "second graph action",
+    inputs: { value: first.outputs.value },
+    outputs: { copied: output.artifact() },
+    async run(exec, input) {
+        const source = exec.path(input.value);
+        const result = await exec.action({
+            argv: ["sh", "-c", `mkdir -p final && cat ${source} > final/copied.txt`],
+            outputs: { copied: output.file("final/copied.txt") },
+        });
+        return { copied: result.outputs.copied };
+    },
+});
+
+export default { [BUILD]: second.outputs.copied };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        run_goal_live(&live, p, "build", &["//".to_owned()])
+            .await
+            .unwrap();
+        assert!(!p.join("scratch/value.txt").exists());
+        assert!(!p.join("final/copied.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn graph_expansion_get_executes_only_the_selected_child() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, expand, output, task } from "imp:core";
+
+globalThis.expansionChildrenRun = [];
+const metadata = task({
+    outputs: { packages: output.value() },
+    async run() {
+        return { packages: ["a", "b"] };
+    },
+});
+
+const packages = expand({
+    inputs: { packages: metadata.outputs.packages },
+    create({ packages }) {
+        return Object.fromEntries(packages.map((name) => {
+            const build = task({
+                inputs: { name },
+                outputs: { value: output.value() },
+                async run(_exec, input) {
+                    globalThis.expansionChildrenRun.push(input.name);
+                    return { value: input.name };
+                },
+            });
+            return [name, { [BUILD]: build.outputs.value }];
+        }));
+    },
+});
+
+export default { [BUILD]: packages.get("a", BUILD) };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        run_goal_live(&live, p, "build", &["//".to_owned()])
+            .await
+            .unwrap();
+        let runs = live
+            .ctx
+            .async_with(async |ctx| -> rquickjs::Result<String> {
+                let stringify: Function = ctx.eval("JSON.stringify")?;
+                let value: Value = ctx.globals().get("expansionChildrenRun")?;
+                stringify.call((value,))
+            })
+            .await
+            .unwrap();
+        assert_eq!(runs, r#"["a"]"#);
+    }
+
+    #[tokio::test]
+    async fn graph_facet_selector_executes_one_named_facet() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { TEST, task } from "imp:core";
+globalThis.facetsRun = [];
+function facet(name) {
+    return task({
+        inputs: { name },
+        async run(_exec, input) {
+            globalThis.facetsRun.push(input.name);
+        },
+    });
+}
+export default { [TEST]: { unit: facet("unit"), asan: facet("asan") } };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        run_goal_live(&live, p, "test", &["//@asan".to_owned()])
+            .await
+            .unwrap();
+        let runs = live
+            .ctx
+            .async_with(async |ctx| -> rquickjs::Result<String> {
+                let stringify: Function = ctx.eval("JSON.stringify")?;
+                let value: Value = ctx.globals().get("facetsRun")?;
+                stringify.call((value,))
+            })
+            .await
+            .unwrap();
+        assert_eq!(runs, r#"["asan"]"#);
+    }
+
+    #[tokio::test]
+    async fn graph_semantic_inputs_resolve_only_at_invocation() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis } from "imp:core";
+defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { goal, semantic, task } from "imp:core";
+const VERIFY = goal("verify", undefined, { flags: { fix: { description: "fix" } } });
+globalThis.semanticResult = null;
+const verify = task({
+    inputs: {
+        args: semantic.args(),
+        fix: semantic.flag("fix"),
+        opt: semantic.mode("opt"),
+    },
+    async run(_exec, input) {
+        globalThis.semanticResult = input;
+    },
+});
+export default { [VERIFY]: verify };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        *live.scheduler.lock().unwrap() = Some(imp_scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        ));
+        let selectors = ["//".to_owned()];
+        let args = ["one".to_owned(), "two".to_owned()];
+        let axes = ["opt=release".to_owned()];
+        execute_goal_live_selection(
+            &live,
+            p,
+            &SelectorContext::root(),
+            "verify",
+            GoalSelection::Selectors(&selectors),
+            GoalExecutionOptions {
+                no_cache: false,
+                trace_inputs: false,
+                js_workers: 1,
+                flags: serde_json::json!({ "fix": true }),
+                run_args: &args,
+                axis_overrides: &axes,
+                profile: None,
+            },
+        )
+        .await
+        .unwrap();
+        let result = live
+            .ctx
+            .async_with(async |ctx| -> rquickjs::Result<String> {
+                let stringify: Function = ctx.eval("JSON.stringify")?;
+                let value: Value = ctx.globals().get("semanticResult")?;
+                stringify.call((value,))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            r#"{"args":["one","two"],"fix":true,"opt":"release"}"#
+        );
     }
 
     #[tokio::test]

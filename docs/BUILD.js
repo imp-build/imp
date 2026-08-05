@@ -63,7 +63,7 @@ export const api_reference = target({ kind: "js-api-reference", attrs: {} });
 export const api_reference_build = product(JsApiReference, BUILD, IMP_TOOL, async function api_reference_build(handle) {
     const srcs = glob({
         root: ".",
-        include: ["src/imp_core.js", "rules/**/*.js", "rules/**/DOC.md"],
+        include: ["src/imp_core.js", "src/graph_core.js", "rules/**/*.js", "rules/**/DOC.md"],
         exclude: ["**/*_test.js"],
     });
 
