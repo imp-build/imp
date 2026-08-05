@@ -41,3 +41,6 @@ Build it with:
 ```sh
 imp build //:hello
 ```
+
+This produces a cached artifact for other build tasks to consume; it does not
+write `generated/hello.txt` into the workspace.

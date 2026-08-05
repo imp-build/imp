@@ -7345,6 +7345,51 @@ export const inspect = { [BUILD]: inspection.outputs.value };
         );
     }
 
+    #[tokio::test]
+    async fn graph_stamp_file_is_a_shared_cas_artifact() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, task } from "imp:core";
+import { stampFile } from "//rules/gen";
+
+const stamp = stampFile({ output: "generated/stamp.txt", text: "graph stamp" });
+const inspect = task({
+    inputs: { stamp: stamp.file },
+    async run(exec, { stamp }) {
+        await exec.action({
+            argv: ["sh", "-c", `test "$(cat ${exec.path(stamp)})" = "graph stamp"`],
+        });
+    },
+});
+
+export const first = stamp;
+export const second = stamp;
+export const verify = { [BUILD]: inspect };
+"#,
+        );
+
+        let live = load_workspace_with_rules(p, RulesSource::directory(repo_rules_dir()))
+            .await
+            .unwrap();
+        run_goal_live(
+            &live,
+            p,
+            "build",
+            &[
+                "//:first".to_owned(),
+                "//:second".to_owned(),
+                "//:verify".to_owned(),
+            ],
+        )
+        .await
+        .unwrap();
+        assert!(!p.join("generated/stamp.txt").exists());
+    }
+
     #[test]
     fn graph_package_path_rejects_non_workspace_callers() {
         let root = tempfile::tempdir().unwrap();
