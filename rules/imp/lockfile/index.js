@@ -24,7 +24,9 @@ import {
 	output_path,
 	readAddressedFile,
 	run,
+	task,
 } from "imp:core";
+import { nativeTool } from "//rules/imp/native-tool";
 
 /**
  * Convert a lockfile address (`//a/b.lock`) to a workspace-relative path
@@ -74,6 +76,24 @@ export function resolveToolLockfile({
 	plat,
 	unverified = false,
 }) {
+	return resolveToolLockfileContents({
+		contents: readAddressedFile(address),
+		address,
+		tool,
+		version,
+		plat,
+		unverified,
+	});
+}
+
+function resolveToolLockfileContents({
+	contents,
+	address,
+	tool,
+	version,
+	plat,
+	unverified = false,
+}) {
 	const miss = (reason) => {
 		const message =
 			`${reason}; run \`imp goal gen-lockfiles\` to regenerate it, ` +
@@ -85,7 +105,6 @@ export function resolveToolLockfile({
 		throw new Error(message);
 	};
 
-	const contents = readAddressedFile(address);
 	if (contents === null) {
 		return miss(`no lockfile found at ${address} for ${tool} ${version}`);
 	}
@@ -170,7 +189,7 @@ export function lockedDownloadTools(plat) {
  *   warning and download unverified.
  * @returns {Promise<string>} The materialized download path.
  */
-export async function downloadToolArtifact({
+async function downloadToolArtifactLegacy({
 	lockfile,
 	tool,
 	version,
@@ -217,6 +236,107 @@ export async function downloadToolArtifact({
 		throw e;
 	}
 	return downloadPath;
+}
+
+async function runGraphDownload(exec, inputs) {
+	const lockEntry = resolveToolLockfileContents({
+		contents: inputs.lockfileContents,
+		address: inputs.lockfile,
+		tool: inputs.tool,
+		version: inputs.version,
+		plat: inputs.lockPlat ?? inputs.plat,
+		unverified: inputs.unverified,
+	});
+	const resolvedUrl = lockEntry ? lockEntry.url : inputs.url;
+	const argv = lockedDownloadArgv({
+		plat: inputs.plat,
+		lockEntry,
+		url: resolvedUrl,
+		downloadPath: inputs.output,
+		displayName: `download-${inputs.tool}`,
+	});
+	const tools = inputs.toolNames.map((_, index) => inputs[`tool${index}`]);
+	argv[0] = exec.tool(tools[0], "sh");
+	try {
+		const result = await exec.action({
+			argv,
+			tools,
+			outputs: { artifact: output.file(inputs.output) },
+			display: inputs.display,
+		});
+		return { artifact: result.outputs.artifact };
+	} catch (error) {
+		if (lockEntry) {
+			throw new Error(
+				`download of ${inputs.tool} ${inputs.version} from ${resolvedUrl} failed transfer or ` +
+					`size/sha256 verification (expected ${lockEntry.sha256} from ${inputs.lockfile}); ` +
+					`if you intentionally changed versions, run \`imp goal gen-lockfiles\`: ` +
+					`${error && error.message ? error.message : error}`,
+			);
+		}
+		throw error;
+	}
+}
+
+function graphDownloadToolArtifact({
+	lockfile,
+	tool: toolName,
+	version,
+	plat,
+	lockPlat,
+	url,
+	output: outputPath,
+	display = `download ${toolName}`,
+	unverified = false,
+}) {
+	if (typeof outputPath !== "string" || outputPath.length === 0) {
+		throw new Error("downloadToolArtifact graph form requires a non-empty output");
+	}
+	const toolNames = ["sh", ...lockedDownloadTools(plat)];
+	const uniqueToolNames = [...new Set(toolNames)];
+	const inputs = {
+		lockfile,
+		lockfileContents: readAddressedFile(lockfile),
+		tool: toolName,
+		version,
+		plat,
+		lockPlat: lockPlat ?? null,
+		url,
+		output: outputPath,
+		display,
+		unverified,
+		toolNames: uniqueToolNames,
+	};
+	for (const [index, name] of uniqueToolNames.entries()) {
+		inputs[`tool${index}`] = nativeTool(name);
+	}
+	return task({
+		inputs,
+		outputs: { artifact: output.artifact() },
+		run: runGraphDownload,
+		display,
+	}).outputs.artifact;
+}
+
+/**
+ * Download a verified tool artifact.
+ *
+ * The graph form uses `output` and returns an artifact handle immediately.
+ * The temporary legacy form uses `downloadPath` and returns a Promise.
+ */
+export function downloadToolArtifact(opts) {
+	if (!opts || typeof opts !== "object") {
+		throw new Error("downloadToolArtifact(options) requires an options object");
+	}
+	if (Object.hasOwn(opts, "output")) {
+		if (Object.hasOwn(opts, "downloadPath") || Object.hasOwn(opts, "tools")) {
+			throw new Error(
+				"downloadToolArtifact graph form cannot include legacy downloadPath or tools",
+			);
+		}
+		return graphDownloadToolArtifact(opts);
+	}
+	return downloadToolArtifactLegacy(opts);
 }
 
 /**
