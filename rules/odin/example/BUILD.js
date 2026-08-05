@@ -5,4 +5,4 @@ export const hello = odinPackage({
 	srcs: ["*.odin"],
 	toolchain: "dev-2026-03",
 });
-export const js = jsSources({});
+export const js = jsSources({ base: "rules/odin/example" });

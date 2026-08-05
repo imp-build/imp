@@ -681,12 +681,19 @@ globalThis.__imp_collect_graph_exports = function collectGraphExports(ns, scope)
 };
 
 globalThis.__imp_execute_graph_handles = async function executeGraphHandles(handleIdsJson, invocationJson) {
-	const ids = JSON.parse(handleIdsJson);
+	const roots = JSON.parse(handleIdsJson);
 	_graphInvocation = Object.freeze(JSON.parse(invocationJson));
 	_graphTaskInflight = new Map();
 	_graphExpansionInflight = new Map();
 	try {
-		await Promise.all(ids.map((id) => _graphResolveHandle(id)));
+		return await Promise.all(roots.map(async ({ address, handleId }) => {
+			const record = _graphHandles.get(handleId);
+			if (record === undefined) throw _graphError(`unknown handle id ${handleId}`);
+			const result = record.kind === "task"
+				? await _graphExecuteTask(record.data.taskId, [])
+				: await _graphResolveHandle(handleId);
+			return Object.freeze({ address, result });
+		}));
 	} finally {
 		_graphInvocation = null;
 		_graphTaskInflight.clear();

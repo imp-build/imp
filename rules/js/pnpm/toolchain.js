@@ -11,6 +11,7 @@ import {
 	cacheGet,
 	cacheHas,
 	toolName,
+	tool as graphTool,
 	group,
 } from "imp:core";
 
@@ -148,10 +149,12 @@ export class PnpmToolchain extends Toolchain {
 // workspace-load time, so tool handles must be created when a toolchain is
 // declared at BUILD.js top level, not inside acquirePnpmToolchain().
 let coreToolHandles = null;
+let graphToolchains = new Map();
 
 export function __resetPnpmToolchainStateForTest() {
 	PnpmToolchain.clearDefault();
 	coreToolHandles = null;
+	graphToolchains = new Map();
 }
 
 /**
@@ -174,10 +177,13 @@ export function pnpmToolchain(version, opts = {}) {
 		);
 	}
 
-	return new PnpmToolchain(
+	new PnpmToolchain(
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	const graph = pnpmGraphTool(version);
+	graphToolchains.set(version, graph);
+	return graph;
 }
 
 /**
@@ -314,6 +320,30 @@ export async function pnpmTool(version) {
 	};
 }
 
+/** Return the CAS-backed graph tool used by graph-native JS rules. */
+export function pnpmGraphTool(version) {
+	const resolved = PnpmToolchain.requireVersion(version);
+	const plat = platformInfo();
+	const key = pnpmCacheKey(resolved, plat);
+	const archive = downloadToolArtifact({
+		lockfile: PNPM_LOCKFILE,
+		tool: "pnpm-toolchain",
+		version: resolved,
+		plat,
+		url: pnpmDownloadUrl(resolved, plat),
+		output: `.imp/pnpm-downloads/${key}/${pnpmArtifactName(resolved, plat)}`,
+		display: `download pnpm ${resolved} (${plat.os}/${plat.arch})`,
+		unverified: PnpmToolchain.resolveUnverified(resolved),
+	});
+	const directory = extractArchive({
+		archive,
+		dest: `.imp/pnpm-toolchains/${key}`,
+		format: plat.os === "windows" ? "zip" : "tar.gz",
+		display: `extract pnpm ${resolved} (${plat.os}/${plat.arch})`,
+	});
+	return graphTool(directory, { binDirs: ["."] });
+}
+
 /**
  * Return a named-cache-backed tool descriptor mounting pnpm's shared
  * content-addressed store at a stable path, read-write across every
@@ -364,7 +394,8 @@ export function defaultPnpmToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultPnpmToolchain() {
-	return PnpmToolchain.default();
+	const version = PnpmToolchain.defaultVersion();
+	return version ? (graphToolchains.get(version) ?? null) : null;
 }
 
 // Importing this rule provisions the pinned default. A workspace can replace

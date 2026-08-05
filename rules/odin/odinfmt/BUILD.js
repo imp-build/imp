@@ -13,4 +13,4 @@ export const rules_test = rulesTest({
 		nativeTool("sha256sum"),
 	],
 });
-export const js = jsSources({});
+export const js = jsSources({ base: "rules/odin/odinfmt" });

@@ -1,60 +1,52 @@
-// JS/TS formatting: biome format has a native check mode (no `--write`
-// exits nonzero if any file needs reformatting), so check mode doesn't need
-// the digest-diff workaround odinfmt requires — a nonzero exit from `biome
-// format` is enough for run() to fail the product, which fmtGoal
-// (rules/workflows/fmt_goal.js) already turns into a goal error. The write
-// path still uses digestOf/diffDigests, the same generic before/after
-// comparison ruffFmt/cargoFmt/odinFmt use, to report an accurate count of
-// files actually changed.
+import { output, semantic, task } from "imp:core";
+import { nativeTool } from "//rules/imp/native-tool";
+import { biomeGraphTool } from "//rules/js/biome/toolchain";
 
-import {
-	declared_path,
-	js_file_sources,
-	jsSourcesActionHandle,
-} from "//rules/js";
-import {
-	biomeTool,
-	resolveBiomeToolchainVersion,
-} from "//rules/js/biome/toolchain";
-import { digestOf, diffDigests, output, paths, run } from "imp:core";
-
-// Reformat a target's own JS/TS sources in place, or (when `check` is
-// true) verify they're already formatted without writing anything back.
-// `biome format` (no `--write`) exits nonzero when any file needs
-// reformatting — verified against a real 2.5.4 binary, not assumed from
-// docs alone.
-export async function biomeFmt(handle, { check = false } = {}) {
-	handle = jsSourcesActionHandle(handle);
-	const srcs = await js_file_sources(handle);
-	const files = paths(srcs);
-	if (files.length === 0) {
-		return check ? { checked: 0 } : { formatted: 0 };
-	}
-	const path = declared_path(handle, handle.attrs.src || ".");
-	const tool = await biomeTool(resolveBiomeToolchainVersion());
-
-	if (check) {
-		await run({
-			argv: ["biome", "format", ...files],
-			tools: [tool],
-			inputs: [srcs],
-			display: `biome format --check ${path}`,
-		});
-
-		return { checked: files.length };
-	}
-
-	const before = digestOf(srcs);
-
-	const result = await run({
-		argv: ["biome", "format", "--write", ...files],
-		tools: [tool],
-		inputs: [srcs],
-		outputs: files.map((f) => output(f)),
-		materialize: true,
-		display: `biome format ${path}`,
+/** Build the CAS-only result consumed by the top-level fmt graph handler. */
+export function biomeFmtRoot({ sources, root }) {
+	const shell = nativeTool("sh");
+	const cp = nativeTool("cp");
+	const mkdir = nativeTool("mkdir");
+	const dirname = nativeTool("dirname");
+	return task({
+		display: `biome format ${root}`,
+		inputs: {
+			sources,
+			biome: biomeGraphTool(),
+			check: semantic.flag("check"),
+			shell,
+			cp,
+			mkdir,
+			dirname,
+		},
+		outputs: {
+			formatted: output.artifact(),
+			paths: output.value(),
+			check: output.value(),
+		},
+		async run(exec, inputs) {
+			const paths = exec.paths(inputs.sources);
+			const biome = `../${exec.tool(inputs.biome, "biome")}`;
+			const result = await exec.action({
+				argv: [
+					exec.tool(inputs.shell, "sh"),
+					"-c",
+					'mode="$1"; biome="$2"; shift 2; for path in "$@"; do mkdir -p "formatted/$(dirname "$path")" && cp "$path" "formatted/$path"; done && cd formatted && if [ "$mode" = write ]; then "$biome" format --write "$@"; else "$biome" format "$@"; fi',
+					"biome-format",
+					inputs.check ? "check" : "write",
+					biome,
+					...paths,
+				],
+				inputs: [inputs.sources],
+				tools: [inputs.shell, inputs.cp, inputs.mkdir, inputs.dirname],
+				outputs: { formatted: output.directory("formatted") },
+				allowFailure: true,
+			});
+			return {
+				formatted: result.outputs.formatted,
+				paths,
+				check: { requested: inputs.check, failed: result.exitCode !== 0 },
+			};
+		},
 	});
-
-	const changes = diffDigests(before, result.outputDigest);
-	return { formatted: changes.length };
 }

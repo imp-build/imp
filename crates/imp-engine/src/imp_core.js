@@ -438,6 +438,10 @@ export function namedCache(opts) {
  *   If `fn` is omitted, the host dispatches every selected target's product
  *   function itself, exactly as before.
  * @param {object} [opts]
+ * @param {(roots: Array<{address: string, result: object}>) => (void | Promise<void>)} [opts.graph]
+ *   Optional handler for results produced by selected exported graph roots.
+ *   It runs after the graph has executed; unlike `fn`, it does not replace
+ *   legacy target dispatch.
  * @param {Record<string, {description?: string}>} [opts.flags] Boolean flags
  *   this goal accepts on the CLI (e.g. `{ check: { description: "..." } }`
  *   becomes `--check`). Read back during goal execution via `goalFlags()`.
@@ -481,6 +485,12 @@ export function goal(name, fn, opts) {
 			);
 		}
 		__host_goal_callback(name, fn);
+	}
+	if (opts && opts.graph !== undefined) {
+		if (typeof opts.graph !== "function") {
+			throw new Error("goal(name, fn?, { graph }) expects graph to be a function");
+		}
+		__host_graph_goal_handler(name, opts.graph);
 	}
 	return _workflow_symbol(name, pid);
 }

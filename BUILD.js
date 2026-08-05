@@ -7,8 +7,8 @@ import { vsWorkspace } from "//rules/workflows/vs";
 export const vs = vsWorkspace();
 
 export const generated_stamp = stampFile({
-    output: "generated/imp-stamp.txt",
-    text: "imp build ran",
+	output: "generated/imp-stamp.txt",
+	text: "imp build ran",
 });
 
 // crates/imp-engine/src/loader.rs embeds the core JS files at compile time via
@@ -16,10 +16,10 @@ export const generated_stamp = stampFile({
 // Cargo.toml/Cargo.lock/**/*.rs, so it needs declaring as a resource dep for
 // the sandboxed build to see it too.
 export const engineAssets = resourcePackage({
-    srcs: [
-        "crates/imp-engine/src/imp_core.js",
-        "crates/imp-engine/src/graph_core.js",
-    ],
+	srcs: [
+		"crates/imp-engine/src/imp_core.js",
+		"crates/imp-engine/src/graph_core.js",
+	],
 });
 
 // The rule library is NOT compiled into the binary — it ships beside it and is
@@ -28,7 +28,7 @@ export const engineAssets = resourcePackage({
 // tree has to exist inside their sandbox. Deliberately kept off
 // //crates/imp, so a rule edit no longer invalidates the release binary.
 export const rulesTree = resourcePackage({
-    srcs: ["rules/**/*"],
+	srcs: ["rules/**/*"],
 });
 
 export const testTar = nativeTool("tar");
