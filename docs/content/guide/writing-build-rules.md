@@ -104,6 +104,24 @@ Modes and configuration are equally explicit. Put `semantic.mode("opt")` or
 `semantic.config("rust", "edition")` in only the tasks that read those values.
 Changing unrelated invocation context then leaves shared producers untouched.
 
+`files()` roots are workspace-relative. Capture `packagePath()` in the BUILD
+module that owns the sources, then pass it explicitly through helpers:
+
+```js
+import { packagePath } from "imp:core";
+import { asset } from "//rules/asset";
+
+const here = packagePath();
+const sources = asset({ base: here, srcs: ["src/**/*.rs"] }).sources;
+```
+
+The default is convenient for a direct BUILD call, but helpers should accept
+and forward `base`: imported BUILD modules do not have one inferable owner.
+
+During the ruleset migration, `resourcePackage()` from `//rules/asset` still
+works as a legacy dependency and also exposes its graph-native source handle
+as `.files`. New graph tasks should consume that handle directly.
+
 An action's named files and directories are normalized into independent CAS
 artifact roots. Downstream tasks consume those handles directly; action
 outputs are not materialized into the workspace. Use `cache: false` for an
