@@ -97,6 +97,20 @@ export function sourcesField(opts) {
 }
 
 /**
+ * Return the workspace-relative directory of the calling BUILD module.
+ *
+ * Rule factories use this to keep their public path arguments relative to
+ * the BUILD.js that invoked them rather than to the workspace root.
+ *
+ * @category graph
+ * @returns {string} `"."` for the workspace root.
+ */
+export function packagePath() {
+	const stack = new Error().stack || "";
+	return __host_package_path(stack);
+}
+
+/**
  * Base class for all target kinds. Handles host registration, dependency
  * discovery, and address/label resolution. Rule modules define subclasses
  * (e.g. `class OdinPackage extends Target`) that compute a `kind` and
