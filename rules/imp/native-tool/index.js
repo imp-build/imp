@@ -10,11 +10,11 @@ import {
 const NATIVE_TOOL_SPEC = "native-tool";
 
 /**
- * Describe an executable resolved from the host PATH.
+ * Declare an executable resolved lazily from the host PATH.
  *
- * This is immutable serializable configuration, not a selectable target.
- * Resolving it with nativeToolSpec() creates the memo dependency used by the
- * selected workload that consumes the tool.
+ * The returned value is a graph tool handle. During the incremental ruleset
+ * migration, nativeToolSpec() can also resolve the same handle into the
+ * descriptor expected by legacy run() consumers.
  *
  * @category configuration
  * @param {string} name Executable name to look up on PATH, e.g. "cmake".
@@ -24,7 +24,7 @@ export function nativeTool(name) {
 	if (typeof name !== "string" || name.length === 0) {
 		throw new Error("nativeTool(name) requires a non-empty executable name");
 	}
-	return Object.freeze({ __imp_native_tool: NATIVE_TOOL_SPEC, name });
+	return globalThis.__imp_graph_native_tool(name);
 }
 
 function isNativeToolSpec(value) {

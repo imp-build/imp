@@ -22,13 +22,12 @@ export const sh_tool = nativeTool("sh");
 const missing_tool = nativeTool("__imp_no_such_binary_xyz");
 
 describe("nativeTool", () => {
-	test("constructs immutable serializable provider data, not a target", () => {
+	test("constructs an immutable graph tool handle, not a target", () => {
 		expect(Object.isFrozen(sh_tool)).toBe(true);
 		expect(sh_tool.__imp).toBe(undefined);
-		expect(JSON.parse(JSON.stringify(sh_tool))).toEqual({
-			__imp_native_tool: "native-tool",
-			name: "sh",
-		});
+		expect(sh_tool.__imp_graph_handle).toBe(true);
+		expect(sh_tool.__imp_native_tool).toBe("native-tool");
+		expect(sh_tool.name).toBe("sh");
 	});
 
 	test("resolves a PATH executable into a tool descriptor", async () => {

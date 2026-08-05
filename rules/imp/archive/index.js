@@ -4,7 +4,8 @@
 // directory output. Deliberately a plain helper, not a base-class pipeline:
 // each toolchain owns its acquire flow and adds its own steps (wrapper
 // scripts, cache seeding, installers) around it.
-import { output, output_path, run } from "imp:core";
+import { output, output_path, run, task } from "imp:core";
+import { nativeTool } from "//rules/imp/native-tool";
 
 // tar flags per archive format. Windows Git Bash ships bsdtar, which unpacks
 // .zip through plain -xf; gzip/xz decompression must be explicit because tar
@@ -56,7 +57,7 @@ export function extractArchiveTools(format) {
  * @param {string} opts.display run() display label.
  * @returns {Promise<string>} The destination directory.
  */
-export async function extractArchive({
+async function extractArchiveLegacy({
 	archive,
 	dest,
 	format,
@@ -91,4 +92,91 @@ export async function extractArchive({
 		display,
 	});
 	return dest;
+}
+
+async function runGraphArchiveExtraction(exec, inputs) {
+	const flags = FORMAT_FLAGS[inputs.format];
+	if (!flags && inputs.format !== "zip-unix") {
+		throw new Error(`unsupported archive format '${inputs.format}'`);
+	}
+	if (inputs.format === "zip-unix" && inputs.stripComponents) {
+		throw new Error("zip-unix extraction does not support stripComponents");
+	}
+	const strip = inputs.stripComponents
+		? ` --strip-components=${inputs.stripComponents}`
+		: "";
+	const command =
+		inputs.format === "zip-unix"
+			? 'mkdir -p "$2" && unzip -q "$1" -d "$2"'
+			: `mkdir -p "$2" && tar ${flags} "$1" -C "$2"${strip}`;
+	const tools = inputs.toolNames.map((_, index) => inputs[`tool${index}`]);
+	const result = await exec.action({
+		argv: [
+			exec.tool(tools[0], "sh"),
+			"-c",
+			command,
+			"extract-archive",
+			exec.path(inputs.archive),
+			inputs.dest,
+		],
+		tools,
+		outputs: { directory: output.directory(inputs.dest) },
+		display: inputs.display,
+	});
+	return { directory: result.outputs.directory };
+}
+
+function graphExtractArchive({
+	archive,
+	dest,
+	format,
+	stripComponents,
+	display = "extract archive",
+}) {
+	if (typeof dest !== "string" || dest.length === 0) {
+		throw new Error("extractArchive graph form requires a non-empty dest");
+	}
+	// Validate construction-time policy before creating any graph nodes.
+	extractArchiveTools(format);
+	if (format === "zip-unix" && stripComponents) {
+		throw new Error("zip-unix extraction does not support stripComponents");
+	}
+	const toolNames = ["sh", ...extractArchiveTools(format)];
+	const uniqueToolNames = [...new Set(toolNames)];
+	const inputs = {
+		archive,
+		dest,
+		format,
+		stripComponents: stripComponents ?? null,
+		display,
+		toolNames: uniqueToolNames,
+	};
+	for (const [index, name] of uniqueToolNames.entries()) {
+		inputs[`tool${index}`] = nativeTool(name);
+	}
+	return task({
+		inputs,
+		outputs: { directory: output.artifact() },
+		run: runGraphArchiveExtraction,
+		display,
+	}).outputs.directory;
+}
+
+/**
+ * Extract an archive. A graph-handle `archive` returns a directory artifact
+ * handle immediately; the temporary string-path form retains its Promise API.
+ */
+export function extractArchive(opts) {
+	if (!opts || typeof opts !== "object") {
+		throw new Error("extractArchive(options) requires an options object");
+	}
+	if (opts.archive?.__imp_graph_handle === true) {
+		if (Object.hasOwn(opts, "tools") || Object.hasOwn(opts, "namedCache")) {
+			throw new Error(
+				"extractArchive graph form owns its tools and does not use namedCache",
+			);
+		}
+		return graphExtractArchive(opts);
+	}
+	return extractArchiveLegacy(opts);
 }

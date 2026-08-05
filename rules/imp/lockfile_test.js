@@ -278,6 +278,36 @@ describe("toolchain lockfiles", () => {
 		});
 	});
 
+	test("downloadToolArtifact graph form returns an artifact handle without running", async () => {
+		await withFakeToolchainHost(async (host) => {
+			host.addFile(ADDRESS, lockJson());
+			const artifact = downloadToolArtifact({
+				lockfile: ADDRESS,
+				tool: "ruff-toolchain",
+				version: "0.15.21",
+				plat: PLAT,
+				url: "https://fallback.example/ruff.tar.gz",
+				output: "downloads/ruff.tar.gz",
+			});
+			expect(artifact.__imp_graph_handle).toBe(true);
+			expect(host.runs.length).toBe(0);
+		});
+	});
+
+	test("downloadToolArtifact rejects mixed graph and legacy options", () => {
+		expect(() =>
+			downloadToolArtifact({
+				lockfile: ADDRESS,
+				tool: "ruff-toolchain",
+				version: "0.15.21",
+				plat: PLAT,
+				url: "https://example.com/ruff.tar.gz",
+				output: "downloads/ruff.tar.gz",
+				downloadPath: ".imp/downloads/ruff.tar.gz",
+			}),
+		).toThrow("cannot include legacy");
+	});
+
 	test("downloadToolArtifact decorates a failed verified download with a gen-lockfiles hint", async () => {
 		await withFakeToolchainHost(async (host) => {
 			host.addFile(ADDRESS, lockJson());

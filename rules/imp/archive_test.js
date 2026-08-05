@@ -4,6 +4,7 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
+import { output, task } from "imp:core";
 import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
 
 describe("archive", () => {
@@ -70,6 +71,24 @@ describe("archive", () => {
 			expect(extract.argv[2]).toContain("tar -xf");
 			expect(extract.argv[2].includes("--strip-components")).toBe(false);
 			expect(extract.outputs[0].namedCache === undefined).toBe(true);
+		});
+	});
+
+	test("extractArchive graph form returns a directory handle without running", async () => {
+		await withFakeToolchainHost(async (host) => {
+			const source = task({
+				outputs: { archive: output.artifact() },
+				async run() {
+					throw new Error("construction must not execute the producer");
+				},
+			}).outputs.archive;
+			const extracted = extractArchive({
+				archive: source,
+				dest: "tool",
+				format: "tar.gz",
+			});
+			expect(extracted.__imp_graph_handle).toBe(true);
+			expect(host.runs.length).toBe(0);
 		});
 	});
 

@@ -20,9 +20,13 @@ function _graphError(message) {
 	return new Error(`graph: ${message}`);
 }
 
-function _graphHandle(kind, data, fingerprint) {
+function _graphHandle(kind, data, fingerprint, publicFields = {}) {
 	const id = _graphNextHandle++;
-	const handle = Object.freeze({ __imp_graph_handle: true, __graph_id: id });
+	const handle = Object.freeze({
+		__imp_graph_handle: true,
+		__graph_id: id,
+		...publicFields,
+	});
 	_graphHandles.set(id, { id, kind, data, fingerprint });
 	return handle;
 }
@@ -166,6 +170,22 @@ export function tool(artifactHandle, opts = {}) {
 		`tool:${artifactRecord.fingerprint}:${_graphCanonical(options)}`,
 	);
 }
+
+function _nativeGraphTool(name, self = false) {
+	if (!self && (typeof name !== "string" || name.length === 0))
+		throw _graphError("native tool name must be a non-empty string");
+	return _graphHandle(
+		"native-tool",
+		Object.freeze({ name: self ? "imp" : name, self }),
+		`native-tool:${self ? "self" : name}`,
+		self ? {} : { __imp_native_tool: "native-tool", name },
+	);
+}
+
+// rules/imp owns the public policy API. These private constructors let that
+// module create native graph handles without exposing a second public core API.
+globalThis.__imp_graph_native_tool = (name) => _nativeGraphTool(name, false);
+globalThis.__imp_graph_self_tool = () => _nativeGraphTool("imp", true);
 
 function _semanticHandle(kind, name = null, path = null) {
 	return _graphHandle(
@@ -321,6 +341,22 @@ async function _graphResolveHandle(id, stack = []) {
 			if (kind === "config") return _graphLookup(_graphInvocation.config?.[name] ?? null, path);
 			throw _graphError(`unknown semantic input kind '${kind}'`);
 		}
+		case "native-tool": {
+			const descriptor = JSON.parse(
+				__host_graph_tool_descriptor(record.data.name, record.data.self),
+			);
+			return _graphBinding("tool", {
+				fingerprint: `native-tool:${descriptor.name}:${descriptor.key}`,
+				native: true,
+				name: descriptor.name,
+				cache: descriptor.cache,
+				key: descriptor.key,
+				path: descriptor.path,
+				binDirs: descriptor.binDirs,
+				options: Object.freeze({ binDirs: descriptor.binDirs }),
+				inputs: Object.freeze([]),
+			});
+		}
 		case "tool": {
 			const artifact = await _graphResolveHandle(record.data.artifact.__graph_id, nextStack);
 			return _graphBinding("tool", {
@@ -384,6 +420,7 @@ function _graphExec(record) {
 		tool(binding, executable) {
 			consume(binding);
 			if (binding.type !== "tool") throw _graphError("exec.tool() expects a tool input");
+			if (binding.native) return executable;
 			const binDirs = binding.options.binDirs || ["bin"];
 			const prefix = binDirs.length === 0 ? binding.path : `${binding.path}/${binDirs[0]}`;
 			return `${prefix}/${executable}`;
@@ -392,9 +429,33 @@ function _graphExec(record) {
 			if (!opts || typeof opts !== "object" || !Array.isArray(opts.argv))
 				throw _graphError("exec.action({ argv, ... }) requires an argv array");
 			const actionInputs = [];
+			const actionTools = [];
+			const addTool = (binding) => {
+				if (!binding || binding.__imp_graph_binding !== true || binding.type !== "tool")
+					throw _graphError("exec.action().tools expects resolved graph tool inputs");
+				if (!binding.native)
+					throw _graphError(
+						"exec.action().tools currently accepts native tool inputs; use exec.tool() for produced tools",
+					);
+				consume(binding);
+				actionTools.push({
+					name: binding.name,
+					cache: binding.cache,
+					key: binding.key,
+					path: binding.path,
+					binDirs: binding.binDirs,
+				});
+			};
+			for (const binding of opts.tools || []) addTool(binding);
 			for (const binding of consumed) _graphCollectActionInput(binding, actionInputs);
+			for (const binding of consumed) {
+				if (binding.native) addTool(binding);
+			}
 			consumed = new Set();
 			_graphCollectActionInput(opts.inputs, actionInputs);
+			const uniqueTools = Array.from(
+				new Map(actionTools.map((entry) => [`${entry.name}:${entry.key}`, entry])).values(),
+			);
 			const outputSpecs = [];
 			const outputNames = {};
 			for (const name of Object.keys(opts.outputs || {}).sort()) {
@@ -414,7 +475,7 @@ function _graphExec(record) {
 				env: opts.env,
 				inputs: actionInputs,
 				outputs: outputSpecs,
-				tools: opts.tools,
+				tools: uniqueTools,
 				allowFailure: opts.allowFailure,
 				impure: opts.cache === false || !record.cache,
 				forceCache: opts.forceCache,

@@ -56,17 +56,18 @@ symbols to output handles. The callback of a `task()` is lazy; it runs only
 when a selected root needs that handle.
 
 ```js
-import { BUILD, RUN, file, files, output, task, tool } from "imp:core";
+import { BUILD, RUN, files, output, task } from "imp:core";
+import { nativeTool } from "//rules/imp/native-tool";
 
 const sources = files({ include: ["src/**/*.rs", "Cargo.toml"] });
-const compiler = tool(file(".tools/rust/bin/rustc"));
+const compiler = nativeTool("rustc");
 
 const binary = task({
     inputs: { sources, compiler },
     outputs: { binary: output.artifact() },
     async run(exec, { sources, compiler }) {
         const result = await exec.action({
-            argv: [exec.tool(compiler), "src/main.rs", "-o", "bin/app"],
+            argv: [exec.tool(compiler, "rustc"), "src/main.rs", "-o", "bin/app"],
             inputs: [sources],
             outputs: { binary: output.file("bin/app") },
         });
@@ -90,6 +91,18 @@ handles, tool handles, and invocation-scoped `semantic` handles all use the
 same named `inputs` object. A task's identity includes only the handles it
 declares, so a task that does not depend on a mode or flag remains shareable
 across those values.
+
+`nativeTool(name)` and `impTool` from `//rules/imp/native-tool` and
+`//rules/imp/self-tool` are lazy tool handles. Consuming them with
+`exec.tool()` makes the resolved executable part of the action identity;
+passing native-tool inputs through `exec.action({ tools })` also exposes them
+on the sandboxed `PATH`. Acquisition helpers such as `downloadToolArtifact()`
+and `extractArchive()` return artifact handles immediately when given their
+graph forms, and own their standard host-tool dependencies.
+
+Modes and configuration are equally explicit. Put `semantic.mode("opt")` or
+`semantic.config("rust", "edition")` in only the tasks that read those values.
+Changing unrelated invocation context then leaves shared producers untouched.
 
 An action's named files and directories are normalized into independent CAS
 artifact roots. Downstream tasks consume those handles directly; action
