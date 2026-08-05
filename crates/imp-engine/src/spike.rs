@@ -2437,6 +2437,26 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_call_site_identity", host_call_site_identity)?;
 
     // ------------------------------------------------------------------
+    // __host_package_path(stack) → workspace-relative directory
+    //
+    // The graph API needs a BUILD-module-relative source root without
+    // exposing loader implementation details to JavaScript. Walk past core
+    // and rule implementation frames to the nearest workspace module, then
+    // derive its physical parent relative to the workspace root.
+    // ------------------------------------------------------------------
+    let package_path_root = workspace_root.clone();
+    let package_path_rules = rules_source.clone();
+    let host_package_path = Function::new(
+        ctx.clone(),
+        move |stack: String| -> rquickjs::Result<String> {
+            package_path_from_stack(&package_path_root, &package_path_rules, &stack).map_err(
+                |error| rquickjs::Error::new_loading_message("packagePath", format!("{error:#}")),
+            )
+        },
+    )?;
+    globals.set("__host_package_path", host_package_path)?;
+
+    // ------------------------------------------------------------------
     // __host_product(specJson, fn, registrationStack) — specJson carries
     // { kind, name, nameId, tool, toolId, module? } (one JSON param keeps
     // the closure within rquickjs's argument-tuple arity).
@@ -5092,6 +5112,56 @@ fn call_site_location(stack: &str) -> Option<String> {
     None
 }
 
+fn package_path_from_stack(
+    workspace_root: &Path,
+    rules_source: &RulesSource,
+    stack: &str,
+) -> Result<String> {
+    let mut saw_rule_module = false;
+    for line in stack.lines() {
+        let line = line.trim();
+        let rest = line.strip_prefix("at ").unwrap_or(line);
+        let location = match rest.rfind('(') {
+            Some(open) => rest[open + 1..].trim_end_matches(')'),
+            None => rest,
+        }
+        .trim();
+        let module = module_name_from_site(location);
+        if module == "imp:core" || !module.starts_with("//") {
+            continue;
+        }
+        if module.starts_with("//rules/") {
+            saw_rule_module = true;
+            continue;
+        }
+        let resolution = match resolve_workspace_module(workspace_root, rules_source, module) {
+            Ok(resolution) => resolution,
+            Err(_) => continue,
+        };
+        if resolution.kind != ModuleKind::Build {
+            continue;
+        }
+        let relative = resolution
+            .path
+            .parent()
+            .and_then(|parent| parent.strip_prefix(workspace_root).ok())
+            .ok_or_else(|| anyhow::anyhow!("calling module '{module}' is not in the workspace"))?;
+        if relative.as_os_str().is_empty() {
+            return Ok(".".to_owned());
+        }
+        return Ok(relative
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/"));
+    }
+    // Rule unit tests construct helpers outside a BUILD.js. Their existing
+    // explicit paths are workspace-relative, so retain that compatibility
+    // until those rulesets themselves move to graph construction.
+    if saw_rule_module {
+        return Ok(".".to_owned());
+    }
+    bail!("packagePath() requires a calling workspace BUILD module")
+}
+
 /// Rule group a product module belongs to — its first path segment under
 /// `//rules/`. Groups map onto the per-directory DOC.md guide tree, so they
 /// stay path-derived; tool identity, by contrast, is declared at product
@@ -7199,6 +7269,94 @@ export const bootstrap = { [BUILD]: build };
             .await
             .unwrap();
         assert_eq!(runs, 1);
+    }
+
+    #[tokio::test]
+    async fn graph_package_path_and_asset_sources_are_build_relative() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(&p.join("assets/ui.png"), "ui");
+        write_file(&p.join("assets/data/keep.txt"), "keep");
+        write_file(&p.join("assets/data/skip.txt"), "skip");
+        write_file(
+            &p.join("helpers/BUILD.js"),
+            r#"
+import { asset } from "//rules/asset";
+
+export function appAssets({ base }) {
+    return asset({ base, srcs: ["*.png"] });
+}
+"#,
+        );
+        write_file(
+            &p.join("assets/BUILD.js"),
+            r#"
+import { BUILD, output, packagePath, task } from "imp:core";
+import { resourcePackage } from "//rules/asset";
+import { appAssets } from "//helpers";
+
+globalThis.assetPackagePath = packagePath();
+const uiAsset = appAssets({ base: packagePath() });
+const resources = resourcePackage({
+    path: "data",
+    srcs: ["**/*.txt"],
+    exclude: ["skip.txt"],
+});
+const inspection = task({
+    inputs: { ui: uiAsset.sources, resources: resources.files },
+    outputs: { value: output.value() },
+    async run(exec, inputs) {
+        globalThis.assetGraphSources = {
+            ui: exec.paths(inputs.ui),
+            resources: exec.paths(inputs.resources),
+        };
+        return { value: null };
+    },
+});
+
+export const ui = uiAsset;
+export const inspect = { [BUILD]: inspection.outputs.value };
+"#,
+        );
+
+        let live = load_workspace_with_rules(p, RulesSource::directory(repo_rules_dir()))
+            .await
+            .unwrap();
+        run_goal_live(&live, p, "build", &["//assets:inspect".to_owned()])
+            .await
+            .unwrap();
+        let (package_path, sources_json) = live
+            .ctx
+            .async_with(async |ctx| {
+                Ok::<_, rquickjs::Error>((
+                    ctx.globals().get::<_, String>("assetPackagePath")?,
+                    ctx.eval::<String, _>("JSON.stringify(globalThis.assetGraphSources)")?,
+                ))
+            })
+            .await
+            .unwrap();
+        let sources: serde_json::Value = serde_json::from_str(&sources_json).unwrap();
+        assert_eq!(package_path, "assets");
+        assert_eq!(sources["ui"], serde_json::json!(["assets/ui.png"]));
+        assert_eq!(
+            sources["resources"],
+            serde_json::json!(["assets/data/keep.txt"])
+        );
+    }
+
+    #[test]
+    fn graph_package_path_rejects_non_workspace_callers() {
+        let root = tempfile::tempdir().unwrap();
+        let error = package_path_from_stack(
+            root.path(),
+            &RulesSource::none(),
+            "at packagePath (imp:core:1:1)\nat helper (native:1:1)",
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("requires a calling workspace BUILD module"));
     }
 
     #[tokio::test]
