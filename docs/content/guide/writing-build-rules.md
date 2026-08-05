@@ -4,49 +4,34 @@ weight = 3
 template = "page.html"
 +++
 
-A rule module exposes factories that synchronously return exported labels.
-Goals attach lazy handlers to those labels, while memoized functions and
-`run()` perform the actual work beneath each handler:
+A rule module exposes factories that synchronously construct immutable graph
+handles. A stamp rule is a small example: its output is a reusable file
+artifact, and the `BUILD` property makes that same artifact selectable.
 
 ```js
-import {
-    build,
-    extensible,
-    label,
-    memo,
-    output,
-    output_path,
-    run,
-} from "imp:core";
+import { BUILD, output, task } from "imp:core";
 
-const writeStampFile = memo(async function writeStampFile(stamp) {
-    const { output: outputPath, text } = stamp.data;
-    return run({
-        argv: [
-            "sh",
-            "-c",
-            'printf \'%s\\n\' "$2" > "$1"',
-            "imp-stamp",
-            output_path(outputPath),
-            text,
-        ],
-        outputs: [output(outputPath)],
-        materialize: true,
-        display: `write ${outputPath}`,
+export function stampFile({ output: path, text }) {
+    const stamp = task({
+        display: `write ${path}`,
+        inputs: { path, text },
+        outputs: { file: output.artifact() },
+        async run(exec, { path, text }) {
+            const result = await exec.action({
+                argv: ["sh", "-c", 'printf \'%s\\n\' "$2" > "$1"', "stamp", path, text],
+                outputs: { file: output.file(path) },
+            });
+            return { file: result.outputs.file };
+        },
     });
-});
-
-export const stampFile = extensible(function stampFile({ output, text }) {
-    const stamp = label({ data: { output, text } });
-    build(stamp, () => writeStampFile(stamp));
-    return stamp;
-});
+    return Object.freeze({ file: stamp.outputs.file, [BUILD]: stamp.outputs.file });
+}
 ```
 
-Export the returned label from a `BUILD.js` file to give it a selectable
-workspace address. The attached build handler does not run during module
-evaluation; it runs only when that label is selected for `imp build`.
-`extensible()` lets integrations attach additional handlers replayably.
+Export the returned object from a `BUILD.js` file to give it a selectable
+workspace address. Its task does not run during module evaluation; it runs
+only when that root or its `file` artifact is needed. The resulting artifact
+stays in the CAS rather than being written into the workspace.
 
 ## Handle graphs
 

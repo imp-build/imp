@@ -1,49 +1,36 @@
-import {
-	build as attachBuild,
-	extensible,
-	label,
-	memo,
-	output,
-	output_path,
-	run,
-} from "imp:core";
-
-const writeStampFile = memo(
-	async function writeStampFile(stamp) {
-		const { output: outputPath, text } = stamp.data;
-		return run({
-			argv: [
-				"sh",
-				"-c",
-				'printf \'%s\\n\' "$2" > "$1"',
-				"imp-stamp",
-				output_path(outputPath),
-				text,
-			],
-			outputs: [output(outputPath)],
-			materialize: true,
-			display: `write ${outputPath}`,
-		});
-	},
-	{ display: "build {0}", level: "info" },
-);
+import { BUILD, output, task } from "imp:core";
 
 /**
- * Declare a label that writes fixed text to an output file.
+ * Declare a graph artifact containing fixed text.
  *
- * @category target
+ * @category graph
  * @param {object} opts
  * @param {string} opts.output Workspace-relative output path.
  * @param {string} opts.text Text to write.
- * @returns {object} Label handle.
+ * @returns {{file: object, [BUILD]: object}} Produced file artifact and build root.
  */
-export const stampFile = extensible(function stampFile({
+export function stampFile({
 	output: outputPath,
 	text,
 }) {
-	const stamp = label({ data: { output: outputPath, text } });
-	attachBuild(stamp, async function buildStampFile() {
-		return writeStampFile(stamp);
+	const stamp = task({
+		display: `write ${outputPath}`,
+		inputs: { outputPath, text },
+		outputs: { file: output.artifact() },
+		async run(exec, { outputPath, text }) {
+			const result = await exec.action({
+				argv: [
+					"sh",
+					"-c",
+					'printf \'%s\\n\' "$2" > "$1"',
+					"imp-stamp",
+					outputPath,
+					text,
+				],
+				outputs: { file: output.file(outputPath) },
+			});
+			return { file: result.outputs.file };
+		},
 	});
-	return stamp;
-});
+	return Object.freeze({ file: stamp.outputs.file, [BUILD]: stamp.outputs.file });
+}
