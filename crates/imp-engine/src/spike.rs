@@ -3948,6 +3948,59 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_native_tool_artifact", host_native_tool_artifact)?;
 
+    // Resolve a graph-native tool lazily. The descriptor key includes the
+    // executable's canonical location and bytes, so action identity follows the
+    // actual selected tool rather than the ambient PATH string.
+    let service_graph_tool = Arc::clone(&service);
+    let host_graph_tool_descriptor = Function::new(
+        ctx.clone(),
+        move |name: String, self_tool: bool| -> rquickjs::Result<String> {
+            let resolved = if self_tool {
+                std::env::current_exe().map_err(|e| {
+                    rquickjs::Error::new_loading_message(
+                        "impTool",
+                        format!("resolve current executable: {e}"),
+                    )
+                })?
+            } else {
+                PathBuf::from(which_executable(&name).ok_or_else(|| {
+                    rquickjs::Error::new_loading_message(
+                        "nativeTool",
+                        format!("no '{name}' executable found on PATH"),
+                    )
+                })?)
+            };
+            let canonical = std::fs::canonicalize(&resolved).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    "nativeTool",
+                    format!("canonicalize {}: {e}", resolved.display()),
+                )
+            })?;
+            let content_digest = service_graph_tool.file_sha256(&canonical).map_err(|e| {
+                rquickjs::Error::new_loading_message("nativeTool", format!("{e:#}"))
+            })?;
+            let root = service_graph_tool
+                .register_native_tool(&name, &canonical)
+                .map_err(|e| {
+                    rquickjs::Error::new_loading_message("nativeTool", format!("{e:#}"))
+                })?;
+            let key = digest_json(&serde_json::json!({
+                "path": canonical,
+                "digest": content_digest,
+            }))
+            .map_err(|e| rquickjs::Error::new_loading_message("nativeTool", format!("{e:#}")))?;
+            serde_json::to_string(&serde_json::json!({
+                "name": name,
+                "cache": "native-tools",
+                "key": key,
+                "path": root,
+                "binDirs": ["."],
+            }))
+            .map_err(|e| rquickjs::Error::new_loading_message("nativeTool", format!("{e}")))
+        },
+    )?;
+    globals.set("__host_graph_tool_descriptor", host_graph_tool_descriptor)?;
+
     // __host_read_file(path) → string
     let exec_root_rf = Arc::clone(&exec_root);
     let wc_rf = workspace_root.clone();
@@ -7194,6 +7247,36 @@ export default { [BUILD]: second.outputs.copied };
             .unwrap();
         assert!(!p.join("scratch/value.txt").exists());
         assert!(!p.join("final/copied.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn graph_self_tool_executes_lazily() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, task } from "imp:core";
+import { impTool } from "//rules/imp/self-tool";
+
+const verify = task({
+    inputs: { imp: impTool },
+    async run(exec, input) {
+        await exec.action({
+            argv: [exec.tool(input.imp, "imp"), "--help"],
+        });
+    },
+});
+
+export default { [BUILD]: verify };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        run_goal_live(&live, p, "build", &["//".to_owned()])
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

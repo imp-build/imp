@@ -70,11 +70,11 @@ The public imp support APIs follow the same rule. Use
 `//rules/imp/test`, `//rules/imp/native-tool`, `//rules/imp/generate`,
 `//rules/imp/mode`, `//rules/imp/archive`, `//rules/imp/lockfile`, and
 `//rules/imp/self-tool` for their respective capabilities. `rulesTest()` is
-the selectable test label; the other modules provide serializable tool
-configuration, workspace configuration, or ordinary rule-author helpers.
-Constructing a `nativeTool()` specification has no effects. Resolving it with
-`nativeToolSpec()` inside a goal handler creates the memoized dependency and
-performs the host `PATH` lookup.
+the selectable TEST graph root; the other modules provide graph tools,
+workspace configuration, or ordinary rule-author helpers. `nativeTool()`
+returns a lazy graph handle: the host `PATH` lookup happens only when selected
+work consumes it. `nativeToolSpec()` remains temporarily for legacy `run()`
+consumers while built-in rulesets migrate.
 
 When moving a public module, update all first-party consumers in the same
 change. Remove the old deep import rather than leaving a compatibility shim:
