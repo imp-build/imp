@@ -436,9 +436,9 @@ export function namedCache(opts) {
  *   selection entirely — a selector-less invocation runs the callback with
  *   an empty selection (e.g. gen-builtin-lockfiles, which walks a registry
  *   instead of selected targets).
- * @returns {object} The product-name token for this goal's product; pass it
- *   to product() to register a target kind's implementation of the goal.
- *   Repeat registrations of the same goal return the same token.
+ * @returns {symbol} The workflow symbol for this goal. Use it as a computed
+ *   property on graph exports, or pass it to product() to register a legacy
+ *   target kind's implementation. Repeat registrations return the same symbol.
  */
 export function goal(name, fn, opts) {
 	if (typeof name !== "string" || name === "") {
@@ -468,7 +468,7 @@ export function goal(name, fn, opts) {
 		}
 		__host_goal_callback(name, fn);
 	}
-	return _mint_product_name_token(name, pid);
+	return _workflow_symbol(name, pid);
 }
 
 /**
@@ -1266,7 +1266,9 @@ export function selectedTargets(kind = undefined) {
  */
 export function resolveProducts(entry) {
 	let product = entry.product;
-	if (product && product.__imp_product_name === true) {
+	if (typeof product === "symbol" && _workflow_name_by_symbol.has(product)) {
+		product = _workflow_name_by_symbol.get(product);
+	} else if (product && product.__imp_product_name === true) {
 		product = product.name;
 	} else if (typeof product !== "string" || product === "") {
 		throw new Error(
@@ -1432,6 +1434,22 @@ export function targetRef(address) {
 
 const _declared_product_names = new Map(); // name → frozen token; persists across resetMemoState
 const _kind_class_by_name = new Map(); // kind string → Target subclass; persists across resetMemoState
+const _workflow_symbols = new Map();
+const _workflow_name_by_symbol = new Map();
+const _workflow_pid_by_symbol = new Map();
+
+function _workflow_symbol(name, pid) {
+	const existing = _workflow_symbols.get(name);
+	if (existing !== undefined) {
+		_workflow_pid_by_symbol.set(existing, pid);
+		return existing;
+	}
+	const symbol = Symbol.for(`imp.workflow.${name}`);
+	_workflow_symbols.set(name, symbol);
+	_workflow_name_by_symbol.set(symbol, name);
+	_workflow_pid_by_symbol.set(symbol, pid);
+	return symbol;
+}
 
 function _mint_product_name_token(name, pid) {
 	const existing = _declared_product_names.get(name);
@@ -1462,7 +1480,7 @@ export function productName(name) {
 
 function _builtin_product_name(name) {
 	const pid = __host_declare_product_name(name, "", true);
-	return _mint_product_name_token(name, pid);
+	return _workflow_symbol(name, pid);
 }
 
 const _declared_tool_names = new Map(); // name → frozen token; persists across resetMemoState
@@ -1504,9 +1522,9 @@ function _tool_name_of(value, api) {
 	);
 }
 
-/** Tokens for the built-in goals' products, plus the "toolchain" role used
- * by `imp @tool` dispatch. Import these instead of writing name literals:
- * `product(PythonApp, BUILD, fn)`. */
+/** Global workflow symbols for the built-in goals, plus the "toolchain" role
+ * used by `imp @tool` dispatch. They are accepted both as computed properties
+ * on graph exports and by the legacy product APIs. */
 export const BUILD = _builtin_product_name("build");
 export const TEST = _builtin_product_name("test");
 export const FMT = _builtin_product_name("fmt");
@@ -1518,6 +1536,12 @@ export const TOOLCHAIN = _builtin_product_name("toolchain");
 // Coerce a product-name argument to { name, pid }. Only declared tokens are
 // accepted — a bare string cannot prove its declaring module is loaded.
 function _product_name_of(value, api) {
+	if (typeof value === "symbol" && _workflow_name_by_symbol.has(value)) {
+		return {
+			name: _workflow_name_by_symbol.get(value),
+			pid: _workflow_pid_by_symbol.get(value),
+		};
+	}
 	if (value && value.__imp_product_name === true) {
 		return { name: value.name, pid: value.__pid };
 	}
@@ -2943,6 +2967,14 @@ globalThis.__imp_dispatch_label_handlers = _dispatch_label_handlers;
  * @returns {function} The same function, wrapped in memo().
  */
 export function expand(kindClass, fn, opts = {}) {
+	if (
+		arguments.length === 1 &&
+		kindClass &&
+		typeof kindClass === "object" &&
+		typeof kindClass.create === "function"
+	) {
+		return globalThis.__imp_graph_expand(kindClass);
+	}
 	const kind = _kind_of(kindClass, "expand()");
 	const memoized = memo(
 		fn,
@@ -3880,6 +3912,9 @@ function _run_dispatch(hostPayload, cacheable) {
 }
 
 export function run(opts) {
+	if (typeof _graphPhase !== "undefined" && _graphPhase === "expansion") {
+		throw new Error("graph: sandbox actions are not allowed while an expansion constructs graph nodes");
+	}
 	const contextEntry = _effective_context_entry(true);
 	const inputs = _materialise_inputs(opts.inputs);
 	const outputs = opts.outputs ?? [];
@@ -3931,6 +3966,10 @@ export function run(opts) {
 		allowFailure: opts.allowFailure,
 		materialize,
 		stream: opts.stream,
+		__graphOutputNames:
+			opts.__graphOutputNames === undefined
+				? undefined
+				: JSON.stringify(opts.__graphOutputNames),
 		__owner: owner,
 	};
 	// Mirrors exec.rs's own cacheable gate exactly: impure calls are meant to

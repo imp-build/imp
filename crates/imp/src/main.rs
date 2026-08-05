@@ -1567,10 +1567,15 @@ async fn cmd_targets(selectors: &[String], changed_since: Option<&str>, tree: &T
         scheduler::Scheduler::new(1, Arc::new(std::sync::atomic::AtomicBool::new(false)), tx);
     *workspace.scheduler.lock().unwrap() = Some(scheduler);
     tokio::spawn(async move { while events.recv().await.is_some() {} });
+    let legacy_selectors: Vec<String> = selectors
+        .iter()
+        .filter(|selector| !selector.contains('@'))
+        .cloned()
+        .collect();
     spike::ensure_discovered_labels(
         &workspace,
         &workspace_root,
-        selectors,
+        &legacy_selectors,
         None,
         &selector_context,
         changed_since.is_some(),
@@ -1608,13 +1613,17 @@ async fn cmd_targets(selectors: &[String], changed_since: Option<&str>, tree: &T
             }
         }
     } else {
+        let graph_roots = workspace
+            .workspace
+            .graph
+            .select_catalog(selectors, &selector_context)?;
         let labels = spike::select_labels_with_discovered_children_in(
             &discovered_workspace,
-            selectors,
+            &legacy_selectors,
             &selector_context,
         )?;
         let mut targets_by_address = std::collections::BTreeMap::new();
-        for selector in selectors {
+        for selector in &legacy_selectors {
             let single = std::slice::from_ref(selector);
             match selector::select_targets_in(&discovered_workspace, single, &selector_context) {
                 Ok(targets) => {
@@ -1629,6 +1638,7 @@ async fn cmd_targets(selectors: &[String], changed_since: Option<&str>, tree: &T
                         &selector_context,
                     )?
                     .is_empty()
+                        && graph_roots.is_empty()
                     {
                         return Err(error);
                     }
@@ -1638,6 +1648,7 @@ async fn cmd_targets(selectors: &[String], changed_since: Option<&str>, tree: &T
         let targets = targets_by_address.into_values().collect::<Vec<_>>();
         spike::format_targets(&targets, &mut out)?;
         spike::format_labels(&discovered_workspace, &labels, &mut out)?;
+        spike::format_graph_roots(&graph_roots, &mut out)?;
     }
     *workspace.scheduler.lock().unwrap() = None;
     print!("{out}");
