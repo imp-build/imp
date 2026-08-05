@@ -12,7 +12,7 @@ use crate::spike::{BUILD_FILE, WORKSPACE_FILE};
 /// The built-in `imp:core` module exposed to every plugin and BUILD file.
 /// Unlike the rule library this is the engine's own source, so it stays
 /// compiled in.
-pub const CORE_JS: &str = include_str!("imp_core.js");
+pub const CORE_JS: &str = concat!(include_str!("imp_core.js"), include_str!("graph_core.js"));
 
 /// Environment variable that points `//rules/...` at an on-disk directory,
 /// overriding the tree shipped alongside the executable — for developing

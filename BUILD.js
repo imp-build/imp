@@ -11,12 +11,15 @@ export const generated_stamp = stampFile({
     text: "imp build ran",
 });
 
-// crates/imp-engine/src/loader.rs embeds imp_core.js at compile time via
+// crates/imp-engine/src/loader.rs embeds the core JS files at compile time via
 // include_str! — cargoPackage's own sources() only globs
 // Cargo.toml/Cargo.lock/**/*.rs, so it needs declaring as a resource dep for
 // the sandboxed build to see it too.
 export const engineAssets = resourcePackage({
-    srcs: ["crates/imp-engine/src/imp_core.js"],
+    srcs: [
+        "crates/imp-engine/src/imp_core.js",
+        "crates/imp-engine/src/graph_core.js",
+    ],
 });
 
 // The rule library is NOT compiled into the binary — it ships beside it and is
