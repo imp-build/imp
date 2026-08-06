@@ -13,7 +13,6 @@
 // summarized before any unformatted file turns into a thrown error, so a
 // single formatter failing to compile shouldn't hide the report for every
 // other target.
-export { odinfmt } from "//rules/odin/odinfmt";
 export { rustfmt } from "//rules/rust/rustfmt";
 export { pythonAppFmt } from "//rules/python/ruff/fmt";
 export { biomeFmtRoot } from "//rules/js/biome/fmt";

@@ -7,7 +7,13 @@
 // owns the common policy: every program is impure, runs in a sandbox, starts
 // in the real workspace, and receives the CLI tail after `--`.
 
-import { goal, resolveProducts, runArgs, runFromTemplate } from "imp:core";
+import {
+	goal,
+	resolveProducts,
+	runArgs,
+	runFromTemplate,
+	writeWorkspace,
+} from "imp:core";
 
 export function requireSingleRunnable(selection) {
 	if (selection.length !== 1) {
@@ -40,4 +46,23 @@ export async function runGoal(selection) {
 	}
 }
 
-goal("run", runGoal);
+export async function graphRunGoal(roots) {
+	if (roots.length !== 1) {
+		throw new Error(`run requires a single target, got ${roots.length}: ${roots.map((root) => root.address).join(", ")}`);
+	}
+	const { address, result } = roots[0];
+	const executable = result?.executable || result;
+	const executablePath = result?.executablePath || executable?.path;
+	if (!executable?.digest || typeof executablePath !== "string") {
+		throw new Error(`${address}: run graph root must return an executable artifact`);
+	}
+	const slug = address.replace(/^\/\//, "").replace(/[:/]/g, "_") || "root";
+	const root = `.imp/runs/${slug}`;
+	writeWorkspace(root, executable.digest, { from: executablePath });
+	return runFromTemplate(
+		{ argv: [`${root}/${executablePath}`], display: `run ${address}` },
+		{ args: runArgs(), sandbox: true, workspaceCwd: true, impure: true, stream: true },
+	);
+}
+
+goal("run", runGoal, { graph: graphRunGoal });

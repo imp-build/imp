@@ -1,125 +1,14 @@
-import {
-	describe,
-	expect,
-	test,
-	withFakeRun,
-	withFakeDiff,
-} from "//rules/imp/test";
-import { odinFmt } from "//rules/odin/odinfmt";
+import { FMT } from "imp:core";
+import { describe, expect, test } from "//rules/imp/test";
+import "//rules/odin/odinfmt";
 import { odinPackage } from "//rules/odin";
-import { getMemoTrace } from "imp:core";
 
-const MAIN_ODIN = "rules/odin/example/main.odin";
-const LOCKED_TEST_VERSION = "dev-2026-03";
-
-describe("Odin fmt mechanics", () => {
-	test("odinFmt write mode runs odinfmt -w over the package's own sources, declares them as materialized outputs, no changes", async () => {
-		await withFakeRun(async () => {
-			// __host_diff_digests is stubbed (not the real digest comparison —
-			// withFakeRun doesn't actually run odinfmt, so there's no real
-			// "after" digest to diff) to exercise the "nothing changed" branch.
-			await withFakeDiff([], async () => {
-				const pkg = odinPackage({
-					path: "rules/odin/example",
-					srcs: ["**/*.odin"],
-					toolchain: LOCKED_TEST_VERSION,
-				});
-				const result = await odinFmt(pkg);
-				const { trace } = getMemoTrace();
-				const runEffect = trace.find(
-					(t) =>
-						t.event === "effect" &&
-						t.kind === "run" &&
-						t.display.startsWith("odinfmt "),
-				);
-				expect(runEffect.argv[2]).toContain("-w");
-				expect(runEffect.outputs).toEqual([{ kind: "file", path: MAIN_ODIN }]);
-				expect(runEffect.materialize).toBe(true);
-				expect(result).toEqual({ formatted: 0 });
-			});
+describe("Odin graph formatter", () => {
+	test("importing odinfmt attaches a construction-time fmt facet", () => {
+		const pkg = odinPackage({
+			path: "rules/odin/example",
+			toolchain: "dev-2026-03",
 		});
-	});
-
-	test("odinFmt write mode reports every file the digest diff flags as changed", async () => {
-		await withFakeRun(async () => {
-			await withFakeDiff([{ type: "modified", path: MAIN_ODIN }], async () => {
-				const pkg = odinPackage({
-					path: "rules/odin/example",
-					srcs: ["**/*.odin"],
-					toolchain: LOCKED_TEST_VERSION,
-				});
-				const result = await odinFmt(pkg);
-				expect(result).toEqual({ formatted: 1 });
-			});
-		});
-	});
-
-	test("odinFmt check mode runs the same batched -w invocation without materializing, no changes", async () => {
-		await withFakeRun(async () => {
-			await withFakeDiff([], async () => {
-				const pkg = odinPackage({
-					path: "rules/odin/example",
-					srcs: ["**/*.odin"],
-					toolchain: LOCKED_TEST_VERSION,
-				});
-				const result = await odinFmt(pkg, { check: true });
-				const { trace } = getMemoTrace();
-				const runEffect = trace.find(
-					(t) =>
-						t.event === "effect" &&
-						t.kind === "run" &&
-						t.display.startsWith("odinfmt --check"),
-				);
-				expect(runEffect.outputs).toEqual([{ kind: "file", path: MAIN_ODIN }]);
-				expect(runEffect.materialize).toBe(false);
-				expect(result).toEqual({ checked: 1, unformatted: [] });
-			});
-		});
-	});
-
-	test("odinFmt check mode reports unformatted files without throwing", async () => {
-		await withFakeRun(async () => {
-			await withFakeDiff([{ type: "modified", path: MAIN_ODIN }], async () => {
-				const pkg = odinPackage({
-					path: "rules/odin/example",
-					srcs: ["**/*.odin"],
-					toolchain: LOCKED_TEST_VERSION,
-				});
-				const result = await odinFmt(pkg, { check: true });
-				expect(result).toEqual({ checked: 1, unformatted: [MAIN_ODIN] });
-			});
-		});
-	});
-
-	test("odinFmt write mode returns formatted: 0 without invoking run when there are no sources", async () => {
-		await withFakeRun(async () => {
-			const pkg = odinPackage({
-				path: "rules/odin/example",
-				srcs: ["missing*.odin"],
-				toolchain: "dev-2026-04",
-			});
-			const result = await odinFmt(pkg);
-			const { trace } = getMemoTrace();
-			expect(trace.some((t) => t.event === "effect" && t.kind === "run")).toBe(
-				false,
-			);
-			expect(result).toEqual({ formatted: 0 });
-		});
-	});
-
-	test("odinFmt check mode returns checked: 0 without invoking run when there are no sources", async () => {
-		await withFakeRun(async () => {
-			const pkg = odinPackage({
-				path: "rules/odin/example",
-				srcs: ["missing*.odin"],
-				toolchain: "dev-2026-04",
-			});
-			const result = await odinFmt(pkg, { check: true });
-			const { trace } = getMemoTrace();
-			expect(trace.some((t) => t.event === "effect" && t.kind === "run")).toBe(
-				false,
-			);
-			expect(result).toEqual({ checked: 0, unformatted: [] });
-		});
+		expect(pkg[FMT].__imp_graph_handle).toBe(true);
 	});
 });

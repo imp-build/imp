@@ -77,7 +77,7 @@ export function graphFmtGoal(roots) {
 				});
 			}
 			summaryLines.push(
-				`- ${address}: formatted ${result.paths.length} JS/TS source(s)`,
+				`- ${address}: formatted ${result.paths.length} source(s)`,
 			);
 		}
 	}

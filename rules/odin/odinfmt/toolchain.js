@@ -9,6 +9,7 @@ import {
 	cacheHas,
 	toolName,
 	group,
+	tool as graphTool,
 } from "imp:core";
 
 import {
@@ -52,7 +53,7 @@ function odinfmtCacheKey(version, plat) {
 	return `${version}/${plat.os}-${plat.arch}`;
 }
 
-function odinfmtCommandName(plat) {
+export function odinfmtCommandName(plat) {
 	const triple = olsTriple(plat);
 	return `odinfmt-${triple}${plat.os === "windows" ? ".exe" : ""}`;
 }
@@ -108,6 +109,7 @@ function coreToolNames(plat) {
 }
 
 let coreToolHandles = null;
+let graphToolchains = new Map();
 
 function ensureCoreTools() {
 	if (!coreToolHandles) {
@@ -140,6 +142,29 @@ export async function odinfmtTool(version) {
 		// archive root; invoke it by that name (JS has no rename primitive).
 		command: odinfmtCommandName(plat),
 	};
+}
+
+/** Build odinfmt from its verified OLS archive as a graph tool. */
+export function odinfmtGraphTool(version) {
+	const resolved = resolveOdinToolchainVersion(version);
+	const plat = platformInfo();
+	const archive = downloadToolArtifact({
+		lockfile: ODINFMT_LOCKFILE,
+		tool: "odinfmt",
+		version: resolved,
+		plat,
+		url: odinfmtDownloadUrl(resolved, plat),
+		output: `odinfmt-downloads/${odinfmtCacheKey(resolved, plat)}/${odinfmtArtifactName(resolved, plat)}`,
+		display: `download odinfmt ${resolved} (${plat.os}/${plat.arch})`,
+		unverified: OdinfmtToolchain.resolveUnverified(resolved),
+	});
+	const directory = extractArchive({
+		archive,
+		dest: "odinfmt-toolchain",
+		format: plat.os === "windows" ? "zip" : "zip-unix",
+		display: `install odinfmt ${resolved} (${plat.os}/${plat.arch})`,
+	});
+	return graphTool(directory, { binDirs: ["."] });
 }
 
 /**
@@ -227,6 +252,7 @@ export class OdinfmtToolchain extends Toolchain {
 export function __resetOdinfmtToolchainStateForTest() {
 	OdinfmtToolchain.clearDefault();
 	coreToolHandles = null;
+	graphToolchains = new Map();
 }
 
 /**
@@ -242,10 +268,14 @@ export function __resetOdinfmtToolchainStateForTest() {
  * @returns {object} Target handle for this odinfmt toolchain.
  */
 export function odinfmtToolchain(version, opts = {}) {
-	return new OdinfmtToolchain(
+	new OdinfmtToolchain(
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	const resolved = resolveOdinToolchainVersion(version);
+	const tool = odinfmtGraphTool(resolved);
+	graphToolchains.set(resolved, tool);
+	return tool;
 }
 
 /**
@@ -254,7 +284,11 @@ export function odinfmtToolchain(version, opts = {}) {
  * @returns {object|null}
  */
 export function defaultOdinfmtToolchain() {
-	return OdinfmtToolchain.default();
+	const version = OdinfmtToolchain.defaultVersion();
+	const resolved = version ? resolveOdinToolchainVersion(version) : null;
+	return resolved
+		? (graphToolchains.get(resolved) ?? odinfmtGraphTool(resolved))
+		: null;
 }
 
 // Odinfmt follows the default Odin compiler version when no explicit version
