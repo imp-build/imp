@@ -34,7 +34,7 @@ import "//rules/imp/test";
 export const biome = defaultBiomeToolchain();
 export const gcc = defaultGccToolchain();
 export const mold = defaultMoldToolchain();
-export const odin = odinToolchain("dev-2026-03", {
+export const odinToolchainDefault = odinToolchain("dev-2026-03", {
 	default: true,
 	linker: mold,
 });

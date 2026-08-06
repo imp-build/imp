@@ -12,6 +12,8 @@ import {
 	cacheHas,
 	toolName,
 	group,
+	task,
+	tool as graphTool,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -157,6 +159,55 @@ export function gccToolchain(version, opts = {}) {
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+}
+
+/** Build the managed GCC distribution as a graph-native tool. */
+export function gccGraphTool(version) {
+	const resolved = GccToolchain.requireVersion(version);
+	const plat = platformInfo();
+	const archive = downloadToolArtifact({
+		lockfile: GCC_LOCKFILE,
+		tool: "gcc",
+		version: resolved,
+		plat,
+		url: gccDownloadUrl(resolved, plat),
+		output: `gcc-downloads/${gccCacheKey(resolved, plat)}/${gccArtifactName(resolved, plat)}`,
+		display: `download gcc ${resolved} (${plat.os}/${plat.arch})`,
+		unverified: GccToolchain.resolveUnverified(resolved),
+	});
+	const shell = nativeTool("sh");
+	const mkdir = nativeTool("mkdir");
+	const tar = nativeTool("tar");
+	const xz = nativeTool("xz");
+	const chmod = nativeTool("chmod");
+	const directory = task({
+		display: `install gcc ${resolved} (${plat.os}/${plat.arch})`,
+		inputs: { archive, shell, mkdir, tar, xz, chmod },
+		outputs: { directory: output.artifact() },
+		async run(exec, inputs) {
+			const result = await exec.action({
+				argv: [
+					exec.tool(inputs.shell, "sh"),
+					"-c",
+					'archive=$1; out=$2; prefix=$3; mkdir -p "$out" && tar -xJf "$archive" -C "$out" --strip-components=1 && for name in clang cc; do printf \'%s\\n\' \'#!/bin/sh\' "exec \\"\\${0%/*}/$prefix-gcc\\" \\"\\$@\\"" > "$out/bin/$name"; chmod +x "$out/bin/$name"; done',
+					"gcc-install",
+					exec.path(inputs.archive),
+					"gcc-toolchain",
+					GCC_EXE_PREFIX[plat.arch],
+				],
+				tools: [
+					inputs.shell,
+					inputs.mkdir,
+					inputs.tar,
+					inputs.xz,
+					inputs.chmod,
+				],
+				outputs: { directory: output.directory("gcc-toolchain") },
+			});
+			return { directory: result.outputs.directory };
+		},
+	}).outputs.directory;
+	return graphTool(directory, { binDirs: ["bin"] });
 }
 
 /**

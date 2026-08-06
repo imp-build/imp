@@ -43,6 +43,33 @@ export async function lintGoal(selection) {
 	}
 }
 
+/** Report graph lint roots using the same result contract as legacy linters. */
+export function graphLintGoal(roots) {
+	const results = roots.map(({ address, result }) => ({
+		address,
+		...(result?.result || result),
+	}));
+	for (const { address, output } of results) {
+		if (output) logInfo(`${address}:\n${output}`);
+	}
+	const fixed = results.filter((result) => result.fixApplied);
+	if (fixed.length > 0) {
+		logInfo(
+			`lint --fix: ${fixed.map((result) => result.address).join(", ")} had fixes applied`,
+		);
+	}
+	const failed = results.filter((result) => !result.ok);
+	logInfo(
+		`lint: ${results.length - failed.length}/${results.length} target(s) clean`,
+	);
+	if (failed.length > 0) {
+		throw new Error(
+			`lint failed: ${failed.map((result) => result.address).join(", ")}`,
+		);
+	}
+}
+
 goal("lint", lintGoal, {
+	graph: graphLintGoal,
 	flags: { fix: { description: "Automatically fix what can be fixed" } },
 });

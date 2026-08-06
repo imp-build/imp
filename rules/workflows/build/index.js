@@ -16,7 +16,7 @@
 // paths it used to print. Getting real files out of a target is `package`'s
 // job (writeWorkspace to dist/), the only goal that still writes.
 
-import { goal, logInfo, resolveProducts } from "imp:core";
+import { goal, logInfo, resolveProducts, writeWorkspace } from "imp:core";
 
 export async function buildGoal(selection) {
 	const resolved = selection.flatMap(resolveProducts);
@@ -38,4 +38,12 @@ export async function buildGoal(selection) {
 	}
 }
 
-goal("build", buildGoal);
+/** Materialize source-generation graph roots while ordinary builds remain CAS-only. */
+export function graphBuildGoal(roots) {
+	for (const { result } of roots) {
+		if (!result?.generated || typeof result.path !== "string") continue;
+		writeWorkspace(result.path, result.generated.digest, { from: result.path });
+	}
+}
+
+goal("build", buildGoal, { graph: graphBuildGoal });
