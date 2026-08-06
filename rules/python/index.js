@@ -15,6 +15,10 @@ export {
 	pythonTest,
 	registerPythonAppHook,
 } from "//rules/python/graph";
+export {
+	defaultPythonRuntimeVersion,
+	pythonRuntime,
+} from "//rules/python/runtime";
 
 export {
 	acquireUvToolchain,
