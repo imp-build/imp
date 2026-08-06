@@ -38,8 +38,7 @@ describe("ruff toolchain", () => {
 		return withRuffHost((host) => {
 			const toolchain = ruffToolchain("0.15.21", { default: true });
 
-			expect(toolchain.__imp).toBe(true);
-			expect(toolchain.attrs.version).toBe("0.15.21");
+			expect(toolchain.__imp_graph_handle).toBe(true);
 			expect(defaultRuffToolchainVersion()).toBe("0.15.21");
 			expect(defaultRuffToolchain()).toBe(toolchain);
 			expect(

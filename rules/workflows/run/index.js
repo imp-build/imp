@@ -12,6 +12,7 @@ import {
 	resolveProducts,
 	runArgs,
 	runFromTemplate,
+	runTemplate,
 	writeWorkspace,
 } from "imp:core";
 
@@ -51,6 +52,9 @@ export async function graphRunGoal(roots) {
 		throw new Error(`run requires a single target, got ${roots.length}: ${roots.map((root) => root.address).join(", ")}`);
 	}
 	const { address, result } = roots[0];
+	// A graph-native run root may already have executed its program as an
+	// uncached task (for example when a runtime tool must wrap an artifact).
+	if (result === undefined || (result && Object.keys(result).length === 0)) return;
 	const executable = result?.executable || result;
 	const executablePath = result?.executablePath || executable?.path;
 	if (!executable?.digest || typeof executablePath !== "string") {
@@ -58,9 +62,10 @@ export async function graphRunGoal(roots) {
 	}
 	const slug = address.replace(/^\/\//, "").replace(/[:/]/g, "_") || "root";
 	const root = `.imp/runs/${slug}`;
-	writeWorkspace(root, executable.digest, { from: executablePath });
+	const executableFile = `${root}/${executablePath}`;
+	writeWorkspace(executableFile, executable.digest, { from: executablePath });
 	return runFromTemplate(
-		{ argv: [`${root}/${executablePath}`], display: `run ${address}` },
+		runTemplate({ argv: [executableFile], display: `run ${address}` }),
 		{ args: runArgs(), sandbox: true, workspaceCwd: true, impure: true, stream: true },
 	);
 }

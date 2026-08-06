@@ -14,6 +14,7 @@
 // single formatter failing to compile shouldn't hide the report for every
 // other target.
 export { rustfmt } from "//rules/rust/rustfmt";
-export { pythonAppFmt } from "//rules/python/ruff/fmt";
+import "//rules/python/ruff/fmt";
+export { ruffFmtRoot } from "//rules/python/ruff_graph";
 export { biomeFmtRoot } from "//rules/js/biome/fmt";
 export { fmtGoal } from "//rules/workflows/fmt_goal";
