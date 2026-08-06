@@ -3,6 +3,8 @@ import { BUILD, files, packagePath, registerBuildRule } from "imp:core";
 // Kept until generated legacy BUILD files have migrated (#39).
 registerBuildRule({ rule: "jsSources", importFrom: "//rules/js" });
 
+export { jsApp, registerJsAppHook, tsApp } from "//rules/js/graph";
+
 const JS_SOURCE_INCLUDES = [
 	"package.json",
 	"*.js",
@@ -45,3 +47,9 @@ export function jsSources({ src = ".", base = packagePath() } = {}) {
 		Object.assign(value, hook(Object.freeze({ ...value })));
 	return Object.freeze(value);
 }
+
+import "//rules/workflows/build";
+import "//rules/workflows/run";
+
+registerBuildRule({ rule: "jsApp", importFrom: "//rules/js" });
+registerBuildRule({ rule: "tsApp", importFrom: "//rules/js" });
