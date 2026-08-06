@@ -87,7 +87,7 @@ describe("python sources", () => {
 					sourceFiles: ["rules/python/example/src/hello/__main__.py"],
 					pythonVersion: runtime.attrs.version,
 					project,
-					projectPath: project.data.path,
+					projectPath: project.path,
 				},
 			};
 

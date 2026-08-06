@@ -44,7 +44,7 @@ export const ml = pythonResolve({
 });
 ```
 
-Then attach it to targets; the resolve supplies their project path (so do not
+Then pass it to targets; the resolve supplies their project path (so do not
 also set `src`):
 
 ```js
@@ -68,8 +68,7 @@ defineProfile("cu124", { python: "cu124" });
 ## Declare an application and tests
 
 ```js
-import { pythonApp } from "//rules/python";
-import { pythonTest } from "//rules/python/test";
+import { pythonApp, pythonTest } from "//rules/python";
 
 export const app = pythonApp({
     entryPoint: "acme.__main__",
@@ -87,9 +86,9 @@ becomes the PEX entry point, while `extraPexArgs` is available for PEX options
 that do not yet have a dedicated field.
 
 `pythonTest` is intentionally separate from `pythonApp`: it does not build a
-PEX first, and its `testArgs` are appended to `python -m pytest`. Test runs are
-impure so an unchanged previous success is never replayed as the current test
-result.
+PEX first, and its `testArgs` are appended to `python -m pytest`. Successful
+test tasks are reused when their inputs match; failures produce no cached
+result and run again next time.
 
 ## Run source files
 
@@ -106,7 +105,9 @@ export const scripts = pythonSources({
 });
 ```
 
-Each direct match is lazily expanded into one `python-source` target. Run it
+Each direct match is lazily expanded into one `python-source` target. This is
+the remaining discovery-backed compatibility bridge while graph-root selection
+is designed in #8. Run it
 by file path, including arguments after `--`:
 
 ```sh
@@ -157,6 +158,6 @@ imp package //services/acme:app
 
 `build` captures the generated `.pex` as a build artifact without writing it
 into the source tree. `package` publishes it below
-`dist/services/acme/app`. Formatting and linting currently apply to targets
-declared with `pythonApp()`; select the application target when checking the
-project's Python files.
+`dist/services/acme/app`. Formatting and linting are graph facets attached at
+construction time by importing the Ruff extensions; select the application
+target when checking the project's Python files.

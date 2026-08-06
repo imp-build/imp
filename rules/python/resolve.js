@@ -2,7 +2,7 @@
 // uv owns the lockfile format and resolver; imp only selects one declared
 // optional-dependency flavor when it synchronizes that environment.
 
-import { defineModeAxis, label, modeAxis } from "imp:core";
+import { defineModeAxis, modeAxis } from "imp:core";
 
 // Unlike a platform axis, dependency flavors are project-defined. Keep this
 // free-form so a workspace may name them cpu, cu124, rocm, internal, etc.
@@ -70,27 +70,22 @@ function normalize_flavors(flavors) {
 /**
  * Declare a locked uv project and its selectable optional-dependency flavors.
  *
- * A resolve is a handleless label: it is addressable (exportable from a
- * BUILD.js) and other labels reference it via `.data`, but it attaches no
- * goal handlers of its own — a `pythonApp()`/`pythonTest()`/`pythonSources()`
- * label reads its `path`/`flavors` directly rather than the engine tracking
- * a declared dependency edge. The selected flavor is `default` unless the
- * resolve declares more than one flavor, in which case
- * `--axis python=<name>` (or a named profile) selects it.
+ * A resolve is immutable configuration shared by Python declarations. The
+ * graph tasks consume its path and flavors explicitly; the selected flavor is
+ * still `default` unless `--axis python=<name>` (or a profile) selects one.
  */
 export function pythonResolve({ path = ".", flavors = { default: {} } } = {}) {
-	return label({
-		data: {
-			path: normalize_workspace_path(path),
-			flavors: normalize_flavors(flavors),
-		},
+	return Object.freeze({
+		__python_resolve: true,
+		path: normalize_workspace_path(path),
+		flavors: normalize_flavors(flavors),
 	});
 }
 
 /** Return the uv sync arguments for this resolve under the active mode. */
 export function pythonResolveSyncArgs(resolve) {
 	if (!resolve) return [];
-	const flavors = resolve.data?.flavors;
+	const flavors = resolve?.flavors;
 	if (!flavors || typeof flavors !== "object") {
 		throw new Error("python target resolve must be a pythonResolve() label");
 	}
@@ -99,7 +94,7 @@ export function pythonResolveSyncArgs(resolve) {
 	const config = flavors[flavor];
 	if (!config) {
 		throw new Error(
-			`python resolve at '${resolve.data.path}' does not define flavor '${flavor}' (available: ${Object.keys(flavors).join(", ")})`,
+			`python resolve at '${resolve.path}' does not define flavor '${flavor}' (available: ${Object.keys(flavors).join(", ")})`,
 		);
 	}
 	return config.extra ? ["--extra", config.extra] : [];
