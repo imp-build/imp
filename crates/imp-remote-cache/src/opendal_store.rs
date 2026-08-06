@@ -5,9 +5,15 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures::stream::{self, StreamExt};
 use opendal::{Error as OpendalError, ErrorKind, Operator};
 
 use crate::{Digest, RemoteStore};
+
+/// Cap on in-flight requests per batch call. This isn't a general-purpose
+/// object store client — just enough to stop serializing what's usually a
+/// handful of blobs per task, without hammering GitHub's cache API.
+const MAX_CONCURRENT_REQUESTS: usize = 16;
 
 pub struct OpendalRemoteStore {
     op: Operator,
@@ -46,45 +52,54 @@ fn immutable_write_outcome(outcome: std::result::Result<(), OpendalError>) -> Re
 #[async_trait]
 impl RemoteStore for OpendalRemoteStore {
     async fn find_missing_blobs(&self, digests: &[Digest]) -> Result<Vec<Digest>> {
-        let mut missing = Vec::new();
-        for digest in digests {
-            let present = self
-                .op
-                .exists(&cas_path(digest))
-                .await
-                .with_context(|| format!("check existence of blob {}", digest.hash))?;
-            if !present {
-                missing.push(digest.clone());
-            }
-        }
-        Ok(missing)
+        let present: Vec<Option<Digest>> = stream::iter(digests.to_vec())
+            .map(|digest| async move {
+                let present = self
+                    .op
+                    .exists(&cas_path(&digest))
+                    .await
+                    .with_context(|| format!("check existence of blob {}", digest.hash))?;
+                Ok::<_, anyhow::Error>(if present { None } else { Some(digest) })
+            })
+            .buffer_unordered(MAX_CONCURRENT_REQUESTS)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        Ok(present.into_iter().flatten().collect())
     }
 
     async fn batch_update_blobs(
         &self,
         blobs: Vec<(Digest, Vec<u8>)>,
     ) -> Result<Vec<(Digest, Result<()>)>> {
-        let mut results = Vec::with_capacity(blobs.len());
-        for (digest, bytes) in blobs {
-            let write = self.op.write(&cas_path(&digest), bytes).await.map(|_| ());
-            let outcome = immutable_write_outcome(write)
-                .with_context(|| format!("upload blob {}", digest.hash));
-            results.push((digest, outcome));
-        }
+        let results = stream::iter(blobs)
+            .map(|(digest, bytes)| async move {
+                let write = self.op.write(&cas_path(&digest), bytes).await.map(|_| ());
+                let outcome = immutable_write_outcome(write)
+                    .with_context(|| format!("upload blob {}", digest.hash));
+                (digest, outcome)
+            })
+            .buffer_unordered(MAX_CONCURRENT_REQUESTS)
+            .collect()
+            .await;
         Ok(results)
     }
 
     async fn batch_read_blobs(&self, digests: &[Digest]) -> Result<Vec<(Digest, Result<Vec<u8>>)>> {
-        let mut results = Vec::with_capacity(digests.len());
-        for digest in digests {
-            let outcome = self
-                .op
-                .read(&cas_path(digest))
-                .await
-                .map(|buffer| buffer.to_vec())
-                .with_context(|| format!("download blob {}", digest.hash));
-            results.push((digest.clone(), outcome));
-        }
+        let results = stream::iter(digests.to_vec())
+            .map(|digest| async move {
+                let outcome = self
+                    .op
+                    .read(&cas_path(&digest))
+                    .await
+                    .map(|buffer| buffer.to_vec())
+                    .with_context(|| format!("download blob {}", digest.hash));
+                (digest, outcome)
+            })
+            .buffer_unordered(MAX_CONCURRENT_REQUESTS)
+            .collect()
+            .await;
         Ok(results)
     }
 

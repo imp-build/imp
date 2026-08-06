@@ -1875,8 +1875,10 @@ struct RegisterGlobalsArgs {
 
 /// Translate a completed action's `CacheOutcome` into the generic
 /// cache-hit-source/remote-write telemetry the scheduler's event stream
-/// carries, so the live summary can report a local/remote hit breakdown and a
-/// remote-cache write count regardless of which `ExecutionService` ran it.
+/// carries, so the live summary can report a local/remote hit breakdown
+/// regardless of which `ExecutionService` ran it. Remote-cache *write*
+/// telemetry is tracked separately (`imp_execution::remote_cache::confirmed_pushes`)
+/// since a background push can outlive this task's own completion.
 fn report_cache_telemetry(
     run_context: &imp_scheduler::RunContext,
     cache_outcome: imp_exec_api::CacheOutcome,
@@ -1888,8 +1890,7 @@ fn report_cache_telemetry(
         imp_exec_api::CacheOutcome::HitRemote => {
             run_context.report_cache_source(imp_scheduler::CacheSource::Remote)
         }
-        imp_exec_api::CacheOutcome::FreshPushed => run_context.report_remote_cache_write(),
-        imp_exec_api::CacheOutcome::Fresh => {}
+        imp_exec_api::CacheOutcome::Fresh | imp_exec_api::CacheOutcome::FreshPushed => {}
     }
 }
 
@@ -4335,14 +4336,12 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                         outcome: imp_scheduler::TaskOutcome::Ok,
                         cached: None,
                         cache_source: None,
-                        remote_cache_write: false,
                     },
                     "fail" => imp_scheduler::TaskEvent::Done {
                         id,
                         outcome: imp_scheduler::TaskOutcome::Err(display.unwrap_or_default()),
                         cached: None,
                         cache_source: None,
-                        remote_cache_write: false,
                     },
                     _ => return Ok(()),
                 };

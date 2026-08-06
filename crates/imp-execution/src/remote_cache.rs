@@ -11,6 +11,7 @@
 //! change `action_digest`/`task_key` for any task, and does not invalidate
 //! existing cache entries.
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, OnceLock};
 
 use anyhow::{bail, Context, Result};
@@ -300,6 +301,12 @@ fn try_remote_hit_inner(
     Ok(Some(record))
 }
 
+/// Pushes spawned but not yet resolved (success or failure).
+static PENDING_PUSHES: AtomicUsize = AtomicUsize::new(0);
+/// Pushes that have actually completed successfully. Deliberately not tied
+/// to any single task's completion event — see [`spawn_remote_push`].
+static CONFIRMED_PUSHES: AtomicUsize = AtomicUsize::new(0);
+
 /// Schedule a best-effort push of a freshly-written local record (and the CAS
 /// blobs it references) to the remote store.
 ///
@@ -308,21 +315,52 @@ fn try_remote_hit_inner(
 /// already been persisted locally before this is called, and failures remain
 /// diagnostic-only.
 ///
-/// This deliberately provides no completion result. The scheduler reports a
-/// task as fresh as soon as its real work is done; claiming `FreshPushed`
-/// before a background upload finishes would make completion telemetry lie.
+/// This deliberately provides no completion result to the *task* that
+/// triggered it. The scheduler reports a task as fresh as soon as its real
+/// work is done; claiming `FreshPushed` before a background upload finishes
+/// would make that task's completion telemetry lie. What it does provide is
+/// [`confirmed_pushes`], a run-wide counter incremented only once the upload
+/// genuinely finishes — see that function and [`drain_pending_pushes`] for
+/// how a caller reports an accurate total without blocking on any one push.
 pub fn spawn_remote_push(record: TaskCacheRecord) {
     let Some(store) = remote_store() else {
         return;
     };
+    PENDING_PUSHES.fetch_add(1, Ordering::SeqCst);
     tokio::spawn(async move {
-        if let Err(error) = push_remote_inner(store, &record).await {
-            eprintln!(
-                "warning: failed to push task {} to remote cache: {error:#}",
-                record.task_key
-            );
+        match push_remote_inner(store, &record).await {
+            Ok(()) => {
+                CONFIRMED_PUSHES.fetch_add(1, Ordering::SeqCst);
+            }
+            Err(error) => {
+                eprintln!(
+                    "warning: failed to push task {} to remote cache: {error:#}",
+                    record.task_key
+                );
+            }
         }
+        PENDING_PUSHES.fetch_sub(1, Ordering::SeqCst);
     });
+}
+
+/// Count of background pushes ([`spawn_remote_push`]) that have completed
+/// and been confirmed written to the remote store so far in this process.
+/// Monotonic for the process lifetime — callers wanting a single run's total
+/// should snapshot this before the run and diff it against the value after.
+pub fn confirmed_pushes() -> usize {
+    CONFIRMED_PUSHES.load(Ordering::SeqCst)
+}
+
+/// Wait (up to `timeout`) for all in-flight background pushes to finish, so
+/// a [`confirmed_pushes`] reading taken afterward reflects the run's real
+/// total rather than an in-progress snapshot. Best-effort: any push still
+/// running after the timeout is left to finish or fail in the background,
+/// same as before this existed — it just won't be counted.
+pub async fn drain_pending_pushes(timeout: std::time::Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while PENDING_PUSHES.load(Ordering::SeqCst) > 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 async fn push_remote_inner(store: &dyn RemoteStore, record: &TaskCacheRecord) -> Result<()> {

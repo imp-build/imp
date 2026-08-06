@@ -220,6 +220,7 @@ CHECK_STEPS = [
 
 PACKAGE_STEPS = [
     {"uses": "actions/checkout@v4"},
+    EXPORT_GHAC_ENV_STEP,
     *DOWNLOAD_IMP_STEPS,
     cache_toolchains_step("package"),
     cache_imp_step("package"),
@@ -285,6 +286,9 @@ JOBS = [
         "needs": "build",
         "runs_on": "ubuntu-latest",
         "if": MAIN_PUSH_ONLY,
+        # Same accelerator as `check` (see its comment above) — requires
+        # EXPORT_GHAC_ENV_STEP in PACKAGE_STEPS so the backend can auth.
+        "env": {"IMP_REMOTE_CACHE": "ghac"},
         "steps": PACKAGE_STEPS,
     },
     {
