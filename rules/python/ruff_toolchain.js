@@ -9,6 +9,7 @@ import {
 	cacheHas,
 	toolName,
 	group,
+	tool as graphTool,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -134,10 +135,12 @@ function lockfileFor(version) {
 // workspace-load time, so tool handles must be created when a toolchain is
 // declared at BUILD.js top level, not inside acquireRuffToolchain().
 let coreToolHandles = null;
+let graphToolchains = new Map();
 
 export function __resetRuffToolchainStateForTest() {
 	RuffToolchain.clearDefault();
 	coreToolHandles = null;
+	graphToolchains = new Map();
 }
 
 /**
@@ -165,10 +168,38 @@ export function ruffToolchain(version, opts = {}) {
 
 	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
 	const unverified = opts.unverified ?? false;
-	return new RuffToolchain(
+	new RuffToolchain(
 		{ version, lockfile, unverified },
 		{ default: opts.default },
 	);
+	const graph = ruffGraphTool(version);
+	graphToolchains.set(version, graph);
+	return graph;
+}
+
+/** Return the CAS-backed graph Ruff tool. */
+export function ruffGraphTool(version) {
+	const resolved = RuffToolchain.requireVersion(version);
+	const plat = platformInfo();
+	const key = ruffCacheKey(resolved, plat);
+	const archive = downloadToolArtifact({
+		lockfile: lockfileFor(resolved),
+		tool: "ruff-toolchain",
+		version: resolved,
+		plat,
+		url: ruffDownloadUrl(resolved, plat),
+		output: `.imp/ruff-downloads/${key}/${ruffArtifactName(resolved, plat)}`,
+		display: `download ruff ${resolved} (${plat.os}/${plat.arch})`,
+		unverified: RuffToolchain.resolveUnverified(resolved),
+	});
+	const directory = extractArchive({
+		archive,
+		dest: `.imp/ruff-toolchains/${key}`,
+		format: plat.os === "windows" ? "zip" : "tar.gz",
+		stripComponents: 1,
+		display: `extract ruff ${resolved} (${plat.os}/${plat.arch})`,
+	});
+	return graphTool(directory, { binDirs: ["."] });
 }
 
 /**
@@ -301,7 +332,8 @@ export function defaultRuffToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultRuffToolchain() {
-	return RuffToolchain.default();
+	const version = RuffToolchain.defaultVersion();
+	return version ? (graphToolchains.get(version) ?? null) : null;
 }
 
 // Importing this rule provisions the pinned default. A workspace can replace

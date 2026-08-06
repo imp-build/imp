@@ -211,9 +211,7 @@ export function pythonSources({
 						runtime,
 						pythonVersion: runtime.attrs.version,
 						project: resolvedProject,
-						...(resolvedProject
-							? { projectPath: resolvedProject.data.path }
-							: {}),
+						...(resolvedProject ? { projectPath: resolvedProject.path } : {}),
 						uvVersion,
 						deps,
 					},

@@ -1,6 +1,12 @@
 // Goal-only lint workflow. //rules/workflows/lint additionally imports all
 // built-in lint products for backwards compatibility.
-import { goal, resolveProducts, goalFlags, logInfo } from "imp:core";
+import {
+	goal,
+	resolveProducts,
+	goalFlags,
+	logInfo,
+	writeWorkspace,
+} from "imp:core";
 
 // `fix` is passed straight through to each product function as a second
 // argument (`fn(handle, {fix})`) rather than registering a second product —
@@ -45,10 +51,19 @@ export async function lintGoal(selection) {
 
 /** Report graph lint roots using the same result contract as legacy linters. */
 export function graphLintGoal(roots) {
+	const { fix } = goalFlags();
 	const results = roots.map(({ address, result }) => ({
 		address,
 		...(result?.result || result),
 	}));
+	if (fix) {
+		for (const result of results) {
+			if (!result.fixed?.digest || !Array.isArray(result.paths)) continue;
+			for (const path of result.paths) {
+				writeWorkspace(path, result.fixed.digest, { from: `fixed/${path}` });
+			}
+		}
+	}
 	for (const { address, output } of results) {
 		if (output) logInfo(`${address}:\n${output}`);
 	}

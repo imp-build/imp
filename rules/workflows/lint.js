@@ -17,5 +17,6 @@
 // has no autofix mode, so it always reports fixSupported: false).
 
 export { clippy } from "//rules/rust/clippy";
-export { pythonAppLint } from "//rules/python/ruff/lint";
+import "//rules/python/ruff/lint";
+export { ruffLintRoot } from "//rules/python/ruff_graph";
 export { lintGoal } from "//rules/workflows/lint_goal";

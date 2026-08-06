@@ -12,6 +12,7 @@ import {
 	cacheHas,
 	toolName,
 	group,
+	tool as graphTool,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -144,10 +145,12 @@ export class UvToolchain extends Toolchain {
 // workspace-load time, so tool handles must be created when a toolchain is
 // declared at BUILD.js top level, not inside acquireUvToolchain().
 let coreToolHandles = null;
+let graphToolchains = new Map();
 
 export function __resetUvToolchainStateForTest() {
 	UvToolchain.clearDefault();
 	coreToolHandles = null;
+	graphToolchains = new Map();
 }
 
 /**
@@ -170,10 +173,38 @@ export function uvToolchain(version, opts = {}) {
 		);
 	}
 
-	return new UvToolchain(
+	new UvToolchain(
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	const graph = uvGraphTool(version);
+	graphToolchains.set(version, graph);
+	return graph;
+}
+
+/** Return the CAS-backed graph tool used by graph-native Python rules. */
+export function uvGraphTool(version) {
+	const resolved = UvToolchain.requireVersion(version);
+	const plat = platformInfo();
+	const key = uvCacheKey(resolved, plat);
+	const archive = downloadToolArtifact({
+		lockfile: UV_LOCKFILE,
+		tool: "uv-toolchain",
+		version: resolved,
+		plat,
+		url: uvDownloadUrl(resolved, plat),
+		output: `.imp/uv-downloads/${key}/${uvArtifactName(resolved, plat)}`,
+		display: `download uv ${resolved} (${plat.os}/${plat.arch})`,
+		unverified: UvToolchain.resolveUnverified(resolved),
+	});
+	const directory = extractArchive({
+		archive,
+		dest: `.imp/uv-toolchains/${key}`,
+		format: plat.os === "windows" ? "zip" : "tar.gz",
+		stripComponents: 1,
+		display: `extract uv ${resolved} (${plat.os}/${plat.arch})`,
+	});
+	return graphTool(directory, { binDirs: ["."] });
 }
 
 /**
@@ -371,7 +402,8 @@ export function defaultUvToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultUvToolchain() {
-	return UvToolchain.default();
+	const version = UvToolchain.defaultVersion();
+	return version ? (graphToolchains.get(version) ?? null) : null;
 }
 
 // Importing this rule provisions the pinned default. A workspace can replace

@@ -12,6 +12,8 @@ import {
 	cacheHas,
 	toolName,
 	group,
+	tool as graphTool,
+	task,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -97,10 +99,12 @@ export class PexToolchain extends Toolchain {
 // workspace-load time, so tool handles must be created when a toolchain is
 // declared at BUILD.js top level, not inside acquirePexToolchain().
 let coreToolHandles = null;
+let graphToolchains = new Map();
 
 export function __resetPexToolchainStateForTest() {
 	PexToolchain.clearDefault();
 	coreToolHandles = null;
+	graphToolchains = new Map();
 }
 
 /**
@@ -123,10 +127,62 @@ export function pexToolchain(version, opts = {}) {
 		);
 	}
 
-	return new PexToolchain(
+	new PexToolchain(
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	const graph = pexGraphTool(version);
+	graphToolchains.set(version, graph);
+	return graph;
+}
+
+/** Return the CAS-backed graph PEX tool. */
+export function pexGraphTool(version) {
+	const resolved = PexToolchain.requireVersion(version);
+	const plat = platformInfo();
+	const archive = downloadToolArtifact({
+		lockfile: PEX_LOCKFILE,
+		tool: "pex-toolchain",
+		version: resolved,
+		plat,
+		lockPlat: PEX_LOCK_PLATFORM,
+		url: pexDownloadUrl(resolved),
+		output: `.imp/pex-downloads/${pexCacheKey(resolved)}/pex`,
+		display: `download pex ${resolved}`,
+		unverified: PexToolchain.resolveUnverified(resolved),
+	});
+	const shell = nativeTool("sh");
+	const cp = nativeTool("cp");
+	const mkdir = nativeTool("mkdir");
+	const chmod = plat.os === "windows" ? null : nativeTool("chmod");
+	const install = task({
+		display: `install pex ${resolved}`,
+		inputs: { archive, shell, cp, mkdir, ...(chmod ? { chmod } : {}) },
+		outputs: { directory: output.artifact() },
+		async run(exec, inputs) {
+			const result = await exec.action({
+				argv: [
+					exec.tool(inputs.shell, "sh"),
+					"-c",
+					plat.os === "windows"
+						? 'mkdir -p "$2" && cp "$1" "$2/pex"'
+						: 'mkdir -p "$2" && cp "$1" "$2/pex" && chmod +x "$2/pex"',
+					"install-pex",
+					exec.path(inputs.archive),
+					"toolchain",
+				],
+				tools: [
+					inputs.shell,
+					inputs.cp,
+					inputs.mkdir,
+					...(inputs.chmod ? [inputs.chmod] : []),
+				],
+				outputs: { directory: output.directory("toolchain") },
+			});
+			return { directory: result.outputs.directory };
+		},
+	});
+	return graphTool(install.outputs.directory, { binDirs: ["."] });
 }
 
 /**
@@ -321,7 +377,8 @@ export function defaultPexToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultPexToolchain() {
-	return PexToolchain.default();
+	const version = PexToolchain.defaultVersion();
+	return version ? (graphToolchains.get(version) ?? null) : null;
 }
 
 // Importing this rule provisions the pinned default. A workspace can replace
