@@ -1554,6 +1554,7 @@ export const TEST = _builtin_product_name("test");
 export const FMT = _builtin_product_name("fmt");
 export const LINT = _builtin_product_name("lint");
 export const PACKAGE = _builtin_product_name("package");
+export const PUBLISH = _builtin_product_name("publish");
 export const RUN = _builtin_product_name("run");
 export const TOOLCHAIN = _builtin_product_name("toolchain");
 

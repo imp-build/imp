@@ -24,6 +24,7 @@ import "//rules/workflows/generate_build";
 import "//rules/workflows/lint";
 import "//rules/workflows/lockfiles";
 import "//rules/workflows/package";
+import "//rules/workflows/publish";
 import "//rules/workflows/run";
 import "//rules/workflows/test";
 import "//rules/workflows/vs";

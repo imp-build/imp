@@ -14,8 +14,8 @@ Registry operations use the pinned Crane release provided by the OCI rule:
 import "//rules/oci";
 ```
 
-The release is downloaded into a shared named cache on first use. Pure local
-composition of a `"scratch"` image does not invoke Crane, but pulls, pushes,
+The release is acquired as an immutable graph artifact on first use. Pure local
+composition of a `"scratch"` image does not invoke Crane, but pulls, publishes,
 mirrors, and builds based on a pulled image do.
 
 ## Pull a base and build an image
@@ -30,6 +30,7 @@ export const alpine = ociPull({
 
 export const app = ociBuild({
     base: alpine,
+    sourceBase: "images",
     path: ".",
     layers: [{
         srcs: ["bin/server"],
@@ -43,16 +44,19 @@ export const app = ociBuild({
 ```
 
 A pull requires exactly one of `tag` or `digest`. Tags are resolved on every
-invocation because they can move; the resolved digest and image contents are
-then stored in the shared OCI cache. Prefer a digest when reproducibility
+invocation because they can move; the resolved digest and image layout then
+flow through immutable artifact handles. Prefer a digest when reproducibility
 matters.
 
-`ociBuild` accepts an `ociPull`/`ociBuild` target as its base or the literal
+`ociBuild` accepts an `ociPull`/`ociBuild` image as its base or the literal
 `"scratch"`. It does not interpret a Dockerfile and cannot run `RUN` commands.
 Each layer stages workspace files selected by `srcs` at the requested image
 path, with optional exclusions, ownership, and mode. Layer tarballs, config,
 manifest, and OCI index are assembled deterministically, so identical inputs
 produce identical image content.
+
+`sourceBase` defaults to the declaring package. Pass it explicitly through a
+BUILD helper that constructs images for another package.
 
 ## Build and package locally
 
@@ -82,16 +86,14 @@ export const mirror = ociMirror({
 });
 ```
 
-Select either target with `imp build`. Push and mirror are intentionally
+Select either target with `imp publish`. Push and mirror are intentionally
 impure: they perform registry side effects on every invocation and are never
 replayed from the task cache. Mirror uses a registry-to-registry Crane copy and
 does not materialize the image locally.
 
-Credential sourcing is not implemented yet. The authentication seam is wired
-through every registry operation, but currently supplies no tools or
-environment, so these rules are presently suitable for public/anonymous
-registries only. Do not assume an ambient Docker login will be visible inside
-the hermetic execution environment.
+Credential sourcing is not implemented yet, so these rules are presently
+suitable for public/anonymous registries only. Do not assume an ambient Docker
+login will be visible inside the hermetic execution environment.
 
 The current image builder emits one image manifest. Multi-platform indexes and
 Dockerfile-compatible command execution are outside this rule's present
