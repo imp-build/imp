@@ -100,4 +100,27 @@ export async function packageGoal(selection) {
 	}
 }
 
-goal("package", packageGoal);
+/** Publish graph package roots at the same workflow boundary as legacy artifacts. */
+export function graphPackageGoal(roots) {
+	const published = [];
+	for (const { address, result } of roots) {
+		if (!result || result.type !== "artifact" || !result.digest) {
+			throw new Error(
+				`${address}: package graph root must resolve to an artifact handle`,
+			);
+		}
+		const withoutSlashes = address.replace(/^\/\//, "");
+		const [dir, name] = withoutSlashes.split(":");
+		const dest = dir ? `dist/${dir}/${name}` : `dist/${name}`;
+		writeWorkspace(dest, result.digest, { from: result.path });
+		published.push({ address, dest });
+	}
+	if (published.length > 0) {
+		logInfo(
+			`Packaged ${published.length} target${published.length === 1 ? "" : "s"}:` +
+				published.map(({ address, dest }) => `\n  ${address} -> ${dest}`).join(""),
+		);
+	}
+}
+
+goal("package", packageGoal, { graph: graphPackageGoal });

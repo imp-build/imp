@@ -394,7 +394,7 @@ pub struct HostState {
 impl Default for HostState {
     fn default() -> Self {
         let mut goals = BTreeMap::new();
-        for name in ["build", "test", "fmt", "lint", "package", "run"] {
+        for name in ["build", "test", "fmt", "lint", "package", "publish", "run"] {
             goals.insert(
                 name.to_owned(),
                 Goal {
@@ -416,6 +416,7 @@ impl Default for HostState {
             "fmt",
             "lint",
             "package",
+            "publish",
             "run",
             "toolchain",
         ] {
