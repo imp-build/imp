@@ -1,5 +1,11 @@
 import {
 	field,
+	BUILD,
+	TEST,
+	FMT,
+	LINT,
+	PACKAGE,
+	RUN,
 	defineConfigSchema,
 	allUnowned,
 	label,
@@ -12,6 +18,11 @@ import {
 	memo,
 	output,
 	output_path,
+	files,
+	task,
+	expand,
+	packagePath,
+	semantic,
 	productFor,
 	registerBuildRule,
 	run,
@@ -63,6 +74,7 @@ import { registerBuildGenerator } from "//rules/workflows/generate_build";
 
 import {
 	defaultOdinToolchain,
+	odinGraphTool,
 	odinTool,
 	resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
@@ -74,6 +86,7 @@ import { resources as resource_package_sources } from "//rules/asset";
 import { cmake_resources } from "//rules/c/cmake";
 
 import { defaultGccToolchain, gccTool } from "//rules/c/gcc";
+import { gccGraphTool, defaultGccToolchainVersion } from "//rules/c/gcc";
 
 // Registers the "run" goal's callback (rules/workflows/run/index.js) for consumers
 // that import Odin build rules without importing the workflows layer
@@ -1283,7 +1296,7 @@ async function collect_gen_sets(handle, seen) {
  * @param {Array} [opts.deps=[]] Additional dependencies.
  * @returns {object} Exported label handle.
  */
-export const odinGen = extensible(function odinGen({
+const legacyOdinGen = extensible(function odinGen({
 	srcs = [],
 	out,
 	cmd,
@@ -1331,7 +1344,7 @@ export const odinGen = extensible(function odinGen({
  * @param {Array} [opts.deps=[]] Odin package and resource package dependencies.
  * @returns {object} Exported label handle.
  */
-export const odinPackage = extensible(function odinPackage({
+const legacyOdinPackage = extensible(function odinPackage({
 	srcs = undefined,
 	exclude = undefined,
 	path = ".",
@@ -1424,7 +1437,7 @@ export const odinPackage = extensible(function odinPackage({
  * @param {Array} [opts.deps=[]] Odin package and resource package dependencies.
  * @returns {object} Exported label handle.
  */
-export const odinTestPackage = extensible(function odinTestPackage({
+const legacyOdinTestPackage = extensible(function odinTestPackage({
 	srcs = undefined,
 	exclude = undefined,
 	path = ".",
@@ -1466,7 +1479,7 @@ export const odinTestPackage = extensible(function odinTestPackage({
 	return packageLabel;
 });
 
-export const odin_test_package = odinTestPackage;
+const legacy_odin_test_package = legacyOdinTestPackage;
 
 // ---------------------------------------------------------------------------
 // generate-build
@@ -1556,3 +1569,379 @@ export const generateBuild = memo(
 );
 
 registerBuildGenerator({ namespace: "odin", generate: generateBuild });
+
+// ---------------------------------------------------------------------------
+// Exported handle graphs
+// ---------------------------------------------------------------------------
+
+// Graph declarations deliberately keep only source/configuration data. Their
+// action nodes are created by an expansion after every BUILD module has loaded,
+// which lets import inference see packages declared later in the workspace.
+const graphPackages = [];
+const graphPackageHooks = [];
+let graphPackageCounter = 0;
+
+/** Register an optional facet enabled by importing an Odin extension. */
+export function registerOdinPackageHook(hook) {
+	if (typeof hook !== "function") {
+		throw new Error("registerOdinPackageHook(hook) expects a function");
+	}
+	if (!graphPackageHooks.includes(hook)) graphPackageHooks.push(hook);
+}
+
+function graphPath(base, path = ".") {
+	return normalize_workspace_path(
+		base === "." ? path : path === "." ? base : `${base}/${path}`,
+	);
+}
+
+function graphCollectionMap(spec, config) {
+	const values = new Map(Object.entries(config?.collections || {}));
+	if (Array.isArray(spec.collections)) {
+		for (const entry of spec.collections) {
+			if (
+				entry &&
+				typeof entry.name === "string" &&
+				typeof entry.path === "string"
+			) {
+				values.set(entry.name, graphPath(spec.base, entry.path));
+			}
+		}
+	} else if (spec.collections && typeof spec.collections === "object") {
+		for (const [name, path] of Object.entries(spec.collections)) {
+			values.set(name, graphPath(spec.base, path));
+		}
+	}
+	return values;
+}
+
+function graphPackageSpec(spec) {
+	return {
+		address: `graph:${spec.key}`,
+		path: spec.path,
+		srcs: spec.srcs,
+		exclude: spec.exclude,
+	};
+}
+
+function graphAnalysis(spec) {
+	return analysis_for_package(graphPackageSpec(spec));
+}
+
+function graphInferredPackages(spec, analysis, config) {
+	const index = build_package_index(graphPackages.map(graphPackageSpec));
+	return infer_dep_entries(
+		graphPackageSpec(spec),
+		index,
+		graphCollectionMap(spec, config),
+		analysis,
+	)
+		.map((entry) => entry.handle)
+		.filter((entry) => entry && entry.__odin_graph_package === true);
+}
+
+function graphDependencyPackages(spec, analysis, config) {
+	const found = new Map();
+	for (const dep of spec.deps) {
+		if (dep?.__odin_graph_package === true) found.set(dep.key, dep);
+	}
+	for (const dep of graphInferredPackages(spec, analysis, config)) {
+		found.set(dep.key, dep);
+	}
+	return [...found.values()];
+}
+
+function graphResourceInputs(spec) {
+	const resources = [];
+	for (const dep of spec.deps) {
+		if (dep?.sources?.__imp_graph_handle === true) resources.push(dep.sources);
+		if (dep?.resources?.__imp_graph_handle === true)
+			resources.push(dep.resources);
+	}
+	return resources;
+}
+
+function graphPackageExpansion(spec) {
+	if (spec.expansion) return spec.expansion;
+	spec.expansion = expand({
+		display: `expand Odin package ${spec.path}`,
+		inputs: { sources: spec.sources, config: semantic.config("odin") },
+		async create(inputs) {
+			// analysis_for_package deliberately reads the semantic source set while
+			// expansion is running; the expansion is recreated for each invocation,
+			// while the resulting task keys include this analysis JSON.
+			const analysis = graphAnalysis(spec);
+			return {
+				[spec.key]: graphActions(spec, analysis, inputs.config || {}),
+			};
+		},
+	});
+	return spec.expansion;
+}
+
+function graphActionInputs(spec, analysis, config) {
+	const inputs = {
+		sources: spec.sources,
+		odin: spec.toolchain,
+		gcc: gccGraphTool(defaultGccToolchainVersion()),
+		analysis: {
+			packagePath: analysis.packagePath,
+			hasMainEntrypoint: analysis.hasMainEntrypoint,
+			collections: [...graphCollectionMap(spec, config).entries()],
+		},
+	};
+	for (const [index, dep] of graphDependencyPackages(
+		spec,
+		analysis,
+		config,
+	).entries()) {
+		inputs[`source${index}`] = dep.sources;
+	}
+	for (const [index, resource] of graphResourceInputs(spec).entries()) {
+		inputs[`resource${index}`] = resource;
+	}
+	return inputs;
+}
+
+function graphOdinBuild(
+	spec,
+	analysis,
+	config,
+	{ test = false, lint = false } = {},
+) {
+	const inputs = graphActionInputs(spec, analysis, config);
+	const outputPath = lint
+		? null
+		: analysis.hasMainEntrypoint
+			? "output"
+			: "output.a";
+	return task({
+		display: `${lint ? "odin check -vet" : test ? "odin test" : "odin build"} ${analysis.packagePath}`,
+		inputs,
+		outputs: lint
+			? { result: output.value() }
+			: { artifact: output.artifact(), executablePath: output.value() },
+		async run(exec, resolved) {
+			const collectionDirs = resolved.analysis.collections.map(
+				([, path]) => path,
+			);
+			const flags = resolved.analysis.collections.map(
+				([name, path]) => `-collection:${name}=${path}`,
+			);
+			const allInputs = Object.entries(resolved)
+				.filter(
+					([name]) =>
+						name === "sources" ||
+						name.startsWith("source") ||
+						name.startsWith("resource"),
+				)
+				.map(([, value]) => value);
+			const command = lint ? "check" : test ? "test" : "build";
+			const args = [
+				exec.tool(resolved.odin, "odin"),
+				command,
+				resolved.analysis.packagePath,
+				...flags,
+				...(lint ? ["-vet"] : []),
+				...(!lint && !test && !resolved.analysis.hasMainEntrypoint
+					? ["-build-mode:lib"]
+					: []),
+				...(!lint && !test ? [`-out:${outputPath}`] : []),
+			];
+			const result = await exec.action({
+				argv: args,
+				inputs: allInputs,
+				env: [`PATH=${exec.path(resolved.gcc)}/bin`],
+				allowFailure: lint,
+				outputs: lint ? {} : { artifact: output.file(outputPath) },
+			});
+			if (lint) {
+				return {
+					result: {
+						ok: result.exitCode === 0,
+						output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
+						fixSupported: false,
+						fixApplied: false,
+					},
+				};
+			}
+			return { artifact: result.outputs.artifact, executablePath: outputPath };
+		},
+	});
+}
+
+function graphActions(spec, analysis, config) {
+	if (analysis.sourceFiles.length === 0) {
+		throw new Error(
+			empty_package_error({ attrs: {}, __id: spec.key }, spec.path),
+		);
+	}
+	const build = graphOdinBuild(spec, analysis, config);
+	const actions = {
+		[BUILD]: build.outputs.artifact,
+		[LINT]: graphOdinBuild(spec, analysis, config, { lint: true }).outputs
+			.result,
+		[PACKAGE]: build.outputs.artifact,
+	};
+	if (spec.test) {
+		actions[TEST] = graphOdinBuild(spec, analysis, config, { test: true });
+	} else if (analysis.hasMainEntrypoint) {
+		actions[RUN] = build.outputs.artifact;
+	}
+	return actions;
+}
+
+function graphRoot(spec, workflow) {
+	return graphPackageExpansion(spec).get(spec.key, workflow);
+}
+
+function createGraphPackage({
+	srcs = undefined,
+	exclude = undefined,
+	path = ".",
+	collections = [],
+	toolchain,
+	deps = [],
+	test = false,
+	base = packagePath(),
+} = {}) {
+	const normalizedSrcs = package_srcs({ srcs });
+	const normalizedExclude =
+		exclude === undefined
+			? test
+				? []
+				: ["*_test.odin", "test_*.odin"]
+			: exclude;
+	const version = typeof toolchain === "string" ? toolchain : undefined;
+	const spec = {
+		__odin_graph_package: true,
+		key: `package-${++graphPackageCounter}`,
+		base,
+		path: graphPath(base, path),
+		srcs: normalizedSrcs,
+		exclude: normalizedExclude,
+		collections,
+		deps: [...deps],
+		test,
+		toolchain:
+			toolchain?.__imp_graph_handle === true
+				? toolchain
+				: version
+					? odinGraphTool(version)
+					: defaultOdinToolchain(),
+		version,
+	};
+	if (!spec.toolchain) {
+		spec.toolchain = defaultOdinToolchain();
+	}
+	spec.sources = files({
+		root: spec.path,
+		include: spec.srcs,
+		exclude: spec.exclude,
+	});
+	graphPackages.push(spec);
+	const value = {
+		__odin_graph_package: true,
+		key: spec.key,
+		sources: spec.sources,
+		base: spec.base,
+		version: spec.version,
+		get [BUILD]() {
+			return graphRoot(spec, BUILD);
+		},
+		get [LINT]() {
+			return graphRoot(spec, LINT);
+		},
+		get [PACKAGE]() {
+			return graphRoot(spec, PACKAGE);
+		},
+	};
+	if (test)
+		Object.defineProperty(value, TEST, {
+			enumerable: true,
+			get: () => graphRoot(spec, TEST),
+		});
+	else
+		Object.defineProperty(value, RUN, {
+			enumerable: true,
+			get: () => graphRoot(spec, RUN),
+		});
+	for (const hook of graphPackageHooks)
+		Object.assign(value, hook(Object.freeze({ ...value })));
+	return Object.freeze(value);
+}
+
+/** Declare an immutable, graph-native Odin package. */
+export function odinPackage(opts = {}) {
+	return createGraphPackage(opts);
+}
+
+/** Declare an immutable, graph-native Odin test package. */
+export function odinTestPackage(opts = {}) {
+	return createGraphPackage({ ...opts, test: true });
+}
+
+export const odin_test_package = odinTestPackage;
+
+/** Declare a graph-native Odin source generator. */
+export function odinGen({
+	srcs = [],
+	out,
+	cmd,
+	generator,
+	base = packagePath(),
+} = {}) {
+	if (!out) throw new Error("odinGen requires an 'out' path");
+	if (!generator && (!cmd || cmd.length === 0)) {
+		throw new Error("odinGen requires either 'cmd' or 'generator'");
+	}
+	const path = graphPath(base, out);
+	const source = files({ root: base, include: srcs, exclude: [out] });
+	const shell = nativeTool("sh");
+	const commandTool = cmd ? nativeTool(cmd[0]) : null;
+	const generated = task({
+		display: `generate ${path}`,
+		inputs: {
+			source,
+			shell,
+			...(commandTool ? { commandTool } : {}),
+			generator: generator || null,
+			command: cmd || null,
+			path,
+		},
+		outputs: { generated: output.artifact(), path: output.value() },
+		async run(exec, inputs) {
+			if (inputs.generator) {
+				const mod = await import(inputs.generator);
+				const content = await mod.generate({ srcs });
+				const result = await exec.action({
+					argv: [
+						exec.tool(inputs.shell, "sh"),
+						"-c",
+						'mkdir -p "$(dirname "$1")" && printf %s "$2" > "$1"',
+						"odin-gen",
+						inputs.path,
+						content,
+					],
+					inputs: [inputs.source],
+					outputs: { generated: output.file(inputs.path) },
+				});
+				return { generated: result.outputs.generated, path: inputs.path };
+			}
+			const result = await exec.action({
+				argv: [
+					exec.tool(inputs.commandTool, inputs.command[0]),
+					...inputs.command.slice(1),
+					inputs.path,
+				],
+				inputs: [inputs.source],
+				outputs: { generated: output.file(inputs.path) },
+			});
+			return { generated: result.outputs.generated, path: inputs.path };
+		},
+	});
+	return Object.freeze({
+		generated: generated.outputs.generated,
+		[BUILD]: generated.outputs.generated,
+	});
+}

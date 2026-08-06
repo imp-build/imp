@@ -9,6 +9,7 @@ import {
 	cacheHas,
 	toolName,
 	group,
+	tool as graphTool,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -135,6 +136,7 @@ export class OdinToolchain extends Toolchain {
 // odinToolchain(), or (odinPackage/odinTestPackage support pinning a bare
 // version string with no toolchain target at all) on first acquire.
 let coreToolHandles = null;
+let graphToolchains = new Map();
 
 function ensureCoreTools() {
 	if (!coreToolHandles) {
@@ -148,6 +150,7 @@ function ensureCoreTools() {
 export function __resetOdinToolchainStateForTest() {
 	OdinToolchain.clearDefault();
 	coreToolHandles = null;
+	graphToolchains = new Map();
 }
 
 /**
@@ -165,13 +168,37 @@ export function __resetOdinToolchainStateForTest() {
  * @returns {object} Target handle for this Odin toolchain.
  */
 export function odinToolchain(version, opts = {}) {
-	namedCache({ name: ODIN_TOOLCHAIN_CACHE, shared: true });
-	ensureCoreTools();
-
-	return new OdinToolchain(
+	new OdinToolchain(
 		{ version, linker: opts.linker, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	const tool = odinGraphTool(version);
+	graphToolchains.set(version, tool);
+	return tool;
+}
+
+/** Build a verified Odin compiler as an ordinary graph tool. */
+export function odinGraphTool(version) {
+	const resolved = resolveOdinToolchainVersion(version);
+	const plat = platformInfo();
+	const archive = downloadToolArtifact({
+		lockfile: "//rules/odin/odin.lock",
+		tool: "odin",
+		version: resolved,
+		plat,
+		url: odinDownloadUrl(resolved, plat),
+		output: `odin-downloads/${odinCacheKey(resolved, plat)}/${odinArtifactName(resolved, plat)}`,
+		display: `download odin ${resolved} (${plat.os}/${plat.arch})`,
+		unverified: OdinToolchain.resolveUnverified(resolved),
+	});
+	const directory = extractArchive({
+		archive,
+		dest: "odin-toolchain",
+		format: plat.os === "windows" ? "zip" : "tar.gz",
+		stripComponents: 1,
+		display: `install odin ${resolved} (${plat.os}/${plat.arch})`,
+	});
+	return graphTool(directory, { binDirs: ["."] });
 }
 
 /**
@@ -287,7 +314,10 @@ export function defaultOdinToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultOdinToolchain() {
-	return OdinToolchain.default();
+	const version = OdinToolchain.defaultVersion();
+	return version
+		? (graphToolchains.get(version) ?? odinGraphTool(version))
+		: null;
 }
 
 // Importing this rule provisions the pinned default. A workspace can replace
