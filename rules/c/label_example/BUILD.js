@@ -121,4 +121,4 @@ packageGoal(hasher, async function packageHasher(ctx) {
 });
 
 export { hasher };
-export const js = jsSources({});
+export const js = jsSources({ base: "rules/c/label_example" });

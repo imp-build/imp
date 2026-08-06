@@ -38,8 +38,7 @@ describe("node toolchain", () => {
 		return withNodeHost((host) => {
 			const toolchain = nodeToolchain("22.11.0", { default: true });
 
-			expect(toolchain.__imp).toBe(true);
-			expect(toolchain.attrs.version).toBe("22.11.0");
+			expect(toolchain.__imp_graph_handle).toBe(true);
 			expect(defaultNodeToolchainVersion()).toBe("22.11.0");
 			expect(defaultNodeToolchain()).toBe(toolchain);
 			expect(

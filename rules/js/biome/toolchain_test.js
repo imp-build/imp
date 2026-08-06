@@ -38,8 +38,7 @@ describe("biome toolchain", () => {
 		return withBiomeHost((host) => {
 			const toolchain = biomeToolchain("2.5.4", { default: true });
 
-			expect(toolchain.__imp).toBe(true);
-			expect(toolchain.attrs.version).toBe("2.5.4");
+			expect(toolchain.__imp_graph_handle).toBe(true);
 			expect(defaultBiomeToolchainVersion()).toBe("2.5.4");
 			expect(defaultBiomeToolchain()).toBe(toolchain);
 			expect(

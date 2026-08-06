@@ -6,4 +6,4 @@ export const rules_test = rulesTest({
 	root: "//rules/imp",
 	tools: [nativeTool("sh")],
 });
-export const js = jsSources({});
+export const js = jsSources({ base: "rules/imp" });

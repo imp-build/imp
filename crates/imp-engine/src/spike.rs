@@ -262,6 +262,9 @@ pub struct Workspace {
     /// callback registered via `goal(name, fn)`. Invoked once per goal
     /// invocation, before any per-target product dispatch.
     pub goal_callbacks: BTreeMap<String, String>,
+    /// Goal name -> global function name for an optional handler of resolved
+    /// exported graph-root results.
+    pub graph_goal_handlers: BTreeMap<String, String>,
     /// Target kind -> expander registered via `expand(kind, fn, opts)`. An
     /// expander may optionally be scoped to the goals that need it.
     pub expanders: BTreeMap<String, Expander>,
@@ -358,6 +361,7 @@ pub struct HostState {
     goals: BTreeMap<String, Goal>,
     id_to_address: BTreeMap<u32, String>,
     goal_callbacks: BTreeMap<String, String>,
+    graph_goal_handlers: BTreeMap<String, String>,
     expanders: BTreeMap<String, Expander>,
     declared_product_names: BTreeMap<String, DeclaredProductName>,
     next_product_name_id: u32,
@@ -444,6 +448,7 @@ impl Default for HostState {
             goals,
             id_to_address: BTreeMap::new(),
             goal_callbacks: BTreeMap::new(),
+            graph_goal_handlers: BTreeMap::new(),
             expanders: BTreeMap::new(),
             declared_product_names,
             next_product_name_id,
@@ -642,6 +647,7 @@ async fn create_live_runtime(
             named_cache_details: hs.named_cache_details.clone(),
             goals: hs.goals.clone(),
             goal_callbacks: hs.goal_callbacks.clone(),
+            graph_goal_handlers: hs.graph_goal_handlers.clone(),
             expanders: hs.expanders.clone(),
             declared_product_names: hs.declared_product_names.clone(),
             label_addresses: BTreeMap::new(),
@@ -896,6 +902,7 @@ async fn load_workspace_with_rules_and_service(
             named_caches: hs.named_caches.clone(),
             named_cache_details: hs.named_cache_details.clone(),
             goal_callbacks: hs.goal_callbacks.clone(),
+            graph_goal_handlers: hs.graph_goal_handlers.clone(),
             expanders: hs.expanders.clone(),
             goals: hs.goals.clone(),
             declared_product_names: hs.declared_product_names.clone(),
@@ -2572,6 +2579,27 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         },
     )?;
     globals.set("__host_goal_callback", host_goal_callback)?;
+
+    let state_graph_goal = Arc::clone(&state);
+    let host_graph_goal_handler = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, name: String, fn_val: Value<'js>| -> rquickjs::Result<()> {
+            let exec_name = {
+                let mut hs = state_graph_goal.lock().unwrap();
+                let n = format!("__imp_exec_{}", hs.next_exec);
+                hs.next_exec += 1;
+                n
+            };
+            ctx.globals().set(exec_name.as_str(), fn_val)?;
+            state_graph_goal
+                .lock()
+                .unwrap()
+                .graph_goal_handlers
+                .insert(name, exec_name);
+            Ok(())
+        },
+    )?;
+    globals.set("__host_graph_goal_handler", host_graph_goal_handler)?;
 
     // ------------------------------------------------------------------
     // __host_register_expander(kind, fn, goals) — registers a lazy target
@@ -6185,7 +6213,10 @@ pub async fn execute_goal_live_selection(
         .collect();
     let selection_json = serde_json::to_string(&selection).context("serialize goal selection")?;
 
-    let graph_handle_ids: Vec<u32> = graph_roots.iter().map(|root| root.handle_id).collect();
+    let graph_handle_ids: Vec<serde_json::Value> = graph_roots
+        .iter()
+        .map(|root| serde_json::json!({ "address": root.address, "handleId": root.handle_id }))
+        .collect();
     let graph_handles_json =
         serde_json::to_string(&graph_handle_ids).context("serialize graph root handles")?;
     let resolved_config = live.host_state.lock().unwrap().workspace_config.clone();
@@ -6206,6 +6237,7 @@ pub async fn execute_goal_live_selection(
     *live.run_args.lock().unwrap() = Some(run_args.to_vec());
 
     let goal_owned = goal.to_owned();
+    let graph_goal_handler_name = live.workspace.graph_goal_handlers.get(goal).cloned();
     let result = live
         .ctx
         .async_with(async move |ctx| -> rquickjs::Result<()> {
@@ -6337,7 +6369,7 @@ pub async fn execute_goal_live_selection(
                         )
                     })?;
                 let promise: MaybePromise = promise_resolve.call((result_value,))?;
-                promise
+                let graph_results: Value = promise
                     .into_future::<Value>()
                     .await
                     .catch(&ctx)
@@ -6347,6 +6379,27 @@ pub async fn execute_goal_live_selection(
                             format!("goal '{goal_owned}': {error}"),
                         )
                     })?;
+                if let Some(handler_name) = &graph_goal_handler_name {
+                    let handler: Function = ctx.globals().get(handler_name.as_str())?;
+                    let handler_result: Value =
+                        handler.call((graph_results,)).catch(&ctx).map_err(|e| {
+                            rquickjs::Error::new_loading_message(
+                                "execute graph handler",
+                                format!("goal '{goal_owned}': {e}"),
+                            )
+                        })?;
+                    let handler_promise: MaybePromise = promise_resolve.call((handler_result,))?;
+                    handler_promise
+                        .into_future::<Value>()
+                        .await
+                        .catch(&ctx)
+                        .map_err(|e| {
+                            rquickjs::Error::new_loading_message(
+                                "execute graph handler",
+                                format!("goal '{goal_owned}': {e}"),
+                            )
+                        })?;
+                }
             }
             if trace_inputs {
                 let assert_trace_inputs: Function =
@@ -7238,6 +7291,47 @@ export default { [BUILD]: produced.outputs.value };
             .await
             .unwrap();
         assert_eq!(runs, 1);
+    }
+
+    #[tokio::test]
+    async fn graph_goal_handler_receives_named_root_results() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { goal } from "imp:core";
+goal("build", undefined, {
+    graph(roots) { globalThis.graphGoalResults = roots; },
+});
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, output, task } from "imp:core";
+const root = task({
+    outputs: { value: output.value() },
+    async run() { return { value: { answer: 42 } }; },
+});
+export const answer = { [BUILD]: root };
+"#,
+        );
+        let live = load_workspace_rules_test_runtime(p).await.unwrap();
+        run_goal_live(&live, p, "build", &["//:answer".to_owned()])
+            .await
+            .unwrap();
+        let result: String = live
+            .ctx
+            .async_with(async |ctx| -> rquickjs::Result<String> {
+                ctx.eval("JSON.stringify(globalThis.graphGoalResults)")
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            r#"[{"address":"//:answer","result":{"value":{"answer":42}}}]"#
+        );
     }
 
     #[tokio::test]

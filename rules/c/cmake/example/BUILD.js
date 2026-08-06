@@ -19,4 +19,4 @@ export const raw_main = ccBinary({
 	deps: [raw_hello],
 	toolchain: zig,
 });
-export const js = jsSources({});
+export const js = jsSources({ base: "rules/c/cmake/example" });
