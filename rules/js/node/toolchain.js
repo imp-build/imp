@@ -8,6 +8,7 @@ import {
 	cacheGet,
 	cacheHas,
 	toolName,
+	tool as graphTool,
 	group,
 } from "imp:core";
 
@@ -129,10 +130,12 @@ export class NodeToolchain extends Toolchain {
 // workspace-load time, so tool handles must be created when a toolchain is
 // declared at BUILD.js top level, not inside acquireNodeToolchain().
 let coreToolHandles = null;
+let graphToolchains = new Map();
 
 export function __resetNodeToolchainStateForTest() {
 	NodeToolchain.clearDefault();
 	coreToolHandles = null;
+	graphToolchains = new Map();
 }
 
 /**
@@ -154,10 +157,13 @@ export function nodeToolchain(version, opts = {}) {
 		);
 	}
 
-	return new NodeToolchain(
+	new NodeToolchain(
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	const graph = nodeGraphTool(version);
+	graphToolchains.set(version, graph);
+	return graph;
 }
 
 /**
@@ -275,6 +281,33 @@ export async function nodeTool(version) {
 	};
 }
 
+/** Return the CAS-backed graph tool used by graph-native JS rules. */
+export function nodeGraphTool(version) {
+	const resolved = NodeToolchain.requireVersion(version);
+	const plat = platformInfo();
+	const key = nodeCacheKey(resolved, plat);
+	const archive = downloadToolArtifact({
+		lockfile: NODE_LOCKFILE,
+		tool: "node-toolchain",
+		version: resolved,
+		plat,
+		url: nodeDownloadUrl(resolved, plat),
+		output: `.imp/node-downloads/${key}/${nodeArtifactName(resolved, plat)}`,
+		display: `download node ${resolved} (${plat.os}/${plat.arch})`,
+		unverified: NodeToolchain.resolveUnverified(resolved),
+	});
+	const directory = extractArchive({
+		archive,
+		dest: `.imp/node-toolchains/${key}`,
+		format: plat.os === "windows" ? "zip" : "tar.gz",
+		stripComponents: 1,
+		display: `extract node ${resolved} (${plat.os}/${plat.arch})`,
+	});
+	return graphTool(directory, {
+		binDirs: [plat.os === "windows" ? "." : "bin"],
+	});
+}
+
 /**
  * Return the currently configured default node toolchain version.
  *
@@ -290,7 +323,8 @@ export function defaultNodeToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultNodeToolchain() {
-	return NodeToolchain.default();
+	const version = NodeToolchain.defaultVersion();
+	return version ? (graphToolchains.get(version) ?? null) : null;
 }
 
 // Importing this rule provisions the pinned default. A workspace can replace

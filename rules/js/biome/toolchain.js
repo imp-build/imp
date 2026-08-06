@@ -11,7 +11,9 @@ import {
 	cacheGet,
 	cacheHas,
 	toolName,
+	tool as graphTool,
 	group,
+	task,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -133,10 +135,12 @@ export class BiomeToolchain extends Toolchain {
 // workspace-load time, so tool handles must be created when a toolchain is
 // declared at BUILD.js top level, not inside acquireBiomeToolchain().
 let coreToolHandles = null;
+let graphToolchains = new Map();
 
 export function __resetBiomeToolchainStateForTest() {
 	BiomeToolchain.clearDefault();
 	coreToolHandles = null;
+	graphToolchains = new Map();
 }
 
 /**
@@ -158,10 +162,13 @@ export function biomeToolchain(version, opts = {}) {
 		);
 	}
 
-	return new BiomeToolchain(
+	new BiomeToolchain(
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	const graph = biomeGraphTool(version);
+	graphToolchains.set(version, graph);
+	return graph;
 }
 
 /**
@@ -286,6 +293,59 @@ export async function biomeTool(version) {
 }
 
 /**
+ * Return a graph-native Biome tool. The legacy declaration API still owns
+ * default-version and lockfile-generation policy during this migration.
+ */
+export function biomeGraphTool(version) {
+	const resolved = BiomeToolchain.requireVersion(version);
+	const plat = platformInfo();
+	const key = biomeCacheKey(resolved, plat);
+	const archive = downloadToolArtifact({
+		lockfile: BIOME_LOCKFILE,
+		tool: "biome-toolchain",
+		version: resolved,
+		plat,
+		url: biomeDownloadUrl(resolved, plat),
+		output: `.imp/biome-downloads/${key}/${biomeArtifactName(plat)}`,
+		display: `download biome ${resolved} (${plat.os}/${plat.arch})`,
+		unverified: BiomeToolchain.resolveUnverified(resolved),
+	});
+	const shell = nativeTool("sh");
+	const cp = nativeTool("cp");
+	const mkdir = nativeTool("mkdir");
+	const chmod = plat.os === "windows" ? null : nativeTool("chmod");
+	const install = task({
+		display: `install biome ${resolved} (${plat.os}/${plat.arch})`,
+		inputs: { archive, shell, cp, mkdir, ...(chmod ? { chmod } : {}) },
+		outputs: { directory: output.artifact() },
+		async run(exec, inputs) {
+			const exe = plat.os === "windows" ? "biome.exe" : "biome";
+			const result = await exec.action({
+				argv: [
+					exec.tool(inputs.shell, "sh"),
+					"-c",
+					plat.os === "windows"
+						? 'mkdir -p "$2" && cp "$1" "$2/biome.exe"'
+						: 'mkdir -p "$2" && cp "$1" "$2/biome" && chmod +x "$2/biome"',
+					"install-biome",
+					exec.path(inputs.archive),
+					"toolchain",
+				],
+				tools: [
+					inputs.shell,
+					inputs.cp,
+					inputs.mkdir,
+					...(inputs.chmod ? [inputs.chmod] : []),
+				],
+				outputs: { directory: output.directory("toolchain") },
+			});
+			return { directory: result.outputs.directory };
+		},
+	});
+	return graphTool(install.outputs.directory, { binDirs: ["."] });
+}
+
+/**
  * Return the currently configured default biome toolchain version.
  *
  * @returns {string|null}
@@ -300,7 +360,8 @@ export function defaultBiomeToolchainVersion() {
  * @returns {object|null}
  */
 export function defaultBiomeToolchain() {
-	return BiomeToolchain.default();
+	const version = BiomeToolchain.defaultVersion();
+	return version ? (graphToolchains.get(version) ?? null) : null;
 }
 
 // Importing this rule provisions the pinned default. A workspace can replace

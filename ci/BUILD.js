@@ -35,7 +35,7 @@ async function runGenerator(materialize) {
 	});
 }
 
-export const js = jsSources({});
+export const js = jsSources({ base: "ci" });
 
 const docs_workflow = label();
 attach(docs_workflow, "generate", async function generateDocsWorkflow(ctx) {

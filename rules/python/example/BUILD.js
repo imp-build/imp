@@ -7,4 +7,4 @@ export const hello = pythonApp({
 });
 
 export const hello_test = pythonTest({});
-export const js = jsSources({});
+export const js = jsSources({ base: "rules/python/example" });

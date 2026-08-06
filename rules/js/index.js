@@ -1,87 +1,7 @@
-import {
-	extensible,
-	glob,
-	label,
-	labelAddress,
-	memo,
-	registerBuildRule,
-} from "imp:core";
+import { BUILD, files, packagePath, registerBuildRule } from "imp:core";
 
-registerBuildRule({
-	rule: "jsSources",
-	importFrom: "//rules/js",
-});
-
-// ---------------------------------------------------------------------------
-// Path helpers (same pattern as rules/rust/index.js and rules/python/index.js)
-// ---------------------------------------------------------------------------
-
-function normalize_workspace_path(path) {
-	const parts = [];
-	for (const part of path.split("/")) {
-		if (part === "" || part === ".") continue;
-		if (part === "..") {
-			throw new Error(`js paths must stay within the workspace: ${path}`);
-		}
-		parts.push(part);
-	}
-	return parts.length === 0 ? "." : parts.join("/");
-}
-
-export function jsSourcesAddress(handle) {
-	try {
-		if (handle && handle.__imp_label) return labelAddress(handle);
-		if (handle && handle.label && handle.label.__imp_label) {
-			return labelAddress(handle.label);
-		}
-		return null;
-	} catch (_) {
-		return null;
-	}
-}
-
-function declaring_directory(handle) {
-	const address = jsSourcesAddress(handle);
-	if (!address || !address.startsWith("//")) return ".";
-	const scope = address.slice(2).split(":")[0];
-	return scope.length === 0 ? "." : scope;
-}
-
-export function declared_path(handle, path = ".") {
-	const base = declaring_directory(handle);
-	const local = path || ".";
-	if (base === ".") return normalize_workspace_path(local);
-	if (local === ".") return base;
-	return normalize_workspace_path(`${base}/${local}`);
-}
-
-export function normalize_deps(deps) {
-	return (deps || [])
-		.map((d) =>
-			d && (d.__imp || d.__imp_label) ? d : d && d.target ? d.target : null,
-		)
-		.filter(Boolean);
-}
-
-// ---------------------------------------------------------------------------
-// Action-handle shim
-// ---------------------------------------------------------------------------
-
-function package_handle(srcLabel) {
-	if (!srcLabel || srcLabel.__imp_label !== true) return srcLabel;
-	return {
-		__id: srcLabel.__id,
-		label: srcLabel,
-		attrs: srcLabel.attrs,
-		deps: (srcLabel.data.deps || []).map((target) => ({ handle: target })),
-	};
-}
-
-export const jsSourcesActionHandle = package_handle;
-
-// ---------------------------------------------------------------------------
-// Memo functions
-// ---------------------------------------------------------------------------
+// Kept until generated legacy BUILD files have migrated (#39).
+registerBuildRule({ rule: "jsSources", importFrom: "//rules/js" });
 
 const JS_SOURCE_INCLUDES = [
 	"package.json",
@@ -92,58 +12,36 @@ const JS_SOURCE_INCLUDES = [
 	"*.json",
 ];
 
-// Single-directory level only, never `**/` — a jsSources label owns exactly
-// the files in its own declared directory, not any nested directory's files.
-// Nested directories with their own sources are always their own separate
-// jsSources label (same convention as odin's default `*.odin` package glob
-// in rules/odin/index.js), so a glob here never crosses into another
-// label's territory the way a recursive `**/*.js` would.
-export const sources = memo(
-	async function sources(handle) {
-		handle = package_handle(handle);
-		const root = declared_path(handle, handle.attrs.src || ".");
-		return glob({ root, include: JS_SOURCE_INCLUDES });
-	},
-	{ display: "sources {0}", level: "debug" },
-);
+const sourceHooks = [];
 
-// Just the files a formatter rewrites, scoped to this label's own
-// directory — narrower than sources() above, which also pulls in
-// package.json as a build-time sandbox input. Same split as
-// python_file_sources vs sources() in rules/python/index.js.
-export const js_file_sources = memo(
-	async function js_file_sources(handle) {
-		handle = package_handle(handle);
-		const root = declared_path(handle, handle.attrs.src || ".");
-		return glob({
-			root,
-			include: ["*.js", "*.jsx", "*.ts", "*.tsx", "*.json"],
-		});
-	},
-	{ display: "js file sources {0}", level: "debug" },
-);
+/** Register an internal facet hook enabled by importing a JS rules extension. */
+export function registerJsSourcesHook(hook) {
+	if (typeof hook !== "function")
+		throw new Error("registerJsSourcesHook(hook) expects a function");
+	if (!sourceHooks.includes(hook)) sourceHooks.push(hook);
+}
 
-// ---------------------------------------------------------------------------
-// Label factory
-// ---------------------------------------------------------------------------
+function workspacePath(base, src) {
+	if (typeof src !== "string")
+		throw new Error("jsSources({ src }) expects a string");
+	const parts = [...base.split("/"), ...src.split("/")].filter(
+		(part) => part && part !== ".",
+	);
+	if (parts.includes(".."))
+		throw new Error(`js paths must stay within the workspace: ${src}`);
+	return parts.join("/") || ".";
+}
 
 /**
- * Declare a set of JavaScript/TypeScript source files.
- *
- * @category target
- * @param {object} [opts]
- * @param {string} [opts.src="."] Workspace-relative source directory.
- * @param {Array} [opts.deps=[]] Additional dependencies.
- * @returns {object} Label handle.
+ * Declare JavaScript/TypeScript sources and their exported graph roots.
+ * Importing an extension such as //rules/js/biome adds its facets at
+ * construction time, without mutating this object after the fact.
  */
-export const jsSources = extensible(function jsSources({
-	src = ".",
-	deps = [],
-} = {}) {
-	return label({
-		data: {
-			src: normalize_workspace_path(src),
-			deps: normalize_deps(deps),
-		},
-	});
-});
+export function jsSources({ src = ".", base = packagePath() } = {}) {
+	const root = workspacePath(base, src);
+	const sources = files({ root, include: JS_SOURCE_INCLUDES });
+	const value = { sources, root, [BUILD]: sources };
+	for (const hook of sourceHooks)
+		Object.assign(value, hook(Object.freeze({ ...value })));
+	return Object.freeze(value);
+}

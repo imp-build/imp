@@ -40,8 +40,7 @@ describe("pnpm toolchain", () => {
 		return withPnpmHost((host) => {
 			const toolchain = pnpmToolchain("11.13.0", { default: true });
 
-			expect(toolchain.__imp).toBe(true);
-			expect(toolchain.attrs.version).toBe("11.13.0");
+			expect(toolchain.__imp_graph_handle).toBe(true);
 			expect(defaultPnpmToolchainVersion()).toBe("11.13.0");
 			expect(defaultPnpmToolchain()).toBe(toolchain);
 			expect(

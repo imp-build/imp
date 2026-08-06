@@ -10,7 +10,13 @@
 // genuinely different result shapes (`unformatted` vs. `formatted`), so this
 // callback still needs its own summary/throw logic rather than lint's
 // simpler loop.
-import { goal, resolveProducts, goalFlags, logInfo } from "imp:core";
+import {
+	goal,
+	resolveProducts,
+	goalFlags,
+	logInfo,
+	writeWorkspace,
+} from "imp:core";
 
 export async function fmtGoal(selection) {
 	const { check } = goalFlags();
@@ -53,7 +59,37 @@ export async function fmtGoal(selection) {
 	}
 }
 
+/** Materialize CAS-only formatter results at the workflow boundary. */
+export function graphFmtGoal(roots) {
+	const { check } = goalFlags();
+	const summaryLines = [];
+	const unformatted = [];
+	for (const { address, result } of roots) {
+		if (!result || !result.formatted || !Array.isArray(result.paths)) continue;
+		if (result.check?.failed) {
+			unformatted.push(`${address}: formatting check failed`);
+			continue;
+		}
+		if (!check) {
+			for (const path of result.paths) {
+				writeWorkspace(path, result.formatted.digest, {
+					from: `formatted/${path}`,
+				});
+			}
+			summaryLines.push(
+				`- ${address}: formatted ${result.paths.length} JS/TS source(s)`,
+			);
+		}
+	}
+	if (summaryLines.length > 0) logInfo(["fmt:", ...summaryLines].join("\n"));
+	if (unformatted.length > 0)
+		throw new Error(
+			`not formatted:\n${unformatted.map((line) => `  ${line}`).join("\n")}`,
+		);
+}
+
 goal("fmt", fmtGoal, {
+	graph: graphFmtGoal,
 	flags: {
 		check: { description: "Verify formatting without writing changes" },
 	},
