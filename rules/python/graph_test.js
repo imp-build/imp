@@ -16,6 +16,15 @@ describe("Python graph declarations", () => {
 			expect(app[workflow].__imp_graph_handle).toBe(true);
 	});
 
+	test("application accepts an explicit pythonVersion override", () => {
+		const app = pythonApp({
+			base: "rules/python/example",
+			entryPoint: "hello.__main__",
+			pythonVersion: "3.12.4",
+		});
+		expect(app[RUN].__imp_graph_handle).toBe(true);
+	});
+
 	test("test roots carry their resolve and test options into a graph task", () => {
 		const resolve = pythonResolve({
 			path: "rules/python/example",

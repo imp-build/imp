@@ -17,6 +17,7 @@ import {
 	defaultPexToolchainVersion,
 	pexGraphTool,
 } from "//rules/python/pex_toolchain";
+import { defaultPythonRuntimeVersion } from "//rules/python/runtime";
 import {
 	defaultUvToolchain,
 	defaultUvToolchainVersion,
@@ -129,6 +130,7 @@ function appBuild(spec) {
 		inputs: {
 			app: build.outputs.artifact,
 			uv: spec.uv,
+			pythonVersion: spec.pythonVersion,
 			args: semantic.args(),
 		},
 		async run(exec, inputs) {
@@ -139,7 +141,7 @@ function appBuild(spec) {
 					"--no-project",
 					"--managed-python",
 					"--python",
-					"3.13.0",
+					inputs.pythonVersion,
 					"--",
 					exec.path(inputs.app),
 					...inputs.args,
@@ -197,11 +199,20 @@ function graphTool(value, tool, defaultTool, defaultVersion, name) {
 	return tool(selected);
 }
 
+function pythonVersionOrDefault(value) {
+	const selected =
+		typeof value === "string" ? value : defaultPythonRuntimeVersion();
+	if (!selected)
+		throw new Error("no default python runtime version configured");
+	return selected;
+}
+
 export function pythonApp({
 	src,
 	entryPoint,
 	uvVersion,
 	pexVersion,
+	pythonVersion,
 	extraPexArgs = [],
 	resolve,
 	deps = [],
@@ -212,6 +223,7 @@ export function pythonApp({
 		entryPoint,
 		extraPexArgs: [...extraPexArgs],
 		deps: [...deps],
+		pythonVersion: pythonVersionOrDefault(pythonVersion),
 		uv: graphTool(
 			uvVersion,
 			uvGraphTool,
