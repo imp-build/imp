@@ -812,19 +812,27 @@ export const tool = memo(
 	{ display: "tool {0}", level: "debug" },
 );
 
-// Stable, path-safe slug derived from a package label's own address — same
-// role as the old Target-only targetOutputSlug(), reimplemented locally
-// since labels have no shared engine-side equivalent. Mirrors
-// rules/rust/index.js's cargoPackageOutputSlug.
+// Stable, path-safe slug derived from a package's own address — same role as
+// the old Target-only targetOutputSlug(). Mirrors rules/rust/index.js's
+// cargoPackageOutputSlug. Shared between the legacy label path
+// (odinPackageOutputSlug) and the graph path (graphDefaultOutputPath) so the
+// regex can't drift between the two.
+function addressSlug(address) {
+	return address.replace(/^\/\//, "").replace(/[:/]/g, "_");
+}
+
 function odinPackageOutputSlug(handle) {
 	const address = safe_address(handle);
-	return address
-		? address.replace(/^\/\//, "").replace(/[:/]/g, "_")
-		: `anon-${handle.__id}`;
+	return address ? addressSlug(address) : `anon-${handle.__id}`;
 }
 
 export function default_output_path(handle) {
 	return `build/odin/${odinPackageOutputSlug(odin_package_handle(handle))}`;
+}
+
+/** Default build output path for a graph-native package, given its resolved address. */
+export function graphDefaultOutputPath(address) {
+	return `build/odin/${addressSlug(address)}`;
 }
 
 export function odin_output_path(out, analysis) {
@@ -1867,7 +1875,10 @@ function createGraphPackage({
 			get: () => graphRoot(spec, RUN),
 		});
 	for (const hook of graphPackageHooks)
-		Object.assign(value, hook(Object.freeze({ ...value })));
+		Object.assign(
+			value,
+			hook(Object.freeze({ ...value }), () => graphAnalysis(spec)),
+		);
 	return Object.freeze(value);
 }
 
