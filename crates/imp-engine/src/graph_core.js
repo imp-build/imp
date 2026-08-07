@@ -120,15 +120,25 @@ function _graphOutputSlots(outputs, api) {
 
 output.artifact = () => Object.freeze({ __imp_graph_output_slot: true, kind: "artifact" });
 output.value = () => Object.freeze({ __imp_graph_output_slot: true, kind: "value" });
-output.file = (path) => {
+output.file = (path, opts) => {
 	if (typeof path !== "string" || path.length === 0)
 		throw _graphError("output.file(path) requires a non-empty path");
-	return Object.freeze({ __imp_graph_action_output: true, kind: "file", path });
+	return Object.freeze({
+		__imp_graph_action_output: true,
+		kind: "file",
+		path,
+		...(opts && opts.namedCache ? { namedCache: opts.namedCache } : {}),
+	});
 };
-output.directory = (path) => {
+output.directory = (path, opts) => {
 	if (typeof path !== "string" || path.length === 0)
 		throw _graphError("output.directory(path) requires a non-empty path");
-	return Object.freeze({ __imp_graph_action_output: true, kind: "directory", path });
+	return Object.freeze({
+		__imp_graph_action_output: true,
+		kind: "directory",
+		path,
+		...(opts && opts.namedCache ? { namedCache: opts.namedCache } : {}),
+	});
 };
 
 /**
@@ -467,7 +477,11 @@ function _graphExec(record) {
 				if (Object.values(outputNames).includes(spec.path))
 					throw _graphError(`exec.action() declares output path '${spec.path}' twice`);
 				outputNames[name] = spec.path;
-				outputSpecs.push({ kind: spec.kind, path: spec.path });
+				outputSpecs.push({
+					kind: spec.kind,
+					path: spec.path,
+					...(spec.namedCache ? { namedCache: spec.namedCache } : {}),
+				});
 			}
 			const result = await run({
 				argv: opts.argv,
