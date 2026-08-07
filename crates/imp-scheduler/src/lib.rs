@@ -97,10 +97,6 @@ pub enum TaskEvent {
         /// served from the local disk cache or a remote cache. `None` for
         /// fresh runs and for nodes emitted via `Scheduler::emit`.
         cache_source: Option<CacheSource>,
-        /// Set via [`RunContext::report_remote_cache_write`] when a fresh run
-        /// was pushed to a configured remote cache. Always `false` for cache
-        /// hits and for nodes emitted via `Scheduler::emit`.
-        remote_cache_write: bool,
     },
     LaneStarted {
         kind: LaneKind,
@@ -149,7 +145,6 @@ struct RunState {
     permit: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
     started: AtomicBool,
     cache_source: Mutex<Option<CacheSource>>,
-    remote_cache_write: AtomicBool,
 }
 
 impl RunContext {
@@ -190,12 +185,6 @@ impl RunContext {
     /// [`RunContext::started`].
     pub fn report_cache_source(&self, source: CacheSource) {
         *self.state.cache_source.lock().unwrap() = Some(source);
-    }
-
-    /// Report that this job's fresh result was pushed to a configured remote
-    /// cache.
-    pub fn report_remote_cache_write(&self) {
-        self.state.remote_cache_write.store(true, Ordering::SeqCst);
     }
 }
 
@@ -281,7 +270,6 @@ impl Scheduler {
                 outcome: TaskOutcome::Canceled,
                 cached: None,
                 cache_source: None,
-                remote_cache_write: false,
             });
             self.bump_outstanding(-1);
             bail!("canceled before execution");
@@ -292,7 +280,6 @@ impl Scheduler {
             permit: Mutex::new(None),
             started: AtomicBool::new(false),
             cache_source: Mutex::new(None),
-            remote_cache_write: AtomicBool::new(false),
         });
         let context = RunContext {
             events: self.events.clone(),
@@ -320,13 +307,11 @@ impl Scheduler {
         };
         let cached = Some(!state.started.load(Ordering::SeqCst));
         let cache_source = *state.cache_source.lock().unwrap();
-        let remote_cache_write = state.remote_cache_write.load(Ordering::SeqCst);
         let _ = self.events.send(TaskEvent::Done {
             id,
             outcome,
             cached,
             cache_source,
-            remote_cache_write,
         });
         self.bump_outstanding(-1);
 
