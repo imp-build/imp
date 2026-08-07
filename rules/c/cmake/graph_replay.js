@@ -179,6 +179,7 @@ export function configureCmakeProject(spec) {
 			cmake: nativeTool("cmake"),
 			find: nativeTool("find"),
 			cat: nativeTool("cat"),
+			dirname: nativeTool("dirname"),
 		},
 		outputs: { directory: output.artifact(), ninjaGraph: output.value() },
 		async run(exec, input) {
@@ -203,7 +204,14 @@ export function configureCmakeProject(spec) {
 					...compilerArgs,
 					...spec.cmakeArgs,
 				],
-				tools: [input.mkdir, input.ninja, input.cmake, input.find, input.cat],
+				tools: [
+					input.mkdir,
+					input.ninja,
+					input.cmake,
+					input.find,
+					input.cat,
+					input.dirname,
+				],
 				inputs: [
 					input.srcs,
 					...Object.keys(spec.dirInputs).map((key) => input[key]),
