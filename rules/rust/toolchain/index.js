@@ -358,7 +358,7 @@ function rustGraphInstallTask(version, plat) {
 		unverified: RustToolchain.resolveUnverified(version),
 	});
 
-	const toolNames = coreToolNames(plat);
+	const toolNames = [...new Set([...coreToolNames(plat), "cp"])];
 	const inputs = { installer };
 	for (const [index, name] of toolNames.entries()) {
 		inputs[`tool${index}`] = nativeTool(name);
@@ -370,12 +370,25 @@ function rustGraphInstallTask(version, plat) {
 		async run(exec, resolved) {
 			const installerPath = exec.path(resolved.installer);
 			const tools = toolNames.map((_, index) => resolved[`tool${index}`]);
-			// See acquireRustToolchain() above for why RUSTUP_HOME/CARGO_HOME
-			// are set from $PWD in-script rather than via run()'s env.
-			const chmodStep = plat.os === "windows" ? "" : 'chmod +x "$1"; ';
-			const script = `set -e; ${chmodStep}export RUSTUP_HOME="$PWD/rustup-home" CARGO_HOME="$PWD/cargo-home"; ./"$1" -y --no-modify-path --profile minimal --component rustfmt --component clippy --default-toolchain "$2"`;
+			// The downloaded installer materializes in the sandbox under its
+			// task-output slot name ("artifact"), not "rustup-init" — and
+			// rustup-init's own multi-call dispatch requires its literal exe
+			// name to be a recognized proxy/mode name, so it's copied to a
+			// fixed filename here before being run. See acquireRustToolchain()
+			// above for why RUSTUP_HOME/CARGO_HOME are set from $PWD in-script
+			// rather than via run()'s env.
+			const chmodStep = plat.os === "windows" ? "" : "chmod +x ./$2; ";
+			const script = `set -e; cp "$1" ./"$2"; ${chmodStep}export RUSTUP_HOME="$PWD/rustup-home" CARGO_HOME="$PWD/cargo-home"; ./"$2" -y --no-modify-path --profile minimal --component rustfmt --component clippy --default-toolchain "$3"`;
 			const result = await exec.action({
-				argv: ["sh", "-c", script, installerPath, version],
+				argv: [
+					"sh",
+					"-c",
+					script,
+					"install-rust",
+					installerPath,
+					rustupInitExe,
+					version,
+				],
 				tools,
 				outputs: {
 					rustupHome: output.directory("rustup-home", {

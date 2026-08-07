@@ -12,8 +12,8 @@ requirements.
 | `imp build` | Cargo | `//rules/rust` |
 | `imp test` | Cargo | `//rules/rust` |
 | `imp package` | Cargo | `//rules/rust` |
-| `imp fmt` | rustfmt | `//rules/rust/rustfmt` |
-| `imp lint` | Clippy | `//rules/rust/clippy` |
+| `imp fmt` | rustfmt | `//rules/rust` |
+| `imp lint` | Clippy | `//rules/rust` |
 
 ## Set up the workspace
 
@@ -74,17 +74,15 @@ import { cargoPackage } from "//rules/rust";
 export const server = cargoPackage({
     bin: "server",
     release: true,
-    // This package has no Rust documentation examples to execute.
-    doctest: false,
 });
 ```
 
 The export name forms the label address, so this declaration is selected as
 `//path/to/package:server`. Set `path` when the manifest is below the declaring
-`BUILD.js`. `bin` accepts a string or a list and can explicitly name the
-binaries Cargo produces. When omitted, the rule derives binary targets from
-`Cargo.toml`; a library-only crate can still be formatted, linted, and tested,
-but has no binary artifact for `build` or `package`.
+`BUILD.js`. `bin` accepts a string or a list and explicitly names the binaries
+Cargo produces — it is not derived from `Cargo.toml`. Omit it for a
+library-only crate: it can still be formatted, linted, and tested, but has no
+binary artifact for `build` or `package`.
 
 For a package declared inside an enclosing Cargo workspace, set
 `workspaceMember: true`. That stages the workspace root and sibling path
@@ -108,10 +106,11 @@ the test invocation can still use the normal task and compiler caches.
 
 `cargoArgs` and `testArgs` append arguments to the corresponding Cargo command.
 Use `testTools` for host programs that tests invoke: they are resolved
-imperatively and placed on the sandbox's `PATH`. Use `deps` for additional
-resource inputs such as files referenced by `include_str!` or
-`include_bytes!`. `doctest` overrides the workspace default for that package;
-set `rustConfig.doctest: false` to disable Cargo doc-tests workspace-wide.
+imperatively and placed on the sandbox's `PATH`. Use `deps`/`testDeps` for
+additional graph-native input handles the build/test run needs (e.g. a
+`resourcePackage()`'s `.files`, for files referenced by `include_str!` or
+`include_bytes!`). Set `rustConfig.doctest: false` to disable Cargo doc-tests
+workspace-wide; there is no per-package override yet.
 
 ## Generate missing BUILD files
 

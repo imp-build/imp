@@ -1,26 +1,46 @@
+// Canonical Rust rule entrypoint (graph-native).
+//
+// cargoPackage() builds a task()/expand() graph: [BUILD]/[PACKAGE] are
+// per-crate tasks defined here; [LINT]/[FMT]/[TEST] delegate to
+// workspace_expansion.js's keyed expand() (one shared cargo invocation per
+// real workspace, attributed per crate — see that module's docstring).
+//
+// The linker (RUST_LINKER/RUST_LINK_DRIVER) and build-cache (RUST_BUILD_CACHE)
+// roles are still resolved dynamically via productFor() against whichever
+// legacy Toolchain subclass registered them (rules/c/gcc's RustGccLinkDriver,
+// rules/rust/kache's RustKacheWrapper, rules/c/mold — none of which are
+// migrating in this issue; see the migration plan's decision #3). Their
+// already-resolved legacy tool-spec results ({name, cache, key, binDirs})
+// pass straight through exec.action()'s tools: array unchanged (the engine's
+// legacy-tool-spec passthrough, graph_core.js's addTool).
+//
+// Known simplifications versus the pre-migration factory:
+//   - `bin` auto-detection from Cargo.toml is not ported; omitting `bin`
+//     means "no binaries" (lib-only). Every real crates/*/BUILD.js in this
+//     repo either omits `bin` (lib-only) or declares it explicitly
+//     (crates/imp/BUILD.js), so this is not a regression here.
+//   - A workspaceMember crate's BUILD/PACKAGE inputs use the whole-repo
+//     source glob (manifestSources(".")) rather than a narrowed
+//     transitive-dependency closure — correct, but coarser build-cache
+//     granularity. Assumes the real workspace root is "." (true for this
+//     repo).
+//   - No per-package `doctest` override (workspace_expansion.js respects
+//     only the workspace-wide `rustConfig.doctest` default). No real crate
+//     here uses a per-package override today.
+
 import {
-	artifact,
-	build as attachBuild,
-	configuration,
-	extensible,
-	file_set,
-	glob,
-	label,
-	labelAddress,
-	logInfo,
-	memo,
+	BUILD,
+	FMT,
+	LINT,
+	PACKAGE,
+	TEST,
+	file,
+	files,
 	output,
-	output_path,
-	packageGoal as attachPackage,
-	paths,
+	packagePath,
 	platformInfo,
 	productFor,
-	read_file,
-	run,
-	targetAddress,
-	test as attachTest,
-	writeWorkspace,
-	group,
+	task,
 } from "imp:core";
 
 import {
@@ -30,8 +50,8 @@ import {
 } from "//rules/rust/products";
 import {
 	defaultRustToolchain,
-	resolveRustToolchainVersion,
-	rustTool,
+	rustGraphToolEnv,
+	rustGraphToolchain,
 } from "//rules/rust/toolchain";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -39,336 +59,22 @@ import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
 import { defaultGccToolchain } from "//rules/c/gcc";
 
 import {
-	wholeWorkspaceFor,
-	workspaceClosureFor,
-	workspaceRootRelativeFor,
-} from "//rules/rust/workspace_closure";
-
-import { resources as resource_package_sources } from "//rules/asset";
+	cargoStandaloneExpansion,
+	cargoWorkspaceExpansion,
+} from "//rules/rust/workspace_expansion";
 
 // Registers the "build" goal's artifact summary callback for consumers that
 // import Rust build rules without importing the workflows layer explicitly.
 import "//rules/workflows/build";
 
-// The package test handler delegates to the production lazy test actions.
-import { cargoPackageTests } from "//rules/rust/test";
-
 // Registers the direct "generate-build" callback (declaring cargoPackage()
-// labels for unowned Cargo.toml files) for the same reason.
+// declarations for unowned Cargo.toml files) for the same reason.
 import "//rules/rust/generate_build";
 
 // ---------------------------------------------------------------------------
-// Path helpers (same pattern as rules/odin/index.js, rules/c/cmake/index.js)
+// Linker / build-cache bridging (unchanged bridging spirit; see module
+// docstring above)
 // ---------------------------------------------------------------------------
-
-function normalize_workspace_path(path) {
-	const parts = [];
-	for (const part of path.split("/")) {
-		if (part === "" || part === ".") continue;
-		if (part === "..") {
-			throw new Error(`Rust paths must stay within the workspace: ${path}`);
-		}
-		parts.push(part);
-	}
-	return parts.length === 0 ? "." : parts.join("/");
-}
-
-export function cargoPackageAddress(handle) {
-	try {
-		if (handle && handle.__imp_label) return labelAddress(handle);
-		if (handle && handle.label && handle.label.__imp_label) {
-			return labelAddress(handle.label);
-		}
-		return targetAddress(handle);
-	} catch (_) {
-		return null;
-	}
-}
-
-function declaring_directory(handle) {
-	const address = cargoPackageAddress(handle);
-	if (!address || !address.startsWith("//")) return ".";
-	const scope = address.slice(2).split(":")[0];
-	return scope.length === 0 ? "." : scope;
-}
-
-export function declared_path(handle, path = ".") {
-	const base = declaring_directory(handle);
-	const local = path || ".";
-	if (base === ".") return normalize_workspace_path(local);
-	if (local === ".") return base;
-	return normalize_workspace_path(`${base}/${local}`);
-}
-
-export function normalize_deps(deps) {
-	return (deps || [])
-		.map((d) => (d && d.__imp ? d : d && d.target ? d.target : null))
-		.filter(Boolean);
-}
-
-const _cargoPackageLabels = [];
-
-function package_handle(packageLabel) {
-	if (!packageLabel || packageLabel.__imp_label !== true) return packageLabel;
-	return {
-		__id: packageLabel.__id,
-		label: packageLabel,
-		attrs: packageLabel.attrs,
-		deps: [
-			...(packageLabel.data.deps || []).map((target) => ({ handle: target })),
-			...(packageLabel.data.testTools || []).map((target) => ({
-				handle: target,
-				mode: "tool",
-			})),
-		],
-	};
-}
-
-export const cargoPackageActionHandle = package_handle;
-
-export function cargoPackageOutputSlug(handle) {
-	const address = cargoPackageAddress(handle);
-	if (!address) return `anon-${handle.__id}`;
-	return address.replace(/^\/\//, "").replace(/[:/]/g, "_");
-}
-
-export function cargoPackageHandles() {
-	return _cargoPackageLabels
-		.map(package_handle)
-		.sort((a, b) =>
-			(cargoPackageAddress(a) || "").localeCompare(
-				cargoPackageAddress(b) || "",
-			),
-		);
-}
-
-function cargo_doctest_enabled(handle) {
-	if (typeof handle.attrs.doctest === "boolean") {
-		return handle.attrs.doctest;
-	}
-	const rust = configuration("rust", {}) || {};
-	return rust.doctest !== false;
-}
-
-// Resolve enabled doc-test package names for one Cargo workspace. Package
-// settings override the workspace default. Unrepresented Cargo members use
-// that default too, so generated/partially-declared workspaces retain Cargo's
-// ordinary `--workspace` coverage.
-function workspace_doctest_packages(workspaceRootRelative, docTestNames) {
-	const rust = configuration("rust", {}) || {};
-	const workspaceDefault = rust.doctest !== false;
-	const settings = new Map(
-		cargoPackageHandles().map((handle) => [
-			declared_path(handle, handle.attrs.path || "."),
-			handle.attrs.doctest,
-		]),
-	);
-	const prefix =
-		workspaceRootRelative === "." ? "" : `${workspaceRootRelative}/`;
-	const enabled = [];
-	let hasDisabledPackage = false;
-	for (const [memberDir, info] of docTestNames) {
-		const setting = settings.get(
-			normalize_workspace_path(`${prefix}${memberDir}`),
-		);
-		const isEnabled = typeof setting === "boolean" ? setting : workspaceDefault;
-		if (!isEnabled) {
-			hasDisabledPackage = true;
-			continue;
-		}
-		// `cargo test --doc -p` errors for a bin-only package, while
-		// `--workspace` silently skips it. Only select packages with a lib or
-		// proc-macro target when we need an explicit subset.
-		if (info.libName) enabled.push(info.packageName);
-	}
-	return { enabled, hasDisabledPackage };
-}
-
-// ---------------------------------------------------------------------------
-// Source discovery
-// ---------------------------------------------------------------------------
-
-// Just the crate's .rs files — used by fmt, which only ever reformats source
-// files (not Cargo.toml/Cargo.lock).
-export const rust_file_sources = memo(
-	async function rust_file_sources(handle) {
-		handle = package_handle(handle);
-		const root = declared_path(handle, handle.attrs.path || ".");
-		return glob({ root, include: ["**/*.rs"], exclude: ["target/**"] });
-	},
-	{ display: "Rust file sources {0}", level: "debug" },
-);
-
-// Everything cargo build needs to see: manifests, lockfile, and sources.
-//
-// A crate declared with `workspaceMember: true` (set by
-// //rules/rust/generate_build.js when `cargo metadata` reports its
-// workspace_root as an ancestor directory, not itself) needs cargo to
-// resolve the real `[workspace]` it belongs to — cargo walks up from
-// --manifest-path to find the enclosing workspace manifest, and (since
-// workspace members here declare real path-dependencies on each other,
-// e.g. crates/imp-execution on crates/imp-store) needs every crate in
-// its transitive path-dependency closure visible too, plus enough of every
-// *other* real member to resolve the workspace at all: a manifest + its
-// declared targets' entry-point files (see
-// //rules/rust/workspace_closure's docstring for why this "shallow" set is
-// enough, and why it replaced synthesizing a narrowed manifest — the real,
-// unmodified root Cargo.toml/Cargo.lock stay valid input as-is, so
-// `--locked` on cargoBuild/cargoTest/cargoClippy/buildTestBinaries is never
-// fighting a lockfile trim cargo would otherwise want to do).
-//
-// A standalone crate (no `workspaceMember`) must stay scoped to its own
-// directory: including an *unrelated* ancestor `[workspace]` manifest that
-// doesn't list it as a member makes cargo fail with "current package
-// believes it's in a workspace when it's not" (confirmed directly against
-// rules/rust/example, which sits under this repo's own root Cargo.toml but
-// isn't one of its `members`).
-//
-// @returns {Promise<{ files: FileSet }>}
-export const sources = memo(
-	async function sources(handle) {
-		handle = package_handle(handle);
-		const path = declared_path(handle, handle.attrs.path || ".");
-		if (!handle.attrs.workspaceMember) {
-			return {
-				files: glob({
-					root: path,
-					include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
-					exclude: ["target/**"],
-				}),
-			};
-		}
-
-		const toolchainVersion = rust_toolchain_version(handle);
-		const { dirs, shallowFiles, workspaceRootRelative } =
-			await workspaceClosureFor(path, toolchainVersion);
-		const prefix =
-			workspaceRootRelative === "." ? "" : `${workspaceRootRelative}/`;
-		const include = dirs.flatMap((dir) => [
-			`${prefix}${dir}/Cargo.toml`,
-			`${prefix}${dir}/**/*.rs`,
-		]);
-		include.push(`${prefix}Cargo.toml`, `${prefix}Cargo.lock`, ...shallowFiles);
-		return {
-			files: glob({ root: ".", include, exclude: ["target/**"] }),
-		};
-	},
-	{ display: "sources {0}", level: "debug" },
-);
-
-// Full source for every real member of the same workspace, not just one
-// crate's own closure — for the shared whole-workspace lint/test-build
-// tasks (see wholeWorkspaceFor's docstring, //rules/rust/workspace_closure,
-// for why lint/test stopped fanning out one cargo invocation per crate).
-export async function wholeWorkspaceSources(
-	workspaceRootRelative,
-	toolchainVersion,
-) {
-	const { memberDirs } = await wholeWorkspaceFor(
-		workspaceRootRelative,
-		toolchainVersion,
-	);
-	const prefix =
-		workspaceRootRelative === "." ? "" : `${workspaceRootRelative}/`;
-	const include = memberDirs.flatMap((dir) => [
-		`${prefix}${dir}/Cargo.toml`,
-		`${prefix}${dir}/**/*.rs`,
-	]);
-	include.push(`${prefix}Cargo.toml`, `${prefix}Cargo.lock`);
-	return {
-		files: glob({ root: ".", include, exclude: ["target/**"] }),
-		memberDirs,
-	};
-}
-
-// FileSet of a cargoPackage's declared resource-package deps (see
-// //rules/asset's resourcePackage) — same pattern rules/odin/index.js's
-// `resources` uses, minus the transitive-package-dep recursion (a
-// cargoPackage has no notion of depending on another cargoPackage the way
-// an odinPackage depends on other odin-package targets; Cargo itself owns
-// crate-to-crate deps via Cargo.toml/the registry).
-export const resources = memo(
-	async function resources(handle) {
-		handle = package_handle(handle);
-		return resourceSetFor(handle.deps);
-	},
-	{ display: "Rust resources {0}", level: "debug" },
-);
-
-// The same, for `testDeps` — files the test binaries read at runtime but the
-// crate does not compile against. Keeping these off `deps` is the point: a
-// change to them must re-run the tests without invalidating the library or
-// binary build. (imp's own rules/ tree is the motivating case: `imp init`
-// and the loader read it from disk, and its tests need it present, but no
-// imp crate embeds it any more.)
-export const testResources = memo(
-	async function testResources(handle) {
-		handle = package_handle(handle);
-		return resourceSetFor(handle.attrs.testDeps);
-	},
-	{ display: "Rust test resources {0}", level: "debug" },
-);
-
-// Accepts both dep shapes in play here: package_handle() wraps `data.deps` as
-// `{ handle }`, while `attrs.testDeps` holds the bare handles normalize_deps
-// returned.
-async function resourceSetFor(deps) {
-	const sets = (deps || [])
-		.map((dep) => (dep && dep.handle ? dep.handle : dep))
-		.filter((dep) => dep && dep.kind === "resource-package");
-	if (sets.length === 0) return file_set.literal([]);
-	const resolved = await group(sets.map(resource_package_sources));
-	return resolved.length === 1 ? resolved[0] : file_set.union(...resolved);
-}
-
-// Union of resources() across every declared Cargo package label whose
-// own directory is one of `dirs` — used by the shared whole-workspace
-// lint/test-build tasks (rules/rust/lint.js, rules/rust/test.js), which
-// compile every member of a real workspace in one cargo invocation and so
-// need every member's resource-package inputs, not just the one crate that
-// happened to trigger the shared task.
-export async function resourcesForDirs(dirs) {
-	const dirSet = new Set(dirs);
-	const handles = cargoPackageHandles().filter((h) =>
-		dirSet.has(declared_path(h, h.attrs.path || ".")),
-	);
-	if (handles.length === 0) return file_set.literal([]);
-	const sets = await group(handles.map(resources));
-	return sets.length === 1 ? sets[0] : file_set.union(...sets);
-}
-
-// Union of every declared Cargo package label's own testTools within
-// `dirs` — same rationale as resourcesForDirs above, for the shared
-// whole-workspace doc-test run (runWorkspaceDocTests below), which actually
-// *runs* every member's doc-tests in one process and so needs every
-// member's own testTools on PATH, not just the one crate that happened to
-// trigger the shared task. Native-tool specs deduplicate by executable name;
-// any retained provider handles deduplicate by identity.
-async function testToolsForDirs(dirs) {
-	const dirSet = new Set(dirs);
-	const handles = cargoPackageHandles().filter((h) =>
-		dirSet.has(declared_path(h, h.attrs.path || ".")),
-	);
-	const seen = new Set();
-	const specs = [];
-	for (const h of handles) {
-		for (const tool of h.attrs.testTools || []) {
-			const key = tool?.__imp_native_tool ? `native:${tool.name}` : tool;
-			if (seen.has(key)) continue;
-			seen.add(key);
-			specs.push(await nativeToolSpec(tool));
-		}
-	}
-	return specs;
-}
-
-export function rust_toolchain_version(handle) {
-	handle = package_handle(handle);
-	const toolchainHandle = handle.attrs.toolchain;
-	return toolchainHandle
-		? toolchainHandle.attrs.version
-		: resolveRustToolchainVersion(handle.attrs.toolchainVersion);
-}
 
 // cargo/rustc need a real C link driver in the hermetic sandbox — rustc
 // shells out to a program literally named "cc" by default. Reuse the gcc
@@ -436,18 +142,11 @@ export async function rustBuildCacheTools(toolchainHandle) {
 	};
 }
 
-// Shared script building blocks for cargoBuild/cargoTest/cargoClippy/
-// buildTestBinaries: all four invoke cargo the same way (a manifest/
-// target-dir/rustflags positional trio, then command-specific args), and all
-// four need the same sandbox-root capture once a build-cache layer (e.g.
-// kache) needs it — see RustKacheWrapper.scriptPreamble()'s doc comment
-// for why that capture has to happen in script text rather than via run()'s
-// own env:.
-//
-// `imp_sandbox_root` is captured unconditionally (cheap, and $(pwd) is
-// always the sandbox root here — none of the four callers `cd` before
-// invoking cargo) so scriptPreamble/remap can both stay simple string
-// splices instead of each needing their own conditional capture.
+// Shared script building blocks for the cargo build task below: a manifest/
+// target-dir/rustflags positional trio, then command-specific args, plus the
+// sandbox-root capture a build-cache layer (e.g. kache) needs — see
+// RustKacheWrapper.scriptPreamble()'s doc comment for why that capture has to
+// happen in script text rather than via exec.action()'s own env.
 export function cargoScriptPreamble(scriptPreamble = "") {
 	return (
 		'imp_sandbox_root="$(pwd)"; manifest=$1; target_dir=$2; rustflags=$3; shift 3; ' +
@@ -463,10 +162,8 @@ export function cargoRemapFlag(kacheActive) {
 	return kacheActive ? ' --remap-path-prefix="$imp_sandbox_root"=/imp-src' : "";
 }
 
-// The common case: `cargoScriptPreamble` followed by one RUSTFLAGS-prefixed
-// cargo invocation. cargoTest's doc-test script wraps its cargo invocation
-// in extra shell logic, so it composes cargoScriptPreamble/cargoRemapFlag
-// directly instead of using this helper.
+// The common case: cargoScriptPreamble followed by one RUSTFLAGS-prefixed
+// cargo invocation.
 export function cargoInvocationScript(cargoCommand, opts = {}) {
 	return (
 		cargoScriptPreamble(opts.scriptPreamble) +
@@ -474,509 +171,197 @@ export function cargoInvocationScript(cargoCommand, opts = {}) {
 	);
 }
 
-// Resolve RUSTUP_HOME/CARGO_HOME/PATH for invoking cargo/rustc.
-//
-// Normally these are sandbox-relative "tool" mount aliases (toolSpec.tools +
-// toolSpec.rustupHome/cargoHome) — reproducible and explicitly tracked as
-// build inputs, per the sandbox's usual hermeticity model.
-//
-// When kache is wrapping rustc, that per-sandbox aliasing itself becomes a
-// risk: a long-lived compiler-cache daemon like kache's can cache detected
-// "compiler info" keyed by the *canonicalized* exe path (resolving the
-// sandbox symlink down to the same real, stable toolchain directory every
-// time — this is exactly the class of bug sccache had in its own
-// src/server.rs `compiler_info()`), but the *literal* (uncanonicalized) exe
-// path embedded in that cached entry — the one actually used to spawn the
-// compiler on a cache miss — would be whichever sandbox's path happened to
-// be seen first. Once that first sandbox is torn down, every later build
-// sharing the same daemon would fail with "No such file or directory" trying
-// to invoke a compiler at a path that no longer exists, even though the
-// exact same toolchain is trivially reachable via the *current* sandbox's
-// own (different) symlink.
-//
-// The fix is to make the literal exe path identical across every sandbox in
-// the first place: when kache is active, resolve cargo/rustc through the
-// real, absolute, stable named-cache directory (toolSpec.rustupHomeAbs/
-// cargoHomeAbs) instead of the sandbox-relative alias, and skip mounting
-// the sandbox "tool" copies at all — mirroring the same real-path-over-
-// sandbox-mount tradeoff already made for kache's own data directory (see
-// kacheDataDir() in //rules/rust/kache/toolchain).
-export function rustToolEnv(toolSpec, kacheActive) {
-	if (!kacheActive) {
+// ---------------------------------------------------------------------------
+// cargoPackage() registry — declaration order, read by generate_build's
+// dedup check and by workspace_expansion.js's per-crate testTools lookup
+// (see testToolsForDir there). Mirrors rules/odin/index.js's graphPackages.
+// ---------------------------------------------------------------------------
+
+const _cargoPackageSpecs = [];
+
+export function cargoPackageHandles() {
+	return _cargoPackageSpecs.slice();
+}
+
+// ---------------------------------------------------------------------------
+// cargoPackage() factory
+// ---------------------------------------------------------------------------
+
+function normalizeWorkspacePath(path) {
+	const parts = [];
+	for (const part of (path || ".").split("/")) {
+		if (part === "" || part === ".") continue;
+		if (part === "..") {
+			throw new Error(`Rust paths must stay within the workspace: ${path}`);
+		}
+		parts.push(part);
+	}
+	return parts.length === 0 ? "." : parts.join("/");
+}
+
+function manifestSources(root) {
+	return files({
+		root,
+		include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
+		exclude: ["target/**"],
+	});
+}
+
+function outputSlugFor(path) {
+	return path === "." ? "root" : path.replace(/\//g, "_");
+}
+
+// A bare toolchain option is either a rustGraphToolchain()-shaped record
+// (identified by its unique `toolchainId` field — a raw tool()/task() handle
+// also has `__imp_graph_handle === true`, so that alone can't distinguish
+// the two), a legacy RustToolchain target handle (has .attrs.version and
+// optionally .linkDriver/.linker/.kache — the only source of those for the
+// productFor() bridge above), a plain version string, or omitted (workspace
+// default). The legacy handle, when given, is kept around unresolved purely
+// so rustLinkerTools()/rustBuildCacheTools() can still read its attrs — it
+// is never passed into a task() input.
+function resolveToolchain(toolchain) {
+	if (toolchain && typeof toolchain.toolchainId === "string") {
+		return { graph: toolchain, legacy: null };
+	}
+	if (toolchain && toolchain.__imp === true) {
 		return {
-			tools: toolSpec.tools,
-			env: [
-				`RUSTUP_HOME=${toolSpec.rustupHome}`,
-				`CARGO_HOME=${toolSpec.cargoHome}`,
-			],
+			graph: rustGraphToolchain(toolchain.attrs.version),
+			legacy: toolchain,
 		};
 	}
+	if (typeof toolchain === "string") {
+		return { graph: rustGraphToolchain(toolchain), legacy: null };
+	}
+	const legacy = defaultRustToolchain();
+	if (!legacy) {
+		throw new Error(
+			"cargoPackage() needs a rustToolchain() declared as the workspace default, or an explicit toolchain option",
+		);
+	}
+	return { graph: rustGraphToolchain(legacy.attrs.version), legacy };
+}
+
+function extraInputs(deps) {
+	return (deps || []).filter((dep) => dep && dep.__imp_graph_handle === true);
+}
+
+function kacheActiveFor(legacyToolchainHandle) {
+	return !!(legacyToolchainHandle && legacyToolchainHandle.attrs.kache);
+}
+
+export async function toolEnvAndTools(exec, input, spec) {
+	const kacheActive = kacheActiveFor(spec.legacyToolchainHandle);
+	const [linker, cache] = await Promise.all([
+		rustLinkerTools(spec.legacyToolchainHandle),
+		rustBuildCacheTools(spec.legacyToolchainHandle),
+	]);
+	const { env: rustEnv } = rustGraphToolEnv(
+		exec,
+		input.rustupHomeTool,
+		input.cargoHomeTool,
+		spec.toolchain.toolchainId,
+		spec.toolchain.version,
+		kacheActive,
+	);
 	return {
-		tools: [],
-		env: [
-			`RUSTUP_HOME=${toolSpec.rustupHomeAbs}`,
-			`CARGO_HOME=${toolSpec.cargoHomeAbs}`,
-			`PATH=${toolSpec.rustupHomeAbs}/toolchains/${toolSpec.toolchainId}/bin:${toolSpec.cargoHomeAbs}/bin`,
-		],
+		kacheActive,
+		tools: [...linker.tools, ...cache.tools],
+		env: [...rustEnv, ...linker.env, ...cache.env],
+		rustflags: linker.rustflags,
+		scriptPreamble: cache.scriptPreamble,
 	};
 }
 
-// ---------------------------------------------------------------------------
-// Product functions
-// ---------------------------------------------------------------------------
+// [BUILD]/[PACKAGE]: one task producing every declared `bin`'s binary
+// artifact. No outputs at all when there are no bins (lib-only package) —
+// callers should omit [BUILD]/[PACKAGE] entirely in that case rather than
+// resolve a no-op task.
+function crateBuildTask(spec) {
+	const manifest = file(`${spec.path}/Cargo.toml`);
+	const manifests = spec.workspaceMember
+		? manifestSources(".")
+		: manifestSources(spec.path);
+	const bins = spec.bin;
+	const profile = spec.release ? "release" : "debug";
+	const buildDir = `build/rust/${spec.outputSlug}`;
 
-/**
- * Build a Cargo binary crate.
- *
- * @param {object} handle Target handle returned by cargoPackage().
- * @returns {Promise<object>} Run result, plus `outputPaths`: the built
- * binaries' workspace-relative paths, one per `bin` entry.
- */
-
-async function runCargoBuild({
-	path,
-	bins,
-	cargoArgs,
-	release,
-	toolchainHandle,
-	toolchainVersion,
-	outputSlug,
-	srcs,
-	resourceInputs,
-}) {
-	if (bins.length === 0) {
-		return { outputPaths: [] };
-	}
-	const toolSpec = await rustTool(toolchainVersion);
-	const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
-	const {
-		tools: linkerTools,
-		rustflags,
-		env: linkerEnv,
-	} = await rustLinkerTools(toolchainHandle);
-	const {
-		tools: cacheTools,
-		env: cacheEnv,
-		scriptPreamble,
-	} = await rustBuildCacheTools(toolchainHandle);
-	const { tools: rustTools, env: rustEnv } = rustToolEnv(toolSpec, kacheActive);
-
-	const profile = release ? "release" : "debug";
-	const buildDir = output_path(`build/rust/${outputSlug}`);
-	const plat = platformInfo();
-	const exeSuffix = plat.os === "windows" ? ".exe" : "";
-	const outPaths = bins.map(
-		(name) => `${buildDir}/${profile}/${name}${exeSuffix}`,
-	);
-
-	const script = cargoInvocationScript(
-		'cargo build --locked --manifest-path "$manifest" --target-dir "$target_dir" "$@"',
-		{ scriptPreamble, kacheActive },
-	);
-
-	const result = await run({
-		argv: [
-			"sh",
-			"-c",
-			script,
-			"cargo-build",
-			`${path}/Cargo.toml`,
-			buildDir,
-			rustflags,
-			...(release ? ["--release"] : []),
-			...cargoArgs,
-		],
-		tools: [...rustTools, ...linkerTools, ...cacheTools],
-		env: [...rustEnv, ...linkerEnv, ...cacheEnv],
-		inputs: [srcs, resourceInputs],
-		outputs: outPaths.map((p) => output(output_path(p))),
-		materialize: false,
-		display: `cargo build ${path}`,
+	return task({
+		display: `cargo build ${spec.path}`,
+		inputs: {
+			manifest,
+			manifests,
+			rustupHomeTool: spec.toolchain.tool,
+			cargoHomeTool: spec.toolchain.cargoHomeTool,
+			...Object.fromEntries(spec.deps.map((d, i) => [`dep${i}`, d])),
+		},
+		outputs: Object.fromEntries(bins.map((name) => [name, output.artifact()])),
+		async run(exec, input) {
+			const { kacheActive, tools, env, rustflags, scriptPreamble } =
+				await toolEnvAndTools(exec, input, spec);
+			const script = cargoScriptPreamble(scriptPreamble).concat(
+				`RUSTFLAGS="$rustflags${cargoRemapFlag(kacheActive)}" cargo build --locked --manifest-path "$manifest" --target-dir "$target_dir" "$@"`,
+			);
+			const exeSuffix = platformInfo().os === "windows" ? ".exe" : "";
+			const result = await exec.action({
+				argv: [
+					"sh",
+					"-c",
+					script,
+					"cargo-build",
+					exec.path(input.manifest),
+					buildDir,
+					rustflags,
+					...(spec.release ? ["--release"] : []),
+					...spec.cargoArgs,
+				],
+				tools,
+				env,
+				inputs: [input.manifests, ...spec.deps.map((_, i) => input[`dep${i}`])],
+				outputs: Object.fromEntries(
+					bins.map((name) => [
+						name,
+						output.file(`${buildDir}/${profile}/${name}${exeSuffix}`),
+					]),
+				),
+			});
+			return Object.fromEntries(
+				bins.map((name) => [name, result.outputs[name]]),
+			);
+		},
 	});
-
-	return { ...result, outputPaths: outPaths, buildDir };
 }
 
-export const cargoBuild = memo(
-	async function cargoBuild(handle) {
-		handle = package_handle(handle);
-		const path = declared_path(handle, handle.attrs.path || ".");
-		const { files: srcs } = await sources(handle);
-		const resourceInputs = await resources(handle);
-		const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-		const bins =
-			handle.attrs.bins === null
-				? deriveBinsFromCargoToml(path)
-				: handle.attrs.bins;
-
-		// A target-local release opt-in remains authoritative, while a workspace
-		// may supply the ordinary debug/release default through its opt axis.
-		// Read the namespace directly so the reusable Rust rules keep their
-		// existing debug behavior in workspaces that do not declare that axis.
-		const mode = configuration("imp.mode", {}) || {};
-		const release = handle.attrs.release || mode.opt === "release";
-
-		return runCargoBuild({
-			path,
-			bins,
-			cargoArgs: handle.attrs.cargoArgs,
-			release,
-			toolchainHandle,
-			toolchainVersion: rust_toolchain_version(handle),
-			outputSlug: cargoPackageOutputSlug(handle),
-			srcs,
-			resourceInputs,
-		});
-	},
-	{ display: "build {0}", level: "info" },
-);
-
-function readFileOrNull(path) {
-	try {
-		return read_file(path);
-	} catch {
-		return null;
-	}
+function crateSpec(opts) {
+	const {
+		path = packagePath(),
+		bin,
+		release = false,
+		toolchain,
+		cargoArgs = [],
+		testArgs = [],
+		testTools = [],
+		deps = [],
+		testDeps = [],
+		workspaceMember = false,
+	} = opts || {};
+	const normalizedPath = normalizeWorkspacePath(path);
+	const { graph, legacy } = resolveToolchain(toolchain);
+	return {
+		path: normalizedPath,
+		bin: bin === undefined ? [] : Array.isArray(bin) ? [...bin] : [bin],
+		release,
+		toolchain: graph,
+		legacyToolchainHandle: legacy,
+		cargoArgs: [...cargoArgs],
+		testArgs: [...testArgs],
+		testTools: [...testTools],
+		deps: extraInputs(deps),
+		testDeps: extraInputs(testDeps),
+		workspaceMember,
+		outputSlug: outputSlugFor(normalizedPath),
+	};
 }
-
-function deriveBinsFromCargoToml(path) {
-	const text = readFileOrNull(`${path}/Cargo.toml`);
-	if (text == null) {
-		throw new Error(`no Cargo.toml at ${path}`);
-	}
-	let section = null;
-	const explicitBins = [];
-	let packageName = null;
-	for (const rawLine of text.split("\n")) {
-		const line = rawLine.trim();
-		if (line.startsWith("[")) {
-			section = line;
-			continue;
-		}
-		const nameMatch = line.match(/^name\s*=\s*"([^"]+)"/);
-		if (!nameMatch) continue;
-		if (section === "[[bin]]") explicitBins.push(nameMatch[1]);
-		else if (section === "[package]" && packageName == null)
-			packageName = nameMatch[1];
-	}
-	if (explicitBins.length > 0) return explicitBins;
-	if (packageName && readFileOrNull(`${path}/src/main.rs`) != null) {
-		return [packageName];
-	}
-	return [];
-}
-
-export const cargoDistPackage = memo(
-	async function cargoDistPackage(handle) {
-		handle = package_handle(handle);
-		const result = await cargoBuild(handle);
-		if (result.outputPaths.length === 0) {
-			return null;
-		}
-		return artifact(result.outputDigest, { from: result.buildDir });
-	},
-	{ display: "package {0}", level: "info" },
-);
-
-// Parses `cargo test --doc --workspace --no-fail-fast` stderr for per-crate
-// attribution. Doc-tests have no `--message-format=json` equivalent (an
-// upstream cargo limitation — unlike clippy, there's no structured output
-// mode for `--doc`), so this relies on two distinct textual markers cargo
-// prints instead:
-//
-//   - a `   Doc-tests <lib_name>` status header once per package cargo
-//     actually attempted (confirmed directly: cargo pads every status verb
-//     to the same column, so leading whitespace varies — 3 spaces for
-//     "Doc-tests", 4 for "Finished", etc. — hence the flexible `\s*`).
-//     `lib_name` is the lib/proc-macro target's own name, always
-//     underscored (e.g. "imp_daemon"), NOT the package name.
-//   - a `` `-p <package_name> --doc` `` reference once per package whose
-//     doc-tests failed — printed both inline right after that package's own
-//     failure and again in the trailing "N targets failed" summary, so a
-//     global match naturally dedupes via the Set. `package_name` here is
-//     the literal package name (hyphens intact, as declared in Cargo.toml)
-//     — never interchangeable with the header's underscored lib_name.
-//
-// @param {string} stderr
-// @returns {{ attemptedLibNames: Set<string>, failedPackageNames: Set<string> }}
-export function parseDocTestOutput(stderr) {
-	const attemptedLibNames = new Set(
-		[...stderr.matchAll(/^\s*Doc-tests (\S+)\s*$/gm)].map((m) => m[1]),
-	);
-	const failedPackageNames = new Set(
-		[...stderr.matchAll(/`-p (\S+) --doc`/g)].map((m) => m[1]),
-	);
-	return { attemptedLibNames, failedPackageNames };
-}
-
-// Shared, memoized `cargo test --doc --workspace --no-fail-fast` run for one
-// real workspace root + toolchain configuration — or the enabled package
-// subset when a package opts out — same collapsing rationale
-// as runWorkspaceClippy (rules/rust/lint.js) and buildWorkspaceTestBinaries
-// (rules/rust/test.js): every workspaceMember crate's own doc-test
-// invocation would otherwise independently recompile the same internal
-// dependency graph from an empty per-sandbox target-dir, once per crate
-// that (transitively) depends on it, instead of once for the whole real
-// workspace.
-//
-// `--no-fail-fast` is load-bearing, not cosmetic: plain `cargo test --doc
-// --workspace` stops at the very first package whose doc-tests fail and
-// never even attempts any package ordered after it — confirmed directly
-// against real cargo (1.94), not assumed. Without it, one crate's doctest
-// failure would silently swallow every later crate's doctest result for
-// that run: a real regression from today's fully independent per-crate
-// invocations, not just lost signal.
-//
-// Uses its own `build/rust-doctest/` tree rather than reusing
-// buildWorkspaceTestBinaries'/cargoBuild's `build/rust/` — purely for
-// output-path/log hygiene (matching runWorkspaceClippy's own
-// `build/rust-clippy/` tree), not to avoid any lock contention: every
-// run() executes in its own ephemeral sandbox (see
-// crates/imp-execution/src/exec.rs), so a `target_dir` argument is never
-// actually shared storage between concurrent invocations unless explicitly
-// bound through a `named_cache` — which none of these are.
-const runWorkspaceDocTests = memo(
-	async function runWorkspaceDocTests(
-		workspaceRootRelative,
-		toolchainVersion,
-		toolchainHandle,
-		doctestSelection,
-	) {
-		const toolSpec = await rustTool(toolchainVersion);
-		const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
-		const {
-			tools: linkerTools,
-			rustflags,
-			env: linkerEnv,
-		} = await rustLinkerTools(toolchainHandle);
-		const {
-			tools: cacheTools,
-			env: cacheEnv,
-			scriptPreamble,
-		} = await rustBuildCacheTools(toolchainHandle);
-		const { tools: rustTools, env: rustEnv } = rustToolEnv(
-			toolSpec,
-			kacheActive,
-		);
-
-		const { memberDirs, docTestNames } = await wholeWorkspaceFor(
-			workspaceRootRelative,
-			toolchainVersion,
-		);
-		const { enabled, hasDisabledPackage } = doctestSelection;
-		if (hasDisabledPackage && enabled.length === 0) {
-			return {
-				result: null,
-				docTestNames,
-				attemptedLibNames: new Set(),
-				failedPackageNames: new Set(),
-			};
-		}
-		const { files: srcs } = await wholeWorkspaceSources(
-			workspaceRootRelative,
-			toolchainVersion,
-		);
-		const resourceInputs = await resourcesForDirs(memberDirs);
-		const testTools = await testToolsForDirs(memberDirs);
-
-		const prefix =
-			workspaceRootRelative === "." ? "" : `${workspaceRootRelative}/`;
-		const cargoArgs = hasDisabledPackage
-			? enabled.flatMap((packageName) => ["-p", packageName])
-			: ["--workspace"];
-		const script = cargoInvocationScript(
-			'cargo test --locked --doc --no-fail-fast --manifest-path "$manifest" ' +
-				'--target-dir "$target_dir" "$@"',
-			{ scriptPreamble, kacheActive },
-		);
-
-		const result = await run({
-			argv: [
-				"sh",
-				"-c",
-				script,
-				"cargo-doctest-workspace",
-				`${prefix}Cargo.toml`,
-				`build/rust-doctest/${workspaceRootRelative === "." ? "root" : workspaceRootRelative}`,
-				rustflags,
-				...cargoArgs,
-			],
-			tools: [...rustTools, ...linkerTools, ...cacheTools, ...testTools],
-			env: [...rustEnv, ...linkerEnv, ...cacheEnv],
-			inputs: [srcs, resourceInputs],
-			allowFailure: true,
-			display: `cargo test --doc ${cargoArgs.join(" ")} ${workspaceRootRelative}`,
-		});
-
-		const { attemptedLibNames, failedPackageNames } = parseDocTestOutput(
-			result.stderr,
-		);
-
-		return { result, docTestNames, attemptedLibNames, failedPackageNames };
-	},
-	{ display: "workspace doc tests {0}", level: "debug" },
-);
-
-/**
- * Run a Cargo binary crate's doc-tests.
- *
- * //rules/rust/test.js discovers and runs every unit/integration test binary
- * beneath the package label via `cargo test --no-run`; running the whole
- * crate's tests again here would duplicate that work.
- * Doc-tests aren't discoverable via `--no-run` though (they only ever run
- * through a real `cargo test`), so this stays scoped to `--doc` as the one
- * piece the fan-out can't cover.
- *
- * A `workspaceMember` crate's doc-tests run as one shared, memoized `cargo
- * test --doc --workspace` invocation per real workspace root (see
- * runWorkspaceDocTests above), attributed back to this one crate by name —
- * same reasoning and precedent as cargoClippy/runWorkspaceClippy
- * (rules/rust/lint.js). A standalone crate has no workspace to share a run
- * with, so it keeps the simple per-crate `cargo test --doc` invocation.
- *
- * @param {object} handle Target handle returned by cargoPackage().
- * @returns {Promise<object>} Run result from `cargo test --doc`.
- */
-export const cargoTest = memo(
-	async function cargoTest(handle) {
-		handle = package_handle(handle);
-		if (!cargo_doctest_enabled(handle)) {
-			return null;
-		}
-		const path = declared_path(handle, handle.attrs.path || ".");
-		const toolchainVersion = rust_toolchain_version(handle);
-		const toolchainHandle = handle.attrs.toolchain || defaultRustToolchain();
-
-		if (handle.attrs.workspaceMember) {
-			const workspaceRootRelative = await workspaceRootRelativeFor(
-				path,
-				toolchainVersion,
-			);
-			const { docTestNames: workspaceDocTestNames } = await wholeWorkspaceFor(
-				workspaceRootRelative,
-				toolchainVersion,
-			);
-			const doctestSelection = workspace_doctest_packages(
-				workspaceRootRelative,
-				workspaceDocTestNames,
-			);
-			const { result, docTestNames, attemptedLibNames, failedPackageNames } =
-				await runWorkspaceDocTests(
-					workspaceRootRelative,
-					toolchainVersion,
-					toolchainHandle,
-					doctestSelection,
-				);
-
-			const info = docTestNames.get(path);
-			if (!info || !info.libName || result === null) {
-				// No lib/proc-macro target (e.g. a bin-only crate) — cargo
-				// silently skips it under `--workspace` (confirmed directly;
-				// unlike naming it explicitly via a standalone `--doc`
-				// invocation, which hard-errors — see the standalone branch
-				// below), so there's nothing to attribute and nothing failed.
-				return result;
-			}
-
-			const context =
-				`cargo test --doc ${workspaceRootRelative} (shared run):\n\n` +
-				`${result.stdout}\n${result.stderr}`;
-
-			if (failedPackageNames.has(info.packageName)) {
-				throw new Error(
-					`doc-tests failed for ${info.packageName} (//${path}):\n\n${context}`,
-				);
-			}
-			if (!attemptedLibNames.has(info.libName)) {
-				// Has a lib target but never got its own "Doc-tests" header —
-				// the shared run hit a real compile error before reaching this
-				// crate. Don't claim a clean pass; surface the whole run so the
-				// actual problem is visible (mirrors cargoClippy's same
-				// fallback for an unattributed non-zero exit).
-				throw new Error(
-					`doc-tests for ${info.packageName} (//${path}) were never reached — ` +
-						`likely a compile error elsewhere in the shared workspace run:\n\n${context}`,
-				);
-			}
-			return result;
-		}
-
-		// Standalone (non-workspaceMember) crate: no workspace to share a run
-		// with, so this stays a simple per-crate `cargo test --doc`
-		// invocation.
-		const toolSpec = await rustTool(toolchainVersion);
-		const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
-		const {
-			tools: linkerTools,
-			rustflags,
-			env: linkerEnv,
-		} = await rustLinkerTools(toolchainHandle);
-		const {
-			tools: cacheTools,
-			env: cacheEnv,
-			scriptPreamble,
-		} = await rustBuildCacheTools(toolchainHandle);
-		const { tools: rustTools, env: rustEnv } = rustToolEnv(
-			toolSpec,
-			kacheActive,
-		);
-		const testTools = await group(
-			(handle.attrs.testTools || []).map(nativeToolSpec),
-		);
-
-		const { files: srcs } = await sources(handle);
-		const resourceInputs = await resources(handle);
-		const buildDir = output_path(`build/rust/${path === "." ? "root" : path}`);
-
-		// --workspace: this standalone crate's own manifest may itself be a
-		// workspace root (e.g. rules/rust/example), in which case its own
-		// members' doc-tests should run too; on a plain single-package
-		// manifest it's a no-op.
-		//
-		// A bin-only crate (no `[lib]` target) has no doc-tests by
-		// definition, but `cargo test --doc` still hard-errors on it
-		// ("no library targets found in package ...", exit 101) instead of
-		// just finding zero doc-tests — so that specific message is treated
-		// as a benign no-op rather than a real test failure.
-		const script =
-			cargoScriptPreamble(scriptPreamble) +
-			`out=$(RUSTFLAGS="$rustflags${cargoRemapFlag(kacheActive)}" cargo test --locked --doc --manifest-path "$manifest" --target-dir "$target_dir" "$@" 2>&1); ec=$?; ` +
-			'printf "%s\\n" "$out"; ' +
-			'case $ec,"$out" in ' +
-			"0,*) exit 0 ;; " +
-			'*,*"no library targets found"*) exit 0 ;; ' +
-			"esac; " +
-			"exit $ec";
-
-		// No outputs/materialize: test binaries aren't user-addressable
-		// artifacts. No impure flag: a passing run is cached like any other
-		// task, replayed on a later run with unchanged inputs; a failing run
-		// bails before any cache record is written, so it's guaranteed to
-		// rerun next time rather than replaying a stale failure.
-		return run({
-			argv: [
-				"sh",
-				"-c",
-				script,
-				"cargo-test",
-				`${path}/Cargo.toml`,
-				buildDir,
-				rustflags,
-				"--workspace",
-				...handle.attrs.testArgs,
-			],
-			tools: [...rustTools, ...linkerTools, ...cacheTools, ...testTools],
-			env: [...rustEnv, ...linkerEnv, ...cacheEnv],
-			inputs: [srcs, resourceInputs],
-			display: `Run cargo doc-tests for ${path}`,
-		});
-	},
-	{ display: "test {0}", level: "info" },
-);
-
-// ---------------------------------------------------------------------------
-// Exported Cargo package label factory
-// ---------------------------------------------------------------------------
 
 /**
  * Declare a Cargo package target: a self-contained crate, a cargo workspace
@@ -987,86 +372,78 @@ export const cargoTest = memo(
  *
  * @category target
  * @param {object} opts
- * @param {string} [opts.path="."] Workspace-relative directory containing Cargo.toml.
- * @param {string|string[]} [opts.bin] Binary name(s) cargo produces (matches `[[bin]]`/package name in Cargo.toml). Omit for a lib-only package.
- * @param {boolean} [opts.release=false] Always build with `cargo build --release`,
- *   even when the workspace `opt` mode is `debug`.
- * @param {object|string} [opts.toolchain] Rust toolchain target handle or version string.
+ * @param {string} [opts.path] Workspace-relative directory containing Cargo.toml. Defaults to the calling BUILD.js's own directory.
+ * @param {string|string[]} [opts.bin] Binary name(s) cargo produces. Omit for a lib-only package (no Cargo.toml auto-detection — see module docstring).
+ * @param {boolean} [opts.release=false] Always build with `cargo build --release`.
+ * @param {object|string} [opts.toolchain] rustGraphToolchain()/legacy rustToolchain() handle, or a version string.
  * @param {string[]} [opts.cargoArgs=[]] Extra arguments appended to `cargo build`.
  * @param {string[]} [opts.testArgs=[]] Extra arguments appended to `cargo test`.
- * @param {Array<object>} [opts.testTools=[]] nativeTool() specifications exposed on PATH while running `cargo test`.
- * @param {Array<object>} [opts.deps=[]] Extra deps, e.g. a resourcePackage() (see //rules/asset) providing non-.rs files an `include_str!`/`include_bytes!` needs.
- * @param {Array<object>} [opts.testDeps=[]] resourcePackage() deps the test binaries read at runtime but the crate doesn't compile against — materialized into the test sandbox only, so changing them re-runs tests without invalidating the build.
- * @param {boolean} [opts.doctest] Override the workspace `rustConfig.doctest`
- *   setting for this package.
- * @param {boolean} [opts.workspaceMember=false] This package is a member of
- *   a cargo workspace rooted in an ancestor directory (not this one) — build/
- *   test/fmt sandbox inputs glob from the repo root instead of just `path`,
- *   so cargo can resolve the enclosing `[workspace]` and any path-deps on
- *   sibling members. Leave false for a self-contained crate or a workspace
- *   root itself.
- * @returns {object} Exported label handle.
+ * @param {Array<object>} [opts.testTools=[]] nativeTool() specifications exposed on PATH while running tests (including doc-tests in a real workspace's shared run).
+ * @param {Array<object>} [opts.deps=[]] Extra graph-native input handles the build needs (e.g. a resourcePackage()'s `.files`).
+ * @param {Array<object>} [opts.testDeps=[]] Extra graph-native input handles the test run needs but the build doesn't.
+ * @param {boolean} [opts.workspaceMember=false] This package is a member of a workspace rooted at "." (see module docstring's limitation on non-root workspace roots).
+ * @returns {object} Frozen object with lazy `[BUILD]`/`[TEST]`/`[LINT]`/`[FMT]`/`[PACKAGE]` getters.
  */
-export const cargoPackage = extensible(function cargoPackage({
-	path = ".",
-	bin,
-	release = false,
-	toolchain,
-	cargoArgs = [],
-	testArgs = [],
-	testTools = [],
-	deps = [],
-	testDeps = [],
-	doctest,
-	workspaceMember = false,
-} = {}) {
-	const toolchainHandle =
-		toolchain && toolchain.__imp === true
-			? toolchain
-			: typeof toolchain === "string"
-				? null
-				: defaultRustToolchain();
-	const packageLabel = label({
-		data: {
-			path,
-			bins: bin === undefined ? null : Array.isArray(bin) ? [...bin] : [bin],
-			release,
-			cargoArgs: [...cargoArgs],
-			testArgs: [...testArgs],
-			testTools: [...testTools],
-			deps: normalize_deps(deps),
-			testDeps: normalize_deps(testDeps),
-			doctest,
-			workspaceMember,
-			...(toolchainHandle ? { toolchain: toolchainHandle } : {}),
-			...(typeof toolchain === "string" ? { toolchainVersion: toolchain } : {}),
+export function cargoPackage(opts = {}) {
+	const spec = crateSpec(opts);
+	_cargoPackageSpecs.push(spec);
+	const toolchainSpec = {
+		toolchain: spec.toolchain,
+		legacyToolchainHandle: spec.legacyToolchainHandle,
+	};
+	const expansion = spec.workspaceMember
+		? cargoWorkspaceExpansion(".", toolchainSpec)
+		: cargoStandaloneExpansion(spec.path, toolchainSpec);
+	// A workspaceMember crate is keyed by its real crate *name* in the shared
+	// expansion (see workspace_expansion.js), not its path — but this
+	// factory only knows the declared `path`. For this repo's real crates,
+	// each directory's basename equals its Cargo.toml package name (e.g.
+	// crates/imp-store -> "imp-store"), so that's used directly rather than
+	// resolving the true crate name from `cargo metadata`.
+	const crateKey = spec.workspaceMember
+		? spec.path === "."
+			? "."
+			: spec.path.slice(spec.path.lastIndexOf("/") + 1)
+		: spec.path;
+
+	let build = null;
+	function buildTask() {
+		if (!build) build = crateBuildTask(spec);
+		return build;
+	}
+
+	const value = {
+		spec,
+		get [LINT]() {
+			return expansion.get(crateKey, LINT);
 		},
-	});
-	_cargoPackageLabels.push(packageLabel);
-
-	attachBuild(packageLabel, async function buildCargoPackage() {
-		return cargoBuild(packageLabel);
-	});
-	attachTest(packageLabel, async function testCargoPackage() {
-		const [tests, doctests] = await group([
-			cargoPackageTests(packageLabel),
-			cargoTest(packageLabel),
-		]);
-		return { tests, doctests };
-	});
-	attachPackage(packageLabel, async function packageCargoPackage() {
-		const artifactResult = await cargoDistPackage(packageLabel);
-		if (artifactResult === null) return null;
-		const address = labelAddress(packageLabel);
-		const withoutSlashes = address.replace(/^\/\//, "");
-		const [dir, name] = withoutSlashes.split(":");
-		const destination = dir ? `dist/${dir}/${name}` : `dist/${name}`;
-		writeWorkspace(destination, artifactResult.digest, {
-			from: artifactResult.from,
+		get [FMT]() {
+			return expansion.get(crateKey, FMT);
+		},
+		// A bare expansion.get(key, TEST) (no facet) would hand the engine's
+		// root-collection walk a single "resolve TEST, no facet" placeholder
+		// handle — but workspace_expansion.js's TEST facet is itself a named
+		// object ({unit, doctests}), not a bare handle, so that placeholder
+		// would fail to resolve. Root-collection only expands a *plain object*
+		// value into per-facet roots (see imp_core.js's
+		// __imp_collect_graph_exports), so the facets are constructed directly
+		// here instead.
+		get [TEST]() {
+			return {
+				unit: expansion.get(crateKey, TEST, "unit"),
+				doctests: expansion.get(crateKey, TEST, "doctests"),
+			};
+		},
+	};
+	if (spec.bin.length > 0) {
+		Object.defineProperty(value, BUILD, {
+			enumerable: true,
+			get: () => buildTask().outputs,
 		});
-		logInfo(`${address}#package -> ${destination}`);
-		return artifactResult;
-	});
-
-	return packageLabel;
-});
+		Object.defineProperty(value, PACKAGE, {
+			enumerable: true,
+			get: () => buildTask().outputs,
+		});
+	}
+	return Object.freeze(value);
+}

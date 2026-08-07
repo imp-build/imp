@@ -174,8 +174,6 @@ export function render(context = {}) {
 		imports.add("//rules/python/ruff_toolchain");
 	}
 
-	if (has("rust.fmt")) imports.add("//rules/rust/rustfmt");
-	if (has("rust.lint")) imports.add("//rules/rust/clippy");
 	if (has("python.fmt")) imports.add("//rules/python/ruff/fmt");
 	if (has("python.lint")) imports.add("//rules/python/ruff/lint");
 
