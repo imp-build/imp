@@ -7591,6 +7591,77 @@ export default { [BUILD]: acquire.outputs.home };
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn graph_action_accepts_a_legacy_tool_spec_alongside_a_native_tool() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        let tool_dir =
+            imp_store::cache::named_cache_key_path(p, "graph-legacy-tool-test", "v1/linux-x86_64")
+                .unwrap();
+        std::fs::create_dir_all(tool_dir.join("bin")).unwrap();
+        let tool_bin = tool_dir.join("bin/hello-legacy-tool");
+        std::fs::write(&tool_bin, "#!/bin/sh\nprintf from-legacy-tool > out.txt\n").unwrap();
+        let mut perms = std::fs::metadata(&tool_bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&tool_bin, perms).unwrap();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, namedCache, output, task } from "imp:core";
+
+namedCache({ name: "graph-legacy-tool-test" });
+
+// Cross-ruleset roles still dispatched through the legacy productFor()
+// protocol (e.g. rules/rust's linker/build-cache bridging) resolve to an
+// already-resolved legacy tool-spec object like this one, not a graph
+// tool() binding — exec.action().tools must accept it directly.
+const legacyTool = {
+    name: "hello",
+    cache: "graph-legacy-tool-test",
+    key: "v1/linux-x86_64",
+    binDirs: ["bin"],
+};
+
+const acquire = task({
+    display: "run with a legacy tool spec",
+    outputs: { out: output.artifact() },
+    async run(exec) {
+        const result = await exec.action({
+            argv: ["hello-legacy-tool"],
+            tools: [legacyTool],
+            outputs: {
+                out: output.file("out.txt", {
+                    namedCache: { name: "graph-legacy-tool-test", key: "v1-out" },
+                }),
+            },
+        });
+        return { out: result.outputs.out };
+    },
+});
+
+export default { [BUILD]: acquire.outputs.out };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        run_goal_live(&live, p, "build", &["//".to_owned()])
+            .await
+            .unwrap();
+
+        let cache_dest =
+            imp_store::cache::named_cache_key_path(p, "graph-legacy-tool-test", "v1-out").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(cache_dest.join("out.txt")).unwrap(),
+            "from-legacy-tool"
+        );
+    }
+
     #[tokio::test]
     async fn graph_self_tool_executes_lazily() {
         let root = tempfile::tempdir().unwrap();

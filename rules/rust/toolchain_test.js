@@ -13,6 +13,7 @@ import {
 	rustBin,
 	rustCacheKey,
 	rustGraphToolchain,
+	rustGraphToolEnv,
 	rustTool,
 	rustToolchain,
 } from "//rules/rust/toolchain";
@@ -231,6 +232,46 @@ describe("rust toolchain", () => {
 			// Building the graph is pure node construction — nothing executes
 			// until a workflow resolves the task, matching Odin's precedent.
 			expect(host.runs.length).toBe(0);
+		});
+	});
+
+	test("rustGraphToolEnv resolves RUSTUP_HOME/CARGO_HOME via exec.path() in non-kache mode", () => {
+		return withRustHost(() => {
+			const exec = { path: (binding) => binding.__fakePath };
+			const rustupHomeTool = { __fakePath: "/sandbox/rustup-home" };
+			const cargoHomeTool = { __fakePath: "/sandbox/cargo-home" };
+			const { env } = rustGraphToolEnv(
+				exec,
+				rustupHomeTool,
+				cargoHomeTool,
+				"1.79.0-x86_64-unknown-linux-gnu",
+				"1.79.0",
+				false,
+			);
+			expect(env).toEqual([
+				"RUSTUP_HOME=/sandbox/rustup-home",
+				"CARGO_HOME=/sandbox/cargo-home",
+			]);
+		});
+	});
+
+	test("rustGraphToolEnv resolves real absolute named-cache paths when kache is active", () => {
+		return withRustHost(() => {
+			installRustToolchain("1.79.0", SEED);
+			const exec = { path: () => "/unused" };
+			const { env } = rustGraphToolEnv(
+				exec,
+				{},
+				{},
+				"1.79.0-x86_64-unknown-linux-gnu",
+				"1.79.0",
+				true,
+			);
+			expect(env).toEqual([
+				"RUSTUP_HOME=/cache/rustup-home/1.79.0/linux-x86_64",
+				"CARGO_HOME=/cache/cargo-home/1.79.0/linux-x86_64",
+				"PATH=/cache/rustup-home/1.79.0/linux-x86_64/toolchains/1.79.0-x86_64-unknown-linux-gnu/bin:/cache/cargo-home/1.79.0/linux-x86_64/bin",
+			]);
 		});
 	});
 });
