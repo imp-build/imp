@@ -12,6 +12,8 @@ import {
 	cacheHas,
 	toolName,
 	group,
+	task,
+	tool as graphTool,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -401,6 +403,180 @@ export const acquireZigToolchain = memo(
 	},
 	{ display: "acquire Zig Toolchain {0}", level: "info" },
 );
+
+/**
+ * Build the managed Zig distribution as a graph-native tool, writing the
+ * same ar/ranlib/clang wrapper scripts alongside it that
+ * acquireZigToolchain()'s legacy install step writes (see wrapperNames()/
+ * wrapperContent() above for the exact set/content).
+ */
+export function zigGraphTool(version) {
+	const resolved = ZigToolchain.requireVersion(version, "Zig");
+	const plat = platformInfo();
+	const archive = downloadToolArtifact({
+		lockfile: ZIG_LOCKFILE,
+		tool: "zig",
+		version: resolved,
+		plat,
+		url: zigDownloadUrl(resolved, plat),
+		output: `zig-downloads/${zigCacheKey(resolved, plat)}/${zigArtifactName(resolved, plat)}`,
+		display: `download zig ${resolved} (${plat.os}/${plat.arch})`,
+		unverified: ZigToolchain.resolveUnverified(resolved),
+	});
+	const zigExe = plat.os === "windows" ? "zig.exe" : "zig";
+	const { ar, ranlib, clang, genericAr } = wrapperNames(plat);
+	const wrappers = [
+		[wrapperContent(plat, zigExe, "ar"), ar],
+		[wrapperContent(plat, zigExe, "ranlib"), ranlib],
+		[wrapperContent(plat, zigExe, "cc"), clang],
+		[wrapperContent(plat, zigExe, "ar"), genericAr],
+	];
+	const wrapperArgs = wrappers.flat();
+	// Shell positional params past $9 need brace syntax ($10, not $10 which
+	// parses as ${1}0).
+	const pos = (n) => (n >= 10 ? `\${${n}}` : `$${n}`);
+	const writeCmds = wrappers.map(
+		(_, i) => `printf %s "${pos(3 + i * 2)}" > "$2/${pos(4 + i * 2)}"`,
+	);
+	const chmodCmd =
+		plat.os === "windows"
+			? ""
+			: ` && ${wrappers.map((_, i) => `chmod +x "$2/${pos(4 + i * 2)}"`).join(" && ")}`;
+	// tar can't sniff compression from a pipe, so -J (xz) must be explicit on
+	// the tar.xz (unix) release; the windows .zip release isn't a filter
+	// format, so plain -xf works.
+	const tarFlags = plat.os === "windows" ? "-xf" : "-xJf";
+	const installScript = `mkdir -p "$2" && tar ${tarFlags} "$1" -C "$2" --strip-components=1 && ${writeCmds.join(" && ")}${chmodCmd}`;
+
+	const toolNames = coreToolNames(plat);
+	const inputs = { archive };
+	for (const [index, name] of toolNames.entries()) {
+		inputs[`tool${index}`] = nativeTool(name);
+	}
+	const directory = task({
+		display: `install zig ${resolved} (${plat.os}/${plat.arch})`,
+		inputs,
+		outputs: { directory: output.artifact() },
+		async run(exec, resolvedInputs) {
+			const tools = toolNames.map((_, index) => resolvedInputs[`tool${index}`]);
+			const result = await exec.action({
+				argv: [
+					"sh",
+					"-c",
+					installScript,
+					"install-zig",
+					exec.path(resolvedInputs.archive),
+					"zig-toolchain",
+					...wrapperArgs,
+				],
+				tools,
+				outputs: { directory: output.directory("zig-toolchain") },
+			});
+			return { directory: result.outputs.directory };
+		},
+	}).outputs.directory;
+	return graphTool(directory, { binDirs: ["."] });
+}
+
+/**
+ * Build the prewarmed Zig runtime build-cache directory (see
+ * ZIG_BUILD_CACHE's doc comment above) as a graph-native tool, given an
+ * already-built zigGraphTool() handle. Not put on PATH (binDirs empty) —
+ * pair with zigGraphCacheEnv() to point $ZIG_GLOBAL_CACHE_DIR at its mount.
+ */
+function zigGraphBuildCacheTool(version, zigTool) {
+	const resolved = ZigToolchain.requireVersion(version, "Zig");
+	const plat = platformInfo();
+	const mkdir = nativeTool("mkdir");
+	const directory = task({
+		display: `prewarm zig build cache ${resolved} (${plat.os}/${plat.arch})`,
+		inputs: { zigTool, mkdir },
+		outputs: { directory: output.artifact() },
+		async run(exec, resolvedInputs) {
+			// zigTool is a produced tool() binding (zigGraphTool()'s own
+			// install task output) — it can't be listed in exec.action()'s
+			// `tools:` array (only native tool bindings/legacy tool specs can;
+			// see gccRustLinkDriverEnv()'s docstring in //rules/c/gcc for the
+			// same constraint and a confirmed real-build failure). exec.tool()
+			// resolves its absolute path instead, used directly in place of a
+			// bare "zig" the script would otherwise need PATH to find.
+			const zigExe = exec.tool(resolvedInputs.zigTool, "zig");
+			// srcDir/srcfile are fixed literals (not derived from user input),
+			// so the script can avoid needing a `dirname` tool mounted at all.
+			const srcDir = "zig-build-cache-prewarm";
+			const srcfile = `${srcDir}/prewarm.c`;
+			const prewarmScript =
+				"srcdir=$1; srcfile=$2; cachedir=$3; body=$4; zig=$5; " +
+				'mkdir -p "$srcdir" "$cachedir" && ' +
+				'printf %s "$body" > "$srcfile" && ' +
+				'ZIG_GLOBAL_CACHE_DIR="$cachedir" "$zig" cc -g -shared -fPIC -o "$srcdir/prewarm.out" "$srcfile"';
+			const prewarmBody =
+				"int imp_zig_build_cache_prewarm(int a, int b) { return a + b; }\n";
+			const result = await exec.action({
+				argv: [
+					"sh",
+					"-c",
+					prewarmScript,
+					"zig-build-cache-prewarm",
+					srcDir,
+					srcfile,
+					"zig-build-cache",
+					prewarmBody,
+					zigExe,
+				],
+				tools: [resolvedInputs.mkdir],
+				outputs: { directory: output.directory("zig-build-cache") },
+			});
+			return { directory: result.outputs.directory };
+		},
+	}).outputs.directory;
+	return graphTool(directory, { binDirs: [] });
+}
+
+/**
+ * Graph-native Zig toolchain: zigGraphTool() plus its prewarmed build-cache
+ * tool, mirroring rustGraphToolchain()'s two-directory shape (//rules/rust/
+ * toolchain) — Zig, like Rust, needs a second directory beyond the compiler
+ * install itself. Has no Rust-facing role (unlike gcc/mold): this exists to
+ * support raw C/C++ consumption of Zig directly.
+ *
+ * @param {string} [version]
+ * @returns {{ tool: object, buildCacheTool: object, version: string }}
+ */
+export function zigGraphToolchain(version) {
+	const resolved = ZigToolchain.requireVersion(version, "Zig");
+	const tool = zigGraphTool(resolved);
+	return Object.freeze({
+		tool,
+		buildCacheTool: zigGraphBuildCacheTool(resolved, tool),
+		version: resolved,
+	});
+}
+
+/**
+ * Return the currently configured default Zig toolchain as graph-native
+ * handles, or null if none is declared.
+ *
+ * @returns {object|null}
+ */
+export function defaultZigGraphToolchain() {
+	const version = ZigToolchain.defaultVersion();
+	return version ? zigGraphToolchain(version) : null;
+}
+
+/**
+ * Graph-native sibling of zigGlobalCacheEnv(): given a task's `exec` and its
+ * already-declared, resolved `zigGraphToolchain().buildCacheTool` input,
+ * resolve the $ZIG_GLOBAL_CACHE_DIR env entry pointing Zig at its shared
+ * build-cache tool mount.
+ *
+ * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
+ * @param {object} resolvedBuildCacheTool Resolved `zigGraphToolchain().buildCacheTool` input.
+ * @returns {string[]}
+ */
+export function zigGraphCacheEnv(exec, resolvedBuildCacheTool) {
+	return [`ZIG_GLOBAL_CACHE_DIR=${exec.path(resolvedBuildCacheTool)}`];
+}
 
 /**
  * Resolve an explicit or default Zig toolchain version.

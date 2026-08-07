@@ -20,7 +20,12 @@ import {
 	task,
 } from "imp:core";
 
-import { cargoPackageHandles, toolEnvAndTools } from "//rules/rust";
+import {
+	cargoPackageHandles,
+	linkerHandlesForSpec,
+	linkerToolInputs,
+	toolEnvAndTools,
+} from "//rules/rust";
 
 // Resolves RUSTUP_HOME/CARGO_HOME/PATH (+ linker/build-cache tools/env) for
 // one cargo invocation — every task below needs this, not just the compiling
@@ -32,7 +37,12 @@ import { cargoPackageHandles, toolEnvAndTools } from "//rules/rust";
 async function cargoEnv(exec, input, toolchainSpec) {
 	return toolEnvAndTools(
 		exec,
-		{ rustupHomeTool: input.toolchain, cargoHomeTool: input.cargoHomeTool },
+		{
+			rustupHomeTool: input.toolchain,
+			cargoHomeTool: input.cargoHomeTool,
+			gccTool: input.gccTool,
+			moldTool: input.moldTool,
+		},
 		toolchainSpec,
 	);
 }
@@ -41,6 +51,7 @@ function toolchainInputs(toolchainSpec) {
 	return {
 		toolchain: toolchainSpec.toolchain.tool,
 		cargoHomeTool: toolchainSpec.toolchain.cargoHomeTool,
+		...linkerToolInputs(linkerHandlesForSpec(toolchainSpec)),
 	};
 }
 
@@ -633,8 +644,9 @@ function crateDoctestTask(pkg, doctest) {
  * @param {string} workspaceRootRelative Workspace-relative root directory
  *   (as returned by workspace_closure.js's workspaceRootRelativeFor()), "."
  *   for the repo root itself.
- * @param {object} toolchainSpec `{toolchain, legacyToolchainHandle}` — see
- *   //rules/rust's cargoPackage(), which builds this bridge.
+ * @param {object} toolchainSpec `{toolchain, legacyToolchainHandle,
+ *   linkerHandles}` — see //rules/rust's cargoPackage(), which builds this
+ *   bridge.
  */
 export function cargoWorkspaceExpansion(workspaceRootRelative, toolchainSpec) {
 	const prefix =
@@ -671,7 +683,10 @@ export function cargoWorkspaceExpansion(workspaceRootRelative, toolchainSpec) {
 				.filter(Boolean)
 				.map((pkg) => ({
 					pkg,
-					dir: manifestDirRelativeTo(pkg.manifest_path, metadata.workspace_root),
+					dir: manifestDirRelativeTo(
+						pkg.manifest_path,
+						metadata.workspace_root,
+					),
 				}));
 			const memberDirs = members.map((m) => m.dir);
 			const deps = depsForDirs(memberDirs);
@@ -907,11 +922,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 								],
 								tools: [
 									...tools,
-									...resolvedExtraInputs(
-										"tool",
-										input,
-										testToolsForDir(path),
-									),
+									...resolvedExtraInputs("tool", input, testToolsForDir(path)),
 								],
 								env: [...env, `RUSTFLAGS=${rustflags}`],
 								inputs: [

@@ -6,7 +6,7 @@ export const cache = { gcMaxAgeDays: 7 };
 import "//rules/c";
 import "//rules/c/cmake";
 import { defaultGccToolchain } from "//rules/c/gcc";
-import { defaultMoldToolchain } from "//rules/c/mold";
+import { defaultMoldGraphToolchain, defaultMoldToolchain } from "//rules/c/mold";
 import "//rules/gen";
 import { defaultBiomeToolchain } from "//rules/js/biome";
 import { odinToolchain } from "//rules/odin";
@@ -35,6 +35,11 @@ import "//rules/imp/test";
 export const biome = defaultBiomeToolchain();
 export const gcc = defaultGccToolchain();
 export const mold = defaultMoldToolchain();
+// Rust's own linker opt below needs a graph-native mold handle (see
+// //rules/rust's linkerHandlesFor()); Odin's linker opt above still resolves
+// mold via the legacy productFor()/MoldToolchain bridge (Odin is out of
+// scope for the graph-native C/C++ migration), so both handles are declared.
+const moldGraph = defaultMoldGraphToolchain();
 export const odinToolchainDefault = odinToolchain("dev-2026-03", {
 	default: true,
 	linker: mold,
@@ -52,7 +57,7 @@ export const kacheConfig = { cacheExecutables: true };
 // the default is gcc, while mold and kache remain explicit opt-ins.
 export const rust = rustToolchain("1.93.0", {
 	default: true,
-	linker: mold,
+	linker: moldGraph,
 	kache,
 });
 
