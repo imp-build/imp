@@ -11,6 +11,7 @@ import "//rules/gen";
 import { defaultBiomeToolchain } from "//rules/js/biome";
 import { odinToolchain } from "//rules/odin";
 import { defaultOdinfmtToolchain } from "//rules/odin/odinfmt";
+import "//rules/odin/vscode";
 import { defaultRuffToolchain } from "//rules/python/ruff_toolchain";
 import { defaultPythonToolchain } from "//rules/python";
 import "//rules/rust/generate_build";
