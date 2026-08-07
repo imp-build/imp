@@ -47,6 +47,19 @@ export const testCurl = nativeTool("curl");
 export const testWc = nativeTool("wc");
 export const testXz = nativeTool("xz");
 export const testChmod = nativeTool("chmod");
+// rules/c/cmake/graph_replay.js's configureCmakeProject() dumps every
+// generated *.ninja/CTestTestfile.cmake file via a `cat`-based multi-file
+// stdout dump (see its own FILE_START/FILE_MID/FILE_END docstring) — a real,
+// new dependency versus the legacy cmakeLib()'s readFileInDigest()-based
+// path this crate's own tests exercised before #31/#63's cutover.
+export const testCat = nativeTool("cat");
+// gccGraphTool()/zigGraphTool()/cmakeGraphTool() (//rules/c/gcc, //rules/c/zig,
+// //rules/c/cmake) each declare `nativeTool("sh")` explicitly for their own
+// install task's argv[0] — a real dependency this crate's tests apparently
+// never exercised before #31/#63's cutover added the first Rust-level test
+// running a real end-to-end graph-native gcc+cmake toolchain install inside
+// this crate's own curated sandbox (see testCat's own note above).
+export const testSh = nativeTool("sh");
 // changed.rs's tests shell out to `git` directly (Command::new("git")), so
 // it needs the same hermetic sandbox mount as tar/gzip — without it those
 // tests fail inside `imp test`'s sandbox with "run git (is git

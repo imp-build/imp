@@ -8,16 +8,13 @@ import {
 	__resetZigToolchainStateForTest,
 	acquireZigToolchain,
 	defaultZigGraphToolchain,
-	defaultZigToolchain,
 	defaultZigToolchainVersion,
 	installZigToolchain,
 	zigArtifactName,
 	zigCacheKey,
 	zigBin,
-	zigCMakeArgs,
 	zigGraphCacheEnv,
 	zigGraphToolchain,
-	zigTool,
 	zigToolchain,
 } from "//rules/c/zig";
 
@@ -47,7 +44,6 @@ describe("Zig toolchain", () => {
 				zigCacheKey(toolchain.attrs.version, { os: "linux", arch: "x86_64" }),
 			).toBe("0.13.0/linux-x86_64");
 			expect(defaultZigToolchainVersion()).toBe("0.13.0");
-			expect(defaultZigToolchain()).toBe(toolchain);
 			expect(host.calls[0][0]).toBe("namedCache");
 		});
 	});
@@ -114,20 +110,6 @@ describe("Zig toolchain", () => {
 			);
 			// Both caches already warm, so no run() should have happened.
 			expect(host.runs.length).toBe(0);
-		});
-	});
-
-	test("describes the named-cache-backed zig tool", async () => {
-		await withZigHost(async () => {
-			installZigToolchain("0.13.0", "/tmp/zig-0.13.0");
-			zigToolchain("0.13.0", { default: true });
-			const tool = await zigTool();
-
-			expect(tool.kind).toBe("tool");
-			expect(tool.name).toBe("zig");
-			expect(tool.cache).toBe("zig-toolchains");
-			expect(tool.key).toBe("0.13.0/linux-x86_64");
-			expect(tool.binDirs.join(",")).toBe(".");
 		});
 	});
 
@@ -227,23 +209,6 @@ describe("Zig toolchain", () => {
 		});
 	});
 
-	test("describes the CMake -D flags for a linux toolchain", async () => {
-		await withZigHost({ os: "linux", arch: "x86_64" }, async () => {
-			zigToolchain("0.13.0", { default: true, unverified: true });
-
-			const args = await zigCMakeArgs();
-
-			expect(args).toEqual([
-				"-DCMAKE_C_COMPILER=zig",
-				"-DCMAKE_C_COMPILER_ARG1=cc",
-				"-DCMAKE_CXX_COMPILER=zig",
-				"-DCMAKE_CXX_COMPILER_ARG1=c++",
-				"-DCMAKE_AR=.imp/tools/zig/zigar",
-				"-DCMAKE_RANLIB=.imp/tools/zig/zigranlib",
-			]);
-		});
-	});
-
 	test("uses legacy os-then-arch artifact naming through 0.14.0", () => {
 		expect(zigArtifactName("0.13.0", { os: "linux", arch: "x86_64" })).toBe(
 			"zig-linux-x86_64-0.13.0.tar.xz",
@@ -269,23 +234,6 @@ describe("Zig toolchain", () => {
 				arch: "x86_64",
 			}),
 		).toBe("zig-x86_64-linux-0.17.0-dev.1267+300116b02.tar.xz");
-	});
-
-	test("describes the CMake -D flags for a windows toolchain", async () => {
-		await withZigHost({ os: "windows", arch: "x86_64" }, async () => {
-			zigToolchain("0.13.0", { default: true, unverified: true });
-
-			const args = await zigCMakeArgs();
-
-			expect(args).toEqual([
-				"-DCMAKE_C_COMPILER=zig.exe",
-				"-DCMAKE_C_COMPILER_ARG1=cc",
-				"-DCMAKE_CXX_COMPILER=zig.exe",
-				"-DCMAKE_CXX_COMPILER_ARG1=c++",
-				"-DCMAKE_AR=.imp/tools/zig/zigar.bat",
-				"-DCMAKE_RANLIB=.imp/tools/zig/zigranlib.bat",
-			]);
-		});
 	});
 
 	test("declares a graph-native zig toolchain with both the toolchain and build-cache tools", () => {

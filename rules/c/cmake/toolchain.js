@@ -3,12 +3,15 @@ import {
 	product,
 	namedCache,
 	memo,
+	output,
 	platformInfo,
 	cachePut,
 	cacheGet,
 	cacheHas,
+	task,
 	toolName,
 	group,
+	tool as graphTool,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -264,15 +267,147 @@ export async function cmakeBin(version) {
 	return `${dir}/bin/${exe}`;
 }
 
+// CMake's own configure step bakes its own invoked path into generated
+// build.ninja text (e.g. a `add_custom_command(... COMMAND ${CMAKE_COMMAND}
+// -E copy ...)` custom command resolves CMAKE_COMMAND to CMake's own
+// absolute/sandbox-relative invocation path) — read back by a *later,
+// separate* replay sandbox during graph_replay.js's own edge replay, exactly
+// the same "baked path, different sandbox" problem gcc's CMAKE_C_COMPILER
+// has (see gccGraphToolchainDir()'s docstring in //rules/c/gcc).
+// rewriteToolInvocations() (ninja_graph.js) already rewrites any such path
+// (real absolute, or imp's own sandbox-relative tool mount) back to a bare
+// "cmake" name; resolving that bare name during replay needs a *freshly
+// constructible* tool spec (a running task() body can't mint new resolved
+// graph tool bindings — see cmakeGraphToolSpec() below), which requires a
+// real named-cache key, not just a plain tool() artifact wrapper.
+namedCache({ name: CMAKE_TOOLCHAIN_CACHE, shared: true });
+
 /**
- * Return a named-cache-backed CMake tool descriptor for sandbox execution.
+ * Build the managed CMake distribution as a graph-native tool (issue #31/#62,
+ * PR D). Mirrors rules/c/gcc's gccGraphTool() — downloadToolArtifact()'s
+ * graph form plus a manual tar-extraction task() (no wrapper scripts needed
+ * for a plain `cmake` binary, unlike gcc/zig's compiler-alias wrappers, so
+ * this is simpler) — writing its result into CMAKE_TOOLCHAIN_CACHE so
+ * cmakeGraphToolSpec() can address the same install by cache key.
  *
  * @param {string} [version]
- * @returns {Promise<object>}
+ * @returns {object} A graph-native tool() handle.
  */
-export async function cmakeTool(version) {
+export function cmakeGraphTool(version) {
 	const resolved = CmakeToolchain.requireVersion(version, "CMake");
-	await acquireCmakeToolchain(resolved);
+	const plat = platformInfo();
+	const cacheKey = cmakeCacheKey(resolved, plat);
+	const archive = downloadToolArtifact({
+		lockfile: CMAKE_LOCKFILE,
+		tool: "cmake",
+		version: resolved,
+		plat,
+		url: cmakeDownloadUrl(resolved, plat),
+		output: `cmake-downloads/${cacheKey}/${cmakeArtifactName(resolved, plat)}`,
+		display: `download cmake ${resolved} (${plat.os}/${plat.arch})`,
+		unverified: CmakeToolchain.resolveUnverified(resolved),
+	});
+	const format = plat.os === "windows" ? "zip" : "tar.gz";
+	const toolNames = extractArchiveTools(format);
+	const tarFlags = format === "tar.gz" ? "-xzf" : "-xf";
+	const inputs = { archive };
+	for (const [index, name] of toolNames.entries()) {
+		inputs[`tool${index}`] = nativeTool(name);
+	}
+	const directory = task({
+		display: `install cmake ${resolved} (${plat.os}/${plat.arch})`,
+		inputs,
+		outputs: { directory: output.artifact() },
+		async run(exec, resolvedInputs) {
+			const tools = toolNames.map((_, index) => resolvedInputs[`tool${index}`]);
+			const result = await exec.action({
+				argv: [
+					"sh",
+					"-c",
+					'archive=$1; out=$2; mkdir -p "$out" && tar $3 "$archive" -C "$out" --strip-components=1',
+					"cmake-install",
+					exec.path(resolvedInputs.archive),
+					"cmake-toolchain",
+					tarFlags,
+				],
+				tools,
+				outputs: {
+					directory: output.directory("cmake-toolchain", {
+						namedCache: { name: CMAKE_TOOLCHAIN_CACHE, key: cacheKey },
+					}),
+				},
+			});
+			return { directory: result.outputs.directory };
+		},
+	}).outputs.directory;
+	return graphTool(directory, { binDirs: ["bin"] });
+}
+
+/**
+ * Graph-native CMake toolchain: cmakeGraphTool() wrapped with version
+ * metadata, mirroring gccGraphToolchain()'s one-directory shape.
+ *
+ * @param {string} [version]
+ * @returns {{ tool: object, version: string }}
+ */
+export function cmakeGraphToolchain(version) {
+	const resolved = CmakeToolchain.requireVersion(version, "CMake");
+	return Object.freeze({
+		tool: cmakeGraphTool(resolved),
+		version: resolved,
+	});
+}
+
+/**
+ * Return the currently configured default CMake toolchain as graph-native
+ * handles, or null if none is declared.
+ *
+ * @returns {object|null}
+ */
+export function defaultCmakeGraphToolchain() {
+	const version = CmakeToolchain.defaultVersion();
+	return version ? cmakeGraphToolchain(version) : null;
+}
+
+/**
+ * The real, absolute host directory (bin/ inside it) a resolved CMake graph
+ * toolchain installed into, via the same named-cache `cacheGet()` real host
+ * path cmakeGraphToolSpec() addresses — mirrors gcc's own
+ * gccGraphToolchainDir() (//rules/c/gcc). Must be used (not exec.tool()'s
+ * sandbox-mount-relative path) for CMake's own configure invocation: its
+ * result gets baked as literal CMAKE_COMMAND text into build.ninja custom
+ * commands (e.g. a POST_BUILD `${CMAKE_COMMAND} -E copy`), read back by a
+ * *later, separate* replay sandbox — confirmed by a real replay failure
+ * ("../../../../../directory/bin/cmake: not found") when this used
+ * exec.tool()'s relative alias instead: rebasePath() only recognizes a real
+ * absolute host path or a genuine sandboxRoot-absolute mount, not an
+ * unresolved sandbox-relative one.
+ *
+ * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
+ * @param {object} resolvedCmakeTool Resolved `cmakeGraphToolchain().tool` input.
+ * @param {string} version `cmakeGraphToolchain().version`.
+ * @returns {string}
+ */
+export function cmakeGraphToolchainDir(exec, resolvedCmakeTool, version) {
+	exec.path(resolvedCmakeTool);
+	const resolved = CmakeToolchain.requireVersion(version, "CMake");
+	const plat = platformInfo();
+	return cacheGet(CMAKE_TOOLCHAIN_CACHE, cmakeCacheKey(resolved, plat));
+}
+
+/**
+ * A freshly-constructible, named-cache-backed legacy tool spec for a pinned
+ * CMake install — the graph-native counterpart of gcc's gccGraphToolSpec(),
+ * used to resolve a bare "cmake" name rewriteToolInvocations() recovers from
+ * a replayed ninja edge's baked-in CMAKE_COMMAND path (see cmakeGraphTool()'s
+ * own docstring). Unlike a resolved tool() binding, this can be constructed
+ * at any time, including inside a running task() body.
+ *
+ * @param {string} [version]
+ * @returns {object} `{kind:"tool", name:"cmake", cache, key, binDirs}`.
+ */
+export function cmakeGraphToolSpec(version) {
+	const resolved = CmakeToolchain.requireVersion(version, "CMake");
 	const plat = platformInfo();
 	return {
 		kind: "tool",
@@ -290,15 +425,6 @@ export async function cmakeTool(version) {
  */
 export function defaultCmakeToolchainVersion() {
 	return CmakeToolchain.defaultVersion();
-}
-
-/**
- * Return the currently configured default CMake toolchain target handle.
- *
- * @returns {object|null}
- */
-export function defaultCmakeToolchain() {
-	return CmakeToolchain.default();
 }
 
 // Importing this rule provisions the pinned default. A workspace can replace

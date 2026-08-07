@@ -1,6 +1,5 @@
 import { productFor } from "imp:core";
 import { ODIN_LINKER } from "//rules/odin/products";
-import { RUST_LINKER } from "//rules/rust/products";
 import {
 	describe,
 	expect,
@@ -245,23 +244,6 @@ describe("mold toolchain", () => {
 		});
 	});
 
-	test("registers a rust-linker product exposing -fuse-ld=mold and a mold tool", async () => {
-		await withMoldHost(async () => {
-			installMoldToolchain("2.41.0", "/tmp/mold-2.41.0");
-			const toolchain = moldToolchain("2.41.0");
-
-			const linker = await productFor(toolchain, RUST_LINKER);
-
-			expect(await linker.rustflags()).toEqual([
-				"-C",
-				"link-arg=-fuse-ld=mold",
-			]);
-			const tools = await linker.tools();
-			expect(tools.length).toBe(1);
-			expect(tools[0].name).toBe("mold");
-		});
-	});
-
 	test("declares a graph-native mold toolchain", () => {
 		return withMoldHost((host) => {
 			moldToolchain("2.41.0", { default: true });
@@ -304,10 +286,9 @@ describe("mold toolchain", () => {
 
 			// This Bootlin-built gcc rejects an absolute `-fuse-ld=<path>`
 			// outright (confirmed by a real build failure — see this function's
-			// docstring in //rules/c/mold) — so it keeps legacy RustMoldLinker's
-			// bare "-fuse-ld=mold" PATH-search form, and instead returns the
-			// real, absolute, stable named-cache bin dir as pathDirs for the
-			// caller to fold into PATH.
+			// docstring in //rules/c/mold) — so it keeps a bare "-fuse-ld=mold"
+			// PATH-search form, and instead returns the real, absolute, stable
+			// named-cache bin dir as pathDirs for the caller to fold into PATH.
 			const { rustflags, pathDirs } = moldRustLinkerEnv(
 				exec,
 				resolvedMoldTool,

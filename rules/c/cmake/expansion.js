@@ -10,19 +10,16 @@
 // the per-target discovery loop (listNamedCmakeTargets(), test
 // correlation) and expand() wiring around them.
 //
-// Known shape gap versus rules/c/graph.js's ccLibrary()/ccBinary(): the
-// #31 migration plan's decision 4 wants a discovered CMake target's
+// Known shape gap versus rules/c's ccLibrary()/ccBinary(): the #31
+// migration plan's decision 4 wants a discovered CMake target's
 // `expand().get(name, BUILD)` usable directly as a raw ccBinary()'s `deps`
 // entry, with transitiveArchives/transitiveIncludeDirs exposed the same
 // way. expand()'s own get()/all() API (see graph_core.js's
 // _graphChildHandle()) only ever returns *one* resolved handle for one
 // workflow+facet — there's no way to also hand back plain sibling fields
 // (arrays computed at declare time) through that same call, unlike a bare
-// JS object ccLibrary() can just return directly. Full transparent
-// interop needs its own follow-up (e.g. a dedicated cc-facing accessor
-// that pairs `get(name, BUILD)` with a caller-supplied includeDirs list,
-// since CMake's own internal include paths aren't really "discovered" from
-// a raw ccBinary()'s perspective anyway); not solved in this PR.
+// JS object ccLibrary() can just return directly. Tracked as issue #67 —
+// not solved here.
 
 import { BUILD, PACKAGE, TEST, expand } from "imp:core";
 import {
@@ -34,6 +31,18 @@ import {
 	runCTestTask,
 } from "//rules/c/cmake/graph_replay";
 import { listNamedCmakeTargets } from "//rules/c/cmake/ninja_graph";
+
+// ---------------------------------------------------------------------------
+// cmakeProject() registry — declaration order, read by
+// //rules/c/generate_build's dedup check. Mirrors rules/c/index.js's own
+// ccWorkloadSpecs()/rules/rust/index.js's cargoPackageHandles().
+// ---------------------------------------------------------------------------
+
+const _cmakeProjectSpecs = [];
+
+export function cmakeProjectSpecs() {
+	return _cmakeProjectSpecs.slice();
+}
 
 /**
  * Discover and build every real CMake target (`add_library`/`add_executable`)
@@ -48,6 +57,7 @@ import { listNamedCmakeTargets } from "//rules/c/cmake/ninja_graph";
  */
 export function cmakeProjectExpansion(opts = {}) {
 	const spec = cmakeProjectSpec(opts);
+	_cmakeProjectSpecs.push(spec);
 	const configured = configureCmakeProject(spec);
 
 	return expand({
