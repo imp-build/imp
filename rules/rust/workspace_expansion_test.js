@@ -1,4 +1,4 @@
-import { LINT, TEST, files, tool } from "imp:core";
+import { FMT, LINT, TEST, files, tool } from "imp:core";
 import {
 	describe,
 	expect,
@@ -123,13 +123,73 @@ describe("cargo workspace expansion", () => {
 		});
 	});
 
-	test("expansion.get(crateName, TEST) resolves to a distinct graph handle per crate", () => {
+	test("expansion.get(crateName, TEST, 'unit') resolves to a distinct graph handle per crate", () => {
 		return withWorkspace(async (_host, expansion) => {
-			const testA = expansion.get("crate-a", TEST);
-			const testB = expansion.get("crate-b", TEST);
+			const testA = expansion.get("crate-a", TEST, "unit");
+			const testB = expansion.get("crate-b", TEST, "unit");
 			expect(testA.__imp_graph_handle).toBe(true);
 			expect(testB.__imp_graph_handle).toBe(true);
 			expect(testA.__graph_id === testB.__graph_id).toBe(false);
+		});
+	});
+
+	test("shares one cargo fmt --check --workspace run across sibling crates' [FMT] roots", () => {
+		return withWorkspace(async (host, expansion) => {
+			host.setRunStdout("cargo fmt --check --workspace .", "");
+
+			await resolveHandles([
+				expansion.get("crate-a", FMT),
+				expansion.get("crate-b", FMT),
+			]);
+
+			const fmtRuns = host.runs.filter((run) =>
+				run.display.startsWith("cargo fmt --check --workspace"),
+			);
+			expect(fmtRuns.length).toBe(1);
+		});
+	});
+
+	test("attributes an unformatted file to the crate it belongs to and leaves the other clean", () => {
+		return withWorkspace(async (host, expansion) => {
+			host.setRunStdout(
+				"cargo fmt --check --workspace .",
+				`Diff in ${manifestPath("crates/a").replace("/Cargo.toml", "/src/lib.rs")} at line 1:\n-x\n+y\n`,
+			);
+
+			let aFailed = false;
+			try {
+				await resolveHandles([expansion.get("crate-a", FMT)]);
+			} catch (_) {
+				aFailed = true;
+			}
+			expect(aFailed).toBe(true);
+
+			await resolveHandles([expansion.get("crate-b", FMT)]);
+		});
+	});
+
+	test("shares one cargo test --doc --workspace run across sibling crates' doctest facets", () => {
+		return withWorkspace(async (host, expansion) => {
+			host.setRunStdout("cargo test --doc --workspace .", "");
+
+			await resolveHandles([
+				expansion.get("crate-a", TEST, "doctests"),
+				expansion.get("crate-b", TEST, "doctests"),
+			]);
+
+			const doctestRuns = host.runs.filter((run) =>
+				run.display.startsWith("cargo test --doc --workspace"),
+			);
+			expect(doctestRuns.length).toBe(1);
+		});
+	});
+
+	test("a bin-only crate (no lib target) has no doctests to attribute and resolves cleanly", () => {
+		return withWorkspace(async (host, expansion) => {
+			host.setRunStdout("cargo test --doc --workspace .", "");
+			// crate-a's METADATA fixture declares no `targets`, so libNameFor()
+			// returns null and the doctest facet must be a clean no-op.
+			await resolveHandles([expansion.get("crate-a", TEST, "doctests")]);
 		});
 	});
 });

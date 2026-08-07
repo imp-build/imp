@@ -407,7 +407,7 @@ function rustGraphInstallTask(version, plat) {
  * bodies).
  *
  * @param {string} [version]
- * @returns {{ tool: object, cargoHomeTool: object, rustupHome: object, cargoHome: object, toolchainId: string }}
+ * @returns {{ tool: object, cargoHomeTool: object, rustupHome: object, cargoHome: object, toolchainId: string, version: string }}
  */
 export function rustGraphToolchain(version) {
 	const resolved = RustToolchain.requireVersion(version);
@@ -422,7 +422,73 @@ export function rustGraphToolchain(version) {
 		rustupHome: install.outputs.rustupHome,
 		cargoHome: install.outputs.cargoHome,
 		toolchainId: id,
+		version: resolved,
 	});
+}
+
+/**
+ * Graph-native sibling of rustToolEnv() (//rules/rust): given a task's
+ * `exec` and its already-declared, resolved `rustupHomeTool`/`cargoHomeTool`
+ * inputs (a rustGraphToolchain() result's `.tool`/`.cargoHomeTool`, taken as
+ * real task inputs so the graph scheduler orders the toolchain's install
+ * task first), resolve the RUSTUP_HOME/CARGO_HOME env needed to invoke
+ * cargo directly (as opposed to via exec.tool(), which is only for
+ * computing one literal executable path, e.g. for argv[0]).
+ *
+ * Non-kache mode reads each tool's own sandbox-mounted root directory via
+ * exec.path() — the same mechanism rules/rust/workspace_expansion.js already
+ * uses for the cargo binary path itself.
+ *
+ * kache-active mode reads the real absolute, stable named-cache paths via
+ * cacheGet() instead of the sandbox-mounted alias — same reasoning as
+ * rustToolEnv()'s own kache branch (//rules/rust): kache's compiler-info
+ * cache is keyed by the *canonicalized* rustc path but invokes the *literal*
+ * one, so that literal path must stay identical across every sandbox. This
+ * cacheGet() read is out-of-band (not itself a tracked graph input), but
+ * it's safe here because `rustupHomeTool`/`cargoHomeTool` are still taken as
+ * real exec.path()-consumed task inputs below, which forces the toolchain's
+ * install task — and thus population of these same named caches — to
+ * complete before this task body ever runs.
+ *
+ * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
+ * @param {object} rustupHomeTool Resolved `rustGraphToolchain().tool` input.
+ * @param {object} cargoHomeTool Resolved `rustGraphToolchain().cargoHomeTool` input.
+ * @param {string} toolchainId `rustGraphToolchain().toolchainId`.
+ * @param {string} version `rustGraphToolchain().version`.
+ * @param {boolean} kacheActive
+ * @returns {{ env: string[] }}
+ */
+export function rustGraphToolEnv(
+	exec,
+	rustupHomeTool,
+	cargoHomeTool,
+	toolchainId,
+	version,
+	kacheActive,
+) {
+	if (!kacheActive) {
+		return {
+			env: [
+				`RUSTUP_HOME=${exec.path(rustupHomeTool)}`,
+				`CARGO_HOME=${exec.path(cargoHomeTool)}`,
+			],
+		};
+	}
+	const plat = platformInfo();
+	const key = rustCacheKey(version, plat);
+	// exec.path() is called anyway (unused result) to consume() these
+	// bindings — see the docstring above for why that ordering matters.
+	exec.path(rustupHomeTool);
+	exec.path(cargoHomeTool);
+	const rustupHomeAbs = cacheGet(RUSTUP_HOME_CACHE, key);
+	const cargoHomeAbs = cacheGet(CARGO_HOME_CACHE, key);
+	return {
+		env: [
+			`RUSTUP_HOME=${rustupHomeAbs}`,
+			`CARGO_HOME=${cargoHomeAbs}`,
+			`PATH=${rustupHomeAbs}/toolchains/${toolchainId}/bin:${cargoHomeAbs}/bin`,
+		],
+	};
 }
 
 /**
