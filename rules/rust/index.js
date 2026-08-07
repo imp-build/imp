@@ -146,7 +146,9 @@ export function linkerHandlesForSpec(specLike) {
 // resolve them inside run() via exec.tool().
 export function linkerToolInputs(linkerHandles) {
 	return {
-		...(linkerHandles.gcc ? { gccTool: linkerHandles.gcc.tool } : {}),
+		...(linkerHandles.gcc
+			? { gccTool: linkerHandles.gcc.tool, dirnameTool: nativeTool("dirname") }
+			: {}),
 		...(linkerHandles.mold ? { moldTool: linkerHandles.mold.tool } : {}),
 	};
 }
@@ -170,7 +172,12 @@ export async function rustLinkerTools(exec, input, linkerHandles, kacheActive) {
 		? moldRustLinkerEnv(exec, input.moldTool, linkerHandles.mold.version)
 		: null;
 	return {
-		tools: [],
+		// Always mounted, even when kache is active: rustc still resolves
+		// "clang" via PATH itself for the *link* step (its own direct
+		// subprocess spawn, not something kache wraps/caches), and that
+		// wrapper script does `exec "$(dirname "$0")/..." "$@"` — mirrors
+		// the legacy RustGccLinkDriver.tools()'s own dirname mount above.
+		tools: [input.dirnameTool],
 		rustflags: [
 			...gccResult.rustflags,
 			...(moldResult ? moldResult.rustflags : []),
