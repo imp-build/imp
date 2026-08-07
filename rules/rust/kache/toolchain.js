@@ -34,6 +34,7 @@ import {
 	workerStart,
 	toolName,
 	group,
+	tool as graphTool,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -410,6 +411,44 @@ async function ensureKacheDataDir() {
 	});
 
 	return key;
+}
+
+/**
+ * Acquire the kache binary as a graph-native tool: a straightforward
+ * downloadToolArtifact()+extractArchive() port, mirroring
+ * rules/odin/toolchain.js's odinGraphTool() — kache's release archives are
+ * flat, so no stripComponents is needed here either.
+ *
+ * The RUSTC_WRAPPER env/daemon-lifecycle wiring (workerStart(), see
+ * RustKacheWrapper below) has no graph-native equivalent to port to yet: it
+ * stays a plain async helper, called directly from inside whichever cargo
+ * action task body needs it (rules/rust's graph-native build/test/lint
+ * passes) rather than being wrapped in its own task() here.
+ *
+ * @param {string} [version]
+ * @returns {object} A tool handle accepted by exec.tool()/exec.action().
+ */
+export function kacheGraphTool(version) {
+	const resolved = KacheToolchain.requireVersion(version);
+	const plat = platformInfo();
+	const key = kacheCacheKey(resolved, plat);
+	const archive = downloadToolArtifact({
+		lockfile: KACHE_LOCKFILE,
+		tool: "kache",
+		version: resolved,
+		plat,
+		url: kacheDownloadUrl(resolved, plat),
+		output: `kache-downloads/${key}/${kacheArtifactName(resolved, plat)}`,
+		display: `download kache ${resolved} (${plat.os}/${plat.arch})`,
+		unverified: KacheToolchain.resolveUnverified(resolved),
+	});
+	const directory = extractArchive({
+		archive,
+		dest: "kache-toolchain",
+		format: plat.os === "windows" ? "zip" : "tar.gz",
+		display: `install kache ${resolved} (${plat.os}/${plat.arch})`,
+	});
+	return graphTool(directory, { binDirs: ["."] });
 }
 
 /**

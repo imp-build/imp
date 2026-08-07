@@ -12,6 +12,7 @@ import {
 	installRustToolchain,
 	rustBin,
 	rustCacheKey,
+	rustGraphToolchain,
 	rustTool,
 	rustToolchain,
 } from "//rules/rust/toolchain";
@@ -205,6 +206,31 @@ describe("rust toolchain", () => {
 				(out) => `${out.namedCache.name}/${out.namedCache.key}`,
 			);
 			expect(outCaches).toEqual([`rustup-home/${key}`, `cargo-home/${key}`]);
+		});
+	});
+
+	test("declares a graph-native toolchain with both PATH roots and raw home handles", () => {
+		return withRustHost((host) => {
+			rustToolchain("1.79.0", { default: true });
+			const graph = rustGraphToolchain("1.79.0");
+
+			expect(graph.tool.__imp_graph_handle).toBe(true);
+			expect(graph.cargoHomeTool.__imp_graph_handle).toBe(true);
+			expect(graph.rustupHome.__imp_graph_handle).toBe(true);
+			expect(graph.cargoHome.__imp_graph_handle).toBe(true);
+			expect(graph.toolchainId).toBe("1.79.0-x86_64-unknown-linux-gnu");
+			expect(Object.isFrozen(graph)).toBe(true);
+		});
+	});
+
+	test("graph toolchain construction does not touch the host run()", () => {
+		return withRustHost((host) => {
+			rustToolchain("1.79.0", { default: true });
+			rustGraphToolchain("1.79.0");
+
+			// Building the graph is pure node construction — nothing executes
+			// until a workflow resolves the task, matching Odin's precedent.
+			expect(host.runs.length).toBe(0);
 		});
 	});
 });

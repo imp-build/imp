@@ -13,6 +13,8 @@ import {
 	cacheHas,
 	toolName,
 	group,
+	task,
+	tool as graphTool,
 } from "imp:core";
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
 import {
@@ -331,6 +333,97 @@ export const acquireRustToolchain = memo(
 	},
 	{ display: "acquire Rust Toolchain {0}", level: "info" },
 );
+
+// Graph-native rustup-init install: one task() per version+platform, keyed
+// by its (single) call site plus the resolved installer artifact and core
+// tool inputs — repeat calls for the same version/platform collapse onto
+// the same task node via task()'s own fingerprint cache, so no separate
+// memoization is needed here (unlike acquireRustToolchain() above, which
+// memoizes by hand because it drives a bare host run()).
+function rustGraphInstallTask(version, plat) {
+	requirePinnedVersion(version);
+	declareBothCaches();
+	const key = rustCacheKey(version, plat);
+	const rustupInitExe =
+		plat.os === "windows" ? "rustup-init.exe" : "rustup-init";
+
+	const installer = downloadToolArtifact({
+		lockfile: RUST_LOCKFILE,
+		tool: "rust",
+		version,
+		plat,
+		url: rustDownloadUrl(version, plat),
+		output: `rust-downloads/${key}/${rustupInitExe}`,
+		display: `download rustup-init for rust ${version} (${plat.os}/${plat.arch})`,
+		unverified: RustToolchain.resolveUnverified(version),
+	});
+
+	const toolNames = coreToolNames(plat);
+	const inputs = { installer };
+	for (const [index, name] of toolNames.entries()) {
+		inputs[`tool${index}`] = nativeTool(name);
+	}
+
+	return task({
+		inputs,
+		outputs: { rustupHome: output.artifact(), cargoHome: output.artifact() },
+		async run(exec, resolved) {
+			const installerPath = exec.path(resolved.installer);
+			const tools = toolNames.map((_, index) => resolved[`tool${index}`]);
+			// See acquireRustToolchain() above for why RUSTUP_HOME/CARGO_HOME
+			// are set from $PWD in-script rather than via run()'s env.
+			const chmodStep = plat.os === "windows" ? "" : 'chmod +x "$1"; ';
+			const script = `set -e; ${chmodStep}export RUSTUP_HOME="$PWD/rustup-home" CARGO_HOME="$PWD/cargo-home"; ./"$1" -y --no-modify-path --profile minimal --component rustfmt --component clippy --default-toolchain "$2"`;
+			const result = await exec.action({
+				argv: ["sh", "-c", script, installerPath, version],
+				tools,
+				outputs: {
+					rustupHome: output.directory("rustup-home", {
+						namedCache: { name: RUSTUP_HOME_CACHE, key },
+					}),
+					cargoHome: output.directory("cargo-home", {
+						namedCache: { name: CARGO_HOME_CACHE, key },
+					}),
+				},
+				display: `install rust ${version} (${plat.os}/${plat.arch})`,
+			});
+			return {
+				rustupHome: result.outputs.rustupHome,
+				cargoHome: result.outputs.cargoHome,
+			};
+		},
+		display: `install rust ${version} (${plat.os}/${plat.arch})`,
+	});
+}
+
+/**
+ * Acquire a Rust toolchain as graph-native handles.
+ *
+ * Unlike a single-directory toolchain (e.g. Odin's), Rust needs two PATH
+ * roots: the rustup-home toolchain dir (cargo/rustc) and cargo-home/bin
+ * (the cargo-fmt/cargo-clippy subcommand proxies rustup installs there) —
+ * plus the raw home directories themselves, for CARGO_HOME/RUSTUP_HOME env
+ * wiring by downstream cargo actions (see rules/rust's build/test/lint task
+ * bodies).
+ *
+ * @param {string} [version]
+ * @returns {{ tool: object, cargoHomeTool: object, rustupHome: object, cargoHome: object, toolchainId: string }}
+ */
+export function rustGraphToolchain(version) {
+	const resolved = RustToolchain.requireVersion(version);
+	const plat = platformInfo();
+	const id = rustToolchainId(resolved, plat);
+	const install = rustGraphInstallTask(resolved, plat);
+	return Object.freeze({
+		tool: graphTool(install.outputs.rustupHome, {
+			binDirs: [`toolchains/${id}/bin`],
+		}),
+		cargoHomeTool: graphTool(install.outputs.cargoHome, { binDirs: ["bin"] }),
+		rustupHome: install.outputs.rustupHome,
+		cargoHome: install.outputs.cargoHome,
+		toolchainId: id,
+	});
+}
 
 /**
  * Resolve an explicit or default Rust toolchain version.
