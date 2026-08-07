@@ -12,5 +12,5 @@ export const protoAssets = resourcePackage({
 
 export const imp_daemon = cargoPackage({
     workspaceMember: true,
-    deps: [protoAssets],
+    deps: [protoAssets.files],
 });

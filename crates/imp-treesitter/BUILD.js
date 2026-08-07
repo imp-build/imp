@@ -11,6 +11,6 @@ export const testdataAssets = resourcePackage({
 });
 
 export const imp_treesitter = cargoPackage({
-    deps: [testdataAssets],
+    deps: [testdataAssets.files],
     workspaceMember: true,
 });

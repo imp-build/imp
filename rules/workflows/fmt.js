@@ -13,7 +13,10 @@
 // summarized before any unformatted file turns into a thrown error, so a
 // single formatter failing to compile shouldn't hide the report for every
 // other target.
-export { rustfmt } from "//rules/rust/rustfmt";
+//
+// Rust's cargoPackage() is graph-native and exposes [FMT] directly (see
+// //rules/rust, //rules/rust/workspace_expansion) rather than registering a
+// legacy product here.
 import "//rules/python/ruff/fmt";
 export { ruffFmtRoot } from "//rules/python/ruff_graph";
 export { biomeFmtRoot } from "//rules/js/biome/fmt";

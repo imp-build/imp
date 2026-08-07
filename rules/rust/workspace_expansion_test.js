@@ -6,6 +6,7 @@ import {
 	withFakeToolchainHost,
 } from "//rules/imp/test";
 import { cargoWorkspaceExpansion } from "//rules/rust/workspace_expansion";
+import { __resetGccToolchainStateForTest, gccToolchain } from "//rules/c/gcc";
 
 const WORKSPACE_ROOT = "/sandbox/repo";
 
@@ -44,16 +45,29 @@ async function resolveHandles(handles) {
 	);
 }
 
-function fakeToolchain() {
-	return tool(files({ root: "rules/rust", include: ["**/*"] }), {
-		binDirs: ["."],
-	});
+function fakeToolchainSpec() {
+	const binRoot = files({ root: "rules/rust", include: ["**/*"] });
+	return {
+		toolchain: {
+			tool: tool(binRoot, { binDirs: ["."] }),
+			cargoHomeTool: tool(binRoot, { binDirs: ["."] }),
+			toolchainId: "1.93.0-x86_64-unknown-linux-gnu",
+			version: "1.93.0",
+		},
+		legacyToolchainHandle: null,
+	};
 }
 
 function withWorkspace(fn) {
 	return withFakeToolchainHost(async (host) => {
+		__resetGccToolchainStateForTest();
+		gccToolchain("2025.08-1", { default: true, unverified: true });
 		host.setRunStdout("cargo metadata (workspace) .", JSON.stringify(METADATA));
-		await fn(host, cargoWorkspaceExpansion(".", fakeToolchain()));
+		try {
+			await fn(host, cargoWorkspaceExpansion(".", fakeToolchainSpec()));
+		} finally {
+			__resetGccToolchainStateForTest();
+		}
 	});
 }
 
@@ -81,17 +95,13 @@ describe("cargo workspace expansion", () => {
 				[clippyMessage("crates/a", "warning")].join("\n"),
 			);
 
-			let aFailed = false;
-			try {
-				await resolveHandles([expansion.get("crate-a", LINT)]);
-			} catch (_) {
-				aFailed = true;
-			}
-			expect(aFailed).toBe(true);
+			const [a] = await resolveHandles([expansion.get("crate-a", LINT)]);
+			expect(a.result.ok).toBe(false);
 
 			// crate-b shares the same clippy run (already resolved above) but has
 			// no attributed diagnostics, so it must resolve cleanly.
-			await resolveHandles([expansion.get("crate-b", LINT)]);
+			const [b] = await resolveHandles([expansion.get("crate-b", LINT)]);
+			expect(b.result.ok).toBe(true);
 		});
 	});
 
@@ -107,19 +117,23 @@ describe("cargo workspace expansion", () => {
 		return withWorkspace(async (host, expansion) => {
 			host.setRunStdout("cargo clippy --workspace .", "");
 			const real = globalThis.__host_run;
+			// Only clippy's own run should fail here — `cargo metadata` still
+			// needs to succeed first (expand()'s own construction depends on
+			// it), so a blanket override would fail for an unrelated reason.
 			globalThis.__host_run = async (opts) => {
 				const result = await real(opts);
-				return { ...result, exitCode: 1 };
+				if (opts.display && opts.display.startsWith("cargo clippy")) {
+					return { ...result, exitCode: 1 };
+				}
+				return result;
 			};
-			let failed = false;
+			let result;
 			try {
-				await resolveHandles([expansion.get("crate-a", LINT)]);
-			} catch (_) {
-				failed = true;
+				[result] = await resolveHandles([expansion.get("crate-a", LINT)]);
 			} finally {
 				globalThis.__host_run = real;
 			}
-			expect(failed).toBe(true);
+			expect(result.result.ok).toBe(false);
 		});
 	});
 

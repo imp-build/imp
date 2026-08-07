@@ -23,10 +23,7 @@ import {
 	run,
 } from "imp:core";
 
-import {
-	cargoPackageHandles,
-	declared_path,
-} from "//rules/rust";
+import { cargoPackageHandles } from "//rules/rust";
 import { rustTool } from "//rules/rust/toolchain";
 import { registerBuildGenerator } from "//rules/workflows/generate_build";
 
@@ -175,9 +172,7 @@ export const generateBuild = memo(
 		});
 
 		const existingPaths = new Set(
-			cargoPackageHandles().map((h) =>
-				normalize_workspace_path(declared_path(h, h.attrs.path || ".")),
-			),
+			cargoPackageHandles().map((h) => normalize_workspace_path(h.path)),
 		);
 
 		const result = {};
