@@ -1,24 +1,25 @@
 import { describe, expect, test, withFakeRun } from "//rules/imp/test";
-import { vs, vsWorkspace } from "//rules/workflows/vs";
-import { odinPackageHandles } from "//rules/odin";
+import { graphVsGoal } from "//rules/workflows/vs";
 import { getMemoTrace } from "imp:core";
 
 describe("vs workflow", () => {
-	test("vs is exported as a function and vsWorkspace declares a vs-workspace target", () => {
-		expect(typeof vs).toBe("function");
-		const target = vsWorkspace();
-		expect(target.kind).toBe("vs-workspace");
+	test("graphVsGoal is exported as a function", () => {
+		expect(typeof graphVsGoal).toBe("function");
 	});
 
-	test("vs emits IDE config using the real output path computed by odinPackageAnalysis", {
-		fixture: "workspace",
-	}, async () => {
+	test("graphVsGoal emits IDE config from resolved [VSCODE] roots", async () => {
 		await withFakeRun(async () => {
-			// Sanity: the workspace actually has at least one odin-package
-			// label for this test to be meaningful (rules/odin/example:hello).
-			expect(odinPackageHandles().length > 0).toBe(true);
+			const roots = [
+				{
+					address: "//rules/odin/example:hello",
+					result: {
+						hasMainEntrypoint: true,
+						packagePath: "rules/odin/example",
+					},
+				},
+			];
 
-			const result = await vs(vsWorkspace());
+			const result = await graphVsGoal(roots);
 			expect(result.generated.length).toBe(4);
 
 			const { trace } = getMemoTrace();
@@ -31,11 +32,10 @@ describe("vs workflow", () => {
 			const tasks = JSON.parse(tasksWrite.argv[5]).tasks;
 			const labels = tasks.map((t) => t.taskLabel);
 			expect(labels).toEqual(["Build hello (Debug)", "Build hello (Release)"]);
-			// rules/odin/example:hello has a main entrypoint, so its real output
-			// path (via odinPackageAnalysis + odin_output_path, not guessed) has
-			// no ".a" suffix. The directory component is the label's own
-			// address slug (rules/odin/example:hello), not just its bare name —
-			// see odinPackageOutputSlug in //rules/odin.
+			// hello has a main entrypoint, so its output path has no ".a" suffix.
+			// The directory component is the address's own slug
+			// (rules_odin_example_hello), not just its bare name — see
+			// graphDefaultOutputPath in //rules/odin.
 			expect(tasks[0].output).toBe(
 				"${workspaceRoot}\\build\\odin\\rules_odin_example_hello.exe",
 			);
