@@ -7547,6 +7547,51 @@ export default { [BUILD]: second.outputs.copied };
     }
 
     #[tokio::test]
+    async fn graph_action_output_namedcache_lands_in_the_named_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, namedCache, output, task } from "imp:core";
+
+namedCache({ name: "graph-po-test-cache" });
+
+const acquire = task({
+    display: "populate named cache",
+    outputs: { home: output.artifact() },
+    async run(exec) {
+        const result = await exec.action({
+            argv: ["sh", "-c", "mkdir -p home && printf cached > home/marker.txt"],
+            outputs: {
+                home: output.directory("home", {
+                    namedCache: { name: "graph-po-test-cache", key: "v1" },
+                }),
+            },
+        });
+        return { home: result.outputs.home };
+    },
+});
+
+export default { [BUILD]: acquire.outputs.home };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        run_goal_live(&live, p, "build", &["//".to_owned()])
+            .await
+            .unwrap();
+
+        let cache_dest =
+            imp_store::cache::named_cache_key_path(p, "graph-po-test-cache", "v1").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(cache_dest.join("marker.txt")).unwrap(),
+            "cached"
+        );
+    }
+
+    #[tokio::test]
     async fn graph_self_tool_executes_lazily() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
