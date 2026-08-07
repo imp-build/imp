@@ -440,7 +440,28 @@ function _graphExec(record) {
 				throw _graphError("exec.action({ argv, ... }) requires an argv array");
 			const actionInputs = [];
 			const actionTools = [];
+			const isLegacyToolSpec = (value) =>
+				value !== null &&
+				typeof value === "object" &&
+				value.__imp_graph_binding !== true &&
+				typeof value.name === "string" &&
+				Array.isArray(value.binDirs);
 			const addTool = (binding) => {
+				if (isLegacyToolSpec(binding)) {
+					// Cross-ruleset roles still dispatched through the legacy
+					// productFor() protocol (e.g. rules/rust's linker/build-cache
+					// bridging) resolve to an already-resolved legacy tool-spec
+					// object, not a graph binding — nothing to consume() or track
+					// as a graph input, same as it is for a legacy run() caller.
+					actionTools.push({
+						name: binding.name,
+						cache: binding.cache,
+						key: binding.key,
+						path: binding.path,
+						binDirs: binding.binDirs,
+					});
+					return;
+				}
 				if (!binding || binding.__imp_graph_binding !== true || binding.type !== "tool")
 					throw _graphError("exec.action().tools expects resolved graph tool inputs");
 				if (!binding.native)
