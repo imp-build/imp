@@ -501,7 +501,9 @@ mod tests {
         let source = render_workspace(&repo_rules(), &linux(), &selected, &BTreeSet::new())
             .await
             .unwrap();
-        assert!(source.contains("//rules/rust/rustfmt"));
+        // Rust's cargoPackage() is graph-native and exposes [FMT] directly
+        // (see //rules/rust) rather than a separate rustfmt submodule import.
+        assert!(source.contains("//rules/rust"));
         assert!(source.contains("//rules/workflows/fmt_goal"));
         assert!(!source.contains("//rules/workflows/fmt\""));
         assert!(!source.contains("ruffToolchain"));

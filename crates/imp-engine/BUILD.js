@@ -28,7 +28,7 @@ import {
 export const imp_engine = cargoPackage({
     // rulesTree is a test input, not a build input: the loader reads rules
     // from disk, and these tests resolve real rules from tempdir workspaces.
-    deps: [engineAssets, rulesTree, protoAssets],
+    deps: [engineAssets.files, rulesTree.files, protoAssets.files],
     testTools: [
         testTar,
         testGzip,

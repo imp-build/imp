@@ -7,12 +7,12 @@ export const imp = cargoPackage({
     // engineAssets is still needed: this sandbox compiles imp-engine from
     // source, and its loader.rs include_str!s imp_core.js. rules/** is what
     // came off — nothing embeds it any more.
-    deps: [engineAssets, protoAssets],
+    deps: [engineAssets.files, protoAssets.files],
     // Runtime-only: nothing here embeds rules/, but the `imp init` tests
     // load the real catalog from disk. testDeps keeps it out of the build
     // inputs, so a rule edit re-runs these tests without rebuilding the
     // release binary.
-    testDeps: [rulesTree],
+    testDeps: [rulesTree.files],
     testTools: [testTar, testGzip, testGit],
     workspaceMember: true,
 });
