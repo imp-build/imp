@@ -567,3 +567,83 @@ product(
 	(handle) => new RustGccLinkDriver(handle),
 	{ display: "rust link driver {0}", level: "info" },
 );
+
+/**
+ * The real, absolute host directory (bin/ inside it) a resolved gcc graph
+ * toolchain installed into, via the same named-cache `cacheGet()` real host
+ * path gccRustLinkDriverEnv() uses — usable directly from any sandbox (no
+ * tool mount needed), unlike exec.tool()'s sandbox-mount-relative path. See
+ * gccCMakeCompilerArgs() below for why rules/c/cmake needs this specifically
+ * (a real path, not a sandbox-relative one).
+ *
+ * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
+ * @param {object} resolvedGccTool Resolved `gccGraphToolchain().tool` input.
+ * @param {string} version `gccGraphToolchain().version`.
+ * @returns {string}
+ */
+export function gccGraphToolchainDir(exec, resolvedGccTool, version) {
+	exec.path(resolvedGccTool);
+	const plat = platformInfo();
+	return cacheGet(GCC_TOOLCHAIN_CACHE, gccCacheKey(version, plat));
+}
+
+/**
+ * Real, absolute CMAKE_C_COMPILER/CMAKE_CXX_COMPILER/CMAKE_AR arguments for
+ * a resolved gcc graph toolchain, for use by rules/c/cmake's graph-native
+ * configure step (see #31/#62). Uses gccGraphToolchainDir()'s real host path
+ * rather than exec.tool()'s sandbox-mount-relative one — CMake bakes this
+ * value into build.ninja, which later replay actions read from a *different*
+ * sandbox than the one that ran configure, so it must be a path valid
+ * everywhere, not just within configure's own sandbox (the exact bug class
+ * gccRustLinkDriverEnv's own docstring already covers for rustc's
+ * `-C linker=`).
+ *
+ * No CMAKE_RANLIB here — gcc's graph install only writes clang/cc/c++/ar
+ * wrapper aliases (see gccGraphTool() above), so a CMake project linking a
+ * STATIC_LIBRARY via this toolchain isn't supported yet; the existing
+ * example fixture only builds a SHARED_LIBRARY, which doesn't need ranlib.
+ *
+ * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
+ * @param {object} resolvedGccTool Resolved `gccGraphToolchain().tool` input.
+ * @param {string} version `gccGraphToolchain().version`.
+ * @returns {string[]}
+ */
+export function gccCMakeCompilerArgs(exec, resolvedGccTool, version) {
+	const dir = gccGraphToolchainDir(exec, resolvedGccTool, version);
+	return [
+		`-DCMAKE_C_COMPILER=${dir}/bin/clang`,
+		`-DCMAKE_CXX_COMPILER=${dir}/bin/c++`,
+		`-DCMAKE_AR=${dir}/bin/ar`,
+	];
+}
+
+/**
+ * A legacy-shaped `{name, cache, key, binDirs}` tool spec for one of gcc's
+ * graph-install wrapper aliases ("clang"/"cc"/"c++"/"ar"), mountable
+ * directly via `exec.action({tools: [...]})`'s existing legacy-tool-spec
+ * passthrough (the same shape `cmakeTool()`/`nativeToolSpec()` already
+ * produce) — no `cacheGet()`/absolute-path plumbing needed by the caller.
+ *
+ * Needed because rules/c/cmake's graph-native replay bakes
+ * gccCMakeCompilerArgs()'s real absolute compiler paths into build.ninja at
+ * configure time, then rewrites them back to bare tool names
+ * ("clang"/"c++"/"ar") before replaying each edge (see
+ * ninja_graph.js's rewriteToolInvocations()) — those bare names need a real
+ * mount, not another absolute-path env trick, to resolve to *this* pinned
+ * gcc toolchain rather than whatever (if anything) is on a bare hermetic
+ * sandbox's PATH.
+ *
+ * @param {string} version `gccGraphToolchain().version`.
+ * @param {string} name One of "clang", "cc", "c++", "ar".
+ * @returns {{ name: string, cache: string, key: string, binDirs: string[] }}
+ */
+export function gccGraphToolSpec(version, name) {
+	const plat = platformInfo();
+	return {
+		kind: "tool",
+		name,
+		cache: GCC_TOOLCHAIN_CACHE,
+		key: gccCacheKey(version, plat),
+		binDirs: ["bin"],
+	};
+}
