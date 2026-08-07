@@ -1095,6 +1095,7 @@ async fn cmd_execute_live_impl(
         None => None,
     };
 
+    let remote_pushed_baseline = imp_execution::remote_cache::confirmed_pushes();
     let multi = tree.multi();
     let what = match invocation {
         LiveInvocation::Goal { goal, .. } => goal.to_owned(),
@@ -1233,7 +1234,6 @@ async fn cmd_execute_live_impl(
         let mut cached_remote_count: usize = 0;
         let mut fresh_js_count: usize = 0;
         let mut fresh_sandbox_count: usize = 0;
-        let mut remote_pushed_count: usize = 0;
         let mut failed_count: usize = 0;
         let mut canceled_count: usize = 0;
 
@@ -1291,7 +1291,6 @@ async fn cmd_execute_live_impl(
                     outcome,
                     cached,
                     cache_source,
-                    remote_cache_write,
                 } => {
                     let label = render_labels
                         .lock()
@@ -1314,9 +1313,6 @@ async fn cmd_execute_live_impl(
                                 }
                                 Some(false) => {
                                     fresh_sandbox_count += 1;
-                                    if remote_cache_write {
-                                        remote_pushed_count += 1;
-                                    }
                                     "fresh "
                                 }
                                 None => {
@@ -1438,7 +1434,10 @@ async fn cmd_execute_live_impl(
             cached_remote: cached_remote_count,
             fresh_js: fresh_js_count,
             fresh_sandbox: fresh_sandbox_count,
-            remote_pushed: remote_pushed_count,
+            // Overwritten after this task joins — background remote-cache
+            // pushes may still be in flight here (see `drain_pending_pushes`
+            // below).
+            remote_pushed: 0,
             failed: failed_count,
             canceled: canceled_count,
             wall: wall_start.elapsed(),
@@ -1539,7 +1538,17 @@ async fn cmd_execute_live_impl(
         .map(|_| ())
         .map_err(|error| format!("{error:#}"));
     let _ = shutdown_tx.send(shutdown_result);
-    let goal_summary = render.await.ok();
+    let mut goal_summary = render.await.ok();
+
+    // Background remote-cache pushes (`imp_execution::remote_cache::spawn_remote_push`)
+    // are fire-and-forget and can still be in flight here — give them a brief
+    // grace period so the "pushed" count reflects pushes actually confirmed
+    // during this run, not always zero.
+    imp_execution::remote_cache::drain_pending_pushes(std::time::Duration::from_secs(5)).await;
+    if let Some(summary) = goal_summary.as_mut() {
+        summary.remote_pushed =
+            imp_execution::remote_cache::confirmed_pushes().saturating_sub(remote_pushed_baseline);
+    }
 
     Ok((result, goal_summary))
 }

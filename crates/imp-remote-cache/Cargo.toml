@@ -6,7 +6,8 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-opendal = { workspace = true, features = ["services-ghac", "reqwest-rustls-tls"] }
+futures.workspace = true
+opendal = { workspace = true, features = ["services-ghac", "reqwest-rustls-tls", "layers-retry"] }
 
 [dev-dependencies]
 opendal = { workspace = true, features = ["services-ghac", "services-memory"] }

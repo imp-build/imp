@@ -2,6 +2,7 @@
 //! service, via OpenDAL's `ghac` backend.
 
 use anyhow::{Context, Result};
+use opendal::layers::RetryLayer;
 use opendal::services::Ghac;
 use opendal::Operator;
 
@@ -21,8 +22,12 @@ const CACHE_VERSION: &str = "imp-remote-cache-v1";
 /// unrelated tools share one GitHub Actions cache without colliding.
 pub fn ghac_remote_store(root: &str) -> Result<OpendalRemoteStore> {
     let builder = Ghac::default().root(root).version(CACHE_VERSION);
+    // GitHub's cache API rate-limits under concurrent load (observed 429s in
+    // CI); retry transient failures with backoff instead of treating them as
+    // an immediate cache miss.
     let op = Operator::new(builder)
         .context("build GitHub Actions cache operator")?
+        .layer(RetryLayer::new())
         .finish();
     Ok(OpendalRemoteStore::new(op))
 }

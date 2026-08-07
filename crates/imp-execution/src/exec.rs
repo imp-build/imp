@@ -890,6 +890,10 @@ fn exec_run_inner_with_start(
                             "cache-record-rejected task_key={task_key} display={:?} reason={e:#}",
                             opts.display
                         );
+                        // The record itself may still be valid remotely (e.g. a
+                        // locally GC'd blob) — race a remote lookup the same way
+                        // as the record-not-found case below.
+                        remote_rx = crate::remote_cache::spawn_remote_hit(&task_key);
                         None
                     }
                 }
