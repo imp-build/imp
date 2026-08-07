@@ -26,7 +26,6 @@ import {
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
 import { ODIN_LINKER } from "//rules/odin/products";
-import { RUST_LINKER } from "//rules/rust/products";
 
 // Declared tool identity for products this toolchain implements; also
 // consumed by rule modules registering mold-driven products.
@@ -427,54 +426,23 @@ product(
 );
 
 /**
- * Adapter exposing a mold toolchain as Rust/rustc's backend linker via
- * `-fuse-ld=mold`, layered on whatever C link driver rustc uses (see
- * RustGccLinkDriver in //rules/c/gcc). Registered as the
- * "rust-linker" product for the "mold-toolchain" kind.
- */
-export class RustMoldLinker {
-	constructor(handle) {
-		this.handle = handle;
-	}
-
-	async tools() {
-		return [await moldTool(this.handle.attrs.version)];
-	}
-
-	/** @returns {Promise<string[]>} paired rustc -C flags enabling mold. */
-	async rustflags() {
-		return ["-C", "link-arg=-fuse-ld=mold"];
-	}
-}
-
-product(
-	MoldToolchain,
-	RUST_LINKER,
-	MOLD_TOOL,
-	(handle) => new RustMoldLinker(handle),
-	{ display: "rust linker {0}", level: "info" },
-);
-
-/**
- * Graph-native replacement for RustMoldLinker: given a task's `exec` and its
- * already-declared, resolved `moldGraphToolchain().tool` input, resolve the
- * rustflags/pathDirs rustLinkerTools() (//rules/rust) needs to enable mold
- * as rustc's backend linker.
+ * Given a task's `exec` and its already-declared, resolved
+ * `moldGraphToolchain().tool` input, resolve the rustflags/pathDirs
+ * rustLinkerTools() (//rules/rust) needs to enable mold as rustc's backend
+ * linker.
  *
  * Unlike gcc's own `-C linker=<path>` (which does accept an absolute path),
  * this Bootlin-built gcc's `-fuse-ld=` rejects an absolute path outright —
  * confirmed by a real `imp lint //crates/imp:imp` failure: "x86_64-linux-
  * gcc.br_real: error: unrecognized command-line option '-fuse-ld=<path>'"
- * (see #60/#31). So this keeps the legacy RustMoldLinker's bare
- * `-fuse-ld=mold` PATH-search form, and instead returns the real, absolute,
- * stable MOLD_TOOLCHAIN_CACHE bin directory (via cacheGet(), populated by
- * moldGraphTool()'s own install task above) as `pathDirs` for the caller to
- * fold into PATH — mirroring how rustGraphToolEnv()'s kache-active branch
- * already builds PATH from named-cache directories (//rules/rust/toolchain).
- * exec.path() is still called, purely to consume() the binding so the graph
- * scheduler orders mold's install task (and therefore this named-cache
- * population) first. Unlike gcc's link-driver role, mold has no kache-active
- * env() branch — RustMoldLinker only ever exposed tools()/rustflags().
+ * (see #60/#31). So this keeps a bare `-fuse-ld=mold` PATH-search form, and
+ * instead returns the real, absolute, stable MOLD_TOOLCHAIN_CACHE bin
+ * directory (via cacheGet(), populated by moldGraphTool()'s own install task
+ * above) as `pathDirs` for the caller to fold into PATH — mirroring how
+ * rustGraphToolEnv()'s kache-active branch already builds PATH from
+ * named-cache directories (//rules/rust/toolchain). exec.path() is still
+ * called, purely to consume() the binding so the graph scheduler orders
+ * mold's install task (and therefore this named-cache population) first.
  *
  * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
  * @param {object} resolvedMoldTool Resolved `moldGraphToolchain().tool` input.

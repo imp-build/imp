@@ -1,16 +1,18 @@
 The C and C++ rules support two levels of integration. `ccLibrary()` and
-`ccBinary()` attach lazy handlers to exported labels, while `cmakeLib()`
-imports an existing CMake/Ninja project and discovers selectable native labels and
-CTest cases. Both paths use declared compiler and linker toolchains and expose
-their artifacts to downstream native or Odin targets.
+`ccBinary()` build a task graph directly from declared sources, while
+`cmakeProject()` (`//rules/c/cmake`) imports an existing CMake/Ninja project
+and discovers separately selectable native targets and CTest cases. Both
+paths use declared compiler and linker toolchains and expose their
+artifacts to downstream native targets — a `ccBinary({deps: [...]})` takes
+another `ccLibrary()` call's result directly, not a label reference.
 
 <!-- capabilities -->
 
 ## Set up a compiler
 
 Import the C rules in `imp.workspace.js`. Raw C targets prefer the default
-Zig toolchain and otherwise fall back to GCC; CMake targets use the managed
-CMake default.
+Zig toolchain and otherwise fall back to GCC; CMake targets build with GCC
+only (see `//rules/c/cmake`'s own docs for the zig gap).
 
 ```js
 import "//rules/c";
@@ -20,7 +22,9 @@ import "//rules/workflows/test";
 ```
 
 Override a rule default only when needed by declaring a replacement with
-`{ default: true }`, or pass a toolchain handle explicitly on one target.
+`{ default: true }`, or pass a toolchain handle explicitly on one target —
+`gccGraphToolchain(version)`/`zigGraphToolchain(version)` (`//rules/c/gcc`,
+`//rules/c/zig`), not the legacy per-rule toolchain classes.
 
 This repository's workspace imports `//rules/imp/mode`. Its `default`
 profile builds raw C/C++ with `-O0 -g` and configures CMake with
@@ -45,24 +49,28 @@ export const calculator = ccBinary({
 });
 ```
 
-Source and header globs are evaluated lazily relative to `path`, which defaults
-to the declaring `BUILD.js` directory. A library produces a static archive by default;
-a binary links an executable. Use `output` for an explicit output path and
-`linkopts` for options that belong only at link time.
+Source and header globs are evaluated relative to `path`, which defaults
+to the declaring `BUILD.js` directory. A library produces a static archive;
+a binary links an executable. `deps` takes other `ccLibrary()`/CMake-target
+call results directly (handle-passing), which the target's own
+`transitiveArchives`/`transitiveIncludeDirs` fold in automatically — not a
+loose filesystem path or label reference. Use `linkopts` for options that
+belong only at link time.
 
 ```sh
 imp build //native/calculator:calculator
 imp package //native/calculator:calculator
 ```
 
-Package handlers publish label artifacts below `dist/`. Dependency labels
-contribute both graph ordering and link inputs; they are not loose filesystem
-paths discovered from the host.
+`ccLibrary()`/`ccBinary()` expose `[BUILD]`/`[PACKAGE]` directly on their
+returned object — no separate export-wrapping needed, unlike a discovered
+CMake target (see `//rules/c/cmake`'s own docs).
 
-For bespoke builds, declare a label in the BUILD file and attach `build()`,
-`test()`, or `packageGoal()` handlers directly. The
-`//rules/c/label_example:hasher` fixture demonstrates this shape using ordinary
-memoized compile and link functions.
+For bespoke builds outside this model entirely, declare a label in the
+BUILD file and attach `build()`, `test()`, or `packageGoal()` handlers
+directly — the legacy, pre-graph-native escape hatch. The
+`//rules/c/label_example:hasher` fixture demonstrates this shape using
+ordinary memoized compile and link functions.
 
 ## Generate declarations
 

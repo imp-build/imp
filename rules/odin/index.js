@@ -83,8 +83,6 @@ import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
 
 import { resources as resource_package_sources } from "//rules/asset";
 
-import { cmake_resources } from "//rules/c/cmake";
-
 import { defaultGccToolchain, gccTool } from "//rules/c/gcc";
 import { gccGraphTool, defaultGccToolchainVersion } from "//rules/c/gcc";
 
@@ -300,9 +298,8 @@ async function collect_source_sets(handle, seen) {
  *
  * @param {object} handle Label handle returned by odinPackage().
  * @returns {Promise<Array>} A list of run()-inputs entries — FileSets
- * (resource-package deps, real workspace files) and/or `{kind:"digest"}`
- * objects (cmake-lib deps, whose build output is never materialized) — to
- * be spread directly into a run()'s own `inputs` array.
+ * (resource-package deps, real workspace files) — to be spread directly
+ * into a run()'s own `inputs` array.
  */
 export const resources = memo(
 	async function resources(handle) {
@@ -317,14 +314,21 @@ async function collect_resource_sets(handle, seen) {
 	if (seen.has(key)) return [];
 	seen.add(key);
 
+	// A "cmake-lib"-kind dep (an Odin package consuming a CMake-built
+	// library as a resource) was dispatched here via the legacy
+	// rules/c/cmake's digest-based cmake_resources() prior to #31/#63's
+	// cutover to graph-native cmakeProject() — removed because graph-native
+	// CMake has no digest-shaped output a legacy run()-based Odin build can
+	// consume the same way, and this repo's own BUILD.js files never
+	// exercised the branch. Real capability used elsewhere; needs a proper
+	// redesign (likely once Odin itself has a graph-native migration to
+	// pair with) rather than silently staying broken — see issue #69.
 	const sets = [];
 	for (const rawDep of handle.deps.map((dep) => dep.handle)) {
 		if (!rawDep) continue;
 		const dep = odin_package_handle(rawDep);
 		if (dep.kind === "resource-package") {
 			sets.push(await resource_package_sources(dep));
-		} else if (dep.kind === "cmake-lib") {
-			sets.push(await cmake_resources(dep));
 		}
 	}
 	for (const dep of await effective_deps(handle)) {

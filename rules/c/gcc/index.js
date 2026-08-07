@@ -26,7 +26,6 @@ import {
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
-import { RUST_LINK_DRIVER } from "//rules/rust/products";
 
 // Declared tool identity for products this toolchain implements; also
 // consumed by rule modules registering gcc-driven products.
@@ -441,70 +440,8 @@ product(
 );
 
 /**
- * Adapter exposing a gcc toolchain as Rust/rustc's C link driver — the
- * program rustc shells out to as its linker driver. Reuses the same
- * "clang"-named wrapper script Odin uses for the same reason (see gccTool()
- * docs above). Registered as the "rust-link-driver" product for the
- * "gcc-toolchain" kind so rustLinkerTools() (rules/rust/index.js) can
- * resolve it dynamically via productFor(handle, RUST_LINK_DRIVER) — this
- * module never imports anything Rust-specific.
- */
-export class RustGccLinkDriver {
-	constructor(handle) {
-		this.handle = handle;
-	}
-
-	async tools() {
-		// Always mounted, even when kache is active: rustc still resolves
-		// "clang" via PATH itself for the *link* step (its own direct
-		// subprocess spawn, not something kache wraps/caches), regardless
-		// of what CC is set to below.
-		return [
-			await nativeToolSpec(nativeTool("dirname")),
-			await gccTool(this.handle.attrs.version),
-		];
-	}
-
-	/** @returns {Promise<string[]>} paired rustc -C flags selecting this link driver. */
-	async rustflags() {
-		return ["-C", "linker=clang"];
-	}
-
-	/**
-	 * @param {boolean} [kacheActive] cc-rs-driven build scripts (e.g. a
-	 *   dependency bundling and compiling its own C/C++ sources) don't go
-	 *   through cargo/RUSTC_WRAPPER at all — they invoke whatever CC/CXX
-	 *   says directly. So when kache is active, CC/CXX are prefixed with
-	 *   `kache ` themselves (cc-rs splits a spaced CC/CXX value into
-	 *   program + leading args, same as its documented `CC="gcc -m32"`
-	 *   support), the same way RUSTC_WRAPPER=kache fronts rustc. kache
-	 *   then treats "clang"/"c++" as its own detected/cached compiler
-	 *   identity, hitting the exact same sandbox-symlink-vs-canonicalized-
-	 *   path risk documented on rustToolEnv() in //rules/rust, but for the C
-	 *   compiler instead of rustc. Resolving CC/CXX to the real, absolute,
-	 *   stable toolchain path (bypassing the sandbox "tool" mount, hence no
-	 *   `tools()` entry either) keeps that literal path identical across
-	 *   every sandbox when kache is active. The `kache` binary itself
-	 *   is still found via PATH — rustBuildCacheTools() already mounts it
-	 *   as a sandbox tool for RUSTC_WRAPPER, and that same mount covers this
-	 *   invocation too.
-	 * @returns {Promise<string[]>} extra env vars so cc-rs-driven build
-	 * scripts can find a real C/C++ compiler too, instead of only rustc's
-	 * own linker knowing about the "clang"-named wrapper via rustflags()
-	 * above.
-	 */
-	async env(kacheActive) {
-		if (kacheActive) {
-			const dir = await acquireGccToolchain(this.handle.attrs.version);
-			return [`CC=kache ${dir}/bin/clang`, `CXX=kache ${dir}/bin/c++`];
-		}
-		return ["CC=clang"];
-	}
-}
-
-/**
- * Graph-native replacement for RustGccLinkDriver: given a task's `exec` and
- * its already-declared, resolved `gccGraphToolchain().tool` input, resolve
+ * Given a task's `exec` and its already-declared, resolved
+ * `gccGraphToolchain().tool` input, resolve
  * the rustflags/env/pathDirs rustLinkerTools() (//rules/rust) needs to point
  * rustc's C link driver at this toolchain's "clang"-named wrapper script
  * (see gccTool()'s docstring above for why that wrapper exists).
@@ -522,20 +459,19 @@ export class RustGccLinkDriver {
  * `pathDirs` (the toolchain's own bin/ dir) matters beyond the linker/CC/CXX
  * roles above: cc-rs-driven build scripts (e.g. a dependency compiling and
  * archiving its own C sources) look for "ar" via PATH with no CC/CXX-shaped
- * override available — the legacy RustGccLinkDriver got this for free by
- * mounting gcc's whole tools() bin/ dir onto PATH; a produced tool() binding
- * can't do that (see this function's own note above), so the caller must
- * fold pathDirs into PATH itself (confirmed missing by a real
- * `imp lint //crates/imp:imp` run failing with `cc-rs: failed to find tool
- * "ar"` once the linker issue above was fixed — see #60/#31).
+ * override available — a produced tool() binding can't put a whole
+ * directory onto PATH on its own (see this function's own note above), so
+ * the caller must fold pathDirs into PATH itself (confirmed missing by a
+ * real `imp lint //crates/imp:imp` run failing with `cc-rs: failed to find
+ * tool "ar"` once the linker issue above was fixed — see #60/#31).
  *
  * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
  * @param {object} resolvedGccTool Resolved `gccGraphToolchain().tool` input.
  * @param {string} version `gccGraphToolchain().version`.
  * @param {boolean} [kacheActive] Selects plain `CC=<path>` vs kache-wrapped
- *   `CC=kache <path>`/`CXX=kache <path>` (see RustGccLinkDriver.env()'s
- *   docstring above for why cc-rs-driven build scripts need CC/CXX too, not
- *   just rustc's own `-C linker=`).
+ *   `CC=kache <path>`/`CXX=kache <path>` — cc-rs-driven build scripts need
+ *   CC/CXX too, not just rustc's own `-C linker=` (see kacheActive's own
+ *   branch below).
  * @returns {{ rustflags: string[], env: string[], pathDirs: string[] }}
  */
 export function gccRustLinkDriverEnv(
@@ -559,14 +495,6 @@ export function gccRustLinkDriverEnv(
 		pathDirs,
 	};
 }
-
-product(
-	GccToolchain,
-	RUST_LINK_DRIVER,
-	GCC_TOOL,
-	(handle) => new RustGccLinkDriver(handle),
-	{ display: "rust link driver {0}", level: "info" },
-);
 
 /**
  * The real, absolute host directory (bin/ inside it) a resolved gcc graph

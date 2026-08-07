@@ -1,4 +1,4 @@
-import { ccBinary, ccLibrary } from "//rules/c/graph";
+import { ccBinary, ccLibrary } from "//rules/c";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
 import { jsSources } from "//rules/js";
 

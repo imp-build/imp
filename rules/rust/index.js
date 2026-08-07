@@ -175,8 +175,7 @@ export async function rustLinkerTools(exec, input, linkerHandles, kacheActive) {
 		// Always mounted, even when kache is active: rustc still resolves
 		// "clang" via PATH itself for the *link* step (its own direct
 		// subprocess spawn, not something kache wraps/caches), and that
-		// wrapper script does `exec "$(dirname "$0")/..." "$@"` — mirrors
-		// the legacy RustGccLinkDriver.tools()'s own dirname mount above.
+		// wrapper script does `exec "$(dirname "$0")/..." "$@"`.
 		tools: [input.dirnameTool],
 		rustflags: [
 			...gccResult.rustflags,

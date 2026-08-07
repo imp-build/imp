@@ -90,10 +90,16 @@ const CONFIGURE_STDOUT =
 	dumpFile("CMakeFiles/rules.ninja", RULES_NINJA) +
 	dumpFile("CTestTestfile.cmake", CTEST_TESTFILE);
 
-// A fully fake gcc toolchain, sidestepping gccGraphToolchain()'s real
-// download+install task chain — see rules/c/graph_test.js's own
-// fakeGccGraphToolchain() for the same technique and rationale.
+// Fully fake gcc/cmake toolchains, sidestepping gccGraphToolchain()'s/
+// cmakeGraphToolchain()'s real download+install task chains — see
+// rules/c/index_test.js's own fakeGccGraphToolchain() for the same
+// technique and rationale.
 function fakeGccGraphToolchain(version = "2025.08-1") {
+	const binRoot = files({ root: "rules/c/gcc", include: ["**/*"] });
+	return { tool: tool(binRoot, { binDirs: ["bin"] }), version };
+}
+
+function fakeCmakeGraphToolchain(version = "3.31.0") {
 	const binRoot = files({ root: "rules/c/gcc", include: ["**/*"] });
 	return { tool: tool(binRoot, { binDirs: ["bin"] }), version };
 }
@@ -107,6 +113,7 @@ function withCmakeHost(fn) {
 		const expansion = cmakeProjectExpansion({
 			path: "rules/c/cmake/example",
 			toolchain: fakeGccGraphToolchain(),
+			cmakeToolchain: fakeCmakeGraphToolchain(),
 		});
 		return fn(host, expansion);
 	});

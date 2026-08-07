@@ -29,7 +29,15 @@
 // wave's exec.action() `inputs:` array directly (the same output-binding
 // chaining every other migrated ruleset already relies on).
 //
-// Toolchain support is gcc-only for now: CMake bakes CMAKE_C_COMPILER et al
+// CMake itself is a pinned, graph-native toolchain (rules/c/cmake/toolchain.js's
+// cmakeGraphTool()/cmakeGraphToolchain(), PR D) — not resolved from ambient
+// host PATH. Configure invokes it via a resolved tool() binding directly;
+// replay resolves a rewritten bare "cmake" name (recovered from a
+// POST_BUILD custom command's baked-in CMAKE_COMMAND path — see
+// cmakeGraphTool()'s own docstring) via cmakeGraphToolSpec(), the same
+// freshly-constructible pattern gcc's own clang/cc/c++/ar names use below.
+//
+// C compiler toolchain support is gcc-only for now: CMake bakes CMAKE_C_COMPILER et al
 // into build.ninja as literal text, read back by *later, separate* replay
 // sandboxes — so it needs a real, stable, absolute host path, not
 // exec.tool()'s sandbox-mount-relative one (the exact bug class
@@ -41,13 +49,18 @@
 // unsupported here — a known follow-up gap, tracked alongside #61's own
 // zig-ar static-archive gap.
 
-import { files, output, task } from "imp:core";
+import { files, output, packagePath, task } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 import {
 	defaultGccGraphToolchain,
 	gccCMakeCompilerArgs,
 	gccGraphToolSpec,
 } from "//rules/c/gcc";
+import {
+	cmakeGraphToolSpec,
+	cmakeGraphToolchainDir,
+	defaultCmakeGraphToolchain,
+} from "//rules/c/cmake/toolchain";
 import {
 	extractCopyDestinations,
 	parseNinja,
@@ -101,6 +114,16 @@ function toolchainTaskInputs(toolchain) {
 	return { ccTool: toolchain.tool };
 }
 
+function resolveCmakeToolchain(toolchain) {
+	const resolved = toolchain || defaultCmakeGraphToolchain();
+	if (!resolved) {
+		throw new Error(
+			"cmakeProject() needs a declared CMake default (see //rules/c/cmake/toolchain) or an explicit cmakeToolchain option",
+		);
+	}
+	return resolved;
+}
+
 function requireGccToolchain(toolchain) {
 	const resolved = toolchain || defaultGccGraphToolchain();
 	if (!resolved) {
@@ -122,7 +145,7 @@ function requireGccToolchain(toolchain) {
 // both, and so tests can construct one directly.
 export function cmakeProjectSpec(opts = {}) {
 	const {
-		path = ".",
+		path = packagePath(),
 		buildDir,
 		srcs = [
 			"CMakeLists.txt",
@@ -138,6 +161,7 @@ export function cmakeProjectSpec(opts = {}) {
 		dirs = [],
 		cmakeArgs = [],
 		toolchain,
+		cmakeToolchain,
 	} = opts;
 	const srcPath = path;
 	const buildDirPath =
@@ -154,6 +178,7 @@ export function cmakeProjectSpec(opts = {}) {
 			]),
 		),
 		toolchain: requireGccToolchain(toolchain),
+		cmakeToolchain: resolveCmakeToolchain(cmakeToolchain),
 	};
 }
 
@@ -176,7 +201,7 @@ export function configureCmakeProject(spec) {
 			...toolchainTaskInputs(spec.toolchain),
 			mkdir: nativeTool("mkdir"),
 			ninja: nativeTool("ninja"),
-			cmake: nativeTool("cmake"),
+			cmakeTool: spec.cmakeToolchain.tool,
 			find: nativeTool("find"),
 			cat: nativeTool("cat"),
 			dirname: nativeTool("dirname"),
@@ -188,9 +213,15 @@ export function configureCmakeProject(spec) {
 				input.ccTool,
 				spec.toolchain.version,
 			);
+			const cmakeDir = cmakeGraphToolchainDir(
+				exec,
+				input.cmakeTool,
+				spec.cmakeToolchain.version,
+			);
+			const cmakeExe = `${cmakeDir}/bin/cmake`;
 			const script =
-				"src=$1; bdir=$2; shift 2; " +
-				'mkdir -p "$bdir" && cmake -S "$src" -B "$bdir" -G Ninja "$@" 1>&2 && ' +
+				"src=$1; bdir=$2; cmakeExe=$3; shift 3; " +
+				'mkdir -p "$bdir" && "$cmakeExe" -S "$src" -B "$bdir" -G Ninja "$@" 1>&2 && ' +
 				`find "$bdir" \\( -name '*.ninja' -o -name CTestTestfile.cmake \\) | while read -r f; do ` +
 				`printf '${FILE_START}%s${FILE_MID}' "\${f#$bdir/}"; cat "$f"; printf '${FILE_END}'; done`;
 			const result = await exec.action({
@@ -201,17 +232,11 @@ export function configureCmakeProject(spec) {
 					"cmake-configure",
 					spec.path,
 					spec.buildDirPath,
+					cmakeExe,
 					...compilerArgs,
 					...spec.cmakeArgs,
 				],
-				tools: [
-					input.mkdir,
-					input.ninja,
-					input.cmake,
-					input.find,
-					input.cat,
-					input.dirname,
-				],
+				tools: [input.mkdir, input.ninja, input.find, input.cat, input.dirname],
 				inputs: [
 					input.srcs,
 					...Object.keys(spec.dirInputs).map((key) => input[key]),
@@ -349,7 +374,6 @@ export function replayCmakeTarget(
 			srcs: spec.srcsInput,
 			...spec.dirInputs,
 			...toolchainTaskInputs(spec.toolchain),
-			cmake: nativeTool("cmake"),
 			mkdir: nativeTool("mkdir"),
 			cp: nativeTool("cp"),
 			dirname: nativeTool("dirname"),
@@ -361,8 +385,8 @@ export function replayCmakeTarget(
 			),
 		},
 		async run(exec, input) {
-			const baseTools = [input.cmake, input.mkdir, input.cp, input.dirname];
-			const baseToolNames = new Set(["cmake", "mkdir", "cp", "dirname"]);
+			const baseTools = [input.mkdir, input.cp, input.dirname];
+			const baseToolNames = new Set(["mkdir", "cp", "dirname"]);
 			const dirInputBindings = Object.keys(spec.dirInputs).map(
 				(key) => input[key],
 			);
@@ -422,24 +446,33 @@ export function replayCmakeTarget(
 				const edgeTools = [...baseTools];
 				for (const name of resolved.toolNames) {
 					if (baseToolNames.has(name)) continue;
-					if (!GCC_GRAPH_TOOL_NAMES.has(name)) {
-						// nativeTool() only produces a resolved graph binding
-						// when declared as a task's own static `inputs:` (see
-						// e.g. rules/c/mold's install task) — a dynamically
-						// discovered tool name, known only once an edge's
-						// command is parsed here at execution time, can't be
-						// turned into one from inside a running task() body.
-						// Not hit by the current example fixture (only
-						// gcc's own clang/c++/ar ever appear); a real gap for
-						// a CMake project invoking some other absolute-pathed
-						// host tool from its build commands — tracked as a
-						// follow-up alongside this migration's other known
-						// gaps (zig-as-CMake-compiler, CMAKE_RANLIB).
-						throw new Error(
-							`cmake edge needs unsupported host tool '${name}' — only gcc's own clang/cc/c++/ar are resolvable from a graph-native CMake replay right now`,
-						);
+					// nativeTool() only produces a resolved graph binding when
+					// declared as a task's own static `inputs:` (see e.g.
+					// rules/c/mold's install task) — a dynamically discovered
+					// tool name, known only once an edge's command is parsed
+					// here at execution time, can't be turned into one from
+					// inside a running task() body. gccGraphToolSpec()/
+					// cmakeGraphToolSpec() are the freshly-constructible,
+					// named-cache-backed alternative (see cmakeGraphTool()'s
+					// own docstring in //rules/c/cmake/toolchain for why
+					// "cmake" — CMAKE_COMMAND baked into a POST_BUILD custom
+					// command — needs the exact same treatment as gcc's own
+					// clang/cc/c++/ar). A real gap for a CMake project
+					// invoking some other absolute-pathed host tool from its
+					// build commands — tracked as a follow-up alongside this
+					// migration's other known gaps (zig-as-CMake-compiler,
+					// CMAKE_RANLIB).
+					if (GCC_GRAPH_TOOL_NAMES.has(name)) {
+						edgeTools.push(gccGraphToolSpec(spec.toolchain.version, name));
+						continue;
 					}
-					edgeTools.push(gccGraphToolSpec(spec.toolchain.version, name));
+					if (name === "cmake") {
+						edgeTools.push(cmakeGraphToolSpec(spec.cmakeToolchain.version));
+						continue;
+					}
+					throw new Error(
+						`cmake edge needs unsupported host tool '${name}' — only gcc's own clang/cc/c++/ar and cmake itself are resolvable from a graph-native CMake replay right now`,
+					);
 				}
 
 				const outputPaths = [...edge.outputs, ...edge.implicitOutputs];

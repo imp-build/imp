@@ -1,59 +1,75 @@
 The CMake integration is for projects whose CMake model should remain the
-source of truth. A `cmakeLib()` label configures the project with Ninja and
-then discovers separately selectable libraries,
-executables, and CTest-backed tests.
+source of truth. `cmakeProject()` configures the project with Ninja and
+discovers every real CMake target (`add_library`/`add_executable`) as a
+separately selectable, separately buildable/testable child, keyed by its
+CMake target name.
 
 ## Declare the project root
 
 ```js
-import { cmakeLib } from "//rules/c/cmake";
-import { zigToolchain } from "//rules/c/zig";
+import { cmakeProject } from "//rules/c/cmake";
+import { BUILD, PACKAGE, TEST } from "imp:core";
 
-const compiler = zigToolchain("0.16.0");
-
-export const project = cmakeLib({
-    compiler,
+const project = cmakeProject({
     cmakeArgs: ["-DCMAKE_BUILD_TYPE=Release"],
 });
+
+export const my_library = {
+    [BUILD]: project.get("my_library", BUILD),
+    [PACKAGE]: project.get("my_library", PACKAGE),
+};
+export const my_test = {
+    [BUILD]: project.get("my_test", BUILD),
+    [TEST]: { unit: project.get("my_test", TEST, "unit") },
+};
 ```
 
-`src` identifies the CMake source directory. `srcs` controls the files staged
-from that directory, while `dirs` adds complete auxiliary directories needed
-by configure or build steps. `cmakeArgs` and `ctestArgs` append project-specific
-options to their respective tools.
+`path` identifies the CMake source directory (defaults to the declaring
+`BUILD.js`'s own directory). `srcs` controls the files staged from that
+directory, while `dirs` adds complete auxiliary directories needed by
+configure or build steps. `cmakeArgs` appends project-specific options to
+`cmake -S -B`.
 
-For a hand-written coarse target, list expected `outputs` relative to the
-source directory. `stageOutputs` can copy explicitly named files to other
-workspace paths, but such scattered outputs cannot currently be packaged as
-one `dist/` artifact.
+`cmakeProject()` returns `{get(cmakeTargetName, workflow, facet?),
+all(workflow, facet?)}` — an `expand()`, not a plain object — so each
+selectable target must be re-exported at the BUILD.js top level wrapped in
+the usual `{[BUILD]: ..., [PACKAGE]: ..., [TEST]: {...}}` shape (a bare
+`project.get(...)` call is not itself a valid export). `workflow` is one of
+`BUILD`/`PACKAGE`/`TEST` (imported from `imp:core`); `TEST`'s facet is
+always `"unit"`.
 
-## Lazy label discovery
+The toolchain a CMake project builds with is gcc-only today — pass an
+explicit `toolchain: gccGraphToolchain(version)` (`//rules/c/gcc`) or rely on
+the declared gcc default. Zig-as-CMake-compiler is a known, deferred gap
+(zig's own graph toolchain has no named-cache-backed real path yet for
+CMake to bake `CMAKE_C_COMPILER` against).
 
-CMake configuration is deferred until the selected graph reaches the project.
-The generated Ninja graph is inspected for named libraries and executables;
-each becomes an imp label in the same address scope. Executables referenced
-by `add_test()` receive test handlers that run the correlated CTest cases. The
-parent `cmakeLib` label can still run the
-whole CTest suite.
+## Discovery and build execution
+
+CMake configuration is deferred until the selected graph actually reaches
+the project, and runs at most once no matter how many targets get selected
+across however many goals (`expand()`'s own memoization — this is the
+entire reason the graph-native rule replaced the legacy, label-based one,
+which reconfigured on every single call). The generated Ninja graph is
+parsed for named libraries and executables; each becomes a keyed child.
+Executables referenced by `add_test()` get a `[TEST]` facet that scopes
+CTest to just their correlated case(s).
 
 ```sh
-# Build the coarse declaration.
-imp build //native/project:project
-
-# Build or test a target discovered from CMake's generated graph.
 imp build //native/project:my_library
 imp test //native/project:my_test
 ```
 
-Build execution replays reachable Ninja edges as imp tasks, allowing
-unchanged compile edges to remain cache hits instead of treating the entire
-CMake build as one opaque command. CTest itself is always run rather than
-replaying a previous successful result.
+Build execution replays reachable Ninja edges as one coarse task per
+selected target (not one task per edge — see the module's own source
+comments for why), so an unrelated target's rebuild doesn't force this
+one's. CTest itself is always run rather than replaying a previous
+successful result.
 
-## Consuming native outputs
+## Known gap: raw ccLibrary()/ccBinary() interop
 
-A CMake target can be used as a dependency by raw C/C++ or Odin targets. Its
-link artifacts and output digest are passed through the build graph even when
-the intermediate build directory is not materialized in the source workspace.
-Use `outputs` to make hand-written target artifacts discoverable to these
-consumers.
+A discovered CMake target's `project.get(name, BUILD)` is a plain resolved
+graph handle — unlike a raw `ccLibrary()` result, it does not also carry
+`transitiveArchives`/`transitiveIncludeDirs`, so `ccBinary({deps:
+[project.get("mylib", BUILD)]})` does not work transparently yet. Tracked as
+a follow-up (see the repo's own issue tracker); not solved by this rule.

@@ -9,9 +9,8 @@ import {
 	acquireCmakeToolchain,
 	cmakeCacheKey,
 	cmakeBin,
-	cmakeTool,
+	cmakeGraphToolSpec,
 	cmakeToolchain,
-	defaultCmakeToolchain,
 	defaultCmakeToolchainVersion,
 	installCmakeToolchain,
 } from "//rules/c/cmake";
@@ -42,7 +41,6 @@ describe("CMake toolchain", () => {
 				cmakeCacheKey(toolchain.attrs.version, { os: "linux", arch: "x86_64" }),
 			).toBe("3.30.5/linux-x86_64");
 			expect(defaultCmakeToolchainVersion()).toBe("3.30.5");
-			expect(defaultCmakeToolchain()).toBe(toolchain);
 			expect(host.calls[0][0]).toBe("namedCache");
 		});
 	});
@@ -81,11 +79,10 @@ describe("CMake toolchain", () => {
 		});
 	});
 
-	test("describes the named-cache-backed cmake tool", async () => {
-		await withCmakeHost(async () => {
-			installCmakeToolchain("3.30.5", "/tmp/cmake-3.30.5");
+	test("cmakeGraphToolSpec describes the named-cache-backed cmake tool, freshly constructible", () => {
+		return withCmakeHost(() => {
 			cmakeToolchain("3.30.5", { default: true });
-			const tool = await cmakeTool();
+			const tool = cmakeGraphToolSpec("3.30.5");
 
 			expect(tool.kind).toBe("tool");
 			expect(tool.name).toBe("cmake");
