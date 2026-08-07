@@ -265,8 +265,8 @@ export const acquireZigToolchain = memo(
 		// acquireRustToolchain's RUSTUP_HOME_CACHE/CARGO_HOME_CACHE pairing, and
 		// means a toolchain seeded via installZigToolchain() (which only ever
 		// populates ZIG_TOOLCHAIN_CACHE) still gets ZIG_BUILD_CACHE backfilled
-		// by the prewarm step below on first real use, rather than leaving
-		// zigBuildCacheTool() pointed at a directory that was never created.
+		// by the prewarm step below on first real use, rather than leaving its
+		// named-cache mount pointed at a directory that was never created.
 		if (cacheHas(ZIG_TOOLCHAIN_CACHE, key) && cacheHas(ZIG_BUILD_CACHE, key)) {
 			return cacheGet(ZIG_TOOLCHAIN_CACHE, key);
 		}
@@ -348,11 +348,10 @@ export const acquireZigToolchain = memo(
 		}
 
 		// Seed ZIG_BUILD_CACHE with a real, populated directory: a "tool" mount
-		// (see zigBuildCacheTool below) requires its named-cache path to already
-		// exist as a directory (materialize_tools_into_sandbox in src/exec.rs
-		// bails otherwise), and this repo's own real cmakeLib usage always
-		// compiles with `-g -shared -fPIC`, so link a throwaway shared library
-		// with those exact flags to force Zig to build and cache compiler-rt/
+		// requires its named-cache path to already exist as a directory
+		// (materialize_tools_into_sandbox in src/exec.rs bails otherwise), so
+		// link a throwaway shared library (a representative real workload,
+		// `-g -shared -fPIC`) to force Zig to build and cache compiler-rt/
 		// libc-start objects right now — turning the ~12s first-ever cost every
 		// zig-cc build would otherwise separately pay (once per sandbox, since
 		// sandboxes don't share state) into a one-time toolchain-acquisition
@@ -602,98 +601,12 @@ export async function zigBin(version) {
 }
 
 /**
- * Return a named-cache-backed Zig tool descriptor for sandbox execution.
- *
- * @param {string} [version]
- * @returns {Promise<object>}
- */
-export async function zigTool(version) {
-	const resolved = ZigToolchain.requireVersion(version, "Zig");
-	await acquireZigToolchain(resolved);
-	const plat = platformInfo();
-	return {
-		kind: "tool",
-		name: "zig",
-		cache: ZIG_TOOLCHAIN_CACHE,
-		key: zigCacheKey(resolved, plat),
-		binDirs: ["."],
-	};
-}
-
-/**
- * Return a named-cache-backed tool descriptor mounting Zig's own runtime
- * build cache (compiler-rt, libc start objects, etc. — see ZIG_BUILD_CACHE's
- * doc comment) at a stable path, shared read-write across every sandbox for
- * this Zig version/platform. Not put on PATH (binDirs empty) — pair with
- * zigGlobalCacheEnv() to point $ZIG_GLOBAL_CACHE_DIR at its mount path.
- *
- * @param {string} [version]
- * @returns {Promise<object>}
- */
-export async function zigBuildCacheTool(version) {
-	const resolved = ZigToolchain.requireVersion(version, "Zig");
-	await acquireZigToolchain(resolved);
-	const plat = platformInfo();
-	return {
-		kind: "tool",
-		name: ZIG_BUILD_CACHE,
-		cache: ZIG_BUILD_CACHE,
-		key: zigCacheKey(resolved, plat),
-		binDirs: [],
-	};
-}
-
-/**
- * Return the `run()` env entries pointing Zig at its shared build-cache tool
- * mount (see zigBuildCacheTool). Any run() using this must also include that
- * tool, or the path won't exist in the sandbox.
- *
- * @returns {string[]}
- */
-export function zigGlobalCacheEnv() {
-	return [`ZIG_GLOBAL_CACHE_DIR=.imp/tools/${ZIG_BUILD_CACHE}`];
-}
-
-/**
- * Return the CMake -D flags to configure this Zig toolchain as the C/C++
- * compiler and archiver.
- *
- * @param {string} [version]
- * @returns {Promise<string[]>}
- */
-export async function zigCMakeArgs(version) {
-	const resolved = ZigToolchain.requireVersion(version, "Zig");
-	await acquireZigToolchain(resolved);
-	const plat = platformInfo();
-	const exe = plat.os === "windows" ? "zig.exe" : "zig";
-	const { ar, ranlib } = wrapperNames(plat);
-	const toolDir = ".imp/tools/zig";
-	return [
-		`-DCMAKE_C_COMPILER=${exe}`,
-		"-DCMAKE_C_COMPILER_ARG1=cc",
-		`-DCMAKE_CXX_COMPILER=${exe}`,
-		"-DCMAKE_CXX_COMPILER_ARG1=c++",
-		`-DCMAKE_AR=${toolDir}/${ar}`,
-		`-DCMAKE_RANLIB=${toolDir}/${ranlib}`,
-	];
-}
-
-/**
  * Return the currently configured default Zig toolchain version.
  *
  * @returns {string|null}
  */
 export function defaultZigToolchainVersion() {
 	return ZigToolchain.defaultVersion();
-}
-
-/**
- * Return the currently configured default Zig toolchain target handle.
- *
- * @returns {object|null}
- */
-export function defaultZigToolchain() {
-	return ZigToolchain.default();
 }
 
 // Importing this rule provisions the pinned default. A workspace can replace

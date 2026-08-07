@@ -1,5 +1,3 @@
-import { productFor } from "imp:core";
-import { RUST_LINK_DRIVER } from "//rules/rust/products";
 import {
 	describe,
 	expect,
@@ -189,39 +187,6 @@ describe("gcc toolchain", () => {
 					(call) => call[0] === "nativeToolSpec" && call[1] === "curl",
 				),
 			).toBe(true);
-		});
-	});
-
-	test("registers a rust-link-driver product exposing -C linker=clang and gcc/dirname tools", async () => {
-		await withGccHost(async () => {
-			installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
-			const toolchain = gccToolchain("2025.08-1");
-
-			const linkDriver = await productFor(toolchain, RUST_LINK_DRIVER);
-
-			expect(await linkDriver.rustflags()).toEqual(["-C", "linker=clang"]);
-			const tools = await linkDriver.tools();
-			expect(tools.some((t) => t.name === "dirname")).toBe(true);
-			expect(tools.some((t) => t.name === "gcc-toolchain")).toBe(true);
-			expect(await linkDriver.env()).toEqual(["CC=clang"]);
-		});
-	});
-
-	test("rust-link-driver's env() wraps CC/CXX with kache at a stable absolute path when kache is active", async () => {
-		await withGccHost(async () => {
-			installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
-			const toolchain = gccToolchain("2025.08-1");
-
-			const linkDriver = await productFor(toolchain, RUST_LINK_DRIVER);
-
-			expect(await linkDriver.env(true)).toEqual([
-				"CC=kache /cache/gcc-toolchains/2025.08-1/linux-x86_64/bin/clang",
-				"CXX=kache /cache/gcc-toolchains/2025.08-1/linux-x86_64/bin/c++",
-			]);
-			// Still mounts gcc-toolchain/dirname as sandbox tools: rustc's own
-			// link step resolves "clang" via PATH regardless of CC/kache.
-			const tools = await linkDriver.tools();
-			expect(tools.some((t) => t.name === "gcc-toolchain")).toBe(true);
 		});
 	});
 

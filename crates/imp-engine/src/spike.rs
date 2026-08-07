@@ -12771,6 +12771,7 @@ export const spall = odinPackage({ srcs: ["*.odin"] });
             &p.join(WORKSPACE_FILE),
             r#"
 import "//rules/c";
+import "//rules/c/generate_build";
 export const cConfig = { buildGenerate: true };
 "#,
         );
@@ -12804,8 +12805,8 @@ add_executable(cmake_app main.c)
             .unwrap();
 
         let cmake_build = std::fs::read_to_string(p.join("cmake_app/BUILD.js")).unwrap();
-        assert!(cmake_build.contains(r#"import { cmakeLib } from "//rules/c/cmake";"#));
-        assert!(cmake_build.contains("export const cmake_app_cmake = cmakeLib({});"));
+        assert!(cmake_build.contains(r#"import { cmakeProject } from "//rules/c/cmake";"#));
+        assert!(cmake_build.contains("export const cmake_app_cmake = cmakeProject({});"));
 
         let app_build = std::fs::read_to_string(p.join("raw_app/BUILD.js")).unwrap();
         assert!(app_build.contains(r#"import { ccBinary } from "//rules/c";"#));
@@ -12824,6 +12825,7 @@ add_executable(cmake_app main.c)
             &p.join(WORKSPACE_FILE),
             r#"
 import "//rules/c/cmake";
+import "//rules/c/generate_build";
 export const cConfig = { buildGenerate: true };
 "#,
         );
@@ -12836,9 +12838,9 @@ export const done = true;
         write_file(
             &p.join("cmake_app/BUILD.js"),
             r#"
-import { cmakeLib } from "//rules/c/cmake";
+import { cmakeProject } from "//rules/c/cmake";
 
-export const cmake_app = cmakeLib({});
+export const cmake_app = cmakeProject({});
 "#,
         );
         write_file(
@@ -13350,16 +13352,33 @@ export { taken };
     }
 
     #[tokio::test]
-    async fn cmake_label_factory_builds_and_tests_discovered_children() {
+    async fn cmake_project_expand_builds_and_tests_discovered_children() {
+        // Graph-native cmakeProject() (issue #31/#62, cutover in #63) replaced
+        // the legacy cmakeLib()'s discoverLabels()-based dynamic addressing
+        // (a discovered CMake target became independently selectable at a
+        // new label address automatically) with expand()'s get()/all() —
+        // each selectable target must be explicitly re-exported at the
+        // BUILD.js top level instead (see rules/c/cmake/DOC.md), which this
+        // fixture does for both hello_cmake (a library) and hello_cmake_main
+        // (its linked, ctest-correlated executable).
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), r#"import "//rules/c/cmake";"#);
         write_file(
             &p.join("native/BUILD.js"),
             r#"
-import { cmakeLib } from "//rules/c/cmake";
+import { BUILD, PACKAGE, TEST } from "imp:core";
+import { cmakeProject } from "//rules/c/cmake";
 
-export const project = cmakeLib({});
+const project = cmakeProject({});
+export const hello_cmake = {
+    [BUILD]: project.get("hello_cmake", BUILD),
+    [PACKAGE]: project.get("hello_cmake", PACKAGE),
+};
+export const hello_cmake_main = {
+    [BUILD]: project.get("hello_cmake_main", BUILD),
+    [TEST]: { unit: project.get("hello_cmake_main", TEST, "unit") },
+};
 "#,
         );
         write_file(
@@ -13392,14 +13411,6 @@ add_test(NAME hello_cmake_main_test COMMAND hello_cmake_main)
         run_goal_live(&live, p, "test", &["//native:hello_cmake_main".to_owned()])
             .await
             .unwrap();
-
-        let snapshot = workspace_with_discovered_labels(&live);
-        assert!(snapshot
-            .label_addresses
-            .contains_key("//native:hello_cmake"));
-        assert!(snapshot
-            .label_addresses
-            .contains_key("//native:hello_cmake_main"));
     }
 
     #[tokio::test]
