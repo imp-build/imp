@@ -15,6 +15,7 @@ import {
 	kacheCacheKey,
 	kacheDataCacheKey,
 	kacheDataDir,
+	kacheGraphTool,
 	kacheTool,
 	kacheToolchain,
 } from "//rules/rust/kache/toolchain";
@@ -275,6 +276,18 @@ describe("kache toolchain", () => {
 
 			const details = host.namedCacheDetails.get("kache-data");
 			expect(await details()).toBe(null);
+			expect(host.runs.length).toBe(0);
+		});
+	});
+
+	test("declares a graph-native kache tool without touching the host run()", () => {
+		return withKacheHost((host) => {
+			kacheToolchain("0.11.0", { default: true });
+			const tool = kacheGraphTool("0.11.0");
+
+			expect(tool.__imp_graph_handle).toBe(true);
+			// Building the graph is pure node construction — nothing executes
+			// until a workflow resolves the task, matching Odin's precedent.
 			expect(host.runs.length).toBe(0);
 		});
 	});
