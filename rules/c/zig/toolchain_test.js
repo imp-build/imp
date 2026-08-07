@@ -7,6 +7,7 @@ import {
 import {
 	__resetZigToolchainStateForTest,
 	acquireZigToolchain,
+	defaultZigGraphToolchain,
 	defaultZigToolchain,
 	defaultZigToolchainVersion,
 	installZigToolchain,
@@ -14,6 +15,8 @@ import {
 	zigCacheKey,
 	zigBin,
 	zigCMakeArgs,
+	zigGraphCacheEnv,
+	zigGraphToolchain,
 	zigTool,
 	zigToolchain,
 } from "//rules/c/zig";
@@ -281,6 +284,52 @@ describe("Zig toolchain", () => {
 				"-DCMAKE_CXX_COMPILER_ARG1=c++",
 				"-DCMAKE_AR=.imp/tools/zig/zigar.bat",
 				"-DCMAKE_RANLIB=.imp/tools/zig/zigranlib.bat",
+			]);
+		});
+	});
+
+	test("declares a graph-native zig toolchain with both the toolchain and build-cache tools", () => {
+		return withZigHost((host) => {
+			zigToolchain("0.16.0", { default: true });
+			const graph = zigGraphToolchain("0.16.0");
+
+			expect(graph.tool.__imp_graph_handle).toBe(true);
+			expect(graph.buildCacheTool.__imp_graph_handle).toBe(true);
+			expect(graph.version).toBe("0.16.0");
+			expect(Object.isFrozen(graph)).toBe(true);
+		});
+	});
+
+	test("graph toolchain construction does not touch the host run()", () => {
+		return withZigHost((host) => {
+			zigToolchain("0.16.0", { default: true });
+			zigGraphToolchain("0.16.0");
+
+			// Building the graph is pure node construction — nothing executes
+			// until a workflow resolves the task, matching Odin/Rust/gcc/mold's
+			// precedent.
+			expect(host.runs.length).toBe(0);
+		});
+	});
+
+	test("defaultZigGraphToolchain resolves the declared default, or null", () => {
+		return withZigHost((host) => {
+			expect(defaultZigGraphToolchain()).toBe(null);
+
+			zigToolchain("0.16.0", { default: true });
+			const graph = defaultZigGraphToolchain();
+
+			expect(graph.version).toBe("0.16.0");
+		});
+	});
+
+	test("zigGraphCacheEnv resolves ZIG_GLOBAL_CACHE_DIR via exec.path()", () => {
+		return withZigHost(() => {
+			const exec = { path: (binding) => binding.__fakePath };
+			const buildCacheTool = { __fakePath: "/sandbox/zig-build-cache" };
+
+			expect(zigGraphCacheEnv(exec, buildCacheTool)).toEqual([
+				"ZIG_GLOBAL_CACHE_DIR=/sandbox/zig-build-cache",
 			]);
 		});
 	});

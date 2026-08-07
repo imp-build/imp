@@ -7,16 +7,29 @@ import {
 } from "//rules/imp/test";
 import { cargoPackage, cargoPackageHandles } from "//rules/rust";
 import { nativeTool } from "//rules/imp/native-tool";
-import { __resetGccToolchainStateForTest, gccToolchain } from "//rules/c/gcc";
+import {
+	__resetGccToolchainStateForTest,
+	gccToolchain,
+	installGccToolchain,
+} from "//rules/c/gcc";
 import {
 	__resetRustToolchainStateForTest,
 	rustToolchain,
 } from "//rules/rust/toolchain";
 
+// Every cargoPackage() call constructs a `cargo metadata` task eagerly
+// (cargoWorkspaceExpansion()/cargoStandaloneExpansion() call metadataTask()
+// synchronously, not lazily inside expand()'s create()), and
+// toolchainInputs() needs a resolvable gcc link-driver for that construction
+// regardless of whether the package ever builds a binary — "every [cargo]
+// task... needs this, not just the compiling ones" per workspace_expansion.js's
+// own cargoEnv() doc comment. So every test here needs *some* gcc default
+// declared, even ones that never touch [BUILD]/[PACKAGE].
 function withRustHost(fn) {
 	const run = async (host) => {
 		__resetRustToolchainStateForTest();
 		__resetGccToolchainStateForTest();
+		gccToolchain("2025.08-1", { default: true, unverified: true });
 		try {
 			return await fn(host);
 		} finally {
@@ -35,6 +48,21 @@ function fakeGraphToolchain() {
 		toolchainId: "1.93.0-x86_64-unknown-linux-gnu",
 		version: "1.93.0",
 	};
+}
+
+// A fully fake gcc link-driver handle, sidestepping gccGraphToolchain()'s
+// real download+install task chain entirely — the fake host's mocked run()
+// doesn't materialize a real CAS artifact for a graph output.artifact() (see
+// resolveIgnoringArtifactValidation()'s doc comment below for the same
+// limitation), so fully resolving a *real* gcc install task isn't possible
+// under this harness; mirrors fakeGraphToolchain()'s own avoidance of
+// rustGraphToolchain()'s real acquisition. gccRustLinkDriverEnv() only ever
+// reads `.version` off this (used for a cacheGet() lookup, not the `.tool`
+// handle itself — see that function's docstring in //rules/c/gcc for why),
+// so the caller must installGccToolchain(version, ...) to seed that lookup.
+function fakeGccGraphToolchain(version = "2025.08-1") {
+	const binRoot = files({ root: "rules/c/gcc", include: ["**/*"] });
+	return { tool: tool(binRoot, { binDirs: ["bin"] }), version };
 }
 
 async function resolveHandles(handles) {
@@ -87,9 +115,9 @@ describe("graph-native cargoPackage", () => {
 	// populated and inspectable — these tests catch that expected, harness-
 	// specific failure and assert on the recorded run() call instead of
 	// resolution succeeding outright.
-	async function resolveBuildIgnoringArtifactValidation(handle) {
+	async function resolveIgnoringArtifactValidation(handles) {
 		try {
-			await resolveHandles([handle]);
+			await resolveHandles(handles);
 		} catch (error) {
 			if (
 				!String(error.message || error).includes("must be an action artifact")
@@ -99,55 +127,74 @@ describe("graph-native cargoPackage", () => {
 		}
 	}
 
-	test("cargo build invokes cargo via the legacy linker/kache bridge", () => {
+	test("cargo build invokes cargo via the graph-native gcc link-driver bridge (kache stays legacy)", () => {
 		return withRustHost(async (host) => {
-			gccToolchain("2025.08-1", { default: true, unverified: true });
+			installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
 			const pkg = cargoPackage({
 				path: "rules/rust/example",
 				bin: "hello",
 				toolchain: fakeGraphToolchain(),
 			});
+			// A fully fake linkDriver (see fakeGccGraphToolchain()'s doc comment)
+			// — assigned before [BUILD] is first accessed below, so
+			// linkerHandlesForSpec()'s lazy cache (rules/rust's crateBuildTask())
+			// picks it up instead of falling back to a real declared gcc default.
+			pkg.spec.legacyToolchainHandle = {
+				attrs: { linkDriver: fakeGccGraphToolchain() },
+			};
 
-			await resolveBuildIgnoringArtifactValidation(pkg[BUILD].hello);
+			await resolveIgnoringArtifactValidation([pkg[BUILD].hello]);
 
 			const buildRun = host.runs.find(
 				(run) => run.display === "cargo build rules/rust/example",
 			);
 			expect(buildRun).toBeTruthy();
 			expect(buildRun.argv[0]).toBe("sh");
+			// -C linker=<real absolute named-cache path> comes from
+			// gccRustLinkDriverEnv() — never a sandbox-relative exec.tool()
+			// alias, which breaks in practice (see that function's docstring in
+			// //rules/c/gcc for the confirmed failure and reasoning).
+			expect(buildRun.argv).toContain(
+				"-C linker=/cache/gcc-toolchains/2025.08-1/linux-x86_64/bin/clang",
+			);
 		});
 	});
 
-	test("exec.action()'s legacy tool-spec passthrough (PR 3a) reaches the sandbox for a custom linker toolchain", () => {
+	test("a custom rustToolchain({ linkDriver }) resolves through the graph-native gcc bridge", () => {
 		return withRustHost(async (host) => {
-			gccToolchain("2025.08-1", { default: true, unverified: true });
-			const linker = gccToolchain("2025.08-1", { unverified: true });
-			const legacyToolchain = rustToolchain("1.93.0", { linkDriver: linker });
+			installGccToolchain("2099.01-1", "/tmp/gcc-2099.01-1");
+			const legacyToolchain = rustToolchain("1.93.0", {
+				linkDriver: fakeGccGraphToolchain("2099.01-1"),
+			});
 			const pkg = cargoPackage({
 				path: "rules/rust/example",
 				bin: "hello",
 				toolchain: fakeGraphToolchain(),
 			});
-			// Manually attach the legacy toolchain handle the way resolveToolchain()
-			// would if `toolchain` had been the legacy handle itself — exercised
-			// directly here to isolate the exec.action() legacy-tool-spec bridge
-			// (PR 3a) from rustGraphToolchain()'s own real acquisition flow, which
-			// this fake toolchain deliberately bypasses (see fakeGraphToolchain()).
+			// linkerHandles is resolved lazily (and cached) the first time
+			// [BUILD] is accessed (rules/rust's linkerHandlesForSpec()), so a
+			// custom linkDriver has to be threaded in before that point — in real
+			// usage via rustToolchain({ linkDriver }) passed as `toolchain`;
+			// reassigning spec.legacyToolchainHandle here mirrors that same
+			// construction-time contract for this fake-toolchain test setup,
+			// which otherwise bypasses resolveToolchain()'s legacy branch
+			// entirely (see fakeGraphToolchain()).
 			pkg.spec.legacyToolchainHandle = legacyToolchain;
 
-			await resolveBuildIgnoringArtifactValidation(pkg[BUILD].hello);
+			await resolveIgnoringArtifactValidation([pkg[BUILD].hello]);
 
 			const buildRun = host.runs.find(
 				(run) => run.display === "cargo build rules/rust/example",
 			);
 			expect(buildRun).toBeTruthy();
-			expect(buildRun.tools.length > 0).toBe(true);
+			expect(buildRun.argv).toContain(
+				"-C linker=/cache/gcc-toolchains/2099.01-1/linux-x86_64/bin/clang",
+			);
 		});
 	});
 
 	test("[LINT]/[FMT] resolve through the shared workspace expansion for a workspaceMember crate", () => {
 		return withRustHost(async (host) => {
-			gccToolchain("2025.08-1", { default: true, unverified: true });
 			host.setRunStdout(
 				"cargo metadata (workspace) .",
 				JSON.stringify({
@@ -171,7 +218,12 @@ describe("graph-native cargoPackage", () => {
 				toolchain: fakeGraphToolchain(),
 			});
 
-			await resolveHandles([pkg[LINT], pkg[FMT]]);
+			// gcc's own graph-native install task can't fully resolve under this
+			// harness either (same "must be an action artifact" limitation as
+			// resolveIgnoringArtifactValidation() above) — tolerated the same way,
+			// since this test's purpose is proving [LINT]/[FMT] wire up through
+			// the shared workspace expansion, not exercising gcc's install task.
+			await resolveIgnoringArtifactValidation([pkg[LINT], pkg[FMT]]);
 		});
 	});
 

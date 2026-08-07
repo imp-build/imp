@@ -295,6 +295,7 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		extract: globalThis.__host_extract,
 		run: globalThis.__host_run,
 		nativeToolArtifact: globalThis.__host_native_tool_artifact,
+		graphToolDescriptor: globalThis.__host_graph_tool_descriptor,
 		workerStart: globalThis.__host_worker_start,
 		workerGet: globalThis.__host_worker_get,
 		readAddressedFile: globalThis.__host_read_addressed_file,
@@ -389,6 +390,22 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		calls.push(["nativeToolSpec", name]);
 		return `/tools/${name}`;
 	};
+	// Graph-native counterpart of __host_native_tool_artifact above — resolves
+	// a graph-native nativeTool()/tool() native-tool binding's descriptor
+	// (imp:core's graph_core.js "native-tool" case), needed by any test that
+	// fully resolves a task() depending on nativeTool() (e.g. a toolchain's
+	// own graph-native install task, not just its legacy memo()-based sibling).
+	globalThis.__host_graph_tool_descriptor = (name, self) => {
+		const resolvedName = self ? "imp" : name;
+		calls.push(["graphNativeTool", resolvedName]);
+		return JSON.stringify({
+			name: resolvedName,
+			cache: "native-tools",
+			key: resolvedName,
+			path: `/tools/${resolvedName}`,
+			binDirs: ["."],
+		});
+	};
 	globalThis.__host_run = async (opts) => {
 		runs.push(opts);
 		for (const out of opts.outputs || []) {
@@ -439,6 +456,7 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		globalThis.__host_extract = originals.extract;
 		globalThis.__host_run = originals.run;
 		globalThis.__host_native_tool_artifact = originals.nativeToolArtifact;
+		globalThis.__host_graph_tool_descriptor = originals.graphToolDescriptor;
 		globalThis.__host_worker_start = originals.workerStart;
 		globalThis.__host_worker_get = originals.workerGet;
 		globalThis.__host_read_addressed_file = originals.readAddressedFile;

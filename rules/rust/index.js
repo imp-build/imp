@@ -5,14 +5,26 @@
 // workspace_expansion.js's keyed expand() (one shared cargo invocation per
 // real workspace, attributed per crate — see that module's docstring).
 //
-// The linker (RUST_LINKER/RUST_LINK_DRIVER) and build-cache (RUST_BUILD_CACHE)
-// roles are still resolved dynamically via productFor() against whichever
-// legacy Toolchain subclass registered them (rules/c/gcc's RustGccLinkDriver,
-// rules/rust/kache's RustKacheWrapper, rules/c/mold — none of which are
-// migrating in this issue; see the migration plan's decision #3). Their
-// already-resolved legacy tool-spec results ({name, cache, key, binDirs})
-// pass straight through exec.action()'s tools: array unchanged (the engine's
-// legacy-tool-spec passthrough, graph_core.js's addTool).
+// The linker/link-driver roles (gcc, mold) are graph-native as of #60:
+// rustLinkerTools() consumes gccGraphToolchain()/moldGraphToolchain()
+// (//rules/c/gcc, //rules/c/mold) directly via linkerHandlesFor() below.
+// Both resolve to the real, absolute, stable named-cache path for their
+// respective toolchain (via cacheGet()) rather than a produced tool()
+// binding's sandbox-relative exec.tool()/exec.path() alias — a relative
+// `-C linker=<path>`/`-fuse-ld=<path>` breaks in practice, confirmed by a
+// real `imp lint //crates/imp:imp` failure (rustc's linker subprocess isn't
+// guaranteed to run with the sandbox root as its cwd) — see
+// gccRustLinkDriverEnv()/moldRustLinkerEnv()'s docstrings for the details,
+// including why mold's flag additionally has to stay in its legacy bare
+// `-fuse-ld=mold` PATH-search form (this repo's gcc build rejects an
+// absolute `-fuse-ld=` value outright).
+//
+// The build-cache role (RUST_BUILD_CACHE, kache) is explicitly out of scope
+// for #31/#60 — rustBuildCacheTools() still resolves it dynamically via
+// productFor() against rules/rust/kache's legacy RustKacheWrapper. Its
+// already-resolved legacy tool-spec result ({name, cache, key, binDirs})
+// passes straight through exec.action()'s tools: array unchanged (the
+// engine's legacy-tool-spec passthrough, graph_core.js's addTool).
 //
 // Known simplifications versus the pre-migration factory:
 //   - `bin` auto-detection from Cargo.toml is not ported; omitting `bin`
@@ -43,11 +55,7 @@ import {
 	task,
 } from "imp:core";
 
-import {
-	RUST_LINKER,
-	RUST_LINK_DRIVER,
-	RUST_BUILD_CACHE,
-} from "//rules/rust/products";
+import { RUST_BUILD_CACHE } from "//rules/rust/products";
 import {
 	defaultRustToolchain,
 	rustGraphToolEnv,
@@ -56,7 +64,8 @@ import {
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
 
-import { defaultGccToolchain } from "//rules/c/gcc";
+import { defaultGccGraphToolchain, gccRustLinkDriverEnv } from "//rules/c/gcc";
+import { moldRustLinkerEnv } from "//rules/c/mold";
 
 import {
 	cargoStandaloneExpansion,
@@ -79,50 +88,99 @@ import "//rules/rust/generate_build";
 // cargo/rustc need a real C link driver in the hermetic sandbox — rustc
 // shells out to a program literally named "cc" by default. Reuse the gcc
 // toolchain Odin already relies on for the same reason (rules/odin/index.js's
-// odinScriptTools): its "rust-link-driver" product exposes a "clang"-named
-// wrapper script on PATH that execs the real (prefixed) gcc binary, so
-// pointing rustc's linker at "clang" sidesteps needing a "cc" alias of our
-// own. A workspace can additionally opt into a faster backend linker (e.g.
-// mold) via rustToolchain({ linker: moldToolchain() }); by default no extra
+// odinScriptTools): gccRustLinkDriverEnv() resolves a "clang"-named wrapper
+// script's absolute path that execs the real (prefixed) gcc binary, so
+// pointing rustc's linker at it sidesteps needing a "cc" alias of our own. A
+// workspace can additionally opt into a faster backend linker (e.g. mold)
+// via rustToolchain({ linker: moldGraphToolchain() }); by default no extra
 // -fuse-ld= flag is added.
 //
 // Windows has no pinned toolchain to plug into this abstraction (the Bootlin
 // gcc archive is Linux-only) — it always uses the host's own MinGW gcc,
 // discovered via PATH, regardless of any declared rustToolchain/linkDriver.
-export async function rustLinkerTools(toolchainHandle) {
+//
+// Resolve the graph-native gcc/mold link-driver/linker handles for a Rust
+// toolchain's legacy .attrs.linkDriver/.attrs.linker (or gcc's own default).
+// Must run at graph-construction time, never inside a task's run() body:
+// gccGraphToolchain()/defaultGccGraphToolchain() call task() internally,
+// which task() itself forbids once execution has started. See
+// linkerToolInputs() below for threading the resulting `.tool` handles
+// through a task's own `inputs:` so toolEnvAndTools() can resolve them at
+// run time without re-deriving these records.
+export function linkerHandlesFor(legacyToolchainHandle) {
+	if (platformInfo().os === "windows") {
+		return { gcc: null, mold: null };
+	}
+	const gcc =
+		(legacyToolchainHandle && legacyToolchainHandle.attrs.linkDriver) ||
+		defaultGccGraphToolchain();
+	if (!gcc) {
+		throw new Error(
+			"cargo builds need the GCC rule default or a rustToolchain({ linkDriver }) — see //rules/c/gcc",
+		);
+	}
+	const mold =
+		(legacyToolchainHandle && legacyToolchainHandle.attrs.linker) || null;
+	return { gcc, mold };
+}
+
+// Lazily computes and caches linkerHandlesFor()'s result on `specLike`
+// (crateSpec()'s own spec object, or workspace_expansion.js's toolchainSpec)
+// the first time it's actually needed — a lib-only cargoPackage() (no
+// [BUILD]/[PACKAGE]) never touches this, so it never needs a declared gcc
+// default, matching the pre-migration factory's equally lazy
+// (run()-time-only) gcc resolution. Safe to call repeatedly (idempotent,
+// content-addressed task() dedup) but memoized anyway so a single spec's
+// gcc/mold handles are computed once and reused by every task built from it.
+export function linkerHandlesForSpec(specLike) {
+	if (!specLike.linkerHandles) {
+		specLike.linkerHandles = linkerHandlesFor(specLike.legacyToolchainHandle);
+	}
+	return specLike.linkerHandles;
+}
+
+// The task()-input slice contributed by linkerHandlesFor()'s result — merge
+// into any task's own `inputs:` map (crateBuildTask below, or
+// workspace_expansion.js's clippy/testBuild/fmt/doctest tasks) so the graph
+// scheduler orders gcc/mold's install tasks first and toolEnvAndTools() can
+// resolve them inside run() via exec.tool().
+export function linkerToolInputs(linkerHandles) {
+	return {
+		...(linkerHandles.gcc ? { gccTool: linkerHandles.gcc.tool } : {}),
+		...(linkerHandles.mold ? { moldTool: linkerHandles.mold.tool } : {}),
+	};
+}
+
+export async function rustLinkerTools(exec, input, linkerHandles, kacheActive) {
 	if (platformInfo().os === "windows") {
 		return {
 			tools: [await nativeToolSpec(nativeTool("gcc"))],
 			rustflags: "-C linker=gcc",
 			env: [],
+			pathDirs: [],
 		};
 	}
-	const linkDriverHandle =
-		(toolchainHandle && toolchainHandle.attrs.linkDriver) ||
-		defaultGccToolchain();
-	if (!linkDriverHandle) {
-		throw new Error(
-			"cargo builds need the GCC rule default or a rustToolchain({ linkDriver }) — see //rules/c/gcc",
-		);
-	}
-	const linkDriver = await productFor(linkDriverHandle, RUST_LINK_DRIVER);
-
-	const linkerHandle = toolchainHandle && toolchainHandle.attrs.linker;
-	const linker = linkerHandle
-		? await productFor(linkerHandle, RUST_LINKER)
+	const gccResult = gccRustLinkDriverEnv(
+		exec,
+		input.gccTool,
+		linkerHandles.gcc.version,
+		kacheActive,
+	);
+	const moldResult = linkerHandles.mold
+		? moldRustLinkerEnv(exec, input.moldTool, linkerHandles.mold.version)
 		: null;
-
-	const kacheActive = !!(toolchainHandle && toolchainHandle.attrs.kache);
-	const tools = [
-		...(await linkDriver.tools()),
-		...(linker ? await linker.tools() : []),
-	];
-	const rustflags = [
-		...(await linkDriver.rustflags()),
-		...(linker ? await linker.rustflags() : []),
-	].join(" ");
-	const env = await linkDriver.env(kacheActive);
-	return { tools, rustflags, env };
+	return {
+		tools: [],
+		rustflags: [
+			...gccResult.rustflags,
+			...(moldResult ? moldResult.rustflags : []),
+		].join(" "),
+		env: gccResult.env,
+		pathDirs: [
+			...gccResult.pathDirs,
+			...(moldResult ? moldResult.pathDirs : []),
+		],
+	};
 }
 
 // Optional rustc build-caching layer (e.g. kache, //rules/rust/kache),
@@ -250,10 +308,28 @@ function kacheActiveFor(legacyToolchainHandle) {
 	return !!(legacyToolchainHandle && legacyToolchainHandle.attrs.kache);
 }
 
+// Folds extraDirs into env's existing PATH entry (prepended, so they win
+// searches), or adds a new PATH entry if none exists yet. Env entries are
+// plain "KEY=VALUE" strings later resolved into one map (see
+// crates/imp-execution/src/exec.rs's resolve_env docstring) — a second
+// literal "PATH=" entry would silently clobber the first rather than merge,
+// so any additional PATH-worthy directory (e.g. moldRustLinkerEnv()'s
+// pathDirs, //rules/c/mold) must be combined here instead of appended as
+// its own env string.
+function mergeEnvPath(env, extraDirs) {
+	if (!extraDirs || extraDirs.length === 0) return env;
+	const index = env.findIndex((entry) => entry.startsWith("PATH="));
+	if (index === -1) return [...env, `PATH=${extraDirs.join(":")}`];
+	const merged = [...env];
+	merged[index] =
+		`PATH=${extraDirs.join(":")}:${env[index].slice("PATH=".length)}`;
+	return merged;
+}
+
 export async function toolEnvAndTools(exec, input, spec) {
 	const kacheActive = kacheActiveFor(spec.legacyToolchainHandle);
 	const [linker, cache] = await Promise.all([
-		rustLinkerTools(spec.legacyToolchainHandle),
+		rustLinkerTools(exec, input, spec.linkerHandles, kacheActive),
 		rustBuildCacheTools(spec.legacyToolchainHandle),
 	]);
 	const { env: rustEnv } = rustGraphToolEnv(
@@ -267,7 +343,10 @@ export async function toolEnvAndTools(exec, input, spec) {
 	return {
 		kacheActive,
 		tools: [...linker.tools, ...cache.tools],
-		env: [...rustEnv, ...linker.env, ...cache.env],
+		env: mergeEnvPath(
+			[...rustEnv, ...linker.env, ...cache.env],
+			linker.pathDirs,
+		),
 		rustflags: linker.rustflags,
 		scriptPreamble: cache.scriptPreamble,
 	};
@@ -293,6 +372,7 @@ function crateBuildTask(spec) {
 			manifests,
 			rustupHomeTool: spec.toolchain.tool,
 			cargoHomeTool: spec.toolchain.cargoHomeTool,
+			...linkerToolInputs(linkerHandlesForSpec(spec)),
 			...Object.fromEntries(spec.deps.map((d, i) => [`dep${i}`, d])),
 		},
 		outputs: Object.fromEntries(bins.map((name) => [name, output.artifact()])),
@@ -387,6 +467,11 @@ function crateSpec(opts) {
 export function cargoPackage(opts = {}) {
 	const spec = crateSpec(opts);
 	_cargoPackageSpecs.push(spec);
+	// linkerHandles is deliberately omitted here — workspace_expansion.js's
+	// toolchainInputs() lazily computes and caches it on this same
+	// toolchainSpec object via linkerHandlesForSpec() the first time a
+	// LINT/FMT/TEST task actually needs it, independent of `spec`'s own
+	// (also lazy) cache used by crateBuildTask()'s [BUILD]/[PACKAGE] path.
 	const toolchainSpec = {
 		toolchain: spec.toolchain,
 		legacyToolchainHandle: spec.legacyToolchainHandle,

@@ -6,7 +6,6 @@ import {
 	withFakeToolchainHost,
 } from "//rules/imp/test";
 import { cargoWorkspaceExpansion } from "//rules/rust/workspace_expansion";
-import { __resetGccToolchainStateForTest, gccToolchain } from "//rules/c/gcc";
 
 const WORKSPACE_ROOT = "/sandbox/repo";
 
@@ -45,6 +44,14 @@ async function resolveHandles(handles) {
 	);
 }
 
+// A fully fake linkDriver, sidestepping gccGraphToolchain()'s real
+// download+install task chain entirely — the fake host's mocked run()/
+// nativeTool() calls don't materialize a real CAS artifact for a graph
+// output.artifact() (see rules/rust/index_test.js's
+// resolveBuildIgnoringArtifactValidation doc comment for the same
+// limitation), so fully resolving a *real* gcc install task isn't possible
+// under this harness; mirrors fakeToolchainSpec's own rust `toolchain` field,
+// which avoids rustGraphToolchain()'s real acquisition the same way.
 function fakeToolchainSpec() {
 	const binRoot = files({ root: "rules/rust", include: ["**/*"] });
 	return {
@@ -55,19 +62,17 @@ function fakeToolchainSpec() {
 			version: "1.93.0",
 		},
 		legacyToolchainHandle: null,
+		linkerHandles: {
+			gcc: { tool: tool(binRoot, { binDirs: ["."] }), version: "2025.08-1" },
+			mold: null,
+		},
 	};
 }
 
 function withWorkspace(fn) {
 	return withFakeToolchainHost(async (host) => {
-		__resetGccToolchainStateForTest();
-		gccToolchain("2025.08-1", { default: true, unverified: true });
 		host.setRunStdout("cargo metadata (workspace) .", JSON.stringify(METADATA));
-		try {
-			await fn(host, cargoWorkspaceExpansion(".", fakeToolchainSpec()));
-		} finally {
-			__resetGccToolchainStateForTest();
-		}
+		await fn(host, cargoWorkspaceExpansion(".", fakeToolchainSpec()));
 	});
 }
 

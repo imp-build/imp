@@ -9,10 +9,13 @@ import {
 import {
 	__resetGccToolchainStateForTest,
 	acquireGccToolchain,
+	defaultGccGraphToolchain,
 	defaultGccToolchain,
 	defaultGccToolchainVersion,
 	gccCacheKey,
 	gccBin,
+	gccGraphToolchain,
+	gccRustLinkDriverEnv,
 	gccTool,
 	gccToolchain,
 	installGccToolchain,
@@ -219,6 +222,101 @@ describe("gcc toolchain", () => {
 			// link step resolves "clang" via PATH regardless of CC/kache.
 			const tools = await linkDriver.tools();
 			expect(tools.some((t) => t.name === "gcc-toolchain")).toBe(true);
+		});
+	});
+
+	test("declares a graph-native gcc toolchain", () => {
+		return withGccHost((host) => {
+			gccToolchain("2025.08-1", { default: true });
+			const graph = gccGraphToolchain("2025.08-1");
+
+			expect(graph.tool.__imp_graph_handle).toBe(true);
+			expect(graph.version).toBe("2025.08-1");
+			expect(Object.isFrozen(graph)).toBe(true);
+		});
+	});
+
+	test("graph toolchain construction does not touch the host run()", () => {
+		return withGccHost((host) => {
+			gccToolchain("2025.08-1", { default: true });
+			gccGraphToolchain("2025.08-1");
+
+			// Building the graph is pure node construction — nothing executes
+			// until a workflow resolves the task, matching Odin/Rust's precedent.
+			expect(host.runs.length).toBe(0);
+		});
+	});
+
+	test("defaultGccGraphToolchain resolves the declared default, or null", () => {
+		return withGccHost((host) => {
+			expect(defaultGccGraphToolchain()).toBe(null);
+
+			gccToolchain("2025.08-1", { default: true });
+			const graph = defaultGccGraphToolchain();
+
+			expect(graph.version).toBe("2025.08-1");
+		});
+	});
+
+	test("gccRustLinkDriverEnv resolves the real absolute named-cache path (not a sandbox-relative one) and sets -C linker=<path>, CC=<path> in non-kache mode", () => {
+		return withGccHost(() => {
+			installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
+			const gccTool = { __imp_graph_handle: true, name: "gcc-tool" };
+			const exec = { path: () => "/unused" };
+
+			const { rustflags, env, pathDirs } = gccRustLinkDriverEnv(
+				exec,
+				gccTool,
+				"2025.08-1",
+				false,
+			);
+
+			// A relative `-C linker=<path>` breaks in practice — rustc's own
+			// linker subprocess isn't guaranteed to run with the sandbox root
+			// as its cwd (confirmed by a real build failure — see this
+			// function's docstring) — so both branches always use the real,
+			// absolute, stable named-cache path, never exec.tool()'s
+			// sandbox-mounted alias.
+			expect(rustflags).toEqual([
+				"-C",
+				"linker=/cache/gcc-toolchains/2025.08-1/linux-x86_64/bin/clang",
+			]);
+			expect(env).toEqual([
+				"CC=/cache/gcc-toolchains/2025.08-1/linux-x86_64/bin/clang",
+			]);
+			// pathDirs: cc-rs-driven build scripts look for "ar" via PATH with
+			// no CC/CXX-shaped override available (confirmed missing by a real
+			// build failure — see this function's docstring).
+			expect(pathDirs).toEqual([
+				"/cache/gcc-toolchains/2025.08-1/linux-x86_64/bin",
+			]);
+		});
+	});
+
+	test("gccRustLinkDriverEnv wraps CC/CXX with kache at the same stable absolute path when kache is active", () => {
+		return withGccHost(() => {
+			installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
+			const gccTool = { __imp_graph_handle: true, name: "gcc-tool" };
+			const exec = { path: () => "/unused" };
+
+			const { rustflags, env, pathDirs } = gccRustLinkDriverEnv(
+				exec,
+				gccTool,
+				"2025.08-1",
+				true,
+			);
+
+			expect(rustflags).toEqual([
+				"-C",
+				"linker=/cache/gcc-toolchains/2025.08-1/linux-x86_64/bin/clang",
+			]);
+			expect(env).toEqual([
+				"CC=kache /cache/gcc-toolchains/2025.08-1/linux-x86_64/bin/clang",
+				"CXX=kache /cache/gcc-toolchains/2025.08-1/linux-x86_64/bin/c++",
+			]);
+			expect(pathDirs).toEqual([
+				"/cache/gcc-toolchains/2025.08-1/linux-x86_64/bin",
+			]);
 		});
 	});
 });

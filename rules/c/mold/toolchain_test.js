@@ -10,11 +10,14 @@ import {
 import {
 	__resetMoldToolchainStateForTest,
 	acquireMoldToolchain,
+	defaultMoldGraphToolchain,
 	defaultMoldToolchain,
 	defaultMoldToolchainVersion,
 	installMoldToolchain,
 	moldBin,
 	moldCacheKey,
+	moldGraphToolchain,
+	moldRustLinkerEnv,
 	moldTool,
 	moldToolchain,
 } from "//rules/c/mold";
@@ -256,6 +259,65 @@ describe("mold toolchain", () => {
 			const tools = await linker.tools();
 			expect(tools.length).toBe(1);
 			expect(tools[0].name).toBe("mold");
+		});
+	});
+
+	test("declares a graph-native mold toolchain", () => {
+		return withMoldHost((host) => {
+			moldToolchain("2.41.0", { default: true });
+			const graph = moldGraphToolchain("2.41.0");
+
+			expect(graph.tool.__imp_graph_handle).toBe(true);
+			expect(graph.version).toBe("2.41.0");
+			expect(Object.isFrozen(graph)).toBe(true);
+		});
+	});
+
+	test("graph toolchain construction does not touch the host run()", () => {
+		return withMoldHost((host) => {
+			moldToolchain("2.41.0", { default: true });
+			moldGraphToolchain("2.41.0");
+
+			// Building the graph is pure node construction — nothing executes
+			// until a workflow resolves the task, matching Odin/Rust/gcc's
+			// precedent.
+			expect(host.runs.length).toBe(0);
+		});
+	});
+
+	test("defaultMoldGraphToolchain resolves the declared default, or null", () => {
+		return withMoldHost((host) => {
+			expect(defaultMoldGraphToolchain()).toBe(null);
+
+			moldToolchain("2.41.0", { default: true });
+			const graph = defaultMoldGraphToolchain();
+
+			expect(graph.version).toBe("2.41.0");
+		});
+	});
+
+	test("moldRustLinkerEnv keeps the bare -fuse-ld=mold form and returns the real absolute named-cache bin dir as pathDirs", () => {
+		return withMoldHost(() => {
+			installMoldToolchain("2.41.0", "/tmp/mold-2.41.0");
+			const resolvedMoldTool = { __imp_graph_handle: true, name: "mold-tool" };
+			const exec = { path: () => "/unused" };
+
+			// This Bootlin-built gcc rejects an absolute `-fuse-ld=<path>`
+			// outright (confirmed by a real build failure — see this function's
+			// docstring in //rules/c/mold) — so it keeps legacy RustMoldLinker's
+			// bare "-fuse-ld=mold" PATH-search form, and instead returns the
+			// real, absolute, stable named-cache bin dir as pathDirs for the
+			// caller to fold into PATH.
+			const { rustflags, pathDirs } = moldRustLinkerEnv(
+				exec,
+				resolvedMoldTool,
+				"2.41.0",
+			);
+
+			expect(rustflags).toEqual(["-C", "link-arg=-fuse-ld=mold"]);
+			expect(pathDirs).toEqual([
+				"/cache/mold-toolchains/2.41.0/linux-x86_64/bin",
+			]);
 		});
 	});
 });

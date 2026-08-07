@@ -3,12 +3,15 @@ import {
 	product,
 	namedCache,
 	memo,
+	output,
 	platformInfo,
 	cachePut,
 	cacheGet,
 	cacheHas,
 	toolName,
 	group,
+	task,
+	tool as graphTool,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -227,6 +230,92 @@ export const acquireMoldToolchain = memo(
 );
 
 /**
+ * Build the managed mold distribution as a graph-native tool.
+ *
+ * A custom task() (rather than extractArchive()'s shared graph helper) so
+ * the extracted directory can also populate MOLD_TOOLCHAIN_CACHE via
+ * output.directory()'s namedCache option — extractArchive()'s graph form
+ * explicitly rejects namedCache (it "owns its tools"), but
+ * moldRustLinkerEnv() (below) needs that named-cache's real, absolute,
+ * stable path: a relative `-fuse-ld=<path>` breaks in practice, the same
+ * way a relative `-C linker=<path>` does — see gccRustLinkDriverEnv()'s
+ * docstring in //rules/c/gcc for the confirmed failure and reasoning.
+ */
+export function moldGraphTool(version) {
+	const resolved = MoldToolchain.requireVersion(version);
+	const plat = platformInfo();
+	namedCache({ name: MOLD_TOOLCHAIN_CACHE, shared: true });
+	const cacheKey = moldCacheKey(resolved, plat);
+	const archive = downloadToolArtifact({
+		lockfile: MOLD_LOCKFILE,
+		tool: "mold",
+		version: resolved,
+		plat,
+		url: moldDownloadUrl(resolved, plat),
+		output: `mold-downloads/${cacheKey}/${moldArtifactName(resolved, plat)}`,
+		display: `download mold ${resolved} (${plat.os}/${plat.arch})`,
+		unverified: MoldToolchain.resolveUnverified(resolved),
+	});
+	const mkdir = nativeTool("mkdir");
+	const tar = nativeTool("tar");
+	const gzip = nativeTool("gzip");
+	const directory = task({
+		display: `install mold ${resolved} (${plat.os}/${plat.arch})`,
+		inputs: { archive, mkdir, tar, gzip },
+		outputs: { directory: output.artifact() },
+		async run(exec, inputs) {
+			// mold's release tarball already ships bin/mold and bin/ld.mold
+			// (the name clang's -fuse-ld=mold looks for) — no wrapper needed,
+			// same as the legacy acquire path above.
+			const result = await exec.action({
+				argv: [
+					"sh",
+					"-c",
+					'mkdir -p "$2" && tar -xzf "$1" -C "$2" --strip-components=1',
+					"mold-install",
+					exec.path(inputs.archive),
+					"mold-toolchain",
+				],
+				tools: [inputs.mkdir, inputs.tar, inputs.gzip],
+				outputs: {
+					directory: output.directory("mold-toolchain", {
+						namedCache: { name: MOLD_TOOLCHAIN_CACHE, key: cacheKey },
+					}),
+				},
+			});
+			return { directory: result.outputs.directory };
+		},
+	}).outputs.directory;
+	return graphTool(directory, { binDirs: ["bin"] });
+}
+
+/**
+ * Graph-native mold toolchain: moldGraphTool() wrapped with version
+ * metadata, mirroring gccGraphToolchain()'s shape (//rules/c/gcc).
+ *
+ * @param {string} [version]
+ * @returns {{ tool: object, version: string }}
+ */
+export function moldGraphToolchain(version) {
+	const resolved = MoldToolchain.requireVersion(version);
+	return Object.freeze({
+		tool: moldGraphTool(resolved),
+		version: resolved,
+	});
+}
+
+/**
+ * Return the currently configured default mold toolchain as graph-native
+ * handles, or null if none is declared.
+ *
+ * @returns {object|null}
+ */
+export function defaultMoldGraphToolchain() {
+	const version = MoldToolchain.defaultVersion();
+	return version ? moldGraphToolchain(version) : null;
+}
+
+/**
  * Resolve an explicit or default mold toolchain version.
  *
  * @param {string} [version]
@@ -365,3 +454,39 @@ product(
 	(handle) => new RustMoldLinker(handle),
 	{ display: "rust linker {0}", level: "info" },
 );
+
+/**
+ * Graph-native replacement for RustMoldLinker: given a task's `exec` and its
+ * already-declared, resolved `moldGraphToolchain().tool` input, resolve the
+ * rustflags/pathDirs rustLinkerTools() (//rules/rust) needs to enable mold
+ * as rustc's backend linker.
+ *
+ * Unlike gcc's own `-C linker=<path>` (which does accept an absolute path),
+ * this Bootlin-built gcc's `-fuse-ld=` rejects an absolute path outright —
+ * confirmed by a real `imp lint //crates/imp:imp` failure: "x86_64-linux-
+ * gcc.br_real: error: unrecognized command-line option '-fuse-ld=<path>'"
+ * (see #60/#31). So this keeps the legacy RustMoldLinker's bare
+ * `-fuse-ld=mold` PATH-search form, and instead returns the real, absolute,
+ * stable MOLD_TOOLCHAIN_CACHE bin directory (via cacheGet(), populated by
+ * moldGraphTool()'s own install task above) as `pathDirs` for the caller to
+ * fold into PATH — mirroring how rustGraphToolEnv()'s kache-active branch
+ * already builds PATH from named-cache directories (//rules/rust/toolchain).
+ * exec.path() is still called, purely to consume() the binding so the graph
+ * scheduler orders mold's install task (and therefore this named-cache
+ * population) first. Unlike gcc's link-driver role, mold has no kache-active
+ * env() branch — RustMoldLinker only ever exposed tools()/rustflags().
+ *
+ * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
+ * @param {object} resolvedMoldTool Resolved `moldGraphToolchain().tool` input.
+ * @param {string} version `moldGraphToolchain().version`.
+ * @returns {{ rustflags: string[], pathDirs: string[] }}
+ */
+export function moldRustLinkerEnv(exec, resolvedMoldTool, version) {
+	exec.path(resolvedMoldTool);
+	const plat = platformInfo();
+	const dir = cacheGet(MOLD_TOOLCHAIN_CACHE, moldCacheKey(version, plat));
+	return {
+		rustflags: ["-C", "link-arg=-fuse-ld=mold"],
+		pathDirs: [`${dir}/bin`],
+	};
+}

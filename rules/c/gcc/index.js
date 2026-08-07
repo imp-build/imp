@@ -165,6 +165,8 @@ export function gccToolchain(version, opts = {}) {
 export function gccGraphTool(version) {
 	const resolved = GccToolchain.requireVersion(version);
 	const plat = platformInfo();
+	namedCache({ name: GCC_TOOLCHAIN_CACHE, shared: true });
+	const cacheKey = gccCacheKey(resolved, plat);
 	const archive = downloadToolArtifact({
 		lockfile: GCC_LOCKFILE,
 		tool: "gcc",
@@ -185,15 +187,24 @@ export function gccGraphTool(version) {
 		inputs: { archive, shell, mkdir, tar, xz, chmod },
 		outputs: { directory: output.artifact() },
 		async run(exec, inputs) {
+			// Wrapper set mirrors the legacy acquireGccToolchain() install
+			// exactly (clang/cc -> gcc, c++ -> g++, ar -> the *binutils*-
+			// prefixed ar, a different prefix from gcc/g++ — see
+			// BINUTILS_PREFIX's own doc comment) — confirmed missing by two
+			// real `imp lint //crates/imp:imp` failures: rustc's own link step
+			// only needs "clang", but cc-rs-driven build scripts also need
+			// "ar" (no CC/CXX-shaped override for it) and this toolchain's own
+			// CXX env value (below) points at "c++".
 			const result = await exec.action({
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
-					'archive=$1; out=$2; prefix=$3; mkdir -p "$out" && tar -xJf "$archive" -C "$out" --strip-components=1 && for name in clang cc; do printf \'%s\\n\' \'#!/bin/sh\' "exec \\"\\${0%/*}/$prefix-gcc\\" \\"\\$@\\"" > "$out/bin/$name"; chmod +x "$out/bin/$name"; done',
+					'archive=$1; out=$2; gccPrefix=$3; binutilsPrefix=$4; mkdir -p "$out" && tar -xJf "$archive" -C "$out" --strip-components=1 && for pair in "clang:$gccPrefix-gcc" "cc:$gccPrefix-gcc" "c++:$gccPrefix-g++" "ar:$binutilsPrefix-ar"; do name=${pair%%:*}; target=${pair#*:}; printf \'%s\\n\' \'#!/bin/sh\' "exec \\"\\${0%/*}/$target\\" \\"\\$@\\"" > "$out/bin/$name"; chmod +x "$out/bin/$name"; done',
 					"gcc-install",
 					exec.path(inputs.archive),
 					"gcc-toolchain",
 					GCC_EXE_PREFIX[plat.arch],
+					BINUTILS_PREFIX[plat.arch],
 				],
 				tools: [
 					inputs.shell,
@@ -202,12 +213,43 @@ export function gccGraphTool(version) {
 					inputs.xz,
 					inputs.chmod,
 				],
-				outputs: { directory: output.directory("gcc-toolchain") },
+				outputs: {
+					directory: output.directory("gcc-toolchain", {
+						namedCache: { name: GCC_TOOLCHAIN_CACHE, key: cacheKey },
+					}),
+				},
 			});
 			return { directory: result.outputs.directory };
 		},
 	}).outputs.directory;
 	return graphTool(directory, { binDirs: ["bin"] });
+}
+
+/**
+ * Graph-native gcc toolchain: gccGraphTool() wrapped with version metadata,
+ * mirroring rustGraphToolchain()'s shape (//rules/rust/toolchain) but scaled
+ * to gcc's single install directory (like Odin's one-directory case).
+ *
+ * @param {string} [version]
+ * @returns {{ tool: object, version: string }}
+ */
+export function gccGraphToolchain(version) {
+	const resolved = GccToolchain.requireVersion(version);
+	return Object.freeze({
+		tool: gccGraphTool(resolved),
+		version: resolved,
+	});
+}
+
+/**
+ * Return the currently configured default gcc toolchain as graph-native
+ * handles, or null if none is declared.
+ *
+ * @returns {object|null}
+ */
+export function defaultGccGraphToolchain() {
+	const version = GccToolchain.defaultVersion();
+	return version ? gccGraphToolchain(version) : null;
 }
 
 /**
@@ -458,6 +500,64 @@ export class RustGccLinkDriver {
 		}
 		return ["CC=clang"];
 	}
+}
+
+/**
+ * Graph-native replacement for RustGccLinkDriver: given a task's `exec` and
+ * its already-declared, resolved `gccGraphToolchain().tool` input, resolve
+ * the rustflags/env/pathDirs rustLinkerTools() (//rules/rust) needs to point
+ * rustc's C link driver at this toolchain's "clang"-named wrapper script
+ * (see gccTool()'s docstring above for why that wrapper exists).
+ *
+ * The path always comes from the real, absolute, stable named-cache
+ * directory (via cacheGet(), same source as the kache-active CC/CXX branch
+ * below) — not exec.tool()'s sandbox-relative mount alias. A relative
+ * `-C linker=<path>` breaks in practice: rustc's own linker subprocess
+ * isn't guaranteed to run with the sandbox root as its cwd (confirmed by a
+ * real `imp lint //crates/imp:imp` run failing with "linker `directory/bin/
+ * clang` not found" — see #60/#31). exec.path() is still called, purely to
+ * consume() the binding so the graph scheduler orders gcc's install task
+ * (and therefore this named-cache population) first.
+ *
+ * `pathDirs` (the toolchain's own bin/ dir) matters beyond the linker/CC/CXX
+ * roles above: cc-rs-driven build scripts (e.g. a dependency compiling and
+ * archiving its own C sources) look for "ar" via PATH with no CC/CXX-shaped
+ * override available — the legacy RustGccLinkDriver got this for free by
+ * mounting gcc's whole tools() bin/ dir onto PATH; a produced tool() binding
+ * can't do that (see this function's own note above), so the caller must
+ * fold pathDirs into PATH itself (confirmed missing by a real
+ * `imp lint //crates/imp:imp` run failing with `cc-rs: failed to find tool
+ * "ar"` once the linker issue above was fixed — see #60/#31).
+ *
+ * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
+ * @param {object} resolvedGccTool Resolved `gccGraphToolchain().tool` input.
+ * @param {string} version `gccGraphToolchain().version`.
+ * @param {boolean} [kacheActive] Selects plain `CC=<path>` vs kache-wrapped
+ *   `CC=kache <path>`/`CXX=kache <path>` (see RustGccLinkDriver.env()'s
+ *   docstring above for why cc-rs-driven build scripts need CC/CXX too, not
+ *   just rustc's own `-C linker=`).
+ * @returns {{ rustflags: string[], env: string[], pathDirs: string[] }}
+ */
+export function gccRustLinkDriverEnv(
+	exec,
+	resolvedGccTool,
+	version,
+	kacheActive,
+) {
+	exec.path(resolvedGccTool);
+	const plat = platformInfo();
+	const dir = cacheGet(GCC_TOOLCHAIN_CACHE, gccCacheKey(version, plat));
+	const clangPath = `${dir}/bin/clang`;
+	const pathDirs = [`${dir}/bin`];
+	const rustflags = ["-C", `linker=${clangPath}`];
+	if (!kacheActive) {
+		return { rustflags, env: [`CC=${clangPath}`], pathDirs };
+	}
+	return {
+		rustflags,
+		env: [`CC=kache ${clangPath}`, `CXX=kache ${dir}/bin/c++`],
+		pathDirs,
+	};
 }
 
 product(
