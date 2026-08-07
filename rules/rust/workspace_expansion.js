@@ -42,6 +42,7 @@ async function cargoEnv(exec, input, toolchainSpec) {
 			cargoHomeTool: input.cargoHomeTool,
 			gccTool: input.gccTool,
 			moldTool: input.moldTool,
+			dirnameTool: input.dirnameTool,
 		},
 		toolchainSpec,
 	);
