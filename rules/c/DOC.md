@@ -51,11 +51,12 @@ export const calculator = ccBinary({
 
 Source and header globs are evaluated relative to `path`, which defaults
 to the declaring `BUILD.js` directory. A library produces a static archive;
-a binary links an executable. `deps` takes other `ccLibrary()`/CMake-target
-call results directly (handle-passing), which the target's own
+a binary links an executable. `deps` takes other `ccLibrary()` call results
+directly (handle-passing), which the target's own
 `transitiveArchives`/`transitiveIncludeDirs` fold in automatically — not a
-loose filesystem path or label reference. Use `linkopts` for options that
-belong only at link time.
+loose filesystem path or label reference. A discovered CMake target needs
+wrapping with `cmakeLibraryDep()` (`//rules/c/cmake`) first — see its own
+docs. Use `linkopts` for options that belong only at link time.
 
 ```sh
 imp build //native/calculator:calculator

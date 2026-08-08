@@ -5,7 +5,10 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
-import { cmakeProjectExpansion } from "//rules/c/cmake/expansion";
+import {
+	cmakeLibraryDep,
+	cmakeProjectExpansion,
+} from "//rules/c/cmake/expansion";
 import { correlateCTestEntries, basename } from "//rules/c/cmake/graph_replay";
 import { listNamedCmakeTargets, parseNinja } from "//rules/c/cmake/ninja_graph";
 
@@ -245,6 +248,27 @@ describe("cmakeProjectExpansion", () => {
 		return withCmakeHost(async (_host, expansion) => {
 			const all = expansion.all(BUILD);
 			expect(all.__imp_graph_handle).toBe(true);
+		});
+	});
+});
+
+describe("cmakeLibraryDep", () => {
+	test("wraps a discovered target's [BUILD] handle as a ccLibrary()-shaped deps entry", () => {
+		return withCmakeHost(async (_host, expansion) => {
+			const dep = cmakeLibraryDep(expansion, "hello_cmake", {
+				includeDirs: ["rules/c/cmake/example"],
+			});
+			expect(dep[BUILD].__imp_graph_handle).toBe(true);
+			expect(dep.archive.__graph_id).toBe(dep[BUILD].__graph_id);
+			expect(dep.transitiveArchives).toEqual([dep.archive]);
+			expect(dep.transitiveIncludeDirs).toEqual(["rules/c/cmake/example"]);
+		});
+	});
+
+	test("defaults includeDirs to an empty list", () => {
+		return withCmakeHost(async (_host, expansion) => {
+			const dep = cmakeLibraryDep(expansion, "hello_cmake");
+			expect(dep.transitiveIncludeDirs).toEqual([]);
 		});
 	});
 });

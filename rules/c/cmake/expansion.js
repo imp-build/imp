@@ -10,16 +10,18 @@
 // the per-target discovery loop (listNamedCmakeTargets(), test
 // correlation) and expand() wiring around them.
 //
-// Known shape gap versus rules/c's ccLibrary()/ccBinary(): the #31
-// migration plan's decision 4 wants a discovered CMake target's
-// `expand().get(name, BUILD)` usable directly as a raw ccBinary()'s `deps`
-// entry, with transitiveArchives/transitiveIncludeDirs exposed the same
-// way. expand()'s own get()/all() API (see graph_core.js's
-// _graphChildHandle()) only ever returns *one* resolved handle for one
-// workflow+facet — there's no way to also hand back plain sibling fields
-// (arrays computed at declare time) through that same call, unlike a bare
-// JS object ccLibrary() can just return directly. Tracked as issue #67 —
-// not solved here.
+// Raw ccLibrary()/ccBinary() interop (issue #67): a discovered CMake
+// target's `expand().get(name, BUILD)` is a bare resolved handle, unlike a
+// raw ccLibrary() result which also carries transitiveArchives/
+// transitiveIncludeDirs. expand()'s own get()/all() (see graph_core.js's
+// _graphChildHandle()) can't hand back extra plain sibling data anyway —
+// child data isn't known until the CMake configure task has actually run,
+// while ccTask() (rules/c/index.js) needs transitiveIncludeDirs as plain
+// strings *synchronously at BUILD.js declare time* (baked into a literal
+// `-I` flags string built outside of run()). No engine change closes that
+// gap. cmakeLibraryDep() below adapts a discovered target into a `deps`
+// entry instead, with a caller-supplied includeDirs list — the same kind
+// of manual knowledge a plain `ccLibrary({hdrs})` glob already requires.
 
 import { BUILD, PACKAGE, TEST, expand } from "imp:core";
 import {
@@ -46,8 +48,9 @@ export function cmakeProjectSpecs() {
 
 /**
  * Discover and build every real CMake target (`add_library`/`add_executable`)
- * a CMakeLists.txt declares, as one keyed expand(). See this module's own
- * docstring for the known raw-ccBinary()-interop gap.
+ * a CMakeLists.txt declares, as one keyed expand(). Use cmakeLibraryDep()
+ * to consume a discovered target as a raw ccLibrary()/ccBinary() `deps`
+ * entry — see this module's own docstring.
  *
  * @param {object} [opts] Same shape as cmakeProjectSpec()'s opts.
  * @returns {object} `{get(cmakeTargetName, workflow, facet?), all(workflow, facet?)}`
@@ -133,4 +136,29 @@ export function cmakeProjectExpansion(opts = {}) {
  */
 export function cmakeProject(opts = {}) {
 	return cmakeProjectExpansion(opts);
+}
+
+/**
+ * Adapt a discovered CMake target for use as a raw ccLibrary()/ccBinary()
+ * `deps` entry. CMake's own per-target include paths aren't structurally
+ * discoverable today (see this module's own docstring) and `expand().get()`
+ * is resolved too late for ccTask()'s synchronous include-flag
+ * construction anyway, so `includeDirs` must be supplied by the caller.
+ *
+ * @param {object} project A cmakeProject()/cmakeProjectExpansion() result.
+ * @param {string} name CMake target name (as passed to add_library/add_executable).
+ * @param {object} [opts]
+ * @param {string[]} [opts.includeDirs=[]] Include dirs downstream ccLibrary()/ccBinary() targets need, e.g. the CMake project's own public header directory.
+ * @returns {object} `{[BUILD], archive, transitiveArchives, transitiveIncludeDirs}` — usable directly as a ccLibrary()/ccBinary() `deps` entry.
+ * @category target
+ */
+export function cmakeLibraryDep(project, name, opts = {}) {
+	const { includeDirs = [] } = opts;
+	const archive = project.get(name, BUILD);
+	return Object.freeze({
+		[BUILD]: archive,
+		archive,
+		transitiveArchives: [archive],
+		transitiveIncludeDirs: [...includeDirs],
+	});
 }
