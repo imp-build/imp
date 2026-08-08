@@ -9,6 +9,7 @@ import {
 	cacheHas,
 	toolName,
 	group,
+	tool as graphTool,
 } from "imp:core";
 
 import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
@@ -229,6 +230,31 @@ export const acquireZolaToolchain = memo(
 	},
 	{ display: "acquire Zola Toolchain {0}", level: "info" },
 );
+
+/** Build zola from its verified release archive as a graph tool. */
+export function zolaGraphTool(version) {
+	const resolved = ZolaToolchain.requireVersion(version);
+	const plat = platformInfo();
+	const archive = downloadToolArtifact({
+		lockfile: ZOLA_LOCKFILE,
+		tool: "zola",
+		version: resolved,
+		plat,
+		url: zolaDownloadUrl(resolved, plat),
+		output: `zola-downloads/${zolaCacheKey(resolved, plat)}/${zolaArtifactName(resolved, plat)}`,
+		display: `download zola ${resolved} (${plat.os}/${plat.arch})`,
+		unverified: ZolaToolchain.resolveUnverified(resolved),
+	});
+	// Zola's release archive ships the `zola` binary at the archive root (no
+	// wrapping directory), so no --strip-components is needed.
+	const directory = extractArchive({
+		archive,
+		dest: "zola-toolchain",
+		format: plat.os === "windows" ? "zip" : "tar.gz",
+		display: `install zola ${resolved} (${plat.os}/${plat.arch})`,
+	});
+	return graphTool(directory, { binDirs: ["."] });
+}
 
 /**
  * Resolve an explicit or default zola toolchain version.
