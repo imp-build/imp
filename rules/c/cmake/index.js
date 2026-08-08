@@ -1,11 +1,13 @@
 // Canonical CMake rule entrypoint (graph-native, issue #31/#62 + #63
 // cutover). cmakeProject() builds one expand()-based per-target discovery
-// per project — see expansion.js's own docstring for the `{get, all}` shape
-// and its known raw-ccBinary()-interop gap (issue #67). The heavier I/O
-// layer (configure/replay via exec.action(), ninja/ctest parsing) lives in
+// per project — see expansion.js's own docstring for the `{get, all}`
+// shape. cmakeLibraryDep() (issue #67) adapts a discovered target for use
+// as a raw ccLibrary()/ccBinary() `deps` entry. The heavier I/O layer
+// (configure/replay via exec.action(), ninja/ctest parsing) lives in
 // separate internal modules this file doesn't re-export: graph_replay.js,
 // ninja_graph.js, ctest_testfile.js.
 export {
+	cmakeLibraryDep,
 	cmakeProject,
 	cmakeProjectExpansion,
 	cmakeProjectSpecs,
