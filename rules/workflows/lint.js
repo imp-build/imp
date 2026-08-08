@@ -13,10 +13,11 @@
 // the goal then fails if any target was unclean, regardless of whether
 // `--fix` also fixed some of it.
 //
-// odin-package keeps its own "lint" product (odinLint, rules/odin/index.js)
-// registered directly there — it follows the same allowFailure/{ok, output,
-// ...} contract as ruffCheck, running `odin check -vet` (which has no
-// autofix mode, so it always reports fixSupported: false).
+// odin-package is graph-native and exposes [LINT] directly (see
+// //rules/odin) rather than registering a legacy product here — it follows
+// the same allowFailure/{ok, output, ...} contract as ruffCheck, running
+// `odin check -vet` (which has no autofix mode, so it always reports
+// fixSupported: false).
 
 import "//rules/python/ruff/lint";
 export { ruffLintRoot } from "//rules/python/ruff_graph";
