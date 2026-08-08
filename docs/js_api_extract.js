@@ -1,7 +1,7 @@
 // Pure-JS extraction of JSDoc comments from the imp JS DSL surface
 // (src/imp_core.js + rules/**/*.js), turned into Zola-ingestible Markdown
 // pages. No host bridge is used here: read_file() is called by the caller
-// (docs/BUILD.js's api_reference_build product) so this module stays a plain,
+// (docs/BUILD.js's api_reference_build task) so this module stays a plain,
 // easily unit-testable string-in/string-out parser.
 
 const EXPORT_FUNCTION_RE = /^export function (\w+)\s*\(([^)]*)\)/;

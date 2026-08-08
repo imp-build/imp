@@ -14,6 +14,7 @@ import {
 	zolaArtifactName,
 	zolaCacheKey,
 	zolaDownloadUrl,
+	zolaGraphTool,
 	zolaTool,
 	zolaToolchain,
 } from "//rules/zola";
@@ -50,6 +51,10 @@ describe("zola toolchain", () => {
 		expect(zolaCacheKey("0.22.1", { os: "linux", arch: "x86_64" })).toBe(
 			"0.22.1/linux-x86_64",
 		);
+	});
+
+	test("declares a graph-native zola tool", () => {
+		expect(zolaGraphTool("0.22.1").__imp_graph_handle).toBe(true);
 	});
 
 	test("declares a default zola toolchain", () => {
