@@ -205,6 +205,7 @@ export function configureCmakeProject(spec) {
 			find: nativeTool("find"),
 			cat: nativeTool("cat"),
 			dirname: nativeTool("dirname"),
+			sed: nativeTool("sed"),
 		},
 		outputs: { directory: output.artifact(), ninjaGraph: output.value() },
 		async run(exec, input) {
@@ -222,6 +223,23 @@ export function configureCmakeProject(spec) {
 			const script =
 				"src=$1; bdir=$2; cmakeExe=$3; shift 3; " +
 				'mkdir -p "$bdir" && "$cmakeExe" -S "$src" -B "$bdir" -G Ninja "$@" 1>&2 && ' +
+				// CTestTestfile.cmake bakes each test's executable as an
+				// *absolute* path rooted at this exact configure sandbox
+				// (CMake's own auto-substitution for `add_test(NAME ...
+				// COMMAND target)`). Rewriting that to a bare relative token
+				// here — right when $bdir's real absolute path is known with
+				// certainty, no separate capture-and-match needed later — is
+				// the "fix at build time, not run time" this repo's own
+				// runCTestTask() used to defer (see its history): a run-time
+				// oldroot->newroot rewrite bakes the *current* sandbox's
+				// $(pwd) into a cached exec.action(), which is invisible to
+				// the action's cache key, so a cache hit silently replays a
+				// stale path from whatever sandbox first produced that exact
+				// cached result. A bare relative token has no sandbox path
+				// to go stale — CTest resolves it against its own --test-dir
+				// cwd (see ctest_testfile.js's own comment on this form).
+				'absbdir=$(cd "$bdir" && pwd) && ' +
+				`find "$bdir" -name CTestTestfile.cmake -exec sed -i "s#\${absbdir}/##g" {} + && ` +
 				`find "$bdir" \\( -name '*.ninja' -o -name CTestTestfile.cmake \\) | while read -r f; do ` +
 				`printf '${FILE_START}%s${FILE_MID}' "\${f#$bdir/}"; cat "$f"; printf '${FILE_END}'; done`;
 			const result = await exec.action({
@@ -236,7 +254,14 @@ export function configureCmakeProject(spec) {
 					...compilerArgs,
 					...spec.cmakeArgs,
 				],
-				tools: [input.mkdir, input.ninja, input.find, input.cat, input.dirname],
+				tools: [
+					input.mkdir,
+					input.ninja,
+					input.find,
+					input.cat,
+					input.dirname,
+					input.sed,
+				],
 				inputs: [
 					input.srcs,
 					...Object.keys(spec.dirInputs).map((key) => input[key]),
@@ -582,8 +607,6 @@ export function runCTestTask(
 		inputs: {
 			directory: built.outputs.directory,
 			ctest: nativeTool("ctest"),
-			sed: nativeTool("sed"),
-			find: nativeTool("find"),
 			mkdir: nativeTool("mkdir"),
 			cp: nativeTool("cp"),
 		},
@@ -591,16 +614,20 @@ export function runCTestTask(
 			// built.outputs.directory mounts at its own output slot name
 			// ("directory"), not spec.buildDirPath — see
 			// reconstructBuildDirCmds()'s docstring in replayCmakeTarget().
-			// CTestTestfile.cmake's own baked executable paths are
-			// `$oldroot/spec.buildDirPath/...` (rewritten below to
-			// `$(pwd)/spec.buildDirPath/...`), so the reconstruction has to
-			// land at that exact relative path too, not wherever
-			// exec.path() happened to mount the raw artifact.
+			// CTestTestfile.cmake's own baked executable paths are already
+			// bare relative tokens by this point — configureCmakeProject()
+			// rewrites them once, at configure time, from its own real
+			// absolute build dir (see that function's own comment on why:
+			// a run-time rewrite here, using this sandbox's $(pwd), would be
+			// invisible to this cached exec.action()'s cache key and risk
+			// replaying a stale path from whichever sandbox first produced
+			// an identical cached result). CTest resolves the relative
+			// tokens itself via --test-dir, so the reconstruction below just
+			// has to land at spec.buildDirPath — no rewriting needed here.
 			const mountedDir = exec.path(input.directory);
 			const script =
-				"oldroot=$1; mounted=$2; bdir=$3; shift 3; newroot=$(pwd); " +
+				"mounted=$1; bdir=$2; shift 2; " +
 				'mkdir -p "$bdir" && cp -r "$mounted"/. "$bdir"/ && ' +
-				'find "$bdir" -name CTestTestfile.cmake -exec sed -i "s#$oldroot#$newroot#g" {} + ; ' +
 				'ctest --test-dir "$bdir" "$@"';
 			await exec.action({
 				argv: [
@@ -608,12 +635,11 @@ export function runCTestTask(
 					"-c",
 					script,
 					"cmake-ctest",
-					ninjaGraph.sandboxRoot || "",
 					mountedDir,
 					spec.buildDirPath,
 					...ctestNameFilterArgs(testNames),
 				],
-				tools: [input.ctest, input.sed, input.find, input.mkdir, input.cp],
+				tools: [input.ctest, input.mkdir, input.cp],
 				display: `ctest ${spec.path}`,
 			});
 		},
