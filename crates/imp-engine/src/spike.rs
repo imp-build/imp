@@ -12,7 +12,7 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use crate::graph::{GraphCatalog, GraphRoot};
+use crate::graph::{GraphCatalog, GraphRoot, GraphWalk, GraphWalkNode};
 use crate::loader::{
     resolve_workspace_module, validate_workspace_module_path, ImpLoader, ImpResolver, ModuleForm,
     ModuleKind, RulesSource,
@@ -1793,6 +1793,197 @@ pub async fn ensure_discovered_labels(
         discovered.completed_owners.insert(discoverer.owner_id);
     }
     Ok(())
+}
+
+/// Run `__imp_walk_graph_for_introspection` (`graph_core.js`) from `roots`,
+/// discovering any expansion children reachable from them. Runs each
+/// reachable expansion's `create()` (and whatever upstream discovery task it
+/// needs, e.g. `cargo metadata`/`cmake configure`) but never a child's own
+/// task — see that function's docstring. Backs both `imp targets`' synthetic
+/// `parent#childKey` listing and `imp dependencies`' graph-native edges.
+pub async fn walk_graph_for_introspection(
+    live: &LiveWorkspace,
+    roots: &[&GraphRoot],
+) -> Result<GraphWalk> {
+    if roots.is_empty() {
+        return Ok(GraphWalk::default());
+    }
+    #[derive(serde::Serialize)]
+    struct WalkRoot {
+        address: String,
+        #[serde(rename = "handleId")]
+        handle_id: u32,
+    }
+    let roots_json = serde_json::to_string(
+        &roots
+            .iter()
+            .map(|root| WalkRoot {
+                address: root.address.clone(),
+                handle_id: root.handle_id,
+            })
+            .collect::<Vec<_>>(),
+    )
+    .context("encode graph introspection roots")?;
+    // Best-effort invocation context for `semantic.*` inputs an expansion's
+    // discovery step might read: the currently resolved mode axes/config, no
+    // CLI args or flags (introspection has none to offer — a goal-specific
+    // invocation only exists inside actual execution).
+    let resolved_config = live.host_state.lock().unwrap().workspace_config.clone();
+    let resolved_mode = resolved_config
+        .get(MODE_AXIS_NAMESPACE)
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let invocation_json = serde_json::to_string(&serde_json::json!({
+        "args": Vec::<String>::new(),
+        "flags": serde_json::Map::<String, serde_json::Value>::new(),
+        "mode": resolved_mode,
+        "config": resolved_config,
+    }))
+    .context("encode graph introspection invocation")?;
+    let walk_json: String = live
+        .ctx
+        .async_with(async |ctx| -> rquickjs::Result<String> {
+            let walk_fn: Function = ctx.globals().get("__imp_walk_graph_for_introspection")?;
+            let result_value: Value = walk_fn
+                .call((roots_json.as_str(), invocation_json.as_str()))
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("walk graph", format!("{e}")))?;
+            let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
+            let promise: MaybePromise = promise_resolve.call((result_value,))?;
+            promise
+                .into_future::<String>()
+                .await
+                .catch(&ctx)
+                .map_err(|e| rquickjs::Error::new_loading_message("walk graph", format!("{e}")))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("walk graph for introspection: {e}"))?;
+    serde_json::from_str(&walk_json).context("decode graph introspection walk")
+}
+
+/// Resolve `selectors` against the graph catalog, then merge in synthetic
+/// `parent#childKey` roots discovered by expanding whatever the selectors
+/// reached — a package/recursive selector picks up every expansion child
+/// under it, and an exact `parent#childKey` selector is resolved by walking
+/// just its parent, since a child's address only exists once its parent has
+/// been expanded (see `GraphWalk::synthetic_children`). Also returns the
+/// union of every walk performed along the way, so a caller that needs
+/// declared dependency edges (`imp dependencies`) doesn't have to re-walk.
+/// `workflow`, when given, scopes resolution to one goal's workflow (e.g.
+/// goal execution itself); `None` resolves across every exported workflow,
+/// as `imp targets`/`imp dependencies` do. Shared by all three call sites so
+/// they see the same expanded view.
+///
+/// Discovering an expansion's children can itself require running a task
+/// (e.g. `cargo metadata`/`cmake configure`), which needs an execution
+/// context — so this installs `exec_root` itself rather than trusting the
+/// caller to have done it (unlike task execution proper, the caller is
+/// still expected to have already installed a scheduler).
+pub async fn resolve_graph_with_expansion(
+    live: &LiveWorkspace,
+    workspace_root: &Path,
+    workflow: Option<&str>,
+    selectors: &[String],
+    context: &SelectorContext,
+) -> Result<(Vec<GraphRoot>, GraphWalk)> {
+    *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
+    let catalog = &live.workspace.graph;
+    let select_static = |selectors: &[String]| -> Result<Vec<&GraphRoot>> {
+        match workflow {
+            Some(workflow) => catalog.select(workflow, selectors, context),
+            None => catalog.select_catalog(selectors, context),
+        }
+    };
+    let static_roots = select_static(selectors)?;
+    let walk = walk_graph_for_introspection(live, &static_roots).await?;
+
+    let mut roots: BTreeMap<(String, String, Option<String>), GraphRoot> = BTreeMap::new();
+    let mut nodes: BTreeMap<u32, GraphWalkNode> = BTreeMap::new();
+    for root in &static_roots {
+        roots.insert(
+            (
+                root.address.clone(),
+                root.workflow.clone(),
+                root.facet.clone(),
+            ),
+            (*root).clone(),
+        );
+    }
+    for node in walk.nodes {
+        nodes.insert(node.id, node);
+    }
+    let synthetic_from_static = GraphWalk {
+        nodes: nodes.values().cloned().collect(),
+    }
+    .synthetic_children(&static_roots);
+    for child in synthetic_from_static {
+        roots.insert(
+            (
+                child.address.clone(),
+                child.workflow.clone(),
+                child.facet.clone(),
+            ),
+            child,
+        );
+    }
+
+    // A selector may name a child directly (`parent#childKey`) without its
+    // parent matching `selectors` as a whole — the parent's own children
+    // only become visible once it's been walked, so resolve those
+    // explicitly by walking just the named parent.
+    for selector in selectors {
+        let (addr_part, facet) = crate::graph::split_facet(selector)?;
+        let Some((parent_addr, child_key)) = addr_part.split_once('#') else {
+            continue;
+        };
+        let parent_selector = match facet {
+            Some(f) => format!("{parent_addr}@{f}"),
+            None => parent_addr.to_owned(),
+        };
+        let parent_roots = select_static(std::slice::from_ref(&parent_selector))?;
+        if parent_roots.is_empty() {
+            continue;
+        }
+        let parent_walk = walk_graph_for_introspection(live, &parent_roots).await?;
+        for node in &parent_walk.nodes {
+            nodes.entry(node.id).or_insert_with(|| node.clone());
+        }
+        for child in parent_walk.synthetic_children(&parent_roots) {
+            if child.address.rsplit_once('#').map(|(_, key)| key) != Some(child_key) {
+                continue;
+            }
+            roots.insert(
+                (
+                    child.address.clone(),
+                    child.workflow.clone(),
+                    child.facet.clone(),
+                ),
+                child,
+            );
+        }
+    }
+
+    Ok((
+        roots.into_values().collect(),
+        GraphWalk {
+            nodes: nodes.into_values().collect(),
+        },
+    ))
+}
+
+/// Convenience wrapper over [`resolve_graph_with_expansion`] for callers
+/// that only need the resolved roots, not their dependency edges.
+pub async fn resolve_graph_roots_with_expansion(
+    live: &LiveWorkspace,
+    workspace_root: &Path,
+    selectors: &[String],
+    context: &SelectorContext,
+) -> Result<Vec<GraphRoot>> {
+    Ok(
+        resolve_graph_with_expansion(live, workspace_root, None, selectors, context)
+            .await?
+            .0,
+    )
 }
 
 fn compute_owned_files(
@@ -5374,7 +5565,16 @@ pub fn format_graph_roots(roots: &[&GraphRoot], w: &mut String) -> std::fmt::Res
             .extend(root.facet.as_deref());
     }
     for (address, workflows) in by_address {
-        writeln!(w, "{address} (graph)")?;
+        // A `#childKey` address was synthesized by the expand()-discovery
+        // walk (crate::graph::GraphWalk::synthetic_children), not exported
+        // directly by a BUILD.js — label it so the view's provenance is
+        // explicit rather than presenting it as an ordinary static root.
+        let label = if address.contains('#') {
+            "graph, expanded"
+        } else {
+            "graph"
+        };
+        writeln!(w, "{address} ({label})")?;
         for (workflow, mut facets) in workflows {
             facets.sort();
             facets.dedup();
@@ -5382,6 +5582,50 @@ pub fn format_graph_roots(roots: &[&GraphRoot], w: &mut String) -> std::fmt::Res
                 writeln!(w, "  {workflow}")?;
             } else {
                 writeln!(w, "  {workflow}: {}", facets.join(", "))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Print each selected graph root's declared input edges and — for
+/// expansion roots — the child keys `expand()` discovered, using the walk
+/// `resolve_graph_with_expansion` already performed. Every edge here is a
+/// declared handle reference (a task's own `inputs`, an expansion's, or a
+/// tool's artifact); the graph model has no other kind of dependency, so
+/// unlike `format_label_dependencies` there's nothing "observed" to
+/// distinguish it from.
+pub fn format_graph_dependencies(
+    roots: &[&GraphRoot],
+    walk: &GraphWalk,
+    w: &mut String,
+) -> std::fmt::Result {
+    use std::fmt::Write;
+    let address_by_handle: BTreeMap<u32, &str> = roots
+        .iter()
+        .map(|root| (root.handle_id, root.address.as_str()))
+        .collect();
+    for root in roots {
+        // `root.address` alone collides when one address exports more than
+        // one workflow (e.g. a `[BUILD]`/`[TEST]` pair) — `display()`
+        // disambiguates with `#workflow`/`@facet#workflow`, same as
+        // `GraphRoot`'s own selector syntax.
+        writeln!(w, "{} (graph)", root.display())?;
+        let Some(node) = walk.node(root.handle_id) else {
+            continue;
+        };
+        for edge in &node.edges {
+            match address_by_handle.get(&edge.handle_id) {
+                Some(address) => writeln!(w, "  <- {}: {address}", edge.name)?,
+                None => writeln!(w, "  <- {} (unaddressed {})", edge.name, node.kind)?,
+            }
+        }
+        let mut children: Vec<_> = node.children.iter().collect();
+        children.sort_by_key(|(key, _)| key.as_str());
+        for (key, handle_id) in children {
+            match address_by_handle.get(handle_id) {
+                Some(address) => writeln!(w, "  -> #{key}: {address}")?,
+                None => writeln!(w, "  -> #{key} (unaddressed)")?,
             }
         }
     }
@@ -5900,15 +6144,6 @@ pub async fn execute_goal_live_selection(
         GoalSelection::Selectors(selectors) => selectors,
         GoalSelection::ChangedAddresses { selectors, .. } => selectors,
     };
-    let graph_roots = match &selection {
-        GoalSelection::Selectors(selectors) => {
-            live.workspace
-                .graph
-                .select(goal, selectors, selector_context)?
-        }
-        // Graph-aware changed-file ownership is tracked separately in #7.
-        GoalSelection::ChangedAddresses { .. } => Vec::new(),
-    };
     let legacy_selectors: Vec<String> = selection_selectors
         .iter()
         .filter(|selector| !selector.contains('@'))
@@ -5918,11 +6153,34 @@ pub async fn execute_goal_live_selection(
     // `ensure_expanded` may invoke a rule's expander, which can call `run()`
     // — that requires an execution context (exec_root + scheduler), so it's
     // installed before expansion runs rather than only around dispatch below.
-    // The caller is required to have installed a scheduler already.
+    // The caller is required to have installed a scheduler already. This is
+    // also why graph-native `resolve_graph_with_expansion` (below) can't run
+    // any earlier: discovering an expand() root's children can itself
+    // require running a task (e.g. `cargo metadata`), which needs the same
+    // execution context.
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
     live.exec_no_cache.store(no_cache, Ordering::SeqCst);
     live.trace_inputs.store(trace_inputs, Ordering::SeqCst);
     resolve_mode_axes(live, profile, axis_overrides)?;
+    let graph_roots = match &selection {
+        GoalSelection::Selectors(selectors) => {
+            // Expansion-aware: a selector may name an expand()-discovered
+            // child directly (`parent#childKey`), which only exists once
+            // its parent's expansion has run — see
+            // `resolve_graph_with_expansion`.
+            resolve_graph_with_expansion(
+                live,
+                workspace_root,
+                Some(goal),
+                selectors,
+                selector_context,
+            )
+            .await?
+            .0
+        }
+        // Graph-aware changed-file ownership is tracked separately in #7.
+        GoalSelection::ChangedAddresses { .. } => Vec::new(),
+    };
     ensure_discovered_labels(
         live,
         workspace_root,
@@ -7276,6 +7534,107 @@ mod tests {
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
         execute_goal_live(live, root, goal, selectors, false, 1, serde_json::json!({})).await
+    }
+
+    #[tokio::test]
+    async fn expansion_children_are_listable_dependency_visible_and_individually_buildable() {
+        // Issue #8: `imp targets`/`imp dependencies` couldn't see expand()-
+        // discovered work (Rust per-crate tests, CMake per-target libs) that
+        // goal execution could already reach. This exercises the discovery
+        // walk (`walk_graph_for_introspection`) and `#childKey` addressing
+        // (`resolve_graph_with_expansion`) against a minimal expand() fixture
+        // — no real toolchain/CMake/Cargo involved — asserting: (1) an
+        // aggregate `expansion.all()` export with no per-child BUILD.js
+        // export becomes individually addressable as `parent#childKey`, (2)
+        // those addresses show up as dependency edges, and (3) building one
+        // child by its synthetic address runs only that child, never its
+        // sibling — proving the walk never executes a child's own task.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, expand, output, task } from "imp:core";
+
+globalThis.builtA = 0;
+globalThis.builtB = 0;
+
+const discover = task({
+    display: "discover children",
+    outputs: { value: output.value() },
+    async run() {
+        return { value: { keys: ["a", "b"] } };
+    },
+});
+
+function childTask(key) {
+    return task({
+        display: `build ${key}`,
+        inputs: { key },
+        outputs: { value: output.value() },
+        async run(_exec, input) {
+            globalThis[`built${input.key.toUpperCase()}`] += 1;
+            return { value: { name: input.key } };
+        },
+    });
+}
+
+const workspace = expand({
+    display: "expand demo",
+    inputs: { discovered: discover.outputs.value },
+    create({ discovered }) {
+        const children = {};
+        for (const key of discovered.keys) {
+            children[key] = { [BUILD]: childTask(key).outputs.value };
+        }
+        return children;
+    },
+});
+
+export const all = { [BUILD]: workspace.all(BUILD) };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let context = SelectorContext::root();
+
+        // (1) Listing: the aggregate's children are individually addressable
+        // even though the BUILD.js never named them.
+        let roots = resolve_graph_roots_with_expansion(&live, p, &["//:all".to_owned()], &context)
+            .await
+            .unwrap();
+        let mut addresses: Vec<_> = roots.iter().map(|r| r.address.clone()).collect();
+        addresses.sort();
+        assert_eq!(addresses, vec!["//:all", "//:all#a", "//:all#b"]);
+
+        // (2) Dependencies: the aggregate declares an edge to its discovery
+        // task, and each child shows up as one of its expansion children.
+        let (dep_roots, walk) =
+            resolve_graph_with_expansion(&live, p, None, &["//:all".to_owned()], &context)
+                .await
+                .unwrap();
+        let dep_roots_ref: Vec<&GraphRoot> = dep_roots.iter().collect();
+        let mut out = String::new();
+        format_graph_dependencies(&dep_roots_ref, &walk, &mut out).unwrap();
+        assert!(out.contains("//:all#build (graph)"), "{out}");
+        assert!(out.contains("-> #a: //:all#a"), "{out}");
+        assert!(out.contains("-> #b: //:all#b"), "{out}");
+
+        // (3) Buildability: building one child by its synthetic address runs
+        // only that child — the discovery walk above must not have executed
+        // either child's own task.
+        run_goal_live(&live, p, "build", &["//:all#a".to_owned()])
+            .await
+            .unwrap();
+        let (built_a, built_b) = live
+            .ctx
+            .async_with(async |ctx| -> rquickjs::Result<(i32, i32)> {
+                Ok((ctx.globals().get("builtA")?, ctx.globals().get("builtB")?))
+            })
+            .await
+            .unwrap();
+        assert_eq!((built_a, built_b), (1, 0));
     }
 
     #[tokio::test]
