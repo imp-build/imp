@@ -3,7 +3,7 @@
 //! Task construction and callback values stay live in QuickJS, while this
 //! module owns the durable, inspectable root catalog used by native selection.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -178,6 +178,11 @@ pub struct GraphWalkNode {
     pub edges: Vec<GraphWalkEdge>,
     #[serde(default)]
     pub children: BTreeMap<String, u32>,
+    /// Raw `record.data` for `"file"`/`"files"` leaves only (the `{path}` or
+    /// `files()` root/include/exclude spec) — `None` for every other kind.
+    /// Used by `stale_node_ids` to test a leaf against changed paths.
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -215,6 +220,68 @@ impl GraphWalk {
             }
         }
         out
+    }
+
+    /// Handle ids stale because a `"file"`/`"files"` leaf's spec matches a
+    /// changed path, plus every consumer reachable from one by reversing
+    /// this walk's own declared edges (a `task`/`tool`/`expansion` node
+    /// inherits staleness from any input it declares, however deep). Also
+    /// returns the subset of `changed_paths` matched by some leaf in the
+    /// walk, for `unowned`-path reporting — independent of whether that
+    /// leaf's staleness reached an address-bearing root.
+    pub fn stale_node_ids(&self, changed_paths: &[String]) -> (BTreeSet<u32>, BTreeSet<String>) {
+        let mut stale = BTreeSet::new();
+        let mut covered = BTreeSet::new();
+        for node in &self.nodes {
+            let Some(data) = &node.data else { continue };
+            let is_stale = match node.kind.as_str() {
+                "file" => {
+                    let matched = data
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|path| changed_paths.iter().any(|p| p == path));
+                    if matched {
+                        if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
+                            covered.insert(path.to_owned());
+                        }
+                    }
+                    matched
+                }
+                "files" => {
+                    let matches =
+                        crate::trace_changed::graph_files_leaf_matches(data, changed_paths);
+                    let any = !matches.is_empty();
+                    covered.extend(matches);
+                    any
+                }
+                _ => false,
+            };
+            if is_stale {
+                stale.insert(node.id);
+            }
+        }
+
+        // Reverse adjacency: `node.edges` point consumer -> producer
+        // (`_graphDeclaredEdges`'s "what does this node depend on"), so
+        // staleness of a producer must propagate to every consumer that
+        // names it.
+        let mut consumers: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        for node in &self.nodes {
+            for edge in &node.edges {
+                consumers.entry(edge.handle_id).or_default().push(node.id);
+            }
+        }
+        let mut queue: VecDeque<u32> = stale.iter().copied().collect();
+        while let Some(id) = queue.pop_front() {
+            if let Some(next) = consumers.get(&id) {
+                for &consumer_id in next {
+                    if stale.insert(consumer_id) {
+                        queue.push_back(consumer_id);
+                    }
+                }
+            }
+        }
+        (stale, covered)
     }
 }
 
@@ -267,6 +334,7 @@ mod tests {
                 kind: "expansion-all".to_owned(),
                 edges: Vec::new(),
                 children: BTreeMap::from([("crate-a".to_owned(), 11), ("crate-b".to_owned(), 12)]),
+                data: None,
             }],
         };
         let mut children = walk.synthetic_children(&[&parent]);
@@ -286,6 +354,67 @@ mod tests {
         // synthetic children.
         let plain = root_with_handle("//pkg:lib", "build", None, false, 20);
         assert!(walk.synthetic_children(&[&plain]).is_empty());
+    }
+
+    #[test]
+    fn stale_node_ids_propagates_through_declared_edges() {
+        // file(10) <- task(11) <- task-output(12); an unrelated file(20) <-
+        // task(21) chain stays clean.
+        let walk = GraphWalk {
+            nodes: vec![
+                GraphWalkNode {
+                    id: 10,
+                    kind: "file".to_owned(),
+                    edges: Vec::new(),
+                    children: BTreeMap::new(),
+                    data: Some(serde_json::json!({ "path": "crates/imp-store/src/lib.rs" })),
+                },
+                GraphWalkNode {
+                    id: 11,
+                    kind: "task".to_owned(),
+                    edges: vec![GraphWalkEdge {
+                        name: "sources".to_owned(),
+                        handle_id: 10,
+                    }],
+                    children: BTreeMap::new(),
+                    data: None,
+                },
+                GraphWalkNode {
+                    id: 12,
+                    kind: "task-output".to_owned(),
+                    edges: vec![GraphWalkEdge {
+                        name: "task".to_owned(),
+                        handle_id: 11,
+                    }],
+                    children: BTreeMap::new(),
+                    data: None,
+                },
+                GraphWalkNode {
+                    id: 20,
+                    kind: "file".to_owned(),
+                    edges: Vec::new(),
+                    children: BTreeMap::new(),
+                    data: Some(serde_json::json!({ "path": "crates/imp-execution/src/lib.rs" })),
+                },
+                GraphWalkNode {
+                    id: 21,
+                    kind: "task".to_owned(),
+                    edges: vec![GraphWalkEdge {
+                        name: "sources".to_owned(),
+                        handle_id: 20,
+                    }],
+                    children: BTreeMap::new(),
+                    data: None,
+                },
+            ],
+        };
+
+        let (stale, covered) = walk.stale_node_ids(&["crates/imp-store/src/lib.rs".to_owned()]);
+        assert_eq!(stale, BTreeSet::from([10, 11, 12]));
+        assert_eq!(
+            covered,
+            BTreeSet::from(["crates/imp-store/src/lib.rs".to_owned()])
+        );
     }
 
     #[test]

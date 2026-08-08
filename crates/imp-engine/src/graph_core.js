@@ -793,21 +793,30 @@ function _graphDeclaredEdges(record) {
  * `_graphResolveHandle`'s "semantic" case) — `invocationJson` supplies one
  * for the walk's duration, same shape as `__imp_execute_graph_handles`'s,
  * restoring whatever was ambient beforehand once done.
+ *
+ * `optsJson.discoverExpansionGet` (default false) additionally runs
+ * discovery for `"expansion-get"` nodes, not just `"expansion-all"` — used
+ * only by the `--changed-since` staleness walk (#7), which needs to see
+ * inside single-key expansions like a Cargo crate's or Odin package's
+ * `[TEST]`/`[BUILD]` root to reach their real dependency edges. Left off by
+ * default so `imp targets`/`imp dependencies` keep today's cheaper, no-extra-
+ * sandbox-risk behavior unchanged.
  */
-async function _graphWalkForIntrospection(rootsJson, invocationJson) {
+async function _graphWalkForIntrospection(rootsJson, invocationJson, optsJson = "{}") {
 	const roots = JSON.parse(rootsJson);
+	const { discoverExpansionGet = false } = JSON.parse(optsJson);
 	const visited = new Set();
 	const queue = roots.map((root) => root.handleId);
 	const nodes = [];
 	const previousInvocation = _graphInvocation;
 	_graphInvocation = Object.freeze(JSON.parse(invocationJson));
 	try {
-		return await _graphWalkForIntrospectionInner(queue, visited, nodes);
+		return await _graphWalkForIntrospectionInner(queue, visited, nodes, discoverExpansionGet);
 	} finally {
 		_graphInvocation = previousInvocation;
 	}
 }
-async function _graphWalkForIntrospectionInner(queue, visited, nodes) {
+async function _graphWalkForIntrospectionInner(queue, visited, nodes, discoverExpansionGet) {
 	while (queue.length > 0) {
 		const id = queue.shift();
 		if (visited.has(id)) continue;
@@ -817,6 +826,9 @@ async function _graphWalkForIntrospectionInner(queue, visited, nodes) {
 		const edges = _graphDeclaredEdges(record);
 		for (const edge of edges) queue.push(edge.handleId);
 		const node = { id, kind: record.kind, edges };
+		if (record.kind === "file" || record.kind === "files") {
+			node.data = record.data;
+		}
 		// Only an "expansion-all" root needs its children actually
 		// discovered: that's the one kind with no address of its own for any
 		// individual child, which is the whole reason this walk exists. An
@@ -826,7 +838,11 @@ async function _graphWalkForIntrospectionInner(queue, visited, nodes) {
 		// `cargo metadata`, in a *separate* sandbox from the one goal
 		// execution uses moments later) for zero new listing value, and
 		// risks exactly the kind of cross-sandbox staleness hermetic caching
-		// is supposed to prevent.
+		// is supposed to prevent. The one exception is `discoverExpansionGet`
+		// (used only by the `--changed-since` staleness walk): a Cargo/Odin
+		// per-package `[TEST]`/`[BUILD]` root is itself an `expansion-get`,
+		// and the dependency edges staleness needs to see (crate path deps,
+		// inferred Odin imports) only exist once `create()` has run — see #7.
 		if (record.kind === "expansion-all") {
 			const { expansionId, workflow, facet } = record.data;
 			const children = await _graphExecuteExpansion(expansionId, []);
@@ -841,6 +857,20 @@ async function _graphWalkForIntrospectionInner(queue, visited, nodes) {
 					// This child has no handle for the requested workflow/facet —
 					// simply not listed for it, same as expansion.all()'s own
 					// resolution silently would not reach it either.
+				}
+			}
+		} else if (record.kind === "expansion-get" && discoverExpansionGet) {
+			const { expansionId, workflow, facet, childKey } = record.data;
+			const children = await _graphExecuteExpansion(expansionId, []);
+			const child = children[childKey];
+			if (child !== undefined) {
+				try {
+					const handle = _graphChildHandle(child, workflow, facet, "staleness");
+					edges.push({ name: `#${childKey}`, handleId: handle.__graph_id });
+					queue.push(handle.__graph_id);
+				} catch (_) {
+					// No handle for this workflow/facet on the discovered child —
+					// nothing further to walk into for staleness purposes.
 				}
 			}
 		}

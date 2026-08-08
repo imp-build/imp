@@ -1633,6 +1633,11 @@ function graphPackageSpec(spec) {
 		path: spec.path,
 		srcs: spec.srcs,
 		exclude: spec.exclude,
+		// `graphInferredPackages()` reads `.handle` off whatever
+		// `infer_dep_entries()` matches in the package index — without this,
+		// every inferred import resolves to an index entry with no handle,
+		// so real Odin imports never produced a graph dependency edge (#7).
+		handle: spec,
 	};
 }
 
@@ -1825,9 +1830,17 @@ function createGraphPackage({
 				: ["*_test.odin", "test_*.odin"]
 			: exclude;
 	const version = typeof toolchain === "string" ? toolchain : undefined;
+	const packageId = ++graphPackageCounter;
 	const spec = {
 		__odin_graph_package: true,
-		key: `package-${++graphPackageCounter}`,
+		// `same_package()` compares `.handle.__id` to tell two packages
+		// apart by identity (a legacy-path concept — see `graphPackageSpec`'s
+		// `handle: spec` below); without this, two distinct graph packages'
+		// specs both have `.handle.__id === undefined`, so every pair
+		// compares "same", and dependency-inference self-exclusion silently
+		// drops every candidate (#7).
+		__id: packageId,
+		key: `package-${packageId}`,
 		base,
 		path: graphPath(base, path),
 		srcs: normalizedSrcs,

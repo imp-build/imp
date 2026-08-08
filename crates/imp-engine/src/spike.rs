@@ -1804,6 +1804,7 @@ pub async fn ensure_discovered_labels(
 pub async fn walk_graph_for_introspection(
     live: &LiveWorkspace,
     roots: &[&GraphRoot],
+    discover_expansion_get: bool,
 ) -> Result<GraphWalk> {
     if roots.is_empty() {
         return Ok(GraphWalk::default());
@@ -1840,12 +1841,20 @@ pub async fn walk_graph_for_introspection(
         "config": resolved_config,
     }))
     .context("encode graph introspection invocation")?;
+    let opts_json = serde_json::to_string(&serde_json::json!({
+        "discoverExpansionGet": discover_expansion_get,
+    }))
+    .context("encode graph introspection options")?;
     let walk_json: String = live
         .ctx
         .async_with(async |ctx| -> rquickjs::Result<String> {
             let walk_fn: Function = ctx.globals().get("__imp_walk_graph_for_introspection")?;
             let result_value: Value = walk_fn
-                .call((roots_json.as_str(), invocation_json.as_str()))
+                .call((
+                    roots_json.as_str(),
+                    invocation_json.as_str(),
+                    opts_json.as_str(),
+                ))
                 .catch(&ctx)
                 .map_err(|e| rquickjs::Error::new_loading_message("walk graph", format!("{e}")))?;
             let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
@@ -1895,7 +1904,7 @@ pub async fn resolve_graph_with_expansion(
         }
     };
     let static_roots = select_static(selectors)?;
-    let walk = walk_graph_for_introspection(live, &static_roots).await?;
+    let walk = walk_graph_for_introspection(live, &static_roots, false).await?;
 
     let mut roots: BTreeMap<(String, String, Option<String>), GraphRoot> = BTreeMap::new();
     let mut nodes: BTreeMap<u32, GraphWalkNode> = BTreeMap::new();
@@ -1944,7 +1953,7 @@ pub async fn resolve_graph_with_expansion(
         if parent_roots.is_empty() {
             continue;
         }
-        let parent_walk = walk_graph_for_introspection(live, &parent_roots).await?;
+        let parent_walk = walk_graph_for_introspection(live, &parent_roots, false).await?;
         for node in &parent_walk.nodes {
             nodes.entry(node.id).or_insert_with(|| node.clone());
         }
@@ -1984,6 +1993,51 @@ pub async fn resolve_graph_roots_with_expansion(
             .await?
             .0,
     )
+}
+
+/// Graph-native addresses stale for `--changed-since` (#7): walks the
+/// *entire* exported graph catalog (every root, not selector-scoped — #8
+/// established that no command should present a subset as the whole graph),
+/// running `expand()` discovery for both `"expansion-all"` and, unlike
+/// `resolve_graph_with_expansion`'s callers, `"expansion-get"` roots too —
+/// a Cargo crate's or Odin package's `[TEST]`/`[BUILD]` root is itself an
+/// `expansion-get`, and its real dependency edges (crate path deps, inferred
+/// Odin imports) only exist once discovery has run. Marks every root whose
+/// declared-edge closure reaches a `"file"`/`"files"` leaf matching
+/// `changed_paths`. No persisted index: recomputed fresh per invocation,
+/// same "no parallel dependency graph" contract as
+/// `resolve_graph_with_expansion` — the graph structure itself is the
+/// dependency graph.
+pub async fn stale_graph_addresses(
+    live: &LiveWorkspace,
+    workspace_root: &Path,
+    changed_paths: &[String],
+) -> Result<GraphChangedResult> {
+    *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
+    let all_roots: Vec<&GraphRoot> = live.workspace.graph.roots.iter().collect();
+    if all_roots.is_empty() || changed_paths.is_empty() {
+        return Ok(GraphChangedResult::default());
+    }
+    let walk = walk_graph_for_introspection(live, &all_roots, true).await?;
+    let synthetic = walk.synthetic_children(&all_roots);
+    let (stale_ids, covered_paths) = walk.stale_node_ids(changed_paths);
+    let addresses = all_roots
+        .iter()
+        .map(|root| (*root).clone())
+        .chain(synthetic)
+        .filter(|root| stale_ids.contains(&root.handle_id))
+        .map(|root| root.address)
+        .collect();
+    Ok(GraphChangedResult {
+        addresses,
+        covered_paths,
+    })
+}
+
+#[derive(Debug, Default)]
+pub struct GraphChangedResult {
+    pub addresses: BTreeSet<String>,
+    pub covered_paths: BTreeSet<String>,
 }
 
 fn compute_owned_files(
@@ -6162,6 +6216,22 @@ pub async fn execute_goal_live_selection(
     live.exec_no_cache.store(no_cache, Ordering::SeqCst);
     live.trace_inputs.store(trace_inputs, Ordering::SeqCst);
     resolve_mode_axes(live, profile, axis_overrides)?;
+    // Computed here (rather than alongside `seed_addresses` below, where it
+    // used to live) so the graph-native branch of `graph_roots` can reuse
+    // it: changed addresses are already statically known, so they don't
+    // depend on anything `graph_roots`/label discovery produce.
+    let changed_addresses = match &selection {
+        GoalSelection::Selectors(_) => None,
+        GoalSelection::ChangedAddresses {
+            addresses,
+            selectors,
+        } => Some(filter_changed_addresses_in(
+            &live.workspace,
+            addresses,
+            selectors,
+            selector_context,
+        )?),
+    };
     let graph_roots = match &selection {
         GoalSelection::Selectors(selectors) => {
             // Expansion-aware: a selector may name an expand()-discovered
@@ -6178,8 +6248,28 @@ pub async fn execute_goal_live_selection(
             .await?
             .0
         }
-        // Graph-aware changed-file ownership is tracked separately in #7.
-        GoalSelection::ChangedAddresses { .. } => Vec::new(),
+        GoalSelection::ChangedAddresses { .. } => {
+            // Changed addresses are already concrete addresses (including
+            // any synthetic `parent#childKey` ones `stale_graph_addresses`
+            // produced) — feed them straight in as exact selectors, reusing
+            // `resolve_graph_with_expansion`'s existing exact-match handling
+            // rather than inventing new resolution logic. See #7.
+            let changed: Vec<String> = changed_addresses
+                .as_ref()
+                .expect("changed selection has an address set")
+                .iter()
+                .cloned()
+                .collect();
+            resolve_graph_with_expansion(
+                live,
+                workspace_root,
+                Some(goal),
+                &changed,
+                selector_context,
+            )
+            .await?
+            .0
+        }
     };
     ensure_discovered_labels(
         live,
@@ -6202,18 +6292,6 @@ pub async fn execute_goal_live_selection(
     // to expanding every statically-declared target whose kind can produce
     // more targets, then retry selector resolution below.
     let empty_dynamic: BTreeMap<String, Target> = BTreeMap::new();
-    let changed_addresses = match &selection {
-        GoalSelection::Selectors(_) => None,
-        GoalSelection::ChangedAddresses {
-            addresses,
-            selectors,
-        } => Some(filter_changed_addresses_in(
-            &live.workspace,
-            addresses,
-            selectors,
-            selector_context,
-        )?),
-    };
     let seed_addresses: Vec<String> = match &selection {
         GoalSelection::Selectors(_) => {
             // Resolve independently so a label-only selector does not make
@@ -7635,6 +7713,87 @@ export const all = { [BUILD]: workspace.all(BUILD) };
             .await
             .unwrap();
         assert_eq!((built_a, built_b), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn stale_graph_addresses_follows_path_dependency_edges() {
+        // Issue #7: a Cargo-style path dependency (crate B's test task takes
+        // crate A's sources as an input, exactly like `crateTestTask`'s
+        // `extraInputs("dep", deps)` in the real Rust ruleset) must make B
+        // stale when A's sources change, even though there's no
+        // crate-to-crate BUILD `deps` edge — the graph's own task-input
+        // edges are the dependency graph. Each crate root is an
+        // `expansion.get()`, matching the real Rust/Odin per-package shape,
+        // so this also exercises `discoverExpansionGet`.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, expand, files, output, task } from "imp:core";
+
+const aSources = files({ root: "crates/a", include: ["**/*.rs"] });
+const bSources = files({ root: "crates/b", include: ["**/*.rs"] });
+
+const discover = task({
+    display: "discover crates",
+    outputs: { value: output.value() },
+    async run() {
+        return { value: { keys: ["a", "b"] } };
+    },
+});
+
+const workspace = expand({
+    display: "cargo-like workspace",
+    inputs: { discovered: discover.outputs.value },
+    create() {
+        return {
+            a: {
+                [BUILD]: task({
+                    display: "build a",
+                    inputs: { sources: aSources },
+                    outputs: { value: output.value() },
+                    async run() { return { value: { crate: "a" } }; },
+                }).outputs.value,
+            },
+            b: {
+                [BUILD]: task({
+                    display: "build b",
+                    inputs: { sources: bSources, dep: aSources },
+                    outputs: { value: output.value() },
+                    async run() { return { value: { crate: "b" } }; },
+                }).outputs.value,
+            },
+        };
+    },
+});
+
+export const crateA = { [BUILD]: workspace.get("a", BUILD) };
+export const crateB = { [BUILD]: workspace.get("b", BUILD) };
+export const unrelated = { [BUILD]: files({ root: "crates/c", include: ["**/*.rs"] }) };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+
+        // Changing a file under crate A's sources makes both A (direct) and
+        // B (via the dep-input edge) stale — the path-dependency scenario.
+        let result = stale_graph_addresses(&live, p, &["crates/a/src/lib.rs".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(
+            result.addresses,
+            BTreeSet::from(["//:crateA".to_owned(), "//:crateB".to_owned()])
+        );
+        assert!(result.covered_paths.contains("crates/a/src/lib.rs"));
+
+        // A path outside both crates' filesets selects neither.
+        let unrelated = stale_graph_addresses(&live, p, &["README.md".to_owned()])
+            .await
+            .unwrap();
+        assert!(unrelated.addresses.is_empty());
+        assert!(unrelated.covered_paths.is_empty());
     }
 
     #[tokio::test]

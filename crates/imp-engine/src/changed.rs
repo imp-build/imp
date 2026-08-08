@@ -1,7 +1,7 @@
 //! Changed-target detection (`--changed-since`).
 //!
 //! Maps the files git reports as changed since a ref onto the targets that
-//! own them. Two mechanisms, both provenance rather than declaration:
+//! own them. Three mechanisms, all provenance rather than declaration:
 //!
 //! - The recorded JS module import graph (a changed rule module invalidates
 //!   every package that transitively imports it; a changed BUILD.js
@@ -13,6 +13,18 @@
 //!   replaces declared `sources:` glob ownership and `--changed-dependents`:
 //!   staleness is inherently transitive once ownership comes from the real
 //!   call graph, so there is no separate direct-vs-transitive mode anymore.
+//!   Only covers rulesets still on the legacy `memo()`/`target()` model.
+//! - Graph-native staleness (#7, `spike::stale_graph_addresses`): rulesets
+//!   migrated to the `task()`/`expand()` handle graph (Rust, Odin, ...)
+//!   never write memo-trace records, so this walks the exported graph
+//!   itself each invocation — no persisted index — and marks a root stale
+//!   when its declared-edge closure reaches a `"file"`/`"files"` leaf
+//!   matching a changed path. Only covers file-based staleness:
+//!   `semantic.*` (mode/flag/args/config) inputs are not yet tracked for
+//!   graph-native rulesets, unlike the memo-trace path's
+//!   `config_namespaces` coverage — a task whose only stale input is a
+//!   changed mode/config value won't be caught. Follow-up if/when that
+//!   matters.
 //!
 //! Cold start (no trace records yet) selects everything for the goal
 //! being run — correct and honest, not a bug to work around.
@@ -23,7 +35,10 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-use crate::spike::{Workspace, BUILD_FILE, CI_WORKSPACE_FILE, WORKSPACE_FILE};
+use crate::runtime::LiveWorkspace;
+use crate::spike::{
+    stale_graph_addresses, Workspace, BUILD_FILE, CI_WORKSPACE_FILE, WORKSPACE_FILE,
+};
 use crate::trace_changed::{LabelChangeContext, TraceIndex};
 
 /// Import edges observed while loading the workspace's JS modules, plus the
@@ -72,7 +87,14 @@ pub struct ChangedTargets {
 /// Checked against every registered product of a target's kind (build, test,
 /// fmt, lint, package, ...), not scoped to any one goal — see
 /// `TraceIndex::target_is_stale` for why a goal-scoped check is unsound.
-pub fn changed_target_addresses(
+///
+/// `live` backs a third, graph-native mechanism (#7): unlike the two above,
+/// it walks the exported handle graph itself rather than any persisted
+/// record, since graph-native task execution never writes memo-trace
+/// records. Self-installs `exec_root`, so caller ordering around it doesn't
+/// matter (mirrors `resolve_graph_with_expansion`).
+pub async fn changed_target_addresses(
+    live: &LiveWorkspace,
     workspace_root: &Path,
     workspace: &Workspace,
     graph: &ImportGraph,
@@ -130,10 +152,25 @@ pub fn changed_target_addresses(
         }
     }
 
+    let graph_result = stale_graph_addresses(live, workspace_root, &files)
+        .await
+        .context("compute graph-native change staleness")?;
+    for address in &graph_result.addresses {
+        addresses.insert(address.clone());
+        reasons
+            .entry(address.clone())
+            .or_default()
+            .push("graph source input changed".to_owned());
+    }
+
     let trace_covered = trace.covered_paths(&files);
     let unowned = files
         .into_iter()
-        .filter(|path| !module_owned.contains(path) && !trace_covered.contains(path))
+        .filter(|path| {
+            !module_owned.contains(path)
+                && !trace_covered.contains(path)
+                && !graph_result.covered_paths.contains(path)
+        })
         .collect();
 
     Ok(ChangedTargets {

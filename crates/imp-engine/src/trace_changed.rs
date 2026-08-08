@@ -441,7 +441,7 @@ fn fileset_spec_is_stale(spec: &serde_json::Value, changed_paths: &[String]) -> 
     }
 }
 
-fn glob_matches(root: &str, include: &[Regex], exclude: &[Regex], path: &str) -> bool {
+pub(crate) fn glob_matches(root: &str, include: &[Regex], exclude: &[Regex], path: &str) -> bool {
     let root_relative = if root == "." {
         Some(path)
     } else {
@@ -451,6 +451,33 @@ fn glob_matches(root: &str, include: &[Regex], exclude: &[Regex], path: &str) ->
         return false;
     };
     include.iter().any(|g| g.is_match(rel)) && !exclude.iter().any(|g| g.is_match(rel))
+}
+
+/// Which of `changed_paths` match a graph-native `files()` leaf's
+/// root/include/exclude spec (`graph_core.js`'s `files(opts)` — the same
+/// fields `glob()` accepts, no `"kind"` wrapper unlike a legacy `FileSet`
+/// trace spec). Shares `compile_globs`/`glob_matches` with the legacy
+/// trace-based path (`fileset_spec_is_stale`'s `"glob"` case) so
+/// glob-vs-changed-path semantics live in exactly one place for both
+/// systems — see #7.
+pub(crate) fn graph_files_leaf_matches(
+    spec: &serde_json::Value,
+    changed_paths: &[String],
+) -> Vec<String> {
+    let root = spec.get("root").and_then(|v| v.as_str()).unwrap_or(".");
+    let include = string_array(spec.get("include"));
+    let exclude = string_array(spec.get("exclude"));
+    let (Ok(include), Ok(exclude)) = (
+        compile_globs("include", &include),
+        compile_globs("exclude", &exclude),
+    ) else {
+        return Vec::new();
+    };
+    changed_paths
+        .iter()
+        .filter(|path| glob_matches(root, &include, &exclude, path))
+        .cloned()
+        .collect()
 }
 
 fn string_array(value: Option<&serde_json::Value>) -> Vec<String> {
