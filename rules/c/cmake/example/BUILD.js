@@ -1,5 +1,6 @@
 import { BUILD, PACKAGE, TEST } from "imp:core";
-import { cmakeProject } from "//rules/c/cmake";
+import { cmakeLibraryDep, cmakeProject } from "//rules/c/cmake";
+import { defaultGccGraphToolchain } from "//rules/c/gcc";
 import { zigGraphToolchain } from "//rules/c/zig";
 import { ccBinary, ccLibrary } from "//rules/c";
 import { jsSources } from "//rules/js";
@@ -33,4 +34,20 @@ export const raw_main = ccBinary({
 	deps: [raw_hello],
 	toolchain: zig,
 });
+
+// Demonstrates issue #67's cmakeLibraryDep(): a raw ccBinary() linking
+// directly against a CMake-discovered target. Needs gcc explicitly (raw
+// ccLibrary()/ccBinary() default to zig, but hello_cmake was built with
+// gcc — see the cmakeProject() comment above).
+export const uses_cmake_lib = ccBinary({
+	path: "rules/c/cmake/example",
+	srcs: ["uses_cmake_lib.c"],
+	deps: [
+		cmakeLibraryDep(hello, "hello_cmake", {
+			includeDirs: ["rules/c/cmake/example"],
+		}),
+	],
+	toolchain: defaultGccGraphToolchain(),
+});
+
 export const js = jsSources({ base: "rules/c/cmake/example" });

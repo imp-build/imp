@@ -66,10 +66,33 @@ comments for why), so an unrelated target's rebuild doesn't force this
 one's. CTest itself is always run rather than replaying a previous
 successful result.
 
-## Known gap: raw ccLibrary()/ccBinary() interop
+## Consuming a discovered target from raw ccLibrary()/ccBinary()
 
 A discovered CMake target's `project.get(name, BUILD)` is a plain resolved
-graph handle — unlike a raw `ccLibrary()` result, it does not also carry
-`transitiveArchives`/`transitiveIncludeDirs`, so `ccBinary({deps:
-[project.get("mylib", BUILD)]})` does not work transparently yet. Tracked as
-a follow-up (see the repo's own issue tracker); not solved by this rule.
+graph handle — unlike a raw `ccLibrary()` result, it does not itself carry
+`transitiveArchives`/`transitiveIncludeDirs`, so a bare
+`project.get("mylib", BUILD)` does not work directly as a `deps` entry.
+Wrap it with `cmakeLibraryDep()` instead:
+
+```js
+import { cmakeLibraryDep, cmakeProject } from "//rules/c/cmake";
+import { ccBinary } from "//rules/c";
+
+const project = cmakeProject({ path: "third_party/mylib" });
+
+export const app = ccBinary({
+    srcs: ["main.c"],
+    deps: [
+        cmakeLibraryDep(project, "mylib", {
+            includeDirs: ["third_party/mylib/include"],
+        }),
+    ],
+});
+```
+
+`includeDirs` is supplied by the caller rather than auto-discovered: CMake's
+Ninja graph isn't parsed for per-target `-I` flags today, and even if it
+were, that data is only known once the CMake configure task has actually
+run — too late for `ccTask()`'s own compiler-flag construction, which needs
+plain strings synchronously at `BUILD.js` declare time. This is the same
+kind of manual knowledge a plain `ccLibrary({hdrs})` glob already requires.
