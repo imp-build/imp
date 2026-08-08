@@ -2960,6 +2960,35 @@ function _trace_label_handler(handler, goalName, selectorAddress, ctx) {
 	return _contextual_thenable(promise, callerContextId);
 }
 
+// A `package`-goal label handler that returns artifact(...) is publishing,
+// the same signal legacy target products and graph-native [PACKAGE] roots
+// already use (rules/workflows/package/index.js's packageGoal/
+// graphPackageGoal). Materializing it here, centrally, means individual
+// handlers don't each have to duplicate their own writeWorkspace() call —
+// mutation stays in the one top-level dispatcher, not scattered across
+// every attached handler (see rules/odin/index.js's packageOdinPackage,
+// simplified alongside this change to just forward its artifact()).
+function _materialize_package_artifacts(results, selectorAddress) {
+	const artifacts = results.filter(
+		(result) =>
+			result && typeof result === "object" && result.__imp_artifact === true,
+	);
+	if (artifacts.length > 1) {
+		throw new Error(
+			`${selectorAddress}#package: more than one attached handler returned artifact(...) — only one handler may publish per label`,
+		);
+	}
+	if (artifacts.length === 1) {
+		const [{ digest, from }] = artifacts;
+		const withoutSlashes = selectorAddress.replace(/^\/\//, "");
+		const [dir, name] = withoutSlashes.split(":");
+		const destination = dir ? `dist/${dir}/${name}` : `dist/${name}`;
+		writeWorkspace(destination, digest, { from });
+		logInfo(`${selectorAddress}#package -> ${destination}`);
+	}
+	return results;
+}
+
 function _dispatch_label_handlers(labelId, goalName, selectorAddress) {
 	const handlers = _label_handlers.get(`${labelId}::${goalName}`) || [];
 	const ctx = {
@@ -2968,10 +2997,14 @@ function _dispatch_label_handlers(labelId, goalName, selectorAddress) {
 		args: runArgs(),
 		mode: configuration("imp.mode", {}),
 	};
-	return Promise.all(
+	const dispatched = Promise.all(
 		handlers.map((handler) =>
 			_trace_label_handler(handler, goalName, selectorAddress, ctx),
 		),
+	);
+	if (goalName !== "package") return dispatched;
+	return dispatched.then((results) =>
+		_materialize_package_artifacts(results, selectorAddress),
 	);
 }
 globalThis.__imp_dispatch_label_handlers = _dispatch_label_handlers;
