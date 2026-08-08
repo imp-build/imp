@@ -10702,6 +10702,96 @@ export const build = product(K_root_nesting_test, BUILD, toolName("root-nesting-
         assert_eq!(run_parents["run //:lib"], Some(memo_ids["build //:lib"]));
     }
 
+    /// imp#25. Two roots awaiting one shared dependency both attach to the
+    /// same in-flight memo promise, so their `_contextual_thenable` wraps
+    /// drain back to back. Each wrap installs its own context as the ambient
+    /// one for the continuation it is about to unblock (QuickJS gives no hook
+    /// at async resumption — see _contextual_thenable), so releasing the JS
+    /// lane before that continuation runs let the second wrap decide the
+    /// context for both. The loser's post-await `run()` then landed at
+    /// context 0 and was attributed to whatever else happened to be in
+    /// flight.
+    ///
+    /// Both //:a and //:b are in flight throughout, which is the point: this
+    /// cannot be rescued by guessing "the one active context", the way the
+    /// single-dependency shape in
+    /// live_goal_nests_selected_dependencies_under_first_caller could be.
+    #[tokio::test]
+    async fn shared_dependency_keeps_post_await_run_ownership_per_caller() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { target, product, run, BUILD, targetKind, toolName } from "imp:core";
+const K_shared_dep_context_test = targetKind("shared-dep-context-test");
+
+export const lib = target({ kind: "shared-dep-context-test" });
+export const a = target({ kind: "shared-dep-context-test", attrs: { dep: lib } });
+export const b = target({ kind: "shared-dep-context-test", attrs: { dep: lib } });
+
+export const build = product(K_shared_dep_context_test, BUILD, toolName("shared-dep-context-test-tool"), async function do_build(handle) {
+    if (handle.attrs.dep) {
+        await build(handle.attrs.dep);
+    }
+    await run({
+        argv: ["sh", "-c", "true"],
+        display: `run ${handle.label.address}`,
+        impure: true,
+    });
+}, { display: "build {0}", level: "info" });
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = imp_scheduler::Scheduler::new(
+            2,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let selectors = vec![":a".to_owned(), ":b".to_owned()];
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &selectors,
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+
+        let mut memo_ids = BTreeMap::new();
+        let mut run_parents = BTreeMap::new();
+        while let Ok(event) = rx.try_recv() {
+            if let imp_scheduler::TaskEvent::Pending {
+                id,
+                parent,
+                display,
+                ..
+            } = event
+            {
+                if display.starts_with("build //:") {
+                    memo_ids.insert(display, id);
+                } else if display.starts_with("run //:") {
+                    run_parents.insert(display, parent);
+                }
+            }
+        }
+
+        assert_eq!(memo_ids.len(), 3);
+        assert_eq!(run_parents.len(), 3);
+        assert_eq!(run_parents["run //:a"], Some(memo_ids["build //:a"]));
+        assert_eq!(run_parents["run //:b"], Some(memo_ids["build //:b"]));
+        assert_eq!(run_parents["run //:lib"], Some(memo_ids["build //:lib"]));
+    }
+
     #[tokio::test]
     async fn promise_all_fanout_restores_parent_context_after_await() {
         let root = tempfile::tempdir().unwrap();
