@@ -694,7 +694,7 @@ export function configuration(namespace, fallback = undefined) {
 	// Record the read on the current call frame so run()'s cache-key salt
 	// (see run() below) can be scoped to only the namespaces actually read,
 	// instead of the whole workspace_config map.
-	_effective_context_entry(true).ctx.readNamespaces.add(namespace);
+	_effective_context_entry().ctx.readNamespaces.add(namespace);
 	const encoded = __host_configuration(namespace);
 	_trace_effect({
 		event: "effect",
@@ -828,7 +828,7 @@ export function modeAxis(name) {
 			`modeAxis: axis "${name}" was not declared via defineModeAxis, or has not been resolved yet`,
 		);
 	}
-	const overrides = _effective_context_entry(true).ctx.modeOverrides;
+	const overrides = _effective_context_entry().ctx.modeOverrides;
 	return overrides && name in overrides ? overrides[name] : cfg[name];
 }
 
@@ -1027,7 +1027,7 @@ export function workerStart(name, opts) {
 	// run()/memo(): __host_worker_start() is a raw host async call with no
 	// imp_core-tracked promise of its own, so nothing else restores the
 	// caller's context once this resumes.
-	const contextEntry = _effective_context_entry(true);
+	const contextEntry = _effective_context_entry();
 	const promise = (async () => {
 		const json = await __host_worker_start(name, {
 			argv: opts.argv,
@@ -1953,7 +1953,6 @@ let _memo_contexts = new Map([
 		},
 	],
 ]);
-let _active_memo_context_ids = new Set();
 let _promise_contexts = new WeakMap();
 let _promise_context_stack = [];
 let _promise_job_context_stack = [];
@@ -2008,8 +2007,19 @@ globalThis.__imp_set_js_workers = function (count) {
 // context here, symmetrically around the synchronous reentrant call,
 // closes that gap without touching the synchronous nesting cycle detection
 // relies on.
+//
+// Waiters that hold the lane past their own microtask (holdsContext, set by
+// _with_js_lane's deferRelease callers) are the exception, and restoring over
+// them would defeat the point: the context they install is what the
+// continuation they just unblocked has to inherit, so it must outlive this
+// grant exactly the way it outlives _call_with_context. Their release is
+// deferred too, so the next waiter cannot overwrite it in the meantime.
 function _grant_js_lane(slot, waiter) {
 	_emit_js_lane("start", slot, waiter.id, waiter.label);
+	if (waiter.holdsContext) {
+		waiter.run(slot);
+		return;
+	}
 	const prevContextId = _current_memo_context_id;
 	const prevOverride = _promise_context_override;
 	try {
@@ -2031,11 +2041,12 @@ function _take_js_lane(id, label) {
 	return null;
 }
 
-function _enqueue_js_lane(id, label, run) {
+function _enqueue_js_lane(id, label, run, holdsContext) {
 	return new Promise((resolve, reject) => {
 		_js_lane_queue.push({
 			id: id || 0,
 			label: label || "js",
+			holdsContext,
 			run: (slot) => {
 				try {
 					resolve(run(slot));
@@ -2057,22 +2068,38 @@ function _release_js_lane(slot, id) {
 	}
 }
 
-function _with_js_lane(id, label, fn) {
+// `deferRelease` holds the lane one microtask past fn(), which callers whose
+// fn() settles somebody's awaited promise must use. See _contextual_thenable
+// for why: fn() only *schedules* the continuation that consumes the context
+// it just installed, so releasing synchronously lets the next lane user
+// overwrite that context before the continuation ever reads it.
+//
+// Releasing from a microtask queued after fn() returns is enough, because the
+// continuation was queued during fn() and the job queue is FIFO: continuation
+// first, release second. Callers that don't settle anything (memo evaluation,
+// label handlers) release synchronously, which memo cycle detection depends
+// on — see _grant_js_lane.
+function _with_js_lane(id, label, fn, deferRelease = false) {
 	const run = (slot) => {
+		let result;
 		try {
-			const result = fn();
-			_release_js_lane(slot, id);
-			return result;
+			result = fn();
 		} catch (error) {
 			_release_js_lane(slot, id);
 			throw error;
 		}
+		if (deferRelease) {
+			Promise.resolve().then(() => _release_js_lane(slot, id));
+		} else {
+			_release_js_lane(slot, id);
+		}
+		return result;
 	};
 	const slot = _take_js_lane(id, label);
 	if (slot !== null) {
 		return Promise.resolve(run(slot));
 	}
-	return _enqueue_js_lane(id, label, run);
+	return _enqueue_js_lane(id, label, run, deferRelease);
 }
 
 function _context_label(contextId) {
@@ -2084,6 +2111,15 @@ function _context_owner(contextId) {
 	return ctx && ctx.owner !== null ? ctx.owner : 0;
 }
 
+// Asymmetric on purpose: it installs contextId and, on success, leaves it
+// installed. fn() here settles an awaiting async function's promise, and that
+// function resumes in a later job that QuickJS gives us no hook for (see
+// _contextual_thenable), so the ambient context standing when fn() returns is
+// the only thing the resumption can inherit. The saved values are pushed for
+// the next __imp_promise_context_after to unwind instead — sloppy, since that
+// "after" belongs to an unrelated adoption job, but the restore has to outlive
+// this call by construction. Only the throwing path unwinds here, since a
+// rejection resumes nobody.
 function _call_with_context(contextId, fn) {
 	const prevOverride = _promise_context_override;
 	const prevContextId = _current_memo_context_id;
@@ -2140,34 +2176,21 @@ function _current_context() {
 	return ctx;
 }
 
-function _single_active_context_id() {
-	let only = null;
-	for (const contextId of _active_memo_context_ids) {
-		if (only !== null) return null;
-		only = contextId;
-	}
-	return only;
+// Context 0 means "no memo owns this" and is reported as such. It used to be
+// treated as "probably whichever memo is the only one currently in flight",
+// which is wrong twice over: top-level dispatcher code legitimately runs at
+// context 0 and owns nothing (rules/rust/workspace_expansion.js's create()
+// callback fans out ~20 calls from there), and a memo that reached context 0
+// through the imp#25 path would be handed back its own context and recorded
+// as its own caller. Both showed up as reads attributed to an unrelated
+// target, which is the whole bug — a guess that is right often enough to hide
+// the real propagation gap is worse than no guess.
+function _effective_context_entry() {
+	return { id: _current_memo_context_id, ctx: _current_context() };
 }
 
-function _effective_context_entry(useSingleActive = false) {
-	const ctx = _current_context();
-	if (ctx.owner !== null || ctx.stack.length > 0) {
-		return { id: _current_memo_context_id, ctx };
-	}
-	if (useSingleActive && _current_memo_context_id === 0) {
-		const activeContextId = _single_active_context_id();
-		if (activeContextId !== null) {
-			return {
-				id: activeContextId,
-				ctx: _memo_contexts.get(activeContextId) || ctx,
-			};
-		}
-	}
-	return { id: _current_memo_context_id, ctx };
-}
-
-function _effective_context(useSingleActive = false) {
-	return _effective_context_entry(useSingleActive).ctx;
+function _effective_context() {
+	return _effective_context_entry().ctx;
 }
 
 function _fork_context(owner, baseContext = _effective_context(), label = "") {
@@ -2176,7 +2199,6 @@ function _fork_context(owner, baseContext = _effective_context(), label = "") {
 	ctx.owner = owner;
 	_memo_contexts.set(id, ctx);
 	_memo_context_labels.set(id, label);
-	_active_memo_context_ids.add(id);
 	return id;
 }
 
@@ -2191,7 +2213,7 @@ function _with_context(contextId, fn) {
 }
 
 function _with_mode_overrides(overrides, fn) {
-	const base = _effective_context_entry(true).ctx;
+	const base = _effective_context_entry().ctx;
 	const contextId = ++_memo_context_counter;
 	const ctx = _clone_context(base);
 	ctx.modeOverrides = Object.freeze({
@@ -2208,6 +2230,30 @@ function _is_object_key(value) {
 	);
 }
 
+// Returning a plain-object thenable rather than a native promise is load
+// bearing, and not only for the asymmetric restore described at memo(): it is
+// the *only* way context survives an `await` at all. QuickJS fires
+// PromiseHookType::Before/After from exactly one place — the thenable-adoption
+// job (`js_promise_resolve_thenable_job`) — and never around ordinary promise
+// reactions or async-function resumptions. So `await someMemoCall()` reaches
+// __imp_promise_context_before only because the awaited value is a thenable
+// the engine has to adopt; awaiting a native promise would be invisible to the
+// hook entirely.
+//
+// That adoption job hands us the awaiting capability's resolve function, and
+// wrap() below calls it with contextId installed as the ambient context. The
+// async function resumes in a *later*, unhooked job, so the only thing telling
+// it which target it belongs to is that ambient context still standing —
+// _call_with_context deliberately does not restore it on the way out (see
+// there).
+//
+// Which makes the ambient a shared resource between the wrap that set it and
+// the continuation that reads it, so the lane has to stay held across that
+// gap. Two callers awaiting one memo promise (a caller plus a top-level
+// selector that hit the same in-flight memo, say) otherwise get both of their
+// wraps drained back to back, and whichever ran last decides the context for
+// both continuations. That is imp#25: the loser's post-await run()/
+// configuration() reads land at context 0 and get misattributed.
 function _contextual_thenable(promise, contextId) {
 	const nativePromise = Promise.resolve(promise);
 	if (_is_object_key(nativePromise) && !_promise_contexts.has(nativePromise)) {
@@ -2220,6 +2266,7 @@ function _contextual_thenable(promise, contextId) {
 				_context_owner(contextId),
 				_context_label(contextId),
 				() => _call_with_context(contextId, () => callback(value)),
+				true,
 			);
 		};
 	};
@@ -2397,7 +2444,6 @@ function _pop_call(key_string, contextId) {
 	if (ctx === undefined) return;
 	ctx.stack.pop();
 	ctx.stackSet.delete(key_string);
-	_active_memo_context_ids.delete(contextId);
 	_memo_context_labels.delete(contextId);
 }
 
@@ -2904,7 +2950,7 @@ function _trace_label_handler(handler, goalName, selectorAddress, ctx) {
 	const display = `${selectorAddress}#${goalName}@${handler.identity.split("@")[0]}`;
 	_key_display.set(key_string, display);
 
-	const callerContext = _effective_context_entry(true);
+	const callerContext = _effective_context_entry();
 	const callerContextId = callerContext.id;
 	const owner = callerContext.ctx.owner;
 	const nodeId = ++_memo_node_counter;
@@ -3408,7 +3454,7 @@ export function memo(fn, opts) {
 			}
 		}
 		const label = _key_display.get(key_string) || key_string;
-		const callerContext = _effective_context_entry(true);
+		const callerContext = _effective_context_entry();
 		const callerContextId = callerContext.id;
 		const owner = callerContext.ctx.owner;
 		// Record the edge before consulting the in-process table. A callee hit
@@ -3488,7 +3534,6 @@ export function resetMemoState() {
 			},
 		],
 	]);
-	_active_memo_context_ids = new Set();
 	_promise_contexts = new WeakMap();
 	_promise_context_stack = [];
 	_promise_job_context_stack = [];
@@ -3580,7 +3625,7 @@ function _eval_fileset(fs) {
 	if (!fs || fs.__fileset !== true)
 		throw new Error("paths() requires a FileSet");
 	if (fs.__digest !== undefined) {
-		_effective_context_entry(true).ctx.readFilesets.push({
+		_effective_context_entry().ctx.readFilesets.push({
 			spec: _fileset_spec_only(fs),
 			resolved_digest: fs.__digest,
 		});
@@ -3626,7 +3671,7 @@ function _eval_fileset(fs) {
 	}
 	fs.__files = result.files;
 	fs.__digest = result.digest;
-	_effective_context_entry(true).ctx.readFilesets.push({
+	_effective_context_entry().ctx.readFilesets.push({
 		spec: _fileset_spec_only(fs),
 		resolved_digest: result.digest,
 	});
@@ -3736,7 +3781,7 @@ export function readFileInDigest(digest, path) {
  * @returns {void}
  */
 export function writeWorkspace(path, digest, opts) {
-	const contextEntry = _effective_context_entry(true);
+	const contextEntry = _effective_context_entry();
 	_trace_effect_in_context(
 		{ event: "effect", kind: "write_workspace", path },
 		contextEntry.ctx,
@@ -3780,7 +3825,7 @@ export function artifact(digest, opts) {
  * @returns {{changed: string[], checked: string[]}}
  */
 export function applyBuildEdits({ edits, check }) {
-	const contextEntry = _effective_context_entry(true);
+	const contextEntry = _effective_context_entry();
 	if (!check) {
 		_trace_effect_in_context(
 			{ event: "effect", kind: "apply_build_edits" },
@@ -3827,7 +3872,7 @@ export const file_set = {
 // are passed through unchanged.
 function _materialise_inputs(inputs) {
 	const result = [];
-	const context = _effective_context_entry(true).ctx;
+	const context = _effective_context_entry().ctx;
 	for (const input of inputs || []) {
 		if (input && input.__fileset === true) {
 			const spec = _fileset_spec_only(input);
@@ -3894,7 +3939,7 @@ export function read_file(path) {
 	// Same shape as configuration()'s readNamespaces recording — lets a
 	// memo trace's input_specs include exactly the files this
 	// call frame read.
-	_effective_context_entry(true).ctx.readFiles.add(path);
+	_effective_context_entry().ctx.readFiles.add(path);
 	_trace_effect({ event: "effect", kind: "read_file", path });
 	return result;
 }
@@ -3979,7 +4024,7 @@ export function run(opts) {
 	if (typeof _graphPhase !== "undefined" && _graphPhase === "expansion") {
 		throw new Error("graph: sandbox actions are not allowed while an expansion constructs graph nodes");
 	}
-	const contextEntry = _effective_context_entry(true);
+	const contextEntry = _effective_context_entry();
 	const inputs = _materialise_inputs(opts.inputs);
 	const outputs = opts.outputs ?? [];
 	if (
@@ -4091,7 +4136,7 @@ export function group(items) {
 	if (!Array.isArray(items)) {
 		throw new Error("group(items) requires an array");
 	}
-	const contextEntry = _effective_context_entry(true);
+	const contextEntry = _effective_context_entry();
 	_trace_effect_in_context(
 		{ event: "effect", kind: "group", count: items.length },
 		contextEntry.ctx,
@@ -4100,7 +4145,7 @@ export function group(items) {
 }
 
 export function workspace_mutation(opts) {
-	const contextEntry = _effective_context_entry(true);
+	const contextEntry = _effective_context_entry();
 	const trace_entry = {
 		event: "effect",
 		kind: "workspace_mutation",
