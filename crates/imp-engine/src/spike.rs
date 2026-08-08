@@ -5145,7 +5145,26 @@ fn package_path_from_stack(
     rules_source: &RulesSource,
     stack: &str,
 ) -> Result<String> {
-    let mut saw_rule_module = false;
+    // ES module evaluation is strictly dependency-ordered: every module a
+    // frame belongs to has already fully finished its own top-level
+    // evaluation before that frame could run, so the *outermost* `Build`-
+    // kind frame on the stack is always the one BUILD.js whose top-level
+    // body is actually mid-evaluation right now — regardless of how many
+    // rule-library or workspace-helper calls sit between it and this
+    // packagePath() call. Nearer Build frames are just ordinary function
+    // calls into already-loaded modules (e.g. a helper defined in one
+    // BUILD.js and called from another) and don't indicate "current
+    // module" at all, so this walks the whole stack and keeps the last
+    // Build match rather than returning at the first one. `Build`-vs-not is
+    // decided by resolving each frame and checking its real ModuleKind, not
+    // by guessing from a `//rules/...` prefix — this repo's own rule
+    // library keeps real BUILD.js files under a top-level `rules/`
+    // directory, so a prefix guess misclassifies them (issue #71).
+    // Relative (`./`, `../`) imports are rejected by the loader, so every
+    // frame that matters is either `imp:core`/native or `//`-rooted —
+    // nothing else can appear here.
+    let mut package_path = None;
+    let mut saw_workspace_module = false;
     for line in stack.lines() {
         let line = line.trim();
         let rest = line.strip_prefix("at ").unwrap_or(line);
@@ -5158,36 +5177,40 @@ fn package_path_from_stack(
         if module == "imp:core" || !module.starts_with("//") {
             continue;
         }
-        if module.starts_with("//rules/") {
-            saw_rule_module = true;
+        let Ok(resolution) = resolve_workspace_module(workspace_root, rules_source, module) else {
             continue;
-        }
-        let resolution = match resolve_workspace_module(workspace_root, rules_source, module) {
-            Ok(resolution) => resolution,
-            Err(_) => continue,
         };
+        // Only a module physically inside the workspace has a meaningful
+        // workspace-relative package path — a built-in rule module served
+        // from the external rules library root doesn't, and isn't a real
+        // candidate; skip it and keep looking for an outer frame.
+        let Some(parent) = resolution.path.parent() else {
+            continue;
+        };
+        let Ok(relative) = parent.strip_prefix(workspace_root) else {
+            continue;
+        };
+        saw_workspace_module = true;
         if resolution.kind != ModuleKind::Build {
             continue;
         }
-        let relative = resolution
-            .path
-            .parent()
-            .and_then(|parent| parent.strip_prefix(workspace_root).ok())
-            .ok_or_else(|| anyhow::anyhow!("calling module '{module}' is not in the workspace"))?;
-        if relative.as_os_str().is_empty() {
-            return Ok(".".to_owned());
-        }
-        return Ok(relative
-            .to_string_lossy()
-            .replace(std::path::MAIN_SEPARATOR, "/"));
+        package_path = Some(if relative.as_os_str().is_empty() {
+            ".".to_owned()
+        } else {
+            relative
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        });
     }
-    // Rule unit tests construct helpers outside a BUILD.js. Their existing
-    // explicit paths are workspace-relative, so retain that compatibility
-    // until those rulesets themselves move to graph construction.
-    if saw_rule_module {
-        return Ok(".".to_owned());
+    // No BUILD.js anywhere in the chain — e.g. a rule constructor called
+    // directly from a unit test, with no wrapping BUILD.js at all. Default
+    // to the workspace root rather than erroring, matching how an explicit,
+    // workspace-root-relative `path:`/`base:` opt has always been usable in
+    // that situation.
+    if package_path.is_none() && saw_workspace_module {
+        package_path = Some(".".to_owned());
     }
-    bail!("packagePath() requires a calling workspace BUILD module")
+    package_path.ok_or_else(|| anyhow::anyhow!("packagePath() requires a calling workspace module"))
 }
 
 /// Rule group a product module belongs to — its first path segment under
@@ -7484,6 +7507,226 @@ export const verify = { [BUILD]: inspect };
         assert!(!p.join("generated/stamp.txt").exists());
     }
 
+    #[tokio::test]
+    async fn graph_package_path_resolves_correctly_under_a_rules_prefixed_package() {
+        // A workspace BUILD.js whose own package address happens to start
+        // with `//rules/...` (this repo's own rules/ tree dogfoods exactly
+        // this) must not be mistaken for a rule-library helper frame and
+        // skipped — packagePath() should still resolve to the BUILD.js's own
+        // directory, not fall through to "." (issue #71).
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(&p.join("rules/widget/widget.txt"), "widget");
+        write_file(
+            &p.join("rules/widget/BUILD.js"),
+            r#"
+import { packagePath } from "imp:core";
+import { asset } from "//rules/asset";
+
+globalThis.widgetPackagePath = packagePath();
+export const noop = asset({ base: packagePath(), srcs: ["*.txt"] });
+"#,
+        );
+
+        let live = load_workspace_with_rules(p, RulesSource::directory(repo_rules_dir()))
+            .await
+            .unwrap();
+        run_goal_live(&live, p, "build", &["//rules/widget:noop".to_owned()])
+            .await
+            .unwrap();
+        let package_path = live
+            .ctx
+            .async_with(async |ctx| ctx.globals().get::<_, String>("widgetPackagePath"))
+            .await
+            .unwrap();
+        assert_eq!(package_path, "rules/widget");
+    }
+
+    #[tokio::test]
+    async fn graph_package_path_resolves_to_the_consuming_build_js_through_a_helper() {
+        // A helper function *defined* in one BUILD.js (helper/BUILD.js) but
+        // *called* from a different BUILD.js (consumer/BUILD.js), where the
+        // helper relies on ccLibrary()'s packagePath()-as-default. The
+        // package that owns the resulting target is the one actually being
+        // processed (consumer) — not wherever the helper happens to live
+        // (issue #71: a naive "nearest BUILD.js frame" stack walk gets this
+        // backwards, since helper/BUILD.js is itself a Build module and
+        // sits closer to packagePath() on the call stack).
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join("helper/BUILD.js"),
+            r#"
+import { packagePath } from "imp:core";
+import { ccLibrary } from "//rules/c";
+import { zigGraphToolchain } from "//rules/c/zig";
+
+export function makeLib() {
+    globalThis.helperSawPackagePath = packagePath();
+    return ccLibrary({ srcs: ["x.c"], toolchain: zigGraphToolchain("0.16.0") });
+}
+"#,
+        );
+        // ccLibrary()'s default path = packagePath() must resolve to
+        // "consumer" (the package actually being processed), so x.c has to
+        // live there, not under helper/ where makeLib() is defined.
+        write_file(&p.join("consumer/x.c"), "int x(void){return 0;}");
+        write_file(
+            &p.join("consumer/BUILD.js"),
+            r#"
+import { makeLib } from "//helper";
+
+export const mylib = makeLib();
+"#,
+        );
+
+        let live = load_workspace_with_rules(p, RulesSource::directory(repo_rules_dir()))
+            .await
+            .unwrap();
+        run_goal_live(&live, p, "build", &["//consumer:mylib".to_owned()])
+            .await
+            .unwrap();
+        let helper_saw = live
+            .ctx
+            .async_with(async |ctx| ctx.globals().get::<_, String>("helperSawPackagePath"))
+            .await
+            .unwrap();
+        assert_eq!(helper_saw, "consumer");
+    }
+
+    #[tokio::test]
+    async fn graph_build_js_can_import_sibling_child_and_parent_files_by_relative_path() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join("shared/BUILD.js"),
+            r#"export const flavor = "vanilla";"#,
+        );
+        write_file(
+            &p.join("pkg/sibling.js"),
+            r#"export const siblingValue = "sibling";"#,
+        );
+        write_file(
+            &p.join("pkg/child/BUILD.js"),
+            r#"export const childValue = "child";"#,
+        );
+        write_file(
+            &p.join("pkg/BUILD.js"),
+            r#"
+import { siblingValue } from "./sibling.js";
+import { childValue } from "./child";
+import { flavor } from "../shared";
+import { BUILD, output, task } from "imp:core";
+
+const inspection = task({
+    inputs: {},
+    outputs: { value: output.value() },
+    async run() {
+        globalThis.relativeImportResults = [siblingValue, childValue, flavor];
+        return { value: null };
+    },
+});
+
+export const check = { [BUILD]: inspection };
+"#,
+        );
+
+        let live = load_workspace_with_rules(p, RulesSource::directory(repo_rules_dir()))
+            .await
+            .unwrap();
+        run_goal_live(&live, p, "build", &["//pkg:check".to_owned()])
+            .await
+            .unwrap();
+        let results = live
+            .ctx
+            .async_with(async |ctx| {
+                ctx.eval::<String, _>("JSON.stringify(globalThis.relativeImportResults)")
+            })
+            .await
+            .unwrap();
+        assert_eq!(results, r#"["sibling","child","vanilla"]"#);
+    }
+
+    #[tokio::test]
+    async fn graph_package_path_inside_expand_create_resolves_to_the_declaring_build_js() {
+        // expand()'s create() runs later, asynchronously, driven by the
+        // graph executor — the declaring BUILD.js's frame is off the call
+        // stack entirely by then. packagePath() must still resolve
+        // correctly there, via the captured-at-declare-time ambient value
+        // (graph_core.js's _graphAmbientPackagePath), not stack-walking.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join("pkg/BUILD.js"),
+            r#"
+import { BUILD, expand, output, packagePath, task } from "imp:core";
+
+const expansion = expand({
+    inputs: {},
+    async create() {
+        globalThis.expandSawPackagePath = packagePath();
+        return {
+            child: {
+                [BUILD]: task({
+                    inputs: {},
+                    outputs: { value: output.value() },
+                    async run() {
+                        globalThis.taskSawPackagePath = packagePath();
+                        return { value: null };
+                    },
+                }),
+            },
+        };
+    },
+});
+
+export const check = { [BUILD]: expansion.get("child", BUILD) };
+"#,
+        );
+
+        let live = load_workspace_with_rules(p, RulesSource::directory(repo_rules_dir()))
+            .await
+            .unwrap();
+        run_goal_live(&live, p, "build", &["//pkg:check".to_owned()])
+            .await
+            .unwrap();
+        let (expand_saw, task_saw) = live
+            .ctx
+            .async_with(async |ctx| {
+                Ok::<_, rquickjs::Error>((
+                    ctx.globals().get::<_, String>("expandSawPackagePath")?,
+                    ctx.globals().get::<_, String>("taskSawPackagePath")?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(expand_saw, "pkg");
+        assert_eq!(task_saw, "pkg");
+    }
+
+    #[tokio::test]
+    async fn graph_relative_import_escaping_the_workspace_root_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join("pkg/BUILD.js"),
+            r#"import { x } from "../../outside";"#,
+        );
+
+        let error = load_workspace_with_rules(p, RulesSource::directory(repo_rules_dir()))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("escapes the workspace"),
+            "{error:#}"
+        );
+    }
+
     #[test]
     fn graph_package_path_rejects_non_workspace_callers() {
         let root = tempfile::tempdir().unwrap();
@@ -7495,7 +7738,7 @@ export const verify = { [BUILD]: inspect };
         .unwrap_err();
         assert!(error
             .to_string()
-            .contains("requires a calling workspace BUILD module"));
+            .contains("requires a calling workspace module"));
     }
 
     #[tokio::test]
@@ -9303,7 +9546,7 @@ export const ci_only = target({ kind: "odin-toolchain", attrs: { version: "ci" }
     }
 
     #[tokio::test]
-    async fn relative_imports_from_build_files_are_rejected_with_context() {
+    async fn relative_imports_from_build_files_are_resolved() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(
@@ -9322,13 +9565,26 @@ export const ui = asset({ srcs: ["**/*.png"] });
 "#,
         );
 
-        let error = format!("{:#}", load_workspace(p).await.unwrap_err());
-        assert!(
-            error.contains("relative import './rules/asset' is prohibited in BUILD.js"),
-            "{error}"
+        let workspace = load_workspace(p).await.unwrap();
+        let ui = workspace.targets.get("//:ui").expect("//:ui");
+        assert_eq!(ui.kind, "asset");
+    }
+
+    #[tokio::test]
+    async fn relative_import_of_an_unknown_module_reports_context() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { x } from "./missing";
+"#,
         );
+
+        let error = format!("{:#}", load_workspace(p).await.unwrap_err());
+        assert!(error.contains("'./missing'"), "{error}");
         assert!(error.contains("BUILD.js"), "{error}");
-        assert!(error.contains("//..."), "{error}");
     }
 
     #[tokio::test]

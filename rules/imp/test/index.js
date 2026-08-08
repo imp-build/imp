@@ -1,4 +1,10 @@
-import { files, task, TEST } from "imp:core";
+import {
+	files,
+	packagePath,
+	task,
+	TEST,
+	withCapturedPackagePath,
+} from "imp:core";
 import { impTool } from "//rules/imp/self-tool";
 
 const suites = [];
@@ -169,7 +175,18 @@ export function test(name, optionsOrFn, maybeFn) {
 			`test isolation must be "runtime" or "process", got ${JSON.stringify(isolation)}`,
 		);
 	}
-	tests.push({ name: fullName(name), fn, fixture, isolation });
+	tests.push({
+		name: fullName(name),
+		fn,
+		fixture,
+		isolation,
+		// runTestCase() invokes fn() well after this module's own top-level
+		// evaluation has finished (it's called from a separate test-running
+		// driver, past the `await import(testModule)` that registered it) —
+		// so packagePath() inside fn() needs this captured now, not
+		// recomputed later. See graph_core.js's withCapturedPackagePath().
+		packagePath: packagePath(),
+	});
 }
 
 export const it = test;
@@ -493,7 +510,7 @@ export async function runTestCase(testModule, ordinal) {
 	if (entry === undefined) {
 		throw new Error(`${testModule} has no test at ordinal ${ordinal}`);
 	}
-	await entry.fn();
+	await withCapturedPackagePath(entry.packagePath, () => entry.fn());
 }
 
 // The rules-test subprocess is a coordinator. It discovers these modules and
