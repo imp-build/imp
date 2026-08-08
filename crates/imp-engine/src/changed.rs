@@ -5,7 +5,9 @@
 //!
 //! - The recorded JS module import graph (a changed rule module invalidates
 //!   every package that transitively imports it; a changed BUILD.js
-//!   re-selects exactly its own package).
+//!   re-selects exactly its own package). Covers both legacy
+//!   `target()`-declared targets and exported graph-native roots (#65) — a
+//!   package's ownership isn't which target model it uses.
 //! - The workspace-scoped memo trace (#51, `trace_changed::TraceIndex`): a target's
 //!   own goal action is itself a memoized call, so "is target T stale for
 //!   goal G" reduces to walking T's own trace record — and its
@@ -297,7 +299,10 @@ pub fn git_changed_files(workspace_root: &Path, since: &str) -> Result<Vec<Strin
 /// Map changed workspace-relative paths to target addresses via BUILD.js
 /// package membership and the JS module import graph — a changed rule
 /// module invalidates every package that (transitively) imports it; a
-/// changed `imp.workspace.js` invalidates everything. Returns the address
+/// changed `imp.workspace.js` invalidates everything. A package's targets
+/// include both legacy `target()`-declared addresses and exported
+/// graph-native roots (`workspace.graph.roots`) — the import graph doesn't
+/// distinguish target models, so neither should this. Returns the address
 /// set plus the subset of `changed` this mechanism accounted for (the
 /// complement, minus whatever the memo trace separately covers,
 /// is reported to the caller as `unowned`).
@@ -360,6 +365,7 @@ pub(crate) fn module_graph_targets(
             .targets
             .keys()
             .chain(workspace.label_primary_addresses.values())
+            .chain(workspace.graph.roots.iter().map(|r| &r.address))
             .cloned()
             .collect();
     }
@@ -384,6 +390,11 @@ fn insert_package_roots(workspace: &Workspace, scope: &str, owners: &mut BTreeSe
             owners.insert(address.clone());
         }
     }
+    for root in &workspace.graph.roots {
+        if root.address.starts_with(&prefix) {
+            owners.insert(root.address.clone());
+        }
+    }
 }
 
 /// All modules reachable from `seeds` by walking importer edges backwards,
@@ -406,6 +417,7 @@ fn reverse_importer_closure(graph: &ImportGraph, seeds: &BTreeSet<String>) -> BT
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::GraphRoot;
     use crate::spike::Target;
 
     fn target(address: &str) -> Target {
@@ -416,6 +428,16 @@ mod tests {
             sources: Vec::new(),
             dependencies: Vec::new(),
             js_id: 0,
+        }
+    }
+
+    fn graph_root(address: &str) -> GraphRoot {
+        GraphRoot {
+            address: address.to_owned(),
+            workflow: "build".to_owned(),
+            facet: None,
+            handle_id: 0,
+            is_default: true,
         }
     }
 
@@ -487,6 +509,45 @@ mod tests {
                 "//app:legacy".to_owned(),
                 "//lib:generated".to_owned(),
                 "//lib:legacy".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn changed_build_js_and_rule_module_own_graph_native_roots() {
+        // #65: a package's ownership must not depend on whether its targets
+        // are legacy `target()`-declared or exported graph-native roots.
+        let mut ws = workspace(vec![target("//app:legacy")]);
+        ws.graph.roots = vec![graph_root("//app:hello"), graph_root("//lib:hello")];
+
+        assert_eq!(
+            owners_of(&ws, &ImportGraph::default(), &["app/BUILD.js"]),
+            BTreeSet::from(["//app:legacy".to_owned(), "//app:hello".to_owned()])
+        );
+
+        // A changed rule module transitively invalidates a package's graph
+        // roots the same way it does its legacy targets.
+        let mut graph = ImportGraph::default();
+        graph.record_module_file("app/BUILD.js".to_owned(), "//app", Some("//app"));
+        graph.record_module_file("rules/gcc.js".to_owned(), "//rules/gcc", None);
+        graph
+            .importers
+            .entry("//rules/gcc".to_owned())
+            .or_default()
+            .insert("//app".to_owned());
+        assert_eq!(
+            owners_of(&ws, &graph, &["rules/gcc.js"]),
+            BTreeSet::from(["//app:legacy".to_owned(), "//app:hello".to_owned()])
+        );
+
+        // A changed workspace file invalidates everything, graph roots
+        // included.
+        assert_eq!(
+            owners_of(&ws, &ImportGraph::default(), &[WORKSPACE_FILE]),
+            BTreeSet::from([
+                "//app:legacy".to_owned(),
+                "//app:hello".to_owned(),
+                "//lib:hello".to_owned(),
             ])
         );
     }
