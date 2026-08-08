@@ -15,6 +15,52 @@ let _graphTaskInflight = new Map();
 let _graphExpansionInflight = new Map();
 let _graphInvocation = null;
 let _graphPhase = "construction";
+// packagePath() normally derives its answer from the live JS call stack,
+// which only means anything during synchronous BUILD.js evaluation. Any
+// framework that registers a callback for later invocation — task()/
+// expand()'s run()/create(), or a test runner's deferred test bodies (see
+// rules/imp/test) — breaks that: by execution time the declaring module's
+// frame is gone from the stack entirely, not just distant on it. The fix
+// is the same shape everywhere: capture packagePath() once, synchronously,
+// at registration time (still inside the declaring module's real
+// evaluation), and deliver it through this one ambient slot instead,
+// scoped for the callback's duration via withCapturedPackagePath(). Safe
+// even under this engine's real concurrent root resolution (see
+// __imp_execute_graph_handles's Promise.all) because JS is single-threaded
+// — nothing can run between "we set this" and the callback's own
+// synchronous prologue reading it. It only covers that synchronous
+// prologue, though: a packagePath() call made after the callback itself
+// awaits something is calling it out of contract, same as it always has
+// been for anything but synchronous declare-time code.
+let _graphAmbientPackagePath = null;
+
+function _graphCapturePackagePath() {
+	try {
+		return packagePath();
+	} catch (_) {
+		return null;
+	}
+}
+
+/**
+ * Run `fn` with packagePath() resolving to `capturedPath` — captured
+ * earlier, synchronously, via packagePath() itself at the point `fn` was
+ * registered — for `fn`'s own synchronous prologue. Restores the previous
+ * ambient value afterward. For frameworks that defer invoking a callback
+ * past the point where normal stack-based packagePath() resolution would
+ * still find the right module (see this file's own task()/expand() use,
+ * and rules/imp/test's test runner).
+ * @category graph
+ */
+export async function withCapturedPackagePath(capturedPath, fn) {
+	const previous = _graphAmbientPackagePath;
+	_graphAmbientPackagePath = capturedPath;
+	try {
+		return await fn();
+	} finally {
+		_graphAmbientPackagePath = previous;
+	}
+}
 
 function _graphError(message) {
 	return new Error(`graph: ${message}`);
@@ -299,6 +345,7 @@ export function task(opts) {
 		cache,
 		run: opts.run,
 		publicHandle,
+		packagePath: _graphCapturePackagePath(),
 	};
 	_graphTasks.set(id, record);
 	if (cache) _graphTasksByKey.set(key, record);
@@ -573,7 +620,9 @@ async function _graphExecuteTask(taskId, stack) {
 	if (existing) return existing;
 	const promise = (async () => {
 		const previous = _graphPhase;
+		const previousPackagePath = _graphAmbientPackagePath;
 		_graphPhase = "execution";
+		_graphAmbientPackagePath = record.packagePath;
 		try {
 			const value = await record.run(_graphExec(record), Object.freeze(resolved));
 			return _graphValidateTaskResult(record, value);
@@ -581,6 +630,7 @@ async function _graphExecuteTask(taskId, stack) {
 			throw _graphError(`task '${record.display}' failed: ${error?.message || error}`);
 		} finally {
 			_graphPhase = previous;
+			_graphAmbientPackagePath = previousPackagePath;
 		}
 	})();
 	_graphTaskInflight.set(runtimeKey, promise);
@@ -619,6 +669,7 @@ function _graphExpand(opts) {
 		display: opts.display || opts.create.name || `expansion ${id}`,
 		inputs,
 		create: opts.create,
+		packagePath: _graphCapturePackagePath(),
 	});
 	return Object.freeze({
 		__imp_graph_expansion: true,
@@ -656,7 +707,9 @@ async function _graphExecuteExpansion(expansionId, stack) {
 	if (existing) return existing;
 	const promise = (async () => {
 		const previous = _graphPhase;
+		const previousPackagePath = _graphAmbientPackagePath;
 		_graphPhase = "expansion";
+		_graphAmbientPackagePath = record.packagePath;
 		try {
 			const children = await record.create(Object.freeze(resolved));
 			if (children === null || typeof children !== "object" || Array.isArray(children))
@@ -664,6 +717,7 @@ async function _graphExecuteExpansion(expansionId, stack) {
 			return children;
 		} finally {
 			_graphPhase = previous;
+			_graphAmbientPackagePath = previousPackagePath;
 		}
 	})();
 	_graphExpansionInflight.set(runtimeKey, promise);
