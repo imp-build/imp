@@ -399,7 +399,17 @@ pub fn filter_changed_addresses_in(
             .iter()
             .filter(|(address, _)| parsed.matches_address(address))
             .collect();
-        if target_matches.is_empty() && label_matches.is_empty() {
+        // Graph-native addresses (#7) have no `Target`/label entry in
+        // `workspace` at all — they only exist in `addresses` itself (the
+        // already-computed changed set, which may include synthetic
+        // `parent#childKey` ones). Match directly against it the same way
+        // labels are matched by address, rather than requiring a
+        // `workspace.targets`/`workspace.label_addresses` entry to exist.
+        let graph_matches: Vec<&String> = addresses
+            .iter()
+            .filter(|address| parsed.matches_address(address))
+            .collect();
+        if target_matches.is_empty() && label_matches.is_empty() && graph_matches.is_empty() {
             bail!("no target or label matches selector '{selector}'");
         }
         for target in target_matches {
@@ -413,6 +423,9 @@ pub fn filter_changed_addresses_in(
                     selected.insert(primary.clone());
                 }
             }
+        }
+        for address in graph_matches {
+            selected.insert(address.clone());
         }
     }
     Ok(selected)
@@ -507,6 +520,51 @@ mod tests {
             dependencies: Vec::new(),
             js_id: 0,
         }
+    }
+
+    #[test]
+    fn filter_changed_addresses_in_matches_graph_native_addresses_directly() {
+        // #7: a graph-native changed address (e.g. a Cargo crate's test
+        // root) has no `Target`/label entry in `workspace` at all — it must
+        // still be selectable by an exact or package selector, matched
+        // straight against the already-computed changed-address set.
+        let workspace = Workspace::default();
+        let context = SelectorContext::root();
+        let addresses = std::collections::BTreeSet::from([
+            "//crates/imp-execution:imp_execution".to_owned(),
+            "//crates/imp-store:imp_store".to_owned(),
+        ]);
+
+        let exact = filter_changed_addresses_in(
+            &workspace,
+            &addresses,
+            &["//crates/imp-execution:imp_execution".to_owned()],
+            &context,
+        )
+        .unwrap();
+        assert_eq!(
+            exact,
+            std::collections::BTreeSet::from(["//crates/imp-execution:imp_execution".to_owned()])
+        );
+
+        let recursive = filter_changed_addresses_in(
+            &workspace,
+            &addresses,
+            &["crates/...".to_owned()],
+            &context,
+        )
+        .unwrap();
+        assert_eq!(recursive, addresses);
+
+        // A selector matching neither a target/label nor any changed
+        // address still errors, same as before.
+        assert!(filter_changed_addresses_in(
+            &workspace,
+            &addresses,
+            &["//nowhere:nothing".to_owned()],
+            &context,
+        )
+        .is_err());
     }
 
     #[test]

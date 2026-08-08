@@ -1083,12 +1083,14 @@ async fn cmd_execute_live_impl(
             let changed::ChangedTargets {
                 addresses, unowned, ..
             } = changed::changed_target_addresses(
+                &workspace,
                 &workspace_root,
                 &discovered_workspace,
                 &graph,
                 since,
                 Some(&label_context),
-            )?;
+            )
+            .await?;
             warn_unowned_changed_files(&unowned);
             Some(addresses)
         }
@@ -1599,12 +1601,14 @@ async fn cmd_targets(selectors: &[String], changed_since: Option<&str>, tree: &T
             reasons,
             unowned,
         } = changed::changed_target_addresses(
+            &workspace,
             &workspace_root,
             &discovered_workspace,
             &graph,
             since,
             None,
-        )?;
+        )
+        .await?;
         warn_unowned_changed_files(&unowned);
         let addresses = selector::filter_changed_addresses_in(
             &discovered_workspace,
