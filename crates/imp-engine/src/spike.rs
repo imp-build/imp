@@ -13920,6 +13920,106 @@ attachSecondBuildHandler(hasher);
     }
 
     #[tokio::test]
+    async fn label_package_handler_return_artifact_is_materialized_by_the_dispatcher() {
+        // #19: a package-goal label handler returning artifact(...) used to
+        // be silently discarded — every existing handler had to duplicate
+        // its own writeWorkspace() call (see rules/odin/index.js's
+        // packageOdinPackage before this fix). The dispatcher now
+        // materializes it centrally, the same way legacy target products
+        // and graph-native [PACKAGE] roots already do. This handler never
+        // calls writeWorkspace itself — only the dispatcher explains the
+        // published file existing.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { artifact, digestOf, glob, label, packageGoal } from "imp:core";
+
+const srcs = glob({ root: ".", include: ["BUILD.js"] });
+const digest = digestOf(srcs);
+
+export const thing = label();
+packageGoal(thing, async function packageThing() {
+    return artifact(digest, { from: "BUILD.js" });
+});
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        run_goal_live(&workspace, p, "package", &["//:thing".to_owned()])
+            .await
+            .unwrap();
+
+        let published = std::fs::read_to_string(p.join("dist/thing")).unwrap();
+        let source = std::fs::read_to_string(p.join(BUILD_FILE)).unwrap();
+        assert_eq!(published, source);
+    }
+
+    #[tokio::test]
+    async fn label_package_goal_rejects_more_than_one_artifact_returning_handler() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { artifact, digestOf, glob, label, packageGoal } from "imp:core";
+
+const srcs = glob({ root: ".", include: ["BUILD.js"] });
+const digest = digestOf(srcs);
+
+export const thing = label();
+packageGoal(thing, async function packageThingA() {
+    return artifact(digest, { from: "BUILD.js" });
+});
+packageGoal(thing, async function packageThingB() {
+    return artifact(digest, { from: "BUILD.js" });
+});
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        let error = format!(
+            "{}",
+            run_goal_live(&workspace, p, "package", &["//:thing".to_owned()])
+                .await
+                .unwrap_err()
+        );
+        assert!(
+            error.contains("more than one attached handler returned artifact"),
+            "{error}"
+        );
+        assert!(!p.join("dist/thing").exists());
+    }
+
+    #[tokio::test]
+    async fn label_package_handler_returning_null_publishes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(p.join(WORKSPACE_FILE), "\n").unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { label, packageGoal } from "imp:core";
+
+export const thing = label();
+packageGoal(thing, async function packageThing() {
+    return null;
+});
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        run_goal_live(&workspace, p, "package", &["//:thing".to_owned()])
+            .await
+            .unwrap();
+
+        assert!(!p.join("dist").exists());
+    }
+
+    #[tokio::test]
     async fn label_attaching_the_same_handler_fn_twice_is_a_hard_error() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();

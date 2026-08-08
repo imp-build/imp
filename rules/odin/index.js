@@ -1417,17 +1417,7 @@ const legacyOdinPackage = extensible(function odinPackage({
 		return odinLint(packageLabel, { fix: !!ctx.flags.fix });
 	});
 	attachPackage(packageLabel, async function packageOdinPackage() {
-		const artifactResult = await odinDistPackage(packageLabel);
-		if (artifactResult === null) return null;
-		const address = labelAddress(packageLabel);
-		const withoutSlashes = address.replace(/^\/\//, "");
-		const [dir, name] = withoutSlashes.split(":");
-		const destination = dir ? `dist/${dir}/${name}` : `dist/${name}`;
-		writeWorkspace(destination, artifactResult.digest, {
-			from: artifactResult.from,
-		});
-		logInfo(`${address}#package -> ${destination}`);
-		return artifactResult;
+		return odinDistPackage(packageLabel);
 	});
 
 	return packageLabel;
