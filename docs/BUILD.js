@@ -1,28 +1,18 @@
 import {
-    artifact,
-    build,
     configurationSchemas,
-    glob,
+    files,
     label,
-    labelAddress,
-    logInfo,
     memo,
     output,
-    output_path,
-    packageGoal,
-    paths,
-    product,
-    read_file,
     ruleCapabilities,
+    read_file,
     run,
     runGoal,
-    target,
-    targetKind,
-    writeWorkspace,
+    task,
     BUILD,
+    PACKAGE,
 } from "imp:core";
 
-const JsApiReference = targetKind("js-api-reference");
 import { rulesTest } from "//rules/imp/test";
 // The reference catalog describes imp's built-in rules, independently of
 // which subset this repository happens to import from imp.workspace.js.
@@ -35,22 +25,16 @@ import "//rules/python/test";
 import "//rules/rust";
 import "//rules/workflows/fmt";
 import "//rules/workflows/lint";
-import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
+import { nativeTool } from "//rules/imp/native-tool";
 import { extractCodeReference, extractUserApiReference } from "//docs/js_api_extract";
-import { zolaToolchain, zolaTool, zolaBin } from "//rules/zola";
-import { IMP_TOOL } from "//rules/imp/self-tool";
+import { zolaBin, zolaGraphTool, zolaToolchain } from "//rules/zola";
 
 export const rules_test = rulesTest({ root: "//docs" });
 
-const API_REFERENCE_OUT = "generated/docs-api-reference";
-const SITE_OUT = "generated/docs-site";
-
-function distPathForLabel(handle) {
-    const address = labelAddress(handle);
-    const withoutSlashes = address.replace(/^\/\//, "");
-    const [dir, name] = withoutSlashes.split(":");
-    return dir ? `dist/${dir}/${name}` : `dist/${name}`;
-}
+// The dist/ destination the generic graphPackageGoal (rules/workflows/package)
+// publishes //docs:site to, derived the same way it derives every graph
+// package root's destination from its address (//docs:site -> dist/docs/site).
+const SITE_DIST_PATH = "dist/docs/site";
 
 const mkdirTool = nativeTool("mkdir");
 const cpTool = nativeTool("cp");
@@ -58,101 +42,99 @@ const dirnameTool = nativeTool("dirname");
 
 zolaToolchain("0.22.1", { default: true });
 
-export const api_reference = target({ kind: "js-api-reference", attrs: {} });
-
-export const api_reference_build = product(JsApiReference, BUILD, IMP_TOOL, async function api_reference_build(handle) {
-    const srcs = glob({
-        root: ".",
-        include: ["src/imp_core.js", "src/graph_core.js", "rules/**/*.js", "rules/**/DOC.md"],
-        exclude: ["**/*_test.js"],
-    });
-
-    const sources = paths(srcs).slice().sort().map(path => ({ sourcePath: path, sourceText: read_file(path) }));
-    const files = sources.filter(({ sourcePath }) => sourcePath.endsWith(".js"));
-    const guides = sources.filter(({ sourcePath }) => sourcePath.endsWith("/DOC.md"));
-    const pages = [
-        ...extractCodeReference(files).map(({ path, markdown }) => [`js-api/${path}`, markdown]),
-        ...extractUserApiReference(files, configurationSchemas(), ruleCapabilities(), guides).map(({ path, markdown }) => [`user-api/${path}`, markdown]),
-    ];
-
-    const script = 'out=$1; shift; mkdir -p "$out"; while [ "$#" -gt 0 ]; do name=$1; content=$2; shift 2; mkdir -p "$out/$(dirname "$name")"; printf "%s" "$content" > "$out/$name"; done';
-    const argv = ["sh", "-c", script, "docs-api-reference", output_path(API_REFERENCE_OUT)];
-    for (const [name, content] of pages) {
-        argv.push(name, content);
-    }
-
-    return run({
-        argv,
-        tools: [await nativeToolSpec(mkdirTool), await nativeToolSpec(dirnameTool)],
-        inputs: [srcs],
-        outputs: [output(output_path(API_REFERENCE_OUT), { kind: "directory" })],
-        materialize: false,
-        display: "extract JS API reference",
-    });
-}, { display: "build {0}", level: "info" });
-
-export const site = label();
-
-export const site_build = memo(async function site_build(handle) {
-    const apiRef = await api_reference_build(api_reference);
-    const zolaToolSpec = await zolaTool();
-
-    const handWritten = glob({
-        root: ".",
-        include: ["docs/config.toml", "docs/content/**", "docs/templates/**", "docs/static/**"],
-    });
-
-    const script = [
-        "root=$1; apiref=$2",
-        'mkdir -p "$root/content/reference/js-api" "$root/content/reference/user-api" "$root/templates" "$root/static"',
-        'cp docs/config.toml "$root/config.toml"',
-        'cp -r docs/content/. "$root/content/"',
-        'cp -r docs/templates/. "$root/templates/"',
-        'cp -r docs/static/. "$root/static/"',
-        'cp -r "$apiref/js-api/." "$root/content/reference/js-api/"',
-        'cp -r "$apiref/user-api/." "$root/content/reference/user-api/"',
-        'zola --root "$root" build --output-dir "$root/public"',
-    ].join(" && ");
-
-    // The API reference is threaded in as a {kind:"digest"} entry — merged
-    // straight into this run's sandbox from apiRef's CAS-captured output tree
-    // (already rooted at API_REFERENCE_OUT, see nest_directory in
-    // src/digest.rs) — rather than reading it back off the workspace, since
-    // api_reference_build no longer materializes there.
-    return run({
-        argv: ["sh", "-c", script, "docs-zola-site", output_path(SITE_OUT), output_path(API_REFERENCE_OUT)],
-        tools: [await nativeToolSpec(mkdirTool), await nativeToolSpec(cpTool), zolaToolSpec],
-        inputs: [handWritten, { kind: "digest", digest: apiRef.outputDigest }],
-        outputs: [output(output_path(SITE_OUT), { kind: "directory" })],
-        materialize: false,
-        display: "build docs site with zola",
-    });
-}, { display: "build {0}", level: "info" });
-
-build(site, async function buildSite() {
-    return site_build(site);
+const apiReferenceSources = files({
+    root: ".",
+    include: ["src/imp_core.js", "src/graph_core.js", "rules/**/*.js", "rules/**/DOC.md"],
+    exclude: ["**/*_test.js"],
 });
 
-export const site_package = memo(async function site_package(handle) {
-    const built = await site_build(handle);
-    return artifact(built.outputDigest, { from: SITE_OUT });
-}, { display: "package {0}", level: "info" });
+const api_reference_build = task({
+    display: "extract JS API reference",
+    inputs: { sources: apiReferenceSources, mkdir: mkdirTool, dirname: dirnameTool },
+    outputs: { dir: output.artifact() },
+    async run(exec, { sources, mkdir, dirname }) {
+        const srcPaths = exec.paths(sources).slice().sort();
+        const entries = srcPaths.map((sourcePath) => ({ sourcePath, sourceText: read_file(sourcePath) }));
+        const jsFiles = entries.filter(({ sourcePath }) => sourcePath.endsWith(".js"));
+        const guides = entries.filter(({ sourcePath }) => sourcePath.endsWith("/DOC.md"));
+        const pages = [
+            ...extractCodeReference(jsFiles).map(({ path, markdown }) => [`js-api/${path}`, markdown]),
+            ...extractUserApiReference(jsFiles, configurationSchemas(), ruleCapabilities(), guides).map(({ path, markdown }) => [`user-api/${path}`, markdown]),
+        ];
 
-packageGoal(site, async function packageSite() {
-    const artifactResult = await site_package(site);
-    const destination = distPathForLabel(site);
-    writeWorkspace(destination, artifactResult.digest, {
-        from: artifactResult.from,
-    });
-    logInfo(`${labelAddress(site)}#package -> ${destination}`);
-    return artifactResult;
+        const script = 'out=$1; shift; mkdir -p "$out"; while [ "$#" -gt 0 ]; do name=$1; content=$2; shift 2; mkdir -p "$out/$(dirname "$name")"; printf "%s" "$content" > "$out/$name"; done';
+        const argv = ["sh", "-c", script, "docs-api-reference", "out"];
+        for (const [name, content] of pages) {
+            argv.push(name, content);
+        }
+
+        const result = await exec.action({
+            argv,
+            tools: [mkdir, dirname],
+            outputs: { dir: output.directory("out") },
+        });
+        return { dir: result.outputs.dir };
+    },
 });
 
-// `imp run //docs:site` supervises a "serve while editing" loop: every
-// second it re-invokes the fully-sandboxed, cache-backed `package` goal
-// (which writes the built site to dist/, see the package handler above), and
-// restarts `zola serve` only when the rebuilt output actually changed. The
-// supervisor itself runs sandbox:false/impure:true (mirroring odinRun,
+export const api_reference = Object.freeze({
+    dir: api_reference_build.outputs.dir,
+    [BUILD]: api_reference_build.outputs.dir,
+});
+
+const siteSources = files({
+    root: ".",
+    include: ["docs/config.toml", "docs/content/**", "docs/templates/**", "docs/static/**"],
+});
+
+const site_build = task({
+    display: "build docs site with zola",
+    inputs: { handWritten: siteSources, apiRef: api_reference.dir, zola: zolaGraphTool(), mkdir: mkdirTool, cp: cpTool },
+    outputs: { dir: output.artifact() },
+    async run(exec, { handWritten, apiRef, zola, mkdir, cp }) {
+        const zolaExe = exec.tool(zola, "zola");
+        const script = [
+            "root=$1; apiref=$2; zola_bin=$3",
+            'mkdir -p "$root/content/reference/js-api" "$root/content/reference/user-api" "$root/templates" "$root/static"',
+            'cp docs/config.toml "$root/config.toml"',
+            'cp -r docs/content/. "$root/content/"',
+            'cp -r docs/templates/. "$root/templates/"',
+            'cp -r docs/static/. "$root/static/"',
+            'cp -r "$apiref/js-api/." "$root/content/reference/js-api/"',
+            'cp -r "$apiref/user-api/." "$root/content/reference/user-api/"',
+            '"$zola_bin" --root "$root" build --output-dir "$root/public"',
+        ].join(" && ");
+
+        const result = await exec.action({
+            argv: ["sh", "-c", script, "docs-zola-site", "site", exec.path(apiRef), zolaExe],
+            tools: [mkdir, cp],
+            inputs: [handWritten, apiRef],
+            outputs: { dir: output.directory("site") },
+        });
+        return { dir: result.outputs.dir };
+    },
+});
+
+export const site = Object.freeze({
+    [BUILD]: site_build.outputs.dir,
+    [PACKAGE]: site_build.outputs.dir,
+});
+
+// `imp run //docs:site_serve` supervises a "serve while editing" loop: every
+// second it re-invokes the fully-sandboxed, cache-backed `package` goal for
+// //docs:site (which writes the built site to dist/site, via the generic
+// graphPackageGoal now that site's build/package are graph-native — see
+// rules/workflows/package/index.js), and restarts `zola serve` only when the
+// rebuilt output actually changed. This is a separate legacy label() (rather
+// than living on the graph-native `site` export above) because a graph-native
+// [RUN] root can only mean "execute a built artifact once" (see
+// rules/odin/index.js's `actions[RUN] = build.outputs.artifact`) — there is
+// no graph-native equivalent for an impure, long-lived, self-restarting
+// supervisor process; exec.action() is always sandboxed with
+// materialize:false. Tracked as a follow-up engine gap rather than solved
+// here (mirrors the CMake resource-bridge gap tracked as issue #69).
+//
+// The supervisor itself runs sandbox:false/impure:true (mirroring odinRun,
 // rules/odin/index.js) since it's long-lived and manages a child process —
 // but it never touches the repo directly beyond dist/; all repo-adjacent
 // work stays exactly as sandboxed as the "build"/"package" goals above. A
@@ -162,9 +144,10 @@ packageGoal(site, async function packageSite() {
 // cancelable background-run handle to restart it from within one sandboxed
 // call — so this restart-on-change loop is the closest fit without new
 // engine primitives.
-export const site_serve = memo(async function site_serve(handle) {
+export const site_serve = label();
+
+const site_serve_loop = memo(async function site_serve_loop() {
     const zolaBinPath = await zolaBin();
-    const distPath = distPathForLabel(handle);
 
     const script = [
         'imp_bin=$1; site_root=$2; zola_bin=$3',
@@ -186,13 +169,13 @@ export const site_serve = memo(async function site_serve(handle) {
     ].join("\n");
 
     return run({
-        argv: ["sh", "-c", script, "docs-watch-serve", globalThis.__imp_self_bin, distPath, zolaBinPath],
+        argv: ["sh", "-c", script, "docs-watch-serve", globalThis.__imp_self_bin, SITE_DIST_PATH, zolaBinPath],
         sandbox: false,
         impure: true,
         display: "watch + serve docs site with zola",
     });
-}, { display: "run {0}", level: "info" });
+}, { display: "watch + serve docs site", level: "info" });
 
-runGoal(site, async function runSite() {
-    return site_serve(site);
+runGoal(site_serve, async function runSiteServe() {
+    return site_serve_loop();
 });
