@@ -40,7 +40,6 @@ export const raw_main = ccBinary({
 // ccLibrary()/ccBinary() default to zig, but hello_cmake was built with
 // gcc — see the cmakeProject() comment above).
 export const uses_cmake_lib = ccBinary({
-	path: "rules/c/cmake/example",
 	srcs: ["uses_cmake_lib.c"],
 	deps: [
 		cmakeLibraryDep(hello, "hello_cmake", {

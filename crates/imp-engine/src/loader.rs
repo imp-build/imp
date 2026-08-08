@@ -220,6 +220,90 @@ impl ImpResolver {
     }
 }
 
+/// The bare `//...` address of the directory containing `base`'s resolved
+/// file — the anchor `./`/`../` relative imports resolve against. `None`
+/// for bases that aren't `//`-addressed workspace files (only `imp:core`
+/// in practice; its own source never uses relative imports).
+fn importer_directory_address(root: &Path, rules: &RulesSource, base: &str) -> Option<String> {
+    let dir = if base == WORKSPACE_FILE {
+        root.to_path_buf()
+    } else if base.starts_with("//") {
+        resolve_workspace_module(root, rules, base)
+            .ok()?
+            .path
+            .parent()?
+            .to_path_buf()
+    } else {
+        return None;
+    };
+    if let Ok(relative) = dir.strip_prefix(root) {
+        return Some(address_from_relative(relative, ""));
+    }
+    if let Some(rules_root) = rules.root() {
+        if let Ok(relative) = dir.strip_prefix(rules_root) {
+            return Some(address_from_relative(relative, "rules"));
+        }
+    }
+    None
+}
+
+fn address_from_relative(relative: &Path, prefix: &str) -> String {
+    let relative = relative
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    let joined = match (prefix.is_empty(), relative.is_empty()) {
+        (true, _) => relative,
+        (false, true) => prefix.to_owned(),
+        (false, false) => format!("{prefix}/{relative}"),
+    };
+    if joined.is_empty() {
+        "//".to_owned()
+    } else {
+        format!("//{joined}")
+    }
+}
+
+/// Resolve a `./`/`../` specifier against `importer_dir` (a bare `//...`
+/// directory address from `importer_directory_address`) into a canonical,
+/// dot-free `//...` address — lexically, without touching the filesystem,
+/// so `resolve_workspace_module`'s own `.js`/`index.js`/`BUILD.js`
+/// candidate search does the actual existence check. A trailing `.js` on
+/// the specifier's final segment is stripped first, so both `./helper` and
+/// `./helper.js` address the same module, matching how `//...` addresses
+/// never spell out the extension.
+fn resolve_relative_module_name(
+    importer_dir: &str,
+    name: &str,
+) -> std::result::Result<String, String> {
+    let mut segments: Vec<String> = importer_dir
+        .strip_prefix("//")
+        .unwrap_or(importer_dir)
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let stripped = name.strip_suffix(".js").unwrap_or(name);
+    for component in Path::new(stripped).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if segments.pop().is_none() {
+                    return Err(format!("relative import '{name}' escapes the workspace"));
+                }
+            }
+            Component::Normal(segment) => segments.push(segment.to_string_lossy().into_owned()),
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("relative import '{name}' must be a relative path"));
+            }
+        }
+    }
+    Ok(if segments.is_empty() {
+        "//".to_owned()
+    } else {
+        format!("//{}", segments.join("/"))
+    })
+}
+
 /// The package scope (`//dir`, or `//` at the root) a BUILD.js file defines.
 fn package_scope_for_build_file(path: &Path, workspace_root: &Path) -> Option<String> {
     let directory = path.parent()?.strip_prefix(workspace_root).ok()?;
@@ -277,18 +361,36 @@ impl Resolver for ImpResolver {
 
         if name.starts_with('.') {
             let importer = module_location(&self.workspace_root, &self.rules_source, base);
-            let message = if module_kind(&self.workspace_root, &self.rules_source, base)
-                == ModuleKind::Build
-            {
-                format!(
-                    "relative import '{name}' is prohibited in BUILD.js module {importer}; use workspace-rooted //... imports or imp:* built-ins"
-                )
-            } else {
-                format!(
-                    "relative import '{name}' is unsupported in module {importer}; use workspace-rooted //... imports or imp:* built-ins"
-                )
+            let Some(importer_dir) =
+                importer_directory_address(&self.workspace_root, &self.rules_source, base)
+            else {
+                return Err(rquickjs::Error::new_resolving_message(
+                    base,
+                    name,
+                    format!(
+                        "relative import '{name}' is unsupported while importing from {importer}"
+                    ),
+                ));
             };
-            return Err(rquickjs::Error::new_resolving_message(base, name, message));
+            let canonical =
+                resolve_relative_module_name(&importer_dir, name).map_err(|message| {
+                    rquickjs::Error::new_resolving_message(
+                        base,
+                        name,
+                        format!("{message} while importing from {importer}"),
+                    )
+                })?;
+            let resolution =
+                resolve_workspace_module(&self.workspace_root, &self.rules_source, &canonical)
+                    .map_err(|message| {
+                        rquickjs::Error::new_resolving_message(
+                            base,
+                            name,
+                            format!("{message} while importing from {importer}"),
+                        )
+                    })?;
+            self.record_import(base, &resolution);
+            return Ok(resolution.name);
         }
 
         Err(rquickjs::Error::new_resolving_message(
@@ -695,6 +797,69 @@ mod tests {
         .unwrap();
         assert_eq!(resolution.path, rules.path().join(BUILD_FILE));
         assert_eq!(resolution.kind, ModuleKind::Build);
+    }
+
+    #[test]
+    fn importer_directory_address_covers_root_workspace_and_rules() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("pkg/sub")).unwrap();
+        std::fs::write(root.path().join("pkg/sub").join(BUILD_FILE), "").unwrap();
+        std::fs::write(root.path().join(WORKSPACE_FILE), "").unwrap();
+        let rules = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(rules.path().join("c")).unwrap();
+        std::fs::write(rules.path().join("c/index.js"), "").unwrap();
+        std::fs::write(rules.path().join("d.js"), "").unwrap();
+        let source = RulesSource::directory(rules.path());
+
+        assert_eq!(
+            importer_directory_address(root.path(), &source, WORKSPACE_FILE),
+            Some("//".to_owned())
+        );
+        assert_eq!(
+            importer_directory_address(root.path(), &source, "//pkg/sub"),
+            Some("//pkg/sub".to_owned())
+        );
+        assert_eq!(
+            importer_directory_address(root.path(), &source, "//rules/c"),
+            Some("//rules/c".to_owned())
+        );
+        // Direct-form module (d.js): its own directory is the parent "rules",
+        // not "//rules/d" — unlike Index/Build forms, where the bare address
+        // already names the directory.
+        assert_eq!(
+            importer_directory_address(root.path(), &source, "//rules/d"),
+            Some("//rules".to_owned())
+        );
+        assert_eq!(
+            importer_directory_address(root.path(), &source, "imp:core"),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_relative_module_name_covers_child_parent_and_extension() {
+        assert_eq!(
+            resolve_relative_module_name("//pkg/sub", "./helper").unwrap(),
+            "//pkg/sub/helper"
+        );
+        assert_eq!(
+            resolve_relative_module_name("//pkg/sub", "./helper.js").unwrap(),
+            "//pkg/sub/helper"
+        );
+        assert_eq!(
+            resolve_relative_module_name("//pkg/sub", "../other").unwrap(),
+            "//pkg/other"
+        );
+        assert_eq!(
+            resolve_relative_module_name("//pkg", "./child/helper").unwrap(),
+            "//pkg/child/helper"
+        );
+        assert_eq!(
+            resolve_relative_module_name("//", "./sibling").unwrap(),
+            "//sibling"
+        );
+        assert!(resolve_relative_module_name("//pkg", "../../outside").is_err());
+        assert!(resolve_relative_module_name("//", "..").is_err());
     }
 
     #[test]
