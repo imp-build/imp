@@ -10,7 +10,7 @@ use std::sync::{
 
 use anyhow::{Context, Result};
 use clap::{Arg, ArgAction, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
-use imp_engine::{changed, runtime, selector, spike};
+use imp_engine::{changed, graph::GraphRoot, runtime, selector, spike};
 use imp_scheduler as scheduler;
 use rquickjs::{promise::MaybePromise, CatchResultExt, FromJs, Function, Module, Object, Value};
 
@@ -1622,10 +1622,14 @@ async fn cmd_targets(selectors: &[String], changed_since: Option<&str>, tree: &T
             }
         }
     } else {
-        let graph_roots = workspace
-            .workspace
-            .graph
-            .select_catalog(selectors, &selector_context)?;
+        let graph_roots_owned = spike::resolve_graph_roots_with_expansion(
+            &workspace,
+            &workspace_root,
+            selectors,
+            &selector_context,
+        )
+        .await?;
+        let graph_roots: Vec<&GraphRoot> = graph_roots_owned.iter().collect();
         let labels = spike::select_labels_with_discovered_children_in(
             &discovered_workspace,
             &legacy_selectors,
@@ -1707,6 +1711,15 @@ async fn cmd_dependencies(selectors: &[String], goal: Option<&str>, tree: &Tree)
         selectors,
         &selector_context,
     )?;
+    let (graph_roots_owned, graph_walk) = spike::resolve_graph_with_expansion(
+        &workspace,
+        &workspace_root,
+        None,
+        selectors,
+        &selector_context,
+    )
+    .await?;
+    let graph_roots: Vec<&GraphRoot> = graph_roots_owned.iter().collect();
     let mut out = String::new();
     let mut target_selectors = Vec::new();
     for selector in selectors {
@@ -1720,6 +1733,7 @@ async fn cmd_dependencies(selectors: &[String], goal: Option<&str>, tree: &Tree)
                     &selector_context,
                 )?
                 .is_empty()
+                    && graph_roots.is_empty()
                 {
                     return Err(error);
                 }
@@ -1742,6 +1756,9 @@ async fn cmd_dependencies(selectors: &[String], goal: Option<&str>, tree: &Tree)
         })?;
         let trace = imp_engine::trace_changed::TraceIndex::build(&workspace_root)?;
         spike::format_label_dependencies(&discovered_workspace, &labels, goal, &trace, &mut out)?;
+    }
+    if !graph_roots.is_empty() {
+        spike::format_graph_dependencies(&graph_roots, &graph_walk, &mut out)?;
     }
     *workspace.scheduler.lock().unwrap() = None;
     print!("{out}");

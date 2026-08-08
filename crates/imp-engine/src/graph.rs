@@ -77,11 +77,13 @@ impl GraphCatalog {
         let mut selected: BTreeMap<(String, Option<String>), &GraphRoot> = BTreeMap::new();
         for selector in selectors {
             let (selector, facet) = split_facet(selector)?;
-            // `#product` remains the legacy product-override syntax. A graph
-            // selector never consumes it.
-            if selector.contains('#') {
-                continue;
-            }
+            // A bare exact selector's `#` suffix may be either the legacy
+            // `#product` override (meaningless here — no graph root address
+            // ever contains one, so it simply matches nothing) or an
+            // expansion child key, once `synthetic_children` below has
+            // appended `parent#childKey` roots to `self.roots`. Both cases
+            // fall out of plain address matching, so no special-casing is
+            // needed here.
             let parsed = context.parse(selector)?;
             let mut matches: Vec<&GraphRoot> = self
                 .roots
@@ -140,7 +142,7 @@ impl GraphCatalog {
     }
 }
 
-fn split_facet(selector: &str) -> Result<(&str, Option<&str>)> {
+pub(crate) fn split_facet(selector: &str) -> Result<(&str, Option<&str>)> {
     let Some((address, facet)) = selector.rsplit_once('@') else {
         return Ok((selector, None));
     };
@@ -150,16 +152,92 @@ fn split_facet(selector: &str) -> Result<(&str, Option<&str>)> {
     Ok((address, Some(facet)))
 }
 
+/// A declared, structural input edge discovered by
+/// `__imp_walk_graph_for_introspection` (`graph_core.js`) — no task
+/// execution involved, see that function's own docstring.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphWalkEdge {
+    pub name: String,
+    pub handle_id: u32,
+}
+
+/// One reachable handle from a discovery-only walk. `children` is only
+/// populated for `"expansion-all"` nodes — the only kind with no address of
+/// its own for any individual child, hence the only one worth the cost of
+/// actually running discovery for (see `graph_core.js`'s
+/// `_graphWalkForIntrospectionInner`). The keys are whatever `expand()`'s
+/// `create()` callback returned, each mapped to its own (unexecuted) handle
+/// id.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphWalkNode {
+    pub id: u32,
+    pub kind: String,
+    #[serde(default)]
+    pub edges: Vec<GraphWalkEdge>,
+    #[serde(default)]
+    pub children: BTreeMap<String, u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GraphWalk {
+    pub nodes: Vec<GraphWalkNode>,
+}
+
+impl GraphWalk {
+    pub fn node(&self, handle_id: u32) -> Option<&GraphWalkNode> {
+        self.nodes.iter().find(|node| node.id == handle_id)
+    }
+
+    /// Synthesize `parent#childKey` roots for each `parent` root the walk
+    /// found to be an `"expansion-all"` aggregate. Only the seeded roots
+    /// themselves gain synthetic addresses — a handle reached transitively
+    /// through a declared edge has no exported address of its own to build
+    /// one from.
+    pub fn synthetic_children(&self, parents: &[&GraphRoot]) -> Vec<GraphRoot> {
+        let mut out = Vec::new();
+        for parent in parents {
+            let Some(node) = self.node(parent.handle_id) else {
+                continue;
+            };
+            if node.kind != "expansion-all" {
+                continue;
+            }
+            for (key, &handle_id) in &node.children {
+                out.push(GraphRoot {
+                    address: format!("{}#{key}", parent.address),
+                    workflow: parent.workflow.clone(),
+                    facet: parent.facet.clone(),
+                    handle_id,
+                    is_default: false,
+                });
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn root(address: &str, workflow: &str, facet: Option<&str>, is_default: bool) -> GraphRoot {
+        root_with_handle(address, workflow, facet, is_default, 1)
+    }
+
+    fn root_with_handle(
+        address: &str,
+        workflow: &str,
+        facet: Option<&str>,
+        is_default: bool,
+        handle_id: u32,
+    ) -> GraphRoot {
         GraphRoot {
             address: address.to_owned(),
             workflow: workflow.to_owned(),
             facet: facet.map(str::to_owned),
-            handle_id: 1,
+            handle_id,
             is_default,
         }
     }
@@ -178,5 +256,67 @@ mod tests {
             .unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].facet.as_deref(), Some("asan"));
+    }
+
+    #[test]
+    fn synthetic_children_builds_parent_hash_child_key_addresses() {
+        let parent = root_with_handle("//pkg:tests", "test", None, false, 10);
+        let walk = GraphWalk {
+            nodes: vec![GraphWalkNode {
+                id: 10,
+                kind: "expansion-all".to_owned(),
+                edges: Vec::new(),
+                children: BTreeMap::from([("crate-a".to_owned(), 11), ("crate-b".to_owned(), 12)]),
+            }],
+        };
+        let mut children = walk.synthetic_children(&[&parent]);
+        children.sort_by(|a, b| a.address.cmp(&b.address));
+        assert_eq!(
+            children
+                .iter()
+                .map(|c| c.address.as_str())
+                .collect::<Vec<_>>(),
+            ["//pkg:tests#crate-a", "//pkg:tests#crate-b"]
+        );
+        assert!(children
+            .iter()
+            .all(|c| c.workflow == "test" && !c.is_default));
+
+        // A non-expansion node (e.g. an ordinary task root) contributes no
+        // synthetic children.
+        let plain = root_with_handle("//pkg:lib", "build", None, false, 20);
+        assert!(walk.synthetic_children(&[&plain]).is_empty());
+    }
+
+    #[test]
+    fn exact_selector_matches_a_synthesized_child_hash_key_address() {
+        let catalog = GraphCatalog {
+            roots: vec![
+                root_with_handle("//pkg:tests", "test", None, false, 10),
+                root_with_handle("//pkg:tests#crate-a", "test", None, false, 11),
+                root_with_handle("//pkg:tests#crate-b", "test", None, false, 12),
+            ],
+        };
+        let context = SelectorContext::root();
+
+        let exact = catalog
+            .select("test", &["//pkg:tests#crate-a".to_owned()], &context)
+            .unwrap();
+        assert_eq!(
+            exact.iter().map(|r| r.address.as_str()).collect::<Vec<_>>(),
+            ["//pkg:tests#crate-a"]
+        );
+
+        // A package/recursive selector naturally sweeps in every child
+        // address alongside the parent, since matching is purely by address
+        // prefix — no special-casing of `#` needed there.
+        let mut swept = catalog
+            .select("test", &["pkg".to_owned()], &context)
+            .unwrap();
+        swept.sort_by(|a, b| a.address.cmp(&b.address));
+        assert_eq!(
+            swept.iter().map(|r| r.address.as_str()).collect::<Vec<_>>(),
+            ["//pkg:tests", "//pkg:tests#crate-a", "//pkg:tests#crate-b"]
+        );
     }
 }

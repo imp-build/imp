@@ -741,6 +741,115 @@ async function _graphResolveExpansionProjection(record, stack) {
 	return Object.freeze(result);
 }
 
+// Declared, structural input edges for a handle — no execution. Used by the
+// introspection walk below to show what a node depends on without running
+// its (or its dependencies') task actions. Only kinds that actually wrap
+// another handle contribute edges; leaf kinds (file, files, semantic,
+// native-tool) have none.
+function _graphDeclaredEdges(record) {
+	switch (record.kind) {
+		case "task": {
+			const taskRecord = _graphTasks.get(record.data.taskId);
+			if (taskRecord === undefined) return [];
+			return Object.entries(taskRecord.inputs)
+				.filter(([, input]) => input.kind === "handle")
+				.map(([name, input]) => ({ name, handleId: input.handle.__graph_id }));
+		}
+		case "task-output": {
+			const taskRecord = _graphTasks.get(record.data.taskId);
+			if (taskRecord === undefined) return [];
+			return [{ name: "task", handleId: taskRecord.publicHandle.__graph_id }];
+		}
+		case "tool":
+			return [{ name: "artifact", handleId: record.data.artifact.__graph_id }];
+		case "expansion-get":
+		case "expansion-all": {
+			const expansionRecord = _graphExpansions.get(record.data.expansionId);
+			if (expansionRecord === undefined) return [];
+			return Object.entries(expansionRecord.inputs)
+				.filter(([, input]) => input.kind === "handle")
+				.map(([name, input]) => ({ name, handleId: input.handle.__graph_id }));
+		}
+		default:
+			return [];
+	}
+}
+
+/**
+ * Walk the declared structure reachable from `roots` for introspection
+ * (`imp targets`/`imp dependencies`), without executing any task action.
+ * The one exception is expansion nodes (`expand()`'s `expansion.all()`/
+ * `.get()` handles): discovering their child keys requires running the
+ * expansion's own `create()` callback (and whatever upstream discovery task
+ * its `inputs` need, e.g. `cargo metadata`/`cmake configure` — see
+ * `_graphExecuteExpansion`, already memoized per invocation), but never the
+ * children's own tasks. Returns one entry per reachable handle: its kind,
+ * declared input edges, and — for expansion nodes — the discovered child
+ * keys and each child's own (unexecuted) handle id, so the walk continues
+ * into them structurally too.
+ *
+ * An expansion's own `inputs` may include `semantic.*` handles (mode/flag/
+ * args/config reads), which only resolve inside a workflow invocation (see
+ * `_graphResolveHandle`'s "semantic" case) — `invocationJson` supplies one
+ * for the walk's duration, same shape as `__imp_execute_graph_handles`'s,
+ * restoring whatever was ambient beforehand once done.
+ */
+async function _graphWalkForIntrospection(rootsJson, invocationJson) {
+	const roots = JSON.parse(rootsJson);
+	const visited = new Set();
+	const queue = roots.map((root) => root.handleId);
+	const nodes = [];
+	const previousInvocation = _graphInvocation;
+	_graphInvocation = Object.freeze(JSON.parse(invocationJson));
+	try {
+		return await _graphWalkForIntrospectionInner(queue, visited, nodes);
+	} finally {
+		_graphInvocation = previousInvocation;
+	}
+}
+async function _graphWalkForIntrospectionInner(queue, visited, nodes) {
+	while (queue.length > 0) {
+		const id = queue.shift();
+		if (visited.has(id)) continue;
+		visited.add(id);
+		const record = _graphHandles.get(id);
+		if (record === undefined) continue;
+		const edges = _graphDeclaredEdges(record);
+		for (const edge of edges) queue.push(edge.handleId);
+		const node = { id, kind: record.kind, edges };
+		// Only an "expansion-all" root needs its children actually
+		// discovered: that's the one kind with no address of its own for any
+		// individual child, which is the whole reason this walk exists. An
+		// "expansion-get" root already names its one child by address (the
+		// BUILD.js export itself) — running discovery for it would pay the
+		// same cost (invoking `create()`, e.g. a real `cmake configure`/
+		// `cargo metadata`, in a *separate* sandbox from the one goal
+		// execution uses moments later) for zero new listing value, and
+		// risks exactly the kind of cross-sandbox staleness hermetic caching
+		// is supposed to prevent.
+		if (record.kind === "expansion-all") {
+			const { expansionId, workflow, facet } = record.data;
+			const children = await _graphExecuteExpansion(expansionId, []);
+			node.expansionId = expansionId;
+			node.children = {};
+			for (const key of Object.keys(children).sort()) {
+				try {
+					const handle = _graphChildHandle(children[key], workflow, facet, "introspection");
+					node.children[key] = handle.__graph_id;
+					queue.push(handle.__graph_id);
+				} catch (_) {
+					// This child has no handle for the requested workflow/facet —
+					// simply not listed for it, same as expansion.all()'s own
+					// resolution silently would not reach it either.
+				}
+			}
+		}
+		nodes.push(node);
+	}
+	return JSON.stringify({ nodes });
+}
+globalThis.__imp_walk_graph_for_introspection = _graphWalkForIntrospection;
+
 globalThis.__imp_collect_graph_exports = function collectGraphExports(ns, scope) {
 	const roots = [];
 	for (const exportName of Object.getOwnPropertyNames(ns)) {
