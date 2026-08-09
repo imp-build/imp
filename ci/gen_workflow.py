@@ -103,6 +103,10 @@ BUILD_STEPS = [
 # The key must cover Cargo.lock as well as the toolchain locks: cargo-home
 # lives in this scope and tracks dependency churn, so a lockfile bump has to
 # rotate the key or newly-vendored crates would never persist.
+# v2: bumped for #98 — task/named-cache identity is call-site + declared
+# inputs only, not the run() closure's own script text, so a change to a
+# toolchain installer's wrapper set (like #98's added ranlib wrapper) is
+# invisible to an already-populated cache; only a key bump forces reinstall.
 TOOLCHAIN_SCOPE_PATH = "~/.cache/imp/named/shared"
 TOOLCHAIN_PINS_HASH = (
     "${{ hashFiles('imp.workspace.js', 'rules/**/*.lock', 'Cargo.lock') }}"
@@ -110,7 +114,7 @@ TOOLCHAIN_PINS_HASH = (
 
 
 def cache_toolchains_step(job):
-    prefix = f"imp-toolchains-v1-{job}-${{{{ runner.os }}}}"
+    prefix = f"imp-toolchains-v2-{job}-${{{{ runner.os }}}}"
     return {
         "name": "Cache imp toolchains",
         "uses": "actions/cache@v4",
@@ -140,7 +144,7 @@ def cache_toolchains_step(job):
 # already-saved cache — and actions/cache skips saving on an exact hit, so
 # that job's additions would silently never persist.
 def cache_imp_step(job):
-    prefix = f"imp-store-v5-{job}-${{{{ runner.os }}}}"
+    prefix = f"imp-store-v6-{job}-${{{{ runner.os }}}}"
     pins = "${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}"
     return {
         "name": "Cache imp store",
