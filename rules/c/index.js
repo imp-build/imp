@@ -226,30 +226,21 @@ function ccTask(spec, isLibrary) {
 					const compilerCmd = compiler(isCxx).map(shellQuote).join(" ");
 					const objPath = objectPaths[i];
 					const script = `set -e; mkdir -p "$(dirname ${shellQuote(objPath)})"; ${compilerCmd} -c ${shellQuote(source)} -o ${shellQuote(objPath)} ${flags}`;
-					// Output slot names only need to be unique within one
-					// exec.action() call, but every one of these compile
-					// actions' outputs is later consumed together by the
-					// same final archive/link action — two actions that
-					// both named their output "object" collide there (see
-					// rules/c/cmake/graph_replay.js's own nextSlot comment),
-					// so each needs a name unique across this whole run().
 					return exec.action({
 						argv: ["sh", "-c", script, "cc-compile"],
 						env,
 						inputs: [input.srcs, input.hdrs],
-						outputs: { [`object${i}`]: output.file(objPath) },
+						outputs: { object: output.file(objPath) },
 						display: `cc compile ${objPath}`,
 					});
 				}),
 			);
-			// A produced exec.action() output only exists in a later action's
-			// sandbox at the path exec.path() reports, not the path it was
-			// declared with (see rules/c/cmake/graph_replay.js's own
-			// reconstructBuildDirCmds() comment) — the archive/link command
-			// below must reference these, not the literal objectPaths.
-			const objectSandboxPaths = compileResults.map((result, i) =>
-				exec.path(result.outputs[`object${i}`]),
-			);
+			// A produced exec.action() output reappears in a later action's
+			// sandbox at its own real declared path (objPath here), so the
+			// archive/link command below can reference objectPaths directly —
+			// it just needs the compile results listed as inputs: so they get
+			// mounted at all.
+			const objectSandboxPaths = objectPaths;
 			const depArchivePaths = transitiveArchives.map((_, i) =>
 				exec.path(input[`archive${i}`]),
 			);
@@ -272,6 +263,7 @@ function ccTask(spec, isLibrary) {
 			const result = await exec.action({
 				argv: ["sh", "-c", script, isLibrary ? "cc-archive" : "cc-link"],
 				env,
+				inputs: compileResults.map((r) => r.outputs.object),
 				outputs: { artifact: output.file(outPath) },
 				display: `cc ${isLibrary ? "archive" : "link"} ${outPath}`,
 			});

@@ -424,48 +424,6 @@ export function replayCmakeTarget(
 			const dirInputBindings = Object.keys(spec.dirInputs).map(
 				(key) => input[key],
 			);
-			// Output slot names ("out0", "out1", ...) are only unique *within*
-			// one exec.action() call — an artifact mounts under its own slot
-			// name when reused elsewhere (see reconstructBuildDirCmds()'s own
-			// docstring), so two *different* actions that both happen to
-			// name their own first output "out0" collide the instant both
-			// get consumed together by a later action (confirmed via a real
-			// "merge conflict at 'out0'" failure). A counter shared across
-			// every exec.action() call in this whole task keeps every
-			// declared name globally unique instead.
-			let nextSlot = 0;
-			const slotName = () => `slot${nextSlot++}`;
-
-			// A produced exec.action() output artifact always mounts, when
-			// later consumed as an input, at its *own output slot name*
-			// (e.g. "directory"/"out3") — never at whatever path it was
-			// *declared* with (confirmed against the engine's own
-			// normalize_graph_artifact()/nest_file()/nest_directory() in
-			// crates/imp-engine/src/spike.rs, which key the artifact's CAS
-			// tree structure by output-slot name). So a later edge can't
-			// just list an earlier edge's output as an `inputs:` entry and
-			// expect it to reappear at ninja's own hardcoded
-			// buildDirPath-relative path — each edge has to explicitly
-			// reconstruct `$bdir` first, `cp`-ing configure's own scaffolding
-			// plus every prior edge's output from wherever exec.path() says
-			// it actually landed to the exact relative path ninja's command
-			// text expects. This is the real replacement for legacy
-			// mergeDigests()'s accumulation (see this module's own
-			// docstring) — tracked here as `{destPath, binding}` pairs
-			// rather than bare bindings so each reconstruction step knows
-			// both where to copy *from* (exec.path(binding)) and *to*
-			// (destPath).
-			function reconstructBuildDirCmds(priorOutputs) {
-				const configureSrc = exec.path(input.configureDirectory);
-				return [
-					`mkdir -p '${spec.buildDirPath}'`,
-					`cp -r '${configureSrc}'/. '${spec.buildDirPath}'/`,
-					...priorOutputs.map(({ destPath, binding }) => {
-						const src = exec.path(binding);
-						return `mkdir -p "$(dirname '${destPath}')" && cp '${src}' '${destPath}'`;
-					}),
-				];
-			}
 
 			async function executeEdge(edge, priorOutputs) {
 				const resolved = resolveEdgeCommand(
@@ -518,23 +476,24 @@ export function replayCmakeTarget(
 					...outputPaths.map((p) => `${spec.buildDirPath}/${p}`),
 					...copyOutputs,
 				];
-				const restoreCmds = reconstructBuildDirCmds(priorOutputs);
-				const cdCommand = `${restoreCmds.join(" && ")} && cd '${spec.buildDirPath}' && ${resolved.command}`;
-				const outputNames = destPaths.map(() => slotName());
+				const cdCommand = `cd '${spec.buildDirPath}' && ${resolved.command}`;
+				const outputNames = destPaths.map((_, i) => `out${i}`);
 
 				const result = await exec.action({
 					argv: ["sh", "-c", cdCommand],
 					tools: edgeTools,
-					inputs: [input.srcs, ...dirInputBindings],
+					inputs: [
+						input.srcs,
+						...dirInputBindings,
+						input.configureDirectory,
+						...priorOutputs,
+					],
 					outputs: Object.fromEntries(
 						destPaths.map((p, i) => [outputNames[i], output.file(p)]),
 					),
 					display: `cmake edge ${outputPaths[0] || edge.rule}`,
 				});
-				return outputNames.map((name, i) => ({
-					destPath: destPaths[i],
-					binding: result.outputs[name],
-				}));
+				return outputNames.map((name) => result.outputs[name]);
 			}
 
 			let priorOutputs = [];
@@ -546,14 +505,17 @@ export function replayCmakeTarget(
 				priorOutputs = [...priorOutputs, ...results.flat()];
 			}
 
-			// Final staging pass: reconstructs $bdir one more time (same as
-			// every edge above) so its declared outputs — the whole
-			// directory plus each exposeOutputs entry — actually exist on
-			// disk when this action's script finishes.
-			const stageRestoreCmds = reconstructBuildDirCmds(priorOutputs);
+			// Every edge's output already reappears at its own real
+			// buildDirPath-relative path once listed as an input (produced
+			// artifacts now nest under their real captured path, not an
+			// output-slot name — see normalize_graph_artifact() in
+			// crates/imp-engine/src/spike.rs), so this pass just needs to
+			// mount configureDirectory plus every edge output together to
+			// declare the final directory/exposeOutputs artifacts; no
+			// reconstruction script is needed.
 			const staged = await exec.action({
-				argv: ["sh", "-c", `${stageRestoreCmds.join(" && ")}`],
-				tools: baseTools,
+				argv: ["sh", "-c", "true"],
+				inputs: [input.configureDirectory, ...priorOutputs],
 				outputs: {
 					directory: output.directory(spec.buildDirPath),
 					...Object.fromEntries(
@@ -616,13 +578,12 @@ export function runCTestTask(
 		inputs: {
 			directory: built.outputs.directory,
 			ctest: nativeTool("ctest"),
-			mkdir: nativeTool("mkdir"),
-			cp: nativeTool("cp"),
 		},
 		async run(exec, input) {
-			// built.outputs.directory mounts at its own output slot name
-			// ("directory"), not spec.buildDirPath — see
-			// reconstructBuildDirCmds()'s docstring in replayCmakeTarget().
+			// built.outputs.directory now mounts at its own real path
+			// (spec.buildDirPath) since produced artifacts nest under their
+			// real captured path, not an output-slot name — see
+			// normalize_graph_artifact() in crates/imp-engine/src/spike.rs.
 			// CTestTestfile.cmake's own baked executable paths are already
 			// bare relative tokens by this point — configureCmakeProject()
 			// rewrites them once, at configure time, from its own real
@@ -631,24 +592,18 @@ export function runCTestTask(
 			// invisible to this cached exec.action()'s cache key and risk
 			// replaying a stale path from whichever sandbox first produced
 			// an identical cached result). CTest resolves the relative
-			// tokens itself via --test-dir, so the reconstruction below just
-			// has to land at spec.buildDirPath — no rewriting needed here.
-			const mountedDir = exec.path(input.directory);
-			const script =
-				"mounted=$1; bdir=$2; shift 2; " +
-				'mkdir -p "$bdir" && cp -r "$mounted"/. "$bdir"/ && ' +
-				'ctest --test-dir "$bdir" "$@"';
+			// tokens itself via --test-dir.
 			await exec.action({
 				argv: [
 					"sh",
 					"-c",
-					script,
+					'bdir=$1; shift; ctest --test-dir "$bdir" "$@"',
 					"cmake-ctest",
-					mountedDir,
 					spec.buildDirPath,
 					...ctestNameFilterArgs(testNames),
 				],
-				tools: [input.ctest, input.mkdir, input.cp],
+				tools: [input.ctest],
+				inputs: [input.directory],
 				display: `ctest ${spec.path}`,
 			});
 		},

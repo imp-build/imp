@@ -753,6 +753,13 @@ function graphResolveImport(imp, fromPath, collections) {
 // import that *does* resolve but has no package behind it is a declaration
 // error, reported here where the importing package and the resolved path are
 // both still known.
+//
+// Known limitation (#96): a package's generatedSrcs are not part of this
+// closure and are never import-scanned. analysis_for_package() reads real
+// files via read_file()/glob() at BUILD-evaluation time, before any
+// exec.action() — and thus a generated source's own producing action — has
+// run. Any import a generated file needs must be satisfied by the consuming
+// package's own deps/collections, same as any other source.
 function graphSourceClosure(spec, analysis, config) {
 	const collections = graphCollectionMap(spec, config);
 	const declared = graphDeclaredPackageIndex();
@@ -894,6 +901,12 @@ function graphActionInputs(spec, analysis, config) {
 	for (const [index, resource] of graphResourceInputs(spec).entries()) {
 		inputs[`resource${index}`] = resource;
 	}
+	for (const [index, generated] of (spec.generatedSrcs || []).entries()) {
+		inputs[`generated${index}`] = generated.artifact;
+	}
+	inputs.generatedExpectedPaths = (spec.generatedSrcs || []).map(
+		(g) => g.expectedPath,
+	);
 	return inputs;
 }
 
@@ -924,9 +937,29 @@ function graphOdinBuild(
 					([name]) =>
 						name === "sources" ||
 						name.startsWith("source") ||
-						name.startsWith("resource"),
+						name.startsWith("resource") ||
+						/^generated\d+$/.test(name),
 				)
 				.map(([, value]) => value);
+			// Generated sources aren't scanned for imports (they don't exist
+			// on disk until their producing exec.action() runs, well after
+			// BUILD-evaluation-time analysis_for_package() would need to read
+			// them) — a generated file's own imports must be satisfied via
+			// this package's deps/collections like any other source. What is
+			// checked here is the one contract generatedSrcs relies on: the
+			// artifact must land exactly at spec.path + its declared relative
+			// path, since `odin build spec.path` only discovers files that
+			// are actually inside that directory.
+			for (const [index, expected] of (
+				resolved.generatedExpectedPaths || []
+			).entries()) {
+				const actual = exec.path(resolved[`generated${index}`]);
+				if (actual !== expected) {
+					throw new Error(
+						`odinPackage generatedSrcs[${index}] artifact's real path '${actual}' does not match spec.path + generatedSrcs.path ('${expected}') — the generating action's output.file() path must match`,
+					);
+				}
+			}
 			const command = lint ? "check" : test ? "test" : "build";
 			const args = [
 				exec.tool(resolved.odin, "odin"),
@@ -993,6 +1026,7 @@ function createGraphPackage({
 	collections = [],
 	toolchain,
 	deps = [],
+	generatedSrcs = [],
 	test = false,
 	base = packagePath(),
 } = {}) {
@@ -1026,6 +1060,24 @@ function createGraphPackage({
 		root: spec.path,
 		include: spec.srcs,
 		exclude: spec.exclude,
+	});
+	// Generated sources aren't workspace files, so they can't join spec.sources'
+	// files() glob — each is declared as its own artifact input, paired with
+	// the real path it's expected to land at (spec.path + its relative path),
+	// which is what makes `odin build spec.path` see it as an ordinary package
+	// source once the compile action mounts it there (see graphOdinBuild()'s
+	// own validation of this contract).
+	spec.generatedSrcs = generatedSrcs.map((entry, index) => {
+		if (entry?.artifact?.__imp_graph_handle !== true || !entry.path) {
+			throw new Error(
+				`odinPackage/odinTestPackage generatedSrcs[${index}] must be { artifact: <graph handle>, path: "<relative .odin path>" }`,
+			);
+		}
+		return {
+			artifact: entry.artifact,
+			path: entry.path,
+			expectedPath: graphPath(spec.path, entry.path),
+		};
 	});
 	graphPackages.push(spec);
 	const value = {
@@ -1133,6 +1185,7 @@ export function odinGen({
 	});
 	return Object.freeze({
 		generated: generated.outputs.generated,
+		path,
 		[BUILD]: generated.outputs.generated,
 	});
 }
