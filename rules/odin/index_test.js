@@ -1,4 +1,6 @@
 import { BUILD, LINT, PACKAGE, RUN, TEST } from "imp:core";
+import { ccLibrary } from "//rules/c";
+import { defaultGccGraphToolchain } from "//rules/c/gcc";
 import { describe, expect, test } from "//rules/imp/test";
 import { odinGen, odinPackage, odinTestPackage } from "//rules/odin";
 
@@ -167,6 +169,23 @@ describe("Odin graph rules", () => {
 		expect(await buildFileRoots(pkgC)).toContain(
 			"rules/odin/example/staleness/pkg_a",
 		);
+	});
+
+	// Issue #100: a raw ccLibrary() dep has no .sources/.resources handle,
+	// only transitiveArchives — this asserts its archive-building task's own
+	// srcs really reach the odin build action's declared inputs, not just
+	// that the graph builds without throwing.
+	test("a ccLibrary() dep's archive-building task reaches the build inputs", async () => {
+		const native = ccLibrary({
+			path: "rules/odin/example/native",
+			toolchain: defaultGccGraphToolchain(),
+		});
+		const app = odinPackage({
+			path: "rules/odin/example",
+			deps: [native],
+			toolchain: "dev-2026-03",
+		});
+		expect(await buildFileRoots(app)).toContain("rules/odin/example/native");
 	});
 
 	test("an import that resolves to no package is an error", async () => {
