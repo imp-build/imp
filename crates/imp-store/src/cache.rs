@@ -178,13 +178,19 @@ pub fn cache_root() -> Result<PathBuf> {
 /// Validate a tool name for use as a path component under the cache's
 /// native-tools/tool roots. Shared by exec's tool materialization and the
 /// native-tool artifact registration below.
+///
+/// `+` is allowed alongside the usual path-safe characters because gcc's
+/// own compiler driver name is `c++` (see rules/c/gcc's `gccGraphToolSpec()`
+/// and rules/c/cmake's `graph_replay.js`, which mount that exact name as a
+/// tool) — a real, unavoidable tool name, not an arbitrary one this
+/// validator should be inventing an alias to dodge.
 pub fn validate_tool_name(name: &str) -> Result<()> {
     if name.is_empty()
         || !name
             .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '+'))
     {
-        bail!("tool name '{name}' must contain only ASCII letters, digits, '-', '_' or '.'");
+        bail!("tool name '{name}' must contain only ASCII letters, digits, '-', '_', '.' or '+'");
     }
     Ok(())
 }
@@ -821,5 +827,18 @@ mod tests {
             std::fs::read_to_string(&destination).unwrap(),
             "new content"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn validate_tool_name_accepts_gccs_cxx_driver_name() {
+        validate_tool_name("c++").unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn validate_tool_name_rejects_path_separators() {
+        assert!(validate_tool_name("../escape").is_err());
+        assert!(validate_tool_name("a/b").is_err());
     }
 }

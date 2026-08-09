@@ -9,7 +9,13 @@ import {
 	cmakeLibraryDep,
 	cmakeProjectExpansion,
 } from "//rules/c/cmake/expansion";
-import { correlateCTestEntries, basename } from "//rules/c/cmake/graph_replay";
+import {
+	basename,
+	cmakeProjectSpec,
+	configureCmakeProject,
+	correlateCTestEntries,
+	replayCmakeTarget,
+} from "//rules/c/cmake/graph_replay";
 import { listNamedCmakeTargets, parseNinja } from "//rules/c/cmake/ninja_graph";
 
 // Fixture mirrors rules/c/cmake/example/CMakeLists.txt: a SHARED_LIBRARY
@@ -229,6 +235,56 @@ describe("cmakeProjectExpansion", () => {
 			expect(build.__imp_graph_handle).toBe(true);
 			expect(testUnit.__imp_graph_handle).toBe(true);
 			expect(build.__graph_id === testUnit.__graph_id).toBe(false);
+		});
+	});
+
+	// Regression: task()'s identity key is call site + declared inputs only
+	// (see graph_core.js's _graphTaskKey()) — it can't see plain closure
+	// arguments. Every discovered target's replayCmakeTarget() call happens
+	// from the very same call site and shares every *declared* input
+	// (spec/configured/ninjaGraph are identical project-wide), so without
+	// targetNames/exposeOutputs folded into replayCmakeTarget()'s own
+	// `inputs`, two different targets' calls collide onto the same task
+	// node — the second target's [BUILD] silently replays the first
+	// target's edges instead of its own. expand().get()'s own handle is a
+	// lazy per-key accessor (see the "lazy handle" test below) and stays
+	// distinct by construction regardless, so the collision has to be
+	// checked one level down, on replayCmakeTarget()'s own return value —
+	// the same call expansion.js's create() makes per target.
+	test("replayCmakeTarget() gives distinct targets distinct task identities", () => {
+		return withFakeToolchainHost(async () => {
+			const spec = cmakeProjectSpec({
+				path: "rules/c/cmake/example",
+				toolchain: fakeGccGraphToolchain(),
+				cmakeToolchain: fakeCmakeGraphToolchain(),
+			});
+			const configured = configureCmakeProject(spec);
+			const ninjaGraph = {
+				...parseNinja(BUILD_NINJA, (path) => {
+					if (path === "CMakeFiles/rules.ninja") return RULES_NINJA;
+					throw new Error(`unexpected include: ${path}`);
+				}),
+				sandboxRoot: SANDBOX_ROOT,
+			};
+			const helloCmake = replayCmakeTarget(
+				spec,
+				configured,
+				ninjaGraph,
+				["hello_cmake"],
+				["libhello_cmake.so"],
+			);
+			const helloCmakeMain = replayCmakeTarget(
+				spec,
+				configured,
+				ninjaGraph,
+				["hello_cmake_main"],
+				["hello_cmake_main"],
+			);
+			expect(helloCmake.__graph_id === helloCmakeMain.__graph_id).toBe(false);
+			expect(
+				helloCmake.outputs.file0.__graph_id ===
+					helloCmakeMain.outputs.file0.__graph_id,
+			).toBe(false);
 		});
 	});
 
