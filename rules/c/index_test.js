@@ -30,6 +30,41 @@ function fakeGccGraphToolchain(version = "2025.08-1") {
 	return { tool: tool(binRoot, { binDirs: ["bin"] }), version };
 }
 
+async function resolveHandles(handles) {
+	const roots = handles.map((handle, index) => ({
+		address: `root${index}`,
+		handleId: handle.__graph_id,
+	}));
+	return globalThis.__imp_execute_graph_handles(
+		JSON.stringify(roots),
+		JSON.stringify({}),
+	);
+}
+
+// The fake host's mocked __host_run() returns only {stdout, stderr,
+// exitCode} — no graphOutputs — so an exec.action() call never has real
+// outputs under this mock. That's harmless for a task's own declared
+// output.file()/output.artifact() (caught downstream as "must be an action
+// artifact", same as rules/rust/index_test.js's own
+// resolveIgnoringArtifactValidation()), but ccTask() also feeds one
+// exec.action()'s output into a later exec.action() within the same run() —
+// exec.path() on that empty output rejects it immediately as "expect a
+// resolved task input". Both are the same underlying mock limitation, so
+// both are tolerated here.
+async function resolveIgnoringArtifactValidation(handles) {
+	try {
+		await resolveHandles(handles);
+	} catch (error) {
+		const message = String(error.message || error);
+		if (
+			!message.includes("must be an action artifact") &&
+			!message.includes("expect a resolved task input")
+		) {
+			throw error;
+		}
+	}
+}
+
 describe("graph-native ccLibrary/ccBinary", () => {
 	test("ccLibrary exposes [BUILD]/[PACKAGE] and transitive archive/include-dir arrays", () => {
 		return withCcHost(() => {
@@ -60,6 +95,34 @@ describe("graph-native ccLibrary/ccBinary", () => {
 			// (it's a final link output, not a library other targets can link
 			// against) — only ccLibrary() results expose that contract.
 			expect(bin.transitiveArchives).toBe(undefined);
+		});
+	});
+
+	test("ccLibrary compiles each source in its own exec.action(), not one script for all sources (#84)", () => {
+		return withCcHost(async (host) => {
+			const lib = ccLibrary({
+				path: "rules/c/label_example",
+				toolchain: fakeGccGraphToolchain(),
+			});
+			await resolveIgnoringArtifactValidation([lib[BUILD]]);
+			const compileRuns = host.runs.filter((run) =>
+				run.display.startsWith("cc compile "),
+			);
+			// rules/c/label_example has two sources (main.c, message.cc) — each
+			// needs its own action, not one script compiling both. A single
+			// shared script is what overflows argv on hundreds of sources
+			// (issue #84).
+			// Each compile action's own script only compiles its one source —
+			// not a script listing every source, which is what would overflow
+			// argv on a target with hundreds of them (issue #84).
+			for (const run of compileRuns) {
+				expect(run.argv[2].split(" -c ").length).toBe(2);
+			}
+			expect(compileRuns.length).toBe(2);
+			// The archive step itself can't be exercised here: it consumes
+			// the compile actions' own outputs via exec.path(), which the
+			// fake host can't produce (see resolveIgnoringArtifactValidation
+			// above) — covered instead by real imp build/imp test runs.
 		});
 	});
 

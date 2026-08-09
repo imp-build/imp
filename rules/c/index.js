@@ -16,12 +16,12 @@
 //   - CMakeLists.txt/main()-detection-driven generate-build support lives in
 //     //rules/c/generate_build, a separate module (mirrors
 //     //rules/rust/generate_build's own split from //rules/rust).
-//   - One coarse compile+archive/link action per target (not one run() per
-//     source file) — a change to any one source recompiles the whole
-//     target. Matches this migration's "graph nodes should be deliberately
-//     coarse" design constraint and mirrors how cargoPackage() compiles a
-//     whole crate in one cargo invocation, at the cost of the legacy
-//     factory's finer-grained per-object task-cache reuse.
+//   - One task() per target, but the run() body issues one exec.action()
+//     compile call per source file (chained into a final archive/link
+//     action) rather than one script compiling everything — a single shell
+//     command compiling hundreds of sources overflows the argument-string
+//     limit (issue #84). This also gets per-object task-cache reuse back,
+//     unlike cargoPackage()'s single whole-crate cargo invocation.
 //   - hdrs are tracked as an input (so editing a header invalidates the
 //     compile) but never individually inspected — same conservative
 //     widening rationale as rules/c/cmake's own header handling.
@@ -195,12 +195,6 @@ function ccTask(spec, isLibrary) {
 			const sourcePaths = exec.paths(input.srcs);
 			exec.paths(input.hdrs);
 			const isCxx = sourcePaths.some(isCxxSource);
-			const { compiler, archiver, env } = toolchainCommands(
-				exec,
-				spec.toolchain,
-				input,
-			);
-			const compilerCmd = compiler(isCxx).map(shellQuote).join(" ");
 			const flags = [
 				...optFlags(),
 				...includeDirs.map((dir) => `-I${dir}`),
@@ -211,28 +205,73 @@ function ccTask(spec, isLibrary) {
 			const objectPaths = sourcePaths.map((source) =>
 				objectPathFor(spec.outputSlug, source),
 			);
-			const compileCmds = sourcePaths.map(
-				(source, i) =>
-					`mkdir -p "$(dirname ${shellQuote(objectPaths[i])})" && ${compilerCmd} -c ${shellQuote(source)} -o ${shellQuote(objectPaths[i])} ${flags}`,
+			// One exec.action() per source file, not one script compiling all
+			// of them: a target with hundreds of sources overflows a single
+			// shell command's argument-string limit (issue #84). This also
+			// restores per-object task-cache reuse the coarse single-script
+			// form gave up.
+			//
+			// toolchainCommands() is re-resolved for every exec.action() call
+			// rather than once up front: it consumes exec.tool()/exec.path()
+			// bindings as a side effect, and exec.action() clears the
+			// consumed set once it returns — a binding consumed for one
+			// action isn't carried over and mounted into the next.
+			const compileResults = await Promise.all(
+				sourcePaths.map((source, i) => {
+					const { compiler, env } = toolchainCommands(
+						exec,
+						spec.toolchain,
+						input,
+					);
+					const compilerCmd = compiler(isCxx).map(shellQuote).join(" ");
+					const objPath = objectPaths[i];
+					const script = `set -e; mkdir -p "$(dirname ${shellQuote(objPath)})"; ${compilerCmd} -c ${shellQuote(source)} -o ${shellQuote(objPath)} ${flags}`;
+					// Output slot names only need to be unique within one
+					// exec.action() call, but every one of these compile
+					// actions' outputs is later consumed together by the
+					// same final archive/link action — two actions that
+					// both named their output "object" collide there (see
+					// rules/c/cmake/graph_replay.js's own nextSlot comment),
+					// so each needs a name unique across this whole run().
+					return exec.action({
+						argv: ["sh", "-c", script, "cc-compile"],
+						env,
+						inputs: [input.srcs, input.hdrs],
+						outputs: { [`object${i}`]: output.file(objPath) },
+						display: `cc compile ${objPath}`,
+					});
+				}),
+			);
+			// A produced exec.action() output only exists in a later action's
+			// sandbox at the path exec.path() reports, not the path it was
+			// declared with (see rules/c/cmake/graph_replay.js's own
+			// reconstructBuildDirCmds() comment) — the archive/link command
+			// below must reference these, not the literal objectPaths.
+			const objectSandboxPaths = compileResults.map((result, i) =>
+				exec.path(result.outputs[`object${i}`]),
 			);
 			const depArchivePaths = transitiveArchives.map((_, i) =>
 				exec.path(input[`archive${i}`]),
 			);
+			const { compiler, archiver, env } = toolchainCommands(
+				exec,
+				spec.toolchain,
+				input,
+			);
 			const finalCmd = isLibrary
-				? `${archiver().map(shellQuote).join(" ")} rcs ${shellQuote(outPath)} ${objectPaths.map(shellQuote).join(" ")}`
+				? `${archiver().map(shellQuote).join(" ")} rcs ${shellQuote(outPath)} ${objectSandboxPaths.map(shellQuote).join(" ")}`
 				: (() => {
 						const needsCxx = sourcePaths.some(isCxxSource);
 						const linker = (needsCxx ? compiler(true) : compiler(false))
 							.map(shellQuote)
 							.join(" ");
 						const linkFlags = spec.linkopts.map(shellQuote).join(" ");
-						return `${linker} -o ${shellQuote(outPath)} ${objectPaths.map(shellQuote).join(" ")} ${depArchivePaths.map(shellQuote).join(" ")} ${linkFlags}`;
+						return `${linker} -o ${shellQuote(outPath)} ${objectSandboxPaths.map(shellQuote).join(" ")} ${depArchivePaths.map(shellQuote).join(" ")} ${linkFlags}`;
 					})();
-			const script = `set -e; mkdir -p "$(dirname ${shellQuote(outPath)})"; ${compileCmds.join("; ")}; ${finalCmd}`;
+			const script = `set -e; mkdir -p "$(dirname ${shellQuote(outPath)})"; ${finalCmd}`;
 			const result = await exec.action({
 				argv: ["sh", "-c", script, isLibrary ? "cc-archive" : "cc-link"],
 				env,
-				inputs: transitiveArchives.map((_, i) => input[`archive${i}`]),
 				outputs: { artifact: output.file(outPath) },
 				display: `cc ${isLibrary ? "archive" : "link"} ${outPath}`,
 			});
