@@ -72,10 +72,18 @@ fn make_execution_service() -> Result<Arc<dyn ExecutionService>> {
     Ok(Arc::new(LocalExecutionService::new()))
 }
 
+// Nests under the artifact's own real captured sandbox path rather than its
+// declared output-slot `name`, so independently-produced outputs compose via
+// ordinary merge_digests() path-union semantics when a later action consumes
+// several of them together, instead of colliding on accidental slot-name
+// equality. The `name` fallback is defensive only: the sole caller reaches
+// this exclusively for output.file()/output.directory() artifacts, which
+// always carry a real path.
 fn normalize_graph_artifact(name: &str, artifact: &CachedArtifact) -> Result<DirectoryDigest> {
+    let path = artifact.path.as_deref().unwrap_or(name);
     match artifact.kind.as_str() {
         "file" | "manifest" => nest_file(
-            name,
+            path,
             artifact.digest.clone(),
             artifact.bytes.unwrap_or_default(),
             artifact.mode,
@@ -84,20 +92,11 @@ fn normalize_graph_artifact(name: &str, artifact: &CachedArtifact) -> Result<Dir
             let digest = artifact
                 .tree_digest
                 .as_ref()
-                .with_context(|| {
-                    format!(
-                        "directory output '{}' has no tree digest",
-                        artifact.path.as_deref().unwrap_or("<unknown>")
-                    )
-                })?
+                .with_context(|| format!("directory output '{path}' has no tree digest"))?
                 .clone();
-            nest_directory(name, &DirectoryDigest::from_digest(digest))
+            nest_directory(path, &DirectoryDigest::from_digest(digest))
         }
-        other => bail!(
-            "graph action output '{}' has unsupported kind '{}'",
-            artifact.path.as_deref().unwrap_or("<unknown>"),
-            other
-        ),
+        other => bail!("graph action output '{path}' has unsupported kind '{other}'"),
     }
 }
 
@@ -4510,7 +4509,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                         binding.set("type", "artifact")?;
                         binding.set("kind", artifact.kind.as_str())?;
                         binding.set("digest", normalized.digest())?;
-                        binding.set("path", name.as_str())?;
+                        binding.set("path", path.as_str())?;
                         binding.set(
                             "fingerprint",
                             format!("artifact:{}:{}", artifact.kind, normalized.digest()),
@@ -7583,6 +7582,7 @@ mod tests {
     use imp_execution::exec::{
         report_process_line, spawn_output_reader, ProcessLine, ProcessStream,
     };
+    use imp_store::digest::{list_files_in_digest, merge_digests};
     use sha2::{Digest, Sha256};
 
     /// Clear runtime-global memo state so a repeated goal invocation on the
@@ -14930,6 +14930,57 @@ export const late = makeLateMutation();
         assert!(message.contains("packageFactory"), "{message}");
         assert!(
             message.contains("called after workspace evaluation completed"),
+            "{message}"
+        );
+    }
+
+    fn file_artifact(path: &str, digest: &str) -> CachedArtifact {
+        CachedArtifact {
+            artifact_id: format!("test-{path}"),
+            kind: "file".to_owned(),
+            path: Some(path.to_owned()),
+            value: None,
+            digest: digest.to_owned(),
+            bytes: Some(0),
+            mode: None,
+            tree_digest: None,
+            named_cache: None,
+        }
+    }
+
+    #[test]
+    fn normalize_graph_artifact_nests_under_real_path_not_slot_name() {
+        // Two exec.action() outputs declared at distinct real paths, reused
+        // under colliding/reused slot names (as ccTask()'s per-source compile
+        // actions do for #84) — real-path nesting means they compose via
+        // ordinary merge, not the slot-name collision this used to hit.
+        let a =
+            normalize_graph_artifact("object", &file_artifact("build/a.o", "digest-a")).unwrap();
+        let b =
+            normalize_graph_artifact("object", &file_artifact("build/b.o", "digest-b")).unwrap();
+        let merged = merge_digests(vec![a, b]).unwrap();
+        let files = list_files_in_digest(&merged).unwrap();
+        assert!(files.contains(&"build/a.o".to_owned()), "{files:?}");
+        assert!(files.contains(&"build/b.o".to_owned()), "{files:?}");
+    }
+
+    #[test]
+    fn normalize_graph_artifact_same_real_path_differing_content_conflicts() {
+        // Two producers legitimately declaring the same real output path
+        // with different content must still fail loudly, even though their
+        // slot names differ — the conflict is on the real path, not the
+        // slot name.
+        let a =
+            normalize_graph_artifact("object0", &file_artifact("build/out.o", "digest-a")).unwrap();
+        let b =
+            normalize_graph_artifact("object1", &file_artifact("build/out.o", "digest-b")).unwrap();
+        let error = match merge_digests(vec![a, b]) {
+            Ok(_) => panic!("expected a merge conflict error"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("merge conflict at 'build/out.o'"),
             "{message}"
         );
     }

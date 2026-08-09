@@ -34,6 +34,49 @@ describe("Odin graph rules", () => {
 		expect(generated[BUILD].__imp_graph_handle).toBe(true);
 	});
 
+	// Issue #96: odinPackage() accepts a generated source artifact (e.g.
+	// odinGen()'s own output) alongside its ordinary workspace srcs.
+	test("odinGen() exposes the real workspace path its artifact lands at", () => {
+		const generated = odinGen({
+			base: "rules/odin/example",
+			srcs: ["*.json"],
+			out: "generated/bindings.odin",
+			cmd: ["echo"],
+		});
+		expect(generated.path).toBe("rules/odin/example/generated/bindings.odin");
+	});
+
+	test("odinPackage(generatedSrcs) builds a valid graph without throwing", () => {
+		const generated = odinGen({
+			base: "rules/odin/example",
+			srcs: ["*.json"],
+			out: "generated/bindings.odin",
+			cmd: ["echo"],
+		});
+		const pkg = odinPackage({
+			path: "rules/odin/example",
+			generatedSrcs: [
+				{ artifact: generated.generated, path: "generated/bindings.odin" },
+			],
+			toolchain: "dev-2026-03",
+		});
+		expect(pkg[BUILD].__imp_graph_handle).toBe(true);
+	});
+
+	test("odinPackage(generatedSrcs) rejects an entry missing artifact/path", () => {
+		let message = null;
+		try {
+			odinPackage({
+				path: "rules/odin/example",
+				generatedSrcs: [{ path: "generated/bindings.odin" }],
+				toolchain: "dev-2026-03",
+			});
+		} catch (error) {
+			message = error.message;
+		}
+		expect(message).toContain("generatedSrcs[0]");
+	});
+
 	// Issue #7: `--changed-since` needs to see the real dependency edge a
 	// genuine inferred Odin import produces (not a hand-wired one), since
 	// that's exactly what `spike::stale_graph_addresses` walks in Rust via

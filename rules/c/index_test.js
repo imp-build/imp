@@ -46,11 +46,10 @@ async function resolveHandles(handles) {
 // outputs under this mock. That's harmless for a task's own declared
 // output.file()/output.artifact() (caught downstream as "must be an action
 // artifact", same as rules/rust/index_test.js's own
-// resolveIgnoringArtifactValidation()), but ccTask() also feeds one
-// exec.action()'s output into a later exec.action() within the same run() —
-// exec.path() on that empty output rejects it immediately as "expect a
-// resolved task input". Both are the same underlying mock limitation, so
-// both are tolerated here.
+// resolveIgnoringArtifactValidation()). ccTask() also calls exec.path() on a
+// dependency library's archive() output (to link against it) — on an empty
+// mock output that rejects immediately as "expect a resolved task input".
+// Both are the same underlying mock limitation, so both are tolerated here.
 async function resolveIgnoringArtifactValidation(handles) {
 	try {
 		await resolveHandles(handles);
@@ -119,10 +118,36 @@ describe("graph-native ccLibrary/ccBinary", () => {
 				expect(run.argv[2].split(" -c ").length).toBe(2);
 			}
 			expect(compileRuns.length).toBe(2);
-			// The archive step itself can't be exercised here: it consumes
-			// the compile actions' own outputs via exec.path(), which the
-			// fake host can't produce (see resolveIgnoringArtifactValidation
-			// above) — covered instead by real imp build/imp test runs.
+			// The archive step itself can't be exercised here: the fake
+			// host's __host_run() never populates graphOutputs (see
+			// resolveIgnoringArtifactValidation above), so the compile
+			// actions' own outputs are never real — covered instead by real
+			// imp build/imp test runs.
+		});
+	});
+
+	test("ccLibrary compile actions each declare exactly one output, at the real per-source object path", () => {
+		return withCcHost(async (host) => {
+			const lib = ccLibrary({
+				path: "rules/c/label_example",
+				toolchain: fakeGccGraphToolchain(),
+			});
+			await resolveIgnoringArtifactValidation([lib[BUILD]]);
+			const compileRuns = host.runs.filter((run) =>
+				run.display.startsWith("cc compile "),
+			);
+			expect(compileRuns.length).toBe(2);
+			// A fixed output name ("object") reused across every compile
+			// action is only safe because produced artifacts nest under
+			// their real captured path, not their output-slot name (see
+			// normalize_graph_artifact() in crates/imp-engine/src/spike.rs)
+			// — so each action's single declared output path must still be
+			// the source-specific object path, not something shared.
+			const paths = compileRuns.map((run) => run.outputs[0].path);
+			expect(new Set(paths).size).toBe(2);
+			for (const run of compileRuns) {
+				expect(run.outputs.length).toBe(1);
+			}
 		});
 	});
 
