@@ -703,11 +703,6 @@ function graphPackageSpec(spec) {
 		path: spec.path,
 		srcs: spec.srcs,
 		exclude: spec.exclude,
-		// `graphInferredPackages()` reads `.handle` off whatever
-		// `infer_dep_entries()` matches in the package index — without this,
-		// every inferred import resolves to an index entry with no handle,
-		// so real Odin imports never produced a graph dependency edge (#7).
-		handle: spec,
 	};
 }
 
@@ -715,32 +710,147 @@ function graphAnalysis(spec) {
 	return analysis_for_package(graphPackageSpec(spec));
 }
 
-function graphInferredPackages(spec, analysis, config) {
-	const index = build_package_index(graphPackages.map(graphPackageSpec));
-	return infer_dep_entries(
-		graphPackageSpec(spec),
-		index,
-		graphCollectionMap(spec, config),
-		analysis,
-	)
-		.map((entry) => entry.handle)
-		.filter((entry) => entry && entry.__odin_graph_package === true);
+// Default exclusions for an ordinary (non-test) Odin package, whether it was
+// declared by createGraphPackage() or reached as an undeclared directory.
+const DEFAULT_PACKAGE_EXCLUDE = ["*_test.odin", "test_*.odin"];
+
+function graphDeclaredPackageIndex() {
+	const index = new Map();
+	for (const candidate of graphPackages) {
+		const path = normalize_workspace_path(candidate.path || ".");
+		const current = index.get(path);
+		// A test package and an ordinary package may share a directory. An
+		// import names the directory's ordinary package, so prefer that one.
+		if (current === undefined || (current.test && !candidate.test))
+			index.set(path, candidate);
+	}
+	return index;
 }
 
-function graphDependencyPackages(spec, analysis, config) {
-	const found = new Map();
+function graphResolveImport(imp, fromPath, collections) {
+	if (!imp.includes(":")) {
+		return { path: workspace_join(fromPath, imp), collection: null };
+	}
+	const resolved = resolved_import_path(imp, collections);
+	if (resolved === null) return null;
+	return { path: resolved, collection: imp.slice(0, imp.indexOf(":")) };
+}
+
+// One `odin build` compiles the root package together with everything it
+// imports, so the sandbox needs the sources of the whole transitive import
+// closure — not just the root package's own direct imports. Two kinds of
+// directory reach that closure:
+//
+//   * a declared odinPackage(), contributing its own files() handle, and
+//   * a directory reached through a collection mapping or a relative import
+//     that no odinPackage() declares — typically a vendored library tree.
+//     Those get a synthesized files() handle, which is what makes the
+//     `-collection:name=path` flag point at a directory that exists inside
+//     the sandbox at all (#88).
+//
+// Imports that don't resolve to a workspace path (`core:`, `vendor:`, and any
+// other unmapped collection) belong to the toolchain and are left alone. An
+// import that *does* resolve but has no package behind it is a declaration
+// error, reported here where the importing package and the resolved path are
+// both still known.
+function graphSourceClosure(spec, analysis, config) {
+	const collections = graphCollectionMap(spec, config);
+	const declared = graphDeclaredPackageIndex();
+	const handles = [];
+	const usedCollections = new Set();
+	const visited = new Set([
+		normalize_workspace_path(spec.path || "."),
+		normalize_workspace_path(analysis.packagePath),
+	]);
+	const queue = [{ analysis, owner: spec.path }];
+
+	const enqueueDeclared = (candidate) => {
+		const path = normalize_workspace_path(candidate.path || ".");
+		if (visited.has(path)) return;
+		visited.add(path);
+		const candidateAnalysis = graphAnalysis(candidate);
+		visited.add(normalize_workspace_path(candidateAnalysis.packagePath));
+		handles.push(candidate.sources);
+		queue.push({ analysis: candidateAnalysis, owner: candidate.path });
+	};
+
 	for (const dep of spec.deps) {
-		if (dep?.__odin_graph_package === true) found.set(dep.key, dep);
+		if (dep?.__odin_graph_package !== true) continue;
+		const candidate = graphPackages.find((entry) => entry.key === dep.key);
+		if (candidate) enqueueDeclared(candidate);
 	}
-	for (const dep of graphInferredPackages(spec, analysis, config)) {
-		found.set(dep.key, dep);
+
+	while (queue.length > 0) {
+		const entry = queue.shift();
+		for (const imp of entry.analysis.imports) {
+			const resolved = graphResolveImport(
+				imp,
+				entry.analysis.packagePath,
+				collections,
+			);
+			if (resolved === null) continue;
+			if (resolved.collection !== null)
+				usedCollections.add(resolved.collection);
+
+			const path = normalize_workspace_path(resolved.path);
+			const candidate = declared.get(path);
+			if (candidate !== undefined) {
+				enqueueDeclared(candidate);
+				continue;
+			}
+			if (visited.has(path)) continue;
+			visited.add(path);
+
+			let vendored = null;
+			try {
+				vendored = analysis_for_package({
+					address: `//${path}`,
+					path,
+					srcs: ["*.odin"],
+					exclude: DEFAULT_PACKAGE_EXCLUDE,
+				});
+			} catch (_) {
+				// glob() rejects a root that is not a directory at all; that is
+				// the same declaration error as an empty one, reported below
+				// with the import that asked for it.
+			}
+			if (vendored === null || vendored.sourceFiles.length === 0) {
+				throw new Error(
+					`Odin package '${entry.owner}' imports '${imp}', which resolves to '${path}', ` +
+						"but there is no Odin package there. " +
+						(resolved.collection === null
+							? "Check the import path."
+							: `Check the '${resolved.collection}' collection mapping.`),
+				);
+			}
+			handles.push(
+				files({
+					root: path,
+					include: ["*.odin"],
+					exclude: DEFAULT_PACKAGE_EXCLUDE,
+				}),
+			);
+			queue.push({ analysis: vendored, owner: path });
+		}
 	}
-	return [...found.values()];
+
+	return {
+		handles,
+		// Only the collections the closure actually reached: a flag for an
+		// unused collection names a directory we have no reason to declare as
+		// an input, which is the shape of #88 all over again.
+		collections: [...collections.entries()].filter(([name]) =>
+			usedCollections.has(name),
+		),
+	};
 }
 
 function graphResourceInputs(spec) {
 	const resources = [];
 	for (const dep of spec.deps) {
+		// Odin package deps travel the source closure above; anything else
+		// contributes its sources/resources as opaque extra inputs.
+		if (dep?.__odin_graph_package === true) continue;
 		if (dep?.sources?.__imp_graph_handle === true) resources.push(dep.sources);
 		if (dep?.resources?.__imp_graph_handle === true)
 			resources.push(dep.resources);
@@ -767,6 +877,7 @@ function graphPackageExpansion(spec) {
 }
 
 function graphActionInputs(spec, analysis, config) {
+	const closure = graphSourceClosure(spec, analysis, config);
 	const inputs = {
 		sources: spec.sources,
 		odin: spec.toolchain,
@@ -774,15 +885,11 @@ function graphActionInputs(spec, analysis, config) {
 		analysis: {
 			packagePath: analysis.packagePath,
 			hasMainEntrypoint: analysis.hasMainEntrypoint,
-			collections: [...graphCollectionMap(spec, config).entries()],
+			collections: closure.collections,
 		},
 	};
-	for (const [index, dep] of graphDependencyPackages(
-		spec,
-		analysis,
-		config,
-	).entries()) {
-		inputs[`source${index}`] = dep.sources;
+	for (const [index, source] of closure.handles.entries()) {
+		inputs[`source${index}`] = source;
 	}
 	for (const [index, resource] of graphResourceInputs(spec).entries()) {
 		inputs[`resource${index}`] = resource;
@@ -809,9 +916,6 @@ function graphOdinBuild(
 			? { result: output.value() }
 			: { artifact: output.artifact(), executablePath: output.value() },
 		async run(exec, resolved) {
-			const collectionDirs = resolved.analysis.collections.map(
-				([, path]) => path,
-			);
 			const flags = resolved.analysis.collections.map(
 				([name, path]) => `-collection:${name}=${path}`,
 			);
@@ -894,22 +998,11 @@ function createGraphPackage({
 } = {}) {
 	const normalizedSrcs = package_srcs({ srcs });
 	const normalizedExclude =
-		exclude === undefined
-			? test
-				? []
-				: ["*_test.odin", "test_*.odin"]
-			: exclude;
+		exclude === undefined ? (test ? [] : DEFAULT_PACKAGE_EXCLUDE) : exclude;
 	const version = typeof toolchain === "string" ? toolchain : undefined;
 	const packageId = ++graphPackageCounter;
 	const spec = {
 		__odin_graph_package: true,
-		// `same_package()` compares `.handle.__id` to tell two packages
-		// apart by identity (a legacy-path concept — see `graphPackageSpec`'s
-		// `handle: spec` below); without this, two distinct graph packages'
-		// specs both have `.handle.__id === undefined`, so every pair
-		// compares "same", and dependency-inference self-exclusion silently
-		// drops every candidate (#7).
-		__id: packageId,
 		key: `package-${packageId}`,
 		base,
 		path: graphPath(base, path),
