@@ -99,7 +99,13 @@ export const editor = odinPackage({
 Local collections may also use collection target handles or `{ name, path }`
 entries when a plain name-to-path object is not sufficient. Collection
 directories are included as declared sandbox inputs, not merely converted into
-compiler flags.
+compiler flags: the rule walks the package's imports transitively and declares
+every directory it reaches, whether that directory is a declared
+`odinPackage()` or an undeclared tree such as a vendored library. Only the
+collections those imports actually use become `-collection:` flags. An import
+that resolves to a workspace path with no Odin package behind it fails the
+build with the importing package and the resolved path, rather than reaching
+the compiler as a broken collection flag.
 
 ## Generate sources and BUILD files
 

@@ -64,4 +64,81 @@ describe("Odin graph rules", () => {
 			.map((node) => node.data && node.data.root);
 		expect(fileRoots).toContain("rules/odin/example/staleness/pkg_a");
 	});
+
+	// Issue #88: one `odin build` compiles the whole import tree, so every
+	// reachable package's sources have to be in the sandbox. These walk the
+	// same introspection path as the test above and assert on the `files`
+	// leaves the build action really declares.
+	async function buildFileRoots(pkg) {
+		const walkJson = await globalThis.__imp_walk_graph_for_introspection(
+			JSON.stringify([{ address: "pkg", handleId: pkg[BUILD].__graph_id }]),
+			JSON.stringify({ args: [], flags: {}, mode: {}, config: {} }),
+			JSON.stringify({ discoverExpansionGet: true }),
+		);
+		return JSON.parse(walkJson)
+			.nodes.filter((node) => node.kind === "files")
+			.map((node) => node.data && node.data.root);
+	}
+
+	test("collection imports become source inputs", async () => {
+		const app = odinPackage({
+			base: "rules/odin/example/collection",
+			path: "app",
+			collections: { lib: "vendor" },
+			toolchain: "dev-2026-03",
+		});
+		expect(await buildFileRoots(app)).toContain(
+			"rules/odin/example/collection/vendor/greet",
+		);
+	});
+
+	test("the source closure follows imports inside a collection", async () => {
+		const app = odinPackage({
+			base: "rules/odin/example/collection",
+			path: "app",
+			collections: { lib: "vendor" },
+			toolchain: "dev-2026-03",
+		});
+		// vendor/util is reached only through vendor/greet's own "lib:util"
+		// import — nothing in app/ names it.
+		expect(await buildFileRoots(app)).toContain(
+			"rules/odin/example/collection/vendor/util",
+		);
+	});
+
+	test("the source closure follows declared packages transitively", async () => {
+		odinPackage({
+			path: "rules/odin/example/staleness/pkg_a",
+			toolchain: "dev-2026-03",
+		});
+		odinPackage({
+			path: "rules/odin/example/staleness/pkg_b",
+			toolchain: "dev-2026-03",
+		});
+		const pkgC = odinPackage({
+			path: "rules/odin/example/staleness/pkg_c",
+			toolchain: "dev-2026-03",
+		});
+		// pkg_c imports pkg_b, which imports pkg_a. Without a closure, pkg_c's
+		// action declares pkg_b only and the compiler fails on pkg_a.
+		expect(await buildFileRoots(pkgC)).toContain(
+			"rules/odin/example/staleness/pkg_a",
+		);
+	});
+
+	test("an import that resolves to no package is an error", async () => {
+		const app = odinPackage({
+			base: "rules/odin/example/collection",
+			path: "app",
+			collections: { lib: "vendor/does-not-exist" },
+			toolchain: "dev-2026-03",
+		});
+		let message = null;
+		try {
+			await buildFileRoots(app);
+		} catch (error) {
+			message = error && error.message ? error.message : String(error);
+		}
+		expect(message).toContain("but there is no Odin package there");
+	});
 });
