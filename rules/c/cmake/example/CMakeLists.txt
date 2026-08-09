@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
-project(hello_cmake C)
+project(hello_cmake C CXX)
 
 add_library(hello_cmake SHARED hello.c)
+
+# Issue #89: a C++ target exercises the GCC graph toolchain's `c++` driver,
+# not just `cc`/`clang`.
+add_executable(hello_cmake_cxx_main hello_cxx.cpp main_cxx.cpp)
 
 add_custom_command(TARGET hello_cmake POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy

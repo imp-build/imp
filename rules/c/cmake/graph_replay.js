@@ -402,6 +402,15 @@ export function replayCmakeTarget(
 			mkdir: nativeTool("mkdir"),
 			cp: nativeTool("cp"),
 			dirname: nativeTool("dirname"),
+			// task()'s identity key is call site + declared inputs only — it
+			// can't see plain closure arguments. Every discovered CMake
+			// target's replayCmakeTarget() call shares this exact call site,
+			// module, and (spec/configured/ninjaGraph-derived) inputs above,
+			// so without these two the key collides across every target in
+			// one CMakeLists.txt and every target after the first silently
+			// resolves to the first target's already-registered task.
+			targetNames,
+			exposeOutputs,
 		},
 		outputs: {
 			directory: output.artifact(),

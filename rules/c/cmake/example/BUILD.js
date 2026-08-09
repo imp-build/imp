@@ -25,6 +25,12 @@ export const hello_cmake_main = {
 	[TEST]: { unit: hello.get("hello_cmake_main", TEST, "unit") },
 };
 
+// Issue #89: replaying a C++ target rewrites its compile command to the bare
+// tool name "c++", which needs its own graph toolchain mount alongside cc/ar.
+export const hello_cmake_cxx_main = {
+	[BUILD]: hello.get("hello_cmake_cxx_main", BUILD),
+};
+
 export const raw_hello = ccLibrary({
 	srcs: ["hello.c"],
 	toolchain: zig,
