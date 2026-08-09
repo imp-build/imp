@@ -861,6 +861,13 @@ function graphResourceInputs(spec) {
 		if (dep?.sources?.__imp_graph_handle === true) resources.push(dep.sources);
 		if (dep?.resources?.__imp_graph_handle === true)
 			resources.push(dep.resources);
+		// ccLibrary()/cmakeLibraryDep()-shaped deps (issue #100): their
+		// transitiveArchives land in the sandbox at their real captured path
+		// (e.g. build/c/<slug>.a), which is exactly what a `foreign import`
+		// referencing that path needs — no linker flag involved, Odin
+		// resolves foreign imports as literal sandbox-relative paths.
+		if (Array.isArray(dep?.transitiveArchives))
+			resources.push(...dep.transitiveArchives);
 	}
 	return resources;
 }
@@ -961,14 +968,26 @@ function graphOdinBuild(
 				}
 			}
 			const command = lint ? "check" : test ? "test" : "build";
+			// `odin test` already tolerates a package with no `main` (that's the
+			// whole point of the test build mode); `build` and `check` both
+			// default to expecting one. `build` already opts out via
+			// -build-mode:lib (a flag `check` doesn't support); `check` has its
+			// own -no-entry-point for the same purpose — without it, a
+			// library-only or test-only package declared directly as a target
+			// (not merely imported as a dep) fails `imp lint` with "Undefined
+			// entry point procedure 'main'", as #100's fixture does.
 			const args = [
 				exec.tool(resolved.odin, "odin"),
 				command,
 				resolved.analysis.packagePath,
 				...flags,
 				...(lint ? ["-vet"] : []),
-				...(!lint && !test && !resolved.analysis.hasMainEntrypoint
-					? ["-build-mode:lib"]
+				...(!resolved.analysis.hasMainEntrypoint
+					? lint
+						? ["-no-entry-point"]
+						: !test
+							? ["-build-mode:lib"]
+							: []
 					: []),
 				...(!lint && !test ? [`-out:${outputPath}`] : []),
 			];

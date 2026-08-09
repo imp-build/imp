@@ -132,3 +132,30 @@ export const app = odinPackage({
 Separately, `imp goal generate-build` can create declarations for unowned
 Odin sources. Opt in with `odinConfig.buildGenerate: true`; it is disabled by
 default.
+
+## Native (`ccLibrary`/CMake) dependencies
+
+`deps` also accepts a raw `ccLibrary()` result, or a `cmakeLibraryDep()`
+adapting a CMake target (see `//rules/c`, `//rules/c/cmake`). Its built
+archive is staged into the sandbox at its real workspace-relative path, so a
+`foreign import` can reference it directly — resolved, per the Odin
+compiler, relative to the importing `.odin` file's own directory:
+
+```js
+import { ccLibrary } from "//rules/c";
+import { odinPackage } from "//rules/odin";
+
+export const sqlite = ccLibrary({ path: "vendor/sqlite" });
+
+export const app = odinPackage({
+    deps: [sqlite],
+});
+```
+
+```odin
+// app.odin (at the odinPackage's own path "."): ccLibrary()'s archive
+// always lands at "build/c/<slug>.a", workspace-root-relative regardless of
+// the library's own path — adjust the "../" prefix for the importing
+// package's own directory depth.
+foreign import sqlite "build/c/vendor_sqlite.a"
+```
