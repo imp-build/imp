@@ -102,7 +102,7 @@ function parseFileDump(dump) {
 // gccGraphToolSpec() (a real mount of this pinned toolchain) rather than
 // nativeTool() (which would resolve to a different, unpinned system tool
 // with the same bare name, if one exists at all in a hermetic sandbox).
-const GCC_GRAPH_TOOL_NAMES = new Set(["clang", "cc", "c++", "ar"]);
+const GCC_GRAPH_TOOL_NAMES = new Set(["clang", "cc", "c++", "ar", "ranlib"]);
 
 function isZigToolchain(toolchain) {
 	return !!toolchain.buildCacheTool;
@@ -449,11 +449,10 @@ export function replayCmakeTarget(
 					// own docstring in //rules/c/cmake/toolchain for why
 					// "cmake" — CMAKE_COMMAND baked into a POST_BUILD custom
 					// command — needs the exact same treatment as gcc's own
-					// clang/cc/c++/ar). A real gap for a CMake project
+					// clang/cc/c++/ar/ranlib). A real gap for a CMake project
 					// invoking some other absolute-pathed host tool from its
 					// build commands — tracked as a follow-up alongside this
-					// migration's other known gaps (zig-as-CMake-compiler,
-					// CMAKE_RANLIB).
+					// migration's other known gap (zig-as-CMake-compiler).
 					if (GCC_GRAPH_TOOL_NAMES.has(name)) {
 						edgeTools.push(gccGraphToolSpec(spec.toolchain.version, name));
 						continue;
@@ -463,7 +462,7 @@ export function replayCmakeTarget(
 						continue;
 					}
 					throw new Error(
-						`cmake edge needs unsupported host tool '${name}' — only gcc's own clang/cc/c++/ar and cmake itself are resolvable from a graph-native CMake replay right now`,
+						`cmake edge needs unsupported host tool '${name}' — only gcc's own clang/cc/c++/ar/ranlib and cmake itself are resolvable from a graph-native CMake replay right now`,
 					);
 				}
 

@@ -186,19 +186,26 @@ export function gccGraphTool(version) {
 		inputs: { archive, shell, mkdir, tar, xz, chmod },
 		outputs: { directory: output.artifact() },
 		async run(exec, inputs) {
-			// Wrapper set mirrors the legacy acquireGccToolchain() install
-			// exactly (clang/cc -> gcc, c++ -> g++, ar -> the *binutils*-
-			// prefixed ar, a different prefix from gcc/g++ — see
-			// BINUTILS_PREFIX's own doc comment) — confirmed missing by two
-			// real `imp lint //crates/imp:imp` failures: rustc's own link step
-			// only needs "clang", but cc-rs-driven build scripts also need
-			// "ar" (no CC/CXX-shaped override for it) and this toolchain's own
-			// CXX env value (below) points at "c++".
+			// Wrapper set must stay identical to the legacy acquireGccToolchain()
+			// install's own (below) — both write to the exact same named-cache
+			// (name, key) pair, so whichever one actually runs first in a given
+			// build wins the race to populate it (see acquireGccToolchain()'s own
+			// comment for the real failure this caused). clang/cc -> gcc,
+			// c++ -> g++, ar -> the *binutils*-prefixed ar, a different prefix
+			// from gcc/g++ — see BINUTILS_PREFIX's own doc comment — confirmed
+			// missing by two real `imp lint //crates/imp:imp` failures: rustc's
+			// own link step only needs "clang", but cc-rs-driven build scripts
+			// also need "ar" (no CC/CXX-shaped override for it) and this
+			// toolchain's own CXX env value (below) points at "c++". "ranlib" is
+			// needed so rules/c/cmake's graph-native replay can pin CMAKE_RANLIB
+			// to this toolchain (see gccCMakeCompilerArgs() below) instead of
+			// leaking whatever ranlib the
+			// configuring host happens to have on PATH (#98).
 			const result = await exec.action({
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
-					'archive=$1; out=$2; gccPrefix=$3; binutilsPrefix=$4; mkdir -p "$out" && tar -xJf "$archive" -C "$out" --strip-components=1 && for pair in "clang:$gccPrefix-gcc" "cc:$gccPrefix-gcc" "c++:$gccPrefix-g++" "ar:$binutilsPrefix-ar"; do name=${pair%%:*}; target=${pair#*:}; printf \'%s\\n\' \'#!/bin/sh\' "exec \\"\\${0%/*}/$target\\" \\"\\$@\\"" > "$out/bin/$name"; chmod +x "$out/bin/$name"; done',
+					'archive=$1; out=$2; gccPrefix=$3; binutilsPrefix=$4; mkdir -p "$out" && tar -xJf "$archive" -C "$out" --strip-components=1 && for pair in "clang:$gccPrefix-gcc" "cc:$gccPrefix-gcc" "c++:$gccPrefix-g++" "ar:$binutilsPrefix-ar" "ranlib:$binutilsPrefix-ranlib"; do name=${pair%%:*}; target=${pair#*:}; printf \'%s\\n\' \'#!/bin/sh\' "exec \\"\\${0%/*}/$target\\" \\"\\$@\\"" > "$out/bin/$name"; chmod +x "$out/bin/$name"; done',
 					"gcc-install",
 					exec.path(inputs.archive),
 					"gcc-toolchain",
@@ -308,13 +315,22 @@ export const acquireGccToolchain = memo(
 		const gccExe = `${GCC_EXE_PREFIX[plat.arch]}-gcc`;
 		const gxxExe = `${GCC_EXE_PREFIX[plat.arch]}-g++`;
 		const arExe = `${BINUTILS_PREFIX[plat.arch]}-ar`;
+		const ranlibExe = `${BINUTILS_PREFIX[plat.arch]}-ranlib`;
 		// Bootlin's own gcc binary is a `toolchain-wrapper` that's argv[0]-
 		// sensitive; wrapper scripts that exec the real binary keep its own name.
+		//
+		// This wrapper set must stay identical to gccGraphTool()'s own (above) —
+		// both write to the exact same named-cache (name, key) pair, and
+		// whichever one runs first in a given build wins the race to populate
+		// it; a real build with both //rules/c/label_example (legacy) and
+		// //rules/c/cmake (graph) targets hit exactly this, silently dropping
+		// the "ranlib" wrapper depending on scheduling order (#98).
 		const wrappers = [
 			[`#!/bin/sh\nexec "$(dirname "$0")/${gccExe}" "$@"\n`, "clang"],
 			[`#!/bin/sh\nexec "$(dirname "$0")/${gccExe}" "$@"\n`, "cc"],
 			[`#!/bin/sh\nexec "$(dirname "$0")/${gxxExe}" "$@"\n`, "c++"],
 			[`#!/bin/sh\nexec "$(dirname "$0")/${arExe}" "$@"\n`, "ar"],
+			[`#!/bin/sh\nexec "$(dirname "$0")/${ranlibExe}" "$@"\n`, "ranlib"],
 		];
 		const wrapperArgs = wrappers.flat();
 		// $1 = archive, $2 = extractPath, $3.. = wrapper (content, filename) pairs.
@@ -516,20 +532,22 @@ export function gccGraphToolchainDir(exec, resolvedGccTool, version) {
 }
 
 /**
- * Real, absolute CMAKE_C_COMPILER/CMAKE_CXX_COMPILER/CMAKE_AR arguments for
- * a resolved gcc graph toolchain, for use by rules/c/cmake's graph-native
- * configure step (see #31/#62). Uses gccGraphToolchainDir()'s real host path
- * rather than exec.tool()'s sandbox-mount-relative one — CMake bakes this
- * value into build.ninja, which later replay actions read from a *different*
- * sandbox than the one that ran configure, so it must be a path valid
- * everywhere, not just within configure's own sandbox (the exact bug class
- * gccRustLinkDriverEnv's own docstring already covers for rustc's
+ * Real, absolute CMAKE_C_COMPILER/CMAKE_CXX_COMPILER/CMAKE_AR/CMAKE_RANLIB
+ * arguments for a resolved gcc graph toolchain, for use by rules/c/cmake's
+ * graph-native configure step (see #31/#62). Uses gccGraphToolchainDir()'s
+ * real host path rather than exec.tool()'s sandbox-mount-relative one — CMake
+ * bakes this value into build.ninja, which later replay actions read from a
+ * *different* sandbox than the one that ran configure, so it must be a path
+ * valid everywhere, not just within configure's own sandbox (the exact bug
+ * class gccRustLinkDriverEnv's own docstring already covers for rustc's
  * `-C linker=`).
  *
- * No CMAKE_RANLIB here — gcc's graph install only writes clang/cc/c++/ar
- * wrapper aliases (see gccGraphTool() above), so a CMake project linking a
- * STATIC_LIBRARY via this toolchain isn't supported yet; the existing
- * example fixture only builds a SHARED_LIBRARY, which doesn't need ranlib.
+ * Pinning CMAKE_RANLIB here matters beyond consistency with CMAKE_AR: left
+ * unset, CMake's own find_program() falls back to whatever `ranlib` exists on
+ * the host running `imp build`, baking that host-dependent absolute path
+ * (e.g. `/usr/bin/ranlib`) into build.ninja — a real hermeticity gap, and the
+ * root cause of #98 (CMake replay failing with "ranlib: not found" once that
+ * baked-in host path got rewritten to a bare name with no matching mount).
  *
  * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
  * @param {object} resolvedGccTool Resolved `gccGraphToolchain().tool` input.
@@ -541,6 +559,7 @@ export function gccCMakeCompilerArgs(exec, resolvedGccTool, version) {
 	return [
 		`-DCMAKE_C_COMPILER=${dir}/bin/clang`,
 		`-DCMAKE_CXX_COMPILER=${dir}/bin/c++`,
+		`-DCMAKE_RANLIB=${dir}/bin/ranlib`,
 		`-DCMAKE_AR=${dir}/bin/ar`,
 	];
 }

@@ -88,8 +88,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/imp/named/shared
-          key: imp-toolchains-v1-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock', 'Cargo.lock') }}
-          restore-keys: imp-toolchains-v1-check-${{ runner.os }}-
+          key: imp-toolchains-v2-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock', 'Cargo.lock') }}
+          restore-keys: imp-toolchains-v2-check-${{ runner.os }}-
 
       - name: Cache imp store
         uses: actions/cache@v4
@@ -97,10 +97,10 @@ jobs:
           path: |
             ~/.cache/imp
             !~/.cache/imp/named/shared
-          key: imp-store-v5-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}
+          key: imp-store-v6-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}
           restore-keys: |
-            imp-store-v5-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-
-            imp-store-v5-check-${{ runner.os }}-
+            imp-store-v6-check-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-
+            imp-store-v6-check-${{ runner.os }}-
 
       - name: Check generated files
         run: ./imp generate //ci:docs_workflow --changed-since "$IMP_CHANGED_SINCE" --check
@@ -175,8 +175,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/imp/named/shared
-          key: imp-toolchains-v1-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock', 'Cargo.lock') }}
-          restore-keys: imp-toolchains-v1-package-${{ runner.os }}-
+          key: imp-toolchains-v2-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock', 'Cargo.lock') }}
+          restore-keys: imp-toolchains-v2-package-${{ runner.os }}-
 
       - name: Cache imp store
         uses: actions/cache@v4
@@ -184,10 +184,10 @@ jobs:
           path: |
             ~/.cache/imp
             !~/.cache/imp/named/shared
-          key: imp-store-v5-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}
+          key: imp-store-v6-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-${{ github.run_id }}
           restore-keys: |
-            imp-store-v5-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-
-            imp-store-v5-package-${{ runner.os }}-
+            imp-store-v6-package-${{ runner.os }}-${{ hashFiles('imp.workspace.js', 'rules/**/*.lock') }}-
+            imp-store-v6-package-${{ runner.os }}-
 
       - name: Package docs site
         run: ./imp package //docs:site
