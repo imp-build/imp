@@ -16,5 +16,14 @@ add_custom_command(TARGET hello_cmake POST_BUILD
 add_executable(hello_cmake_main main.c)
 target_link_libraries(hello_cmake_main PRIVATE hello_cmake)
 
+# Issue #98: a STATIC_LIBRARY target's archive edge runs `ar` then `ranlib`
+# (a SHARED_LIBRARY, like hello_cmake above, never invokes ranlib) — this is
+# the only target in this fixture that exercises that edge.
+add_library(hello_cmake_static STATIC hello.c)
+
+add_executable(hello_cmake_static_main main.c)
+target_link_libraries(hello_cmake_static_main PRIVATE hello_cmake_static)
+
 enable_testing()
 add_test(NAME hello_cmake_main_test COMMAND hello_cmake_main)
+add_test(NAME hello_cmake_static_main_test COMMAND hello_cmake_static_main)
