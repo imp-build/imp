@@ -1,37 +1,50 @@
+import { BUILD } from "imp:core";
 import { describe, expect, test } from "//rules/imp/test";
-import { loadGrammar, parseSource, treeSexp, tsQuery } from "imp:core";
+import { parseTree } from "//rules/treesitter";
 
-// Prebuilt fixture, not compiled by this test — see
-// testdata/tree-sitter-json/README.md for why (this test's own sandboxed
-// action has no C toolchain available, unlike the earlier build step).
 const GRAMMAR_PATH = "rules/treesitter/testdata/tree-sitter-json/tree-sitter-json.so";
 
-describe("tree-sitter JS API", () => {
-	test("loadGrammar + parseSource + treeSexp round trip", async () => {
-		const grammar = loadGrammar(GRAMMAR_PATH, "tree_sitter_json");
-		const tree = parseSource(grammar, JSON.stringify({ a: [1, 2, true] }));
-		const sexp = treeSexp(tree);
-		expect(sexp).toContain("document");
-		expect(sexp).toContain("object");
-		expect(sexp).toContain("array");
+describe("parseTree", () => {
+	test("returns a frozen graph root wired to the grammar and source", () => {
+		const parsed = parseTree({
+			grammarPath: GRAMMAR_PATH,
+			symbolName: "tree_sitter_json",
+			source: JSON.stringify({ a: [1, 2, true] }),
+		});
+
+		expect(Object.isFrozen(parsed)).toBe(true);
+		expect(parsed.sexp.__imp_graph_handle).toBe(true);
+		expect(parsed.matches.__imp_graph_handle).toBe(true);
+		expect(parsed[BUILD]).toBe(parsed.sexp);
 	});
 
-	test("loadGrammar reuses the handle for the same path", async () => {
-		const a = loadGrammar(GRAMMAR_PATH, "tree_sitter_json");
-		const b = loadGrammar(GRAMMAR_PATH, "tree_sitter_json");
-		expect(a).toBe(b);
+	test("reuses the same task for matching declarations", () => {
+		const opts = {
+			grammarPath: GRAMMAR_PATH,
+			symbolName: "tree_sitter_json",
+			source: JSON.stringify({ name: "imp", ok: true }),
+			query: "(string (string_content) @key)",
+		};
+
+		const first = parseTree(opts);
+		const second = parseTree({ ...opts });
+
+		expect(first.sexp).toBe(second.sexp);
+		expect(first.matches).toBe(second.matches);
 	});
 
-	test("tsQuery captures matching nodes", async () => {
-		const grammar = loadGrammar(GRAMMAR_PATH, "tree_sitter_json");
-		const tree = parseSource(
-			grammar,
-			JSON.stringify({ name: "imp", ok: true }),
-		);
-		const matches = tsQuery(grammar, tree, "(string (string_content) @key)");
-		const texts = matches.flatMap((m) => m.captures.map((c) => c.text));
-		expect(texts).toContain("name");
-		expect(texts).toContain("imp");
-		expect(texts).toContain("ok");
+	test("declarations with different source produce distinct tasks", () => {
+		const a = parseTree({
+			grammarPath: GRAMMAR_PATH,
+			symbolName: "tree_sitter_json",
+			source: "1",
+		});
+		const b = parseTree({
+			grammarPath: GRAMMAR_PATH,
+			symbolName: "tree_sitter_json",
+			source: "2",
+		});
+
+		expect(a.sexp).not.toBe(b.sexp);
 	});
 });
