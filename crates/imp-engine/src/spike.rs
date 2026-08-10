@@ -12,7 +12,7 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use crate::graph::{GraphCatalog, GraphRoot, GraphWalk, GraphWalkNode};
+use crate::graph::{GraphCatalog, GraphFormat, GraphRoot, GraphView, GraphWalk, GraphWalkNode};
 use crate::loader::{
     resolve_workspace_module, validate_workspace_module_path, ImpLoader, ImpResolver, ModuleForm,
     ModuleKind, RulesSource,
@@ -1800,10 +1800,16 @@ pub async fn ensure_discovered_labels(
 /// needs, e.g. `cargo metadata`/`cmake configure`) but never a child's own
 /// task — see that function's docstring. Backs both `imp targets`' synthetic
 /// `parent#childKey` listing and `imp dependencies`' graph-native edges.
+///
+/// `discover_expansion_all` (every existing caller passes `true`, preserving
+/// prior behavior) is the explicit opt-out for `"expansion-all"` discovery
+/// itself: `imp graph`'s static-catalog view (#93) passes `false` to walk
+/// with zero tasks run, not even expansion `create()`.
 pub async fn walk_graph_for_introspection(
     live: &LiveWorkspace,
     roots: &[&GraphRoot],
     discover_expansion_get: bool,
+    discover_expansion_all: bool,
 ) -> Result<GraphWalk> {
     if roots.is_empty() {
         return Ok(GraphWalk::default());
@@ -1842,6 +1848,7 @@ pub async fn walk_graph_for_introspection(
     .context("encode graph introspection invocation")?;
     let opts_json = serde_json::to_string(&serde_json::json!({
         "discoverExpansionGet": discover_expansion_get,
+        "discoverExpansionAll": discover_expansion_all,
     }))
     .context("encode graph introspection options")?;
     let walk_json: String = live
@@ -1903,7 +1910,7 @@ pub async fn resolve_graph_with_expansion(
         }
     };
     let static_roots = select_static(selectors)?;
-    let walk = walk_graph_for_introspection(live, &static_roots, false).await?;
+    let walk = walk_graph_for_introspection(live, &static_roots, false, true).await?;
 
     let mut roots: BTreeMap<(String, String, Option<String>), GraphRoot> = BTreeMap::new();
     let mut nodes: BTreeMap<u32, GraphWalkNode> = BTreeMap::new();
@@ -1952,7 +1959,7 @@ pub async fn resolve_graph_with_expansion(
         if parent_roots.is_empty() {
             continue;
         }
-        let parent_walk = walk_graph_for_introspection(live, &parent_roots, false).await?;
+        let parent_walk = walk_graph_for_introspection(live, &parent_roots, false, true).await?;
         for node in &parent_walk.nodes {
             nodes.entry(node.id).or_insert_with(|| node.clone());
         }
@@ -1994,6 +2001,35 @@ pub async fn resolve_graph_roots_with_expansion(
     )
 }
 
+/// Static-catalog view for `imp graph` (#93): resolve `selectors` and walk
+/// them with `discover_expansion_all: false` — no `create()` ever runs, so
+/// the diagram shows exactly what `BUILD.js` files export, not what
+/// selecting them would expand into. Unlike
+/// [`resolve_graph_with_expansion`] (the staged-planning view `imp targets`/
+/// `imp dependencies` use), this never needs `exec_root` installed, since
+/// nothing it does can trigger a discovery task.
+///
+/// `workflow` scopes to one registered workflow when given (`imp graph
+/// --goal test`); `None` (the default) resolves every workflow the address
+/// registers, same as `imp targets`' `select_catalog`. Either way, an
+/// address contributing more than one root here (build *and* test *and*
+/// lint, ...) is still drawn as one box — see `format_graph_diagram`'s
+/// address grouping — so leaving `workflow` unscoped costs nothing but a
+/// wider edge set on that one box, not a multiplied diagram.
+pub async fn resolve_graph_catalog_view(
+    live: &LiveWorkspace,
+    workflow: Option<&str>,
+    selectors: &[String],
+    context: &SelectorContext,
+) -> Result<(Vec<GraphRoot>, GraphWalk)> {
+    let static_roots = match workflow {
+        Some(workflow) => live.workspace.graph.select(workflow, selectors, context)?,
+        None => live.workspace.graph.select_catalog(selectors, context)?,
+    };
+    let walk = walk_graph_for_introspection(live, &static_roots, false, false).await?;
+    Ok((static_roots.into_iter().cloned().collect(), walk))
+}
+
 /// Graph-native addresses stale for `--changed-since` (#7): walks the
 /// *entire* exported graph catalog (every root, not selector-scoped — #8
 /// established that no command should present a subset as the whole graph),
@@ -2017,7 +2053,7 @@ pub async fn stale_graph_addresses(
     if all_roots.is_empty() || changed_paths.is_empty() {
         return Ok(GraphChangedResult::default());
     }
-    let walk = walk_graph_for_introspection(live, &all_roots, true).await?;
+    let walk = walk_graph_for_introspection(live, &all_roots, true, true).await?;
     let synthetic = walk.synthetic_children(&all_roots);
     let (stale_ids, covered_paths) = walk.stale_node_ids(changed_paths);
     let addresses = all_roots
@@ -5685,6 +5721,258 @@ pub fn format_graph_dependencies(
     Ok(())
 }
 
+fn mermaid_escape(label: &str) -> String {
+    label.replace('\\', "\\\\").replace('"', "&quot;")
+}
+
+fn dot_escape(label: &str) -> String {
+    label.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Human label for one diagram node. A selected root (keyed by its
+/// *canonical* rendered id — see `format_graph_diagram`'s address grouping)
+/// uses its precomputed label; everything else prefers the walk's own
+/// `display` (see `graph_core.js`'s `_graphNodeDisplay`), falling back to a
+/// `file`/`files` leaf's path/root or, lastly, its bare `kind`. A collapsed
+/// `"expansion-all"` node (see below) is labelled with its discovered child
+/// count instead.
+fn graph_diagram_node_label(
+    node: &GraphWalkNode,
+    rendered_id: u32,
+    root_labels: &BTreeMap<u32, String>,
+    expand_children: bool,
+) -> String {
+    if let Some(label) = root_labels.get(&rendered_id) {
+        return label.clone();
+    }
+    if node.kind == "expansion-all" && !expand_children && !node.children.is_empty() {
+        let base = node.display.as_deref().unwrap_or("expansion");
+        return format!("{base} ({} children)", node.children.len());
+    }
+    if let Some(display) = &node.display {
+        return display.clone();
+    }
+    match node.kind.as_str() {
+        "file" => node
+            .data
+            .as_ref()
+            .and_then(|data| data.get("path"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| "file".to_owned()),
+        "files" => node
+            .data
+            .as_ref()
+            .and_then(|data| data.get("root"))
+            .and_then(|value| value.as_str())
+            .map(|root| format!("files({root})"))
+            .unwrap_or_else(|| "files()".to_owned()),
+        other => other.to_owned(),
+    }
+}
+
+/// Render the selected roots' reachable graph (`walk`, from
+/// `resolve_graph_catalog_view` or `resolve_graph_with_expansion`) as a
+/// Mermaid or DOT diagram: the honest text core #93 asks for, no external
+/// renderer required. Reuses the same node/edge shape
+/// `format_graph_dependencies` walks — no second graph representation.
+///
+/// A shared producer is deduplicated by construction: the walk already
+/// visits each reachable handle id once, so two roots pointing at the same
+/// node naturally render as one box with two converging edges.
+///
+/// `"expansion-all"` nodes collapse into a single node (labelled with their
+/// discovered child count) unless `expand_children` is set, in which case
+/// each child renders as its own node with a `#key`-labelled edge — the
+/// walk already resolved those child handle ids, so nothing new is computed
+/// here, only what's drawn.
+///
+/// `"tool"`/`"native-tool"` leaves (e.g. `sh`, `mkdir`, `dirname`) and
+/// `"semantic"` leaves (a flag/mode/config/args read, e.g. `semantic:flag:
+/// check`) are omitted by default unless `show_plumbing` is set. Neither
+/// describes build structure — one is shell-level plumbing every task
+/// happens to invoke, the other is invocation-scoped context a task reads —
+/// and since identical ones are now a single shared node (see
+/// `_graphMemoizedHandle` in `graph_core.js`), leaving them in by default
+/// would turn a handful of generic tools/flags into the highest-fan-in hubs
+/// in every diagram, drowning out the actual dependency shape.
+///
+/// An address that registers more than one workflow (build, test, lint, ...)
+/// renders as *one* box, not one per workflow: those are properties of the
+/// same thing, not separate structural nodes — unless the selection was
+/// already scoped to a single workflow (`imp graph --goal test`), in which
+/// case each address contributes exactly one root already and this is a
+/// no-op. The merged box's edges are the union of every one of its
+/// workflows' declared edges.
+pub fn format_graph_diagram(
+    roots: &[&GraphRoot],
+    walk: &GraphWalk,
+    view: GraphView,
+    format: GraphFormat,
+    expand_children: bool,
+    show_plumbing: bool,
+    w: &mut String,
+) -> std::fmt::Result {
+    use std::fmt::Write;
+
+    // Group roots sharing one address under a single canonical id — its
+    // lowest handle id, deterministic within one render — and precompute
+    // that group's label: the plain selector display for a lone workflow,
+    // or the address plus every workflow it registers when there's more
+    // than one.
+    let mut roots_by_address: BTreeMap<&str, Vec<&GraphRoot>> = BTreeMap::new();
+    for root in roots {
+        roots_by_address
+            .entry(root.address.as_str())
+            .or_default()
+            .push(root);
+    }
+    let mut canonical_id: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut root_labels: BTreeMap<u32, String> = BTreeMap::new();
+    for group in roots_by_address.into_values() {
+        let canonical = group.iter().map(|root| root.handle_id).min().unwrap();
+        for root in &group {
+            canonical_id.insert(root.handle_id, canonical);
+        }
+        let label = if let [only] = group.as_slice() {
+            only.display()
+        } else {
+            let mut workflows: Vec<&str> =
+                group.iter().map(|root| root.workflow.as_str()).collect();
+            workflows.sort();
+            workflows.dedup();
+            format!("{} ({})", group[0].address, workflows.join(", "))
+        };
+        root_labels.insert(canonical, label);
+    }
+    let render_id = |id: u32| canonical_id.get(&id).copied().unwrap_or(id);
+
+    // Re-derive which nodes are actually shown from the roots' own
+    // reachability, rather than just hiding a collapsed expansion's direct
+    // children: a node reachable *only* through a collapsed expansion's
+    // children (e.g. the child's own producing task) must disappear too,
+    // while one also reachable via an ordinary declared edge stays put.
+    let by_id: BTreeMap<u32, &GraphWalkNode> =
+        walk.nodes.iter().map(|node| (node.id, node)).collect();
+    let is_plumbing = |node: &GraphWalkNode| {
+        node.kind == "tool" || node.kind == "native-tool" || node.kind == "semantic"
+    };
+    let mut visible_ids: BTreeSet<u32> = BTreeSet::new();
+    let mut queue: std::collections::VecDeque<u32> =
+        roots.iter().map(|root| root.handle_id).collect();
+    while let Some(id) = queue.pop_front() {
+        if !visible_ids.insert(id) {
+            continue;
+        }
+        let Some(node) = by_id.get(&id) else {
+            continue;
+        };
+        for edge in &node.edges {
+            if !show_plumbing {
+                if let Some(target) = by_id.get(&edge.handle_id) {
+                    if is_plumbing(target) {
+                        continue;
+                    }
+                }
+            }
+            queue.push_back(edge.handle_id);
+        }
+        if expand_children || node.kind != "expansion-all" {
+            for &child_id in node.children.values() {
+                queue.push_back(child_id);
+            }
+        }
+    }
+    let visible = |id: u32| visible_ids.contains(&id);
+
+    // Collect (rendered source, edge label, rendered target) triples ahead
+    // of writing anything: several raw roots can now share one rendered id
+    // (the address grouping above), and two of their edges can coincide
+    // once redirected there — dedupe before emitting rather than printing
+    // the same line twice.
+    let mut rendered_edges: BTreeSet<(u32, String, u32)> = BTreeSet::new();
+    for node in &walk.nodes {
+        if !visible(node.id) {
+            continue;
+        }
+        let src = render_id(node.id);
+        for edge in &node.edges {
+            if !visible(edge.handle_id) {
+                continue;
+            }
+            rendered_edges.insert((src, edge.name.clone(), render_id(edge.handle_id)));
+        }
+        if expand_children {
+            for (key, &handle_id) in &node.children {
+                rendered_edges.insert((src, format!("#{key}"), render_id(handle_id)));
+            }
+        }
+    }
+    let mut emitted_nodes: BTreeSet<u32> = BTreeSet::new();
+
+    match format {
+        GraphFormat::Mermaid => {
+            writeln!(w, "%% view: {}", view.label())?;
+            writeln!(w, "flowchart TD")?;
+            for node in &walk.nodes {
+                if !visible(node.id) {
+                    continue;
+                }
+                let rendered_id = render_id(node.id);
+                if !emitted_nodes.insert(rendered_id) {
+                    continue;
+                }
+                let label = mermaid_escape(&graph_diagram_node_label(
+                    node,
+                    rendered_id,
+                    &root_labels,
+                    expand_children,
+                ));
+                if root_labels.contains_key(&rendered_id) {
+                    writeln!(w, "  n{rendered_id}[[\"{label}\"]]")?;
+                } else {
+                    writeln!(w, "  n{rendered_id}[\"{label}\"]")?;
+                }
+            }
+            for (src, name, dst) in &rendered_edges {
+                writeln!(w, "  n{src} -->|{}| n{dst}", mermaid_escape(name))?;
+            }
+        }
+        GraphFormat::Dot => {
+            writeln!(w, "// view: {}", view.label())?;
+            writeln!(w, "digraph graph_view {{")?;
+            for node in &walk.nodes {
+                if !visible(node.id) {
+                    continue;
+                }
+                let rendered_id = render_id(node.id);
+                if !emitted_nodes.insert(rendered_id) {
+                    continue;
+                }
+                let label = dot_escape(&graph_diagram_node_label(
+                    node,
+                    rendered_id,
+                    &root_labels,
+                    expand_children,
+                ));
+                if root_labels.contains_key(&rendered_id) {
+                    writeln!(
+                        w,
+                        "  n{rendered_id} [label=\"{label}\", shape=box, peripheries=2];"
+                    )?;
+                } else {
+                    writeln!(w, "  n{rendered_id} [label=\"{label}\"];")?;
+                }
+            }
+            for (src, name, dst) in &rendered_edges {
+                writeln!(w, "  n{src} -> n{dst} [label=\"{}\"];", dot_escape(name))?;
+            }
+            writeln!(w, "}}")?;
+        }
+    }
+    Ok(())
+}
+
 pub fn format_dependencies(
     workspace: &Workspace,
     selectors: &[String],
@@ -7713,6 +8001,536 @@ export const all = { [BUILD]: workspace.all(BUILD) };
             .await
             .unwrap();
         assert_eq!((built_a, built_b), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn discover_expansion_all_false_leaves_expansion_children_undiscovered() {
+        // #93: `imp graph`'s static-catalog view must be able to walk with
+        // zero tasks run, not even an expansion's own `create()`. Same
+        // fixture shape as the `expand()`-discovery test above, but this
+        // asserts the walk's new opt-out directly: `discover_expansion_all:
+        // false` leaves the expansion-all node childless, `true` (the
+        // existing default every other caller keeps) discovers as before.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, expand, output, task } from "imp:core";
+
+const discover = task({
+    display: "discover children",
+    outputs: { value: output.value() },
+    async run() {
+        return { value: { keys: ["a", "b"] } };
+    },
+});
+
+const workspace = expand({
+    display: "expand demo",
+    inputs: { discovered: discover.outputs.value },
+    create({ discovered }) {
+        const children = {};
+        for (const key of discovered.keys) {
+            children[key] = { [BUILD]: discover.outputs.value };
+        }
+        return children;
+    },
+});
+
+export const all = { [BUILD]: workspace.all(BUILD) };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let context = SelectorContext::root();
+        let roots = live
+            .workspace
+            .graph
+            .select_catalog(&["//:all".to_owned()], &context)
+            .unwrap();
+
+        let undiscovered = walk_graph_for_introspection(&live, &roots, false, false)
+            .await
+            .unwrap();
+        let node = undiscovered.node(roots[0].handle_id).unwrap();
+        assert_eq!(node.kind, "expansion-all");
+        assert!(node.children.is_empty(), "{undiscovered:?}");
+
+        let discovered = walk_graph_for_introspection(&live, &roots, false, true)
+            .await
+            .unwrap();
+        let node = discovered.node(roots[0].handle_id).unwrap();
+        assert_eq!(node.children.len(), 2, "{discovered:?}");
+    }
+
+    #[tokio::test]
+    async fn format_graph_diagram_dedupes_shared_producer_and_labels_the_view() {
+        // #93: two roots that both depend on one common upstream task must
+        // render that task as one node with two converging edges — for
+        // free, since the walk already dedupes by handle id — and the
+        // diagram must say which view it's showing.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, output, task } from "imp:core";
+
+const common = task({
+    display: "shared build",
+    outputs: { value: output.value() },
+    async run() {
+        return { value: 1 };
+    },
+});
+
+function consumer(name) {
+    return task({
+        display: `consume ${name}`,
+        inputs: { common: common.outputs.value, name },
+        outputs: { value: output.value() },
+        async run(_exec, input) {
+            return { value: input.name };
+        },
+    });
+}
+
+export const a = { [BUILD]: consumer("a").outputs.value };
+export const b = { [BUILD]: consumer("b").outputs.value };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let context = SelectorContext::root();
+        let (roots, walk) = resolve_graph_with_expansion(
+            &live,
+            p,
+            None,
+            &["//:a".to_owned(), "//:b".to_owned()],
+            &context,
+        )
+        .await
+        .unwrap();
+        let roots_ref: Vec<&GraphRoot> = roots.iter().collect();
+
+        // The `common` edge each consumer task declares points at the
+        // *task-output* handle (`common.outputs.value`), not the task node
+        // itself — that's the handle actually passed as `inputs.common`.
+        let shared_id = walk
+            .nodes
+            .iter()
+            .find(|node| node.display.as_deref() == Some("shared build · value"))
+            .expect("shared task-output node present")
+            .id;
+
+        let mut out = String::new();
+        format_graph_diagram(
+            &roots_ref,
+            &walk,
+            GraphView::Planning,
+            GraphFormat::Mermaid,
+            false,
+            false,
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(out.starts_with("%% view: staged-planning-graph\n"), "{out}");
+        assert_eq!(
+            out.matches(&format!("n{shared_id}[\"shared build · value\"]"))
+                .count(),
+            1,
+            "shared node must render once: {out}"
+        );
+        assert_eq!(
+            out.matches(&format!("|common| n{shared_id}")).count(),
+            2,
+            "shared node must have two converging edges: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn format_graph_diagram_collapses_and_expands_expansion_children() {
+        // #93's "Scale" concern: an expansion's children are one node by
+        // default (labelled with the discovered count), and only rendered
+        // individually — using the walk's existing per-child handle ids,
+        // nothing new computed — when `expand_children` is set.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, expand, output, task } from "imp:core";
+
+const discover = task({
+    display: "discover children",
+    outputs: { value: output.value() },
+    async run() {
+        return { value: { keys: ["a", "b"] } };
+    },
+});
+
+function childTask(key) {
+    return task({
+        display: `build ${key}`,
+        inputs: { key },
+        outputs: { value: output.value() },
+        async run(_exec, input) {
+            return { value: { name: input.key } };
+        },
+    });
+}
+
+const workspace = expand({
+    display: "expand demo",
+    inputs: { discovered: discover.outputs.value },
+    create({ discovered }) {
+        const children = {};
+        for (const key of discovered.keys) {
+            children[key] = { [BUILD]: childTask(key).outputs.value };
+        }
+        return children;
+    },
+});
+
+export const all = { [BUILD]: workspace.all(BUILD) };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let context = SelectorContext::root();
+        let selectors = ["//:all".to_owned()];
+        let (roots, walk) = resolve_graph_with_expansion(&live, p, None, &selectors, &context)
+            .await
+            .unwrap();
+        // Mirrors `cmd_graph`'s own filtering: `resolve_graph_with_expansion`
+        // always adds synthetic `parent#childKey` roots for an expansion's
+        // discovered children (so `imp targets`/`imp dependencies` can
+        // address them individually) regardless of what the diagram wants to
+        // draw. A diagram must not let those leak in as extra root boxes
+        // unless the caller explicitly selected one by address.
+        let requested: std::collections::BTreeSet<&str> =
+            selectors.iter().map(String::as_str).collect();
+        let roots: Vec<GraphRoot> = roots
+            .into_iter()
+            .filter(|root| !root.address.contains('#') || requested.contains(root.address.as_str()))
+            .collect();
+        let roots_ref: Vec<&GraphRoot> = roots.iter().collect();
+
+        let mut collapsed = String::new();
+        format_graph_diagram(
+            &roots_ref,
+            &walk,
+            GraphView::Planning,
+            GraphFormat::Mermaid,
+            false,
+            false,
+            &mut collapsed,
+        )
+        .unwrap();
+        // The expansion-all node here is itself the selected root, so it
+        // keeps its selector-address label (roots always do) rather than
+        // the "(N children)" collapse label — that only applies when an
+        // expansion is reached transitively, not selected directly. What
+        // this asserts is the actual collapse behavior: neither child task
+        // nor its `#key` edge leaks into the diagram.
+        assert!(collapsed.contains("//:all#build"), "{collapsed}");
+        assert!(!collapsed.contains("build a"), "{collapsed}");
+        assert!(!collapsed.contains("build b"), "{collapsed}");
+        assert!(!collapsed.contains("|#a|"), "{collapsed}");
+        assert!(!collapsed.contains("|#b|"), "{collapsed}");
+
+        let mut expanded = String::new();
+        format_graph_diagram(
+            &roots_ref,
+            &walk,
+            GraphView::Planning,
+            GraphFormat::Mermaid,
+            true,
+            false,
+            &mut expanded,
+        )
+        .unwrap();
+        assert!(expanded.contains("build a"), "{expanded}");
+        assert!(expanded.contains("build b"), "{expanded}");
+        assert!(expanded.contains("|#a|"), "{expanded}");
+        assert!(expanded.contains("|#b|"), "{expanded}");
+    }
+
+    #[tokio::test]
+    async fn format_graph_diagram_dot_smoke_test() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, output, task } from "imp:core";
+
+const build = task({
+    display: "build app",
+    outputs: { value: output.value() },
+    async run() {
+        return { value: 1 };
+    },
+});
+
+export const app = { [BUILD]: build.outputs.value };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let context = SelectorContext::root();
+        let (roots, walk) =
+            resolve_graph_catalog_view(&live, Some("build"), &["//:app".to_owned()], &context)
+                .await
+                .unwrap();
+        let roots_ref: Vec<&GraphRoot> = roots.iter().collect();
+
+        let mut out = String::new();
+        format_graph_diagram(
+            &roots_ref,
+            &walk,
+            GraphView::Catalog,
+            GraphFormat::Dot,
+            false,
+            false,
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(
+            out.starts_with("// view: static-exported-catalog\n"),
+            "{out}"
+        );
+        assert!(out.contains("digraph graph_view {"), "{out}");
+        assert!(out.trim_end().ends_with('}'), "{out}");
+        assert!(out.contains("shape=box, peripheries=2"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn format_graph_diagram_hides_plumbing_leaves_unless_show_plumbing_is_set() {
+        // Two independent tasks each declaring their own `tool(sh)` and
+        // `semantic.flag("check")` handle collapse into one shared node per
+        // kind (`_graphMemoizedHandle` in graph_core.js) — which then
+        // becomes a high-fan-in hub dominating the diagram, same failure
+        // mode for both: a shell tool every task happens to invoke, and an
+        // invocation-scoped flag every task happens to read. Neither is
+        // build structure. `show_plumbing: false` (the default) must omit
+        // both and everything reachable only through them; `true` must show
+        // both.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, output, semantic, task } from "imp:core";
+import { nativeTool } from "//rules/imp/native-tool";
+
+function shellTask(name) {
+    return task({
+        display: `run ${name}`,
+        inputs: { sh: nativeTool("sh"), check: semantic.flag("check"), name },
+        outputs: { value: output.value() },
+        async run(_exec, input) {
+            return { value: input.name };
+        },
+    });
+}
+
+export const a = { [BUILD]: shellTask("a").outputs.value };
+export const b = { [BUILD]: shellTask("b").outputs.value };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let context = SelectorContext::root();
+        let (roots, walk) = resolve_graph_with_expansion(
+            &live,
+            p,
+            None,
+            &["//:a".to_owned(), "//:b".to_owned()],
+            &context,
+        )
+        .await
+        .unwrap();
+        let roots_ref: Vec<&GraphRoot> = roots.iter().collect();
+
+        let mut hidden = String::new();
+        format_graph_diagram(
+            &roots_ref,
+            &walk,
+            GraphView::Planning,
+            GraphFormat::Mermaid,
+            false,
+            false,
+            &mut hidden,
+        )
+        .unwrap();
+        assert!(!hidden.contains("tool: sh"), "{hidden}");
+        assert!(!hidden.contains("semantic:"), "{hidden}");
+
+        let mut shown = String::new();
+        format_graph_diagram(
+            &roots_ref,
+            &walk,
+            GraphView::Planning,
+            GraphFormat::Mermaid,
+            false,
+            true,
+            &mut shown,
+        )
+        .unwrap();
+        assert_eq!(
+            shown.matches("[\"tool: sh\"]").count(),
+            1,
+            "shared sh node must render once when shown: {shown}"
+        );
+        assert_eq!(
+            shown.matches("|sh| n").count(),
+            2,
+            "both tasks must edge into the shared sh node: {shown}"
+        );
+        assert_eq!(
+            shown.matches("[\"semantic: flag(check)\"]").count(),
+            1,
+            "shared flag node must render once when shown: {shown}"
+        );
+        assert_eq!(
+            shown.matches("|check| n").count(),
+            2,
+            "both tasks must edge into the shared flag node: {shown}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_graph_catalog_view_scopes_to_one_workflow() {
+        // #93 follow-up: an address exporting both [BUILD] and a second
+        // workflow must not multiply into one root box per workflow just
+        // because the catalog registers both — the diagram should show
+        // exactly the workflow asked for.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, goal, output, task } from "imp:core";
+
+const CHECK = goal("check");
+
+const build = task({
+    display: "build app",
+    outputs: { value: output.value() },
+    async run() {
+        return { value: 1 };
+    },
+});
+const check = task({
+    display: "check app",
+    outputs: { value: output.value() },
+    async run() {
+        return { value: 1 };
+    },
+});
+
+export const app = {
+    [BUILD]: build.outputs.value,
+    [CHECK]: check.outputs.value,
+};
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let context = SelectorContext::root();
+
+        let (build_roots, _) =
+            resolve_graph_catalog_view(&live, Some("build"), &["//:app".to_owned()], &context)
+                .await
+                .unwrap();
+        assert_eq!(build_roots.len(), 1);
+        assert_eq!(build_roots[0].workflow, "build");
+
+        let (check_roots, _) =
+            resolve_graph_catalog_view(&live, Some("check"), &["//:app".to_owned()], &context)
+                .await
+                .unwrap();
+        assert_eq!(check_roots.len(), 1);
+        assert_eq!(check_roots[0].workflow, "check");
+    }
+
+    #[tokio::test]
+    async fn format_graph_diagram_merges_one_address_multiple_workflows_into_one_box() {
+        // An address registering two workflows is one thing with two
+        // properties, not two structural nodes: without --goal scoping the
+        // selection to one workflow, //:app must render as a single root
+        // box labelled with both workflows, fanning out to both tasks.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { BUILD, goal, output, task } from "imp:core";
+
+const CHECK = goal("check");
+
+const build = task({
+    display: "build app",
+    outputs: { value: output.value() },
+    async run() {
+        return { value: 1 };
+    },
+});
+const check = task({
+    display: "check app",
+    outputs: { value: output.value() },
+    async run() {
+        return { value: 1 };
+    },
+});
+
+export const app = {
+    [BUILD]: build.outputs.value,
+    [CHECK]: check.outputs.value,
+};
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let context = SelectorContext::root();
+        let (roots, walk) =
+            resolve_graph_catalog_view(&live, None, &["//:app".to_owned()], &context)
+                .await
+                .unwrap();
+        assert_eq!(roots.len(), 2, "both workflows resolve as roots: {roots:?}");
+        let roots_ref: Vec<&GraphRoot> = roots.iter().collect();
+
+        let mut out = String::new();
+        format_graph_diagram(
+            &roots_ref,
+            &walk,
+            GraphView::Catalog,
+            GraphFormat::Mermaid,
+            false,
+            false,
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(
+            out.matches("[[").count(),
+            1,
+            "exactly one root box, not one per workflow: {out}"
+        );
+        assert!(out.contains("//:app (build, check)"), "{out}");
+        assert!(out.contains("build app"), "{out}");
+        assert!(out.contains("check app"), "{out}");
     }
 
     #[tokio::test]

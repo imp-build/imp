@@ -10,7 +10,11 @@ use std::sync::{
 
 use anyhow::{Context, Result};
 use clap::{Arg, ArgAction, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
-use imp_engine::{changed, graph::GraphRoot, runtime, selector, spike};
+use imp_engine::{
+    changed,
+    graph::{GraphFormat, GraphRoot, GraphView},
+    runtime, selector, spike,
+};
 use imp_scheduler as scheduler;
 use rquickjs::{promise::MaybePromise, CatchResultExt, FromJs, Function, Module, Object, Value};
 
@@ -62,6 +66,38 @@ impl From<LogLevelArg> for log::LevelFilter {
     }
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum GraphViewArg {
+    /// Exported roots exactly as declared — no expand() discovery runs
+    Catalog,
+    /// Exported roots plus discovered expansion children (default)
+    Planning,
+}
+
+impl From<GraphViewArg> for GraphView {
+    fn from(view: GraphViewArg) -> Self {
+        match view {
+            GraphViewArg::Catalog => GraphView::Catalog,
+            GraphViewArg::Planning => GraphView::Planning,
+        }
+    }
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum GraphFormatArg {
+    Mermaid,
+    Dot,
+}
+
+impl From<GraphFormatArg> for GraphFormat {
+    fn from(format: GraphFormatArg) -> Self {
+        match format {
+            GraphFormatArg::Mermaid => GraphFormat::Mermaid,
+            GraphFormatArg::Dot => GraphFormat::Dot,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Initialize an imp workspace in the current directory
@@ -82,6 +118,36 @@ enum Cmd {
         /// Goal whose observed handler trace should be shown for labels
         #[arg(long, value_name = "NAME")]
         goal: Option<String>,
+    },
+    /// Render the selected exported graph roots' reachable graph as a
+    /// Mermaid or DOT diagram
+    Graph {
+        /// Graph root selectors, e.g. //pkg:app, //pkg:app@unit, //pkg/...
+        selectors: Vec<String>,
+        /// Scope to one workflow's graph only. Without this, an address
+        /// registering multiple workflows (build, test, lint, ...) still
+        /// renders as one box with the union of their edges — pass --goal
+        /// to instead see exactly one workflow's own graph.
+        #[arg(long, value_name = "NAME")]
+        goal: Option<String>,
+        /// Which of the graph's views to render
+        #[arg(long, value_enum, default_value = "planning")]
+        view: GraphViewArg,
+        /// Diagram text format
+        #[arg(long, value_enum, default_value = "mermaid")]
+        format: GraphFormatArg,
+        /// Explode expansion nodes into their individual discovered children
+        /// instead of collapsing each into one node
+        #[arg(long)]
+        expand_children: bool,
+        /// Show tool/native-tool leaves (sh, mkdir, dirname, ...) and
+        /// semantic leaves (flag/mode/config reads) instead of omitting them
+        /// as invocation plumbing, not build structure
+        #[arg(long)]
+        show_plumbing: bool,
+        /// Write the diagram here instead of stdout
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
     },
     /// List target types and rules in the workspace
     Rules {
@@ -699,6 +765,28 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> RunO
         Cmd::Dependencies { selectors, goal } => cmd_dependencies(selectors, goal.as_deref(), tree)
             .await
             .into(),
+        Cmd::Graph {
+            selectors,
+            goal,
+            view,
+            format,
+            expand_children,
+            show_plumbing,
+            output,
+        } => cmd_graph(
+            selectors,
+            GraphRenderOptions {
+                goal: goal.as_deref(),
+                view: (*view).into(),
+                format: (*format).into(),
+                expand_children: *expand_children,
+                show_plumbing: *show_plumbing,
+                output: output.as_deref(),
+            },
+            tree,
+        )
+        .await
+        .into(),
         Cmd::Rules { command } => cmd_rules(command.as_ref(), tree).await.into(),
         Cmd::Config { command } => cmd_config(command).await.into(),
         Cmd::Goal { name, args } => {
@@ -1769,6 +1857,93 @@ async fn cmd_dependencies(selectors: &[String], goal: Option<&str>, tree: &Tree)
     Ok(())
 }
 
+/// Render the selected exported graph roots' reachable graph as text (#93).
+/// Graph-only, unlike `imp targets`/`imp dependencies`: this renders "the
+/// engine's own object" (#26), not the legacy label/product model.
+struct GraphRenderOptions<'a> {
+    goal: Option<&'a str>,
+    view: GraphView,
+    format: GraphFormat,
+    expand_children: bool,
+    show_plumbing: bool,
+    output: Option<&'a std::path::Path>,
+}
+
+async fn cmd_graph(
+    selectors: &[String],
+    options: GraphRenderOptions<'_>,
+    tree: &Tree,
+) -> Result<()> {
+    let GraphRenderOptions {
+        goal,
+        view,
+        format,
+        expand_children,
+        show_plumbing,
+        output,
+    } = options;
+    let current_dir = std::env::current_dir().context("determine current directory")?;
+    let workspace_root = spike::find_workspace_root(&current_dir)?;
+    let selector_context =
+        selector::SelectorContext::for_invocation(&workspace_root, &current_dir)?;
+    let workspace = load_workspace_with_messages(&workspace_root, tree).await?;
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel::<scheduler::TaskEvent>();
+    let scheduler =
+        scheduler::Scheduler::new(1, Arc::new(std::sync::atomic::AtomicBool::new(false)), tx);
+    *workspace.scheduler.lock().unwrap() = Some(scheduler);
+    tokio::spawn(async move { while events.recv().await.is_some() {} });
+    let (graph_roots_owned, graph_walk) = match view {
+        GraphView::Catalog => {
+            spike::resolve_graph_catalog_view(&workspace, goal, selectors, &selector_context)
+                .await?
+        }
+        GraphView::Planning => {
+            spike::resolve_graph_with_expansion(
+                &workspace,
+                &workspace_root,
+                goal,
+                selectors,
+                &selector_context,
+            )
+            .await?
+        }
+    };
+    *workspace.scheduler.lock().unwrap() = None;
+    if graph_roots_owned.is_empty() {
+        anyhow::bail!("no exported graph roots matched {selectors:?}");
+    }
+    // `resolve_graph_with_expansion` always adds synthetic `parent#childKey`
+    // roots for an expansion's discovered children (so `imp targets`/`imp
+    // dependencies` can address them individually) regardless of what the
+    // diagram wants to draw. Don't let those leak in as extra root boxes
+    // unless the caller explicitly selected one by address — `--expand-
+    // children` is what actually controls whether a diagram shows them.
+    let requested: std::collections::BTreeSet<&str> =
+        selectors.iter().map(String::as_str).collect();
+    let graph_roots_owned: Vec<GraphRoot> = graph_roots_owned
+        .into_iter()
+        .filter(|root| !root.address.contains('#') || requested.contains(root.address.as_str()))
+        .collect();
+    let graph_roots: Vec<&GraphRoot> = graph_roots_owned.iter().collect();
+    let mut out = String::new();
+    spike::format_graph_diagram(
+        &graph_roots,
+        &graph_walk,
+        view,
+        format,
+        expand_children,
+        show_plumbing,
+        &mut out,
+    )?;
+    match output {
+        Some(path) => {
+            std::fs::write(path, out).with_context(|| format!("write {}", path.display()))?
+        }
+        None => print!("{out}"),
+    }
+    Ok(())
+}
+
 async fn cmd_rules(command: Option<&RulesCmd>, tree: &Tree) -> Result<()> {
     match command {
         None => workspace_cmd!(tree, |workspace, out| {
@@ -1947,6 +2122,69 @@ mod tests {
                 assert_eq!(goal.as_deref(), Some("build"));
             }
             _ => panic!("expected dependencies subcommand"),
+        }
+    }
+
+    #[test]
+    fn graph_subcommand_accepts_view_format_and_output_flags() {
+        let cli = Cli::parse_from([
+            "imp",
+            "graph",
+            "//pkg:app",
+            "--goal",
+            "test",
+            "--view",
+            "catalog",
+            "--format",
+            "dot",
+            "--expand-children",
+            "--show-plumbing",
+            "--output",
+            "out.dot",
+        ]);
+        match cli.command {
+            Cmd::Graph {
+                selectors,
+                goal,
+                view,
+                format,
+                expand_children,
+                show_plumbing,
+                output,
+            } => {
+                assert_eq!(selectors, ["//pkg:app"]);
+                assert_eq!(goal.as_deref(), Some("test"));
+                assert!(matches!(view, GraphViewArg::Catalog));
+                assert!(matches!(format, GraphFormatArg::Dot));
+                assert!(expand_children);
+                assert!(show_plumbing);
+                assert_eq!(output.as_deref(), Some(std::path::Path::new("out.dot")));
+            }
+            _ => panic!("expected graph subcommand"),
+        }
+    }
+
+    #[test]
+    fn graph_subcommand_defaults_to_unscoped_planning_mermaid_stdout() {
+        let cli = Cli::parse_from(["imp", "graph", "//pkg:app"]);
+        match cli.command {
+            Cmd::Graph {
+                goal,
+                view,
+                format,
+                expand_children,
+                show_plumbing,
+                output,
+                ..
+            } => {
+                assert_eq!(goal, None);
+                assert!(matches!(view, GraphViewArg::Planning));
+                assert!(matches!(format, GraphFormatArg::Mermaid));
+                assert!(!expand_children);
+                assert!(!show_plumbing);
+                assert_eq!(output, None);
+            }
+            _ => panic!("expected graph subcommand"),
         }
     }
 
