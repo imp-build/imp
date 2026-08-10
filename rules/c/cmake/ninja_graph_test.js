@@ -4,6 +4,7 @@ import {
 	listNamedCmakeTargets,
 	parseNinja,
 	reachableEdges,
+	reachableEdgesBounded,
 	rebaseAbsolutePaths,
 	resolveEdgeCommand,
 	rewriteToolInvocations,
@@ -180,6 +181,54 @@ describe("ninja_graph reachability", () => {
 		expect(rules.has("CLEAN")).toBe(false);
 		expect(rules.has("HELP")).toBe(false);
 		expect(rules.has("CUSTOM_COMMAND")).toBe(false);
+	});
+});
+
+describe("ninja_graph bounded reachability", () => {
+	test("excludes another named target's own edges once its boundary output is referenced", () => {
+		const { edges } = parseNinja(BUILD_NINJA, readInclude);
+		const { edges: reached, boundaries } = reachableEdgesBounded(
+			edges,
+			["app"],
+			new Set(["libcore.a"]),
+		);
+		const outputs = reached
+			.filter((e) => e.rule !== "phony")
+			.map((e) => e.outputs[0] || e.implicitOutputs[0]);
+
+		// app's own edges only — core's compile/link edges never appear,
+		// since the walk stops at "libcore.a" instead of recursing into
+		// whatever produces it.
+		expect(outputs).toEqual(["CMakeFiles/app.dir/src/main.c.o", "app"]);
+		expect(boundaries).toEqual(["libcore.a"]);
+	});
+
+	test("reports no boundary hit when the boundary path is never referenced", () => {
+		const { edges } = parseNinja(BUILD_NINJA, readInclude);
+		// "app" never references this unrelated path, so it must not show
+		// up as a boundary dependency, and the reached set must be
+		// unaffected by its presence in the boundary set.
+		const unbounded = reachableEdgesBounded(edges, ["app"], new Set());
+		const bounded = reachableEdgesBounded(
+			edges,
+			["app"],
+			new Set(["some/other/target.a"]),
+		);
+		expect(bounded.boundaries).toEqual([]);
+		expect(bounded.edges).toEqual(unbounded.edges);
+	});
+
+	test("walks through a dependency that isn't in the boundary set, exactly like reachableEdges", () => {
+		const { edges } = parseNinja(BUILD_NINJA, readInclude);
+		// Simulates a dependency on a target REAL_TARGET_TYPES filters out
+		// (OBJECT_LIBRARY/INTERFACE_LIBRARY/UTILITY): its output is never
+		// added to the boundary set by a caller, so the walk must proceed
+		// into it exactly as the unbounded reachableEdges() does.
+		const plain = reachableEdges(edges, ["app"]).filter(
+			(e) => e.rule !== "phony",
+		);
+		const { edges: bounded } = reachableEdgesBounded(edges, ["app"], new Set());
+		expect(bounded.filter((e) => e.rule !== "phony")).toEqual(plain);
 	});
 });
 
