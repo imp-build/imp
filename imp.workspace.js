@@ -72,8 +72,7 @@ export const rustConfig = { buildGenerate: true, doctest: false };
 export const cConfig = { buildGenerate: true };
 export const odinConfig = { buildGenerate: true };
 
-// GitHub-hosted standard runners give us 4 cores; sandboxed task execution
-// benefits from that concurrency. jsWorkers is left at 1 (the default) since
-// it only throttles JS continuation dispatch, not real work — benchmarking
-// showed no measurable effect on this workspace's build times.
-export const imp = { jobs: 4, jsWorkers: 1 };
+export const imp = {
+	jobs: 16,
+	jsWorkers: 1
+};
