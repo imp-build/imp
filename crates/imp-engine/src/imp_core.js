@@ -4021,7 +4021,11 @@ function _run_dispatch(hostPayload, cacheable) {
 }
 
 export function run(opts) {
-	if (typeof _graphPhase !== "undefined" && _graphPhase === "expansion") {
+	if (
+		!opts.__graphTaskAction &&
+		typeof _graphPhase !== "undefined" &&
+		_graphPhase === "expansion"
+	) {
 		throw new Error("graph: sandbox actions are not allowed while an expansion constructs graph nodes");
 	}
 	const contextEntry = _effective_context_entry();
