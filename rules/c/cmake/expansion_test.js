@@ -8,6 +8,8 @@ import {
 import {
 	cmakeLibraryDep,
 	cmakeProjectExpansion,
+	crossTargetDependencies,
+	topoSortTargets,
 } from "//rules/c/cmake/expansion";
 import {
 	basename,
@@ -286,6 +288,88 @@ describe("cmakeProjectExpansion", () => {
 					helloCmakeMain.outputs.file0.__graph_id,
 			).toBe(false);
 		});
+	});
+
+	// Regression, same task-identity-key mechanism as above: targetDeps is a
+	// declared input like targetNames/exposeOutputs, so two calls differing
+	// only in targetDeps must not collide onto the same task.
+	test("replayCmakeTarget() with targetDeps folds the dependency into task identity", () => {
+		return withFakeToolchainHost(async () => {
+			const spec = cmakeProjectSpec({
+				path: "rules/c/cmake/example",
+				toolchain: fakeGccGraphToolchain(),
+				cmakeToolchain: fakeCmakeGraphToolchain(),
+			});
+			const configured = configureCmakeProject(spec);
+			const ninjaGraph = {
+				...parseNinja(BUILD_NINJA, (path) => {
+					if (path === "CMakeFiles/rules.ninja") return RULES_NINJA;
+					throw new Error(`unexpected include: ${path}`);
+				}),
+				sandboxRoot: SANDBOX_ROOT,
+			};
+			const helloCmake = replayCmakeTarget(
+				spec,
+				configured,
+				ninjaGraph,
+				["hello_cmake"],
+				["libhello_cmake.so"],
+			);
+			const withoutDeps = replayCmakeTarget(
+				spec,
+				configured,
+				ninjaGraph,
+				["hello_cmake_main"],
+				["hello_cmake_main"],
+			);
+			const withDeps = replayCmakeTarget(
+				spec,
+				configured,
+				ninjaGraph,
+				["hello_cmake_main"],
+				["hello_cmake_main"],
+				{
+					hello_cmake: {
+						outputs: ["libhello_cmake.so"],
+						task: helloCmake,
+					},
+				},
+			);
+			expect(withoutDeps.__graph_id === withDeps.__graph_id).toBe(false);
+		});
+	});
+
+	// create()'s own two-pass discovery (crossTargetDependencies/
+	// topoSortTargets) can't be exercised through a resolved expand() child
+	// under this harness — configureCmakeProject()'s `directory: output.
+	// artifact()` output fails the fake host's own artifact-shape check
+	// (same "must be an action artifact" limitation resolveIgnoringArtifact
+	// Validation() covers) as soon as *any* of its outputs are requested,
+	// including `ninjaGraph` — which is exactly what expand()'s own `inputs`
+	// needs to run create() at all. So, matching this file's existing
+	// pattern of testing create()'s pure logic directly (see
+	// listNamedCmakeTargets()/correlateCTestEntries() above), these test the
+	// two-pass helpers directly against the same parsed fixture.
+	test("crossTargetDependencies() finds hello_cmake_main depends on hello_cmake, not the reverse", () => {
+		const ninjaGraph = parseNinja(BUILD_NINJA, (path) => {
+			if (path === "CMakeFiles/rules.ninja") return RULES_NINJA;
+			throw new Error(`unexpected include: ${path}`);
+		});
+		const named = listNamedCmakeTargets(ninjaGraph);
+		const crossDeps = crossTargetDependencies(named, ninjaGraph);
+		expect(crossDeps.get("hello_cmake_main")).toEqual(["hello_cmake"]);
+		expect(crossDeps.get("hello_cmake")).toEqual([]);
+	});
+
+	test("topoSortTargets() orders hello_cmake before hello_cmake_main", () => {
+		const ninjaGraph = parseNinja(BUILD_NINJA, (path) => {
+			if (path === "CMakeFiles/rules.ninja") return RULES_NINJA;
+			throw new Error(`unexpected include: ${path}`);
+		});
+		const named = listNamedCmakeTargets(ninjaGraph);
+		const crossDeps = crossTargetDependencies(named, ninjaGraph);
+		const ordered = topoSortTargets(named, crossDeps).map((t) => t.name);
+		expect(ordered).toEqual(["hello_cmake", "hello_cmake_main"]);
 	});
 
 	test("get() on any target name (including an unknown one) returns a lazy handle without eagerly validating", () => {

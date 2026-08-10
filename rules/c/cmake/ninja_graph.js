@@ -182,6 +182,56 @@ export function reachableEdges(edges, targetNames) {
 	return order;
 }
 
+// Same backward-reachability walk as reachableEdges(), but treats any
+// dependency path in `boundaryOutputs` as a stop: record it, don't recurse
+// into whatever edge produces it. `boundaryOutputs` is the set of *other*
+// named CMake targets' own final output paths (see listNamedCmakeTargets()) —
+// CMake's Ninja generator names exactly this path in a `|`/`||` reference
+// when one real target depends on another (confirmed against a real
+// `build.ninja`: an order-only `|| libcrypto.a` on a static library's own
+// link edge when it depends on another library, an implicit `| libssl.a
+// libcrypto.a` on an executable's link edge that actually needs the files
+// present — both forms are walked identically here since
+// inputs/implicitInputs/orderOnly are checked the same way). Used to avoid
+// re-deriving another target's own edges when it already has its own
+// independent replay task producing that exact artifact.
+export function reachableEdgesBounded(edges, targetNames, boundaryOutputs) {
+	const byOutput = new Map();
+	for (const edge of edges) {
+		for (const o of [...edge.outputs, ...edge.implicitOutputs]) {
+			byOutput.set(o, edge);
+		}
+	}
+
+	const visited = new Set();
+	const order = [];
+	const boundaries = new Set();
+
+	function visit(edge) {
+		if (visited.has(edge)) return;
+		visited.add(edge);
+		for (const dep of [
+			...edge.inputs,
+			...edge.implicitInputs,
+			...edge.orderOnly,
+		]) {
+			if (boundaryOutputs.has(dep)) {
+				boundaries.add(dep);
+				continue;
+			}
+			const depEdge = byOutput.get(dep);
+			if (depEdge) visit(depEdge);
+		}
+		order.push(edge);
+	}
+
+	for (const name of targetNames) {
+		const edge = byOutput.get(name);
+		if (edge) visit(edge);
+	}
+	return { edges: order, boundaries: Array.from(boundaries) };
+}
+
 // Absolute host paths CMake bakes into rule commands (e.g. "/usr/bin/cc")
 // don't resolve inside a fresh imp sandbox — every sandbox mounts tools
 // at a fixed ".imp/tools/<name>/..." location, never at the tool's

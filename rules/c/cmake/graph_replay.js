@@ -64,7 +64,7 @@ import {
 import {
 	extractCopyDestinations,
 	parseNinja,
-	reachableEdges,
+	reachableEdgesBounded,
 	rebasePath,
 	resolveEdgeCommand,
 	sandboxRootFromWorkdir,
@@ -342,6 +342,16 @@ export function basename(path) {
  *   caller (rules/c/cmake/expansion.js) can hand out a single target's own
  *   build product without the whole shared build directory. Omit to skip
  *   (only `.outputs.directory` is produced).
+ * @param {object} [targetDeps] `{ [otherTargetName]: { outputs: string[],
+ *   task: <replayCmakeTarget() handle>, fileIndex?: number } }` — other
+ *   named CMake targets this one depends on (CMake's own Ninja generator
+ *   names a dependency's final output directly in a `|`/`||` reference; see
+ *   reachableEdgesBounded() in ninja_graph.js). Declaring them here stops
+ *   this target's own edge walk at that boundary instead of re-deriving the
+ *   dependency's edges, and takes its already-built artifact
+ *   (`dep.task.outputs[`file${dep.fileIndex ?? 0}`]`) as a declared graph
+ *   input instead. Omit for a target with no cross-target dependencies —
+ *   behaves exactly as before.
  * @returns {object} Task handle with `.outputs.directory` (an artifact: the
  *   build directory after replay, including any POST_BUILD copy
  *   destinations) and, per `exposeOutputs` entry, `.outputs.file<i>`.
@@ -352,9 +362,24 @@ export function replayCmakeTarget(
 	ninjaGraph,
 	targetNames,
 	exposeOutputs = [],
+	targetDeps = {},
 ) {
 	const { rules, edges, sandboxRoot } = ninjaGraph;
-	const allReached = reachableEdges(edges, targetNames);
+	// A dependency's own final output(s) — CMake's Ninja generator names
+	// these directly in a `|`/`||` reference when one real target depends
+	// on another (see reachableEdgesBounded()'s own docstring). Stopping
+	// the walk there means this target's replay takes the other target's
+	// already-built artifact as a declared input instead of re-deriving
+	// its edges from scratch.
+	const boundaryOutputPaths = new Set();
+	for (const dep of Object.values(targetDeps)) {
+		for (const p of dep.outputs) boundaryOutputPaths.add(p);
+	}
+	const { edges: allReached } = reachableEdgesBounded(
+		edges,
+		targetNames,
+		boundaryOutputPaths,
+	);
 	const reached = allReached.filter(
 		(edge) =>
 			edge.rule !== "phony" && rules[edge.rule] && rules[edge.rule].command,
@@ -411,6 +436,21 @@ export function replayCmakeTarget(
 			// resolves to the first target's already-registered task.
 			targetNames,
 			exposeOutputs,
+			// Real graph handles (not plain closure data), so task()'s own
+			// _graphInput() fingerprints each by its producing task's
+			// identity — a dependency target whose own inputs changed (or a
+			// different set of dependency names entirely, which changes
+			// this object's own key set) naturally produces a distinct key
+			// here. depTargetNames is redundant with the dep_<name> keys
+			// above but kept anyway, matching this file's existing
+			// targetNames/exposeOutputs defense-in-depth precedent.
+			...Object.fromEntries(
+				Object.entries(targetDeps).map(([name, dep]) => [
+					`dep_${name}`,
+					dep.task.outputs[`file${dep.fileIndex ?? 0}`],
+				]),
+			),
+			depTargetNames: Object.keys(targetDeps).sort(),
 		},
 		outputs: {
 			directory: output.artifact(),
@@ -423,6 +463,20 @@ export function replayCmakeTarget(
 			const baseToolNames = new Set(["mkdir", "cp", "dirname"]);
 			const dirInputBindings = Object.keys(spec.dirInputs).map(
 				(key) => input[key],
+			);
+			// A boundary dependency's own artifact is already captured at
+			// its real buildDirPath-relative path (same mechanism
+			// exposeOutputs' file0..N rely on). It's mounted unconditionally
+			// for every edge in this replay rather than only the specific
+			// edge that references it: an order-only ("||") reference is by
+			// design invisible in resolved command text (see
+			// reachableEdgesBounded()'s own docstring), so which edge
+			// actually needs the file physically present can't be
+			// determined from parsed data alone — there are normally only
+			// one or two boundary deps per target, so mounting them broadly
+			// is cheap.
+			const boundaryInputs = Object.keys(targetDeps).map(
+				(name) => input[`dep_${name}`],
 			);
 
 			async function executeEdge(edge, priorOutputs) {
@@ -486,6 +540,7 @@ export function replayCmakeTarget(
 						...dirInputBindings,
 						input.configureDirectory,
 						...priorOutputs,
+						...boundaryInputs,
 					],
 					outputs: Object.fromEntries(
 						destPaths.map((p, i) => [outputNames[i], output.file(p)]),
@@ -514,7 +569,13 @@ export function replayCmakeTarget(
 			// reconstruction script is needed.
 			const staged = await exec.action({
 				argv: ["sh", "-c", "true"],
-				inputs: [input.configureDirectory, ...priorOutputs],
+				// boundaryInputs included so this target's own exposed
+				// `directory` stays a complete build tree (e.g. for
+				// runCTestTask(), which runs a test executable straight out
+				// of it) — the same completeness the old unbounded replay
+				// had incidentally, from re-deriving the dependency's files
+				// itself.
+				inputs: [input.configureDirectory, ...priorOutputs, ...boundaryInputs],
 				outputs: {
 					directory: output.directory(spec.buildDirPath),
 					...Object.fromEntries(
@@ -562,6 +623,9 @@ function ctestNameFilterArgs(testNames) {
  * @param {object} ninjaGraph The *resolved* `configured.outputs.ninjaGraph` value.
  * @param {string[]} targetNames Ninja target names to build first (see replayCmakeTarget()).
  * @param {string[]} [testNames] CTest test name(s) to scope to; all tests if omitted.
+ * @param {object} [targetDeps] Forwarded to replayCmakeTarget() — see its
+ *   own docstring. Avoids the test executable's own replay re-deriving a
+ *   library dependency's edges it already has its own task for.
  * @returns {object} Task handle (no declared outputs — a failing `ctest` invocation fails the task).
  */
 export function runCTestTask(
@@ -570,8 +634,16 @@ export function runCTestTask(
 	ninjaGraph,
 	targetNames,
 	testNames = [],
+	targetDeps = {},
 ) {
-	const built = replayCmakeTarget(spec, configured, ninjaGraph, targetNames);
+	const built = replayCmakeTarget(
+		spec,
+		configured,
+		ninjaGraph,
+		targetNames,
+		[],
+		targetDeps,
+	);
 	return task({
 		display: `ctest ${spec.path} [${(testNames.length ? testNames : ["all"]).join(",")}]`,
 		inputs: {

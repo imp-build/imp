@@ -32,7 +32,10 @@ import {
 	replayCmakeTarget,
 	runCTestTask,
 } from "//rules/c/cmake/graph_replay";
-import { listNamedCmakeTargets } from "//rules/c/cmake/ninja_graph";
+import {
+	listNamedCmakeTargets,
+	reachableEdgesBounded,
+} from "//rules/c/cmake/ninja_graph";
 
 // ---------------------------------------------------------------------------
 // cmakeProject() registry — declaration order, read by
@@ -44,6 +47,94 @@ const _cmakeProjectSpecs = [];
 
 export function cmakeProjectSpecs() {
 	return _cmakeProjectSpecs.slice();
+}
+
+// Pass 1 of create()'s two-pass discovery: for each named target, walk its
+// edges bounded against every *other* named target's own final output(s)
+// (see reachableEdgesBounded() in ninja_graph.js) and record which of those
+// targets it actually references — CMake's own inter-library dependency
+// shape, confirmed against a real `build.ninja` (an order-only `||
+// libcrypto.a` on a static library's link edge, an implicit `| libssl.a
+// libcrypto.a` on an executable's). Returns `Map<targetName, string[]>` of
+// each target's real cross-target dependency names. Exported for direct
+// testing — the fake test host can't drive create() itself end-to-end (see
+// expansion_test.js's own comment on this).
+export function crossTargetDependencies(named, ninjaGraph) {
+	const crossDeps = new Map();
+	for (const t of named) {
+		const targetNames = t.outputs.length > 0 ? t.outputs : [t.name];
+		const ownOutputs = new Set(targetNames);
+		const boundaryOutputPaths = new Set();
+		for (const other of named) {
+			if (other.name === t.name) continue;
+			for (const o of other.outputs) {
+				if (!ownOutputs.has(o)) boundaryOutputPaths.add(o);
+			}
+		}
+		const { boundaries } = reachableEdgesBounded(
+			ninjaGraph.edges,
+			targetNames,
+			boundaryOutputPaths,
+		);
+		const boundarySet = new Set(boundaries);
+		const deps = named
+			.filter((other) => other.name !== t.name)
+			.filter((other) => other.outputs.some((o) => boundarySet.has(o)))
+			.map((other) => other.name);
+		crossDeps.set(t.name, deps);
+	}
+	return crossDeps;
+}
+
+// Pass 2's minting order: dependencies before dependents, so each target's
+// targetDeps entries always reference an already-minted task handle (task()
+// calls don't execute at declare time, but replayCmakeTarget() itself reads
+// `dep.outputs`/`dep.task` synchronously while building its own `inputs:`).
+// CMake's own target graph is a DAG by construction — a real link target
+// can't order-only-depend on something that depends back on it — so a
+// leftover node after Kahn's algorithm terminates means boundary detection
+// itself is wrong, not a valid project shape; surfaced as a clear error
+// rather than an undefined handle downstream. Exported for direct testing —
+// see crossTargetDependencies()'s own docstring.
+export function topoSortTargets(named, crossDeps) {
+	const byName = new Map(named.map((t) => [t.name, t]));
+	const remainingDeps = new Map(
+		named.map((t) => [t.name, new Set(crossDeps.get(t.name))]),
+	);
+	const ordered = [];
+	let progressed = true;
+	while (remainingDeps.size > 0 && progressed) {
+		progressed = false;
+		for (const [name, deps] of remainingDeps) {
+			if (deps.size > 0) continue;
+			ordered.push(byName.get(name));
+			remainingDeps.delete(name);
+			for (const other of remainingDeps.values()) other.delete(name);
+			progressed = true;
+		}
+	}
+	if (remainingDeps.size > 0) {
+		throw new Error(
+			`cmake project: cyclic target dependency detected among ${Array.from(remainingDeps.keys()).join(", ")} — not expected from any valid CMakeLists.txt`,
+		);
+	}
+	return ordered;
+}
+
+// Builds a target's replayCmakeTarget()/runCTestTask() `targetDeps` argument
+// from already-minted handles — shared by both the task-minting pass and
+// the runCTestTask() call in the children-building pass below, which needs
+// the same shape for the same target.
+function buildTargetDeps(targetName, named, crossDeps, builtByName) {
+	return Object.fromEntries(
+		crossDeps.get(targetName).map((depName) => {
+			const depTarget = named.find((n) => n.name === depName);
+			return [
+				depName,
+				{ outputs: depTarget.outputs, task: builtByName[depName] },
+			];
+		}),
+	);
 }
 
 /**
@@ -68,8 +159,30 @@ export function cmakeProjectExpansion(opts = {}) {
 		inputs: { ninjaGraph: configured.outputs.ninjaGraph },
 		create({ ninjaGraph }) {
 			const testsByBasename = correlateCTestEntries(ninjaGraph);
+			const named = listNamedCmakeTargets(ninjaGraph);
+			const crossDeps = crossTargetDependencies(named, ninjaGraph);
+
+			const builtByName = {};
+			for (const t of topoSortTargets(named, crossDeps)) {
+				const targetNames = t.outputs.length > 0 ? t.outputs : [t.name];
+				const targetDeps = buildTargetDeps(
+					t.name,
+					named,
+					crossDeps,
+					builtByName,
+				);
+				builtByName[t.name] = replayCmakeTarget(
+					spec,
+					configured,
+					ninjaGraph,
+					targetNames,
+					t.outputs,
+					targetDeps,
+				);
+			}
+
 			const children = {};
-			for (const cmakeTarget of listNamedCmakeTargets(ninjaGraph)) {
+			for (const cmakeTarget of named) {
 				const matchedTestNames = new Set();
 				if (cmakeTarget.type === "EXECUTABLE") {
 					for (const candidate of [cmakeTarget.name, ...cmakeTarget.outputs]) {
@@ -84,13 +197,7 @@ export function cmakeProjectExpansion(opts = {}) {
 						? cmakeTarget.outputs
 						: [cmakeTarget.name];
 
-				const built = replayCmakeTarget(
-					spec,
-					configured,
-					ninjaGraph,
-					targetNames,
-					cmakeTarget.outputs,
-				);
+				const built = builtByName[cmakeTarget.name];
 				// A CMake target can list more than one output path, but only
 				// the first is exposed as [BUILD]/[PACKAGE] — same "one target,
 				// one product" assumption the legacy discoverCmakeLabels()'s
@@ -109,6 +216,12 @@ export function cmakeProjectExpansion(opts = {}) {
 										ninjaGraph,
 										targetNames,
 										testNames,
+										buildTargetDeps(
+											cmakeTarget.name,
+											named,
+											crossDeps,
+											builtByName,
+										),
 									),
 								},
 							}
