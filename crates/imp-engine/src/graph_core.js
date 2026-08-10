@@ -164,6 +164,29 @@ function _graphOutputSlots(outputs, api) {
 	return Object.freeze(result);
 }
 
+const _graphMemoByFingerprint = new Map();
+
+// Return the existing handle for `fingerprint` if one was already built,
+// otherwise build and remember one via `create()`. `task()` has always done
+// this itself (`_graphTasksByKey`, below) so that two calls describing the
+// same work share one cached execution; this generalizes the same
+// fingerprint-keyed caching to every other constructor that describes an
+// immutable, side-effect-free value — file()/files()/tool()/the native-tool
+// constructors/semantic.*() — so e.g. `nativeTool("sh")` called from a dozen
+// different toolchain helpers collapses into one shared node instead of a
+// dozen look-alike ones. Safe by construction: these constructors never do
+// anything but describe data, and task *caching* already keys off a handle's
+// fingerprint rather than its id (see `_graphInput`), so merging identically-
+// fingerprinted handles here changes no execution or invalidation behavior —
+// only how many redundant nodes the graph carries.
+function _graphMemoizedHandle(fingerprint, create) {
+	const cached = _graphMemoByFingerprint.get(fingerprint);
+	if (cached !== undefined) return cached;
+	const handle = create();
+	_graphMemoByFingerprint.set(fingerprint, handle);
+	return handle;
+}
+
 output.artifact = () => Object.freeze({ __imp_graph_output_slot: true, kind: "artifact" });
 output.value = () => Object.freeze({ __imp_graph_output_slot: true, kind: "value" });
 output.file = (path, opts) => {
@@ -196,7 +219,8 @@ output.directory = (path, opts) => {
 export function file(path) {
 	if (typeof path !== "string" || path.length === 0)
 		throw _graphError("file(path) requires a non-empty path");
-	return _graphHandle("file", { path }, `file:${path}`);
+	const fingerprint = `file:${path}`;
+	return _graphMemoizedHandle(fingerprint, () => _graphHandle("file", { path }, fingerprint));
 }
 
 /**
@@ -207,7 +231,8 @@ export function file(path) {
  */
 export function files(opts = {}) {
 	const spec = _graphJson(opts, "files(options)");
-	return _graphHandle("files", spec, `files:${_graphCanonical(spec)}`);
+	const fingerprint = `files:${_graphCanonical(spec)}`;
+	return _graphMemoizedHandle(fingerprint, () => _graphHandle("files", spec, fingerprint));
 }
 
 /**
@@ -220,21 +245,23 @@ export function files(opts = {}) {
 export function tool(artifactHandle, opts = {}) {
 	const artifactRecord = _graphRecord(artifactHandle, "tool(artifact, options)");
 	const options = _graphJson(opts, "tool(options)");
-	return _graphHandle(
-		"tool",
-		{ artifact: artifactHandle, options },
-		`tool:${artifactRecord.fingerprint}:${_graphCanonical(options)}`,
+	const fingerprint = `tool:${artifactRecord.fingerprint}:${_graphCanonical(options)}`;
+	return _graphMemoizedHandle(fingerprint, () =>
+		_graphHandle("tool", { artifact: artifactHandle, options }, fingerprint),
 	);
 }
 
 function _nativeGraphTool(name, self = false) {
 	if (!self && (typeof name !== "string" || name.length === 0))
 		throw _graphError("native tool name must be a non-empty string");
-	return _graphHandle(
-		"native-tool",
-		Object.freeze({ name: self ? "imp" : name, self }),
-		`native-tool:${self ? "self" : name}`,
-		self ? {} : { __imp_native_tool: "native-tool", name },
+	const fingerprint = `native-tool:${self ? "self" : name}`;
+	return _graphMemoizedHandle(fingerprint, () =>
+		_graphHandle(
+			"native-tool",
+			Object.freeze({ name: self ? "imp" : name, self }),
+			fingerprint,
+			self ? {} : { __imp_native_tool: "native-tool", name },
+		),
 	);
 }
 
@@ -244,10 +271,9 @@ globalThis.__imp_graph_native_tool = (name) => _nativeGraphTool(name, false);
 globalThis.__imp_graph_self_tool = () => _nativeGraphTool("imp", true);
 
 function _semanticHandle(kind, name = null, path = null) {
-	return _graphHandle(
-		"semantic",
-		Object.freeze({ kind, name, path }),
-		`semantic:${kind}:${name ?? ""}:${path ?? ""}`,
+	const fingerprint = `semantic:${kind}:${name ?? ""}:${path ?? ""}`;
+	return _graphMemoizedHandle(fingerprint, () =>
+		_graphHandle("semantic", Object.freeze({ kind, name, path }), fingerprint),
 	);
 }
 
@@ -775,6 +801,35 @@ function _graphDeclaredEdges(record) {
 	}
 }
 
+// Human label for a node in the introspection walk, reusing whatever
+// `display:` the declaring `task()`/`expand()` call already recorded rather
+// than inventing a second labelling scheme. Returns undefined for kinds with
+// no natural label of their own (file/files/tool already carry enough via
+// `node.data`/their own edges).
+function _graphNodeDisplay(record) {
+	switch (record.kind) {
+		case "task": {
+			const taskRecord = _graphTasks.get(record.data.taskId);
+			return taskRecord?.display;
+		}
+		case "task-output": {
+			const taskRecord = _graphTasks.get(record.data.taskId);
+			return taskRecord ? `${taskRecord.display} · ${record.data.name}` : record.data.name;
+		}
+		case "expansion-all":
+		case "expansion-get": {
+			const expansionRecord = _graphExpansions.get(record.data.expansionId);
+			return expansionRecord?.display;
+		}
+		case "native-tool":
+			return record.data.self ? "imp (self)" : `tool: ${record.data.name}`;
+		case "semantic":
+			return `semantic: ${record.data.kind}(${record.data.name ?? ""})`;
+		default:
+			return undefined;
+	}
+}
+
 /**
  * Walk the declared structure reachable from `roots` for introspection
  * (`imp targets`/`imp dependencies`), without executing any task action.
@@ -801,22 +856,42 @@ function _graphDeclaredEdges(record) {
  * `[TEST]`/`[BUILD]` root to reach their real dependency edges. Left off by
  * default so `imp targets`/`imp dependencies` keep today's cheaper, no-extra-
  * sandbox-risk behavior unchanged.
+ *
+ * `optsJson.discoverExpansionAll` (default true) is the inverse switch for
+ * `"expansion-all"` nodes: set it false to see only what's exported without
+ * ever running an expansion's `create()` (and whatever discovery task it
+ * needs, e.g. `cargo metadata`/`cmake configure`) — used by `imp graph`'s
+ * static-catalog view (#93), which must be able to show the graph with zero
+ * tasks run. An undiscovered `"expansion-all"` node gets no `children`/
+ * `expansionId`, same shape as any other leaf.
  */
 async function _graphWalkForIntrospection(rootsJson, invocationJson, optsJson = "{}") {
 	const roots = JSON.parse(rootsJson);
-	const { discoverExpansionGet = false } = JSON.parse(optsJson);
+	const { discoverExpansionGet = false, discoverExpansionAll = true } = JSON.parse(optsJson);
 	const visited = new Set();
 	const queue = roots.map((root) => root.handleId);
 	const nodes = [];
 	const previousInvocation = _graphInvocation;
 	_graphInvocation = Object.freeze(JSON.parse(invocationJson));
 	try {
-		return await _graphWalkForIntrospectionInner(queue, visited, nodes, discoverExpansionGet);
+		return await _graphWalkForIntrospectionInner(
+			queue,
+			visited,
+			nodes,
+			discoverExpansionGet,
+			discoverExpansionAll,
+		);
 	} finally {
 		_graphInvocation = previousInvocation;
 	}
 }
-async function _graphWalkForIntrospectionInner(queue, visited, nodes, discoverExpansionGet) {
+async function _graphWalkForIntrospectionInner(
+	queue,
+	visited,
+	nodes,
+	discoverExpansionGet,
+	discoverExpansionAll = true,
+) {
 	while (queue.length > 0) {
 		const id = queue.shift();
 		if (visited.has(id)) continue;
@@ -829,6 +904,8 @@ async function _graphWalkForIntrospectionInner(queue, visited, nodes, discoverEx
 		if (record.kind === "file" || record.kind === "files") {
 			node.data = record.data;
 		}
+		const display = _graphNodeDisplay(record);
+		if (display !== undefined) node.display = display;
 		// Only an "expansion-all" root needs its children actually
 		// discovered: that's the one kind with no address of its own for any
 		// individual child, which is the whole reason this walk exists. An
@@ -843,7 +920,7 @@ async function _graphWalkForIntrospectionInner(queue, visited, nodes, discoverEx
 		// per-package `[TEST]`/`[BUILD]` root is itself an `expansion-get`,
 		// and the dependency edges staleness needs to see (crate path deps,
 		// inferred Odin imports) only exist once `create()` has run — see #7.
-		if (record.kind === "expansion-all") {
+		if (record.kind === "expansion-all" && discoverExpansionAll) {
 			const { expansionId, workflow, facet } = record.data;
 			const children = await _graphExecuteExpansion(expansionId, []);
 			node.expansionId = expansionId;

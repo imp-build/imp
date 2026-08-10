@@ -30,6 +30,38 @@ impl GraphRoot {
     }
 }
 
+/// Which of #26's introspection views `imp graph` (#93) is rendering. Kept
+/// as an explicit enum (rather than inferring it from how the walk was
+/// produced) so the diagram can always say which one it is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphView {
+    /// Exported roots exactly as `BUILD.js` files declare them — no
+    /// `expand()` `create()` ever runs (see
+    /// `spike::resolve_graph_catalog_view`).
+    Catalog,
+    /// Exported roots plus every reachable expansion's discovered children —
+    /// the same walk `imp targets`/`imp dependencies` already use (see
+    /// `spike::resolve_graph_with_expansion`).
+    Planning,
+}
+
+impl GraphView {
+    pub fn label(self) -> &'static str {
+        match self {
+            GraphView::Catalog => "static-exported-catalog",
+            GraphView::Planning => "staged-planning-graph",
+        }
+    }
+}
+
+/// Text output format for `imp graph` (#93). Both are the "honest core" the
+/// issue asks for: no external renderer needed to produce either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphFormat {
+    Mermaid,
+    Dot,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GraphCatalog {
     pub roots: Vec<GraphRoot>,
@@ -183,6 +215,12 @@ pub struct GraphWalkNode {
     /// Used by `stale_node_ids` to test a leaf against changed paths.
     #[serde(default)]
     pub data: Option<serde_json::Value>,
+    /// Human label reused from the declaring `task()`/`expand()` call's own
+    /// `display:` (see `graph_core.js`'s `_graphNodeDisplay`). `None` for
+    /// kinds with no natural label of their own (file/files/tool already
+    /// carry enough via `data`/their own edges).
+    #[serde(default)]
+    pub display: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -335,6 +373,7 @@ mod tests {
                 edges: Vec::new(),
                 children: BTreeMap::from([("crate-a".to_owned(), 11), ("crate-b".to_owned(), 12)]),
                 data: None,
+                display: None,
             }],
         };
         let mut children = walk.synthetic_children(&[&parent]);
@@ -368,6 +407,7 @@ mod tests {
                     edges: Vec::new(),
                     children: BTreeMap::new(),
                     data: Some(serde_json::json!({ "path": "crates/imp-store/src/lib.rs" })),
+                    display: None,
                 },
                 GraphWalkNode {
                     id: 11,
@@ -378,6 +418,7 @@ mod tests {
                     }],
                     children: BTreeMap::new(),
                     data: None,
+                    display: None,
                 },
                 GraphWalkNode {
                     id: 12,
@@ -388,6 +429,7 @@ mod tests {
                     }],
                     children: BTreeMap::new(),
                     data: None,
+                    display: None,
                 },
                 GraphWalkNode {
                     id: 20,
@@ -395,6 +437,7 @@ mod tests {
                     edges: Vec::new(),
                     children: BTreeMap::new(),
                     data: Some(serde_json::json!({ "path": "crates/imp-execution/src/lib.rs" })),
+                    display: None,
                 },
                 GraphWalkNode {
                     id: 21,
@@ -405,6 +448,7 @@ mod tests {
                     }],
                     children: BTreeMap::new(),
                     data: None,
+                    display: None,
                 },
             ],
         };
