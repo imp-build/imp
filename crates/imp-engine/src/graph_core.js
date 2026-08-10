@@ -578,6 +578,18 @@ function _graphExec(record) {
 				});
 			}
 			const result = await run({
+				// exec.action() is only ever reachable from inside a task's own
+				// run() (the only place given an `exec`) — expand()'s create()
+				// callback is never handed one (see _graphExecuteExpansion below)
+				// — so this call can never actually originate from inside an
+				// expansion's construction. Bypassing run()'s expansion-phase
+				// guard here isn't just an optimization: leaving it in place is
+				// actively wrong, since _graphPhase is one shared global and an
+				// unrelated expansion running concurrently elsewhere in the graph
+				// (e.g. while most of the graph is cache-hit and everything
+				// resolves in a tight interleave) can transiently read back as
+				// "expansion" here and fail an otherwise-legitimate task action.
+				__graphTaskAction: true,
 				argv: opts.argv,
 				display: opts.display || record.display,
 				env: opts.env,
@@ -732,19 +744,29 @@ async function _graphExecuteExpansion(expansionId, stack) {
 	const existing = _graphExpansionInflight.get(runtimeKey);
 	if (existing) return existing;
 	const promise = (async () => {
+		// _graphPhase="expansion" is only held for create()'s own synchronous
+		// prologue, not its whole (possibly async) lifetime — same contract
+		// _graphAmbientPackagePath already documents above (only meaningful
+		// until the callback's first await). Holding it across an await would
+		// leave it readable by whatever unrelated task/expansion happens to
+		// interleave on the microtask queue in the meantime, which is exactly
+		// how this guard used to produce false positives against completely
+		// unrelated concurrent task execution.
 		const previous = _graphPhase;
 		const previousPackagePath = _graphAmbientPackagePath;
 		_graphPhase = "expansion";
 		_graphAmbientPackagePath = record.packagePath;
+		let pending;
 		try {
-			const children = await record.create(Object.freeze(resolved));
-			if (children === null || typeof children !== "object" || Array.isArray(children))
-				throw _graphError(`expansion '${record.display}' must return a keyed object`);
-			return children;
+			pending = record.create(Object.freeze(resolved));
 		} finally {
 			_graphPhase = previous;
 			_graphAmbientPackagePath = previousPackagePath;
 		}
+		const children = await pending;
+		if (children === null || typeof children !== "object" || Array.isArray(children))
+			throw _graphError(`expansion '${record.display}' must return a keyed object`);
+		return children;
 	})();
 	_graphExpansionInflight.set(runtimeKey, promise);
 	return promise;
