@@ -308,7 +308,7 @@ function _graphFunctionIdentity(fn, label) {
 	return `${fn.name || "<anonymous>"}@${site}`;
 }
 
-function _graphTaskKey(fn, inputs, outputs, cache) {
+function _graphTaskKey(fn, inputs, outputs, cache, display) {
 	const fnId = _graphFunctionIdentity(fn, "task");
 	let moduleDigest = null;
 	const at = fnId.indexOf("@");
@@ -320,6 +320,7 @@ function _graphTaskKey(fn, inputs, outputs, cache) {
 	return JSON.stringify({
 		fnId,
 		moduleDigest,
+		display,
 		inputs: Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, input.fingerprint])),
 		outputs,
 		cache,
@@ -329,6 +330,18 @@ function _graphTaskKey(fn, inputs, outputs, cache) {
 /**
  * Add an immutable task node to the graph and return its completion handle.
  * Named output handles are available under the returned handle's `outputs`.
+ *
+ * `display` is part of the node's identity, not only its label. A shared
+ * helper that builds several different actions from one `task()` call site —
+ * telling them apart with a closure-captured flag — has the same `run`
+ * identity and frequently the same inputs for every variant, so `display` is
+ * the only thing left that can separate them. Two tasks that do different
+ * work must therefore have different displays, and a display must be
+ * deterministic across runs: a display that varies run to run splits one node
+ * into many. This costs nothing on disk — the persistent task cache keys off
+ * the action and its inputs (see `task_key` in imp-execution's exec.rs), not
+ * off this key, which governs in-process graph dedup only.
+ *
  * @category graph
  * @param {object} opts
  * @param {Record<string, *>} [opts.inputs]
@@ -347,7 +360,11 @@ export function task(opts) {
 	const inputs = _graphInputs(opts.inputs, "task");
 	const outputs = _graphOutputSlots(opts.outputs, "task");
 	const cache = opts.cache !== false;
-	let key = _graphTaskKey(opts.run, inputs, outputs, cache);
+	// Only an authored display goes in the key. The `task ${id}` fallback below
+	// is unique per node, so keying on it would give every unnamed task a
+	// distinct key and defeat dedup entirely.
+	const authoredDisplay = opts.display || opts.run.name || null;
+	let key = _graphTaskKey(opts.run, inputs, outputs, cache, authoredDisplay);
 	if (!cache) key += `:instance:${_graphNextTask}`;
 	if (cache && _graphTasksByKey.has(key)) return _graphTasksByKey.get(key).publicHandle;
 
@@ -365,7 +382,7 @@ export function task(opts) {
 	const record = {
 		id,
 		key,
-		display: opts.display || opts.run.name || `task ${id}`,
+		display: authoredDisplay || `task ${id}`,
 		inputs,
 		outputs,
 		cache,
@@ -697,14 +714,18 @@ function _graphExpand(opts) {
 		throw _graphError("expand({ inputs, create }) requires a create callback");
 	const inputs = _graphInputs(opts.inputs, "expand");
 	const id = _graphNextExpansion++;
+	// `display` participates in the key for the same reason it does in task()
+	// — see the note there. The `expansion ${id}` fallback stays out of it.
+	const authoredDisplay = opts.display || opts.create.name || null;
 	const key = JSON.stringify({
 		fnId: _graphFunctionIdentity(opts.create, "expand"),
+		display: authoredDisplay,
 		inputs: Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, input.fingerprint])),
 	});
 	_graphExpansions.set(id, {
 		id,
 		key,
-		display: opts.display || opts.create.name || `expansion ${id}`,
+		display: authoredDisplay || `expansion ${id}`,
 		inputs,
 		create: opts.create,
 		packagePath: _graphCapturePackagePath(),
