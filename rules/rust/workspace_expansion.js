@@ -27,6 +27,8 @@ import {
 	toolEnvAndTools,
 } from "//rules/rust";
 
+import { nativeTool } from "//rules/imp/native-tool";
+
 // Resolves RUSTUP_HOME/CARGO_HOME/PATH (+ linker/build-cache tools/env) for
 // one cargo invocation — every task below needs this, not just the compiling
 // ones: `cargo fmt`/`cargo metadata` still need RUSTUP_HOME/CARGO_HOME set
@@ -204,6 +206,43 @@ function manifestSources(root) {
 	});
 }
 
+// A `cargo test --no-run --target-dir <dir>`'s full target dir also holds
+// every dependency's .rlib/.rmeta, incremental compilation state, and
+// fingerprints — none of which any downstream task ever reads, only the
+// compiled test executables cargo itself reports via
+// --message-format=json's compiler-artifact `.executable` field (see
+// parseTestBinaries above). Rather than output.directory()-ing the whole
+// target dir, this script copies just those reported executables into a
+// sibling `<target_dir>.bins` directory (mirroring each one's target-dir-
+// relative path so parseTestBinaries/crateTestTask's own prefix-stripping
+// join still resolves them there unchanged), and that curated directory is
+// what actually gets captured.
+const CURATED_TEST_BUILD_SCRIPT = [
+	'imp_sandbox_root="$(pwd)"; manifest=$1; target_dir=$2; rustflags=$3; shift 3;',
+	'bins_dir="$target_dir.bins"; report="$target_dir.json";',
+	'mkdir -p "$bins_dir";',
+	'RUSTFLAGS="$rustflags" cargo test --locked --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@" > "$report";',
+	'cat "$report";',
+	'jq -r \'select(.reason=="compiler-artifact" and .profile.test==true and .executable != null) | .executable\' "$report" |',
+	"while IFS= read -r exe; do",
+	'  rel=${exe#"$imp_sandbox_root/"}; rel=${rel#"$target_dir/"};',
+	'  case "$rel" in */*) mkdir -p "$bins_dir/${rel%/*}" ;; esac;',
+	'  cp "$exe" "$bins_dir/$rel";',
+	"done",
+].join(" ");
+
+function curatedTestBuildTools(input) {
+	return [input.jqTool, input.mkdirTool, input.cpTool];
+}
+
+function curatedTestBuildToolInputs() {
+	return {
+		jqTool: nativeTool("jq"),
+		mkdirTool: nativeTool("mkdir"),
+		cpTool: nativeTool("cp"),
+	};
+}
+
 function metadataTask(
 	display,
 	manifestPath,
@@ -367,6 +406,7 @@ function workspaceTestBuildTask(
 			manifests,
 			...toolchainInputs(toolchainSpec),
 			...extraInputs("dep", deps),
+			...curatedTestBuildToolInputs(),
 		},
 		outputs: { binaries: output.artifact(), report: output.value() },
 		async run(exec, input) {
@@ -377,21 +417,19 @@ function workspaceTestBuildTask(
 			);
 			const result = await exec.action({
 				argv: [
-					exec.tool(input.toolchain, "cargo"),
-					"test",
-					"--locked",
-					"--no-run",
-					"--workspace",
-					"--message-format=json",
-					"--manifest-path",
+					"sh",
+					"-c",
+					CURATED_TEST_BUILD_SCRIPT,
+					"cargo-test-build",
 					manifestPath,
-					"--target-dir",
 					buildDir,
+					rustflags,
+					"--workspace",
 				],
-				tools,
-				env: [...env, `RUSTFLAGS=${rustflags}`],
+				tools: [...tools, ...curatedTestBuildTools(input)],
+				env,
 				inputs: [input.manifests, ...resolvedExtraInputs("dep", input, deps)],
-				outputs: { binaries: output.directory(buildDir) },
+				outputs: { binaries: output.directory(`${buildDir}.bins`) },
 			});
 			return {
 				binaries: result.outputs.binaries,
@@ -831,6 +869,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 					manifests,
 					...toolchainInputs(toolchainSpec),
 					...extraInputs("dep", deps),
+					...curatedTestBuildToolInputs(),
 				},
 				outputs: { binaries: output.artifact(), report: output.value() },
 				async run(exec, input) {
@@ -842,23 +881,21 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 					const buildDir = `build/rust/${path}`;
 					const result = await exec.action({
 						argv: [
-							exec.tool(input.toolchain, "cargo"),
-							"test",
-							"--locked",
-							"--no-run",
-							"--message-format=json",
-							"--manifest-path",
+							"sh",
+							"-c",
+							CURATED_TEST_BUILD_SCRIPT,
+							"cargo-test-build",
 							manifestPath,
-							"--target-dir",
 							buildDir,
+							rustflags,
 						],
-						tools,
-						env: [...env, `RUSTFLAGS=${rustflags}`],
+						tools: [...tools, ...curatedTestBuildTools(input)],
+						env,
 						inputs: [
 							input.manifests,
 							...resolvedExtraInputs("dep", input, deps),
 						],
-						outputs: { binaries: output.directory(buildDir) },
+						outputs: { binaries: output.directory(`${buildDir}.bins`) },
 					});
 					return {
 						binaries: result.outputs.binaries,
