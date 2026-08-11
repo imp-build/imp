@@ -29,17 +29,19 @@ import {
  * its own "prefer materialize:false" warning and is meant for the dist/
  * package pattern, not for scattered per-file codegen outputs.
  *
- * Call this with `materialize: !check` inside a target's single `generate`
- * product, branching on the `check` flag `generateGoal` passes as the
- * product function's second argument (//rules/workflows/generate.js) —
- * `materialize: true` writes into the workspace, `materialize: false` keeps
- * the result CAS-only for a CI drift check:
+ * Call this with `materialize: !check` inside a `generate` handler,
+ * branching on the goal's `check` flag: `materialize: true` writes into the
+ * workspace, `materialize: false` keeps the result CAS-only for a CI drift
+ * check. `//ci:docs_workflow` (ci/BUILD.js) is the real, working example
+ * today — it uses `attach(label, "generate", fn)` (the `generate()` sugar in
+ * imp:core), reading `ctx.flags.check`:
  *
  * ```js
- * export const generate = product(SomeKind, GENERATE, MY_TOOL, async (handle, { check = false } = {}) => {
- *     const built = await buildGenerator(handle);
+ * const docs_workflow = label();
+ * attach(docs_workflow, "generate", async function generateDocsWorkflow(ctx) {
+ *     const check = !!ctx.flags.check;
  *     const { changed } = await generatedFiles({
- *         display: `generate ${handle.label.address}`,
+ *         display: "generate GitHub workflows",
  *         argv: [built.path, ...args],
  *         tools: [built],
  *         inputs: [...],
@@ -47,8 +49,14 @@ import {
  *         materialize: !check,
  *     });
  *     return check ? { checked: 2, stale: changed } : { generated: changed.length };
- * }, { display: "generate {0}", level: "info" });
+ * });
+ * export { docs_workflow };
  * ```
+ *
+ * There is no graph-native `[GENERATE]` materialization contract yet — the
+ * legacy `product(kind, GENERATE, tool, fn)` registration this doc comment
+ * used to teach has no real caller left in the repo and was retired
+ * alongside #6's other goal migrations.
  *
  * @param {object} opts
  * @param {string} [opts.display] Human-readable action label.
