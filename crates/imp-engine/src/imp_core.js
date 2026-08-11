@@ -3079,6 +3079,10 @@ globalThis.__imp_dispatch_label_handlers = _dispatch_label_handlers;
  * current goal's selection (see `ensure_expanded` in spike.rs). An optional
  * `{ goals: ["test", ...] }` scope limits expansion to those goals.
  *
+ * Called in its graph form — `expand({ inputs, create, display })` — the
+ * `display` is part of the expansion's identity, exactly as it is for `task()`.
+ * See the note on `task()` in graph_core.js.
+ *
  * @param {Function} kindClass Target subclass declaring `static kind`, e.g. CmakeLib.
  * @param {function} fn Async function taking the expanding target's handle;
  *   calls `registerTarget()` for each target it discovers.

@@ -913,7 +913,13 @@ function graphOdinBuild(
 	{ test = false, lint = false } = {},
 ) {
 	const inputs = graphActionInputs(spec, analysis, config);
-	const outputPath = lint
+	// `odin test` compiles and runs in one step and names its binary after the
+	// package, so there is no artifact to declare and no -out: to pass (below):
+	// its exit code is the whole result, the same shape python's testRoot() and
+	// rust's per-crate test-run action already use. `odin check -vet` likewise
+	// writes nothing.
+	const captures = !lint && !test;
+	const outputPath = !captures
 		? null
 		: analysis.hasMainEntrypoint
 			? "output"
@@ -923,7 +929,9 @@ function graphOdinBuild(
 		inputs,
 		outputs: lint
 			? { result: output.value() }
-			: { artifact: output.artifact(), executablePath: output.value() },
+			: test
+				? undefined
+				: { artifact: output.artifact(), executablePath: output.value() },
 		async run(exec, resolved) {
 			const flags = resolved.analysis.collections.map(
 				([name, path]) => `-collection:${name}=${path}`,
@@ -978,14 +986,14 @@ function graphOdinBuild(
 							? ["-build-mode:lib"]
 							: []
 					: []),
-				...(!lint && !test ? [`-out:${outputPath}`] : []),
+				...(captures ? [`-out:${outputPath}`] : []),
 			];
 			const result = await exec.action({
 				argv: args,
 				inputs: allInputs,
 				env: [`PATH=${exec.path(resolved.gcc)}/bin`],
 				allowFailure: lint,
-				outputs: lint ? {} : { artifact: output.file(outputPath) },
+				outputs: captures ? { artifact: output.file(outputPath) } : {},
 			});
 			if (lint) {
 				return {
@@ -997,6 +1005,9 @@ function graphOdinBuild(
 					},
 				};
 			}
+			// A failing test already failed the action above (allowFailure is
+			// off), and the task declares no outputs, so it must return nothing.
+			if (test) return undefined;
 			return { artifact: result.outputs.artifact, executablePath: outputPath };
 		},
 	});

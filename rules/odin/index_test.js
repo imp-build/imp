@@ -30,6 +30,28 @@ describe("Odin graph rules", () => {
 		expect(pkg[RUN]).toBe(undefined);
 	});
 
+	// A test package's build and test actions have the same run callback, the
+	// same call site and the same inputs — they used to collide on one task
+	// key, so [TEST] resolved to the *build* task and `imp test` compiled the
+	// package and reported success without ever running a test.
+	test("a test package's TEST action really is `odin test`", async () => {
+		const pkg = odinTestPackage({
+			path: "rules/odin/example/native",
+			toolchain: "dev-2026-03",
+		});
+		expect(pkg[TEST].__graph_id).not.toBe(pkg[BUILD].__graph_id);
+
+		const walkJson = await globalThis.__imp_walk_graph_for_introspection(
+			JSON.stringify([{ address: "pkg", handleId: pkg[TEST].__graph_id }]),
+			JSON.stringify({ args: [], flags: {}, mode: {}, config: {} }),
+			JSON.stringify({ discoverExpansionGet: true }),
+		);
+		const displays = JSON.parse(walkJson)
+			.nodes.map((node) => node.display)
+			.filter(Boolean);
+		expect(displays).toContain("odin test rules/odin/example/native");
+	});
+
 	test("generators produce a CAS artifact graph", () => {
 		const generated = odinGen({
 			srcs: ["*.json"],
