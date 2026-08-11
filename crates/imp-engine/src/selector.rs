@@ -55,15 +55,34 @@ impl SelectorContext {
         }
 
         if let Some((package, name)) = selector.split_once(':') {
+            // A graph expansion child's address is `<root>#<childKey>`, and a
+            // key is only constrained by the ruleset that mints it — an
+            // expansion keyed by source file (//rules/python/source) uses a
+            // workspace-relative path, so it contains '/'. Split the key off
+            // before validating the exported root's own name, then re-attach
+            // it, rather than rejecting the whole selector. Legacy
+            // `selector#product` overrides never reach here: `select_roots_in`
+            // strips those before parsing.
+            let (name, child_key) = match name.split_once('#') {
+                Some((name, key)) => (name, Some(key)),
+                None => (name, None),
+            };
             if name.is_empty() || name.contains(':') || name.contains('/') {
                 bail!("invalid exact target selector '{selector}'");
             }
+            if child_key.is_some_and(str::is_empty) {
+                bail!("target selector '{selector}' has an empty expansion child key");
+            }
             let package = if package.is_empty() { "." } else { package };
             let package = self.normalize_package(package, selector)?;
-            let address = if package.is_empty() {
+            let root = if package.is_empty() {
                 format!("//:{name}")
             } else {
                 format!("//{package}:{name}")
+            };
+            let address = match child_key {
+                Some(key) => format!("{root}#{key}"),
+                None => root,
             };
             return Ok(ParsedSelector::Exact(address));
         }
@@ -586,6 +605,38 @@ mod tests {
 
         assert!(context.parse(":pkg").unwrap().matches(&root));
         assert!(!context.parse("jodin").unwrap().matches(&nested));
+    }
+
+    #[test]
+    fn exact_selectors_carry_a_path_shaped_expansion_child_key() {
+        // An expansion keyed by source file (//rules/python/source) mints
+        // child keys containing '/', which must survive the exact-selector
+        // name validation instead of being rejected as an invalid name.
+        let context = SelectorContext::root();
+
+        assert_eq!(
+            context
+                .parse("//tools:scripts#tools/nested/demo.py")
+                .unwrap(),
+            ParsedSelector::Exact("//tools:scripts#tools/nested/demo.py".to_owned())
+        );
+        // Relative spellings resolve the same way.
+        let nested = SelectorContext {
+            package: "tools".to_owned(),
+        };
+        assert_eq!(
+            nested.parse(":scripts#tools/demo.py").unwrap(),
+            ParsedSelector::Exact("//tools:scripts#tools/demo.py".to_owned())
+        );
+        // A crate-name-shaped key (no '/') is unchanged.
+        assert_eq!(
+            context.parse("//crates/imp-store:crate#imp-store").unwrap(),
+            ParsedSelector::Exact("//crates/imp-store:crate#imp-store".to_owned())
+        );
+        // The exported root's own name still may not contain '/', and an
+        // empty key is rejected rather than silently matching the parent.
+        assert!(context.parse("//tools:bad/name#key").is_err());
+        assert!(context.parse("//tools:scripts#").is_err());
     }
 
     #[test]

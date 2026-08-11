@@ -1,22 +1,30 @@
 // File-granular Python execution rules. `pythonSources()` is a deliberately
-// shallow discovery-backed label generator: each direct match under `root`
-// becomes one selectable child label when a run selector needs it. The
-// generated address uses the source file as its scope
-// (`//tools/hello.py:python`), making `imp run tools/hello.py` work with
-// the normal package-selector parser.
+// shallow, graph-native expansion: every direct match under `root` becomes one
+// keyed child exposing a `[RUN]` root. The child key is the file's
+// workspace-relative path, so a script is selectable either explicitly
+// (`//tools:scripts#tools/hello.py`) or by bare path (`imp run tools/hello.py`,
+// resolved by the engine to the nearest enclosing expansion owner).
+//
+// A `[RUN]` root here describes its program rather than executing it: the
+// descriptor task returns the argv/tools/env plus one merged digest to stage,
+// and //rules/workflows/run owns the actual policy (sandboxed, impure,
+// streamed, cwd at the real workspace). Nothing is published into the working
+// tree to make a script runnable.
 
 import {
-	discoverLabels,
-	file_set,
+	RUN,
+	digestOf,
+	expand,
+	files,
 	glob,
+	group,
 	label,
+	mergeDigests,
+	output,
 	paths,
 	registerBuildRule,
-	registerLabel,
-	runFromTemplate,
-	runGoal,
-	runTemplate,
-	group,
+	semantic,
+	task,
 } from "imp:core";
 
 import {
@@ -135,11 +143,58 @@ export function defaultPythonProject() {
 	return default_python_project;
 }
 
+const PROJECT_SOURCES = ["pyproject.toml", "uv.lock"];
+
+// One [RUN] root per discovered file. It runs nothing itself: it resolves the
+// staged digest and assembles the program description //rules/workflows/run
+// executes. `cache: false` keeps it out of the action cache — the described
+// program is impure by definition, and re-describing it is cheap.
+function sourceRunDescriptor(spec, file) {
+	const projectSet = spec.resolve
+		? files({ root: spec.resolve.path, include: PROJECT_SOURCES })
+		: null;
+	return task({
+		display: `python run ${file}`,
+		cache: false,
+		inputs: {
+			sources: files({ root: spec.root, include: spec.sources }),
+			...(projectSet ? { project: projectSet } : {}),
+			file,
+			root: spec.root,
+			pythonVersion: spec.pythonVersion,
+			uvVersion: spec.uvVersion,
+			mode: semantic.mode("python"),
+		},
+		outputs: { spec: output.value() },
+		async run(_exec, input) {
+			// Filesets already carry their merged tree digest (digestOf() only
+			// exposes what _eval_fileset computed), so the input sets collapse
+			// into the single digest the runner stages.
+			const digests = [digestOf(input.sources.fileset)];
+			if (input.project) digests.push(digestOf(input.project.fileset));
+			const described = await pythonSourceRunSpec({
+				file: input.file,
+				root: input.root,
+				resolve: spec.resolve,
+				pythonVersion: input.pythonVersion,
+				uvVersion: input.uvVersion,
+				mode: input.mode,
+				deps: spec.deps,
+			});
+			return {
+				spec: {
+					...described,
+					digest: digests.length === 1 ? digests[0] : mergeDigests(digests),
+				},
+			};
+		},
+	});
+}
+
 /**
  * Declare a shallow Python source-set generator. Every matching file under
- * `root` becomes a separately selectable, discovery-backed `run` label
- * (`//<file>:python`), minted lazily the first time a selection needs it —
- * not eagerly at BUILD-load time.
+ * `root` becomes a separately selectable `run` root, discovered when the
+ * expansion resolves rather than enumerated in BUILD.js.
  *
  * @param {object} opts
  * @param {string} opts.root Workspace-relative directory to scan (no recursion).
@@ -150,7 +205,8 @@ export function defaultPythonProject() {
  * @param {Array} [opts.deps=[]] Extra tool providers made available on PATH
  *   inside each source's run: nativeTool() specifications or legacy target
  *   providers whose kind registers a `TOOL` product.
- * @returns {object} Label handle owning the discovered per-file run labels.
+ * @returns {object} An exportable object whose `[RUN]` root expands to one
+ *   selectable child per discovered file.
  */
 export function pythonSources({
 	root,
@@ -178,83 +234,61 @@ export function pythonSources({
 			"pythonSources accepts either project or resolve, not both",
 		);
 	}
-	const resolvedProject = resolve || project || default_python_project;
-	const runtime = require_default_python_toolchain();
-	const uvVersion = require_default_uv_version();
-	const normalizedRoot = normalize_workspace_path(root);
-	const owner = label({
-		data: {
-			root: normalizedRoot,
-			sources,
-			runtime,
-			project: resolvedProject,
-			uvVersion,
-			deps,
+	const spec = {
+		root: normalize_workspace_path(root),
+		sources: [...sources],
+		resolve: resolve || project || default_python_project,
+		pythonVersion: require_default_python_toolchain().attrs.version,
+		uvVersion: require_default_uv_version(),
+		deps: [...deps],
+	};
+
+	const expansion = expand({
+		display: `expand python sources ${spec.root}`,
+		inputs: { sources: files({ root: spec.root, include: spec.sources }) },
+		// paths() is synchronous — discovery here is a glob, not a task — so
+		// this reconstructs live child handles cheaply on every invocation
+		// instead of persisting them, the same contract rules/odin's own
+		// expansion documents.
+		create() {
+			const children = {};
+			for (const file of paths(
+				glob({ root: spec.root, include: spec.sources, exclude: [] }),
+			)) {
+				children[file] = {
+					[RUN]: sourceRunDescriptor(spec, file).outputs.spec,
+				};
+			}
+			return children;
 		},
 	});
-	discoverLabels(
-		owner,
-		async function discoverPythonSourceLabels(sourceSet) {
-			const sourceFiles = await paths(
-				glob({
-					root: sourceSet.data.root,
-					include: sourceSet.data.sources,
-					exclude: [],
-				}),
-			);
-			for (const file of sourceFiles) {
-				const child = label({
-					data: {
-						file,
-						root: sourceSet.data.root,
-						sourceFiles,
-						runtime,
-						pythonVersion: runtime.attrs.version,
-						project: resolvedProject,
-						...(resolvedProject ? { projectPath: resolvedProject.path } : {}),
-						uvVersion,
-						deps,
-					},
-				});
-				runGoal(child, async function runPythonSource(ctx) {
-					const template = await buildPythonSourceRunTemplate(child);
-					return runFromTemplate(template, {
-						args: ctx.args,
-						sandbox: true,
-						workspaceCwd: true,
-						impure: true,
-						stream: true,
-					});
-				});
-				registerLabel(child, `//${file}:python`);
-			}
-		},
-		{ goals: ["run"] },
-	);
-	return owner;
+
+	// expansion.all() (not a per-file .get()) is what makes the children
+	// synthetic roots the engine discovers by walking this one export. Unlike
+	// CMake's named targets, a glob's matches are not knowable to the BUILD.js
+	// author, so they must not have to be enumerated there.
+	return Object.freeze({ root: spec.root, [RUN]: expansion.all(RUN) });
 }
 
-export async function buildPythonSourceRunTemplate(
-	handle,
+/**
+ * Assemble the program description for one Python source file: everything
+ * //rules/workflows/run needs except the digest to stage.
+ *
+ * @returns {Promise<{argv: string[], env: string[], tools: object[], display: string}>}
+ */
+export async function pythonSourceRunSpec(
+	{ file, root, resolve, pythonVersion, uvVersion, mode, deps = [] },
 	resolveUvTool = uvTool,
 ) {
-	const file = handle.attrs.file;
-	const root = handle.attrs.root;
-	const project = handle.attrs.projectPath || "";
-	const syncArgs = pythonResolveSyncArgs(handle.attrs.project)
+	const project = resolve ? resolve.path : "";
+	const syncArgs = pythonResolveSyncArgs(resolve, mode)
 		.map((value) => `'${value.replaceAll("'", `'"'"'`)}'`)
 		.join(" ");
 	const venv = project ? `${project}/.venv` : "";
-	const uvToolSpec = await resolveUvTool(handle.attrs.uvVersion);
+	const uvToolSpec = await resolveUvTool(uvVersion);
 	const uvCacheToolSpec = uvCacheDirTool();
-	const depToolSpecs = await group((handle.attrs.deps || []).map(toolSpec));
+	const depToolSpecs = await group(deps.map(toolSpec));
 	const envExports = sandboxRootEnvExports(uvCacheDirEnv());
-	const inputs = [file_set.literal(handle.attrs.sourceFiles)];
-	if (project) {
-		inputs.push(
-			glob({ root: project, include: ["pyproject.toml", "uv.lock"] }),
-		);
-	}
 	const script =
 		`file=$1; root=$2; project=$3; venv=$4; version=$5; shift 5; ` +
 		`${envExports.join(" && ")} && ` +
@@ -264,7 +298,7 @@ export async function buildPythonSourceRunTemplate(
 		'"$venv/bin/python" "$file" "$@"; ' +
 		'else uv run --no-project --managed-python --python "$version" -- "$file" "$@"; fi';
 
-	return runTemplate({
+	return {
 		argv: [
 			"sh",
 			"-c",
@@ -274,12 +308,12 @@ export async function buildPythonSourceRunTemplate(
 			root,
 			project,
 			venv,
-			handle.attrs.pythonVersion,
+			pythonVersion,
 		],
+		env: [],
 		tools: [uvToolSpec, uvCacheToolSpec, ...depToolSpecs],
-		inputs,
 		display: `python run ${file}`,
-	});
+	};
 }
 
 registerBuildRule({

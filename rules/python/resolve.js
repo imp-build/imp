@@ -82,15 +82,30 @@ export function pythonResolve({ path = ".", flavors = { default: {} } } = {}) {
 	});
 }
 
-/** Return the uv sync arguments for this resolve under the active mode. */
-export function pythonResolveSyncArgs(resolve) {
+/**
+ * Return the uv sync arguments for this resolve under the selected mode.
+ *
+ * `mode` is the graph-native caller's own `semantic.mode("python")` input,
+ * passed explicitly so the selected flavor participates in that task's
+ * invalidation. Omitting it falls back to reading the ambient legacy axis,
+ * which is only meaningful on the legacy label path.
+ */
+export function pythonResolveSyncArgs(resolve, mode) {
 	if (!resolve) return [];
 	const flavors = resolve?.flavors;
 	if (!flavors || typeof flavors !== "object") {
 		throw new Error("python target resolve must be a pythonResolve() label");
 	}
+	// A single-flavor resolve must not read the mode at all — the axis may not
+	// be declared or resolved yet, and there is nothing to select between.
+	// Keeping that short-circuit ahead of the lookup is load-bearing, not an
+	// optimization.
 	const flavor =
-		Object.keys(flavors).length === 1 ? "default" : modeAxis("python");
+		Object.keys(flavors).length === 1
+			? "default"
+			: mode === undefined
+				? modeAxis("python")
+				: mode || "default";
 	const config = flavors[flavor];
 	if (!config) {
 		throw new Error(
