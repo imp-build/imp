@@ -503,9 +503,11 @@ mod tests {
             .unwrap();
         // Rust's cargoPackage() is graph-native and exposes [FMT] directly
         // (see //rules/rust) rather than a separate rustfmt submodule import.
+        // //rules/workflows/fmt is goal-only (no built-in ruleset registers
+        // a formatter merely by importing it), so selecting rust.fmt alone
+        // must not also pull in python's ruff formatter.
         assert!(source.contains("//rules/rust"));
-        assert!(source.contains("//rules/workflows/fmt_goal"));
-        assert!(!source.contains("//rules/workflows/fmt\""));
+        assert!(source.contains("//rules/workflows/fmt"));
         assert!(!source.contains("ruffToolchain"));
         assert!(!source.contains("//rules/python/ruff/fmt"));
         assert!(!source.contains("Toolchain("));

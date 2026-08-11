@@ -4212,8 +4212,8 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     // JS-callable entry point for the same render_raw_build_file/
     // apply_build_edits pipeline `generate-build` used to reach only via the
     // bespoke `cmd_generate_build` CLI path. Never bails on stale files
-    // itself; the calling goal (rules/workflows/generate_build.js) decides
-    // what a check failure means, mirroring how fmtGoal/generateGoal own
+    // itself; the calling goal (rules/workflows/generate_build/index.js) decides
+    // what a check failure means, mirroring how generateGoal/graphFmtGoal own
     // their own check/throw logic.
     let wc = workspace_root.clone();
     let state_abe = Arc::clone(&state);
@@ -10309,7 +10309,7 @@ product(K_cargo_package, LINT, toolName("clippy"), async () => ({}));
         // to the shared helper's own directory rather than the real caller's
         // — this is a general limitation of that stack-walk, not something
         // any one call site can opt out of. It's why
-        // rules/workflows/lockfiles.js's registerToolchainLockfile()
+        // rules/workflows/lockfiles/index.js's registerToolchainLockfile()
         // deliberately does *not* call product() on a toolchain's behalf;
         // every toolchain module calls product() directly itself instead (see
         // the sibling test below). Documented here so a future "simplify
@@ -10364,7 +10364,7 @@ registerViaHelper(K_rust_toolchain, BUILD, toolName("rust"), async () => ({}));
         // Companion to the test above: a toolchain module that calls
         // product() itself, only delegating the (stack-attribution-
         // irrelevant) registerBuiltinLockfile bookkeeping to a shared helper
-        // — the pattern rules/workflows/lockfiles.js's
+        // — the pattern rules/workflows/lockfiles/index.js's
         // registerToolchainLockfile() actually implements — attributes
         // correctly to the toolchain's own module.
         let root = tempfile::tempdir().unwrap();

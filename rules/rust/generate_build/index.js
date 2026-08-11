@@ -10,7 +10,7 @@
 // package (or one with both a lib and one or more bins, see cargoPackage's
 // now-optional `bin`) is represented just as accurately either way.
 //
-// Runs through the golden path (see //rules/workflows/generate_build.js),
+// Runs through the golden path (see //rules/workflows/generate_build),
 // so run() — needed to shell out to `cargo metadata` — is available.
 
 import {
