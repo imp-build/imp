@@ -27,7 +27,7 @@
 // Separately, each toolchain module calls registerBuiltinLockfile() with the
 // version list its *shipped* lockfile should pin. Those checked-in locks are
 // derived state: `imp goal gen-builtin-lockfiles`
-// (rules/workflows/builtin_lockfiles.js) regenerates every one to exactly
+// (rules/workflows/builtin_lockfiles) regenerates every one to exactly
 // its registered versions, needing no toolchain targets in any workspace —
 // the registered list is the source of truth (bump = append, prune = remove).
 

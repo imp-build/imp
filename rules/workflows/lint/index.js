@@ -1,5 +1,27 @@
-// Goal-only lint workflow. //rules/workflows/lint additionally imports all
-// built-in lint products for backwards compatibility.
+// Goal-only lint workflow. Importing this module registers the "lint" goal
+// but enables no linter on its own — each language's lint integration (e.g.
+// //rules/python/ruff/lint) is a separate opt-in import, so callers such as
+// `imp init` can enable only the integrations a workspace selected.
+//
+// No built-in ruleset registers a legacy lint product today — Rust's
+// cargoPackage() and odin-package both expose [LINT] directly (see
+// //rules/rust, //rules/rust/workspace_expansion, //rules/odin) — so
+// lintGoal's resolveProducts fan-out below only matters for targets still
+// using the legacy target()/product() API.
+//
+// Unlike fmtGoal/testGoal, which fail fast on the first target that throws,
+// lintGoal runs every selected target to completion: ruffCheck never throws
+// for a tool-reported lint failure (it calls run() with allowFailure: true
+// and returns { ok, output, fixSupported, fixApplied, outputDigest } instead),
+// so nothing here aborts early. Every target's captured output — ANSI codes
+// intact, since the underlying tools are invoked with forced color — is
+// printed only after every run has finished, followed by a pass/fail summary;
+// the goal then fails if any target was unclean, regardless of whether
+// `--fix` also fixed some of it.
+//
+// odin-package follows the same allowFailure/{ok, output, ...} contract as
+// ruffCheck, running `odin check -vet` (which has no autofix mode, so it
+// always reports fixSupported: false).
 import {
 	goal,
 	resolveProducts,
@@ -10,9 +32,9 @@ import {
 
 // `fix` is passed straight through to each product function as a second
 // argument (`fn(handle, {fix})`) rather than registering a second product —
-// same convention fmtGoal uses for `--check` (//rules/workflows/fmt_goal.js).
-// Not every lint tool has a fix mode, so the decision of what (if anything)
-// to do with `fix` belongs to each linter, not to a product-lookup fallback
+// same convention fmtGoal uses for `--check` (//rules/workflows/fmt). Not
+// every lint tool has a fix mode, so the decision of what (if anything) to
+// do with `fix` belongs to each linter, not to a product-lookup fallback
 // here.
 export async function lintGoal(selection) {
 	const { fix } = goalFlags();

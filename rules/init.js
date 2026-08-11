@@ -178,10 +178,10 @@ export function render(context = {}) {
 	if (has("python.lint")) imports.add("//rules/python/ruff/lint");
 
 	if (any("js.fmt", "odin.fmt", "python.fmt", "rust.fmt")) {
-		imports.add("//rules/workflows/fmt_goal");
+		imports.add("//rules/workflows/fmt");
 	}
 	if (any("odin.lint", "python.lint", "rust.lint")) {
-		imports.add("//rules/workflows/lint_goal");
+		imports.add("//rules/workflows/lint");
 	}
 	if (any("c.test", "odin.test", "python.test", "rust.test")) {
 		imports.add("//rules/workflows/test");

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { lintGoal } from "//rules/workflows/lint_goal";
+import { lintGoal } from "//rules/workflows/lint";
 import { product, target, LINT, targetKind, toolName } from "imp:core";
 
 const TEST_TOOL = toolName("lint-test-tool");

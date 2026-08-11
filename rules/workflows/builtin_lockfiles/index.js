@@ -1,6 +1,6 @@
 // The "gen-builtin-lockfiles" goal: regenerate every shipped toolchain
 // lockfile from its registerBuiltinLockfile() spec (rules/workflows/
-// lockfiles.js), independent of which toolchain targets any workspace
+// lockfiles/index.js), independent of which toolchain targets any workspace
 // declares. The checked-in locks are derived state — each registered version
 // list is the source of truth, and regeneration writes exactly those
 // versions.

@@ -309,7 +309,7 @@ function attributedMessages(messages, dir) {
 // Per-crate [LINT] root: attributes the shared workspace clippy run's
 // diagnostics back to this one crate by path substring, same as
 // lint.js's cargoClippy(). Returns { ok, output } (not throw-on-failure) —
-// //rules/workflows/lint_goal's graphLintGoal aggregates every selected
+// //rules/workflows/lint's graphLintGoal aggregates every selected
 // target's own { ok, output } result into one pass/fail report (same
 // contract rules/odin/index.js's own [LINT] task uses), rather than treating
 // a per-target exception as the failure signal the way [TEST] does.

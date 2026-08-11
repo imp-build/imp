@@ -678,7 +678,7 @@ mod tests {
         let contents = resolve_workspace_file(
             root.path(),
             &RulesSource::directory(repo_rules_dir()),
-            "//rules/workflows/fmt.js",
+            "//rules/workflows/fmt/index.js",
         )
         .unwrap()
         .unwrap();

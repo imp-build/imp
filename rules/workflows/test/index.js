@@ -1,10 +1,12 @@
-// The "test" goal is seeded by default in HostState::default() (src/spike.rs),
-// but its real products live elsewhere: rules-test (rules/imp/test/index.js).
-// Odin is graph-native and exposes [TEST] directly (see //rules/odin) rather
-// than registering a legacy product here. This file just declares the goal
-// explicitly so it's documented here rather than relying solely on the Rust
-// default; goal registration is first-registration-wins, so this is a no-op
-// today and stays correct if that default is ever dropped.
+// The "test" goal is seeded by default in HostState::default() (src/spike.rs).
+// Declared explicitly here so it's documented; goal registration is
+// first-registration-wins, so this is a no-op today and stays correct if
+// that default is ever dropped.
+//
+// Every built-in ruleset is graph-native and exposes [TEST] directly today
+// (Odin, rules-test's rulesTest(), Rust's cargoPackage(), ...) rather than
+// registering a legacy product here — the callback below only matters for
+// targets still using the legacy target()/product() API.
 //
 // Unlike "run", "test" has no single-target restriction — every selected
 // target's registered test product runs. The callback below just delegates
