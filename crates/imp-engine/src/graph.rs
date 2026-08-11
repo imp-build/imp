@@ -492,4 +492,31 @@ mod tests {
             ["//pkg:tests", "//pkg:tests#crate-a", "//pkg:tests#crate-b"]
         );
     }
+
+    #[test]
+    fn exact_selector_matches_a_path_keyed_child_address() {
+        // An expansion keyed by source file gives children '/'-bearing keys
+        // (//rules/python/source). Selecting one exactly must resolve it, and
+        // must not be confused by a sibling whose key shares a path prefix.
+        let catalog = GraphCatalog {
+            roots: vec![
+                root_with_handle("//tools:scripts", "run", None, false, 20),
+                root_with_handle("//tools:scripts#tools/demo.py", "run", None, false, 21),
+                root_with_handle("//tools:scripts#tools/demo.py.bak", "run", None, false, 22),
+            ],
+        };
+        let context = SelectorContext::root();
+
+        let exact = catalog
+            .select(
+                "run",
+                &["//tools:scripts#tools/demo.py".to_owned()],
+                &context,
+            )
+            .unwrap();
+        assert_eq!(
+            exact.iter().map(|r| r.address.as_str()).collect::<Vec<_>>(),
+            ["//tools:scripts#tools/demo.py"]
+        );
+    }
 }

@@ -20,7 +20,7 @@ use crate::loader::{
 use crate::runtime::LiveWorkspace;
 use crate::selector::{
     filter_changed_addresses_in, select_label_roots_in, select_roots_for_addresses,
-    select_roots_in, select_targets_in, SelectorContext,
+    select_roots_in, select_targets_in, ParsedSelector, SelectorContext,
 };
 
 type ModuleExports = (Vec<(String, u32)>, Vec<GraphRoot>);
@@ -1876,6 +1876,113 @@ pub async fn walk_graph_for_introspection(
     serde_json::from_str(&walk_json).context("decode graph introspection walk")
 }
 
+/// The workspace-relative package part of a graph root address — `//pkg:name`
+/// for a named export, or bare `//pkg` for a module default.
+fn address_package_of(address: &str) -> &str {
+    let rest = address.strip_prefix("//").unwrap_or(address);
+    match rest.split_once(':') {
+        Some((package, _)) => package,
+        None => rest,
+    }
+}
+
+/// The workspace-relative path a selector names, if it is a bare path to a
+/// real file rather than an address. Used only as a last-resort fallback (see
+/// `expansion_children_for_file`), so this is deliberately narrow: an exact
+/// `pkg:name` selector, a recursive `...` selector, a `#`/`@` form, or a path
+/// that is not an existing file all decline.
+fn bare_file_selector(
+    workspace_root: &Path,
+    selector: &str,
+    context: &SelectorContext,
+) -> Result<Option<String>> {
+    if selector.contains('#') || selector.contains('@') {
+        return Ok(None);
+    }
+    let ParsedSelector::Package { package, recursive } = context.parse(selector)? else {
+        return Ok(None);
+    };
+    if recursive || package.is_empty() {
+        return Ok(None);
+    }
+    if !workspace_root.join(&package).is_file() {
+        return Ok(None);
+    }
+    Ok(Some(package))
+}
+
+/// Find the expansion children keyed by `file_path`, searching the file's own
+/// package first and then each ancestor package up to the workspace root —
+/// nearest enclosing owner wins, since a `BUILD.js` at `tools/` may declare an
+/// expansion rooted at `tools/scripts/`.
+///
+/// Scoped to `workflow` when given, which keeps the search cheap: an
+/// expansion whose children are keyed by something other than a path (a Cargo
+/// crate name, a CMake target) simply never matches, and one that registers no
+/// root for the requested workflow is never walked at all. Whether a file is
+/// addressable this way is therefore decided by the ruleset's own key space,
+/// not by a policy here.
+async fn expansion_children_for_file(
+    live: &LiveWorkspace,
+    file_path: &str,
+    workflow: Option<&str>,
+) -> Result<Vec<GraphRoot>> {
+    let directory = match file_path.rsplit_once('/') {
+        Some((directory, _)) => directory,
+        None => "",
+    };
+    let mut packages: Vec<&str> = Vec::new();
+    let mut current = directory;
+    loop {
+        packages.push(current);
+        match current.rsplit_once('/') {
+            Some((parent, _)) => current = parent,
+            None => break,
+        }
+    }
+    if !directory.is_empty() {
+        packages.push("");
+    }
+
+    for package in packages {
+        let candidates: Vec<&GraphRoot> = live
+            .workspace
+            .graph
+            .roots
+            .iter()
+            .filter(|root| workflow.is_none_or(|workflow| root.workflow == workflow))
+            .filter(|root| address_package_of(&root.address) == package)
+            .collect();
+        if candidates.is_empty() {
+            continue;
+        }
+        let walk = walk_graph_for_introspection(live, &candidates, false, true).await?;
+        let matched: Vec<GraphRoot> = walk
+            .synthetic_children(&candidates)
+            .into_iter()
+            .filter(|child| child.address.rsplit_once('#').map(|(_, key)| key) == Some(file_path))
+            .collect();
+        if matched.is_empty() {
+            continue;
+        }
+        // Two exports globbing the same file is a real ambiguity: picking one
+        // arbitrarily would silently run the wrong thing.
+        let owners: BTreeSet<&str> = matched
+            .iter()
+            .filter_map(|child| child.address.rsplit_once('#').map(|(owner, _)| owner))
+            .collect();
+        if owners.len() > 1 {
+            bail!(
+                "'{file_path}' is claimed by more than one expansion ({}); \
+                 select one explicitly as '<address>#{file_path}'",
+                owners.into_iter().collect::<Vec<_>>().join(", ")
+            );
+        }
+        return Ok(matched);
+    }
+    Ok(Vec::new())
+}
+
 /// Resolve `selectors` against the graph catalog, then merge in synthetic
 /// `parent#childKey` roots discovered by expanding whatever the selectors
 /// reached — a package/recursive selector picks up every expansion child
@@ -1967,6 +2074,31 @@ pub async fn resolve_graph_with_expansion(
             if child.address.rsplit_once('#').map(|(_, key)| key) != Some(child_key) {
                 continue;
             }
+            roots.insert(
+                (
+                    child.address.clone(),
+                    child.workflow.clone(),
+                    child.facet.clone(),
+                ),
+                child,
+            );
+        }
+    }
+
+    // A bare path naming a real file may name an expansion child keyed by that
+    // path (`imp run tools/demo.py`), without the user having to know which
+    // export owns it. This only runs for a selector that matched nothing above,
+    // so its cost lands on a path that was otherwise about to fail — never on a
+    // successful selection.
+    for selector in selectors {
+        if !select_static(std::slice::from_ref(selector))?.is_empty() {
+            continue;
+        }
+        let file_path = match bare_file_selector(workspace_root, selector, context)? {
+            Some(path) => path,
+            None => continue,
+        };
+        for child in expansion_children_for_file(live, &file_path, workflow).await? {
             roots.insert(
                 (
                     child.address.clone(),
@@ -7872,6 +8004,47 @@ mod tests {
     };
     use imp_store::digest::{list_files_in_digest, merge_digests};
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn address_package_of_handles_named_and_default_exports() {
+        assert_eq!(address_package_of("//tools:scripts"), "tools");
+        assert_eq!(address_package_of("//a/b/c:name"), "a/b/c");
+        assert_eq!(address_package_of("//:root"), "");
+        // A module default export's address has no ':name' part at all.
+        assert_eq!(address_package_of("//tools"), "tools");
+        assert_eq!(address_package_of("//"), "");
+    }
+
+    #[test]
+    fn bare_file_selector_only_accepts_a_plain_path_to_a_real_file() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("tools")).unwrap();
+        std::fs::write(workspace.path().join("tools/demo.py"), "print()\n").unwrap();
+        let context = SelectorContext::root();
+        let accept =
+            |selector: &str| bare_file_selector(workspace.path(), selector, &context).unwrap();
+
+        assert_eq!(accept("tools/demo.py"), Some("tools/demo.py".to_owned()));
+
+        // A directory is not a file; a missing path is not a file.
+        assert_eq!(accept("tools"), None);
+        assert_eq!(accept("tools/missing.py"), None);
+        // Address forms decline outright, so the fallback never shadows a
+        // genuine address that simply failed to resolve.
+        assert_eq!(accept("//tools:scripts"), None);
+        assert_eq!(accept("tools/..."), None);
+        assert_eq!(accept("//tools:scripts#tools/demo.py"), None);
+        assert_eq!(accept("//tools:scripts@unit"), None);
+
+        // Resolved relative to the invocation package, like any selector.
+        let nested =
+            SelectorContext::for_invocation(workspace.path(), &workspace.path().join("tools"))
+                .unwrap();
+        assert_eq!(
+            bare_file_selector(workspace.path(), "demo.py", &nested).unwrap(),
+            Some("tools/demo.py".to_owned())
+        );
+    }
 
     /// Clear runtime-global memo state so a repeated goal invocation on the
     /// same LiveWorkspace re-evaluates its product functions. Production runs
