@@ -105,13 +105,22 @@ export const scripts = pythonSources({
 });
 ```
 
-Each direct match is lazily expanded into one `python-source` target. This is
-the remaining discovery-backed compatibility bridge while graph-root selection
-is designed in #8. Run it
-by file path, including arguments after `--`:
+Each direct match becomes one selectable child of the exported source set,
+keyed by its workspace-relative path. Run it by file path, including arguments
+after `--`:
 
 ```sh
 imp run tools/demo.py -- --verbose
+```
+
+A bare path resolves to whichever exported source set claims that file,
+searching the file's own package first and then each parent package, so the
+`scripts` export above does not have to be named. When two source sets glob the
+same file, the path is ambiguous and `imp` says so; select one explicitly by
+its full child address instead:
+
+```sh
+imp run //tools:scripts#tools/demo.py -- --verbose
 ```
 
 The source set's complete file list is staged and `root` is added to
