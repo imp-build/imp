@@ -8,7 +8,9 @@ CMake target name.
 
 ```js
 import { cmakeProject } from "//rules/c/cmake";
-import { BUILD, PACKAGE, TEST } from "imp:core";
+import { BUILD } from "//rules/workflows/build";
+import { PACKAGE } from "//rules/workflows/package";
+import { TEST } from "//rules/workflows/test";
 
 const project = cmakeProject({
     cmakeArgs: ["-DCMAKE_BUILD_TYPE=Release"],

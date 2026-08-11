@@ -11,8 +11,8 @@
 // streamed, cwd at the real workspace). Nothing is published into the working
 // tree to make a script runnable.
 
+import { RUN } from "//rules/workflows/run";
 import {
-	RUN,
 	digestOf,
 	expand,
 	files,
@@ -26,7 +26,6 @@ import {
 	semantic,
 	task,
 } from "imp:core";
-
 import {
 	resolveUvToolchainVersion,
 	uvCacheDirEnv,
@@ -36,10 +35,6 @@ import {
 import { pythonResolve, pythonResolveSyncArgs } from "//rules/python/resolve";
 
 import { toolSpec } from "//rules/imp/native-tool";
-
-// Keep `run`'s single-program contract available to consumers that import
-// Python rules without separately importing the workflows layer.
-import "//rules/workflows/run";
 
 let default_python_toolchain = null;
 let default_python_project = null;

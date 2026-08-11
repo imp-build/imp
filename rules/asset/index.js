@@ -1,5 +1,5 @@
+import { BUILD } from "//rules/workflows/build";
 import {
-	BUILD,
 	Target,
 	files,
 	glob,
@@ -8,8 +8,7 @@ import {
 	registerBuildRule,
 	sourcesField,
 	task,
-} from "imp:core";
-import { nativeTool } from "//rules/imp/native-tool";
+} from "imp:core";import { nativeTool } from "//rules/imp/native-tool";
 
 // resourcePackage remains registered for generated legacy BUILD.js files until
 // the remaining legacy rulesets have migrated to graph handles (#39).

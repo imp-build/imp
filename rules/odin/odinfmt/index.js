@@ -1,4 +1,5 @@
-import { FMT, output, semantic, task } from "imp:core";
+import { FMT } from "//rules/workflows/fmt";
+import { output, semantic, task } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 import { registerOdinPackageHook } from "//rules/odin";
 import {

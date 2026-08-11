@@ -25,4 +25,4 @@ export function graphBuildGoal(roots) {
 	}
 }
 
-goal("build", undefined, { graph: graphBuildGoal });
+export const BUILD = goal("build", undefined, { graph: graphBuildGoal });

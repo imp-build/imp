@@ -2,7 +2,7 @@
 // factory. Keeping it here makes `python/ruff` the lint handler's automatic
 // provenance; importing this module enables `lint` without pulling in
 // formatting, for packages declared before or after the import.
-import { LINT } from "imp:core";
+import { LINT } from "//rules/workflows/lint";
 import { registerPythonAppHook } from "//rules/python";
 import { ruffLintRoot } from "//rules/python/ruff_graph";
 

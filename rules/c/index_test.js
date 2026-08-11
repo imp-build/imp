@@ -1,4 +1,6 @@
-import { BUILD, PACKAGE, files, tool } from "imp:core";
+import { BUILD } from "//rules/workflows/build";
+import { PACKAGE } from "//rules/workflows/package";
+import { files, tool } from "imp:core";
 import {
 	describe,
 	expect,

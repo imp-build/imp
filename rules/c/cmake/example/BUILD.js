@@ -1,4 +1,6 @@
-import { BUILD, PACKAGE, TEST } from "imp:core";
+import { BUILD } from "//rules/workflows/build";
+import { PACKAGE } from "//rules/workflows/package";
+import { TEST } from "//rules/workflows/test";
 import { cmakeLibraryDep, cmakeProject } from "//rules/c/cmake";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
 import { zigGraphToolchain } from "//rules/c/zig";

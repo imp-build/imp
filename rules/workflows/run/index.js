@@ -93,4 +93,4 @@ export async function graphRunGoal(roots) {
 	});
 }
 
-goal("run", undefined, { graph: graphRunGoal });
+export const RUN = goal("run", undefined, { graph: graphRunGoal });

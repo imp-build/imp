@@ -1,4 +1,4 @@
-import { FMT } from "imp:core";
+import { FMT } from "//rules/workflows/fmt";
 import { describe, expect, test } from "//rules/imp/test";
 import "//rules/odin/odinfmt";
 import { odinPackage } from "//rules/odin";

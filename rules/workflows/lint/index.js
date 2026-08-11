@@ -47,7 +47,7 @@ export function graphLintGoal(roots) {
 	}
 }
 
-goal("lint", undefined, {
+export const LINT = goal("lint", undefined, {
 	graph: graphLintGoal,
 	flags: { fix: { description: "Automatically fix what can be fixed" } },
 });

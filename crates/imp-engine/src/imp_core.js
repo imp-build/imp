@@ -1552,16 +1552,26 @@ function _tool_name_of(value, api) {
 	);
 }
 
-/** Global workflow symbols for the built-in goals, plus the "toolchain" role
- * used by `imp @tool` dispatch. They are accepted both as computed properties
- * on graph exports and by the legacy product APIs. */
-export const BUILD = _builtin_product_name("build");
-export const TEST = _builtin_product_name("test");
-export const FMT = _builtin_product_name("fmt");
-export const LINT = _builtin_product_name("lint");
-export const PACKAGE = _builtin_product_name("package");
-export const PUBLISH = _builtin_product_name("publish");
-export const RUN = _builtin_product_name("run");
+/** The "toolchain" role used by `imp @tool` dispatch. Accepted both as a
+ * computed property on graph exports and by the legacy product APIs.
+ *
+ * The goal symbols (BUILD, TEST, FMT, LINT, PACKAGE, PUBLISH, RUN) are
+ * deliberately NOT exported here. They come from the workflow module that
+ * implements each goal instead — `import { PACKAGE } from
+ * "//rules/workflows/package"` — so that declaring `[PACKAGE]` on an export
+ * cannot compile without loading the handler that publishes it. Exporting
+ * them from imp:core broke the same "the token proves its declaring module is
+ * loaded" invariant that _declare_product_name() below states: imp:core is
+ * embedded in the engine (loader.rs's CORE_JS) and cannot import the
+ * swappable rules tree, so its token proved nothing about the workflows
+ * layer. A workspace that declared [PACKAGE] without importing
+ * //rules/workflows/package got a full build and an empty dist/, silently.
+ *
+ * The goals themselves stay seeded in HostState::default() so their product
+ * names exist for legacy per-kind product dispatch; only the JS-authoring
+ * tokens moved. _workflow_symbol() mints Symbol.for("imp.workflow.<name>"),
+ * a global-registry symbol, so a workflow module's goal() returns the exact
+ * same symbol this module used to export. */
 export const TOOLCHAIN = _builtin_product_name("toolchain");
 
 // Coerce a product-name argument to { name, pid }. Only declared tokens are
@@ -1578,7 +1588,8 @@ function _product_name_of(value, api) {
 	}
 	throw new Error(
 		`${api} requires a product-name token; use the token returned by ` +
-			`productName()/goal(), or a builtin like BUILD from imp:core`,
+			`productName()/goal(), or a goal symbol like BUILD from ` +
+			`//rules/workflows/build`,
 	);
 }
 
@@ -2458,9 +2469,10 @@ function _pop_call(key_string, contextId) {
  * them all.
  *
  * @param {Function} kindClass Target subclass declaring `static kind`, e.g. OdinPackage.
- * @param {object} nameToken Product-name token from productName(), goal(), or
- *   a builtin export (BUILD, TEST, …) — never a bare string, so registering a
- *   name requires importing its declaring module.
+ * @param {object} nameToken Product-name token from productName(), or a goal
+ *   symbol exported by the workflow module that implements it (BUILD from
+ *   //rules/workflows/build, …) — never a bare string, so registering a name
+ *   requires importing its declaring module.
  * @param {object} toolToken Tool-name token from toolName() or a toolchain
  *   class's `static tool` — the tool this registration attributes to in
  *   capability docs and multi-tool dispatch labels.

@@ -2,7 +2,7 @@
 // graph factories. Keeping it here makes `js/biome` the lint handler's
 // automatic provenance; importing this module enables lint independently of
 // formatting, for sources/apps declared before or after the import.
-import { LINT } from "imp:core";
+import { LINT } from "//rules/workflows/lint";
 import { registerJsSourcesHook } from "//rules/js";
 import { registerJsAppHook } from "//rules/js/graph";
 import { biomeLintRoot } from "//rules/js/biome/graph";

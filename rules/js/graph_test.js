@@ -1,4 +1,7 @@
-import { BUILD, FMT, LINT, RUN } from "imp:core";
+import { BUILD } from "//rules/workflows/build";
+import { FMT } from "//rules/workflows/fmt";
+import { LINT } from "//rules/workflows/lint";
+import { RUN } from "//rules/workflows/run";
 import { describe, expect, test } from "//rules/imp/test";
 import { jsApp, tsApp } from "//rules/js";
 import "//rules/js/biome";

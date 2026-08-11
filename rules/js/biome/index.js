@@ -1,4 +1,4 @@
-import { FMT } from "imp:core";
+import { FMT } from "//rules/workflows/fmt";
 import { registerJsSourcesHook } from "//rules/js";
 import { registerJsAppHook } from "//rules/js/graph";
 import { biomeFmtRoot } from "//rules/js/biome/fmt";

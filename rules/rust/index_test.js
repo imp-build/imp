@@ -1,4 +1,9 @@
-import { BUILD, FMT, LINT, PACKAGE, TEST, files, tool } from "imp:core";
+import { BUILD } from "//rules/workflows/build";
+import { FMT } from "//rules/workflows/fmt";
+import { LINT } from "//rules/workflows/lint";
+import { PACKAGE } from "//rules/workflows/package";
+import { TEST } from "//rules/workflows/test";
+import { files, tool } from "imp:core";
 import {
 	describe,
 	expect,

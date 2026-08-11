@@ -1,4 +1,4 @@
-import { BUILD } from "imp:core";
+import { BUILD } from "//rules/workflows/build";
 import { asset, resourcePackage } from "//rules/asset";
 import { expect, test } from "//rules/imp/test";
 

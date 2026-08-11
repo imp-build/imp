@@ -1,18 +1,17 @@
+import { BUILD } from "//rules/workflows/build";
+import { PACKAGE } from "//rules/workflows/package";
 import {
-    configurationSchemas,
-    files,
-    label,
-    memo,
-    output,
-    ruleCapabilities,
-    read_file,
-    run,
-    runGoal,
-    task,
-    BUILD,
-    PACKAGE,
+	configurationSchemas,
+	files,
+	label,
+	memo,
+	output,
+	ruleCapabilities,
+	read_file,
+	run,
+	runGoal,
+	task,
 } from "imp:core";
-
 import { rulesTest } from "//rules/imp/test";
 // The reference catalog describes imp's built-in rules, independently of
 // which subset this repository happens to import from imp.workspace.js.

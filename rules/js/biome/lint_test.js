@@ -1,4 +1,4 @@
-import { LINT } from "imp:core";
+import { LINT } from "//rules/workflows/lint";
 import { describe, expect, test } from "//rules/imp/test";
 import { jsApp, jsSources } from "//rules/js";
 import "//rules/js/biome/lint";
