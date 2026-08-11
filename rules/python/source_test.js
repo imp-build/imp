@@ -1,10 +1,10 @@
+import { RUN } from "//rules/workflows/run";
 import {
 	describe,
 	expect,
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
-import { RUN } from "imp:core";
 import {
 	__resetPythonSourceStateForTest,
 	pythonProject,

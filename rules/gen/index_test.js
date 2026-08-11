@@ -1,4 +1,4 @@
-import { BUILD } from "imp:core";
+import { BUILD } from "//rules/workflows/build";
 import { describe, expect, test } from "//rules/imp/test";
 import { stampFile } from "//rules/gen";
 

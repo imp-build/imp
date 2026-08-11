@@ -42,7 +42,7 @@ export function graphFmtGoal(roots) {
 		);
 }
 
-goal("fmt", undefined, {
+export const FMT = goal("fmt", undefined, {
 	graph: graphFmtGoal,
 	flags: {
 		check: { description: "Verify formatting without writing changes" },

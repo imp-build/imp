@@ -1,5 +1,8 @@
-import { BUILD, output, task } from "imp:core";
-
+import { BUILD } from "//rules/workflows/build";
+import {
+	output,
+	task,
+} from "imp:core";
 /**
  * Declare a graph artifact containing fixed text.
  *

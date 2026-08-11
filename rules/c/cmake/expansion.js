@@ -23,7 +23,10 @@
 // entry instead, with a caller-supplied includeDirs list — the same kind
 // of manual knowledge a plain `ccLibrary({hdrs})` glob already requires.
 
-import { BUILD, PACKAGE, TEST, expand } from "imp:core";
+import { BUILD } from "//rules/workflows/build";
+import { PACKAGE } from "//rules/workflows/package";
+import { TEST } from "//rules/workflows/test";
+import { expand } from "imp:core";
 import {
 	basename,
 	cmakeProjectSpec,

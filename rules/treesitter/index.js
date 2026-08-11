@@ -1,5 +1,5 @@
+import { BUILD } from "//rules/workflows/build";
 import {
-	BUILD,
 	file,
 	loadGrammar,
 	output,
@@ -8,7 +8,6 @@ import {
 	treeSexp,
 	tsQuery,
 } from "imp:core";
-
 /**
  * Load a grammar, parse source text, and (optionally) run a tree-sitter
  * query against the result, as one coarse graph task.

@@ -5,11 +5,11 @@
 // acquisition intentionally belongs to rules/imp (#34); this fixture models
 // a pre-provisioned Rust tool directory as an ordinary source-backed tool.
 
+import { BUILD } from "//rules/workflows/build";
+import { LINT } from "//rules/workflows/lint";
+import { RUN } from "//rules/workflows/run";
+import { TEST } from "//rules/workflows/test";
 import {
-	BUILD,
-	LINT,
-	RUN,
-	TEST,
 	expand,
 	file,
 	files,
@@ -18,7 +18,6 @@ import {
 	task,
 	tool,
 } from "imp:core";
-
 const manifest = file("Cargo.toml");
 const lockfile = file("Cargo.lock");
 const workspaceSources = files({

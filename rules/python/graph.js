@@ -1,16 +1,10 @@
-import {
-	BUILD,
-	FMT,
-	LINT,
-	PACKAGE,
-	RUN,
-	TEST,
-	files,
-	output,
-	packagePath,
-	semantic,
-	task,
-} from "imp:core";
+import { BUILD } from "//rules/workflows/build";
+import { FMT } from "//rules/workflows/fmt";
+import { LINT } from "//rules/workflows/lint";
+import { PACKAGE } from "//rules/workflows/package";
+import { RUN } from "//rules/workflows/run";
+import { TEST } from "//rules/workflows/test";
+import { files, output, packagePath, semantic, task } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 import {
 	defaultPexToolchain,

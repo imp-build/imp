@@ -40,12 +40,12 @@
 //     only the workspace-wide `rustConfig.doctest` default). No real crate
 //     here uses a per-package override today.
 
+import { BUILD } from "//rules/workflows/build";
+import { FMT } from "//rules/workflows/fmt";
+import { LINT } from "//rules/workflows/lint";
+import { PACKAGE } from "//rules/workflows/package";
+import { TEST } from "//rules/workflows/test";
 import {
-	BUILD,
-	FMT,
-	LINT,
-	PACKAGE,
-	TEST,
 	file,
 	files,
 	output,
@@ -54,7 +54,6 @@ import {
 	productFor,
 	task,
 } from "imp:core";
-
 import { RUST_BUILD_CACHE } from "//rules/rust/products";
 import {
 	defaultRustToolchain,
@@ -71,10 +70,6 @@ import {
 	cargoStandaloneExpansion,
 	cargoWorkspaceExpansion,
 } from "//rules/rust/workspace_expansion";
-
-// Registers the "build" goal's artifact summary callback for consumers that
-// import Rust build rules without importing the workflows layer explicitly.
-import "//rules/workflows/build";
 
 // Registers the direct "generate-build" callback (declaring cargoPackage()
 // declarations for unowned Cargo.toml files) for the same reason.

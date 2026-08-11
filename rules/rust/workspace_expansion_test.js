@@ -1,4 +1,7 @@
-import { FMT, LINT, TEST, files, tool } from "imp:core";
+import { FMT } from "//rules/workflows/fmt";
+import { LINT } from "//rules/workflows/lint";
+import { TEST } from "//rules/workflows/test";
+import { files, tool } from "imp:core";
 import {
 	describe,
 	expect,

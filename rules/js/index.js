@@ -1,5 +1,5 @@
-import { BUILD, files, packagePath, registerBuildRule } from "imp:core";
-
+import { BUILD } from "//rules/workflows/build";
+import { files, packagePath, registerBuildRule } from "imp:core";
 // Kept until generated legacy BUILD files have migrated (#39).
 registerBuildRule({ rule: "jsSources", importFrom: "//rules/js" });
 
@@ -48,7 +48,6 @@ export function jsSources({ src = ".", base = packagePath() } = {}) {
 	return Object.freeze(value);
 }
 
-import "//rules/workflows/build";
 import "//rules/workflows/run";
 
 registerBuildRule({ rule: "jsApp", importFrom: "//rules/js" });

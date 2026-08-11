@@ -9,17 +9,10 @@
 // Each per-crate root locally filters/attributes the shared run's output by
 // path substring instead of invoking cargo itself.
 
-import {
-	FMT,
-	LINT,
-	TEST,
-	configuration,
-	expand,
-	files,
-	output,
-	task,
-} from "imp:core";
-
+import { FMT } from "//rules/workflows/fmt";
+import { LINT } from "//rules/workflows/lint";
+import { TEST } from "//rules/workflows/test";
+import { configuration, expand, files, output, task } from "imp:core";
 import {
 	cargoPackageHandles,
 	linkerHandlesForSpec,

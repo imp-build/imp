@@ -26,16 +26,9 @@
 //     compile) but never individually inspected — same conservative
 //     widening rationale as rules/c/cmake's own header handling.
 
-import {
-	BUILD,
-	PACKAGE,
-	configuration,
-	files,
-	output,
-	packagePath,
-	task,
-} from "imp:core";
-
+import { BUILD } from "//rules/workflows/build";
+import { PACKAGE } from "//rules/workflows/package";
+import { configuration, files, output, packagePath, task } from "imp:core";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
 import { defaultZigGraphToolchain, zigGraphCacheEnv } from "//rules/c/zig";
 

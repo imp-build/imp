@@ -1,14 +1,13 @@
+import { BUILD } from "//rules/workflows/build";
 import { describe, expect, test } from "//rules/imp/test";
 import {
 	Target,
 	field,
 	product,
-	BUILD,
 	toolName,
 	target,
 	targetSchemas,
 } from "imp:core";
-
 const WIDGET_TOOL = toolName("target-schema-test-widget");
 
 class Widget extends Target {

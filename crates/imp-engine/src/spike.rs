@@ -8094,7 +8094,8 @@ mod tests {
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, expand, output, task } from "imp:core";
+import { expand, goal, output, task } from "imp:core";
+const BUILD = goal("build");
 
 globalThis.builtA = 0;
 globalThis.builtB = 0;
@@ -8190,7 +8191,8 @@ export const all = { [BUILD]: workspace.all(BUILD) };
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, expand, output, task } from "imp:core";
+import { expand, goal, output, task } from "imp:core";
+const BUILD = goal("build");
 
 const discover = task({
     display: "discover children",
@@ -8250,7 +8252,8 @@ export const all = { [BUILD]: workspace.all(BUILD) };
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, output, task } from "imp:core";
+import { goal, output, task } from "imp:core";
+const BUILD = goal("build");
 
 const common = task({
     display: "shared build",
@@ -8337,7 +8340,8 @@ export const b = { [BUILD]: consumer("b").outputs.value };
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, expand, output, task } from "imp:core";
+import { expand, goal, output, task } from "imp:core";
+const BUILD = goal("build");
 
 const discover = task({
     display: "discover children",
@@ -8442,7 +8446,8 @@ export const all = { [BUILD]: workspace.all(BUILD) };
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, output, task } from "imp:core";
+import { goal, output, task } from "imp:core";
+const BUILD = goal("build");
 
 const build = task({
     display: "build app",
@@ -8502,7 +8507,8 @@ export const app = { [BUILD]: build.outputs.value };
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, output, semantic, task } from "imp:core";
+import { goal, output, semantic, task } from "imp:core";
+const BUILD = goal("build");
 import { nativeTool } from "//rules/imp/native-tool";
 
 function shellTask(name) {
@@ -8593,7 +8599,8 @@ export const b = { [BUILD]: shellTask("b").outputs.value };
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, goal, output, task } from "imp:core";
+import { goal, output, task } from "imp:core";
+const BUILD = goal("build");
 
 const CHECK = goal("check");
 
@@ -8649,7 +8656,8 @@ export const app = {
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, goal, output, task } from "imp:core";
+import { goal, output, task } from "imp:core";
+const BUILD = goal("build");
 
 const CHECK = goal("check");
 
@@ -8722,7 +8730,8 @@ export const app = {
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, expand, files, output, task } from "imp:core";
+import { expand, files, goal, output, task } from "imp:core";
+const BUILD = goal("build");
 
 const aSources = files({ root: "crates/a", include: ["**/*.rs"] });
 const bSources = files({ root: "crates/b", include: ["**/*.rs"] });
@@ -8795,7 +8804,8 @@ export const unrelated = { [BUILD]: files({ root: "crates/c", include: ["**/*.rs
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, output, task } from "imp:core";
+import { goal, output, task } from "imp:core";
+const BUILD = goal("build");
 
 globalThis.graphRuns = 0;
 const produced = task({
@@ -8841,7 +8851,8 @@ goal("build", undefined, {
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, output, task } from "imp:core";
+import { goal, output, task } from "imp:core";
+const BUILD = goal("build");
 const root = task({
     outputs: { value: output.value() },
     async run() { return { value: { answer: 42 } }; },
@@ -8873,7 +8884,8 @@ export const answer = { [BUILD]: root };
         write_file(
             &p.join(WORKSPACE_FILE),
             r#"
-import { BUILD, task } from "imp:core";
+import { goal, task } from "imp:core";
+const BUILD = goal("build");
 globalThis.workspaceGraphRuns = 0;
 const build = task({
     async run() {
@@ -8918,7 +8930,8 @@ export function appAssets({ base }) {
         write_file(
             &p.join("assets/BUILD.js"),
             r#"
-import { BUILD, output, packagePath, task } from "imp:core";
+import { goal, output, packagePath, task } from "imp:core";
+const BUILD = goal("build");
 import { resourcePackage } from "//rules/asset";
 import { appAssets } from "//helpers";
 
@@ -8979,7 +8992,8 @@ export const inspect = { [BUILD]: inspection.outputs.value };
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, task } from "imp:core";
+import { goal, task } from "imp:core";
+const BUILD = goal("build");
 import { stampFile } from "//rules/gen";
 
 const stamp = stampFile({ output: "generated/stamp.txt", text: "graph stamp" });
@@ -9128,7 +9142,8 @@ export const mylib = makeLib();
 import { siblingValue } from "./sibling.js";
 import { childValue } from "./child";
 import { flavor } from "../shared";
-import { BUILD, output, task } from "imp:core";
+import { goal, output, task } from "imp:core";
+const BUILD = goal("build");
 
 const inspection = task({
     inputs: {},
@@ -9172,7 +9187,8 @@ export const check = { [BUILD]: inspection };
         write_file(
             &p.join("pkg/BUILD.js"),
             r#"
-import { BUILD, expand, output, packagePath, task } from "imp:core";
+import { expand, goal, output, packagePath, task } from "imp:core";
+const BUILD = goal("build");
 
 const expansion = expand({
     inputs: {},
@@ -9217,6 +9233,42 @@ export const check = { [BUILD]: expansion.get("child", BUILD) };
         assert_eq!(task_saw, "pkg");
     }
 
+    // A workspace that imports a language's build rules but not the
+    // workflows layer must still get the "package" goal's graph handler.
+    // Without it, `imp package` runs every graph root and then publishes
+    // nothing at all: the goal is seeded in HostState::default(), so the
+    // command stays valid, but execute_goal_live_selection only calls a
+    // handler when one is registered.
+    //
+    // This now holds by construction — the PACKAGE symbol is exported by
+    // //rules/workflows/package, so a rule module cannot declare a [PACKAGE]
+    // root without importing the handler. The test guards that property
+    // against a regression to imp:core-exported goal symbols.
+    #[tokio::test]
+    async fn language_rules_register_the_package_goal_without_the_workflows_layer() {
+        for module in [
+            "//rules/odin",
+            "//rules/rust",
+            "//rules/c",
+            "//rules/c/cmake",
+            "//rules/python",
+            "//rules/oci",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let p = root.path();
+            write_file(&p.join(WORKSPACE_FILE), &format!("import {module:?};"));
+
+            let live = load_workspace_with_rules(p, RulesSource::directory(repo_rules_dir()))
+                .await
+                .unwrap();
+            assert!(
+                live.workspace.graph_goal_handlers.contains_key("package"),
+                "{module} does not register the 'package' graph goal handler; \
+                 add `import \"//rules/workflows/package\";` to it"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn graph_relative_import_escaping_the_workspace_root_is_rejected() {
         let root = tempfile::tempdir().unwrap();
@@ -9258,7 +9310,8 @@ export const check = { [BUILD]: expansion.get("child", BUILD) };
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, output, task } from "imp:core";
+import { goal, output, task } from "imp:core";
+const BUILD = goal("build");
 
 const first = task({
     display: "first graph action",
@@ -9306,7 +9359,8 @@ export default { [BUILD]: second.outputs.copied };
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, namedCache, output, task } from "imp:core";
+import { goal, namedCache, output, task } from "imp:core";
+const BUILD = goal("build");
 
 namedCache({ name: "graph-po-test-cache" });
 
@@ -9365,7 +9419,8 @@ export default { [BUILD]: acquire.outputs.home };
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, namedCache, output, task } from "imp:core";
+import { goal, namedCache, output, task } from "imp:core";
+const BUILD = goal("build");
 
 namedCache({ name: "graph-legacy-tool-test" });
 
@@ -9422,7 +9477,8 @@ export default { [BUILD]: acquire.outputs.out };
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, task } from "imp:core";
+import { goal, task } from "imp:core";
+const BUILD = goal("build");
 import { impTool } from "//rules/imp/self-tool";
 
 const verify = task({
@@ -9452,7 +9508,8 @@ export default { [BUILD]: verify };
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { BUILD, expand, output, task } from "imp:core";
+import { expand, goal, output, task } from "imp:core";
+const BUILD = goal("build");
 
 globalThis.expansionChildrenRun = [];
 const metadata = task({
@@ -9507,7 +9564,8 @@ export default { [BUILD]: packages.get("a", BUILD) };
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { TEST, task } from "imp:core";
+import { goal, task } from "imp:core";
+const TEST = goal("test");
 globalThis.facetsRun = [];
 function facet(name) {
     return task({
@@ -9671,7 +9729,8 @@ export {{ app }};
     // ---- Common rule JS strings ----------------------------------------
 
     const CPP_RULES_JS: &str = r#"
-import { target, glob, memo, product, run, BUILD, targetKind, toolName } from "imp:core";
+import { glob, goal, memo, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_cmake_lib = targetKind("cmake-lib");
 
 export const sources = memo(async function sources(handle) {
@@ -9695,7 +9754,8 @@ export function cmakeLib({ entrypoint, deps = [] }) {
 "#;
 
     const ODIN_RULES_JS: &str = r#"
-import { target, glob, memo, product, run, BUILD, targetKind, toolName } from "imp:core";
+import { glob, goal, memo, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_odin_package = targetKind("odin-package");
 
 export const sources = memo(async function sources(handle) {
@@ -9713,7 +9773,8 @@ export function odinPackage({ srcs, deps = [] }) {
 "#;
 
     const ASSET_RULES_JS: &str = r#"
-import { target, glob, memo, product, run, BUILD, targetKind, toolName } from "imp:core";
+import { glob, goal, memo, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_asset = targetKind("asset");
 
 export const sources = memo(async function sources(handle) {
@@ -10011,7 +10072,8 @@ export const actionName = "external build {address}";
         write_file(
             &dev_rules_dir.join("external/index.js"),
             r#"
-import { target, product, run, BUILD, targetKind, toolName } from "imp:core";
+import { goal, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_external = targetKind("external");
 import { actionName } from "//rules/external/helper";
 
@@ -10135,7 +10197,8 @@ configure("example", { flags: { mode: "debug" } });
         write_file(
             &p.join("rules/configured.js"),
             r#"
-import { target, glob, memo, product, run, configuration, BUILD, targetKind, toolName } from "imp:core";
+import { configuration, glob, goal, memo, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_configured = targetKind("configured");
 
 export const sources = memo(async function sources(handle) {
@@ -10443,7 +10506,8 @@ import "//rules/rust/clippy";
         write_file(
             &p.join("rules/rust/test.js"),
             r#"
-import { product, TEST, targetKind, toolName } from "imp:core";
+import { goal, product, targetKind, toolName } from "imp:core";
+const TEST = goal("test");
 const K_rust_test = targetKind("rust_test");
 product(K_rust_test, TEST, toolName("rust"), async () => ({}));
 "#,
@@ -10451,7 +10515,8 @@ product(K_rust_test, TEST, toolName("rust"), async () => ({}));
         write_file(
             &p.join("rules/rust/clippy/index.js"),
             r#"
-import { product, LINT, targetKind, toolName } from "imp:core";
+import { goal, product, targetKind, toolName } from "imp:core";
+const LINT = goal("lint");
 const K_cargo_package = targetKind("cargo-package");
 product(K_cargo_package, LINT, toolName("clippy"), async () => ({}));
 "#,
@@ -10509,7 +10574,8 @@ export function registerViaHelper(kindClass, name, tool, fn) {
         write_file(
             &p.join("rules/rust/toolchain.js"),
             r#"
-import { BUILD, targetKind, toolName } from "imp:core";
+import { goal, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 import { registerViaHelper } from "//rules/shared/helper";
 const K_rust_toolchain = targetKind("rust-toolchain");
 registerViaHelper(K_rust_toolchain, BUILD, toolName("rust"), async () => ({}));
@@ -10560,7 +10626,8 @@ export function registerBuiltinSpec(spec) {
         write_file(
             &p.join("rules/rust/toolchain.js"),
             r#"
-import { product, BUILD, targetKind, toolName } from "imp:core";
+import { goal, product, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 import { registerBuiltinSpec } from "//rules/shared/helper";
 const K_rust_toolchain = targetKind("rust-toolchain");
 const spec = registerBuiltinSpec({ name: "rust" });
@@ -10588,7 +10655,8 @@ product(K_rust_toolchain, BUILD, toolName("rust"), async () => spec);
         write_file(
             p.join(BUILD_FILE).as_path(),
             r#"
-import { target, expand, registerTarget, product, run, BUILD, targetKind, toolName } from "imp:core";
+import { expand, goal, product, registerTarget, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_expandable = targetKind("expandable");
 
 export const build = product(K_expandable, BUILD, toolName("expandable-tool"), async function build(handle) {
@@ -10650,7 +10718,8 @@ export const parent = target({ kind: "expandable", attrs: {} });
             p.join(BUILD_FILE).as_path(),
             &format!(
                 r#"
-import {{ target, expand, registerTarget, product, run, targetAddress, BUILD, targetKind, toolName }} from "imp:core";
+import {{ expand, goal, product, registerTarget, run, target, targetAddress, targetKind, toolName }} from "imp:core";
+const BUILD = goal("build");
 const K_expandable = targetKind("expandable");
 const markerDir = {marker_dir:?};
 
@@ -10703,7 +10772,8 @@ export const parent = target({{ kind: "expandable", attrs: {{}} }});
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { product, runTemplate, RUN, target, targetKind, toolName } from "imp:core";
+import { goal, product, runTemplate, target, targetKind, toolName } from "imp:core";
+const RUN = goal("run");
 const K_run_args = targetKind("run-args-test");
 export const app = target({ kind: "run-args-test" });
 export const run = product(K_run_args, RUN, toolName("run-args-test-tool"), async function run() {
@@ -10827,7 +10897,8 @@ import "//rules/tool";
         write_file(
             &p.join("rules/tool.js"),
             r#"
-import { namedCache, output, product, run, target, BUILD, targetKind, toolName } from "imp:core";
+import { goal, namedCache, output, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_tool_user = targetKind("tool-user");
 
 namedCache({ name: "test-tools" });
@@ -10882,7 +10953,8 @@ export const generated = toolUser();
             &p.join(BUILD_FILE),
             &format!(
                 r#"
-import {{ BUILD, cacheGet, cacheHas, memo, namedCache, output, product, run, target, targetKind, toolName }} from "imp:core";
+import {{ cacheGet, cacheHas, goal, memo, namedCache, output, product, run, target, targetKind, toolName }} from "imp:core";
+const BUILD = goal("build");
 const K_acquire = targetKind("memo-named-cache-acquire");
 const TOOL = toolName("memo-named-cache-tool");
 namedCache({{ name: "memo-acquired-tool" }});
@@ -11618,7 +11690,8 @@ if (a !== "S" || b !== "S") {
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, BUILD, targetKind, toolName } from "imp:core";
+import { goal, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_root_nesting_test = targetKind("root-nesting-test");
 
 export const lib = target({ kind: "root-nesting-test" });
@@ -11716,7 +11789,8 @@ export const build = product(K_root_nesting_test, BUILD, toolName("root-nesting-
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, BUILD, targetKind, toolName } from "imp:core";
+import { goal, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_shared_dep_context_test = targetKind("shared-dep-context-test");
 
 export const lib = target({ kind: "shared-dep-context-test" });
@@ -11792,7 +11866,8 @@ export const build = product(K_shared_dep_context_test, BUILD, toolName("shared-
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, memo, run, BUILD, targetKind, toolName } from "imp:core";
+import { goal, memo, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_promise_all_context_test = targetKind("promise-all-context-test");
 
 export const app = target({ kind: "promise-all-context-test" });
@@ -11877,7 +11952,8 @@ export const build = product(K_promise_all_context_test, BUILD, toolName("promis
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, memo, run, BUILD, targetKind, toolName } from "imp:core";
+import { goal, memo, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_sequential_sibling_context_test = targetKind("sequential-sibling-context-test");
 
 export const app = target({ kind: "sequential-sibling-context-test" });
@@ -11954,7 +12030,8 @@ export const build = product(K_sequential_sibling_context_test, BUILD, toolName(
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, BUILD, targetKind, toolName } from "imp:core";
+import { goal, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_fail_test = targetKind("fail-test");
 
 export const app = target({ kind: "fail-test" });
@@ -12005,7 +12082,8 @@ export const build = product(K_fail_test, BUILD, toolName("fail-test-tool"), asy
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, memo, output, BUILD, targetKind, toolName } from "imp:core";
+import { goal, memo, output, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_shared_fail_test = targetKind("shared-fail-test");
 
 export const a = target({ kind: "shared-fail-test", attrs: { name: "a" } });
@@ -12068,7 +12146,8 @@ export const build = product(K_shared_fail_test, BUILD, toolName("shared-fail-te
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, BUILD, targetKind, toolName } from "imp:core";
+import { goal, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_concurrent_root_test = targetKind("concurrent-root-test");
 
 export const a = target({ kind: "concurrent-root-test" });
@@ -12148,7 +12227,8 @@ export const build = product(K_concurrent_root_test, BUILD, toolName("concurrent
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, output, selectedTargets, BUILD, targetKind, toolName } from "imp:core";
+import { goal, output, product, run, selectedTargets, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_selected_targets_test = targetKind("selected-targets-test");
 
 export const a = target({ kind: "selected-targets-test" });
@@ -12257,7 +12337,8 @@ export const check = product(K_selected_targets_outside_test, P_check, toolName(
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, BUILD, targetKind, toolName } from "imp:core";
+import { goal, product, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_selected_targets_reset_test = targetKind("selected-targets-reset-test");
 
 export const a = target({ kind: "selected-targets-reset-test" });
@@ -12474,7 +12555,8 @@ export const build = product(K_plain_goal_test, P_plain_goal, toolName("plain-go
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, BUILD, targetKind, toolName } from "imp:core";
+import { goal, product, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_js_lane_slot_test = targetKind("js-lane-slot-test");
 
 export const a = target({ kind: "js-lane-slot-test" });
@@ -12536,7 +12618,8 @@ export const build = product(K_js_lane_slot_test, BUILD, toolName("js-lane-slot-
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, memo, run, BUILD, targetKind, toolName } from "imp:core";
+import { goal, memo, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_js_lane_bound_test = targetKind("js-lane-bound-test");
 
 export const app = target({ kind: "js-lane-bound-test" });
@@ -12623,7 +12706,8 @@ export const build = product(K_js_lane_bound_test, BUILD, toolName("js-lane-boun
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, memo, BUILD, targetKind, toolName } from "imp:core";
+import { goal, memo, product, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_single_js_worker_inflight_test = targetKind("single-js-worker-inflight-test");
 
 export const app = target({ kind: "single-js-worker-inflight-test" });
@@ -12678,7 +12762,8 @@ export const build = product(K_single_js_worker_inflight_test, BUILD, toolName("
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, BUILD, targetKind, toolName } from "imp:core";
+import { goal, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_interleaved_root_context_test = targetKind("interleaved-root-context-test");
 
 export const a = target({ kind: "interleaved-root-context-test" });
@@ -12761,7 +12846,8 @@ export const build = product(K_interleaved_root_context_test, BUILD, toolName("i
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, BUILD, targetKind, toolName } from "imp:core";
+import { goal, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_deferred_run_context_test = targetKind("deferred-run-context-test");
 
 export const app = target({ kind: "deferred-run-context-test" });
@@ -12852,7 +12938,8 @@ export const build = product(K_deferred_run_context_test, BUILD, toolName("defer
             &p.join(BUILD_FILE),
             &format!(
                 r#"
-import {{ target, product, run, output, BUILD, targetKind, toolName }} from "imp:core";
+import {{ goal, output, product, run, target, targetKind, toolName }} from "imp:core";
+const BUILD = goal("build");
 const K_live_cache_test = targetKind("live-cache-test");
 
 export const app = target({{ kind: "live-cache-test" }});
@@ -12966,7 +13053,8 @@ export const build = product(K_live_cache_test, BUILD, toolName("live-cache-test
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, output, BUILD, targetKind, toolName } from "imp:core";
+import { goal, output, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_trace_input_test = targetKind("trace-input-test");
 
 export const app = target({ kind: "trace-input-test" });
@@ -13059,7 +13147,8 @@ export const build = product(K_trace_input_test, BUILD, toolName("trace-input-te
             &p.join(BUILD_FILE),
             &format!(
                 r#"
-import {{ target, product, run, output, configuration, BUILD, targetKind, toolName }} from "imp:core";
+import {{ configuration, goal, output, product, run, target, targetKind, toolName }} from "imp:core";
+const BUILD = goal("build");
 const K_config_cache_test = targetKind("config-cache-test");
 
 export const app = target({{ kind: "config-cache-test" }});
@@ -13136,7 +13225,8 @@ configure("cache_test", {{ mode: {mode} }});
             &p.join(BUILD_FILE),
             &format!(
                 r#"
-import {{ target, product, run, output, configuration, BUILD, targetKind, toolName }} from "imp:core";
+import {{ configuration, goal, output, product, run, target, targetKind, toolName }} from "imp:core";
+const BUILD = goal("build");
 const K_config_cache_test = targetKind("config-cache-test");
 
 export const app = target({{ kind: "config-cache-test" }});
@@ -13211,7 +13301,8 @@ configure("cache_test_unread", {{ mode: {mode} }});
             &p.join(BUILD_FILE),
             &format!(
                 r#"
-import {{ target, product, run, output, BUILD, targetKind, toolName }} from "imp:core";
+import {{ goal, output, product, run, target, targetKind, toolName }} from "imp:core";
+const BUILD = goal("build");
 const K_config_cache_test = targetKind("config-cache-test");
 
 export const app = target({{ kind: "config-cache-test" }});
@@ -13307,7 +13398,8 @@ defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: 
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, output, modeAxis, BUILD, targetKind, toolName } from "imp:core";
+import { goal, modeAxis, output, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K = targetKind("mode-axis-test");
 
 export const app = target({ kind: "mode-axis-test" });
@@ -13339,7 +13431,8 @@ defineProfile("windows-release", { opt: "release", target: "windows" });
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, run, output, modeAxis, BUILD, targetKind, toolName } from "imp:core";
+import { goal, modeAxis, output, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K = targetKind("mode-profile-test");
 
 export const app = target({ kind: "mode-profile-test" });
@@ -13371,7 +13464,8 @@ defineProfile("release", { opt: "release" });
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { Target, BUILD, toolName, product, profile, hydrateTarget, modeAxis, output, run } from "imp:core";
+import { Target, goal, hydrateTarget, modeAxis, output, product, profile, run, toolName } from "imp:core";
+const BUILD = goal("build");
 const TOOL = toolName("profiled-dependency-test");
 
 class Dep extends Target {
@@ -13437,7 +13531,8 @@ defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: 
             &p.join(BUILD_FILE),
             &format!(
                 r#"
-import {{ target, product, run, output, BUILD, targetKind, toolName }} from "imp:core";
+import {{ goal, output, product, run, target, targetKind, toolName }} from "imp:core";
+const BUILD = goal("build");
 const K = targetKind("mode-axis-unread-test");
 
 export const app = target({{ kind: "mode-axis-unread-test" }});
@@ -13469,7 +13564,8 @@ defineProfile("debug", { opt: "debug" });
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { Target, BUILD, toolName, product, link, profile, productFor, modeAxis, namedOutput, output, run } from "imp:core";
+import { Target, goal, link, modeAxis, namedOutput, output, product, productFor, profile, run, toolName } from "imp:core";
+const BUILD = goal("build");
 
 const LINK_TOOL = toolName("link-mode-test");
 
@@ -13528,7 +13624,8 @@ defineModeAxis("linking", { kind: "output-select", values: ["static", "shared"],
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { Target, BUILD, toolName, product, link, productFor, output, run } from "imp:core";
+import { Target, goal, link, output, product, productFor, run, toolName } from "imp:core";
+const BUILD = goal("build");
 
 const TOOL = toolName("link-missing-named-output-test");
 
@@ -13581,7 +13678,8 @@ defineProfile("release", { opt: "release" });
             &p.join(BUILD_FILE),
             &format!(
                 r#"
-import {{ Target, BUILD, toolName, product, link, profile, productFor, modeAxis, namedOutput, output, run }} from "imp:core";
+import {{ Target, goal, link, modeAxis, namedOutput, output, product, productFor, profile, run, toolName }} from "imp:core";
+const BUILD = goal("build");
 
 const OUTPUT_TOOL = toolName("named-output-test");
 
@@ -13988,7 +14086,8 @@ defineProfile("broken", { opt: "turbo" });
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, configure, BUILD, targetKind, toolName } from "imp:core";
+import { configure, goal, product, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K = targetKind("mode-axis-reserved-test");
 
 export const app = target({ kind: "mode-axis-reserved-test" });
@@ -14111,7 +14210,8 @@ export const check = product(K_kind_a, P_check, toolName("kind-a-tool"), async f
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { target, product, goal, targetKind, BUILD, toolName } from "imp:core";
+import { goal, product, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const KindA = targetKind("wild-kind-a");
 const KindB = targetKind("wild-kind-b");
 
@@ -14375,7 +14475,9 @@ export const custom = product(KindA, CUSTOM, toolName("kinda-tool"), async funct
         write_file(
             &p.join(BUILD_FILE),
             r#"
-import { product, targetKind, BUILD, TEST, toolName } from "imp:core";
+import { goal, product, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
+const TEST = goal("test");
 const KindA = targetKind("kind-a");
 const KindAAgain = targetKind("kind-a");
 export const a = product(KindA, BUILD, toolName("kinda-tool"), async function a(handle) {});
@@ -15322,7 +15424,10 @@ export { taken };
         write_file(
             &p.join("native/BUILD.js"),
             r#"
-import { BUILD, PACKAGE, TEST } from "imp:core";
+import { goal } from "imp:core";
+const BUILD = goal("build");
+const PACKAGE = goal("package");
+const TEST = goal("test");
 import { cmakeProject } from "//rules/c/cmake";
 
 const project = cmakeProject({});
@@ -15382,7 +15487,8 @@ add_test(NAME hello_cmake_main_test COMMAND hello_cmake_main)
         std::fs::write(
             p.join("rules").join("asset.js"),
             r#"
-import { target, glob, memo, product, BUILD, targetKind, toolName } from "imp:core";
+import { glob, goal, memo, product, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_asset = targetKind("asset");
 
 export const sources = memo(async function sources(handle) {
@@ -15453,7 +15559,8 @@ export const generated = makeGenerated();
         std::fs::write(
             p.join("rules").join("asset.js"),
             r#"
-import { target, glob, memo, product, BUILD, targetKind, toolName } from "imp:core";
+import { glob, goal, memo, product, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_asset = targetKind("asset");
 
 export const sources = memo(async function sources(handle) {

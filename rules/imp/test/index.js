@@ -1,10 +1,5 @@
-import {
-	files,
-	packagePath,
-	task,
-	TEST,
-	withCapturedPackagePath,
-} from "imp:core";
+import { TEST } from "//rules/workflows/test";
+import { files, packagePath, task, withCapturedPackagePath } from "imp:core";
 import { impTool } from "//rules/imp/self-tool";
 
 const suites = [];

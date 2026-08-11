@@ -1,13 +1,7 @@
-import {
-	BUILD,
-	PACKAGE,
-	PUBLISH,
-	files,
-	output,
-	packagePath,
-	task,
-} from "imp:core";
-
+import { BUILD } from "//rules/workflows/build";
+import { PACKAGE } from "//rules/workflows/package";
+import { PUBLISH } from "//rules/workflows/publish";
+import { files, output, packagePath, task } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 import { craneGraphTool } from "//rules/oci/toolchain";
 

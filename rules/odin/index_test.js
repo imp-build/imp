@@ -1,4 +1,8 @@
-import { BUILD, LINT, PACKAGE, RUN, TEST } from "imp:core";
+import { BUILD } from "//rules/workflows/build";
+import { LINT } from "//rules/workflows/lint";
+import { PACKAGE } from "//rules/workflows/package";
+import { RUN } from "//rules/workflows/run";
+import { TEST } from "//rules/workflows/test";
 import { ccLibrary } from "//rules/c";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
 import { describe, expect, test } from "//rules/imp/test";

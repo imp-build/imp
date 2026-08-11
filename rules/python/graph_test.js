@@ -1,4 +1,9 @@
-import { BUILD, FMT, LINT, PACKAGE, RUN, TEST } from "imp:core";
+import { BUILD } from "//rules/workflows/build";
+import { FMT } from "//rules/workflows/fmt";
+import { LINT } from "//rules/workflows/lint";
+import { PACKAGE } from "//rules/workflows/package";
+import { RUN } from "//rules/workflows/run";
+import { TEST } from "//rules/workflows/test";
 import { describe, expect, test } from "//rules/imp/test";
 import { pythonApp, pythonTest } from "//rules/python";
 import { pythonResolve } from "//rules/python/resolve";

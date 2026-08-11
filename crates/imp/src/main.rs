@@ -2351,7 +2351,8 @@ mod tests {
         write_file(
             &p.join(spike::BUILD_FILE),
             r#"
-import { target, product, targetKind, BUILD, toolName } from "imp:core";
+import { goal, product, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
 const K_workspace_js_workers_test = targetKind("workspace-js-workers-test");
 
 export const a = target({ kind: "workspace-js-workers-test" });

@@ -1,12 +1,6 @@
-import {
-	BUILD,
-	RUN,
-	files,
-	output,
-	packagePath,
-	semantic,
-	task,
-} from "imp:core";
+import { BUILD } from "//rules/workflows/build";
+import { RUN } from "//rules/workflows/run";
+import { files, output, packagePath, semantic, task } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 import {
 	defaultNodeToolchain,

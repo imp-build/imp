@@ -14,4 +14,4 @@
 
 import { goal } from "imp:core";
 
-goal("test");
+export const TEST = goal("test");

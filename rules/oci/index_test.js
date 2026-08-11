@@ -1,4 +1,6 @@
-import { BUILD, PACKAGE, PUBLISH } from "imp:core";
+import { BUILD } from "//rules/workflows/build";
+import { PACKAGE } from "//rules/workflows/package";
+import { PUBLISH } from "//rules/workflows/publish";
 import { describe, expect, test } from "//rules/imp/test";
 import { ociBuild, ociMirror, ociPull, ociPush } from "//rules/oci";
 

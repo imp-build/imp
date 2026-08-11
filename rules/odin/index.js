@@ -1,10 +1,10 @@
+import { BUILD } from "//rules/workflows/build";
+import { LINT } from "//rules/workflows/lint";
+import { PACKAGE } from "//rules/workflows/package";
+import { RUN } from "//rules/workflows/run";
+import { TEST } from "//rules/workflows/test";
 import {
 	field,
-	BUILD,
-	TEST,
-	LINT,
-	PACKAGE,
-	RUN,
 	defineConfigSchema,
 	allUnowned,
 	glob,
@@ -23,7 +23,6 @@ import {
 	targetAddress,
 	targetRef,
 } from "imp:core";
-
 /**
  * Declarative workspace configuration schema for Odin.
  *
@@ -64,16 +63,6 @@ import { nativeTool } from "//rules/imp/native-tool";
 
 import { gccGraphTool, defaultGccToolchainVersion } from "//rules/c/gcc";
 
-// Registers the "run" goal's callback (rules/workflows/run/index.js) for consumers
-// that import Odin build rules without importing the workflows layer
-// explicitly. Odin's own RUN root is exported directly from each graph-native
-// odinPackage() label below and does not depend on this registration, but
-// other, still-Target-based run products may.
-import "//rules/workflows/run";
-
-// Registers the "build" goal's artifact summary callback for consumers that
-// import Odin build rules without importing the workflows layer explicitly.
-import "//rules/workflows/build";
 import { ODIN_TOOL } from "//rules/odin/toolchain";
 
 export {

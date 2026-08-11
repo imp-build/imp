@@ -9,7 +9,8 @@ handles. A stamp rule is a small example: its output is a reusable file
 artifact, and the `BUILD` property makes that same artifact selectable.
 
 ```js
-import { BUILD, output, task } from "imp:core";
+import { output, task } from "imp:core";
+import { BUILD } from "//rules/workflows/build";
 
 export function stampFile({ output: path, text }) {
     const stamp = task({
@@ -41,7 +42,9 @@ symbols to output handles. The callback of a `task()` is lazy; it runs only
 when a selected root needs that handle.
 
 ```js
-import { BUILD, RUN, files, output, task } from "imp:core";
+import { files, output, task } from "imp:core";
+import { BUILD } from "//rules/workflows/build";
+import { RUN } from "//rules/workflows/run";
 import { nativeTool } from "//rules/imp/native-tool";
 
 const sources = files({ include: ["src/**/*.rs", "Cargo.toml"] });
