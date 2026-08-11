@@ -4,40 +4,18 @@
 // that default is ever dropped.
 //
 // Every built-in ruleset is graph-native and exposes [BUILD] directly today
-// (Odin, cmake-lib/cmake-toolchain, asset, stampFile labels, ...) rather than
-// registering a legacy product here — the callback below only matters for
-// targets still using the legacy target()/product() API. It resolves each
-// selected target's product itself via resolveProducts, driving its own
-// fan-out/await loop directly (the same pattern //rules/workflows/run,
-// test, and fmt use).
+// (Odin, cmake-lib/cmake-toolchain, asset, stampFile labels, ...), and the
+// legacy target()/product() dispatch this goal used to fall back to has been
+// retired — a BUILD.js wanting a build-selectable workload now needs a real
+// [BUILD] handle. attach(label, "build", fn) (the `build()` sugar in
+// imp:core) is a separate, still-supported mechanism and is unaffected.
 //
 // `build` is cache-only: it builds and warms the task cache, but (now that
 // every build product is materialize:false) never leaves files in the
-// workspace — so it reports a plain count rather than the on-disk artifact
-// paths it used to print. Getting real files out of a target is `package`'s
-// job (writeWorkspace to dist/), the only goal that still writes.
+// workspace. Getting real files out of a target is `package`'s job
+// (writeWorkspace to dist/), the only goal that still writes.
 
-import { goal, logInfo, resolveProducts, writeWorkspace } from "imp:core";
-
-export async function buildGoal(selection) {
-	const resolved = selection.flatMap(resolveProducts);
-	const calls = resolved.map(({ label, fn, handle }) => ({
-		label,
-		promise: fn(handle),
-	}));
-	let count = 0;
-	for (const { label, promise } of calls) {
-		try {
-			await promise;
-		} catch (e) {
-			throw new Error(`${label}: ${e && e.message ? e.message : e}`);
-		}
-		count++;
-	}
-	if (count > 0) {
-		logInfo(`Built ${count} target${count === 1 ? "" : "s"}`);
-	}
-}
+import { goal, writeWorkspace } from "imp:core";
 
 /** Materialize source-generation graph roots while ordinary builds remain CAS-only. */
 export function graphBuildGoal(roots) {
@@ -47,4 +25,4 @@ export function graphBuildGoal(roots) {
 	}
 }
 
-goal("build", buildGoal, { graph: graphBuildGoal });
+goal("build", undefined, { graph: graphBuildGoal });

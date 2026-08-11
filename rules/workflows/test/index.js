@@ -4,30 +4,14 @@
 // that default is ever dropped.
 //
 // Every built-in ruleset is graph-native and exposes [TEST] directly today
-// (Odin, rules-test's rulesTest(), Rust's cargoPackage(), ...) rather than
-// registering a legacy product here — the callback below only matters for
-// targets still using the legacy target()/product() API.
-//
-// Unlike "run", "test" has no single-target restriction — every selected
-// target's registered test product runs. The callback below just delegates
-// to the default per-target dispatch, since a goal callback replaces native
-// dispatch entirely rather than running alongside it.
+// (Odin, rules-test's rulesTest(), Rust's cargoPackage(), ...). Selected
+// [TEST] graph roots execute on their own; no workflow-level callback is
+// needed to run them, unlike goals that materialize or aggregate results
+// (build, fmt, lint, package). The legacy target()/product() dispatch this
+// goal used to fall back to has been retired.
+// attach(label, "test", fn) (the `test()` sugar in imp:core) is a separate,
+// still-supported mechanism and is unaffected.
 
-import { goal, resolveProducts } from "imp:core";
+import { goal } from "imp:core";
 
-export async function testGoal(selection) {
-	const resolved = selection.flatMap(resolveProducts);
-	const calls = resolved.map(({ label, fn, handle }) => ({
-		label,
-		promise: fn(handle),
-	}));
-	for (const { label, promise } of calls) {
-		try {
-			await promise;
-		} catch (e) {
-			throw new Error(`${label}: ${e && e.message ? e.message : e}`);
-		}
-	}
-}
-
-goal("test", testGoal);
+goal("test");

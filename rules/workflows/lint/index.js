@@ -3,73 +3,14 @@
 // //rules/python/ruff/lint) is a separate opt-in import, so callers such as
 // `imp init` can enable only the integrations a workspace selected.
 //
-// No built-in ruleset registers a legacy lint product today — Rust's
-// cargoPackage() and odin-package both expose [LINT] directly (see
-// //rules/rust, //rules/rust/workspace_expansion, //rules/odin) — so
-// lintGoal's resolveProducts fan-out below only matters for targets still
-// using the legacy target()/product() API.
-//
-// Unlike fmtGoal/testGoal, which fail fast on the first target that throws,
-// lintGoal runs every selected target to completion: ruffCheck never throws
-// for a tool-reported lint failure (it calls run() with allowFailure: true
-// and returns { ok, output, fixSupported, fixApplied, outputDigest } instead),
-// so nothing here aborts early. Every target's captured output — ANSI codes
-// intact, since the underlying tools are invoked with forced color — is
-// printed only after every run has finished, followed by a pass/fail summary;
-// the goal then fails if any target was unclean, regardless of whether
-// `--fix` also fixed some of it.
-//
-// odin-package follows the same allowFailure/{ok, output, ...} contract as
-// ruffCheck, running `odin check -vet` (which has no autofix mode, so it
-// always reports fixSupported: false).
-import {
-	goal,
-	resolveProducts,
-	goalFlags,
-	logInfo,
-	writeWorkspace,
-} from "imp:core";
-
-// `fix` is passed straight through to each product function as a second
-// argument (`fn(handle, {fix})`) rather than registering a second product —
-// same convention fmtGoal uses for `--check` (//rules/workflows/fmt). Not
-// every lint tool has a fix mode, so the decision of what (if anything) to
-// do with `fix` belongs to each linter, not to a product-lookup fallback
-// here.
-export async function lintGoal(selection) {
-	const { fix } = goalFlags();
-	const resolved = selection.flatMap(resolveProducts);
-	const calls = resolved.map(({ label, fn, handle }) => ({
-		label,
-		promise: fn(handle, { fix }),
-	}));
-
-	const results = [];
-	for (const { label, promise } of calls) {
-		results.push({ label, ...(await promise) });
-	}
-
-	for (const { label, output } of results) {
-		if (output) logInfo(`${label}:\n${output}`);
-	}
-
-	if (fix) {
-		const fixed = results.filter((r) => r.fixApplied);
-		if (fixed.length > 0) {
-			logInfo(
-				`lint --fix: ${fixed.map((r) => r.label).join(", ")} had fixes applied`,
-			);
-		}
-	}
-
-	const failed = results.filter((r) => !r.ok);
-	logInfo(
-		`lint: ${results.length - failed.length}/${results.length} target(s) clean`,
-	);
-	if (failed.length > 0) {
-		throw new Error(`lint failed: ${failed.map((r) => r.label).join(", ")}`);
-	}
-}
+// The legacy target()/product() dispatch this goal used to fall back to has
+// been retired — every selected target now needs a real [LINT] graph handle,
+// following the same allowFailure/{ok, output, ...} contract Rust's
+// cargoPackage() and odin-package use (see //rules/rust,
+// //rules/rust/workspace_expansion, //rules/odin). attach(label, "lint", fn)
+// (the `lint()` sugar in imp:core) is a separate, still-supported mechanism
+// and is unaffected.
+import { goal, goalFlags, logInfo, writeWorkspace } from "imp:core";
 
 /** Report graph lint roots using the same result contract as legacy linters. */
 export function graphLintGoal(roots) {
@@ -106,7 +47,7 @@ export function graphLintGoal(roots) {
 	}
 }
 
-goal("lint", lintGoal, {
+goal("lint", undefined, {
 	graph: graphLintGoal,
 	flags: { fix: { description: "Automatically fix what can be fixed" } },
 });

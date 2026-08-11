@@ -682,7 +682,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert!(contents.contains("fmtGoal"));
+        assert!(contents.contains("graphFmtGoal"));
     }
 
     #[test]

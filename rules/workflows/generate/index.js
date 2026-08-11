@@ -4,8 +4,7 @@
 // without writing — for CI drift gates on committed codegen (see
 // //rules/imp/generate's doc comment for the product-authoring pattern).
 // `check` is passed straight through to each product function as a second
-// argument (`fn(handle, {check})`) rather than registering a second product —
-// same convention fmtGoal uses (//rules/workflows/fmt).
+// argument (`fn(handle, {check})`) rather than registering a second product.
 //
 // This module only provides the shared dispatch goal; a rule package adds a
 // `generate` product for its own target kind following the pattern

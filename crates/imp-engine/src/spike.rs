@@ -4213,7 +4213,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     // apply_build_edits pipeline `generate-build` used to reach only via the
     // bespoke `cmd_generate_build` CLI path. Never bails on stale files
     // itself; the calling goal (rules/workflows/generate_build/index.js) decides
-    // what a check failure means, mirroring how fmtGoal/generateGoal own
+    // what a check failure means, mirroring how generateGoal/graphFmtGoal own
     // their own check/throw logic.
     let wc = workspace_root.clone();
     let state_abe = Arc::clone(&state);

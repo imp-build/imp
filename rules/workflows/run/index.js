@@ -6,46 +6,13 @@
 // Run products return a template describing their executable. This workflow
 // owns the common policy: every program is impure, runs in a sandbox, starts
 // in the real workspace, and receives the CLI tail after `--`.
+//
+// The legacy target()/product() dispatch this goal used to fall back to has
+// been retired — every selected target now needs a real [RUN] graph handle.
+// attach(label, "run", fn) (the `runGoal()` sugar in imp:core) is a separate,
+// still-supported mechanism and is unaffected.
 
-import {
-	goal,
-	resolveProducts,
-	runArgs,
-	runFromTemplate,
-	runTemplate,
-	writeWorkspace,
-} from "imp:core";
-
-export function requireSingleRunnable(selection) {
-	if (selection.length !== 1) {
-		throw new Error(
-			`run requires a single target, got ${selection.length}: ${selection.map((t) => t.address).join(", ")}`,
-		);
-	}
-}
-
-export async function runGoal(selection) {
-	requireSingleRunnable(selection);
-	const resolved = selection.flatMap(resolveProducts);
-	if (resolved.length !== 1) {
-		throw new Error(
-			`run requires exactly one run product, got ${resolved.length}: ${resolved.map((entry) => entry.label).join(", ")}`,
-		);
-	}
-	const { label, fn, handle } = resolved[0];
-	try {
-		const template = await fn(handle);
-		return await runFromTemplate(template, {
-			args: runArgs(),
-			sandbox: true,
-			workspaceCwd: true,
-			impure: true,
-			stream: true,
-		});
-	} catch (e) {
-		throw new Error(`${label}: ${e && e.message ? e.message : e}`);
-	}
-}
+import { goal, runArgs, runFromTemplate, runTemplate, writeWorkspace } from "imp:core";
 
 export async function graphRunGoal(roots) {
 	if (roots.length !== 1) {
@@ -70,4 +37,4 @@ export async function graphRunGoal(roots) {
 	);
 }
 
-goal("run", runGoal, { graph: graphRunGoal });
+goal("run", undefined, { graph: graphRunGoal });
