@@ -31,9 +31,9 @@ fail() {
 
 [ -x "$bin" ] || fail "no executable at $stage/bin/imp[.exe]"
 
-# init.js has no importers, so a module-resolution smoke test would not catch
-# it going missing — but `imp init` is unusable without it.
-[ -f "$rules/init.js" ] || fail "missing $rules/init.js"
+# The initializer has no importers, so a module-resolution smoke test would not
+# catch it going missing — but `imp init` is unusable without it.
+[ -f "$rules/init/index.js" ] || fail "missing $rules/init/index.js"
 
 # Toolchain lockfiles are read at runtime through readAddressedFile, not
 # imported, so they'd likewise slip through a resolution-only check.

@@ -170,7 +170,7 @@ pub fn test_rules_dir() -> Option<PathBuf> {
         .ok()?
         .ancestors()
         .map(|dir| dir.join("rules"))
-        .find(|candidate| candidate.join("init.js").is_file())
+        .find(|candidate| candidate.join("init").join("index.js").is_file())
 }
 
 /// Candidate rule libraries for an executable at `exe`, in precedence order:
