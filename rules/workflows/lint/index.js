@@ -10,7 +10,7 @@
 // //rules/rust/workspace_expansion, //rules/odin). attach(label, "lint", fn)
 // (the `lint()` sugar in imp:core) is a separate, still-supported mechanism
 // and is unaffected.
-import { goal, goalFlags, logInfo, writeWorkspace } from "imp:core";
+import { goal, goalError, goalFlags, logInfo, writeWorkspace } from "imp:core";
 
 /** Report graph lint roots using the same result contract as legacy linters. */
 export function graphLintGoal(roots) {
@@ -41,7 +41,7 @@ export function graphLintGoal(roots) {
 		`lint: ${results.length - failed.length}/${results.length} target(s) clean`,
 	);
 	if (failed.length > 0) {
-		throw new Error(
+		throw goalError(
 			`lint failed: ${failed.map((result) => result.address).join(", ")}`,
 		);
 	}

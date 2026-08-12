@@ -447,7 +447,10 @@ export function namedCache(opts) {
  * @param {(roots: Array<{address: string, result: object}>) => (void | Promise<void>)} [opts.graph]
  *   Optional handler for results produced by selected exported graph roots.
  *   It runs after the graph has executed; unlike `fn`, it does not replace
- *   legacy target dispatch.
+ *   legacy target dispatch. To refuse — "not formatted", "out of date" —
+ *   throw `goalError(message)`, which the host prints alone. Keep
+ *   `new Error()` for a fault in the handler itself, which must keep its
+ *   full diagnostic.
  * @param {Record<string, {description?: string}>} [opts.flags] Boolean flags
  *   this goal accepts on the CLI (e.g. `{ check: { description: "..." } }`
  *   becomes `--check`). Read back during goal execution via `goalFlags()`.
@@ -4210,6 +4213,19 @@ export function logWarn(...args) {
 }
 export function logError(...args) {
 	__host_log("error", _fmt(...args));
+}
+
+/** Make an error that a goal raises on purpose, for a failure the user caused
+ *  and can correct. The host prints the message alone, with no stack trace and
+ *  no engine wrapper. Use `new Error()` for a fault in the rule code itself,
+ *  which must keep its full diagnostic. Throw the result:
+ *
+ *      if (stale.length > 0) throw goalError(`out of date:\n${listed}`);
+ */
+export function goalError(message) {
+	const error = new Error(message);
+	error.impGoalError = true;
+	return error;
 }
 
 /** Path to the currently running imp executable. Use as the first element of
