@@ -1536,6 +1536,61 @@ fn select_label_roots_with_discovered_children(
         .collect())
 }
 
+/// Decide what a selector that matched no target, no label and no graph root
+/// means. Returns `None` when it is tolerable, `Some(error)` when the
+/// invocation must fail.
+///
+/// `fallback` is the per-selector error target selection already produced
+/// (`select_roots_in`/`select_targets_in`), which correctly distinguishes "no
+/// such address" from "address exists but has no product". This adds the one
+/// case those two cannot see: an address the graph catalog exports, but not
+/// for the workflow this goal wants — say `imp test //:generated_stamp` where
+/// the address only exports `build`. Reporting "no target matches selector"
+/// there tells the user the wrong thing.
+///
+/// A package or recursive selector that matches addresses but no work for
+/// this goal is not an error: `imp test //...` over a workspace of mostly
+/// non-test targets is the normal case, and target selection already skips
+/// productless targets for wildcard selectors the same way.
+pub fn unmatched_selector_error(
+    workspace: &Workspace,
+    goal: Option<&str>,
+    selector: &str,
+    context: &SelectorContext,
+    fallback: anyhow::Error,
+) -> Option<anyhow::Error> {
+    let single = [selector.to_owned()];
+    // Unscoped by workflow: the question here is only whether the address
+    // exists at all, not whether it does anything for this goal.
+    let Ok(anywhere) = workspace.graph.select_catalog(&single, context) else {
+        return Some(fallback);
+    };
+    if anywhere.is_empty() {
+        return Some(fallback);
+    }
+    let selects_multiple = crate::graph::split_facet(selector)
+        .ok()
+        .and_then(|(address, _)| context.parse(address).ok())
+        .is_some_and(|parsed| parsed.selects_multiple());
+    if selects_multiple {
+        return None;
+    }
+    let addresses: BTreeSet<&str> = anywhere.iter().map(|root| root.address.as_str()).collect();
+    let (Some(goal), 1) = (goal, addresses.len()) else {
+        return Some(fallback);
+    };
+    let address = addresses.into_iter().next().expect("one address");
+    let workflows = workspace
+        .graph
+        .workflows_at(address)
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(anyhow::anyhow!(
+        "{address} has no '{goal}' workflow; it exports: {workflows}"
+    ))
+}
+
 pub fn select_labels_with_discovered_children_in(
     workspace: &Workspace,
     selectors: &[String],
@@ -1983,6 +2038,21 @@ async fn expansion_children_for_file(
     Ok(Vec::new())
 }
 
+/// What graph resolution made of one selector list: the roots it found, the
+/// union of every walk it did along the way, and the selectors that matched
+/// no root at all. `unmatched` is what lets a caller fail a selector that
+/// resolved to nothing without having to ask "did the invocation as a whole
+/// find anything" — see the per-selector tolerance loops in
+/// `execute_goal_live_selection` and in `imp targets`/`imp dependencies`.
+pub struct GraphResolution {
+    pub roots: Vec<GraphRoot>,
+    pub walk: GraphWalk,
+    /// Input selectors that matched no graph root, after every fallback.
+    /// A selector listed here may still name a target or a label, so it is
+    /// only an error once those two resolvers also come up empty.
+    pub unmatched: Vec<String>,
+}
+
 /// Resolve `selectors` against the graph catalog, then merge in synthetic
 /// `parent#childKey` roots discovered by expanding whatever the selectors
 /// reached — a package/recursive selector picks up every expansion child
@@ -2007,7 +2077,7 @@ pub async fn resolve_graph_with_expansion(
     workflow: Option<&str>,
     selectors: &[String],
     context: &SelectorContext,
-) -> Result<(Vec<GraphRoot>, GraphWalk)> {
+) -> Result<GraphResolution> {
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
     let catalog = &live.workspace.graph;
     let select_static = |selectors: &[String]| -> Result<Vec<&GraphRoot>> {
@@ -2016,7 +2086,32 @@ pub async fn resolve_graph_with_expansion(
             None => catalog.select_catalog(selectors, context),
         }
     };
-    let static_roots = select_static(selectors)?;
+    // Selection is per-selector rather than one call over the whole list, so
+    // a selector that contributes no root stays identifiable — `select`
+    // unions its results and loses that. The two fallbacks below then clear
+    // whichever selectors they resolve late, and whatever remains is what
+    // `GraphResolution::unmatched` reports.
+    let mut static_roots: Vec<&GraphRoot> = Vec::new();
+    let mut unmatched: BTreeSet<&str> = BTreeSet::new();
+    {
+        let mut seen: BTreeSet<(&str, &str, Option<&str>)> = BTreeSet::new();
+        for selector in selectors {
+            let matched = select_static(std::slice::from_ref(selector))?;
+            if matched.is_empty() {
+                unmatched.insert(selector.as_str());
+                continue;
+            }
+            for root in matched {
+                if seen.insert((
+                    root.address.as_str(),
+                    root.workflow.as_str(),
+                    root.facet.as_deref(),
+                )) {
+                    static_roots.push(root);
+                }
+            }
+        }
+    }
     let walk = walk_graph_for_introspection(live, &static_roots, false, true).await?;
 
     let mut roots: BTreeMap<(String, String, Option<String>), GraphRoot> = BTreeMap::new();
@@ -2074,6 +2169,7 @@ pub async fn resolve_graph_with_expansion(
             if child.address.rsplit_once('#').map(|(_, key)| key) != Some(child_key) {
                 continue;
             }
+            unmatched.remove(selector.as_str());
             roots.insert(
                 (
                     child.address.clone(),
@@ -2091,7 +2187,7 @@ pub async fn resolve_graph_with_expansion(
     // so its cost lands on a path that was otherwise about to fail — never on a
     // successful selection.
     for selector in selectors {
-        if !select_static(std::slice::from_ref(selector))?.is_empty() {
+        if !unmatched.contains(selector.as_str()) {
             continue;
         }
         let file_path = match bare_file_selector(workspace_root, selector, context)? {
@@ -2099,6 +2195,7 @@ pub async fn resolve_graph_with_expansion(
             None => continue,
         };
         for child in expansion_children_for_file(live, &file_path, workflow).await? {
+            unmatched.remove(selector.as_str());
             roots.insert(
                 (
                     child.address.clone(),
@@ -2110,27 +2207,13 @@ pub async fn resolve_graph_with_expansion(
         }
     }
 
-    Ok((
-        roots.into_values().collect(),
-        GraphWalk {
+    Ok(GraphResolution {
+        roots: roots.into_values().collect(),
+        walk: GraphWalk {
             nodes: nodes.into_values().collect(),
         },
-    ))
-}
-
-/// Convenience wrapper over [`resolve_graph_with_expansion`] for callers
-/// that only need the resolved roots, not their dependency edges.
-pub async fn resolve_graph_roots_with_expansion(
-    live: &LiveWorkspace,
-    workspace_root: &Path,
-    selectors: &[String],
-    context: &SelectorContext,
-) -> Result<Vec<GraphRoot>> {
-    Ok(
-        resolve_graph_with_expansion(live, workspace_root, None, selectors, context)
-            .await?
-            .0,
-    )
+        unmatched: unmatched.into_iter().map(str::to_owned).collect(),
+    })
 }
 
 /// Static-catalog view for `imp graph` (#93): resolve `selectors` and walk
@@ -2153,13 +2236,47 @@ pub async fn resolve_graph_catalog_view(
     workflow: Option<&str>,
     selectors: &[String],
     context: &SelectorContext,
-) -> Result<(Vec<GraphRoot>, GraphWalk)> {
-    let static_roots = match workflow {
-        Some(workflow) => live.workspace.graph.select(workflow, selectors, context)?,
-        None => live.workspace.graph.select_catalog(selectors, context)?,
+) -> Result<GraphResolution> {
+    let select_static = |selectors: &[String]| -> Result<Vec<&GraphRoot>> {
+        match workflow {
+            Some(workflow) => live.workspace.graph.select(workflow, selectors, context),
+            None => live.workspace.graph.select_catalog(selectors, context),
+        }
     };
+    // Per-selector for the same reason as `resolve_graph_with_expansion`,
+    // minus its two fallbacks: this view resolves nothing lazily, so an
+    // empty result here is final.
+    let mut static_roots: Vec<&GraphRoot> = Vec::new();
+    let mut unmatched: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<(&str, &str, Option<&str>)> = BTreeSet::new();
+    for selector in selectors {
+        let matched = select_static(std::slice::from_ref(selector))?;
+        if matched.is_empty() {
+            unmatched.push(selector.clone());
+            continue;
+        }
+        for root in matched {
+            if seen.insert((
+                root.address.as_str(),
+                root.workflow.as_str(),
+                root.facet.as_deref(),
+            )) {
+                static_roots.push(root);
+            }
+        }
+    }
+    // Address order, not selector order: this is what `select_catalog`'s own
+    // map ordering used to give the diagram, and `format_graph_diagram`
+    // renders roots in the order it receives them.
+    static_roots.sort_by(|a, b| {
+        (&a.address, &a.workflow, &a.facet).cmp(&(&b.address, &b.workflow, &b.facet))
+    });
     let walk = walk_graph_for_introspection(live, &static_roots, false, false).await?;
-    Ok((static_roots.into_iter().cloned().collect(), walk))
+    Ok(GraphResolution {
+        roots: static_roots.into_iter().cloned().collect(),
+        walk,
+        unmatched,
+    })
 }
 
 /// Graph-native addresses stale for `--changed-since` (#7): walks the
@@ -6666,21 +6783,26 @@ pub async fn execute_goal_live_selection(
             selector_context,
         )?),
     };
+    // Selectors that matched no graph root. Empty for a changed-address
+    // selection: those addresses are concrete and may be target- or
+    // label-only, so "matched no graph root" carries no fault there.
+    let mut graph_unmatched: BTreeSet<String> = BTreeSet::new();
     let graph_roots = match &selection {
         GoalSelection::Selectors(selectors) => {
             // Expansion-aware: a selector may name an expand()-discovered
             // child directly (`parent#childKey`), which only exists once
             // its parent's expansion has run — see
             // `resolve_graph_with_expansion`.
-            resolve_graph_with_expansion(
+            let resolution = resolve_graph_with_expansion(
                 live,
                 workspace_root,
                 Some(goal),
                 selectors,
                 selector_context,
             )
-            .await?
-            .0
+            .await?;
+            graph_unmatched.extend(resolution.unmatched);
+            resolution.roots
         }
         GoalSelection::ChangedAddresses { .. } => {
             // Changed addresses are already concrete addresses (including
@@ -6702,7 +6824,7 @@ pub async fn execute_goal_live_selection(
                 selector_context,
             )
             .await?
-            .0
+            .roots
         }
     };
     ensure_discovered_labels(
@@ -6756,7 +6878,11 @@ pub async fn execute_goal_live_selection(
                             selector_context,
                         )?
                         .is_empty();
-                        if !matched_a_label && graph_roots.is_empty() {
+                        // Per-selector, not "did anything in this invocation
+                        // resolve": another selector's graph root says
+                        // nothing about whether *this* one can still be
+                        // satisfied by a dynamic target.
+                        if !matched_a_label && graph_unmatched.contains(selector) {
                             needs_dynamic_fallback = true;
                         }
                     }
@@ -6851,9 +6977,23 @@ pub async fn execute_goal_live_selection(
                             selector_context,
                         )?
                         .is_empty();
-                        if matched_a_label || !graph_roots.is_empty() {
+                        // Per-selector: `graph_unmatched` asks whether *this*
+                        // selector found a graph root, not whether some other
+                        // selector in the same invocation did. Testing the
+                        // latter is what used to let `imp test //ok //typo`
+                        // drop `//typo` without a word.
+                        if matched_a_label || !graph_unmatched.contains(selector) {
                             continue;
                         }
+                        let Some(error) = unmatched_selector_error(
+                            &live.workspace,
+                            Some(goal),
+                            selector,
+                            selector_context,
+                            error,
+                        ) else {
+                            continue;
+                        };
                         if goal == "run" {
                             let kinds = live
                                 .workspace
@@ -8156,19 +8296,23 @@ export const all = { [BUILD]: workspace.all(BUILD) };
 
         // (1) Listing: the aggregate's children are individually addressable
         // even though the BUILD.js never named them.
-        let roots = resolve_graph_roots_with_expansion(&live, p, &["//:all".to_owned()], &context)
+        let roots = resolve_graph_with_expansion(&live, p, None, &["//:all".to_owned()], &context)
             .await
-            .unwrap();
+            .unwrap()
+            .roots;
         let mut addresses: Vec<_> = roots.iter().map(|r| r.address.clone()).collect();
         addresses.sort();
         assert_eq!(addresses, vec!["//:all", "//:all#a", "//:all#b"]);
 
         // (2) Dependencies: the aggregate declares an edge to its discovery
         // task, and each child shows up as one of its expansion children.
-        let (dep_roots, walk) =
-            resolve_graph_with_expansion(&live, p, None, &["//:all".to_owned()], &context)
-                .await
-                .unwrap();
+        let GraphResolution {
+            roots: dep_roots,
+            walk,
+            ..
+        } = resolve_graph_with_expansion(&live, p, None, &["//:all".to_owned()], &context)
+            .await
+            .unwrap();
         let dep_roots_ref: Vec<&GraphRoot> = dep_roots.iter().collect();
         let mut out = String::new();
         format_graph_dependencies(&dep_roots_ref, &walk, &mut out).unwrap();
@@ -8296,7 +8440,7 @@ export const b = { [BUILD]: consumer("b").outputs.value };
 
         let live = load_workspace(p).await.unwrap();
         let context = SelectorContext::root();
-        let (roots, walk) = resolve_graph_with_expansion(
+        let GraphResolution { roots, walk, .. } = resolve_graph_with_expansion(
             &live,
             p,
             None,
@@ -8396,9 +8540,10 @@ export const all = { [BUILD]: workspace.all(BUILD) };
         let live = load_workspace(p).await.unwrap();
         let context = SelectorContext::root();
         let selectors = ["//:all".to_owned()];
-        let (roots, walk) = resolve_graph_with_expansion(&live, p, None, &selectors, &context)
-            .await
-            .unwrap();
+        let GraphResolution { roots, walk, .. } =
+            resolve_graph_with_expansion(&live, p, None, &selectors, &context)
+                .await
+                .unwrap();
         // Mirrors `cmd_graph`'s own filtering: `resolve_graph_with_expansion`
         // always adds synthetic `parent#childKey` roots for an expansion's
         // discovered children (so `imp targets`/`imp dependencies` can
@@ -8478,7 +8623,7 @@ export const app = { [BUILD]: build.outputs.value };
 
         let live = load_workspace(p).await.unwrap();
         let context = SelectorContext::root();
-        let (roots, walk) =
+        let GraphResolution { roots, walk, .. } =
             resolve_graph_catalog_view(&live, Some("build"), &["//:app".to_owned()], &context)
                 .await
                 .unwrap();
@@ -8544,7 +8689,7 @@ export const b = { [BUILD]: shellTask("b").outputs.value };
 
         let live = load_workspace(p).await.unwrap();
         let context = SelectorContext::root();
-        let (roots, walk) = resolve_graph_with_expansion(
+        let GraphResolution { roots, walk, .. } = resolve_graph_with_expansion(
             &live,
             p,
             None,
@@ -8644,17 +8789,19 @@ export const app = {
         let live = load_workspace(p).await.unwrap();
         let context = SelectorContext::root();
 
-        let (build_roots, _) =
+        let build_roots =
             resolve_graph_catalog_view(&live, Some("build"), &["//:app".to_owned()], &context)
                 .await
-                .unwrap();
+                .unwrap()
+                .roots;
         assert_eq!(build_roots.len(), 1);
         assert_eq!(build_roots[0].workflow, "build");
 
-        let (check_roots, _) =
+        let check_roots =
             resolve_graph_catalog_view(&live, Some("check"), &["//:app".to_owned()], &context)
                 .await
-                .unwrap();
+                .unwrap()
+                .roots;
         assert_eq!(check_roots.len(), 1);
         assert_eq!(check_roots[0].workflow, "check");
     }
@@ -8700,7 +8847,7 @@ export const app = {
 
         let live = load_workspace(p).await.unwrap();
         let context = SelectorContext::root();
-        let (roots, walk) =
+        let GraphResolution { roots, walk, .. } =
             resolve_graph_catalog_view(&live, None, &["//:app".to_owned()], &context)
                 .await
                 .unwrap();
@@ -15712,6 +15859,149 @@ export const generated = makeGenerated();
             "{marks:?}"
         );
         assert_eq!(marks.len(), 2, "{marks:?}");
+    }
+
+    /// Graph-native fixture for the per-selector resolution tests below.
+    /// `//:tested` and `//:alsoTested` export a `test` workflow; `//:builtOnly`
+    /// and `//pkg:helper` export only `build`, so a selector naming either is
+    /// a real address with no work for the `test` goal.
+    async fn per_selector_fixture(p: &std::path::Path) -> LiveWorkspace {
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { goal, task } from "imp:core";
+const TEST = goal("test");
+const BUILD = goal("build");
+globalThis.selectorRuns = [];
+function mark(name) {
+    return task({
+        inputs: { name },
+        async run(_exec, input) {
+            globalThis.selectorRuns.push(input.name);
+        },
+    });
+}
+export const tested = { [TEST]: mark("tested") };
+export const alsoTested = { [TEST]: mark("alsoTested") };
+export const builtOnly = { [BUILD]: mark("builtOnly") };
+"#,
+        );
+        write_file(
+            &p.join("pkg").join(BUILD_FILE),
+            r#"
+import { goal, task } from "imp:core";
+const BUILD = goal("build");
+export const helper = {
+    [BUILD]: task({ inputs: {}, async run() {} }),
+};
+"#,
+        );
+        load_workspace(p).await.unwrap()
+    }
+
+    async fn selector_runs(live: &LiveWorkspace) -> String {
+        live.ctx
+            .async_with(async |ctx| -> rquickjs::Result<String> {
+                let stringify: Function = ctx.eval("JSON.stringify")?;
+                let value: Value = ctx.globals().get("selectorRuns")?;
+                stringify.call((value,))
+            })
+            .await
+            .unwrap()
+    }
+
+    /// A selector that resolves to nothing must fail the invocation even when
+    /// a sibling selector resolved. The tolerance that lets a label-only or
+    /// graph-only selector survive target selection used to be keyed on the
+    /// invocation's whole graph selection, so `imp test //ok //typo` dropped
+    /// `//typo` without a word and exited 0 — see `GraphResolution::unmatched`.
+    #[tokio::test]
+    async fn unmatched_selector_errors_even_when_another_selector_matched_a_graph_root() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let live = per_selector_fixture(p).await;
+
+        let error = run_goal_live(
+            &live,
+            p,
+            "test",
+            &["//:tested".to_owned(), "//nope:missing".to_owned()],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("no target matches selector '//nope:missing'"),
+            "{error}"
+        );
+        assert_eq!(
+            selector_runs(&live).await,
+            "[]",
+            "selection fails before dispatch, so no work may run"
+        );
+    }
+
+    /// Two resolving graph selectors in one invocation both dispatch — the
+    /// property the per-selector strictness above must not cost.
+    #[tokio::test]
+    async fn two_resolving_graph_selectors_both_dispatch() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let live = per_selector_fixture(p).await;
+
+        run_goal_live(
+            &live,
+            p,
+            "test",
+            &["//:tested".to_owned(), "//:alsoTested".to_owned()],
+        )
+        .await
+        .unwrap();
+        // Address order, not selector order — roots dispatch sorted.
+        assert_eq!(selector_runs(&live).await, r#"["alsoTested","tested"]"#);
+    }
+
+    /// An exact selector naming a real address that exports no workflow for
+    /// this goal says so, and names what the address does export. Reporting
+    /// "no target matches selector" there (what target selection alone can
+    /// see) points the user at the wrong problem.
+    #[tokio::test]
+    async fn exact_selector_on_wrong_goal_names_the_exported_workflows() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let live = per_selector_fixture(p).await;
+
+        let error = run_goal_live(&live, p, "test", &["//:builtOnly".to_owned()])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("//:builtOnly has no 'test' workflow; it exports: build"),
+            "{error}"
+        );
+    }
+
+    /// A package or recursive selector covering addresses that simply have no
+    /// work for this goal is the normal case (`imp test //...` over a mostly
+    /// non-test workspace), not a mistake — strictness applies to selectors
+    /// whose address space is empty, not to wildcards that match less than
+    /// everything.
+    #[tokio::test]
+    async fn wildcard_over_goalless_package_stays_silent() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let live = per_selector_fixture(p).await;
+
+        run_goal_live(
+            &live,
+            p,
+            "test",
+            &["//:tested".to_owned(), "//pkg/...".to_owned()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(selector_runs(&live).await, r#"["tested"]"#);
     }
 
     /// Mirrors the "worked example: one-off C or workflow build"

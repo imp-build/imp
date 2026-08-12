@@ -25,6 +25,31 @@ Package selectors automatically skip target kinds that do not implement the
 goal. Exact target selectors instead report a missing goal product, which is
 usually a sign that the wrong goal or target was chosen.
 
+## Give more than one selector
+
+A command accepts any number of selectors and runs the union of what they
+select.
+
+```sh
+imp test //apps/server:server //libraries/parser:parser
+```
+
+Each selector must resolve on its own. If one of them matches nothing, the
+command fails and runs no work, even when the other selectors resolved — a
+mistyped address in a list is a mistake, not an empty set. An exact selector
+naming an address that exists but has no work for the requested goal reports
+what the address does provide:
+
+```
+$ imp test //apps/server:assets
+error: //apps/server:assets has no 'test' workflow; it exports: build
+```
+
+Package and recursive selectors keep their filtering behaviour: `imp test
+//...` over a workspace of mostly non-test targets succeeds and runs the test
+targets it found. Such a selector only fails when its address space is empty,
+for example when it names a directory that does not exist.
+
 ## Select changes from Git
 
 `--changed-since REF` selects targets that own files changed since the merge
