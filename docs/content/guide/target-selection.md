@@ -21,9 +21,24 @@ imp fmt //apps/...
 imp lint //...
 ```
 
-Package selectors automatically skip target kinds that do not implement the
-goal. Exact target selectors instead report a missing goal product, which is
-usually a sign that the wrong goal or target was chosen.
+Package selectors automatically skip targets that do not implement the goal.
+An exact target selector instead reports that the target has no such workflow,
+which is usually a sign that the wrong goal or target was chosen.
+
+A target may expose more than one root for the same goal. Two suffixes select
+between them:
+
+```sh
+# A named facet, when a workflow exposes several
+imp test //crates/imp-store:imp_store@doctests
+
+# One child of an expansion, by its key
+imp run //rules/python/example:scripts#rules/python/example/scripts/demo.py
+```
+
+An expansion key is minted by the ruleset, so it is not always a bare name —
+an expansion keyed by source file uses that file's workspace-relative path, as
+above.
 
 ## Give more than one selector
 
@@ -84,8 +99,8 @@ imp targets //libraries/... --changed-since origin/main
 
 A nonexistent or invalid selector is still an error. If a valid selector has
 no changed targets in scope, the command succeeds without running work.
-Changed goal runs always use that goal's product, so `#product` overrides are
-not supported with `--changed-since`.
+A changed run always uses the goal's own workflow, so the legacy
+`//pkg:target#product` override is not supported with `--changed-since`.
 
 Goals declared with `selection: "none"` are independent of target selection:
 their callbacks still run with an empty selection when `--changed-since` is

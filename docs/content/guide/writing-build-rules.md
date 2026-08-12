@@ -127,37 +127,42 @@ one child's build handle and `.all(BUILD)` depends on all of them. Expansion
 may add tasks but cannot execute actions, keeping discovery separate from
 sandbox work.
 
-Factories whose selectable children are only known after async metadata
-discovery can register them beneath a statically exported owner:
+Sometimes the `BUILD.js` author cannot name the children at all — a glob's
+matches, or a package list that only a metadata command knows. Export
+`expansion.all(WORKFLOW)` rather than a projection of one key, and the engine
+discovers each child as its own selectable root by walking that single export:
 
 ```js
-import {
-	build,
-	discoverLabels,
-	label,
-	registerLabel,
-} from "imp:core";
+import { expand, files, glob, paths } from "imp:core";
+import { RUN } from "//rules/workflows/run";
 
-export function generatedProject(opts) {
-	const project = label({ data: opts });
-	discoverLabels(project, async owner => {
-		for (const item of await discoverItems(owner.data)) {
-			const child = label({ data: item });
-			build(child, () => buildItem(child.data));
-			registerLabel(child, `//generated:${item.name}`);
-		}
-	}, { goals: ["build"] });
-	return project;
+export function scripts({ root, include = ["*.py"] }) {
+	const expansion = expand({
+		display: `expand scripts ${root}`,
+		inputs: { sources: files({ root, include }) },
+		create() {
+			const children = {};
+			for (const file of paths(glob({ root, include, exclude: [] }))) {
+				children[file] = { [RUN]: runScript(root, file) };
+			}
+			return children;
+		},
+	});
+	return Object.freeze({ root, [RUN]: expansion.all(RUN) });
 }
 ```
 
-The discovery callback replays once per live runtime so registrations are
-never cached away. Put expensive discovery beneath `memo()`. Addresses passed
-to `registerLabel()` must be absolute and canonical; handlers remain lazy and
-run only when their child is selected.
+Each child is selectable by its key beneath the owner —
+`//tools:scripts#tools/hello.py`. `rules/python/source.js` uses exactly this
+shape. Discovery reruns on every invocation, which is why `create()` should
+stay cheap — a glob, or a read of a result some ordinary cached task already
+produced. Keep the expensive part in that task, not in `create()`.
 
 Every real subprocess runs through `run()`, hermetically sandboxed and cached by the content-addressed digest of its declared inputs, tools, and configuration. The parent directories of declared `outputs` (and directory outputs themselves) are created in the sandbox before the command runs, so scripts don't need to `mkdir` them. See the [JS code reference](../../reference/js-api/) for the full exported implementation surface.
 
+`memo()` covers host-side work that sits outside the graph, such as toolchain
+acquisition. Inside a rule's build graph, `task()` already deduplicates by
+content, so reach for `memo()` only when there is no task to hold the work.
 Memoized functions use the same metadata object:
 
 ```js
@@ -171,7 +176,7 @@ const sources = memo(async function sources(handle) {
 
 Display templates use positional placeholders. Targets render as addresses,
 scalars render plainly, and collections or objects use bounded summaries such
-as `[8 targets]` and `{…}`. User-facing products and toolchain acquisition
+as `[8 targets]` and `{…}`. User-facing work and toolchain acquisition
 normally use `info`; internal source, resource, and metadata computations use
 `debug`. Memo failures are always reported at `error`.
 
