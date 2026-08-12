@@ -4,15 +4,28 @@ weight = 2
 template = "page.html"
 +++
 
-`imp.workspace.js` is the root marker imp looks for when finding the workspace root. It's evaluated once, before any `BUILD.js` file. Import rule modules here to register their `product()`s so `BUILD.js` files can use them; each rule supplies its pinned default toolchain when imported.
+`imp.workspace.js` is the root marker imp looks for when finding the workspace root. It's evaluated once, before any `BUILD.js` file.
+
+Imports here are what enable things. Importing a workflow module enables its
+goal; importing a rule module registers that rule's configuration schema and
+supplies its pinned default toolchain, so `BUILD.js` files can use it.
 
 ```js
-import "//rules/c/cmake";
 import "//rules/workflows/build";
-import "//rules/odin";
-import "//rules/odin/odinfmt";
+import "//rules/workflows/fmt";
+import "//rules/workflows/lint";
+import "//rules/workflows/test";
 
+import "//rules/c/cmake";
+import { odinToolchain } from "//rules/odin";
+import { defaultOdinfmtToolchain } from "//rules/odin/odinfmt";
+
+export const odin = odinToolchain("dev-2026-05", { default: true });
+export const odinfmt = defaultOdinfmtToolchain();
 ```
+
+A bare `import` is enough when the rule's pinned default is what you want. Use
+a named import when the workspace exports a toolchain of its own, as below.
 
 Static, known-shape configuration uses an export named after its schema
 namespace. For example, an Odin collections configuration is declared as:
@@ -56,6 +69,11 @@ export const odin = odinToolchain("dev-2026-04", { default: true });
 ```
 
 ## `imp @TOOL` resolves exported toolchains automatically
+
+This section describes how imp runs a toolchain binary *for you*, from the
+command line. It is a separate mechanism from how a rule package gets a
+compiler for its own tasks — a rule consumes a toolchain as a graph handle,
+described in [Extending Imp](../extending-imp/).
 
 `imp @odin build foo.odin -out:foo` and `imp @odinfmt` run a managed toolchain binary directly, bypassing imp's own CLI parsing so the tool's flags never need a `--` separator. `TOOL` is resolved purely from the workspace: imp looks up the export named `TOOL` at `//:TOOL`, and if its target kind has a `"toolchain"` product registered, calls that product to get an absolute binary path and runs it.
 
