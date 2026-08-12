@@ -265,6 +265,25 @@ export async function withFakeWriteWorkspace(fn) {
 }
 
 /**
+ * Run a test body with `__host_current_goal_flags` stubbed to return `flags`,
+ * so `goalFlags()` works inside a test even though tests run outside of
+ * `execute_goal_live` (where the real binding has no flags to report) — for
+ * testing a workflow goal handler that branches on a flag such as `check`.
+ *
+ * @param {object} flags
+ * @param {() => Promise<any>} fn
+ */
+export async function withFakeGoalFlags(flags, fn) {
+	const real = globalThis.__host_current_goal_flags;
+	globalThis.__host_current_goal_flags = () => JSON.stringify(flags);
+	try {
+		return await fn();
+	} finally {
+		globalThis.__host_current_goal_flags = real;
+	}
+}
+
+/**
  * Run a test body with `__host_selected_targets` stubbed to return `list`,
  * so `selectedTargets()` works inside a test even though tests run outside
  * of `execute_goal_live` (where the real binding always errors).
