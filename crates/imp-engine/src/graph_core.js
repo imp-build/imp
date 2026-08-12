@@ -66,6 +66,33 @@ function _graphError(message) {
 	return new Error(`graph: ${message}`);
 }
 
+// Mark whatever the host rejects an action with as a user-facing failure. The
+// host builds that message from the program's own exit code and output, so the
+// user needs the message and nothing else.
+async function _graphMarkActionFailure(promise) {
+	try {
+		return await promise;
+	} catch (error) {
+		if (error instanceof Error) error.impGoalError = true;
+		throw error;
+	}
+}
+
+// Wrap a failure that came out of a task's run() body. `cause` decides how the
+// host shows it. A failed action, or a rule that raised goalError() to report
+// what a compiler, formatter, or test said, is a failure the user caused: it
+// keeps the mark, and the host prints the report alone. Anything else is a
+// fault in the rule itself, which keeps the "graph:" prefix and its full
+// diagnostic, stack included.
+function _graphTaskFailure(message, cause) {
+	if (cause && cause.impGoalError === true) {
+		const error = new Error(message);
+		error.impGoalError = true;
+		return error;
+	}
+	return _graphError(message);
+}
+
 function _graphHandle(kind, data, fingerprint, publicFields = {}) {
 	const id = _graphNextHandle++;
 	const handle = Object.freeze({
@@ -594,7 +621,10 @@ function _graphExec(record) {
 					...(spec.namedCache ? { namedCache: spec.namedCache } : {}),
 				});
 			}
-			const result = await run({
+			// A non-zero exit is the program's own verdict on the user's code,
+			// and the host already put the program's report in the message.
+			// Mark it so the CLI shows that report alone, with no JS frames.
+			const result = await _graphMarkActionFailure(run({
 				// exec.action() is only ever reachable from inside a task's own
 				// run() (the only place given an `exec`) — expand()'s create()
 				// callback is never handed one (see _graphExecuteExpansion below)
@@ -618,7 +648,7 @@ function _graphExec(record) {
 				forceCache: opts.forceCache,
 				materialize: false,
 				__graphOutputNames: outputNames,
-			});
+			}));
 			const normalizedOutputs = Object.fromEntries(
 				Object.entries(result.graphOutputs || {}).map(([name, artifact]) => [
 					name,
@@ -682,7 +712,10 @@ async function _graphExecuteTask(taskId, stack) {
 			const value = await record.run(_graphExec(record), Object.freeze(resolved));
 			return _graphValidateTaskResult(record, value);
 		} catch (error) {
-			throw _graphError(`task '${record.display}' failed: ${error?.message || error}`);
+			throw _graphTaskFailure(
+				`task '${record.display}' failed: ${error?.message || error}`,
+				error,
+			);
 		} finally {
 			_graphPhase = previous;
 			_graphAmbientPackagePath = previousPackagePath;

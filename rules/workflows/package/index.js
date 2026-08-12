@@ -29,14 +29,14 @@
 // + binary composed into a distributable zip) than the plain binary publish
 // below, and still a TODO if that's needed again.
 
-import { goal, logInfo, writeWorkspace } from "imp:core";
+import { goal, goalError, logInfo, writeWorkspace } from "imp:core";
 
 /** Publish graph package roots at the same workflow boundary as legacy artifacts. */
 export function graphPackageGoal(roots) {
 	const published = [];
 	for (const { address, result } of roots) {
 		if (!result || result.type !== "artifact" || !result.digest) {
-			throw new Error(
+			throw goalError(
 				`${address}: package graph root must resolve to an artifact handle`,
 			);
 		}

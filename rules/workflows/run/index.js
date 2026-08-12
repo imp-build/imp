@@ -12,7 +12,7 @@
 // attach(label, "run", fn) (the `runGoal()` sugar in imp:core) is a separate,
 // still-supported mechanism and is unaffected.
 
-import { goal, runArgs, runFromTemplate, runTemplate } from "imp:core";
+import { goal, goalError, runArgs, runFromTemplate, runTemplate } from "imp:core";
 
 // A graph-native [RUN] root resolves to one of two shapes:
 //
@@ -56,7 +56,7 @@ function templateFor(address, result) {
 	// content), and its `tools` are legacy tool specs run() consumes directly.
 	if (Array.isArray(result.argv)) {
 		if (typeof result.digest !== "string") {
-			throw new Error(
+			throw goalError(
 				`${address}: run graph root describing a program must supply a digest to stage`,
 			);
 		}
@@ -71,14 +71,14 @@ function templateFor(address, result) {
 	const executable = result.executable || result;
 	const executablePath = result.executablePath || executable?.path;
 	if (!executable?.digest || typeof executablePath !== "string") {
-		throw new Error(`${address}: run graph root must return an executable artifact`);
+		throw goalError(`${address}: run graph root must return an executable artifact`);
 	}
 	return stagedExecutableTemplate(address, executable.digest, executablePath);
 }
 
 export async function graphRunGoal(roots) {
 	if (roots.length !== 1) {
-		throw new Error(`run requires a single target, got ${roots.length}: ${roots.map((root) => root.address).join(", ")}`);
+		throw goalError(`run requires a single target, got ${roots.length}: ${roots.map((root) => root.address).join(", ")}`);
 	}
 	const { address, result } = roots[0];
 	// A graph-native run root may already have executed its program as an

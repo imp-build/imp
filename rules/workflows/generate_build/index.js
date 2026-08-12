@@ -22,6 +22,7 @@ import {
 	applyBuildEdits,
 	configuration,
 	goal,
+	goalError,
 	goalFlags,
 	logInfo,
 	productFor,
@@ -111,7 +112,7 @@ export async function generateBuildGoal(selection) {
 			`generate-build: ${checked.length} file(s) checked, ${changed.length} out of date`,
 		);
 		if (changed.length > 0) {
-			throw new Error(
+			throw goalError(
 				`generated BUILD files are out of date: ${changed.join(", ")}`,
 			);
 		}

@@ -12,7 +12,14 @@
 import { FMT } from "//rules/workflows/fmt";
 import { LINT } from "//rules/workflows/lint";
 import { TEST } from "//rules/workflows/test";
-import { configuration, expand, files, output, task } from "imp:core";
+import {
+	configuration,
+	expand,
+	files,
+	goalError,
+	output,
+	task,
+} from "imp:core";
 import {
 	cargoPackageHandles,
 	linkerHandlesForSpec,
@@ -264,7 +271,7 @@ function metadataTask(
 				env,
 				inputs: [input.manifests],
 			});
-			if (result.exitCode !== 0) throw new Error(result.stderr);
+			if (result.exitCode !== 0) throw goalError(result.stderr);
 			return { metadata: JSON.parse(result.stdout) };
 		},
 	});
@@ -543,12 +550,12 @@ function crateFmtTask(dir, fmt) {
 				// cargo fmt --check failed for a reason with no per-file
 				// attribution at all (e.g. a syntax error) — surface it rather
 				// than claiming a clean pass.
-				throw new Error(
+				throw goalError(
 					stdout || `cargo fmt --check failed before reaching ${input.dir}`,
 				);
 			}
 			if (own.length > 0) {
-				throw new Error(`unformatted: ${own.join(", ")}`);
+				throw goalError(`unformatted: ${own.join(", ")}`);
 			}
 		},
 	});
@@ -653,10 +660,10 @@ function crateDoctestTask(pkg, doctest) {
 				input.stderr,
 			);
 			if (failedPackageNames.has(input.packageName)) {
-				throw new Error(`doc-tests failed for ${input.packageName}`);
+				throw goalError(`doc-tests failed for ${input.packageName}`);
 			}
 			if (!attemptedLibNames.has(input.libName)) {
-				throw new Error(
+				throw goalError(
 					`doc-tests for ${input.packageName} were never reached — likely a ` +
 						"compile error elsewhere in the shared workspace run",
 				);
@@ -915,7 +922,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 						env,
 						inputs: [input.manifests],
 					});
-					if (result.exitCode !== 0) throw new Error(result.stdout);
+					if (result.exitCode !== 0) throw goalError(result.stdout);
 				},
 			});
 
@@ -968,7 +975,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 								result.stdout.includes("no library targets found") ||
 								result.stderr.includes("no library targets found");
 							if (!benign) {
-								throw new Error(
+								throw goalError(
 									[result.stdout, result.stderr].filter(Boolean).join("\n"),
 								);
 							}

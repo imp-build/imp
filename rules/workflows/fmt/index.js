@@ -11,7 +11,7 @@
 // been retired — every selected target now needs a real [FMT] graph handle.
 // attach(label, "fmt", fn) (the `fmt()` sugar in imp:core) is a separate,
 // still-supported mechanism and is unaffected.
-import { goal, goalFlags, logInfo, writeWorkspace } from "imp:core";
+import { goal, goalError, goalFlags, logInfo, writeWorkspace } from "imp:core";
 
 /** Materialize CAS-only formatter results at the workflow boundary. */
 export function graphFmtGoal(roots) {
@@ -37,7 +37,7 @@ export function graphFmtGoal(roots) {
 	}
 	if (summaryLines.length > 0) logInfo(["fmt:", ...summaryLines].join("\n"));
 	if (unformatted.length > 0)
-		throw new Error(
+		throw goalError(
 			`not formatted:\n${unformatted.map((line) => `  ${line}`).join("\n")}`,
 		);
 }
