@@ -11,15 +11,15 @@ make clear what it enables.
 ## Public entrypoints
 
 Every user-selectable rule, toolchain, or workflow lives in a named directory
-whose `index.js` is its only public import path:
+whose `index.js` is its public import path:
 
 ```text
 rules/
-  python/
-    index.js          # Python targets and public Python declarations
-    ruff/
-      index.js        # Ruff formatting and linting integration
-      format.js       # private implementation
+  js/
+    index.js          # JavaScript targets and public JavaScript declarations
+    biome/
+      index.js        # Biome formatting integration
+      toolchain.js    # private implementation
 ```
 
 The parent `rules/` directory is a namespace, not a tool. Do not add a catch-all
@@ -28,8 +28,8 @@ child tool. Import the narrowest directory that represents the capability being
 selected:
 
 ```js
-import "//rules/python";
-import "//rules/python/ruff";
+import "//rules/js";
+import "//rules/js/biome";
 import "//rules/workflows/fmt";
 ```
 
@@ -38,6 +38,28 @@ workspace or `BUILD.js` file, such as target constructors, toolchain factories,
 configuration schemas, and intentional product-registration side effects. Its
 module comment should say what importing it provides. Keep its export list
 small; an exported helper is part of the supported user API.
+
+## Independently selectable facets
+
+One case does not fit a single `index.js`: a tool whose capabilities are
+selected separately. It gets one public entrypoint per facet, inside the tool's
+directory. Ruff is the case — `//rules/python/ruff/fmt` enables formatting and
+`//rules/python/ruff/lint` enables linting, so a workspace can take one without
+the other:
+
+```js
+import "//rules/python";
+import "//rules/python/ruff/lint";
+```
+
+There is no `rules/python/ruff/index.js`, because enabling both facets at once
+is not itself a capability a user selects.
+
+Reach for this only when the facets are genuinely independent. A shared
+toolchain, or a split that is merely an implementation detail, belongs behind
+one `index.js`. Everything else here applies unchanged: the facet module is
+public, its siblings are private, and a consumer imports the facet it selected
+rather than a helper filename.
 
 ## Private implementation
 
@@ -56,7 +78,8 @@ and avoid adding a public entrypoint unless a real user capability emerges.
 
 ## Consumer rules
 
-These consumers must import directory entrypoints only:
+These consumers must import public entrypoints only — a directory's `index.js`,
+or one of its facet modules as described above:
 
 - `imp.workspace.js` and generated output from `imp init`;
 - user `BUILD.js` files and repository examples;

@@ -157,7 +157,7 @@ async fn call_catalog_export(
     argument: &serde_json::Value,
 ) -> Result<String> {
     let catalog_source = rules
-        .read_builtin("init.js")
+        .read_builtin("init/index.js")
         .map_err(|e| anyhow::anyhow!(e))
         .context("read init catalog")?;
     let runtime = JsRuntime::new().context("create init JavaScript runtime")?;
@@ -466,6 +466,54 @@ mod tests {
         )
     }
 
+    /// Every group and every feature the built-in catalog offers.
+    async fn whole_catalog(rules: &RulesSource, platform: &Platform) -> Vec<String> {
+        load_catalog(rules, platform)
+            .await
+            .unwrap()
+            .groups
+            .iter()
+            .flat_map(|group| {
+                std::iter::once(group.id.clone())
+                    .chain(group.features.iter().map(|feature| feature.id.clone()))
+            })
+            .collect()
+    }
+
+    /// Render one group's full selection, write it into a scratch workspace, and
+    /// load it. Loading evaluates every emitted import, so a stale specifier or
+    /// a registration that throws fails here — without executing a goal or
+    /// fetching a toolchain. The returned `TempDir` keeps the workspace on disk
+    /// for the caller's assertions.
+    async fn load_rendered_group(
+        group: &str,
+    ) -> (tempfile::TempDir, imp_engine::runtime::LiveWorkspace) {
+        let rules = repo_rules();
+        let catalog = load_catalog(&rules, &linux()).await.unwrap();
+        let selected: Vec<String> = catalog
+            .groups
+            .iter()
+            .filter(|candidate| candidate.id == group)
+            .flat_map(|candidate| {
+                std::iter::once(candidate.id.clone())
+                    .chain(candidate.features.iter().map(|feature| feature.id.clone()))
+            })
+            .collect();
+        assert!(!selected.is_empty(), "no catalog group named {group}");
+        let source = render_workspace(&rules, &linux(), &selected, &BTreeSet::new())
+            .await
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(WORKSPACE_FILE), &source).unwrap();
+        std::fs::write(root.path().join("BUILD.js"), "").unwrap();
+        let live = imp_engine::runtime::load_workspace(root.path())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("the rendered {group} workspace must load: {error}\n{source}")
+            });
+        (root, live)
+    }
+
     #[tokio::test]
     async fn built_in_catalog_is_valid() {
         let catalog = load_catalog(&repo_rules(), &linux()).await.unwrap();
@@ -495,46 +543,98 @@ mod tests {
     async fn renderer_keeps_language_formatters_independent() {
         let selected = vec![
             "python".to_owned(),
+            "python.fmt".to_owned(),
             "rust".to_owned(),
-            "rust.fmt".to_owned(),
         ];
         let source = render_workspace(&repo_rules(), &linux(), &selected, &BTreeSet::new())
             .await
             .unwrap();
-        // Rust's cargoPackage() is graph-native and exposes [FMT] directly
-        // (see //rules/rust) rather than a separate rustfmt submodule import.
-        // //rules/workflows/fmt is goal-only (no built-in ruleset registers
-        // a formatter merely by importing it), so selecting rust.fmt alone
-        // must not also pull in python's ruff formatter.
-        assert!(source.contains("//rules/rust"));
-        assert!(source.contains("//rules/workflows/fmt"));
-        assert!(!source.contains("ruffToolchain"));
-        assert!(!source.contains("//rules/python/ruff/fmt"));
+        // Each formatter is enabled by its own extension entrypoint, so
+        // selecting python.fmt must not reach biome or odinfmt. Ruff's
+        // toolchain arrives through //rules/python/ruff/fmt itself; naming
+        // //rules/python/ruff_toolchain here would be both redundant and a
+        // private helper in a user's workspace.
+        assert!(source.contains("import \"//rules/python/ruff/fmt\";"));
+        assert!(!source.contains("//rules/python/ruff/lint"));
+        assert!(!source.contains("//rules/python/ruff_toolchain"));
+        assert!(!source.contains("//rules/js/biome"));
+        assert!(!source.contains("//rules/odin/odinfmt"));
         assert!(!source.contains("Toolchain("));
     }
 
+    /// A workflow module is never rendered directly: every ruleset entrypoint
+    /// imports the workflow modules it needs for its `[SYMBOL]`s, so a rendered
+    /// workflow import would advertise a choice the workspace does not have.
     #[tokio::test]
-    async fn combined_render_deduplicates_shared_workflows_without_toolchains() {
-        let catalog = load_catalog(&repo_rules(), &linux()).await.unwrap();
-        let selected: Vec<String> = catalog
-            .groups
-            .iter()
-            .flat_map(|group| {
-                std::iter::once(group.id.clone())
-                    .chain(group.features.iter().map(|feature| feature.id.clone()))
-            })
-            .collect();
-        let source = render_workspace(&repo_rules(), &linux(), &selected, &BTreeSet::new())
-            .await
-            .unwrap();
-        assert_eq!(
-            source.matches("import \"//rules/workflows/test\";").count(),
-            1
+    async fn combined_render_names_only_load_bearing_entrypoints() {
+        let source = render_workspace(
+            &repo_rules(),
+            &linux(),
+            &whole_catalog(&repo_rules(), &linux()).await,
+            &BTreeSet::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !source.contains("//rules/workflows/"),
+            "workflow imports are implied by the group entrypoints:\n{source}"
         );
+        // //rules/c is the one group entrypoint that does not register its own
+        // build generator, so c.generate-build must name the module that does.
+        assert!(source.contains("import \"//rules/c/generate_build\";"));
         assert!(!source.contains("Toolchain("));
         assert!(source.contains("export const cConfig = { buildGenerate: true };"));
         assert!(source.contains("export const odinConfig = { buildGenerate: true };"));
         assert!(source.contains("export const rustConfig = { buildGenerate: true };"));
+    }
+
+    /// Public entrypoints whose capability is a facet of a directory rather
+    /// than the directory itself, so they are a module inside it instead of its
+    /// `index.js`. Sanctioned by
+    /// docs/content/guide/rule-module-structure.md; keeping the list explicit
+    /// here means a new exception has to be added deliberately.
+    const FACET_ENTRYPOINTS: &[&str] = &["python/ruff/fmt", "python/ruff/lint"];
+
+    /// `imp init` output may import public entrypoints only — see
+    /// docs/content/guide/rule-module-structure.md. A rendered specifier that
+    /// resolves to a private helper beside its directory (say
+    /// `python/ruff_toolchain.js`) is a leak of rule-implementation detail into
+    /// the user's workspace.
+    #[tokio::test]
+    async fn every_rendered_import_is_a_public_entrypoint() {
+        let rules = repo_rules();
+        let source = render_workspace(
+            &rules,
+            &linux(),
+            &whole_catalog(&rules, &linux()).await,
+            &BTreeSet::new(),
+        )
+        .await
+        .unwrap();
+        let root = imp_engine::loader::test_rules_dir().expect("locate the repo's rules/ tree");
+        let mut seen = 0;
+        for line in source.lines() {
+            let Some(specifier) = line
+                .strip_prefix("import \"//rules/")
+                .and_then(|rest| rest.strip_suffix("\";"))
+            else {
+                continue;
+            };
+            seen += 1;
+            if FACET_ENTRYPOINTS.contains(&specifier) {
+                assert!(
+                    root.join(format!("{specifier}.js")).is_file(),
+                    "//rules/{specifier} is listed as a facet entrypoint but does not exist"
+                );
+                continue;
+            }
+            assert!(
+                root.join(specifier).join("index.js").is_file(),
+                "//rules/{specifier} is neither a directory entrypoint nor a \
+                 sanctioned facet entrypoint"
+            );
+        }
+        assert!(seen > 0, "rendered nothing to check:\n{source}");
     }
 
     #[tokio::test]
@@ -553,6 +653,62 @@ mod tests {
                 .warning
                 .is_some());
         }
+    }
+
+    /// Each group's own selection must load on its own, not only as part of the
+    /// whole catalog — a broken specifier in one group is otherwise masked by
+    /// another group importing the same module.
+    ///
+    /// The goals asserted here are the ones the group's entrypoints register on
+    /// evaluation. This does not prove a goal has anything to act on; it proves
+    /// every rendered import resolves and evaluates, which is what the rendered
+    /// workspace is responsible for.
+    #[tokio::test]
+    async fn each_rendered_group_loads_with_its_goals_registered() {
+        for (group, goals) in [
+            ("c", &["build", "package"][..]),
+            ("js", &["build", "fmt"][..]),
+            (
+                "odin",
+                &["build", "fmt", "lint", "package", "run", "test"][..],
+            ),
+            (
+                "python",
+                &["build", "fmt", "lint", "package", "run", "test"][..],
+            ),
+            ("rust", &["build", "fmt", "lint", "package", "test"][..]),
+        ] {
+            let (_root, live) = load_rendered_group(group).await;
+            for goal in goals {
+                assert!(
+                    live.workspace.goals.contains_key(*goal),
+                    "{group} workspace is missing the {goal} goal"
+                );
+            }
+        }
+    }
+
+    /// `//rules/c/generate_build` is the only module that registers a C build
+    /// generator and the `c` configuration schema — `//rules/c` does not, unlike
+    /// `//rules/rust`, which imports its own. Rendering `cConfig` without that
+    /// import produced a workspace that set `buildGenerate` on a namespace no
+    /// module owned, so the generator never ran.
+    ///
+    /// A registered schema is the observable half: the generator list itself
+    /// lives in JS module state, and reaching it would mean executing the goal.
+    #[tokio::test]
+    async fn c_generate_build_selection_owns_the_c_config_namespace() {
+        let (_root, live) = load_rendered_group("c").await;
+        assert!(live.workspace.goals.contains_key("generate-build"));
+        let schema = live
+            .workspace
+            .config_schemas
+            .get("c")
+            .expect("//rules/c/generate_build must register the c config schema");
+        assert!(
+            schema.get("buildGenerate").is_some(),
+            "c config schema has no buildGenerate field: {schema}"
+        );
     }
 
     #[tokio::test]
@@ -603,15 +759,7 @@ mod tests {
     #[tokio::test]
     async fn fully_generated_workspace_loads_normally() {
         let root = tempfile::tempdir().unwrap();
-        let catalog = load_catalog(&repo_rules(), &linux()).await.unwrap();
-        let selected: Vec<String> = catalog
-            .groups
-            .iter()
-            .flat_map(|group| {
-                std::iter::once(group.id.clone())
-                    .chain(group.features.iter().map(|feature| feature.id.clone()))
-            })
-            .collect();
+        let selected = whole_catalog(&repo_rules(), &linux()).await;
         let source = render_workspace(&repo_rules(), &linux(), &selected, &BTreeSet::new())
             .await
             .unwrap();
