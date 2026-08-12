@@ -428,7 +428,25 @@ pub fn filter_changed_addresses_in(
             .iter()
             .filter(|address| parsed.matches_address(address))
             .collect();
-        if target_matches.is_empty() && label_matches.is_empty() && graph_matches.is_empty() {
+        // A graph root that exists but did not change is absent from
+        // `addresses`, which would make the three match sets above empty and
+        // the selector look like a typo. A `Target`/label keeps its workspace
+        // entry in that case and stays distinguishable, so consult the static
+        // exported-root catalog to give a graph root the same treatment: the
+        // selector resolved, it simply has no changed work. This only
+        // suppresses the "matched nothing" error — selection itself stays
+        // restricted to the changed set below.
+        let resolves_to_known_root = graph_matches.is_empty()
+            && workspace
+                .graph
+                .roots
+                .iter()
+                .any(|root| parsed.matches_address(&root.address));
+        if target_matches.is_empty()
+            && label_matches.is_empty()
+            && graph_matches.is_empty()
+            && !resolves_to_known_root
+        {
             bail!("no target or label matches selector '{selector}'");
         }
         for target in target_matches {
@@ -584,6 +602,84 @@ mod tests {
             &context,
         )
         .is_err());
+    }
+
+    fn graph_root(address: &str) -> crate::graph::GraphRoot {
+        crate::graph::GraphRoot {
+            address: address.to_owned(),
+            workflow: "generate".to_owned(),
+            facet: None,
+            handle_id: 0,
+            is_default: false,
+        }
+    }
+
+    #[test]
+    fn unchanged_graph_root_resolves_instead_of_looking_like_a_typo() {
+        // A `Target` keeps its workspace entry when it did not change, so an
+        // exact selector for it succeeds and simply selects nothing. Before
+        // `[GENERATE]` became graph-native, //ci:docs_workflow was such a
+        // target and the CI drift gate relied on that. A graph root has no
+        // workspace entry, so without the exported-root catalog it would be
+        // indistinguishable from a misspelling and fail the whole command.
+        let mut workspace = Workspace::default();
+        workspace.graph.roots.push(graph_root("//ci:docs_workflow"));
+        let context = SelectorContext::root();
+        // Something else changed; the selected root did not.
+        let addresses = std::collections::BTreeSet::from(["//docs:site".to_owned()]);
+
+        let selected = filter_changed_addresses_in(
+            &workspace,
+            &addresses,
+            &["//ci:docs_workflow".to_owned()],
+            &context,
+        )
+        .expect("an existing graph root must resolve even when unchanged");
+        assert!(
+            selected.is_empty(),
+            "an unchanged root must select no work: {selected:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_address_still_errors_when_a_root_catalog_exists() {
+        // The catalog must not weaken #124: a selector naming nothing at all
+        // stays a hard error rather than being silently dropped.
+        let mut workspace = Workspace::default();
+        workspace.graph.roots.push(graph_root("//ci:docs_workflow"));
+        let context = SelectorContext::root();
+        let addresses = std::collections::BTreeSet::from(["//docs:site".to_owned()]);
+
+        let error = filter_changed_addresses_in(
+            &workspace,
+            &addresses,
+            &["//ci:no_such_root".to_owned()],
+            &context,
+        )
+        .expect_err("an unknown address must still error");
+        assert!(error.to_string().contains("//ci:no_such_root"), "{error}");
+    }
+
+    #[test]
+    fn changed_graph_root_is_still_selected() {
+        // The catalog only suppresses the "matched nothing" error. A root
+        // that did change must still be selected for execution.
+        let mut workspace = Workspace::default();
+        workspace.graph.roots.push(graph_root("//ci:docs_workflow"));
+        let context = SelectorContext::root();
+        let addresses = std::collections::BTreeSet::from(["//ci:docs_workflow".to_owned()]);
+
+        let selected = filter_changed_addresses_in(
+            &workspace,
+            &addresses,
+            &["//ci:docs_workflow".to_owned()],
+            &context,
+        )
+        .unwrap();
+        assert_eq!(
+            selected,
+            std::collections::BTreeSet::from(["//ci:docs_workflow".to_owned()])
+        );
     }
 
     #[test]
