@@ -2291,6 +2291,21 @@ struct RegisterGlobalsArgs {
 /// regardless of which `ExecutionService` ran it. Remote-cache *write*
 /// telemetry is tracked separately (`imp_execution::remote_cache::confirmed_pushes`)
 /// since a background push can outlive this task's own completion.
+/// Binds an executing action's lifecycle to its scheduler job. The newtype is
+/// what lets `imp-exec-api`'s gate trait reach `imp-scheduler`'s `RunContext`;
+/// this is the one crate that can see both.
+struct SchedulerGate<'a>(&'a imp_scheduler::RunContext);
+
+impl imp_exec_api::JobGate for SchedulerGate<'_> {
+    fn reserve(&self) {
+        self.0.reserve()
+    }
+
+    fn started(&self) {
+        self.0.started()
+    }
+}
+
 fn report_cache_telemetry(
     run_context: &imp_scheduler::RunContext,
     cache_outcome: imp_exec_api::CacheOutcome,
@@ -4579,7 +4594,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                                         &root,
                                         run_opts,
                                         Some(cancellation.as_ref()),
-                                        Some(&|| run_context.started()),
+                                        Some(&SchedulerGate(&run_context)),
                                         ui_multi.as_ref(),
                                     )
                                     .map(|result| imp_exec_api::ExecOutcome {
@@ -4619,7 +4634,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                                     &workspace_id,
                                     action,
                                     Some(cancellation.as_ref()),
-                                    &|| run_context.started(),
+                                    &SchedulerGate(&run_context),
                                 )?;
                                 report_cache_telemetry(&run_context, result.cache_outcome);
                                 if materialize {
@@ -11547,6 +11562,80 @@ await run({{
         assert!(!marker.exists());
     }
 
+    /// A canceled action must not leave its sandbox behind under the default
+    /// retention. Keeping one per abandoned action is what let `/tmp/imp` grow to
+    /// thousands of directories. The child reports its own sandbox path, so the
+    /// assertion needs no access to the sandbox base directory.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn quickjs_host_run_cancel_hands_its_sandbox_to_the_sweep() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let sandbox_path_file = p.join("sandbox-path.txt");
+
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(&p.join(BUILD_FILE), r#"export const done = true;"#);
+
+        let live = load_workspace(p).await.unwrap();
+        *live.exec_root.lock().unwrap() = Some(p.to_owned());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let scheduler = imp_scheduler::Scheduler::new(1, Arc::clone(&cancellation), tx);
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let cancellation_thread = Arc::clone(&cancellation);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            cancellation_thread.store(true, Ordering::SeqCst);
+        });
+
+        let result = live
+            .ctx
+            .async_with(async |ctx| -> rquickjs::Result<()> {
+                let promise = Module::evaluate(
+                    ctx.clone(),
+                    "host-run-cancel-sandbox",
+                    format!(
+                        r#"
+import {{ run }} from "imp:core";
+
+await run({{
+    argv: ["sh", "-c", "printf %s \"$IMP_SANDBOX_ROOT\" > {path_file}; sleep 5"],
+    display: "cancel sandbox probe",
+    impure: true,
+}});
+"#,
+                        path_file = js_string_path(&sandbox_path_file),
+                    ),
+                )?;
+                promise.into_future::<()>().await.catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message("host-run-cancel-sandbox", format!("{e}"))
+                })?;
+                Ok(())
+            })
+            .await;
+
+        let error = format!("{}", result.unwrap_err());
+        assert!(error.contains("canceled"), "{error}");
+
+        let sandbox_root = std::fs::read_to_string(&sandbox_path_file)
+            .expect("child must have reported its sandbox root");
+        assert!(!sandbox_root.is_empty(), "empty IMP_SANDBOX_ROOT");
+        // The guard drops as the blocking worker unwinds, just after the error
+        // surfaces here.
+        std::thread::sleep(Duration::from_millis(200));
+        // A canceled action hands its sandbox to the sweep that `main` runs
+        // before it exits, so what this asserts is ownership, not absence: the
+        // sandbox is still registered and something is going to remove it.
+        // Draining the real registry here would delete the sandboxes of tests
+        // running concurrently in this binary, so claim and remove just this one.
+        assert!(
+            imp_execution::sandbox_registry::claim(Path::new(&sandbox_root)),
+            "canceled run left its sandbox unowned at {sandbox_root}"
+        );
+        std::fs::remove_dir_all(&sandbox_root).ok();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn quickjs_host_run_cancel_does_not_wait_for_inherited_output_pipes() {
@@ -12043,6 +12132,11 @@ export const build = product(K_fail_test, BUILD, toolName("fail-test-tool"), asy
         );
 
         let live = load_workspace(p).await.unwrap();
+        // This action fails on purpose, and the default retention keeps a failed
+        // action's sandbox for post-mortem. Opt out so the suite leaves nothing
+        // behind under the sandbox base dir.
+        live.exec_sandbox_retention
+            .store(SandboxRetention::Never.as_u8(), Ordering::SeqCst);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = imp_scheduler::Scheduler::new(
             1,
@@ -12106,6 +12200,11 @@ export const build = product(K_shared_fail_test, BUILD, toolName("shared-fail-te
         );
 
         let live = load_workspace(p).await.unwrap();
+        // This action fails on purpose, and the default retention keeps a failed
+        // action's sandbox for post-mortem. Opt out so the suite leaves nothing
+        // behind under the sandbox base dir.
+        live.exec_sandbox_retention
+            .store(SandboxRetention::Never.as_u8(), Ordering::SeqCst);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = imp_scheduler::Scheduler::new(
             1,

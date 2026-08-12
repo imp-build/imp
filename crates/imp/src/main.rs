@@ -354,13 +354,36 @@ async fn main() {
                 1
             }
         };
-        std::process::exit(code);
+        exit_after_sandbox_cleanup(code);
     }
 
     if let Err(e) = run().await {
         eprintln!("error: {e:#}");
-        std::process::exit(1);
+        exit_after_sandbox_cleanup(1);
     }
+
+    // A run can succeed after a signal armed cancellation, in which case actions
+    // cut short by it deferred their sandboxes to this sweep. `canceled` is true
+    // because that interruption is the only way an entry outlives a successful
+    // run; `--keep-sandbox=always` is still honoured.
+    imp_execution::sandbox_registry::cleanup_live_sandboxes(true);
+}
+
+/// Remove sandboxes still owned by in-flight work, then exit.
+///
+/// `std::process::exit` does not unwind, so a `SandboxGuard` held by a blocking
+/// worker that is still running never drops — which is how one failed run used
+/// to leak every sandbox it had staged. Returning a `Result` from `main` instead
+/// is not an option: that drops the tokio runtime, and `Runtime::drop` blocks
+/// until every started `spawn_blocking` task finishes, i.e. it waits on exactly
+/// the abandoned children the fast exit exists to escape.
+///
+/// On the failure path this runs after `run_inner`'s cancellation drain has
+/// killed those children and after the progress UI has been shut down, so the
+/// sweep prints cleanly and races with nothing that matters.
+fn exit_after_sandbox_cleanup(code: i32) -> ! {
+    imp_execution::sandbox_registry::cleanup_live_sandboxes(code != 0);
+    std::process::exit(code)
 }
 
 /// Run a managed toolchain binary directly, passing all remaining args through
@@ -719,17 +742,36 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Install the cancellation flag that in-flight work polls, and arm a second
+/// signal to terminate immediately.
+///
+/// Two handlers per signal. The first press finds the flag `false`, so
+/// `register_conditional_default` does nothing and `register` arms the flag —
+/// a graceful cancel that lets actions tear their sandboxes down. The second
+/// press finds it `true` and takes the signal's default action, so an
+/// unresponsive run can still be escaped without reaching for SIGKILL (which
+/// runs nothing and leaks every live sandbox).
+///
+/// Registration order is load-bearing: handlers run in the order registered, so
+/// the conditional default must go first or the first press would kill us.
 fn install_termination_signal_flag() -> Result<Arc<AtomicBool>> {
     let cancellation = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
     {
         for signal in signal_hook::consts::TERM_SIGNALS {
+            signal_hook::flag::register_conditional_default(*signal, Arc::clone(&cancellation))
+                .with_context(|| format!("register second-signal default for {signal}"))?;
             signal_hook::flag::register(*signal, Arc::clone(&cancellation))
                 .with_context(|| format!("register signal handler for {signal}"))?;
         }
     }
     #[cfg(not(unix))]
     {
+        signal_hook::flag::register_conditional_default(
+            signal_hook::consts::SIGINT,
+            Arc::clone(&cancellation),
+        )
+        .context("register second-signal default for SIGINT")?;
         signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&cancellation))
             .context("register signal handler for SIGINT")?;
     }

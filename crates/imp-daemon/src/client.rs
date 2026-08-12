@@ -1,7 +1,8 @@
 use crate::{convert, lifecycle, proto, PROTOCOL_VERSION};
 use anyhow::{bail, Result};
 use imp_exec_api::{
-    Capabilities, ExecAction, ExecOutcome, ExecutionService, WorkerHandle, WorkerSpec,
+    Capabilities, ExecAction, ExecOutcome, ExecutionService, JobGate, NoGate, WorkerHandle,
+    WorkerSpec,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -145,15 +146,18 @@ impl ExecutionService for RemoteExecutionService {
         action: ExecAction,
         _cancellation: Option<&AtomicBool>,
     ) -> Result<ExecOutcome> {
-        self.execute_with_start(workspace_id, action, _cancellation, &|| {})
+        self.execute_with_start(workspace_id, action, _cancellation, &NoGate)
     }
     fn execute_with_start(
         &self,
         workspace_id: &str,
         action: ExecAction,
         _cancellation: Option<&AtomicBool>,
-        started: &dyn Fn(),
+        gate: &dyn JobGate,
     ) -> Result<ExecOutcome> {
+        // No `reserve()` here on purpose: the sandbox is staged in the daemon
+        // process, so reserving would spend a local `--jobs` slot on work this
+        // process never does — including daemon-side cache hits.
         let mut c = self.client()?;
         let req = proto::ExecuteRequest {
             workspace_id: workspace_id.to_owned(),
@@ -164,7 +168,7 @@ impl ExecutionService for RemoteExecutionService {
         loop {
             match self.block_on_external(|rt| Ok(rt.block_on(stream.message())?))? {
                 Some(e) => match e.event {
-                    Some(proto::execute_event::Event::Started(_)) => started(),
+                    Some(proto::execute_event::Event::Started(_)) => gate.started(),
                     Some(proto::execute_event::Event::Finished(f)) => {
                         return match f.result {
                             Some(proto::finished::Result::Outcome(o)) => {
