@@ -29,14 +29,16 @@ impl proto::execution_server::Execution for ExecutionServer {
         let (tx, rx) = tokio::sync::mpsc::channel(2);
         tokio::task::spawn_blocking(move || {
             let display = action.display.clone();
-            let started = || {
+            // The daemon has no scheduler of its own, so there is no slot to
+            // reserve — only the start event to forward to the client.
+            let gate = imp_exec_api::StartedGate(|| {
                 let _ = tx.blocking_send(Ok(proto::ExecuteEvent {
                     event: Some(proto::execute_event::Event::Started(proto::Started {
                         display: display.clone(),
                     })),
                 }));
-            };
-            let result = svc.execute_with_start(&req.workspace_id, action, None, &started);
+            });
+            let result = svc.execute_with_start(&req.workspace_id, action, None, &gate);
             let event = match result {
                 Ok(o) => proto::ExecuteEvent {
                     event: Some(proto::execute_event::Event::Finished(proto::Finished {

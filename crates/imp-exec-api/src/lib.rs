@@ -135,7 +135,9 @@ pub struct ExecAction {
 pub enum SandboxRetention {
     /// Always delete the sandbox, even after a failed command.
     Never,
-    /// Delete on success; keep the sandbox when the command failed.
+    /// Delete on success; keep the sandbox when the command failed. A canceled
+    /// command counts as neither: its sandbox is deleted, because cancellation
+    /// abandons every queued action at once and those sandboxes show nothing.
     #[default]
     OnFailure,
     /// Never delete — retain every sandbox for inspection.
@@ -242,6 +244,43 @@ pub struct Capabilities {
 }
 
 // ---------------------------------------------------------------------------
+// Concurrency gate
+// ---------------------------------------------------------------------------
+
+/// How an action tells the caller's scheduler where it is in its lifecycle.
+///
+/// The two calls are distinct because they bound different things. `reserve`
+/// takes the concurrency slot that `--jobs` sizes, and must be held before the
+/// action creates and stages its sandbox — staging is real, expensive I/O, and
+/// leaving it ungated let hundreds of sandboxes be built at once. `started`
+/// says the action crossed into running its command, which is what decides
+/// whether it counts as a cache hit and whether it takes a progress lane.
+///
+/// An action that is satisfied from cache calls neither.
+pub trait JobGate {
+    /// Reserve the concurrency slot that bounds `--jobs`. Idempotent. Must not
+    /// mark the job started, and must not take a progress lane.
+    fn reserve(&self) {}
+    /// Announce that the action has crossed the process-start boundary.
+    fn started(&self) {}
+}
+
+/// Gate for callers with no scheduler to answer to.
+pub struct NoGate;
+
+impl JobGate for NoGate {}
+
+/// Gate that reports `started` to a callback and has no slot to reserve — for
+/// transports that expose the start event but do not own the concurrency limit.
+pub struct StartedGate<F: Fn()>(pub F);
+
+impl<F: Fn()> JobGate for StartedGate<F> {
+    fn started(&self) {
+        (self.0)()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The service trait
 // ---------------------------------------------------------------------------
 
@@ -263,17 +302,18 @@ pub trait ExecutionService: Send + Sync {
         cancellation: Option<&AtomicBool>,
     ) -> Result<ExecOutcome>;
 
-    /// Execute while notifying the caller when the action has crossed the
-    /// process-start boundary. Implementations may leave the callback unused
-    /// for transports that do not expose that lifecycle event yet.
+    /// Execute against a caller-supplied [`JobGate`], so the action can reserve
+    /// its concurrency slot before staging and report when it starts running.
+    /// Implementations may leave the gate unused for transports that do not
+    /// expose those lifecycle events yet.
     fn execute_with_start(
         &self,
         workspace_id: &str,
         action: ExecAction,
         cancellation: Option<&AtomicBool>,
-        started: &dyn Fn(),
+        gate: &dyn JobGate,
     ) -> Result<ExecOutcome> {
-        let _ = started;
+        let _ = gate;
         self.execute(workspace_id, action, cancellation)
     }
 

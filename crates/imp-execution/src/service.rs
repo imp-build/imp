@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 use imp_exec_api::{
-    Capabilities, ExecAction, ExecOutcome, ExecutionService, WorkerHandle, WorkerSpec,
+    Capabilities, ExecAction, ExecOutcome, ExecutionService, JobGate, WorkerHandle, WorkerSpec,
 };
 use imp_store::cache::named_cache_key_path_by_id;
 
@@ -58,9 +58,9 @@ impl ExecutionService for LocalExecutionService {
         workspace_id: &str,
         action: ExecAction,
         cancellation: Option<&AtomicBool>,
-        started: &dyn Fn(),
+        gate: &dyn JobGate,
     ) -> Result<ExecOutcome> {
-        exec_run_hermetic_with_start(workspace_id, action, cancellation, started)
+        exec_run_hermetic_with_start(workspace_id, action, cancellation, gate)
     }
 
     fn cache_dir_get(&self, workspace_id: &str, name: &str, key: &str) -> Result<Option<PathBuf>> {

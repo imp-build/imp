@@ -116,7 +116,9 @@ pub struct Scheduler {
     /// Bounds concurrent jobs to `jobs`.
     permits: Arc<Semaphore>,
     /// Stable slot ids in `[0, jobs)` handed to running jobs so the UI can show
-    /// a fixed set of lanes. A permit is always held before a slot is taken.
+    /// a fixed set of lanes. A permit is always held before a slot is taken; the
+    /// reverse does not hold, since a job reserves its permit before staging and
+    /// may finish without ever starting a command.
     slots: Arc<Mutex<Vec<usize>>>,
     events: UnboundedSender<TaskEvent>,
     next_job: AtomicU64,
@@ -128,9 +130,13 @@ pub struct Scheduler {
     cancellation: Arc<AtomicBool>,
 }
 
-/// Handle given to a scheduled job so it can announce that it actually
-/// started doing work. Reserving a scheduler slot is not sufficient: a job
-/// may be satisfied entirely by the execution cache.
+/// Handle given to a scheduled job so it can announce where it is in its
+/// lifecycle. The two events are separate on purpose: [`RunContext::reserve`]
+/// takes the concurrency slot that bounds `--jobs`, which a job must hold before
+/// it stages a sandbox, while [`RunContext::started`] says it crossed into
+/// running its command. Holding a slot is not evidence of the latter — a job may
+/// be satisfied entirely by the execution cache, and cache classification keys
+/// off `started` alone.
 pub struct RunContext {
     events: UnboundedSender<TaskEvent>,
     id: u64,
@@ -138,6 +144,7 @@ pub struct RunContext {
     permits: Arc<Semaphore>,
     slots: Arc<Mutex<Vec<usize>>>,
     state: Arc<RunState>,
+    cancellation: Arc<AtomicBool>,
 }
 
 struct RunState {
@@ -148,26 +155,58 @@ struct RunState {
 }
 
 impl RunContext {
-    pub fn started(&self) {
-        self.state.started.store(true, Ordering::SeqCst);
-        let mut slot = self.state.slot.lock().unwrap();
-        if slot.is_some() {
-            return;
+    /// Take the concurrency slot that bounds `--jobs`, if this job does not hold
+    /// one already. Spins on the blocking pool because it runs inside a
+    /// `spawn_blocking` closure and cannot await.
+    ///
+    /// `strict` decides what happens when the run is being canceled. A job that
+    /// is only reserving gives up and returns `false`, so a cancellation does not
+    /// have to wait out every queued job's turn; a job reporting `started` waits
+    /// regardless, since a progress lane without a permit would break the
+    /// `slots_taken <= permits_held <= jobs` invariant.
+    fn acquire_permit(&self, strict: bool) -> bool {
+        let mut held = self.state.permit.lock().unwrap();
+        if held.is_some() {
+            return true;
         }
-        let permit = loop {
+        loop {
             match self.permits.clone().try_acquire_owned() {
-                Ok(permit) => break permit,
+                Ok(permit) => {
+                    *held = Some(permit);
+                    return true;
+                }
                 Err(tokio::sync::TryAcquireError::NoPermits) => {
+                    if !strict && self.cancellation.load(Ordering::SeqCst) {
+                        return false;
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 Err(tokio::sync::TryAcquireError::Closed) => {
                     panic!("scheduler semaphore closed")
                 }
             }
-        };
+        }
+    }
+
+    /// Reserve this job's concurrency slot before it does expensive work such as
+    /// staging a sandbox. Idempotent, and deliberately silent: it neither marks
+    /// the job started nor takes a progress lane, so cache classification is
+    /// unaffected.
+    pub fn reserve(&self) {
+        let _ = self.acquire_permit(false);
+    }
+
+    pub fn started(&self) {
+        self.state.started.store(true, Ordering::SeqCst);
+        // Never hold the slot lock across the permit spin: a permit is always
+        // taken first, and the two locks must not nest.
+        self.acquire_permit(true);
+        let mut slot = self.state.slot.lock().unwrap();
+        if slot.is_some() {
+            return;
+        }
         let assigned = self.slots.lock().unwrap().pop().unwrap_or(0);
         *slot = Some(assigned);
-        *self.state.permit.lock().unwrap() = Some(permit);
         let _ = self.events.send(TaskEvent::LaneStarted {
             kind: LaneKind::Sandbox,
             slot: assigned,
@@ -240,8 +279,9 @@ impl Scheduler {
 
     /// Submit a blocking unit of work owned by memo node `parent`. Emits
     /// `Pending` immediately, then runs `f` on a blocking worker. The job calls
+    /// [`RunContext::reserve`] before it stages anything expensive, and
     /// [`RunContext::started`] when it has crossed its actual work boundary;
-    /// cache-only jobs never need to call it.
+    /// cache-only jobs never need to call either.
     pub async fn run<T, F>(
         &self,
         parent: Option<u64>,
@@ -288,6 +328,7 @@ impl Scheduler {
             permits: Arc::clone(&self.permits),
             slots: Arc::clone(&self.slots),
             state: Arc::clone(&state),
+            cancellation: Arc::clone(&self.cancellation),
         };
         let result = tokio::task::spawn_blocking(move || f(context)).await;
         if let Some(slot) = state.slot.lock().unwrap().take() {
@@ -297,8 +338,11 @@ impl Scheduler {
                 id,
             });
             self.slots.lock().unwrap().push(slot);
-            drop(state.permit.lock().unwrap().take());
         }
+        // Unconditional, and after the slot: a job that reserved a permit but
+        // never started holds no slot, and leaving its permit behind would retire
+        // one `--jobs` lane for the rest of the run.
+        drop(state.permit.lock().unwrap().take());
 
         let outcome = match &result {
             Ok(Ok(_)) => TaskOutcome::Ok,
@@ -325,7 +369,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::{Scheduler, TaskEvent, TaskKind};
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     #[tokio::test]
@@ -382,5 +426,98 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// `reserve()` is what bounds sandbox staging, so it must respect `--jobs`
+    /// while staying invisible to lane and cache accounting.
+    #[tokio::test]
+    async fn reserve_bounds_concurrency_without_starting_a_lane() {
+        const JOBS: usize = 2;
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = Scheduler::new(JOBS, Arc::new(AtomicBool::new(false)), tx);
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for index in 0..8 {
+            let scheduler = Arc::clone(&scheduler);
+            let live = Arc::clone(&live);
+            let peak = Arc::clone(&peak);
+            handles.push(tokio::spawn(async move {
+                scheduler
+                    .run(
+                        None,
+                        format!("staging {index}"),
+                        TaskKind::Sandbox,
+                        move |context| {
+                            context.reserve();
+                            let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(now, Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                            live.fetch_sub(1, Ordering::SeqCst);
+                            Ok(())
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert!(
+            peak.load(Ordering::SeqCst) <= JOBS,
+            "reserve() must bound staging to --jobs, saw {} concurrent",
+            peak.load(Ordering::SeqCst)
+        );
+        let collected: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(
+            collected
+                .iter()
+                .all(|event| !matches!(event, TaskEvent::LaneStarted { .. })),
+            "reserve() must not take a progress lane"
+        );
+        let done: Vec<_> = collected
+            .iter()
+            .filter_map(|event| match event {
+                TaskEvent::Done { cached, .. } => Some(*cached),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(done.len(), 8);
+        assert!(
+            done.iter().all(|cached| *cached == Some(true)),
+            "reserve() alone must not change cache classification"
+        );
+    }
+
+    /// A job that reserves but never starts holds a permit and no slot. Releasing
+    /// the permit only alongside a slot would retire a `--jobs` lane per such job
+    /// and wedge the scheduler; the timeout is what catches that.
+    #[tokio::test]
+    async fn reserve_only_jobs_release_their_permit() {
+        let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = Scheduler::new(1, Arc::new(AtomicBool::new(false)), tx);
+
+        let work = async {
+            for index in 0..4 {
+                scheduler
+                    .run(
+                        None,
+                        format!("reserve {index}"),
+                        TaskKind::Sandbox,
+                        |context| {
+                            context.reserve();
+                            Ok(())
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), work)
+            .await
+            .expect("reserve-only jobs must not exhaust the permit pool");
     }
 }

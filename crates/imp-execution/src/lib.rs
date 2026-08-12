@@ -5,6 +5,7 @@
 pub mod exec;
 pub mod fetch;
 pub mod remote_cache;
+pub mod sandbox_registry;
 pub mod service;
 pub mod staging;
 pub mod worker;

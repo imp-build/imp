@@ -27,7 +27,8 @@ use imp_store::digest::{
 };
 
 pub use imp_exec_api::{
-    ExecAction, ExecIoSpec, ExecRunOpts, ExecRunResult, ExecToolSpec, SandboxRetention,
+    ExecAction, ExecIoSpec, ExecRunOpts, ExecRunResult, ExecToolSpec, JobGate, NoGate,
+    SandboxRetention,
 };
 
 /// Execute a frontend-staged action. The compatibility implementation below
@@ -39,14 +40,14 @@ pub fn exec_run_hermetic(
     action: ExecAction,
     cancellation: Option<&AtomicBool>,
 ) -> Result<imp_exec_api::ExecOutcome> {
-    exec_run_hermetic_with_start(workspace_id, action, cancellation, &|| {})
+    exec_run_hermetic_with_start(workspace_id, action, cancellation, &imp_exec_api::NoGate)
 }
 
 pub fn exec_run_hermetic_with_start(
     workspace_id: &str,
     action: ExecAction,
     cancellation: Option<&AtomicBool>,
-    started: &dyn Fn(),
+    gate: &dyn JobGate,
 ) -> Result<imp_exec_api::ExecOutcome> {
     let env = action
         .env
@@ -85,7 +86,7 @@ pub fn exec_run_hermetic_with_start(
         workspace_id,
         legacy,
         cancellation,
-        Some(started),
+        Some(gate),
         None,
     )
     .with_context(|| format!("hermetic executor action for workspace {workspace_id}"))?;
@@ -436,19 +437,37 @@ fn signal_child_process_group(child: &Child, signal: &str) -> bool {
 /// RAII guard that removes a sandbox root on drop unless the configured
 /// retention policy says to keep it. `succeeded` is flipped to `true` right
 /// before a successful return so the guard covers every exit path — normal
-/// return, `bail!`, and panics — uniformly.
-pub struct SandboxGuard {
+/// return, `bail!`, and panics — uniformly. The one path it cannot cover is
+/// `std::process::exit`, which does not unwind; `sandbox_registry` is the
+/// fallback owner for that case.
+///
+/// The guard borrows the run's cancellation flag so `drop` can tell a canceled
+/// action from a failed one. The two differ under the default `OnFailure`: a
+/// failure keeps its sandbox for post-mortem, a cancellation does not.
+///
+/// Note that `imp`'s `main` sets the cancellation flag on *any* error, to kill
+/// in-flight children. The action that actually failed still keeps its sandbox,
+/// because its own guard drops before that error propagates; the siblings the
+/// abort cut short are the ones discarded. That is the intent — do not "fix" it.
+pub struct SandboxGuard<'a> {
     root: PathBuf,
     retention: SandboxRetention,
     succeeded: bool,
+    cancellation: Option<&'a AtomicBool>,
 }
 
-impl SandboxGuard {
-    fn new(root: PathBuf, retention: SandboxRetention) -> Self {
+impl<'a> SandboxGuard<'a> {
+    fn new(
+        root: PathBuf,
+        retention: SandboxRetention,
+        cancellation: Option<&'a AtomicBool>,
+    ) -> Self {
+        crate::sandbox_registry::register(&root, retention);
         Self {
             root,
             retention,
             succeeded: false,
+            cancellation,
         }
     }
 
@@ -457,21 +476,29 @@ impl SandboxGuard {
     }
 }
 
-impl Drop for SandboxGuard {
+impl Drop for SandboxGuard<'_> {
     fn drop(&mut self) {
-        let keep = match self.retention {
-            SandboxRetention::Never => false,
-            SandboxRetention::OnFailure => !self.succeeded,
-            SandboxRetention::Always => true,
-        };
-        if keep {
+        let canceled = self
+            .cancellation
+            .is_some_and(|flag| flag.load(Ordering::SeqCst));
+        if canceled {
+            // Teardown in progress. Leave this sandbox registered and let the
+            // sweep in `main` remove it: removing a large tree takes longer than
+            // the process has left, and being cut off partway through leaves a
+            // half-deleted directory that nothing will ever come back for. The
+            // sweep runs to completion before the process exits.
+            return;
+        }
+        if !crate::sandbox_registry::claim(&self.root) {
+            // The sweep already owns this sandbox.
+            return;
+        }
+        if crate::sandbox_registry::keep_sandbox(self.retention, self.succeeded, canceled) {
             eprintln!("keeping sandbox {}", self.root.display());
             return;
         }
-        if let Err(error) = std::fs::remove_dir_all(&self.root) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("failed to remove sandbox {}: {error}", self.root.display());
-            }
+        if let Err(error) = crate::sandbox_registry::remove_sandbox_tree(&self.root) {
+            eprintln!("failed to remove sandbox {}: {error}", self.root.display());
         }
     }
 }
@@ -703,7 +730,7 @@ pub fn exec_run_local_with_start(
     workspace_root: &Path,
     opts: ExecRunOpts,
     cancellation: Option<&AtomicBool>,
-    started: Option<&dyn Fn()>,
+    gate: Option<&dyn JobGate>,
     ui_suspend: Option<&MultiProgress>,
 ) -> Result<ExecRunResult> {
     let workspace_id = imp_store::cache::workspace_cache_id(workspace_root);
@@ -712,7 +739,7 @@ pub fn exec_run_local_with_start(
         &workspace_id,
         opts,
         cancellation,
-        started,
+        gate,
         ui_suspend,
     )
 }
@@ -776,7 +803,7 @@ fn exec_run_inner_with_start(
     workspace_id: &str,
     opts: ExecRunOpts,
     cancellation: Option<&AtomicBool>,
-    started: Option<&dyn Fn()>,
+    gate: Option<&dyn JobGate>,
     ui_suspend: Option<&MultiProgress>,
 ) -> Result<ExecRunResult> {
     if !opts.sandbox {
@@ -925,15 +952,31 @@ fn exec_run_inner_with_start(
         );
     }
 
-    // Cache miss — build the sandbox and run the command. The guard removes the
-    // sandbox on drop (per the retention policy), covering every exit path below.
+    // Cache miss — this action is going to do real work, so take the `--jobs`
+    // slot now, before staging. Creating a sandbox and hardlinking a full input
+    // tree into it is the expensive part; gating only the command spawn let an
+    // unbounded number of sandboxes be staged at once.
+    //
+    // Everything above this point is cache lookup, so a cache hit still costs no
+    // slot. Re-check cancellation once the slot is in hand: a run being torn down
+    // must stop creating sandboxes rather than stage every action it had queued.
+    if let Some(gate) = gate {
+        gate.reserve();
+    }
+    if cancellation.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        bail!("{} canceled", opts.display);
+    }
+
+    // The guard removes the sandbox on drop (per the retention policy), covering
+    // every exit path below.
     let sandbox_root = create_sandbox_root()?;
     imp_store::artifact_trace!(
         "cache-miss task_key={task_key} display={:?} sandbox={}",
         opts.display,
         sandbox_root.display()
     );
-    let mut sandbox_guard = SandboxGuard::new(sandbox_root.clone(), opts.sandbox_retention);
+    let mut sandbox_guard =
+        SandboxGuard::new(sandbox_root.clone(), opts.sandbox_retention, cancellation);
     let tool_path_entries = materialize_tools_into_sandbox(&opts.tools, &sandbox_root)?;
 
     // Stage inputs directly from CAS (hardlinked where possible) using the tree
@@ -1009,8 +1052,10 @@ fn exec_run_inner_with_start(
     command.process_group(0);
 
     // The remote race may already have resolved during sandbox staging above —
-    // check once before taking a job-slot permit or spawning, so a fast
-    // remote hit never counts against `--jobs` for work we're about to abandon.
+    // check once before spawning. The `--jobs` slot is already held, because it
+    // gated that staging, but returning here still keeps a remote win out of a
+    // progress lane and classified as the cache hit it is: that follows from
+    // never reaching `started()` below.
     if let Some(rx) = remote_rx.as_ref() {
         if let Ok(Some(record)) = rx.try_recv() {
             imp_store::artifact_trace!(
@@ -1022,8 +1067,8 @@ fn exec_run_inner_with_start(
         }
     }
 
-    if let Some(started) = started {
-        started();
+    if let Some(gate) = gate {
+        gate.started();
     }
 
     let (status, stdout, stderr) = if opts.stream {
@@ -1363,7 +1408,9 @@ mod tests {
             stream: false,
             materialize: true,
             no_cache: false,
-            sandbox_retention: SandboxRetention::default(),
+            // Never, not the default: these tests write into the real sandbox
+            // base dir, and the default keeps a sandbox for every failing case.
+            sandbox_retention: SandboxRetention::Never,
             allow_failure: false,
         }
     }
@@ -1425,7 +1472,9 @@ mod tests {
             stream: false,
             materialize: true,
             no_cache: false,
-            sandbox_retention: SandboxRetention::default(),
+            // Never, not the default: these tests write into the real sandbox
+            // base dir, and the default keeps a sandbox for every failing case.
+            sandbox_retention: SandboxRetention::Never,
             allow_failure: false,
         }
     }
@@ -1994,7 +2043,9 @@ mod tests {
             stream: false,
             materialize: true,
             no_cache: true,
-            sandbox_retention: SandboxRetention::default(),
+            // Never, not the default: these tests write into the real sandbox
+            // base dir, and the default keeps a sandbox for every failing case.
+            sandbox_retention: SandboxRetention::Never,
             allow_failure: false,
         };
         stage2.no_cache = true;
@@ -2334,7 +2385,7 @@ mod tests {
     fn sandbox_guard_deletes_on_success() {
         let (_root, sandbox) = guard_sandbox_dir();
         {
-            let mut guard = SandboxGuard::new(sandbox.clone(), SandboxRetention::OnFailure);
+            let mut guard = SandboxGuard::new(sandbox.clone(), SandboxRetention::OnFailure, None);
             guard.succeed();
         }
         assert!(
@@ -2348,7 +2399,7 @@ mod tests {
         let (_root, sandbox) = guard_sandbox_dir();
         {
             // Not marked succeeded — simulates a failed command.
-            let _guard = SandboxGuard::new(sandbox.clone(), SandboxRetention::OnFailure);
+            let _guard = SandboxGuard::new(sandbox.clone(), SandboxRetention::OnFailure, None);
         }
         assert!(sandbox.exists(), "failed OnFailure run must keep sandbox");
     }
@@ -2357,7 +2408,7 @@ mod tests {
     fn sandbox_guard_never_deletes_even_on_failure() {
         let (_root, sandbox) = guard_sandbox_dir();
         {
-            let _guard = SandboxGuard::new(sandbox.clone(), SandboxRetention::Never);
+            let _guard = SandboxGuard::new(sandbox.clone(), SandboxRetention::Never, None);
         }
         assert!(!sandbox.exists(), "Never retention must always delete");
     }
@@ -2366,10 +2417,31 @@ mod tests {
     fn sandbox_guard_always_keeps_even_on_success() {
         let (_root, sandbox) = guard_sandbox_dir();
         {
-            let mut guard = SandboxGuard::new(sandbox.clone(), SandboxRetention::Always);
+            let mut guard = SandboxGuard::new(sandbox.clone(), SandboxRetention::Always, None);
             guard.succeed();
         }
         assert!(sandbox.exists(), "Always retention must keep the sandbox");
+    }
+
+    /// Under cancellation the guard hands its sandbox to the sweep rather than
+    /// starting a removal the exiting process may cut in half. The sandbox must
+    /// therefore still be registered when the guard is gone.
+    #[test]
+    fn sandbox_guard_defers_a_canceled_sandbox_to_the_sweep() {
+        let (_root, sandbox) = guard_sandbox_dir();
+        let canceled = AtomicBool::new(true);
+        {
+            let _guard = SandboxGuard::new(
+                sandbox.clone(),
+                SandboxRetention::OnFailure,
+                Some(&canceled),
+            );
+        }
+        assert!(
+            crate::sandbox_registry::claim(&sandbox),
+            "a canceled sandbox must stay registered for the sweep to remove"
+        );
+        assert!(sandbox.exists(), "the guard must not start the removal");
     }
 
     #[test]
