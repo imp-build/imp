@@ -34,8 +34,8 @@ import "//rules/workflows/fmt";
 ```
 
 `index.js` owns the public contract. It exports declarations that belong in a
-workspace or `BUILD.js` file, such as target constructors, toolchain factories,
-configuration schemas, and intentional product-registration side effects. Its
+workspace or `BUILD.js` file, such as rule factories, toolchain factories,
+configuration schemas, and intentional registration side effects. Its
 module comment should say what importing it provides. Keep its export list
 small; an exported helper is part of the supported user API.
 
@@ -65,7 +65,7 @@ rather than a helper filename.
 
 Put implementation modules below the entrypoint's directory and import them
 only from rule implementation code or focused tests. Helpers may contain
-product functions, source discovery, lockfile handling, or platform details,
+task construction, source discovery, lockfile handling, or platform details,
 but users must not need their filenames to configure a workspace.
 
 Create a child directory only when it is independently selected or configured
@@ -105,10 +105,10 @@ the canonical directory path is the only supported path.
 
 ## Registration and migration checklist
 
-Loading an entrypoint must preserve every product, configuration schema,
-default toolchain, and goal registration that its public capability requires.
-Avoid cycles by keeping shared target types in the parent entrypoint and having
-a selected child entrypoint register only its own product.
+Loading an entrypoint must preserve every configuration schema, default
+toolchain, and goal implementation that its public capability requires.
+Avoid cycles by keeping shared rule factories in the parent entrypoint and
+having a selected child entrypoint register only its own.
 
 For each migration:
 
@@ -116,6 +116,6 @@ For each migration:
    public surface.
 2. Repoint workspace, `BUILD.js`, initializer, example, and documentation
    imports to the directory path.
-3. Update path-sensitive loader, API-reference, and product-registration tests.
+3. Update path-sensitive loader, API-reference, and registration tests.
 4. Remove the old path, then verify the canonical import both loads and
-   registers the expected products.
+   registers what its capability requires.
