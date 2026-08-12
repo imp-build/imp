@@ -1756,14 +1756,15 @@ async fn cmd_targets(selectors: &[String], changed_since: Option<&str>, tree: &T
             }
         }
     } else {
-        let graph_roots_owned = spike::resolve_graph_roots_with_expansion(
+        let graph = spike::resolve_graph_with_expansion(
             &workspace,
             &workspace_root,
+            None,
             selectors,
             &selector_context,
         )
         .await?;
-        let graph_roots: Vec<&GraphRoot> = graph_roots_owned.iter().collect();
+        let graph_roots: Vec<&GraphRoot> = graph.roots.iter().collect();
         let labels = spike::select_labels_with_discovered_children_in(
             &discovered_workspace,
             &legacy_selectors,
@@ -1779,14 +1780,27 @@ async fn cmd_targets(selectors: &[String], changed_since: Option<&str>, tree: &T
                     }
                 }
                 Err(error) => {
-                    if spike::select_labels_with_discovered_children_in(
+                    // Per-selector: another selector matching a graph root
+                    // says nothing about this one. Testing the invocation's
+                    // whole graph selection here is what used to make a
+                    // mistyped selector disappear silently.
+                    if !spike::select_labels_with_discovered_children_in(
                         &discovered_workspace,
                         single,
                         &selector_context,
                     )?
                     .is_empty()
-                        && graph_roots.is_empty()
+                        || !graph.unmatched.contains(selector)
                     {
+                        continue;
+                    }
+                    if let Some(error) = spike::unmatched_selector_error(
+                        &discovered_workspace,
+                        None,
+                        selector,
+                        &selector_context,
+                        error,
+                    ) {
                         return Err(error);
                     }
                 }
@@ -1845,7 +1859,7 @@ async fn cmd_dependencies(selectors: &[String], goal: Option<&str>, tree: &Tree)
         selectors,
         &selector_context,
     )?;
-    let (graph_roots_owned, graph_walk) = spike::resolve_graph_with_expansion(
+    let graph = spike::resolve_graph_with_expansion(
         &workspace,
         &workspace_root,
         None,
@@ -1853,7 +1867,8 @@ async fn cmd_dependencies(selectors: &[String], goal: Option<&str>, tree: &Tree)
         &selector_context,
     )
     .await?;
-    let graph_roots: Vec<&GraphRoot> = graph_roots_owned.iter().collect();
+    let graph_walk = graph.walk;
+    let graph_roots: Vec<&GraphRoot> = graph.roots.iter().collect();
     let mut out = String::new();
     let mut target_selectors = Vec::new();
     for selector in selectors {
@@ -1861,14 +1876,24 @@ async fn cmd_dependencies(selectors: &[String], goal: Option<&str>, tree: &Tree)
         match selector::select_targets_in(&discovered_workspace, single, &selector_context) {
             Ok(_) => target_selectors.push(selector.clone()),
             Err(error) => {
-                if spike::select_labels_with_discovered_children_in(
+                // Per-selector, as in `cmd_targets` above.
+                if !spike::select_labels_with_discovered_children_in(
                     &discovered_workspace,
                     single,
                     &selector_context,
                 )?
                 .is_empty()
-                    && graph_roots.is_empty()
+                    || !graph.unmatched.contains(selector)
                 {
+                    continue;
+                }
+                if let Some(error) = spike::unmatched_selector_error(
+                    &discovered_workspace,
+                    None,
+                    selector,
+                    &selector_context,
+                    error,
+                ) {
                     return Err(error);
                 }
             }
@@ -1934,7 +1959,7 @@ async fn cmd_graph(
         scheduler::Scheduler::new(1, Arc::new(std::sync::atomic::AtomicBool::new(false)), tx);
     *workspace.scheduler.lock().unwrap() = Some(scheduler);
     tokio::spawn(async move { while events.recv().await.is_some() {} });
-    let (graph_roots_owned, graph_walk) = match view {
+    let graph = match view {
         GraphView::Catalog => {
             spike::resolve_graph_catalog_view(&workspace, goal, selectors, &selector_context)
                 .await?
@@ -1951,8 +1976,25 @@ async fn cmd_graph(
         }
     };
     *workspace.scheduler.lock().unwrap() = None;
+    let graph_walk = graph.walk;
+    let graph_roots_owned = graph.roots;
     if graph_roots_owned.is_empty() {
         anyhow::bail!("no exported graph roots matched {selectors:?}");
+    }
+    // This command is graph-only — it has no target or label side to fall
+    // back on, so any selector that found no root is a mistake, even when
+    // its neighbours resolved. A wildcard that merely covers no work for
+    // `--goal` is still fine; `unmatched_selector_error` owns that rule.
+    for selector in &graph.unmatched {
+        if let Some(error) = spike::unmatched_selector_error(
+            &workspace.workspace,
+            goal,
+            selector,
+            &selector_context,
+            anyhow::anyhow!("no exported graph root matches selector '{selector}'"),
+        ) {
+            return Err(error);
+        }
     }
     // `resolve_graph_with_expansion` always adds synthetic `parent#childKey`
     // roots for an expansion's discovered children (so `imp targets`/`imp

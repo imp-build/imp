@@ -363,6 +363,47 @@ mod tests {
         assert_eq!(selected[0].facet.as_deref(), Some("asan"));
     }
 
+    /// The two primitives `unmatched_selector_error` builds on: `select`
+    /// reports a non-matching selector as an empty result rather than an
+    /// error (so callers must test emptiness per selector to notice one), and
+    /// `workflows_at` names what an address does export, which is what turns
+    /// "matched nothing" into a message worth reading.
+    #[test]
+    fn select_is_silent_on_a_non_matching_selector_and_workflows_at_names_the_exports() {
+        let catalog = GraphCatalog {
+            roots: vec![
+                root("//pkg:app", "build", None, false),
+                root("//pkg:app", "lint", None, false),
+            ],
+        };
+        let context = SelectorContext::root();
+
+        assert!(catalog
+            .select("test", &["//pkg:app".to_owned()], &context)
+            .unwrap()
+            .is_empty());
+        assert!(catalog
+            .select_catalog(&["//nope:missing".to_owned()], &context)
+            .unwrap()
+            .is_empty());
+        // The address exists, just not for "test" — `select_catalog` is how a
+        // caller tells that apart from an address that does not exist.
+        assert_eq!(
+            catalog
+                .select_catalog(&["//pkg:app".to_owned()], &context)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            catalog
+                .workflows_at("//pkg:app")
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["build", "lint"]
+        );
+    }
+
     #[test]
     fn synthetic_children_builds_parent_hash_child_key_addresses() {
         let parent = root_with_handle("//pkg:tests", "test", None, false, 10);
