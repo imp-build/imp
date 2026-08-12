@@ -12,7 +12,7 @@
 // at the workflow boundary. Staleness is measured here, against the real
 // workspace, rather than inside the task — that keeps the generator itself
 // hermetic and lets both modes share one cache entry.
-import { goal, goalFlags, logInfo, writeWorkspace } from "imp:core";
+import { goal, goalError, goalFlags, logInfo, writeWorkspace } from "imp:core";
 import { generatedFileIsStale } from "//rules/imp/generate";
 
 /** Publish graph generate roots at the workflow boundary, or verify them. */
@@ -22,14 +22,14 @@ export function graphGenerateGoal(roots) {
 	let checked = 0;
 	for (const { address, result } of roots) {
 		if (!result || !Array.isArray(result.paths) || !result.files) {
-			throw new Error(
+			throw goalError(
 				`${address}: generate graph root must resolve to a generatedFiles() result`,
 			);
 		}
 		for (const path of result.paths) {
 			const artifact = result.files[path];
 			if (!artifact || !artifact.digest) {
-				throw new Error(
+				throw goalError(
 					`${address}: generate graph root has no artifact for '${path}'`,
 				);
 			}
@@ -44,7 +44,7 @@ export function graphGenerateGoal(roots) {
 	const listed = stale.map((path) => `  ${path}`).join("\n");
 	if (check) {
 		if (stale.length > 0)
-			throw new Error(`generated files are out of date:\n${listed}`);
+			throw goalError(`generated files are out of date:\n${listed}`);
 		logInfo(`generate --check: ${checked} generated file(s) up to date`);
 		return;
 	}

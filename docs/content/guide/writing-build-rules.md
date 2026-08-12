@@ -175,6 +175,45 @@ as `[8 targets]` and `{…}`. User-facing products and toolchain acquisition
 normally use `info`; internal source, resource, and metadata computations use
 `debug`. Memo failures are always reported at `error`.
 
+## Report a failure the user must fix
+
+A goal handler — the `graph` function given to `goal()` — and a task's `run()`
+body both report two very different kinds of failure, and imp shows them
+differently.
+
+Use `goalError(message)` when the workspace is at fault and the user can
+correct it. imp prints the message alone:
+
+```js
+import { goalError } from "imp:core";
+
+if (stale.length > 0) {
+    throw goalError(`generated files are out of date:\n${listed}`);
+}
+```
+
+```text
+error: generated files are out of date:
+  .github/workflows/docs.yml
+```
+
+The same applies inside a task. A rule that runs a tool with
+`allowFailure: true` and then reports the tool's verdict itself must use
+`goalError`, so the report reaches the user without the engine's own frames
+around it:
+
+```js
+if (own.length > 0) throw goalError(`unformatted: ${own.join(", ")}`);
+```
+
+An action that imp itself failed — a non-zero exit without `allowFailure` — is
+already treated this way; no rule code is needed for it.
+
+Use a plain `new Error()` when the rule or the engine is at fault. imp then
+adds the goal name and keeps the JS stack, because somebody has to debug it.
+The stack of a `goalError` is not lost either — run the goal again with
+`imp --level debug <goal>` to see it.
+
 ## Validate memo-trace inputs
 
 `imp <goal> --trace-inputs` checks that the provenance record written for

@@ -41,8 +41,8 @@ use imp_store::digest::{nest_directory, nest_file, DirectoryDigest};
 use regex::Regex;
 use rquickjs::{
     function::Async, promise::MaybePromise, promise::PromiseHookType, Array,
-    AsyncContext as JsContext, AsyncRuntime as Runtime, CatchResultExt, Ctx, Filter, FromJs,
-    Function, Module, Object, Value,
+    AsyncContext as JsContext, AsyncRuntime as Runtime, CatchResultExt, CaughtError, Ctx, Filter,
+    FromJs, Function, Module, Object, Value,
 };
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -6721,6 +6721,49 @@ pub fn resolve_mode_axes(
     Ok(resolved)
 }
 
+/// A failure a workflow raised on purpose with `goalError()`. Its `Display` is
+/// the message alone: the workflow already wrote the sentence the user must
+/// read, so the host adds no wrapper and no stack trace around it.
+#[derive(Debug)]
+struct UserFacingGoalError(String);
+
+impl std::fmt::Display for UserFacingGoalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UserFacingGoalError {}
+
+/// Describe a JS exception that occurred while goal work executed. `context`
+/// tells the user what ran.
+///
+/// These call sites execute code, they do not load modules, so they must not
+/// use `rquickjs::Error::Loading` as a message carrier: its `Display` starts
+/// with "Error loading module", which is wrong for every one of them.
+///
+/// An exception that `goalError()` made is a deliberate, user-facing failure.
+/// Keep its message and remove the frames. The stack goes to the debug log, so
+/// `imp --level debug` can still show it. All other exceptions keep their full
+/// text, stack included, because they are faults in the engine or in the rule.
+fn goal_execution_error(context: &str, error: CaughtError<'_>) -> anyhow::Error {
+    if let CaughtError::Exception(exception) = &error {
+        if exception
+            .get::<_, Option<bool>>("impGoalError")
+            .ok()
+            .flatten()
+            .unwrap_or(false)
+        {
+            let message = exception.message().unwrap_or_else(|| error.to_string());
+            if let Some(stack) = exception.stack() {
+                log::debug!("{context}: {message}\n{stack}");
+            }
+            return anyhow::Error::new(UserFacingGoalError(message));
+        }
+    }
+    anyhow::anyhow!("{context}: {error}")
+}
+
 pub async fn execute_goal_live_selection(
     live: &LiveWorkspace,
     workspace_root: &Path,
@@ -7173,7 +7216,7 @@ pub async fn execute_goal_live_selection(
     let graph_goal_handler_name = live.workspace.graph_goal_handlers.get(goal).cloned();
     let result = live
         .ctx
-        .async_with(async move |ctx| -> rquickjs::Result<()> {
+        .async_with(async move |ctx| -> Result<()> {
             let set_js_workers: Function = ctx.globals().get("__imp_set_js_workers")?;
             set_js_workers.call::<_, ()>((js_workers.max(1),))?;
             let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
@@ -7186,49 +7229,34 @@ pub async fn execute_goal_live_selection(
                 let json_parse: Function = ctx.eval("(s) => JSON.parse(s)")?;
                 let selection_value: Value = json_parse.call((selection_json.as_str(),))?;
                 let callback_fn: Function = ctx.globals().get(callback_fn_name.as_str())?;
+                let callback_context = format!("goal '{goal_owned}' callback");
                 let result_value: Value = callback_fn
                     .call((selection_value,))
                     .catch(&ctx)
-                    .map_err(|e| {
-                        rquickjs::Error::new_loading_message(
-                            "execute",
-                            format!("goal '{goal_owned}' callback: {e}"),
-                        )
-                    })?;
+                    .map_err(|e| goal_execution_error(&callback_context, e))?;
                 let promise: MaybePromise = promise_resolve
                     .call((result_value,))
                     .catch(&ctx)
-                    .map_err(|e| {
-                        rquickjs::Error::new_loading_message(
-                            "execute",
-                            format!("goal '{goal_owned}' callback: {e}"),
-                        )
-                    })?;
+                    .map_err(|e| goal_execution_error(&callback_context, e))?;
                 promise
                     .into_future::<Value>()
                     .await
                     .catch(&ctx)
-                    .map_err(|e| {
-                        rquickjs::Error::new_loading_message(
-                            "execute",
-                            format!("goal '{goal_owned}' callback: {e}"),
-                        )
-                    })?;
+                    .map_err(|e| goal_execution_error(&callback_context, e))?;
             }
 
             let mut promises = Vec::with_capacity(calls.len());
             for (js_id, fn_name, label) in &calls {
                 let handle: Object = resolve_fn.call((*js_id,))?;
                 let product_fn: Function = ctx.globals().get(fn_name.as_str())?;
-                let result_value: Value = product_fn.call((handle,)).catch(&ctx).map_err(|e| {
-                    rquickjs::Error::new_loading_message("execute", format!("{label}: {e}"))
-                })?;
+                let result_value: Value = product_fn
+                    .call((handle,))
+                    .catch(&ctx)
+                    .map_err(|e| goal_execution_error(label, e))?;
                 let promise: MaybePromise = promise_resolve
                     .call((result_value,))
                     .catch(&ctx)
-                    .map_err(|e| {
-                        rquickjs::Error::new_loading_message("execute", format!("{label}: {e}"))
-                    })?;
+                    .map_err(|e| goal_execution_error(label, e))?;
                 promises.push((label, promise));
             }
 
@@ -7237,9 +7265,7 @@ pub async fn execute_goal_live_selection(
                     .into_future::<Value>()
                     .await
                     .catch(&ctx)
-                    .map_err(|e| {
-                        rquickjs::Error::new_loading_message("execute", format!("{label}: {e}"))
-                    })?;
+                    .map_err(|e| goal_execution_error(label, e))?;
             }
 
             // Label handler dispatch runs
@@ -7260,21 +7286,12 @@ pub async fn execute_goal_live_selection(
                     let result_value: Value = dispatch_label
                         .call((*label_id, goal_owned.as_str(), address.as_str()))
                         .catch(&ctx)
-                        .map_err(|e| {
-                            rquickjs::Error::new_loading_message(
-                                "execute",
-                                format!("{call_label}: {e}"),
-                            )
-                        })?;
-                    let promise: MaybePromise = promise_resolve
-                        .call((result_value,))
-                        .catch(&ctx)
-                        .map_err(|e| {
-                        rquickjs::Error::new_loading_message(
-                            "execute",
-                            format!("{call_label}: {e}"),
-                        )
-                    })?;
+                        .map_err(|e| goal_execution_error(&call_label, e))?;
+                    let promise: MaybePromise =
+                        promise_resolve
+                            .call((result_value,))
+                            .catch(&ctx)
+                            .map_err(|e| goal_execution_error(&call_label, e))?;
                     label_promises.push((call_label, promise));
                 }
                 for (call_label, promise) in label_promises {
@@ -7282,56 +7299,35 @@ pub async fn execute_goal_live_selection(
                         .into_future::<Value>()
                         .await
                         .catch(&ctx)
-                        .map_err(|e| {
-                            rquickjs::Error::new_loading_message(
-                                "execute",
-                                format!("{call_label}: {e}"),
-                            )
-                        })?;
+                        .map_err(|e| goal_execution_error(&call_label, e))?;
                 }
             }
             if !graph_handle_ids.is_empty() {
                 let execute_graph: Function = ctx.globals().get("__imp_execute_graph_handles")?;
+                let graph_context = format!("goal '{goal_owned}' graph execution");
                 let result_value: Value = execute_graph
                     .call((graph_handles_json.as_str(), graph_invocation_json.as_str()))
                     .catch(&ctx)
-                    .map_err(|error| {
-                        rquickjs::Error::new_loading_message(
-                            "execute graph",
-                            format!("goal '{goal_owned}': {error}"),
-                        )
-                    })?;
+                    .map_err(|error| goal_execution_error(&graph_context, error))?;
                 let promise: MaybePromise = promise_resolve.call((result_value,))?;
                 let graph_results: Value = promise
                     .into_future::<Value>()
                     .await
                     .catch(&ctx)
-                    .map_err(|error| {
-                        rquickjs::Error::new_loading_message(
-                            "execute graph",
-                            format!("goal '{goal_owned}': {error}"),
-                        )
-                    })?;
+                    .map_err(|error| goal_execution_error(&graph_context, error))?;
                 if let Some(handler_name) = &graph_goal_handler_name {
                     let handler: Function = ctx.globals().get(handler_name.as_str())?;
-                    let handler_result: Value =
-                        handler.call((graph_results,)).catch(&ctx).map_err(|e| {
-                            rquickjs::Error::new_loading_message(
-                                "execute graph handler",
-                                format!("goal '{goal_owned}': {e}"),
-                            )
-                        })?;
+                    let handler_context = format!("goal '{goal_owned}' graph handler");
+                    let handler_result: Value = handler
+                        .call((graph_results,))
+                        .catch(&ctx)
+                        .map_err(|e| goal_execution_error(&handler_context, e))?;
                     let handler_promise: MaybePromise = promise_resolve.call((handler_result,))?;
                     handler_promise
                         .into_future::<Value>()
                         .await
                         .catch(&ctx)
-                        .map_err(|e| {
-                            rquickjs::Error::new_loading_message(
-                                "execute graph handler",
-                                format!("goal '{goal_owned}': {e}"),
-                            )
-                        })?;
+                        .map_err(|e| goal_execution_error(&handler_context, e))?;
                 }
             }
             if trace_inputs {
@@ -7342,7 +7338,17 @@ pub async fn execute_goal_live_selection(
             Ok(())
         })
         .await
-        .map_err(|e| anyhow::anyhow!("execute goal '{goal}' failed: {e}"));
+        // A workflow that refused on purpose already wrote the sentence the
+        // user must read. Only an engine or rule fault gets the outer context,
+        // and it stays a flat message: callers show `to_string()`, not the
+        // anyhow chain.
+        .map_err(|e| {
+            if e.downcast_ref::<UserFacingGoalError>().is_some() {
+                e
+            } else {
+                anyhow::anyhow!("execute goal '{goal}' failed: {e}")
+            }
+        });
     live.exec_no_cache.store(false, Ordering::SeqCst);
     live.trace_inputs.store(false, Ordering::SeqCst);
     live.exec_sandbox_retention
@@ -14561,6 +14567,113 @@ goal("selectorless-changed", () => {
         .unwrap_err()
         .to_string();
         assert!(err.contains("selectorless callback reached"), "{err}");
+        // A plain Error is a fault in the rule, so it keeps its diagnostic —
+        // but no part of goal execution loads a module, so it must not say so.
+        assert!(!err.contains("loading module"), "{err}");
+    }
+
+    /// Writes a workspace whose only graph root carries a `refuse` goal, and
+    /// runs it. `body` is the graph handler body, which decides how the goal
+    /// fails. Returns the error text the user would see.
+    #[cfg(test)]
+    async fn refusing_graph_goal_error(body: &str) -> String {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            &format!(
+                r#"
+import {{ goal, goalError, output, task }} from "imp:core";
+const REFUSE = goal("refuse", undefined, {{ graph: () => {{ {body} }} }});
+export const thing = {{
+    [REFUSE]: task({{
+        display: "noop",
+        outputs: {{ value: output.value() }},
+        async run() {{ return {{ value: {{}} }}; }},
+    }}).outputs.value,
+}};
+"#
+            ),
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        run_goal_live(&live, p, "refuse", &["//:thing".to_owned()])
+            .await
+            .unwrap_err()
+            .to_string()
+    }
+
+    // #127: a workflow that refuses on purpose already wrote the sentence the
+    // user must read. The host must print that sentence and nothing else — no
+    // "execute goal ... failed" context, no "Error loading module" carrier,
+    // and no JS stack frame.
+    #[tokio::test]
+    async fn goal_error_from_a_graph_handler_prints_its_message_alone() {
+        let err = refusing_graph_goal_error(r#"throw goalError("workspace is not ready");"#).await;
+        assert_eq!(err, "workspace is not ready");
+    }
+
+    // The other half of the contract: an unmarked exception is a fault in the
+    // rule or the engine, so it keeps its full diagnostic, stack included.
+    #[tokio::test]
+    async fn plain_error_from_a_graph_handler_keeps_its_diagnostic() {
+        let err = refusing_graph_goal_error(r#"throw new TypeError("bad handler");"#).await;
+        assert!(err.contains("bad handler"), "{err}");
+        assert!(err.contains("execute goal 'refuse' failed"), "{err}");
+        assert!(err.contains("graph handler"), "{err}");
+        // The wrapper must name what ran, not claim a module failed to load.
+        assert!(!err.contains("loading module"), "{err}");
+    }
+
+    /// Writes a workspace whose only graph root is a task that fails, and runs
+    /// `build` over it. `body` is the task's run() body.
+    #[cfg(test)]
+    async fn failing_graph_task_error(body: &str) -> String {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            &format!(
+                r#"
+import {{ goal, goalError, output, task }} from "imp:core";
+const BUILD = goal("build");
+export const thing = {{
+    [BUILD]: task({{
+        display: "check things",
+        outputs: {{ value: output.value() }},
+        async run() {{ {body} }},
+    }}).outputs.value,
+}};
+"#
+            ),
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        run_goal_live(&live, p, "build", &["//:thing".to_owned()])
+            .await
+            .unwrap_err()
+            .to_string()
+    }
+
+    // #127: a rule that reports a tool's verdict — "unformatted: x.rs", a
+    // compiler diagnostic — is reporting a failure the user caused. The task
+    // wrapper must carry that mark out so the report prints alone.
+    #[tokio::test]
+    async fn goal_error_from_a_task_body_prints_the_report_alone() {
+        let err = failing_graph_task_error(r#"throw goalError("unformatted: a.rs");"#).await;
+        assert_eq!(err, "task 'check things' failed: unformatted: a.rs");
+    }
+
+    // A fault in the rule's own run() body is not the user's doing, so it keeps
+    // the "graph:" prefix, the goal context, and its stack.
+    #[tokio::test]
+    async fn plain_error_from_a_task_body_keeps_its_diagnostic() {
+        let err = failing_graph_task_error(r#"throw new TypeError("bad rule");"#).await;
+        assert!(err.contains("bad rule"), "{err}");
+        assert!(err.contains("execute goal 'build' failed"), "{err}");
+        assert!(err.contains("graph: task 'check things' failed"), "{err}");
     }
 
     #[tokio::test]
