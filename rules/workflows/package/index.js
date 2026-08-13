@@ -16,11 +16,10 @@
 // builds with materialize:false, then returns artifact(digest, {from})
 // (imp:core) — a digest plus an optional subtree path within it.
 // graphPackageGoal below materializes those artifacts and reports on them.
-// Label handlers bypass this goal and publish their own artifacts, as
-// rules/c/label_example/BUILD.js does — attach(label, "package", fn) (the
-// `packageGoal()` sugar in imp:core) is a separate, still-supported
-// mechanism and is unaffected by this goal's own dispatch. It uses the same
-// dist/ address convention.
+// Label handlers bypass this goal and publish their own artifacts —
+// attach(label, "package", fn) (the `packageGoal()` sugar in imp:core) is a
+// separate, still-supported mechanism and is unaffected by this goal's own
+// dispatch. It uses the same dist/ address convention.
 //
 // The legacy Rust command (crates/imp/src/commands/package.rs, since
 // deleted) built a content pak, copied game binaries and license files into

@@ -70,24 +70,24 @@ describe("graph-native ccLibrary/ccBinary", () => {
 	test("ccLibrary exposes [BUILD]/[PACKAGE] and transitive archive/include-dir arrays", () => {
 		return withCcHost(() => {
 			const lib = ccLibrary({
-				path: "rules/c/label_example",
+				path: "rules/c/testdata/mixed_sources",
 				toolchain: fakeGccGraphToolchain(),
 			});
 			expect(lib[BUILD].__imp_graph_handle).toBe(true);
 			expect(lib[PACKAGE].__imp_graph_handle).toBe(true);
 			expect(lib.transitiveArchives).toEqual([lib.archive]);
-			expect(lib.transitiveIncludeDirs).toEqual(["rules/c/label_example"]);
+			expect(lib.transitiveIncludeDirs).toEqual(["rules/c/testdata/mixed_sources"]);
 		});
 	});
 
 	test("ccBinary({deps}) folds a dependency library's transitiveArchives in, handle-passing (not label references)", () => {
 		return withCcHost(() => {
 			const lib = ccLibrary({
-				path: "rules/c/label_example",
+				path: "rules/c/testdata/mixed_sources",
 				toolchain: fakeGccGraphToolchain(),
 			});
 			const bin = ccBinary({
-				path: "rules/c/label_example",
+				path: "rules/c/testdata/mixed_sources",
 				deps: [lib],
 				toolchain: fakeGccGraphToolchain(),
 			});
@@ -102,17 +102,17 @@ describe("graph-native ccLibrary/ccBinary", () => {
 	test("ccLibrary compiles each source in its own exec.action(), not one script for all sources (#84)", () => {
 		return withCcHost(async (host) => {
 			const lib = ccLibrary({
-				path: "rules/c/label_example",
+				path: "rules/c/testdata/mixed_sources",
 				toolchain: fakeGccGraphToolchain(),
 			});
 			await resolveIgnoringArtifactValidation([lib[BUILD]]);
 			const compileRuns = host.runs.filter((run) =>
 				run.display.startsWith("cc compile "),
 			);
-			// rules/c/label_example has two sources (main.c, message.cc) — each
-			// needs its own action, not one script compiling both. A single
-			// shared script is what overflows argv on hundreds of sources
-			// (issue #84).
+			// rules/c/testdata/mixed_sources has two sources (main.c,
+			// message.cc) — each needs its own action, not one script
+			// compiling both. A single shared script is what overflows argv
+			// on hundreds of sources (issue #84).
 			// Each compile action's own script only compiles its one source —
 			// not a script listing every source, which is what would overflow
 			// argv on a target with hundreds of them (issue #84).
@@ -131,7 +131,7 @@ describe("graph-native ccLibrary/ccBinary", () => {
 	test("ccLibrary compile actions each declare exactly one output, at the real per-source object path", () => {
 		return withCcHost(async (host) => {
 			const lib = ccLibrary({
-				path: "rules/c/label_example",
+				path: "rules/c/testdata/mixed_sources",
 				toolchain: fakeGccGraphToolchain(),
 			});
 			await resolveIgnoringArtifactValidation([lib[BUILD]]);
@@ -163,7 +163,7 @@ describe("graph-native ccLibrary/ccBinary", () => {
 			__resetZigToolchainStateForTest();
 			let message = null;
 			try {
-				ccLibrary({ path: "rules/c/label_example" });
+				ccLibrary({ path: "rules/c/testdata/mixed_sources" });
 			} catch (error) {
 				message = error.message;
 			}

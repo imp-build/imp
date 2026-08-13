@@ -69,9 +69,8 @@ CMake target (see `//rules/c/cmake`'s own docs).
 
 For bespoke builds outside this model entirely, declare a label in the
 BUILD file and attach `build()`, `test()`, or `packageGoal()` handlers
-directly — the legacy, pre-graph-native escape hatch. The
-`//rules/c/label_example:hasher` fixture demonstrates this shape using
-ordinary memoized compile and link functions.
+directly — the legacy, pre-graph-native escape hatch, still supported for
+builds that don't fit `ccLibrary()`/`ccBinary()`'s shape.
 
 ## Generate declarations
 
