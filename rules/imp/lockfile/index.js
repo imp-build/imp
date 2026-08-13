@@ -18,14 +18,7 @@
 // platform entry throws (the actionable default), unless the toolchain was
 // declared with `unverified: true`, which downgrades to a warning and an
 // unverified download.
-import {
-	logWarn,
-	output,
-	output_path,
-	readAddressedFile,
-	run,
-	task,
-} from "imp:core";
+import { logWarn, output, readAddressedFile, task } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 
 /**
@@ -163,81 +156,6 @@ export function lockedDownloadTools(plat) {
 	return tools;
 }
 
-/**
- * Download a toolchain artifact, verified against its lockfile by default —
- * the shared cold-path download step every toolchain's acquire composes with
- * its own extract/install runs. Resolves the lockfile entry (throwing, or
- * warning when `unverified`, on any miss), runs the verified download, and
- * decorates a failed transfer or size/SHA-256 mismatch with a
- * `gen-lockfiles` pointer.
- *
- * @param {object} opts
- * @param {string} opts.lockfile Lockfile address, e.g. "//rules/c/mold/mold.lock".
- * @param {string} opts.tool Lockfile `tool` stem, e.g. "mold".
- * @param {string} opts.version
- * @param {{ os: string, arch: string }} opts.plat Host platform (drives the
- *   download script's tool selection).
- * @param {{ os: string, arch: string }} [opts.lockPlat] Platform key used
- *   for the lockfile entry lookup when it differs from the host — e.g.
- *   pex's platform-independent `{ os: "any", arch: "any" }` artifact.
- * @param {string} opts.url Fallback download URL when no lock entry resolves.
- * @param {string} opts.downloadPath Sandbox-relative destination path.
- * @param {object[]} opts.tools Resolved native-tool specs covering
- *   lockedDownloadTools(plat).
- * @param {string} opts.display run() display label.
- * @param {boolean} [opts.unverified=false] Downgrade lockfile misses to a
- *   warning and download unverified.
- * @returns {Promise<string>} The materialized download path.
- */
-async function downloadToolArtifactLegacy({
-	lockfile,
-	tool,
-	version,
-	plat,
-	lockPlat,
-	url,
-	downloadPath,
-	tools,
-	display,
-	unverified = false,
-}) {
-	const lockEntry = resolveToolLockfile({
-		address: lockfile,
-		tool,
-		version,
-		plat: lockPlat ?? plat,
-		unverified,
-	});
-	const resolvedUrl = lockEntry ? lockEntry.url : url;
-	const argv = lockedDownloadArgv({
-		plat,
-		lockEntry,
-		url: resolvedUrl,
-		downloadPath,
-		displayName: `download-${tool}`,
-	});
-	try {
-		await run({
-			argv,
-			tools,
-			outputs: [output(output_path(downloadPath))],
-			materialize: true,
-			display,
-		});
-	} catch (e) {
-		if (lockEntry) {
-			throw new Error(
-				`download of ${tool} ${version} from ${resolvedUrl} failed transfer or ` +
-					`size/sha256 verification (expected ${lockEntry.sha256} from ${lockfile}); ` +
-					`if you intentionally changed versions, run \`imp goal gen-lockfiles\`: ` +
-					`${e && e.message ? e.message : e}`,
-			);
-		}
-		throw e;
-	}
-	return downloadPath;
-}
-
 async function runGraphDownload(exec, inputs) {
 	const lockEntry = resolveToolLockfileContents({
 		contents: inputs.lockfileContents,
@@ -278,7 +196,31 @@ async function runGraphDownload(exec, inputs) {
 	}
 }
 
-function graphDownloadToolArtifact({
+/**
+ * Download a toolchain artifact, verified against its lockfile by default —
+ * the shared cold-path download step every toolchain's install task composes
+ * with its own extract/install task. Resolves the lockfile entry (throwing,
+ * or warning when `unverified`, on any miss), runs the verified download,
+ * and decorates a failed transfer or size/SHA-256 mismatch with a
+ * `gen-lockfiles` pointer.
+ *
+ * @param {object} opts
+ * @param {string} opts.lockfile Lockfile address, e.g. "//rules/c/mold/mold.lock".
+ * @param {string} opts.tool Lockfile `tool` stem, e.g. "mold".
+ * @param {string} opts.version
+ * @param {{ os: string, arch: string }} opts.plat Host platform (drives the
+ *   download script's tool selection).
+ * @param {{ os: string, arch: string }} [opts.lockPlat] Platform key used
+ *   for the lockfile entry lookup when it differs from the host — e.g.
+ *   pex's platform-independent `{ os: "any", arch: "any" }` artifact.
+ * @param {string} opts.url Fallback download URL when no lock entry resolves.
+ * @param {string} opts.output Sandbox-relative destination path.
+ * @param {string} [opts.display] Task display label.
+ * @param {boolean} [opts.unverified=false] Downgrade lockfile misses to a
+ *   warning and download unverified.
+ * @returns {object} Artifact handle for the downloaded file.
+ */
+export function downloadToolArtifact({
 	lockfile,
 	tool: toolName,
 	version,
@@ -290,7 +232,7 @@ function graphDownloadToolArtifact({
 	unverified = false,
 }) {
 	if (typeof outputPath !== "string" || outputPath.length === 0) {
-		throw new Error("downloadToolArtifact graph form requires a non-empty output");
+		throw new Error("downloadToolArtifact(options) requires a non-empty output");
 	}
 	const toolNames = ["sh", ...lockedDownloadTools(plat)];
 	const uniqueToolNames = [...new Set(toolNames)];
@@ -319,29 +261,9 @@ function graphDownloadToolArtifact({
 }
 
 /**
- * Download a verified tool artifact.
- *
- * The graph form uses `output` and returns an artifact handle immediately.
- * The temporary legacy form uses `downloadPath` and returns a Promise.
- */
-export function downloadToolArtifact(opts) {
-	if (!opts || typeof opts !== "object") {
-		throw new Error("downloadToolArtifact(options) requires an options object");
-	}
-	if (Object.hasOwn(opts, "output")) {
-		if (Object.hasOwn(opts, "downloadPath") || Object.hasOwn(opts, "tools")) {
-			throw new Error(
-				"downloadToolArtifact graph form cannot include legacy downloadPath or tools",
-			);
-		}
-		return graphDownloadToolArtifact(opts);
-	}
-	return downloadToolArtifactLegacy(opts);
-}
-
-/**
- * argv for a run() downloading a toolchain artifact to `downloadPath` — the
- * blessed way to fetch anything a lockfile pins. With a `lockEntry` (from
+ * argv for an exec.action() downloading a toolchain artifact to
+ * `downloadPath` — the blessed way to fetch anything a lockfile pins. With
+ * a `lockEntry` (from
  * resolveToolLockfile) the transfer is verified: SHA-256 always, byte size
  * too when the entry records one; any mismatch fails the run (nonzero exit).
  * With `lockEntry: null` (unverified toolchain) it is a plain download of

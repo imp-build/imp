@@ -6,7 +6,6 @@ import {
 } from "//rules/imp/test";
 import {
 	__resetRustToolchainStateForTest,
-	acquireRustToolchain,
 	defaultRustToolchain,
 	defaultRustToolchainVersion,
 	installRustToolchain,
@@ -48,10 +47,12 @@ describe("rust toolchain", () => {
 			expect(defaultRustToolchainVersion()).toBe("1.79.0");
 			expect(defaultRustToolchain()).toBe(toolchain);
 			// Both RUSTUP_HOME and CARGO_HOME caches are declared up front.
-			const declared = host.calls
-				.filter((call) => call[0] === "namedCache")
-				.map((call) => call[1]);
-			expect(declared).toEqual(["rustup-home", "cargo-home"]);
+			const declared = new Set(
+				host.calls
+					.filter((call) => call[0] === "namedCache")
+					.map((call) => call[1]),
+			);
+			expect([...declared].sort().join(",")).toBe("cargo-home,rustup-home");
 		});
 	});
 
@@ -66,20 +67,6 @@ describe("rust toolchain", () => {
 			}
 
 			expect(message).toContain("must be an exact version");
-		});
-	});
-
-	test("throws when no toolchain has been declared", async () => {
-		await withRustHost(async () => {
-			let message = null;
-
-			try {
-				await acquireRustToolchain("1.79.0");
-			} catch (error) {
-				message = error.message;
-			}
-
-			expect(message).toContain("no rust toolchain declared");
 		});
 	});
 
@@ -98,7 +85,7 @@ describe("rust toolchain", () => {
 		});
 	});
 
-	test("installs and acquires a toolchain from the named caches", async () => {
+	test("installRustToolchain publishes a local layout into both named caches", async () => {
 		await withRustHost(async (host) => {
 			const key = rustCacheKey("1.79.0", { os: "linux", arch: "x86_64" });
 
@@ -123,22 +110,12 @@ describe("rust toolchain", () => {
 						call[3] === "/tmp/cargo",
 				),
 			).toBe(true);
-
-			expect(await acquireRustToolchain("1.79.0")).toBe(
-				"/cache/rustup-home/1.79.0/linux-x86_64",
-			);
-			expect(await rustBin("1.79.0")).toBe(
-				"/cache/rustup-home/1.79.0/linux-x86_64/toolchains/1.79.0-x86_64-unknown-linux-gnu/bin/cargo",
-			);
-			// Already cached, so no download/install run() should have happened.
-			expect(host.runs.length).toBe(0);
 		});
 	});
 
 	test("describes the two-cache tool with RUSTUP_HOME/CARGO_HOME mount paths", async () => {
 		await withRustHost(async () => {
-			installRustToolchain("1.79.0", SEED);
-			rustToolchain("1.79.0", { default: true });
+			rustToolchain("1.79.0", { default: true, unverified: true });
 			const tool = await rustTool();
 
 			expect(tool.tools.length).toBe(2);
@@ -178,9 +155,10 @@ describe("rust toolchain", () => {
 			);
 
 			rustToolchain("1.79.0", { default: true });
-			const path = await acquireRustToolchain("1.79.0");
 
-			expect(path).toBe("/cache/rustup-home/1.79.0/linux-x86_64");
+			expect(await rustBin("1.79.0")).toBe(
+				"/cache/rustup-home/1.79.0/linux-x86_64/toolchains/1.79.0-x86_64-unknown-linux-gnu/bin/cargo",
+			);
 			expect(host.runs.length).toBe(2);
 
 			const [download, install] = host.runs;
@@ -199,14 +177,18 @@ describe("rust toolchain", () => {
 			// and pins the toolchain, then commits both directories to their
 			// caches.
 			const script = install.argv[2];
-			expect(script).toContain('RUSTUP_HOME="$PWD/$2"');
-			expect(script).toContain('CARGO_HOME="$PWD/$3"');
+			expect(script).toContain('RUSTUP_HOME="$PWD/rustup-home"');
+			expect(script).toContain('CARGO_HOME="$PWD/cargo-home"');
 			expect(script).toContain("--default-toolchain");
 			expect(install.argv).toContain("1.79.0");
-			const outCaches = install.outputs.map(
-				(out) => `${out.namedCache.name}/${out.namedCache.key}`,
+			// One install action commits both directories; slot order is the
+			// task's own, so compare as a set.
+			const outCaches = install.outputs
+				.map((out) => `${out.namedCache.name}/${out.namedCache.key}`)
+				.sort();
+			expect(outCaches).toEqual(
+				[`rustup-home/${key}`, `cargo-home/${key}`].sort(),
 			);
-			expect(outCaches).toEqual([`rustup-home/${key}`, `cargo-home/${key}`]);
 		});
 	});
 

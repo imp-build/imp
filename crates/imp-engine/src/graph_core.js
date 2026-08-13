@@ -1061,23 +1061,80 @@ globalThis.__imp_collect_graph_exports = function collectGraphExports(ns, scope)
 	return JSON.stringify(roots);
 };
 
-globalThis.__imp_execute_graph_handles = async function executeGraphHandles(handleIdsJson, invocationJson) {
-	const roots = JSON.parse(handleIdsJson);
-	_graphInvocation = Object.freeze(JSON.parse(invocationJson));
+// Open an invocation scope: an invocation record plus the in-flight memo
+// tables that make one node execute once for its duration.
+//
+// Saves and RESTORES all three, the same discipline
+// _graphWalkForIntrospection already uses for _graphInvocation alone. The
+// restore matters because resolution can nest: a task body may resolve
+// another handle through resolveGraphHandle() (rules/rust/kache's
+// RUSTC_WRAPPER role does exactly this, from inside toolEnvAndTools()). An
+// inner scope that nulled the invocation and cleared the tables on the way
+// out would leave the outer execution with no invocation — every later
+// semantic.* read throwing "resolved outside a workflow invocation" — and no
+// memo table, silently re-executing tasks it had already run.
+//
+// At the top level this is identical to what it replaces: the previous
+// invocation is null and the tables it restores are the empty module-level
+// ones, so no state crosses between invocations.
+async function _graphWithInvocation(invocation, fn) {
+	const previousInvocation = _graphInvocation;
+	const previousTaskInflight = _graphTaskInflight;
+	const previousExpansionInflight = _graphExpansionInflight;
+	_graphInvocation = Object.freeze(invocation);
 	_graphTaskInflight = new Map();
 	_graphExpansionInflight = new Map();
 	try {
-		return await Promise.all(roots.map(async ({ address, handleId }) => {
+		return await fn();
+	} finally {
+		_graphInvocation = previousInvocation;
+		_graphTaskInflight = previousTaskInflight;
+		_graphExpansionInflight = previousExpansionInflight;
+	}
+}
+
+function _graphResolveRecord(handle, record) {
+	return record.kind === "task"
+		? _graphExecuteTask(record.data.taskId, [])
+		: _graphResolveHandle(handle.__graph_id);
+}
+
+/**
+ * Execute whatever a graph handle needs and return its resolved binding.
+ *
+ * The imperative escape hatch for a caller that holds a handle but is not
+ * itself a graph root — Toolchain.bin() answering `imp @tool`, say. Prefer
+ * declaring the handle as a task input: that keeps the edge in the graph,
+ * where culling, caching, and introspection can all see it. This exists for
+ * the callers that cannot.
+ *
+ * Inside an active invocation this JOINS that invocation rather than opening
+ * a new one, so an install task the surrounding build already started is
+ * awaited instead of run a second time.
+ *
+ * The handle must have been constructed at declaration time: task() refuses
+ * to add graph nodes during execution, so a caller reachable from inside a
+ * task body must look its handle up, not build one.
+ *
+ * @category graph
+ * @param {object} handle A graph handle from task()/tool()/an output slot.
+ * @returns {Promise<object|undefined>} The resolved binding.
+ */
+export async function resolveGraphHandle(handle) {
+	const record = _graphRecord(handle, "resolveGraphHandle(handle)");
+	if (_graphInvocation !== null) return _graphResolveRecord(handle, record);
+	return _graphWithInvocation({}, () => _graphResolveRecord(handle, record));
+}
+
+globalThis.__imp_execute_graph_handles = async function executeGraphHandles(handleIdsJson, invocationJson) {
+	const roots = JSON.parse(handleIdsJson);
+	return _graphWithInvocation(JSON.parse(invocationJson), () =>
+		Promise.all(roots.map(async ({ address, handleId }) => {
 			const record = _graphHandles.get(handleId);
 			if (record === undefined) throw _graphError(`unknown handle id ${handleId}`);
 			const result = record.kind === "task"
 				? await _graphExecuteTask(record.data.taskId, [])
 				: await _graphResolveHandle(handleId);
 			return Object.freeze({ address, result });
-		}));
-	} finally {
-		_graphInvocation = null;
-		_graphTaskInflight.clear();
-		_graphExpansionInflight.clear();
-	}
+		})));
 };

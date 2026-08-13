@@ -66,7 +66,6 @@ import { gccGraphTool, defaultGccToolchainVersion } from "//rules/c/gcc";
 import { ODIN_TOOL } from "//rules/odin/toolchain";
 
 export {
-	acquireOdinToolchain,
 	defaultOdinToolchain,
 	defaultOdinToolchainVersion,
 	odinArtifactName,

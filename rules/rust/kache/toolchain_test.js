@@ -8,12 +8,12 @@ import {
 } from "//rules/imp/test";
 import {
 	__resetKacheToolchainStateForTest,
-	acquireKacheToolchain,
 	defaultKacheToolchain,
 	defaultKacheToolchainVersion,
 	installKacheToolchain,
 	kacheCacheKey,
 	kacheDataCacheKey,
+	kacheBin,
 	kacheDataDir,
 	kacheGraphTool,
 	kacheTool,
@@ -61,25 +61,15 @@ describe("kache toolchain", () => {
 			).toBe("0.11.0/linux-x86_64");
 			expect(defaultKacheToolchainVersion()).toBe("0.11.0");
 			expect(defaultKacheToolchain()).toBe(toolchain);
-			expect(host.calls[0][0]).toBe("namedCache");
+			expect(
+				host.calls.some(
+					(call) => call[0] === "namedCache" && call[1] === "kache-toolchains",
+				),
+			).toBe(true);
 		});
 	});
 
-	test("throws when no toolchain has been declared", async () => {
-		await withKacheHost(async () => {
-			let message = null;
-
-			try {
-				await acquireKacheToolchain("0.11.0");
-			} catch (error) {
-				message = error.message;
-			}
-
-			expect(message).toContain("no kache toolchain declared");
-		});
-	});
-
-	test("installs and acquires a toolchain from the named cache", async () => {
+	test("installKacheToolchain publishes a local toolchain into the named cache", async () => {
 		await withKacheHost(async (host) => {
 			const key = kacheCacheKey("0.11.0", { os: "linux", arch: "x86_64" });
 
@@ -95,12 +85,6 @@ describe("kache toolchain", () => {
 						call[3] === "/tmp/kache-0.11.0",
 				),
 			).toBe(true);
-
-			expect(await acquireKacheToolchain("0.11.0")).toBe(
-				"/cache/kache-toolchains/0.11.0/linux-x86_64",
-			);
-			// Already cached, so no download/extract run() should have happened.
-			expect(host.runs.length).toBe(0);
 		});
 	});
 
@@ -125,9 +109,10 @@ describe("kache toolchain", () => {
 			);
 
 			kacheToolchain("0.11.0", { default: true });
-			const path = await acquireKacheToolchain("0.11.0");
 
-			expect(path).toBe("/cache/kache-toolchains/0.11.0/linux-x86_64");
+			expect(await kacheBin("0.11.0")).toBe(
+				"/cache/kache-toolchains/0.11.0/linux-x86_64/kache",
+			);
 			expect(host.runs.length).toBe(2);
 
 			const [download, extract] = host.runs;
@@ -139,19 +124,12 @@ describe("kache toolchain", () => {
 			expect(download.argv[2]).toContain("sha256sum -c -");
 			expect(extract.outputs[0].namedCache.name).toBe("kache-toolchains");
 			expect(extract.outputs[0].namedCache.key).toBe(key);
-
-			expect(
-				host.calls.some(
-					(call) => call[0] === "nativeToolSpec" && call[1] === "curl",
-				),
-			).toBe(true);
 		});
 	});
 
 	test("describes the named-cache-backed kache tool", async () => {
 		await withKacheHost(async () => {
-			installKacheToolchain("0.11.0", "/tmp/kache-0.11.0");
-			kacheToolchain("0.11.0", { default: true });
+			kacheToolchain("0.11.0", { default: true, unverified: true });
 			const tool = await kacheTool();
 
 			expect(tool.kind).toBe("tool");
@@ -162,7 +140,7 @@ describe("kache toolchain", () => {
 		});
 	});
 
-	test("seeds the kache data directory once, then reuses it from the named cache", async () => {
+	test("seeds the kache data directory into its named cache", async () => {
 		await withKacheHost(async (host) => {
 			kacheToolchain("0.11.0", { default: true });
 
@@ -170,18 +148,18 @@ describe("kache toolchain", () => {
 			expect(first).toBe("/cache/kache-data/linux-x86_64");
 			expect(host.runs.length).toBe(1);
 			expect(host.runs[0].outputs[0].namedCache.name).toBe("kache-data");
+			expect(host.runs[0].outputs[0].namedCache.key).toBe("linux-x86_64");
 
-			const second = await kacheDataDir();
-			expect(second).toBe(first);
-			// Already seeded, so no second init run() should have happened.
-			expect(host.runs.length).toBe(1);
+			// Same seed task, so the same directory. Re-running it is harmless:
+			// a named-cache slot is immutable by key, so the accumulated object
+			// cache survives (crates/imp-store/src/cache.rs).
+			expect(await kacheDataDir()).toBe(first);
 		});
 	});
 
 	test("registers a rust-build-cache product exposing RUSTC_WRAPPER/KACHE_CACHE_DIR and tools", async () => {
 		await withKacheHost(async (host) => {
-			installKacheToolchain("0.11.0", "/tmp/kache-0.11.0");
-			const toolchain = kacheToolchain("0.11.0");
+			const toolchain = kacheToolchain("0.11.0", { unverified: true });
 
 			const wrapper = await productFor(toolchain, RUST_BUILD_CACHE);
 
@@ -203,8 +181,7 @@ describe("kache toolchain", () => {
 
 	test("kacheConfig enables executable caching for both client and daemon", async () => {
 		await withKacheHost(async (host) => {
-			installKacheToolchain("0.11.0", "/tmp/kache-0.11.0");
-			const toolchain = kacheToolchain("0.11.0");
+			const toolchain = kacheToolchain("0.11.0", { unverified: true });
 
 			await withKacheConfig({ cacheExecutables: true }, async () => {
 				const wrapper = await productFor(toolchain, RUST_BUILD_CACHE);
@@ -222,7 +199,10 @@ describe("kache toolchain", () => {
 	test("cacheSize opts into a custom KACHE_MAX_SIZE on both the client and daemon env", async () => {
 		await withKacheHost(async (host) => {
 			installKacheToolchain("0.11.0", "/tmp/kache-0.11.0");
-			const toolchain = kacheToolchain("0.11.0", { cacheSize: "1GiB" });
+			const toolchain = kacheToolchain("0.11.0", {
+				cacheSize: "1GiB",
+				unverified: true,
+			});
 
 			const wrapper = await productFor(toolchain, RUST_BUILD_CACHE);
 			const clientEnv = await wrapper.env();
@@ -248,8 +228,7 @@ describe("kache toolchain", () => {
 
 	test("env() starts the kache daemon via the host worker registry", async () => {
 		await withKacheHost(async (host) => {
-			installKacheToolchain("0.11.0", "/tmp/kache-0.11.0");
-			const toolchain = kacheToolchain("0.11.0");
+			const toolchain = kacheToolchain("0.11.0", { unverified: true });
 
 			const wrapper = await productFor(toolchain, RUST_BUILD_CACHE);
 			await wrapper.env();

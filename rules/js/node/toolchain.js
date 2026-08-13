@@ -2,22 +2,16 @@ import {
 	Toolchain,
 	product,
 	namedCache,
-	memo,
 	platformInfo,
 	cachePut,
 	cacheGet,
-	cacheHas,
 	toolName,
 	tool as graphTool,
-	group,
 } from "imp:core";
 
-import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
-import {
-	downloadToolArtifact,
-	lockedDownloadTools,
-} from "//rules/imp/lockfile";
+import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
+import { toolchainBin } from "//rules/imp/toolchain";
 import {
 	generateToolLockfile,
 	GEN_LOCKFILES,
@@ -99,15 +93,6 @@ export function nodeSupportedPlatforms() {
 	});
 }
 
-// Bare coreutils the download/extract scripts need — same reasoning as
-// coreToolNames in uv_toolchain.js/ruff_toolchain.js: the sandbox is fully
-// hermetic, so even these must be declared tools, not resolved from an
-// ambient PATH.
-function coreToolNames(plat) {
-	const extract = plat.os === "windows" ? ["tar"] : ["tar", "gzip"];
-	return [...new Set([...lockedDownloadTools(plat), ...extract])];
-}
-
 export class NodeToolchain extends Toolchain {
 	static kind = "node-toolchain";
 	static tool = NODE_TOOL;
@@ -126,16 +111,18 @@ export class NodeToolchain extends Toolchain {
 	}
 }
 
-// Declared lazily, once — target() addresses are only assigned at
-// workspace-load time, so tool handles must be created when a toolchain is
-// declared at BUILD.js top level, not inside acquireNodeToolchain().
-let coreToolHandles = null;
+// Built once per declared version, at declaration time: task() refuses to add
+// graph nodes during execution, so anything that resolves a toolchain while
+// the graph is running must find a handle here rather than build one.
 let graphToolchains = new Map();
 
 export function __resetNodeToolchainStateForTest() {
 	NodeToolchain.clearDefault();
-	coreToolHandles = null;
 	graphToolchains = new Map();
+}
+
+function graphToolFor(version) {
+	return graphToolchains.get(version) ?? nodeGraphTool(version);
 }
 
 /**
@@ -150,13 +137,6 @@ export function __resetNodeToolchainStateForTest() {
  * @category configuration
  */
 export function nodeToolchain(version, opts = {}) {
-	namedCache({ name: NODE_TOOLCHAIN_CACHE, shared: true });
-	if (!coreToolHandles) {
-		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
-			nativeTool(name),
-		);
-	}
-
 	new NodeToolchain(
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
@@ -182,61 +162,6 @@ export function installNodeToolchain(version, source) {
 }
 
 /**
- * Acquire a node toolchain, downloading and caching it if not already
- * installed in the named cache.
- *
- * @param {string} version
- * @returns {Promise<string>} Local path to the toolchain root.
- */
-export const acquireNodeToolchain = memo(
-	async function acquireNodeToolchain(version) {
-		const plat = platformInfo();
-		const key = nodeCacheKey(version, plat);
-
-		if (!coreToolHandles) {
-			throw new Error(
-				"no node toolchain declared via nodeToolchain(); nothing to acquire",
-			);
-		}
-		const coreTools = await group(
-			coreToolHandles.map((handle) => nativeToolSpec(handle)),
-		);
-
-		if (!cacheHas(NODE_TOOLCHAIN_CACHE, key)) {
-			const downloadPath = `.imp/node-downloads/${key}/${nodeArtifactName(version, plat)}`;
-			await downloadToolArtifact({
-				lockfile: NODE_LOCKFILE,
-				tool: "node-toolchain",
-				version,
-				plat,
-				url: nodeDownloadUrl(version, plat),
-				downloadPath,
-				tools: coreTools,
-				display: `download node ${version} (${plat.os}/${plat.arch})`,
-				unverified: NodeToolchain.resolveUnverified(version),
-			});
-
-			// Node's release archives extract a single top-level
-			// node-v<version>-<os>-<arch>/ directory containing bin/node (and
-			// bin/npm/bin/npx) — strip it so the cache root holds the binaries
-			// directly, same shape acquireUvToolchain/acquireRuffToolchain use.
-			await extractArchive({
-				archive: downloadPath,
-				dest: `.imp/node-toolchains/${key}`,
-				format: plat.os === "windows" ? "zip" : "tar.gz",
-				stripComponents: 1,
-				tools: coreTools,
-				namedCache: { name: NODE_TOOLCHAIN_CACHE, key },
-				display: `extract node ${version} (${plat.os}/${plat.arch})`,
-			});
-		}
-
-		return cacheGet(NODE_TOOLCHAIN_CACHE, key);
-	},
-	{ display: "acquire Node Toolchain {0}", level: "info" },
-);
-
-/**
  * Resolve an explicit or default node toolchain version.
  *
  * @param {string} [version]
@@ -247,38 +172,24 @@ export function resolveNodeToolchainVersion(version) {
 }
 
 /**
- * Return the node executable path for a toolchain version.
+ * Return the node executable path for a toolchain version, installing the
+ * toolchain if necessary.
+ *
+ * Node's own release layout puts binaries under bin/ on unix but at the
+ * archive root on windows.
  *
  * @param {string} [version]
  * @returns {Promise<string>}
  */
 export async function nodeBin(version) {
 	const resolved = NodeToolchain.requireVersion(version);
-	const dir = await acquireNodeToolchain(resolved);
-	const exe = platformInfo().os === "windows" ? "node.exe" : "bin/node";
-	return `${dir}/${exe}`;
-}
-
-/**
- * Return a named-cache-backed node tool descriptor for sandbox execution.
- * Node's own release layout puts binaries under bin/ on unix but at the
- * archive root on windows — binDirs reflects that so run()'s PATH wiring
- * finds `node`/`npm`/`npx` on both.
- *
- * @param {string} [version]
- * @returns {Promise<object>}
- */
-export async function nodeTool(version) {
-	const resolved = NodeToolchain.requireVersion(version);
-	await acquireNodeToolchain(resolved);
 	const plat = platformInfo();
-	return {
-		kind: "tool",
-		name: "node",
-		cache: NODE_TOOLCHAIN_CACHE,
+	return toolchainBin(graphToolFor(resolved), {
+		name: NODE_TOOLCHAIN_CACHE,
 		key: nodeCacheKey(resolved, plat),
-		binDirs: [plat.os === "windows" ? "." : "bin"],
-	};
+		subDir: plat.os === "windows" ? "." : "bin",
+		exe: plat.os === "windows" ? "node.exe" : "node",
+	});
 }
 
 /** Return the CAS-backed graph tool used by graph-native JS rules. */
@@ -286,6 +197,7 @@ export function nodeGraphTool(version) {
 	const resolved = NodeToolchain.requireVersion(version);
 	const plat = platformInfo();
 	const key = nodeCacheKey(resolved, plat);
+	namedCache({ name: NODE_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
 		lockfile: NODE_LOCKFILE,
 		tool: "node-toolchain",
@@ -296,11 +208,16 @@ export function nodeGraphTool(version) {
 		display: `download node ${resolved} (${plat.os}/${plat.arch})`,
 		unverified: NodeToolchain.resolveUnverified(resolved),
 	});
+	// Node's release archives extract a single top-level
+	// node-v<version>-<os>-<arch>/ directory containing bin/node (and
+	// bin/npm/bin/npx) — strip it so the cache root holds the binaries
+	// directly, the same shape uv and ruff use.
 	const directory = extractArchive({
 		archive,
 		dest: `.imp/node-toolchains/${key}`,
 		format: plat.os === "windows" ? "zip" : "tar.gz",
 		stripComponents: 1,
+		namedCache: { name: NODE_TOOLCHAIN_CACHE, key },
 		display: `extract node ${resolved} (${plat.os}/${plat.arch})`,
 	});
 	return graphTool(directory, {

@@ -2,22 +2,16 @@ import {
 	Toolchain,
 	product,
 	namedCache,
-	memo,
 	platformInfo,
 	cachePut,
 	cacheGet,
-	cacheHas,
 	toolName,
-	group,
 	tool as graphTool,
 } from "imp:core";
 
-import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
-import {
-	downloadToolArtifact,
-	lockedDownloadTools,
-} from "//rules/imp/lockfile";
+import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
+import { toolchainBin } from "//rules/imp/toolchain";
 import {
 	generateToolLockfile,
 	GEN_LOCKFILES,
@@ -99,14 +93,6 @@ export function ruffSupportedPlatforms() {
 	});
 }
 
-// Bare coreutils the download/extract scripts need — same reasoning as
-// coreToolNames in uv_toolchain.js: the sandbox is fully hermetic, so even
-// these must be declared tools, not resolved from an ambient PATH.
-function coreToolNames(plat) {
-	const extract = plat.os === "windows" ? ["tar"] : ["tar", "gzip"];
-	return [...new Set([...lockedDownloadTools(plat), ...extract])];
-}
-
 export class RuffToolchain extends Toolchain {
 	static kind = "ruff-toolchain";
 	static tool = RUFF_TOOL;
@@ -131,16 +117,18 @@ function lockfileFor(version) {
 	);
 }
 
-// Declared lazily, once — target() addresses are only assigned at
-// workspace-load time, so tool handles must be created when a toolchain is
-// declared at BUILD.js top level, not inside acquireRuffToolchain().
-let coreToolHandles = null;
+// Built once per declared version, at declaration time: task() refuses to add
+// graph nodes during execution, so anything that resolves a toolchain while
+// the graph is running must find a handle here rather than build one.
 let graphToolchains = new Map();
 
 export function __resetRuffToolchainStateForTest() {
 	RuffToolchain.clearDefault();
-	coreToolHandles = null;
 	graphToolchains = new Map();
+}
+
+function graphToolFor(version) {
+	return graphToolchains.get(version) ?? ruffGraphTool(version);
 }
 
 /**
@@ -159,13 +147,6 @@ export function __resetRuffToolchainStateForTest() {
  * @category configuration
  */
 export function ruffToolchain(version, opts = {}) {
-	namedCache({ name: RUFF_TOOLCHAIN_CACHE, shared: true });
-	if (!coreToolHandles) {
-		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
-			nativeTool(name),
-		);
-	}
-
 	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
 	const unverified = opts.unverified ?? false;
 	new RuffToolchain(
@@ -182,6 +163,7 @@ export function ruffGraphTool(version) {
 	const resolved = RuffToolchain.requireVersion(version);
 	const plat = platformInfo();
 	const key = ruffCacheKey(resolved, plat);
+	namedCache({ name: RUFF_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
 		lockfile: lockfileFor(resolved),
 		tool: "ruff-toolchain",
@@ -192,11 +174,15 @@ export function ruffGraphTool(version) {
 		display: `download ruff ${resolved} (${plat.os}/${plat.arch})`,
 		unverified: RuffToolchain.resolveUnverified(resolved),
 	});
+	// ruff's release archives extract a single top-level ruff-<triple>/
+	// directory containing the `ruff` binary — strip it so the cache root
+	// holds the binary directly, the same shape uv uses.
 	const directory = extractArchive({
 		archive,
 		dest: `.imp/ruff-toolchains/${key}`,
 		format: plat.os === "windows" ? "zip" : "tar.gz",
 		stripComponents: 1,
+		namedCache: { name: RUFF_TOOLCHAIN_CACHE, key },
 		display: `extract ruff ${resolved} (${plat.os}/${plat.arch})`,
 	});
 	return graphTool(directory, { binDirs: ["."] });
@@ -218,64 +204,6 @@ export function installRuffToolchain(version, source) {
 }
 
 /**
- * Acquire a ruff toolchain, downloading and caching it if not already
- * installed in the named cache.
- *
- * @param {string} version
- * @returns {Promise<string>} Local path to the toolchain root.
- */
-export const acquireRuffToolchain = memo(
-	async function acquireRuffToolchain(version) {
-		const plat = platformInfo();
-		const key = ruffCacheKey(version, plat);
-
-		if (!coreToolHandles) {
-			throw new Error(
-				"no ruff toolchain declared via ruffToolchain(); nothing to acquire",
-			);
-		}
-		const coreTools = await group(
-			coreToolHandles.map((handle) => nativeToolSpec(handle)),
-		);
-
-		if (!cacheHas(RUFF_TOOLCHAIN_CACHE, key)) {
-			// Verification only runs on this cold path — warm named-cache
-			// contents were verified when inserted, or seeded deliberately via
-			// installRuffToolchain.
-			const downloadPath = `.imp/ruff-downloads/${key}/${ruffArtifactName(version, plat)}`;
-			await downloadToolArtifact({
-				lockfile: lockfileFor(version),
-				tool: "ruff-toolchain",
-				version,
-				plat,
-				url: ruffDownloadUrl(version, plat),
-				downloadPath,
-				tools: coreTools,
-				display: `download ruff ${version} (${plat.os}/${plat.arch})`,
-				unverified: RuffToolchain.resolveUnverified(version),
-			});
-
-			// ruff's release archives extract a single top-level
-			// ruff-<triple>/ directory containing the `ruff` binary — strip it
-			// so the cache root holds the binary directly, same shape
-			// acquireUvToolchain uses.
-			await extractArchive({
-				archive: downloadPath,
-				dest: `.imp/ruff-toolchains/${key}`,
-				format: plat.os === "windows" ? "zip" : "tar.gz",
-				stripComponents: 1,
-				tools: coreTools,
-				namedCache: { name: RUFF_TOOLCHAIN_CACHE, key },
-				display: `extract ruff ${version} (${plat.os}/${plat.arch})`,
-			});
-		}
-
-		return cacheGet(RUFF_TOOLCHAIN_CACHE, key);
-	},
-	{ display: "acquire Ruff Toolchain {0}", level: "info" },
-);
-
-/**
  * Resolve an explicit or default ruff toolchain version.
  *
  * @param {string} [version]
@@ -293,28 +221,12 @@ export function resolveRuffToolchainVersion(version) {
  */
 export async function ruffBin(version) {
 	const resolved = RuffToolchain.requireVersion(version);
-	const dir = await acquireRuffToolchain(resolved);
-	const exe = platformInfo().os === "windows" ? "ruff.exe" : "ruff";
-	return `${dir}/${exe}`;
-}
-
-/**
- * Return a named-cache-backed ruff tool descriptor for sandbox execution.
- *
- * @param {string} [version]
- * @returns {Promise<object>}
- */
-export async function ruffTool(version) {
-	const resolved = RuffToolchain.requireVersion(version);
-	await acquireRuffToolchain(resolved);
 	const plat = platformInfo();
-	return {
-		kind: "tool",
-		name: "ruff",
-		cache: RUFF_TOOLCHAIN_CACHE,
+	return toolchainBin(graphToolFor(resolved), {
+		name: RUFF_TOOLCHAIN_CACHE,
 		key: ruffCacheKey(resolved, plat),
-		binDirs: ["."],
-	};
+		exe: plat.os === "windows" ? "ruff.exe" : "ruff",
+	});
 }
 
 /**

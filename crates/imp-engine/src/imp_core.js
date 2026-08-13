@@ -236,6 +236,13 @@ const _toolchain_registered = new Set();
 // non-default instance (e.g. `unverified`) resolve correctly even when
 // acquiring that version rather than the default one.
 const _toolchain_by_version = new Map();
+// tool name string (cls.tool.name) → concrete subclass. Powers
+// resolveToolchainByName()'s `imp @tool` fallback: unlike the `//:{name}`
+// workspace-export lookup resolve_workspace_tool_bin() tries first (see
+// crates/imp/src/main.rs), this needs no workspace export at all — only
+// that the toolchain's module was imported (registering the class here) and
+// declared a default instance.
+const _toolchain_by_tool_name = new Map();
 
 /**
  * Base class for toolchain target kinds. Subclasses declare:
@@ -359,11 +366,44 @@ export class Toolchain extends Target {
 			);
 		}
 		_toolchain_registered.add(cls);
+		_toolchain_by_tool_name.set(cls.tool.name, cls);
 		product(cls, TOOLCHAIN, cls.tool, (handle) => handle.bin(), {
 			display: "toolchain {0}",
 			level: "info",
 		});
 	}
+}
+
+/**
+ * Resolve `@name` to an absolute binary path via a toolchain class's own
+ * default instance, independent of whatever a workspace's `//:{name}` export
+ * resolves to (or whether it exists at all). This is `imp @tool` dispatch's
+ * fallback for a toolchain whose declaration API returns a graph-native
+ * handle rather than a target handle — e.g. `defaultBiomeToolchain()` — so
+ * `//:biome` never lands in the workspace's target map even when biome is
+ * declared and its module is imported. `resolve_workspace_tool_bin` (see
+ * crates/imp/src/main.rs) tries the `//:{name}` export lookup first and only
+ * falls back to this when that misses, so `imp @mold`/`@rust`/`@kache` (whose
+ * declaration APIs already return target handles, and whose exports already
+ * exist in imp.workspace.js) keep resolving exactly as before.
+ *
+ * @param {string} name Tool name, as declared by a Toolchain subclass's
+ *   `static tool = toolName(name)`.
+ * @returns {string|Promise<string>} Absolute path to the toolchain's binary.
+ */
+export function resolveToolchainByName(name) {
+	const cls = _toolchain_by_tool_name.get(name);
+	if (!cls) {
+		throw new Error(
+			`unknown tool '@${name}'; declare \`export const ${name} = ...Toolchain(...)\` ` +
+				`in imp.workspace.js, or use one of the built-in tools (kcov)`,
+		);
+	}
+	const instance = cls.default();
+	if (!instance) {
+		throw new Error(`no default ${name} toolchain declared`);
+	}
+	return productFor(instance, TOOLCHAIN);
 }
 
 /** Clear every toolchain kind's default instance (test isolation hook). */
@@ -1870,16 +1910,15 @@ function _stable_function_id(fn) {
 //     same way) needed to distinguish the value — see the wrapper-unwrapping
 //     branch below.
 //   - Anonymous/dynamic handles (never bound to a workspace export — e.g. a
-//     label() minted inside discoverLabels()) are rejected from durable traces,
-//     not content-addressed as a substitute: `unaddressed` propagates up to
-//     memo()'s traceKey computation, which becomes null for that call.
-//     In-process reuse (this evaluation's own memo table) still works via
-//     `key_string`, which is allowed to embed the raw __id since it never
-//     outlives this process.
+//     bare label() call with no matching export) are rejected from durable
+//     traces, not content-addressed as a substitute: `unaddressed`
+//     propagates up to memo()'s traceKey computation, which becomes null for
+//     that call. In-process reuse (this evaluation's own memo table) still
+//     works via `key_string`, which is allowed to embed the raw __id since
+//     it never outlives this process.
 //   - This is deliberately a silent (debug-trace-only) fallback, not a
 //     build-time warning: real, sanctioned anonymous-label patterns exist
-//     (e.g. rules/python/source.js's discoverLabels()-based per-file source
-//     labels) where losing persisted provenance is expected, not a bug to flag.
+//     where losing persisted provenance is expected, not a bug to flag.
 // Eliminating anonymous handles at their construction sites (so more calls
 // become traceable) is #60's job, not this function's.
 function _stable_digest(args) {
@@ -2642,258 +2681,6 @@ export function attach(label, goalName, fn, opts) {
 	);
 	return label;
 }
-
-// Factories registered through extensible(). Extensions are replayed once,
-// after every workspace/BUILD module has evaluated and exported label
-// addresses have been resolved, but before label attachments seal. Keeping
-// replay at that boundary makes labels created before and after package.attach()
-// indistinguishable without introducing an engine-side kind/trait registry.
-const _extensible_factories = [];
-let _factory_extensions_sealed = false;
-let _active_label_discovery = false;
-const _discovered_factory_instances = new Map();
-
-function _extension_name(extension) {
-	return extension.name || "<anonymous extension>";
-}
-
-function _validate_extension(extension, caller) {
-	if (typeof extension !== "function") {
-		throw new Error(`${caller} expects an extension function`);
-	}
-}
-
-function _factory_variant(state, localExtensions, allowAttach) {
-	const variant = function (...args) {
-		if (_factory_extensions_sealed && !_active_label_discovery) {
-			throw new Error(
-				`extensible factory '${state.name}' called after workspace evaluation completed; ` +
-					"factories and their extensions seal before goal dispatch",
-			);
-		}
-		const created = state.factory.apply(this, args);
-		if (!created || created.__imp_label !== true) {
-			throw new Error(
-				`extensible factory '${state.name}' must synchronously return a label() handle`,
-			);
-		}
-		const instance = { label: created, localExtensions };
-		if (_factory_extensions_sealed) {
-			_discovered_factory_instances.set(created.__id, { state, instance });
-		} else {
-			state.instances.push(instance);
-		}
-		return created;
-	};
-
-	variant.with = function (...extensions) {
-		if (_factory_extensions_sealed) {
-			throw new Error(
-				`extensible factory '${state.name}'.with() called after workspace evaluation completed; ` +
-					"factories and their extensions seal before goal dispatch",
-			);
-		}
-		if (extensions.length === 0) {
-			throw new Error(
-				`extensible factory '${state.name}'.with() expects at least one extension function`,
-			);
-		}
-		for (const extension of extensions) {
-			_validate_extension(
-				extension,
-				`extensible factory '${state.name}'.with()`,
-			);
-		}
-		const combined = [];
-		const seen = new Set();
-		for (const extension of [...localExtensions, ...extensions]) {
-			if (!seen.has(extension)) {
-				seen.add(extension);
-				combined.push(extension);
-			}
-		}
-		return _factory_variant(state, combined, false);
-	};
-
-	if (allowAttach) {
-		variant.attach = function (extension) {
-			if (_factory_extensions_sealed) {
-				throw new Error(
-					`extensible factory '${state.name}'.attach() called after workspace evaluation completed; ` +
-						"factories and their extensions seal before goal dispatch",
-				);
-			}
-			_validate_extension(
-				extension,
-				`extensible factory '${state.name}'.attach()`,
-			);
-			if (!state.globalExtensionSet.has(extension)) {
-				state.globalExtensionSet.add(extension);
-				state.globalExtensions.push(extension);
-			}
-			return variant;
-		};
-	}
-
-	return variant;
-}
-
-/**
- * Make a reusable label factory extensible by downstream integrations.
- *
- * `factory.attach(extension)` applies an extension to every instance created
- * by the factory, regardless of whether the instance was created before or
- * after the attachment. `factory.with(extension)` returns a callable variant
- * that applies the extension only to instances created through that variant.
- * Extensions are additive, synchronous definition-phase functions receiving
- * the created label; they normally call build()/test()/fmt()/lint()/attach().
- *
- * @param {(...args: any[]) => object} factory A synchronous function returning
- *   one label() handle.
- * @returns {Function} The callable root factory with attach() and with().
- */
-export function extensible(factory) {
-	if (typeof factory !== "function") {
-		throw new Error("extensible(factory) expects a factory function");
-	}
-	if (_factory_extensions_sealed) {
-		throw new Error(
-			"extensible(factory) called after workspace evaluation completed; " +
-				"factories and their extensions seal before goal dispatch",
-		);
-	}
-	const state = {
-		factory,
-		name: factory.name || "<anonymous factory>",
-		globalExtensions: [],
-		globalExtensionSet: new Set(),
-		instances: [],
-	};
-	_extensible_factories.push(state);
-	return _factory_variant(state, [], true);
-}
-
-// Called by load_workspace after it has published id→address mappings but
-// before HostState.labels_sealed is set. The host must not hold HostState's
-// mutex while calling this: extensions attach handlers through __host_attach.
-function _finalize_factory_extensions() {
-	if (_factory_extensions_sealed) return;
-	// Freeze factory creation/composition before invoking user extensions.
-	// Goal-handler attachment remains open host-side until replay completes,
-	// but an extension must not mutate the registry being replayed.
-	_factory_extensions_sealed = true;
-	for (const state of _extensible_factories) {
-		for (const instance of state.instances) {
-			_apply_factory_extensions(state, instance);
-		}
-		state.instances.length = 0;
-	}
-	_extensible_factories.length = 0;
-}
-globalThis.__imp_finalize_factory_extensions =
-	_finalize_factory_extensions;
-
-function _apply_factory_extensions(state, instance) {
-	const seen = new Set();
-	for (const extension of [
-		...state.globalExtensions,
-		...instance.localExtensions,
-	]) {
-		if (seen.has(extension)) continue;
-		seen.add(extension);
-		try {
-			const previousProvenance = _active_extension_provenance;
-			_active_extension_provenance = {
-				factory: state.name,
-				extension: _extension_name(extension),
-			};
-			let result;
-			try {
-				result = extension(instance.label);
-			} finally {
-				_active_extension_provenance = previousProvenance;
-			}
-			if (
-				result !== null &&
-				result !== undefined &&
-				(typeof result === "object" || typeof result === "function") &&
-				typeof result.then === "function"
-			) {
-				throw new Error(
-					"returned a Promise; extensions must finish synchronously during label definition",
-				);
-			}
-		} catch (error) {
-			let address;
-			try {
-				address = __host_target_address(instance.label.__id);
-			} catch (_) {
-				address = `<unexported label id ${instance.label.__id}>`;
-			}
-			throw new Error(
-				`extensible factory '${state.name}' extension '${_extension_name(extension)}' ` +
-					`failed for ${address}: ${error}`,
-			);
-		}
-	}
-}
-
-/**
- * Register an async metadata-discovery callback owned by an exported label.
- * The callback may create labels and publish them with registerLabel().
- * Expensive work beneath the callback should use memo(); the callback itself
- * intentionally replays so registration side effects are never cached away.
- */
-export function discoverLabels(owner, fn, opts = {}) {
-	if (!owner || owner.__imp_label !== true) {
-		throw new Error("discoverLabels(owner, fn) expects a label() owner");
-	}
-	if (typeof fn !== "function") {
-		throw new Error("discoverLabels(owner, fn) expects fn to be a function");
-	}
-	const goals = opts.goals ?? null;
-	if (
-		goals !== null &&
-		(!Array.isArray(goals) ||
-			goals.length === 0 ||
-			goals.some((goal) => typeof goal !== "string" || goal === ""))
-	) {
-		throw new Error("discoverLabels({ goals }) expects non-empty goal names");
-	}
-	const stack = new Error("label discoverer registration").stack || "";
-	const origin = __host_call_site_identity(stack) || "<unknown discoverer>";
-	__host_register_label_discoverer(owner.__id, fn, goals, origin);
-	return fn;
-}
-
-/**
- * Give a label created by the active discoverLabels() callback one canonical
- * absolute address. Existing extensible-factory attachments replay only after
- * the address is published.
- */
-export function registerLabel(handle, address) {
-	if (!handle || handle.__imp_label !== true) {
-		throw new Error("registerLabel(handle, address) expects a label() handle");
-	}
-	__host_register_dynamic_label(handle.__id, address);
-	const pending = _discovered_factory_instances.get(handle.__id);
-	if (pending !== undefined) {
-		_discovered_factory_instances.delete(handle.__id);
-		_apply_factory_extensions(pending.state, pending.instance);
-	}
-	return handle;
-}
-
-globalThis.__imp_set_label_discovery_active = function (active) {
-	_active_label_discovery = Boolean(active);
-	if (!_active_label_discovery && _discovered_factory_instances.size > 0) {
-		const ids = Array.from(_discovered_factory_instances.keys()).join(", ");
-		_discovered_factory_instances.clear();
-		throw new Error(
-			`discoverLabels() created extensible label(s) without registerLabel(): ${ids}`,
-		);
-	}
-};
 
 function _goal_sugar(goalName) {
 	return function (labelOrFn, fn, opts) {

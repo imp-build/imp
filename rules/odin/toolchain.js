@@ -2,22 +2,14 @@ import {
 	Toolchain,
 	product,
 	namedCache,
-	memo,
 	platformInfo,
-	cachePut,
-	cacheGet,
-	cacheHas,
 	toolName,
-	group,
 	tool as graphTool,
 } from "imp:core";
 
-import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
-import {
-	downloadToolArtifact,
-	lockedDownloadTools,
-} from "//rules/imp/lockfile";
-import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
+import { downloadToolArtifact } from "//rules/imp/lockfile";
+import { extractArchive } from "//rules/imp/archive";
+import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
 	generateToolLockfile,
 	GEN_LOCKFILES,
@@ -98,18 +90,6 @@ export function odinSupportedPlatforms() {
 	return ODIN_SUPPORTED_PLATFORMS.map((plat) => ({ ...plat }));
 }
 
-// Bare coreutils the verified-download and extract scripts need. The sandbox
-// is fully hermetic — even `mkdir`/`tar` must be declared tools, not resolved
-// from an ambient PATH.
-function coreToolNames(plat) {
-	return [
-		...new Set([
-			...lockedDownloadTools(plat),
-			...extractArchiveTools(plat.os === "windows" ? "zip" : "tar.gz"),
-		]),
-	];
-}
-
 export class OdinToolchain extends Toolchain {
 	static kind = "odin-toolchain";
 	static tool = ODIN_TOOL;
@@ -132,24 +112,19 @@ export class OdinToolchain extends Toolchain {
 	}
 }
 
-// Declared lazily, once — either when a toolchain is first declared via
-// odinToolchain(), or (odinPackage/odinTestPackage support pinning a bare
-// version string with no toolchain target at all) on first acquire.
-let coreToolHandles = null;
+// Built once per declared version, at declaration time: task() refuses to add
+// graph nodes during execution, so anything that resolves a toolchain while
+// the graph is running must find a handle here rather than build one.
+// odinPackage/odinTestPackage also accept a bare version string with no
+// toolchain target at all, so a lookup can still miss.
 let graphToolchains = new Map();
 
-function ensureCoreTools() {
-	if (!coreToolHandles) {
-		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
-			nativeTool(name),
-		);
-	}
-	return coreToolHandles;
+function graphToolFor(version) {
+	return graphToolchains.get(version) ?? odinGraphTool(version);
 }
 
 export function __resetOdinToolchainStateForTest() {
 	OdinToolchain.clearDefault();
-	coreToolHandles = null;
 	graphToolchains = new Map();
 }
 
@@ -181,6 +156,7 @@ export function odinToolchain(version, opts = {}) {
 export function odinGraphTool(version) {
 	const resolved = resolveOdinToolchainVersion(version);
 	const plat = platformInfo();
+	namedCache({ name: ODIN_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
 		lockfile: "//rules/odin/odin.lock",
 		tool: "odin",
@@ -191,67 +167,21 @@ export function odinGraphTool(version) {
 		display: `download odin ${resolved} (${plat.os}/${plat.arch})`,
 		unverified: OdinToolchain.resolveUnverified(resolved),
 	});
+	// Odin's release archive wraps its contents in a single top-level
+	// directory (e.g. "odin-linux-amd64-dev-2026-03/"), so strip it.
 	const directory = extractArchive({
 		archive,
 		dest: "odin-toolchain",
 		format: plat.os === "windows" ? "zip" : "tar.gz",
 		stripComponents: 1,
+		namedCache: {
+			name: ODIN_TOOLCHAIN_CACHE,
+			key: odinCacheKey(resolved, plat),
+		},
 		display: `install odin ${resolved} (${plat.os}/${plat.arch})`,
 	});
 	return graphTool(directory, { binDirs: ["."] });
 }
-
-/**
- * Acquire (download, verify, and extract) an Odin toolchain, caching it in
- * the named cache.
- *
- * @param {string} version Odin release version, e.g. "dev-2026-03".
- * @returns {Promise<string>} Local path to the toolchain root containing the
- *   Odin binary.
- */
-export const acquireOdinToolchain = memo(
-	async function acquireOdinToolchain(version) {
-		const plat = platformInfo();
-		const key = odinCacheKey(version, plat);
-
-		namedCache({ name: ODIN_TOOLCHAIN_CACHE, shared: true });
-		if (cacheHas(ODIN_TOOLCHAIN_CACHE, key)) {
-			return cacheGet(ODIN_TOOLCHAIN_CACHE, key);
-		}
-
-		const coreTools = await group(
-			ensureCoreTools().map((handle) => nativeToolSpec(handle)),
-		);
-
-		const downloadPath = `.imp/odin-downloads/${key}/${odinArtifactName(version, plat)}`;
-		await downloadToolArtifact({
-			lockfile: "//rules/odin/odin.lock",
-			tool: "odin",
-			version,
-			plat,
-			url: odinDownloadUrl(version, plat),
-			downloadPath,
-			tools: coreTools,
-			display: `download odin ${version} (${plat.os}/${plat.arch})`,
-			unverified: OdinToolchain.resolveUnverified(version),
-		});
-
-		// Odin's release archive wraps its contents in a single top-level
-		// directory (e.g. "odin-linux-amd64-dev-2026-03/"), so strip it.
-		await extractArchive({
-			archive: downloadPath,
-			dest: `.imp/odin-toolchains/${key}`,
-			format: plat.os === "windows" ? "zip" : "tar.gz",
-			stripComponents: 1,
-			tools: coreTools,
-			namedCache: { name: ODIN_TOOLCHAIN_CACHE, key },
-			display: `install odin ${version} (${plat.os}/${plat.arch})`,
-		});
-
-		return cacheGet(ODIN_TOOLCHAIN_CACHE, key);
-	},
-	{ display: "acquire Odin Toolchain {0}", level: "info" },
-);
 
 /**
  * Resolve an explicit or default Odin toolchain version.
@@ -275,9 +205,12 @@ export function resolveOdinToolchainVersion(version) {
  */
 export async function odinBin(version) {
 	const resolved = resolveOdinToolchainVersion(version);
-	const dir = await acquireOdinToolchain(resolved);
-	const exe = platformInfo().os === "windows" ? "odin.exe" : "odin";
-	return `${dir}/${exe}`;
+	const plat = platformInfo();
+	return toolchainBin(graphToolFor(resolved), {
+		name: ODIN_TOOLCHAIN_CACHE,
+		key: odinCacheKey(resolved, plat),
+		exe: plat.os === "windows" ? "odin.exe" : "odin",
+	});
 }
 
 /**
@@ -288,15 +221,13 @@ export async function odinBin(version) {
  */
 export async function odinTool(version) {
 	const resolved = resolveOdinToolchainVersion(version);
-	await acquireOdinToolchain(resolved);
 	const plat = platformInfo();
-	return {
-		kind: "tool",
-		name: "odin",
-		cache: ODIN_TOOLCHAIN_CACHE,
+	return toolchainToolSpec(graphToolFor(resolved), {
+		toolName: "odin",
+		name: ODIN_TOOLCHAIN_CACHE,
 		key: odinCacheKey(resolved, plat),
 		binDirs: ["."],
-	};
+	});
 }
 
 /**
@@ -315,9 +246,7 @@ export function defaultOdinToolchainVersion() {
  */
 export function defaultOdinToolchain() {
 	const version = OdinToolchain.defaultVersion();
-	return version
-		? (graphToolchains.get(version) ?? odinGraphTool(version))
-		: null;
+	return version ? graphToolFor(version) : null;
 }
 
 // Importing this rule provisions the pinned default. A workspace can replace

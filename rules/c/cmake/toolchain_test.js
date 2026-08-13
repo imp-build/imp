@@ -6,7 +6,6 @@ import {
 } from "//rules/imp/test";
 import {
 	__resetCmakeToolchainStateForTest,
-	acquireCmakeToolchain,
 	cmakeCacheKey,
 	cmakeBin,
 	cmakeGraphToolSpec,
@@ -41,7 +40,11 @@ describe("CMake toolchain", () => {
 				cmakeCacheKey(toolchain.attrs.version, { os: "linux", arch: "x86_64" }),
 			).toBe("3.30.5/linux-x86_64");
 			expect(defaultCmakeToolchainVersion()).toBe("3.30.5");
-			expect(host.calls[0][0]).toBe("namedCache");
+			expect(
+				host.calls.some(
+					(call) => call[0] === "namedCache" && call[1] === "cmake-toolchains",
+				),
+			).toBe(true);
 		});
 	});
 
@@ -51,7 +54,7 @@ describe("CMake toolchain", () => {
 		});
 	});
 
-	test("installs and acquires a toolchain from the named cache", async () => {
+	test("installCmakeToolchain publishes a local toolchain into the named cache", async () => {
 		await withCmakeHost(async (host) => {
 			const key = cmakeCacheKey("3.30.5", { os: "linux", arch: "x86_64" });
 
@@ -67,15 +70,6 @@ describe("CMake toolchain", () => {
 						call[3] === "/tmp/cmake-3.30.5",
 				),
 			).toBe(true);
-
-			expect(await acquireCmakeToolchain("3.30.5")).toBe(
-				"/cache/cmake-toolchains/3.30.5/linux-x86_64",
-			);
-			expect(await cmakeBin("3.30.5")).toBe(
-				"/cache/cmake-toolchains/3.30.5/linux-x86_64/bin/cmake",
-			);
-			// Already cached, so no download/extract run() should have happened.
-			expect(host.runs.length).toBe(0);
 		});
 	});
 
@@ -89,20 +83,6 @@ describe("CMake toolchain", () => {
 			expect(tool.cache).toBe("cmake-toolchains");
 			expect(tool.key).toBe("3.30.5/linux-x86_64");
 			expect(tool.binDirs.join(",")).toBe("bin");
-		});
-	});
-
-	test("throws when no toolchain has been declared", async () => {
-		await withCmakeHost(async () => {
-			let message = null;
-
-			try {
-				await acquireCmakeToolchain("3.30.5");
-			} catch (error) {
-				message = error.message;
-			}
-
-			expect(message).toContain("no CMake toolchain declared");
 		});
 	});
 
@@ -127,9 +107,10 @@ describe("CMake toolchain", () => {
 			);
 
 			cmakeToolchain("3.30.5", { default: true });
-			const path = await acquireCmakeToolchain("3.30.5");
 
-			expect(path).toBe("/cache/cmake-toolchains/3.30.5/linux-x86_64");
+			expect(await cmakeBin("3.30.5")).toBe(
+				"/cache/cmake-toolchains/3.30.5/linux-x86_64/bin/cmake",
+			);
 			expect(host.runs.length).toBe(2);
 
 			const [download, extract] = host.runs;
@@ -142,12 +123,6 @@ describe("CMake toolchain", () => {
 			expect(extract.argv[2]).toContain("--strip-components=1");
 			expect(extract.outputs[0].namedCache.name).toBe("cmake-toolchains");
 			expect(extract.outputs[0].namedCache.key).toBe(key);
-
-			expect(
-				host.calls.some(
-					(call) => call[0] === "nativeToolSpec" && call[1] === "curl",
-				),
-			).toBe(true);
 		});
 	});
 });

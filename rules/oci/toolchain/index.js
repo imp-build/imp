@@ -1,5 +1,6 @@
 import {
 	Toolchain,
+	namedCache,
 	platformInfo,
 	product,
 	tool as graphTool,
@@ -8,6 +9,7 @@ import {
 
 import { extractArchive } from "//rules/imp/archive";
 import { downloadToolArtifact } from "//rules/imp/lockfile";
+import { toolchainBin } from "//rules/imp/toolchain";
 import {
 	generateToolLockfile,
 	GEN_LOCKFILES,
@@ -17,6 +19,7 @@ import {
 export const CRANE_TOOL = toolName("crane");
 
 const CRANE_LOCKFILE = "//rules/oci/crane.lock";
+const CRANE_TOOLCHAIN_CACHE = "crane-toolchains";
 
 const TARGET_OS = {
 	linux: "Linux",
@@ -78,6 +81,10 @@ export class CraneToolchain extends Toolchain {
 			opts,
 		);
 	}
+
+	bin() {
+		return craneBin(this.attrs.version);
+	}
 }
 
 let graphToolchains = new Map();
@@ -105,10 +112,32 @@ export function resolveCraneToolchainVersion(version) {
 	return CraneToolchain.resolveVersion(version);
 }
 
+function graphToolFor(version) {
+	return graphToolchains.get(version) ?? craneGraphTool(version);
+}
+
+/**
+ * Return the crane executable path for a toolchain version, installing the
+ * toolchain if necessary.
+ *
+ * @param {string} [version]
+ * @returns {Promise<string>}
+ */
+export async function craneBin(version) {
+	const resolved = CraneToolchain.requireVersion(version);
+	const plat = platformInfo();
+	return toolchainBin(graphToolFor(resolved), {
+		name: CRANE_TOOLCHAIN_CACHE,
+		key: craneCacheKey(resolved, plat),
+		exe: plat.os === "windows" ? "crane.exe" : "crane",
+	});
+}
+
 /** Build Crane from a verified archive as an ordinary artifact-producing graph. */
 export function craneGraphTool(version) {
 	const resolved = CraneToolchain.requireVersion(version);
 	const plat = platformInfo();
+	namedCache({ name: CRANE_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
 		lockfile: CRANE_LOCKFILE,
 		tool: "crane",
@@ -123,6 +152,10 @@ export function craneGraphTool(version) {
 		archive,
 		dest: "crane-toolchain",
 		format: "tar.gz",
+		namedCache: {
+			name: CRANE_TOOLCHAIN_CACHE,
+			key: craneCacheKey(resolved, plat),
+		},
 		display: `install crane ${resolved} (${plat.os}/${plat.arch})`,
 	});
 	return graphTool(directory, { binDirs: ["."] });

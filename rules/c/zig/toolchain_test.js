@@ -6,7 +6,6 @@ import {
 } from "//rules/imp/test";
 import {
 	__resetZigToolchainStateForTest,
-	acquireZigToolchain,
 	defaultZigGraphToolchain,
 	defaultZigToolchainVersion,
 	installZigToolchain,
@@ -44,21 +43,11 @@ describe("Zig toolchain", () => {
 				zigCacheKey(toolchain.attrs.version, { os: "linux", arch: "x86_64" }),
 			).toBe("0.13.0/linux-x86_64");
 			expect(defaultZigToolchainVersion()).toBe("0.13.0");
-			expect(host.calls[0][0]).toBe("namedCache");
-		});
-	});
-
-	test("throws when no toolchain has been declared", async () => {
-		await withZigHost(async () => {
-			let message = null;
-
-			try {
-				await acquireZigToolchain("0.13.0");
-			} catch (error) {
-				message = error.message;
-			}
-
-			expect(message).toContain("no Zig toolchain declared");
+			expect(
+				host.calls.some(
+					(call) => call[0] === "namedCache" && call[1] === "zig-toolchains",
+				),
+			).toBe(true);
 		});
 	});
 
@@ -77,14 +66,9 @@ describe("Zig toolchain", () => {
 		});
 	});
 
-	test("installs and acquires a toolchain from the named cache", async () => {
+	test("installZigToolchain publishes a local toolchain into the named cache", async () => {
 		await withZigHost(async (host) => {
 			const key = zigCacheKey("0.13.0", { os: "linux", arch: "x86_64" });
-			// zigToolchain() is what normally sets up coreToolHandles;
-			// installZigToolchain() alone (a manual/offline seeding path) only
-			// ever populates ZIG_TOOLCHAIN_CACHE, so acquireZigToolchain still
-			// needs a prior toolchain declaration to acquire from at all.
-			zigToolchain("0.13.0");
 
 			expect(installZigToolchain("0.13.0", "/tmp/zig-0.13.0")).toBe(
 				"/cache/zig-toolchains/0.13.0/linux-x86_64",
@@ -98,18 +82,6 @@ describe("Zig toolchain", () => {
 						call[3] === "/tmp/zig-0.13.0",
 				),
 			).toBe(true);
-			// Build cache already warm too (e.g. backfilled by a prior real
-			// acquire), so nothing left for acquireZigToolchain to seed.
-			host.install("zig-build-cache", key, "/tmp/zig-build-cache-0.13.0");
-
-			expect(await acquireZigToolchain("0.13.0")).toBe(
-				"/cache/zig-toolchains/0.13.0/linux-x86_64",
-			);
-			expect(await zigBin("0.13.0")).toBe(
-				"/cache/zig-toolchains/0.13.0/linux-x86_64/zig",
-			);
-			// Both caches already warm, so no run() should have happened.
-			expect(host.runs.length).toBe(0);
 		});
 	});
 
@@ -134,13 +106,15 @@ describe("Zig toolchain", () => {
 			);
 
 			zigToolchain("0.13.0", { default: true });
-			const path = await acquireZigToolchain("0.13.0");
 
-			expect(path).toBe("/cache/zig-toolchains/0.13.0/linux-x86_64");
-			// verified download, install, and the zig-build-cache prewarm.
-			expect(host.runs.length).toBe(3);
+			expect(await zigBin("0.13.0")).toBe(
+				"/cache/zig-toolchains/0.13.0/linux-x86_64/zig",
+			);
+			// Verified download plus install. The zig-build-cache prewarm is its
+			// own graph tool (zigGraphToolchain), not part of getting the binary.
+			expect(host.runs.length).toBe(2);
 
-			const [download, install, prewarm] = host.runs;
+			const [download, install] = host.runs;
 			expect(download.argv).toContain(
 				"https://locked.example/zig-linux-x86_64-0.13.0.tar.xz",
 			);
@@ -169,17 +143,6 @@ describe("Zig toolchain", () => {
 			).toBe(true);
 			expect(install.outputs[0].namedCache.name).toBe("zig-toolchains");
 			expect(install.outputs[0].namedCache.key).toBe(key);
-
-			expect(prewarm.argv[0]).toBe("sh");
-			expect(prewarm.tools.some((t) => t.name === "zig")).toBe(true);
-			expect(prewarm.outputs[0].namedCache.name).toBe("zig-build-cache");
-			expect(prewarm.outputs[0].namedCache.key).toBe(key);
-
-			expect(
-				host.calls.some(
-					(call) => call[0] === "nativeToolSpec" && call[1] === "curl",
-				),
-			).toBe(true);
 		});
 	});
 
@@ -187,7 +150,7 @@ describe("Zig toolchain", () => {
 		await withZigHost({ os: "windows", arch: "x86_64" }, async (host) => {
 			// unverified: exercises the lockfile-less opt-out path.
 			zigToolchain("0.13.0", { default: true, unverified: true });
-			await acquireZigToolchain("0.13.0");
+			await zigBin("0.13.0");
 
 			const [, install] = host.runs;
 			expect(
