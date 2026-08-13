@@ -4,7 +4,7 @@
 // directory output. Deliberately a plain helper, not a base-class pipeline:
 // each toolchain owns its acquire flow and adds its own steps (wrapper
 // scripts, cache seeding, installers) around it.
-import { output, output_path, run, task } from "imp:core";
+import { output, task } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 
 // tar flags per archive format. Windows Git Bash ships bsdtar, which unpacks
@@ -38,60 +38,6 @@ export function extractArchiveTools(format) {
 	}
 	const decompress = { "tar.gz": ["gzip"], "tar.xz": ["xz"] }[format] ?? [];
 	return ["mkdir", "tar", ...decompress];
-}
-
-/**
- * Extract a downloaded archive into a directory via run().
- *
- * @param {object} opts
- * @param {string} opts.archive Sandbox-relative path of the downloaded archive.
- * @param {string} opts.dest Sandbox-relative extraction directory.
- * @param {string} opts.format One of "tar.gz", "tar.xz", "tar", "zip", or
- *   "zip-unix". "zip" unpacks via `tar -xf` for Windows' bsdtar; use
- *   "zip-unix" for GNU/Linux and macOS, where it invokes `unzip` instead.
- * @param {number} [opts.stripComponents] tar --strip-components value.
- * @param {object[]} opts.tools Resolved native-tool specs covering
- *   extractArchiveTools(format) (plus `sh` on windows).
- * @param {{ name: string, key: string }} [opts.namedCache] Publish `dest` as
- *   a named-cache-keyed directory output (the toolchain-install shape).
- * @param {string} opts.display run() display label.
- * @returns {Promise<string>} The destination directory.
- */
-async function extractArchiveLegacy({
-	archive,
-	dest,
-	format,
-	stripComponents,
-	tools,
-	namedCache,
-	display,
-}) {
-	const flags = FORMAT_FLAGS[format];
-	if (!flags && format !== "zip-unix") {
-		throw new Error(`unsupported archive format '${format}'`);
-	}
-	if (format === "zip-unix" && stripComponents) {
-		throw new Error("zip-unix extraction does not support stripComponents");
-	}
-	const strip = stripComponents ? ` --strip-components=${stripComponents}` : "";
-	const command =
-		format === "zip-unix"
-			? 'mkdir -p "$2" && unzip -q "$1" -d "$2"'
-			: `mkdir -p "$2" && tar ${flags} "$1" -C "$2"${strip}`;
-	await run({
-		argv: ["sh", "-c", command, "extract-archive", archive, dest],
-		tools,
-		inputs: [{ kind: "file", path: archive }],
-		outputs: [
-			output(output_path(dest), {
-				kind: "directory",
-				...(namedCache ? { namedCache } : {}),
-			}),
-		],
-		materialize: true,
-		display,
-	});
-	return dest;
 }
 
 async function runGraphArchiveExtraction(exec, inputs) {
@@ -130,16 +76,44 @@ async function runGraphArchiveExtraction(exec, inputs) {
 	return { directory: result.outputs.directory };
 }
 
-function graphExtractArchive({
+/**
+ * Extract an archive into a directory, returning a directory artifact
+ * handle immediately.
+ *
+ * This owns its own native tools (derived from `format`), so `tools` is
+ * rejected. `namedCache` is accepted: a toolchain install has to publish its
+ * extracted tree at a real, absolute, stable path, because callers outside
+ * any sandbox need one — `imp @tool` executes the binary directly, and a
+ * relative `-fuse-ld=<path>` breaks in practice (see moldRustLinkerEnv() in
+ * //rules/c/mold).
+ *
+ * @param {object} opts
+ * @param {object} opts.archive Graph handle for the downloaded archive
+ *   (e.g. downloadToolArtifact()'s return value).
+ * @param {string} opts.dest Sandbox-relative extraction directory.
+ * @param {string} opts.format One of "tar.gz", "tar.xz", "tar", "zip", or
+ *   "zip-unix". "zip" unpacks via `tar -xf` for Windows' bsdtar; use
+ *   "zip-unix" for GNU/Linux and macOS, where it invokes `unzip` instead.
+ * @param {number} [opts.stripComponents] tar --strip-components value.
+ * @param {{ name: string, key: string }} [opts.namedCache] Publish `dest` as
+ *   a named-cache-keyed directory output (the toolchain-install shape).
+ * @param {string} [opts.display] Task display label.
+ * @returns {object} Directory artifact handle.
+ */
+export function extractArchive({
 	archive,
 	dest,
 	format,
 	stripComponents,
 	namedCache,
+	tools,
 	display = "extract archive",
 }) {
+	if (tools !== undefined) {
+		throw new Error("extractArchive owns its tools");
+	}
 	if (typeof dest !== "string" || dest.length === 0) {
-		throw new Error("extractArchive graph form requires a non-empty dest");
+		throw new Error("extractArchive(options) requires a non-empty dest");
 	}
 	// Validate construction-time policy before creating any graph nodes.
 	extractArchiveTools(format);
@@ -169,27 +143,4 @@ function graphExtractArchive({
 		run: runGraphArchiveExtraction,
 		display,
 	}).outputs.directory;
-}
-
-/**
- * Extract an archive. A graph-handle `archive` returns a directory artifact
- * handle immediately; the temporary string-path form retains its Promise API.
- *
- * The graph form declares its own tools, so `tools` is rejected. `namedCache`
- * is accepted: a toolchain install has to publish its extracted tree at a
- * real, absolute, stable path, because callers outside any sandbox need one —
- * `imp @tool` executes the binary directly, and a relative `-fuse-ld=<path>`
- * breaks in practice (see moldRustLinkerEnv() in //rules/c/mold).
- */
-export function extractArchive(opts) {
-	if (!opts || typeof opts !== "object") {
-		throw new Error("extractArchive(options) requires an options object");
-	}
-	if (opts.archive?.__imp_graph_handle === true) {
-		if (Object.hasOwn(opts, "tools")) {
-			throw new Error("extractArchive graph form owns its tools");
-		}
-		return graphExtractArchive(opts);
-	}
-	return extractArchiveLegacy(opts);
 }

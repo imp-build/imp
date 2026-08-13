@@ -96,8 +96,12 @@ The public imp support APIs follow the same rule. Use
 the selectable TEST graph root; the other modules provide graph tools,
 workspace configuration, or ordinary rule-author helpers. `nativeTool()`
 returns a lazy graph handle: the host `PATH` lookup happens only when selected
-work consumes it. `nativeToolSpec()` remains temporarily for legacy `run()`
-consumers while built-in rulesets migrate.
+work consumes it. `nativeToolSpec()` resolves that handle into the tool-spec
+shape `exec.action()`'s legacy-tool-spec bridge accepts (`graph_core.js`'s
+`addTool`) — still load-bearing for cross-kind role dispatch that resolves
+dynamically via `productFor(handle, ROLE)` (e.g. `rules/rust/kache`'s
+RUST_BUILD_CACHE wrapper, `rules/c/mold`'s Odin-linker role), not a
+deprecated shim.
 
 When moving a public module, update all first-party consumers in the same
 change. Remove the old deep import rather than leaving a compatibility shim:

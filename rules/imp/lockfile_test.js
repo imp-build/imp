@@ -255,29 +255,6 @@ describe("toolchain lockfiles", () => {
 		]);
 	});
 
-	test("downloadToolArtifact runs a verified download from the lock entry", async () => {
-		await withFakeToolchainHost(async (host) => {
-			host.addFile(ADDRESS, lockJson());
-			const path = await downloadToolArtifact({
-				lockfile: ADDRESS,
-				tool: "ruff-toolchain",
-				version: "0.15.21",
-				plat: PLAT,
-				url: "https://fallback.example/ruff.tar.gz",
-				downloadPath: ".imp/downloads/ruff.tar.gz",
-				tools: [],
-				display: "download ruff",
-			});
-
-			expect(path).toBe(".imp/downloads/ruff.tar.gz");
-			expect(host.runs.length).toBe(1);
-			const [download] = host.runs;
-			// The lock entry's URL wins over the caller's fallback.
-			expect(download.argv).toContain("https://example.com/ruff.tar.gz");
-			expect(download.argv[2]).toContain("sha256sum -c -");
-		});
-	});
-
 	test("downloadToolArtifact graph form returns an artifact handle without running", async () => {
 		await withFakeToolchainHost(async (host) => {
 			host.addFile(ADDRESS, lockJson());
@@ -294,7 +271,29 @@ describe("toolchain lockfiles", () => {
 		});
 	});
 
-	test("downloadToolArtifact rejects mixed graph and legacy options", () => {
+	test("downloadToolArtifact runs a verified download from the lock entry", async () => {
+		await withFakeToolchainHost(async (host) => {
+			host.addFile(ADDRESS, lockJson());
+			const artifact = downloadToolArtifact({
+				lockfile: ADDRESS,
+				tool: "ruff-toolchain",
+				version: "0.15.21",
+				plat: PLAT,
+				url: "https://fallback.example/ruff.tar.gz",
+				output: "downloads/ruff.tar.gz",
+				display: "download ruff",
+			});
+			await host.resolve(artifact);
+
+			expect(host.runs.length).toBe(1);
+			const [download] = host.runs;
+			// The lock entry's URL wins over the caller's fallback.
+			expect(download.argv).toContain("https://example.com/ruff.tar.gz");
+			expect(download.argv[2]).toContain("sha256sum -c -");
+		});
+	});
+
+	test("downloadToolArtifact requires a non-empty output", () => {
 		expect(() =>
 			downloadToolArtifact({
 				lockfile: ADDRESS,
@@ -302,10 +301,8 @@ describe("toolchain lockfiles", () => {
 				version: "0.15.21",
 				plat: PLAT,
 				url: "https://example.com/ruff.tar.gz",
-				output: "downloads/ruff.tar.gz",
-				downloadPath: ".imp/downloads/ruff.tar.gz",
 			}),
-		).toThrow("cannot include legacy");
+		).toThrow("requires a non-empty output");
 	});
 
 	test("downloadToolArtifact decorates a failed verified download with a gen-lockfiles hint", async () => {
@@ -314,18 +311,18 @@ describe("toolchain lockfiles", () => {
 			globalThis.__host_run = async () => {
 				throw new Error("exit code 1");
 			};
+			const artifact = downloadToolArtifact({
+				lockfile: ADDRESS,
+				tool: "ruff-toolchain",
+				version: "0.15.21",
+				plat: PLAT,
+				url: "https://fallback.example/ruff.tar.gz",
+				output: "downloads/ruff.tar.gz",
+				display: "download ruff",
+			});
 			let message = null;
 			try {
-				await downloadToolArtifact({
-					lockfile: ADDRESS,
-					tool: "ruff-toolchain",
-					version: "0.15.21",
-					plat: PLAT,
-					url: "https://fallback.example/ruff.tar.gz",
-					downloadPath: ".imp/downloads/ruff.tar.gz",
-					tools: [],
-					display: "download ruff",
-				});
+				await host.resolve(artifact);
 			} catch (e) {
 				message = e.message;
 			}
@@ -351,17 +348,17 @@ describe("toolchain lockfiles", () => {
 					},
 				}),
 			);
-			await downloadToolArtifact({
+			const artifact = downloadToolArtifact({
 				lockfile: "//locks/pex.lock",
 				tool: "pex-toolchain",
 				version: "2.97.1",
 				plat: PLAT,
 				lockPlat: { os: "any", arch: "any" },
 				url: "https://fallback.example/pex",
-				downloadPath: ".imp/downloads/pex",
-				tools: [],
+				output: "downloads/pex",
 				display: "download pex",
 			});
+			await host.resolve(artifact);
 
 			const [download] = host.runs;
 			expect(download.argv).toContain("https://example.com/pex");
