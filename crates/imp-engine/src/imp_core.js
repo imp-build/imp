@@ -236,6 +236,13 @@ const _toolchain_registered = new Set();
 // non-default instance (e.g. `unverified`) resolve correctly even when
 // acquiring that version rather than the default one.
 const _toolchain_by_version = new Map();
+// tool name string (cls.tool.name) → concrete subclass. Powers
+// resolveToolchainByName()'s `imp @tool` fallback: unlike the `//:{name}`
+// workspace-export lookup resolve_workspace_tool_bin() tries first (see
+// crates/imp/src/main.rs), this needs no workspace export at all — only
+// that the toolchain's module was imported (registering the class here) and
+// declared a default instance.
+const _toolchain_by_tool_name = new Map();
 
 /**
  * Base class for toolchain target kinds. Subclasses declare:
@@ -359,11 +366,44 @@ export class Toolchain extends Target {
 			);
 		}
 		_toolchain_registered.add(cls);
+		_toolchain_by_tool_name.set(cls.tool.name, cls);
 		product(cls, TOOLCHAIN, cls.tool, (handle) => handle.bin(), {
 			display: "toolchain {0}",
 			level: "info",
 		});
 	}
+}
+
+/**
+ * Resolve `@name` to an absolute binary path via a toolchain class's own
+ * default instance, independent of whatever a workspace's `//:{name}` export
+ * resolves to (or whether it exists at all). This is `imp @tool` dispatch's
+ * fallback for a toolchain whose declaration API returns a graph-native
+ * handle rather than a target handle — e.g. `defaultBiomeToolchain()` — so
+ * `//:biome` never lands in the workspace's target map even when biome is
+ * declared and its module is imported. `resolve_workspace_tool_bin` (see
+ * crates/imp/src/main.rs) tries the `//:{name}` export lookup first and only
+ * falls back to this when that misses, so `imp @mold`/`@rust`/`@kache` (whose
+ * declaration APIs already return target handles, and whose exports already
+ * exist in imp.workspace.js) keep resolving exactly as before.
+ *
+ * @param {string} name Tool name, as declared by a Toolchain subclass's
+ *   `static tool = toolName(name)`.
+ * @returns {string|Promise<string>} Absolute path to the toolchain's binary.
+ */
+export function resolveToolchainByName(name) {
+	const cls = _toolchain_by_tool_name.get(name);
+	if (!cls) {
+		throw new Error(
+			`unknown tool '@${name}'; declare \`export const ${name} = ...Toolchain(...)\` ` +
+				`in imp.workspace.js, or use one of the built-in tools (kcov)`,
+		);
+	}
+	const instance = cls.default();
+	if (!instance) {
+		throw new Error(`no default ${name} toolchain declared`);
+	}
+	return productFor(instance, TOOLCHAIN);
 }
 
 /** Clear every toolchain kind's default instance (test isolation hook). */

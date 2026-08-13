@@ -2,6 +2,7 @@ mod codegen;
 mod commands;
 mod ui;
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -419,12 +420,20 @@ fn run_direct_tool_command(bin: &std::path::Path, args: &[std::ffi::OsString]) -
 async fn resolve_workspace_tool_bin(name: &str) -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("read current directory")?;
     let workspace_root = spike::find_workspace_root(&cwd)?;
-    let live = runtime::load_workspace(&workspace_root).await?;
+    resolve_tool_bin_in_workspace(&workspace_root, name).await
+}
+
+/// [`resolve_workspace_tool_bin`], parameterized on an explicit workspace
+/// root instead of discovering one from the process's current directory —
+/// the seam that makes `@tool` dispatch testable without mutating global
+/// process state (`std::env::set_current_dir`) across parallel tests.
+async fn resolve_tool_bin_in_workspace(workspace_root: &Path, name: &str) -> Result<PathBuf> {
+    let live = runtime::load_workspace(workspace_root).await?;
 
     // A cold toolchain resolution may need to acquire the tool — verified
     // download + install through run() — so install a minimal execution
     // context (no progress rendering; events are drained and dropped).
-    *live.exec_root.lock().unwrap() = Some(workspace_root.clone());
+    *live.exec_root.lock().unwrap() = Some(workspace_root.to_path_buf());
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel::<scheduler::TaskEvent>();
     let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sched = scheduler::Scheduler::new(
@@ -435,17 +444,19 @@ async fn resolve_workspace_tool_bin(name: &str) -> Result<PathBuf> {
     *live.scheduler.lock().unwrap() = Some(sched);
     tokio::spawn(async move { while events.recv().await.is_some() {} });
 
+    // `//:{name}` export lookup first: this is a target handle a workspace
+    // exported at that address (e.g. `export const mold = ...`), and it
+    // covers every toolchain whose declaration API still returns a target
+    // handle. Falls back to resolveToolchainByName() below when it misses —
+    // a toolchain whose declaration API returns a graph-native handle
+    // instead (e.g. biome, ruff, odinfmt) never lands an export in the
+    // target map at all, even when it's declared and its module is
+    // imported, since only target handles register there.
     let js_id = live
         .workspace
         .targets
         .get(&format!("//:{name}"))
-        .map(|target| target.js_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "unknown tool '@{name}'; declare `export const {name} = ...Toolchain(...)` \
-                 in imp.workspace.js, or use one of the built-in tools (kcov)"
-            )
-        })?;
+        .map(|target| target.js_id);
 
     let path = live
         .ctx
@@ -457,11 +468,21 @@ async fn resolve_workspace_tool_bin(name: &str) -> Result<PathBuf> {
                 promise.into_future().await.catch(&ctx).map_err(|e| {
                     rquickjs::Error::new_loading_message("imp:core", format!("{e}"))
                 })?;
-            let invoke: Function = core_ns.get("invokeToolchainProduct")?;
             let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
-            let value: Value = invoke.call((js_id,)).catch(&ctx).map_err(|e| {
-                rquickjs::Error::new_loading_message("invokeToolchainProduct", format!("{e}"))
-            })?;
+            let value: Value = if let Some(js_id) = js_id {
+                let invoke: Function = core_ns.get("invokeToolchainProduct")?;
+                invoke.call((js_id,)).catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message("invokeToolchainProduct", format!("{e}"))
+                })?
+            } else {
+                let resolve_by_name: Function = core_ns.get("resolveToolchainByName")?;
+                resolve_by_name.call((name,)).catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message(
+                        "resolveToolchainByName",
+                        format!("{e}"),
+                    )
+                })?
+            };
             let result: MaybePromise = promise_resolve.call((value,)).catch(&ctx).map_err(|e| {
                 rquickjs::Error::new_loading_message("invokeToolchainProduct", format!("{e}"))
             })?;
@@ -2488,5 +2509,75 @@ export const build = product(K_workspace_js_workers_test, BUILD, toolName("works
         }
 
         assert_eq!(slots, BTreeSet::from([0, 1]));
+    }
+
+    #[tokio::test]
+    async fn resolve_tool_bin_finds_a_target_exported_at_its_own_address() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        // A toolchain whose declaration API returns the target handle
+        // itself (mold/rust/kache's shape): `//:demo` lands in the
+        // workspace's target map, so resolve_tool_bin_in_workspace's
+        // `//:{name}` lookup finds it without ever touching
+        // resolveToolchainByName().
+        write_file(
+            &p.join(spike::WORKSPACE_FILE),
+            r#"
+import { Toolchain, toolName } from "imp:core";
+
+class DemoToolchain extends Toolchain {
+    static kind = "demo-toolchain";
+    static tool = toolName("demo");
+    bin() { return "/abs/demo-target-bin"; }
+}
+
+export const demo = new DemoToolchain({ kind: "demo-toolchain", attrs: {} }, { default: true });
+"#,
+        );
+
+        let path = resolve_tool_bin_in_workspace(p, "demo").await.unwrap();
+        assert_eq!(path, PathBuf::from("/abs/demo-target-bin"));
+    }
+
+    #[tokio::test]
+    async fn resolve_tool_bin_falls_back_to_a_toolchains_own_default_when_unexported() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+
+        // A toolchain whose declaration API returns a graph-native handle
+        // (biome/ruff/odinfmt's shape): nothing is exported at `//:demo`,
+        // so the `//:{name}` lookup misses and resolve_tool_bin_in_workspace
+        // must fall back to resolveToolchainByName(), which reads the
+        // class's own default() instance instead.
+        write_file(
+            &p.join(spike::WORKSPACE_FILE),
+            r#"
+import { Toolchain, toolName } from "imp:core";
+
+class DemoToolchain extends Toolchain {
+    static kind = "demo-toolchain";
+    static tool = toolName("demo");
+    bin() { return "/abs/demo-fallback-bin"; }
+}
+
+new DemoToolchain({ kind: "demo-toolchain", attrs: {} }, { default: true });
+"#,
+        );
+
+        let path = resolve_tool_bin_in_workspace(p, "demo").await.unwrap();
+        assert_eq!(path, PathBuf::from("/abs/demo-fallback-bin"));
+    }
+
+    #[tokio::test]
+    async fn resolve_tool_bin_reports_an_unknown_tool_name() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(spike::WORKSPACE_FILE), r#"import "imp:core";"#);
+
+        let error = resolve_tool_bin_in_workspace(p, "nonexistent-tool")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown tool"));
     }
 }
