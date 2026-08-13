@@ -477,10 +477,7 @@ async fn resolve_tool_bin_in_workspace(workspace_root: &Path, name: &str) -> Res
             } else {
                 let resolve_by_name: Function = core_ns.get("resolveToolchainByName")?;
                 resolve_by_name.call((name,)).catch(&ctx).map_err(|e| {
-                    rquickjs::Error::new_loading_message(
-                        "resolveToolchainByName",
-                        format!("{e}"),
-                    )
+                    rquickjs::Error::new_loading_message("resolveToolchainByName", format!("{e}"))
                 })?
             };
             let result: MaybePromise = promise_resolve.call((value,)).catch(&ctx).map_err(|e| {
