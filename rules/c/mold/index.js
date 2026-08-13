@@ -2,24 +2,18 @@ import {
 	Toolchain,
 	product,
 	namedCache,
-	memo,
 	output,
 	platformInfo,
 	cachePut,
 	cacheGet,
-	cacheHas,
 	toolName,
-	group,
 	task,
 	tool as graphTool,
 } from "imp:core";
 
-import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
-import {
-	downloadToolArtifact,
-	lockedDownloadTools,
-} from "//rules/imp/lockfile";
-import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
+import { nativeTool } from "//rules/imp/native-tool";
+import { downloadToolArtifact } from "//rules/imp/lockfile";
+import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
 	generateToolLockfile,
 	GEN_LOCKFILES,
@@ -93,18 +87,6 @@ export function moldCacheKey(version, plat) {
 	return `${version}/${plat.os}-${plat.arch}`;
 }
 
-// Bare coreutils the verified-download and extract scripts need. The sandbox
-// is fully hermetic — even `mkdir`/`tar` must be declared tools, not
-// resolved from an ambient or fixed-base PATH.
-function coreToolNames(plat) {
-	return [
-		...new Set([
-			...lockedDownloadTools(plat),
-			...extractArchiveTools("tar.gz"),
-		]),
-	];
-}
-
 export class MoldToolchain extends Toolchain {
 	static kind = "mold-toolchain";
 	static tool = MOLD_TOOL;
@@ -123,14 +105,19 @@ export class MoldToolchain extends Toolchain {
 	}
 }
 
-// Declared lazily, once, the first time a toolchain is declared — target()
-// addresses are only assigned at workspace-load time, so this must happen
-// at BUILD.js top level rather than inside acquireToolchain() at execution time.
-let coreToolHandles = null;
+// Built once per declared version, at declaration time: task() refuses to add
+// graph nodes during execution, so anything that resolves a toolchain while
+// the graph is running must find a handle here rather than build one —
+// OdinMoldLinker.tools() (below) resolves exactly that way.
+let graphToolchains = new Map();
 
 export function __resetMoldToolchainStateForTest() {
 	MoldToolchain.clearDefault();
-	coreToolHandles = null;
+	graphToolchains = new Map();
+}
+
+function graphToolFor(version) {
+	return graphToolchains.get(version) ?? moldGraphTool(version);
 }
 
 /**
@@ -145,17 +132,12 @@ export function __resetMoldToolchainStateForTest() {
  * @category configuration
  */
 export function moldToolchain(version, opts = {}) {
-	namedCache({ name: MOLD_TOOLCHAIN_CACHE, shared: true });
-	if (!coreToolHandles) {
-		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
-			nativeTool(name),
-		);
-	}
-
-	return new MoldToolchain(
+	const toolchain = new MoldToolchain(
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	graphToolchains.set(version, moldGraphTool(version));
+	return toolchain;
 }
 
 /**
@@ -172,61 +154,6 @@ export function installMoldToolchain(version, source) {
 	cachePut(MOLD_TOOLCHAIN_CACHE, key, source);
 	return cacheGet(MOLD_TOOLCHAIN_CACHE, key);
 }
-
-/**
- * Acquire a mold toolchain, downloading and caching it if not already
- * installed in the named cache.
- *
- * @param {string} version
- * @returns {Promise<string>} Local path to the toolchain root.
- */
-export const acquireMoldToolchain = memo(
-	async function acquireMoldToolchain(version) {
-		const plat = platformInfo();
-		const key = moldCacheKey(version, plat);
-
-		if (cacheHas(MOLD_TOOLCHAIN_CACHE, key)) {
-			return cacheGet(MOLD_TOOLCHAIN_CACHE, key);
-		}
-		if (!coreToolHandles) {
-			throw new Error(
-				"no mold toolchain declared via moldToolchain(); nothing to acquire",
-			);
-		}
-
-		const coreTools = await group(
-			coreToolHandles.map((handle) => nativeToolSpec(handle)),
-		);
-
-		const downloadPath = `.imp/mold-downloads/${key}/${moldArtifactName(version, plat)}`;
-		await downloadToolArtifact({
-			lockfile: MOLD_LOCKFILE,
-			tool: "mold",
-			version,
-			plat,
-			url: moldDownloadUrl(version, plat),
-			downloadPath,
-			tools: coreTools,
-			display: `download mold ${version} (${plat.os}/${plat.arch})`,
-			unverified: MoldToolchain.resolveUnverified(version),
-		});
-
-		// mold's release tarball already ships bin/mold and bin/ld.mold (the
-		// name clang's -fuse-ld=mold looks for) — no wrapper needed.
-		await extractArchive({
-			archive: downloadPath,
-			dest: `.imp/mold-toolchains/${key}`,
-			format: "tar.gz",
-			stripComponents: 1,
-			tools: coreTools,
-			namedCache: { name: MOLD_TOOLCHAIN_CACHE, key },
-			display: `install mold ${version} (${plat.os}/${plat.arch})`,
-		});
-
-		return cacheGet(MOLD_TOOLCHAIN_CACHE, key);
-	},
-	{ display: "acquire Mold Toolchain {0}", level: "info" },
-);
 
 /**
  * Build the managed mold distribution as a graph-native tool.
@@ -332,8 +259,13 @@ export function resolveMoldToolchainVersion(version) {
  */
 export async function moldBin(version) {
 	const resolved = MoldToolchain.requireVersion(version);
-	const dir = await acquireMoldToolchain(resolved);
-	return `${dir}/bin/mold`;
+	const plat = platformInfo();
+	return toolchainBin(graphToolFor(resolved), {
+		name: MOLD_TOOLCHAIN_CACHE,
+		key: moldCacheKey(resolved, plat),
+		subDir: "bin",
+		exe: "mold",
+	});
 }
 
 /**
@@ -344,15 +276,13 @@ export async function moldBin(version) {
  */
 export async function moldTool(version) {
 	const resolved = MoldToolchain.requireVersion(version);
-	await acquireMoldToolchain(resolved);
 	const plat = platformInfo();
-	return {
-		kind: "tool",
-		name: "mold",
-		cache: MOLD_TOOLCHAIN_CACHE,
+	return toolchainToolSpec(graphToolFor(resolved), {
+		toolName: "mold",
+		name: MOLD_TOOLCHAIN_CACHE,
 		key: moldCacheKey(resolved, plat),
 		binDirs: ["bin"],
-	};
+	});
 }
 
 /**

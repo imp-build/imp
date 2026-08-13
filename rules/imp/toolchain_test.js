@@ -149,9 +149,9 @@ describe("installed toolchain resolution", () => {
 
 			// An archive that puts its binaries in bin/, and one that puts them
 			// at the root — the two layouts every toolchain has.
-			expect(await toolchainBin(handle, { ...cache, subDir: "bin", exe: "demo" })).toBe(
-				`/cache/${DEMO_CACHE}/2.0/linux-x86_64/bin/demo`,
-			);
+			expect(
+				await toolchainBin(handle, { ...cache, subDir: "bin", exe: "demo" }),
+			).toBe(`/cache/${DEMO_CACHE}/2.0/linux-x86_64/bin/demo`);
 			expect(await toolchainBin(handle, { ...cache, exe: "demo.exe" })).toBe(
 				`/cache/${DEMO_CACHE}/2.0/linux-x86_64/demo.exe`,
 			);

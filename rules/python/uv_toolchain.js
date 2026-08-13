@@ -2,25 +2,20 @@ import {
 	Toolchain,
 	product,
 	namedCache,
-	memo,
-	run,
 	output,
-	output_path,
 	platformInfo,
 	cachePut,
 	cacheGet,
-	cacheHas,
+	resolveGraphHandle,
 	toolName,
-	group,
 	tool as graphTool,
+	task,
 } from "imp:core";
 
-import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
-import {
-	downloadToolArtifact,
-	lockedDownloadTools,
-} from "//rules/imp/lockfile";
+import { nativeTool } from "//rules/imp/native-tool";
+import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
+import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
 	generateToolLockfile,
 	GEN_LOCKFILES,
@@ -111,18 +106,6 @@ export function uvSupportedPlatforms() {
 	});
 }
 
-// Bare coreutils the download/extract scripts need — even these must be
-// declared tools, not resolved from an ambient PATH, since the sandbox is
-// fully hermetic. uv ships .tar.gz on unix and .zip on windows. GNU tar
-// shells out to a separate `gzip` process to decompress .tar.gz (it doesn't
-// inline gzip support the way it does for some other formats), so gzip must
-// be declared too — same reason Zig's toolchain.js declares `xz` for its
-// .tar.xz archives. Bare `sh` only auto-resolves on unix.
-function coreToolNames(plat) {
-	const extract = plat.os === "windows" ? ["tar"] : ["tar", "gzip"];
-	return [...new Set([...lockedDownloadTools(plat), ...extract])];
-}
-
 export class UvToolchain extends Toolchain {
 	static kind = "uv-toolchain";
 	static tool = UV_TOOL;
@@ -141,16 +124,64 @@ export class UvToolchain extends Toolchain {
 	}
 }
 
-// Declared lazily, once — target() addresses are only assigned at
-// workspace-load time, so tool handles must be created when a toolchain is
-// declared at BUILD.js top level, not inside acquireUvToolchain().
-let coreToolHandles = null;
+// Built once per declared version, at declaration time: task() refuses to add
+// graph nodes during execution, so anything that resolves a toolchain while
+// the graph is running must find a handle here rather than build one.
 let graphToolchains = new Map();
+// The UV_CACHE_DIR_CACHE seed task (see uvCacheDirSeed); one for the whole
+// workspace, since that cache uses a fixed key.
+let cacheDirSeed = null;
 
 export function __resetUvToolchainStateForTest() {
 	UvToolchain.clearDefault();
-	coreToolHandles = null;
 	graphToolchains = new Map();
+	cacheDirSeed = null;
+}
+
+function graphToolFor(version) {
+	return graphToolchains.get(version) ?? uvGraphTool(version);
+}
+
+/**
+ * Task that creates UV_CACHE_DIR_CACHE as a real, empty directory.
+ *
+ * A named-cache "tool" mount (see uvCacheDirTool) needs its cache path to
+ * already exist as a directory — materialize_tools_into_sandbox in
+ * crates/imp-execution/src/exec.rs fails otherwise. Re-running this task
+ * cannot discard uv's accumulated cache: a named-cache slot is immutable by
+ * key, so materialize_named_cache_artifacts skips a destination that already
+ * exists (crates/imp-store/src/cache.rs).
+ */
+function uvCacheDirSeed() {
+	if (cacheDirSeed) return cacheDirSeed;
+	namedCache({ name: UV_CACHE_DIR_CACHE });
+	const shell = nativeTool("sh");
+	const mkdir = nativeTool("mkdir");
+	const seed = task({
+		display: "seed uv cache dir",
+		inputs: { shell, mkdir },
+		outputs: { directory: output.artifact() },
+		async run(exec, inputs) {
+			const result = await exec.action({
+				argv: [
+					exec.tool(inputs.shell, "sh"),
+					"-c",
+					'mkdir -p "$1"',
+					"seed-uv-cache-dir",
+					"uv-cache-dir",
+				],
+				tools: [inputs.shell, inputs.mkdir],
+				outputs: {
+					directory: output.directory("uv-cache-dir", {
+						namedCache: { name: UV_CACHE_DIR_CACHE, key: UV_CACHE_KEY },
+					}),
+				},
+			});
+			return { directory: result.outputs.directory };
+		},
+	});
+	cacheDirSeed = seed.outputs.directory;
+	return cacheDirSeed;
 }
 
 /**
@@ -165,13 +196,7 @@ export function __resetUvToolchainStateForTest() {
  * @category configuration
  */
 export function uvToolchain(version, opts = {}) {
-	namedCache({ name: UV_TOOLCHAIN_CACHE, shared: true });
-	namedCache({ name: UV_CACHE_DIR_CACHE });
-	if (!coreToolHandles) {
-		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
-			nativeTool(name),
-		);
-	}
+	uvCacheDirSeed();
 
 	new UvToolchain(
 		{ version, unverified: opts.unverified },
@@ -187,6 +212,7 @@ export function uvGraphTool(version) {
 	const resolved = UvToolchain.requireVersion(version);
 	const plat = platformInfo();
 	const key = uvCacheKey(resolved, plat);
+	namedCache({ name: UV_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
 		lockfile: UV_LOCKFILE,
 		tool: "uv-toolchain",
@@ -197,11 +223,15 @@ export function uvGraphTool(version) {
 		display: `download uv ${resolved} (${plat.os}/${plat.arch})`,
 		unverified: UvToolchain.resolveUnverified(resolved),
 	});
+	// uv's release archives extract a single top-level uv-<triple>/ directory
+	// containing `uv` (and `uvx`) — strip it so the cache root holds the
+	// binaries directly, the same shape ruff and node use.
 	const directory = extractArchive({
 		archive,
 		dest: `.imp/uv-toolchains/${key}`,
 		format: plat.os === "windows" ? "zip" : "tar.gz",
 		stripComponents: 1,
+		namedCache: { name: UV_TOOLCHAIN_CACHE, key },
 		display: `extract uv ${resolved} (${plat.os}/${plat.arch})`,
 	});
 	return graphTool(directory, { binDirs: ["."] });
@@ -223,84 +253,6 @@ export function installUvToolchain(version, source) {
 }
 
 /**
- * Acquire a uv toolchain, downloading and caching it if not already
- * installed in the named cache.
- *
- * @param {string} version
- * @returns {Promise<string>} Local path to the toolchain root.
- */
-export const acquireUvToolchain = memo(
-	async function acquireUvToolchain(version) {
-		const plat = platformInfo();
-		const key = uvCacheKey(version, plat);
-
-		if (!coreToolHandles) {
-			throw new Error(
-				"no uv toolchain declared via uvToolchain(); nothing to acquire",
-			);
-		}
-		const coreTools = await group(
-			coreToolHandles.map((handle) => nativeToolSpec(handle)),
-		);
-
-		if (!cacheHas(UV_TOOLCHAIN_CACHE, key)) {
-			const downloadPath = `.imp/uv-downloads/${key}/${uvArtifactName(version, plat)}`;
-			await downloadToolArtifact({
-				lockfile: UV_LOCKFILE,
-				tool: "uv-toolchain",
-				version,
-				plat,
-				url: uvDownloadUrl(version, plat),
-				downloadPath,
-				tools: coreTools,
-				display: `download uv ${version} (${plat.os}/${plat.arch})`,
-				unverified: UvToolchain.resolveUnverified(version),
-			});
-
-			// uv's release archives extract a single top-level uv-<triple>/
-			// directory containing `uv` (and `uvx`) — strip it so the cache
-			// root holds the binaries directly, same shape acquireZigToolchain
-			// uses.
-			await extractArchive({
-				archive: downloadPath,
-				dest: `.imp/uv-toolchains/${key}`,
-				format: plat.os === "windows" ? "zip" : "tar.gz",
-				stripComponents: 1,
-				tools: coreTools,
-				namedCache: { name: UV_TOOLCHAIN_CACHE, key },
-				display: `extract uv ${version} (${plat.os}/${plat.arch})`,
-			});
-		}
-
-		// A named-cache "tool" mount (see uvCacheDirTool) requires its cache
-		// path to already exist as a real directory — materialize_tools_into_
-		// sandbox in src/exec.rs bails otherwise — so seed it with an empty
-		// directory here, guarded independently of the toolchain cacheHas()
-		// above since this cache is keyed "shared", not per-version (same
-		// independent-guard pattern as ZIG_BUILD_CACHE's seeding in
-		// rules/c/zig/index.js).
-		if (!cacheHas(UV_CACHE_DIR_CACHE, UV_CACHE_KEY)) {
-			const seedPath = ".imp/uv-cache-dir-seed";
-			await run({
-				argv: ["sh", "-c", 'mkdir -p "$1"', "seed-uv-cache-dir", seedPath],
-				tools: coreTools,
-				outputs: [
-					output(output_path(seedPath), {
-						kind: "directory",
-						namedCache: { name: UV_CACHE_DIR_CACHE, key: UV_CACHE_KEY },
-					}),
-				],
-				materialize: true,
-				display: "seed uv cache dir",
-			});
-		}
-
-		return cacheGet(UV_TOOLCHAIN_CACHE, key);
-	},
-	{ display: "acquire Uv Toolchain {0}", level: "info" },
-);
-
-/**
  * Resolve an explicit or default uv toolchain version.
  *
  * @param {string} [version]
@@ -318,9 +270,12 @@ export function resolveUvToolchainVersion(version) {
  */
 export async function uvBin(version) {
 	const resolved = UvToolchain.requireVersion(version);
-	const dir = await acquireUvToolchain(resolved);
-	const exe = platformInfo().os === "windows" ? "uv.exe" : "uv";
-	return `${dir}/${exe}`;
+	const plat = platformInfo();
+	return toolchainBin(graphToolFor(resolved), {
+		name: UV_TOOLCHAIN_CACHE,
+		key: uvCacheKey(resolved, plat),
+		exe: plat.os === "windows" ? "uv.exe" : "uv",
+	});
 }
 
 /**
@@ -331,15 +286,17 @@ export async function uvBin(version) {
  */
 export async function uvTool(version) {
 	const resolved = UvToolchain.requireVersion(version);
-	await acquireUvToolchain(resolved);
 	const plat = platformInfo();
-	return {
-		kind: "tool",
-		name: "uv",
-		cache: UV_TOOLCHAIN_CACHE,
+	// Every uvTool() consumer also mounts uvCacheDirTool(), whose cache must
+	// exist on disk before the sandbox can mount it — so run the seed here
+	// rather than leave each caller to remember it.
+	await resolveGraphHandle(uvCacheDirSeed());
+	return toolchainToolSpec(graphToolFor(resolved), {
+		toolName: "uv",
+		name: UV_TOOLCHAIN_CACHE,
 		key: uvCacheKey(resolved, plat),
 		binDirs: ["."],
-	};
+	});
 }
 
 /**

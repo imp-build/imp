@@ -6,7 +6,6 @@ import {
 } from "//rules/imp/test";
 import {
 	__resetZolaToolchainStateForTest,
-	acquireZolaToolchain,
 	defaultZolaToolchain,
 	defaultZolaToolchainVersion,
 	installZolaToolchain,
@@ -65,21 +64,11 @@ describe("zola toolchain", () => {
 			expect(toolchain.attrs.version).toBe("0.22.1");
 			expect(defaultZolaToolchainVersion()).toBe("0.22.1");
 			expect(defaultZolaToolchain()).toBe(toolchain);
-			expect(host.calls[0][0]).toBe("namedCache");
-		});
-	});
-
-	test("throws when no toolchain has been declared", async () => {
-		await withZolaHost(async () => {
-			let message = null;
-
-			try {
-				await acquireZolaToolchain("0.22.1");
-			} catch (error) {
-				message = error.message;
-			}
-
-			expect(message).toContain("no zola toolchain declared");
+			expect(
+				host.calls.some(
+					(call) => call[0] === "namedCache" && call[1] === "zola-toolchains",
+				),
+			).toBe(true);
 		});
 	});
 
@@ -98,7 +87,7 @@ describe("zola toolchain", () => {
 		});
 	});
 
-	test("installs and acquires a toolchain from the named cache", async () => {
+	test("installZolaToolchain publishes a local toolchain into the named cache", async () => {
 		await withZolaHost(async (host) => {
 			const key = zolaCacheKey("0.22.1", { os: "linux", arch: "x86_64" });
 
@@ -114,22 +103,12 @@ describe("zola toolchain", () => {
 						call[3] === "/tmp/zola-0.22.1",
 				),
 			).toBe(true);
-
-			expect(await acquireZolaToolchain("0.22.1")).toBe(
-				"/cache/zola-toolchains/0.22.1/linux-x86_64",
-			);
-			expect(await zolaBin("0.22.1")).toBe(
-				"/cache/zola-toolchains/0.22.1/linux-x86_64/zola",
-			);
-			// Already cached, so no download/extract run() should have happened.
-			expect(host.runs.length).toBe(0);
 		});
 	});
 
 	test("describes the named-cache-backed zola tool", async () => {
 		await withZolaHost(async () => {
-			installZolaToolchain("0.22.1", "/tmp/zola-0.22.1");
-			zolaToolchain("0.22.1", { default: true });
+			zolaToolchain("0.22.1", { default: true, unverified: true });
 			const tool = await zolaTool();
 
 			expect(tool.kind).toBe("tool");
@@ -161,9 +140,10 @@ describe("zola toolchain", () => {
 			);
 
 			zolaToolchain("0.22.1", { default: true });
-			const path = await acquireZolaToolchain("0.22.1");
 
-			expect(path).toBe("/cache/zola-toolchains/0.22.1/linux-x86_64");
+			expect(await zolaBin("0.22.1")).toBe(
+				"/cache/zola-toolchains/0.22.1/linux-x86_64/zola",
+			);
 			expect(host.runs.length).toBe(2);
 
 			const [download, extract] = host.runs;
@@ -175,12 +155,6 @@ describe("zola toolchain", () => {
 			expect(download.argv[2]).toContain("sha256sum -c -");
 			expect(extract.outputs[0].namedCache.name).toBe("zola-toolchains");
 			expect(extract.outputs[0].namedCache.key).toBe(key);
-
-			expect(
-				host.calls.some(
-					(call) => call[0] === "nativeToolSpec" && call[1] === "curl",
-				),
-			).toBe(true);
 		});
 	});
 

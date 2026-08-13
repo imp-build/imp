@@ -8,7 +8,6 @@ import {
 } from "//rules/imp/test";
 import {
 	__resetMoldToolchainStateForTest,
-	acquireMoldToolchain,
 	defaultMoldGraphToolchain,
 	defaultMoldToolchain,
 	defaultMoldToolchainVersion,
@@ -48,21 +47,11 @@ describe("mold toolchain", () => {
 			).toBe("2.41.0/linux-x86_64");
 			expect(defaultMoldToolchainVersion()).toBe("2.41.0");
 			expect(defaultMoldToolchain()).toBe(toolchain);
-			expect(host.calls[0][0]).toBe("namedCache");
-		});
-	});
-
-	test("throws when no toolchain has been declared", async () => {
-		await withMoldHost(async () => {
-			let message = null;
-
-			try {
-				await acquireMoldToolchain("2.41.0");
-			} catch (error) {
-				message = error.message;
-			}
-
-			expect(message).toContain("no mold toolchain declared");
+			expect(
+				host.calls.some(
+					(call) => call[0] === "namedCache" && call[1] === "mold-toolchains",
+				),
+			).toBe(true);
 		});
 	});
 
@@ -81,7 +70,7 @@ describe("mold toolchain", () => {
 		});
 	});
 
-	test("installs and acquires a toolchain from the named cache", async () => {
+	test("installMoldToolchain publishes a local toolchain into the named cache", async () => {
 		await withMoldHost(async (host) => {
 			const key = moldCacheKey("2.41.0", { os: "linux", arch: "x86_64" });
 
@@ -97,22 +86,12 @@ describe("mold toolchain", () => {
 						call[3] === "/tmp/mold-2.41.0",
 				),
 			).toBe(true);
-
-			expect(await acquireMoldToolchain("2.41.0")).toBe(
-				"/cache/mold-toolchains/2.41.0/linux-x86_64",
-			);
-			expect(await moldBin("2.41.0")).toBe(
-				"/cache/mold-toolchains/2.41.0/linux-x86_64/bin/mold",
-			);
-			// Already cached, so no download/extract run() should have happened.
-			expect(host.runs.length).toBe(0);
 		});
 	});
 
 	test("describes the named-cache-backed mold tool", async () => {
 		await withMoldHost(async () => {
-			installMoldToolchain("2.41.0", "/tmp/mold-2.41.0");
-			moldToolchain("2.41.0", { default: true });
+			moldToolchain("2.41.0", { default: true, unverified: true });
 			const tool = await moldTool();
 
 			expect(tool.kind).toBe("tool");
@@ -144,9 +123,10 @@ describe("mold toolchain", () => {
 			);
 
 			moldToolchain("2.41.0", { default: true });
-			const path = await acquireMoldToolchain("2.41.0");
 
-			expect(path).toBe("/cache/mold-toolchains/2.41.0/linux-x86_64");
+			expect(await moldBin("2.41.0")).toBe(
+				"/cache/mold-toolchains/2.41.0/linux-x86_64/bin/mold",
+			);
 			expect(host.runs.length).toBe(2);
 
 			const [download, extract] = host.runs;
@@ -160,12 +140,6 @@ describe("mold toolchain", () => {
 			expect(extract.argv[2]).toContain("--strip-components=1");
 			expect(extract.outputs[0].namedCache.name).toBe("mold-toolchains");
 			expect(extract.outputs[0].namedCache.key).toBe(key);
-
-			expect(
-				host.calls.some(
-					(call) => call[0] === "nativeToolSpec" && call[1] === "curl",
-				),
-			).toBe(true);
 		});
 	});
 
@@ -174,7 +148,7 @@ describe("mold toolchain", () => {
 			moldToolchain("2.41.0", { default: true });
 			let message = null;
 			try {
-				await acquireMoldToolchain("2.41.0");
+				await moldBin("2.41.0");
 			} catch (error) {
 				message = error.message;
 			}
@@ -186,7 +160,7 @@ describe("mold toolchain", () => {
 	test("unverified: true downloads without a sha check", async () => {
 		await withMoldHost(async (host) => {
 			moldToolchain("2.41.0", { default: true, unverified: true });
-			await acquireMoldToolchain("2.41.0");
+			await moldBin("2.41.0");
 
 			expect(host.runs.length).toBe(2);
 			const [download] = host.runs;
@@ -208,7 +182,7 @@ describe("mold toolchain", () => {
 			moldToolchain("2.41.0", { default: true });
 			moldToolchain("9.9.9", { unverified: true });
 
-			await acquireMoldToolchain("9.9.9");
+			await moldBin("9.9.9");
 
 			const [download] = host.runs;
 			expect(download.argv[2]).not.toContain("sha256sum");
@@ -222,7 +196,7 @@ describe("mold toolchain", () => {
 
 			let message = null;
 			try {
-				await acquireMoldToolchain("9.9.9");
+				await moldBin("9.9.9");
 			} catch (error) {
 				message = error.message;
 			}
@@ -232,8 +206,7 @@ describe("mold toolchain", () => {
 
 	test("registers an odin-linker product exposing -linker:mold and a mold tool", async () => {
 		await withMoldHost(async () => {
-			installMoldToolchain("2.41.0", "/tmp/mold-2.41.0");
-			const toolchain = moldToolchain("2.41.0");
+			const toolchain = moldToolchain("2.41.0", { unverified: true });
 
 			const linker = await productFor(toolchain, ODIN_LINKER);
 

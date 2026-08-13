@@ -2,25 +2,18 @@ import {
 	Toolchain,
 	product,
 	namedCache,
-	memo,
-	run,
 	output,
-	output_path,
 	platformInfo,
 	cachePut,
 	cacheGet,
-	cacheHas,
 	toolName,
-	group,
 	task,
 	tool as graphTool,
 } from "imp:core";
 
-import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
-import {
-	downloadToolArtifact,
-	lockedDownloadTools,
-} from "//rules/imp/lockfile";
+import { nativeTool } from "//rules/imp/native-tool";
+import { downloadToolArtifact } from "//rules/imp/lockfile";
+import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
 	generateToolLockfile,
 	GEN_LOCKFILES,
@@ -99,14 +92,6 @@ export function gccCacheKey(version, plat) {
 	return `${version}/${plat.os}-${plat.arch}`;
 }
 
-// Bare coreutils the verified-download and install scripts need. The sandbox
-// is fully hermetic — even `mkdir`/`tar` must be declared tools, not
-// resolved from an ambient or fixed-base PATH. GNU tar shells out to a
-// separate `xz` process to decompress `.tar.xz`.
-function coreToolNames(plat) {
-	return [...new Set([...lockedDownloadTools(plat), "tar", "xz", "chmod"])];
-}
-
 export class GccToolchain extends Toolchain {
 	static kind = "gcc-toolchain";
 	static tool = GCC_TOOL;
@@ -125,14 +110,18 @@ export class GccToolchain extends Toolchain {
 	}
 }
 
-// Declared lazily, once, the first time a toolchain is declared — target()
-// addresses are only assigned at workspace-load time, so this must happen
-// at BUILD.js top level rather than inside acquireToolchain() at execution time.
-let coreToolHandles = null;
+// Built once per declared version, at declaration time: task() refuses to add
+// graph nodes during execution, so anything that resolves a toolchain while
+// the graph is running must find a handle here rather than build one.
+let graphToolchains = new Map();
 
 export function __resetGccToolchainStateForTest() {
 	GccToolchain.clearDefault();
-	coreToolHandles = null;
+	graphToolchains = new Map();
+}
+
+function graphToolFor(version) {
+	return graphToolchains.get(version) ?? gccGraphTool(version);
 }
 
 /**
@@ -147,17 +136,12 @@ export function __resetGccToolchainStateForTest() {
  * @category configuration
  */
 export function gccToolchain(version, opts = {}) {
-	namedCache({ name: GCC_TOOLCHAIN_CACHE, shared: true });
-	if (!coreToolHandles) {
-		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
-			nativeTool(name),
-		);
-	}
-
-	return new GccToolchain(
+	const toolchain = new GccToolchain(
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	graphToolchains.set(version, gccGraphTool(version));
+	return toolchain;
 }
 
 /** Build the managed GCC distribution as a graph-native tool. */
@@ -186,11 +170,9 @@ export function gccGraphTool(version) {
 		inputs: { archive, shell, mkdir, tar, xz, chmod },
 		outputs: { directory: output.artifact() },
 		async run(exec, inputs) {
-			// Wrapper set must stay identical to the legacy acquireGccToolchain()
-			// install's own (below) — both write to the exact same named-cache
-			// (name, key) pair, so whichever one actually runs first in a given
-			// build wins the race to populate it (see acquireGccToolchain()'s own
-			// comment for the real failure this caused). clang/cc -> gcc,
+			// Bootlin's own gcc binary is a `toolchain-wrapper` that is argv[0]-
+			// sensitive, so these wrapper scripts exec the real binary under its
+			// own name. clang/cc -> gcc,
 			// c++ -> g++, ar -> the *binutils*-prefixed ar, a different prefix
 			// from gcc/g++ — see BINUTILS_PREFIX's own doc comment — confirmed
 			// missing by two real `imp lint //crates/imp:imp` failures: rustc's
@@ -274,104 +256,6 @@ export function installGccToolchain(version, source) {
 }
 
 /**
- * Acquire a gcc toolchain, downloading and caching it if not already
- * installed in the named cache.
- *
- * @param {string} version
- * @returns {Promise<string>} Local path to the toolchain root.
- */
-export const acquireGccToolchain = memo(
-	async function acquireGccToolchain(version) {
-		const plat = platformInfo();
-		const key = gccCacheKey(version, plat);
-
-		if (cacheHas(GCC_TOOLCHAIN_CACHE, key)) {
-			return cacheGet(GCC_TOOLCHAIN_CACHE, key);
-		}
-		if (!coreToolHandles) {
-			throw new Error(
-				"no gcc toolchain declared via gccToolchain(); nothing to acquire",
-			);
-		}
-
-		const coreTools = await group(
-			coreToolHandles.map((handle) => nativeToolSpec(handle)),
-		);
-
-		const downloadPath = `.imp/gcc-downloads/${key}/${gccArtifactName(version, plat)}`;
-		await downloadToolArtifact({
-			lockfile: GCC_LOCKFILE,
-			tool: "gcc",
-			version,
-			plat,
-			url: gccDownloadUrl(version, plat),
-			downloadPath,
-			tools: coreTools,
-			display: `download gcc ${version} (${plat.os}/${plat.arch})`,
-			unverified: GccToolchain.resolveUnverified(version),
-		});
-
-		const extractPath = `.imp/gcc-toolchains/${key}`;
-		const gccExe = `${GCC_EXE_PREFIX[plat.arch]}-gcc`;
-		const gxxExe = `${GCC_EXE_PREFIX[plat.arch]}-g++`;
-		const arExe = `${BINUTILS_PREFIX[plat.arch]}-ar`;
-		const ranlibExe = `${BINUTILS_PREFIX[plat.arch]}-ranlib`;
-		// Bootlin's own gcc binary is a `toolchain-wrapper` that's argv[0]-
-		// sensitive; wrapper scripts that exec the real binary keep its own name.
-		//
-		// This wrapper set must stay identical to gccGraphTool()'s own (above) —
-		// both write to the exact same named-cache (name, key) pair, and
-		// whichever one runs first in a given build wins the race to populate
-		// it; a real build with both //rules/c/label_example (legacy) and
-		// //rules/c/cmake (graph) targets hit exactly this, silently dropping
-		// the "ranlib" wrapper depending on scheduling order (#98).
-		const wrappers = [
-			[`#!/bin/sh\nexec "$(dirname "$0")/${gccExe}" "$@"\n`, "clang"],
-			[`#!/bin/sh\nexec "$(dirname "$0")/${gccExe}" "$@"\n`, "cc"],
-			[`#!/bin/sh\nexec "$(dirname "$0")/${gxxExe}" "$@"\n`, "c++"],
-			[`#!/bin/sh\nexec "$(dirname "$0")/${arExe}" "$@"\n`, "ar"],
-			[`#!/bin/sh\nexec "$(dirname "$0")/${ranlibExe}" "$@"\n`, "ranlib"],
-		];
-		const wrapperArgs = wrappers.flat();
-		// $1 = archive, $2 = extractPath, $3.. = wrapper (content, filename) pairs.
-		const writeCmds = wrappers.map(
-			(_, i) => `printf %s "\${${3 + i * 2}}" > "$2/bin/\${${4 + i * 2}}"`,
-		);
-		const chmodCmds = wrappers.map(
-			(_, i) => `chmod +x "$2/bin/\${${4 + i * 2}}"`,
-		);
-		// Extraction and wrapper-writing stay one run: the wrappers land inside
-		// the extract dir the named-cache output captures.
-		const installScript = `mkdir -p "$2" && tar -xJf "$1" -C "$2" --strip-components=1 && ${writeCmds.join(" && ")} && ${chmodCmds.join(" && ")}`;
-
-		await run({
-			argv: [
-				"sh",
-				"-c",
-				installScript,
-				"install-gcc",
-				downloadPath,
-				extractPath,
-				...wrapperArgs,
-			],
-			tools: coreTools,
-			inputs: [{ kind: "file", path: downloadPath }],
-			outputs: [
-				output(output_path(extractPath), {
-					kind: "directory",
-					namedCache: { name: GCC_TOOLCHAIN_CACHE, key },
-				}),
-			],
-			materialize: false,
-			display: `install gcc ${version} (${plat.os}/${plat.arch})`,
-		});
-
-		return cacheGet(GCC_TOOLCHAIN_CACHE, key);
-	},
-	{ display: "acquire Gcc Toolchain {0}", level: "info" },
-);
-
-/**
  * Resolve an explicit or default gcc toolchain version.
  *
  * @param {string} [version]
@@ -389,9 +273,13 @@ export function resolveGccToolchainVersion(version) {
  */
 export async function gccBin(version) {
 	const resolved = GccToolchain.requireVersion(version);
-	const dir = await acquireGccToolchain(resolved);
 	const plat = platformInfo();
-	return `${dir}/bin/${GCC_EXE_PREFIX[plat.arch]}-gcc`;
+	return toolchainBin(graphToolFor(resolved), {
+		name: GCC_TOOLCHAIN_CACHE,
+		key: gccCacheKey(resolved, plat),
+		subDir: "bin",
+		exe: `${GCC_EXE_PREFIX[plat.arch]}-gcc`,
+	});
 }
 
 /**
@@ -404,15 +292,13 @@ export async function gccBin(version) {
  */
 export async function gccTool(version) {
 	const resolved = GccToolchain.requireVersion(version);
-	await acquireGccToolchain(resolved);
 	const plat = platformInfo();
-	return {
-		kind: "tool",
-		name: "gcc-toolchain",
-		cache: GCC_TOOLCHAIN_CACHE,
+	return toolchainToolSpec(graphToolFor(resolved), {
+		toolName: "gcc-toolchain",
+		name: GCC_TOOLCHAIN_CACHE,
 		key: gccCacheKey(resolved, plat),
 		binDirs: ["bin"],
-	};
+	});
 }
 
 /**

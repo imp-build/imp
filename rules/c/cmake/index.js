@@ -18,7 +18,6 @@ export {
 // split the legacy rule used.
 export {
 	__resetCmakeToolchainStateForTest,
-	acquireCmakeToolchain,
 	cmakeBin,
 	cmakeCacheKey,
 	cmakeGraphTool,

@@ -21,7 +21,6 @@ export {
 } from "//rules/python/runtime";
 
 export {
-	acquireUvToolchain,
 	defaultUvToolchain,
 	defaultUvToolchainVersion,
 	installUvToolchain,
@@ -36,7 +35,6 @@ export {
 	uvToolchain,
 } from "//rules/python/uv_toolchain";
 export {
-	acquirePexToolchain,
 	defaultPexToolchain,
 	defaultPexToolchainVersion,
 	installPexToolchain,

@@ -2,22 +2,16 @@ import {
 	Toolchain,
 	product,
 	namedCache,
-	memo,
 	platformInfo,
 	cachePut,
 	cacheGet,
-	cacheHas,
 	toolName,
-	group,
 	tool as graphTool,
 } from "imp:core";
 
-import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
-import {
-	downloadToolArtifact,
-	lockedDownloadTools,
-} from "//rules/imp/lockfile";
-import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
+import { downloadToolArtifact } from "//rules/imp/lockfile";
+import { extractArchive } from "//rules/imp/archive";
+import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
 	generateToolLockfile,
 	GEN_LOCKFILES,
@@ -97,18 +91,6 @@ export function zolaCacheKey(version, plat) {
 	return `${version}/${plat.os}-${plat.arch}`;
 }
 
-// Bare coreutils the verified-download and extract scripts need. The sandbox
-// is fully hermetic — even `mkdir`/`tar` must be declared tools, not
-// resolved from an ambient or fixed-base PATH.
-function coreToolNames(plat) {
-	return [
-		...new Set([
-			...lockedDownloadTools(plat),
-			...extractArchiveTools(plat.os === "windows" ? "zip" : "tar.gz"),
-		]),
-	];
-}
-
 export class ZolaToolchain extends Toolchain {
 	static kind = "zola-toolchain";
 	static tool = ZOLA_TOOL;
@@ -127,14 +109,18 @@ export class ZolaToolchain extends Toolchain {
 	}
 }
 
-// Declared lazily, once, the first time a toolchain is declared — target()
-// addresses are only assigned at workspace-load time, so this must happen
-// at BUILD.js top level rather than inside acquireToolchain() at execution time.
-let coreToolHandles = null;
+// Built once per declared version, at declaration time: task() refuses to add
+// graph nodes during execution, so anything that resolves a toolchain while
+// the graph is running must find a handle here rather than build one.
+let graphToolchains = new Map();
 
 export function __resetZolaToolchainStateForTest() {
 	ZolaToolchain.clearDefault();
-	coreToolHandles = null;
+	graphToolchains = new Map();
+}
+
+function graphToolFor(version) {
+	return graphToolchains.get(version) ?? zolaGraphTool(version);
 }
 
 /**
@@ -149,17 +135,12 @@ export function __resetZolaToolchainStateForTest() {
  * @category configuration
  */
 export function zolaToolchain(version, opts = {}) {
-	namedCache({ name: ZOLA_TOOLCHAIN_CACHE, shared: true });
-	if (!coreToolHandles) {
-		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
-			nativeTool(name),
-		);
-	}
-
-	return new ZolaToolchain(
+	const toolchain = new ZolaToolchain(
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	graphToolchains.set(version, zolaGraphTool(version));
+	return toolchain;
 }
 
 /**
@@ -177,64 +158,11 @@ export function installZolaToolchain(version, source) {
 	return cacheGet(ZOLA_TOOLCHAIN_CACHE, key);
 }
 
-/**
- * Acquire a zola toolchain, downloading and caching it if not already
- * installed in the named cache.
- *
- * @param {string} version
- * @returns {Promise<string>} Local path to the toolchain root.
- */
-export const acquireZolaToolchain = memo(
-	async function acquireZolaToolchain(version) {
-		const plat = platformInfo();
-		const key = zolaCacheKey(version, plat);
-
-		if (cacheHas(ZOLA_TOOLCHAIN_CACHE, key)) {
-			return cacheGet(ZOLA_TOOLCHAIN_CACHE, key);
-		}
-		if (!coreToolHandles) {
-			throw new Error(
-				"no zola toolchain declared via zolaToolchain(); nothing to acquire",
-			);
-		}
-
-		const coreTools = await group(
-			coreToolHandles.map((handle) => nativeToolSpec(handle)),
-		);
-
-		const downloadPath = `.imp/zola-downloads/${key}/${zolaArtifactName(version, plat)}`;
-		await downloadToolArtifact({
-			lockfile: ZOLA_LOCKFILE,
-			tool: "zola",
-			version,
-			plat,
-			url: zolaDownloadUrl(version, plat),
-			downloadPath,
-			tools: coreTools,
-			display: `download zola ${version} (${plat.os}/${plat.arch})`,
-			unverified: ZolaToolchain.resolveUnverified(version),
-		});
-
-		// Zola's release archive ships the `zola` binary at the archive root
-		// (no wrapping directory), so no --strip-components is needed.
-		await extractArchive({
-			archive: downloadPath,
-			dest: `.imp/zola-toolchains/${key}`,
-			format: plat.os === "windows" ? "zip" : "tar.gz",
-			tools: coreTools,
-			namedCache: { name: ZOLA_TOOLCHAIN_CACHE, key },
-			display: `install zola ${version} (${plat.os}/${plat.arch})`,
-		});
-
-		return cacheGet(ZOLA_TOOLCHAIN_CACHE, key);
-	},
-	{ display: "acquire Zola Toolchain {0}", level: "info" },
-);
-
 /** Build zola from its verified release archive as a graph tool. */
 export function zolaGraphTool(version) {
 	const resolved = ZolaToolchain.requireVersion(version);
 	const plat = platformInfo();
+	namedCache({ name: ZOLA_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
 		lockfile: ZOLA_LOCKFILE,
 		tool: "zola",
@@ -251,6 +179,10 @@ export function zolaGraphTool(version) {
 		archive,
 		dest: "zola-toolchain",
 		format: plat.os === "windows" ? "zip" : "tar.gz",
+		namedCache: {
+			name: ZOLA_TOOLCHAIN_CACHE,
+			key: zolaCacheKey(resolved, plat),
+		},
 		display: `install zola ${resolved} (${plat.os}/${plat.arch})`,
 	});
 	return graphTool(directory, { binDirs: ["."] });
@@ -274,9 +206,12 @@ export function resolveZolaToolchainVersion(version) {
  */
 export async function zolaBin(version) {
 	const resolved = ZolaToolchain.requireVersion(version);
-	const dir = await acquireZolaToolchain(resolved);
 	const plat = platformInfo();
-	return plat.os === "windows" ? `${dir}/zola.exe` : `${dir}/zola`;
+	return toolchainBin(graphToolFor(resolved), {
+		name: ZOLA_TOOLCHAIN_CACHE,
+		key: zolaCacheKey(resolved, plat),
+		exe: plat.os === "windows" ? "zola.exe" : "zola",
+	});
 }
 
 /**
@@ -287,15 +222,13 @@ export async function zolaBin(version) {
  */
 export async function zolaTool(version) {
 	const resolved = ZolaToolchain.requireVersion(version);
-	await acquireZolaToolchain(resolved);
 	const plat = platformInfo();
-	return {
-		kind: "tool",
-		name: "zola",
-		cache: ZOLA_TOOLCHAIN_CACHE,
+	return toolchainToolSpec(graphToolFor(resolved), {
+		toolName: "zola",
+		name: ZOLA_TOOLCHAIN_CACHE,
 		key: zolaCacheKey(resolved, plat),
 		binDirs: ["."],
-	};
+	});
 }
 
 /**

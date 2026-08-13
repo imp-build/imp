@@ -3,24 +3,20 @@ import {
 	Toolchain,
 	product,
 	namedCache,
-	memo,
-	run,
 	output,
-	output_path,
 	platformInfo,
 	cachePut,
 	cacheGet,
-	cacheHas,
 	toolName,
-	group,
 	task,
 	tool as graphTool,
 } from "imp:core";
-import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
+import { nativeTool } from "//rules/imp/native-tool";
 import {
 	downloadToolArtifact,
 	lockedDownloadTools,
 } from "//rules/imp/lockfile";
+import { toolchainBin, toolchainDir } from "//rules/imp/toolchain";
 import {
 	generateToolLockfile,
 	GEN_LOCKFILES,
@@ -34,7 +30,7 @@ export const RUST_TOOL = toolName("rust");
 // Rust is installed via rustup, which lays out two env-located state trees:
 // RUSTUP_HOME (rustup itself + installed toolchains) and CARGO_HOME (cargo
 // registry + proxies). We give each its own named cache and point rustup at
-// them so it never touches ~/.rustup / ~/.cargo. See declareToolchain/acquire.
+// them so it never touches ~/.rustup / ~/.cargo.
 const RUST_LOCKFILE = "//rules/rust/rust.lock";
 const RUSTUP_HOME_CACHE = "rustup-home";
 const CARGO_HOME_CACHE = "cargo-home";
@@ -169,14 +165,18 @@ export class RustToolchain extends Toolchain {
 	}
 }
 
-// Declared lazily, once — target() addresses are only assigned at
-// workspace-load time, so tool handles must be created when a toolchain is
-// declared at BUILD.js top level, not inside acquireToolchain().
-let coreToolHandles = null;
+// Built once per declared version, at declaration time: task() refuses to add
+// graph nodes during execution, so anything that resolves a toolchain while
+// the graph is running must find a handle here rather than build one.
+let graphToolchains = new Map();
 
 export function __resetRustToolchainStateForTest() {
 	RustToolchain.clearDefault();
-	coreToolHandles = null;
+	graphToolchains = new Map();
+}
+
+function graphToolchainFor(version) {
+	return graphToolchains.get(version) ?? rustGraphToolchain(version);
 }
 
 function declareBothCaches() {
@@ -209,13 +209,8 @@ function declareBothCaches() {
 export function rustToolchain(version, opts = {}) {
 	requirePinnedVersion(version);
 	declareBothCaches();
-	if (!coreToolHandles) {
-		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
-			nativeTool(name),
-		);
-	}
 
-	return new RustToolchain(
+	const toolchain = new RustToolchain(
 		{
 			version,
 			linkDriver: opts.linkDriver,
@@ -225,6 +220,8 @@ export function rustToolchain(version, opts = {}) {
 		},
 		{ default: opts.default },
 	);
+	graphToolchains.set(version, rustGraphToolchain(version));
+	return toolchain;
 }
 
 /**
@@ -247,99 +244,10 @@ export function installRustToolchain(version, source) {
 	};
 }
 
-/**
- * Acquire a Rust toolchain: download rustup-init and run it, installing into
- * the rustup-home and cargo-home named caches.
- *
- * @param {string} version
- * @returns {Promise<string>} Local path to the RUSTUP_HOME cache root.
- */
-export const acquireRustToolchain = memo(
-	async function acquireRustToolchain(version) {
-		const plat = platformInfo();
-		const key = rustCacheKey(version, plat);
-
-		if (cacheHas(RUSTUP_HOME_CACHE, key) && cacheHas(CARGO_HOME_CACHE, key)) {
-			return cacheGet(RUSTUP_HOME_CACHE, key);
-		}
-		if (!coreToolHandles) {
-			throw new Error(
-				"no rust toolchain declared via rustToolchain(); nothing to acquire",
-			);
-		}
-
-		const coreTools = await group(
-			coreToolHandles.map((handle) => nativeToolSpec(handle)),
-		);
-
-		const rustupHomeDir = `.imp/rustup-home/${key}`;
-		const cargoHomeDir = `.imp/cargo-home/${key}`;
-		const rustupInitExe =
-			plat.os === "windows" ? "rustup-init.exe" : "rustup-init";
-
-		// The verified rustup-init download (pinned by rust.lock) lands in a
-		// materialized scratch path; only the resulting RUSTUP_HOME/CARGO_HOME
-		// are cached — the installer file is discarded with the sandbox.
-		const downloadPath = `.imp/rust-downloads/${key}/${rustupInitExe}`;
-		await downloadToolArtifact({
-			lockfile: RUST_LOCKFILE,
-			tool: "rust",
-			version,
-			plat,
-			url: rustDownloadUrl(version, plat),
-			downloadPath,
-			tools: coreTools,
-			display: `download rustup-init for rust ${version} (${plat.os}/${plat.arch})`,
-			unverified: RustToolchain.resolveUnverified(version),
-		});
-
-		// rustup writes into RUSTUP_HOME/CARGO_HOME, which we point at via $PWD
-		// (run() env can't expand $PWD, so this lives in the script). Profile
-		// "minimal" plus explicit rustfmt (for fmt/format-check,
-		// rules/rust/fmt.js) and clippy (for lint) components — "default" would
-		// also pull in rust-docs, ~740MB of small files that dominate
-		// cold-acquire time.
-		const chmodStep = plat.os === "windows" ? "" : 'chmod +x "$1"; ';
-		const installScript = `set -e; ${chmodStep}export RUSTUP_HOME="$PWD/$2" CARGO_HOME="$PWD/$3"; ./"$1" -y --no-modify-path --profile minimal --component rustfmt --component clippy --default-toolchain "$4"`;
-
-		await run({
-			argv: [
-				"sh",
-				"-c",
-				installScript,
-				"install-rust",
-				downloadPath,
-				rustupHomeDir,
-				cargoHomeDir,
-				version,
-			],
-			tools: coreTools,
-			inputs: [{ kind: "file", path: downloadPath }],
-			outputs: [
-				output(output_path(rustupHomeDir), {
-					kind: "directory",
-					namedCache: { name: RUSTUP_HOME_CACHE, key },
-				}),
-				output(output_path(cargoHomeDir), {
-					kind: "directory",
-					namedCache: { name: CARGO_HOME_CACHE, key },
-				}),
-			],
-			materialize: false,
-			display: `install rust ${version} (${plat.os}/${plat.arch})`,
-		});
-
-		return cacheGet(RUSTUP_HOME_CACHE, key);
-	},
-	{ display: "acquire Rust Toolchain {0}", level: "info" },
-);
-
 // Graph-native rustup-init install: one task() per version+platform, keyed
 // by its (single) call site plus the resolved installer artifact and core
 // tool inputs — repeat calls for the same version/platform collapse onto
-// the same task node via task()'s own fingerprint cache, so no separate
-// memoization is needed here (unlike acquireRustToolchain() above, which
-// memoizes by hand because it drives a bare host run()).
+// the same task node via task()'s own fingerprint cache.
 function rustGraphInstallTask(version, plat) {
 	requirePinnedVersion(version);
 	declareBothCaches();
@@ -374,9 +282,9 @@ function rustGraphInstallTask(version, plat) {
 			// task-output slot name ("artifact"), not "rustup-init" — and
 			// rustup-init's own multi-call dispatch requires its literal exe
 			// name to be a recognized proxy/mode name, so it's copied to a
-			// fixed filename here before being run. See acquireRustToolchain()
-			// above for why RUSTUP_HOME/CARGO_HOME are set from $PWD in-script
-			// rather than via run()'s env.
+			// fixed filename here before being run. RUSTUP_HOME/CARGO_HOME are
+			// set from $PWD in-script because an action's env cannot expand
+			// $PWD.
 			const chmodStep = plat.os === "windows" ? "" : "chmod +x ./$2; ";
 			const script = `set -e; cp "$1" ./"$2"; ${chmodStep}export RUSTUP_HOME="$PWD/rustup-home" CARGO_HOME="$PWD/cargo-home"; ./"$2" -y --no-modify-path --profile minimal --component rustfmt --component clippy --default-toolchain "$3"`;
 			const result = await exec.action({
@@ -523,10 +431,15 @@ export function resolveRustToolchainVersion(version) {
  */
 export async function rustBin(version, name = "cargo") {
 	const resolved = RustToolchain.requireVersion(version);
-	const dir = await acquireRustToolchain(resolved);
 	const plat = platformInfo();
 	const exe = plat.os === "windows" ? ".exe" : "";
-	return `${dir}/toolchains/${rustToolchainId(resolved, plat)}/bin/${name}${exe}`;
+	// One install task fills both caches, so resolving either one is enough.
+	return toolchainBin(graphToolchainFor(resolved).tool, {
+		name: RUSTUP_HOME_CACHE,
+		key: rustCacheKey(resolved, plat),
+		subDir: `toolchains/${rustToolchainId(resolved, plat)}/bin`,
+		exe: `${name}${exe}`,
+	});
 }
 
 /**
@@ -538,8 +451,12 @@ export async function rustBin(version, name = "cargo") {
  */
 export async function rustTool(version) {
 	const resolved = RustToolchain.requireVersion(version);
-	await acquireRustToolchain(resolved);
 	const plat = platformInfo();
+	// One install task fills both caches, so one resolve covers both specs.
+	await toolchainDir(graphToolchainFor(resolved).tool, {
+		name: RUSTUP_HOME_CACHE,
+		key: rustCacheKey(resolved, plat),
+	});
 	const key = rustCacheKey(resolved, plat);
 	const id = rustToolchainId(resolved, plat);
 	return {

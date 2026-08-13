@@ -2,13 +2,8 @@ import {
 	Toolchain,
 	product,
 	namedCache,
-	memo,
 	platformInfo,
-	cachePut,
-	cacheGet,
-	cacheHas,
 	toolName,
-	group,
 	tool as graphTool,
 } from "imp:core";
 
@@ -16,12 +11,9 @@ import {
 	odinSupportedPlatforms,
 	resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
-import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
-import {
-	downloadToolArtifact,
-	lockedDownloadTools,
-} from "//rules/imp/lockfile";
-import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
+import { downloadToolArtifact } from "//rules/imp/lockfile";
+import { extractArchive } from "//rules/imp/archive";
+import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
 	generateToolLockfile,
 	GEN_LOCKFILES,
@@ -44,10 +36,6 @@ const olsTripleMap = {
 	"macos/aarch64": "arm64-darwin",
 	"windows/x86_64": "x86_64-pc-windows-msvc",
 };
-
-function declareOdinfmtCache() {
-	namedCache({ name: ODINFMT_CACHE, shared: true });
-}
 
 function odinfmtCacheKey(version, plat) {
 	return `${version}/${plat.os}-${plat.arch}`;
@@ -96,27 +84,13 @@ export function odinfmtDownloadUrl(version, plat) {
 	return `https://github.com/DanielGavin/ols/releases/download/${version}/${odinfmtArtifactName(version, plat)}`;
 }
 
-// Bare coreutils the verified-download and extract scripts need. The sandbox
-// is fully hermetic — even `mkdir`/`tar` must be declared tools, not resolved
-// from an ambient PATH.
-function coreToolNames(plat) {
-	return [
-		...new Set([
-			...lockedDownloadTools(plat),
-			...extractArchiveTools(plat.os === "windows" ? "zip" : "zip-unix"),
-		]),
-	];
-}
-
-let coreToolHandles = null;
+// Built once per declared version, at declaration time: task() refuses to add
+// graph nodes during execution, so anything that resolves a toolchain while
+// the graph is running must find a handle here rather than build one.
 let graphToolchains = new Map();
 
-function ensureCoreTools() {
-	if (!coreToolHandles) {
-		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
-			nativeTool(name),
-		);
-	}
+function graphToolFor(version) {
+	return graphToolchains.get(version) ?? odinfmtGraphTool(version);
 }
 
 /**
@@ -128,16 +102,14 @@ function ensureCoreTools() {
  */
 export async function odinfmtTool(version) {
 	const resolved = resolveOdinToolchainVersion(version);
-	await acquireOdinfmt(resolved);
 	const plat = platformInfo();
 	return {
-		tool: {
-			kind: "tool",
-			name: "odinfmt",
-			cache: ODINFMT_CACHE,
+		tool: await toolchainToolSpec(graphToolFor(resolved), {
+			toolName: "odinfmt",
+			name: ODINFMT_CACHE,
 			key: odinfmtCacheKey(resolved, plat),
 			binDirs: ["."],
-		},
+		}),
 		// The OLS zip stores the binary under its triple-suffixed name at the
 		// archive root; invoke it by that name (JS has no rename primitive).
 		command: odinfmtCommandName(plat),
@@ -148,6 +120,7 @@ export async function odinfmtTool(version) {
 export function odinfmtGraphTool(version) {
 	const resolved = resolveOdinToolchainVersion(version);
 	const plat = platformInfo();
+	namedCache({ name: ODINFMT_CACHE, shared: true });
 	const archive = downloadToolArtifact({
 		lockfile: ODINFMT_LOCKFILE,
 		tool: "odinfmt",
@@ -162,6 +135,10 @@ export function odinfmtGraphTool(version) {
 		archive,
 		dest: "odinfmt-toolchain",
 		format: plat.os === "windows" ? "zip" : "zip-unix",
+		namedCache: {
+			name: ODINFMT_CACHE,
+			key: odinfmtCacheKey(resolved, plat),
+		},
 		display: `install odinfmt ${resolved} (${plat.os}/${plat.arch})`,
 	});
 	return graphTool(directory, { binDirs: ["."] });
@@ -175,58 +152,13 @@ export function odinfmtGraphTool(version) {
  */
 export async function odinfmtBin(version) {
 	const resolved = resolveOdinToolchainVersion(version);
-	const dir = await acquireOdinfmt(resolved);
-	return `${dir}/${odinfmtCommandName(platformInfo())}`;
+	const plat = platformInfo();
+	return toolchainBin(graphToolFor(resolved), {
+		name: ODINFMT_CACHE,
+		key: odinfmtCacheKey(resolved, plat),
+		exe: odinfmtCommandName(plat),
+	});
 }
-
-/**
- * Acquire (download, verify, and extract) odinfmt for a version and return
- * its cache path.
- *
- * @param {string} version
- * @returns {Promise<string>}
- */
-export const acquireOdinfmt = memo(
-	async function acquireOdinfmt(version) {
-		declareOdinfmtCache();
-		ensureCoreTools();
-		const plat = platformInfo();
-		const key = odinfmtCacheKey(version, plat);
-
-		if (cacheHas(ODINFMT_CACHE, key)) {
-			return cacheGet(ODINFMT_CACHE, key);
-		}
-
-		const coreTools = await group(
-			coreToolHandles.map((handle) => nativeToolSpec(handle)),
-		);
-
-		const downloadPath = `.imp/odinfmt-downloads/${key}/${odinfmtArtifactName(version, plat)}`;
-		await downloadToolArtifact({
-			lockfile: ODINFMT_LOCKFILE,
-			tool: "odinfmt",
-			version,
-			plat,
-			url: odinfmtDownloadUrl(version, plat),
-			downloadPath,
-			tools: coreTools,
-			display: `download odinfmt ${version} (${plat.os}/${plat.arch})`,
-			unverified: OdinfmtToolchain.resolveUnverified(version),
-		});
-
-		await extractArchive({
-			archive: downloadPath,
-			dest: `.imp/odinfmt-toolchains/${key}`,
-			format: plat.os === "windows" ? "zip" : "zip-unix",
-			tools: coreTools,
-			namedCache: { name: ODINFMT_CACHE, key },
-			display: `install odinfmt ${version} (${plat.os}/${plat.arch})`,
-		});
-
-		return cacheGet(ODINFMT_CACHE, key);
-	},
-	{ display: "acquire Odinfmt {0}", level: "info" },
-);
 
 export class OdinfmtToolchain extends Toolchain {
 	static kind = "odinfmt-toolchain";
@@ -251,7 +183,6 @@ export class OdinfmtToolchain extends Toolchain {
 
 export function __resetOdinfmtToolchainStateForTest() {
 	OdinfmtToolchain.clearDefault();
-	coreToolHandles = null;
 	graphToolchains = new Map();
 }
 
@@ -286,9 +217,7 @@ export function odinfmtToolchain(version, opts = {}) {
 export function defaultOdinfmtToolchain() {
 	const version = OdinfmtToolchain.defaultVersion();
 	const resolved = version ? resolveOdinToolchainVersion(version) : null;
-	return resolved
-		? (graphToolchains.get(resolved) ?? odinfmtGraphTool(resolved))
-		: null;
+	return resolved ? graphToolFor(resolved) : null;
 }
 
 // Odinfmt follows the default Odin compiler version when no explicit version

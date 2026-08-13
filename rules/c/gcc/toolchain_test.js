@@ -6,7 +6,6 @@ import {
 } from "//rules/imp/test";
 import {
 	__resetGccToolchainStateForTest,
-	acquireGccToolchain,
 	defaultGccGraphToolchain,
 	defaultGccToolchain,
 	defaultGccToolchainVersion,
@@ -46,21 +45,11 @@ describe("gcc toolchain", () => {
 			).toBe("2025.08-1/linux-x86_64");
 			expect(defaultGccToolchainVersion()).toBe("2025.08-1");
 			expect(defaultGccToolchain()).toBe(toolchain);
-			expect(host.calls[0][0]).toBe("namedCache");
-		});
-	});
-
-	test("throws when no toolchain has been declared", async () => {
-		await withGccHost(async () => {
-			let message = null;
-
-			try {
-				await acquireGccToolchain("2025.08-1");
-			} catch (error) {
-				message = error.message;
-			}
-
-			expect(message).toContain("no gcc toolchain declared");
+			expect(
+				host.calls.some(
+					(call) => call[0] === "namedCache" && call[1] === "gcc-toolchains",
+				),
+			).toBe(true);
 		});
 	});
 
@@ -79,7 +68,7 @@ describe("gcc toolchain", () => {
 		});
 	});
 
-	test("installs and acquires a toolchain from the named cache", async () => {
+	test("installGccToolchain publishes a local toolchain into the named cache", async () => {
 		await withGccHost(async (host) => {
 			const key = gccCacheKey("2025.08-1", { os: "linux", arch: "x86_64" });
 
@@ -95,22 +84,12 @@ describe("gcc toolchain", () => {
 						call[3] === "/tmp/gcc-2025.08-1",
 				),
 			).toBe(true);
-
-			expect(await acquireGccToolchain("2025.08-1")).toBe(
-				"/cache/gcc-toolchains/2025.08-1/linux-x86_64",
-			);
-			expect(await gccBin("2025.08-1")).toBe(
-				"/cache/gcc-toolchains/2025.08-1/linux-x86_64/bin/x86_64-linux-gcc",
-			);
-			// Already cached, so no download/extract run() should have happened.
-			expect(host.runs.length).toBe(0);
 		});
 	});
 
 	test("describes the named-cache-backed gcc tool", async () => {
 		await withGccHost(async () => {
-			installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
-			gccToolchain("2025.08-1", { default: true });
+			gccToolchain("2025.08-1", { default: true, unverified: true });
 			const tool = await gccTool();
 
 			expect(tool.kind).toBe("tool");
@@ -142,9 +121,10 @@ describe("gcc toolchain", () => {
 			);
 
 			gccToolchain("2025.08-1", { default: true });
-			const path = await acquireGccToolchain("2025.08-1");
 
-			expect(path).toBe("/cache/gcc-toolchains/2025.08-1/linux-x86_64");
+			expect(await gccBin("2025.08-1")).toBe(
+				"/cache/gcc-toolchains/2025.08-1/linux-x86_64/bin/x86_64-linux-gcc",
+			);
 			expect(host.runs.length).toBe(2);
 
 			const [download, install] = host.runs;
@@ -161,32 +141,17 @@ describe("gcc toolchain", () => {
 				),
 			).toBe(true);
 			expect(install.tools.some((t) => t.name === "xz")).toBe(true);
-			expect(install.argv).toContain("clang");
-			expect(install.argv).toContain("ar");
-			expect(
-				install.argv.some(
-					(arg) =>
-						typeof arg === "string" &&
-						arg.includes("#!/bin/sh") &&
-						arg.includes("x86_64-linux-gcc"),
-				),
-			).toBe(true);
-			expect(
-				install.argv.some(
-					(arg) =>
-						typeof arg === "string" &&
-						arg.includes("#!/bin/sh") &&
-						arg.includes("x86_64-buildroot-linux-gnu-ar"),
-				),
-			).toBe(true);
+			// The install script writes a wrapper per name; gcc and binutils use
+			// different prefixes, both passed in as arguments.
+			const script = install.argv[2];
+			for (const wrapper of ["clang", "cc", "c++", "ar", "ranlib"]) {
+				expect(script).toContain(`"${wrapper}:$`);
+			}
+			expect(script).toContain("#!/bin/sh");
+			expect(install.argv).toContain("x86_64-linux");
+			expect(install.argv).toContain("x86_64-buildroot-linux-gnu");
 			expect(install.outputs[0].namedCache.name).toBe("gcc-toolchains");
 			expect(install.outputs[0].namedCache.key).toBe(key);
-
-			expect(
-				host.calls.some(
-					(call) => call[0] === "nativeToolSpec" && call[1] === "curl",
-				),
-			).toBe(true);
 		});
 	});
 

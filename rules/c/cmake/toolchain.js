@@ -2,24 +2,19 @@ import {
 	Toolchain,
 	product,
 	namedCache,
-	memo,
 	output,
 	platformInfo,
 	cachePut,
 	cacheGet,
-	cacheHas,
 	task,
 	toolName,
-	group,
 	tool as graphTool,
 } from "imp:core";
 
-import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
-import {
-	downloadToolArtifact,
-	lockedDownloadTools,
-} from "//rules/imp/lockfile";
-import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
+import { nativeTool } from "//rules/imp/native-tool";
+import { downloadToolArtifact } from "//rules/imp/lockfile";
+import { extractArchiveTools } from "//rules/imp/archive";
+import { toolchainBin } from "//rules/imp/toolchain";
 import {
 	generateToolLockfile,
 	GEN_LOCKFILES,
@@ -98,27 +93,6 @@ export function cmakeCacheKey(version, plat) {
 	return `${version}/${plat.os}-${plat.arch}`;
 }
 
-/**
- * Build a CMake toolchain API. Tests can pass a fake host implementation, and
- * the install/acquire path can grow here without touching the CMake build rule.
- *
- * @param {object} [host]
- * @returns {object}
- */
-// Bare coreutils used by the install script below. The sandbox is fully
-// hermetic — even `mkdir`/`tar` must be declared tools, not resolved from an
-// ambient or fixed-base PATH. Bare `sh` only auto-resolves on unix (see
-// BUILTIN_SHELL_CANDIDATES in src/exec.rs), so Windows needs `sh` (Git Bash)
-// declared as a tool too.
-function coreToolNames(plat) {
-	return [
-		...new Set([
-			...lockedDownloadTools(plat),
-			...extractArchiveTools(plat.os === "windows" ? "zip" : "tar.gz"),
-		]),
-	];
-}
-
 export class CmakeToolchain extends Toolchain {
 	static kind = "cmake-toolchain";
 	static tool = CMAKE_TOOL;
@@ -137,14 +111,18 @@ export class CmakeToolchain extends Toolchain {
 	}
 }
 
-// Declared lazily, once, the first time a toolchain is declared — target()
-// addresses are only assigned at workspace-load time, so this must happen
-// at BUILD.js top level rather than inside acquireToolchain() at execution time.
-let coreToolHandles = null;
+// Built once per declared version, at declaration time: task() refuses to add
+// graph nodes during execution, so anything that resolves a toolchain while
+// the graph is running must find a handle here rather than build one.
+let graphToolchains = new Map();
 
 export function __resetCmakeToolchainStateForTest() {
 	CmakeToolchain.clearDefault();
-	coreToolHandles = null;
+	graphToolchains = new Map();
+}
+
+function graphToolFor(version) {
+	return graphToolchains.get(version) ?? cmakeGraphTool(version);
 }
 
 /**
@@ -159,17 +137,12 @@ export function __resetCmakeToolchainStateForTest() {
  * @category configuration
  */
 export function cmakeToolchain(version, opts = {}) {
-	namedCache({ name: CMAKE_TOOLCHAIN_CACHE, shared: true });
-	if (!coreToolHandles) {
-		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
-			nativeTool(name),
-		);
-	}
-
-	return new CmakeToolchain(
+	const toolchain = new CmakeToolchain(
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	graphToolchains.set(version, cmakeGraphTool(version));
+	return toolchain;
 }
 
 /**
@@ -186,59 +159,6 @@ export function installCmakeToolchain(version, source) {
 	cachePut(CMAKE_TOOLCHAIN_CACHE, key, source);
 	return cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
 }
-
-/**
- * Acquire a CMake toolchain, downloading and caching it if not already
- * installed in the named cache.
- *
- * @param {string} version
- * @returns {Promise<string>} Local path to the toolchain root.
- */
-export const acquireCmakeToolchain = memo(
-	async function acquireCmakeToolchain(version) {
-		const plat = platformInfo();
-		const key = cmakeCacheKey(version, plat);
-
-		if (cacheHas(CMAKE_TOOLCHAIN_CACHE, key)) {
-			return cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
-		}
-		if (!coreToolHandles) {
-			throw new Error(
-				"no CMake toolchain declared via cmakeToolchain(); nothing to acquire",
-			);
-		}
-
-		const coreTools = await group(
-			coreToolHandles.map((handle) => nativeToolSpec(handle)),
-		);
-
-		const downloadPath = `.imp/cmake-downloads/${key}/${cmakeArtifactName(version, plat)}`;
-		await downloadToolArtifact({
-			lockfile: CMAKE_LOCKFILE,
-			tool: "cmake",
-			version,
-			plat,
-			url: cmakeDownloadUrl(version, plat),
-			downloadPath,
-			tools: coreTools,
-			display: `download cmake ${version} (${plat.os}/${plat.arch})`,
-			unverified: CmakeToolchain.resolveUnverified(version),
-		});
-
-		await extractArchive({
-			archive: downloadPath,
-			dest: `.imp/cmake-toolchains/${key}`,
-			format: plat.os === "windows" ? "zip" : "tar.gz",
-			stripComponents: 1,
-			tools: coreTools,
-			namedCache: { name: CMAKE_TOOLCHAIN_CACHE, key },
-			display: `install cmake ${version} (${plat.os}/${plat.arch})`,
-		});
-
-		return cacheGet(CMAKE_TOOLCHAIN_CACHE, key);
-	},
-	{ display: "acquire Cmake Toolchain {0}", level: "info" },
-);
 
 /**
  * Resolve an explicit or default CMake toolchain version.
@@ -259,12 +179,18 @@ export function resolveCmakeToolchainVersion(version) {
  */
 export async function cmakeBin(version) {
 	const resolved = resolveCmakeToolchainVersion(version);
+	// No declared toolchain means "use whatever cmake is on PATH" — check this
+	// first, so no install task is ever built for a workspace that opted out.
 	if (!resolved) {
 		return "cmake";
 	}
-	const dir = await acquireCmakeToolchain(resolved);
-	const exe = platformInfo().os === "windows" ? "cmake.exe" : "cmake";
-	return `${dir}/bin/${exe}`;
+	const plat = platformInfo();
+	return toolchainBin(graphToolFor(resolved), {
+		name: CMAKE_TOOLCHAIN_CACHE,
+		key: cmakeCacheKey(resolved, plat),
+		subDir: "bin",
+		exe: plat.os === "windows" ? "cmake.exe" : "cmake",
+	});
 }
 
 // CMake's own configure step bakes its own invoked path into generated
@@ -297,6 +223,7 @@ export function cmakeGraphTool(version) {
 	const resolved = CmakeToolchain.requireVersion(version, "CMake");
 	const plat = platformInfo();
 	const cacheKey = cmakeCacheKey(resolved, plat);
+	namedCache({ name: CMAKE_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
 		lockfile: CMAKE_LOCKFILE,
 		tool: "cmake",

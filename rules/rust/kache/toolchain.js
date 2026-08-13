@@ -23,26 +23,27 @@ import {
 	field,
 	product,
 	namedCache,
-	memo,
 	run,
 	output,
-	output_path,
 	platformInfo,
 	cachePut,
 	cacheGet,
 	cacheHas,
+	resolveGraphHandle,
 	workerStart,
+	task,
 	toolName,
-	group,
 	tool as graphTool,
 } from "imp:core";
 
-import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
+import { nativeTool } from "//rules/imp/native-tool";
+import { downloadToolArtifact } from "//rules/imp/lockfile";
+import { extractArchive } from "//rules/imp/archive";
 import {
-	downloadToolArtifact,
-	lockedDownloadTools,
-} from "//rules/imp/lockfile";
-import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
+	toolchainBin,
+	toolchainDir,
+	toolchainToolSpec,
+} from "//rules/imp/toolchain";
 import {
 	generateToolLockfile,
 	GEN_LOCKFILES,
@@ -159,21 +160,6 @@ export function kacheSupportedPlatforms() {
 	});
 }
 
-// Bare coreutils used by the install/init scripts below. The sandbox is
-// fully hermetic — even `mkdir`/`tar` must be declared tools, not resolved
-// from an ambient or fixed-base PATH. kache's release archives are flat
-// (the binary sits at the archive root, no wrapping directory), so both
-// tar.gz (Linux/macOS) and zip (Windows) extraction tools may be needed
-// depending on which platform this workspace targets.
-function coreToolNames(plat) {
-	return [
-		...new Set([
-			...lockedDownloadTools(plat),
-			...extractArchiveTools(plat.os === "windows" ? "zip" : "tar.gz"),
-		]),
-	];
-}
-
 export class KacheToolchain extends Toolchain {
 	static kind = "kache-toolchain";
 	static tool = KACHE_TOOL;
@@ -193,23 +179,27 @@ export class KacheToolchain extends Toolchain {
 
 	// kache is a compiler wrapper resolved through the RUST_BUILD_CACHE role,
 	// not an @tool-dispatchable binary; expose the cached binary path.
-	async bin() {
-		const dir = await acquireKacheToolchain(
-			KacheToolchain.requireVersion(this.attrs.version),
-		);
-		const exe = platformInfo().os === "windows" ? "kache.exe" : "kache";
-		return `${dir}/${exe}`;
+	bin() {
+		return kacheBin(this.attrs.version);
 	}
 }
 
-// Declared lazily, once — target() addresses are only assigned at
-// workspace-load time, so tool handles must be created when a toolchain is
-// declared at BUILD.js top level, not inside acquireKacheToolchain().
-let coreToolHandles = null;
+// Built once per declared version, at declaration time. This map is what
+// makes kache work at all: RustKacheWrapper resolves the toolchain from
+// inside a running cargo task body (rules/rust/index.js), and task() refuses
+// to add graph nodes during execution — so the handle must already exist.
+let graphToolchains = new Map();
+// The KACHE_DATA_CACHE seed task (see kacheDataSeed); one per platform key.
+let dataSeeds = new Map();
 
 export function __resetKacheToolchainStateForTest() {
 	KacheToolchain.clearDefault();
-	coreToolHandles = null;
+	graphToolchains = new Map();
+	dataSeeds = new Map();
+}
+
+function graphToolFor(version) {
+	return graphToolchains.get(version) ?? kacheGraphTool(version);
 }
 
 /**
@@ -289,16 +279,14 @@ export function kacheToolchain(version, opts = {}) {
 			return result.exitCode === 0 ? result.stdout.trim() : null;
 		},
 	});
-	if (!coreToolHandles) {
-		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
-			nativeTool(name),
-		);
-	}
+	kacheDataSeed();
 
-	return new KacheToolchain(
+	const toolchain = new KacheToolchain(
 		{ version, unverified: opts.unverified, cacheSize: opts.cacheSize },
 		{ default: opts.default },
 	);
+	graphToolchains.set(version, kacheGraphTool(version));
+	return toolchain;
 }
 
 /**
@@ -314,103 +302,6 @@ export function installKacheToolchain(version, source) {
 	const key = kacheCacheKey(version, plat);
 	cachePut(KACHE_TOOLCHAIN_CACHE, key, source);
 	return cacheGet(KACHE_TOOLCHAIN_CACHE, key);
-}
-
-/**
- * Acquire a kache toolchain, downloading and caching it if not already
- * installed in the named cache.
- *
- * @param {string} version
- * @returns {Promise<string>} Local path to the toolchain root.
- */
-export const acquireKacheToolchain = memo(
-	async function acquireKacheToolchain(version) {
-		const plat = platformInfo();
-		const key = kacheCacheKey(version, plat);
-
-		if (cacheHas(KACHE_TOOLCHAIN_CACHE, key)) {
-			return cacheGet(KACHE_TOOLCHAIN_CACHE, key);
-		}
-		if (!coreToolHandles) {
-			throw new Error(
-				"no kache toolchain declared via kacheToolchain(); nothing to acquire",
-			);
-		}
-
-		const coreTools = await group(
-			coreToolHandles.map((handle) => nativeToolSpec(handle)),
-		);
-
-		const downloadPath = `.imp/kache-downloads/${key}/${kacheArtifactName(version, plat)}`;
-		await downloadToolArtifact({
-			lockfile: KACHE_LOCKFILE,
-			tool: "kache",
-			version,
-			plat,
-			url: kacheDownloadUrl(version, plat),
-			downloadPath,
-			tools: coreTools,
-			display: `download kache ${version} (${plat.os}/${plat.arch})`,
-			unverified: KacheToolchain.resolveUnverified(version),
-		});
-
-		// kache's release archives are flat (the binary sits at the archive
-		// root, no wrapping directory), unlike sccache's — no
-		// stripComponents needed.
-		await extractArchive({
-			archive: downloadPath,
-			dest: `.imp/kache-toolchains/${key}`,
-			format: plat.os === "windows" ? "zip" : "tar.gz",
-			tools: coreTools,
-			namedCache: { name: KACHE_TOOLCHAIN_CACHE, key },
-			display: `install kache ${version} (${plat.os}/${plat.arch})`,
-		});
-
-		return cacheGet(KACHE_TOOLCHAIN_CACHE, key);
-	},
-	{ display: "acquire Kache Toolchain {0}", level: "info" },
-);
-
-/**
- * Ensure the kache data (object cache) directory exists in the named cache,
- * seeding it with an empty directory the first time. Once seeded, every
- * build mounts this same on-disk directory as a "tool" (symlinked, not
- * copied — see materialize_tools_into_sandbox), so kache's own cache grows
- * across separate imp invocations instead of starting from empty every
- * sandbox.
- *
- * @returns {Promise<string>} The named-cache key for the data directory.
- */
-async function ensureKacheDataDir() {
-	const plat = platformInfo();
-	const key = kacheDataCacheKey(plat);
-	if (cacheHas(KACHE_DATA_CACHE, key)) {
-		return key;
-	}
-	if (!coreToolHandles) {
-		throw new Error(
-			"no kache toolchain declared via kacheToolchain(); nothing to acquire",
-		);
-	}
-	const coreTools = await group(
-		coreToolHandles.map((handle) => nativeToolSpec(handle)),
-	);
-	const dataDir = `.imp/kache-data/${key}`;
-
-	await run({
-		argv: ["sh", "-c", 'mkdir -p "$1"', "init-kache-data", dataDir],
-		tools: coreTools,
-		outputs: [
-			output(output_path(dataDir), {
-				kind: "directory",
-				namedCache: { name: KACHE_DATA_CACHE, key },
-			}),
-		],
-		materialize: false,
-		display: `init kache data dir (${plat.os}/${plat.arch})`,
-	});
-
-	return key;
 }
 
 /**
@@ -432,6 +323,7 @@ export function kacheGraphTool(version) {
 	const resolved = KacheToolchain.requireVersion(version);
 	const plat = platformInfo();
 	const key = kacheCacheKey(resolved, plat);
+	namedCache({ name: KACHE_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
 		lockfile: KACHE_LOCKFILE,
 		tool: "kache",
@@ -446,9 +338,70 @@ export function kacheGraphTool(version) {
 		archive,
 		dest: "kache-toolchain",
 		format: plat.os === "windows" ? "zip" : "tar.gz",
+		namedCache: { name: KACHE_TOOLCHAIN_CACHE, key },
 		display: `install kache ${resolved} (${plat.os}/${plat.arch})`,
 	});
 	return graphTool(directory, { binDirs: ["."] });
+}
+
+/**
+ * Task that creates KACHE_DATA_CACHE as a real, empty directory.
+ *
+ * kache's object cache must be mounted as a "tool" (symlinked in place, not
+ * copied) so writes made during a build persist for the next invocation, and
+ * a tool mount needs its cache path to already exist as a directory.
+ * Re-running this task cannot discard the accumulated object cache: a
+ * named-cache slot is immutable by key, so materialize_named_cache_artifacts
+ * skips a destination that already exists (crates/imp-store/src/cache.rs).
+ */
+function kacheDataSeed() {
+	const plat = platformInfo();
+	const key = kacheDataCacheKey(plat);
+	const existing = dataSeeds.get(key);
+	if (existing) return existing;
+	const shell = nativeTool("sh");
+	const mkdir = nativeTool("mkdir");
+	const seed = task({
+		display: `init kache data dir (${plat.os}/${plat.arch})`,
+		inputs: { shell, mkdir },
+		outputs: { directory: output.artifact() },
+		async run(exec, inputs) {
+			const result = await exec.action({
+				argv: [
+					exec.tool(inputs.shell, "sh"),
+					"-c",
+					'mkdir -p "$1"',
+					"init-kache-data",
+					"kache-data",
+				],
+				tools: [inputs.shell, inputs.mkdir],
+				outputs: {
+					directory: output.directory("kache-data", {
+						namedCache: { name: KACHE_DATA_CACHE, key },
+					}),
+				},
+			});
+			return { directory: result.outputs.directory };
+		},
+	});
+	dataSeeds.set(key, seed.outputs.directory);
+	return seed.outputs.directory;
+}
+
+/**
+ * Return the absolute host path of the kache binary for a toolchain version.
+ *
+ * @param {string} [version]
+ * @returns {Promise<string>}
+ */
+export async function kacheBin(version) {
+	const resolved = KacheToolchain.requireVersion(version);
+	const plat = platformInfo();
+	return toolchainBin(graphToolFor(resolved), {
+		name: KACHE_TOOLCHAIN_CACHE,
+		key: kacheCacheKey(resolved, plat),
+		exe: plat.os === "windows" ? "kache.exe" : "kache",
+	});
 }
 
 /**
@@ -469,15 +422,13 @@ export function resolveKacheToolchainVersion(version) {
  */
 export async function kacheTool(version) {
 	const resolved = KacheToolchain.requireVersion(version);
-	await acquireKacheToolchain(resolved);
 	const plat = platformInfo();
-	return {
-		kind: "tool",
-		name: "kache",
-		cache: KACHE_TOOLCHAIN_CACHE,
+	return toolchainToolSpec(graphToolFor(resolved), {
+		toolName: "kache",
+		name: KACHE_TOOLCHAIN_CACHE,
 		key: kacheCacheKey(resolved, plat),
 		binDirs: ["."],
-	};
+	});
 }
 
 /**
@@ -495,7 +446,8 @@ export async function kacheTool(version) {
  * @returns {Promise<string>}
  */
 export async function kacheDataDir() {
-	const key = await ensureKacheDataDir();
+	const key = kacheDataCacheKey(platformInfo());
+	await resolveGraphHandle(kacheDataSeed());
 	return cacheGet(KACHE_DATA_CACHE, key);
 }
 
@@ -600,10 +552,14 @@ export class RustKacheWrapper {
 	 */
 	async env() {
 		const version = this.handle.attrs.version;
-		await acquireKacheToolchain(version);
 		const plat = platformInfo();
+		const resolved = KacheToolchain.requireVersion(version);
 		const exe = plat.os === "windows" ? "kache.exe" : "kache";
-		const bin = `${cacheGet(KACHE_TOOLCHAIN_CACHE, kacheCacheKey(version, plat))}/${exe}`;
+		const dir = await toolchainDir(graphToolFor(resolved), {
+			name: KACHE_TOOLCHAIN_CACHE,
+			key: kacheCacheKey(resolved, plat),
+		});
+		const bin = `${dir}/${exe}`;
 		const dataDir = await kacheDataDir();
 		const cacheSize = this.handle.attrs.cacheSize;
 		const cacheExecutables = cache_executables_env();
