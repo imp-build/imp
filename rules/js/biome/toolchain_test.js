@@ -6,12 +6,10 @@ import {
 } from "//rules/imp/test";
 import {
 	__resetBiomeToolchainStateForTest,
-	acquireBiomeToolchain,
 	biomeArtifactName,
 	biomeBin,
 	biomeCacheKey,
 	biomeDownloadUrl,
-	biomeTool,
 	biomeToolchain,
 	defaultBiomeToolchain,
 	defaultBiomeToolchainVersion,
@@ -31,6 +29,28 @@ function withBiomeHost(platOrFn, maybeFn) {
 	return typeof platOrFn === "function"
 		? withFakeToolchainHost(run)
 		: withFakeToolchainHost(platOrFn, run);
+}
+
+// The graph install always runs its download task, so any test that reaches
+// bin() needs a lock entry — the legacy acquire path used to short-circuit on
+// a warm named cache and never look.
+function seedLockfile(host) {
+	host.addFile(
+		"//rules/js/biome/biome-toolchain.lock",
+		JSON.stringify({
+			tool: "biome-toolchain",
+			versions: {
+				"2.5.4": {
+					"linux/x86_64": {
+						url: "https://locked.example/biome-linux-x64",
+						artifact: "biome-linux-x64",
+						size: 12345,
+						sha256: "deadbeef",
+					},
+				},
+			},
+		}),
+	);
 }
 
 describe("biome toolchain", () => {
@@ -60,18 +80,6 @@ describe("biome toolchain", () => {
 		});
 	});
 
-	test("throws when no toolchain has been declared", async () => {
-		await withBiomeHost(async () => {
-			let message = null;
-			try {
-				await acquireBiomeToolchain("2.5.4");
-			} catch (error) {
-				message = error.message;
-			}
-			expect(message).toContain("no biome toolchain declared");
-		});
-	});
-
 	test("throws when no version is given and no default is set", async () => {
 		await withBiomeHost(async () => {
 			biomeToolchain("2.5.4");
@@ -85,49 +93,25 @@ describe("biome toolchain", () => {
 		});
 	});
 
-	test("installs and acquires a toolchain from the named cache", async () => {
-		await withBiomeHost(async (host) => {
+	test("installBiomeToolchain publishes a local build into the named cache", async () => {
+		await withBiomeHost(async () => {
 			const key = biomeCacheKey("2.5.4", { os: "linux", arch: "x86_64" });
 
-			const seeded = installBiomeToolchain("2.5.4", "/tmp/biome");
-			expect(seeded).toBe(`/cache/biome-toolchains/${key}`);
-
-			biomeToolchain("2.5.4", { default: true });
-			expect(await acquireBiomeToolchain("2.5.4")).toBe(
+			expect(installBiomeToolchain("2.5.4", "/tmp/biome")).toBe(
 				`/cache/biome-toolchains/${key}`,
 			);
-			expect(await biomeBin("2.5.4")).toBe(
-				`/cache/biome-toolchains/${key}/biome`,
-			);
-			// Already cached, so no download/install run() should have happened.
-			expect(host.runs.length).toBe(0);
 		});
 	});
 
-	test("downloads and installs biome via two sandboxed runs when not cached, with no archive extraction", async () => {
+	test("downloads and installs biome via two sandboxed runs, with no archive extraction", async () => {
 		await withBiomeHost(async (host) => {
-			host.addFile(
-				"//rules/js/biome/biome-toolchain.lock",
-				JSON.stringify({
-					tool: "biome-toolchain",
-					versions: {
-						"2.5.4": {
-							"linux/x86_64": {
-								url: "https://locked.example/biome-linux-x64",
-								artifact: "biome-linux-x64",
-								size: 12345,
-								sha256: "deadbeef",
-							},
-						},
-					},
-				}),
-			);
+			seedLockfile(host);
 			biomeToolchain("2.5.4", { default: true });
-			const tool = await biomeTool("2.5.4");
+			const key = biomeCacheKey("2.5.4", { os: "linux", arch: "x86_64" });
 
-			expect(tool.kind).toBe("tool");
-			expect(tool.name).toBe("biome");
-			expect(tool.binDirs).toEqual(["."]);
+			expect(await biomeBin("2.5.4")).toBe(
+				`/cache/biome-toolchains/${key}/biome`,
+			);
 			expect(host.runs.length).toBe(2);
 
 			const [download, install] = host.runs;
@@ -147,7 +131,7 @@ describe("biome toolchain", () => {
 			biomeToolchain("2.5.4", { default: true });
 			let message = null;
 			try {
-				await biomeTool("2.5.4");
+				await biomeBin("2.5.4");
 			} catch (error) {
 				message = error.message;
 			}
@@ -159,7 +143,7 @@ describe("biome toolchain", () => {
 	test("unverified: true downloads without a sha check", async () => {
 		await withBiomeHost(async (host) => {
 			biomeToolchain("2.5.4", { default: true, unverified: true });
-			await biomeTool("2.5.4");
+			await biomeBin("2.5.4");
 
 			expect(host.runs.length).toBe(2);
 			const [download] = host.runs;

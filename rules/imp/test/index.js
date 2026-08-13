@@ -1,5 +1,11 @@
 import { TEST } from "//rules/workflows/test";
-import { files, packagePath, task, withCapturedPackagePath } from "imp:core";
+import {
+	files,
+	packagePath,
+	resolveGraphHandle,
+	task,
+	withCapturedPackagePath,
+} from "imp:core";
 import { impTool } from "//rules/imp/self-tool";
 
 const suites = [];
@@ -364,6 +370,13 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		clearCalls() {
 			calls.length = 0;
 		},
+		// Execute a graph handle against this fake host and return its resolved
+		// binding — the graph-native counterpart of calling a rule's legacy
+		// acquire*() directly. Every toolchain suite needs it, so it lives here
+		// rather than being redeclared per suite.
+		resolve(handle) {
+			return resolveGraphHandle(handle);
+		},
 	};
 
 	globalThis.__host_target = (
@@ -439,6 +452,9 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 	};
 	globalThis.__host_run = async (opts) => {
 		runs.push(opts);
+		const kinds = new Map(
+			(opts.outputs || []).map((out) => [out.path, out.kind || "file"]),
+		);
 		for (const out of opts.outputs || []) {
 			if (out.namedCache) {
 				cache.set(
@@ -447,10 +463,34 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 				);
 			}
 		}
+		// A graph task validates that every declared output came back as a real
+		// action artifact (_graphValidateTaskResult in imp:core), so the fake
+		// has to answer with one per declared name or the task fails before its
+		// own assertions run. __graphOutputNames maps output name -> declared
+		// path; the kind comes from the matching outputs[] entry.
+		const graphOutputs = {};
+		const names = opts.__graphOutputNames
+			? JSON.parse(opts.__graphOutputNames)
+			: {};
+		for (const [name, path] of Object.entries(names)) {
+			const digest = `digest:${path}`;
+			const kind = kinds.get(path) || "file";
+			graphOutputs[name] = {
+				__imp_graph_artifact: true,
+				__imp_graph_binding: true,
+				type: "artifact",
+				kind,
+				digest,
+				path,
+				fingerprint: `artifact:${kind}:${digest}`,
+				inputs: [{ kind: "digest", digest }],
+			};
+		}
 		return {
 			stdout: runStdout.get(opts.display) ?? "",
 			stderr: runStderr.get(opts.display) ?? "",
 			exitCode: 0,
+			graphOutputs,
 		};
 	};
 	globalThis.__host_worker_start = async (name, opts) => {

@@ -6,7 +6,6 @@ import {
 } from "//rules/imp/test";
 import {
 	__resetPnpmToolchainStateForTest,
-	acquirePnpmToolchain,
 	defaultPnpmToolchain,
 	defaultPnpmToolchainVersion,
 	installPnpmToolchain,
@@ -16,7 +15,6 @@ import {
 	pnpmDownloadUrl,
 	pnpmStoreDirEnv,
 	pnpmStoreDirTool,
-	pnpmTool,
 	pnpmToolchain,
 } from "//rules/js/pnpm/toolchain";
 
@@ -67,18 +65,6 @@ describe("pnpm toolchain", () => {
 		});
 	});
 
-	test("throws when no toolchain has been declared", async () => {
-		await withPnpmHost(async () => {
-			let message = null;
-			try {
-				await acquirePnpmToolchain("11.13.0");
-			} catch (error) {
-				message = error.message;
-			}
-			expect(message).toContain("no pnpm toolchain declared");
-		});
-	});
-
 	test("throws when no version is given and no default is set", async () => {
 		await withPnpmHost(async () => {
 			pnpmToolchain("11.13.0");
@@ -92,36 +78,13 @@ describe("pnpm toolchain", () => {
 		});
 	});
 
-	test("installs and acquires a toolchain from the named cache, seeding the store on first acquire", async () => {
-		await withPnpmHost(async (host) => {
+	test("installPnpmToolchain publishes a local toolchain into the named cache", async () => {
+		await withPnpmHost(async () => {
 			const key = pnpmCacheKey("11.13.0", { os: "linux", arch: "x86_64" });
 
-			const seeded = installPnpmToolchain("11.13.0", "/tmp/pnpm");
-			expect(seeded).toBe(`/cache/pnpm-toolchains/${key}`);
-
-			pnpmToolchain("11.13.0", { default: true });
-			expect(await acquirePnpmToolchain("11.13.0")).toBe(
+			expect(installPnpmToolchain("11.13.0", "/tmp/pnpm")).toBe(
 				`/cache/pnpm-toolchains/${key}`,
 			);
-			expect(await pnpmBin("11.13.0")).toBe(
-				`/cache/pnpm-toolchains/${key}/pnpm`,
-			);
-			// Toolchain itself is warm (installPnpmToolchain seeded it), but the
-			// shared pnpm-store cache has never been seeded, so one run() should
-			// have happened to create it.
-			expect(host.runs.length).toBe(1);
-			expect(host.runs[0].outputs[0].namedCache.name).toBe("pnpm-store");
-		});
-	});
-
-	test("skips the store seed run when the store is already warm", async () => {
-		await withPnpmHost(async (host) => {
-			installPnpmToolchain("11.13.0", "/tmp/pnpm");
-			host.install("pnpm-store", "shared", "/tmp/pnpm-store");
-			pnpmToolchain("11.13.0", { default: true });
-
-			await acquirePnpmToolchain("11.13.0");
-			expect(host.runs.length).toBe(0);
 		});
 	});
 
@@ -145,11 +108,11 @@ describe("pnpm toolchain", () => {
 			);
 			host.install("pnpm-store", "shared", "/tmp/pnpm-store");
 			pnpmToolchain("11.13.0", { default: true });
-			const tool = await pnpmTool("11.13.0");
+			const key = pnpmCacheKey("11.13.0", { os: "linux", arch: "x86_64" });
 
-			expect(tool.kind).toBe("tool");
-			expect(tool.name).toBe("pnpm");
-			expect(tool.binDirs).toEqual(["."]);
+			expect(await pnpmBin("11.13.0")).toBe(
+				`/cache/pnpm-toolchains/${key}/pnpm`,
+			);
 			expect(host.runs.length).toBe(2);
 
 			const [download, extract] = host.runs;
@@ -166,7 +129,7 @@ describe("pnpm toolchain", () => {
 			pnpmToolchain("11.13.0", { default: true });
 			let message = null;
 			try {
-				await pnpmTool("11.13.0");
+				await pnpmBin("11.13.0");
 			} catch (error) {
 				message = error.message;
 			}

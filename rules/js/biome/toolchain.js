@@ -2,25 +2,18 @@ import {
 	Toolchain,
 	product,
 	namedCache,
-	memo,
-	run,
 	output,
-	output_path,
 	platformInfo,
 	cachePut,
 	cacheGet,
-	cacheHas,
 	toolName,
 	tool as graphTool,
-	group,
 	task,
 } from "imp:core";
 
-import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
-import {
-	downloadToolArtifact,
-	lockedDownloadTools,
-} from "//rules/imp/lockfile";
+import { nativeTool } from "//rules/imp/native-tool";
+import { toolchainBin } from "//rules/imp/toolchain";
+import { downloadToolArtifact } from "//rules/imp/lockfile";
 import {
 	generateToolLockfile,
 	GEN_LOCKFILES,
@@ -104,15 +97,6 @@ export function biomeSupportedPlatforms() {
 	});
 }
 
-// Bare coreutils the download/install scripts need — same reasoning as
-// coreToolNames in pex_toolchain.js: the sandbox is fully hermetic, so even
-// these must be declared tools. No tar/extraction step (biome is a single
-// executable, not an archive).
-function coreToolNames(plat) {
-	const extra = plat.os === "windows" ? ["cp"] : ["cp", "chmod"];
-	return [...new Set([...lockedDownloadTools(plat), ...extra])];
-}
-
 export class BiomeToolchain extends Toolchain {
 	static kind = "biome-toolchain";
 	static tool = BIOME_TOOL;
@@ -131,16 +115,18 @@ export class BiomeToolchain extends Toolchain {
 	}
 }
 
-// Declared lazily, once — target() addresses are only assigned at
-// workspace-load time, so tool handles must be created when a toolchain is
-// declared at BUILD.js top level, not inside acquireBiomeToolchain().
-let coreToolHandles = null;
+// Built once per declared version, at declaration time: task() refuses to add
+// graph nodes during execution, so anything that resolves a toolchain while
+// the graph is running must find a handle here rather than build one.
 let graphToolchains = new Map();
 
 export function __resetBiomeToolchainStateForTest() {
 	BiomeToolchain.clearDefault();
-	coreToolHandles = null;
 	graphToolchains = new Map();
+}
+
+function graphToolFor(version) {
+	return graphToolchains.get(version) ?? biomeGraphTool(version);
 }
 
 /**
@@ -155,13 +141,6 @@ export function __resetBiomeToolchainStateForTest() {
  * @category configuration
  */
 export function biomeToolchain(version, opts = {}) {
-	namedCache({ name: BIOME_TOOLCHAIN_CACHE, shared: true });
-	if (!coreToolHandles) {
-		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
-			nativeTool(name),
-		);
-	}
-
 	new BiomeToolchain(
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
@@ -187,70 +166,6 @@ export function installBiomeToolchain(version, source) {
 }
 
 /**
- * Acquire a biome toolchain, downloading and caching it if not already
- * installed in the named cache.
- *
- * @param {string} version
- * @returns {Promise<string>} Local path to the toolchain directory (containing `biome`).
- */
-export const acquireBiomeToolchain = memo(
-	async function acquireBiomeToolchain(version) {
-		const plat = platformInfo();
-		const key = biomeCacheKey(version, plat);
-
-		if (!coreToolHandles) {
-			throw new Error(
-				"no biome toolchain declared via biomeToolchain(); nothing to acquire",
-			);
-		}
-		const coreTools = await group(
-			coreToolHandles.map((handle) => nativeToolSpec(handle)),
-		);
-
-		if (!cacheHas(BIOME_TOOLCHAIN_CACHE, key)) {
-			// No archive to extract — the verified download lands the single
-			// `biome` executable straight into a download path, then a small
-			// install run marks it executable and publishes it into the cache.
-			const exe = plat.os === "windows" ? "biome.exe" : "biome";
-			const dir = `.imp/biome-toolchains/${key}`;
-			const downloadPath = `.imp/biome-downloads/${key}/${biomeArtifactName(plat)}`;
-			await downloadToolArtifact({
-				lockfile: BIOME_LOCKFILE,
-				tool: "biome-toolchain",
-				version,
-				plat,
-				url: biomeDownloadUrl(version, plat),
-				downloadPath,
-				tools: coreTools,
-				display: `download biome ${version} (${plat.os}/${plat.arch})`,
-				unverified: BiomeToolchain.resolveUnverified(version),
-			});
-
-			const script =
-				plat.os === "windows"
-					? `mkdir -p "$2" && cp "$1" "$2/${exe}"`
-					: `mkdir -p "$2" && cp "$1" "$2/${exe}" && chmod +x "$2/${exe}"`;
-			await run({
-				argv: ["sh", "-c", script, "install-biome", downloadPath, dir],
-				tools: coreTools,
-				inputs: [{ kind: "file", path: downloadPath }],
-				outputs: [
-					output(output_path(dir), {
-						kind: "directory",
-						namedCache: { name: BIOME_TOOLCHAIN_CACHE, key },
-					}),
-				],
-				materialize: true,
-				display: `install biome ${version} (${plat.os}/${plat.arch})`,
-			});
-		}
-
-		return cacheGet(BIOME_TOOLCHAIN_CACHE, key);
-	},
-	{ display: "acquire Biome Toolchain {0}", level: "info" },
-);
-
-/**
  * Resolve an explicit or default biome toolchain version.
  *
  * @param {string} [version]
@@ -261,35 +176,20 @@ export function resolveBiomeToolchainVersion(version) {
 }
 
 /**
- * Return the biome executable path for a toolchain version.
+ * Return the biome executable path for a toolchain version, installing the
+ * toolchain if necessary.
  *
  * @param {string} [version]
  * @returns {Promise<string>}
  */
 export async function biomeBin(version) {
 	const resolved = BiomeToolchain.requireVersion(version);
-	const dir = await acquireBiomeToolchain(resolved);
-	const exe = platformInfo().os === "windows" ? "biome.exe" : "biome";
-	return `${dir}/${exe}`;
-}
-
-/**
- * Return a named-cache-backed biome tool descriptor for sandbox execution.
- *
- * @param {string} [version]
- * @returns {Promise<object>}
- */
-export async function biomeTool(version) {
-	const resolved = BiomeToolchain.requireVersion(version);
-	await acquireBiomeToolchain(resolved);
 	const plat = platformInfo();
-	return {
-		kind: "tool",
-		name: "biome",
-		cache: BIOME_TOOLCHAIN_CACHE,
+	return toolchainBin(graphToolFor(resolved), {
+		name: BIOME_TOOLCHAIN_CACHE,
 		key: biomeCacheKey(resolved, plat),
-		binDirs: ["."],
-	};
+		exe: plat.os === "windows" ? "biome.exe" : "biome",
+	});
 }
 
 /**
@@ -300,6 +200,10 @@ export function biomeGraphTool(version) {
 	const resolved = BiomeToolchain.requireVersion(version);
 	const plat = platformInfo();
 	const key = biomeCacheKey(resolved, plat);
+	// Declared here rather than in biomeToolchain(): the install task below
+	// publishes into this cache, and it is the graph tool — not the
+	// declaration call — that every path to an installed biome goes through.
+	namedCache({ name: BIOME_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
 		lockfile: BIOME_LOCKFILE,
 		tool: "biome-toolchain",
@@ -337,7 +241,15 @@ export function biomeGraphTool(version) {
 					inputs.mkdir,
 					...(inputs.chmod ? [inputs.chmod] : []),
 				],
-				outputs: { directory: output.directory("toolchain") },
+				outputs: {
+					// Published into the named cache as well as the CAS: a
+					// sandboxed consumer reaches this through exec.tool(), but
+					// `imp @biome` executes it directly and needs a real
+					// absolute path (see //rules/imp/toolchain).
+					directory: output.directory("toolchain", {
+						namedCache: { name: BIOME_TOOLCHAIN_CACHE, key },
+					}),
+				},
 			});
 			return { directory: result.outputs.directory };
 		},

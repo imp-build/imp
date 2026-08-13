@@ -4,7 +4,7 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
-import { output, task } from "imp:core";
+import { cacheGet, output, task } from "imp:core";
 import { extractArchive, extractArchiveTools } from "//rules/imp/archive";
 
 describe("archive", () => {
@@ -90,6 +90,63 @@ describe("archive", () => {
 			expect(extracted.__imp_graph_handle).toBe(true);
 			expect(host.runs.length).toBe(0);
 		});
+	});
+
+	test("extractArchive graph form publishes a named cache when asked", async () => {
+		await withFakeToolchainHost(async (host) => {
+			const source = task({
+				display: "download tool",
+				outputs: { archive: output.artifact() },
+				async run(exec) {
+					const result = await exec.action({
+						argv: ["true"],
+						outputs: { archive: output.file("tool.tar.gz") },
+					});
+					return { archive: result.outputs.archive };
+				},
+			}).outputs.archive;
+			const extracted = extractArchive({
+				archive: source,
+				dest: "tool",
+				format: "tar.gz",
+				stripComponents: 1,
+				namedCache: { name: "demo-toolchains", key: "1.0/linux-x86_64" },
+			});
+
+			await host.resolve(extracted);
+
+			const extract = host.runs.find((run) =>
+				run.argv[2]?.includes("tar -xzf"),
+			);
+			expect(extract.outputs[0].namedCache).toEqual({
+				name: "demo-toolchains",
+				key: "1.0/linux-x86_64",
+			});
+			// The install is now reachable at a real absolute path, which is
+			// what Toolchain.bin() reads back for `imp @tool`.
+			expect(cacheGet("demo-toolchains", "1.0/linux-x86_64")).toBe(
+				"/cache/demo-toolchains/1.0/linux-x86_64",
+			);
+		});
+	});
+
+	test("extractArchive graph form still rejects caller-supplied tools", async () => {
+		let message = null;
+		try {
+			const source = task({
+				outputs: { archive: output.artifact() },
+				run() {},
+			}).outputs.archive;
+			extractArchive({
+				archive: source,
+				dest: "tool",
+				format: "tar.gz",
+				tools: [],
+			});
+		} catch (e) {
+			message = e.message;
+		}
+		expect(message).toContain("owns its tools");
 	});
 
 	test("extractArchive rejects unknown formats", async () => {

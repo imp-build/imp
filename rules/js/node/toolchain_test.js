@@ -6,7 +6,6 @@ import {
 } from "//rules/imp/test";
 import {
 	__resetNodeToolchainStateForTest,
-	acquireNodeToolchain,
 	defaultNodeToolchain,
 	defaultNodeToolchainVersion,
 	installNodeToolchain,
@@ -14,7 +13,6 @@ import {
 	nodeBin,
 	nodeCacheKey,
 	nodeDownloadUrl,
-	nodeTool,
 	nodeToolchain,
 } from "//rules/js/node/toolchain";
 
@@ -62,18 +60,6 @@ describe("node toolchain", () => {
 		});
 	});
 
-	test("throws when no toolchain has been declared", async () => {
-		await withNodeHost(async () => {
-			let message = null;
-			try {
-				await acquireNodeToolchain("22.11.0");
-			} catch (error) {
-				message = error.message;
-			}
-			expect(message).toContain("no node toolchain declared");
-		});
-	});
-
 	test("throws when no version is given and no default is set", async () => {
 		await withNodeHost(async () => {
 			nodeToolchain("22.11.0");
@@ -87,22 +73,13 @@ describe("node toolchain", () => {
 		});
 	});
 
-	test("installs and acquires a toolchain from the named cache", async () => {
-		await withNodeHost(async (host) => {
+	test("installNodeToolchain publishes a local toolchain into the named cache", async () => {
+		await withNodeHost(async () => {
 			const key = nodeCacheKey("22.11.0", { os: "linux", arch: "x86_64" });
 
-			const seeded = installNodeToolchain("22.11.0", "/tmp/node");
-			expect(seeded).toBe(`/cache/node-toolchains/${key}`);
-
-			nodeToolchain("22.11.0", { default: true });
-			expect(await acquireNodeToolchain("22.11.0")).toBe(
+			expect(installNodeToolchain("22.11.0", "/tmp/node")).toBe(
 				`/cache/node-toolchains/${key}`,
 			);
-			expect(await nodeBin("22.11.0")).toBe(
-				`/cache/node-toolchains/${key}/bin/node`,
-			);
-			// Already cached, so no download/extract run() should have happened.
-			expect(host.runs.length).toBe(0);
 		});
 	});
 
@@ -125,11 +102,11 @@ describe("node toolchain", () => {
 				}),
 			);
 			nodeToolchain("22.11.0", { default: true });
-			const tool = await nodeTool("22.11.0");
+			const key = nodeCacheKey("22.11.0", { os: "linux", arch: "x86_64" });
 
-			expect(tool.kind).toBe("tool");
-			expect(tool.name).toBe("node");
-			expect(tool.binDirs).toEqual(["bin"]);
+			expect(await nodeBin("22.11.0")).toBe(
+				`/cache/node-toolchains/${key}/bin/node`,
+			);
 			expect(host.runs.length).toBe(2);
 
 			const [download, extract] = host.runs;
@@ -148,7 +125,7 @@ describe("node toolchain", () => {
 			nodeToolchain("22.11.0", { default: true });
 			let message = null;
 			try {
-				await nodeTool("22.11.0");
+				await nodeBin("22.11.0");
 			} catch (error) {
 				message = error.message;
 			}
@@ -160,7 +137,7 @@ describe("node toolchain", () => {
 	test("unverified: true downloads without a sha check", async () => {
 		await withNodeHost(async (host) => {
 			nodeToolchain("22.11.0", { default: true, unverified: true });
-			await nodeTool("22.11.0");
+			await nodeBin("22.11.0");
 
 			expect(host.runs.length).toBe(2);
 			const [download] = host.runs;

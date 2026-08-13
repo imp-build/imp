@@ -120,7 +120,11 @@ async function runGraphArchiveExtraction(exec, inputs) {
 			inputs.dest,
 		],
 		tools,
-		outputs: { directory: output.directory(inputs.dest) },
+		outputs: {
+			directory: inputs.namedCache
+				? output.directory(inputs.dest, { namedCache: inputs.namedCache })
+				: output.directory(inputs.dest),
+		},
 		display: inputs.display,
 	});
 	return { directory: result.outputs.directory };
@@ -131,6 +135,7 @@ function graphExtractArchive({
 	dest,
 	format,
 	stripComponents,
+	namedCache,
 	display = "extract archive",
 }) {
 	if (typeof dest !== "string" || dest.length === 0) {
@@ -148,6 +153,10 @@ function graphExtractArchive({
 		dest,
 		format,
 		stripComponents: stripComponents ?? null,
+		// Plain JSON, so it participates in the task key: publishing an
+		// extraction into a named cache is part of what the task does, not an
+		// invisible side effect two callers could disagree about.
+		namedCache: namedCache ?? null,
 		display,
 		toolNames: uniqueToolNames,
 	};
@@ -165,16 +174,20 @@ function graphExtractArchive({
 /**
  * Extract an archive. A graph-handle `archive` returns a directory artifact
  * handle immediately; the temporary string-path form retains its Promise API.
+ *
+ * The graph form declares its own tools, so `tools` is rejected. `namedCache`
+ * is accepted: a toolchain install has to publish its extracted tree at a
+ * real, absolute, stable path, because callers outside any sandbox need one —
+ * `imp @tool` executes the binary directly, and a relative `-fuse-ld=<path>`
+ * breaks in practice (see moldRustLinkerEnv() in //rules/c/mold).
  */
 export function extractArchive(opts) {
 	if (!opts || typeof opts !== "object") {
 		throw new Error("extractArchive(options) requires an options object");
 	}
 	if (opts.archive?.__imp_graph_handle === true) {
-		if (Object.hasOwn(opts, "tools") || Object.hasOwn(opts, "namedCache")) {
-			throw new Error(
-				"extractArchive graph form owns its tools and does not use namedCache",
-			);
+		if (Object.hasOwn(opts, "tools")) {
+			throw new Error("extractArchive graph form owns its tools");
 		}
 		return graphExtractArchive(opts);
 	}

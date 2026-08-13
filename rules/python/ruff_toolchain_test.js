@@ -6,7 +6,6 @@ import {
 } from "//rules/imp/test";
 import {
 	__resetRuffToolchainStateForTest,
-	acquireRuffToolchain,
 	defaultRuffToolchain,
 	defaultRuffToolchainVersion,
 	installRuffToolchain,
@@ -14,7 +13,6 @@ import {
 	ruffBin,
 	ruffCacheKey,
 	ruffDownloadUrl,
-	ruffTool,
 	ruffToolchain,
 } from "//rules/python/ruff_toolchain";
 
@@ -62,18 +60,6 @@ describe("ruff toolchain", () => {
 		});
 	});
 
-	test("throws when no toolchain has been declared", async () => {
-		await withRuffHost(async () => {
-			let message = null;
-			try {
-				await acquireRuffToolchain("0.15.21");
-			} catch (error) {
-				message = error.message;
-			}
-			expect(message).toContain("no ruff toolchain declared");
-		});
-	});
-
 	test("throws when no version is given and no default is set", async () => {
 		await withRuffHost(async () => {
 			ruffToolchain("0.15.21");
@@ -87,22 +73,13 @@ describe("ruff toolchain", () => {
 		});
 	});
 
-	test("installs and acquires a toolchain from the named cache", async () => {
-		await withRuffHost(async (host) => {
+	test("installRuffToolchain publishes a local toolchain into the named cache", async () => {
+		await withRuffHost(async () => {
 			const key = ruffCacheKey("0.15.21", { os: "linux", arch: "x86_64" });
 
-			const seeded = installRuffToolchain("0.15.21", "/tmp/ruff");
-			expect(seeded).toBe(`/cache/ruff-toolchains/${key}`);
-
-			ruffToolchain("0.15.21", { default: true });
-			expect(await acquireRuffToolchain("0.15.21")).toBe(
+			expect(installRuffToolchain("0.15.21", "/tmp/ruff")).toBe(
 				`/cache/ruff-toolchains/${key}`,
 			);
-			expect(await ruffBin("0.15.21")).toBe(
-				`/cache/ruff-toolchains/${key}/ruff`,
-			);
-			// Already cached, so no download/extract run() should have happened.
-			expect(host.runs.length).toBe(0);
 		});
 	});
 
@@ -125,11 +102,11 @@ describe("ruff toolchain", () => {
 				}),
 			);
 			ruffToolchain("0.15.21", { default: true });
-			const tool = await ruffTool("0.15.21");
+			const key = ruffCacheKey("0.15.21", { os: "linux", arch: "x86_64" });
 
-			expect(tool.kind).toBe("tool");
-			expect(tool.name).toBe("ruff");
-			expect(tool.binDirs).toEqual(["."]);
+			expect(await ruffBin("0.15.21")).toBe(
+				`/cache/ruff-toolchains/${key}/ruff`,
+			);
 			expect(host.runs.length).toBe(2);
 
 			const [download, extract] = host.runs;
@@ -148,7 +125,7 @@ describe("ruff toolchain", () => {
 			ruffToolchain("0.15.21", { default: true });
 			let message = null;
 			try {
-				await ruffTool("0.15.21");
+				await ruffBin("0.15.21");
 			} catch (error) {
 				message = error.message;
 			}
@@ -160,7 +137,7 @@ describe("ruff toolchain", () => {
 	test("unverified: true downloads without a sha check", async () => {
 		await withRuffHost(async (host) => {
 			ruffToolchain("0.15.21", { default: true, unverified: true });
-			await ruffTool("0.15.21");
+			await ruffBin("0.15.21");
 
 			expect(host.runs.length).toBe(2);
 			const [download] = host.runs;
@@ -193,7 +170,7 @@ describe("ruff toolchain", () => {
 				default: true,
 				lockfile: "//locks/ruff.lock",
 			});
-			await ruffTool("0.15.22");
+			await ruffBin("0.15.22");
 
 			expect(
 				host.calls.some(

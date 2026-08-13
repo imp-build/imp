@@ -2,25 +2,16 @@ import {
 	Toolchain,
 	product,
 	namedCache,
-	memo,
-	run,
-	output,
-	output_path,
 	platformInfo,
 	cachePut,
 	cacheGet,
-	cacheHas,
 	toolName,
 	tool as graphTool,
-	group,
 } from "imp:core";
 
-import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
-import {
-	downloadToolArtifact,
-	lockedDownloadTools,
-} from "//rules/imp/lockfile";
+import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
+import { toolchainBin } from "//rules/imp/toolchain";
 import {
 	generateToolLockfile,
 	GEN_LOCKFILES,
@@ -118,15 +109,6 @@ export function pnpmSupportedPlatforms() {
 	});
 }
 
-// Bare coreutils the download/extract scripts need — same reasoning as
-// coreToolNames in uv_toolchain.js/node_toolchain.js: the sandbox is fully
-// hermetic, so even these must be declared tools, not resolved from an
-// ambient PATH.
-function coreToolNames(plat) {
-	const extract = plat.os === "windows" ? ["tar"] : ["tar", "gzip"];
-	return [...new Set([...lockedDownloadTools(plat), ...extract])];
-}
-
 export class PnpmToolchain extends Toolchain {
 	static kind = "pnpm-toolchain";
 	static tool = PNPM_TOOL;
@@ -145,16 +127,18 @@ export class PnpmToolchain extends Toolchain {
 	}
 }
 
-// Declared lazily, once — target() addresses are only assigned at
-// workspace-load time, so tool handles must be created when a toolchain is
-// declared at BUILD.js top level, not inside acquirePnpmToolchain().
-let coreToolHandles = null;
+// Built once per declared version, at declaration time: task() refuses to add
+// graph nodes during execution, so anything that resolves a toolchain while
+// the graph is running must find a handle here rather than build one.
 let graphToolchains = new Map();
 
 export function __resetPnpmToolchainStateForTest() {
 	PnpmToolchain.clearDefault();
-	coreToolHandles = null;
 	graphToolchains = new Map();
+}
+
+function graphToolFor(version) {
+	return graphToolchains.get(version) ?? pnpmGraphTool(version);
 }
 
 /**
@@ -169,14 +153,7 @@ export function __resetPnpmToolchainStateForTest() {
  * @category configuration
  */
 export function pnpmToolchain(version, opts = {}) {
-	namedCache({ name: PNPM_TOOLCHAIN_CACHE, shared: true });
 	namedCache({ name: PNPM_STORE_CACHE });
-	if (!coreToolHandles) {
-		coreToolHandles = coreToolNames(platformInfo()).map((name) =>
-			nativeTool(name),
-		);
-	}
-
 	new PnpmToolchain(
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
@@ -202,83 +179,6 @@ export function installPnpmToolchain(version, source) {
 }
 
 /**
- * Acquire a pnpm toolchain, downloading and caching it if not already
- * installed in the named cache.
- *
- * @param {string} version
- * @returns {Promise<string>} Local path to the toolchain root.
- */
-export const acquirePnpmToolchain = memo(
-	async function acquirePnpmToolchain(version) {
-		const plat = platformInfo();
-		const key = pnpmCacheKey(version, plat);
-
-		if (!coreToolHandles) {
-			throw new Error(
-				"no pnpm toolchain declared via pnpmToolchain(); nothing to acquire",
-			);
-		}
-		const coreTools = await group(
-			coreToolHandles.map((handle) => nativeToolSpec(handle)),
-		);
-
-		if (!cacheHas(PNPM_TOOLCHAIN_CACHE, key)) {
-			const downloadPath = `.imp/pnpm-downloads/${key}/${pnpmArtifactName(version, plat)}`;
-			await downloadToolArtifact({
-				lockfile: PNPM_LOCKFILE,
-				tool: "pnpm-toolchain",
-				version,
-				plat,
-				url: pnpmDownloadUrl(version, plat),
-				downloadPath,
-				tools: coreTools,
-				display: `download pnpm ${version} (${plat.os}/${plat.arch})`,
-				unverified: PnpmToolchain.resolveUnverified(version),
-			});
-
-			// pnpm's release archives are flat — a `pnpm` executable (plus its
-			// bundled dist/ payload) sit at the archive root already, unlike
-			// node/uv/ruff's single top-level `<name>-<triple>/` wrapper — so no
-			// stripComponents here.
-			await extractArchive({
-				archive: downloadPath,
-				dest: `.imp/pnpm-toolchains/${key}`,
-				format: plat.os === "windows" ? "zip" : "tar.gz",
-				tools: coreTools,
-				namedCache: { name: PNPM_TOOLCHAIN_CACHE, key },
-				display: `extract pnpm ${version} (${plat.os}/${plat.arch})`,
-			});
-		}
-
-		// A named-cache "tool" mount (see pnpmStoreDirTool) requires its cache
-		// path to already exist as a real directory — materialize_tools_into_
-		// sandbox in src/exec.rs bails otherwise — so seed it with an empty
-		// directory here, guarded independently of the toolchain cacheHas()
-		// above since this cache is keyed "shared", not per-version (same
-		// independent-guard pattern as UV_CACHE_DIR_CACHE's seeding in
-		// rules/python/uv_toolchain.js).
-		if (!cacheHas(PNPM_STORE_CACHE, PNPM_STORE_KEY)) {
-			const seedPath = ".imp/pnpm-store-seed";
-			await run({
-				argv: ["sh", "-c", 'mkdir -p "$1"', "seed-pnpm-store", seedPath],
-				tools: coreTools,
-				outputs: [
-					output(output_path(seedPath), {
-						kind: "directory",
-						namedCache: { name: PNPM_STORE_CACHE, key: PNPM_STORE_KEY },
-					}),
-				],
-				materialize: true,
-				display: "seed pnpm store",
-			});
-		}
-
-		return cacheGet(PNPM_TOOLCHAIN_CACHE, key);
-	},
-	{ display: "acquire Pnpm Toolchain {0}", level: "info" },
-);
-
-/**
  * Resolve an explicit or default pnpm toolchain version.
  *
  * @param {string} [version]
@@ -296,28 +196,12 @@ export function resolvePnpmToolchainVersion(version) {
  */
 export async function pnpmBin(version) {
 	const resolved = PnpmToolchain.requireVersion(version);
-	const dir = await acquirePnpmToolchain(resolved);
-	const exe = platformInfo().os === "windows" ? "pnpm.exe" : "pnpm";
-	return `${dir}/${exe}`;
-}
-
-/**
- * Return a named-cache-backed pnpm tool descriptor for sandbox execution.
- *
- * @param {string} [version]
- * @returns {Promise<object>}
- */
-export async function pnpmTool(version) {
-	const resolved = PnpmToolchain.requireVersion(version);
-	await acquirePnpmToolchain(resolved);
 	const plat = platformInfo();
-	return {
-		kind: "tool",
-		name: "pnpm",
-		cache: PNPM_TOOLCHAIN_CACHE,
+	return toolchainBin(graphToolFor(resolved), {
+		name: PNPM_TOOLCHAIN_CACHE,
 		key: pnpmCacheKey(resolved, plat),
-		binDirs: ["."],
-	};
+		exe: plat.os === "windows" ? "pnpm.exe" : "pnpm",
+	});
 }
 
 /** Return the CAS-backed graph tool used by graph-native JS rules. */
@@ -325,6 +209,7 @@ export function pnpmGraphTool(version) {
 	const resolved = PnpmToolchain.requireVersion(version);
 	const plat = platformInfo();
 	const key = pnpmCacheKey(resolved, plat);
+	namedCache({ name: PNPM_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
 		lockfile: PNPM_LOCKFILE,
 		tool: "pnpm-toolchain",
@@ -335,10 +220,14 @@ export function pnpmGraphTool(version) {
 		display: `download pnpm ${resolved} (${plat.os}/${plat.arch})`,
 		unverified: PnpmToolchain.resolveUnverified(resolved),
 	});
+	// pnpm's release archives are flat — a `pnpm` executable (plus its bundled
+	// dist/ payload) sit at the archive root already, unlike node/uv/ruff's
+	// single top-level `<name>-<triple>/` wrapper — so no stripComponents.
 	const directory = extractArchive({
 		archive,
 		dest: `.imp/pnpm-toolchains/${key}`,
 		format: plat.os === "windows" ? "zip" : "tar.gz",
+		namedCache: { name: PNPM_TOOLCHAIN_CACHE, key },
 		display: `extract pnpm ${resolved} (${plat.os}/${plat.arch})`,
 	});
 	return graphTool(directory, { binDirs: ["."] });
