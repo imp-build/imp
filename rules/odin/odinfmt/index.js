@@ -57,7 +57,7 @@ export function odinFmtRoot({ sources, base, version }) {
 					'formatter=$1; shift; "$formatter" -w "$@"',
 					"odinfmt",
 					command,
-					...paths,
+					base,
 				],
 				inputs: [inputs.sources],
 				tools: [inputs.shell],
