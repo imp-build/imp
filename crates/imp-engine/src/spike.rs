@@ -6461,6 +6461,7 @@ pub async fn execute_goal_live(
         },
     )
     .await
+    .map(|_| ())
 }
 
 /// How `execute_goal_live_selection` picks its root targets: user-typed
@@ -6636,7 +6637,7 @@ pub async fn execute_goal_live_selection(
     goal: &str,
     selection: GoalSelection<'_>,
     options: GoalExecutionOptions<'_>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let GoalExecutionOptions {
         no_cache,
         trace_inputs,
@@ -6947,7 +6948,7 @@ pub async fn execute_goal_live_selection(
                             goal
                         );
                     }
-                    return Ok(());
+                    return Ok(None);
                 }
                 roots
             }
@@ -7081,7 +7082,7 @@ pub async fn execute_goal_live_selection(
     let graph_goal_handler_name = live.workspace.graph_goal_handlers.get(goal).cloned();
     let result = live
         .ctx
-        .async_with(async move |ctx| -> Result<()> {
+        .async_with(async move |ctx| -> Result<Option<String>> {
             let set_js_workers: Function = ctx.globals().get("__imp_set_js_workers")?;
             set_js_workers.call::<_, ()>((js_workers.max(1),))?;
             let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
@@ -7167,6 +7168,15 @@ pub async fn execute_goal_live_selection(
                         .map_err(|e| goal_execution_error(&call_label, e))?;
                 }
             }
+            // A graph goal handler may return a plain string report (e.g.
+            // [TEST]'s per-unit pass/fail listing) — captured here and handed
+            // back to the caller to print with `println!` once the live
+            // progress UI has been torn down, rather than through the
+            // logger, which suspends/redraws indicatif per line and fights
+            // it for the terminal on a burst of output. `undefined`/`null`/
+            // non-string returns (every other graph goal today) mean "no
+            // report", same as before this existed.
+            let mut report: Option<String> = None;
             if !graph_handle_ids.is_empty() {
                 let execute_graph: Function = ctx.globals().get("__imp_execute_graph_handles")?;
                 let graph_context = format!("goal '{goal_owned}' graph execution");
@@ -7188,11 +7198,14 @@ pub async fn execute_goal_live_selection(
                         .catch(&ctx)
                         .map_err(|e| goal_execution_error(&handler_context, e))?;
                     let handler_promise: MaybePromise = promise_resolve.call((handler_result,))?;
-                    handler_promise
+                    let resolved: Value = handler_promise
                         .into_future::<Value>()
                         .await
                         .catch(&ctx)
                         .map_err(|e| goal_execution_error(&handler_context, e))?;
+                    if resolved.is_string() {
+                        report = Some(String::from_js(&ctx, resolved)?);
+                    }
                 }
             }
             if trace_inputs {
@@ -7200,7 +7213,7 @@ pub async fn execute_goal_live_selection(
                     ctx.globals().get("__imp_assert_trace_inputs")?;
                 assert_trace_inputs.call::<_, ()>(())?;
             }
-            Ok(())
+            Ok(report)
         })
         .await
         // A workflow that refused on purpose already wrote the sentence the
@@ -13502,6 +13515,7 @@ configure("cache_test_unread", {{ mode: {mode} }});
             },
         )
         .await
+        .map(|_| ())
     }
 
     fn write_mode_axis_build_file(p: &Path) {

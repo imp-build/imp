@@ -359,7 +359,9 @@ async fn main() {
     }
 
     if let Err(e) = run().await {
-        eprintln!("error: {e:#}");
+        if e.downcast_ref::<AlreadyPrinted>().is_none() {
+            eprintln!("error: {e:#}");
+        }
         exit_after_sandbox_cleanup(1);
     }
 
@@ -533,6 +535,20 @@ async fn print_help_with_registered_goals(long: bool) {
     println!();
 }
 
+/// Marks an error `run()` already printed itself (in narrative order, before
+/// the goal's trailing stats block) — `main`'s catch-all `eprintln!` checks
+/// for this to avoid printing the same message twice.
+#[derive(Debug)]
+struct AlreadyPrinted;
+
+impl std::fmt::Display for AlreadyPrinted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "")
+    }
+}
+
+impl std::error::Error for AlreadyPrinted {}
+
 async fn run() -> Result<()> {
     if std::env::args().count() == 2 {
         match std::env::args().nth(1).as_deref() {
@@ -595,10 +611,23 @@ async fn run() -> Result<()> {
     let outcome = run_inner(cli, ui.tree(), cancellation).await;
     ui.shutdown();
 
+    // Print in narrative order: what went wrong (or the goal's own report)
+    // first, the run's cache/timing stats last — printing the error only
+    // after `run()` returns (main's catch-all `eprintln!`) would put it below
+    // the stats block instead. `AlreadyPrinted` tells that catch-all not to
+    // print it a second time.
+    if let Err(error) = &outcome.result {
+        eprintln!("error: {error:#}");
+    }
+    if let Some(report) = &outcome.report {
+        println!("{report}");
+    }
     if let Some(goal_summary) = &outcome.summary {
         print_goal_summary(goal_summary);
     }
-    outcome.result
+    outcome
+        .result
+        .map_err(|_| anyhow::Error::new(AlreadyPrinted))
 }
 
 fn effective_gc_max_age_days(workspace: &spike::Workspace, cli_value: Option<u64>) -> u64 {
@@ -797,11 +826,14 @@ fn install_termination_signal_flag() -> Result<Arc<AtomicBool>> {
 }
 
 /// What `run_inner` produced: the command's own result, plus (only for goal
-/// execution) the final summary — kept separate so `run()` can print it as
-/// plain output only after the live progress UI has been shut down.
+/// execution) the final summary and any plain-text report a graph goal
+/// handler returned (e.g. [TEST]'s per-unit pass/fail listing) — kept
+/// separate so `run()` can print both as plain output only after the live
+/// progress UI has been shut down, rather than through the logger.
 struct RunOutcome {
     result: Result<()>,
     summary: Option<GoalSummary>,
+    report: Option<String>,
 }
 
 impl From<Result<()>> for RunOutcome {
@@ -809,6 +841,7 @@ impl From<Result<()>> for RunOutcome {
         Self {
             result,
             summary: None,
+            report: None,
         }
     }
 }
@@ -850,7 +883,7 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> RunO
         Cmd::Rules { command } => cmd_rules(command.as_ref(), tree).await.into(),
         Cmd::Config { command } => cmd_config(command).await.into(),
         Cmd::Goal { name, args } => {
-            let (result, summary) = cmd_execute_goal(
+            let (result, summary, report) = cmd_execute_goal(
                 name,
                 &args.raw,
                 Arc::clone(&cancellation),
@@ -858,11 +891,15 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> RunO
                 cli.level.map(log::LevelFilter::from),
             )
             .await;
-            RunOutcome { result, summary }
+            RunOutcome {
+                result,
+                summary,
+                report,
+            }
         }
         Cmd::External(argv) => {
             let (name, raw) = argv.split_first().expect("clap guarantees non-empty argv");
-            let (result, summary) = cmd_execute_goal(
+            let (result, summary, report) = cmd_execute_goal(
                 name,
                 raw,
                 Arc::clone(&cancellation),
@@ -870,7 +907,11 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> RunO
                 cli.level.map(log::LevelFilter::from),
             )
             .await;
-            RunOutcome { result, summary }
+            RunOutcome {
+                result,
+                summary,
+                report,
+            }
         }
         Cmd::RulesTest { modules } => cmd_rules_test(modules, Arc::clone(&cancellation), tree)
             .await
@@ -996,7 +1037,7 @@ async fn cmd_execute_goal(
     cancellation: Arc<AtomicBool>,
     tree: &Tree,
     cli_level: Option<log::LevelFilter>,
-) -> (Result<()>, Option<GoalSummary>) {
+) -> (Result<()>, Option<GoalSummary>, Option<String>) {
     cmd_execute_live(
         LiveInvocation::Goal { goal, raw },
         cancellation,
@@ -1047,7 +1088,7 @@ struct GoalSummary {
 const SUMMARY_LABEL_WIDTH: usize = "sandboxes:".len() + 1;
 
 fn print_goal_summary(summary: &GoalSummary) {
-    println!("imp {}", env!("CARGO_PKG_VERSION"));
+    println!("");
 
     // JS memo nodes never carry a cache verdict at the scheduler-event level
     // (an in-process memo hit never reaches `Done` at all — see
@@ -1103,10 +1144,10 @@ async fn cmd_execute_live(
     cancellation: Arc<AtomicBool>,
     tree: &Tree,
     cli_level: Option<log::LevelFilter>,
-) -> (Result<()>, Option<GoalSummary>) {
+) -> (Result<()>, Option<GoalSummary>, Option<String>) {
     match cmd_execute_live_impl(invocation, cancellation, tree, cli_level).await {
         Ok(outcome) => outcome,
-        Err(error) => (Err(error), None),
+        Err(error) => (Err(error), None, None),
     }
 }
 
@@ -1115,7 +1156,7 @@ async fn cmd_execute_live_impl(
     cancellation: Arc<AtomicBool>,
     tree: &Tree,
     cli_level: Option<log::LevelFilter>,
-) -> Result<(Result<()>, Option<GoalSummary>)> {
+) -> Result<(Result<()>, Option<GoalSummary>, Option<String>)> {
     let current_dir = std::env::current_dir().context("determine current directory")?;
     let workspace_root = spike::find_workspace_root(&current_dir)?;
     let selector_context =
@@ -1700,7 +1741,8 @@ async fn cmd_execute_live_impl(
             imp_execution::remote_cache::confirmed_pushes().saturating_sub(remote_pushed_baseline);
     }
 
-    Ok((result, goal_summary))
+    let report = result.as_ref().ok().cloned().flatten();
+    Ok((result.map(|_| ()), goal_summary, report))
 }
 
 macro_rules! workspace_cmd {
