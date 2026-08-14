@@ -1,4 +1,4 @@
-import { output, semantic, task } from "imp:core";
+import { digestOf, output, semantic, task } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 import { biomeGraphTool } from "//rules/js/biome/toolchain";
 
@@ -24,8 +24,10 @@ function biomeRoot({ sources, root }, kind) {
 			kind === "fmt"
 				? {
 						formatted: output.artifact(),
+						sourcesDigest: output.value(),
 						paths: output.value(),
 						check: output.value(),
+						output: output.value(),
 					}
 				: { result: output.value() },
 		async run(exec, inputs) {
@@ -39,14 +41,24 @@ function biomeRoot({ sources, root }, kind) {
 						}
 					: { result: { ok: true, output: "", fixApplied: false } };
 			}
-			const biome = `../${exec.tool(inputs.biome, "biome")}`;
-			const outDir = kind === "fmt" ? "formatted" : "linted";
+			// fmt formats in place — the sandbox's mounted inputs are writable,
+			// not read-only, so there's no need to cp sources aside first. This
+			// also keeps the declared output digest rooted exactly like
+			// sourcesDigest (both real workspace-relative paths under `root`),
+			// so graphFmtGoal can diffDigests() them directly. lint still
+			// copies into linted/, since --fix's output is a deliberately
+			// separate artifact from the (untouched) sources.
+			const biome =
+				kind === "fmt"
+					? exec.tool(inputs.biome, "biome")
+					: `../${exec.tool(inputs.biome, "biome")}`;
+			const outDir = kind === "fmt" ? root : "linted";
 			const result = await exec.action({
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
 					kind === "fmt"
-						? `mode="$1"; biome="$2"; shift 2; for path in "$@"; do mkdir -p "${outDir}/$(dirname "$path")" && cp "$path" "${outDir}/$path"; done && cd ${outDir} && if [ "$mode" = write ]; then "$biome" format --write "$@"; else "$biome" format "$@"; fi`
+						? `mode="$1"; biome="$2"; shift 2; if [ "$mode" = write ]; then "$biome" format --write "$@"; else "$biome" format "$@"; fi`
 						: `fix="$1"; biome="$2"; shift 2; for path in "$@"; do mkdir -p "${outDir}/$(dirname "$path")" && cp "$path" "${outDir}/$path"; done && cd ${outDir} && "$biome" lint --colors=force "$@" \${fix:+--write}`,
 					`biome-${kind}`,
 					kind === "fmt"
@@ -60,15 +72,22 @@ function biomeRoot({ sources, root }, kind) {
 					...paths,
 				],
 				inputs: [inputs.sources],
-				tools: [inputs.shell, inputs.cp, inputs.mkdir, inputs.dirname],
-				outputs: { [outDir]: output.directory(outDir) },
+				tools:
+					kind === "fmt"
+						? [inputs.shell]
+						: [inputs.shell, inputs.cp, inputs.mkdir, inputs.dirname],
+				outputs: {
+					[kind === "fmt" ? "formatted" : outDir]: output.directory(outDir),
+				},
 				allowFailure: true,
 			});
 			if (kind === "fmt")
 				return {
 					formatted: result.outputs.formatted,
+					sourcesDigest: digestOf(inputs.sources.fileset),
 					paths,
 					check: { requested: inputs.flag, failed: result.exitCode !== 0 },
+					output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
 				};
 			return {
 				result: {

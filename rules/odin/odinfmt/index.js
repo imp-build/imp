@@ -1,5 +1,5 @@
 import { FMT } from "//rules/workflows/fmt";
-import { output, semantic, task } from "imp:core";
+import { digestOf, output, semantic, task } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 import { registerOdinPackageHook } from "//rules/odin";
 import {
@@ -16,10 +16,6 @@ export {
 /** Build the CAS formatter result consumed by the shared graph fmt workflow. */
 export function odinFmtRoot({ sources, base, version }) {
 	const shell = nativeTool("sh");
-	const cp = nativeTool("cp");
-	const mkdir = nativeTool("mkdir");
-	const dirname = nativeTool("dirname");
-	const cmp = nativeTool("cmp");
 	const formatter = odinfmtGraphTool(version);
 	return task({
 		display: `odinfmt ${base}`,
@@ -28,10 +24,6 @@ export function odinFmtRoot({ sources, base, version }) {
 			formatter,
 			check: semantic.flag("check"),
 			shell,
-			cp,
-			mkdir,
-			dirname,
-			cmp,
 		},
 		outputs: { result: output.value() },
 		async run(exec, inputs) {
@@ -39,16 +31,7 @@ export function odinFmtRoot({ sources, base, version }) {
 			if (paths.length === 0) {
 				return {
 					result: {
-						formatted: (
-							await exec.action({
-								argv: [
-									exec.tool(inputs.shell, "sh"),
-									"-c",
-									"mkdir -p formatted",
-								],
-								outputs: { formatted: output.directory("formatted") },
-							})
-						).outputs.formatted,
+						formatted: null,
 						paths,
 						check: { requested: inputs.check, failed: false },
 					},
@@ -58,32 +41,36 @@ export function odinFmtRoot({ sources, base, version }) {
 				inputs.formatter,
 				odinfmtCommandName(platformInfo()),
 			);
+			// Formats in place — the sandbox's mounted inputs are writable, not
+			// read-only, so odinfmt can rewrite paths directly. Unlike ruff/biome
+			// (which natively refuse to write under --check and report a
+			// failed exit code instead), odinfmt has no such mode: it always
+			// writes, so whether a --check run "fails" is derived the same way
+			// "changed" is in write mode — a real diffDigests() comparison
+			// against sourcesDigest, done centrally in graphFmtGoal's
+			// unitStatus() rather than the shell's own cmp — so this task
+			// itself never needs to know whether --check was requested.
 			const result = await exec.action({
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
-					'check=$1; formatter=$2; shift 2; for path in "$@"; do mkdir -p "formatted/$(dirname "$path")" && cp "$path" "formatted/$path"; done; cd formatted && "$formatter" -w "$@"; status=0; if [ "$check" = true ]; then for path in "$@"; do cmp -s "../$path" "$path" || status=1; done; fi; exit $status',
+					'formatter=$1; shift; "$formatter" -w "$@"',
 					"odinfmt",
-					String(inputs.check),
 					command,
 					...paths,
 				],
 				inputs: [inputs.sources],
-				tools: [
-					inputs.shell,
-					inputs.cp,
-					inputs.mkdir,
-					inputs.dirname,
-					inputs.cmp,
-				],
-				outputs: { formatted: output.directory("formatted") },
+				tools: [inputs.shell],
+				outputs: { formatted: output.directory(base) },
 				allowFailure: true,
 			});
 			return {
 				result: {
 					formatted: result.outputs.formatted,
+					sourcesDigest: digestOf(inputs.sources.fileset),
 					paths,
 					check: { requested: inputs.check, failed: result.exitCode !== 0 },
+					output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
 				},
 			};
 		},

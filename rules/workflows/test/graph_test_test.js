@@ -1,14 +1,34 @@
 import { graphTestGoal } from "//rules/workflows/test";
 import { expect, test } from "//rules/imp/test";
 
-test("graphTestGoal returns a sorted PASS/FAIL report instead of throwing when every unit is ok", () => {
+const GREEN = "\x1b[32m";
+const RED = "\x1b[31m";
+const RESET = "\x1b[0m";
+
+test("graphTestGoal returns a sorted, aligned, colored report instead of throwing when every unit is ok", () => {
 	const report = graphTestGoal([
 		{ address: "//pkg:b", result: [{ name: "unit-b", ok: true }] },
 		{ address: "//pkg:a", result: [{ name: "unit-a", ok: true }] },
 	]);
 	expect(report).toBe(
-		"PASS //pkg:a unit-a\nPASS //pkg:b unit-b\ntest: 2/2 unit(s) passed",
+		`//pkg:a unit-a  ${GREEN}PASS${RESET}\n//pkg:b unit-b  ${GREEN}PASS${RESET}\ntest: 2/2 unit(s) passed`,
 	);
+});
+
+test("graphTestGoal sorts failures before passes, regardless of address order", () => {
+	const report = (() => {
+		try {
+			graphTestGoal([
+				{ address: "//pkg:z", result: [{ name: "unit-z", ok: true }] },
+				{ address: "//pkg:a", result: [{ name: "unit-a", ok: false, output: "boom" }] },
+			]);
+		} catch (error) {
+			return error.message;
+		}
+	})();
+	const failLine = `//pkg:a unit-a  ${RED}FAIL${RESET}`;
+	const passLine = `//pkg:z unit-z  ${GREEN}PASS${RESET}`;
+	expect(report.indexOf(failLine) < report.indexOf(passLine)).toBe(true);
 });
 
 test("graphTestGoal aggregates failures across every selected root, not just the first", () => {

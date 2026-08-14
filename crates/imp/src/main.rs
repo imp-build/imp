@@ -1088,7 +1088,7 @@ struct GoalSummary {
 const SUMMARY_LABEL_WIDTH: usize = "sandboxes:".len() + 1;
 
 fn print_goal_summary(summary: &GoalSummary) {
-    println!("");
+    println!();
 
     // JS memo nodes never carry a cache verdict at the scheduler-event level
     // (an in-process memo hit never reaches `Done` at all — see
