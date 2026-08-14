@@ -27,7 +27,16 @@ export function odinFmtRoot({ sources, base, version }) {
 		},
 		outputs: { result: output.value() },
 		async run(exec, inputs) {
-			const paths = exec.paths(inputs.sources);
+			// inputs.sources is the package's declared srcs glob, which isn't
+			// always `.odin`-only in practice: odin has no way to pick up a
+			// dep's sources when compiling except by pointing a collection at
+			// a real directory, so some packages work around that by widening
+			// their own srcs glob to sweep a vendored tree's files (including
+			// non-.odin ones) into their sources. odinfmt only understands
+			// `.odin` files, so filter to those before formatting.
+			const paths = exec
+				.paths(inputs.sources)
+				.filter((path) => path.endsWith(".odin"));
 			if (paths.length === 0) {
 				return {
 					result: {
