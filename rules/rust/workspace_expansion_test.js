@@ -204,15 +204,12 @@ describe("cargo workspace expansion", () => {
 				`Diff in ${manifestPath("crates/a").replace("/Cargo.toml", "/src/lib.rs")} at line 1:\n-x\n+y\n`,
 			);
 
-			let aFailed = false;
-			try {
-				await resolveHandles([expansion.get("crate-a", FMT)]);
-			} catch (_) {
-				aFailed = true;
-			}
-			expect(aFailed).toBe(true);
+			const [a] = await resolveHandles([expansion.get("crate-a", FMT)]);
+			expect(a.result.check.failed).toBe(true);
+			expect(a.result.output).toContain("unformatted");
 
-			await resolveHandles([expansion.get("crate-b", FMT)]);
+			const [b] = await resolveHandles([expansion.get("crate-b", FMT)]);
+			expect(b.result.check.failed).toBe(false);
 		});
 	});
 

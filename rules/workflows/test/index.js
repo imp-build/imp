@@ -18,23 +18,36 @@
 // The legacy target()/product() dispatch this goal used to fall back to has
 // been retired. attach(label, "test", fn) (the `test()` sugar in imp:core)
 // is a separate, still-supported mechanism and is unaffected.
-import { goal, goalError, logInfo } from "imp:core";
+import { goal, goalError } from "imp:core";
+import { statusReport } from "//rules/workflows/report";
 
 /** Aggregate every selected [TEST] root's execution-unit results and report once. */
 export function graphTestGoal(roots) {
 	const units = roots.flatMap(({ address, result }) =>
 		(result || []).map((unit) => ({ ...unit, address })),
 	);
-	const failed = units.filter((unit) => !unit.ok);
-	for (const unit of failed) {
-		if (unit.output) logInfo(`${unit.address} ${unit.name}:\n${unit.output}`);
-	}
-	logInfo(`test: ${units.length - failed.length}/${units.length} unit(s) passed`);
-	if (failed.length > 0) {
-		throw goalError(
-			`test failed: ${failed.map((unit) => `${unit.address} ${unit.name}`).join(", ")}`,
-		);
-	}
+	// Returned (on an all-passing run) or thrown as the goalError message (on
+	// any failure) rather than logged: the live progress UI's logger suspends
+	// and redraws indicatif per line, which fights a burst of ~one-line-per-unit
+	// output for the terminal. Returning/throwing a plain string instead lets
+	// the host print it with a plain `println!`/`eprintln!` once the UI has
+	// already been torn down (see execute_goal_live_selection's `report`
+	// capture and `run()` in crates/imp/src/main.rs).
+	const report = statusReport(
+		units.map((unit) => ({
+			key: `${unit.address} ${unit.name}`,
+			status: unit.ok ? "pass" : "fail",
+			output: unit.output,
+		})),
+		{
+			order: ["fail", "pass"],
+			colors: { fail: "red", pass: "green" },
+			summary: (counts) =>
+				`test: ${counts.pass}/${counts.pass + counts.fail} unit(s) passed`,
+		},
+	);
+	if (units.some((unit) => !unit.ok)) throw goalError(report);
+	return report;
 }
 
 export const TEST = goal("test", undefined, { graph: graphTestGoal });

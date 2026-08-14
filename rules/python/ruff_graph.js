@@ -1,4 +1,4 @@
-import { output, semantic, task } from "imp:core";
+import { digestOf, output, semantic, task } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 import {
 	defaultRuffToolchainVersion,
@@ -37,13 +37,23 @@ function ruffRoot(source, kind) {
 									check: { requested: inputs.flag, failed: false },
 								},
 				};
-			const command = `../${exec.tool(inputs.ruff, "ruff")}`;
+			// fmt formats in place — the sandbox's mounted inputs are writable,
+			// not read-only, so there's no need to cp sources aside first. This
+			// also keeps the declared output digest rooted exactly like
+			// sourcesDigest (both real workspace-relative paths under
+			// source.root), so graphFmtGoal can diffDigests() them directly.
+			// lint still copies into fixed/, since --fix's output is a
+			// deliberately separate artifact from the (untouched) sources.
+			const command =
+				kind === "fmt"
+					? exec.tool(inputs.ruff, "ruff")
+					: `../${exec.tool(inputs.ruff, "ruff")}`;
 			const result = await exec.action({
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
 					kind === "fmt"
-						? 'check=$1; ruff=$2; shift 2; for path in "$@"; do mkdir -p "formatted/$(dirname "$path")" && cp "$path" "formatted/$path"; done && cd formatted && "$ruff" format "$@" ${check:+--check}'
+						? 'check=$1; ruff=$2; shift 2; "$ruff" format "$@" ${check:+--check}'
 						: 'fix=$1; ruff=$2; shift 2; for path in "$@"; do mkdir -p "fixed/$(dirname "$path")" && cp "$path" "fixed/$path"; done && cd fixed && "$ruff" check --color=always "$@" ${fix:+--fix}',
 					`ruff-${kind}`,
 					inputs.flag ? "1" : "",
@@ -51,10 +61,13 @@ function ruffRoot(source, kind) {
 					...paths,
 				],
 				inputs: [inputs.sources],
-				tools: [inputs.shell, inputs.cp, inputs.mkdir, inputs.dirname],
+				tools:
+					kind === "fmt"
+						? [inputs.shell]
+						: [inputs.shell, inputs.cp, inputs.mkdir, inputs.dirname],
 				outputs:
 					kind === "fmt"
-						? { formatted: output.directory("formatted") }
+						? { formatted: output.directory(source.root) }
 						: { fixed: output.directory("fixed") },
 				allowFailure: true,
 			});
@@ -62,8 +75,10 @@ function ruffRoot(source, kind) {
 				return {
 					result: {
 						formatted: result.outputs.formatted,
+						sourcesDigest: digestOf(inputs.sources.fileset),
 						paths,
 						check: { requested: inputs.flag, failed: result.exitCode !== 0 },
+						output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
 					},
 				};
 			return {

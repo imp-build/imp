@@ -565,20 +565,36 @@ function crateFmtTask(dir, fmt) {
 	return task({
 		display: `cargo fmt --check ${dir}`,
 		inputs: { report: fmt.outputs.report, dir },
+		outputs: { result: output.value() },
 		async run(_exec, input) {
 			const { exitCode, unformatted, stdout } = input.report;
 			const own = unformatted.filter((p) => p.includes(`/${input.dir}/`));
+			// cargo fmt --check never writes — no formatted/sourcesDigest, so
+			// //rules/workflows/fmt's status derivation always resolves this to
+			// "unchanged" or "failed", never "changed".
 			if (exitCode !== 0 && own.length === 0 && unformatted.length === 0) {
-				// cargo fmt --check failed for a reason with no per-file
-				// attribution at all (e.g. a syntax error) — surface it rather
-				// than claiming a clean pass.
-				throw goalError(
-					stdout || `cargo fmt --check failed before reaching ${input.dir}`,
-				);
+				// The shared run failed for a reason with no per-file attribution
+				// at all (e.g. a syntax error) — surface it rather than claiming a
+				// clean pass.
+				return {
+					result: {
+						paths: [],
+						check: {
+							requested: true,
+							failed: true,
+						},
+						output:
+							stdout || `cargo fmt --check failed before reaching ${input.dir}`,
+					},
+				};
 			}
-			if (own.length > 0) {
-				throw goalError(`unformatted: ${own.join(", ")}`);
-			}
+			return {
+				result: {
+					paths: [],
+					check: { requested: true, failed: own.length > 0 },
+					output: own.length > 0 ? `unformatted: ${own.join(", ")}` : "",
+				},
+			};
 		},
 	});
 }
@@ -821,7 +837,7 @@ export function cargoWorkspaceExpansion(workspaceRootRelative, toolchainSpec) {
 							: noopDoctestTask(`cargo test --doc ${pkg.name} (disabled)`)
 						).outputs.units,
 					},
-					[FMT]: crateFmtTask(dir, fmt),
+					[FMT]: crateFmtTask(dir, fmt).outputs.result,
 				};
 			}
 			return children;
@@ -947,6 +963,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 			const fmt = task({
 				display: `cargo fmt --check ${path}`,
 				inputs: { manifests, ...toolchainInputs(toolchainSpec) },
+				outputs: { result: output.value() },
 				async run(exec, input) {
 					const { tools, env } = await cargoEnv(exec, input, toolchainSpec);
 					const result = await exec.action({
@@ -961,8 +978,18 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 						tools,
 						env,
 						inputs: [input.manifests],
+						allowFailure: true,
 					});
-					if (result.exitCode !== 0) throw goalError(result.stdout);
+					// cargo fmt --check never writes — no formatted/sourcesDigest, so
+					// //rules/workflows/fmt's status derivation always resolves this
+					// to "unchanged" or "failed", never "changed".
+					return {
+						result: {
+							paths: [],
+							check: { requested: true, failed: result.exitCode !== 0 },
+							output: result.exitCode !== 0 ? result.stdout : "",
+						},
+					};
 				},
 			});
 
@@ -1102,7 +1129,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 						}).outputs.units,
 						doctests: doctest.outputs.units,
 					},
-					[FMT]: fmt,
+					[FMT]: fmt.outputs.result,
 				},
 			};
 		},
