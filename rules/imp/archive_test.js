@@ -60,7 +60,9 @@ describe("archive", () => {
 			});
 			await host.resolve(extracted);
 
-			const extract = host.runs.find((run) => run.argv[2]?.includes("tar -xzf"));
+			const extract = host.runs.find((run) =>
+				run.argv[2]?.includes("tar -xzf"),
+			);
 			expect(extract.argv[0]).toBe("sh");
 			expect(extract.argv[2]).toContain("tar -xzf");
 			expect(extract.argv[2]).toContain("--strip-components=1");

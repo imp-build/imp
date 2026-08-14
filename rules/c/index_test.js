@@ -76,7 +76,9 @@ describe("graph-native ccLibrary/ccBinary", () => {
 			expect(lib[BUILD].__imp_graph_handle).toBe(true);
 			expect(lib[PACKAGE].__imp_graph_handle).toBe(true);
 			expect(lib.transitiveArchives).toEqual([lib.archive]);
-			expect(lib.transitiveIncludeDirs).toEqual(["rules/c/testdata/mixed_sources"]);
+			expect(lib.transitiveIncludeDirs).toEqual([
+				"rules/c/testdata/mixed_sources",
+			]);
 		});
 	});
 

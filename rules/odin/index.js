@@ -929,7 +929,7 @@ function graphOdinBuild(
 		outputs: lint
 			? { result: output.value() }
 			: test
-				? undefined
+				? { units: output.value() }
 				: { artifact: output.artifact(), executablePath: output.value() },
 		async run(exec, resolved) {
 			const flags = resolved.analysis.collections.map(
@@ -991,7 +991,7 @@ function graphOdinBuild(
 				argv: args,
 				inputs: allInputs,
 				env: [`PATH=${exec.path(resolved.gcc)}/bin`],
-				allowFailure: lint,
+				allowFailure: lint || test,
 				outputs: captures ? { artifact: output.file(outputPath) } : {},
 			});
 			if (lint) {
@@ -1004,9 +1004,24 @@ function graphOdinBuild(
 					},
 				};
 			}
-			// A failing test already failed the action above (allowFailure is
-			// off), and the task declares no outputs, so it must return nothing.
-			if (test) return undefined;
+			if (test) {
+				const ok = result.exitCode === 0;
+				return {
+					units: [
+						{
+							name: resolved.analysis.packagePath,
+							ok,
+							...(ok
+								? {}
+								: {
+										output: [result.stdout, result.stderr]
+											.filter(Boolean)
+											.join("\n"),
+									}),
+						},
+					],
+				};
+			}
 			return { artifact: result.outputs.artifact, executablePath: outputPath };
 		},
 	});
@@ -1026,7 +1041,9 @@ function graphActions(spec, analysis, config) {
 		[PACKAGE]: build.outputs.artifact,
 	};
 	if (spec.test) {
-		actions[TEST] = graphOdinBuild(spec, analysis, config, { test: true });
+		actions[TEST] = graphOdinBuild(spec, analysis, config, {
+			test: true,
+		}).outputs.units;
 	} else if (analysis.hasMainEntrypoint) {
 		actions[RUN] = build.outputs.artifact;
 	}

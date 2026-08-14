@@ -225,7 +225,7 @@ export function cmakeProjectExpansion(opts = {}) {
 											crossDeps,
 											builtByName,
 										),
-									),
+									).outputs.units,
 								},
 							}
 						: {}),

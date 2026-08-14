@@ -16,6 +16,7 @@ import {
 	defaultUvToolchain,
 	defaultUvToolchainVersion,
 	uvGraphTool,
+	uvTool,
 } from "//rules/python/uv_toolchain";
 
 export const PYTHON_PROJECT_SOURCE_INCLUDES = [
@@ -118,33 +119,55 @@ function appBuild(spec) {
 			return { artifact: result.outputs.artifact };
 		},
 	});
+	// Describes the program rather than running it: //rules/workflows/run's
+	// graphRunGoal is the one place that actually executes a [RUN] root, so it
+	// alone owns sandboxing/streaming/CLI-tail policy. uvTool() resolves uv
+	// into the legacy tool-spec shape run() consumes directly (a symlinked
+	// PATH entry inside whatever sandbox graphRunGoal spawns), the same bridge
+	// rules/rust/kache's kacheTool() uses.
 	const run = task({
 		display: `python run ${spec.resolve.path}`,
-		cache: false,
 		inputs: {
 			app: build.outputs.artifact,
 			uv: spec.uv,
 			pythonVersion: spec.pythonVersion,
-			args: semantic.args(),
 		},
-		async run(exec, inputs) {
-			await exec.action({
-				argv: [
-					exec.tool(inputs.uv, "uv"),
-					"run",
-					"--no-project",
-					"--managed-python",
-					"--python",
-					inputs.pythonVersion,
-					"--",
-					exec.path(inputs.app),
-					...inputs.args,
-				],
-				inputs: [inputs.app],
-			});
+		outputs: { description: output.value() },
+		async run(_exec, inputs) {
+			const uv = await uvTool(spec.uvVersion);
+			return {
+				description: {
+					argv: [
+						"sh",
+						"-c",
+						'prog=$1; ver=$2; shift 2; exec uv run --no-project --managed-python --python "$ver" -- "$IMP_SANDBOX_ROOT/$prog" "$@"',
+						"python-run",
+						inputs.app.path,
+						inputs.pythonVersion,
+					],
+					tools: [uv],
+					digest: inputs.app.digest,
+				},
+			};
 		},
 	});
 	return { build, run, sources, pythonSources };
+}
+
+// Groups pytest's `-rA` "short test summary info" lines (`OUTCOME
+// path/to/file.py::test_name ...`) by file — the execution-unit granularity
+// //rules/workflows/test's contract wants for Python, matching the shipped
+// test binary/package granularity Rust/CMake/Odin already report at.
+function pytestFilesByOutcome(stdout) {
+	const seenFiles = new Set();
+	const failedFiles = new Set();
+	for (const match of stdout.matchAll(/^(PASSED|FAILED|ERROR)\s+(\S+)/gm)) {
+		const [, outcome, nodeId] = match;
+		const file = nodeId.split("::")[0];
+		seenFiles.add(file);
+		if (outcome !== "PASSED") failedFiles.add(file);
+	}
+	return { seenFiles, failedFiles };
 }
 
 function testRoot(spec) {
@@ -164,14 +187,15 @@ function testRoot(spec) {
 			testArgs: spec.testArgs,
 			deps: spec.deps,
 		},
+		outputs: { units: output.value() },
 		async run(exec, inputs) {
 			for (const dep of inputs.deps) exec.path(dep);
 			const syncArgs = resolveArgs(inputs.resolve, inputs.mode);
-			await exec.action({
+			const result = await exec.action({
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
-					'src=$1; uv=$2; sync=$3; testargs=$4; "$uv" sync --project "$src" --locked --no-progress $sync && "$src/.venv/bin/python" -m pytest "$src" $testargs',
+					'src=$1; uv=$2; sync=$3; testargs=$4; "$uv" sync --project "$src" --locked --no-progress $sync && "$src/.venv/bin/python" -m pytest "$src" -rA $testargs',
 					"python-test",
 					inputs.resolve.path,
 					exec.tool(inputs.uv, "uv"),
@@ -180,7 +204,39 @@ function testRoot(spec) {
 				],
 				inputs: [inputs.sources],
 				tools: [inputs.shell],
+				allowFailure: true,
 			});
+			const combinedOutput = [result.stdout, result.stderr]
+				.filter(Boolean)
+				.join("\n");
+			const { seenFiles, failedFiles } = pytestFilesByOutcome(result.stdout);
+			if (seenFiles.size === 0) {
+				// Nothing pytest itself reported per-file — either a clean run
+				// with zero collected tests, or a failure before collection
+				// (uv sync, a collection error). Report the whole invocation as
+				// one unit rather than silently dropping a failure.
+				return {
+					units:
+						result.exitCode === 0
+							? []
+							: [
+									{
+										name: inputs.resolve.path,
+										ok: false,
+										output: combinedOutput,
+									},
+								],
+				};
+			}
+			return {
+				units: Array.from(seenFiles)
+					.sort()
+					.map((file) => ({
+						name: file,
+						ok: !failedFiles.has(file),
+						...(failedFiles.has(file) ? { output: combinedOutput } : {}),
+					})),
+			};
 		},
 	});
 }
@@ -225,6 +281,11 @@ export function pythonApp({
 			defaultUvToolchainVersion,
 			"uv",
 		),
+		// Kept alongside the resolved `uv` handle above (not derivable from it):
+		// the [RUN] task resolves uv into a legacy tool spec via uvTool(), which
+		// re-resolves by version string against the same toolchain registry
+		// graphTool() already consulted, rather than reusing the handle itself.
+		uvVersion,
 		pex: graphTool(
 			pexVersion,
 			pexGraphTool,
@@ -240,7 +301,7 @@ export function pythonApp({
 		root: spec.resolve.path,
 		[BUILD]: build.outputs.artifact,
 		[PACKAGE]: build.outputs.artifact,
-		[RUN]: run,
+		[RUN]: run.outputs.description,
 	};
 	for (const hook of appHooks)
 		Object.assign(value, hook(Object.freeze({ ...value })));
@@ -267,5 +328,8 @@ export function pythonTest({
 			"uv",
 		),
 	};
-	return Object.freeze({ root: spec.resolve.path, [TEST]: testRoot(spec) });
+	return Object.freeze({
+		root: spec.resolve.path,
+		[TEST]: testRoot(spec).outputs.units,
+	});
 }

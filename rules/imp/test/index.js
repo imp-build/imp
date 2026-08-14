@@ -1,6 +1,7 @@
 import { TEST } from "//rules/workflows/test";
 import {
 	files,
+	output,
 	packagePath,
 	resolveGraphHandle,
 	task,
@@ -342,6 +343,7 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 	const files = new Map();
 	const runStdout = new Map();
 	const runStderr = new Map();
+	const runExitCode = new Map();
 	const namedCacheDetails = new Map();
 
 	const host = {
@@ -366,6 +368,14 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		// cargo's stderr specifically, not stdout.
 		setRunStderr(display, stderr) {
 			runStderr.set(display, stderr);
+		},
+		// Same as setRunStdout, but for exitCode — every fake run() otherwise
+		// always "succeeds" (exitCode 0), so a test exercising an
+		// allowFailure:true caller's failure path (e.g. a [TEST] root's
+		// {ok:false, output} branch) needs a way to make one specific call
+		// fail without throwing.
+		setRunExitCode(display, exitCode) {
+			runExitCode.set(display, exitCode);
 		},
 		clearCalls() {
 			calls.length = 0;
@@ -489,7 +499,7 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		return {
 			stdout: runStdout.get(opts.display) ?? "",
 			stderr: runStderr.get(opts.display) ?? "",
-			exitCode: 0,
+			exitCode: runExitCode.get(opts.display) ?? 0,
 			graphOutputs,
 		};
 	};
@@ -583,13 +593,28 @@ async function runRulesTest(exec, inputs) {
 		throw new Error(`no JS rule tests found directly in //${inputs.root}`);
 	}
 	const tools = inputs.toolNames.map((_, index) => inputs[`tool${index}`]);
-	await exec.action({
+	const result = await exec.action({
 		argv: [exec.tool(inputs.imp, "imp"), "rules-test", ...testModules],
 		inputs: [inputs.sharedSources, inputs.rootSources],
 		tools,
 		env: [`IMP_CACHE_DIR=${inputs.cacheDir}`],
 		display: `test JS rules //${inputs.root}`,
+		allowFailure: true,
 	});
+	const ok = result.exitCode === 0;
+	return {
+		units: [
+			{
+				name: inputs.root,
+				ok,
+				...(ok
+					? {}
+					: {
+							output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
+						}),
+			},
+		],
+	};
 }
 
 /**
@@ -637,8 +662,9 @@ export function rulesTest({ root, tools = [] }) {
 	for (const [index, tool] of tools.entries()) inputs[`tool${index}`] = tool;
 	const testTask = task({
 		inputs,
+		outputs: { units: output.value() },
 		run: runRulesTest,
 		display: `test JS rules ${root}`,
 	});
-	return Object.freeze({ [TEST]: testTask });
+	return Object.freeze({ [TEST]: testTask.outputs.units });
 }

@@ -626,7 +626,8 @@ function ctestNameFilterArgs(testNames) {
  * @param {object} [targetDeps] Forwarded to replayCmakeTarget() — see its
  *   own docstring. Avoids the test executable's own replay re-deriving a
  *   library dependency's edges it already has its own task for.
- * @returns {object} Task handle (no declared outputs — a failing `ctest` invocation fails the task).
+ * @returns {object} Task handle whose `units` output resolves to a single-entry
+ *   `[{name, ok, output}]` list — see //rules/workflows/test's contract.
  */
 export function runCTestTask(
 	spec,
@@ -644,12 +645,14 @@ export function runCTestTask(
 		[],
 		targetDeps,
 	);
+	const unitName = testNames.length ? testNames.join(",") : spec.path;
 	return task({
 		display: `ctest ${spec.path} [${(testNames.length ? testNames : ["all"]).join(",")}]`,
 		inputs: {
 			directory: built.outputs.directory,
 			ctest: nativeTool("ctest"),
 		},
+		outputs: { units: output.value() },
 		async run(exec, input) {
 			// built.outputs.directory now mounts at its own real path
 			// (spec.buildDirPath) since produced artifacts nest under their
@@ -664,7 +667,7 @@ export function runCTestTask(
 			// replaying a stale path from whichever sandbox first produced
 			// an identical cached result). CTest resolves the relative
 			// tokens itself via --test-dir.
-			await exec.action({
+			const result = await exec.action({
 				argv: [
 					"sh",
 					"-c",
@@ -676,7 +679,24 @@ export function runCTestTask(
 				tools: [input.ctest],
 				inputs: [input.directory],
 				display: `ctest ${spec.path}`,
+				allowFailure: true,
 			});
+			const ok = result.exitCode === 0;
+			return {
+				units: [
+					{
+						name: unitName,
+						ok,
+						...(ok
+							? {}
+							: {
+									output: [result.stdout, result.stderr]
+										.filter(Boolean)
+										.join("\n"),
+								}),
+					},
+				],
+			};
 		},
 	});
 }

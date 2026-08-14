@@ -1,11 +1,20 @@
 import { BUILD } from "//rules/workflows/build";
 import { RUN } from "//rules/workflows/run";
-import { files, output, packagePath, semantic, task } from "imp:core";
+import {
+	digestOf,
+	files,
+	mergeDigests,
+	output,
+	packagePath,
+	resolveGraphHandle,
+	task,
+} from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 import {
 	defaultNodeToolchain,
 	defaultNodeToolchainVersion,
 	nodeGraphTool,
+	nodeTool,
 } from "//rules/js/node/toolchain";
 import {
 	defaultPnpmToolchain,
@@ -76,6 +85,11 @@ function appSpec({
 			defaultNodeToolchainVersion,
 			"node",
 		),
+		// Kept alongside the resolved `node` handle above: [RUN]'s description
+		// resolves node into a legacy tool spec via nodeTool(), which
+		// re-resolves by version string against the same toolchain registry
+		// graphTool() already consulted, rather than reusing the handle itself.
+		nodeVersion,
 		pnpm: graphTool(
 			pnpmVersion,
 			pnpmGraphTool,
@@ -189,45 +203,50 @@ function appTypecheck(spec, install) {
 	});
 }
 
+// Describes the program rather than running it: //rules/workflows/run's
+// graphRunGoal is the one place that actually executes a [RUN] root, so it
+// alone owns sandboxing/streaming/CLI-tail policy. sources/nodeModules/dist
+// are merged into one staged digest (see mergeDigests()'s own doc comment on
+// combining several run() outputs this way) — nodeModules and dist are each
+// already declared at their real spec.root-relative path
+// (`${spec.root}/node_modules`, `${spec.root}/dist`), so once merged and
+// staged under $IMP_SANDBOX_ROOT they land as ordinary siblings of the
+// sources, the same tree shape `cd spec.root && node entry` expects; no
+// symlinking into the user's real working directory required. nodeTool()
+// resolves node into the legacy tool-spec shape run() consumes directly, the
+// same bridge rules/js/node's nodeTool() and rules/python's uvTool() use.
 function appRun(spec, install, dist) {
-	const shell = nativeTool("sh");
-	const ln = nativeTool("ln");
 	return task({
 		display: `js run ${spec.root}`,
-		cache: false,
 		inputs: {
 			sources: spec.sources,
 			nodeModules: install.outputs.nodeModules,
 			dist: dist ?? null,
-			node: spec.node,
-			shell,
-			ln,
-			args: semantic.args(),
+			entry: dist ? `${TS_OUT_DIR}/${spec.entry}` : spec.entry,
 		},
-		async run(exec, inputs) {
-			const nodeModulesPath = exec.path(inputs.nodeModules);
-			const nodeBin = exec.tool(inputs.node, "node");
-			const distPath = inputs.dist ? exec.path(inputs.dist) : "";
-			const entry = inputs.dist ? `${TS_OUT_DIR}/${spec.entry}` : spec.entry;
-			const linkDist = inputs.dist
-				? ` && ${linkArtifactDir("$root", "$dist", TS_OUT_DIR)}`
-				: "";
-			await exec.action({
-				argv: [
-					exec.tool(inputs.shell, "sh"),
-					"-c",
-					`root=$1; nm=$2; dist=$3; node=$4; entry=$5; shift 5; ${linkArtifactDir("$root", "$nm", "node_modules")}${linkDist} && cd "$root" && exec "$IMP_SANDBOX_ROOT/$node" "$entry" "$@"`,
-					"js-run",
-					spec.root,
-					nodeModulesPath,
-					distPath,
-					nodeBin,
-					entry,
-					...inputs.args,
-				],
-				inputs: inputs.dist ? [inputs.sources, inputs.dist] : [inputs.sources],
-				tools: [inputs.shell, inputs.ln],
-			});
+		outputs: { description: output.value() },
+		async run(_exec, inputs) {
+			const node = await nodeTool(spec.nodeVersion);
+			const sourcesBinding = await resolveGraphHandle(spec.sources);
+			const digests = [
+				digestOf(sourcesBinding.fileset),
+				inputs.nodeModules.digest,
+			];
+			if (inputs.dist) digests.push(inputs.dist.digest);
+			return {
+				description: {
+					argv: [
+						"sh",
+						"-c",
+						'root=$1; entry=$2; shift 2; cd "$IMP_SANDBOX_ROOT/$root" && exec node "$entry" "$@"',
+						"js-run",
+						spec.root,
+						inputs.entry,
+					],
+					tools: [node],
+					digest: mergeDigests(digests),
+				},
+			};
 		},
 	});
 }
@@ -237,7 +256,7 @@ function buildAppValue(spec, buildOutput, install, dist) {
 		sources: spec.sources,
 		root: spec.root,
 		[BUILD]: buildOutput,
-		[RUN]: appRun(spec, install, dist),
+		[RUN]: appRun(spec, install, dist).outputs.description,
 	};
 	for (const hook of appHooks)
 		Object.assign(value, hook(Object.freeze({ ...value })));

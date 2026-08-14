@@ -80,7 +80,13 @@ function doctestEnabled() {
 }
 
 function noopDoctestTask(display) {
-	return task({ display, async run() {} });
+	return task({
+		display,
+		outputs: { units: output.value() },
+		async run() {
+			return { units: [] };
+		},
+	});
 }
 
 // Parses `cargo test --no-run --message-format=json`'s newline-delimited
@@ -459,6 +465,7 @@ function crateTestTask(dir, testBuild, testTools, deps, testDeps) {
 			...extraInputs("testDep", testDeps),
 			...extraInputs("tool", testTools),
 		},
+		outputs: { units: output.value() },
 		async run(exec, input) {
 			const own = parseTestBinaries(
 				input.report.stdout,
@@ -473,16 +480,31 @@ function crateTestTask(dir, testBuild, testTools, deps, testDeps) {
 			const depInputs = resolvedExtraInputs("dep", input, deps);
 			const testDepInputs = resolvedExtraInputs("testDep", input, testDeps);
 			const resolvedTestTools = resolvedExtraInputs("tool", input, testTools);
+			const units = [];
 			for (const bin of own) {
 				const relative = bin.executable.startsWith(prefix)
 					? bin.executable.slice(prefix.length)
 					: bin.executable;
-				await exec.action({
+				const result = await exec.action({
 					argv: [`${binariesRoot}/${relative}`, "--test-threads=1"],
 					tools: resolvedTestTools,
 					inputs: [input.binaries, ...depInputs, ...testDepInputs],
+					allowFailure: true,
+				});
+				const ok = result.exitCode === 0;
+				units.push({
+					name: `${bin.name}:${bin.kind}`,
+					ok,
+					...(ok
+						? {}
+						: {
+								output: [result.stdout, result.stderr]
+									.filter(Boolean)
+									.join("\n"),
+							}),
 				});
 			}
+			return { units };
 		},
 	});
 }
@@ -654,20 +676,37 @@ function crateDoctestTask(pkg, doctest) {
 			packageName: pkg.name,
 			libName: libNameFor(pkg),
 		},
+		outputs: { units: output.value() },
 		async run(_exec, input) {
-			if (!input.libName) return;
+			if (!input.libName) return { units: [] };
 			const { attemptedLibNames, failedPackageNames } = parseDocTestOutput(
 				input.stderr,
 			);
 			if (failedPackageNames.has(input.packageName)) {
-				throw goalError(`doc-tests failed for ${input.packageName}`);
+				return {
+					units: [
+						{
+							name: input.packageName,
+							ok: false,
+							output: `doc-tests failed for ${input.packageName}`,
+						},
+					],
+				};
 			}
 			if (!attemptedLibNames.has(input.libName)) {
-				throw goalError(
-					`doc-tests for ${input.packageName} were never reached — likely a ` +
-						"compile error elsewhere in the shared workspace run",
-				);
+				return {
+					units: [
+						{
+							name: input.packageName,
+							ok: false,
+							output:
+								`doc-tests for ${input.packageName} were never reached — likely a ` +
+								"compile error elsewhere in the shared workspace run",
+						},
+					],
+				};
 			}
+			return { units: [{ name: input.packageName, ok: true }] };
 		},
 	});
 }
@@ -776,10 +815,11 @@ export function cargoWorkspaceExpansion(workspaceRootRelative, toolchainSpec) {
 							testToolsForDir(dir),
 							depsForDir(dir),
 							testDepsForDir(dir),
-						),
-						doctests: doctest
+						).outputs.units,
+						doctests: (doctest
 							? crateDoctestTask(pkg, doctest)
-							: noopDoctestTask(`cargo test --doc ${pkg.name} (disabled)`),
+							: noopDoctestTask(`cargo test --doc ${pkg.name} (disabled)`)
+						).outputs.units,
 					},
 					[FMT]: crateFmtTask(dir, fmt),
 				};
@@ -943,6 +983,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 							...extraInputs("testDep", testDeps),
 							...extraInputs("tool", testToolsForDir(path)),
 						},
+						outputs: { units: output.value() },
 						async run(exec, input) {
 							const { tools, env, rustflags } = await cargoEnv(
 								exec,
@@ -974,11 +1015,21 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 								result.exitCode === 0 ||
 								result.stdout.includes("no library targets found") ||
 								result.stderr.includes("no library targets found");
-							if (!benign) {
-								throw goalError(
-									[result.stdout, result.stderr].filter(Boolean).join("\n"),
-								);
-							}
+							return {
+								units: [
+									{
+										name: path,
+										ok: benign,
+										...(benign
+											? {}
+											: {
+													output: [result.stdout, result.stderr]
+														.filter(Boolean)
+														.join("\n"),
+												}),
+									},
+								],
+							};
 						},
 					})
 				: noopDoctestTask(`cargo test --doc ${path} (disabled)`);
@@ -1003,6 +1054,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 								...extraInputs("testDep", testDeps),
 								...extraInputs("tool", testToolsForDir(path)),
 							},
+							outputs: { units: output.value() },
 							async run(exec, input) {
 								const binaries = parseTestBinaries(
 									input.report.stdout,
@@ -1021,19 +1073,34 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 									input,
 									testToolsForDir(path),
 								);
+								const units = [];
 								for (const bin of binaries) {
 									const relative = bin.executable.startsWith(prefix)
 										? bin.executable.slice(prefix.length)
 										: bin.executable;
-									await exec.action({
+									const result = await exec.action({
 										argv: [`${binariesRoot}/${relative}`, "--test-threads=1"],
 										tools: resolvedTestTools,
 										inputs: [input.binaries, ...depInputs, ...testDepInputs],
+										allowFailure: true,
+									});
+									const ok = result.exitCode === 0;
+									units.push({
+										name: `${bin.name}:${bin.kind}`,
+										ok,
+										...(ok
+											? {}
+											: {
+													output: [result.stdout, result.stderr]
+														.filter(Boolean)
+														.join("\n"),
+												}),
 									});
 								}
+								return { units };
 							},
-						}),
-						doctests: doctest,
+						}).outputs.units,
+						doctests: doctest.outputs.units,
 					},
 					[FMT]: fmt,
 				},
