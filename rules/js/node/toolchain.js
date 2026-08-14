@@ -11,7 +11,7 @@ import {
 
 import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
-import { toolchainBin } from "//rules/imp/toolchain";
+import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
 	generateToolLockfile,
 	GEN_LOCKFILES,
@@ -189,6 +189,27 @@ export async function nodeBin(version) {
 		key: nodeCacheKey(resolved, plat),
 		subDir: plat.os === "windows" ? "." : "bin",
 		exe: plat.os === "windows" ? "node.exe" : "node",
+	});
+}
+
+/**
+ * Return a named-cache-backed node tool descriptor for sandbox execution —
+ * for legacy run() consumers, mirroring uvTool()/kacheTool(). Used by
+ * appRun()'s [RUN] description (//rules/js/graph.js) so the run workflow
+ * (//rules/workflows/run) can execute node directly rather than the app
+ * task running it itself.
+ *
+ * @param {string} [version]
+ * @returns {Promise<object>}
+ */
+export async function nodeTool(version) {
+	const resolved = NodeToolchain.requireVersion(version);
+	const plat = platformInfo();
+	return toolchainToolSpec(graphToolFor(resolved), {
+		toolName: "node",
+		name: NODE_TOOLCHAIN_CACHE,
+		key: nodeCacheKey(resolved, plat),
+		binDirs: [plat.os === "windows" ? "." : "bin"],
 	});
 }
 

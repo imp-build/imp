@@ -155,6 +155,32 @@ describe("cargo workspace expansion", () => {
 		});
 	});
 
+	test("a failing test binary reports ok:false with captured output instead of throwing", () => {
+		return withWorkspace(async (host, expansion) => {
+			host.setRunStdout(
+				"cargo test --no-run --workspace .",
+				JSON.stringify({
+					reason: "compiler-artifact",
+					executable: `${WORKSPACE_ROOT}/build/rust/root/deps/crate_a-abc123`,
+					profile: { test: true },
+					target: { name: "crate-a", kind: ["lib"] },
+					manifest_path: manifestPath("crates/a"),
+				}),
+			);
+			host.setRunExitCode("cargo test crates/a", 1);
+			host.setRunStdout("cargo test crates/a", "assertion failed");
+
+			const [result] = await resolveHandles([
+				expansion.get("crate-a", TEST, "unit"),
+			]);
+
+			expect(result.result.length).toBe(1);
+			expect(result.result[0].name).toBe("crate-a:lib");
+			expect(result.result[0].ok).toBe(false);
+			expect(result.result[0].output).toContain("assertion failed");
+		});
+	});
+
 	test("shares one cargo fmt --check --workspace run across sibling crates' [FMT] roots", () => {
 		return withWorkspace(async (host, expansion) => {
 			host.setRunStdout("cargo fmt --check --workspace .", "");
@@ -203,6 +229,42 @@ describe("cargo workspace expansion", () => {
 				run.display.startsWith("cargo test --doc --workspace"),
 			);
 			expect(doctestRuns.length).toBe(1);
+		});
+	});
+
+	test("a failing doc-test reports ok:false with captured output instead of throwing", () => {
+		return withFakeToolchainHost(async (host) => {
+			// crate-a needs a declared lib target — the shared METADATA fixture's
+			// crates are deliberately bin-only (see the no-op test below), so
+			// libNameFor() would short-circuit before reaching the failure-marker
+			// check this test exercises.
+			const metadataWithLib = {
+				...METADATA,
+				packages: [
+					{
+						...METADATA.packages[0],
+						targets: [{ name: "crate-a", kind: ["lib"] }],
+					},
+					METADATA.packages[1],
+				],
+			};
+			host.setRunStdout(
+				"cargo metadata (workspace) .",
+				JSON.stringify(metadataWithLib),
+			);
+			host.setRunStderr(
+				"cargo test --doc --workspace .",
+				"   Doc-tests crate-a\n`-p crate-a --doc`\n",
+			);
+			const expansion = cargoWorkspaceExpansion(".", fakeToolchainSpec());
+
+			const [result] = await resolveHandles([
+				expansion.get("crate-a", TEST, "doctests"),
+			]);
+
+			expect(result.result.length).toBe(1);
+			expect(result.result[0].name).toBe("crate-a");
+			expect(result.result[0].ok).toBe(false);
 		});
 	});
 
