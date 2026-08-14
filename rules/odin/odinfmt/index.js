@@ -50,14 +50,23 @@ export function odinFmtRoot({ sources, base, version }) {
 			// against sourcesDigest, done centrally in graphFmtGoal's
 			// unitStatus() rather than the shell's own cmp — so this task
 			// itself never needs to know whether --check was requested.
+			// odinfmt's CLI takes exactly one [path] argument (a single file or
+			// a directory), never a list of files, so each declared source is
+			// formatted with its own invocation. A single directory argument
+			// (base) would be simpler, but odinfmt walks it recursively, and the
+			// sandbox root also holds whatever else this run mounted (e.g. the
+			// toolchain's own bundled builtin/*.odin files); for a root-declared
+			// package (base === ".") that swept up and reformatted the
+			// toolchain's own files too. Looping per-file keeps this scoped to
+			// exactly the package's declared sources.
 			const result = await exec.action({
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
-					'formatter=$1; shift; "$formatter" -w "$@"',
+					'formatter=$1; shift; status=0; for path in "$@"; do "$formatter" -w "$path" || status=1; done; exit $status',
 					"odinfmt",
 					command,
-					base,
+					...paths,
 				],
 				inputs: [inputs.sources],
 				tools: [inputs.shell],
