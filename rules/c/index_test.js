@@ -79,6 +79,8 @@ describe("graph-native ccLibrary/ccBinary", () => {
 			expect(lib.transitiveIncludeDirs).toEqual([
 				"rules/c/testdata/mixed_sources",
 			]);
+			expect(lib.transitiveHdrs.length).toBe(1);
+			expect(lib.transitiveHdrs[0].__imp_graph_handle).toBe(true);
 		});
 	});
 
@@ -98,6 +100,46 @@ describe("graph-native ccLibrary/ccBinary", () => {
 			// (it's a final link output, not a library other targets can link
 			// against) — only ccLibrary() results expose that contract.
 			expect(bin.transitiveArchives).toBe(undefined);
+		});
+	});
+
+	test("ccBinary({deps}) mounts a dependency library's headers into its own compile sandbox, not just -I flags (#114)", () => {
+		return withCcHost(async (host) => {
+			const standaloneBin = ccBinary({
+				path: "rules/c/testdata/dep_consumer",
+				srcs: ["main.c"],
+				toolchain: fakeGccGraphToolchain(),
+			});
+			await resolveIgnoringArtifactValidation([standaloneBin[BUILD]]);
+			const baselineInputCount = host.runs.find((run) =>
+				run.display.startsWith("cc compile "),
+			).inputs.length;
+
+			const runsBeforeDeps = host.runs.length;
+			const lib = ccLibrary({
+				path: "rules/c/testdata/dep_lib",
+				toolchain: fakeGccGraphToolchain(),
+			});
+			const bin = ccBinary({
+				path: "rules/c/testdata/dep_consumer",
+				deps: [lib],
+				toolchain: fakeGccGraphToolchain(),
+			});
+			await resolveIgnoringArtifactValidation([bin[BUILD]]);
+			// Resolving bin[BUILD] also builds its dep (dep_lib's own lib.c), so
+			// filter down to the consumer's own compile of main.c specifically,
+			// among only the runs from this second resolve.
+			const compileRuns = host.runs
+				.slice(runsBeforeDeps)
+				.filter(
+					(run) =>
+						run.display.startsWith("cc compile ") &&
+						run.display.includes("dep_consumer"),
+				);
+			expect(compileRuns.length).toBe(1);
+			// The dependency's header fileset must add exactly one more mounted
+			// digest input versus the same target with no deps.
+			expect(compileRuns[0].inputs.length).toBe(baselineInputCount + 1);
 		});
 	});
 

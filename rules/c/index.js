@@ -5,8 +5,8 @@
 // plain frozen object a caller passes directly as ccBinary({deps:[A]})'s
 // dependency — a flat, eagerly-computed transitiveArchives array (mirrors
 // rules/rust's cargoPackage({deps}) pattern). This output shape
-// ({[BUILD], archive, transitiveArchives, transitiveIncludeDirs, [PACKAGE]})
-// is a deliberate cross-module contract: rules/c/cmake's graph-native
+// ({[BUILD], archive, transitiveArchives, transitiveIncludeDirs,
+// transitiveHdrs, [PACKAGE]}) is a deliberate cross-module contract: rules/c/cmake's graph-native
 // per-target expand() children (issue #62) are meant to expose the same
 // shape so a raw ccBinary({deps:[cmakeThing.get("mylib")]}) works
 // transparently — see rules/c/cmake/expansion.js's own docstring for the
@@ -166,6 +166,11 @@ function ccTask(spec, isLibrary) {
 		? `build/c/${spec.outputSlug}.a`
 		: `build/c/${spec.outputSlug}`;
 	const transitiveArchives = spec.deps.flatMap((d) => d.transitiveArchives);
+	// A dep without transitiveHdrs (e.g. a raw rules/c/cmake target — see its
+	// own expansion.js docstring for why it can't cheaply supply header
+	// handles) just contributes no headers to mount, same asymmetry already
+	// accepted for transitiveIncludeDirs there.
+	const transitiveHdrs = spec.deps.flatMap((d) => d.transitiveHdrs || []);
 	// Own path first, so a target's own headers shadow a same-named header
 	// pulled in transitively.
 	const includeDirs = [
@@ -173,7 +178,7 @@ function ccTask(spec, isLibrary) {
 		...spec.deps.flatMap((d) => d.transitiveIncludeDirs),
 	];
 
-	return task({
+	const built = task({
 		display: `cc ${isLibrary ? "archive" : "link"} ${spec.path}`,
 		inputs: {
 			srcs,
@@ -181,6 +186,9 @@ function ccTask(spec, isLibrary) {
 			...toolchainTaskInputs(spec.toolchain),
 			...Object.fromEntries(
 				transitiveArchives.map((archive, i) => [`archive${i}`, archive]),
+			),
+			...Object.fromEntries(
+				transitiveHdrs.map((depHdrs, i) => [`depHdrs${i}`, depHdrs]),
 			),
 		},
 		outputs: { artifact: output.artifact() },
@@ -222,7 +230,11 @@ function ccTask(spec, isLibrary) {
 					return exec.action({
 						argv: ["sh", "-c", script, "cc-compile"],
 						env,
-						inputs: [input.srcs, input.hdrs],
+						inputs: [
+							input.srcs,
+							input.hdrs,
+							...transitiveHdrs.map((_, j) => input[`depHdrs${j}`]),
+						],
 						outputs: { object: output.file(objPath) },
 						display: `cc compile ${objPath}`,
 					});
@@ -263,6 +275,7 @@ function ccTask(spec, isLibrary) {
 			return { artifact: result.outputs.artifact };
 		},
 	});
+	return { built, hdrs };
 }
 
 /**
@@ -280,11 +293,11 @@ function ccTask(spec, isLibrary) {
  * @param {Array<object>} [opts.deps=[]] Other ccLibrary()/cmake-target results this library links against.
  * @param {object} [opts.toolchain] gccGraphToolchain()/zigGraphToolchain() result, or the workspace default.
  * @param {string[]} [opts.copts=[]] Extra compiler flags.
- * @returns {object} Frozen `{[BUILD], archive, transitiveArchives, transitiveIncludeDirs, [PACKAGE]}`.
+ * @returns {object} Frozen `{[BUILD], archive, transitiveArchives, transitiveIncludeDirs, transitiveHdrs, [PACKAGE]}`.
  */
 export function ccLibrary(opts = {}) {
 	const spec = crateSpec(opts);
-	const built = ccTask(spec, true);
+	const { built, hdrs } = ccTask(spec, true);
 	const archive = built.outputs.artifact;
 	return Object.freeze({
 		spec,
@@ -298,6 +311,7 @@ export function ccLibrary(opts = {}) {
 			spec.path,
 			...spec.deps.flatMap((d) => d.transitiveIncludeDirs),
 		],
+		transitiveHdrs: [hdrs, ...spec.deps.flatMap((d) => d.transitiveHdrs || [])],
 		[PACKAGE]: archive,
 	});
 }
@@ -319,7 +333,7 @@ export function ccLibrary(opts = {}) {
  */
 export function ccBinary(opts = {}) {
 	const spec = crateSpec(opts);
-	const built = ccTask(spec, false);
+	const { built } = ccTask(spec, false);
 	const executable = built.outputs.artifact;
 	return Object.freeze({
 		spec,
