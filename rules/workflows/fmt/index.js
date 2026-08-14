@@ -11,30 +11,44 @@
 // been retired — every selected target now needs a real [FMT] graph handle.
 // attach(label, "fmt", fn) (the `fmt()` sugar in imp:core) is a separate,
 // still-supported mechanism and is unaffected.
-import { diffDigests, goal, goalError, goalFlags, writeWorkspace } from "imp:core";
+import {
+	goal,
+	goalError,
+	goalFlags,
+	readFileInDigest,
+	writeWorkspace,
+} from "imp:core";
 import { statusReport } from "//rules/workflows/report";
 
-// "changed"/"failed" (from content, not just exit code) is a real digest
+// "changed"/"failed" (from content, not just exit code) is a real content
 // comparison: every per-language fmt task formats its matched sources in
 // place (the sandbox's mounted inputs are writable, not read-only) and
-// declares its output at the same root the sources fileset itself uses (see
-// e.g. rules/python/ruff_graph.js) — so the formatted digest and
-// sourcesDigest share the same tree shape (real workspace-relative paths)
-// and diffDigests() compares them directly, no extra narrowing needed.
+// declares its output as a directory rooted at the package's own base (see
+// e.g. rules/python/ruff_graph.js). That directory can contain more than just
+// the declared sources — for a package declared at the workspace root
+// (base === "."), it's the whole sandbox, tool mounts included — so this
+// compares each declared path individually via readFileInDigest() rather
+// than diffing the two trees structurally: a whole-tree diffDigests() would
+// see every extraneous entry in `formatted` as an "added" path and report
+// every root-declared package as permanently changed, even when correctly
+// formatted.
 //
 // check.failed (set by the formatter task itself) is checked first — ruff
 // and biome natively refuse to write under --check and report a failed exit
 // code instead, so for them a content diff never even applies. But not every
 // formatter has a real check mode: odinfmt always writes, so a --check run's
-// pass/fail there is derived from the same diff this function already
-// computes for "changed" — non-empty diff means "changed" in a write run,
-// but "failed" (would need reformatting) under a --check run, since nothing
-// gets published back to the workspace either way.
+// pass/fail there is derived from the same comparison this function already
+// does for "changed" — any declared path whose content differs means
+// "changed" in a write run, but "failed" (would need reformatting) under a
+// --check run, since nothing gets published back to the workspace either way.
 function unitStatus(result) {
 	if (result.check?.failed) return "failed";
 	if (!result.formatted || !result.sourcesDigest) return "unchanged";
-	const changed =
-		diffDigests(result.sourcesDigest, result.formatted.digest).length > 0;
+	const changed = result.paths.some(
+		(path) =>
+			readFileInDigest(result.sourcesDigest, path) !==
+			readFileInDigest(result.formatted.digest, path),
+	);
 	if (!changed) return "unchanged";
 	return result.check?.requested ? "failed" : "changed";
 }
