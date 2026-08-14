@@ -2348,6 +2348,51 @@ mod tests {
     }
 
     #[test]
+    fn exec_run_materializes_a_directory_output_declared_at_the_workspace_root() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let mut opts = run_opts(&["sh", "-c", "printf marker > marker.txt"], &[], &[]);
+        opts.outputs = vec![ExecIoSpec {
+            path: Some(".".to_owned()),
+            kind: "directory".to_owned(),
+            digest: None,
+            named_cache: None,
+        }];
+
+        let result = exec_run_inner(p, opts, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("marker.txt")).unwrap(),
+            "marker"
+        );
+        let artifact = &result.outputs[0];
+        assert_eq!(artifact.path.as_deref(), Some("."));
+        assert!(artifact.tree_digest.is_some());
+    }
+
+    #[test]
+    fn exec_run_rejects_a_file_output_declared_at_the_workspace_root() {
+        // The sandbox root is a directory, not a file, so this is caught by
+        // the existing "was it created as a file" check before it would ever
+        // reach nest_file's own root guard — still a clear, correct
+        // rejection, just via a different, earlier code path.
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let mut opts = run_opts(&["sh", "-c", "true"], &[], &[]);
+        opts.outputs = vec![ExecIoSpec {
+            path: Some(".".to_owned()),
+            kind: "file".to_owned(),
+            digest: None,
+            named_cache: None,
+        }];
+
+        let err = match exec_run_inner(p, opts, None) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("file output declared at the workspace root must fail"),
+        };
+        assert!(err.contains("was not created as a file"), "got: {err}");
+    }
+
+    #[test]
     fn exec_run_precreates_nested_output_dir_without_mkdir() {
         // The script writes to a nested path and a directory output without any
         // `mkdir`: the engine must pre-create both from the declared outputs.

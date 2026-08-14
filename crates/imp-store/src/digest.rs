@@ -581,6 +581,14 @@ fn diff_entry(path: &str, before: &Entry, after: &Entry) -> Result<Vec<PathChang
     }
 }
 
+/// True if `relative_path` normalizes to the workspace/sandbox root itself
+/// (`"."`, `""`, `"./."`, ...) rather than a named entry under it.
+pub fn is_root_artifact_path(relative_path: &str) -> bool {
+    Path::new(relative_path)
+        .components()
+        .all(|c| matches!(c, std::path::Component::CurDir))
+}
+
 /// Wrap a single file, already stored in CAS, under `relative_path` — e.g. storing
 /// `digest` at `"a/b/c.txt"` produces a one-file tree `a/b/c.txt`. Used to fold a
 /// plain `{kind:"file"}` input/output into the same merged-tree representation as
@@ -591,6 +599,12 @@ pub fn nest_file(
     size: u64,
     mode: Option<u32>,
 ) -> Result<DirectoryDigest> {
+    if is_root_artifact_path(relative_path) {
+        bail!(
+            "artifact path {relative_path:?} names the workspace root; only \
+             directory outputs/inputs may target the root, not a file/manifest"
+        );
+    }
     let components: Vec<&str> = relative_path.split('/').collect();
     let (name, parents) = components
         .split_last()
@@ -605,8 +619,13 @@ pub fn nest_file(
 }
 
 /// Wrap an already-captured directory tree under `relative_path` — the directory
-/// analog of `nest_file`.
+/// analog of `nest_file`. If `relative_path` names the workspace/sandbox root
+/// itself, `inner` is already the correct root-shaped tree (a `DirectoryDigest`
+/// carries no name of its own), so it's returned unwrapped rather than nested.
 pub fn nest_directory(relative_path: &str, inner: &DirectoryDigest) -> Result<DirectoryDigest> {
+    if is_root_artifact_path(relative_path) {
+        return Ok(inner.clone());
+    }
     let components: Vec<&str> = relative_path.split('/').collect();
     let (name, parents) = components
         .split_last()
@@ -1328,5 +1347,50 @@ mod tests {
         assert!(marked.contains(&crate::cache::digest_bytes(b"top")));
         assert!(marked.contains(&crate::cache::digest_bytes(b"inner")));
         assert_eq!(marked.len(), 4);
+    }
+
+    #[test]
+    fn nest_directory_at_root_returns_the_tree_unwrapped() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("a.txt"), "a");
+        let inner = capture_directory(&src).unwrap();
+
+        for root_path in [".", ""] {
+            let nested = nest_directory(root_path, &inner).unwrap();
+            assert_eq!(nested.digest(), inner.digest());
+        }
+    }
+
+    #[test]
+    fn nest_directory_under_a_name_still_wraps_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("a.txt"), "a");
+        let inner = capture_directory(&src).unwrap();
+
+        let nested = nest_directory("out", &inner).unwrap();
+        let entries = nested.tree().unwrap().entries();
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            Entry::Directory(d) => {
+                assert_eq!(d.name, "out");
+                assert_eq!(d.digest, inner.digest());
+            }
+            other => panic!("expected a directory entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nest_file_at_root_errors() {
+        for root_path in [".", ""] {
+            match nest_file(root_path, "deadbeef".to_owned(), 0, None) {
+                Err(err) => assert!(
+                    err.to_string().contains("workspace root"),
+                    "unexpected error message: {err}"
+                ),
+                Ok(_) => panic!("expected nest_file({root_path:?}, ..) to error"),
+            }
+        }
     }
 }

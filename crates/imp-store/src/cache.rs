@@ -323,6 +323,14 @@ pub fn store_file_blob(path: &Path, kind: &str) -> Result<(String, u64)> {
     Ok((digest, size))
 }
 
+/// Normalize a rule-declared artifact path into a path relative to the
+/// workspace/sandbox root, for joining onto a real filesystem root. Rejects
+/// absolute paths and any `..`/prefix component. A path that normalizes to
+/// nothing (`"."`, `""`, `"./."`, ...) is valid and returns an empty
+/// `PathBuf` — callers that filesystem-join it get the root itself
+/// (`root.join(PathBuf::new()) == root`, a no-op join); callers that need to
+/// *name* an entry (`nest_file`/`nest_directory`) must check for this case
+/// explicitly, since an empty path has no leaf name to give.
 pub fn artifact_relative_path(path: &str) -> Result<PathBuf> {
     let path = Path::new(path);
     if path.is_absolute() {
@@ -342,9 +350,6 @@ pub fn artifact_relative_path(path: &str) -> Result<PathBuf> {
                 path.display()
             ),
         }
-    }
-    if relative.as_os_str().is_empty() {
-        bail!("artifact path must not be empty");
     }
     Ok(relative)
 }
@@ -840,5 +845,38 @@ mod tests {
     fn validate_tool_name_rejects_path_separators() {
         assert!(validate_tool_name("../escape").is_err());
         assert!(validate_tool_name("a/b").is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn artifact_relative_path_root_normalizes_to_empty() {
+        assert_eq!(artifact_relative_path(".").unwrap(), PathBuf::new());
+        assert_eq!(artifact_relative_path("").unwrap(), PathBuf::new());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn artifact_relative_path_strips_cur_dir_components() {
+        assert_eq!(
+            artifact_relative_path("./foo").unwrap(),
+            PathBuf::from("foo")
+        );
+        assert_eq!(
+            artifact_relative_path("foo/.").unwrap(),
+            PathBuf::from("foo")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn artifact_relative_path_rejects_absolute() {
+        assert!(artifact_relative_path("/abs").is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn artifact_relative_path_rejects_parent_components() {
+        assert!(artifact_relative_path("../escape").is_err());
+        assert!(artifact_relative_path("a/../b").is_err());
     }
 }
