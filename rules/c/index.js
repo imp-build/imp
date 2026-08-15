@@ -93,7 +93,7 @@ function toolchainTaskInputs(toolchain) {
 // Resolves the executable-token prefix (zig's own tools are invoked as
 // `zig <subcommand>`, two tokens) and env additions for compiling/archiving
 // with a resolved toolchain, from inside a task's run().
-function toolchainCommands(exec, toolchain, input) {
+function toolchainCommands(exec, toolchain, input, unsafeSystemPaths) {
 	if (isZigToolchain(toolchain)) {
 		const zigExe = exec.tool(input.ccTool, "zig");
 		return {
@@ -102,8 +102,15 @@ function toolchainCommands(exec, toolchain, input) {
 			env: zigGraphCacheEnv(exec, input.ccBuildCacheTool),
 		};
 	}
+	// unsafeSystemPaths swaps in the "-unsafe-paths" aliases (see
+	// rules/c/gcc's gccGraphTool() install-step comment), which bypass
+	// Bootlin's toolchain-wrapper unsafe-path guard — a no-op concern for zig
+	// (no such wrapper/guard), so only the gcc branch here checks it.
+	const suffix = unsafeSystemPaths ? "-unsafe-paths" : "";
 	return {
-		compiler: (isCxx) => [exec.tool(input.ccTool, isCxx ? "c++" : "clang")],
+		compiler: (isCxx) => [
+			exec.tool(input.ccTool, isCxx ? `c++${suffix}` : `clang${suffix}`),
+		],
 		archiver: () => [exec.tool(input.ccTool, "ar")],
 		env: [],
 	};
@@ -139,6 +146,7 @@ function crateSpec(opts) {
 		toolchain,
 		copts = [],
 		linkopts = [],
+		unsafeSystemPaths = false,
 	} = opts || {};
 	const normalizedPath = normalizeWorkspacePath(path);
 	const spec = {
@@ -150,6 +158,10 @@ function crateSpec(opts) {
 		copts: [...copts],
 		linkopts: [...linkopts],
 		outputSlug: outputSlugFor(normalizedPath),
+		// Bypasses Bootlin's toolchain-wrapper unsafe-path guard (see
+		// toolchainCommands()'s own comment) — needed to link against host
+		// system packages like libwebkit2gtk-4.1.
+		unsafeSystemPaths: !!unsafeSystemPaths,
 	};
 	_ccSpecs.push(spec);
 	return spec;
@@ -223,6 +235,7 @@ function ccTask(spec, isLibrary) {
 						exec,
 						spec.toolchain,
 						input,
+						spec.unsafeSystemPaths,
 					);
 					const compilerCmd = compiler(isCxx).map(shellQuote).join(" ");
 					const objPath = objectPaths[i];
@@ -253,6 +266,7 @@ function ccTask(spec, isLibrary) {
 				exec,
 				spec.toolchain,
 				input,
+				spec.unsafeSystemPaths,
 			);
 			const finalCmd = isLibrary
 				? `${archiver().map(shellQuote).join(" ")} rcs ${shellQuote(outPath)} ${objectSandboxPaths.map(shellQuote).join(" ")}`
@@ -293,6 +307,7 @@ function ccTask(spec, isLibrary) {
  * @param {Array<object>} [opts.deps=[]] Other ccLibrary()/cmake-target results this library links against.
  * @param {object} [opts.toolchain] gccGraphToolchain()/zigGraphToolchain() result, or the workspace default.
  * @param {string[]} [opts.copts=[]] Extra compiler flags.
+ * @param {boolean} [opts.unsafeSystemPaths=false] Bypass Bootlin's toolchain-wrapper unsafe-path guard (which rejects -I/-isystem/-L flags under /usr/include or /usr/lib) so this target can link against host system packages (e.g. libwebkit2gtk-4.1). No-op on a zig toolchain, which has no such guard.
  * @returns {object} Frozen `{[BUILD], archive, transitiveArchives, transitiveIncludeDirs, transitiveHdrs, [PACKAGE]}`.
  */
 export function ccLibrary(opts = {}) {
@@ -329,6 +344,7 @@ export function ccLibrary(opts = {}) {
  * @param {object} [opts.toolchain] gccGraphToolchain()/zigGraphToolchain() result, or the workspace default.
  * @param {string[]} [opts.copts=[]] Extra compiler flags.
  * @param {string[]} [opts.linkopts=[]] Extra linker flags.
+ * @param {boolean} [opts.unsafeSystemPaths=false] Bypass Bootlin's toolchain-wrapper unsafe-path guard (which rejects -I/-isystem/-L flags under /usr/include or /usr/lib) so this target can link against host system packages (e.g. libwebkit2gtk-4.1). No-op on a zig toolchain, which has no such guard.
  * @returns {object} Frozen `{[BUILD], [PACKAGE]}`.
  */
 export function ccBinary(opts = {}) {

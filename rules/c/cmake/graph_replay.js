@@ -102,7 +102,19 @@ function parseFileDump(dump) {
 // gccGraphToolSpec() (a real mount of this pinned toolchain) rather than
 // nativeTool() (which would resolve to a different, unpinned system tool
 // with the same bare name, if one exists at all in a hermetic sandbox).
-const GCC_GRAPH_TOOL_NAMES = new Set(["clang", "cc", "c++", "ar", "ranlib"]);
+const GCC_GRAPH_TOOL_NAMES = new Set([
+	"clang",
+	"cc",
+	"c++",
+	"ar",
+	"ranlib",
+	// The unsafeSystemPaths escape hatch (see cmakeProjectSpec() below and
+	// rules/c/gcc's gccGraphTool()/gccCMakeCompilerArgs()) can bake these
+	// aliases into build.ninja instead of the plain ones above.
+	"clang-unsafe-paths",
+	"cc-unsafe-paths",
+	"c++-unsafe-paths",
+]);
 
 function isZigToolchain(toolchain) {
 	return !!toolchain.buildCacheTool;
@@ -162,6 +174,7 @@ export function cmakeProjectSpec(opts = {}) {
 		cmakeArgs = [],
 		toolchain,
 		cmakeToolchain,
+		unsafeSystemPaths = false,
 	} = opts;
 	const srcPath = path;
 	const buildDirPath =
@@ -179,6 +192,11 @@ export function cmakeProjectSpec(opts = {}) {
 		),
 		toolchain: requireGccToolchain(toolchain),
 		cmakeToolchain: resolveCmakeToolchain(cmakeToolchain),
+		// Bypasses Bootlin's toolchain-wrapper unsafe-path guard for this
+		// project's compiler (see gccGraphTool()'s install-step comment in
+		// rules/c/gcc/index.js for what it rejects and why) — needed to link
+		// against host system packages like libwebkit2gtk-4.1.
+		unsafeSystemPaths: !!unsafeSystemPaths,
 	};
 }
 
@@ -213,6 +231,7 @@ export function configureCmakeProject(spec) {
 				exec,
 				input.ccTool,
 				spec.toolchain.version,
+				spec.unsafeSystemPaths,
 			);
 			const cmakeDir = cmakeGraphToolchainDir(
 				exec,

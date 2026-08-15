@@ -183,11 +183,26 @@ export function gccGraphTool(version) {
 			// to this toolchain (see gccCMakeCompilerArgs() below) instead of
 			// leaking whatever ranlib the
 			// configuring host happens to have on PATH (#98).
+			//
+			// A second set of aliases ("clang-unsafe-paths"/"cc-unsafe-paths"/
+			// "c++-unsafe-paths") execs the *.br_real binary directly instead of
+			// Bootlin's own toolchain-wrapper, with the same --sysroot and
+			// hardening flags the wrapper would otherwise inject (captured via
+			// BR2_DEBUG_WRAPPER=1) baked in ahead of "$@". The wrapper hardcodes a
+			// rejection of any -I/-isystem/-idirafter/-iquote/-L argument under
+			// /usr/include or /usr/lib ("unsafe header/library path used in
+			// cross-compilation") — a pure argv string check unrelated to the
+			// actual compiler target — which blocks linking against system
+			// packages like libwebkit2gtk-4.1. Targets opting into
+			// unsafeSystemPaths (see rules/c/index.js, rules/c/cmake/graph_replay.js)
+			// reference these aliases instead, keeping the same sysroot/hardening
+			// behavior minus that one guard. ar/ranlib are real binutils binaries,
+			// not wrapped, so they need no such alias.
 			const result = await exec.action({
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
-					'archive=$1; out=$2; gccPrefix=$3; binutilsPrefix=$4; mkdir -p "$out" && tar -xJf "$archive" -C "$out" --strip-components=1 && for pair in "clang:$gccPrefix-gcc" "cc:$gccPrefix-gcc" "c++:$gccPrefix-g++" "ar:$binutilsPrefix-ar" "ranlib:$binutilsPrefix-ranlib"; do name=${pair%%:*}; target=${pair#*:}; printf \'%s\\n\' \'#!/bin/sh\' "exec \\"\\${0%/*}/$target\\" \\"\\$@\\"" > "$out/bin/$name"; chmod +x "$out/bin/$name"; done',
+					'archive=$1; out=$2; gccPrefix=$3; binutilsPrefix=$4; mkdir -p "$out" && tar -xJf "$archive" -C "$out" --strip-components=1 && for pair in "clang:$gccPrefix-gcc" "cc:$gccPrefix-gcc" "c++:$gccPrefix-g++" "ar:$binutilsPrefix-ar" "ranlib:$binutilsPrefix-ranlib"; do name=${pair%%:*}; target=${pair#*:}; printf \'%s\\n\' \'#!/bin/sh\' "exec \\"\\${0%/*}/$target\\" \\"\\$@\\"" > "$out/bin/$name"; chmod +x "$out/bin/$name"; done && for pair in "clang-unsafe-paths:$binutilsPrefix-gcc.br_real" "cc-unsafe-paths:$binutilsPrefix-gcc.br_real" "c++-unsafe-paths:$binutilsPrefix-g++.br_real"; do name=${pair%%:*}; target=${pair#*:}; printf \'%s\\n\' \'#!/bin/sh\' "exec \\"\\${0%/*}/$target\\" --sysroot \\"\\${0%/*}/../$binutilsPrefix/sysroot\\" -fstack-protector-strong -fPIE -pie -Wl,-z,now -Wl,-z,relro \\"\\$@\\"" > "$out/bin/$name"; chmod +x "$out/bin/$name"; done',
 					"gcc-install",
 					exec.path(inputs.archive),
 					"gcc-toolchain",
@@ -438,13 +453,25 @@ export function gccGraphToolchainDir(exec, resolvedGccTool, version) {
  * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
  * @param {object} resolvedGccTool Resolved `gccGraphToolchain().tool` input.
  * @param {string} version `gccGraphToolchain().version`.
+ * @param {boolean} [unsafeSystemPaths] When true, point CMAKE_C_COMPILER/
+ *   CMAKE_CXX_COMPILER at the "-unsafe-paths" aliases (see gccGraphTool()'s
+ *   own install-step comment) instead of the plain wrapper-backed ones, so
+ *   CMake-supplied -I/-isystem/-L flags under /usr/include or /usr/lib
+ *   aren't rejected by Bootlin's toolchain-wrapper. CMAKE_AR/CMAKE_RANLIB
+ *   are unaffected — ar/ranlib aren't wrapped.
  * @returns {string[]}
  */
-export function gccCMakeCompilerArgs(exec, resolvedGccTool, version) {
+export function gccCMakeCompilerArgs(
+	exec,
+	resolvedGccTool,
+	version,
+	unsafeSystemPaths,
+) {
 	const dir = gccGraphToolchainDir(exec, resolvedGccTool, version);
+	const suffix = unsafeSystemPaths ? "-unsafe-paths" : "";
 	return [
-		`-DCMAKE_C_COMPILER=${dir}/bin/clang`,
-		`-DCMAKE_CXX_COMPILER=${dir}/bin/c++`,
+		`-DCMAKE_C_COMPILER=${dir}/bin/clang${suffix}`,
+		`-DCMAKE_CXX_COMPILER=${dir}/bin/c++${suffix}`,
 		`-DCMAKE_RANLIB=${dir}/bin/ranlib`,
 		`-DCMAKE_AR=${dir}/bin/ar`,
 	];

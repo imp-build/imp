@@ -197,6 +197,32 @@ describe("graph-native ccLibrary/ccBinary", () => {
 		});
 	});
 
+	test("unsafeSystemPaths selects the -unsafe-paths compiler alias, plain ar otherwise", () => {
+		return withCcHost(async (host) => {
+			const lib = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+				unsafeSystemPaths: true,
+			});
+			await resolveIgnoringArtifactValidation([lib[BUILD]]);
+			const compileRuns = host.runs.filter((run) =>
+				run.display.startsWith("cc compile "),
+			);
+			expect(compileRuns.length).toBe(2);
+			for (const run of compileRuns) {
+				expect(
+					run.argv[2].includes("clang-unsafe-paths") ||
+						run.argv[2].includes("c++-unsafe-paths"),
+				).toBe(true);
+			}
+			const archiveRun = host.runs.find((run) =>
+				run.display.startsWith("cc archive "),
+			);
+			// ar is a real binutils binary, not wrapped — unaffected by the flag.
+			expect(archiveRun.argv[2].includes("unsafe-paths")).toBe(false);
+		});
+	});
+
 	test("throws without an explicit toolchain or a declared gcc/zig default", () => {
 		return withFakeToolchainHost(() => {
 			// Both rules/c/gcc and rules/c/zig auto-declare a default toolchain

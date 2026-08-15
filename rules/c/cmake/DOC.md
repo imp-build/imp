@@ -46,6 +46,21 @@ the declared gcc default. Zig-as-CMake-compiler is a known, deferred gap
 (zig's own graph toolchain has no named-cache-backed real path yet for
 CMake to bake `CMAKE_C_COMPILER` against).
 
+The default gcc toolchain (`//rules/c/gcc`) is a Bootlin external toolchain
+whose compiler wrapper rejects any `-I`/`-isystem`/`-L` flag pointing under
+`/usr/include` or `/usr/lib` ("unsafe header/library path used in
+cross-compilation"), which blocks linking against host system packages (e.g.
+`libwebkit2gtk-4.1` discovered via CMake's own `pkg_check_modules`). Pass
+`unsafeSystemPaths: true` to bypass that guard for this project — same
+toolchain sysroot, just without the check:
+
+```js
+const project = cmakeProject({
+    cmakeArgs: ["-DWEBVIEW_WEBKITGTK_MODULE_NAME=webkit2gtk-4.1"],
+    unsafeSystemPaths: true,
+});
+```
+
 ## Discovery and build execution
 
 CMake configuration is deferred until the selected graph actually reaches

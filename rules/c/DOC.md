@@ -58,6 +58,22 @@ loose filesystem path or label reference. A discovered CMake target needs
 wrapping with `cmakeLibraryDep()` (`//rules/c/cmake`) first — see its own
 docs. Use `linkopts` for options that belong only at link time.
 
+The default GCC toolchain (`//rules/c/gcc`) is a Bootlin external toolchain
+whose compiler wrapper rejects any `-I`/`-isystem`/`-L` flag pointing under
+`/usr/include` or `/usr/lib` ("unsafe header/library path used in
+cross-compilation"), which blocks linking against host system packages. Pass
+`unsafeSystemPaths: true` to bypass that guard for one target — same
+toolchain sysroot, just without the check (no-op on the Zig toolchain, which
+has no such guard):
+
+```js
+export const webview = ccLibrary({
+    srcs: ["webview.c"],
+    copts: ["-isystem", "/usr/include/webkitgtk-4.1"],
+    unsafeSystemPaths: true,
+});
+```
+
 ```sh
 imp build //native/calculator:calculator
 imp package //native/calculator:calculator

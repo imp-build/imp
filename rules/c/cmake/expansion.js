@@ -247,6 +247,7 @@ export function cmakeProjectExpansion(opts = {}) {
  * @param {string[]} [opts.dirs] Extra directories (e.g. vendored includes) to mount.
  * @param {string[]} [opts.cmakeArgs] Extra `cmake -S -B` arguments.
  * @param {object} [opts.toolchain] `gccGraphToolchain()` result, or the workspace default. zig isn't supported yet — see graph_replay.js's own docstring.
+ * @param {boolean} [opts.unsafeSystemPaths=false] Bypass Bootlin's toolchain-wrapper unsafe-path guard (which rejects -I/-isystem/-L flags under /usr/include or /usr/lib) so this project's compile/link steps can use host system packages (e.g. libwebkit2gtk-4.1). Same sysroot and hardening flags as normal, just without that one guard.
  * @returns {object} `{get(cmakeTargetName, workflow, facet?), all(workflow, facet?)}`.
  * @category target
  */

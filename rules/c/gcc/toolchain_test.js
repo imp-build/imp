@@ -11,6 +11,7 @@ import {
 	defaultGccToolchainVersion,
 	gccCacheKey,
 	gccBin,
+	gccCMakeCompilerArgs,
 	gccGraphToolchain,
 	gccRustLinkDriverEnv,
 	gccTool,
@@ -152,6 +153,40 @@ describe("gcc toolchain", () => {
 			expect(install.argv).toContain("x86_64-buildroot-linux-gnu");
 			expect(install.outputs[0].namedCache.name).toBe("gcc-toolchains");
 			expect(install.outputs[0].namedCache.key).toBe(key);
+			// The escape-hatch aliases exec .br_real directly (bypassing
+			// Bootlin's toolchain-wrapper unsafe-path guard) with an explicit
+			// --sysroot baked in, since .br_real has no wrapper to add it.
+			for (const wrapper of [
+				"clang-unsafe-paths",
+				"cc-unsafe-paths",
+				"c++-unsafe-paths",
+			]) {
+				expect(script).toContain(`"${wrapper}:$`);
+			}
+			expect(script).toContain(".br_real");
+			expect(script).toContain("--sysroot");
+		});
+	});
+
+	test("gccCMakeCompilerArgs points at the plain aliases by default and the -unsafe-paths ones when unsafeSystemPaths is set", () => {
+		return withGccHost(() => {
+			installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
+			const gccTool = { __imp_graph_handle: true, name: "gcc-tool" };
+			const exec = { path: () => "/unused" };
+			const dir = "/cache/gcc-toolchains/2025.08-1/linux-x86_64";
+
+			expect(gccCMakeCompilerArgs(exec, gccTool, "2025.08-1")).toEqual([
+				`-DCMAKE_C_COMPILER=${dir}/bin/clang`,
+				`-DCMAKE_CXX_COMPILER=${dir}/bin/c++`,
+				`-DCMAKE_RANLIB=${dir}/bin/ranlib`,
+				`-DCMAKE_AR=${dir}/bin/ar`,
+			]);
+			expect(gccCMakeCompilerArgs(exec, gccTool, "2025.08-1", true)).toEqual([
+				`-DCMAKE_C_COMPILER=${dir}/bin/clang-unsafe-paths`,
+				`-DCMAKE_CXX_COMPILER=${dir}/bin/c++-unsafe-paths`,
+				`-DCMAKE_RANLIB=${dir}/bin/ranlib`,
+				`-DCMAKE_AR=${dir}/bin/ar`,
+			]);
 		});
 	});
 
