@@ -1029,7 +1029,10 @@ function graphOdinBuild(
 							: []
 					: []),
 				...(captures ? [`-out:${outputPath}`] : []),
-				...odinExtraLinkerFlagsArgs(resolved.analysis.linkopts),
+				// `odin check` never links (it's a pure type-check, no -out: even)
+				// and rejects -extra-linker-flags: outright — only `build`/`test`
+				// actually invoke the linker.
+				...(lint ? [] : odinExtraLinkerFlagsArgs(resolved.analysis.linkopts)),
 			];
 			const result = await exec.action({
 				argv: args,
