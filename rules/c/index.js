@@ -178,6 +178,12 @@ function ccTask(spec, isLibrary) {
 		? `build/c/${spec.outputSlug}.a`
 		: `build/c/${spec.outputSlug}`;
 	const transitiveArchives = spec.deps.flatMap((d) => d.transitiveArchives);
+	// Own linkopts stays link-step-only (not transitive) — only a dep's own
+	// transitiveLinkopts (e.g. a cmakeLibraryDep()'s pkg-config-derived
+	// -L/-l flags) flows into this target's own link step.
+	const transitiveLinkopts = spec.deps.flatMap(
+		(d) => d.transitiveLinkopts || [],
+	);
 	// A dep without transitiveHdrs (e.g. a raw rules/c/cmake target — see its
 	// own expansion.js docstring for why it can't cheaply supply header
 	// handles) just contributes no headers to mount, same asymmetry already
@@ -275,7 +281,9 @@ function ccTask(spec, isLibrary) {
 						const linker = (needsCxx ? compiler(true) : compiler(false))
 							.map(shellQuote)
 							.join(" ");
-						const linkFlags = spec.linkopts.map(shellQuote).join(" ");
+						const linkFlags = [...spec.linkopts, ...transitiveLinkopts]
+							.map(shellQuote)
+							.join(" ");
 						return `${linker} -o ${shellQuote(outPath)} ${objectSandboxPaths.map(shellQuote).join(" ")} ${depArchivePaths.map(shellQuote).join(" ")} ${linkFlags}`;
 					})();
 			const script = `set -e; mkdir -p "$(dirname ${shellQuote(outPath)})"; ${finalCmd}`;
@@ -308,7 +316,7 @@ function ccTask(spec, isLibrary) {
  * @param {object} [opts.toolchain] gccGraphToolchain()/zigGraphToolchain() result, or the workspace default.
  * @param {string[]} [opts.copts=[]] Extra compiler flags.
  * @param {boolean} [opts.unsafeSystemPaths=false] Bypass Bootlin's toolchain-wrapper unsafe-path guard (which rejects -I/-isystem/-L flags under /usr/include or /usr/lib) so this target can link against host system packages (e.g. libwebkit2gtk-4.1). No-op on a zig toolchain, which has no such guard.
- * @returns {object} Frozen `{[BUILD], archive, transitiveArchives, transitiveIncludeDirs, transitiveHdrs, [PACKAGE]}`.
+ * @returns {object} Frozen `{[BUILD], archive, transitiveArchives, transitiveIncludeDirs, transitiveHdrs, transitiveLinkopts, [PACKAGE]}`.
  */
 export function ccLibrary(opts = {}) {
 	const spec = crateSpec(opts);
@@ -327,6 +335,11 @@ export function ccLibrary(opts = {}) {
 			...spec.deps.flatMap((d) => d.transitiveIncludeDirs),
 		],
 		transitiveHdrs: [hdrs, ...spec.deps.flatMap((d) => d.transitiveHdrs || [])],
+		// Own linkopts (this library's own link step — irrelevant, ccLibrary()
+		// archives rather than links) is deliberately not folded in here; only
+		// a dep's own transitiveLinkopts flows through (see ccTask()'s own
+		// comment on the same asymmetry).
+		transitiveLinkopts: spec.deps.flatMap((d) => d.transitiveLinkopts || []),
 		[PACKAGE]: archive,
 	});
 }
@@ -343,7 +356,7 @@ export function ccLibrary(opts = {}) {
  * @param {Array<object>} [opts.deps=[]] ccLibrary()/cmake-target results this binary links against.
  * @param {object} [opts.toolchain] gccGraphToolchain()/zigGraphToolchain() result, or the workspace default.
  * @param {string[]} [opts.copts=[]] Extra compiler flags.
- * @param {string[]} [opts.linkopts=[]] Extra linker flags.
+ * @param {string[]} [opts.linkopts=[]] Extra linker flags for this binary's own link step (not propagated to anything that might depend on it — deps' own `transitiveLinkopts` are folded in automatically instead).
  * @param {boolean} [opts.unsafeSystemPaths=false] Bypass Bootlin's toolchain-wrapper unsafe-path guard (which rejects -I/-isystem/-L flags under /usr/include or /usr/lib) so this target can link against host system packages (e.g. libwebkit2gtk-4.1). No-op on a zig toolchain, which has no such guard.
  * @returns {object} Frozen `{[BUILD], [PACKAGE]}`.
  */

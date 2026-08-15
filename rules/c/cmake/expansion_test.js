@@ -414,4 +414,19 @@ describe("cmakeLibraryDep", () => {
 			expect(dep.transitiveIncludeDirs).toEqual([]);
 		});
 	});
+
+	test("exposes linkopts as transitiveLinkopts, defaulting to an empty list", () => {
+		return withCmakeHost(async (_host, expansion) => {
+			const dep = cmakeLibraryDep(expansion, "hello_cmake", {
+				linkopts: ["-L/usr/lib/x86_64-linux-gnu", "-lwebkit2gtk-4.1"],
+			});
+			expect(dep.transitiveLinkopts).toEqual([
+				"-L/usr/lib/x86_64-linux-gnu",
+				"-lwebkit2gtk-4.1",
+			]);
+			expect(
+				cmakeLibraryDep(expansion, "hello_cmake").transitiveLinkopts,
+			).toEqual([]);
+		});
+	});
 });

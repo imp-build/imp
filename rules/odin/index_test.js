@@ -6,7 +6,13 @@ import { TEST } from "//rules/workflows/test";
 import { ccLibrary } from "//rules/c";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
 import { describe, expect, test } from "//rules/imp/test";
-import { odinGen, odinPackage, odinTestPackage } from "//rules/odin";
+import {
+	odinExtraLinkerFlagsArgs,
+	odinGen,
+	odinLinkerPathDir,
+	odinPackage,
+	odinTestPackage,
+} from "//rules/odin";
 
 describe("Odin graph rules", () => {
 	test("packages expose immutable graph roots", () => {
@@ -212,6 +218,35 @@ describe("Odin graph rules", () => {
 			toolchain: "dev-2026-03",
 		});
 		expect(await buildFileRoots(app)).toContain("rules/odin/example/native");
+	});
+
+	// A ccLibrary()/cmakeLibraryDep()-shaped dep's transitiveLinkopts (e.g.
+	// pkg-config-derived -L/-l flags for a shared library's own dependencies)
+	// can't reach Odin as a mounted file the way transitiveArchives does —
+	// they need to reach `odin build`'s own linker invocation as a single
+	// `-extra-linker-flags:` string. See graphOdinBuild()'s own use of this.
+	test("odinExtraLinkerFlagsArgs joins linkopts into one -extra-linker-flags: arg, or omits it when empty", () => {
+		expect(odinExtraLinkerFlagsArgs([])).toEqual([]);
+		expect(
+			odinExtraLinkerFlagsArgs([
+				"-L/usr/lib/x86_64-linux-gnu",
+				"-lwebkit2gtk-4.1",
+			]),
+		).toEqual([
+			"-extra-linker-flags:-L/usr/lib/x86_64-linux-gnu -lwebkit2gtk-4.1",
+		]);
+	});
+
+	// Odin execs a program literally named "clang" via PATH lookup to link
+	// (see gccTool()'s own docstring) — unsafeSystemPaths has to change which
+	// directory lands on PATH, not which name is referenced.
+	test("odinLinkerPathDir selects bin-unsafe-paths/ only when unsafeSystemPaths is set", () => {
+		expect(odinLinkerPathDir("/cache/gcc-toolchains/x", false)).toBe(
+			"/cache/gcc-toolchains/x/bin",
+		);
+		expect(odinLinkerPathDir("/cache/gcc-toolchains/x", true)).toBe(
+			"/cache/gcc-toolchains/x/bin-unsafe-paths",
+		);
 	});
 
 	test("an import that resolves to no package is an error", async () => {

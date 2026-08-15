@@ -53,10 +53,13 @@ Source and header globs are evaluated relative to `path`, which defaults
 to the declaring `BUILD.js` directory. A library produces a static archive;
 a binary links an executable. `deps` takes other `ccLibrary()` call results
 directly (handle-passing), which the target's own
-`transitiveArchives`/`transitiveIncludeDirs` fold in automatically — not a
-loose filesystem path or label reference. A discovered CMake target needs
-wrapping with `cmakeLibraryDep()` (`//rules/c/cmake`) first — see its own
-docs. Use `linkopts` for options that belong only at link time.
+`transitiveArchives`/`transitiveIncludeDirs`/`transitiveLinkopts` fold in
+automatically — not a loose filesystem path or label reference. A discovered
+CMake target needs wrapping with `cmakeLibraryDep()` (`//rules/c/cmake`)
+first — see its own docs. Use `linkopts` for options that belong only at
+this target's own link step (not propagated to anything depending on it —
+use a dep's `transitiveLinkopts` for flags a consumer needs, e.g. a shared
+library's own `-L`/`-l` dependencies).
 
 The default GCC toolchain (`//rules/c/gcc`) is a Bootlin external toolchain
 whose compiler wrapper rejects any `-I`/`-isystem`/`-L` flag pointing under

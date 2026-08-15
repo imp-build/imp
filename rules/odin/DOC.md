@@ -159,3 +159,31 @@ export const app = odinPackage({
 // package's own directory depth.
 foreign import sqlite "build/c/vendor_sqlite.a"
 ```
+
+A dep's own `transitiveLinkopts` (e.g. a `cmakeLibraryDep({linkopts: [...]})`
+wrapping a shared library that itself depends on host system packages) fold
+into the final `odin build`'s own linker invocation automatically, as a
+single `-extra-linker-flags:` argument. The default GCC toolchain
+(`//rules/c/gcc`) is a Bootlin external toolchain whose compiler wrapper
+rejects any `-L` flag pointing under `/usr/lib` — since Odin links via that
+same toolchain, pass `unsafeSystemPaths: true` on the `odinPackage()` itself
+to bypass that guard for its own linker invocation (independent of, and in
+addition to, `unsafeSystemPaths` on any `ccLibrary()`/`cmakeProject()` dep —
+see `//rules/c`'s own docs):
+
+```js
+import { cmakeLibraryDep, cmakeProject } from "//rules/c/cmake";
+import { odinPackage } from "//rules/odin";
+
+const project = cmakeProject({ path: "third_party/webview", unsafeSystemPaths: true });
+
+export const app = odinPackage({
+    deps: [
+        cmakeLibraryDep(project, "webview", {
+            includeDirs: ["third_party/webview/include"],
+            linkopts: ["-L/usr/lib/x86_64-linux-gnu", "-lwebkit2gtk-4.1", "-lgtk-3"],
+        }),
+    ],
+    unsafeSystemPaths: true,
+});
+```

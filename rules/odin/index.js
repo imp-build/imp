@@ -842,6 +842,7 @@ function graphSourceClosure(spec, analysis, config) {
 
 function graphResourceInputs(spec) {
 	const resources = [];
+	const linkopts = [];
 	for (const dep of spec.deps) {
 		// Odin package deps travel the source closure above; anything else
 		// contributes its sources/resources as opaque extra inputs.
@@ -856,8 +857,16 @@ function graphResourceInputs(spec) {
 		// resolves foreign imports as literal sandbox-relative paths.
 		if (Array.isArray(dep?.transitiveArchives))
 			resources.push(...dep.transitiveArchives);
+		// A dep's own transitiveLinkopts (e.g. a cmakeLibraryDep()'s
+		// pkg-config-derived -L/-l flags for a shared library's own
+		// dependencies) — unlike transitiveArchives, these aren't files Odin
+		// can resolve as `foreign import` paths, so they instead need to
+		// reach the final `odin build`'s own linker invocation directly (see
+		// graphOdinBuild()'s -extra-linker-flags: handling below).
+		if (Array.isArray(dep?.transitiveLinkopts))
+			linkopts.push(...dep.transitiveLinkopts);
 	}
-	return resources;
+	return { resources, linkopts };
 }
 
 function graphPackageExpansion(spec) {
@@ -880,6 +889,7 @@ function graphPackageExpansion(spec) {
 
 function graphActionInputs(spec, analysis, config) {
 	const closure = graphSourceClosure(spec, analysis, config);
+	const { resources, linkopts } = graphResourceInputs(spec);
 	const inputs = {
 		sources: spec.sources,
 		odin: spec.toolchain,
@@ -888,12 +898,13 @@ function graphActionInputs(spec, analysis, config) {
 			packagePath: analysis.packagePath,
 			hasMainEntrypoint: analysis.hasMainEntrypoint,
 			collections: closure.collections,
+			linkopts,
 		},
 	};
 	for (const [index, source] of closure.handles.entries()) {
 		inputs[`source${index}`] = source;
 	}
-	for (const [index, resource] of graphResourceInputs(spec).entries()) {
+	for (const [index, resource] of resources.entries()) {
 		inputs[`resource${index}`] = resource;
 	}
 	for (const [index, generated] of (spec.generatedSrcs || []).entries()) {
@@ -903,6 +914,38 @@ function graphActionInputs(spec, analysis, config) {
 		(g) => g.expectedPath,
 	);
 	return inputs;
+}
+
+/**
+ * A dep's own transitiveLinkopts (e.g. a cmakeLibraryDep()'s pkg-config-
+ * derived -L/-l flags) reach Odin's own linker invocation as a single
+ * `-extra-linker-flags:"..."` arg — Odin takes one string, not repeated
+ * flags, so this joins them the same way gccCMakeCompilerArgs()'s own
+ * compiler-args construction already does for CMake.
+ *
+ * @param {string[]} linkopts
+ * @returns {string[]} `[]`, or a single `-extra-linker-flags:` arg.
+ */
+export function odinExtraLinkerFlagsArgs(linkopts) {
+	return linkopts.length > 0
+		? [`-extra-linker-flags:${linkopts.join(" ")}`]
+		: [];
+}
+
+/**
+ * The gcc toolchain bin dir to put on PATH for Odin's own linker invocation
+ * (Odin execs a program literally named "clang" to link — see gccTool()'s
+ * own docstring). unsafeSystemPaths points at "bin-unsafe-paths/" instead of
+ * "bin/" (see gccGraphTool()'s own comment) so -extra-linker-flags: above
+ * aren't rejected by Bootlin's toolchain-wrapper as an "unsafe header/
+ * library path".
+ *
+ * @param {string} gccToolDir Sandbox-mounted path to the gcc toolchain root (`exec.path(resolved.gcc)`).
+ * @param {boolean} unsafeSystemPaths
+ * @returns {string}
+ */
+export function odinLinkerPathDir(gccToolDir, unsafeSystemPaths) {
+	return `${gccToolDir}/${unsafeSystemPaths ? "bin-unsafe-paths" : "bin"}`;
 }
 
 function graphOdinBuild(
@@ -986,11 +1029,14 @@ function graphOdinBuild(
 							: []
 					: []),
 				...(captures ? [`-out:${outputPath}`] : []),
+				...odinExtraLinkerFlagsArgs(resolved.analysis.linkopts),
 			];
 			const result = await exec.action({
 				argv: args,
 				inputs: allInputs,
-				env: [`PATH=${exec.path(resolved.gcc)}/bin`],
+				env: [
+					`PATH=${odinLinkerPathDir(exec.path(resolved.gcc), spec.unsafeSystemPaths)}`,
+				],
 				allowFailure: lint || test,
 				outputs: captures ? { artifact: output.file(outputPath) } : {},
 			});
@@ -1064,6 +1110,7 @@ function createGraphPackage({
 	generatedSrcs = [],
 	test = false,
 	base = packagePath(),
+	unsafeSystemPaths = false,
 } = {}) {
 	const normalizedSrcs = package_srcs({ srcs });
 	const normalizedExclude =
@@ -1087,6 +1134,12 @@ function createGraphPackage({
 					? odinGraphTool(version)
 					: defaultOdinToolchain(),
 		version,
+		// Bypasses Bootlin's toolchain-wrapper unsafe-path guard for this
+		// package's own linker invocation (see gccGraphTool()'s own
+		// bin-unsafe-paths/ comment) — needed to link against a dep's
+		// transitiveLinkopts pointing at host system packages like
+		// libwebkit2gtk-4.1.
+		unsafeSystemPaths: !!unsafeSystemPaths,
 	};
 	if (!spec.toolchain) {
 		spec.toolchain = defaultOdinToolchain();

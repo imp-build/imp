@@ -165,6 +165,19 @@ describe("gcc toolchain", () => {
 			}
 			expect(script).toContain(".br_real");
 			expect(script).toContain("--sysroot");
+			// bin-unsafe-paths/ mirrors bin/ under the same bare names ("clang"/
+			// "cc"/"c++"/"ar"/"ranlib") — needed because Odin execs a program
+			// literally named "clang" via PATH lookup to link, with no flag to
+			// select a differently-named binary (see gccGraphTool()'s own
+			// comment).
+			expect(script).toContain("bin-unsafe-paths");
+			// These are real scripts (not symlinks to "bin/*-unsafe-paths") that
+			// reference the real binary via a "../bin/"-prefixed path relative to
+			// their own "bin-unsafe-paths/" location — a symlink's own script
+			// would resolve "$0" to the invoked (symlink) path, not the link
+			// target, and fail to find .br_real.
+			expect(script).toContain('"$out/bin-unsafe-paths/$name"');
+			expect(script).toContain("/../bin/$target");
 		});
 	});
 

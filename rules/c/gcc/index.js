@@ -198,11 +198,24 @@ export function gccGraphTool(version) {
 			// reference these aliases instead, keeping the same sysroot/hardening
 			// behavior minus that one guard. ar/ranlib are real binutils binaries,
 			// not wrapped, so they need no such alias.
+			//
+			// A sibling "bin-unsafe-paths/" directory mirrors "bin/" but under
+			// the same bare names ("clang"/"cc"/"c++"/"ar"/"ranlib"), pointed at
+			// the unsafe-paths targets — needed because Odin invokes a program
+			// literally named "clang" via PATH lookup to link (see gccTool()'s
+			// own docstring) with no flag to select a differently-named binary,
+			// so opting an odinPackage() into unsafeSystemPaths works by putting
+			// this directory on PATH instead of "bin/" (see rules/odin/index.js).
+			// These are real scripts, not symlinks to the "bin/*-unsafe-paths"
+			// ones: a script's own "$0" reflects the path it was *invoked* at,
+			// not a symlink's target, so a symlinked script would resolve its
+			// own "${0%/*}"-relative .br_real/sysroot paths against
+			// "bin-unsafe-paths/" instead of "bin/" and fail to find them.
 			const result = await exec.action({
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
-					'archive=$1; out=$2; gccPrefix=$3; binutilsPrefix=$4; mkdir -p "$out" && tar -xJf "$archive" -C "$out" --strip-components=1 && for pair in "clang:$gccPrefix-gcc" "cc:$gccPrefix-gcc" "c++:$gccPrefix-g++" "ar:$binutilsPrefix-ar" "ranlib:$binutilsPrefix-ranlib"; do name=${pair%%:*}; target=${pair#*:}; printf \'%s\\n\' \'#!/bin/sh\' "exec \\"\\${0%/*}/$target\\" \\"\\$@\\"" > "$out/bin/$name"; chmod +x "$out/bin/$name"; done && for pair in "clang-unsafe-paths:$binutilsPrefix-gcc.br_real" "cc-unsafe-paths:$binutilsPrefix-gcc.br_real" "c++-unsafe-paths:$binutilsPrefix-g++.br_real"; do name=${pair%%:*}; target=${pair#*:}; printf \'%s\\n\' \'#!/bin/sh\' "exec \\"\\${0%/*}/$target\\" --sysroot \\"\\${0%/*}/../$binutilsPrefix/sysroot\\" -fstack-protector-strong -fPIE -pie -Wl,-z,now -Wl,-z,relro \\"\\$@\\"" > "$out/bin/$name"; chmod +x "$out/bin/$name"; done',
+					'archive=$1; out=$2; gccPrefix=$3; binutilsPrefix=$4; mkdir -p "$out" && tar -xJf "$archive" -C "$out" --strip-components=1 && for pair in "clang:$gccPrefix-gcc" "cc:$gccPrefix-gcc" "c++:$gccPrefix-g++" "ar:$binutilsPrefix-ar" "ranlib:$binutilsPrefix-ranlib"; do name=${pair%%:*}; target=${pair#*:}; printf \'%s\\n\' \'#!/bin/sh\' "exec \\"\\${0%/*}/$target\\" \\"\\$@\\"" > "$out/bin/$name"; chmod +x "$out/bin/$name"; done && for pair in "clang-unsafe-paths:$binutilsPrefix-gcc.br_real" "cc-unsafe-paths:$binutilsPrefix-gcc.br_real" "c++-unsafe-paths:$binutilsPrefix-g++.br_real"; do name=${pair%%:*}; target=${pair#*:}; printf \'%s\\n\' \'#!/bin/sh\' "exec \\"\\${0%/*}/$target\\" --sysroot \\"\\${0%/*}/../$binutilsPrefix/sysroot\\" -fstack-protector-strong -fPIE -pie -Wl,-z,now -Wl,-z,relro \\"\\$@\\"" > "$out/bin/$name"; chmod +x "$out/bin/$name"; done && mkdir -p "$out/bin-unsafe-paths" && for pair in "clang:$binutilsPrefix-gcc.br_real" "cc:$binutilsPrefix-gcc.br_real" "c++:$binutilsPrefix-g++.br_real"; do name=${pair%%:*}; target=${pair#*:}; printf \'%s\\n\' \'#!/bin/sh\' "exec \\"\\${0%/*}/../bin/$target\\" --sysroot \\"\\${0%/*}/../$binutilsPrefix/sysroot\\" -fstack-protector-strong -fPIE -pie -Wl,-z,now -Wl,-z,relro \\"\\$@\\"" > "$out/bin-unsafe-paths/$name"; chmod +x "$out/bin-unsafe-paths/$name"; done && for pair in "ar:$binutilsPrefix-ar" "ranlib:$binutilsPrefix-ranlib"; do name=${pair%%:*}; target=${pair#*:}; printf \'%s\\n\' \'#!/bin/sh\' "exec \\"\\${0%/*}/../bin/$target\\" \\"\\$@\\"" > "$out/bin-unsafe-paths/$name"; chmod +x "$out/bin-unsafe-paths/$name"; done',
 					"gcc-install",
 					exec.path(inputs.archive),
 					"gcc-toolchain",

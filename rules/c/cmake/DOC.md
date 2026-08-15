@@ -87,7 +87,7 @@ successful result.
 
 A discovered CMake target's `project.get(name, BUILD)` is a plain resolved
 graph handle — unlike a raw `ccLibrary()` result, it does not itself carry
-`transitiveArchives`/`transitiveIncludeDirs`, so a bare
+`transitiveArchives`/`transitiveIncludeDirs`/`transitiveLinkopts`, so a bare
 `project.get("mylib", BUILD)` does not work directly as a `deps` entry.
 Wrap it with `cmakeLibraryDep()` instead:
 
@@ -113,3 +113,23 @@ were, that data is only known once the CMake configure task has actually
 run — too late for `ccTask()`'s own compiler-flag construction, which needs
 plain strings synchronously at `BUILD.js` declare time. This is the same
 kind of manual knowledge a plain `ccLibrary({hdrs})` glob already requires.
+
+If the CMake target is a shared library with its own shared-library
+dependencies (e.g. pkg-config-discovered `libwebkit2gtk-4.1`), the final
+consumer's own link step needs those flags too — the same
+`unsafeSystemPaths` escape hatch (above) only fixes *this* target's own
+compile/link, not what a downstream `ccBinary()`/`odinPackage()` needs to
+resolve it. Supply them via `linkopts`, for the same "not structurally
+discoverable" reason as `includeDirs`:
+
+```js
+cmakeLibraryDep(project, "webview", {
+    includeDirs: ["third_party/webview/include"],
+    linkopts: ["-L/usr/lib/x86_64-linux-gnu", "-lwebkit2gtk-4.1", "-lgtk-3"],
+});
+```
+
+These flow through as `transitiveLinkopts` — a `ccBinary()` consumer folds
+them into its own link step automatically, and an `odinPackage()` consumer
+needs `unsafeSystemPaths: true` of its own (see `//rules/odin`'s own docs)
+to actually accept `-L` flags under `/usr/lib` on its own linker invocation.

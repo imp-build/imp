@@ -223,6 +223,52 @@ describe("graph-native ccLibrary/ccBinary", () => {
 		});
 	});
 
+	test("a dep's transitiveLinkopts reach ccBinary's own link step, not the archive step", () => {
+		return withCcHost(async (host) => {
+			const lib = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+			});
+			const depWithLinkopts = {
+				...lib,
+				transitiveLinkopts: ["-L/usr/lib/x86_64-linux-gnu", "-lwebkit2gtk-4.1"],
+			};
+			const bin = ccBinary({
+				path: "rules/c/testdata/mixed_sources",
+				deps: [depWithLinkopts],
+				toolchain: fakeGccGraphToolchain(),
+			});
+			await resolveIgnoringArtifactValidation([bin[BUILD]]);
+			const linkRun = host.runs.find((run) =>
+				run.display.startsWith("cc link "),
+			);
+			expect(linkRun.argv[2]).toContain("-lwebkit2gtk-4.1");
+			expect(linkRun.argv[2]).toContain("-L/usr/lib/x86_64-linux-gnu");
+			const archiveRuns = host.runs.filter((run) =>
+				run.display.startsWith("cc archive "),
+			);
+			for (const run of archiveRuns) {
+				expect(run.argv[2]).not.toContain("webkitgtk");
+			}
+		});
+	});
+
+	test("ccLibrary() forwards a dep's transitiveLinkopts, not its own linkopts", () => {
+		return withCcHost(() => {
+			const dep = {
+				transitiveArchives: [],
+				transitiveIncludeDirs: [],
+				transitiveLinkopts: ["-lfoo"],
+			};
+			const lib = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+				deps: [dep],
+			});
+			expect(lib.transitiveLinkopts).toEqual(["-lfoo"]);
+		});
+	});
+
 	test("throws without an explicit toolchain or a declared gcc/zig default", () => {
 		return withFakeToolchainHost(() => {
 			// Both rules/c/gcc and rules/c/zig auto-declare a default toolchain

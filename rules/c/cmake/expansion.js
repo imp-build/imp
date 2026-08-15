@@ -266,16 +266,18 @@ export function cmakeProject(opts = {}) {
  * @param {string} name CMake target name (as passed to add_library/add_executable).
  * @param {object} [opts]
  * @param {string[]} [opts.includeDirs=[]] Include dirs downstream ccLibrary()/ccBinary() targets need, e.g. the CMake project's own public header directory.
- * @returns {object} `{[BUILD], archive, transitiveArchives, transitiveIncludeDirs}` — usable directly as a ccLibrary()/ccBinary() `deps` entry.
+ * @param {string[]} [opts.linkopts=[]] Link flags downstream targets need to resolve this target's own shared-library dependencies, e.g. pkg-config-derived `-L`/`-l` flags for a `.so` linked against host system packages. CMake's own per-target link flags aren't structurally discoverable any more than its include paths are (see `includeDirs` above) — supplied by the caller for the same reason.
+ * @returns {object} `{[BUILD], archive, transitiveArchives, transitiveIncludeDirs, transitiveLinkopts}` — usable directly as a ccLibrary()/ccBinary() `deps` entry.
  * @category target
  */
 export function cmakeLibraryDep(project, name, opts = {}) {
-	const { includeDirs = [] } = opts;
+	const { includeDirs = [], linkopts = [] } = opts;
 	const archive = project.get(name, BUILD);
 	return Object.freeze({
 		[BUILD]: archive,
 		archive,
 		transitiveArchives: [archive],
 		transitiveIncludeDirs: [...includeDirs],
+		transitiveLinkopts: [...linkopts],
 	});
 }
