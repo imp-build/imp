@@ -367,9 +367,14 @@ export class Toolchain extends Target {
 		}
 		_toolchain_registered.add(cls);
 		_toolchain_by_tool_name.set(cls.tool.name, cls);
+		// One fresh closure per subclass, all from this one call site — needs
+		// its own stable id per subclass rather than the default name-derived
+		// identity (the closure itself is anonymous, and even a named
+		// function here would collide across subclasses).
 		product(cls, TOOLCHAIN, cls.tool, (handle) => handle.bin(), {
 			display: "toolchain {0}",
 			level: "info",
+			id: `toolchain:${cls.tool.name}`,
 		});
 	}
 }
@@ -1863,38 +1868,69 @@ function _resolve_named_output_result(
 
 const _memo_fn_ids = new WeakMap();
 let _memo_fn_counter = 0;
-const _fn_id_names = new Map(); // fn_id → fn.name; persists across resetMemoState
+const _fn_id_names = new Map(); // fn_id → name; persists across resetMemoState
 const _product_fn_info = new Map(); // fn_id → product_name; persists across resetMemoState
 const _products_by_kind_name = new Map(); // "kind:name" → Map(tool → memoized fn); persists across resetMemoState
-const _fn_by_call_site = new Map(); // call site → fn, to detect a site minting more than one function
+// "name@module" → {fn, generation, origin}; detects two different functions
+// claiming the same declared name in one module. `generation` is bumped by
+// resetMemoState() (imp-engine/imp-execution test-only; production never
+// resets), so a new function object at an already-registered key is an error
+// within one generation (two things really do share a name) but an accepted
+// replacement across a reset (the module was legitimately re-evaluated).
+const _fn_by_name_key = new Map();
+let _memo_generation = 0;
 
-// Identity is derived from where memo()/product()/expand() was called
-// (module + line + col from the call stack), not evaluation order, so it's
-// stable across separate processes given the same source tree. The WeakMap
-// above still dedupes by function reference first, so the same fn reused
-// across call sites (or across resetMemoState) keeps its original id.
-function _stable_function_id(fn) {
+// Identity keys on the function's own declared name, module-scoped, not on
+// where in the module it's textually written — so moving a memo()/product()/
+// expand() call to a different line (e.g. a comment shifts above it) doesn't
+// mint a new id, and a reusable factory can pass an explicit { id } per
+// instance instead of relying on a bare closure's (often absent or reused)
+// name. The WeakMap above still dedupes by function reference first, so the
+// same fn reused across call sites keeps its original id for free.
+// `internal.label` customizes error-message wording for callers other than
+// memo() itself (graph_core.js's task()/expand() share this resolver).
+function _stableFunctionIdentity(fn, opts, internal) {
 	let id = _memo_fn_ids.get(fn);
-	if (id === undefined) {
-		const stack = new Error().stack || "";
-		const site = __host_call_site_identity(stack);
-		const label = fn.name || "<anonymous>";
-		if (site !== undefined && site !== null) {
-			const existing = _fn_by_call_site.get(site);
-			if (existing !== undefined && existing !== fn) {
-				throw new Error(
-					`memo()/product()/expand() called from ${site} with more than one function — ` +
-						"call it once at module scope and export the result",
-				);
-			}
-			_fn_by_call_site.set(site, fn);
-			id = `${label}@${site}`;
-		} else {
-			id = `${label}#${++_memo_fn_counter}`;
-		}
-		_memo_fn_ids.set(fn, id);
-		_fn_id_names.set(id, label);
+	if (id !== undefined) return id;
+
+	const label = (internal && internal.label) || "memo()/product()/expand()";
+	const name = (opts && opts.id) || fn.name || null;
+	const stack = new Error().stack || "";
+	const site = __host_call_site_identity(stack);
+
+	if (name === null) {
+		throw new Error(
+			`${label}: anonymous functions need a name or an explicit { id }` +
+				(site ? ` (at ${site})` : ""),
+		);
 	}
+
+	if (site === undefined || site === null) {
+		id = `${name}#${++_memo_fn_counter}`;
+		_memo_fn_ids.set(fn, id);
+		_fn_id_names.set(id, name);
+		return id;
+	}
+
+	const module = site.replace(/:\d+:\d+$/, "");
+	const key = `${name}@${module}`;
+	const existing = _fn_by_name_key.get(key);
+	if (existing === undefined) {
+		_fn_by_name_key.set(key, { fn, generation: _memo_generation, origin: site });
+	} else if (existing.fn !== fn) {
+		if (existing.generation === _memo_generation) {
+			throw new Error(
+				`${label}: '${name}' in ${module} is already used by a different function ` +
+					`(registered at ${existing.origin}, now also at ${site}) — pass an explicit { id } to disambiguate`,
+			);
+		}
+		existing.fn = fn;
+		existing.generation = _memo_generation;
+		existing.origin = site;
+	}
+	id = key;
+	_memo_fn_ids.set(fn, id);
+	_fn_id_names.set(id, name);
 	return id;
 }
 
@@ -2519,9 +2555,11 @@ function _pop_call(key_string, contextId) {
  *   class's `static tool` — the tool this registration attributes to in
  *   capability docs and multi-tool dispatch labels.
  * @param {function} fn Async function taking a target handle and returning a result.
- * @param {{display:string, level:"trace"|"debug"|"info"|"warn"|"error"}} [opts]
+ * @param {{display:string, level:"trace"|"debug"|"info"|"warn"|"error", id:string}} [opts]
  *   Task display template and completion log level. Positional placeholders
- *   such as `{0}` interpolate compactly formatted call arguments.
+ *   such as `{0}` interpolate compactly formatted call arguments. `id`
+ *   overrides the default name-derived identity; required when `fn` is
+ *   anonymous — see `memo()`.
  * @returns {function} The same function, wrapped in memo().
  */
 export function product(kindClass, nameToken, toolToken, fn, opts) {
@@ -2541,12 +2579,12 @@ export function product(kindClass, nameToken, toolToken, fn, opts) {
 			nameId: pid,
 			tool,
 			toolId: tid,
-			fnId: _stable_function_id(fn),
+			fnId: _stableFunctionIdentity(fn),
 		}),
 		memoized,
 		registrationStack,
 	);
-	_product_fn_info.set(_stable_function_id(fn), name);
+	_product_fn_info.set(_stableFunctionIdentity(fn), name);
 	let by_tool = _products_by_kind_name.get(`${kind}:${name}`);
 	if (by_tool === undefined) {
 		by_tool = new Map();
@@ -2595,15 +2633,19 @@ export function label(opts) {
 
 // "labelId::goalName" -> Set<fn>, used only to detect the exact same
 // handler function attached twice to one (label, goal) pair. Deliberately
-// keyed on live function-reference identity rather than call-site-derived
-// identity (`_stable_function_id`): a reusable factory like `cargoPackage()`
-// legitimately calls `build(crate, ctx => ...)` once per label instance,
-// creating a fresh closure at the *same* call site every time, which
-// `_stable_function_id`'s "one function per call site" rule (see below)
-// would wrongly flag as a rebinding. Two different handlers attached to one
-// (label, goal) pair — the common case for e.g. a language rule's `build`
-// handler plus a separately-shipped fmt rule's `fmt` handler — is not a
-// conflict either way; both simply run.
+// keyed on live function-reference identity rather than declared-name
+// identity (`_stableFunctionIdentity`): a reusable factory like
+// `cargoPackage()` legitimately calls `build(crate, ctx => ...)` once per
+// label instance, creating a fresh closure every time — `attach()` never
+// needs those closures to carry any persistent identity, so plain reference
+// identity is enough here. (`memo()`'s equivalent factory case instead needs
+// each instance's closure to have its own *durable, cross-process* identity
+// for tracing, which a fresh closure's declared name alone can't give it —
+// hence the explicit `{ id }` option on `_stableFunctionIdentity`, one
+// distinct id per instance — see below.) Two different
+// handlers attached to one (label, goal) pair — the common case for e.g. a
+// language rule's `build` handler plus a separately-shipped fmt rule's `fmt`
+// handler — is not a conflict either way; both simply run.
 const _label_handler_fns = new Map();
 // "labelId::goalName" -> {fn, identity, origin}[] in attachment order.
 // Host-side metadata mirrors these entries after sealing; functions remain
@@ -2869,9 +2911,10 @@ globalThis.__imp_dispatch_label_handlers = _dispatch_label_handlers;
  * current goal's selection (see `ensure_expanded` in spike.rs). An optional
  * `{ goals: ["test", ...] }` scope limits expansion to those goals.
  *
- * Called in its graph form — `expand({ inputs, create, display })` — the
+ * Called in its graph form — `expand({ inputs, create, display, id })` — the
  * `display` is part of the expansion's identity, exactly as it is for `task()`.
- * See the note on `task()` in graph_core.js.
+ * See the note on `task()` in graph_core.js. `id` overrides `create`'s
+ * default name-derived identity; required when `create` is anonymous.
  *
  * @param {Function} kindClass Target subclass declaring `static kind`, e.g. CmakeLib.
  * @param {function} fn Async function taking the expanding target's handle;
@@ -2880,6 +2923,8 @@ globalThis.__imp_dispatch_label_handlers = _dispatch_label_handlers;
  *   needed by a particular graph traversal, such as test-binary discovery.
  * @param {string} [opts.display] Task display template.
  * @param {"trace"|"debug"|"info"|"warn"|"error"} [opts.level] Completion log level.
+ * @param {string} [opts.id] Overrides the default name-derived identity;
+ *   required when `fn` is anonymous.
  * @returns {function} The same function, wrapped in memo().
  */
 export function expand(kindClass, fn, opts = {}) {
@@ -2894,7 +2939,9 @@ export function expand(kindClass, fn, opts = {}) {
 	const kind = _kind_of(kindClass, "expand()");
 	const memoized = memo(
 		fn,
-		opts.display !== undefined || opts.level !== undefined ? opts : undefined,
+		opts.display !== undefined || opts.level !== undefined || opts.id !== undefined
+			? opts
+			: undefined,
 	);
 	__host_register_expander(kind, memoized, opts.goals ?? null);
 	return memoized;
@@ -2922,11 +2969,15 @@ export function registerTarget(handle, address) {
  * cached result. Cycles in the call graph are detected and thrown as errors.
  * Call getMemoTrace() for hit/miss events and dependency edges.
  *
- * @param {function} fn Named async function to memoize.
- * @param {{display:string, level:"trace"|"debug"|"info"|"warn"|"error"}} [opts]
+ * @param {function} fn Named async function to memoize. Identity defaults to
+ *   `fn.name`, scoped to the declaring module — pass `opts.id` when a factory
+ *   calls `memo()` once per instance with a fresh closure each time (so each
+ *   instance needs its own stable identity) or when `fn` is anonymous.
+ * @param {{display:string, level:"trace"|"debug"|"info"|"warn"|"error", id:string}} [opts]
  *   Task display template and completion log level. `{0}`, `{1}`, etc.
  *   interpolate compact argument summaries; `{{` and `}}` emit literal braces.
- *   Omitting this object is deprecated.
+ *   Omitting `display` is deprecated. `id` overrides the default
+ *   name-derived identity; required when `fn` has no name.
  * @returns {function}
  */
 const _MEMO_LEVELS = new Set(["trace", "debug", "info", "warn", "error"]);
@@ -3023,7 +3074,14 @@ function _memo_display(template, args, validateOnly = false) {
 }
 
 function _memo_metadata(fn, opts) {
-	if (opts === undefined) {
+	if (opts !== undefined && (opts === null || typeof opts !== "object")) {
+		throw new Error(`memo(${fn.name || "<anonymous>"}) expects an options object`);
+	}
+	// A missing display is treated the same whether opts itself is absent or
+	// just doesn't set display — e.g. memo(fn, { id }) alone is legal and
+	// falls back to the same default/deprecation-nudge path as memo(fn).
+	const display = opts && opts.display;
+	if (display === undefined) {
 		if (typeof globalThis.__host_memo_deprecation === "function") {
 			globalThis.__host_memo_deprecation(fn.name || "<anonymous>");
 		}
@@ -3032,12 +3090,7 @@ function _memo_metadata(fn, opts) {
 			level: "info",
 		};
 	}
-	if (
-		opts === null ||
-		typeof opts !== "object" ||
-		typeof opts.display !== "string" ||
-		opts.display.length === 0
-	) {
+	if (typeof display !== "string" || display.length === 0) {
 		throw new Error(
 			`memo(${fn.name || "<anonymous>"}) expects options with a non-empty display template`,
 		);
@@ -3049,8 +3102,8 @@ function _memo_metadata(fn, opts) {
 		);
 	}
 	// Validate syntax at declaration time. Argument bounds are checked per call.
-	_memo_display(opts.display, [], true);
-	return { display: opts.display, level };
+	_memo_display(display, [], true);
+	return { display, level };
 }
 
 // ---------------------------------------------------------------------------
@@ -3061,9 +3114,9 @@ function _memo_metadata(fn, opts) {
 // persisted solely for change detection; results are never stored or replayed.
 // ---------------------------------------------------------------------------
 
-// A fn_id is either "<label>@<module>:<line>:<col>" (call-site identity, see
-// _stable_function_id) or, only when call-site resolution failed, the
-// non-restart-stable "<label>#<counter>" fallback. Only the former can be
+// A fn_id is either "<name>@<module>" (declared-name identity, see
+// _stableFunctionIdentity) or, only when call-site resolution failed, the
+// non-restart-stable "<name>#<counter>" fallback. Only the former can be
 // resolved back to a module to digest, and is the only form worth tracing
 // across invocations.
 function _memo_module_digest(fn_id) {
@@ -3214,7 +3267,7 @@ function _write_memo_trace(
 }
 
 export function memo(fn, opts) {
-	const fn_id = _stable_function_id(fn);
+	const fn_id = _stableFunctionIdentity(fn, opts);
 	const metadata = _memo_metadata(fn, opts);
 	const moduleDigest = _memo_module_digest(fn_id);
 	return function memoized(...args) {
@@ -3311,11 +3364,17 @@ export function memo(fn, opts) {
 
 /**
  * Reset all memo state. Call between test runs to start with a clean slate.
- * Does NOT reset function identity — identity is derived from each
- * function's module + call-site location, so it's stable by construction
- * across resets (and across separate processes on the same source tree).
+ * Identity strings themselves are not reset — they're derived from each
+ * function's declared name + module, stable by construction across resets
+ * and across separate processes on the same source tree — but the
+ * generation counter is bumped, so a name that now resolves to a *different*
+ * function object (the module was legitimately re-evaluated since the last
+ * reset) is accepted as a replacement rather than rejected as a collision.
+ * Production runs one goal per process and never calls this, so replacement
+ * only matters for test harnesses that reuse one JS realm across runs.
  */
 export function resetMemoState() {
+	_memo_generation++;
 	_memo_table = new Map();
 	_memo_deps = [];
 	_memo_trace_keys = new Map();

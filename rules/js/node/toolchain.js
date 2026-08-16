@@ -283,6 +283,8 @@ product(
 	NodeToolchain,
 	GEN_LOCKFILES,
 	NODE_TOOL,
-	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	function generateNodeLockfiles(handle) {
+		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
+	},
 	{ display: "gen lockfiles {0}", level: "info" },
 );

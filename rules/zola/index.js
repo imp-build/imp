@@ -267,6 +267,8 @@ product(
 	ZolaToolchain,
 	GEN_LOCKFILES,
 	ZOLA_TOOL,
-	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	function generateZolaLockfiles(handle) {
+		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
+	},
 	{ display: "gen lockfiles {0}", level: "info" },
 );

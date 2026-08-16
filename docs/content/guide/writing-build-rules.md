@@ -180,6 +180,23 @@ as `[8 targets]` and `{…}`. User-facing work and toolchain acquisition
 normally use `info`; internal source, resource, and metadata computations use
 `debug`. Memo failures are always reported at `error`.
 
+`memo()`/`product()`/`expand()` identify a function by its declared name,
+scoped to the module it's called from — moving a call to a different line
+doesn't change its identity. A factory that calls `memo()` once per instance,
+each time with a fresh closure, needs an explicit `{ id }` per instance (the
+closures share a name, or have none); so does any genuinely anonymous
+function:
+
+```js
+function cargoPackage(pkg) {
+    return memo(async function build() { /* ... */ }, {
+        display: `build ${pkg.name}`,
+        level: "info",
+        id: `cargoPackage:${pkg.name}`,
+    });
+}
+```
+
 ## Report a failure the user must fix
 
 A goal handler — the `graph` function given to `goal()` — and a task's `run()`

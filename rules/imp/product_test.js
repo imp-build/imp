@@ -139,17 +139,27 @@ describe("product", () => {
 
 	test("productFor rejects a role registered by several tools", async () => {
 		const OTHER_TOOL = toolName("product-test-other-tool");
-		product(TestKind, ROLE_PRODUCT, TEST_TOOL, async () => "one", {
-			display: "role product {0}",
-			level: "info",
-		});
+		product(
+			TestKind,
+			ROLE_PRODUCT,
+			TEST_TOOL,
+			async function roleProductOne() {
+				return "one";
+			},
+			{ display: "role product {0}", level: "info" },
+		);
 		const handle = target({ kind: "test-kind" });
 		expect(await productFor(handle, ROLE_PRODUCT)).toBe("one");
 
-		product(TestKind, ROLE_PRODUCT, OTHER_TOOL, async () => "two", {
-			display: "role product {0}",
-			level: "info",
-		});
+		product(
+			TestKind,
+			ROLE_PRODUCT,
+			OTHER_TOOL,
+			async function roleProductTwo() {
+				return "two";
+			},
+			{ display: "role product {0}", level: "info" },
+		);
 		expect(() => productFor(handle, ROLE_PRODUCT)).toThrow(
 			"products from several tools",
 		);

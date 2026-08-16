@@ -487,7 +487,9 @@ product(
 	KacheToolchain,
 	GEN_LOCKFILES,
 	KACHE_TOOL,
-	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	function generateKacheLockfiles(handle) {
+		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
+	},
 	{ display: "gen lockfiles {0}", level: "info" },
 );
 
@@ -608,6 +610,8 @@ product(
 	KacheToolchain,
 	RUST_BUILD_CACHE,
 	KACHE_TOOL,
-	(handle) => new RustKacheWrapper(handle),
+	function kacheRustBuildCacheWrapper(handle) {
+		return new RustKacheWrapper(handle);
+	},
 	{ display: "rust build cache {0}", level: "info" },
 );

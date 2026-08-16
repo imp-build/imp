@@ -372,6 +372,8 @@ product(
 	CmakeToolchain,
 	GEN_LOCKFILES,
 	CMAKE_TOOL,
-	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	function generateCmakeLockfiles(handle) {
+		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
+	},
 	{ display: "gen lockfiles {0}", level: "info" },
 );

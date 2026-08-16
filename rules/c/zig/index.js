@@ -476,6 +476,8 @@ product(
 	ZigToolchain,
 	GEN_LOCKFILES,
 	ZIG_TOOL,
-	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	function generateZigLockfiles(handle) {
+		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
+	},
 	{ display: "gen lockfiles {0}", level: "info" },
 );

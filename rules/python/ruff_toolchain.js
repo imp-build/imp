@@ -266,11 +266,12 @@ product(
 	RuffToolchain,
 	GEN_LOCKFILES,
 	RUFF_TOOL,
-	(handle) =>
-		generateToolLockfile({
+	function generateRuffLockfiles(handle) {
+		return generateToolLockfile({
 			handle,
 			...LOCKFILE_SPEC,
 			lockfile: handle.attrs.lockfile ?? DEFAULT_LOCKFILE,
-		}),
+		});
+	},
 	{ display: "gen lockfiles {0}", level: "info" },
 );

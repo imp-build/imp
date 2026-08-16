@@ -312,6 +312,8 @@ product(
 	PexToolchain,
 	GEN_LOCKFILES,
 	PEX_TOOL,
-	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	function generatePexLockfiles(handle) {
+		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
+	},
 	{ display: "gen lockfiles {0}", level: "info" },
 );

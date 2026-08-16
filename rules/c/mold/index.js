@@ -321,7 +321,9 @@ product(
 	MoldToolchain,
 	GEN_LOCKFILES,
 	MOLD_TOOL,
-	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	function generateMoldLockfiles(handle) {
+		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
+	},
 	{ display: "gen lockfiles {0}", level: "info" },
 );
 
@@ -351,7 +353,9 @@ product(
 	MoldToolchain,
 	ODIN_LINKER,
 	MOLD_TOOL,
-	(handle) => new OdinMoldLinker(handle),
+	function moldOdinLinker(handle) {
+		return new OdinMoldLinker(handle);
+	},
 	{ display: "odin linker {0}", level: "info" },
 );
 

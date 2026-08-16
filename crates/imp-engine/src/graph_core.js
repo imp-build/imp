@@ -329,14 +329,27 @@ export const semantic = Object.freeze({
 	},
 });
 
-function _graphFunctionIdentity(fn, label) {
+// Declared-name identity, same "name@module" shape memo()/product()/expand()
+// use (fixes the same comment/line-churn fragility), but deliberately NOT
+// routed through imp_core.js's collision-checking registry: task()'s own key
+// (_graphTaskKey, below) already folds in inputs/outputs/display/cache, and
+// its doc comment spells out the intended pattern — one shared helper calling
+// task() repeatedly with a fresh, identically-named `run` per instance (e.g.
+// method-shorthand `async run(exec, input) {...}`), told apart by `display`,
+// not by function identity. Policing name collisions here the way memo()
+// does would make that documented, tested pattern a hard error. `id` stays
+// available as an explicit opt-in for callers who want one, e.g. to force
+// two structurally-identical closures to intentionally share a node.
+function _graphFunctionIdentity(fn, label, id) {
 	const stack = new Error(`${label} registration`).stack || "";
-	const site = __host_call_site_identity(stack) || `${label}:${fn.name || "<anonymous>"}`;
-	return `${fn.name || "<anonymous>"}@${site}`;
+	const site = __host_call_site_identity(stack);
+	const name = id || fn.name || "<anonymous>";
+	const module = site ? site.replace(/:\d+:\d+$/, "") : `${label}:${name}`;
+	return `${name}@${module}`;
 }
 
-function _graphTaskKey(fn, inputs, outputs, cache, display) {
-	const fnId = _graphFunctionIdentity(fn, "task");
+function _graphTaskKey(fn, inputs, outputs, cache, display, id) {
+	const fnId = _graphFunctionIdentity(fn, "task", id);
 	let moduleDigest = null;
 	const at = fnId.indexOf("@");
 	if (at >= 0) {
@@ -376,6 +389,10 @@ function _graphTaskKey(fn, inputs, outputs, cache, display) {
  * @param {function(object, object): Promise<object>} opts.run
  * @param {string} [opts.display]
  * @param {boolean} [opts.cache]
+ * @param {string} [opts.id] Overrides the default name-derived identity for
+ *   `opts.run`; required when `opts.run` is anonymous, or when a shared
+ *   helper calls `task()` with a fresh closure per instance and each
+ *   instance needs its own stable identity.
  * @returns {object} A task handle with named output handles.
  */
 export function task(opts) {
@@ -391,7 +408,7 @@ export function task(opts) {
 	// is unique per node, so keying on it would give every unnamed task a
 	// distinct key and defeat dedup entirely.
 	const authoredDisplay = opts.display || opts.run.name || null;
-	let key = _graphTaskKey(opts.run, inputs, outputs, cache, authoredDisplay);
+	let key = _graphTaskKey(opts.run, inputs, outputs, cache, authoredDisplay, opts.id);
 	if (!cache) key += `:instance:${_graphNextTask}`;
 	if (cache && _graphTasksByKey.has(key)) return _graphTasksByKey.get(key).publicHandle;
 
@@ -751,7 +768,7 @@ function _graphExpand(opts) {
 	// — see the note there. The `expansion ${id}` fallback stays out of it.
 	const authoredDisplay = opts.display || opts.create.name || null;
 	const key = JSON.stringify({
-		fnId: _graphFunctionIdentity(opts.create, "expand"),
+		fnId: _graphFunctionIdentity(opts.create, "expand", opts.id),
 		display: authoredDisplay,
 		inputs: Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, input.fingerprint])),
 	});

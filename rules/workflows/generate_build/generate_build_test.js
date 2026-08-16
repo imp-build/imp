@@ -27,7 +27,7 @@ describe("generate-build workflow", () => {
 			K_generate_build_test_off,
 			GENERATE_BUILD,
 			TEST_TOOL,
-			async () => {
+			async function generateBuildTestOff() {
 				called = true;
 				return {};
 			},
@@ -52,7 +52,7 @@ describe("generate-build workflow", () => {
 			K_generate_build_test_false,
 			GENERATE_BUILD,
 			TEST_TOOL,
-			async () => {
+			async function generateBuildTestFalse() {
 				called = true;
 				return {};
 			},
@@ -77,7 +77,7 @@ describe("generate-build workflow", () => {
 			K_generate_build_test_on,
 			GENERATE_BUILD,
 			TEST_TOOL,
-			async () => {
+			async function generateBuildTestOn() {
 				return {};
 			},
 			{ display: "generate build {0}", level: "info" },
