@@ -1,6 +1,5 @@
 import {
 	Toolchain,
-	product,
 	namedCache,
 	platformInfo,
 	cachePut,
@@ -13,7 +12,7 @@ import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
-	generateToolLockfile,
+	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
@@ -139,6 +138,10 @@ export function zolaToolchain(version, opts = {}) {
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({
+		version,
+		...LOCKFILE_SPEC,
+	});
 	graphToolchains.set(version, zolaGraphTool(version));
 	return toolchain;
 }
@@ -249,10 +252,6 @@ export function defaultZolaToolchain() {
 	return ZolaToolchain.default();
 }
 
-// Importing this rule provisions the pinned default. A workspace can replace
-// it by declaring another zolaToolchain(..., { default: true }).
-zolaToolchain("0.22.1", { default: true });
-
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "zola",
@@ -263,12 +262,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["0.22.1"],
 );
-product(
-	ZolaToolchain,
-	GEN_LOCKFILES,
-	ZOLA_TOOL,
-	function generateZolaLockfiles(handle) {
-		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
-	},
-	{ display: "gen lockfiles {0}", level: "info" },
-);
+
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another zolaToolchain(..., { default: true }).
+zolaToolchain("0.22.1", { default: true });

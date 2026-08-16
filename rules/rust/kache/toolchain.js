@@ -45,7 +45,7 @@ import {
 	toolchainToolSpec,
 } from "//rules/imp/toolchain";
 import {
-	generateToolLockfile,
+	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
@@ -285,6 +285,10 @@ export function kacheToolchain(version, opts = {}) {
 		{ version, unverified: opts.unverified, cacheSize: opts.cacheSize },
 		{ default: opts.default },
 	);
+	toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({
+		version,
+		...LOCKFILE_SPEC,
+	});
 	graphToolchains.set(version, kacheGraphTool(version));
 	return toolchain;
 }
@@ -469,10 +473,6 @@ export function defaultKacheToolchain() {
 	return KacheToolchain.default();
 }
 
-// Importing this rule provisions the pinned default. A workspace can replace
-// it by declaring another kacheToolchain(..., { default: true }).
-kacheToolchain("0.11.0", { default: true });
-
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "kache",
@@ -483,15 +483,10 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["0.11.0"],
 );
-product(
-	KacheToolchain,
-	GEN_LOCKFILES,
-	KACHE_TOOL,
-	function generateKacheLockfiles(handle) {
-		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
-	},
-	{ display: "gen lockfiles {0}", level: "info" },
-);
+
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another kacheToolchain(..., { default: true }).
+kacheToolchain("0.11.0", { default: true });
 
 /**
  * Adapter exposing a kache toolchain as Rust's RUSTC_WRAPPER, sharing a

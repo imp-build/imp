@@ -1,6 +1,5 @@
 import {
 	Toolchain,
-	product,
 	namedCache,
 	platformInfo,
 	cachePut,
@@ -13,7 +12,7 @@ import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin } from "//rules/imp/toolchain";
 import {
-	generateToolLockfile,
+	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
@@ -158,6 +157,30 @@ export function ruffToolchain(version, opts = {}) {
 	return graph;
 }
 
+/**
+ * The `[GEN_LOCKFILES]` root for a ruff toolchain version.
+ *
+ * This is a separate function from ruffToolchain(). ruffToolchain()
+ * returns a frozen tool() handle. A frozen object cannot hold an extra
+ * property.
+ *
+ * @param {string} [version]
+ * @param {object} [opts]
+ * @param {string} [opts.lockfile] Use this lockfile address instead of the
+ *   default. This matches ruffToolchain()'s own `opts.lockfile`.
+ * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
+ */
+export function ruffGenLockfiles(version, opts = {}) {
+	const resolved = RuffToolchain.requireVersion(version);
+	return {
+		[GEN_LOCKFILES]: graphGenerateToolLockfile({
+			version: resolved,
+			...LOCKFILE_SPEC,
+			lockfile: opts.lockfile ?? DEFAULT_LOCKFILE,
+		}),
+	};
+}
+
 /** Return the CAS-backed graph Ruff tool. */
 export function ruffGraphTool(version) {
 	const resolved = RuffToolchain.requireVersion(version);
@@ -261,17 +284,4 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		lockfile: DEFAULT_LOCKFILE,
 	},
 	["0.15.20", "0.15.21"],
-);
-product(
-	RuffToolchain,
-	GEN_LOCKFILES,
-	RUFF_TOOL,
-	function generateRuffLockfiles(handle) {
-		return generateToolLockfile({
-			handle,
-			...LOCKFILE_SPEC,
-			lockfile: handle.attrs.lockfile ?? DEFAULT_LOCKFILE,
-		});
-	},
-	{ display: "gen lockfiles {0}", level: "info" },
 );

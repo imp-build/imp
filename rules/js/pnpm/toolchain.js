@@ -1,6 +1,5 @@
 import {
 	Toolchain,
-	product,
 	namedCache,
 	platformInfo,
 	cachePut,
@@ -13,7 +12,7 @@ import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin } from "//rules/imp/toolchain";
 import {
-	generateToolLockfile,
+	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
@@ -164,6 +163,26 @@ export function pnpmToolchain(version, opts = {}) {
 }
 
 /**
+ * The `[GEN_LOCKFILES]` root for a pnpm toolchain version.
+ *
+ * This is a separate function from pnpmToolchain(). pnpmToolchain() returns a
+ * frozen tool() handle. A frozen object cannot hold an extra
+ * property.
+ *
+ * @param {string} [version]
+ * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
+ */
+export function pnpmGenLockfiles(version) {
+	const resolved = PnpmToolchain.requireVersion(version);
+	return {
+		[GEN_LOCKFILES]: graphGenerateToolLockfile({
+			version: resolved,
+			...LOCKFILE_SPEC,
+		}),
+	};
+}
+
+/**
  * Install a local pnpm toolchain directory into the named cache.
  *
  * @param {string} version
@@ -300,13 +319,4 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		lockfile: PNPM_LOCKFILE,
 	},
 	["11.13.0"],
-);
-product(
-	PnpmToolchain,
-	GEN_LOCKFILES,
-	PNPM_TOOL,
-	function generatePnpmLockfiles(handle) {
-		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
-	},
-	{ display: "gen lockfiles {0}", level: "info" },
 );

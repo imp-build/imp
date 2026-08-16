@@ -1,6 +1,5 @@
 import {
 	Toolchain,
-	product,
 	namedCache,
 	platformInfo,
 	toolName,
@@ -11,7 +10,7 @@ import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
-	generateToolLockfile,
+	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
@@ -152,6 +151,26 @@ export function odinToolchain(version, opts = {}) {
 	return tool;
 }
 
+/**
+ * The `[GEN_LOCKFILES]` root for an Odin toolchain version.
+ *
+ * This is a separate function from odinToolchain(). odinToolchain()
+ * returns a frozen tool() handle. Other rules use that handle directly
+ * through exec.tool(). A frozen object cannot hold an extra property.
+ *
+ * @param {string} [version]
+ * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
+ */
+export function odinGenLockfiles(version) {
+	const resolved = resolveOdinToolchainVersion(version);
+	return {
+		[GEN_LOCKFILES]: graphGenerateToolLockfile({
+			version: resolved,
+			...LOCKFILE_SPEC,
+		}),
+	};
+}
+
 /** Build a verified Odin compiler as an ordinary graph tool. */
 export function odinGraphTool(version) {
 	const resolved = resolveOdinToolchainVersion(version);
@@ -262,13 +281,4 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		lockfile: "//rules/odin/odin.lock",
 	},
 	["dev-2026-03"],
-);
-product(
-	OdinToolchain,
-	GEN_LOCKFILES,
-	ODIN_TOOL,
-	function generateOdinLockfiles(handle) {
-		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
-	},
-	{ display: "gen lockfiles {0}", level: "info" },
 );

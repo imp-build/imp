@@ -1,6 +1,5 @@
 import {
 	Toolchain,
-	product,
 	namedCache,
 	output,
 	platformInfo,
@@ -17,7 +16,7 @@ import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
-	generateToolLockfile,
+	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
@@ -207,6 +206,26 @@ export function uvToolchain(version, opts = {}) {
 	return graph;
 }
 
+/**
+ * The `[GEN_LOCKFILES]` root for a uv toolchain version.
+ *
+ * This is a separate function from uvToolchain(). uvToolchain() returns a
+ * frozen tool() handle. A frozen object cannot hold an extra
+ * property.
+ *
+ * @param {string} [version]
+ * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
+ */
+export function uvGenLockfiles(version) {
+	const resolved = UvToolchain.requireVersion(version);
+	return {
+		[GEN_LOCKFILES]: graphGenerateToolLockfile({
+			version: resolved,
+			...LOCKFILE_SPEC,
+		}),
+	};
+}
+
 /** Return the CAS-backed graph tool used by graph-native Python rules. */
 export function uvGraphTool(version) {
 	const resolved = UvToolchain.requireVersion(version);
@@ -380,13 +399,4 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		lockfile: UV_LOCKFILE,
 	},
 	["0.11.16"],
-);
-product(
-	UvToolchain,
-	GEN_LOCKFILES,
-	UV_TOOL,
-	function generateUvLockfiles(handle) {
-		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
-	},
-	{ display: "gen lockfiles {0}", level: "info" },
 );

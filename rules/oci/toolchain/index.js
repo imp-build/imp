@@ -2,7 +2,6 @@ import {
 	Toolchain,
 	namedCache,
 	platformInfo,
-	product,
 	tool as graphTool,
 	toolName,
 } from "imp:core";
@@ -11,7 +10,7 @@ import { extractArchive } from "//rules/imp/archive";
 import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { toolchainBin } from "//rules/imp/toolchain";
 import {
-	generateToolLockfile,
+	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
@@ -108,6 +107,26 @@ export function craneToolchain(version, opts = {}) {
 	return tool;
 }
 
+/**
+ * The `[GEN_LOCKFILES]` root for a crane toolchain version.
+ *
+ * This is a separate function from craneToolchain(). craneToolchain()
+ * returns a frozen tool() handle. A frozen object cannot hold an extra
+ * property.
+ *
+ * @param {string} [version]
+ * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
+ */
+export function craneGenLockfiles(version) {
+	const resolved = CraneToolchain.requireVersion(version);
+	return {
+		[GEN_LOCKFILES]: graphGenerateToolLockfile({
+			version: resolved,
+			...LOCKFILE_SPEC,
+		}),
+	};
+}
+
 export function resolveCraneToolchainVersion(version) {
 	return CraneToolchain.resolveVersion(version);
 }
@@ -181,13 +200,4 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		lockfile: CRANE_LOCKFILE,
 	},
 	["0.20.6"],
-);
-product(
-	CraneToolchain,
-	GEN_LOCKFILES,
-	CRANE_TOOL,
-	function generateCraneLockfiles(handle) {
-		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
-	},
-	{ display: "gen lockfiles {0}", level: "info" },
 );

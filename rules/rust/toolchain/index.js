@@ -1,7 +1,6 @@
 // Canonical Rust toolchain entrypoint.
 import {
 	Toolchain,
-	product,
 	namedCache,
 	output,
 	platformInfo,
@@ -18,7 +17,7 @@ import {
 } from "//rules/imp/lockfile";
 import { toolchainBin, toolchainDir } from "//rules/imp/toolchain";
 import {
-	generateToolLockfile,
+	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
@@ -220,6 +219,10 @@ export function rustToolchain(version, opts = {}) {
 		},
 		{ default: opts.default },
 	);
+	toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({
+		version,
+		...LOCKFILE_SPEC,
+	});
 	graphToolchains.set(version, rustGraphToolchain(version));
 	return toolchain;
 }
@@ -511,10 +514,6 @@ export function defaultRustToolchain() {
 	return RustToolchain.default();
 }
 
-// Importing this rule provisions the pinned default. A workspace can replace
-// it by declaring another rustToolchain(..., { default: true }).
-rustToolchain("1.93.0", { default: true });
-
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "rust",
@@ -525,12 +524,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["1.93.0"],
 );
-product(
-	RustToolchain,
-	GEN_LOCKFILES,
-	RUST_TOOL,
-	function generateRustLockfiles(handle) {
-		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
-	},
-	{ display: "gen lockfiles {0}", level: "info" },
-);
+
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another rustToolchain(..., { default: true }).
+rustToolchain("1.93.0", { default: true });

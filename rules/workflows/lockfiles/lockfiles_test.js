@@ -1,8 +1,15 @@
-import { describe, expect, test } from "//rules/imp/test";
+import {
+	describe,
+	expect,
+	test,
+	withFakeToolchainHost,
+} from "//rules/imp/test";
 import {
 	generateToolLockfile,
 	generateBuiltinLockfile,
 	builtinLockfiles,
+	graphGenerateToolLockfile,
+	graphGenLockfilesGoal,
 } from "//rules/workflows/lockfiles";
 // Load-bearing: pulls in every toolchain module so their
 // registerBuiltinLockfile() calls run — the registry assertions below verify
@@ -248,6 +255,76 @@ describe("generateToolLockfile", () => {
 			{ __output: "rules/widgets/widget.lock" },
 		]);
 		expect(Object.keys(lock.versions)).toEqual(["8", "9"]);
+	});
+});
+
+describe("graphGenerateToolLockfile", () => {
+	test("resolves to the same lock generateToolLockfile() would write", async () => {
+		await withFakeToolchainHost(async (host) => {
+			const root = graphGenerateToolLockfile({
+				version: "1.2.3",
+				name: "tool",
+				platforms: [{ os: "linux", arch: "x86_64" }],
+				downloadUrl: () => "https://ex/a",
+				artifactName: () => "a.tar",
+			});
+			const lock = await host.resolve(root);
+
+			expect(lock.tool).toBe("tool");
+			expect(Object.keys(lock.versions)).toEqual(["1.2.3"]);
+			expect(lock.versions["1.2.3"]["linux/x86_64"].url).toBe("https://ex/a");
+			expect(
+				host.calls.some((call) => call[0] === "download" && call[1] === "https://ex/a"),
+			).toBe(true);
+		});
+	});
+
+	test("merges with an existing lockfile read at the given address", async () => {
+		await withFakeToolchainHost(async (host) => {
+			host.addFile(
+				"//rules/widgets/widget.lock",
+				JSON.stringify({
+					tool: "widget",
+					versions: {
+						8: {
+							"linux/x86_64": { url: "u8", artifact: "a8", size: 8, sha256: "s8" },
+						},
+					},
+				}),
+			);
+			const root = graphGenerateToolLockfile({
+				version: "9",
+				name: "widget",
+				platforms: [{ os: "linux", arch: "x86_64" }],
+				downloadUrl: () => "https://ex/a",
+				artifactName: () => "a.tar",
+				lockfile: "//rules/widgets/widget.lock",
+			});
+			const lock = await host.resolve(root);
+
+			expect(Object.keys(lock.versions)).toEqual(["8", "9"]);
+		});
+	});
+});
+
+describe("graphGenLockfilesGoal", () => {
+	test("accepts resolved generateToolLockfile()-shaped roots", () => {
+		expect(() =>
+			graphGenLockfilesGoal([
+				{
+					address: "//workspace:tool",
+					result: { tool: "tool", versions: { "1.2.3": {} } },
+				},
+			]),
+		).not.toThrow();
+	});
+
+	test("rejects a root that isn't a generateToolLockfile() result", () => {
+		expect(() =>
+			graphGenLockfilesGoal([
+				{ address: "//workspace:tool", result: { ok: true } },
+			]),
+		).toThrow("must resolve to a generateToolLockfile() result");
 	});
 });
 
