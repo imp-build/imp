@@ -34,7 +34,7 @@ import {
 } from "//rules/python/uv_toolchain";
 import { pythonResolve, pythonResolveSyncArgs } from "//rules/python/resolve";
 
-import { toolSpec } from "//rules/imp/native-tool";
+import { nativeToolSpec } from "//rules/imp/native-tool";
 
 let default_python_toolchain = null;
 let default_python_project = null;
@@ -198,8 +198,7 @@ function sourceRunDescriptor(spec, file) {
  * @param {object} [opts.project] Deprecated alias for `resolve`, kept for the
  *   previous single-default-project source-run API; exclusive with `resolve`.
  * @param {Array} [opts.deps=[]] Extra tool providers made available on PATH
- *   inside each source's run: nativeTool() specifications or legacy target
- *   providers whose kind registers a `TOOL` product.
+ *   inside each source's run: nativeTool() specifications.
  * @returns {object} An exportable object whose `[RUN]` root expands to one
  *   selectable child per discovered file.
  */
@@ -282,7 +281,7 @@ export async function pythonSourceRunSpec(
 	const venv = project ? `${project}/.venv` : "";
 	const uvToolSpec = await resolveUvTool(uvVersion);
 	const uvCacheToolSpec = uvCacheDirTool();
-	const depToolSpecs = await group(deps.map(toolSpec));
+	const depToolSpecs = await group(deps.map(nativeToolSpec));
 	const envExports = sandboxRootEnvExports(uvCacheDirEnv());
 	const script =
 		`file=$1; root=$2; project=$3; venv=$4; version=$5; shift 5; ` +

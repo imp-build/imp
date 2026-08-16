@@ -1,11 +1,5 @@
 // Canonical public entrypoint for serializable host-PATH tool providers.
-import {
-	env,
-	memo,
-	nativeToolArtifact,
-	productFor,
-	productName,
-} from "imp:core";
+import { env, memo, nativeToolArtifact } from "imp:core";
 
 const NATIVE_TOOL_SPEC = "native-tool";
 
@@ -59,17 +53,4 @@ export function nativeToolSpec(spec) {
 		throw new Error("nativeToolSpec(spec) expects a nativeTool() specification");
 	}
 	return resolveNativeTool(spec.name, env("PATH"));
-}
-
-// Retained for target-based providers that have not migrated away from the
-// generic product role. Native tools themselves no longer register a product.
-export const TOOL = productName("tool");
-
-/**
- * Resolve either a serializable nativeTool() specification or a legacy target
- * provider implementing the generic TOOL product.
- */
-export function toolSpec(provider) {
-	if (isNativeToolSpec(provider)) return nativeToolSpec(provider);
-	return productFor(provider, TOOL);
 }
