@@ -1,5 +1,5 @@
-// The "gen-lockfiles" goal and the shared machinery its per-toolchain products
-// reuse.
+// The "gen-lockfiles" goal. This file has the shared code that its
+// per-toolchain graph roots use.
 //
 // A tool lockfile pins, for every locked version and every platform a
 // toolchain publishes a release for, the download URL, artifact filename,
@@ -17,12 +17,22 @@
 // root — only useful for one-off/test lock generation, not for toolchains
 // meant to ship a pinned lockfile.
 //
-// Each toolchain rule module registers its own
-// `product(SomeToolchain, GEN_LOCKFILES, ...)` by calling
-// generateToolLockfile() with its pure URL/artifact helpers and its published
-// platform list. The goal carries no callback, so host dispatch runs that
-// product for every selected toolchain target. Invoke as
-// `imp goal gen-lockfiles //...`.
+// Each toolchain rule module adds a `[GEN_LOCKFILES]` graph root to the
+// value its declare function returns. graphGenerateToolLockfile() below
+// builds this root, using the toolchain's own URL/artifact helpers and its
+// list of published platforms.
+//
+// `imp goal gen-lockfiles //some:address` selects this root by address. The
+// toolchain declaration must be exported, or the goal cannot find it.
+//
+// This repo's own 16 built-in toolchains do not need that export.
+// gen-builtin-lockfiles below already manages their locks: to add or remove
+// a version, edit the version list in code. No address selection is needed.
+//
+// `[GEN_LOCKFILES]` matters for a toolchain that a caller declares and
+// exports on its own — a workspace's own `rustToolchain(...)` or
+// `gccToolchain(...)` call, or a third-party rule that calls
+// generateToolLockfile() directly.
 //
 // Separately, each toolchain module calls registerBuiltinLockfile() with the
 // version list its *shipped* lockfile should pin. Those checked-in locks are
@@ -33,6 +43,8 @@
 
 import {
 	goal,
+	goalError,
+	logInfo,
 	run,
 	output,
 	output_path,
@@ -40,12 +52,71 @@ import {
 	sha256,
 	file_size,
 	readAddressedFile,
+	task,
 } from "imp:core";
 import { lockfileAddressToPath } from "//rules/imp/lockfile";
 
-/** Token for the per-toolchain lockfile-generation product; toolchain rule
- * modules register it via `product(SomeToolchain, GEN_LOCKFILES, ...)`. */
-export const GEN_LOCKFILES = goal("gen-lockfiles");
+/**
+ * Declare a toolchain's lockfile regeneration as a selectable graph root.
+ * Takes the same opts as generateToolLockfile(), but with a plain `version`
+ * string instead of `handle` — this function has no target to read it from.
+ *
+ * @param {object} opts
+ * @param {string} opts.version
+ * @param {string} opts.name
+ * @param {Array<{ os: string, arch: string }>} opts.platforms
+ * @param {(version: string, plat: object) => string} opts.downloadUrl
+ * @param {(version: string, plat: object) => string} opts.artifactName
+ * @param {string} [opts.lockfile]
+ * @returns {object} A value handle carrying the written lock's contents.
+ */
+export function graphGenerateToolLockfile({
+	version,
+	name,
+	platforms,
+	downloadUrl,
+	artifactName,
+	lockfile,
+}) {
+	return task({
+		display: `gen lockfile ${name} ${version}`,
+		// This task fetches from the network and reads live workspace
+		// state. It is impure by design, so it is not cached.
+		cache: false,
+		inputs: { version, name, platforms, lockfile: lockfile ?? null },
+		outputs: { result: output.value() },
+		async run(_exec, inputs) {
+			return {
+				result: await generateToolLockfile({
+					handle: { attrs: { version: inputs.version } },
+					name,
+					platforms,
+					downloadUrl,
+					artifactName,
+					lockfile: inputs.lockfile ?? undefined,
+				}),
+			};
+		},
+	}).outputs.result;
+}
+
+/** Check each selected [GEN_LOCKFILES] root, then log the toolchains it locked. */
+export function graphGenLockfilesGoal(roots) {
+	const names = [];
+	for (const { address, result } of roots) {
+		if (!result || typeof result.tool !== "string" || !result.versions) {
+			throw goalError(
+				`${address}: gen-lockfiles graph root must resolve to a generateToolLockfile() result`,
+			);
+		}
+		names.push(result.tool);
+	}
+	logInfo(`gen-lockfiles: regenerated ${names.length} lockfile(s): ${names.join(", ")}`);
+}
+
+export const GEN_LOCKFILES = goal("gen-lockfiles", undefined, {
+	graph: graphGenLockfilesGoal,
+});
 
 const defaultHost = {
 	download,
@@ -110,7 +181,9 @@ function existingLockedVersions(host, address, name) {
  * re-locking an existing version replaces that version's entries.
  *
  * @param {object} opts
- * @param {object} opts.handle Toolchain target handle (reads `attrs.version`).
+ * @param {object} opts.handle An object with `attrs.version` set. This can
+ *   be a legacy toolchain target handle, or a plain `{ attrs: { version } }`
+ *   value (see graphGenerateToolLockfile()).
  * @param {string} opts.name Tool name, also the lockfile stem, e.g. "odin".
  * @param {Array<{ os: string, arch: string }>} opts.platforms Published platforms.
  * @param {(version: string, plat: object) => string} opts.downloadUrl
@@ -199,23 +272,20 @@ export function builtinLockfiles() {
 }
 
 /**
- * Register a toolchain's builtin (checked-in) lockfile and return the spec
- * for the caller's own `product(SomeToolchain, GEN_LOCKFILES, tool, ..., { display: "gen lockfiles {0}", level: "info" })`
- * registration — every toolchain rule module otherwise repeats the
- * `registerBuiltinLockfile({ ...spec, versions })` line verbatim.
+ * Register a toolchain's builtin (checked-in) lockfile. Return the spec for
+ * the caller's own
+ * `toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({ version, ...spec })`
+ * assignment. Without this helper, every toolchain module would repeat the
+ * `registerBuiltinLockfile({ ...spec, versions })` line.
  *
- * Deliberately does *not* also register the `gen-lockfiles` product itself:
- * module attribution for capability docs is derived by walking the JS call
- * stack back to the first `//rules/` frame (see `product()`'s docs), so
- * `product()` must still be called directly from each toolchain's own module
- * — routing it through this shared helper would misattribute every
- * toolchain's registration to `//rules/workflows` instead of its own
- * language group.
+ * This function does not build the `[GEN_LOCKFILES]` root itself. Each
+ * toolchain's own module must still do that call, next to its declaration
+ * function.
  *
  * @param {object} spec Same shape as generateToolLockfile's opts minus
  *   `handle`.
  * @param {string[]} versions Versions the shipped lockfile should pin.
- * @returns {object} `spec`, for the caller's own `generateToolLockfile` call.
+ * @returns {object} `spec`, for the caller's own `graphGenerateToolLockfile` call.
  */
 export function registerToolchainLockfile(spec, versions) {
 	registerBuiltinLockfile({ ...spec, versions });

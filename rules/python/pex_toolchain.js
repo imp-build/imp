@@ -1,6 +1,5 @@
 import {
 	Toolchain,
-	product,
 	namedCache,
 	output,
 	platformInfo,
@@ -15,7 +14,7 @@ import { nativeTool } from "//rules/imp/native-tool";
 import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
-	generateToolLockfile,
+	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
@@ -114,6 +113,26 @@ export function pexToolchain(version, opts = {}) {
 	const graph = pexGraphTool(version);
 	graphToolchains.set(version, graph);
 	return graph;
+}
+
+/**
+ * The `[GEN_LOCKFILES]` root for a pex toolchain version.
+ *
+ * This is a separate function from pexToolchain(). pexToolchain() returns a
+ * frozen tool() handle. A frozen object cannot hold an extra
+ * property.
+ *
+ * @param {string} [version]
+ * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
+ */
+export function pexGenLockfiles(version) {
+	const resolved = PexToolchain.requireVersion(version);
+	return {
+		[GEN_LOCKFILES]: graphGenerateToolLockfile({
+			version: resolved,
+			...LOCKFILE_SPEC,
+		}),
+	};
 }
 
 /** Return the CAS-backed graph PEX tool. */
@@ -307,13 +326,4 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		lockfile: PEX_LOCKFILE,
 	},
 	["2.97.1"],
-);
-product(
-	PexToolchain,
-	GEN_LOCKFILES,
-	PEX_TOOL,
-	function generatePexLockfiles(handle) {
-		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
-	},
-	{ display: "gen lockfiles {0}", level: "info" },
 );

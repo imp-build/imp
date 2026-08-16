@@ -332,6 +332,8 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		download: globalThis.__host_download,
 		extract: globalThis.__host_extract,
 		run: globalThis.__host_run,
+		sha256: globalThis.__host_sha256,
+		fileSize: globalThis.__host_file_size,
 		nativeToolArtifact: globalThis.__host_native_tool_artifact,
 		graphToolDescriptor: globalThis.__host_graph_tool_descriptor,
 		workerStart: globalThis.__host_worker_start,
@@ -437,6 +439,14 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		calls.push(["download", url]);
 		return "/downloads/odin-release";
 	};
+	globalThis.__host_sha256 = (path) => {
+		calls.push(["sha256", path]);
+		return `sha256:${path}`;
+	};
+	globalThis.__host_file_size = (path) => {
+		calls.push(["fileSize", path]);
+		return path.length;
+	};
 	globalThis.__host_extract = (archive, dest, format, stripComponents) => {
 		calls.push(["extract", archive, dest, format, stripComponents]);
 	};
@@ -536,6 +546,8 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		globalThis.__host_download = originals.download;
 		globalThis.__host_extract = originals.extract;
 		globalThis.__host_run = originals.run;
+		globalThis.__host_sha256 = originals.sha256;
+		globalThis.__host_file_size = originals.fileSize;
 		globalThis.__host_native_tool_artifact = originals.nativeToolArtifact;
 		globalThis.__host_graph_tool_descriptor = originals.graphToolDescriptor;
 		globalThis.__host_worker_start = originals.workerStart;

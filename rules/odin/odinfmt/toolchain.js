@@ -1,6 +1,5 @@
 import {
 	Toolchain,
-	product,
 	namedCache,
 	platformInfo,
 	toolName,
@@ -15,7 +14,7 @@ import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
-	generateToolLockfile,
+	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
@@ -210,6 +209,27 @@ export function odinfmtToolchain(version, opts = {}) {
 }
 
 /**
+ * The `[GEN_LOCKFILES]` root for an odinfmt toolchain version.
+ *
+ * This is a separate function from odinfmtToolchain(). odinfmtToolchain()
+ * returns a frozen tool() handle. A frozen object cannot hold an extra
+ * property. If you omit `version`, this function uses the workspace's
+ * default Odin toolchain version, same as odinfmtToolchain() does.
+ *
+ * @param {string} [version]
+ * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
+ */
+export function odinfmtGenLockfiles(version) {
+	const resolved = resolveOdinToolchainVersion(version);
+	return {
+		[GEN_LOCKFILES]: graphGenerateToolLockfile({
+			version: resolved,
+			...LOCKFILE_SPEC,
+		}),
+	};
+}
+
+/**
  * Return the currently configured default odinfmt toolchain target handle.
  *
  * @returns {object|null}
@@ -234,21 +254,4 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		lockfile: ODINFMT_LOCKFILE,
 	},
 	["dev-2026-03"],
-);
-// odinfmt's version tracks the workspace's default Odin toolchain when
-// declared without one of its own (the common case), so the handle's raw
-// attrs.version — possibly null — must be resolved before locking.
-product(
-	OdinfmtToolchain,
-	GEN_LOCKFILES,
-	ODINFMT_TOOL,
-	function generateOdinfmtLockfiles(handle) {
-		return generateToolLockfile({
-			handle: {
-				attrs: { version: resolveOdinToolchainVersion(handle.attrs.version) },
-			},
-			...LOCKFILE_SPEC,
-		});
-	},
-	{ display: "gen lockfiles {0}", level: "info" },
 );

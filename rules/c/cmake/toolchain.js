@@ -1,6 +1,5 @@
 import {
 	Toolchain,
-	product,
 	namedCache,
 	output,
 	platformInfo,
@@ -16,7 +15,7 @@ import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { extractArchiveTools } from "//rules/imp/archive";
 import { toolchainBin } from "//rules/imp/toolchain";
 import {
-	generateToolLockfile,
+	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
@@ -141,6 +140,10 @@ export function cmakeToolchain(version, opts = {}) {
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({
+		version,
+		...LOCKFILE_SPEC,
+	});
 	graphToolchains.set(version, cmakeGraphTool(version));
 	return toolchain;
 }
@@ -354,10 +357,6 @@ export function defaultCmakeToolchainVersion() {
 	return CmakeToolchain.defaultVersion();
 }
 
-// Importing this rule provisions the pinned default. A workspace can replace
-// it by declaring another cmakeToolchain(..., { default: true }).
-cmakeToolchain("3.31.0", { default: true });
-
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "cmake",
@@ -368,12 +367,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["3.31.0"],
 );
-product(
-	CmakeToolchain,
-	GEN_LOCKFILES,
-	CMAKE_TOOL,
-	function generateCmakeLockfiles(handle) {
-		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
-	},
-	{ display: "gen lockfiles {0}", level: "info" },
-);
+
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another cmakeToolchain(..., { default: true }).
+cmakeToolchain("3.31.0", { default: true });

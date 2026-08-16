@@ -1,6 +1,5 @@
 import {
 	Toolchain,
-	product,
 	namedCache,
 	output,
 	platformInfo,
@@ -18,7 +17,7 @@ import {
 } from "//rules/imp/lockfile";
 import { toolchainBin } from "//rules/imp/toolchain";
 import {
-	generateToolLockfile,
+	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
@@ -205,6 +204,10 @@ export function zigToolchain(version, opts = {}) {
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({
+		version,
+		...LOCKFILE_SPEC,
+	});
 	graphToolchains.set(version, zigGraphTool(version));
 	return toolchain;
 }
@@ -458,10 +461,6 @@ export function defaultZigToolchainVersion() {
 	return ZigToolchain.defaultVersion();
 }
 
-// Importing this rule provisions the pinned default. A workspace can replace
-// it by declaring another zigToolchain(..., { default: true }).
-zigToolchain("0.16.0", { default: true });
-
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "zig",
@@ -472,12 +471,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["0.16.0"],
 );
-product(
-	ZigToolchain,
-	GEN_LOCKFILES,
-	ZIG_TOOL,
-	function generateZigLockfiles(handle) {
-		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
-	},
-	{ display: "gen lockfiles {0}", level: "info" },
-);
+
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another zigToolchain(..., { default: true }).
+zigToolchain("0.16.0", { default: true });

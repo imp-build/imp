@@ -15,7 +15,7 @@ import { nativeTool } from "//rules/imp/native-tool";
 import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
-	generateToolLockfile,
+	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
@@ -136,6 +136,10 @@ export function moldToolchain(version, opts = {}) {
 		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({
+		version,
+		...LOCKFILE_SPEC,
+	});
 	graphToolchains.set(version, moldGraphTool(version));
 	return toolchain;
 }
@@ -303,10 +307,6 @@ export function defaultMoldToolchain() {
 	return MoldToolchain.default();
 }
 
-// Importing this rule provisions the pinned default. A workspace can replace
-// it by declaring another moldToolchain(..., { default: true }).
-moldToolchain("2.41.0", { default: true });
-
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
 		name: "mold",
@@ -317,15 +317,10 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	},
 	["2.41.0"],
 );
-product(
-	MoldToolchain,
-	GEN_LOCKFILES,
-	MOLD_TOOL,
-	function generateMoldLockfiles(handle) {
-		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
-	},
-	{ display: "gen lockfiles {0}", level: "info" },
-);
+
+// Importing this rule provisions the pinned default. A workspace can replace
+// it by declaring another moldToolchain(..., { default: true }).
+moldToolchain("2.41.0", { default: true });
 
 /**
  * Adapter exposing a mold toolchain as Odin's `-linker:mold` linker role.

@@ -103,9 +103,17 @@ Derive toolchain handles while the graph is being constructed, never inside a
 `run()` body: `task()` may not be called once execution has started.
 
 The separate `Toolchain` class described in
-[the workspace file guide](../workspace-file/) is what backs `imp @tool`
-passthrough and lockfile generation. It is not how a rule package gets a
-compiler for its own tasks.
+[the workspace file guide](../workspace-file/) backs `imp @tool` passthrough.
+It is not how a rule package gets a compiler for its own tasks.
+
+Lockfile generation is a separate mechanism again. A toolchain's declare
+function attaches a `[GEN_LOCKFILES]` graph root to the value it returns. For
+a toolchain like Odin, whose declare function returns a bare `tool()` handle,
+the root instead comes from a sibling function, `odinGenLockfiles(version)`.
+`imp goal gen-lockfiles //some:address` needs that root exported to find it.
+This repo's own built-in toolchains do not need an export for this: the
+`gen-builtin-lockfiles` goal already owns their lock files, with no
+selection step at all.
 
 ## Configuration
 

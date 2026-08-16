@@ -1,6 +1,5 @@
 import {
 	Toolchain,
-	product,
 	namedCache,
 	output,
 	platformInfo,
@@ -15,7 +14,7 @@ import { nativeTool } from "//rules/imp/native-tool";
 import { toolchainBin } from "//rules/imp/toolchain";
 import { downloadToolArtifact } from "//rules/imp/lockfile";
 import {
-	generateToolLockfile,
+	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
@@ -148,6 +147,26 @@ export function biomeToolchain(version, opts = {}) {
 	const graph = biomeGraphTool(version);
 	graphToolchains.set(version, graph);
 	return graph;
+}
+
+/**
+ * The `[GEN_LOCKFILES]` root for a biome toolchain version.
+ *
+ * This is a separate function from biomeToolchain(). biomeToolchain() returns a
+ * frozen tool() handle. A frozen object cannot hold an extra
+ * property.
+ *
+ * @param {string} [version]
+ * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
+ */
+export function biomeGenLockfiles(version) {
+	const resolved = BiomeToolchain.requireVersion(version);
+	return {
+		[GEN_LOCKFILES]: graphGenerateToolLockfile({
+			version: resolved,
+			...LOCKFILE_SPEC,
+		}),
+	};
 }
 
 /**
@@ -289,13 +308,4 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		lockfile: BIOME_LOCKFILE,
 	},
 	["2.5.4"],
-);
-product(
-	BiomeToolchain,
-	GEN_LOCKFILES,
-	BIOME_TOOL,
-	function generateBiomeLockfiles(handle) {
-		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
-	},
-	{ display: "gen lockfiles {0}", level: "info" },
 );

@@ -1,6 +1,5 @@
 import {
 	Toolchain,
-	product,
 	namedCache,
 	platformInfo,
 	cachePut,
@@ -13,7 +12,7 @@ import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
-	generateToolLockfile,
+	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
@@ -144,6 +143,26 @@ export function nodeToolchain(version, opts = {}) {
 	const graph = nodeGraphTool(version);
 	graphToolchains.set(version, graph);
 	return graph;
+}
+
+/**
+ * The `[GEN_LOCKFILES]` root for a node toolchain version.
+ *
+ * This is a separate function from nodeToolchain(). nodeToolchain() returns a
+ * frozen tool() handle. A frozen object cannot hold an extra
+ * property.
+ *
+ * @param {string} [version]
+ * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
+ */
+export function nodeGenLockfiles(version) {
+	const resolved = NodeToolchain.requireVersion(version);
+	return {
+		[GEN_LOCKFILES]: graphGenerateToolLockfile({
+			version: resolved,
+			...LOCKFILE_SPEC,
+		}),
+	};
 }
 
 /**
@@ -278,13 +297,4 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		lockfile: NODE_LOCKFILE,
 	},
 	["22.11.0"],
-);
-product(
-	NodeToolchain,
-	GEN_LOCKFILES,
-	NODE_TOOL,
-	function generateNodeLockfiles(handle) {
-		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
-	},
-	{ display: "gen lockfiles {0}", level: "info" },
 );
