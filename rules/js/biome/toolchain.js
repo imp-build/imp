@@ -294,6 +294,8 @@ product(
 	BiomeToolchain,
 	GEN_LOCKFILES,
 	BIOME_TOOL,
-	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	function generateBiomeLockfiles(handle) {
+		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
+	},
 	{ display: "gen lockfiles {0}", level: "info" },
 );

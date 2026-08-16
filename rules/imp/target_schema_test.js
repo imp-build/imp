@@ -21,7 +21,7 @@ class Widget extends Target {
 		super({ kind: Widget.kind, attrs });
 	}
 }
-product(Widget, BUILD, WIDGET_TOOL, () => {}, {
+product(Widget, BUILD, WIDGET_TOOL, function buildWidget() {}, {
 	display: "build {0}",
 	level: "info",
 });
@@ -72,7 +72,7 @@ class BaseGadget extends Target {
 		super({ kind: new.target.kind, attrs });
 	}
 }
-product(BaseGadget, BUILD, BASE_GADGET_TOOL, () => {}, {
+product(BaseGadget, BUILD, BASE_GADGET_TOOL, function buildBaseGadget() {}, {
 	display: "build {0}",
 	level: "info",
 });
@@ -86,7 +86,7 @@ class Gadget extends BaseGadget {
 		version: field.int({ required: true }),
 	};
 }
-product(Gadget, BUILD, GADGET_TOOL, () => {}, {
+product(Gadget, BUILD, GADGET_TOOL, function buildGadget() {}, {
 	display: "build {0}",
 	level: "info",
 });

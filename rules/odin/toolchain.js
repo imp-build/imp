@@ -267,6 +267,8 @@ product(
 	OdinToolchain,
 	GEN_LOCKFILES,
 	ODIN_TOOL,
-	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	function generateOdinLockfiles(handle) {
+		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
+	},
 	{ display: "gen lockfiles {0}", level: "info" },
 );

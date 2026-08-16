@@ -547,10 +547,21 @@ mod tests {
 
     #[test]
     fn trace_key_matches_js_field_order_and_shape() {
+        // Old on-disk shape (module:line:col) — still a valid fn_id to key on.
         let key = trace_key("cargoBuild@rules/rust/index.js:503:2", "//app:app").unwrap();
         assert_eq!(
             key,
             r#"{"fn_id":"cargoBuild@rules/rust/index.js:503:2","args_digest":"[{\"__imp_ref_addr\":\"//app:app\"}]"}"#
+        );
+    }
+
+    #[test]
+    fn trace_key_matches_current_declared_name_shape() {
+        // Current shape: _stableFunctionIdentity mints "<name>@<module>", no line:col.
+        let key = trace_key("cargoBuild@rules/rust/index.js", "//app:app").unwrap();
+        assert_eq!(
+            key,
+            r#"{"fn_id":"cargoBuild@rules/rust/index.js","args_digest":"[{\"__imp_ref_addr\":\"//app:app\"}]"}"#
         );
     }
 

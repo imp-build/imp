@@ -5420,9 +5420,13 @@ pub(crate) fn scoped_configuration_digest(
     digest_json(&scoped)
 }
 
-/// `<module>:<line>:<col>` (as minted by `_stable_function_id`) → the bare
-/// `<module>` portion. Shared by `__host_module_digest` and
-/// `trace_changed::directly_stale`'s `module_digest` recheck.
+/// The bare `<module>` portion of a call-site site string. `_stableFunctionIdentity`
+/// now mints ids as plain `<name>@<module>` (no line:col), but old on-disk
+/// memo-trace records may still carry the previous `<name>@<module>:<line>:<col>`
+/// shape, so this strips a trailing `:<line>:<col>` only when present — a
+/// module string with no trailing digits passes through unchanged. Shared by
+/// `__host_module_digest` and `trace_changed::directly_stale`'s
+/// `module_digest` recheck.
 pub(crate) fn module_name_from_site(site: &str) -> &str {
     site.rsplit_once(':')
         .and_then(|(prefix, suffix)| {
@@ -8045,6 +8049,28 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     #[test]
+    fn module_name_from_site_strips_line_col_only_when_present() {
+        // Current shape: _stableFunctionIdentity mints ids with no line:col.
+        assert_eq!(
+            module_name_from_site("rules/rust/index.js"),
+            "rules/rust/index.js"
+        );
+        assert_eq!(module_name_from_site("//rules/example"), "//rules/example");
+        // Old on-disk shape, still supported for existing memo-trace records.
+        assert_eq!(
+            module_name_from_site("rules/rust/index.js:503:2"),
+            "rules/rust/index.js"
+        );
+        assert_eq!(
+            module_name_from_site("//rules/example:10:2"),
+            "//rules/example"
+        );
+        // A single trailing ':<digits>' segment is stripped too (treated as
+        // a lone col with no line to also strip).
+        assert_eq!(module_name_from_site("m.js:1"), "m.js");
+    }
+
+    #[test]
     fn address_package_of_handles_named_and_default_exports() {
         assert_eq!(address_package_of("//tools:scripts"), "tools");
         assert_eq!(address_package_of("//a/b/c:name"), "a/b/c");
@@ -10555,7 +10581,7 @@ import "//rules/rust/clippy";
 import { goal, product, targetKind, toolName } from "imp:core";
 const TEST = goal("test");
 const K_rust_test = targetKind("rust_test");
-product(K_rust_test, TEST, toolName("rust"), async () => ({}));
+product(K_rust_test, TEST, toolName("rust"), async function rustTest() { return {}; });
 "#,
         );
         write_file(
@@ -10564,7 +10590,7 @@ product(K_rust_test, TEST, toolName("rust"), async () => ({}));
 import { goal, product, targetKind, toolName } from "imp:core";
 const LINT = goal("lint");
 const K_cargo_package = targetKind("cargo-package");
-product(K_cargo_package, LINT, toolName("clippy"), async () => ({}));
+product(K_cargo_package, LINT, toolName("clippy"), async function cargoClippy() { return {}; });
 "#,
         );
 
@@ -10624,7 +10650,7 @@ import { goal, targetKind, toolName } from "imp:core";
 const BUILD = goal("build");
 import { registerViaHelper } from "//rules/shared/helper";
 const K_rust_toolchain = targetKind("rust-toolchain");
-registerViaHelper(K_rust_toolchain, BUILD, toolName("rust"), async () => ({}));
+registerViaHelper(K_rust_toolchain, BUILD, toolName("rust"), async function rustToolchainBin() { return {}; });
 "#,
         );
 
@@ -10677,7 +10703,7 @@ const BUILD = goal("build");
 import { registerBuiltinSpec } from "//rules/shared/helper";
 const K_rust_toolchain = targetKind("rust-toolchain");
 const spec = registerBuiltinSpec({ name: "rust" });
-product(K_rust_toolchain, BUILD, toolName("rust"), async () => spec);
+product(K_rust_toolchain, BUILD, toolName("rust"), async function rustToolchainBin() { return spec; });
 "#,
         );
 

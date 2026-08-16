@@ -242,12 +242,13 @@ product(
 	OdinfmtToolchain,
 	GEN_LOCKFILES,
 	ODINFMT_TOOL,
-	(handle) =>
-		generateToolLockfile({
+	function generateOdinfmtLockfiles(handle) {
+		return generateToolLockfile({
 			handle: {
 				attrs: { version: resolveOdinToolchainVersion(handle.attrs.version) },
 			},
 			...LOCKFILE_SPEC,
-		}),
+		});
+	},
 	{ display: "gen lockfiles {0}", level: "info" },
 );

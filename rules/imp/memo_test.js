@@ -68,17 +68,30 @@ describe("memo", () => {
 		expect(calls).toBe(1);
 	});
 
-	test("distinct function references have independent caches", async () => {
+	test("distinct function references sharing a name collide without an explicit id", () => {
+		expect(() => {
+			memo(async function f() {});
+			memo(async function f() {});
+		}).toThrow("is already used by a different function");
+	});
+
+	test("an explicit id lets distinct function references have independent caches", async () => {
 		let callsA = 0,
 			callsB = 0;
-		const fa = memo(async function f(x) {
-			callsA++;
-			return x;
-		});
-		const fb = memo(async function f(x) {
-			callsB++;
-			return x;
-		});
+		const fa = memo(
+			async function f(x) {
+				callsA++;
+				return x;
+			},
+			{ id: "f-a" },
+		);
+		const fb = memo(
+			async function f(x) {
+				callsB++;
+				return x;
+			},
+			{ id: "f-b" },
+		);
 
 		await fa(1);
 		await fb(1);
@@ -241,7 +254,7 @@ describe("memo", () => {
 	test("rejects invalid display metadata", () => {
 		let invalidLevel = false;
 		try {
-			memo(async function invalid() {}, {
+			memo(async function invalidLevel_() {}, {
 				display: "invalid",
 				level: "verbose",
 			});
@@ -252,7 +265,7 @@ describe("memo", () => {
 
 		let invalidTemplate = false;
 		try {
-			memo(async function invalid() {}, {
+			memo(async function invalidTemplate_() {}, {
 				display: "invalid {name}",
 				level: "debug",
 			});

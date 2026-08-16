@@ -186,6 +186,8 @@ product(
 	CraneToolchain,
 	GEN_LOCKFILES,
 	CRANE_TOOL,
-	(handle) => generateToolLockfile({ handle, ...LOCKFILE_SPEC }),
+	function generateCraneLockfiles(handle) {
+		return generateToolLockfile({ handle, ...LOCKFILE_SPEC });
+	},
 	{ display: "gen lockfiles {0}", level: "info" },
 );
