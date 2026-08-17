@@ -92,13 +92,12 @@ export function odinSupportedPlatforms() {
 export class OdinToolchain extends Toolchain {
 	static kind = "odin-toolchain";
 	static tool = ODIN_TOOL;
-	constructor({ version, linker, unverified }, opts) {
+	constructor({ version, unverified }, opts) {
 		super(
 			{
 				kind: OdinToolchain.kind,
 				attrs: {
 					version,
-					...(linker ? { linker } : {}),
 					...(unverified ? { unverified } : {}),
 				},
 			},
@@ -118,6 +117,13 @@ export class OdinToolchain extends Toolchain {
 // toolchain target at all, so a lookup can still miss.
 let graphToolchains = new Map();
 
+// odinToolchain()'s own return value is a frozen tool() handle (see
+// odinGenLockfiles()'s doc comment — a frozen object can't carry an extra
+// property), so opts.linker can't ride along on it. Tracked here instead,
+// keyed by version, and read back via odinLinkerFor()/
+// defaultOdinLinkerToolchain() — mirrors graphToolchains above.
+let odinLinkers = new Map();
+
 function graphToolFor(version) {
 	return graphToolchains.get(version) ?? odinGraphTool(version);
 }
@@ -125,6 +131,7 @@ function graphToolFor(version) {
 export function __resetOdinToolchainStateForTest() {
 	OdinToolchain.clearDefault();
 	graphToolchains = new Map();
+	odinLinkers = new Map();
 }
 
 /**
@@ -136,19 +143,43 @@ export function __resetOdinToolchainStateForTest() {
  * @param {boolean} [opts.default=false] Set as the default toolchain.
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
- * @param {object} [opts.linker] Linker toolchain handle (e.g. moldToolchain())
- *   registering an "odin-linker" product. If omitted, Odin links with
- *   whatever `ld` the gcc toolchain's clang wrapper selects by default.
- * @returns {object} Target handle for this Odin toolchain.
+ * @param {object} [opts.linker] Graph-native linker toolchain handle (e.g.
+ *   moldGraphToolchain()'s `{ tool, version }` shape, //rules/c/mold) Odin
+ *   should use instead of the gcc toolchain's default `ld`. Read back via
+ *   odinLinkerFor()/defaultOdinLinkerToolchain().
+ * @returns {object} Tool handle for this Odin toolchain.
  */
 export function odinToolchain(version, opts = {}) {
 	new OdinToolchain(
-		{ version, linker: opts.linker, unverified: opts.unverified },
+		{ version, unverified: opts.unverified },
 		{ default: opts.default },
 	);
 	const tool = odinGraphTool(version);
 	graphToolchains.set(version, tool);
+	if (opts.linker) odinLinkers.set(version, opts.linker);
 	return tool;
+}
+
+/**
+ * Return the graph-native linker handle declared for an Odin toolchain
+ * version via odinToolchain(version, { linker }), or null if none was set.
+ *
+ * @param {string} version
+ * @returns {object|null}
+ */
+export function odinLinkerFor(version) {
+	return odinLinkers.get(version) ?? null;
+}
+
+/**
+ * Return the linker handle declared for the currently configured default
+ * Odin toolchain version, or null if none is declared or no linker was set.
+ *
+ * @returns {object|null}
+ */
+export function defaultOdinLinkerToolchain() {
+	const version = OdinToolchain.defaultVersion();
+	return version ? odinLinkerFor(version) : null;
 }
 
 /**

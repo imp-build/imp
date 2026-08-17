@@ -5,6 +5,7 @@ import { RUN } from "//rules/workflows/run";
 import { TEST } from "//rules/workflows/test";
 import { ccLibrary } from "//rules/c";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
+import { defaultMoldGraphToolchain } from "//rules/c/mold";
 import { describe, expect, test } from "//rules/imp/test";
 import {
 	odinExtraLinkerFlagsArgs,
@@ -13,6 +14,10 @@ import {
 	odinPackage,
 	odinTestPackage,
 } from "//rules/odin";
+import {
+	__resetOdinToolchainStateForTest,
+	odinToolchain,
+} from "//rules/odin/toolchain";
 
 describe("Odin graph rules", () => {
 	test("packages expose immutable graph roots", () => {

@@ -55,13 +55,16 @@ import { registerBuildGenerator } from "//rules/workflows/generate_build";
 
 import {
 	defaultOdinToolchain,
+	defaultOdinToolchainVersion,
 	odinGraphTool,
+	odinLinkerFor,
 	resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
 
 import { nativeTool } from "//rules/imp/native-tool";
 
 import { gccGraphTool, defaultGccToolchainVersion } from "//rules/c/gcc";
+import { moldOdinLinkerEnv } from "//rules/c/mold";
 
 import { ODIN_TOOL } from "//rules/odin/toolchain";
 
@@ -887,13 +890,28 @@ function graphPackageExpansion(spec) {
 	return spec.expansion;
 }
 
+// odinToolchain(version, { linker }) records the linker against the
+// *declared* version; a package's spec.version is only set when its own
+// toolchain option was a bare version string (createGraphPackage() above) —
+// omitted or a graph handle passed directly both leave it undefined, in
+// which case the workspace default toolchain's linker (if any) applies.
+// This mirrors spec.version's own existing fallback semantics elsewhere in
+// this file; a package pinned to an explicit non-default toolchain *handle*
+// (rather than a version string) is the one case this can't distinguish,
+// same pre-existing gap spec.version already has.
+function odinLinkerHandleFor(spec) {
+	return odinLinkerFor(spec.version || defaultOdinToolchainVersion());
+}
+
 function graphActionInputs(spec, analysis, config) {
 	const closure = graphSourceClosure(spec, analysis, config);
 	const { resources, linkopts } = graphResourceInputs(spec);
+	const linker = odinLinkerHandleFor(spec);
 	const inputs = {
 		sources: spec.sources,
 		odin: spec.toolchain,
 		gcc: gccGraphTool(defaultGccToolchainVersion()),
+		...(linker ? { moldTool: linker.tool } : {}),
 		analysis: {
 			packagePath: analysis.packagePath,
 			hasMainEntrypoint: analysis.hasMainEntrypoint,
@@ -1007,6 +1025,14 @@ function graphOdinBuild(
 				}
 			}
 			const command = lint ? "check" : test ? "test" : "build";
+			// `odin check` never links (it's a pure type-check, no -out: even)
+			// and rejects -linker:/-extra-linker-flags: outright — only
+			// `build`/`test` actually invoke the linker.
+			const linker = odinLinkerHandleFor(spec);
+			const linkerEnv =
+				linker && !lint
+					? moldOdinLinkerEnv(exec, resolved.moldTool, linker.version)
+					: null;
 			// `odin test` already tolerates a package with no `main` (that's the
 			// whole point of the test build mode); `build` and `check` both
 			// default to expecting one. `build` already opts out via
@@ -1029,16 +1055,17 @@ function graphOdinBuild(
 							: []
 					: []),
 				...(captures ? [`-out:${outputPath}`] : []),
-				// `odin check` never links (it's a pure type-check, no -out: even)
-				// and rejects -extra-linker-flags: outright — only `build`/`test`
-				// actually invoke the linker.
+				...(linkerEnv ? linkerEnv.flags : []),
 				...(lint ? [] : odinExtraLinkerFlagsArgs(resolved.analysis.linkopts)),
 			];
 			const result = await exec.action({
 				argv: args,
 				inputs: allInputs,
 				env: [
-					`PATH=${odinLinkerPathDir(exec.path(resolved.gcc), spec.unsafeSystemPaths)}`,
+					`PATH=${[
+						...(linkerEnv ? linkerEnv.pathDirs : []),
+						odinLinkerPathDir(exec.path(resolved.gcc), spec.unsafeSystemPaths),
+					].join(":")}`,
 				],
 				allowFailure: lint || test,
 				outputs: captures ? { artifact: output.file(outputPath) } : {},

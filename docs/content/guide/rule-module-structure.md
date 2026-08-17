@@ -98,10 +98,12 @@ workspace configuration, or ordinary rule-author helpers. `nativeTool()`
 returns a lazy graph handle: the host `PATH` lookup happens only when selected
 work consumes it. `nativeToolSpec()` resolves that handle into the tool-spec
 shape `exec.action()`'s legacy-tool-spec bridge accepts (`graph_core.js`'s
-`addTool`) — still load-bearing for cross-kind role dispatch that resolves
-dynamically via `productFor(handle, ROLE)` (e.g. `rules/rust/kache`'s
-RUST_BUILD_CACHE wrapper, `rules/c/mold`'s Odin-linker role), not a
-deprecated shim.
+`addTool`) — still load-bearing (e.g. the Windows-only rust-linker fallback
+in `rules/rust/index.js`'s `rustLinkerTools()`, tracked in #155), not a
+deprecated shim. `rules/rust/kache`'s build-cache role and `rules/c/mold`'s
+Odin-linker role used to reach this bridge dynamically via
+`productFor(handle, ROLE)`; as of #148 both are plain, statically-imported
+function calls instead.
 
 When moving a public module, update all first-party consumers in the same
 change. Remove the old deep import rather than leaving a compatibility shim:

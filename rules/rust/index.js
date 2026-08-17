@@ -19,12 +19,14 @@
 // `-fuse-ld=mold` PATH-search form (this repo's gcc build rejects an
 // absolute `-fuse-ld=` value outright).
 //
-// The build-cache role (RUST_BUILD_CACHE, kache) is explicitly out of scope
-// for #31/#60 — rustBuildCacheTools() still resolves it dynamically via
-// productFor() against rules/rust/kache's legacy RustKacheWrapper. Its
-// already-resolved legacy tool-spec result ({name, cache, key, binDirs})
-// passes straight through exec.action()'s tools: array unchanged (the
-// engine's legacy-tool-spec passthrough, graph_core.js's addTool).
+// The build-cache role (kache) is graph-native as of #148:
+// rustBuildCacheTools() calls rules/rust/kache's kacheBuildCacheTools()/
+// kacheBuildCacheEnv()/kacheScriptPreamble() directly rather than resolving
+// them dynamically via productFor(). kacheBuildCacheTools()'s result is
+// still a legacy tool-spec ({name, cache, key, binDirs}) — that shape itself
+// is unchanged, and still passes straight through exec.action()'s tools:
+// array via the engine's legacy-tool-spec passthrough (graph_core.js's
+// addTool); only the dispatch that used to reach it is gone.
 //
 // Known simplifications versus the pre-migration factory:
 //   - `bin` auto-detection from Cargo.toml is not ported; omitting `bin`
@@ -45,16 +47,7 @@ import { FMT } from "//rules/workflows/fmt";
 import { LINT } from "//rules/workflows/lint";
 import { PACKAGE } from "//rules/workflows/package";
 import { TEST } from "//rules/workflows/test";
-import {
-	file,
-	files,
-	output,
-	packagePath,
-	platformInfo,
-	productFor,
-	task,
-} from "imp:core";
-import { RUST_BUILD_CACHE } from "//rules/rust/products";
+import { file, files, output, packagePath, platformInfo, task } from "imp:core";
 import {
 	defaultRustToolchain,
 	rustGraphToolEnv,
@@ -65,6 +58,11 @@ import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
 
 import { defaultGccGraphToolchain, gccRustLinkDriverEnv } from "//rules/c/gcc";
 import { moldRustLinkerEnv } from "//rules/c/mold";
+import {
+	kacheBuildCacheEnv,
+	kacheBuildCacheTools,
+	kacheScriptPreamble,
+} from "//rules/rust/kache";
 
 import {
 	cargoStandaloneExpansion,
@@ -193,19 +191,19 @@ export async function rustBuildCacheTools(toolchainHandle) {
 	if (!kacheHandle) {
 		return { tools: [], env: [], scriptPreamble: "" };
 	}
-	const wrapper = await productFor(kacheHandle, RUST_BUILD_CACHE);
+	const { version, cacheSize } = kacheHandle.attrs;
 	return {
-		tools: await wrapper.tools(),
-		env: await wrapper.env(),
-		scriptPreamble: wrapper.scriptPreamble(),
+		tools: await kacheBuildCacheTools(version),
+		env: await kacheBuildCacheEnv(version, cacheSize),
+		scriptPreamble: kacheScriptPreamble(),
 	};
 }
 
 // Shared script building blocks for the cargo build task below: a manifest/
 // target-dir/rustflags positional trio, then command-specific args, plus the
 // sandbox-root capture a build-cache layer (e.g. kache) needs — see
-// RustKacheWrapper.scriptPreamble()'s doc comment for why that capture has to
-// happen in script text rather than via exec.action()'s own env.
+// kacheScriptPreamble()'s doc comment for why that capture has to happen in
+// script text rather than via exec.action()'s own env.
 export function cargoScriptPreamble(scriptPreamble = "") {
 	return (
 		'imp_sandbox_root="$(pwd)"; manifest=$1; target_dir=$2; rustflags=$3; shift 3; ' +
@@ -274,11 +272,10 @@ function outputSlugFor(path) {
 // (identified by its unique `toolchainId` field — a raw tool()/task() handle
 // also has `__imp_graph_handle === true`, so that alone can't distinguish
 // the two), a legacy RustToolchain target handle (has .attrs.version and
-// optionally .linkDriver/.linker/.kache — the only source of those for the
-// productFor() bridge above), a plain version string, or omitted (workspace
-// default). The legacy handle, when given, is kept around unresolved purely
-// so rustLinkerTools()/rustBuildCacheTools() can still read its attrs — it
-// is never passed into a task() input.
+// optionally .linkDriver/.linker/.kache), a plain version string, or omitted
+// (workspace default). The legacy handle, when given, is kept around
+// unresolved purely so rustLinkerTools()/rustBuildCacheTools() can still
+// read its attrs — it is never passed into a task() input.
 function resolveToolchain(toolchain) {
 	if (toolchain && typeof toolchain.toolchainId === "string") {
 		return { graph: toolchain, legacy: null };
