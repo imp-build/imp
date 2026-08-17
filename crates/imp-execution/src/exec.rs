@@ -651,21 +651,30 @@ const BUILTIN_SHELL_CANDIDATES: &[&str] = &[
 
 /// Resolve `program` to the binary that should actually be spawned. Only
 /// `sh` is special-cased (see `BUILTIN_SHELL_CANDIDATES`); everything else is
-/// used as-is if already absolute (from a declared tool or an explicit
-/// argument) — there is no PATH search fallback. A relative `program` (e.g. a
-/// produced/toolchain tool's sandbox-relative path from `exec.tool()`, like
-/// `rustup-home/toolchains/.../bin/cargo.exe`) is joined onto `base` (the same
-/// directory passed to the command's own `current_dir()`) to make it
-/// absolute before it ever reaches `Command::new()`. That's not just
-/// belt-and-suspenders: `Command::new()`'s own relative-path resolution is
-/// documented to run against *this* process's current directory, not the
-/// child's `current_dir()` — a relative program string can silently resolve
-/// against the wrong base entirely, independent of whether the intended
-/// target actually exists under the intended cwd.
+/// either:
+/// - a bare name with no directory component (e.g. "imp", from a native
+///   tool's `exec.tool()` binding) — left untouched, since `Command::spawn()`
+///   resolves that itself via the sandboxed `PATH` env `sandbox_command_env()`
+///   builds, same as `execvp`. Joining `base` onto this would turn a PATH
+///   lookup into one specific, wrong file path.
+/// - already absolute — left untouched.
+/// - a relative path that names a directory (e.g. a produced/toolchain
+///   tool's sandbox-relative path from `exec.tool()`, like
+///   `rustup-home/toolchains/.../bin/cargo.exe`) — joined onto `base` (the
+///   same directory passed to the command's own `current_dir()`) to make it
+///   absolute before it ever reaches `Command::new()`. That's not just
+///   belt-and-suspenders: `Command::new()`'s own relative-path resolution is
+///   documented to run against *this* process's current directory, not the
+///   child's `current_dir()` — a relative program string can silently
+///   resolve against the wrong base entirely, independent of whether the
+///   intended target actually exists under the intended cwd.
 pub fn resolve_program(program: &str, base: &Path) -> Result<PathBuf> {
     if program != "sh" {
         let path = PathBuf::from(program);
-        return Ok(if path.is_absolute() {
+        let is_bare_name = path
+            .parent()
+            .is_some_and(|parent| parent.as_os_str().is_empty());
+        return Ok(if path.is_absolute() || is_bare_name {
             path
         } else {
             base.join(path)
