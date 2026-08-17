@@ -490,8 +490,7 @@ struct PendingDependency {
 
 /// Find the nearest ancestor directory that contains `imp.workspace.js`.
 pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
-    let mut directory = start
-        .canonicalize()
+    let mut directory = dunce::canonicalize(start)
         .with_context(|| format!("canonicalize workspace start {}", start.display()))?;
     if directory.is_file() {
         directory = directory
@@ -10248,8 +10247,25 @@ export const app = target({ kind: "asset", attrs: { marker } });
         let nested = root.path().join("library/jodin");
         assert_eq!(
             find_workspace_root(&nested).unwrap(),
-            root.path().canonicalize().unwrap()
+            dunce::canonicalize(root.path()).unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_root_accepts_a_non_canonicalized_invocation_directory() {
+        // `find_workspace_root` canonicalizes its result. On Windows,
+        // `std::fs::canonicalize` alone would return a `\\?\`-prefixed
+        // verbatim path, which would never match as a prefix of a plain,
+        // non-canonicalized invocation directory (e.g. from
+        // `std::env::current_dir()`). This exercises that pairing end to end.
+        let root = fixture();
+        let nested = root.path().join("library/jodin");
+        let workspace_root = find_workspace_root(&nested).unwrap();
+        let context = SelectorContext::for_invocation(&workspace_root, &nested).unwrap();
+        let ParsedSelector::Package { package, .. } = context.parse("...").unwrap() else {
+            panic!("expected a package selector");
+        };
+        assert_eq!(package, "library/jodin");
     }
 
     #[tokio::test]
