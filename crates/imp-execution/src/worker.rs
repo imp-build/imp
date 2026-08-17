@@ -97,6 +97,49 @@ fn run_with_worker_env(
     command.output().with_context(|| format!("spawn {program}"))
 }
 
+/// Launch the worker's start command and detach immediately, without waiting
+/// for it to exit. `[bin, "daemon", "run"]`-style commands are meant to run
+/// forever (until their own idle timeout, per the module doc comment above),
+/// so calling `run_with_worker_env`'s `Command::output()` here would block the
+/// caller for as long as the daemon stays up — on Unix that's usually masked
+/// by the daemon double-forking and detaching (so the immediate child this
+/// spawns exits quickly), but on Windows there's no such detachment and the
+/// process just runs in the foreground, so `.output()` would wait out its
+/// entire idle timeout (confirmed: matches the ~600s stalls a debugger traced
+/// to this exact call). Readiness is established by the health-check poll in
+/// `spawn_and_health_check`, not by this call returning — mirrors the
+/// `imp daemon serve` self-spawn in `imp-daemon/src/client.rs`.
+fn spawn_worker_start(
+    argv: &[String],
+    handle: &WorkerHandle,
+    extra_env: &[(String, String)],
+) -> Result<()> {
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("empty argv"))?;
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .env("HOME", &handle.home_dir)
+        .env("TMPDIR", &handle.tmp_dir)
+        .env("IMP_WORKER_PORT", handle.port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+        .spawn()
+        .with_context(|| format!("spawn {program}"))?;
+    Ok(())
+}
+
 fn is_healthy(handle: &WorkerHandle, spec: &WorkerSpec) -> bool {
     if spec.health_check_argv.is_empty() {
         return true;
@@ -126,9 +169,9 @@ async fn spawn_and_health_check(
     // earlier imp invocation is still running (this process's registry is
     // always empty on a fresh start, since it doesn't persist across
     // invocations — only the worker itself does, by design; see the module
-    // doc comment). So a non-zero exit here isn't fatal on its own — it's
+    // doc comment). So a spawn error here isn't fatal on its own — it's
     // only a real failure if the health check below also never succeeds.
-    let start_result = run_with_worker_env(&spec.argv, &handle, &spec.env)
+    let start_result = spawn_worker_start(&spec.argv, &handle, &spec.env)
         .with_context(|| format!("start worker '{name}'"));
 
     if !spec.health_check_argv.is_empty() {
@@ -142,13 +185,7 @@ async fn spawn_and_health_check(
         }
         if !healthy {
             match start_result {
-                Ok(output) if !output.status.success() => bail!(
-                    "worker '{name}' start command exited with {}\nstdout:\n{}\nstderr:\n{}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr),
-                ),
-                Ok(_) => bail!("worker '{name}' did not become healthy after starting"),
+                Ok(()) => bail!("worker '{name}' did not become healthy after starting"),
                 Err(error) => return Err(error),
             }
         }

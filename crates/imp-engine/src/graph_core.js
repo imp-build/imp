@@ -545,6 +545,16 @@ function _graphCollectActionInput(value, result) {
 	for (const input of value.inputs || []) result.push(input);
 }
 
+// Cached: __host_platform_info() is a host round-trip, and this is called
+// once per exec.tool() invocation.
+let _graphIsWindowsCache;
+function _graphIsWindows() {
+	if (_graphIsWindowsCache === undefined) {
+		_graphIsWindowsCache = JSON.parse(__host_platform_info()).os === "windows";
+	}
+	return _graphIsWindowsCache;
+}
+
 function _graphExec(record) {
 	let consumed = new Set();
 	const consume = (binding) => {
@@ -567,7 +577,14 @@ function _graphExec(record) {
 			if (binding.native) return executable;
 			const binDirs = binding.options.binDirs || ["bin"];
 			const prefix = binDirs.length === 0 ? binding.path : `${binding.path}/${binDirs[0]}`;
-			return `${prefix}/${executable}`;
+			// Produced/toolchain binaries are referenced by bare name (e.g.
+			// "cargo"); native tools (the `binding.native` branch above) don't
+			// need this, since their path was already resolved off the host PATH
+			// by nativeToolArtifact(), which finds the real, extensioned file.
+			// This one builds the path from scratch by string concatenation, so
+			// it must add the extension itself.
+			const exe = _graphIsWindows() ? `${executable}.exe` : executable;
+			return `${prefix}/${exe}`;
 		},
 		async action(opts) {
 			if (!opts || typeof opts !== "object" || !Array.isArray(opts.argv))

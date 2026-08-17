@@ -197,14 +197,16 @@ export function ruffGraphTool(version) {
 		display: `download ruff ${resolved} (${plat.os}/${plat.arch})`,
 		unverified: RuffToolchain.resolveUnverified(resolved),
 	});
-	// ruff's release archives extract a single top-level ruff-<triple>/
-	// directory containing the `ruff` binary — strip it so the cache root
-	// holds the binary directly, the same shape uv uses.
+	// ruff's tar.gz releases (Linux/macOS) extract a single top-level
+	// ruff-<triple>/ directory containing the `ruff` binary — strip it so
+	// the cache root holds the binary directly, the same shape uv uses. The
+	// Windows zip release has no such wrapping directory; ruff.exe sits at
+	// the archive root, so it must not be stripped.
 	const directory = extractArchive({
 		archive,
 		dest: `.imp/ruff-toolchains/${key}`,
 		format: plat.os === "windows" ? "zip" : "tar.gz",
-		stripComponents: 1,
+		stripComponents: plat.os === "windows" ? undefined : 1,
 		namedCache: { name: RUFF_TOOLCHAIN_CACHE, key },
 		display: `extract ruff ${resolved} (${plat.os}/${plat.arch})`,
 	});
