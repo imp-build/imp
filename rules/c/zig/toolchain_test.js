@@ -160,6 +160,14 @@ describe("Zig toolchain", () => {
 			).toBe(true);
 			expect(install.tools.some((t) => t.name === "sh")).toBe(true);
 			expect(install.tools.some((t) => t.name === "xz")).toBe(false);
+			// Extracted with unzip, not tar — see coreToolNames()'s own comment
+			// on why a bare "tar" on Windows can't be trusted to resolve to a
+			// zip-capable implementation.
+			expect(install.tools.some((t) => t.name === "unzip")).toBe(true);
+			expect(install.tools.some((t) => t.name === "mv")).toBe(true);
+			expect(install.tools.some((t) => t.name === "tar")).toBe(false);
+			expect(install.argv[2]).toContain("unzip -q");
+			expect(install.argv[2]).not.toContain(" tar ");
 
 			expect(install.argv).toContain("zigar.bat");
 			expect(install.argv).toContain("zigranlib.bat");

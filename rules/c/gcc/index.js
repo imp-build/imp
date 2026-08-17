@@ -25,12 +25,13 @@ export const GCC_TOOL = toolName("gcc");
 
 const GCC_TOOLCHAIN_CACHE = "gcc-toolchains";
 const GCC_LOCKFILE = "//rules/c/gcc/gcc.lock";
+const GCC_WINDOWS_LOCKFILE = "//rules/c/gcc/gcc-windows.lock";
 
-// Bootlin only publishes prebuilt Linux toolchains; this doesn't cover
-// Windows (a different linking story entirely — MSVC link.exe — and out of
-// scope here).
+// Linux downloads a Bootlin cross-toolchain; Windows downloads a WinLibs
+// mingw-w64 build (see winlibsDownloadUrl() below) — two unrelated vendors
+// with unrelated version-tag schemes, not a single formula across OSes.
 function requireSupportedPlatform(plat) {
-	if (plat.os !== "linux") {
+	if (plat.os !== "linux" && plat.os !== "windows") {
 		throw new Error(`unsupported gcc toolchain OS: ${plat.os}`);
 	}
 	if (plat.arch !== "x86_64") {
@@ -46,8 +47,36 @@ const BOOTLIN_ARCH = { x86_64: "x86-64" };
 const GCC_EXE_PREFIX = { x86_64: "x86_64-linux" };
 const BINUTILS_PREFIX = { x86_64: "x86_64-buildroot-linux-gnu" };
 
+// WinLibs (winlibs.com) publishes prebuilt, self-contained mingw-w64 GCC
+// builds for native Windows use — UCRT runtime, POSIX threading, SEH
+// exceptions, x86_64 only — as GitHub release assets. Its release tag
+// doubles as both the GitHub Releases URL path segment and (after a fixed
+// rewrite) the archive filename, e.g. tag "16.1.0posix-14.0.0-ucrt-r4"
+// downloads "winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r4.zip".
+// Unlike Bootlin's version string, this tag packs three independent version
+// numbers (GCC, the mingw-w64 runtime, and WinLibs' own build revision) with
+// no formula linking it to a bare GCC version — so a Windows gcc toolchain
+// "version" is this tag, verbatim, not a plain GCC release number.
+const WINLIBS_TAG_RE = /^(\d+\.\d+\.\d+)posix-(\d+\.\d+\.\d+)-ucrt-r(\d+)$/;
+
+function winlibsArtifactName(version) {
+	const match = WINLIBS_TAG_RE.exec(version);
+	if (!match) {
+		throw new Error(
+			`gcc toolchain version '${version}' doesn't look like a WinLibs release tag (expected e.g. "16.1.0posix-14.0.0-ucrt-r4")`,
+		);
+	}
+	const [, gccVersion, mingwVersion, rev] = match;
+	return `winlibs-x86_64-posix-seh-gcc-${gccVersion}-mingw-w64ucrt-${mingwVersion}-r${rev}.zip`;
+}
+
+function winlibsDownloadUrl(version) {
+	return `https://github.com/brechtsanders/winlibs_mingw/releases/download/${version}/${winlibsArtifactName(version)}`;
+}
+
 /**
- * Return the Bootlin toolchain name for a version and platform.
+ * Return the toolchain archive filename for a version and platform: a
+ * Bootlin tarball name on Linux, a WinLibs zip name on Windows.
  *
  * @param {string} version
  * @param {{ os: string, arch: string }} plat
@@ -55,11 +84,15 @@ const BINUTILS_PREFIX = { x86_64: "x86_64-buildroot-linux-gnu" };
  */
 export function gccArtifactName(version, plat) {
 	requireSupportedPlatform(plat);
+	if (plat.os === "windows") {
+		return winlibsArtifactName(version);
+	}
 	return `${BOOTLIN_ARCH[plat.arch]}--glibc--stable-${version}.tar.xz`;
 }
 
 /**
- * Return the Bootlin toolchain download URL for a version and platform.
+ * Return the toolchain download URL for a version and platform: Bootlin on
+ * Linux, WinLibs on Windows.
  *
  * @param {string} version
  * @param {{ os: string, arch: string }} plat
@@ -67,6 +100,9 @@ export function gccArtifactName(version, plat) {
  */
 export function gccDownloadUrl(version, plat) {
 	requireSupportedPlatform(plat);
+	if (plat.os === "windows") {
+		return winlibsDownloadUrl(version);
+	}
 	return `https://toolchains.bootlin.com/downloads/releases/toolchains/${BOOTLIN_ARCH[plat.arch]}/tarballs/${gccArtifactName(version, plat)}`;
 }
 
@@ -126,7 +162,13 @@ function graphToolFor(version) {
 /**
  * Declare a gcc toolchain version and optionally set it as the default.
  *
- * @param {string} version Bootlin toolchain release version, e.g. "2025.08-1".
+ * @param {string|{linux?: string, windows?: string}} version Bootlin
+ *   toolchain release version on Linux (e.g. "2025.08-1"), WinLibs release
+ *   tag on Windows (e.g. "16.1.0posix-14.0.0-ucrt-r4") — see
+ *   requireSupportedPlatform's own comment for why these don't share a
+ *   vocabulary. A plain string is used as-is for whichever platform is
+ *   active; pass an object keyed by os to pin both platforms from one call
+ *   (see this module's own pinned default at the bottom of the file).
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
  * @param {boolean} [opts.unverified=false] Allow downloading without a
@@ -135,15 +177,24 @@ function graphToolFor(version) {
  * @category configuration
  */
 export function gccToolchain(version, opts = {}) {
+	const plat = platformInfo();
+	const resolved = typeof version === "string" ? version : version[plat.os];
+	if (!resolved) {
+		throw new Error(
+			`gcc toolchain version has no entry for platform '${plat.os}'`,
+		);
+	}
 	const toolchain = new GccToolchain(
-		{ version, unverified: opts.unverified },
+		{ version: resolved, unverified: opts.unverified },
 		{ default: opts.default },
 	);
+	const lockfileSpec =
+		plat.os === "windows" ? LOCKFILE_SPEC_WINDOWS : LOCKFILE_SPEC_LINUX;
 	toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({
-		version,
-		...LOCKFILE_SPEC,
+		version: resolved,
+		...lockfileSpec,
 	});
-	graphToolchains.set(version, gccGraphTool(version));
+	graphToolchains.set(resolved, gccGraphTool(resolved));
 	return toolchain;
 }
 
@@ -154,8 +205,8 @@ export function gccGraphTool(version) {
 	namedCache({ name: GCC_TOOLCHAIN_CACHE, shared: true });
 	const cacheKey = gccCacheKey(resolved, plat);
 	const archive = downloadToolArtifact({
-		lockfile: GCC_LOCKFILE,
-		tool: "gcc",
+		lockfile: plat.os === "windows" ? GCC_WINDOWS_LOCKFILE : GCC_LOCKFILE,
+		tool: plat.os === "windows" ? "gcc-windows" : "gcc",
 		version: resolved,
 		plat,
 		url: gccDownloadUrl(resolved, plat),
@@ -163,6 +214,9 @@ export function gccGraphTool(version) {
 		display: `download gcc ${resolved} (${plat.os}/${plat.arch})`,
 		unverified: GccToolchain.resolveUnverified(resolved),
 	});
+	if (plat.os === "windows") {
+		return gccGraphToolWindows(resolved, plat, archive, cacheKey);
+	}
 	const shell = nativeTool("sh");
 	const mkdir = nativeTool("mkdir");
 	const tar = nativeTool("tar");
@@ -245,6 +299,89 @@ export function gccGraphTool(version) {
 }
 
 /**
+ * Windows counterpart of the install step above: extracts a WinLibs
+ * mingw-w64 GCC release (a plain UCRT/POSIX/SEH x86_64 zip — no Bootlin-style
+ * toolchain-wrapper/sysroot/hardening-flag machinery to replicate, since
+ * MinGW's own binaries have no such guard to work around) and copies the
+ * real gcc.exe/g++.exe into the clang/cc alias names other rules expect (see
+ * the Linux install step's own comment for why those aliases exist: Odin
+ * execs a program literally named "clang" to link, and rustc's C link driver
+ * needs "clang"/"cc" too). ar.exe/ranlib.exe/c++.exe already ship under
+ * their plain names in WinLibs' own bin/, so those need no aliasing. The
+ * "-unsafe-paths" aliases and the bin-unsafe-paths/ mirror are plain copies
+ * of the same binaries, not different flags — there's no Bootlin-style
+ * unsafe-path guard on Windows to bypass, so unsafeSystemPaths is a no-op
+ * here (mirrors zig's own toolchain, which has no such guard either).
+ */
+function gccGraphToolWindows(version, plat, archive, cacheKey) {
+	const shell = nativeTool("sh");
+	const mkdir = nativeTool("mkdir");
+	const cp = nativeTool("cp");
+	const mv = nativeTool("mv");
+	const unzip = nativeTool("unzip");
+	// WinLibs ships a zip, not a tar archive, so this extracts with unzip —
+	// not tar (Windows hosts two "tar"s that answer to the same bare name,
+	// Git-for-Windows' bundled MSYS/GNU tar with no zip support at all and
+	// the OS's own bsdtar, and which one wins is a PATH-order accident; see
+	// rules/imp/archive's own comment). unzip has no such competing
+	// alternative to accidentally shadow it. It also has no
+	// --strip-components equivalent, so dropping the zip's wrapping
+	// "mingw64/" directory means unpacking into a staging dir first and
+	// moving its contents up — the same approach rules/imp/archive's
+	// extractArchive() now uses for a zip's stripComponents.
+	//
+	// Bare "mkdir"/"cp"/"mv"/"unzip" inside the script would resolve through
+	// Git-for-Windows' own self-prepended PATH (its usr/bin, ahead of
+	// anything imp's sandbox itself puts on PATH) rather than the mounted
+	// tools declared below. exec.tool() is no help here either: for a native
+	// tool binding it's a pure passthrough of the bare executable name (see
+	// graph_core.js's exec.tool()), not a real path. exec.path() does return
+	// the tool's real resolved absolute path, so passing each tool that way
+	// as an argv positional sidesteps the PATH-precedence hazard entirely.
+	const installScript =
+		'archive=$1; out=$2; mkdir=$3; cp=$4; mv=$5; unzip=$6; ' +
+		'"$mkdir" -p "$out/bin" "$out/bin-unsafe-paths" "$out.stage" && ' +
+		'"$unzip" -q "$archive" -d "$out.stage" && ' +
+		'"$mv" "$out.stage"/*/* "$out"/ && ' +
+		'for pair in "clang:gcc" "cc:gcc" "clang-unsafe-paths:gcc" "cc-unsafe-paths:gcc" "c++-unsafe-paths:c++"; do ' +
+		'name=${pair%%:*}; target=${pair#*:}; ' +
+		'"$cp" "$out/bin/$target.exe" "$out/bin/$name.exe"; ' +
+		"done && " +
+		"for name in clang cc c++ ar ranlib; do " +
+		'"$cp" "$out/bin/$name.exe" "$out/bin-unsafe-paths/$name.exe"; ' +
+		"done";
+	const directory = task({
+		display: `install gcc ${version} (${plat.os}/${plat.arch})`,
+		inputs: { archive, shell, mkdir, cp, mv, unzip },
+		outputs: { directory: output.artifact() },
+		async run(exec, inputs) {
+			const result = await exec.action({
+				argv: [
+					exec.tool(inputs.shell, "sh"),
+					"-c",
+					installScript,
+					"gcc-install",
+					exec.path(inputs.archive),
+					"gcc-toolchain",
+					`${exec.path(inputs.mkdir)}/mkdir.exe`,
+					`${exec.path(inputs.cp)}/cp.exe`,
+					`${exec.path(inputs.mv)}/mv.exe`,
+					`${exec.path(inputs.unzip)}/unzip.exe`,
+				],
+				tools: [inputs.shell, inputs.mkdir, inputs.cp, inputs.mv, inputs.unzip],
+				outputs: {
+					directory: output.directory("gcc-toolchain", {
+						namedCache: { name: GCC_TOOLCHAIN_CACHE, key: cacheKey },
+					}),
+				},
+			});
+			return { directory: result.outputs.directory };
+		},
+	}).outputs.directory;
+	return graphTool(directory, { binDirs: ["bin"] });
+}
+
+/**
  * Graph-native gcc toolchain: gccGraphTool() wrapped with version metadata,
  * mirroring rustGraphToolchain()'s shape (//rules/rust/toolchain) but scaled
  * to gcc's single install directory (like Odin's one-directory case).
@@ -309,7 +446,8 @@ export async function gccBin(version) {
 		name: GCC_TOOLCHAIN_CACHE,
 		key: gccCacheKey(resolved, plat),
 		subDir: "bin",
-		exe: `${GCC_EXE_PREFIX[plat.arch]}-gcc`,
+		exe:
+			plat.os === "windows" ? "gcc.exe" : `${GCC_EXE_PREFIX[plat.arch]}-gcc`,
 	});
 }
 
@@ -350,7 +488,7 @@ export function defaultGccToolchain() {
 	return GccToolchain.default();
 }
 
-const LOCKFILE_SPEC = registerToolchainLockfile(
+const LOCKFILE_SPEC_LINUX = registerToolchainLockfile(
 	{
 		name: "gcc",
 		platforms: gccSupportedPlatforms(),
@@ -361,9 +499,30 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	["2025.08-1"],
 );
 
-// Importing this rule provisions the pinned default. A workspace can replace
-// it by declaring another gccToolchain(..., { default: true }).
-gccToolchain("2025.08-1", { default: true });
+// WinLibs' tag shares no version vocabulary with Bootlin's (see
+// requireSupportedPlatform's own comment), so Windows gets its own lockfile
+// file and its own version list instead of sharing Linux's —
+// registerToolchainLockfile()/generateToolLockfile() assume one version
+// string resolves via the same formula for every platform in the list,
+// which doesn't hold across these two vendors.
+const LOCKFILE_SPEC_WINDOWS = registerToolchainLockfile(
+	{
+		name: "gcc-windows",
+		platforms: [{ os: "windows", arch: "x86_64" }],
+		downloadUrl: gccDownloadUrl,
+		artifactName: gccArtifactName,
+		lockfile: GCC_WINDOWS_LOCKFILE,
+	},
+	["16.1.0posix-14.0.0-ucrt-r4"],
+);
+
+// Importing this rule provisions the pinned default for whichever platform
+// is active. A workspace can replace it by declaring another
+// gccToolchain(..., { default: true }).
+gccToolchain(
+	{ linux: "2025.08-1", windows: "16.1.0posix-14.0.0-ucrt-r4" },
+	{ default: true },
+);
 
 /**
  * Given a task's `exec` and its already-declared, resolved
@@ -409,7 +568,8 @@ export function gccRustLinkDriverEnv(
 	exec.path(resolvedGccTool);
 	const plat = platformInfo();
 	const dir = cacheGet(GCC_TOOLCHAIN_CACHE, gccCacheKey(version, plat));
-	const clangPath = `${dir}/bin/clang`;
+	const exeSuffix = plat.os === "windows" ? ".exe" : "";
+	const clangPath = `${dir}/bin/clang${exeSuffix}`;
 	const pathDirs = [`${dir}/bin`];
 	const rustflags = ["-C", `linker=${clangPath}`];
 	if (!kacheActive) {
@@ -417,7 +577,7 @@ export function gccRustLinkDriverEnv(
 	}
 	return {
 		rustflags,
-		env: [`CC=kache ${clangPath}`, `CXX=kache ${dir}/bin/c++`],
+		env: [`CC=kache ${clangPath}`, `CXX=kache ${dir}/bin/c++${exeSuffix}`],
 		pathDirs,
 	};
 }
@@ -478,11 +638,12 @@ export function gccCMakeCompilerArgs(
 ) {
 	const dir = gccGraphToolchainDir(exec, resolvedGccTool, version);
 	const suffix = unsafeSystemPaths ? "-unsafe-paths" : "";
+	const exeSuffix = platformInfo().os === "windows" ? ".exe" : "";
 	return [
-		`-DCMAKE_C_COMPILER=${dir}/bin/clang${suffix}`,
-		`-DCMAKE_CXX_COMPILER=${dir}/bin/c++${suffix}`,
-		`-DCMAKE_RANLIB=${dir}/bin/ranlib`,
-		`-DCMAKE_AR=${dir}/bin/ar`,
+		`-DCMAKE_C_COMPILER=${dir}/bin/clang${suffix}${exeSuffix}`,
+		`-DCMAKE_CXX_COMPILER=${dir}/bin/c++${suffix}${exeSuffix}`,
+		`-DCMAKE_RANLIB=${dir}/bin/ranlib${exeSuffix}`,
+		`-DCMAKE_AR=${dir}/bin/ar${exeSuffix}`,
 	];
 }
 

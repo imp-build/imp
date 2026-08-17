@@ -114,6 +114,18 @@ const GCC_GRAPH_TOOL_NAMES = new Set([
 	"clang-unsafe-paths",
 	"cc-unsafe-paths",
 	"c++-unsafe-paths",
+	// gccCMakeCompilerArgs() bakes a ".exe" suffix into every name above on
+	// Windows (see its own doc comment in rules/c/gcc) — rewriteToolInvocations()
+	// extracts the basename verbatim, extension included, so those literal
+	// names need their own entries here.
+	"clang.exe",
+	"cc.exe",
+	"c++.exe",
+	"ar.exe",
+	"ranlib.exe",
+	"clang-unsafe-paths.exe",
+	"cc-unsafe-paths.exe",
+	"c++-unsafe-paths.exe",
 ]);
 
 function isZigToolchain(toolchain) {

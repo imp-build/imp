@@ -12,8 +12,8 @@ describe("archive", () => {
 		expect(extractArchiveTools("tar.gz")).toEqual(["mkdir", "tar", "gzip"]);
 		expect(extractArchiveTools("tar.xz")).toEqual(["mkdir", "tar", "xz"]);
 		expect(extractArchiveTools("tar")).toEqual(["mkdir", "tar"]);
-		expect(extractArchiveTools("zip")).toEqual(["mkdir", "tar"]);
-		expect(extractArchiveTools("zip-unix")).toEqual(["mkdir", "unzip"]);
+		expect(extractArchiveTools("zip")).toEqual(["mkdir", "unzip", "mv"]);
+		expect(extractArchiveTools("zip-unix")).toEqual(["mkdir", "unzip", "mv"]);
 		expect(() => extractArchiveTools("rar")).toThrow(
 			"unsupported archive format",
 		);
@@ -83,11 +83,48 @@ describe("archive", () => {
 			});
 			await host.resolve(extracted);
 
-			const extract = host.runs.find((run) => run.argv[2]?.includes("tar -xf"));
-			expect(extract.argv[2]).toContain("tar -xf");
+			const extract = host.runs.find((run) => run.argv[2]?.includes("unzip"));
+			expect(extract.argv[2]).toContain("unzip -q");
 			expect(extract.argv[2].includes("--strip-components")).toBe(false);
 			expect(extract.outputs[0].namedCache === undefined).toBe(true);
 		});
+	});
+
+	test("extractArchive strips a zip's wrapping top-level directory via a staging dir + mv", async () => {
+		await withFakeToolchainHost(async (host) => {
+			const extracted = extractArchive({
+				archive: fakeDownload("a.zip"),
+				dest: "out",
+				format: "zip",
+				stripComponents: 1,
+				display: "unzip",
+			});
+			await host.resolve(extracted);
+
+			const extract = host.runs.find((run) => run.argv[2]?.includes("unzip"));
+			expect(extract.argv[2]).toContain("unzip -q");
+			expect(extract.argv[2]).toContain('"$2.stage"');
+			expect(extract.argv[2]).toContain('mv "$2.stage"/*/* "$2"');
+		});
+	});
+
+	test("extractArchive rejects a zip stripComponents value other than 1", async () => {
+		let message = null;
+		try {
+			const source = task({
+				outputs: { archive: output.artifact() },
+				run() {},
+			}).outputs.archive;
+			extractArchive({
+				archive: source,
+				dest: "out",
+				format: "zip",
+				stripComponents: 2,
+			});
+		} catch (e) {
+			message = e.message;
+		}
+		expect(message).toContain("only supports stripComponents of 1");
 	});
 
 	test("extractArchive graph form returns a directory handle without running", async () => {

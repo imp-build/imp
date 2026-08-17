@@ -540,7 +540,7 @@ fn try_resolve_in_root(
     }
 
     for (path, kind, form) in candidates {
-        let found = path.is_file();
+        let found = is_file_exact_case(&path);
         tried.push(path.clone());
         if found {
             return Some(WorkspaceModuleResolution {
@@ -552,6 +552,27 @@ fn try_resolve_in_root(
         }
     }
     None
+}
+
+/// Like `Path::is_file`, but verifies the file name's case exactly instead
+/// of trusting the OS lookup. Windows (NTFS) and default macOS (APFS) both
+/// resolve paths case-insensitively, so `<rel>.js` would otherwise silently
+/// match a differently-cased sibling such as `BUILD.js` — e.g. a request for
+/// `rules/workflows/build.js` matching the package's own
+/// `rules/workflows/BUILD.js` instead of correctly falling through to
+/// `rules/workflows/build/index.js`.
+fn is_file_exact_case(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let (Some(file_name), Some(parent)) = (path.file_name(), path.parent()) else {
+        return false;
+    };
+    std::fs::read_dir(parent)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .any(|entry| entry.file_name() == file_name)
 }
 
 /// Resolve a workspace-addressed data file (e.g.
@@ -777,6 +798,37 @@ mod tests {
                 err.len()
             );
         }
+    }
+
+    /// On case-insensitive filesystems (Windows NTFS, default macOS APFS), a
+    /// bare `is_file()` check for `<rel>.js` would incorrectly match a
+    /// differently-cased sibling: requesting `//rules/workflows/build`
+    /// probes `rules/workflows/build.js` first, which must not match the
+    /// package's own `rules/workflows/BUILD.js` and skip the real module at
+    /// `rules/workflows/build/index.js`.
+    #[test]
+    fn module_resolution_is_case_sensitive_for_the_direct_js_candidate() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("rules/workflows/build")).unwrap();
+        std::fs::write(
+            root.path().join("rules/workflows/BUILD.js"),
+            "export const js = 1;",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("rules/workflows/build/index.js"),
+            "export const BUILD = 1;",
+        )
+        .unwrap();
+
+        let resolution =
+            resolve_workspace_module(root.path(), &RulesSource::none(), "//rules/workflows/build")
+                .unwrap();
+        assert_eq!(resolution.form, ModuleForm::Index);
+        assert_eq!(
+            resolution.path,
+            root.path().join("rules/workflows/build/index.js")
+        );
     }
 
     /// `import "//rules"` resolves to the library's own BUILD.js. This never

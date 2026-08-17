@@ -490,8 +490,7 @@ struct PendingDependency {
 
 /// Find the nearest ancestor directory that contains `imp.workspace.js`.
 pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
-    let mut directory = start
-        .canonicalize()
+    let mut directory = dunce::canonicalize(start)
         .with_context(|| format!("canonicalize workspace start {}", start.display()))?;
     if directory.is_file() {
         directory = directory
@@ -4918,7 +4917,25 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     Ok(())
 }
 
+// Windows ships a libarchive-based bsdtar at this fixed path that, unlike
+// Git-for-Windows' own MSYS tar (commonly found earlier on PATH than this —
+// the same PATH-ordering hazard BUILTIN_SHELL_CANDIDATES's own doc comment
+// sidesteps for "sh" by never trusting PATH search for it either), can
+// extract .zip archives, not just tar-family ones. Toolchain installers on
+// Windows (e.g. rules/c/gcc's and rules/c/zig's own Windows install steps)
+// download .zip releases and need this specific tar, so it's preferred
+// outright rather than trusting PATH order — confirmed by a real gcc/kache
+// install failure on a machine with Git's tar ahead of this one on PATH:
+// "tar: This does not look like a tar archive".
+#[cfg(windows)]
+const WINDOWS_BSDTAR: &str = r"C:\Windows\System32\tar.exe";
+
 fn which_executable(name: &str) -> Option<String> {
+    #[cfg(windows)]
+    if name == "tar" && Path::new(WINDOWS_BSDTAR).is_file() {
+        return Some(WINDOWS_BSDTAR.to_owned());
+    }
+
     // mut is only needed for the dirs.extend() below, which is windows-only.
     #[cfg_attr(not(windows), allow(unused_mut))]
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
@@ -10248,8 +10265,25 @@ export const app = target({ kind: "asset", attrs: { marker } });
         let nested = root.path().join("library/jodin");
         assert_eq!(
             find_workspace_root(&nested).unwrap(),
-            root.path().canonicalize().unwrap()
+            dunce::canonicalize(root.path()).unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_root_accepts_a_non_canonicalized_invocation_directory() {
+        // `find_workspace_root` canonicalizes its result. On Windows,
+        // `std::fs::canonicalize` alone would return a `\\?\`-prefixed
+        // verbatim path, which would never match as a prefix of a plain,
+        // non-canonicalized invocation directory (e.g. from
+        // `std::env::current_dir()`). This exercises that pairing end to end.
+        let root = fixture();
+        let nested = root.path().join("library/jodin");
+        let workspace_root = find_workspace_root(&nested).unwrap();
+        let context = SelectorContext::for_invocation(&workspace_root, &nested).unwrap();
+        let ParsedSelector::Package { package, .. } = context.parse("...").unwrap() else {
+            panic!("expected a package selector");
+        };
+        assert_eq!(package, "library/jodin");
     }
 
     #[tokio::test]

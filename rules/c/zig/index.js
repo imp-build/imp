@@ -110,17 +110,22 @@ export function zigCacheKey(version, plat) {
 // Bare coreutils used by the download/extract scripts below. The sandbox is
 // fully hermetic — even `mkdir`/`dirname`/`tar` must be declared tools, not
 // resolved from an ambient or fixed-base PATH. GNU tar shells out to a
-// separate `xz` process to decompress `.tar.xz` on Linux; Windows extracts
-// the `.zip` release via `tar.exe` (bsdtar) directly. Bare `sh` only
-// auto-resolves on unix (see BUILTIN_SHELL_CANDIDATES in src/exec.rs), so
-// Windows needs `sh` (Git Bash) declared as a tool too.
+// separate `xz` process to decompress `.tar.xz` on Linux. Windows extracts
+// the `.zip` release with unzip, not tar: Windows hosts two "tar"s that
+// answer to the same bare name — Git-for-Windows' bundled MSYS/GNU tar (no
+// zip support at all) and the OS's own bsdtar — and which one a bare `tar`
+// resolves to is a PATH-order accident, not something a hermetic build
+// should depend on (confirmed by a real failure: a machine with Git's tar
+// ahead on PATH got "does not look like a tar archive" on a valid zip).
+// unzip has no such competing alternative to accidentally shadow it. Bare
+// `sh` only auto-resolves on unix (see BUILTIN_SHELL_CANDIDATES in
+// src/exec.rs), so Windows needs `sh` (Git Bash) declared as a tool too.
 function coreToolNames(plat) {
 	return [
 		...new Set([
 			...lockedDownloadTools(plat),
-			"tar",
-			...(plat.os === "linux" ? ["xz", "chmod"] : []),
-			...(plat.os === "windows" ? ["sh"] : []),
+			...(plat.os === "linux" ? ["tar", "xz", "chmod"] : []),
+			...(plat.os === "windows" ? ["sh", "unzip", "mv"] : []),
 		]),
 	];
 }
@@ -265,11 +270,16 @@ export function zigGraphTool(version) {
 		plat.os === "windows"
 			? ""
 			: ` && ${wrappers.map((_, i) => `chmod +x "$2/${pos(4 + i * 2)}"`).join(" && ")}`;
-	// tar can't sniff compression from a pipe, so -J (xz) must be explicit on
-	// the tar.xz (unix) release; the windows .zip release isn't a filter
-	// format, so plain -xf works.
-	const tarFlags = plat.os === "windows" ? "-xf" : "-xJf";
-	const installScript = `mkdir -p "$2" && tar ${tarFlags} "$1" -C "$2" --strip-components=1 && ${writeCmds.join(" && ")}${chmodCmd}`;
+	// tar.xz (unix): tar can't sniff compression from a pipe, so -J (xz) must
+	// be explicit. zip (windows): extracted with unzip, not tar (see
+	// coreToolNames()'s own comment on why) — unzip has no
+	// --strip-components equivalent, so the release's wrapping top-level
+	// directory is dropped via a staging dir + mv instead.
+	const extractCmd =
+		plat.os === "windows"
+			? 'mkdir -p "$2" "$2.stage" && unzip -q "$1" -d "$2.stage" && mv "$2.stage"/*/* "$2"'
+			: 'mkdir -p "$2" && tar -xJf "$1" -C "$2" --strip-components=1';
+	const installScript = `${extractCmd} && ${writeCmds.join(" && ")}${chmodCmd}`;
 
 	const toolNames = coreToolNames(plat);
 	const inputs = { archive };

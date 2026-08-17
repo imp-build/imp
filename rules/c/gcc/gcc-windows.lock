@@ -1,0 +1,13 @@
+{
+  "tool": "gcc-windows",
+  "versions": {
+    "16.1.0posix-14.0.0-ucrt-r4": {
+      "windows/x86_64": {
+        "url": "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.1.0posix-14.0.0-ucrt-r4/winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r4.zip",
+        "artifact": "winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r4.zip",
+        "size": 272877601,
+        "sha256": "c406a22f8cac82559a3a1d96b62ff603f666499fb5ff4784e87b4eb6fa37dede"
+      }
+    }
+  }
+}

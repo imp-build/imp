@@ -28,7 +28,14 @@
 
 import { BUILD } from "//rules/workflows/build";
 import { PACKAGE } from "//rules/workflows/package";
-import { configuration, files, output, packagePath, task } from "imp:core";
+import {
+	configuration,
+	files,
+	output,
+	packagePath,
+	platformInfo,
+	task,
+} from "imp:core";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
 import { defaultZigGraphToolchain, zigGraphCacheEnv } from "//rules/c/zig";
 
@@ -107,11 +114,27 @@ function toolchainCommands(exec, toolchain, input, unsafeSystemPaths) {
 	// Bootlin's toolchain-wrapper unsafe-path guard — a no-op concern for zig
 	// (no such wrapper/guard), so only the gcc branch here checks it.
 	const suffix = unsafeSystemPaths ? "-unsafe-paths" : "";
+	const isWindows = platformInfo().os === "windows";
+	const exeSuffix = isWindows ? ".exe" : "";
+	// This whole action runs under "sh -c" (see ccTask's own script), and
+	// Git-for-Windows' MSYS runtime drops TMP/TEMP when it spawns a native
+	// (non-MSYS) child — confirmed directly: neither an inherited nor a
+	// per-command "TMP=... TEMP=... cmd" prefix reaches a native child
+	// spawned from its sh. Without a real temp dir, gcc's cc1/as stages fail
+	// with "Cannot create temporary file in C:\WINDOWS\: Permission denied"
+	// (falling through GetTempPath()'s last resort). -pipe sidesteps this by
+	// connecting the compilation stages with a pipe instead of temp files,
+	// rather than fighting MSYS's env-filtering from the Rust side.
+	const pipeFlag = isWindows ? ["-pipe"] : [];
 	return {
 		compiler: (isCxx) => [
-			exec.tool(input.ccTool, isCxx ? `c++${suffix}` : `clang${suffix}`),
+			exec.tool(
+				input.ccTool,
+				(isCxx ? `c++${suffix}` : `clang${suffix}`) + exeSuffix,
+			),
+			...pipeFlag,
 		],
-		archiver: () => [exec.tool(input.ccTool, "ar")],
+		archiver: () => [exec.tool(input.ccTool, `ar${exeSuffix}`)],
 		env: [],
 	};
 }

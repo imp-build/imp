@@ -318,9 +318,14 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 	["2.41.0"],
 );
 
-// Importing this rule provisions the pinned default. A workspace can replace
-// it by declaring another moldToolchain(..., { default: true }).
-moldToolchain("2.41.0", { default: true });
+// Importing this rule provisions the pinned default — but only on Linux
+// (see requireSupportedPlatform's own comment above: mold ships no
+// Windows/macOS build), so an eager toolchain build doesn't crash the whole
+// workspace import on a platform mold doesn't support. A workspace can
+// still declare its own moldToolchain(..., { default: true }) explicitly.
+if (platformInfo().os === "linux") {
+	moldToolchain("2.41.0", { default: true });
+}
 
 /**
  * Adapter exposing a mold toolchain as Odin's `-linker:mold` linker role.

@@ -1,3 +1,4 @@
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -292,7 +293,23 @@ pub fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
                 .with_context(|| format!("create {}", parent.display()))?;
         }
         let temp = temp_sibling_path(&blob_path, "tmp-blob");
-        std::fs::write(&temp, bytes).with_context(|| format!("write {}", temp.display()))?;
+        // Explicit sync_all() before rename, not std::fs::write(): closing a
+        // handle alone doesn't guarantee NTFS has flushed the write, so a
+        // rename immediately followed by a hardlink + read from a freshly
+        // spawned process could in principle observe stale/torn content
+        // without it. (Investigated as a candidate cause of a real "tar:
+        // does not look like a tar archive" failure that turned out to be a
+        // separate PATH-resolution bug — see which_executable()'s own
+        // WINDOWS_BSDTAR handling — but this fsync gap is real regardless
+        // and cheap to close.)
+        {
+            let mut file = std::fs::File::create(&temp)
+                .with_context(|| format!("create {}", temp.display()))?;
+            file.write_all(bytes)
+                .with_context(|| format!("write {}", temp.display()))?;
+            file.sync_all()
+                .with_context(|| format!("sync {}", temp.display()))?;
+        }
         std::fs::rename(&temp, &blob_path).with_context(|| {
             format!("publish blob {} to {}", temp.display(), blob_path.display())
         })?;
