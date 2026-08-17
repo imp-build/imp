@@ -194,9 +194,10 @@ fn send_process_output_line(
 ) {
     let line = String::from_utf8_lossy(pending).into_owned();
     pending.clear();
-    sender
-        .send(ProcessLine { stream, line })
-        .expect("failed sending process line");
+    // The receiver is dropped once the caller stops draining lines (e.g. the
+    // task already finished); a reader thread racing to flush its tail end
+    // after that is not an error.
+    let _ = sender.send(ProcessLine { stream, line });
 }
 
 fn drain_process_lines(
@@ -650,11 +651,34 @@ const BUILTIN_SHELL_CANDIDATES: &[&str] = &[
 
 /// Resolve `program` to the binary that should actually be spawned. Only
 /// `sh` is special-cased (see `BUILTIN_SHELL_CANDIDATES`); everything else is
-/// used as-is, so it must already be an absolute path (from a declared tool
-/// or an explicit argument) — there is no PATH search fallback.
-pub fn resolve_program(program: &str) -> Result<PathBuf> {
+/// either:
+/// - a bare name with no directory component (e.g. "imp", from a native
+///   tool's `exec.tool()` binding) — left untouched, since `Command::spawn()`
+///   resolves that itself via the sandboxed `PATH` env `sandbox_command_env()`
+///   builds, same as `execvp`. Joining `base` onto this would turn a PATH
+///   lookup into one specific, wrong file path.
+/// - already absolute — left untouched.
+/// - a relative path that names a directory (e.g. a produced/toolchain
+///   tool's sandbox-relative path from `exec.tool()`, like
+///   `rustup-home/toolchains/.../bin/cargo.exe`) — joined onto `base` (the
+///   same directory passed to the command's own `current_dir()`) to make it
+///   absolute before it ever reaches `Command::new()`. That's not just
+///   belt-and-suspenders: `Command::new()`'s own relative-path resolution is
+///   documented to run against *this* process's current directory, not the
+///   child's `current_dir()` — a relative program string can silently
+///   resolve against the wrong base entirely, independent of whether the
+///   intended target actually exists under the intended cwd.
+pub fn resolve_program(program: &str, base: &Path) -> Result<PathBuf> {
     if program != "sh" {
-        return Ok(PathBuf::from(program));
+        let path = PathBuf::from(program);
+        let is_bare_name = path
+            .parent()
+            .is_some_and(|parent| parent.as_os_str().is_empty());
+        return Ok(if path.is_absolute() || is_bare_name {
+            path
+        } else {
+            base.join(path)
+        });
     }
     for candidate in BUILTIN_SHELL_CANDIDATES {
         if Path::new(candidate).is_file() {
@@ -1042,14 +1066,14 @@ fn exec_run_inner_with_start(
         "IMP_SANDBOX_ROOT".to_owned(),
         sandbox_root.to_string_lossy().into_owned(),
     );
-    let resolved_program = resolve_program(program)?;
-    add_executable_library_path(&mut command_env, &resolved_program, &sandbox_root);
-    let mut command = Command::new(&resolved_program);
     let command_cwd = if opts.workspace_cwd {
         workspace_root
     } else {
         &sandbox_root
     };
+    let resolved_program = resolve_program(program, command_cwd)?;
+    add_executable_library_path(&mut command_env, &resolved_program, &sandbox_root);
+    let mut command = Command::new(&resolved_program);
     command
         .args(args)
         .current_dir(command_cwd)
@@ -1326,7 +1350,7 @@ pub fn exec_run_unsandboxed(
             command_env.insert("PATH".to_owned(), path.to_string_lossy().into_owned());
         }
     }
-    let resolved_program = resolve_program(program)?;
+    let resolved_program = resolve_program(program, workspace_root)?;
     let mut command = Command::new(&resolved_program);
     command
         .args(args)
