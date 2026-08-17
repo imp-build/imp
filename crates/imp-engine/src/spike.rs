@@ -4917,7 +4917,25 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     Ok(())
 }
 
+// Windows ships a libarchive-based bsdtar at this fixed path that, unlike
+// Git-for-Windows' own MSYS tar (commonly found earlier on PATH than this —
+// the same PATH-ordering hazard BUILTIN_SHELL_CANDIDATES's own doc comment
+// sidesteps for "sh" by never trusting PATH search for it either), can
+// extract .zip archives, not just tar-family ones. Toolchain installers on
+// Windows (e.g. rules/c/gcc's and rules/c/zig's own Windows install steps)
+// download .zip releases and need this specific tar, so it's preferred
+// outright rather than trusting PATH order — confirmed by a real gcc/kache
+// install failure on a machine with Git's tar ahead of this one on PATH:
+// "tar: This does not look like a tar archive".
+#[cfg(windows)]
+const WINDOWS_BSDTAR: &str = r"C:\Windows\System32\tar.exe";
+
 fn which_executable(name: &str) -> Option<String> {
+    #[cfg(windows)]
+    if name == "tar" && Path::new(WINDOWS_BSDTAR).is_file() {
+        return Some(WINDOWS_BSDTAR.to_owned());
+    }
+
     // mut is only needed for the dirs.extend() below, which is windows-only.
     #[cfg_attr(not(windows), allow(unused_mut))]
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")

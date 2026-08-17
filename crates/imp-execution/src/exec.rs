@@ -1026,6 +1026,18 @@ fn exec_run_inner_with_start(
     let (home_dir, tmp_dir) = sandbox_home_tmp(&sandbox_root)?;
     command_env.insert("HOME".to_owned(), home_dir.to_string_lossy().into_owned());
     command_env.insert("TMPDIR".to_owned(), tmp_dir.to_string_lossy().into_owned());
+    // Native Windows programs (e.g. a WinLibs gcc.exe driving cc1/as/ld as
+    // subprocesses) look up their temp directory via GetTempPath(), which
+    // checks TMP/TEMP, not the POSIX-convention TMPDIR set above — without
+    // this they fall through GetTempPath()'s last resort, the Windows
+    // directory itself, and fail with "Cannot create temporary file in
+    // C:\WINDOWS\: Permission denied" (confirmed by a real compile failure).
+    #[cfg(windows)]
+    {
+        let tmp_dir_str = tmp_dir.to_string_lossy().into_owned();
+        command_env.insert("TMP".to_owned(), tmp_dir_str.clone());
+        command_env.insert("TEMP".to_owned(), tmp_dir_str);
+    }
     command_env.insert(
         "IMP_SANDBOX_ROOT".to_owned(),
         sandbox_root.to_string_lossy().into_owned(),
