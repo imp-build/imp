@@ -1,18 +1,15 @@
 import {
 	Toolchain,
 	namedCache,
-	output,
 	platformInfo,
 	cachePut,
 	cacheGet,
-	task,
 	toolName,
 	tool as graphTool,
 } from "imp:core";
 
-import { nativeTool } from "//rules/imp/native-tool";
 import { downloadToolArtifact } from "//rules/imp/lockfile";
-import { extractArchiveTools } from "//rules/imp/archive";
+import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin } from "//rules/imp/toolchain";
 import {
 	graphGenerateToolLockfile,
@@ -214,9 +211,9 @@ namedCache({ name: CMAKE_TOOLCHAIN_CACHE, shared: true });
 /**
  * Build the managed CMake distribution as a graph-native tool (issue #31/#62,
  * PR D). Mirrors rules/c/gcc's gccGraphTool() — downloadToolArtifact()'s
- * graph form plus a manual tar-extraction task() (no wrapper scripts needed
- * for a plain `cmake` binary, unlike gcc/zig's compiler-alias wrappers, so
- * this is simpler) — writing its result into CMAKE_TOOLCHAIN_CACHE so
+ * graph form plus extractArchive() (no wrapper scripts needed for a plain
+ * `cmake` binary, unlike gcc/zig's compiler-alias wrappers, so this is
+ * simpler) — writing its result into CMAKE_TOOLCHAIN_CACHE so
  * cmakeGraphToolSpec() can address the same install by cache key.
  *
  * @param {string} [version]
@@ -237,39 +234,19 @@ export function cmakeGraphTool(version) {
 		display: `download cmake ${resolved} (${plat.os}/${plat.arch})`,
 		unverified: CmakeToolchain.resolveUnverified(resolved),
 	});
+	// Extracted via the shared extractArchive() helper: "zip" (windows)
+	// unpacks with unzip, not tar — see rules/imp/archive's own comment on
+	// why a bare "tar" on Windows can't be trusted to resolve to a
+	// zip-capable implementation.
 	const format = plat.os === "windows" ? "zip" : "tar.gz";
-	const toolNames = extractArchiveTools(format);
-	const tarFlags = format === "tar.gz" ? "-xzf" : "-xf";
-	const inputs = { archive };
-	for (const [index, name] of toolNames.entries()) {
-		inputs[`tool${index}`] = nativeTool(name);
-	}
-	const directory = task({
+	const directory = extractArchive({
+		archive,
+		dest: "cmake-toolchain",
+		format,
+		stripComponents: 1,
+		namedCache: { name: CMAKE_TOOLCHAIN_CACHE, key: cacheKey },
 		display: `install cmake ${resolved} (${plat.os}/${plat.arch})`,
-		inputs,
-		outputs: { directory: output.artifact() },
-		async run(exec, resolvedInputs) {
-			const tools = toolNames.map((_, index) => resolvedInputs[`tool${index}`]);
-			const result = await exec.action({
-				argv: [
-					"sh",
-					"-c",
-					'archive=$1; out=$2; mkdir -p "$out" && tar $3 "$archive" -C "$out" --strip-components=1',
-					"cmake-install",
-					exec.path(resolvedInputs.archive),
-					"cmake-toolchain",
-					tarFlags,
-				],
-				tools,
-				outputs: {
-					directory: output.directory("cmake-toolchain", {
-						namedCache: { name: CMAKE_TOOLCHAIN_CACHE, key: cacheKey },
-					}),
-				},
-			});
-			return { directory: result.outputs.directory };
-		},
-	}).outputs.directory;
+	});
 	return graphTool(directory, { binDirs: ["bin"] });
 }
 

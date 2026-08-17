@@ -357,19 +357,26 @@ describe("gcc toolchain on windows", () => {
 
 			expect(install.argv[0]).toBe("sh");
 			const script = install.argv[2];
-			// A plain zip (not xz-filtered), so no "-J" flag.
-			expect(script).toContain("tar -xf");
-			expect(script).not.toContain("-xJf");
+			// A zip, extracted with unzip — not tar, which on Windows can
+			// silently resolve to Git-for-Windows' own GNU tar (no zip
+			// support) instead of the OS's bsdtar, depending on PATH order.
+			expect(script).toContain('"$unzip" -q');
+			expect(script).not.toContain('"$tar"');
+			// unzip has no --strip-components equivalent, so the wrapping
+			// "mingw64/" directory is dropped via a staging dir + mv instead.
+			expect(script).toContain('"$out.stage"');
+			expect(script).toContain('"$mv" "$out.stage"/*/* "$out"/');
 			// No Bootlin toolchain-wrapper to work around, so aliases are plain
 			// file copies of the real binaries, not generated wrapper scripts.
-			expect(script).toContain("cp ");
+			expect(script).toContain('"$cp"');
 			expect(script).not.toContain("#!/bin/sh\\nexec");
 			expect(script).not.toContain("chmod");
 			for (const pair of ["clang:gcc", "cc:gcc", "c++-unsafe-paths:c++"]) {
 				expect(script).toContain(`"${pair}"`);
 			}
 			expect(script).toContain("bin-unsafe-paths");
-			expect(install.tools.some((t) => t.name === "tar")).toBe(true);
+			expect(install.tools.some((t) => t.name === "unzip")).toBe(true);
+			expect(install.tools.some((t) => t.name === "mv")).toBe(true);
 			expect(install.tools.some((t) => t.name === "cp")).toBe(true);
 			expect(install.outputs[0].namedCache.name).toBe("gcc-toolchains");
 			expect(install.outputs[0].namedCache.key).toBe(

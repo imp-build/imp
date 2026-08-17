@@ -317,22 +317,32 @@ function gccGraphToolWindows(version, plat, archive, cacheKey) {
 	const shell = nativeTool("sh");
 	const mkdir = nativeTool("mkdir");
 	const cp = nativeTool("cp");
-	const tar = nativeTool("tar");
-	// Bare "mkdir"/"cp"/"tar" inside the script would resolve through
+	const mv = nativeTool("mv");
+	const unzip = nativeTool("unzip");
+	// WinLibs ships a zip, not a tar archive, so this extracts with unzip —
+	// not tar (Windows hosts two "tar"s that answer to the same bare name,
+	// Git-for-Windows' bundled MSYS/GNU tar with no zip support at all and
+	// the OS's own bsdtar, and which one wins is a PATH-order accident; see
+	// rules/imp/archive's own comment). unzip has no such competing
+	// alternative to accidentally shadow it. It also has no
+	// --strip-components equivalent, so dropping the zip's wrapping
+	// "mingw64/" directory means unpacking into a staging dir first and
+	// moving its contents up — the same approach rules/imp/archive's
+	// extractArchive() now uses for a zip's stripComponents.
+	//
+	// Bare "mkdir"/"cp"/"mv"/"unzip" inside the script would resolve through
 	// Git-for-Windows' own self-prepended PATH (its usr/bin, ahead of
 	// anything imp's sandbox itself puts on PATH) rather than the mounted
-	// tools declared below — confirmed by a real failure where bare "tar"
-	// silently ran Git's own GNU tar (no zip support) instead of the pinned
-	// Windows bsdtar, producing "does not look like a tar archive" on a
-	// perfectly valid zip. exec.tool() is no help here either: for a native
+	// tools declared below. exec.tool() is no help here either: for a native
 	// tool binding it's a pure passthrough of the bare executable name (see
 	// graph_core.js's exec.tool()), not a real path. exec.path() does return
 	// the tool's real resolved absolute path, so passing each tool that way
 	// as an argv positional sidesteps the PATH-precedence hazard entirely.
 	const installScript =
-		'archive=$1; out=$2; mkdir=$3; cp=$4; tar=$5; ' +
-		'"$mkdir" -p "$out/bin" "$out/bin-unsafe-paths" && ' +
-		'"$tar" -xf "$archive" -C "$out" --strip-components=1 && ' +
+		'archive=$1; out=$2; mkdir=$3; cp=$4; mv=$5; unzip=$6; ' +
+		'"$mkdir" -p "$out/bin" "$out/bin-unsafe-paths" "$out.stage" && ' +
+		'"$unzip" -q "$archive" -d "$out.stage" && ' +
+		'"$mv" "$out.stage"/*/* "$out"/ && ' +
 		'for pair in "clang:gcc" "cc:gcc" "clang-unsafe-paths:gcc" "cc-unsafe-paths:gcc" "c++-unsafe-paths:c++"; do ' +
 		'name=${pair%%:*}; target=${pair#*:}; ' +
 		'"$cp" "$out/bin/$target.exe" "$out/bin/$name.exe"; ' +
@@ -342,7 +352,7 @@ function gccGraphToolWindows(version, plat, archive, cacheKey) {
 		"done";
 	const directory = task({
 		display: `install gcc ${version} (${plat.os}/${plat.arch})`,
-		inputs: { archive, shell, mkdir, cp, tar },
+		inputs: { archive, shell, mkdir, cp, mv, unzip },
 		outputs: { directory: output.artifact() },
 		async run(exec, inputs) {
 			const result = await exec.action({
@@ -355,9 +365,10 @@ function gccGraphToolWindows(version, plat, archive, cacheKey) {
 					"gcc-toolchain",
 					`${exec.path(inputs.mkdir)}/mkdir.exe`,
 					`${exec.path(inputs.cp)}/cp.exe`,
-					`${exec.path(inputs.tar)}/tar.exe`,
+					`${exec.path(inputs.mv)}/mv.exe`,
+					`${exec.path(inputs.unzip)}/unzip.exe`,
 				],
-				tools: [inputs.shell, inputs.mkdir, inputs.cp, inputs.tar],
+				tools: [inputs.shell, inputs.mkdir, inputs.cp, inputs.mv, inputs.unzip],
 				outputs: {
 					directory: output.directory("gcc-toolchain", {
 						namedCache: { name: GCC_TOOLCHAIN_CACHE, key: cacheKey },

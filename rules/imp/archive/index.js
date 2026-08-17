@@ -7,17 +7,23 @@
 import { output, task } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 
-// tar flags per archive format. Windows Git Bash ships bsdtar, which unpacks
-// .zip through plain -xf; gzip/xz decompression must be explicit because tar
-// can't sniff the compression of a piped or plain file argument everywhere.
+// tar flags per real tar-family format; gzip/xz decompression must be
+// explicit because tar can't sniff the compression of a piped or plain file
+// argument everywhere. Zip archives are handled separately, by unzip, not
+// tar: bsdtar can technically read a zip through plain "-xf", but Windows
+// hosts two "tar"s that answer to the same bare name — Git-for-Windows'
+// bundled MSYS/GNU tar (no zip support at all) and the OS's own bsdtar — and
+// which one PATH search finds first is a host-configuration accident, not
+// something a hermetic build should depend on (confirmed by a real failure:
+// a machine with Git's tar ahead on PATH got "does not look like a tar
+// archive" on a perfectly valid zip). unzip has no such competing
+// alternative implementation to accidentally shadow it.
 const FORMAT_FLAGS = {
 	"tar.gz": "-xzf",
 	"tar.xz": "-xJf",
 	tar: "-xf",
-	// Windows' bsdtar can read zip files; Unix callers needing a zip must use
-	// "zip-unix", which invokes the native unzip utility instead.
-	zip: "-xf",
 };
+const ZIP_FORMATS = new Set(["zip", "zip-unix"]);
 
 /**
  * Native-tool names extractArchive's script needs for a format (callers merge
@@ -25,12 +31,16 @@ const FORMAT_FLAGS = {
  * ambient PATH).
  *
  * @param {string} format One of "tar.gz", "tar.xz", "tar", "zip", or
- *   "zip-unix".
+ *   "zip-unix" ("zip" and "zip-unix" are equivalent; both unpack via unzip).
  * @returns {string[]}
  */
 export function extractArchiveTools(format) {
-	if (format === "zip-unix") {
-		return ["mkdir", "unzip"];
+	if (ZIP_FORMATS.has(format)) {
+		// "mv" is only exercised when stripComponents is set (see
+		// runGraphArchiveExtraction's own comment on why unzip needs a staging
+		// dir + mv rather than tar's built-in --strip-components), but the
+		// tool set is derived from format alone, not per-call options.
+		return ["mkdir", "unzip", "mv"];
 	}
 	const flags = FORMAT_FLAGS[format];
 	if (!flags) {
@@ -41,20 +51,26 @@ export function extractArchiveTools(format) {
 }
 
 async function runGraphArchiveExtraction(exec, inputs) {
+	const isZip = ZIP_FORMATS.has(inputs.format);
 	const flags = FORMAT_FLAGS[inputs.format];
-	if (!flags && inputs.format !== "zip-unix") {
+	if (!flags && !isZip) {
 		throw new Error(`unsupported archive format '${inputs.format}'`);
 	}
-	if (inputs.format === "zip-unix" && inputs.stripComponents) {
-		throw new Error("zip-unix extraction does not support stripComponents");
+	if (isZip && inputs.stripComponents && inputs.stripComponents !== 1) {
+		throw new Error("zip extraction only supports stripComponents of 1");
 	}
 	const strip = inputs.stripComponents
 		? ` --strip-components=${inputs.stripComponents}`
 		: "";
-	const command =
-		inputs.format === "zip-unix"
-			? 'mkdir -p "$2" && unzip -q "$1" -d "$2"'
-			: `mkdir -p "$2" && tar ${flags} "$1" -C "$2"${strip}`;
+	// unzip has no --strip-components equivalent, so stripping the archive's
+	// wrapping top-level directory (e.g. Node's Windows release unpacking to
+	// "node-v22.0.0-win-x64/...") means unpacking into a staging directory
+	// first, then moving that single top-level directory's contents up.
+	const command = isZip
+		? inputs.stripComponents
+			? 'mkdir -p "$2" "$2.stage" && unzip -q "$1" -d "$2.stage" && mv "$2.stage"/*/* "$2"'
+			: 'mkdir -p "$2" && unzip -q "$1" -d "$2"'
+		: `mkdir -p "$2" && tar ${flags} "$1" -C "$2"${strip}`;
 	const tools = inputs.toolNames.map((_, index) => inputs[`tool${index}`]);
 	const result = await exec.action({
 		argv: [
@@ -92,8 +108,7 @@ async function runGraphArchiveExtraction(exec, inputs) {
  *   (e.g. downloadToolArtifact()'s return value).
  * @param {string} opts.dest Sandbox-relative extraction directory.
  * @param {string} opts.format One of "tar.gz", "tar.xz", "tar", "zip", or
- *   "zip-unix". "zip" unpacks via `tar -xf` for Windows' bsdtar; use
- *   "zip-unix" for GNU/Linux and macOS, where it invokes `unzip` instead.
+ *   "zip-unix" — the latter two are equivalent, both extracting via unzip.
  * @param {number} [opts.stripComponents] tar --strip-components value.
  * @param {{ name: string, key: string }} [opts.namedCache] Publish `dest` as
  *   a named-cache-keyed directory output (the toolchain-install shape).
@@ -117,8 +132,8 @@ export function extractArchive({
 	}
 	// Validate construction-time policy before creating any graph nodes.
 	extractArchiveTools(format);
-	if (format === "zip-unix" && stripComponents) {
-		throw new Error("zip-unix extraction does not support stripComponents");
+	if (ZIP_FORMATS.has(format) && stripComponents && stripComponents !== 1) {
+		throw new Error("zip extraction only supports stripComponents of 1");
 	}
 	const toolNames = ["sh", ...extractArchiveTools(format)];
 	const uniqueToolNames = [...new Set(toolNames)];
