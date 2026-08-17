@@ -21,7 +21,6 @@ import {
 	configuration,
 	defineConfigSchema,
 	field,
-	product,
 	namedCache,
 	run,
 	output,
@@ -49,10 +48,9 @@ import {
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
-import { RUST_BUILD_CACHE } from "//rules/rust/products";
 
-// Declared tool identity for products this toolchain implements; also
-// consumed by rule modules registering kache-driven products.
+// Declared tool identity for the "kache-toolchain" kind's TOOLCHAIN product
+// (imp @tool dispatch).
 export const KACHE_TOOL = toolName("kache");
 
 const KACHE_TOOLCHAIN_CACHE = "kache-toolchains";
@@ -61,8 +59,8 @@ const KACHE_DATA_CACHE = "kache-data";
 
 // kache's own default (50 GiB) is the only thing bounding KACHE_CACHE_DIR's
 // growth otherwise — imp's own GC can't prune inside it (see
-// RustKacheWrapper's doc comment below), so an explicit, smaller cap is set
-// unless a rule author overrides it via kacheToolchain(version, { cacheSize }).
+// kacheBuildCacheEnv()'s doc comment below), so an explicit, smaller cap is
+// set unless a rule author overrides it via kacheToolchain(version, { cacheSize }).
 const DEFAULT_CACHE_SIZE = "4GiB";
 
 export const kacheConfigSchema = {
@@ -177,17 +175,19 @@ export class KacheToolchain extends Toolchain {
 		);
 	}
 
-	// kache is a compiler wrapper resolved through the RUST_BUILD_CACHE role,
-	// not an @tool-dispatchable binary; expose the cached binary path.
+	// kache is a compiler wrapper consumed via kacheBuildCacheTools()/
+	// kacheBuildCacheEnv(), not an @tool-dispatchable binary; expose the
+	// cached binary path.
 	bin() {
 		return kacheBin(this.attrs.version);
 	}
 }
 
 // Built once per declared version, at declaration time. This map is what
-// makes kache work at all: RustKacheWrapper resolves the toolchain from
-// inside a running cargo task body (rules/rust/index.js), and task() refuses
-// to add graph nodes during execution — so the handle must already exist.
+// makes kache work at all: kacheBuildCacheTools()/kacheBuildCacheEnv() below
+// resolve the toolchain from inside a running cargo task body
+// (rules/rust/index.js), and task() refuses to add graph nodes during
+// execution — so the handle must already exist.
 let graphToolchains = new Map();
 // The KACHE_DATA_CACHE seed task (see kacheDataSeed); one per platform key.
 let dataSeeds = new Map();
@@ -213,7 +213,7 @@ function graphToolFor(version) {
  * @param {string} [opts.cacheSize="4GiB"] KACHE_MAX_SIZE — caps
  *   KACHE_CACHE_DIR's on-disk size (kache's own default is 50 GiB; imp's
  *   GC can't prune inside it, only delete it wholesale — see
- *   RustKacheWrapper's doc comment).
+ *   kacheBuildCacheEnv()'s doc comment).
  * @returns {object} Target handle for this kache toolchain.
  * @category configuration
  */
@@ -315,10 +315,12 @@ export function installKacheToolchain(version, source) {
  * flat, so no stripComponents is needed here either.
  *
  * The RUSTC_WRAPPER env/daemon-lifecycle wiring (workerStart(), see
- * RustKacheWrapper below) has no graph-native equivalent to port to yet: it
- * stays a plain async helper, called directly from inside whichever cargo
- * action task body needs it (rules/rust's graph-native build/test/lint
- * passes) rather than being wrapped in its own task() here.
+ * kacheBuildCacheEnv() below) has no task()-based graph-native form to port
+ * to: it stays a plain async helper, called directly from inside whichever
+ * cargo action task body needs it (rules/rust's graph-native build/test/lint
+ * passes) rather than being wrapped in its own task() here. Only its
+ * *dispatch* (once reached dynamically via productFor(), #148) is now a
+ * plain, statically-imported function call.
  *
  * @param {string} [version]
  * @returns {object} A tool handle accepted by exec.tool()/exec.action().
@@ -444,8 +446,8 @@ export async function kacheTool(version) {
  * ordinary filesystem access), so a real absolute path is reachable from
  * inside the sandbox just fine — and it needs to be a genuinely stable path,
  * not a sandbox-relative one, precisely because it's handed to a long-lived
- * kache background daemon (see RustKacheWrapper.wrapScript) whose own env
- * must outlive any single sandbox.
+ * kache background daemon (see kacheScriptPreamble()) whose own env must
+ * outlive any single sandbox.
  *
  * @returns {Promise<string>}
  */
@@ -489,124 +491,109 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 kacheToolchain("0.11.0", { default: true });
 
 /**
- * Adapter exposing a kache toolchain as Rust's RUSTC_WRAPPER, sharing a
- * persistent on-disk object cache across sandboxed cargo builds. Registered
- * as the "rust-build-cache" product for the "kache-toolchain" kind so
- * rules/rust/index.js can resolve it dynamically via
- * productFor(handle, RUST_BUILD_CACHE) the same way it resolves
- * "rust-link-driver"/"rust-linker".
+ * Expose a kache toolchain as Rust's RUSTC_WRAPPER, sharing a persistent
+ * on-disk object cache across sandboxed cargo builds. Called directly by
+ * rules/rust/index.js's rustBuildCacheTools() with the kache toolchain
+ * handle's own .attrs (#148 — this used to be resolved dynamically via
+ * productFor(handle, RUST_BUILD_CACHE) against a RustKacheWrapper instance;
+ * now a plain function call, same behavior).
+ *
+ * @param {string} version
+ * @returns {Promise<object[]>} run({ tools }) entries kache needs.
  */
-export class RustKacheWrapper {
-	constructor(handle) {
-		this.handle = handle;
-	}
-
-	/** @returns {Promise<object[]>} run({ tools }) entries this wrapper needs. */
-	async tools() {
-		return [await kacheTool(this.handle.attrs.version)];
-	}
-
-	/**
-	 * Shell text to run before invoking cargo, once the caller has captured
-	 * `imp_sandbox_root="$(pwd)"` as the first statement of its own script
-	 * (same idiom as rules/c/cmake/index.js's zigEnvExportStmts — see its doc
-	 * comment for why this can't just be one more entry in env()'s array).
-	 *
-	 * KACHE_BASE_DIR can't be a literal path handed through run()'s env:,
-	 * because the sandbox root doesn't exist yet when env: is hashed into the
-	 * task key (crates/imp-execution/src/exec.rs computes the key before
-	 * creating the sandbox) — only the symbolic shell reference
-	 * `$imp_sandbox_root`, resolved by the shell at actual run time, is
-	 * safe to bake into the hashed script text. Without KACHE_BASE_DIR at
-	 * all, kache keys compiles partly off the absolute paths rustc is
-	 * invoked with, which differ on every sandbox — so cache entries almost
-	 * never hit and the cache just grows. KACHE_BASE_DIR tells kache which
-	 * prefix is "the sandbox" so it can normalize those paths away before
-	 * hashing.
-	 *
-	 * @returns {string}
-	 */
-	scriptPreamble() {
-		return 'export KACHE_BASE_DIR="$imp_sandbox_root"; ';
-	}
-
-	/**
-	 * Ensure kache's background daemon is running, then return the env
-	 * entries wiring rustc through it.
-	 *
-	 * The daemon is started via workerStart() (see //rules/imp, backed by
-	 * src/worker.rs) rather than left to run ad hoc from inside a sandbox:
-	 * every imp run() sandbox gets a fresh TMPDIR/HOME that's deleted with
-	 * its sandbox (src/exec.rs's sandbox_home_tmp), so a daemon spawned from
-	 * inside one sandbox would end up pointed at directories that no longer
-	 * exist as soon as that sandbox is torn down. workerStart() instead
-	 * spawns the daemon directly from the host into a stable,
-	 * workspace-scoped directory that outlives any single sandbox (and this
-	 * imp process), and is idempotent/singleton across concurrent run()s
-	 * (`--jobs > 1`) requesting it at once.
-	 *
-	 * @returns {Promise<string[]>} env entries wiring rustc through kache.
-	 */
-	async env() {
-		const version = this.handle.attrs.version;
-		const plat = platformInfo();
-		const resolved = KacheToolchain.requireVersion(version);
-		const exe = plat.os === "windows" ? "kache.exe" : "kache";
-		const dir = await toolchainDir(graphToolFor(resolved), {
-			name: KACHE_TOOLCHAIN_CACHE,
-			key: kacheCacheKey(resolved, plat),
-		});
-		const bin = `${dir}/${exe}`;
-		const dataDir = await kacheDataDir();
-		const cacheSize = this.handle.attrs.cacheSize;
-		const cacheExecutables = cache_executables_env();
-
-		// KACHE_MAX_SIZE goes on the daemon's own start env, not just the
-		// client env returned below: the daemon is a singleton per workspace
-		// (see worker.rs) that fixes its env at first start, so it must carry
-		// the real limit itself rather than relying on whichever client
-		// happens to start it. It's set on the client env too (below) since
-		// kache's own docs describe size-pressure GC as triggered by "the
-		// wrapper" — each individual `kache rustc ...` client invocation
-		// checks the store size against KACHE_MAX_SIZE and spawns a `kache
-		// gc` subprocess when needed — so both sides need it.
-		await workerStart("kache", {
-			argv: [bin, "daemon", "run"],
-			env: [
-				`KACHE_CACHE_DIR=${dataDir}`,
-				`KACHE_MAX_SIZE=${cacheSize}`,
-				`KACHE_CACHE_EXECUTABLES=${cacheExecutables}`,
-				"KACHE_LOCAL_ONLY=1",
-			],
-			healthCheckArgv: [bin, "daemon", "status"],
-		});
-
-		return [
-			`KACHE_CACHE_DIR=${dataDir}`,
-			"RUSTC_WRAPPER=kache",
-			`KACHE_MAX_SIZE=${cacheSize}`,
-			`KACHE_CACHE_EXECUTABLES=${cacheExecutables}`,
-			// User-requested: never let kache reach for S3/planner remote
-			// caching, even if a config file elsewhere on the host enables
-			// it — env wins over the config file for this setting.
-			"KACHE_LOCAL_ONLY=1",
-			// kache strips rustc's own `-C incremental=<dir>` flag itself
-			// (setting CARGO_INCREMENTAL=0 on the child process would be too
-			// late, since cargo injects the flag before the wrapper runs),
-			// but kache's own benchmark/e2e scenarios still set this
-			// explicitly too — it keeps cargo's target-dir lean and removes
-			// a redundant, discarded-every-sandbox incremental state anyway.
-			"CARGO_INCREMENTAL=0",
-		];
-	}
+export async function kacheBuildCacheTools(version) {
+	return [await kacheTool(version)];
 }
 
-product(
-	KacheToolchain,
-	RUST_BUILD_CACHE,
-	KACHE_TOOL,
-	function kacheRustBuildCacheWrapper(handle) {
-		return new RustKacheWrapper(handle);
-	},
-	{ display: "rust build cache {0}", level: "info" },
-);
+/**
+ * Shell text to run before invoking cargo, once the caller has captured
+ * `imp_sandbox_root="$(pwd)"` as the first statement of its own script (same
+ * idiom as rules/c/cmake/index.js's zigEnvExportStmts — see its doc comment
+ * for why this can't just be one more entry in kacheBuildCacheEnv()'s array).
+ *
+ * KACHE_BASE_DIR can't be a literal path handed through run()'s env:, because
+ * the sandbox root doesn't exist yet when env: is hashed into the task key
+ * (crates/imp-execution/src/exec.rs computes the key before creating the
+ * sandbox) — only the symbolic shell reference `$imp_sandbox_root`, resolved
+ * by the shell at actual run time, is safe to bake into the hashed script
+ * text. Without KACHE_BASE_DIR at all, kache keys compiles partly off the
+ * absolute paths rustc is invoked with, which differ on every sandbox — so
+ * cache entries almost never hit and the cache just grows. KACHE_BASE_DIR
+ * tells kache which prefix is "the sandbox" so it can normalize those paths
+ * away before hashing.
+ *
+ * @returns {string}
+ */
+export function kacheScriptPreamble() {
+	return 'export KACHE_BASE_DIR="$imp_sandbox_root"; ';
+}
+
+/**
+ * Ensure kache's background daemon is running, then return the env entries
+ * wiring rustc through it.
+ *
+ * The daemon is started via workerStart() (see //rules/imp, backed by
+ * src/worker.rs) rather than left to run ad hoc from inside a sandbox: every
+ * imp run() sandbox gets a fresh TMPDIR/HOME that's deleted with its sandbox
+ * (src/exec.rs's sandbox_home_tmp), so a daemon spawned from inside one
+ * sandbox would end up pointed at directories that no longer exist as soon
+ * as that sandbox is torn down. workerStart() instead spawns the daemon
+ * directly from the host into a stable, workspace-scoped directory that
+ * outlives any single sandbox (and this imp process), and is
+ * idempotent/singleton across concurrent run()s (`--jobs > 1`) requesting it
+ * at once.
+ *
+ * @param {string} version
+ * @param {string} cacheSize KACHE_MAX_SIZE for both the client and daemon env.
+ * @returns {Promise<string[]>} env entries wiring rustc through kache.
+ */
+export async function kacheBuildCacheEnv(version, cacheSize) {
+	const plat = platformInfo();
+	const resolved = KacheToolchain.requireVersion(version);
+	const exe = plat.os === "windows" ? "kache.exe" : "kache";
+	const dir = await toolchainDir(graphToolFor(resolved), {
+		name: KACHE_TOOLCHAIN_CACHE,
+		key: kacheCacheKey(resolved, plat),
+	});
+	const bin = `${dir}/${exe}`;
+	const dataDir = await kacheDataDir();
+	const cacheExecutables = cache_executables_env();
+
+	// KACHE_MAX_SIZE goes on the daemon's own start env, not just the client
+	// env returned below: the daemon is a singleton per workspace (see
+	// worker.rs) that fixes its env at first start, so it must carry the real
+	// limit itself rather than relying on whichever client happens to start
+	// it. It's set on the client env too (below) since kache's own docs
+	// describe size-pressure GC as triggered by "the wrapper" — each
+	// individual `kache rustc ...` client invocation checks the store size
+	// against KACHE_MAX_SIZE and spawns a `kache gc` subprocess when needed —
+	// so both sides need it.
+	await workerStart("kache", {
+		argv: [bin, "daemon", "run"],
+		env: [
+			`KACHE_CACHE_DIR=${dataDir}`,
+			`KACHE_MAX_SIZE=${cacheSize}`,
+			`KACHE_CACHE_EXECUTABLES=${cacheExecutables}`,
+			"KACHE_LOCAL_ONLY=1",
+		],
+		healthCheckArgv: [bin, "daemon", "status"],
+	});
+
+	return [
+		`KACHE_CACHE_DIR=${dataDir}`,
+		"RUSTC_WRAPPER=kache",
+		`KACHE_MAX_SIZE=${cacheSize}`,
+		`KACHE_CACHE_EXECUTABLES=${cacheExecutables}`,
+		// User-requested: never let kache reach for S3/planner remote
+		// caching, even if a config file elsewhere on the host enables
+		// it — env wins over the config file for this setting.
+		"KACHE_LOCAL_ONLY=1",
+		// kache strips rustc's own `-C incremental=<dir>` flag itself
+		// (setting CARGO_INCREMENTAL=0 on the child process would be too
+		// late, since cargo injects the flag before the wrapper runs),
+		// but kache's own benchmark/e2e scenarios still set this
+		// explicitly too — it keeps cargo's target-dir lean and removes
+		// a redundant, discarded-every-sandbox incremental state anyway.
+		"CARGO_INCREMENTAL=0",
+	];
+}

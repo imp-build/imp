@@ -1,5 +1,3 @@
-import { productFor } from "imp:core";
-import { RUST_BUILD_CACHE } from "//rules/rust/products";
 import {
 	describe,
 	expect,
@@ -11,11 +9,14 @@ import {
 	defaultKacheToolchain,
 	defaultKacheToolchainVersion,
 	installKacheToolchain,
+	kacheBuildCacheEnv,
+	kacheBuildCacheTools,
 	kacheCacheKey,
 	kacheDataCacheKey,
 	kacheBin,
 	kacheDataDir,
 	kacheGraphTool,
+	kacheScriptPreamble,
 	kacheTool,
 	kacheToolchain,
 } from "//rules/rust/kache/toolchain";
@@ -157,13 +158,16 @@ describe("kache toolchain", () => {
 		});
 	});
 
-	test("registers a rust-build-cache product exposing RUSTC_WRAPPER/KACHE_CACHE_DIR and tools", async () => {
+	test("exposes RUSTC_WRAPPER/KACHE_CACHE_DIR env and tools for the rust build-cache role", async () => {
 		await withKacheHost(async (host) => {
 			const toolchain = kacheToolchain("0.11.0", { unverified: true });
 
-			const wrapper = await productFor(toolchain, RUST_BUILD_CACHE);
-
-			expect(await wrapper.env()).toEqual([
+			expect(
+				await kacheBuildCacheEnv(
+					toolchain.attrs.version,
+					toolchain.attrs.cacheSize,
+				),
+			).toEqual([
 				"KACHE_CACHE_DIR=/cache/kache-data/linux-x86_64",
 				"RUSTC_WRAPPER=kache",
 				"KACHE_MAX_SIZE=4GiB",
@@ -171,9 +175,9 @@ describe("kache toolchain", () => {
 				"KACHE_LOCAL_ONLY=1",
 				"CARGO_INCREMENTAL=0",
 			]);
-			const tools = await wrapper.tools();
+			const tools = await kacheBuildCacheTools(toolchain.attrs.version);
 			expect(tools.some((t) => t.name === "kache")).toBe(true);
-			expect(wrapper.scriptPreamble()).toBe(
+			expect(kacheScriptPreamble()).toBe(
 				'export KACHE_BASE_DIR="$imp_sandbox_root"; ',
 			);
 		});
@@ -184,8 +188,10 @@ describe("kache toolchain", () => {
 			const toolchain = kacheToolchain("0.11.0", { unverified: true });
 
 			await withKacheConfig({ cacheExecutables: true }, async () => {
-				const wrapper = await productFor(toolchain, RUST_BUILD_CACHE);
-				const clientEnv = await wrapper.env();
+				const clientEnv = await kacheBuildCacheEnv(
+					toolchain.attrs.version,
+					toolchain.attrs.cacheSize,
+				);
 				expect(clientEnv).toContain("KACHE_CACHE_EXECUTABLES=1");
 
 				const [, opts] = host.calls
@@ -204,8 +210,10 @@ describe("kache toolchain", () => {
 				unverified: true,
 			});
 
-			const wrapper = await productFor(toolchain, RUST_BUILD_CACHE);
-			const clientEnv = await wrapper.env();
+			const clientEnv = await kacheBuildCacheEnv(
+				toolchain.attrs.version,
+				toolchain.attrs.cacheSize,
+			);
 
 			// Unlike sccache's cache-size cap (server-only — each individual
 			// compile doesn't need it), kache's own docs describe
@@ -230,8 +238,10 @@ describe("kache toolchain", () => {
 		await withKacheHost(async (host) => {
 			const toolchain = kacheToolchain("0.11.0", { unverified: true });
 
-			const wrapper = await productFor(toolchain, RUST_BUILD_CACHE);
-			await wrapper.env();
+			await kacheBuildCacheEnv(
+				toolchain.attrs.version,
+				toolchain.attrs.cacheSize,
+			);
 
 			const [name, opts] = host.calls
 				.find((call) => call[0] === "workerStart")

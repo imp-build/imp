@@ -1,6 +1,5 @@
 import {
 	Toolchain,
-	product,
 	namedCache,
 	output,
 	platformInfo,
@@ -19,10 +18,9 @@ import {
 	GEN_LOCKFILES,
 	registerToolchainLockfile,
 } from "//rules/workflows/lockfiles";
-import { ODIN_LINKER } from "//rules/odin/products";
 
-// Declared tool identity for products this toolchain implements; also
-// consumed by rule modules registering mold-driven products.
+// Declared tool identity for the "mold-toolchain" kind's TOOLCHAIN product
+// (imp @tool dispatch).
 export const MOLD_TOOL = toolName("mold");
 
 const MOLD_TOOLCHAIN_CACHE = "mold-toolchains";
@@ -108,7 +106,7 @@ export class MoldToolchain extends Toolchain {
 // Built once per declared version, at declaration time: task() refuses to add
 // graph nodes during execution, so anything that resolves a toolchain while
 // the graph is running must find a handle here rather than build one —
-// OdinMoldLinker.tools() (below) resolves exactly that way.
+// moldRustLinkerEnv()/moldOdinLinkerEnv() (below) resolve exactly that way.
 let graphToolchains = new Map();
 
 export function __resetMoldToolchainStateForTest() {
@@ -328,55 +326,39 @@ if (platformInfo().os === "linux") {
 }
 
 /**
- * Adapter exposing a mold toolchain as Odin's `-linker:mold` linker role.
- * Registered as the "odin-linker" product for the "mold-toolchain" kind so
- * odinScriptTools() (rules/odin/index.js) can resolve it dynamically via
- * productFor(handle, ODIN_LINKER) instead of a hardcoded default lookup.
+ * Given a task's `exec` and its already-declared, resolved
+ * `moldGraphToolchain().tool` input, resolve mold's real, absolute, stable
+ * bin directory (via cacheGet(), populated by moldGraphTool()'s own install
+ * task above) — shared by moldRustLinkerEnv()/moldOdinLinkerEnv() below.
+ * exec.path() is still called, purely to consume() the binding so the graph
+ * scheduler orders mold's install task (and therefore this named-cache
+ * population) first.
+ *
+ * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
+ * @param {object} resolvedMoldTool Resolved `moldGraphToolchain().tool` input.
+ * @param {string} version `moldGraphToolchain().version`.
+ * @returns {string} Absolute path to mold's `bin/` directory.
  */
-export class OdinMoldLinker {
-	constructor(handle) {
-		this.handle = handle;
-	}
-
-	/** @returns {Promise<object[]>} run({ tools }) entries this linker needs. */
-	async tools() {
-		return [await moldTool(this.handle.attrs.version)];
-	}
-
-	/** @returns {Promise<string[]>} Odin CLI flags selecting this linker. */
-	async flags() {
-		return ["-linker:mold"];
-	}
+function moldBinDir(exec, resolvedMoldTool, version) {
+	exec.path(resolvedMoldTool);
+	const plat = platformInfo();
+	const dir = cacheGet(MOLD_TOOLCHAIN_CACHE, moldCacheKey(version, plat));
+	return `${dir}/bin`;
 }
 
-product(
-	MoldToolchain,
-	ODIN_LINKER,
-	MOLD_TOOL,
-	function moldOdinLinker(handle) {
-		return new OdinMoldLinker(handle);
-	},
-	{ display: "odin linker {0}", level: "info" },
-);
-
 /**
- * Given a task's `exec` and its already-declared, resolved
- * `moldGraphToolchain().tool` input, resolve the rustflags/pathDirs
- * rustLinkerTools() (//rules/rust) needs to enable mold as rustc's backend
- * linker.
+ * Resolve the rustflags/pathDirs rustLinkerTools() (//rules/rust) needs to
+ * enable mold as rustc's backend linker.
  *
  * Unlike gcc's own `-C linker=<path>` (which does accept an absolute path),
  * this Bootlin-built gcc's `-fuse-ld=` rejects an absolute path outright —
  * confirmed by a real `imp lint //crates/imp:imp` failure: "x86_64-linux-
  * gcc.br_real: error: unrecognized command-line option '-fuse-ld=<path>'"
  * (see #60/#31). So this keeps a bare `-fuse-ld=mold` PATH-search form, and
- * instead returns the real, absolute, stable MOLD_TOOLCHAIN_CACHE bin
- * directory (via cacheGet(), populated by moldGraphTool()'s own install task
- * above) as `pathDirs` for the caller to fold into PATH — mirroring how
- * rustGraphToolEnv()'s kache-active branch already builds PATH from
- * named-cache directories (//rules/rust/toolchain). exec.path() is still
- * called, purely to consume() the binding so the graph scheduler orders
- * mold's install task (and therefore this named-cache population) first.
+ * instead returns mold's real, absolute, stable bin directory as `pathDirs`
+ * for the caller to fold into PATH — mirroring how rustGraphToolEnv()'s
+ * kache-active branch already builds PATH from named-cache directories
+ * (//rules/rust/toolchain).
  *
  * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
  * @param {object} resolvedMoldTool Resolved `moldGraphToolchain().tool` input.
@@ -384,11 +366,28 @@ product(
  * @returns {{ rustflags: string[], pathDirs: string[] }}
  */
 export function moldRustLinkerEnv(exec, resolvedMoldTool, version) {
-	exec.path(resolvedMoldTool);
-	const plat = platformInfo();
-	const dir = cacheGet(MOLD_TOOLCHAIN_CACHE, moldCacheKey(version, plat));
 	return {
 		rustflags: ["-C", "link-arg=-fuse-ld=mold"],
-		pathDirs: [`${dir}/bin`],
+		pathDirs: [moldBinDir(exec, resolvedMoldTool, version)],
+	};
+}
+
+/**
+ * Resolve the flags/pathDirs Odin's build task (//rules/odin) needs to
+ * select mold as its linker via `-linker:mold`. Odin execs its linker
+ * directly by name (unlike rustc, which shells through a `-C linker=`/
+ * `-fuse-ld=` flag pointed at a link driver) — the flag alone selects mold,
+ * but mold's own binary still has to be reachable on PATH, same as gcc's
+ * `bin[-unsafe-paths]/` dir already is for Odin's default linker.
+ *
+ * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
+ * @param {object} resolvedMoldTool Resolved `moldGraphToolchain().tool` input.
+ * @param {string} version `moldGraphToolchain().version`.
+ * @returns {{ flags: string[], pathDirs: string[] }}
+ */
+export function moldOdinLinkerEnv(exec, resolvedMoldTool, version) {
+	return {
+		flags: ["-linker:mold"],
+		pathDirs: [moldBinDir(exec, resolvedMoldTool, version)],
 	};
 }

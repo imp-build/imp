@@ -1,5 +1,3 @@
-import { productFor } from "imp:core";
-import { ODIN_LINKER } from "//rules/odin/products";
 import {
 	describe,
 	expect,
@@ -15,6 +13,7 @@ import {
 	moldBin,
 	moldCacheKey,
 	moldGraphToolchain,
+	moldOdinLinkerEnv,
 	moldRustLinkerEnv,
 	moldTool,
 	moldToolchain,
@@ -204,16 +203,22 @@ describe("mold toolchain", () => {
 		});
 	});
 
-	test("registers an odin-linker product exposing -linker:mold and a mold tool", async () => {
-		await withMoldHost(async () => {
-			const toolchain = moldToolchain("2.41.0", { unverified: true });
+	test("moldOdinLinkerEnv selects -linker:mold and returns the real absolute named-cache bin dir as pathDirs", () => {
+		return withMoldHost(() => {
+			installMoldToolchain("2.41.0", "/tmp/mold-2.41.0");
+			const resolvedMoldTool = { __imp_graph_handle: true, name: "mold-tool" };
+			const exec = { path: () => "/unused" };
 
-			const linker = await productFor(toolchain, ODIN_LINKER);
+			const { flags, pathDirs } = moldOdinLinkerEnv(
+				exec,
+				resolvedMoldTool,
+				"2.41.0",
+			);
 
-			expect(await linker.flags()).toEqual(["-linker:mold"]);
-			const tools = await linker.tools();
-			expect(tools.length).toBe(1);
-			expect(tools[0].name).toBe("mold");
+			expect(flags).toEqual(["-linker:mold"]);
+			expect(pathDirs).toEqual([
+				"/cache/mold-toolchains/2.41.0/linux-x86_64/bin",
+			]);
 		});
 	});
 

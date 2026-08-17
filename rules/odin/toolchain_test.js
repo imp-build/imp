@@ -6,10 +6,12 @@ import {
 } from "//rules/imp/test";
 import {
 	__resetOdinToolchainStateForTest,
+	defaultOdinLinkerToolchain,
 	odinArtifactName,
 	odinBin,
 	odinCacheKey,
 	odinGraphTool,
+	odinLinkerFor,
 	odinTool,
 	odinToolchain,
 } from "//rules/odin/toolchain";
@@ -40,6 +42,20 @@ describe("Odin graph toolchain", () => {
 			odinToolchain("dev-2026-03", { default: true }).__imp_graph_handle,
 		).toBe(true);
 		expect(odinGraphTool("dev-2026-03").__imp_graph_handle).toBe(true);
+	});
+
+	test("odinLinkerFor/defaultOdinLinkerToolchain read back opts.linker declared per version", () => {
+		return withOdinHost(() => {
+			expect(odinLinkerFor("dev-2026-03")).toBe(null);
+			expect(defaultOdinLinkerToolchain()).toBe(null);
+
+			const linker = { __imp_graph_handle: true, tool: {}, version: "2.41.0" };
+			odinToolchain("dev-2026-03", { default: true, linker });
+
+			expect(odinLinkerFor("dev-2026-03")).toBe(linker);
+			expect(defaultOdinLinkerToolchain()).toBe(linker);
+			expect(odinLinkerFor("no-such-version")).toBe(null);
+		});
 	});
 
 	test("declares the shared named cache the install task publishes into", () => {
