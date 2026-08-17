@@ -298,3 +298,109 @@ describe("gcc toolchain", () => {
 		});
 	});
 });
+
+describe("gcc toolchain on windows", () => {
+	const WIN = { os: "windows", arch: "x86_64" };
+	const WIN_VERSION = "16.1.0posix-14.0.0-ucrt-r4";
+
+	function withWindowsGccHost(fn) {
+		return withGccHost(WIN, fn);
+	}
+
+	test("a plain OS-keyed version object resolves to the windows tag", () => {
+		return withWindowsGccHost((host) => {
+			const toolchain = gccToolchain(
+				{ linux: "2025.08-1", windows: WIN_VERSION },
+				{ default: true },
+			);
+
+			expect(toolchain.attrs.version).toBe(WIN_VERSION);
+			expect(defaultGccToolchainVersion()).toBe(WIN_VERSION);
+			expect(gccCacheKey(toolchain.attrs.version, WIN)).toBe(
+				`${WIN_VERSION}/windows-x86_64`,
+			);
+		});
+	});
+
+	test("downloads, verifies, and installs via two sandboxed runs, aliasing gcc.exe/g++.exe by copy", () => {
+		return withWindowsGccHost(async (host) => {
+			host.addFile(
+				"//rules/c/gcc/gcc-windows.lock",
+				JSON.stringify({
+					tool: "gcc-windows",
+					versions: {
+						[WIN_VERSION]: {
+							"windows/x86_64": {
+								url: "https://locked.example/winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r4.zip",
+								artifact:
+									"winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r4.zip",
+								size: 12345,
+								sha256: "deadbeef",
+							},
+						},
+					},
+				}),
+			);
+
+			gccToolchain(WIN_VERSION, { default: true });
+
+			expect(await gccBin(WIN_VERSION)).toBe(
+				`/cache/gcc-toolchains/${WIN_VERSION}/windows-x86_64/bin/gcc.exe`,
+			);
+			expect(host.runs.length).toBe(2);
+
+			const [download, install] = host.runs;
+			expect(download.argv).toContain(
+				"https://locked.example/winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r4.zip",
+			);
+			expect(download.argv).toContain("deadbeef");
+
+			expect(install.argv[0]).toBe("sh");
+			const script = install.argv[2];
+			// A plain zip (not xz-filtered), so no "-J" flag.
+			expect(script).toContain("tar -xf");
+			expect(script).not.toContain("-xJf");
+			// No Bootlin toolchain-wrapper to work around, so aliases are plain
+			// file copies of the real binaries, not generated wrapper scripts.
+			expect(script).toContain("cp ");
+			expect(script).not.toContain("#!/bin/sh\\nexec");
+			expect(script).not.toContain("chmod");
+			for (const pair of ["clang:gcc", "cc:gcc", "c++-unsafe-paths:c++"]) {
+				expect(script).toContain(`"${pair}"`);
+			}
+			expect(script).toContain("bin-unsafe-paths");
+			expect(install.tools.some((t) => t.name === "tar")).toBe(true);
+			expect(install.tools.some((t) => t.name === "cp")).toBe(true);
+			expect(install.outputs[0].namedCache.name).toBe("gcc-toolchains");
+			expect(install.outputs[0].namedCache.key).toBe(
+				`${WIN_VERSION}/windows-x86_64`,
+			);
+		});
+	});
+
+	test("gccCMakeCompilerArgs/gccRustLinkDriverEnv append .exe on windows", () => {
+		return withWindowsGccHost(() => {
+			installGccToolchain(WIN_VERSION, "/tmp/gcc-win");
+			const gccTool = { __imp_graph_handle: true, name: "gcc-tool" };
+			const exec = { path: () => "/unused" };
+			const dir = `/cache/gcc-toolchains/${WIN_VERSION}/windows-x86_64`;
+
+			expect(gccCMakeCompilerArgs(exec, gccTool, WIN_VERSION)).toEqual([
+				`-DCMAKE_C_COMPILER=${dir}/bin/clang.exe`,
+				`-DCMAKE_CXX_COMPILER=${dir}/bin/c++.exe`,
+				`-DCMAKE_RANLIB=${dir}/bin/ranlib.exe`,
+				`-DCMAKE_AR=${dir}/bin/ar.exe`,
+			]);
+
+			const { rustflags, env, pathDirs } = gccRustLinkDriverEnv(
+				exec,
+				gccTool,
+				WIN_VERSION,
+				false,
+			);
+			expect(rustflags).toEqual(["-C", `linker=${dir}/bin/clang.exe`]);
+			expect(env).toEqual([`CC=${dir}/bin/clang.exe`]);
+			expect(pathDirs).toEqual([`${dir}/bin`]);
+		});
+	});
+});

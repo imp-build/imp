@@ -371,6 +371,7 @@ describe("generateBuiltinLockfile", () => {
 			"cmake",
 			"crane",
 			"gcc",
+			"gcc-windows",
 			"kache",
 			"mold",
 			"node-toolchain",
