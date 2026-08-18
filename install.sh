@@ -4,6 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/imp-build/imp/main/install.sh | sh
 #   curl -fsSL https://raw.githubusercontent.com/imp-build/imp/main/install.sh | sh -s -- --draft
 #   ./install.sh --local
+#   IMP_DEBUG=1 ./install.sh --local   # --local, but skip --release for a faster build
 
 set -eu
 
@@ -49,17 +50,19 @@ if [ "$local_install" = true ]; then
     repo_dir="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
     manifest="$repo_dir/crates/imp/Cargo.toml"
     rules_dir="$repo_dir/rules"
-    binary="$repo_dir/target/release/imp"
+    target_dir="$repo_dir/target"
 
     if [ ! -f "$manifest" ] || [ ! -d "$rules_dir" ]; then
         echo "--local must be run from a checked-out imp repository" >&2
         exit 1
     fi
 
-    echo "Building optimized local imp"
-    CARGO_TARGET_DIR="$repo_dir/target" cargo build \
-        --release \
-        --manifest-path "$manifest"
+    echo "Building local imp"
+    if [ "${IMP_DEBUG:-0}" != "0" ]; then
+        CARGO_TARGET_DIR="$target_dir" cargo build --manifest-path "$manifest"
+    else
+        CARGO_TARGET_DIR="$target_dir" cargo build --release --manifest-path "$manifest"
+    fi
 
     mkdir -p "$install_dir"
     shim_tmp="$(mktemp "$install_dir/.imp-local.XXXXXX")"
@@ -68,19 +71,27 @@ if [ "$local_install" = true ]; then
         echo '#!/bin/sh'
         echo 'set -e'
         printf "export IMP_RULES_DIR='%s'\n" "$(printf '%s' "$rules_dir" | sed "s/'/'\\\\''/g")"
-        printf "CARGO_TARGET_DIR='%s' cargo build --release --manifest-path '%s'\n" \
-            "$(printf '%s' "$repo_dir/target" | sed "s/'/'\\\\''/g")" \
+        printf "export CARGO_TARGET_DIR='%s'\n" "$(printf '%s' "$target_dir" | sed "s/'/'\\\\''/g")"
+        # IMP_DEBUG is read fresh on every invocation, not baked in at install
+        # time, so toggling it doesn't require rerunning install.sh.
+        echo 'if [ "${IMP_DEBUG:-0}" != "0" ]; then'
+        printf "    profile_dir=debug; cargo build --manifest-path '%s'\n" \
             "$(printf '%s' "$manifest" | sed "s/'/'\\\\''/g")"
-        printf "exec '%s' \"\$@\"\n" "$(printf '%s' "$binary" | sed "s/'/'\\\\''/g")"
+        echo 'else'
+        printf "    profile_dir=release; cargo build --release --manifest-path '%s'\n" \
+            "$(printf '%s' "$manifest" | sed "s/'/'\\\\''/g")"
+        echo 'fi'
+        printf "exec '%s/'\"\$profile_dir\"'/imp' \"\$@\"\n" \
+            "$(printf '%s' "$target_dir" | sed "s/'/'\\\\''/g")"
     } > "$shim_tmp"
     chmod +x "$shim_tmp"
     mv -f "$shim_tmp" "$install_dir/imp"
     trap - EXIT
 
     echo "Installed local imp shim to $install_dir/imp"
-    echo "Binary: $binary"
+    echo "Binary: $target_dir/{release,debug}/imp (release unless IMP_DEBUG is set)"
     echo "Rules:  $rules_dir (live from this checkout, via IMP_RULES_DIR)"
-    echo "The shim will rebuild changed Rust code before each run."
+    echo "The shim will rebuild changed Rust code before each run, honoring IMP_DEBUG at run time."
     exit 0
 fi
 

@@ -1,6 +1,7 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -149,31 +150,81 @@ pub fn create_sandbox_root() -> Result<PathBuf> {
     bail!("failed to create unique sandbox under {}", base.display())
 }
 
+/// Resolved once per process and cached: re-resolving (and re-verifying every
+/// directory below) on every call was measurably expensive on the hot cache
+/// read/write path, which calls this indirectly per file. No caller — in
+/// tests or otherwise — mutates `IMP_CACHE_DIR`/`XDG_CACHE_HOME`/`HOME` after
+/// process start and expects a different resolution, so caching the winner
+/// for the process lifetime is safe.
+///
+/// The four structural children created alongside the root
+/// (`cas/blobs`, `cas/meta`, `tasks`, `native-tools`) are never removed by
+/// `imp gc` (only legacy dirs and empty named-cache slot leaves are), so
+/// callers that write into them (`store_blob`, `write_task_cache_record`) no
+/// longer need their own `create_dir_all` — they're guaranteed to exist for
+/// the rest of the process once this has resolved once. If the cache root is
+/// deleted out-of-band mid-process (self-inflicted; `imp gc` never does
+/// this), that no longer self-heals: the next write into the missing
+/// directory surfaces as a plain I/O error instead of silently recreating it.
 pub fn cache_root() -> Result<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(dir) = std::env::var_os("IMP_CACHE_DIR") {
-        candidates.push(PathBuf::from(dir));
-    }
-    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
-        candidates.push(PathBuf::from(cache).join("imp"));
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        candidates.push(PathBuf::from(home).join(".cache").join("imp"));
-    }
-    candidates.push(PathBuf::from("/tmp/imp/cache"));
+    static ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    ROOT.get_or_init(resolve_cache_root)
+        .clone()
+        .map_err(|msg| anyhow::anyhow!(msg))
+}
 
-    let mut last_error = None;
-    for candidate in candidates {
-        match std::fs::create_dir_all(&candidate) {
-            Ok(()) => return Ok(candidate),
-            Err(error) => last_error = Some((candidate, error)),
+fn resolve_cache_root() -> Result<PathBuf, String> {
+    (|| -> Result<PathBuf> {
+        let mut candidates = Vec::new();
+        if let Some(dir) = std::env::var_os("IMP_CACHE_DIR") {
+            candidates.push(PathBuf::from(dir));
         }
-    }
+        if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
+            candidates.push(PathBuf::from(cache).join("imp"));
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            candidates.push(PathBuf::from(home).join(".cache").join("imp"));
+        }
+        candidates.push(PathBuf::from("/tmp/imp/cache"));
 
-    if let Some((candidate, error)) = last_error {
-        bail!("create cache root {}: {error}", candidate.display());
+        let mut last_error = None;
+        let mut root = None;
+        for candidate in candidates {
+            match std::fs::create_dir_all(&candidate) {
+                Ok(()) => {
+                    root = Some(candidate);
+                    break;
+                }
+                Err(error) => last_error = Some((candidate, error)),
+            }
+        }
+        let root = match root {
+            Some(root) => root,
+            None => {
+                if let Some((candidate, error)) = last_error {
+                    bail!("create cache root {}: {error}", candidate.display());
+                }
+                bail!("no cache root candidates available")
+            }
+        };
+
+        ensure_structural_children(&root)?;
+        Ok(root)
+    })()
+    .map_err(|error| format!("{error:#}"))
+}
+
+/// Create the fixed, always-needed subdirectories under a cache root:
+/// `cas/blobs`, `cas/meta`, `tasks`, `native-tools`. Split out from
+/// `resolve_cache_root` so it can be exercised directly against a throwaway
+/// path in tests, without touching `cache_root()`'s process-wide memoization
+/// or any environment variable.
+fn ensure_structural_children(root: &Path) -> Result<()> {
+    for sub in ["cas/blobs", "cas/meta", "tasks", "native-tools"] {
+        let dir = root.join(sub);
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     }
-    bail!("no cache root candidates available")
+    Ok(())
 }
 
 /// Validate a tool name for use as a path component under the cache's
@@ -288,10 +339,8 @@ pub fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
     );
     let blob_path = cas_blob_path(&digest)?;
     if !blob_path.is_file() {
-        if let Some(parent) = blob_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
-        }
+        // No create_dir_all(parent) here: cas/blobs is created once by
+        // cache_root()'s resolution and never removed by imp gc.
         let temp = temp_sibling_path(&blob_path, "tmp-blob");
         // Explicit sync_all() before rename, not std::fs::write(): closing a
         // handle alone doesn't guarantee NTFS has flushed the write, so a
@@ -317,10 +366,8 @@ pub fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
 
     let meta_path = cas_meta_path(&digest)?;
     if !meta_path.is_file() {
-        if let Some(parent) = meta_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
-        }
+        // No create_dir_all(parent) here either: cas/meta is created
+        // alongside cas/blobs above, same rationale.
         let metadata = serde_json::json!({
             "digest": digest,
             "kind": kind,
@@ -434,9 +481,8 @@ pub fn cached_outputs_present(record: &TaskCacheRecord) -> Result<()> {
 
 pub fn write_task_cache_record(record: &TaskCacheRecord) -> Result<()> {
     let path = task_record_path(&record.task_key)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
+    // No create_dir_all(parent) here: tasks/ is created once by
+    // cache_root()'s resolution and never removed by imp gc.
     let encoded = serde_json::to_vec_pretty(record)?;
     let temp = temp_sibling_path(&path, "tmp-record");
     std::fs::write(&temp, &encoded).with_context(|| format!("write {}", temp.display()))?;
@@ -632,7 +678,8 @@ fn publish_file_atomically(source: &Path, destination: &Path) -> Result<()> {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let temp = temp_sibling_path(destination, "tmp-file");
-    copy_file(source, &temp)?;
+    // temp is a sibling of destination, so its parent was just created above.
+    copy_file_into_existing_dir(source, &temp)?;
     std::fs::rename(&temp, destination).with_context(|| {
         format!(
             "publish file {} to {}",
@@ -699,13 +746,17 @@ pub fn temp_sibling_path(destination: &Path, suffix: &str) -> PathBuf {
     destination.with_file_name(temp_name)
 }
 
+fn copy_file_into_existing_dir(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::copy(source, destination)
+        .with_context(|| format!("copy {} to {}", source.display(), destination.display()))?;
+    Ok(())
+}
+
 pub fn copy_file(source: &Path, destination: &Path) -> Result<()> {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    std::fs::copy(source, destination)
-        .with_context(|| format!("copy {} to {}", source.display(), destination.display()))?;
-    Ok(())
+    copy_file_into_existing_dir(source, destination)
 }
 
 pub fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
@@ -719,7 +770,10 @@ pub fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
             std::fs::create_dir_all(&target)
                 .with_context(|| format!("create {}", target.display()))?;
         } else if entry.file_type().is_file() {
-            copy_file(entry.path(), &target)?;
+            // The dir entry for target's parent is always walked before its
+            // file entries (WalkDir's default pre-order traversal), so the
+            // parent directory already exists — no redundant create_dir_all.
+            copy_file_into_existing_dir(entry.path(), &target)?;
         }
     }
     Ok(())
@@ -895,5 +949,98 @@ mod tests {
     fn artifact_relative_path_rejects_parent_components() {
         assert!(artifact_relative_path("../escape").is_err());
         assert!(artifact_relative_path("a/../b").is_err());
+    }
+
+    // `ensure_structural_children` is exercised directly against a throwaway
+    // tempdir rather than through `cache_root()`/`IMP_CACHE_DIR`: cache_root()
+    // memoizes its resolution in a process-wide OnceLock, and `cargo test`
+    // runs this binary's tests concurrently on multiple threads, so mutating
+    // IMP_CACHE_DIR here could race another test file's first (real, pinned
+    // for the rest of the process) call to cache_root(). Testing the pure,
+    // path-parameterized helper sidesteps that entirely.
+    #[test]
+    #[cfg(unix)]
+    fn ensure_structural_children_creates_the_fixed_cache_subdirs() {
+        let root = tempfile::tempdir().unwrap();
+
+        ensure_structural_children(root.path()).unwrap();
+
+        for sub in ["cas/blobs", "cas/meta", "tasks", "native-tools"] {
+            assert!(
+                root.path().join(sub).is_dir(),
+                "{sub} should have been created under the cache root"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ensure_structural_children_is_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+
+        ensure_structural_children(root.path()).unwrap();
+        // Must not error the second time (mirrors store_blob/
+        // write_task_cache_record now relying on this having already run).
+        ensure_structural_children(root.path()).unwrap();
+
+        assert!(root.path().join("cas/blobs").is_dir());
+    }
+
+    // store_blob/write_task_cache_record no longer create_dir_all their own
+    // parent directory — this exercises the real functions (through the
+    // process's real, memoized cache_root()) to confirm they still work now
+    // that they rely on cache_root() having already created cas/blobs,
+    // cas/meta, and tasks/. Deliberately does not set IMP_CACHE_DIR (see the
+    // comment above) — it runs against whatever this process's cache_root()
+    // resolves to, which is safe because both functions publish atomically
+    // (temp file + rename) and are content-addressed/idempotent, so sharing
+    // that directory with any other concurrently running test is harmless.
+    #[test]
+    #[cfg(unix)]
+    fn store_blob_and_write_task_cache_record_work_without_their_own_mkdir() {
+        let digest = store_blob(
+            b"cache.rs ensure_structural_children regression test",
+            "test",
+        )
+        .unwrap();
+        assert!(cas_blob_path(&digest).unwrap().is_file());
+        assert!(cas_meta_path(&digest).unwrap().is_file());
+
+        let record = TaskCacheRecord {
+            version: TASK_CACHE_VERSION,
+            task_id: "test-task".to_owned(),
+            task_key: "cache-rs-ensure-structural-children-regression-test".to_owned(),
+            action_digest: digest.clone(),
+            input_digest: digest.clone(),
+            output_digest: String::new(),
+            named_caches: Vec::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            outputs: Vec::new(),
+        };
+        write_task_cache_record(&record).unwrap();
+        assert!(task_record_path(&record.task_key).unwrap().is_file());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn copy_directory_copies_nested_files() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source.path().join("sub")).unwrap();
+        std::fs::write(source.path().join("top.txt"), b"top").unwrap();
+        std::fs::write(source.path().join("sub").join("nested.txt"), b"nested").unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        let destination = dest.path().join("out");
+        copy_directory(source.path(), &destination).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(destination.join("top.txt")).unwrap(),
+            "top"
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join("sub").join("nested.txt")).unwrap(),
+            "nested"
+        );
     }
 }

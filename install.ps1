@@ -3,6 +3,7 @@
 #   irm https://raw.githubusercontent.com/imp-build/imp/main/install.ps1 | iex
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/imp-build/imp/main/install.ps1))) -Draft
 #   .\install.ps1 -Local
+#   $env:IMP_DEBUG = 1; .\install.ps1 -Local   # -Local, but skip --release for a faster build
 
 [CmdletBinding()]
 param(
@@ -39,15 +40,18 @@ if ($Local) {
     $manifest = Join-Path $repoDir "crates\imp\Cargo.toml"
     $rulesDir = Join-Path $repoDir "rules"
     $targetDir = Join-Path $repoDir "target"
-    $binary = Join-Path $targetDir "release\imp.exe"
 
     if (-not (Test-Path $manifest) -or -not (Test-Path $rulesDir)) {
         throw "-Local must be run from a checked-out imp repository"
     }
 
-    Write-Host "Building optimized local imp"
+    $debugBuild = $env:IMP_DEBUG -and $env:IMP_DEBUG -ne "0"
+    $buildArgs = @('build', '--manifest-path', $manifest)
+    if (-not $debugBuild) { $buildArgs += '--release' }
+
+    Write-Host "Building local imp"
     $env:CARGO_TARGET_DIR = $targetDir
-    & cargo build --release --manifest-path $manifest
+    & cargo @buildArgs
     if ($LASTEXITCODE -ne 0) {
         throw "cargo build failed"
     }
@@ -61,13 +65,22 @@ if ($Local) {
         Remove-Item -Force $staleExe
     }
 
+    # IMP_DEBUG is read fresh on every invocation below, not baked in at
+    # install time, so toggling it doesn't require rerunning install.ps1.
     $shimPath = Join-Path $installDir "imp.cmd"
     $shimContent = @"
 @echo off
 set "IMP_RULES_DIR=$rulesDir"
 set "CARGO_TARGET_DIR=$targetDir"
-cargo build --release --manifest-path "$manifest" || exit /b 1
-"$binary" %*
+if "%IMP_DEBUG%"=="" set "IMP_DEBUG=0"
+if not "%IMP_DEBUG%"=="0" (
+    set "profile_dir=debug"
+    cargo build --manifest-path "$manifest" || exit /b 1
+) else (
+    set "profile_dir=release"
+    cargo build --release --manifest-path "$manifest" || exit /b 1
+)
+"$targetDir\%profile_dir%\imp.exe" %*
 exit /b %ERRORLEVEL%
 "@
     Set-Content -Path $shimPath -Value $shimContent -Encoding ascii -NoNewline
@@ -79,22 +92,26 @@ exit /b %ERRORLEVEL%
     $bashRulesDir = $rulesDir -replace '\\', '/'
     $bashTargetDir = $targetDir -replace '\\', '/'
     $bashManifest = $manifest -replace '\\', '/'
-    $bashBinary = $binary -replace '\\', '/'
     $bashShimPath = Join-Path $installDir "imp"
     $bashShimLines = @(
         '#!/bin/sh',
         'set -e',
         "export IMP_RULES_DIR='$bashRulesDir'",
-        "CARGO_TARGET_DIR='$bashTargetDir' cargo build --release --manifest-path '$bashManifest'",
-        "exec '$bashBinary' `"`$@`""
+        "export CARGO_TARGET_DIR='$bashTargetDir'",
+        'if [ "${IMP_DEBUG:-0}" != "0" ]; then',
+        "    profile_dir=debug; cargo build --manifest-path '$bashManifest'",
+        'else',
+        "    profile_dir=release; cargo build --release --manifest-path '$bashManifest'",
+        'fi',
+        "exec '$bashTargetDir/'`"`$profile_dir`"'/imp' `"`$@`""
     )
     Set-Content -Path $bashShimPath -Value (($bashShimLines -join "`n") + "`n") -Encoding ascii -NoNewline
 
     Write-Host "Installed local imp shim to $shimPath"
     Write-Host "Installed bash-compatible shim to $bashShimPath"
-    Write-Host "Binary: $binary"
+    Write-Host "Binary: $targetDir\{release,debug}\imp.exe (release unless IMP_DEBUG is set)"
     Write-Host "Rules:  $rulesDir (live from this checkout, via IMP_RULES_DIR)"
-    Write-Host "The shim will rebuild changed Rust code before each run."
+    Write-Host "The shim will rebuild changed Rust code before each run, honoring IMP_DEBUG at run time."
 
     Add-InstallDirToUserPath
     exit 0

@@ -262,14 +262,16 @@ JOBS = [
         "id": "check",
         "needs": "build",
         "runs_on": "ubuntu-latest",
-        # Opt imp-execution's task-cache lookup into the GitHub Actions
-        # cache as a remote tier (see crates/imp-remote-cache) for every
-        # step in this job — purely an accelerator, read directly via
-        # std::env::var and never folded into any task's action digest, so
-        # this cannot invalidate cache entries. Requires
-        # EXPORT_GHAC_ENV_STEP to have run first so the backend can auth.
+        # GHAC remote-cache tier (see crates/imp-remote-cache) is disabled
+        # for now — it's been intermittently slow/hanging, stalling this job
+        # well past its normal runtime. IMP_REMOTE_CACHE unset means
+        # imp-execution's task-cache lookup just skips the remote tier
+        # entirely (see remote_cache.rs's `.ok()?` short-circuit), falling
+        # back to the local disk cache only. Re-add `"IMP_REMOTE_CACHE":
+        # "ghac"` once the underlying GHAC flakiness is root-caused; the
+        # EXPORT_GHAC_ENV_STEP credential export below is left in place so
+        # that's a one-line revert.
         "env": {
-            "IMP_REMOTE_CACHE": "ghac",
             "IMP_CHANGED_SINCE": "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}",
             # Temporary diagnostic: surfaces cache-record-rejected /
             # blob-missing reasons on stderr (crates/imp-store/src/trace.rs)
@@ -290,9 +292,8 @@ JOBS = [
         "needs": "build",
         "runs_on": "ubuntu-latest",
         "if": MAIN_PUSH_ONLY,
-        # Same accelerator as `check` (see its comment above) — requires
-        # EXPORT_GHAC_ENV_STEP in PACKAGE_STEPS so the backend can auth.
-        "env": {"IMP_REMOTE_CACHE": "ghac"},
+        # GHAC remote-cache tier disabled here too — see `check`'s comment
+        # above.
         "steps": PACKAGE_STEPS,
     },
     {

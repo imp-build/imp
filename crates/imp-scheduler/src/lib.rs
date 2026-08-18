@@ -132,11 +132,12 @@ pub struct Scheduler {
 
 /// Handle given to a scheduled job so it can announce where it is in its
 /// lifecycle. The two events are separate on purpose: [`RunContext::reserve`]
-/// takes the concurrency slot that bounds `--jobs`, which a job must hold before
-/// it stages a sandbox, while [`RunContext::started`] says it crossed into
-/// running its command. Holding a slot is not evidence of the latter — a job may
-/// be satisfied entirely by the execution cache, and cache classification keys
-/// off `started` alone.
+/// takes the concurrency slot that bounds `--jobs` and, with it, a progress
+/// lane — staging a sandbox is real, visible work, and the swimlane should
+/// show it rather than sit idle until the command itself spawns. But holding
+/// a lane is not evidence of [`RunContext::started`]: a job may be satisfied
+/// entirely by the execution cache (e.g. a remote hit that resolves mid-stage)
+/// after reserving, and cache classification keys off `started` alone.
 pub struct RunContext {
     events: UnboundedSender<TaskEvent>,
     id: u64,
@@ -188,19 +189,11 @@ impl RunContext {
         }
     }
 
-    /// Reserve this job's concurrency slot before it does expensive work such as
-    /// staging a sandbox. Idempotent, and deliberately silent: it neither marks
-    /// the job started nor takes a progress lane, so cache classification is
-    /// unaffected.
-    pub fn reserve(&self) {
-        let _ = self.acquire_permit(false);
-    }
-
-    pub fn started(&self) {
-        self.state.started.store(true, Ordering::SeqCst);
-        // Never hold the slot lock across the permit spin: a permit is always
-        // taken first, and the two locks must not nest.
-        self.acquire_permit(true);
+    /// Assign this job a stable lane slot and announce it, unless it already
+    /// holds one. Idempotent, so both `reserve` and `started` can call it
+    /// unconditionally. Never call this while holding the permit lock — a
+    /// permit is always taken first, and the two locks must not nest.
+    fn assign_slot(&self) {
         let mut slot = self.state.slot.lock().unwrap();
         if slot.is_some() {
             return;
@@ -213,9 +206,32 @@ impl RunContext {
             id: self.id,
             display: self.display.clone(),
         });
+    }
+
+    /// Reserve this job's concurrency slot before it does expensive work such
+    /// as staging a sandbox, and take its progress lane alongside it — staging
+    /// is real work the swimlane should show, not leave looking idle until the
+    /// command itself spawns. Idempotent. Deliberately does not mark the job
+    /// started, so cache classification (a remote hit can still resolve mid-
+    /// stage) is unaffected; the lane is cleared either way once the job ends.
+    pub fn reserve(&self) {
+        if self.acquire_permit(false) {
+            self.assign_slot();
+        }
+    }
+
+    pub fn started(&self) {
+        self.state.started.store(true, Ordering::SeqCst);
+        // Never hold the slot lock across the permit spin: a permit is always
+        // taken first, and the two locks must not nest.
+        self.acquire_permit(true);
+        // Normally already assigned by `reserve`; this is a fallback for a
+        // caller that jumps straight to `started`.
+        self.assign_slot();
+        let slot = self.state.slot.lock().unwrap().unwrap_or(0);
         let _ = self.events.send(TaskEvent::Running {
             id: self.id,
-            detail: Some(format!("slot {assigned}")),
+            detail: Some(format!("slot {slot}")),
         });
     }
 
@@ -428,10 +444,11 @@ mod tests {
         )));
     }
 
-    /// `reserve()` is what bounds sandbox staging, so it must respect `--jobs`
-    /// while staying invisible to lane and cache accounting.
+    /// `reserve()` is what bounds sandbox staging, so it must respect `--jobs`;
+    /// it also now takes a progress lane (so staging shows up in the swimlane)
+    /// while staying invisible to cache accounting.
     #[tokio::test]
-    async fn reserve_bounds_concurrency_without_starting_a_lane() {
+    async fn reserve_bounds_concurrency_and_takes_a_lane() {
         const JOBS: usize = 2;
         let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Scheduler::new(JOBS, Arc::new(AtomicBool::new(false)), tx);
@@ -472,11 +489,18 @@ mod tests {
             peak.load(Ordering::SeqCst)
         );
         let collected: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
-        assert!(
-            collected
-                .iter()
-                .all(|event| !matches!(event, TaskEvent::LaneStarted { .. })),
-            "reserve() must not take a progress lane"
+        let started = collected
+            .iter()
+            .filter(|event| matches!(event, TaskEvent::LaneStarted { .. }))
+            .count();
+        let cleared = collected
+            .iter()
+            .filter(|event| matches!(event, TaskEvent::LaneCleared { .. }))
+            .count();
+        assert_eq!(started, 8, "reserve() must take a progress lane");
+        assert_eq!(
+            cleared, 8,
+            "every lane reserve() takes must be cleared once the job ends"
         );
         let done: Vec<_> = collected
             .iter()
@@ -492,9 +516,11 @@ mod tests {
         );
     }
 
-    /// A job that reserves but never starts holds a permit and no slot. Releasing
-    /// the permit only alongside a slot would retire a `--jobs` lane per such job
-    /// and wedge the scheduler; the timeout is what catches that.
+    /// A job that reserves but never starts still holds both a permit and a
+    /// slot (reserve takes both now). If either leaked instead of being
+    /// released when the job ends, sequential reserve-only jobs against a
+    /// single-slot scheduler would exhaust the pool and wedge; the timeout is
+    /// what catches that.
     #[tokio::test]
     async fn reserve_only_jobs_release_their_permit() {
         let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
