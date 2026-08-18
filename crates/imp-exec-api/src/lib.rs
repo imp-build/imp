@@ -252,14 +252,17 @@ pub struct Capabilities {
 /// The two calls are distinct because they bound different things. `reserve`
 /// takes the concurrency slot that `--jobs` sizes, and must be held before the
 /// action creates and stages its sandbox — staging is real, expensive I/O, and
-/// leaving it ungated let hundreds of sandboxes be built at once. `started`
-/// says the action crossed into running its command, which is what decides
-/// whether it counts as a cache hit and whether it takes a progress lane.
+/// leaving it ungated let hundreds of sandboxes be built at once. It also takes
+/// the action's progress lane, so that visible staging work shows up in the
+/// swimlane instead of the run looking stalled until the command spawns.
+/// `started` says the action crossed into running its command, which is what
+/// decides whether it counts as a cache hit — a lane taken by `reserve` can
+/// still end up a cache hit (e.g. a remote hit resolving mid-stage).
 ///
 /// An action that is satisfied from cache calls neither.
 pub trait JobGate {
-    /// Reserve the concurrency slot that bounds `--jobs`. Idempotent. Must not
-    /// mark the job started, and must not take a progress lane.
+    /// Reserve the concurrency slot that bounds `--jobs`, and its progress
+    /// lane alongside it. Idempotent. Must not mark the job started.
     fn reserve(&self) {}
     /// Announce that the action has crossed the process-start boundary.
     fn started(&self) {}

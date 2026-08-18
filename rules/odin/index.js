@@ -22,6 +22,7 @@ import {
 	labelAddress,
 	targetAddress,
 	targetRef,
+	platformInfo,
 } from "imp:core";
 /**
  * Declarative workspace configuration schema for Odin.
@@ -979,10 +980,15 @@ function graphOdinBuild(
 	// rust's per-crate test-run action already use. `odin check -vet` likewise
 	// writes nothing.
 	const captures = !lint && !test;
+	// Odin's Windows linker rejects an executable output path with no
+	// extension ("must have an appropriate extension") — confirmed by a real
+	// `odin build` failure. The library case doesn't need this: Odin accepts
+	// a plain ".a" for -build-mode:lib output on Windows too.
+	const isWindows = platformInfo().os === "windows";
 	const outputPath = !captures
 		? null
 		: analysis.hasMainEntrypoint
-			? "output"
+			? `output${isWindows ? ".exe" : ""}`
 			: "output.a";
 	return task({
 		display: `${lint ? "odin check -vet" : test ? "odin test" : "odin build"} ${analysis.packagePath}`,
