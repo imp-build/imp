@@ -998,8 +998,11 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn store_blob_and_write_task_cache_record_work_without_their_own_mkdir() {
-        let digest =
-            store_blob(b"cache.rs ensure_structural_children regression test", "test").unwrap();
+        let digest = store_blob(
+            b"cache.rs ensure_structural_children regression test",
+            "test",
+        )
+        .unwrap();
         assert!(cas_blob_path(&digest).unwrap().is_file());
         assert!(cas_meta_path(&digest).unwrap().is_file());
 

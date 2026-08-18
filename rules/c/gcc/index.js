@@ -339,12 +339,12 @@ function gccGraphToolWindows(version, plat, archive, cacheKey) {
 	// the tool's real resolved absolute path, so passing each tool that way
 	// as an argv positional sidesteps the PATH-precedence hazard entirely.
 	const installScript =
-		'archive=$1; out=$2; mkdir=$3; cp=$4; mv=$5; unzip=$6; ' +
+		"archive=$1; out=$2; mkdir=$3; cp=$4; mv=$5; unzip=$6; " +
 		'"$mkdir" -p "$out/bin" "$out/bin-unsafe-paths" "$out.stage" && ' +
 		'"$unzip" -q "$archive" -d "$out.stage" && ' +
 		'"$mv" "$out.stage"/*/* "$out"/ && ' +
 		'for pair in "clang:gcc" "cc:gcc" "clang-unsafe-paths:gcc" "cc-unsafe-paths:gcc" "c++-unsafe-paths:c++"; do ' +
-		'name=${pair%%:*}; target=${pair#*:}; ' +
+		"name=${pair%%:*}; target=${pair#*:}; " +
 		'"$cp" "$out/bin/$target.exe" "$out/bin/$name.exe"; ' +
 		"done && " +
 		"for name in clang cc c++ ar ranlib; do " +
@@ -446,8 +446,7 @@ export async function gccBin(version) {
 		name: GCC_TOOLCHAIN_CACHE,
 		key: gccCacheKey(resolved, plat),
 		subDir: "bin",
-		exe:
-			plat.os === "windows" ? "gcc.exe" : `${GCC_EXE_PREFIX[plat.arch]}-gcc`,
+		exe: plat.os === "windows" ? "gcc.exe" : `${GCC_EXE_PREFIX[plat.arch]}-gcc`,
 	});
 }
 
