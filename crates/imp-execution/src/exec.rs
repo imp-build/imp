@@ -436,6 +436,9 @@ fn terminate_child_and_wait(child: &mut Child, job: Option<&ChildJob>) {
 }
 
 fn terminate_child(child: &mut Child, job: Option<&ChildJob>) {
+    // `job` is only read on Windows; this keeps it from tripping an
+    // unused-variable lint on other platforms without affecting either.
+    let _ = job;
     #[cfg(windows)]
     {
         if let Some(job) = job {
@@ -453,6 +456,7 @@ fn terminate_child(child: &mut Child, job: Option<&ChildJob>) {
 }
 
 fn kill_child(child: &mut Child, job: Option<&ChildJob>) {
+    let _ = job;
     #[cfg(windows)]
     {
         if let Some(job) = job {
@@ -572,6 +576,11 @@ impl ChildJob {
         None
     }
 
+    // Never called on this platform — `for_child` always returns `None`
+    // here, so `terminate_child`/`kill_child`'s `#[cfg(windows)]` call site
+    // never compiles in. Kept only so the type's public surface matches the
+    // Windows twin's.
+    #[allow(dead_code)]
     fn terminate(&self, _exit_code: u32) {}
 }
 
