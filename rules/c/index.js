@@ -115,7 +115,6 @@ function toolchainCommands(exec, toolchain, input, unsafeSystemPaths) {
 	// (no such wrapper/guard), so only the gcc branch here checks it.
 	const suffix = unsafeSystemPaths ? "-unsafe-paths" : "";
 	const isWindows = platformInfo().os === "windows";
-	const exeSuffix = isWindows ? ".exe" : "";
 	// This whole action runs under "sh -c" (see ccTask's own script), and
 	// Git-for-Windows' MSYS runtime drops TMP/TEMP when it spawns a native
 	// (non-MSYS) child — confirmed directly: neither an inherited nor a
@@ -128,13 +127,10 @@ function toolchainCommands(exec, toolchain, input, unsafeSystemPaths) {
 	const pipeFlag = isWindows ? ["-pipe"] : [];
 	return {
 		compiler: (isCxx) => [
-			exec.tool(
-				input.ccTool,
-				(isCxx ? `c++${suffix}` : `clang${suffix}`) + exeSuffix,
-			),
+			exec.tool(input.ccTool, isCxx ? `c++${suffix}` : `clang${suffix}`),
 			...pipeFlag,
 		],
-		archiver: () => [exec.tool(input.ccTool, `ar${exeSuffix}`)],
+		archiver: () => [exec.tool(input.ccTool, "ar")],
 		env: [],
 	};
 }
