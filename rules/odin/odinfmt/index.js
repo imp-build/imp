@@ -2,10 +2,7 @@ import { FMT } from "//rules/workflows/fmt";
 import { digestOf, output, semantic, task } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 import { registerOdinPackageHook } from "//rules/odin";
-import {
-	odinfmtGraphTool,
-	odinfmtCommandName,
-} from "//rules/odin/odinfmt/toolchain";
+import { odinfmtGraphTool, olsTriple } from "//rules/odin/odinfmt/toolchain";
 import { platformInfo } from "imp:core";
 
 export {
@@ -46,9 +43,14 @@ export function odinFmtRoot({ sources, base, version }) {
 					},
 				};
 			}
+			// exec.tool() appends the platform's own executable suffix itself
+			// (e.g. ".exe" on Windows), so this passes the bare OLS triple name
+			// — not odinfmtCommandName()'s already-suffixed one, which is for
+			// toolchainBin()-style host-side path building instead (see its own
+			// docstring).
 			const command = exec.tool(
 				inputs.formatter,
-				odinfmtCommandName(platformInfo()),
+				`odinfmt-${olsTriple(platformInfo())}`,
 			);
 			// Formats in place — the sandbox's mounted inputs are writable, not
 			// read-only, so odinfmt can rewrite paths directly. Unlike ruff/biome
