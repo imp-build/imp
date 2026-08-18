@@ -13,6 +13,14 @@ use anyhow::{bail, Context, Result};
 use indicatif::{MultiProgress, ProgressBar};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+#[cfg(windows)]
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject,
+};
 
 #[cfg(not(unix))]
 use imp_store::cache::copy_directory;
@@ -285,6 +293,7 @@ pub fn wait_for_child_output(
     child: &mut Child,
     display: &str,
     cancellation: Option<&AtomicBool>,
+    job: Option<&ChildJob>,
     mut progress: Option<&mut ProgressBar>,
     remote_hit: Option<&mpsc::Receiver<Option<TaskCacheRecord>>>,
 ) -> Result<ChildRaceOutcome<(ExitStatus, String, String)>> {
@@ -311,7 +320,7 @@ pub fn wait_for_child_output(
             .map(|cancellation| cancellation.load(Ordering::SeqCst))
             .unwrap_or(false)
         {
-            terminate_child_and_wait(child);
+            terminate_child_and_wait(child, job);
             // Do not join the output reader threads on cancellation. Descendant
             // processes can inherit stdout/stderr and keep those pipes open
             // after the child process group is gone, which would make Ctrl-C
@@ -322,7 +331,7 @@ pub fn wait_for_child_output(
         if let Some(rx) = remote_hit {
             match rx.try_recv() {
                 Ok(Some(record)) => {
-                    terminate_child_and_wait(child);
+                    terminate_child_and_wait(child, job);
                     // Same rationale as cancellation above: don't join the
                     // reader threads, a descendant may be holding the pipes open.
                     return Ok(ChildRaceOutcome::RemoteHit(Box::new(record)));
@@ -391,13 +400,14 @@ fn wait_for_child_status(
     child: &mut Child,
     display: &str,
     cancellation: Option<&AtomicBool>,
+    job: Option<&ChildJob>,
 ) -> Result<ExitStatus> {
     loop {
         if cancellation
             .map(|cancellation| cancellation.load(Ordering::SeqCst))
             .unwrap_or(false)
         {
-            terminate_child_and_wait(child);
+            terminate_child_and_wait(child, job);
             bail!("{display} canceled");
         }
         if let Some(status) = child
@@ -410,8 +420,8 @@ fn wait_for_child_status(
     }
 }
 
-fn terminate_child_and_wait(child: &mut Child) {
-    terminate_child(child);
+fn terminate_child_and_wait(child: &mut Child, job: Option<&ChildJob>) {
+    terminate_child(child, job);
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match child.try_wait() {
@@ -421,11 +431,18 @@ fn terminate_child_and_wait(child: &mut Child) {
             Err(_) => return,
         }
     }
-    kill_child(child);
+    kill_child(child, job);
     let _ = child.wait();
 }
 
-fn terminate_child(child: &mut Child) {
+fn terminate_child(child: &mut Child, job: Option<&ChildJob>) {
+    #[cfg(windows)]
+    {
+        if let Some(job) = job {
+            job.terminate(1);
+            return;
+        }
+    }
     #[cfg(unix)]
     {
         if signal_child_process_group(child, "TERM") {
@@ -435,7 +452,14 @@ fn terminate_child(child: &mut Child) {
     let _ = child.kill();
 }
 
-fn kill_child(child: &mut Child) {
+fn kill_child(child: &mut Child, job: Option<&ChildJob>) {
+    #[cfg(windows)]
+    {
+        if let Some(job) = job {
+            job.terminate(1);
+            return;
+        }
+    }
     #[cfg(unix)]
     {
         if signal_child_process_group(child, "KILL") {
@@ -454,6 +478,101 @@ fn signal_child_process_group(child: &Child, signal: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+/// Windows-only: a Job Object the sandboxed child (and any descendant it
+/// spawns while assigned to it — job membership propagates to children by
+/// default) is placed into immediately after spawn, so `terminate_child`/
+/// `kill_child` can tear down the whole process tree via
+/// `TerminateJobObject`, mirroring what `signal_child_process_group` does
+/// with a process group on Unix.
+///
+/// Deliberately does NOT set `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`: closing
+/// our handle on normal, successful completion (`Drop`, below) must not
+/// force-kill legitimate long-lived helper processes a toolchain may leave
+/// running for reuse across invocations (e.g. MSVC's `mspdbsrv.exe`).
+/// Termination is therefore always explicit via `terminate()`, called only
+/// from `terminate_child`/`kill_child` on the same cancellation/hard-kill
+/// paths `signal_child_process_group` fires on — never on normal completion.
+#[cfg(windows)]
+pub struct ChildJob {
+    handle: HANDLE,
+}
+
+#[cfg(windows)]
+impl ChildJob {
+    /// Create a Job Object and assign `child` to it. Returns `None` (never
+    /// an `Err`) on any failure — a Job Object problem must never fail a
+    /// `run()` that would otherwise have succeeded; it just degrades to
+    /// today's immediate-child-only kill behavior.
+    fn for_child(child: &Child, display: &str) -> Option<Self> {
+        // SAFETY: straightforward FFI per the documented Win32 contract;
+        // `process_handle` is a live handle owned by `child` for the
+        // duration of this call.
+        let handle: HANDLE = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            eprintln!(
+                "warning: failed to create a Windows Job Object for {display} (error {}); \
+                 cancellation will only terminate this process, not any it spawns",
+                unsafe { GetLastError() }
+            );
+            return None;
+        }
+
+        // No SetInformationJobObject call: the only capability needed is
+        // TerminateJobObject later, and a bare job with default limits
+        // already supports that — setting an all-zero LimitFlags struct
+        // would be a no-op FFI call for no behavioral benefit.
+
+        let process_handle = child.as_raw_handle() as HANDLE;
+        if unsafe { AssignProcessToJobObject(handle, process_handle) } == 0 {
+            let error = unsafe { GetLastError() };
+            unsafe { CloseHandle(handle) };
+            eprintln!(
+                "warning: failed to assign {display} to a Windows Job Object (error {error}); \
+                 cancellation will only terminate this process, not any it spawns"
+            );
+            return None;
+        }
+        Some(Self { handle })
+    }
+
+    /// Kill every process still assigned to the job. Only called from
+    /// `terminate_child`/`kill_child`.
+    fn terminate(&self, exit_code: u32) {
+        unsafe {
+            let _ = TerminateJobObject(self.handle, exit_code);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ChildJob {
+    fn drop(&mut self) {
+        // No TerminateJobObject here — see the struct doc comment. Just
+        // release our handle; the kernel job object isn't destroyed until
+        // every handle to it is closed AND every process still assigned to
+        // it has exited, so legitimate stragglers (e.g. mspdbsrv.exe) keep
+        // running untouched.
+        unsafe {
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+/// No-op counterpart so call sites and signatures don't need `#[cfg]`
+/// gating: on Unix, `signal_child_process_group` already does this job, so
+/// `ChildJob` is never actually constructed with `Some(_)` there.
+#[cfg(not(windows))]
+pub struct ChildJob;
+
+#[cfg(not(windows))]
+impl ChildJob {
+    fn for_child(_child: &Child, _display: &str) -> Option<Self> {
+        None
+    }
+
+    fn terminate(&self, _exit_code: u32) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -1158,7 +1277,8 @@ fn exec_run_inner_with_start(
             let mut child = command
                 .spawn()
                 .with_context(|| format!("run() command in {}", command_cwd.display()))?;
-            wait_for_child_status(&mut child, &opts.display, cancellation)
+            let job = ChildJob::for_child(&child, &opts.display);
+            wait_for_child_status(&mut child, &opts.display, cancellation, job.as_ref())
         };
         let status = match ui_suspend {
             Some(multi) => multi.suspend(run_child),
@@ -1169,10 +1289,12 @@ fn exec_run_inner_with_start(
         let mut child = command
             .spawn()
             .with_context(|| format!("run() command in {}", command_cwd.display()))?;
+        let job = ChildJob::for_child(&child, &opts.display);
         match wait_for_child_output(
             &mut child,
             &opts.display,
             cancellation,
+            job.as_ref(),
             None,
             remote_rx.as_ref(),
         )? {
@@ -1411,11 +1533,13 @@ pub fn exec_run_unsandboxed(
     let mut child = command
         .spawn()
         .with_context(|| format!("run() unsandboxed command in {}", workspace_root.display()))?;
+    let job = ChildJob::for_child(&child, &opts.display);
 
     let (status, stdout, stderr) = match wait_for_child_output(
         &mut child,
         &opts.display,
         cancellation,
+        job.as_ref(),
         progress.as_deref_mut(),
         None,
     )? {
@@ -1818,7 +1942,8 @@ mod tests {
         });
 
         let start = Instant::now();
-        let outcome = wait_for_child_output(&mut child, "probe", None, None, Some(&rx)).unwrap();
+        let outcome =
+            wait_for_child_output(&mut child, "probe", None, None, None, Some(&rx)).unwrap();
         assert!(
             start.elapsed() < Duration::from_secs(2),
             "a remote hit should short-circuit the child's 5s sleep"
@@ -1841,7 +1966,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Option<TaskCacheRecord>>();
         drop(tx);
         let mut child = spawn_probe_child("printf out");
-        match wait_for_child_output(&mut child, "probe", None, None, Some(&rx)).unwrap() {
+        match wait_for_child_output(&mut child, "probe", None, None, None, Some(&rx)).unwrap() {
             ChildRaceOutcome::Exited((status, stdout, _)) => {
                 assert!(status.success());
                 assert_eq!(stdout, "out\n");
@@ -1854,7 +1979,7 @@ mod tests {
     fn wait_for_child_output_sandbox_wins_when_remote_channel_never_resolves() {
         let (tx, rx) = mpsc::channel::<Option<TaskCacheRecord>>();
         let mut child = spawn_probe_child("printf out");
-        match wait_for_child_output(&mut child, "probe", None, None, Some(&rx)).unwrap() {
+        match wait_for_child_output(&mut child, "probe", None, None, None, Some(&rx)).unwrap() {
             ChildRaceOutcome::Exited((status, stdout, _)) => {
                 assert!(status.success());
                 assert_eq!(stdout, "out\n");
@@ -1867,7 +1992,7 @@ mod tests {
     #[test]
     fn wait_for_child_output_none_receiver_matches_pre_race_behavior() {
         let mut child = spawn_probe_child("printf out");
-        match wait_for_child_output(&mut child, "probe", None, None, None).unwrap() {
+        match wait_for_child_output(&mut child, "probe", None, None, None, None).unwrap() {
             ChildRaceOutcome::Exited((status, stdout, _)) => {
                 assert!(status.success());
                 assert_eq!(stdout, "out\n");
@@ -1880,9 +2005,44 @@ mod tests {
     fn wait_for_child_output_cancellation_still_bails_with_no_remote_hit_receiver() {
         let cancellation = AtomicBool::new(true);
         let mut child = spawn_probe_child("sleep 5");
-        let result = wait_for_child_output(&mut child, "probe", Some(&cancellation), None, None);
+        let result =
+            wait_for_child_output(&mut child, "probe", Some(&cancellation), None, None, None);
         let err = result.unwrap_err();
         assert!(err.to_string().contains("canceled"), "{err:#}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_job_object_kills_grandchild_process() {
+        // Three process levels deep (outer cmd -> nested cmd -> timeout.exe)
+        // proves ChildJob covers the whole tree, not just the immediate
+        // child this test holds a `Child` for — job membership propagates
+        // to descendants by default (no JOB_OBJECT_LIMIT_BREAKAWAY_OK set).
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("marker");
+        let inner = format!("timeout /T 5 >nul & type nul > \"{}\"", marker.display());
+        let mut child = Command::new("cmd")
+            .args(["/C", "cmd", "/C", &inner])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let job = ChildJob::for_child(&child, "probe")
+            .expect("Job Object creation should succeed in a normal Windows test environment");
+
+        // Let the nested cmd.exe/timeout.exe actually start before tearing down.
+        thread::sleep(Duration::from_millis(500));
+        terminate_child_and_wait(&mut child, Some(&job));
+
+        // Wait past the inner `timeout /T 5` so a false pass (marker absent
+        // only because nothing had spawned yet) is ruled out.
+        thread::sleep(Duration::from_secs(6));
+        assert!(
+            !marker.exists(),
+            "the grandchild timeout/nested cmd.exe should have been killed via \
+             the Job Object, not survived to write the marker"
+        );
     }
 
     #[test]
