@@ -1022,7 +1022,9 @@ fn exec_run_inner_with_start(
     // Cache miss — this action is going to do real work, so take the `--jobs`
     // slot now, before staging. Creating a sandbox and hardlinking a full input
     // tree into it is the expensive part; gating only the command spawn let an
-    // unbounded number of sandboxes be staged at once.
+    // unbounded number of sandboxes be staged at once. This also puts the
+    // action in its progress lane immediately, so the swimlane reflects
+    // staging in flight instead of sitting empty until the command spawns.
     //
     // Everything above this point is cache lookup, so a cache hit still costs no
     // slot. Re-check cancellation once the slot is in hand: a run being torn down
@@ -1131,10 +1133,11 @@ fn exec_run_inner_with_start(
     command.process_group(0);
 
     // The remote race may already have resolved during sandbox staging above —
-    // check once before spawning. The `--jobs` slot is already held, because it
-    // gated that staging, but returning here still keeps a remote win out of a
-    // progress lane and classified as the cache hit it is: that follows from
-    // never reaching `started()` below.
+    // check once before spawning. The `--jobs` slot (and its progress lane) is
+    // already held, since `reserve()` took both before staging, but returning
+    // here still keeps this classified as the cache hit it is: that follows
+    // from never reaching `started()` below. The lane itself is cleared like
+    // any other job's once this call returns.
     if let Some(rx) = remote_rx.as_ref() {
         if let Ok(Some(record)) = rx.try_recv() {
             imp_store::artifact_trace!(
