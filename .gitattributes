@@ -1,0 +1,9 @@
+# Normalize line endings to LF in the repository regardless of what a
+# contributor's OS or tool wrote to disk (see #159: a Windows odinfmt run
+# committed CRLF into four .odin fixtures, which Linux CI's own LF-only
+# odinfmt then flagged as unformatted). `text=auto` leaves git's own
+# heuristic to skip real binaries.
+* text=auto eol=lf
+
+# Caught by text=auto's heuristic too, but explicit to avoid any doubt.
+*.so binary
