@@ -574,6 +574,21 @@ pub const PASSTHROUGH_ENV_VARS: &[&str] = &[
     "SSL_CERT_DIR",
 ];
 
+/// Windows system variables allowed through the same scrub, matched
+/// case-insensitively (Windows env var names are, and the exact casing on
+/// the inherited process environment block varies by parent shell). Without
+/// `ProgramData` in particular, MSVC toolchain auto-detection (e.g. Odin's
+/// own `vswhere`-style lookup for `link.exe`/the Windows SDK libs) silently
+/// fails even with Visual Studio Build Tools properly installed — confirmed
+/// by a real `odin build` failing with "link.exe not found." purely from
+/// this scrub, on a machine with a working VS install. `SystemRoot` is
+/// included alongside it as the standard baseline Windows programs assume is
+/// set, even though this specific failure only required `ProgramData`.
+#[cfg(windows)]
+pub const PASSTHROUGH_ENV_VARS_WINDOWS: &[&str] = &["SystemRoot", "ProgramData"];
+#[cfg(not(windows))]
+pub const PASSTHROUGH_ENV_VARS_WINDOWS: &[&str] = &[];
+
 /// Prefixes of host environment variables allowed through (locale family).
 pub const PASSTHROUGH_ENV_PREFIXES: &[&str] = &["LC_"];
 
@@ -584,6 +599,9 @@ pub fn passthrough_env_snapshot() -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for (key, value) in std::env::vars() {
         let allowed = PASSTHROUGH_ENV_VARS.contains(&key.as_str())
+            || PASSTHROUGH_ENV_VARS_WINDOWS
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&key))
             || PASSTHROUGH_ENV_PREFIXES
                 .iter()
                 .any(|prefix| key.starts_with(prefix));
