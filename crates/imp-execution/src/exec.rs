@@ -353,9 +353,34 @@ pub fn wait_for_child_output(
         }
     };
 
-    let _ = stdout_thread.join();
-    let _ = stderr_thread.join();
-    drain_process_lines(&receiver, &mut stdout, &mut stderr, progress);
+    // Do not join the reader threads unconditionally: a descendant the child
+    // spawned (e.g. a linker's helper process) can inherit the stdout/stderr
+    // pipes and keep the write end open well after the child we're actually
+    // waiting on has exited. On Windows this is routine — CreateProcess
+    // inheritance is all-or-nothing, so any tool the child shells out to can
+    // end up holding our pipes — and it turned a single failed action into a
+    // whole-run stall (all worker threads parked in this join) until the
+    // lingering process finally exited on its own, minutes later. Once the
+    // child has exited, give the readers a bounded grace period to flush
+    // whatever's already buffered, then stop waiting; the threads are left to
+    // finish (and the pipes to close) in the background, same rationale as
+    // the cancellation and remote-hit paths above.
+    let drain_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match receiver.recv_timeout(Duration::from_millis(20)) {
+            Ok(line) => {
+                record_process_line(line, &mut stdout, &mut stderr, progress.as_deref_mut())
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if Instant::now() >= drain_deadline {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let _ = stdout_thread;
+    let _ = stderr_thread;
     Ok(ChildRaceOutcome::Exited((status, stdout, stderr)))
 }
 
