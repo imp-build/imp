@@ -367,6 +367,49 @@ export function rebaseAbsolutePaths(text, sandboxRoot, replacement = "") {
 	return text.split(sandboxRoot + "/").join(replacement);
 }
 
+// CMake's Windows Ninja generator wraps a link rule's whole command in its
+// own `cmd.exe /C "$PRE_LINK && <linker> ... && $POST_BUILD"` shell wrapper
+// — confirmed against a real Windows `cmake -G Ninja` run: ninja doesn't
+// invoke a shell for a rule's command the way it effectively does via
+// `sh -c` on Unix, so CMake bakes cmd.exe's own equivalent in directly
+// wherever a rule needs more than one statement. `$PRE_LINK`/`$POST_BUILD`
+// are themselves edge-scoped variables — when a target needs a POST_BUILD
+// custom command run from a different directory (e.g. a SHARED_LIBRARY's
+// own build-then-copy-to-source-tree step), CMake gives POST_BUILD *its
+// own* nested `cmd.exe /C "..."` wrapper, so expandVar() substituting it
+// into the outer template produces a command with one `cmd.exe /C "` +
+// `"` pair nested inside another — not something a single balanced-quote
+// regex can unwrap correctly (matching only the first inner `"` as if it
+// closed the outer wrapper truncates the command). resolveEdgeCommand()'s
+// result already gets run through executeEdge()'s `sh -c` (see
+// graph_replay.js), so every layer of this wrapper is both redundant and
+// unusable there: CMake emits "cmd.exe" as a bare name, never an absolute
+// path, so rewriteToolInvocations() never recognizes it as a tool needing
+// a mount, and the sandbox's minimal, declared-tools-only PATH has nothing
+// by that name — it just fails outright ("command not found"). Handled
+// instead by stripping every "cmd.exe /C" prefix (regardless of nesting
+// depth) and every stray double-quote outright, rather than trying to
+// parse balanced quoting: nothing in a CMake-generated command legitimately
+// needs a literal quote preserved (matching this file's own deliberately
+// narrow scope — see its docstring), so this always leaves a clean, plain
+// `&&`-joined shell command behind, at any nesting depth.
+const CMD_EXE_PREFIX_RE = /cmd(?:\.exe)?\s+\/[Cc]\s+/g;
+
+// The one piece of cmd.exe-specific syntax that survives the above
+// otherwise: CMake pairs a `cmd.exe /C` wrapper that changes directory with
+// `cd /D <dir>`, not a plain `cd <dir>` — `/D` is needed there because
+// plain `cd` on cmd.exe can't switch drives. bash's own `cd` builtin has no
+// such flag (and no need for one: a replay sandbox is always one drive), so
+// left as-is it would try to `cd` into a literal directory named `/D`.
+const CMD_CD_SLASH_D_RE = /\bcd\s+\/[Dd]\s+/g;
+
+function stripCmdExeWrapper(command) {
+	return command
+		.replace(CMD_EXE_PREFIX_RE, "")
+		.replace(CMD_CD_SLASH_D_RE, "cd ")
+		.replace(/"/g, "");
+}
+
 // Rebases a single path token the same way, for use on edge input/output
 // path lists (which are workspace/sandbox-root-relative, independent of
 // whatever cwd a replayed command executes from) rather than command text.
@@ -399,7 +442,8 @@ export function resolveEdgeCommand(
 		sandboxRoot,
 		upPrefixForBuildDir(buildDirPath),
 	);
-	const { command, toolNames } = rewriteToolInvocations(rebased);
+	const unwrapped = stripCmdExeWrapper(rebased);
+	const { command, toolNames } = rewriteToolInvocations(unwrapped);
 	return { command, toolNames };
 }
 

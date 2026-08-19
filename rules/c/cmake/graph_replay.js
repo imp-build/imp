@@ -416,15 +416,17 @@ export function basename(path) {
  *   build product without the whole shared build directory. Omit to skip
  *   (only `.outputs.directory` is produced).
  * @param {object} [targetDeps] `{ [otherTargetName]: { outputs: string[],
- *   task: <replayCmakeTarget() handle>, fileIndex?: number } }` — other
+ *   task: <replayCmakeTarget() handle>, fileIndices?: number[] } }` — other
  *   named CMake targets this one depends on (CMake's own Ninja generator
  *   names a dependency's final output directly in a `|`/`||` reference; see
  *   reachableEdgesBounded() in ninja_graph.js). Declaring them here stops
  *   this target's own edge walk at that boundary instead of re-deriving the
- *   dependency's edges, and takes its already-built artifact
- *   (`dep.task.outputs[`file${dep.fileIndex ?? 0}`]`) as a declared graph
- *   input instead. Omit for a target with no cross-target dependencies —
- *   behaves exactly as before.
+ *   dependency's edges, and takes its already-built artifact(s)
+ *   (`dep.task.outputs[`file${i}`]` for each `i` in `fileIndices`, default
+ *   `[0]`) as declared graph inputs instead — every referenced output, not
+ *   just one, since a dependency can be needed in more than one way at once
+ *   (see buildTargetDeps()'s own docstring in expansion.js). Omit for a
+ *   target with no cross-target dependencies — behaves exactly as before.
  * @returns {object} Task handle with `.outputs.directory` (an artifact: the
  *   build directory after replay, including any POST_BUILD copy
  *   destinations) and, per `exposeOutputs` entry, `.outputs.file<i>`.
@@ -514,14 +516,19 @@ export function replayCmakeTarget(
 			// identity — a dependency target whose own inputs changed (or a
 			// different set of dependency names entirely, which changes
 			// this object's own key set) naturally produces a distinct key
-			// here. depTargetNames is redundant with the dep_<name> keys
+			// here. depTargetNames is redundant with the dep_<name>_<i> keys
 			// above but kept anyway, matching this file's existing
-			// targetNames/exposeOutputs defense-in-depth precedent.
+			// targetNames/exposeOutputs defense-in-depth precedent. One key
+			// per referenced fileIndex, not one per dependency name: a
+			// dependency can be needed in more than one way at once (see
+			// buildTargetDeps()'s own docstring in expansion.js).
 			...Object.fromEntries(
-				Object.entries(targetDeps).map(([name, dep]) => [
-					`dep_${name}`,
-					dep.task.outputs[`file${dep.fileIndex ?? 0}`],
-				]),
+				Object.entries(targetDeps).flatMap(([name, dep]) =>
+					(dep.fileIndices ?? [0]).map((i) => [
+						`dep_${name}_${i}`,
+						dep.task.outputs[`file${i}`],
+					]),
+				),
 			),
 			depTargetNames: Object.keys(targetDeps).sort(),
 		},
@@ -537,19 +544,20 @@ export function replayCmakeTarget(
 			const dirInputBindings = Object.keys(spec.dirInputs).map(
 				(key) => input[key],
 			);
-			// A boundary dependency's own artifact is already captured at
-			// its real buildDirPath-relative path (same mechanism
-			// exposeOutputs' file0..N rely on). It's mounted unconditionally
-			// for every edge in this replay rather than only the specific
-			// edge that references it: an order-only ("||") reference is by
-			// design invisible in resolved command text (see
-			// reachableEdgesBounded()'s own docstring), so which edge
-			// actually needs the file physically present can't be
-			// determined from parsed data alone — there are normally only
-			// one or two boundary deps per target, so mounting them broadly
-			// is cheap.
-			const boundaryInputs = Object.keys(targetDeps).map(
-				(name) => input[`dep_${name}`],
+			// A boundary dependency's own artifact(s) are already captured at
+			// their real buildDirPath-relative paths (same mechanism
+			// exposeOutputs' file0..N rely on). Every referenced output is
+			// mounted unconditionally for every edge in this replay, not just
+			// the ones that need it: which edge needs which specific file
+			// physically present can't be determined from parsed data alone
+			// (an order-only reference is by design invisible in resolved
+			// command text — see reachableEdgesBounded()'s own docstring —
+			// yet still a real requirement, e.g. a DLL a built executable
+			// loads at runtime without ever naming it in its own link
+			// command), and there are normally only one or two boundary deps
+			// per target, so mounting them broadly is cheap.
+			const boundaryInputs = Object.entries(targetDeps).flatMap(([name, dep]) =>
+				(dep.fileIndices ?? [0]).map((i) => input[`dep_${name}_${i}`]),
 			);
 
 			async function executeEdge(edge, priorOutputs) {
@@ -584,7 +592,15 @@ export function replayCmakeTarget(
 						edgeTools.push(gccGraphToolSpec(spec.toolchain.version, name));
 						continue;
 					}
-					if (name === "cmake") {
+					// ".exe" alongside the bare name for the same reason
+					// GCC_GRAPH_TOOL_NAMES lists both forms: on Windows,
+					// gccCMakeCompilerArgs()'s own compiler paths always
+					// carry the suffix, and rewriteToolInvocations() extracts
+					// the basename verbatim, extension included. The mount's
+					// own folder name ("cmake", from cmakeGraphToolSpec()) is
+					// unrelated to this — only its bin dir matters for PATH,
+					// and the real binary inside it is "cmake.exe" either way.
+					if (name === "cmake" || name === "cmake.exe") {
 						edgeTools.push(cmakeGraphToolSpec(spec.cmakeToolchain.version));
 						continue;
 					}

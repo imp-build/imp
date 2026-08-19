@@ -9,6 +9,7 @@ import {
 	withFakeToolchainHost,
 } from "//rules/imp/test";
 import {
+	buildTargetDeps,
 	cmakeLibraryDep,
 	cmakeProjectExpansion,
 	crossTargetDependencies,
@@ -367,7 +368,9 @@ describe("cmakeProjectExpansion", () => {
 		});
 		const named = listNamedCmakeTargets(ninjaGraph);
 		const crossDeps = crossTargetDependencies(named, ninjaGraph);
-		expect(crossDeps.get("hello_cmake_main")).toEqual(["hello_cmake"]);
+		expect(crossDeps.get("hello_cmake_main")).toEqual([
+			{ name: "hello_cmake", outputPaths: ["libhello_cmake.so"] },
+		]);
 		expect(crossDeps.get("hello_cmake")).toEqual([]);
 	});
 
@@ -380,6 +383,85 @@ describe("cmakeProjectExpansion", () => {
 		const crossDeps = crossTargetDependencies(named, ninjaGraph);
 		const ordered = topoSortTargets(named, crossDeps).map((t) => t.name);
 		expect(ordered).toEqual(["hello_cmake", "hello_cmake_main"]);
+	});
+
+	test("buildTargetDeps() mounts every one of a dependency's referenced outputs, not just one", () => {
+		// A Windows SHARED_LIBRARY target declares *two* outputs — the DLL
+		// itself and a `.dll.a` import library. The real build line confirmed
+		// against a Windows run references *both* at once — `|
+		// libhello_cmake.dll.a || libhello_cmake.dll` — the `.dll.a` as a
+		// real (`|`) link input, the `.dll` only order-only (`||`): never an
+		// argument in the link command, but still a real requirement of the
+		// *built executable*, which needs the DLL physically present to even
+		// launch (confirmed the hard way: mounting only the import library
+		// produces a binary that fails at runtime with STATUS_DLL_NOT_FOUND,
+		// since replay builds each target into its own isolated directory
+		// rather than one shared build tree where the DLL would already be
+		// sitting right there). Both outputs must end up mounted.
+		const rules = `
+rule C_COMPILER__hello_cmake_unscanned_
+  command = cc -c $in -o $out
+
+rule C_SHARED_LIBRARY_LINKER__hello_cmake_
+  command = cc -shared -o $TARGET_FILE $in
+
+rule C_COMPILER__hello_cmake_main_unscanned_
+  command = cc -c $in -o $out
+
+rule C_EXECUTABLE_LINKER__hello_cmake_main_
+  command = cc $in -o $TARGET_FILE -lhello_cmake
+`;
+		const build = `
+include CMakeFiles/rules.ninja
+
+# Object build statements for SHARED_LIBRARY target hello_cmake
+build CMakeFiles/hello_cmake.dir/hello.c.o: C_COMPILER__hello_cmake_unscanned_ hello.c
+  DEP_FILE = CMakeFiles/hello_cmake.dir/hello.c.o.d
+  OBJECT_DIR = CMakeFiles/hello_cmake.dir
+
+# Link build statements for SHARED_LIBRARY target hello_cmake
+build libhello_cmake.dll libhello_cmake.dll.a: C_SHARED_LIBRARY_LINKER__hello_cmake_ CMakeFiles/hello_cmake.dir/hello.c.o
+  TARGET_FILE = libhello_cmake.dll
+  OBJECT_DIR = CMakeFiles/hello_cmake.dir
+
+build hello_cmake: phony libhello_cmake.dll
+
+# Object build statements for EXECUTABLE target hello_cmake_main
+build CMakeFiles/hello_cmake_main.dir/main.c.o: C_COMPILER__hello_cmake_main_unscanned_ main.c
+  DEP_FILE = CMakeFiles/hello_cmake_main.dir/main.c.o.d
+  OBJECT_DIR = CMakeFiles/hello_cmake_main.dir
+
+# Link build statements for EXECUTABLE target hello_cmake_main
+build hello_cmake_main.exe: C_EXECUTABLE_LINKER__hello_cmake_main_ CMakeFiles/hello_cmake_main.dir/main.c.o | libhello_cmake.dll.a || libhello_cmake.dll
+  TARGET_FILE = hello_cmake_main.exe
+
+build hello_cmake_main: phony hello_cmake_main.exe
+
+build all: phony libhello_cmake.dll hello_cmake_main
+`;
+		const ninjaGraph = parseNinja(build, (path) => {
+			if (path === "CMakeFiles/rules.ninja") return rules;
+			throw new Error(`unexpected include: ${path}`);
+		});
+		const named = listNamedCmakeTargets(ninjaGraph);
+		const crossDeps = crossTargetDependencies(named, ninjaGraph);
+
+		expect(crossDeps.get("hello_cmake_main")).toEqual([
+			{
+				name: "hello_cmake",
+				outputPaths: ["libhello_cmake.dll", "libhello_cmake.dll.a"],
+			},
+		]);
+
+		const targetDeps = buildTargetDeps("hello_cmake_main", named, crossDeps, {
+			hello_cmake: "FAKE_HELLO_CMAKE_TASK",
+		});
+		expect(targetDeps.hello_cmake.fileIndices).toEqual([0, 1]);
+		expect(targetDeps.hello_cmake.outputs).toEqual([
+			"libhello_cmake.dll",
+			"libhello_cmake.dll.a",
+		]);
+		expect(targetDeps.hello_cmake.task).toBe("FAKE_HELLO_CMAKE_TASK");
 	});
 
 	test("get() on any target name (including an unknown one) returns a lazy handle without eagerly validating", () => {
