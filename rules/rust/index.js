@@ -169,7 +169,12 @@ export async function rustLinkerTools(exec, input, linkerHandles, kacheActive) {
 		// "clang" via PATH itself for the *link* step (its own direct
 		// subprocess spawn, not something kache wraps/caches), and that
 		// wrapper script does `exec "$(dirname "$0")/..." "$@"`.
-		tools: [input.dirnameTool],
+		tools: [
+			...(kacheActive || input.gccTool?.mountName === undefined
+				? []
+				: [input.gccTool]),
+			input.dirnameTool,
+		],
 		rustflags: [
 			...gccResult.rustflags,
 			...(moldResult ? moldResult.rustflags : []),
@@ -340,7 +345,16 @@ export async function toolEnvAndTools(exec, input, spec) {
 	);
 	return {
 		kacheActive,
-		tools: [...linker.tools, ...cache.tools],
+		tools: [
+			...(input.rustupHomeTool.mountName === undefined
+				? []
+				: [input.rustupHomeTool]),
+			...(input.cargoHomeTool.mountName === undefined
+				? []
+				: [input.cargoHomeTool]),
+			...linker.tools,
+			...cache.tools,
+		],
 		env: mergeEnvPath(
 			[...rustEnv, ...linker.env, ...cache.env],
 			linker.pathDirs,

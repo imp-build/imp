@@ -37,6 +37,7 @@ import {
 	task,
 } from "imp:core";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
+import { nativeTool } from "//rules/imp/native-tool";
 import { defaultZigGraphToolchain, zigGraphCacheEnv } from "//rules/c/zig";
 
 export const DEFAULT_CPP_SRCS = ["**/*.c", "**/*.cc", "**/*.cpp", "**/*.cxx"];
@@ -220,6 +221,8 @@ function ccTask(spec, isLibrary) {
 		inputs: {
 			srcs,
 			hdrs,
+			mkdir: nativeTool("mkdir"),
+			dirname: nativeTool("dirname"),
 			...toolchainTaskInputs(spec.toolchain),
 			...Object.fromEntries(
 				transitiveArchives.map((archive, i) => [`archive${i}`, archive]),
@@ -268,6 +271,7 @@ function ccTask(spec, isLibrary) {
 					return exec.action({
 						argv: ["sh", "-c", script, "cc-compile"],
 						env,
+						tools: [input.mkdir, input.dirname],
 						inputs: [
 							input.srcs,
 							input.hdrs,
@@ -309,6 +313,7 @@ function ccTask(spec, isLibrary) {
 			const result = await exec.action({
 				argv: ["sh", "-c", script, isLibrary ? "cc-archive" : "cc-link"],
 				env,
+				tools: [input.mkdir, input.dirname],
 				inputs: compileResults.map((r) => r.outputs.object),
 				outputs: { artifact: output.file(outPath) },
 				display: `cc ${isLibrary ? "archive" : "link"} ${outPath}`,

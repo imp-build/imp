@@ -295,7 +295,10 @@ export function gccGraphTool(version) {
 			return { directory: result.outputs.directory };
 		},
 	}).outputs.directory;
-	return graphTool(directory, { binDirs: ["bin"] });
+	return graphTool(directory, {
+		binDirs: ["bin"],
+		mount: { name: "gcc-toolchain", cache: GCC_TOOLCHAIN_CACHE, key: cacheKey },
+	});
 }
 
 /**
@@ -378,7 +381,10 @@ function gccGraphToolWindows(version, plat, archive, cacheKey) {
 			return { directory: result.outputs.directory };
 		},
 	}).outputs.directory;
-	return graphTool(directory, { binDirs: ["bin"] });
+	return graphTool(directory, {
+		binDirs: ["bin"],
+		mount: { name: "gcc-toolchain", cache: GCC_TOOLCHAIN_CACHE, key: cacheKey },
+	});
 }
 
 /**
@@ -564,19 +570,26 @@ export function gccRustLinkDriverEnv(
 	version,
 	kacheActive,
 ) {
-	exec.path(resolvedGccTool);
 	const plat = platformInfo();
-	const dir = cacheGet(GCC_TOOLCHAIN_CACHE, gccCacheKey(version, plat));
 	const exeSuffix = plat.os === "windows" ? ".exe" : "";
-	const clangPath = `${dir}/bin/clang${exeSuffix}`;
-	const pathDirs = [`${dir}/bin`];
+	const cacheDir = cacheGet(GCC_TOOLCHAIN_CACHE, gccCacheKey(version, plat));
+	const mounted = !kacheActive && resolvedGccTool?.mountName !== undefined;
+	const clangPath = mounted
+		? exec.tool(resolvedGccTool, "clang")
+		: `${cacheDir}/bin/clang${exeSuffix}`;
+	const cxxPath = mounted
+		? exec.tool(resolvedGccTool, "c++")
+		: `${cacheDir}/bin/c++${exeSuffix}`;
+	const pathDirs = [
+		mounted ? ".imp/tools/gcc-toolchain/bin" : `${cacheDir}/bin`,
+	];
 	const rustflags = ["-C", `linker=${clangPath}`];
 	if (!kacheActive) {
 		return { rustflags, env: [`CC=${clangPath}`], pathDirs };
 	}
 	return {
 		rustflags,
-		env: [`CC=kache ${clangPath}`, `CXX=kache ${dir}/bin/c++${exeSuffix}`],
+		env: [`CC=kache ${clangPath}`, `CXX=kache ${cxxPath}`],
 		pathDirs,
 	};
 }
@@ -589,13 +602,10 @@ export function gccRustLinkDriverEnv(
  * gccCMakeCompilerArgs() below for why rules/c/cmake needs this specifically
  * (a real path, not a sandbox-relative one).
  *
- * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
- * @param {object} resolvedGccTool Resolved `gccGraphToolchain().tool` input.
  * @param {string} version `gccGraphToolchain().version`.
  * @returns {string}
  */
-export function gccGraphToolchainDir(exec, resolvedGccTool, version) {
-	exec.path(resolvedGccTool);
+export function gccGraphToolchainDir(version) {
 	const plat = platformInfo();
 	return cacheGet(GCC_TOOLCHAIN_CACHE, gccCacheKey(version, plat));
 }
@@ -618,8 +628,6 @@ export function gccGraphToolchainDir(exec, resolvedGccTool, version) {
  * root cause of #98 (CMake replay failing with "ranlib: not found" once that
  * baked-in host path got rewritten to a bare name with no matching mount).
  *
- * @param {object} exec Task's exec (see task()'s run(exec, resolved) body).
- * @param {object} resolvedGccTool Resolved `gccGraphToolchain().tool` input.
  * @param {string} version `gccGraphToolchain().version`.
  * @param {boolean} [unsafeSystemPaths] When true, point CMAKE_C_COMPILER/
  *   CMAKE_CXX_COMPILER at the "-unsafe-paths" aliases (see gccGraphTool()'s
@@ -629,13 +637,8 @@ export function gccGraphToolchainDir(exec, resolvedGccTool, version) {
  *   are unaffected — ar/ranlib aren't wrapped.
  * @returns {string[]}
  */
-export function gccCMakeCompilerArgs(
-	exec,
-	resolvedGccTool,
-	version,
-	unsafeSystemPaths,
-) {
-	const dir = gccGraphToolchainDir(exec, resolvedGccTool, version);
+export function gccCMakeCompilerArgs(version, unsafeSystemPaths) {
+	const dir = gccGraphToolchainDir(version);
 	const suffix = unsafeSystemPaths ? "-unsafe-paths" : "";
 	const exeSuffix = platformInfo().os === "windows" ? ".exe" : "";
 	return [

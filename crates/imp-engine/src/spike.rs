@@ -4674,6 +4674,12 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                         binding.set("kind", artifact.kind.as_str())?;
                         binding.set("digest", normalized.digest())?;
                         binding.set("path", path.as_str())?;
+                        if let Some(named_cache) = &artifact.named_cache {
+                            let named_cache_obj = Object::new(ctx.clone())?;
+                            named_cache_obj.set("name", named_cache.name.as_str())?;
+                            named_cache_obj.set("key", named_cache.key.as_str())?;
+                            binding.set("namedCache", named_cache_obj)?;
+                        }
                         binding.set(
                             "fingerprint",
                             format!("artifact:{}:{}", artifact.kind, normalized.digest()),
@@ -9556,6 +9562,71 @@ export default { [BUILD]: acquire.outputs.out };
             std::fs::read_to_string(cache_dest.join("out.txt")).unwrap(),
             "from-legacy-tool"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn graph_action_mounts_a_named_cache_graph_tool_without_staging_its_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r##"
+import { goal, namedCache, output, task, tool } from "imp:core";
+import { nativeTool } from "//rules/imp/native-tool";
+const BUILD = goal("build");
+
+namedCache({ name: "graph-mounted-tool-test" });
+
+const install = task({
+    display: "install mounted graph tool",
+    inputs: { chmod: nativeTool("chmod"), mkdir: nativeTool("mkdir") },
+    outputs: { directory: output.artifact() },
+    async run(exec, input) {
+        const result = await exec.action({
+            argv: [
+                "sh", "-c",
+                'mkdir -p tool-root/bin && printf "#!/bin/sh\\n[ -L .imp/tools/fixture-tool ] && [ ! -e tool-root ] || exit 1\\nprintf mounted > \"\\$1\"\\n" > tool-root/bin/fixture && chmod +x tool-root/bin/fixture',
+                "install-mounted-tool",
+            ],
+            tools: [input.chmod, input.mkdir],
+            outputs: {
+                directory: output.directory("tool-root", {
+                    namedCache: { name: "graph-mounted-tool-test", key: "v1" },
+                }),
+            },
+        });
+        return { directory: result.outputs.directory };
+    },
+});
+
+const mounted = tool(install.outputs.directory, {
+    binDirs: ["bin"],
+    mount: { name: "fixture-tool", cache: "graph-mounted-tool-test", key: "v1" },
+});
+const consume = task({
+    display: "consume mounted graph tool",
+    inputs: { mounted },
+    outputs: { out: output.artifact() },
+    async run(exec, input) {
+        const result = await exec.action({
+            argv: [exec.tool(input.mounted, "fixture"), "out.txt"],
+            tools: [input.mounted],
+            outputs: { out: output.file("out.txt") },
+        });
+        return { out: result.outputs.out };
+    },
+});
+
+export default { [BUILD]: consume.outputs.out };
+"##,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        run_goal_live(&live, p, "build", &["//".to_owned()])
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

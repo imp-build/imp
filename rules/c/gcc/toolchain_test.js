@@ -184,17 +184,15 @@ describe("gcc toolchain", () => {
 	test("gccCMakeCompilerArgs points at the plain aliases by default and the -unsafe-paths ones when unsafeSystemPaths is set", () => {
 		return withGccHost(() => {
 			installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
-			const gccTool = { __imp_graph_handle: true, name: "gcc-tool" };
-			const exec = { path: () => "/unused" };
 			const dir = "/cache/gcc-toolchains/2025.08-1/linux-x86_64";
 
-			expect(gccCMakeCompilerArgs(exec, gccTool, "2025.08-1")).toEqual([
+			expect(gccCMakeCompilerArgs("2025.08-1")).toEqual([
 				`-DCMAKE_C_COMPILER=${dir}/bin/clang`,
 				`-DCMAKE_CXX_COMPILER=${dir}/bin/c++`,
 				`-DCMAKE_RANLIB=${dir}/bin/ranlib`,
 				`-DCMAKE_AR=${dir}/bin/ar`,
 			]);
-			expect(gccCMakeCompilerArgs(exec, gccTool, "2025.08-1", true)).toEqual([
+			expect(gccCMakeCompilerArgs("2025.08-1", true)).toEqual([
 				`-DCMAKE_C_COMPILER=${dir}/bin/clang-unsafe-paths`,
 				`-DCMAKE_CXX_COMPILER=${dir}/bin/c++-unsafe-paths`,
 				`-DCMAKE_RANLIB=${dir}/bin/ranlib`,
@@ -239,7 +237,6 @@ describe("gcc toolchain", () => {
 	test("gccRustLinkDriverEnv resolves the real absolute named-cache path (not a sandbox-relative one) and sets -C linker=<path>, CC=<path> in non-kache mode", () => {
 		return withGccHost(() => {
 			installGccToolchain("2025.08-1", "/tmp/gcc-2025.08-1");
-			const gccTool = { __imp_graph_handle: true, name: "gcc-tool" };
 			const exec = { path: () => "/unused" };
 
 			const { rustflags, env, pathDirs } = gccRustLinkDriverEnv(
@@ -392,7 +389,7 @@ describe("gcc toolchain on windows", () => {
 			const exec = { path: () => "/unused" };
 			const dir = `/cache/gcc-toolchains/${WIN_VERSION}/windows-x86_64`;
 
-			expect(gccCMakeCompilerArgs(exec, gccTool, WIN_VERSION)).toEqual([
+			expect(gccCMakeCompilerArgs(WIN_VERSION)).toEqual([
 				`-DCMAKE_C_COMPILER=${dir}/bin/clang.exe`,
 				`-DCMAKE_CXX_COMPILER=${dir}/bin/c++.exe`,
 				`-DCMAKE_RANLIB=${dir}/bin/ranlib.exe`,
@@ -401,7 +398,7 @@ describe("gcc toolchain on windows", () => {
 
 			const { rustflags, env, pathDirs } = gccRustLinkDriverEnv(
 				exec,
-				gccTool,
+				{ __imp_graph_handle: true, name: "gcc-tool" },
 				WIN_VERSION,
 				false,
 			);
