@@ -198,8 +198,15 @@ export function gccToolchain(version, opts = {}) {
 	return toolchain;
 }
 
-/** Build the managed GCC distribution as a graph-native tool. */
-export function gccGraphTool(version) {
+/**
+ * Build the managed GCC distribution as a graph-native tool.
+ *
+ * @param {string} version
+ * @param {object} [opts]
+ * @param {boolean} [opts.unsafeSystemPaths=false] Put the direct compiler
+ *   launchers first on PATH instead of Bootlin's guard wrappers.
+ */
+export function gccGraphTool(version, { unsafeSystemPaths = false } = {}) {
 	const resolved = GccToolchain.requireVersion(version);
 	const plat = platformInfo();
 	namedCache({ name: GCC_TOOLCHAIN_CACHE, shared: true });
@@ -215,7 +222,13 @@ export function gccGraphTool(version) {
 		unverified: GccToolchain.resolveUnverified(resolved),
 	});
 	if (plat.os === "windows") {
-		return gccGraphToolWindows(resolved, plat, archive, cacheKey);
+		return gccGraphToolWindows(
+			resolved,
+			plat,
+			archive,
+			cacheKey,
+			unsafeSystemPaths,
+		);
 	}
 	const shell = nativeTool("sh");
 	const mkdir = nativeTool("mkdir");
@@ -296,7 +309,7 @@ export function gccGraphTool(version) {
 		},
 	}).outputs.directory;
 	return graphTool(directory, {
-		binDirs: ["bin"],
+		binDirs: [unsafeSystemPaths ? "bin-unsafe-paths" : "bin"],
 		mount: { name: "gcc-toolchain", cache: GCC_TOOLCHAIN_CACHE, key: cacheKey },
 	});
 }
@@ -316,7 +329,13 @@ export function gccGraphTool(version) {
  * unsafe-path guard on Windows to bypass, so unsafeSystemPaths is a no-op
  * here (mirrors zig's own toolchain, which has no such guard either).
  */
-function gccGraphToolWindows(version, plat, archive, cacheKey) {
+function gccGraphToolWindows(
+	version,
+	plat,
+	archive,
+	cacheKey,
+	unsafeSystemPaths,
+) {
 	const shell = nativeTool("sh");
 	const mkdir = nativeTool("mkdir");
 	const cp = nativeTool("cp");
@@ -382,7 +401,7 @@ function gccGraphToolWindows(version, plat, archive, cacheKey) {
 		},
 	}).outputs.directory;
 	return graphTool(directory, {
-		binDirs: ["bin"],
+		binDirs: [unsafeSystemPaths ? "bin-unsafe-paths" : "bin"],
 		mount: { name: "gcc-toolchain", cache: GCC_TOOLCHAIN_CACHE, key: cacheKey },
 	});
 }

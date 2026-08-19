@@ -911,7 +911,9 @@ function graphActionInputs(spec, analysis, config) {
 	const inputs = {
 		sources: spec.sources,
 		odin: spec.toolchain,
-		gcc: gccGraphTool(defaultGccToolchainVersion()),
+		gcc: gccGraphTool(defaultGccToolchainVersion(), {
+			unsafeSystemPaths: spec.unsafeSystemPaths,
+		}),
 		...(linker ? { moldTool: linker.tool } : {}),
 		analysis: {
 			packagePath: analysis.packagePath,
@@ -954,17 +956,36 @@ export function odinExtraLinkerFlagsArgs(linkopts) {
 /**
  * The gcc toolchain bin dir to put on PATH for Odin's own linker invocation
  * (Odin execs a program literally named "clang" to link — see gccTool()'s
- * own docstring). unsafeSystemPaths points at "bin-unsafe-paths/" instead of
- * "bin/" (see gccGraphTool()'s own comment) so -extra-linker-flags: above
- * aren't rejected by Bootlin's toolchain-wrapper as an "unsafe header/
- * library path".
+ * own docstring). Its graph tool selects either bin/ or bin-unsafe-paths/
+ * before the executor constructs PATH, so the mounted tool's own normal bin/
+ * directory cannot override an unsafeSystemPaths selection.
  *
- * @param {string} gccToolDir Sandbox-mounted path to the gcc toolchain root (`exec.path(resolved.gcc)`).
- * @param {boolean} unsafeSystemPaths
+ * @param {string} clangPath Sandbox path to the GCC tool's `clang` launcher
+ *   (`exec.tool(resolved.gcc, "clang")`).
  * @returns {string}
  */
-export function odinLinkerPathDir(gccToolDir, unsafeSystemPaths) {
-	return `${gccToolDir}/${unsafeSystemPaths ? "bin-unsafe-paths" : "bin"}`;
+export function odinLinkerPathDir(clangPath) {
+	const executable = `clang${platformInfo().os === "windows" ? ".exe" : ""}`;
+	const suffix = `/${executable}`;
+	if (!clangPath.endsWith(suffix)) {
+		throw new Error(
+			`expected GCC clang launcher path ending in '${suffix}', got '${clangPath}'`,
+		);
+	}
+	return clangPath.slice(0, -suffix.length);
+}
+
+/**
+ * Resolve the GCC linker directory through the graph tool mount. `exec.path`
+ * is not valid here: a mounted graph tool is available only at its
+ * `.imp/tools/...` mount point.
+ *
+ * @param {object} exec Task executor.
+ * @param {object} resolvedGccTool Resolved GCC graph tool input.
+ * @returns {string}
+ */
+export function odinGccLinkerPathDir(exec, resolvedGccTool) {
+	return odinLinkerPathDir(exec.tool(resolvedGccTool, "clang"));
 }
 
 function graphOdinBuild(
@@ -1070,7 +1091,7 @@ function graphOdinBuild(
 				env: [
 					`PATH=${[
 						...(linkerEnv ? linkerEnv.pathDirs : []),
-						odinLinkerPathDir(exec.path(resolved.gcc), spec.unsafeSystemPaths),
+						odinGccLinkerPathDir(exec, resolved.gcc),
 					].join(":")}`,
 				],
 				allowFailure: lint || test,

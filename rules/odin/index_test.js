@@ -9,6 +9,7 @@ import { defaultMoldGraphToolchain } from "//rules/c/mold";
 import { describe, expect, test } from "//rules/imp/test";
 import {
 	odinExtraLinkerFlagsArgs,
+	odinGccLinkerPathDir,
 	odinGen,
 	odinLinkerPathDir,
 	odinPackage,
@@ -242,16 +243,32 @@ describe("Odin graph rules", () => {
 		]);
 	});
 
-	// Odin execs a program literally named "clang" via PATH lookup to link
-	// (see gccTool()'s own docstring) — unsafeSystemPaths has to change which
-	// directory lands on PATH, not which name is referenced.
-	test("odinLinkerPathDir selects bin-unsafe-paths/ only when unsafeSystemPaths is set", () => {
-		expect(odinLinkerPathDir("/cache/gcc-toolchains/x", false)).toBe(
-			"/cache/gcc-toolchains/x/bin",
+	// The GCC graph tool chooses bin/ or bin-unsafe-paths/ before the executor
+	// prepends its tool directories to PATH. This helper only derives the
+	// selected launcher's directory.
+	test("odinLinkerPathDir returns the mounted clang directory", () => {
+		expect(odinLinkerPathDir(".imp/tools/gcc-toolchain/bin/clang")).toBe(
+			".imp/tools/gcc-toolchain/bin",
 		);
-		expect(odinLinkerPathDir("/cache/gcc-toolchains/x", true)).toBe(
-			"/cache/gcc-toolchains/x/bin-unsafe-paths",
+		expect(
+			odinLinkerPathDir(".imp/tools/gcc-toolchain/bin-unsafe-paths/clang"),
+		).toBe(".imp/tools/gcc-toolchain/bin-unsafe-paths");
+	});
+
+	test("odinGccLinkerPathDir resolves clang through the graph tool mount", () => {
+		const gcc = { mountName: "gcc-toolchain" };
+		let toolCall = null;
+		const path = odinGccLinkerPathDir(
+			{
+				tool(handle, executable) {
+					toolCall = [handle, executable];
+					return ".imp/tools/gcc-toolchain/bin/clang";
+				},
+			},
+			gcc,
 		);
+		expect(toolCall).toEqual([gcc, "clang"]);
+		expect(path).toBe(".imp/tools/gcc-toolchain/bin");
 	});
 
 	test("an import that resolves to no package is an error", async () => {
