@@ -152,6 +152,63 @@ describe("ninja_graph parser", () => {
 		expect(appLink.inputs).toEqual(["CMakeFiles/app.dir/src/main.c.o"]);
 		expect(appLink.implicitInputs).toEqual(["libcore.a"]);
 	});
+
+	test("unescapes Ninja's $: syntax in values and path tokens", () => {
+		// CMake's own Ninja generator escapes a literal colon as `$:`
+		// wherever one appears in a value or path token — the drive-letter
+		// colon in a Windows absolute path is the case that matters here
+		// (colon otherwise means the `build out: rule in` separator), and it
+		// must round-trip back to a real ":" for the path to resolve.
+		// Build-line *outputs* are always build-dir-relative in CMake's own
+		// generated files (Ninja executes with cwd = build dir), so they
+		// never carry a drive letter/escaped colon in practice — only
+		// top-level values and absolute *inputs* (referencing the source
+		// tree) do, which is what's exercised below.
+		const text = [
+			"cmake_ninja_workdir = C$:/tmp/imp/sandbox-1/build/",
+			"",
+			"rule CUSTOM_COMMAND",
+			"  command = $COMMAND",
+			"",
+			"build out.txt: CUSTOM_COMMAND C$:/src/a.txt",
+			"  COMMAND = C$:/tools/echo.exe hi",
+		].join("\n");
+
+		const { edges, topVars } = parseNinja(text, readInclude);
+
+		expect(topVars.cmake_ninja_workdir).toBe("C:/tmp/imp/sandbox-1/build/");
+		const edge = edges[0];
+		expect(edge.inputs).toEqual(["C:/src/a.txt"]);
+		expect(edge.vars.COMMAND).toBe("C:/tools/echo.exe hi");
+	});
+
+	test("normalizes backslashes to forward slashes in rule/edge values", () => {
+		// CMake's Windows Ninja generator writes several of its own per-edge
+		// variable values (OBJECT_DIR, DEP_FILE, TARGET_FILE, the compiler's
+		// own absolute path baked into a rule's `command =`) with native
+		// backslash separators — unlike build-line path tokens and
+		// cmake_ninja_workdir, which always stay forward-slashed. A raw
+		// backslash surviving into a resolved edge command gets mangled once
+		// it reaches `sh -c` on Windows (see executeEdge() in
+		// graph_replay.js), so it must be normalized away here instead.
+		const text = [
+			"rule C_COMPILER__hello_unscanned_",
+			"  command = C:\\tools\\clang.exe -MF $DEP_FILE -o $out -c $in",
+			"",
+			"build hello.o: C_COMPILER__hello_unscanned_ hello.c",
+			"  DEP_FILE = CMakeFiles\\hello.dir\\hello.c.o.d",
+			"  OBJECT_DIR = CMakeFiles\\hello.dir",
+		].join("\n");
+
+		const { rules, edges } = parseNinja(text, readInclude);
+
+		expect(rules.C_COMPILER__hello_unscanned_.command).toBe(
+			"C:/tools/clang.exe -MF $DEP_FILE -o $out -c $in",
+		);
+		const edge = edges[0];
+		expect(edge.vars.DEP_FILE).toBe("CMakeFiles/hello.dir/hello.c.o.d");
+		expect(edge.vars.OBJECT_DIR).toBe("CMakeFiles/hello.dir");
+	});
 });
 
 describe("ninja_graph reachability", () => {
