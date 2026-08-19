@@ -49,7 +49,14 @@
 // unsupported here — a known follow-up gap, tracked alongside #61's own
 // zig-ar static-archive gap.
 
-import { files, output, packagePath, task } from "imp:core";
+import {
+	files,
+	output,
+	packagePath,
+	pathsInDigest,
+	readFileInDigest,
+	task,
+} from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 import {
 	defaultGccGraphToolchain,
@@ -70,29 +77,6 @@ import {
 	sandboxRootFromWorkdir,
 } from "//rules/c/cmake/ninja_graph";
 import { parseCTestTestfile } from "//rules/c/cmake/ctest_testfile";
-
-// Control bytes delimiting a multi-file dump in one exec.action()'s stdout:
-// the only way to get an unknown-in-advance set of files (every *.ninja
-// CMake's generator wrote, plus CTestTestfile.cmake if present) back out of
-// a single action, since exec.action()'s own `outputs:` must be declared
-// (as a fixed set of names) before the action runs — a real file's name
-// can't become a new named output after the fact. Control bytes (not valid
-// in any of these plain-text generated files) delimit path/content pairs.
-const FILE_START = "\x01";
-const FILE_MID = "\x02";
-const FILE_END = "\x03";
-
-function parseFileDump(dump) {
-	const filesByPath = new Map();
-	for (const chunk of dump.split(FILE_END)) {
-		if (chunk.length === 0) continue;
-		const start = chunk.indexOf(FILE_START);
-		const mid = chunk.indexOf(FILE_MID);
-		if (start === -1 || mid === -1) continue;
-		filesByPath.set(chunk.slice(start + 1, mid), chunk.slice(mid + 1));
-	}
-	return filesByPath;
-}
 
 // build.ninja bakes gccCMakeCompilerArgs()'s real absolute compiler paths
 // in as literal command text; rewriteToolInvocations() (see ninja_graph.js)
@@ -229,12 +213,8 @@ export function configureCmakeProject(spec) {
 			srcs: spec.srcsInput,
 			...spec.dirInputs,
 			...toolchainTaskInputs(spec.toolchain),
-			mkdir: nativeTool("mkdir"),
 			ninja: nativeTool("ninja"),
 			cmakeTool: spec.cmakeToolchain.tool,
-			find: nativeTool("find"),
-			cat: nativeTool("cat"),
-			dirname: nativeTool("dirname"),
 			sed: nativeTool("sed"),
 		},
 		outputs: { directory: output.artifact(), ninjaGraph: output.value() },
@@ -251,48 +231,34 @@ export function configureCmakeProject(spec) {
 				spec.cmakeToolchain.version,
 			);
 			const cmakeExe = `${cmakeDir}/bin/cmake`;
-			const script =
-				"src=$1; bdir=$2; cmakeExe=$3; shift 3; " +
-				'mkdir -p "$bdir" && "$cmakeExe" -S "$src" -B "$bdir" -G Ninja "$@" 1>&2 && ' +
-				// CTestTestfile.cmake bakes each test's executable as an
-				// *absolute* path rooted at this exact configure sandbox
-				// (CMake's own auto-substitution for `add_test(NAME ...
-				// COMMAND target)`). Rewriting that to a bare relative token
-				// here — right when $bdir's real absolute path is known with
-				// certainty, no separate capture-and-match needed later — is
-				// the "fix at build time, not run time" this repo's own
-				// runCTestTask() used to defer (see its history): a run-time
-				// oldroot->newroot rewrite bakes the *current* sandbox's
-				// $(pwd) into a cached exec.action(), which is invisible to
-				// the action's cache key, so a cache hit silently replays a
-				// stale path from whatever sandbox first produced that exact
-				// cached result. A bare relative token has no sandbox path
-				// to go stale — CTest resolves it against its own --test-dir
-				// cwd (see ctest_testfile.js's own comment on this form).
-				'absbdir=$(cd "$bdir" && pwd) && ' +
-				`find "$bdir" -name CTestTestfile.cmake -exec sed -i "s#\${absbdir}/##g" {} + && ` +
-				`find "$bdir" \\( -name '*.ninja' -o -name CTestTestfile.cmake \\) | while read -r f; do ` +
-				`printf '${FILE_START}%s${FILE_MID}' "\${f#$bdir/}"; cat "$f"; printf '${FILE_END}'; done`;
-			const result = await exec.action({
+			// Direct argv, no `sh`: cmake (and everything it spawns
+			// internally, including try_compile's own nested cmake/ninja/
+			// clang chain) is then a genuine native child of imp's Rust
+			// harness, so it actually inherits the harness's sandboxed
+			// TMP/TEMP (sandbox_home_tmp() in
+			// crates/imp-execution/src/exec.rs) instead of losing them
+			// across Git-for-Windows' MSYS sh's native-child exec boundary —
+			// the same failure class rules/c/index.js's own
+			// toolchainCommands() comment documents for direct compiler
+			// invocations, except CMake's try_compile has no -pipe-style
+			// escape hatch since it's spawned deep inside cmake.exe's own
+			// process tree, not something our own argv construction
+			// touches. No `mkdir` needed either: the harness pre-creates
+			// every declared output's directory before a sandboxed run
+			// starts.
+			const configured = await exec.action({
 				argv: [
-					"sh",
-					"-c",
-					script,
-					"cmake-configure",
-					spec.path,
-					spec.buildDirPath,
 					cmakeExe,
+					"-S",
+					spec.path,
+					"-B",
+					spec.buildDirPath,
+					"-G",
+					"Ninja",
 					...compilerArgs,
 					...spec.cmakeArgs,
 				],
-				tools: [
-					input.mkdir,
-					input.ninja,
-					input.find,
-					input.cat,
-					input.dirname,
-					input.sed,
-				],
+				tools: [input.ninja],
 				inputs: [
 					input.srcs,
 					...Object.keys(spec.dirInputs).map((key) => input[key]),
@@ -300,22 +266,98 @@ export function configureCmakeProject(spec) {
 				outputs: { directory: output.directory(spec.buildDirPath) },
 				display: `cmake configure ${spec.path}`,
 			});
-			const dumped = parseFileDump(result.stdout);
-			const mainText = dumped.get("build.ninja") || "";
+
+			// Read generated files straight out of the captured directory's
+			// own CAS tree — no sandbox, no second process needed just to
+			// look at text CMake already wrote. A directory-kind output
+			// nests under its own declared path (see
+			// normalize_graph_artifact() in crates/imp-engine/src/spike.rs),
+			// so reads need the buildDirPath prefix, not a bare
+			// bdir-relative path.
+			const digest = configured.outputs.directory.digest;
+			const readGenerated = (relPath) =>
+				readFileInDigest(digest, `${spec.buildDirPath}/${relPath}`);
+			const mainText = readGenerated("build.ninja");
 			const { rules, edges, topVars, targetTypes } = parseNinja(
 				mainText,
-				(p) => dumped.get(p) || "",
+				readGenerated,
 			);
 			const sandboxRoot = sandboxRootFromWorkdir(
 				topVars.cmake_ninja_workdir,
 				spec.buildDirPath,
 			);
-			// Dump keys are relative to $bdir (spec.buildDirPath), not
-			// workspace-relative — matches the find/printf script's own
-			// "${f#$bdir/}" stripping above.
-			const ctestText = dumped.get("CTestTestfile.cmake") || null;
+
+			// CTestTestfile.cmake bakes each test's executable as an
+			// *absolute* path rooted at this exact configure sandbox
+			// (CMake's own auto-substitution for `add_test(NAME ...
+			// COMMAND target)`). Rewritten here, right when the real
+			// absolute build dir (cmake_ninja_workdir) is known with
+			// certainty, no separate capture-and-match needed later — the
+			// "fix at build time, not run time" this repo's own
+			// runCTestTask() used to defer (see its history): a run-time
+			// oldroot->newroot rewrite bakes the *current* sandbox's path
+			// into a cached exec.action(), which is invisible to the
+			// action's cache key, so a cache hit silently replays a stale
+			// path from whatever sandbox first produced that exact cached
+			// result. A bare relative token has no sandbox path to go
+			// stale — CTest resolves it against its own --test-dir cwd (see
+			// ctest_testfile.js's own comment on this form). A project with
+			// nested add_subdirectory()s that each call
+			// enable_testing()/add_test() gets one CTestTestfile.cmake per
+			// subdirectory, not just the top-level one — every one needs
+			// the same rewrite for `ctest --test-dir` to recurse correctly.
+			const allPaths = pathsInDigest(digest);
+			const topCtestPath = `${spec.buildDirPath}/CTestTestfile.cmake`;
+			const ctestPaths = allPaths.filter(
+				(p) => p === topCtestPath || p.endsWith("/CTestTestfile.cmake"),
+			);
+			const workdir = topVars.cmake_ninja_workdir;
+
+			let directory = configured.outputs.directory;
+			if (ctestPaths.length > 0 && workdir) {
+				// Still via `sh`, unlike the configure action above: this
+				// repo's `sed` is an MSYS-linked build (imports
+				// msys-2.0.dll/msys-intl-8.dll — confirmed directly), so
+				// invoking it as a bare native child fails to launch at all
+				// (STATUS_DLL_NOT_FOUND) without sh's environment. That's
+				// fine here — unlike cmake's try_compile, this step never
+				// spawns a compiler toolchain that needs a real TMP/TEMP, so
+				// it was never exposed to the MSYS TMP-dropping bug in the
+				// first place. Pattern/paths are still fully precomputed in
+				// JS, so no `find`/shell expansion is needed beyond handing
+				// sed its args.
+				const patched = await exec.action({
+					argv: [
+						"sh",
+						"-c",
+						'pattern=$1; shift; sed -i "$pattern" "$@"',
+						"cmake-patch-ctest",
+						`s#${workdir}##g`,
+						...ctestPaths,
+					],
+					tools: [input.sed],
+					inputs: [configured.outputs.directory],
+					outputs: { directory: output.directory(spec.buildDirPath) },
+					display: `cmake patch ctest paths ${spec.path}`,
+				});
+				directory = patched.outputs.directory;
+			}
+
+			// Computed independently of the patch action above (which
+			// exists purely to fix the *physical* file runCTestTask() later
+			// runs ctest directly against) — an equivalent rewrite, done in
+			// JS against the raw digest content, so correlateCTestEntries()
+			// doesn't have to wait on/depend on that action at all.
+			const rawCtestText = ctestPaths.includes(topCtestPath)
+				? readFileInDigest(digest, topCtestPath)
+				: null;
+			const ctestText =
+				rawCtestText && workdir
+					? rawCtestText.split(workdir).join("")
+					: rawCtestText;
+
 			return {
-				directory: result.outputs.directory,
+				directory,
 				ninjaGraph: {
 					rules,
 					edges,

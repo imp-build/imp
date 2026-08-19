@@ -91,18 +91,19 @@ const CTEST_TESTFILE = `# CMake generated Testfile for
 add_test([=[hello_cmake_main_test]=] "${SANDBOX_ROOT}/build/hello_cmake_main")
 `;
 
-const FILE_START = "\x01";
-const FILE_MID = "\x02";
-const FILE_END = "\x03";
+// Matches cmakeProjectSpec()'s default buildDirPath (`build/<path>`) for
+// path: "rules/c/cmake/example" below — configureCmakeProject() reads
+// generated files via readFileInDigest() at this full, buildDirPath-prefixed
+// path (a directory-kind output nests under its own declared path, see
+// normalize_graph_artifact() in crates/imp-engine/src/spike.rs), not a bare
+// bdir-relative one.
+const CONFIGURE_BUILD_DIR = "build/rules/c/cmake/example";
 
-function dumpFile(path, content) {
-	return `${FILE_START}${path}${FILE_MID}${content}${FILE_END}`;
-}
-
-const CONFIGURE_STDOUT =
-	dumpFile("build.ninja", BUILD_NINJA) +
-	dumpFile("CMakeFiles/rules.ninja", RULES_NINJA) +
-	dumpFile("CTestTestfile.cmake", CTEST_TESTFILE);
+const CONFIGURE_FILES = {
+	[`${CONFIGURE_BUILD_DIR}/build.ninja`]: BUILD_NINJA,
+	[`${CONFIGURE_BUILD_DIR}/CMakeFiles/rules.ninja`]: RULES_NINJA,
+	[`${CONFIGURE_BUILD_DIR}/CTestTestfile.cmake`]: CTEST_TESTFILE,
+};
 
 // Fully fake gcc/cmake toolchains, sidestepping gccGraphToolchain()'s/
 // cmakeGraphToolchain()'s real download+install task chains — see
@@ -120,9 +121,10 @@ function fakeCmakeGraphToolchain(version = "3.31.0") {
 
 function withCmakeHost(fn) {
 	return withFakeToolchainHost(async (host) => {
-		host.setRunStdout(
+		host.setRunOutputFiles(
 			"cmake configure rules/c/cmake/example",
-			CONFIGURE_STDOUT,
+			"directory",
+			CONFIGURE_FILES,
 		);
 		const expansion = cmakeProjectExpansion({
 			path: "rules/c/cmake/example",
@@ -163,6 +165,11 @@ async function resolveIgnoringArtifactValidation(handles) {
 	}
 }
 
+// Filtered to the "cmake configure" display prefix specifically:
+// configureCmakeProject() also runs a second, separate exec.action() (
+// "cmake patch ctest paths ...") whenever the fixture's CTestTestfile.cmake
+// is present, to fix up that file's baked-in absolute paths — a distinct
+// display, so it doesn't inflate this count.
 function configureRunCount(host) {
 	return host.runs.filter((run) => run.display.startsWith("cmake configure"))
 		.length;

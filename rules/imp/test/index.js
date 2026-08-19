@@ -339,6 +339,8 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		workerStart: globalThis.__host_worker_start,
 		workerGet: globalThis.__host_worker_get,
 		readAddressedFile: globalThis.__host_read_addressed_file,
+		digestPaths: globalThis.__host_digest_paths,
+		digestReadFile: globalThis.__host_digest_read_file,
 	};
 
 	const workers = new Map();
@@ -347,6 +349,13 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 	const runStderr = new Map();
 	const runExitCode = new Map();
 	const namedCacheDetails = new Map();
+	// `${display} ${outputName}` -> Map<path, content>, opt-in via
+	// setRunOutputFiles(). digestFiles is the same maps keyed by the
+	// synthetic digest string a fake run() output gets assigned once it has
+	// registered files, so __host_digest_paths/__host_digest_read_file can
+	// serve them without touching real CAS.
+	const runOutputFiles = new Map();
+	const digestFiles = new Map();
 
 	const host = {
 		calls,
@@ -378,6 +387,20 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		// fail without throwing.
 		setRunExitCode(display, exitCode) {
 			runExitCode.set(display, exitCode);
+		},
+		// Opt-in fake content for a directory-kind exec.action() output,
+		// matched by the action's own display + declared output name — lets a
+		// test exercise pathsInDigest()/readFileInDigest() against a fake
+		// action's result without needing real CAS-backed content. Keys of
+		// `filesByPath` are full paths as they'd appear in the real digest
+		// (i.e. including the output's own declared directory prefix, since
+		// a directory-kind output nests under its own path — see
+		// normalize_graph_artifact() in crates/imp-engine/src/spike.rs).
+		setRunOutputFiles(display, outputName, filesByPath) {
+			runOutputFiles.set(
+				`${display} ${outputName}`,
+				new Map(Object.entries(filesByPath)),
+			);
 		},
 		clearCalls() {
 			calls.length = 0;
@@ -493,8 +516,11 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 			? JSON.parse(opts.__graphOutputNames)
 			: {};
 		for (const [name, path] of Object.entries(names)) {
-			const digest = `digest:${path}`;
 			const kind = kinds.get(path) || "file";
+			const filesKey = `${opts.display} ${name}`;
+			const fakeFiles = runOutputFiles.get(filesKey);
+			const digest = fakeFiles ? `fake-digest:${filesKey}` : `digest:${path}`;
+			if (fakeFiles) digestFiles.set(digest, fakeFiles);
 			graphOutputs[name] = {
 				__imp_graph_artifact: true,
 				__imp_graph_binding: true,
@@ -532,6 +558,25 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		calls.push(["readAddressedFile", address]);
 		return files.get(address) ?? null;
 	};
+	// Serve fake directory-output content registered via setRunOutputFiles();
+	// fall through to the real implementation for every other digest (e.g. a
+	// toolchain fixture's real, on-disk-derived digest), same fallback
+	// pattern as every other __host_* stub here.
+	globalThis.__host_digest_paths = (digest) => {
+		const fake = digestFiles.get(digest);
+		if (fake) return JSON.stringify(Array.from(fake.keys()));
+		return originals.digestPaths(digest);
+	};
+	globalThis.__host_digest_read_file = (digest, path) => {
+		const fake = digestFiles.get(digest);
+		if (fake) {
+			if (!fake.has(path)) {
+				throw new Error(`fake digest has no file at '${path}'`);
+			}
+			return fake.get(path);
+		}
+		return originals.digestReadFile(digest, path);
+	};
 
 	try {
 		return await fn(host);
@@ -553,6 +598,8 @@ export async function withFakeToolchainHost(platOrFn, maybeFn) {
 		globalThis.__host_worker_start = originals.workerStart;
 		globalThis.__host_worker_get = originals.workerGet;
 		globalThis.__host_read_addressed_file = originals.readAddressedFile;
+		globalThis.__host_digest_paths = originals.digestPaths;
+		globalThis.__host_digest_read_file = originals.digestReadFile;
 	}
 }
 
