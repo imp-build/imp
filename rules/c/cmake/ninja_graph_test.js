@@ -152,6 +152,63 @@ describe("ninja_graph parser", () => {
 		expect(appLink.inputs).toEqual(["CMakeFiles/app.dir/src/main.c.o"]);
 		expect(appLink.implicitInputs).toEqual(["libcore.a"]);
 	});
+
+	test("unescapes Ninja's $: syntax in values and path tokens", () => {
+		// CMake's own Ninja generator escapes a literal colon as `$:`
+		// wherever one appears in a value or path token — the drive-letter
+		// colon in a Windows absolute path is the case that matters here
+		// (colon otherwise means the `build out: rule in` separator), and it
+		// must round-trip back to a real ":" for the path to resolve.
+		// Build-line *outputs* are always build-dir-relative in CMake's own
+		// generated files (Ninja executes with cwd = build dir), so they
+		// never carry a drive letter/escaped colon in practice — only
+		// top-level values and absolute *inputs* (referencing the source
+		// tree) do, which is what's exercised below.
+		const text = [
+			"cmake_ninja_workdir = C$:/tmp/imp/sandbox-1/build/",
+			"",
+			"rule CUSTOM_COMMAND",
+			"  command = $COMMAND",
+			"",
+			"build out.txt: CUSTOM_COMMAND C$:/src/a.txt",
+			"  COMMAND = C$:/tools/echo.exe hi",
+		].join("\n");
+
+		const { edges, topVars } = parseNinja(text, readInclude);
+
+		expect(topVars.cmake_ninja_workdir).toBe("C:/tmp/imp/sandbox-1/build/");
+		const edge = edges[0];
+		expect(edge.inputs).toEqual(["C:/src/a.txt"]);
+		expect(edge.vars.COMMAND).toBe("C:/tools/echo.exe hi");
+	});
+
+	test("normalizes backslashes to forward slashes in rule/edge values", () => {
+		// CMake's Windows Ninja generator writes several of its own per-edge
+		// variable values (OBJECT_DIR, DEP_FILE, TARGET_FILE, the compiler's
+		// own absolute path baked into a rule's `command =`) with native
+		// backslash separators — unlike build-line path tokens and
+		// cmake_ninja_workdir, which always stay forward-slashed. A raw
+		// backslash surviving into a resolved edge command gets mangled once
+		// it reaches `sh -c` on Windows (see executeEdge() in
+		// graph_replay.js), so it must be normalized away here instead.
+		const text = [
+			"rule C_COMPILER__hello_unscanned_",
+			"  command = C:\\tools\\clang.exe -MF $DEP_FILE -o $out -c $in",
+			"",
+			"build hello.o: C_COMPILER__hello_unscanned_ hello.c",
+			"  DEP_FILE = CMakeFiles\\hello.dir\\hello.c.o.d",
+			"  OBJECT_DIR = CMakeFiles\\hello.dir",
+		].join("\n");
+
+		const { rules, edges } = parseNinja(text, readInclude);
+
+		expect(rules.C_COMPILER__hello_unscanned_.command).toBe(
+			"C:/tools/clang.exe -MF $DEP_FILE -o $out -c $in",
+		);
+		const edge = edges[0];
+		expect(edge.vars.DEP_FILE).toBe("CMakeFiles/hello.dir/hello.c.o.d");
+		expect(edge.vars.OBJECT_DIR).toBe("CMakeFiles/hello.dir");
+	});
 });
 
 describe("ninja_graph reachability", () => {
@@ -229,6 +286,37 @@ describe("ninja_graph bounded reachability", () => {
 		);
 		const { edges: bounded } = reachableEdgesBounded(edges, ["app"], new Set());
 		expect(bounded.filter((e) => e.rule !== "phony")).toEqual(plain);
+	});
+
+	test("reports both an implicit (|) and an order-only (||) reference to the same dependency", () => {
+		// A Windows SHARED_LIBRARY dependency can show up two ways in the same
+		// build line at once — confirmed against a real run: `| lib.dll.a ||
+		// lib.dll` — a real (`|`) reference to the import library a link edge
+		// needs to *link*, and a pure ordering (`||`) reference to the DLL
+		// itself: never read by the link command, but still a real runtime
+		// dependency of the resulting executable (confirmed the hard way: a
+		// replayed executable that only mounts the `|` reference fails to
+		// even launch, "DLL not found," since replay builds each target into
+		// its own isolated directory instead of one shared build tree where
+		// the DLL would just already be sitting right there). Both belong in
+		// `boundaries` uniformly — a caller (crossTargetDependencies() in
+		// expansion.js) that wants a dependency's artifact physically present
+		// needs every path referenced either way, not just the linker's own.
+		const text = [
+			"rule LINK",
+			"  command = cc $in -o $out -limpl",
+			"",
+			"build exe: LINK main.o | lib.dll.a || lib.dll",
+		].join("\n");
+		const { edges } = parseNinja(text, readInclude);
+
+		const { boundaries } = reachableEdgesBounded(
+			edges,
+			["exe"],
+			new Set(["lib.dll.a", "lib.dll"]),
+		);
+
+		expect(boundaries.sort()).toEqual(["lib.dll", "lib.dll.a"]);
 	});
 });
 
@@ -388,6 +476,127 @@ describe("ninja_graph command resolution", () => {
 			": && cmake -E rm -f libcore.a && ar qc libcore.a  CMakeFiles/core.dir/src/core.c.o && ranlib libcore.a && :",
 		);
 		expect(toolNames.sort()).toEqual(["ar", "cmake", "ranlib"]);
+	});
+
+	test("resolveEdgeCommand strips CMake's Windows cmd.exe /C wrapper", () => {
+		// CMake's Windows Ninja generator wraps any multi-statement rule
+		// command in its own `cmd.exe /C "..."` shell wrapper (ninja itself
+		// doesn't invoke a shell for a rule's command on Windows the way it
+		// effectively does via sh -c on Unix) — confirmed against a real
+		// Windows run, "cmd.exe" always a bare name, never an absolute path,
+		// so it's stripped explicitly rather than relying on
+		// rewriteToolInvocations() to catch it. The tools *inside* the
+		// wrapper are still real absolute (here, Windows drive-letter) paths
+		// exactly like the Unix rule above, and must still be discovered and
+		// rewritten once unwrapped.
+		const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
+		const libEdge = edges.find((e) => e.outputs.includes("libcore.a"));
+		const windowsRule = {
+			...rules[libEdge.rule],
+			command:
+				'cmd.exe /C "cd . && C:/tools/cmake.exe -E rm -f $TARGET_FILE && ' +
+				"C:/tools/ar.exe qc $TARGET_FILE $LINK_FLAGS $in && " +
+				'C:/tools/ranlib.exe $TARGET_FILE && cd ."',
+		};
+		const rulesWithCmd = { ...rules, [libEdge.rule]: windowsRule };
+		const root = sandboxRootFromWorkdir(topVars.cmake_ninja_workdir, "build");
+
+		const { command, toolNames } = resolveEdgeCommand(
+			libEdge,
+			rulesWithCmd,
+			topVars,
+			root,
+			"build",
+		);
+
+		expect(command).not.toContain("cmd.exe");
+		expect(command).not.toContain("C:/tools");
+		expect(command).toBe(
+			"cd . && cmake.exe -E rm -f libcore.a && ar.exe qc libcore.a  CMakeFiles/core.dir/src/core.c.o && ranlib.exe libcore.a && cd .",
+		);
+		expect(toolNames.sort()).toEqual(["ar.exe", "cmake.exe", "ranlib.exe"]);
+	});
+
+	test("resolveEdgeCommand strips a mid-chain cmd.exe /C wrapper and its cd /D flag", () => {
+		// A SHARED_LIBRARY link rule's own POST_BUILD copy-to-source-tree step
+		// (CMake's own equivalent of a PRE_LINK/POST_BUILD custom command) gets
+		// its own `cmd.exe /C "..."` segment appended after the link command
+		// itself, not wrapping the whole rule — confirmed against a real
+		// Windows run. CMake also pairs it with `cd /D <dir>`, not a plain
+		// `cd <dir>`: `/D` is meaningless (and unsupported) for bash's own
+		// `cd` builtin, so it must be dropped too, not just the wrapper.
+		const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
+		const libEdge = edges.find((e) => e.outputs.includes("libcore.a"));
+		const windowsRule = {
+			...rules[libEdge.rule],
+			command:
+				"C:/tools/ar.exe qc $TARGET_FILE $LINK_FLAGS $in && " +
+				'cmd.exe /C "cd /D ../out && C:/tools/cmake.exe -E copy a.dll b.dll"',
+		};
+		const rulesWithCmd = { ...rules, [libEdge.rule]: windowsRule };
+		const root = sandboxRootFromWorkdir(topVars.cmake_ninja_workdir, "build");
+
+		const { command, toolNames } = resolveEdgeCommand(
+			libEdge,
+			rulesWithCmd,
+			topVars,
+			root,
+			"build",
+		);
+
+		expect(command).not.toContain("cmd.exe");
+		expect(command).not.toContain("/D");
+		expect(command).toBe(
+			"ar.exe qc libcore.a  CMakeFiles/core.dir/src/core.c.o && cd ../out && cmake.exe -E copy a.dll b.dll",
+		);
+		expect(toolNames.sort()).toEqual(["ar.exe", "cmake.exe"]);
+	});
+
+	test("resolveEdgeCommand unwraps a cmd.exe /C wrapper nested inside another via $POST_BUILD", () => {
+		// The real shape confirmed against a Windows run: a link rule's own
+		// template is itself `cmd.exe /C "$PRE_LINK && <linker> ... &&
+		// $POST_BUILD"`, and $POST_BUILD (an edge-scoped var, substituted by
+		// expandVar() *inside* that already-quoted template) can be its own
+		// separate `cmd.exe /C "..."`-wrapped copy step — nesting one
+		// wrapper's quotes inside another's. A regex that tries to match
+		// balanced quotes sees the inner wrapper's own opening quote as if
+		// it closed the outer one, truncating the command; stripping every
+		// "cmd.exe /C" prefix and every stray quote outright (regardless of
+		// nesting) avoids that entirely.
+		const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
+		const libEdge = edges.find((e) => e.outputs.includes("libcore.a"));
+		const windowsRule = {
+			...rules[libEdge.rule],
+			command:
+				'cmd.exe /C "$PRE_LINK && C:/tools/ar.exe qc $TARGET_FILE $LINK_FLAGS $in && $POST_BUILD"',
+		};
+		const nestedEdge = {
+			...libEdge,
+			vars: {
+				...libEdge.vars,
+				PRE_LINK: ":",
+				POST_BUILD:
+					'cmd.exe /C "cd /D ../out && C:/tools/cmake.exe -E copy a.dll b.dll"',
+			},
+		};
+		const rulesWithCmd = { ...rules, [libEdge.rule]: windowsRule };
+		const root = sandboxRootFromWorkdir(topVars.cmake_ninja_workdir, "build");
+
+		const { command, toolNames } = resolveEdgeCommand(
+			nestedEdge,
+			rulesWithCmd,
+			topVars,
+			root,
+			"build",
+		);
+
+		expect(command).not.toContain("cmd.exe");
+		expect(command).not.toContain('"');
+		expect(command).not.toContain("/D");
+		expect(command).toBe(
+			": && ar.exe qc libcore.a  CMakeFiles/core.dir/src/core.c.o && cd ../out && cmake.exe -E copy a.dll b.dll",
+		);
+		expect(toolNames.sort()).toEqual(["ar.exe", "cmake.exe"]);
 	});
 });
 

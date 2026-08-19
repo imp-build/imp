@@ -40,18 +40,15 @@ export const testNinja = nativeTool("ninja");
 export const testDirname = nativeTool("dirname");
 export const testCp = nativeTool("cp");
 export const testCtest = nativeTool("ctest");
-export const testFind = nativeTool("find");
 export const testSed = nativeTool("sed");
 export const testSha256sum = nativeTool("sha256sum");
 export const testCurl = nativeTool("curl");
 export const testWc = nativeTool("wc");
 export const testXz = nativeTool("xz");
 export const testChmod = nativeTool("chmod");
-// rules/c/cmake/graph_replay.js's configureCmakeProject() dumps every
-// generated *.ninja/CTestTestfile.cmake file via a `cat`-based multi-file
-// stdout dump (see its own FILE_START/FILE_MID/FILE_END docstring) — a real,
-// new dependency versus the legacy cmakeLib()'s readFileInDigest()-based
-// path this crate's own tests exercised before #31/#63's cutover.
+// rules/oci/index.js's composeImage() declares `cat` as one of its script's
+// tools — a real dependency this crate's own end-to-end "every ruleset
+// loads" test exercises (see spike.rs's own coverage of //rules/oci).
 export const testCat = nativeTool("cat");
 // gccGraphTool()/zigGraphTool()/cmakeGraphTool() (//rules/c/gcc, //rules/c/zig,
 // //rules/c/cmake) each declare `nativeTool("sh")` explicitly for their own

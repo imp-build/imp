@@ -37,6 +37,7 @@ tree-sitter-language = "0.1"
 libloading   = "0.9"
 opendal      = { version = "0.57", default-features = false }
 dunce        = "1"
+app_dirs2    = "2.5"
 windows-sys  = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects"] }
 
 [profile.dev]

@@ -8,9 +8,46 @@
 // vars, |/|| dependency syntax, a single level of `include`) — not a
 // general-purpose Ninja parser.
 
+// Ninja escapes a literal `$`, `:`, or ` ` as `$$`, `$:`, `$ ` wherever one
+// of those characters must appear in a value or path token instead of
+// taking on its usual syntactic meaning. CMake's Ninja generator relies on
+// `$:` specifically to emit Windows drive-letter paths (e.g.
+// `cmake_ninja_workdir = C$:/tmp/imp/sandbox-.../`) — colon is otherwise the
+// `build out: rule in` separator, so an unescaped one there would corrupt
+// parsing. `$identifier`/`${identifier}` variable references (`$in`, `$out`,
+// `$DEP_FILE`, ...) are untouched here: `\w` never matches `$`, `:`, or a
+// space, so this always runs safely before expandVar() resolves those
+// references later.
+//
+// Also normalizes any raw backslash to a forward slash. CMake's Windows
+// Ninja generator writes several of its own per-edge variable values (not
+// just OBJECT_DIR — DEP_FILE, TARGET_FILE, and the compiler's own absolute
+// path all do it too) with native backslash separators, unlike build-line
+// path tokens and cmake_ninja_workdir itself, which always stay
+// forward-slashed. Left un-normalized, a resolved edge command carrying one
+// of these reaches executeEdge()'s `argv: ["sh", "-c", ...]` with a raw
+// backslash in it — confirmed (via a real Windows run, then a controlled
+// repro isolating each layer) to come out mangled on the other side: Rust's
+// `Command::args()` escapes for a standard C-runtime argv parser, which
+// MSYS bash's own argv reparsing doesn't match, so the backslash sequences
+// get corrupted in transit and the command silently fails ("command not
+// found") long before anything CMake- or Ninja-specific is at fault. Since
+// this codebase already treats forward slashes as the one true separator
+// everywhere else (sandboxRoot, path tokens, ...), and both separators
+// resolve identically on Windows' own filesystem APIs, normalizing here
+// removes the raw backslash before it can ever reach that boundary. Safe
+// for this file's own deliberately-narrow scope (see its own docstring):
+// every backslash CMake's generator emits into a value here is a path
+// separator, never a literal character with some other meaning.
+function unescapeNinjaValue(s) {
+	return s.replace(/\$([$: ])/g, "$1").replace(/\\/g, "/");
+}
+
 function tokenizePaths(s) {
 	const trimmed = (s || "").trim();
-	return trimmed.length === 0 ? [] : trimmed.split(/\s+/);
+	return trimmed.length === 0
+		? []
+		: trimmed.split(/\s+/).map(unescapeNinjaValue);
 }
 
 function splitOnce(s, sep) {
@@ -80,7 +117,7 @@ function parseInto(text, rules, edges, topVars, targetTypes, readInclude) {
 			const body = {};
 			while (i < lines.length && lines[i].startsWith("  ")) {
 				const [k, v] = splitOnce(lines[i].trim(), "=");
-				body[k.trim()] = v.trim();
+				body[k.trim()] = unescapeNinjaValue(v.trim());
 				i += 1;
 			}
 			rules[name] = body;
@@ -102,7 +139,7 @@ function parseInto(text, rules, edges, topVars, targetTypes, readInclude) {
 			const vars = {};
 			while (i < lines.length && lines[i].startsWith("  ")) {
 				const [k, v] = splitOnce(lines[i].trim(), "=");
-				vars[k.trim()] = v.trim();
+				vars[k.trim()] = unescapeNinjaValue(v.trim());
 				i += 1;
 			}
 
@@ -121,7 +158,7 @@ function parseInto(text, rules, edges, topVars, targetTypes, readInclude) {
 		// Top-level "name = value" variable assignment.
 		if (stripped.includes("=")) {
 			const [k, v] = splitOnce(stripped, "=");
-			topVars[k.trim()] = v.trim();
+			topVars[k.trim()] = unescapeNinjaValue(v.trim());
 		}
 		i += 1;
 	}
@@ -239,7 +276,20 @@ export function reachableEdgesBounded(edges, targetNames, boundaryOutputs) {
 // Only rewrite paths in *command position* (start of string, or right after
 // a shell control operator) — argument paths like "-I/abs/inc" or a source
 // file path must be left alone.
-const HOST_ABSOLUTE_TOOL_RE = /(^|&&|\|\||;|\()\s*(\/[^\s&|;()'"]+)/g;
+//
+// Matches a Windows drive-absolute path (`C:/...`, forward-slashed by the
+// time this runs — see unescapeNinjaValue()) as well as a Unix one:
+// confirmed against a real Windows `cmake -G Ninja` run that the compiler
+// path gccCMakeCompilerArgs() bakes in (`-DCMAKE_C_COMPILER=C:/Users/.../
+// clang.exe`) reaches this function unrewritten to a bare tool name when
+// only the leading-`/` Unix form was matched — the drive letter isn't a
+// leading `/`, so a forward-slashed Windows path slipped straight past the
+// old pattern. Left unrewritten, that literal absolute host path (a
+// "named" cache path, not the ephemeral sandbox root — never valid inside
+// the replay sandbox) reached executeEdge()'s `sh -c` as a raw command
+// name, which just doesn't exist there ("command not found").
+const HOST_ABSOLUTE_TOOL_RE =
+	/(^|&&|\|\||;|\()\s*(\/[^\s&|;()'"]+|[A-Za-z]:[\\/][^\s&|;()'"]+)/g;
 
 // A compiler path CMake resolved *through* imp's own tool-mount
 // convention at configure time (e.g. a Zig toolchain's CMAKE_C_COMPILER
@@ -317,6 +367,49 @@ export function rebaseAbsolutePaths(text, sandboxRoot, replacement = "") {
 	return text.split(sandboxRoot + "/").join(replacement);
 }
 
+// CMake's Windows Ninja generator wraps a link rule's whole command in its
+// own `cmd.exe /C "$PRE_LINK && <linker> ... && $POST_BUILD"` shell wrapper
+// — confirmed against a real Windows `cmake -G Ninja` run: ninja doesn't
+// invoke a shell for a rule's command the way it effectively does via
+// `sh -c` on Unix, so CMake bakes cmd.exe's own equivalent in directly
+// wherever a rule needs more than one statement. `$PRE_LINK`/`$POST_BUILD`
+// are themselves edge-scoped variables — when a target needs a POST_BUILD
+// custom command run from a different directory (e.g. a SHARED_LIBRARY's
+// own build-then-copy-to-source-tree step), CMake gives POST_BUILD *its
+// own* nested `cmd.exe /C "..."` wrapper, so expandVar() substituting it
+// into the outer template produces a command with one `cmd.exe /C "` +
+// `"` pair nested inside another — not something a single balanced-quote
+// regex can unwrap correctly (matching only the first inner `"` as if it
+// closed the outer wrapper truncates the command). resolveEdgeCommand()'s
+// result already gets run through executeEdge()'s `sh -c` (see
+// graph_replay.js), so every layer of this wrapper is both redundant and
+// unusable there: CMake emits "cmd.exe" as a bare name, never an absolute
+// path, so rewriteToolInvocations() never recognizes it as a tool needing
+// a mount, and the sandbox's minimal, declared-tools-only PATH has nothing
+// by that name — it just fails outright ("command not found"). Handled
+// instead by stripping every "cmd.exe /C" prefix (regardless of nesting
+// depth) and every stray double-quote outright, rather than trying to
+// parse balanced quoting: nothing in a CMake-generated command legitimately
+// needs a literal quote preserved (matching this file's own deliberately
+// narrow scope — see its docstring), so this always leaves a clean, plain
+// `&&`-joined shell command behind, at any nesting depth.
+const CMD_EXE_PREFIX_RE = /cmd(?:\.exe)?\s+\/[Cc]\s+/g;
+
+// The one piece of cmd.exe-specific syntax that survives the above
+// otherwise: CMake pairs a `cmd.exe /C` wrapper that changes directory with
+// `cd /D <dir>`, not a plain `cd <dir>` — `/D` is needed there because
+// plain `cd` on cmd.exe can't switch drives. bash's own `cd` builtin has no
+// such flag (and no need for one: a replay sandbox is always one drive), so
+// left as-is it would try to `cd` into a literal directory named `/D`.
+const CMD_CD_SLASH_D_RE = /\bcd\s+\/[Dd]\s+/g;
+
+function stripCmdExeWrapper(command) {
+	return command
+		.replace(CMD_EXE_PREFIX_RE, "")
+		.replace(CMD_CD_SLASH_D_RE, "cd ")
+		.replace(/"/g, "");
+}
+
 // Rebases a single path token the same way, for use on edge input/output
 // path lists (which are workspace/sandbox-root-relative, independent of
 // whatever cwd a replayed command executes from) rather than command text.
@@ -349,7 +442,8 @@ export function resolveEdgeCommand(
 		sandboxRoot,
 		upPrefixForBuildDir(buildDirPath),
 	);
-	const { command, toolNames } = rewriteToolInvocations(rebased);
+	const unwrapped = stripCmdExeWrapper(rebased);
+	const { command, toolNames } = rewriteToolInvocations(unwrapped);
 	return { command, toolNames };
 }
 
@@ -397,6 +491,13 @@ const CMAKE_COPY_RE = /\bcmake\s+-E\s+copy(?:_if_different)?\s+(\S+)\s+(\S+)/g;
 //
 // Filtered to just the names that reach at least one real (non-phony,
 // has-a-command) edge, so bookkeeping-only markers never surface here.
+//
+// OBJECT_DIR (unlike path tokens elsewhere in this file) comes out of a real
+// Windows `cmake -G Ninja` run backslashed (`OBJECT_DIR = CMakeFiles\hello.dir`)
+// rather than forward-slashed — a forward-slash-only pattern silently
+// matched zero targets on Windows. unescapeNinjaValue() normalizes that away
+// at parse time (see its own docstring), so this only ever sees forward
+// slashes by the time it runs.
 const TARGET_DIR_RE = /CMakeFiles\/([^/]+)\.dir\//;
 
 // Only these CMake target types have a single well-defined build artifact

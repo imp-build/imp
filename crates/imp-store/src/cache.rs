@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use anyhow::{bail, Context, Result};
+use app_dirs2::{AppDataType, AppInfo};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
@@ -11,6 +12,11 @@ use std::os::unix::fs::PermissionsExt;
 use walkdir::WalkDir;
 
 pub const TASK_CACHE_VERSION: u32 = 7;
+
+const APP_INFO: AppInfo = AppInfo {
+    name: "imp",
+    author: "imp",
+};
 
 // ---------------------------------------------------------------------------
 // Cache types
@@ -114,13 +120,26 @@ pub fn named_cache_key_path_by_id(workspace_id: &str, name: &str, key: &str) -> 
 // CAS and task cache functions
 // ---------------------------------------------------------------------------
 
-/// Base directory under which per-run sandbox roots are created. Defaults to
-/// `/tmp/imp`; `IMP_SANDBOX_DIR` overrides it (mirroring `IMP_CACHE_DIR`)
-/// so tests can point sandboxes at an isolated, inspectable location.
+/// Base directory under which per-run sandbox roots are created.
+/// `IMP_SANDBOX_DIR` overrides it (mirroring `IMP_CACHE_DIR`) so tests can
+/// point sandboxes at an isolated, inspectable location.
+///
+/// Deliberately `std::env::temp_dir()`, not `cache_root()`/app_dirs2's
+/// (longer, `$HOME`-rooted) `UserCache` directory: `worker_dirs_by_id()` in
+/// imp-execution's worker.rs builds sccache's control socket path from this
+/// same base and needs it short (a Unix-domain socket path is capped at
+/// ~108 bytes, `SUN_LEN`) — `std::env::temp_dir()` gives exactly that
+/// (`/tmp` on Linux, matching the old hardcoded default) while still
+/// resolving correctly on Windows (`GetTempPath`, always drive-lettered,
+/// unlike a bare hardcoded `/tmp/imp` string — confirmed to break any
+/// `sh -c`-invoked command relying on a sandbox-rooted PATH entry: MSYS
+/// bash only recognizes a drive-lettered absolute path as one needing
+/// Win32-to-POSIX translation, so a bare leading `/` was silently resolved
+/// inside Git's own install root instead of the real sandbox).
 pub fn sandbox_base_dir() -> PathBuf {
     std::env::var_os("IMP_SANDBOX_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp/imp"))
+        .unwrap_or_else(|| std::env::temp_dir().join("imp"))
 }
 
 pub fn create_sandbox_root() -> Result<PathBuf> {
@@ -173,19 +192,28 @@ pub fn cache_root() -> Result<PathBuf> {
         .map_err(|msg| anyhow::anyhow!(msg))
 }
 
+// app_dirs2's UserCache resolves the real, OS-conventional cache directory
+// on every platform this runs on — XDG_CACHE_HOME/$HOME/.cache on Linux
+// (it honors that env var itself), ~/Library/Caches on macOS, and
+// %LOCALAPPDATA%\imp\cache on Windows. That last one is the one a
+// hand-rolled Unix-only fallback (the previous `/tmp/imp/cache`) could
+// never get right: it has no drive letter, and Git-for-Windows' MSYS bash
+// only recognizes a drive-lettered absolute path as one needing
+// Win32-to-POSIX translation — a bare leading `/` silently resolves inside
+// Git's own install root instead of the real directory for any `sh
+// -c`-invoked command that looks it up (confirmed against a real failure:
+// a sandboxed compile's PATH entry, built the same way, sent MSYS bash
+// looking in the wrong place entirely).
 fn resolve_cache_root() -> Result<PathBuf, String> {
     (|| -> Result<PathBuf> {
         let mut candidates = Vec::new();
         if let Some(dir) = std::env::var_os("IMP_CACHE_DIR") {
             candidates.push(PathBuf::from(dir));
         }
-        if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
-            candidates.push(PathBuf::from(cache).join("imp"));
-        }
-        if let Some(home) = std::env::var_os("HOME") {
-            candidates.push(PathBuf::from(home).join(".cache").join("imp"));
-        }
-        candidates.push(PathBuf::from("/tmp/imp/cache"));
+        candidates.push(
+            app_dirs2::get_app_root(AppDataType::UserCache, &APP_INFO)
+                .map_err(|error| anyhow::anyhow!("resolve platform cache dir: {error}"))?,
+        );
 
         let mut last_error = None;
         let mut root = None;

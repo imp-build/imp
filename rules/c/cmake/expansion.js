@@ -58,8 +58,15 @@ export function cmakeProjectSpecs() {
 // targets it actually references — CMake's own inter-library dependency
 // shape, confirmed against a real `build.ninja` (an order-only `||
 // libcrypto.a` on a static library's link edge, an implicit `| libssl.a
-// libcrypto.a` on an executable's). Returns `Map<targetName, string[]>` of
-// each target's real cross-target dependency names. Exported for direct
+// libcrypto.a` on an executable's). Returns `Map<targetName, {name,
+// outputPaths}[]>` of each target's real cross-target dependencies —
+// `outputPaths` is *every* one of the dependency's own (possibly multiple)
+// declared outputs this target's edges reference, via `|` or `||` alike (see
+// buildTargetDeps()'s own docstring for why both matter: a Windows
+// SHARED_LIBRARY dependency's `.dll.a` import library is a real, `|`-only
+// link-time need, but its `.dll` — referenced only order-only, `||` — is
+// still a real runtime need of the built executable, just one CMake's own
+// ninja graph doesn't model as a command-text argument). Exported for direct
 // testing — the fake test host can't drive create() itself end-to-end (see
 // expansion_test.js's own comment on this).
 export function crossTargetDependencies(named, ninjaGraph) {
@@ -83,7 +90,10 @@ export function crossTargetDependencies(named, ninjaGraph) {
 		const deps = named
 			.filter((other) => other.name !== t.name)
 			.filter((other) => other.outputs.some((o) => boundarySet.has(o)))
-			.map((other) => other.name);
+			.map((other) => ({
+				name: other.name,
+				outputPaths: other.outputs.filter((o) => boundarySet.has(o)),
+			}));
 		crossDeps.set(t.name, deps);
 	}
 	return crossDeps;
@@ -102,7 +112,10 @@ export function crossTargetDependencies(named, ninjaGraph) {
 export function topoSortTargets(named, crossDeps) {
 	const byName = new Map(named.map((t) => [t.name, t]));
 	const remainingDeps = new Map(
-		named.map((t) => [t.name, new Set(crossDeps.get(t.name))]),
+		named.map((t) => [
+			t.name,
+			new Set(crossDeps.get(t.name).map((dep) => dep.name)),
+		]),
 	);
 	const ordered = [];
 	let progressed = true;
@@ -128,13 +141,46 @@ export function topoSortTargets(named, crossDeps) {
 // from already-minted handles — shared by both the task-minting pass and
 // the runCTestTask() call in the children-building pass below, which needs
 // the same shape for the same target.
-function buildTargetDeps(targetName, named, crossDeps, builtByName) {
+//
+// fileIndices picks out *every* output crossTargetDependencies() found this
+// target's own edges referencing — not just the dependency's first declared
+// output, and not just one. A CMake SHARED_LIBRARY target on Windows has
+// two: the `.dll` itself and a `.dll.a` import library. The import library
+// is needed to *link* (confirmed against a real Windows run: an executable
+// linking such a library fails with "cannot find ...dll.a" if handed only
+// the dependency's file0, which happened to be the `.dll`, not the import
+// library the link edge actually references) — but the DLL is *also* needed,
+// separately, for the built executable to even launch (confirmed the same
+// way: mounting only the import library produces a binary that fails at
+// runtime with STATUS_DLL_NOT_FOUND, since replay builds each target into
+// its own isolated directory rather than one shared build tree where the
+// DLL would already be sitting right there). So every referenced output
+// gets mounted, not just whichever one resolves the link command — on a
+// single-output dependency (the common case, e.g. any Unix
+// STATIC_LIBRARY/SHARED_LIBRARY) that's still just the one index, same as
+// before. Exported for direct testing — see crossTargetDependencies()'s own
+// docstring on why the fake test host can't drive create() itself
+// end-to-end.
+export function buildTargetDeps(targetName, named, crossDeps, builtByName) {
 	return Object.fromEntries(
-		crossDeps.get(targetName).map((depName) => {
+		crossDeps.get(targetName).map(({ name: depName, outputPaths }) => {
 			const depTarget = named.find((n) => n.name === depName);
+			const fileIndices = outputPaths.map((outputPath) => {
+				const fileIndex = depTarget.outputs.indexOf(outputPath);
+				if (fileIndex === -1) {
+					throw new Error(
+						`cmake project: '${targetName}' depends on '${depName}' via output '${outputPath}', but that output isn't among '${depName}'s own declared outputs (${depTarget.outputs.join(", ")}) — crossTargetDependencies() and this function have gone out of sync`,
+					);
+				}
+				return fileIndex;
+			});
 			return [
 				depName,
-				{ outputs: depTarget.outputs, task: builtByName[depName] },
+				{
+					outputs: depTarget.outputs,
+					task: builtByName[depName],
+					fileIndices,
+				},
 			];
 		}),
 	);
