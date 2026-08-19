@@ -217,22 +217,19 @@ describe("rust toolchain", () => {
 		});
 	});
 
-	test("rustGraphToolEnv resolves RUSTUP_HOME/CARGO_HOME via exec.path() in non-kache mode", () => {
+	test("rustGraphToolEnv resolves RUSTUP_HOME/CARGO_HOME through atomic tool mounts in non-kache mode", () => {
 		return withRustHost(() => {
-			const exec = { path: (binding) => binding.__fakePath };
-			const rustupHomeTool = { __fakePath: "/sandbox/rustup-home" };
-			const cargoHomeTool = { __fakePath: "/sandbox/cargo-home" };
 			const { env } = rustGraphToolEnv(
-				exec,
-				rustupHomeTool,
-				cargoHomeTool,
+				{},
+				{},
+				{},
 				"1.79.0-x86_64-unknown-linux-gnu",
 				"1.79.0",
 				false,
 			);
 			expect(env).toEqual([
-				"RUSTUP_HOME=/sandbox/rustup-home",
-				"CARGO_HOME=/sandbox/cargo-home",
+				"RUSTUP_HOME=.imp/tools/rustup-home",
+				"CARGO_HOME=.imp/tools/cargo-home",
 			]);
 		});
 	});

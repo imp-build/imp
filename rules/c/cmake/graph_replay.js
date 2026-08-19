@@ -240,8 +240,6 @@ export function configureCmakeProject(spec) {
 		outputs: { directory: output.artifact(), ninjaGraph: output.value() },
 		async run(exec, input) {
 			const compilerArgs = gccCMakeCompilerArgs(
-				exec,
-				input.ccTool,
 				spec.toolchain.version,
 				spec.unsafeSystemPaths,
 			);

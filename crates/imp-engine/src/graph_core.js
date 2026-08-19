@@ -264,6 +264,11 @@ export function files(opts = {}) {
 
 /**
  * Interpret an artifact handle as an executable tool.
+ *
+ * `mount: { name, cache, key }` makes a named-cache-backed directory artifact
+ * available as one atomic sandbox tool mount. `exec.tool()` mounts it for
+ * the action automatically; it can also be listed in `exec.action({ tools })`.
+ * tools without it retain the historical artifact-input behavior.
  * @category graph
  * @param {object} artifactHandle
  * @param {object} [opts]
@@ -503,12 +508,49 @@ async function _graphResolveHandle(id, stack = []) {
 		}
 		case "tool": {
 			const artifact = await _graphResolveHandle(record.data.artifact.__graph_id, nextStack);
+			const mount = record.data.options.mount;
+			if (mount !== undefined) {
+				if (
+					!mount ||
+					typeof mount !== "object" ||
+					typeof mount.name !== "string" ||
+					!/^[A-Za-z0-9_.+-]+$/.test(mount.name) ||
+					typeof mount.cache !== "string" ||
+					mount.cache.length === 0 ||
+					typeof mount.key !== "string" ||
+					mount.key.length === 0
+				)
+					throw _graphError(
+						"tool(..., { mount }) requires non-empty name, cache, and key strings",
+					);
+				if (artifact.kind !== "directory")
+					throw _graphError(
+						"tool(..., { mount }) requires a directory artifact",
+					);
+				if (
+					artifact.namedCache &&
+					(artifact.namedCache.name !== mount.cache ||
+						artifact.namedCache.key !== mount.key)
+				)
+					throw _graphError(
+						"tool(..., { mount }) does not match the artifact's named-cache binding",
+					);
+			}
 			return _graphBinding("tool", {
 				fingerprint: record.fingerprint,
 				artifact,
 				options: record.data.options,
 				path: artifact.path,
 				inputs: artifact.inputs,
+				...(mount === undefined
+					? {}
+					: {
+							mountName: mount.name,
+							name: mount.name,
+							cache: mount.cache,
+							key: mount.key,
+							binDirs: record.data.options.binDirs || ["bin"],
+						}),
 			});
 		}
 		case "task":
@@ -576,6 +618,13 @@ function _graphExec(record) {
 			if (binding.type !== "tool") throw _graphError("exec.tool() expects a tool input");
 			if (binding.native) return executable;
 			const binDirs = binding.options.binDirs || ["bin"];
+			if (binding.mountName !== undefined) {
+				const exe = _graphIsWindows() ? `${executable}.exe` : executable;
+				const prefix = binDirs.length === 0
+					? `.imp/tools/${binding.mountName}`
+					: `.imp/tools/${binding.mountName}/${binDirs[0]}`;
+				return `${prefix}/${exe}`;
+			}
 			const prefix = binDirs.length === 0 ? binding.path : `${binding.path}/${binDirs[0]}`;
 			// Produced/toolchain binaries are referenced by bare name (e.g.
 			// "cargo"); native tools (the `binding.native` branch above) don't
@@ -591,6 +640,7 @@ function _graphExec(record) {
 				throw _graphError("exec.action({ argv, ... }) requires an argv array");
 			const actionInputs = [];
 			const actionTools = [];
+			const mountedTools = new Set();
 			const isLegacyToolSpec = (value) =>
 				value !== null &&
 				typeof value === "object" &&
@@ -615,26 +665,43 @@ function _graphExec(record) {
 				}
 				if (!binding || binding.__imp_graph_binding !== true || binding.type !== "tool")
 					throw _graphError("exec.action().tools expects resolved graph tool inputs");
-				if (!binding.native)
+				if (!binding.native && binding.mountName === undefined)
 					throw _graphError(
-						"exec.action().tools currently accepts native tool inputs; use exec.tool() for produced tools",
+						"exec.action().tools accepts native tools or graph tools declared with tool(..., { mount })",
 					);
-				consume(binding);
+				if (!binding.native) mountedTools.add(binding);
+				else consume(binding);
 				actionTools.push({
 					name: binding.name,
 					cache: binding.cache,
 					key: binding.key,
-					path: binding.path,
+					...(binding.native ? { path: binding.path } : {}),
 					binDirs: binding.binDirs,
 				});
 			};
 			for (const binding of opts.tools || []) addTool(binding);
-			for (const binding of consumed) _graphCollectActionInput(binding, actionInputs);
+			for (const binding of consumed) {
+				if (binding.mountName !== undefined) {
+					if (!mountedTools.has(binding)) addTool(binding);
+					continue;
+				}
+				_graphCollectActionInput(binding, actionInputs);
+			}
 			for (const binding of consumed) {
 				if (binding.native) addTool(binding);
 			}
 			consumed = new Set();
 			_graphCollectActionInput(opts.inputs, actionInputs);
+			const mountSources = new Map();
+			for (const tool of actionTools) {
+				const source = `${tool.cache}:${tool.key}`;
+				const existing = mountSources.get(tool.name);
+				if (existing !== undefined && existing !== source)
+					throw _graphError(
+						`exec.action() mounts '${tool.name}' from more than one cache entry`,
+					);
+				mountSources.set(tool.name, source);
+			}
 			const uniqueTools = Array.from(
 				new Map(actionTools.map((entry) => [`${entry.name}:${entry.key}`, entry])).values(),
 			);
