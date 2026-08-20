@@ -301,13 +301,33 @@ pub fn ensure_native_tool_artifact(name: &str, resolved: &Path) -> Result<PathBu
     std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
     let link = root.join(native_tool_artifact_filename(name, &resolved));
     if std::fs::read_link(&link).ok().as_deref() != Some(resolved.as_path()) {
+        #[cfg(not(unix))]
+        {
+            // The artifact is a hard link (or copy) on Windows, never a real
+            // symlink, so read_link above never matches and this branch
+            // always runs. If the host's PATH lookup for `name` resolved to
+            // this exact cached artifact (e.g. a prior registration already
+            // put this tool's own cache dir on PATH — confirmed happening in
+            // practice), removing it first would delete the only copy of the
+            // file, then fail to link/copy from a path that no longer
+            // exists. Comparing canonical paths catches that before doing
+            // anything destructive.
+            let already_current = std::fs::canonicalize(&link)
+                .map(|existing| existing == resolved)
+                .unwrap_or(false);
+            if already_current {
+                return Ok(root);
+            }
+        }
         let _ = std::fs::remove_file(&link);
         #[cfg(unix)]
         std::os::unix::fs::symlink(&resolved, &link)
             .with_context(|| format!("symlink {} -> {}", link.display(), resolved.display()))?;
         #[cfg(not(unix))]
-        std::fs::copy(&resolved, &link)
-            .with_context(|| format!("copy {} -> {}", resolved.display(), link.display()))?;
+        if std::fs::hard_link(&resolved, &link).is_err() {
+            std::fs::copy(&resolved, &link)
+                .with_context(|| format!("copy {} -> {}", resolved.display(), link.display()))?;
+        }
     }
     Ok(root)
 }
