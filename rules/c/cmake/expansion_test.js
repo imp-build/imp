@@ -17,9 +17,11 @@ import {
 } from "//rules/c/cmake/expansion";
 import {
 	basename,
+	compilerWorkspaceSources,
 	cmakeProjectSpec,
 	configureCmakeProject,
 	correlateCTestEntries,
+	isCmakeCompilerEdge,
 	replayCmakeTarget,
 } from "//rules/c/cmake/graph_replay";
 import { listNamedCmakeTargets, parseNinja } from "//rules/c/cmake/ninja_graph";
@@ -31,8 +33,14 @@ import { listNamedCmakeTargets, parseNinja } from "//rules/c/cmake/ninja_graph";
 // cmakeProjectExpansion()'s create() actually discovers.
 const SANDBOX_ROOT = "/sandbox-7-3-1";
 
+// Matches cmakeProjectSpec()'s default buildDirPath for path:
+// "rules/c/cmake/example" below.
+const CONFIGURE_BUILD_DIR = "build/rules/c/cmake/example";
+
 const RULES_NINJA = `
 rule C_COMPILER__hello_cmake_unscanned_
+  depfile = $DEP_FILE
+  deps = gcc
   command = /usr/bin/cc $DEFINES $INCLUDES $FLAGS -o $out -c $in
   description = Building C object $out
 
@@ -41,6 +49,8 @@ rule C_SHARED_LIBRARY_LINKER__hello_cmake_
   description = Linking C shared library $TARGET_FILE
 
 rule C_COMPILER__hello_cmake_main_unscanned_
+  depfile = $DEP_FILE
+  deps = gcc
   command = /usr/bin/cc $DEFINES $INCLUDES $FLAGS -o $out -c $in
   description = Building C object $out
 
@@ -58,10 +68,10 @@ ninja_required_version = 1.5
 
 include CMakeFiles/rules.ninja
 
-cmake_ninja_workdir = ${SANDBOX_ROOT}/build/
+cmake_ninja_workdir = ${SANDBOX_ROOT}/${CONFIGURE_BUILD_DIR}/
 
 # Object build statements for SHARED_LIBRARY target hello_cmake
-build CMakeFiles/hello_cmake.dir/hello.c.o: C_COMPILER__hello_cmake_unscanned_ ${SANDBOX_ROOT}/hello.c
+build CMakeFiles/hello_cmake.dir/hello.c.o: C_COMPILER__hello_cmake_unscanned_ ${SANDBOX_ROOT}/rules/c/cmake/example/hello.c
   DEP_FILE = CMakeFiles/hello_cmake.dir/hello.c.o.d
   OBJECT_DIR = CMakeFiles/hello_cmake.dir
 
@@ -72,7 +82,7 @@ build libhello_cmake.so: C_SHARED_LIBRARY_LINKER__hello_cmake_ CMakeFiles/hello_
 build hello_cmake: phony libhello_cmake.so
 
 # Object build statements for EXECUTABLE target hello_cmake_main
-build CMakeFiles/hello_cmake_main.dir/main.c.o: C_COMPILER__hello_cmake_main_unscanned_ ${SANDBOX_ROOT}/main.c
+build CMakeFiles/hello_cmake_main.dir/main.c.o: C_COMPILER__hello_cmake_main_unscanned_ ${SANDBOX_ROOT}/rules/c/cmake/example/main.c
   DEP_FILE = CMakeFiles/hello_cmake_main.dir/main.c.o.d
   OBJECT_DIR = CMakeFiles/hello_cmake_main.dir
 
@@ -91,14 +101,6 @@ const CTEST_TESTFILE = `# CMake generated Testfile for
 # Build directory: ${SANDBOX_ROOT}/build
 add_test([=[hello_cmake_main_test]=] "${SANDBOX_ROOT}/build/hello_cmake_main")
 `;
-
-// Matches cmakeProjectSpec()'s default buildDirPath (`build/<path>`) for
-// path: "rules/c/cmake/example" below — configureCmakeProject() reads
-// generated files via readFileInDigest() at this full, buildDirPath-prefixed
-// path (a directory-kind output nests under its own declared path, see
-// normalize_graph_artifact() in crates/imp-engine/src/spike.rs), not a bare
-// bdir-relative one.
-const CONFIGURE_BUILD_DIR = "build/rules/c/cmake/example";
 
 const CONFIGURE_FILES = {
 	[`${CONFIGURE_BUILD_DIR}/build.ninja`]: BUILD_NINJA,
@@ -177,6 +179,44 @@ function configureRunCount(host) {
 }
 
 describe("cmakeProjectExpansion", () => {
+	test("compiler edges select their direct source while other edges stay broad", () => {
+		const ninjaGraph = parseNinja(BUILD_NINJA, (path) => {
+			if (path === "CMakeFiles/rules.ninja") return RULES_NINJA;
+			throw new Error(`unexpected include: ${path}`);
+		});
+		const compiler = ninjaGraph.edges.find((edge) =>
+			edge.outputs.includes("CMakeFiles/hello_cmake.dir/hello.c.o"),
+		);
+		const linker = ninjaGraph.edges.find((edge) =>
+			edge.outputs.includes("libhello_cmake.so"),
+		);
+		const sourcePaths = [
+			"rules/c/cmake/example/hello.c",
+			"rules/c/cmake/example/hello.h",
+			"rules/c/cmake/example/main.c",
+			"rules/c/cmake/example/unrelated.json",
+		];
+
+		expect(isCmakeCompilerEdge(compiler, ninjaGraph.rules)).toBe(true);
+		expect(isCmakeCompilerEdge(linker, ninjaGraph.rules)).toBe(false);
+		expect(
+			compilerWorkspaceSources(
+				compiler,
+				ninjaGraph.rules,
+				SANDBOX_ROOT,
+				sourcePaths,
+			),
+		).toEqual(["rules/c/cmake/example/hello.c"]);
+		expect(
+			compilerWorkspaceSources(
+				linker,
+				ninjaGraph.rules,
+				SANDBOX_ROOT,
+				sourcePaths,
+			),
+		).toEqual([]);
+	});
+
 	test("runs cmake configure exactly once across multiple get() calls for different targets", () => {
 		return withCmakeHost(async (host, expansion) => {
 			await resolveIgnoringArtifactValidation([
@@ -194,6 +234,28 @@ describe("cmakeProjectExpansion", () => {
 				expansion.all(BUILD),
 			]);
 			expect(configureRunCount(host)).toBe(1);
+		});
+	});
+
+	test("compiler replay mounts its source and headers, not the full source set", () => {
+		return withCmakeHost(async (host, expansion) => {
+			await resolveIgnoringArtifactValidation([
+				expansion.get("hello_cmake", BUILD),
+			]);
+			const compile = host.runs.find(
+				(run) =>
+					run.display === "cmake edge CMakeFiles/hello_cmake.dir/hello.c.o",
+			);
+			expect(compile.inputs.length).toBe(3);
+			expect(
+				compile.inputs
+					.map((input) => input.path)
+					.filter(Boolean)
+					.sort(),
+			).toEqual([
+				"rules/c/cmake/example/hello.c",
+				"rules/c/cmake/example/hello.h",
+			]);
 		});
 	});
 
@@ -347,6 +409,67 @@ describe("cmakeProjectExpansion", () => {
 				},
 			);
 			expect(withoutDeps.__graph_id === withDeps.__graph_id).toBe(false);
+		});
+	});
+
+	test("replayCmakeTarget() folds extraGlobs and graph deps into task identity", () => {
+		return withFakeToolchainHost(async () => {
+			const options = {
+				path: "rules/c/cmake/example",
+				toolchain: fakeGccGraphToolchain(),
+				cmakeToolchain: fakeCmakeGraphToolchain(),
+			};
+			const baseSpec = cmakeProjectSpec(options);
+			const configured = configureCmakeProject(baseSpec);
+			const extraSpec = cmakeProjectSpec({
+				...options,
+				extraGlobs: ["**/*.json"],
+			});
+			const depSpec = cmakeProjectSpec({
+				...options,
+				deps: [configured.outputs.directory],
+			});
+			const ninjaGraph = {
+				...parseNinja(BUILD_NINJA, (path) => {
+					if (path === "CMakeFiles/rules.ninja") return RULES_NINJA;
+					throw new Error(`unexpected include: ${path}`);
+				}),
+				sandboxRoot: SANDBOX_ROOT,
+			};
+			const sourcePaths = [
+				"rules/c/cmake/example/hello.c",
+				"rules/c/cmake/example/hello.h",
+			];
+			const base = replayCmakeTarget(
+				baseSpec,
+				configured,
+				ninjaGraph,
+				["hello_cmake"],
+				[],
+				{},
+				sourcePaths,
+			);
+			const extra = replayCmakeTarget(
+				extraSpec,
+				configureCmakeProject(extraSpec),
+				ninjaGraph,
+				["hello_cmake"],
+				[],
+				{},
+				sourcePaths,
+			);
+			const withDep = replayCmakeTarget(
+				depSpec,
+				configureCmakeProject(depSpec),
+				ninjaGraph,
+				["hello_cmake"],
+				[],
+				{},
+				sourcePaths,
+			);
+
+			expect(base.__graph_id === extra.__graph_id).toBe(false);
+			expect(base.__graph_id === withDep.__graph_id).toBe(false);
 		});
 	});
 

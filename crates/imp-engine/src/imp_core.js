@@ -686,6 +686,7 @@ export function defineConfigSchema(namespace, shape) {
 defineConfigSchema("imp", {
 	jsWorkers: field.int({ default: 1 }),
 	jobs: field.int({ default: 1 }),
+	fsJobs: field.int(),
 	logLevel: field.enum(["trace", "debug", "info", "warn", "error"], {
 		default: "info",
 	}),

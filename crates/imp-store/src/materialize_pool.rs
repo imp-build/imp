@@ -43,6 +43,35 @@ struct BatchState {
     error: Option<anyhow::Error>,
 }
 
+static WORKER_COUNT: OnceLock<usize> = OnceLock::new();
+
+/// Return the automatic materialization-worker count for this machine.
+pub fn default_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(4)
+        .min(16)
+}
+
+/// Set the number of materialization workers before the first batch runs.
+///
+/// The process-wide pool cannot change size after it starts. Callers must set
+/// this during process setup, before they can materialize an artifact.
+pub fn configure_worker_count(worker_count: usize) -> Result<()> {
+    let worker_count = worker_count.max(1);
+    match WORKER_COUNT.set(worker_count) {
+        Ok(()) => Ok(()),
+        Err(existing) if existing == worker_count => Ok(()),
+        Err(existing) => anyhow::bail!(
+            "materialization worker pool already uses {existing} workers; cannot change it to {worker_count}"
+        ),
+    }
+}
+
+fn worker_count() -> usize {
+    *WORKER_COUNT.get_or_init(default_worker_count)
+}
+
 fn sender() -> &'static crossbeam_channel::Sender<Job> {
     static SENDER: OnceLock<crossbeam_channel::Sender<Job>> = OnceLock::new();
     SENDER.get_or_init(|| {
@@ -51,10 +80,7 @@ fn sender() -> &'static crossbeam_channel::Sender<Job> {
         // 24-core Windows machine (both fewer and many more regressed);
         // available_parallelism() with a cap tracks that without hardcoding
         // a number unrelated to the actual machine.
-        let threads = std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(4)
-            .min(16);
+        let threads = worker_count();
         for i in 0..threads {
             let rx = rx.clone();
             std::thread::Builder::new()

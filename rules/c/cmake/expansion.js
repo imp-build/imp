@@ -205,8 +205,11 @@ export function cmakeProjectExpansion(opts = {}) {
 
 	return expand({
 		display: `expand cmake project ${spec.path}`,
-		inputs: { ninjaGraph: configured.outputs.ninjaGraph },
-		create({ ninjaGraph }) {
+		inputs: {
+			ninjaGraph: configured.outputs.ninjaGraph,
+			sourcePaths: configured.outputs.sourcePaths,
+		},
+		create({ ninjaGraph, sourcePaths }) {
 			const testsByBasename = correlateCTestEntries(ninjaGraph);
 			const named = listNamedCmakeTargets(ninjaGraph);
 			const crossDeps = crossTargetDependencies(named, ninjaGraph);
@@ -227,6 +230,7 @@ export function cmakeProjectExpansion(opts = {}) {
 					targetNames,
 					t.outputs,
 					targetDeps,
+					sourcePaths,
 				);
 			}
 
@@ -271,6 +275,7 @@ export function cmakeProjectExpansion(opts = {}) {
 											crossDeps,
 											builtByName,
 										),
+										sourcePaths,
 									).outputs.units,
 								},
 							}
@@ -291,6 +296,10 @@ export function cmakeProjectExpansion(opts = {}) {
  * @param {string} [opts.buildDir] Build directory; defaults to `build/<path>`.
  * @param {string[]} [opts.srcs] Source glob CMake configure/replay depends on.
  * @param {string[]} [opts.dirs] Extra directories (e.g. vendored includes) to mount.
+ * @param {string[]} [opts.extraGlobs=[]] Extra project-relative files to mount
+ *   for compiler edges, for inputs that do not use a standard header suffix.
+ * @param {Array<object>} [opts.deps=[]] Artifact handles to mount for CMake
+ *   configure and replay. CMake arguments define how the project uses them.
  * @param {string[]} [opts.cmakeArgs] Extra `cmake -S -B` arguments.
  * @param {object} [opts.toolchain] `gccGraphToolchain()` result, or the workspace default. zig isn't supported yet — see graph_replay.js's own docstring.
  * @param {boolean} [opts.unsafeSystemPaths=false] Bypass Bootlin's toolchain-wrapper unsafe-path guard (which rejects -I/-isystem/-L flags under /usr/include or /usr/lib) so this project's compile/link steps can use host system packages (e.g. libwebkit2gtk-4.1). Same sysroot and hardening flags as normal, just without that one guard.

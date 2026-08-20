@@ -15,12 +15,11 @@
 //     in topological waves — one task per *call*, so rules/c/cmake's
 //     expand()-based per-target discovery (#62/PR C2) can mint one replay
 //     task per discovered CMake target, each depending on the shared
-//     configure task's output. Per the #31 migration plan's decision 6,
-//     this migration deliberately stops at target-level task granularity
-//     (not one task per ninja edge) — any one target's task still declares
-//     the whole project's sources as its own input, so an unrelated
-//     source-file edit still invalidates it, same coarse tradeoff
-//     rules/c/graph.js's own ccTask() already accepts.
+//     configure task's output. The task remains target-granular, but C/C++
+//     compiler actions receive only their direct workspace source, captured
+//     include-like files, and declared extra inputs. Other edge types retain
+//     the full project input because Ninja does not describe their runtime
+//     reads completely.
 //
 // mergeDigests()-based accumulation (the legacy mechanism letting a later
 // wave "see" an earlier wave's outputs without physical materialization)
@@ -50,6 +49,7 @@
 // zig-ar static-archive gap.
 
 import {
+	file,
 	files,
 	output,
 	packagePath,
@@ -165,8 +165,14 @@ export function cmakeProjectSpec(opts = {}) {
 			"**/*.hh",
 			"**/*.hpp",
 			"**/*.hxx",
+			"**/*.inc",
+			"**/*.inl",
+			"**/*.ipp",
+			"**/*.tpp",
 		],
 		dirs = [],
+		extraGlobs = [],
+		deps = [],
 		cmakeArgs = [],
 		toolchain,
 		cmakeToolchain,
@@ -180,12 +186,17 @@ export function cmakeProjectSpec(opts = {}) {
 		buildDirPath,
 		cmakeArgs: [...cmakeArgs],
 		srcsInput: files({ root: srcPath, include: srcs }),
+		extraInput:
+			extraGlobs.length > 0
+				? files({ root: srcPath, include: extraGlobs })
+				: null,
 		dirInputs: Object.fromEntries(
 			dirs.map((d, i) => [
 				`dir${i}`,
 				files({ root: `${srcPath}/${d}`, include: ["**/*"] }),
 			]),
 		),
+		deps: [...deps],
 		toolchain: requireGccToolchain(toolchain),
 		cmakeToolchain: resolveCmakeToolchain(cmakeToolchain),
 		// Bypasses Bootlin's toolchain-wrapper unsafe-path guard for this
@@ -203,8 +214,8 @@ export function cmakeProjectSpec(opts = {}) {
  *
  * @param {object} spec From cmakeProjectSpec().
  * @returns {object} Task handle with `.outputs.directory` (the configured
- *   build dir, an artifact) and `.outputs.ninjaGraph` (a plain JSON value:
- *   `{rules, edges, topVars, targetTypes, sandboxRoot, ctestText}`).
+ *   build dir, an artifact), `.outputs.ninjaGraph` (a plain JSON value), and
+ *   `.outputs.sourcePaths` (the exact workspace paths captured by `srcs`).
  */
 export function configureCmakeProject(spec) {
 	return task({
@@ -212,12 +223,17 @@ export function configureCmakeProject(spec) {
 		inputs: {
 			srcs: spec.srcsInput,
 			...spec.dirInputs,
+			...Object.fromEntries(spec.deps.map((dep, i) => [`dep${i}`, dep])),
 			...toolchainTaskInputs(spec.toolchain),
 			ninja: nativeTool("ninja"),
 			cmakeTool: spec.cmakeToolchain.tool,
 			sed: nativeTool("sed"),
 		},
-		outputs: { directory: output.artifact(), ninjaGraph: output.value() },
+		outputs: {
+			directory: output.artifact(),
+			ninjaGraph: output.value(),
+			sourcePaths: output.value(),
+		},
 		async run(exec, input) {
 			const compilerArgs = gccCMakeCompilerArgs(
 				spec.toolchain.version,
@@ -260,6 +276,7 @@ export function configureCmakeProject(spec) {
 				inputs: [
 					input.srcs,
 					...Object.keys(spec.dirInputs).map((key) => input[key]),
+					...spec.deps.map((_, i) => input[`dep${i}`]),
 				],
 				outputs: { directory: output.directory(spec.buildDirPath) },
 				display: `cmake configure ${spec.path}`,
@@ -356,6 +373,7 @@ export function configureCmakeProject(spec) {
 
 			return {
 				directory,
+				sourcePaths: exec.paths(input.srcs),
 				ninjaGraph: {
 					rules,
 					edges,
@@ -389,6 +407,52 @@ export function correlateCTestEntries(ninjaGraph) {
 export function basename(path) {
 	const idx = path.lastIndexOf("/");
 	return idx === -1 ? path : path.slice(idx + 1);
+}
+
+const INCLUDE_LIKE_SUFFIXES = [
+	".h",
+	".hh",
+	".hpp",
+	".hxx",
+	".inc",
+	".inl",
+	".ipp",
+	".tpp",
+];
+
+// CMake emits `deps = gcc` for both C and C++ compiler rules when it uses
+// the Ninja generator. Other edges keep the full project source set because
+// their true runtime inputs are not recoverable from build.ninja alone.
+export function isCmakeCompilerEdge(edge, rules) {
+	return rules[edge.rule]?.deps === "gcc";
+}
+
+// The path list comes from configure's captured `srcs` input, so generated
+// files and build-edge outputs never get mistaken for workspace sources.
+export function compilerWorkspaceSources(
+	edge,
+	rules,
+	sandboxRoot,
+	sourcePaths,
+) {
+	if (!isCmakeCompilerEdge(edge, rules)) return [];
+	const captured = new Set(sourcePaths);
+	return Array.from(
+		new Set(
+			[...edge.inputs, ...edge.implicitInputs]
+				.map((path) => rebasePath(path, sandboxRoot))
+				.filter((path) => captured.has(path)),
+		),
+	).sort();
+}
+
+function includeLikeSources(sourcePaths) {
+	return sourcePaths
+		.filter((path) => {
+			const lower = path.toLowerCase();
+			return INCLUDE_LIKE_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+		})
+		.sort();
 }
 
 /**
@@ -425,6 +489,8 @@ export function basename(path) {
  *   just one, since a dependency can be needed in more than one way at once
  *   (see buildTargetDeps()'s own docstring in expansion.js). Omit for a
  *   target with no cross-target dependencies — behaves exactly as before.
+ * @param {string[]} [sourcePaths] Exact workspace paths captured by the
+ *   configure action's `srcs` input.
  * @returns {object} Task handle with `.outputs.directory` (an artifact: the
  *   build directory after replay, including any POST_BUILD copy
  *   destinations) and, per `exposeOutputs` entry, `.outputs.file<i>`.
@@ -436,6 +502,7 @@ export function replayCmakeTarget(
 	targetNames,
 	exposeOutputs = [],
 	targetDeps = {},
+	sourcePaths = [],
 ) {
 	const { rules, edges, sandboxRoot } = ninjaGraph;
 	// A dependency's own final output(s) — CMake's Ninja generator names
@@ -489,13 +556,40 @@ export function replayCmakeTarget(
 		const level = levelOf(edge);
 		(waves[level] || (waves[level] = [])).push(edge);
 	}
+	const compilerSources = new Map(
+		reached.map((edge) => [
+			edge,
+			compilerWorkspaceSources(edge, rules, sandboxRoot, sourcePaths),
+		]),
+	);
+	const compilerSourcePaths = Array.from(
+		new Set(Array.from(compilerSources.values()).flat()),
+	).sort();
+	const headerPaths = includeLikeSources(sourcePaths).filter(
+		(path) => !compilerSourcePaths.includes(path),
+	);
+	const compilerSourceInputs = Object.fromEntries(
+		compilerSourcePaths.map((path, i) => [`source${i}`, file(path)]),
+	);
+	const headerInputs = Object.fromEntries(
+		headerPaths.map((path, i) => [`header${i}`, file(path)]),
+	);
+	const sourceInputNames = new Map(
+		compilerSourcePaths.map((path, i) => [path, `source${i}`]),
+	);
+	const headerInputNames = headerPaths.map((_, i) => `header${i}`);
+	const graphDepInputNames = spec.deps.map((_, i) => `graphDep${i}`);
 
 	return task({
 		display: `cmake build ${spec.path} [${targetNames.join(",")}]`,
 		inputs: {
 			configureDirectory: configured.outputs.directory,
 			srcs: spec.srcsInput,
+			...compilerSourceInputs,
+			...headerInputs,
+			...(spec.extraInput ? { extra: spec.extraInput } : {}),
 			...spec.dirInputs,
+			...Object.fromEntries(spec.deps.map((dep, i) => [`graphDep${i}`, dep])),
 			...toolchainTaskInputs(spec.toolchain),
 			mkdir: nativeTool("mkdir"),
 			cp: nativeTool("cp"),
@@ -542,6 +636,8 @@ export function replayCmakeTarget(
 			const dirInputBindings = Object.keys(spec.dirInputs).map(
 				(key) => input[key],
 			);
+			const compilerHeaderInputs = headerInputNames.map((key) => input[key]);
+			const graphDepInputs = graphDepInputNames.map((key) => input[key]);
 			// A boundary dependency's own artifact(s) are already captured at
 			// their real buildDirPath-relative paths (same mechanism
 			// exposeOutputs' file0..N rely on). Every referenced output is
@@ -619,16 +715,34 @@ export function replayCmakeTarget(
 				const cdCommand = `cd '${spec.buildDirPath}' && ${resolved.command}`;
 				const outputNames = destPaths.map((_, i) => `out${i}`);
 
+				const compilerInputs = compilerSources
+					.get(edge)
+					.map((path) => input[sourceInputNames.get(path)]);
+				const edgeInputs =
+					isCmakeCompilerEdge(edge, rules) && sourcePaths.length > 0
+						? [
+								...compilerInputs,
+								...compilerHeaderInputs,
+								...(spec.extraInput ? [input.extra] : []),
+								...dirInputBindings,
+								input.configureDirectory,
+								...graphDepInputs,
+								...priorOutputs,
+								...boundaryInputs,
+							]
+						: [
+								input.srcs,
+								...dirInputBindings,
+								input.configureDirectory,
+								...graphDepInputs,
+								...priorOutputs,
+								...boundaryInputs,
+							];
+
 				const result = await exec.action({
 					argv: ["sh", "-c", cdCommand],
 					tools: edgeTools,
-					inputs: [
-						input.srcs,
-						...dirInputBindings,
-						input.configureDirectory,
-						...priorOutputs,
-						...boundaryInputs,
-					],
+					inputs: edgeInputs,
 					outputs: Object.fromEntries(
 						destPaths.map((p, i) => [outputNames[i], output.file(p)]),
 					),
@@ -662,7 +776,12 @@ export function replayCmakeTarget(
 				// of it) — the same completeness the old unbounded replay
 				// had incidentally, from re-deriving the dependency's files
 				// itself.
-				inputs: [input.configureDirectory, ...priorOutputs, ...boundaryInputs],
+				inputs: [
+					input.configureDirectory,
+					...graphDepInputs,
+					...priorOutputs,
+					...boundaryInputs,
+				],
 				outputs: {
 					directory: output.directory(spec.buildDirPath),
 					...Object.fromEntries(
@@ -713,6 +832,7 @@ function ctestNameFilterArgs(testNames) {
  * @param {object} [targetDeps] Forwarded to replayCmakeTarget() — see its
  *   own docstring. Avoids the test executable's own replay re-deriving a
  *   library dependency's edges it already has its own task for.
+ * @param {string[]} [sourcePaths] Forwarded to replayCmakeTarget().
  * @returns {object} Task handle whose `units` output resolves to a single-entry
  *   `[{name, ok, output}]` list — see //rules/workflows/test's contract.
  */
@@ -723,6 +843,7 @@ export function runCTestTask(
 	targetNames,
 	testNames = [],
 	targetDeps = {},
+	sourcePaths = [],
 ) {
 	const built = replayCmakeTarget(
 		spec,
@@ -731,6 +852,7 @@ export function runCTestTask(
 		targetNames,
 		[],
 		targetDeps,
+		sourcePaths,
 	);
 	const unitName = testNames.length ? testNames.join(",") : spec.path;
 	return task({

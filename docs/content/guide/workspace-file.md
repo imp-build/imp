@@ -45,6 +45,17 @@ export const odinConfig = {
 };
 ```
 
+The built-in `imp` configuration also accepts `jobs`, `jsWorkers`, and
+`fsJobs`. `fsJobs` sets the number of filesystem workers that materialize
+sandbox files. It can be overridden for one goal with `--fs-jobs`, just as
+`--jobs` overrides `jobs`.
+
+```js
+export const impConfig = {
+    fsJobs: 8,
+};
+```
+
 ## Exported declarations are workspace targets
 
 An `export const name = ...` at the top level of `imp.workspace.js` gets a stable address, `//:name`, exactly like an export from a root `BUILD.js` file. `workspaceTargets()` and the target graph see it; nothing about it is workspace-file-specific beyond where it's declared.

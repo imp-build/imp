@@ -263,6 +263,9 @@ struct GoalArgs {
     /// Maximum number of ready tasks to execute concurrently
     #[arg(long)]
     jobs: Option<usize>,
+    /// Number of concurrent filesystem workers for sandbox materialization
+    #[arg(long)]
+    fs_jobs: Option<usize>,
     /// Number of concurrent JS worker slots for live evaluation
     #[arg(long)]
     js_workers: Option<usize>,
@@ -976,6 +979,21 @@ fn effective_jobs(workspace: &spike::Workspace, cli_value: Option<usize>) -> Res
         .unwrap_or(1))
 }
 
+fn effective_fs_jobs(workspace: &spike::Workspace, cli_value: Option<usize>) -> Result<usize> {
+    if let Some(value) = cli_value {
+        return Ok(value.max(1));
+    }
+
+    Ok(workspace
+        .workspace_config
+        .get("imp")
+        .and_then(|config| config.get("fsJobs"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or_else(imp_store::default_worker_count)
+        .max(1))
+}
+
 fn effective_log_level(
     workspace: &spike::Workspace,
     cli_value: Option<log::LevelFilter>,
@@ -1212,6 +1230,7 @@ async fn cmd_execute_live_impl(
         selectors,
         changed_since,
         jobs: jobs_cli,
+        fs_jobs: fs_jobs_cli,
         js_workers: js_workers_cli,
         no_cache,
         trace_inputs,
@@ -1222,6 +1241,8 @@ async fn cmd_execute_live_impl(
     validate_changed_selector_overrides(changed_since.as_deref(), &selectors)?;
     let js_workers = effective_js_workers(&workspace.workspace, js_workers_cli)?;
     let jobs = effective_jobs(&workspace.workspace, jobs_cli)?;
+    let fs_jobs = effective_fs_jobs(&workspace.workspace, fs_jobs_cli)?;
+    imp_store::configure_worker_count(fs_jobs)?;
     let goal_name = match invocation {
         LiveInvocation::Goal { goal, .. } => goal,
     };
@@ -2191,6 +2212,25 @@ mod tests {
     }
 
     #[test]
+    fn effective_fs_jobs_defaults_to_the_capped_parallelism() {
+        let workspace = spike::Workspace::default();
+        let expected = imp_store::default_worker_count();
+        assert_eq!(effective_fs_jobs(&workspace, None).unwrap(), expected);
+    }
+
+    #[test]
+    fn effective_fs_jobs_uses_workspace_config() {
+        let workspace = workspace_with_imp_config(json!({ "fsJobs": 4 }));
+        assert_eq!(effective_fs_jobs(&workspace, None).unwrap(), 4);
+    }
+
+    #[test]
+    fn effective_fs_jobs_cli_overrides_workspace_config() {
+        let workspace = workspace_with_imp_config(json!({ "fsJobs": 4 }));
+        assert_eq!(effective_fs_jobs(&workspace, Some(2)).unwrap(), 2);
+    }
+
+    #[test]
     fn effective_log_level_defaults_to_info() {
         let workspace = spike::Workspace::default();
         assert_eq!(
@@ -2440,6 +2480,8 @@ mod tests {
             "//:pkg".to_owned(),
             "--jobs".to_owned(),
             "2".to_owned(),
+            "--fs-jobs".to_owned(),
+            "3".to_owned(),
             "--trace-inputs".to_owned(),
         ];
         let flag_defs = std::collections::BTreeMap::from([(
@@ -2452,6 +2494,7 @@ mod tests {
         let args = GoalArgs::from_arg_matches(&matches).unwrap();
         assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
         assert_eq!(args.jobs, Some(2));
+        assert_eq!(args.fs_jobs, Some(3));
         assert!(args.trace_inputs);
         assert!(!matches.get_flag("check"));
     }

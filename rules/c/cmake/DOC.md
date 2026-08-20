@@ -32,6 +32,17 @@ directory, while `dirs` adds complete auxiliary directories needed by
 configure or build steps. `cmakeArgs` appends project-specific options to
 `cmake -S -B`.
 
+Configure receives the full `srcs` input once. During replay, C/C++ compiler
+edges receive their direct source, all captured include-like files (`.h`,
+`.hpp`, `.inc`, and related suffixes), `extraGlobs`, `dirs`, generated CMake
+files, and declared `deps`. Link and custom edges retain the full `srcs`
+input because Ninja does not state all files those commands can read.
+
+Use `extraGlobs` for compiler inputs with another suffix, such as generated
+metadata. Use `deps` for artifact handles that CMake must see at configure
+and replay time. The CMake arguments still define how CMake includes or links
+those artifacts.
+
 `cmakeProject()` returns `{get(cmakeTargetName, workflow, facet?),
 all(workflow, facet?)}` — an `expand()`, not a plain object — so each
 selectable target must be re-exported at the BUILD.js top level wrapped in

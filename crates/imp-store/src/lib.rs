@@ -6,6 +6,7 @@ pub mod cache;
 pub mod digest;
 pub mod gc;
 mod materialize_pool;
+pub use materialize_pool::{configure_worker_count, default_worker_count};
 pub mod memo_trace;
 pub mod stats;
 pub mod trace;
