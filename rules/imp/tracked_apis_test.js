@@ -12,7 +12,23 @@ import {
 	workspace_mutation,
 	configure,
 	configuration,
+	platformInfo,
 } from "imp:core";
+
+// A real, host-visible tmp path outside any sandbox, so a value a sandboxed
+// run() writes can still be read back afterward via read_file() (host-side
+// I/O — by the time run() returns, the sandbox it ran in is already torn
+// down). On Windows this must be a drive-lettered path: bash from Git for
+// Windows only recognizes a drive-lettered absolute path as needing
+// Win32-to-POSIX translation, so a bare "/tmp/..." silently resolves inside
+// Git's own install root instead — while read_file()'s host-side resolution
+// treats that same string as relative to the current drive's root, a
+// different location entirely (confirmed by a real "file not found").
+function hostTmpFile(name) {
+	const dir =
+		platformInfo().os === "windows" ? (env("TEMP") ?? env("TMP")) : "/tmp";
+	return `${dir}/${name}`;
+}
 
 describe("tracked runtime APIs", () => {
 	test("env returns a string for PATH", async () => {
@@ -131,8 +147,8 @@ describe("tracked runtime APIs", () => {
 	});
 
 	test("read_file reads a file written by run", async () => {
-		const tmpfile = "/tmp/imp_tracked_test_" + Date.now() + ".txt";
-		await run({ argv: ["sh", "-c", `echo tracked > ${tmpfile}`] });
+		const tmpfile = hostTmpFile("imp_tracked_test_" + Date.now() + ".txt");
+		await run({ argv: ["sh", "-c", `echo tracked > '${tmpfile}'`] });
 		const content = read_file(tmpfile);
 		expect(content.trim()).toBe("tracked");
 	});
@@ -163,7 +179,9 @@ describe("tracked runtime APIs", () => {
 	// see imp-execution's exec_run_inner_with_start) must coalesce onto one
 	// execution instead of both racing and stranding one caller's outputs.
 	test("run() single-flights concurrent calls with identical opts", async () => {
-		const marker = "/tmp/imp_run_single_flight_test_" + Date.now() + ".txt";
+		const marker = hostTmpFile(
+			"imp_run_single_flight_test_" + Date.now() + ".txt",
+		);
 		const opts = () => ({
 			argv: [
 				"sh",
