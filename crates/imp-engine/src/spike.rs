@@ -8936,6 +8936,273 @@ export default { [BUILD]: produced.outputs.value };
     }
 
     #[tokio::test]
+    async fn graph_task_inputs_start_concurrently() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { goal, output, task } from "imp:core";
+const BUILD = goal("build");
+
+function input(name) {
+    return task({
+        display: `produce ${name}`,
+        outputs: { value: output.value() },
+        async run(exec) {
+            await exec.action({
+                argv: ["sh", "-c", "sleep 0.2"],
+                display: `produce ${name}`,
+                cache: false,
+            });
+            return { value: name };
+        },
+    }).outputs.value;
+}
+
+const build = task({
+    display: "consume inputs",
+    inputs: { first: input("first"), second: input("second") },
+    outputs: { value: output.value() },
+    async run(_exec, inputs) { return { value: inputs }; },
+});
+export default { [BUILD]: build.outputs.value };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = imp_scheduler::Scheduler::new(
+            2,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &["//".to_owned()],
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+
+        let mut job_ids = BTreeSet::new();
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let imp_scheduler::TaskEvent::Pending { id, display, .. } = &event {
+                if display == "produce first" || display == "produce second" {
+                    job_ids.insert(*id);
+                }
+            }
+            events.push(event);
+        }
+        let mut active = BTreeSet::new();
+        let mut max_active = 0;
+        for event in events {
+            match event {
+                imp_scheduler::TaskEvent::Running { id, .. } if job_ids.contains(&id) => {
+                    active.insert(id);
+                    max_active = max_active.max(active.len());
+                }
+                imp_scheduler::TaskEvent::Done { id, .. } if job_ids.contains(&id) => {
+                    active.remove(&id);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(job_ids.len(), 2);
+        assert_eq!(max_active, 2, "independent task inputs should overlap");
+    }
+
+    #[tokio::test]
+    async fn graph_task_inputs_share_one_inflight_producer() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { goal, output, task } from "imp:core";
+const BUILD = goal("build");
+
+globalThis.sharedInputRuns = 0;
+const shared = task({
+    outputs: { value: output.value() },
+    async run() {
+        globalThis.sharedInputRuns += 1;
+        return { value: "shared" };
+    },
+}).outputs.value;
+const build = task({
+    inputs: { first: shared, second: shared },
+    async run() {},
+});
+export default { [BUILD]: build };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        run_goal_live(&live, p, "build", &["//".to_owned()])
+            .await
+            .unwrap();
+        let runs = live
+            .ctx
+            .async_with(async |ctx| ctx.globals().get::<_, i32>("sharedInputRuns"))
+            .await
+            .unwrap();
+        assert_eq!(runs, 1);
+    }
+
+    #[tokio::test]
+    async fn graph_expansion_all_children_start_concurrently() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { expand, goal, output, task } from "imp:core";
+const BUILD = goal("build");
+
+const targets = expand({
+    async create() {
+        return Object.fromEntries(["first", "second"].map((name) => [name, {
+            [BUILD]: task({
+                display: `expand ${name}`,
+                outputs: { value: output.value() },
+                async run(exec) {
+                    await exec.action({
+                        argv: ["sh", "-c", "sleep 0.2"],
+                        display: `expand ${name}`,
+                        cache: false,
+                    });
+                    return { value: name };
+                },
+            }).outputs.value,
+        }]));
+    },
+});
+export default { [BUILD]: targets.all(BUILD) };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = imp_scheduler::Scheduler::new(
+            2,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        execute_goal_live(
+            &live,
+            p,
+            "build",
+            &["//".to_owned()],
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+
+        let mut job_ids = BTreeSet::new();
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let imp_scheduler::TaskEvent::Pending { id, display, .. } = &event {
+                if display == "expand first" || display == "expand second" {
+                    job_ids.insert(*id);
+                }
+            }
+            events.push(event);
+        }
+        let mut active = BTreeSet::new();
+        let mut max_active = 0;
+        for event in events {
+            match event {
+                imp_scheduler::TaskEvent::Running { id, .. } if job_ids.contains(&id) => {
+                    active.insert(id);
+                    max_active = max_active.max(active.len());
+                }
+                imp_scheduler::TaskEvent::Done { id, .. } if job_ids.contains(&id) => {
+                    active.remove(&id);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(job_ids.len(), 2);
+        assert_eq!(
+            max_active, 2,
+            "independent expansion children should overlap"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_task_input_failures_keep_declared_order() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { goal, output, task } from "imp:core";
+const BUILD = goal("build");
+
+function failingInput(name, command) {
+    return task({
+        display: `fail ${name}`,
+        outputs: { value: output.value() },
+        async run(exec) {
+            await exec.action({ argv: ["sh", "-c", command], cache: false });
+            throw new Error(`${name} failure`);
+        },
+    }).outputs.value;
+}
+
+const build = task({
+    inputs: {
+        first: failingInput("first", "sleep 0.1"),
+        second: failingInput("second", "true"),
+    },
+    async run() {},
+});
+export default { [BUILD]: build };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = imp_scheduler::Scheduler::new(
+            2,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        );
+        *live.scheduler.lock().unwrap() = Some(scheduler);
+
+        let error = execute_goal_live(
+            &live,
+            p,
+            "build",
+            &["//".to_owned()],
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("first failure"), "{message}");
+        assert!(!message.contains("second failure"), "{message}");
+    }
+
+    #[tokio::test]
     async fn graph_goal_handler_receives_named_root_results() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();

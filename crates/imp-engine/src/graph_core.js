@@ -577,6 +577,28 @@ function _graphRuntimeKey(value) {
 	return value;
 }
 
+// Resolve independent graph edges together. Return results in the order the
+// caller declares. The outcome wrapper observes later failures and prevents
+// an unhandled rejection. The result order keeps the failure precedence of
+// the old sequential loops.
+async function _graphResolveOrderedConcurrent(values, resolve) {
+	const pending = values.map((value) =>
+		Promise.resolve()
+			.then(() => resolve(value))
+			.then(
+				(result) => ({ ok: true, result }),
+				(error) => ({ ok: false, error }),
+			),
+	);
+	const results = [];
+	for (const promise of pending) {
+		const outcome = await promise;
+		if (!outcome.ok) throw outcome.error;
+		results.push(outcome.result);
+	}
+	return results;
+}
+
 function _graphCollectActionInput(value, result) {
 	if (value === null || value === undefined) return;
 	if (Array.isArray(value)) {
@@ -797,10 +819,17 @@ function _graphValidateTaskResult(record, value) {
 async function _graphExecuteTask(taskId, stack) {
 	const record = _graphTasks.get(taskId);
 	if (record === undefined) throw _graphError(`unknown task ${taskId}`);
-	const resolved = {};
-	for (const [name, input] of Object.entries(record.inputs)) {
-		resolved[name] = input.kind === "literal" ? input.value : await _graphResolveHandle(input.handle.__graph_id, stack);
-	}
+	const resolved = Object.fromEntries(
+		await _graphResolveOrderedConcurrent(
+			Object.entries(record.inputs),
+			async ([name, input]) => [
+				name,
+				input.kind === "literal"
+					? input.value
+					: await _graphResolveHandle(input.handle.__graph_id, stack),
+			],
+		),
+	);
 	const runtimeKey = `${record.key}:${JSON.stringify(_graphRuntimeKey(resolved))}`;
 	const existing = _graphTaskInflight.get(runtimeKey);
 	if (existing) return existing;
@@ -936,12 +965,22 @@ async function _graphResolveExpansionProjection(record, stack) {
 		const handle = _graphChildHandle(child, workflow, facet, `expansion.get('${record.data.childKey}')`);
 		return _graphResolveHandle(handle.__graph_id, stack);
 	}
-	const result = {};
-	for (const key of Object.keys(children).sort()) {
-		const handle = _graphChildHandle(children[key], workflow, facet, `expansion.all() child '${key}'`);
-		result[key] = await _graphResolveHandle(handle.__graph_id, stack);
-	}
-	return Object.freeze(result);
+	return Object.freeze(
+		Object.fromEntries(
+			await _graphResolveOrderedConcurrent(
+				Object.keys(children).sort(),
+				async (key) => {
+					const handle = _graphChildHandle(
+						children[key],
+						workflow,
+						facet,
+						`expansion.all() child '${key}'`,
+					);
+					return [key, await _graphResolveHandle(handle.__graph_id, stack)];
+				},
+			),
+		),
+	);
 }
 
 // Declared, structural input edges for a handle — no execution. Used by the
