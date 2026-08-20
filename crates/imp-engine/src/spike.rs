@@ -5,11 +5,11 @@
 //! via `__host_target`.  The Rust engine resolves product requests into a task
 //! DAG without executing it.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU8, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
 
 use crate::graph::{GraphCatalog, GraphFormat, GraphRoot, GraphView, GraphWalk, GraphWalkNode};
@@ -2427,6 +2427,55 @@ fn report_cache_telemetry(
     }
 }
 
+/// Single-flights `ExecutionService::register_native_tool` across every
+/// concurrent caller in this process, keyed by tool name alone (matching
+/// `ensure_native_tool_artifact`'s own stated invariant: "a single global
+/// path per tool name").
+///
+/// `native-tool()`/`tool()` handles already memoize by fingerprint at the
+/// graph level (`_graphMemoizedHandle` in graph_core.js), but that
+/// memoization is per-JS-module-instance: it stops two call sites in the
+/// *same* graph build from creating duplicate handle objects, but does
+/// nothing for the same tool being resolved from *different* JS runtimes at
+/// once — every `rules_test` file gets its own fresh runtime and its own
+/// fresh `ExecutionService`, and a real workspace build runs many
+/// concurrent JS worker lanes, so "the same tool, needed by many
+/// independent graph-execution contexts around the same moment" is the
+/// normal case, not an edge case. Without this, each of those contexts
+/// calls straight through to the same on-disk `native-tools/<name>/`
+/// artifact with no coordination, and two concurrent writers can race
+/// Windows into `ERROR_SHARING_VIOLATION` ("the process cannot access the
+/// file because it is being used by another process") — confirmed
+/// happening in practice under `imp test //...`.
+///
+/// A plain `OnceLock` per tool name (not a coarse lock held across the
+/// whole resolution) means callers for *different* tool names never
+/// contend with each other, and the outer map lock is only ever held for
+/// the fast get-or-insert, never across the actual filesystem work.
+fn singleflight_register_native_tool(
+    service: &Arc<dyn ExecutionService>,
+    name: &str,
+    resolved: &Path,
+) -> Result<PathBuf, String> {
+    static INFLIGHT: OnceLock<Mutex<HashMap<String, Arc<OnceLock<Result<PathBuf, String>>>>>> =
+        OnceLock::new();
+    let map = INFLIGHT.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let cell = {
+        let mut map = map.lock().unwrap();
+        Arc::clone(
+            map.entry(name.to_owned())
+                .or_insert_with(|| Arc::new(OnceLock::new())),
+        )
+    };
+    cell.get_or_init(|| {
+        service
+            .register_native_tool(name, resolved)
+            .map_err(|e| format!("{e:#}"))
+    })
+    .clone()
+}
+
 /// Register host globals on `ctx`.
 fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::Result<()> {
     let RegisterGlobalsArgs {
@@ -4401,11 +4450,12 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                     format!("no '{name}' executable found on PATH"),
                 )
             })?;
-            let root = service_native_tool
-                .register_native_tool(&name, Path::new(&resolved))
-                .map_err(|e| {
-                    rquickjs::Error::new_loading_message("nativeTool", format!("{e:#}"))
-                })?;
+            let root = singleflight_register_native_tool(
+                &service_native_tool,
+                &name,
+                Path::new(&resolved),
+            )
+            .map_err(|e| rquickjs::Error::new_loading_message("nativeTool", e))?;
             Ok(root.to_string_lossy().into_owned())
         },
     )?;
@@ -4442,11 +4492,8 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
             let content_digest = service_graph_tool.file_sha256(&canonical).map_err(|e| {
                 rquickjs::Error::new_loading_message("nativeTool", format!("{e:#}"))
             })?;
-            let root = service_graph_tool
-                .register_native_tool(&name, &canonical)
-                .map_err(|e| {
-                    rquickjs::Error::new_loading_message("nativeTool", format!("{e:#}"))
-                })?;
+            let root = singleflight_register_native_tool(&service_graph_tool, &name, &canonical)
+                .map_err(|e| rquickjs::Error::new_loading_message("nativeTool", e))?;
             let key = digest_json(&serde_json::json!({
                 "path": canonical,
                 "digest": content_digest,
@@ -8075,6 +8122,44 @@ mod tests {
     };
     use imp_store::digest::{list_files_in_digest, merge_digests};
     use sha2::{Digest, Sha256};
+
+    // Regression for the cross-JS-runtime native-tool resolution race: many
+    // concurrent callers resolving the same tool name (the normal case
+    // under real concurrency — every rules_test file gets its own fresh
+    // JS runtime and ExecutionService, and a real build runs many JS
+    // worker lanes at once) must not error and must all agree on the same
+    // resolved root, instead of racing ExecutionService::register_native_tool's
+    // underlying remove-then-write directly against each other.
+    #[test]
+    fn singleflight_register_native_tool_coalesces_concurrent_callers() {
+        let service: Arc<dyn ExecutionService> = Arc::new(LocalExecutionService::new());
+        let resolved = which_executable("sh").expect("sh must be on PATH for this test");
+        let resolved = std::fs::canonicalize(&resolved).expect("canonicalize sh");
+
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let service = Arc::clone(&service);
+                let resolved = resolved.clone();
+                std::thread::spawn(move || {
+                    singleflight_register_native_tool(&service, "sh", &resolved)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let first = results[0]
+            .as_ref()
+            .unwrap_or_else(|e| panic!("concurrent resolution must not race: {e}"));
+        for result in &results {
+            assert_eq!(
+                result
+                    .as_ref()
+                    .unwrap_or_else(|e| panic!("concurrent resolution must not race: {e}")),
+                first,
+                "every concurrent caller must agree on the same resolved root"
+            );
+        }
+    }
 
     #[test]
     fn module_name_from_site_strips_line_col_only_when_present() {
