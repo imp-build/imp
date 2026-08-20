@@ -387,9 +387,26 @@ pub fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
             file.sync_all()
                 .with_context(|| format!("sync {}", temp.display()))?;
         }
-        std::fs::rename(&temp, &blob_path).with_context(|| {
-            format!("publish blob {} to {}", temp.display(), blob_path.display())
-        })?;
+        match std::fs::rename(&temp, &blob_path) {
+            Ok(()) => {}
+            // Lost a race with a concurrent publish of the same digest (same
+            // content, since CAS blobs are content-addressed): on Windows,
+            // MoveFileEx's replace-existing needs to delete the file another
+            // worker just published, which fails with access-denied if
+            // anything (another worker's still-closing handle, an AV
+            // scanner) has it open without FILE_SHARE_DELETE. POSIX rename
+            // never surfaces this because replacing an existing file is
+            // atomic and handle-agnostic there. Either way the winner's
+            // bytes are already correct, so drop our redundant temp copy.
+            Err(_) if blob_path.is_file() => {
+                let _ = std::fs::remove_file(&temp);
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("publish blob {} to {}", temp.display(), blob_path.display())
+                });
+            }
+        }
     }
 
     let meta_path = cas_meta_path(&digest)?;
@@ -401,8 +418,25 @@ pub fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
             "kind": kind,
             "bytes": bytes.len(),
         });
-        std::fs::write(&meta_path, serde_json::to_vec_pretty(&metadata)?)
-            .with_context(|| format!("write {}", meta_path.display()))?;
+        let temp = temp_sibling_path(&meta_path, "tmp-meta");
+        std::fs::write(&temp, serde_json::to_vec_pretty(&metadata)?)
+            .with_context(|| format!("write {}", temp.display()))?;
+        match std::fs::rename(&temp, &meta_path) {
+            Ok(()) => {}
+            // Same redundant-publish race as the blob above.
+            Err(_) if meta_path.is_file() => {
+                let _ = std::fs::remove_file(&temp);
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "publish metadata {} to {}",
+                        temp.display(),
+                        meta_path.display()
+                    )
+                });
+            }
+        }
     }
     Ok(digest)
 }
@@ -813,8 +847,10 @@ pub fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     use super::*;
+    #[cfg(windows)]
+    use std::thread;
 
     #[test]
     #[cfg(unix)]
@@ -1070,5 +1106,49 @@ mod tests {
             std::fs::read_to_string(destination.join("sub").join("nested.txt")).unwrap(),
             "nested"
         );
+    }
+
+    // Regression for the Windows CAS-publish race: two build tasks producing
+    // byte-identical output (e.g. BoringSSL's per-arch assembly stubs, which
+    // compile to the same near-empty object file on a non-matching host arch)
+    // both target the same content-addressed blob path. On Windows,
+    // MoveFileEx's replace-existing has to delete the file the other thread
+    // just published, which fails with access-denied if anything still holds
+    // it open without FILE_SHARE_DELETE (Rust's default). This can't be
+    // forced deterministically without a fault-injection hook into
+    // store_blob's check/write/rename sequence — real repro depends on OS
+    // scheduling and, in the field, an AV scanner's timing — so this drives
+    // many threads at identical content instead, to confirm concurrent
+    // publishes of the same digest never corrupt the blob or spuriously
+    // error even under real thread contention.
+    #[test]
+    #[cfg(windows)]
+    fn concurrent_store_blob_of_identical_content_never_corrupts_or_errors() {
+        let content = b"concurrent store_blob race regression test payload";
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    store_blob(content, "test")
+                })
+            })
+            .collect();
+
+        let digests: Vec<String> = handles
+            .into_iter()
+            .map(|h| h.join().unwrap().unwrap())
+            .collect();
+
+        let expected = digest_bytes(content);
+        for digest in &digests {
+            assert_eq!(digest, &expected);
+        }
+        assert_eq!(
+            std::fs::read(cas_blob_path(&expected).unwrap()).unwrap(),
+            content
+        );
+        assert!(cas_meta_path(&expected).unwrap().is_file());
     }
 }
