@@ -22,8 +22,6 @@ use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject,
 };
 
-#[cfg(not(unix))]
-use imp_store::cache::copy_directory;
 use imp_store::cache::{
     artifact_relative_path, cached_outputs_present, create_sandbox_root, digest_json, file_mode,
     materialize_cached_outputs, materialize_named_cache_artifacts, store_file_blob,
@@ -703,9 +701,21 @@ fn symlink_tool_root(source: &Path, destination: &Path) -> Result<()> {
         .with_context(|| format!("symlink {} -> {}", destination.display(), source.display()))
 }
 
-#[cfg(not(unix))]
+// Real symlinks need either elevated privileges or Developer Mode enabled,
+// neither of which is a safe assumption, and NTFS has no hard-link
+// equivalent for directories. A junction is the closest match to Unix's
+// single symlink call: one reparse point, created without special
+// privilege, that `std::fs::remove_dir_all` on sandbox teardown removes as
+// a unit rather than recursing into (confirmed empirically) — so it can't
+// walk through the junction and delete the real, shared toolchain. Copying
+// the tool root byte-for-byte into every sandbox instead (the previous
+// approach here) was measured turning "setting up sandbox" into the
+// dominant cost of every single task, for a toolchain install that can run
+// to the tens of thousands of files.
+#[cfg(windows)]
 fn symlink_tool_root(source: &Path, destination: &Path) -> Result<()> {
-    copy_directory(source, destination)
+    junction::create(source, destination)
+        .with_context(|| format!("junction {} -> {}", destination.display(), source.display()))
 }
 
 fn resolve_tool_bin_dir(tool_root: &Path, bin_dir: &str) -> Result<PathBuf> {
@@ -1664,6 +1674,35 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    // Regression for the junction-based Windows tool linking: the tool's
+    // content must be reachable through the junction, and — the actual
+    // hazard that made this worth a test — tearing the sandbox down with
+    // remove_dir_all (what SandboxGuard/remove_sandbox_tree really call)
+    // must remove only the junction itself, never recurse through it and
+    // delete the real, shared tool root that every other sandbox still
+    // needs.
+    #[test]
+    #[cfg(windows)]
+    fn symlink_tool_root_junction_survives_sandbox_teardown() {
+        let tool_root = tempfile::tempdir().unwrap();
+        std::fs::write(tool_root.path().join("tool.exe"), b"binary").unwrap();
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let linked = sandbox.path().join("linked-tool");
+        symlink_tool_root(tool_root.path(), &linked).unwrap();
+        assert_eq!(
+            std::fs::read(linked.join("tool.exe")).unwrap(),
+            b"binary",
+            "tool content must be reachable through the junction"
+        );
+
+        std::fs::remove_dir_all(sandbox.path()).unwrap();
+        assert!(
+            tool_root.path().join("tool.exe").is_file(),
+            "removing the sandbox must not delete the shared tool root through the junction"
+        );
     }
 
     #[test]

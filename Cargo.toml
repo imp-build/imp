@@ -39,6 +39,7 @@ opendal      = { version = "0.57", default-features = false }
 dunce        = "1"
 app_dirs2    = "2.5"
 windows-sys  = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects"] }
+junction     = "2"
 
 [profile.dev]
 opt-level = 1

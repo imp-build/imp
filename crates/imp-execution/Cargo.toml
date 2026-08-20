@@ -23,6 +23,7 @@ walkdir.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
+junction.workspace = true
 
 [dev-dependencies]
 opendal = { workspace = true, features = ["services-memory"] }
