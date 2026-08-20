@@ -7,6 +7,7 @@ import { ccLibrary } from "//rules/c";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
 import { defaultMoldGraphToolchain } from "//rules/c/mold";
 import { describe, expect, test } from "//rules/imp/test";
+import { platformInfo } from "imp:core";
 import {
 	odinExtraLinkerFlagsArgs,
 	odinGccLinkerPathDir,
@@ -246,12 +247,16 @@ describe("Odin graph rules", () => {
 	// The GCC graph tool chooses bin/ or bin-unsafe-paths/ before the executor
 	// prepends its tool directories to PATH. This helper only derives the
 	// selected launcher's directory.
+	const clangExe = `clang${platformInfo().os === "windows" ? ".exe" : ""}`;
+
 	test("odinLinkerPathDir returns the mounted clang directory", () => {
-		expect(odinLinkerPathDir(".imp/tools/gcc-toolchain/bin/clang")).toBe(
+		expect(odinLinkerPathDir(`.imp/tools/gcc-toolchain/bin/${clangExe}`)).toBe(
 			".imp/tools/gcc-toolchain/bin",
 		);
 		expect(
-			odinLinkerPathDir(".imp/tools/gcc-toolchain/bin-unsafe-paths/clang"),
+			odinLinkerPathDir(
+				`.imp/tools/gcc-toolchain/bin-unsafe-paths/${clangExe}`,
+			),
 		).toBe(".imp/tools/gcc-toolchain/bin-unsafe-paths");
 	});
 
@@ -262,7 +267,7 @@ describe("Odin graph rules", () => {
 			{
 				tool(handle, executable) {
 					toolCall = [handle, executable];
-					return ".imp/tools/gcc-toolchain/bin/clang";
+					return `.imp/tools/gcc-toolchain/bin/${clangExe}`;
 				},
 			},
 			gcc,
