@@ -2402,6 +2402,11 @@ impl imp_exec_api::JobGate for SchedulerGate<'_> {
         self.0.reserve()
     }
 
+    fn phase(&self, phase: imp_exec_api::ExecutionPhase) {
+        self.0
+            .phase(format!("{}: {}", phase.label(), self.0.display()));
+    }
+
     fn started(&self) {
         self.0.started()
     }

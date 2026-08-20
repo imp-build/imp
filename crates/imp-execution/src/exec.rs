@@ -35,8 +35,8 @@ use imp_store::digest::{
 };
 
 pub use imp_exec_api::{
-    ExecAction, ExecIoSpec, ExecRunOpts, ExecRunResult, ExecToolSpec, JobGate, NoGate,
-    SandboxRetention,
+    ExecAction, ExecIoSpec, ExecRunOpts, ExecRunResult, ExecToolSpec, ExecutionPhase, JobGate,
+    NoGate, SandboxRetention,
 };
 
 /// Execute a frontend-staged action. The compatibility implementation below
@@ -608,6 +608,7 @@ pub struct SandboxGuard<'a> {
     retention: SandboxRetention,
     succeeded: bool,
     cancellation: Option<&'a AtomicBool>,
+    gate: Option<&'a dyn JobGate>,
 }
 
 impl<'a> SandboxGuard<'a> {
@@ -622,7 +623,13 @@ impl<'a> SandboxGuard<'a> {
             retention,
             succeeded: false,
             cancellation,
+            gate: None,
         }
+    }
+
+    fn with_gate(mut self, gate: Option<&'a dyn JobGate>) -> Self {
+        self.gate = gate;
+        self
     }
 
     fn succeed(&mut self) {
@@ -632,6 +639,9 @@ impl<'a> SandboxGuard<'a> {
 
 impl Drop for SandboxGuard<'_> {
     fn drop(&mut self) {
+        if let Some(gate) = self.gate {
+            gate.phase(ExecutionPhase::TearingDownSandbox);
+        }
         let canceled = self
             .cancellation
             .is_some_and(|flag| flag.load(Ordering::SeqCst));
@@ -1159,6 +1169,7 @@ fn exec_run_inner_with_start(
     // must stop creating sandboxes rather than stage every action it had queued.
     if let Some(gate) = gate {
         gate.reserve();
+        gate.phase(ExecutionPhase::SettingUpSandbox);
     }
     if cancellation.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
         bail!("{} canceled", opts.display);
@@ -1173,7 +1184,8 @@ fn exec_run_inner_with_start(
         sandbox_root.display()
     );
     let mut sandbox_guard =
-        SandboxGuard::new(sandbox_root.clone(), opts.sandbox_retention, cancellation);
+        SandboxGuard::new(sandbox_root.clone(), opts.sandbox_retention, cancellation)
+            .with_gate(gate);
     let tool_path_entries = materialize_tools_into_sandbox(&opts.tools, &sandbox_root)?;
 
     // Stage inputs directly from CAS (hardlinked where possible) using the tree
@@ -1185,6 +1197,9 @@ fn exec_run_inner_with_start(
     // Sandboxes are treated as disposable/short-lived, so this is accepted for
     // now — worth revisiting (read-only CAS blobs, or copying for tools known to
     // mutate inputs in place) if it ever bites in practice.
+    if let Some(gate) = gate {
+        gate.phase(ExecutionPhase::MaterializingInputs);
+    }
     imp_store::digest::materialize_trie(merged_input_digest.tree()?, &sandbox_root, true)?;
 
     // Pre-create the directories named by declared outputs so rule scripts don't
@@ -1278,6 +1293,7 @@ fn exec_run_inner_with_start(
     }
 
     if let Some(gate) = gate {
+        gate.phase(ExecutionPhase::Running);
         gate.started();
     }
 
@@ -1334,6 +1350,9 @@ fn exec_run_inner_with_start(
     // merged digest across everything this task produced — the latter lets a
     // later run() feed this task's output straight into its own inputs (as a
     // {kind:"digest"} entry) without round-tripping through the workspace.
+    if let Some(gate) = gate {
+        gate.phase(ExecutionPhase::CapturingOutputs);
+    }
     let mut cached_outputs = Vec::new();
     let mut output_trees = Vec::new();
     for output in &opts.outputs {
@@ -1606,6 +1625,16 @@ fn direct_tool_path_entries(tools: &[ExecToolSpec]) -> Result<Vec<PathBuf>> {
 mod tests {
     use super::*;
     use imp_store::cache::named_cache_key_path;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct PhaseGate(Mutex<Vec<ExecutionPhase>>);
+
+    impl JobGate for PhaseGate {
+        fn phase(&self, phase: ExecutionPhase) {
+            self.0.lock().unwrap().push(phase);
+        }
+    }
 
     fn digest_opts(env: &[(&str, &str)], config_digest: &str) -> ExecRunOpts {
         ExecRunOpts {
@@ -1635,6 +1664,31 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn sandboxed_run_reports_the_complete_phase_lifecycle() {
+        let root = tempfile::tempdir().unwrap();
+        let mut opts = run_opts(
+            &["sh", "-c", "mkdir -p build && printf x > build/out.txt"],
+            &[],
+            &["build/out.txt"],
+        );
+        opts.no_cache = true;
+        let gate = PhaseGate::default();
+
+        exec_run_local_with_start(root.path(), opts, None, Some(&gate), None).unwrap();
+
+        assert_eq!(
+            *gate.0.lock().unwrap(),
+            vec![
+                ExecutionPhase::SettingUpSandbox,
+                ExecutionPhase::MaterializingInputs,
+                ExecutionPhase::Running,
+                ExecutionPhase::CapturingOutputs,
+                ExecutionPhase::TearingDownSandbox,
+            ]
+        );
     }
 
     #[test]

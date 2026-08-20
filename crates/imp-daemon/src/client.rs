@@ -168,6 +168,16 @@ impl ExecutionService for RemoteExecutionService {
         loop {
             match self.block_on_external(|rt| Ok(rt.block_on(stream.message())?))? {
                 Some(e) => match e.event {
+                    Some(proto::execute_event::Event::Phase(phase)) => {
+                        let phase = imp_exec_api::ExecutionPhase::from_u32(phase.phase)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "daemon sent unknown execution phase {}",
+                                    phase.phase
+                                )
+                            })?;
+                        gate.phase(phase);
+                    }
                     Some(proto::execute_event::Event::Started(_)) => gate.started(),
                     Some(proto::execute_event::Event::Finished(f)) => {
                         return match f.result {

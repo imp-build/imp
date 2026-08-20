@@ -1383,6 +1383,20 @@ async fn cmd_execute_live_impl(
             task_to_slot.remove(&id);
         }
 
+        fn update_lane(
+            slots: &mut [SlotState],
+            task_to_slot: &std::collections::HashMap<u64, usize>,
+            slot: usize,
+            id: u64,
+            label: String,
+        ) {
+            if task_to_slot.get(&id) == Some(&slot) {
+                if let Some(state) = slots.get_mut(slot) {
+                    state.item.set_message(label);
+                }
+            }
+        }
+
         let mut js_slots: Vec<SlotState> = Vec::with_capacity(js_workers);
         for _ in 0..js_workers {
             let item = add_bar("    <idle>");
@@ -1592,6 +1606,17 @@ async fn cmd_execute_live_impl(
                         id,
                         format!("run: {display}"),
                     ),
+                },
+                TaskEvent::LaneUpdated {
+                    kind,
+                    slot,
+                    id,
+                    display,
+                } => match kind {
+                    LaneKind::Js => update_lane(&mut js_slots, &js_task_to_slot, slot, id, display),
+                    LaneKind::Sandbox => {
+                        update_lane(&mut sandbox_slots, &sandbox_task_to_slot, slot, id, display)
+                    }
                 },
                 TaskEvent::LaneCleared { kind, slot, id } => match kind {
                     LaneKind::Js => clear_lane(&mut js_slots, &mut js_task_to_slot, slot, id),

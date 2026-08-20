@@ -247,6 +247,45 @@ pub struct Capabilities {
 // Concurrency gate
 // ---------------------------------------------------------------------------
 
+/// The visible lifecycle of a cache-miss action after it has entered the
+/// executor. Input digest capture happens in the frontend, before this point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ExecutionPhase {
+    SettingUpSandbox = 1,
+    MaterializingInputs = 2,
+    Running = 3,
+    CapturingOutputs = 4,
+    TearingDownSandbox = 5,
+}
+
+impl ExecutionPhase {
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    pub const fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            1 => Some(Self::SettingUpSandbox),
+            2 => Some(Self::MaterializingInputs),
+            3 => Some(Self::Running),
+            4 => Some(Self::CapturingOutputs),
+            5 => Some(Self::TearingDownSandbox),
+            _ => None,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SettingUpSandbox => "setting up sandbox",
+            Self::MaterializingInputs => "materializing inputs",
+            Self::Running => "running",
+            Self::CapturingOutputs => "capturing outputs",
+            Self::TearingDownSandbox => "tearing down sandbox",
+        }
+    }
+}
+
 /// How an action tells the caller's scheduler where it is in its lifecycle.
 ///
 /// The two calls are distinct because they bound different things. `reserve`
@@ -264,6 +303,9 @@ pub trait JobGate {
     /// Reserve the concurrency slot that bounds `--jobs`, and its progress
     /// lane alongside it. Idempotent. Must not mark the job started.
     fn reserve(&self) {}
+    /// Report a visible executor phase. The first phase may reserve a lane for
+    /// a remote action whose executor owns the actual sandbox concurrency.
+    fn phase(&self, _phase: ExecutionPhase) {}
     /// Announce that the action has crossed the process-start boundary.
     fn started(&self) {}
 }
@@ -273,13 +315,20 @@ pub struct NoGate;
 
 impl JobGate for NoGate {}
 
-/// Gate that reports `started` to a callback and has no slot to reserve — for
-/// transports that expose the start event but do not own the concurrency limit.
-pub struct StartedGate<F: Fn()>(pub F);
+/// Gate that forwards lifecycle callbacks without owning a concurrency slot —
+/// for transports that report executor progress to a client scheduler.
+pub struct StartedGate<F: Fn(), P: Fn(ExecutionPhase)> {
+    pub started: F,
+    pub phase: P,
+}
 
-impl<F: Fn()> JobGate for StartedGate<F> {
+impl<F: Fn(), P: Fn(ExecutionPhase)> JobGate for StartedGate<F, P> {
+    fn phase(&self, phase: ExecutionPhase) {
+        (self.phase)(phase)
+    }
+
     fn started(&self) {
-        (self.0)()
+        (self.started)()
     }
 }
 

@@ -104,6 +104,12 @@ pub enum TaskEvent {
         id: u64,
         display: String,
     },
+    LaneUpdated {
+        kind: LaneKind,
+        slot: usize,
+        id: u64,
+        display: String,
+    },
     LaneCleared {
         kind: LaneKind,
         slot: usize,
@@ -156,6 +162,10 @@ struct RunState {
 }
 
 impl RunContext {
+    pub fn display(&self) -> &str {
+        &self.display
+    }
+
     /// Take the concurrency slot that bounds `--jobs`, if this job does not hold
     /// one already. Spins on the blocking pool because it runs inside a
     /// `spawn_blocking` closure and cannot await.
@@ -232,6 +242,21 @@ impl RunContext {
         let _ = self.events.send(TaskEvent::Running {
             id: self.id,
             detail: Some(format!("slot {slot}")),
+        });
+    }
+
+    /// Update this job's lane without changing its cache classification. A
+    /// remote executor can call this before `started`, in which case the lane
+    /// takes a normal client `--jobs` permit first.
+    pub fn phase(&self, display: impl Into<String>) {
+        self.acquire_permit(true);
+        self.assign_slot();
+        let slot = self.state.slot.lock().unwrap().unwrap_or(0);
+        let _ = self.events.send(TaskEvent::LaneUpdated {
+            kind: LaneKind::Sandbox,
+            slot,
+            id: self.id,
+            display: display.into(),
         });
     }
 
@@ -439,6 +464,44 @@ mod tests {
             event,
             TaskEvent::Done {
                 cached: Some(false),
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn phase_takes_and_updates_one_lane_without_starting_the_command() {
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = Scheduler::new(1, Arc::new(AtomicBool::new(false)), tx);
+
+        scheduler
+            .run(None, "remote command", TaskKind::Sandbox, |context| {
+                context.phase("setting up sandbox: remote command");
+                context.phase("materializing inputs: remote command");
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let collected: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert_eq!(
+            collected
+                .iter()
+                .filter(|event| matches!(event, TaskEvent::LaneStarted { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            collected
+                .iter()
+                .filter(|event| matches!(event, TaskEvent::LaneUpdated { .. }))
+                .count(),
+            2
+        );
+        assert!(collected.iter().any(|event| matches!(
+            event,
+            TaskEvent::Done {
+                cached: Some(true),
                 ..
             }
         )));

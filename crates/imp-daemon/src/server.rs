@@ -29,15 +29,26 @@ impl proto::execution_server::Execution for ExecutionServer {
         let (tx, rx) = tokio::sync::mpsc::channel(2);
         tokio::task::spawn_blocking(move || {
             let display = action.display.clone();
-            // The daemon has no scheduler of its own, so there is no slot to
-            // reserve — only the start event to forward to the client.
-            let gate = imp_exec_api::StartedGate(|| {
-                let _ = tx.blocking_send(Ok(proto::ExecuteEvent {
-                    event: Some(proto::execute_event::Event::Started(proto::Started {
-                        display: display.clone(),
-                    })),
-                }));
-            });
+            // The daemon has no client scheduler slot to reserve. It forwards
+            // every cache-miss lifecycle event to the client instead.
+            let started_tx = tx.clone();
+            let phase_tx = tx.clone();
+            let gate = imp_exec_api::StartedGate {
+                started: move || {
+                    let _ = started_tx.blocking_send(Ok(proto::ExecuteEvent {
+                        event: Some(proto::execute_event::Event::Started(proto::Started {
+                            display: display.clone(),
+                        })),
+                    }));
+                },
+                phase: move |phase| {
+                    let _ = phase_tx.blocking_send(Ok(proto::ExecuteEvent {
+                        event: Some(proto::execute_event::Event::Phase(proto::Phase {
+                            phase: phase.as_u32(),
+                        })),
+                    }));
+                },
+            };
             let result = svc.execute_with_start(&req.workspace_id, action, None, &gate);
             let event = match result {
                 Ok(o) => proto::ExecuteEvent {
