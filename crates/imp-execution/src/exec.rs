@@ -1198,19 +1198,21 @@ fn exec_run_inner_with_start(
             .with_gate(gate);
     let tool_path_entries = materialize_tools_into_sandbox(&opts.tools, &sandbox_root)?;
 
-    // Stage inputs directly from CAS (hardlinked where possible) using the tree
-    // merged above — avoids re-touching the workspace and the duplicate I/O of
-    // hashing a file just to immediately re-copy its bytes.
-    //
-    // NB: hardlinked sandbox files alias the shared CAS blob; a task that mutates
-    // its inputs in place would corrupt that blob for every other consumer.
-    // Sandboxes are treated as disposable/short-lived, so this is accepted for
-    // now — worth revisiting (read-only CAS blobs, or copying for tools known to
-    // mutate inputs in place) if it ever bites in practice.
+    // Stage inputs directly from CAS using the tree merged above — avoids
+    // re-touching the workspace and the duplicate I/O of hashing a file just
+    // to immediately re-copy its bytes. Always real, independent copies
+    // (never hardlinked): a hardlinked sandbox file would alias the shared,
+    // permanent CAS blob, so any in-place mutation by the action — a code
+    // generator, `autoreconf`, anything that doesn't write-new-then-rename —
+    // would silently corrupt that content for every other consumer of that
+    // digest, including sibling sandboxes reading the same blob concurrently
+    // under `--jobs`. materialize_trie() parallelizes the copy internally
+    // (see imp-store's materialize_pool), which measured faster on Windows
+    // than the old serial hardlink this replaced.
     if let Some(gate) = gate {
         gate.phase(ExecutionPhase::MaterializingInputs);
     }
-    imp_store::digest::materialize_trie(merged_input_digest.tree()?, &sandbox_root, true)?;
+    imp_store::digest::materialize_trie(merged_input_digest.tree()?, &sandbox_root)?;
 
     // Pre-create the directories named by declared outputs so rule scripts don't
     // need to `mkdir` them: the parent dir for file/manifest outputs, and the

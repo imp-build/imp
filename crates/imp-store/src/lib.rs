@@ -5,6 +5,7 @@
 pub mod cache;
 pub mod digest;
 pub mod gc;
+mod materialize_pool;
 pub mod memo_trace;
 pub mod stats;
 pub mod trace;

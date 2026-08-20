@@ -686,7 +686,7 @@ fn materialize_cached_directory(output: &CachedArtifact, destination: &Path) -> 
     }
     let temp = temp_sibling_path(destination, "tmp-dir");
     remove_path_if_exists(&temp)?;
-    crate::digest::materialize_trie(&tree, &temp, false)?;
+    crate::digest::materialize_trie(&tree, &temp)?;
     remove_path_if_exists(destination)?;
     std::fs::rename(&temp, destination).with_context(|| {
         format!(
@@ -723,7 +723,7 @@ pub fn write_workspace(digest: &str, from: Option<&str>, destination: &Path) -> 
             }
             let temp = temp_sibling_path(destination, "tmp-dir");
             remove_path_if_exists(&temp)?;
-            crate::digest::materialize_trie(dir.tree()?, &temp, false)?;
+            crate::digest::materialize_trie(dir.tree()?, &temp)?;
             remove_path_if_exists(destination)?;
             std::fs::rename(&temp, destination).with_context(|| {
                 format!("publish {} to {}", temp.display(), destination.display())

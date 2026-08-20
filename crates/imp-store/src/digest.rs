@@ -20,6 +20,7 @@ use crate::cache::{
     cas_blob_path, copy_file, create_symlink, file_mode, restore_file_mode, store_blob,
     store_file_blob,
 };
+use crate::materialize_pool;
 
 // ---------------------------------------------------------------------------
 // In-memory tree types
@@ -890,61 +891,66 @@ fn build_trie_from_nodes(nodes: BTreeMap<String, BuildNode>) -> Result<DigestTri
 // Materialize — write a tree back out to disk
 // ---------------------------------------------------------------------------
 
-/// Walk `trie` and write it out under `destination`. When `link_files` is set,
-/// regular files are hardlinked from their CAS blob rather than copied (falling
-/// back to a copy if hardlinking fails, e.g. across filesystems) — appropriate for
-/// ephemeral, single-use sandboxes, but NOT for materializing into the workspace:
-/// a hardlinked workspace file that a user or tool later edits in place would
-/// silently corrupt the shared CAS blob. Workspace materialization must always
-/// copy (`link_files: false`).
-pub fn materialize_trie(trie: &DigestTrie, destination: &Path, link_files: bool) -> Result<()> {
+/// Walk `trie` and write it out under `destination`, always as real,
+/// independent copies — never hardlinked from the CAS blob. A hardlinked
+/// file aliases the same inode as the shared, permanent CAS blob: any
+/// in-place write to it (a code generator, `autoreconf`, anything that
+/// doesn't write-new-then-rename) would silently corrupt that content for
+/// every other consumer of that digest, forever, with no digest mismatch to
+/// ever catch it. That risk applies just as much to an ephemeral sandbox's
+/// inputs as to the workspace — sandboxes for concurrent `--jobs` workers
+/// can be reading the very same blob at the very same time, so it's not
+/// just a future-cache hazard, it's a live race between sibling actions.
+///
+/// Directory and symlink entries are created serially during this walk (a
+/// small fraction of any real tree, and each directory must exist before
+/// the files dispatched into it can land). Regular files are instead
+/// collected into a flat batch and handed to `materialize_pool` once the
+/// whole walk completes, so every file in the tree materializes in
+/// parallel through one process-wide worker pool rather than one syscall
+/// at a time on the calling thread — see that module for why (measured
+/// Windows numbers: parallel copy through the pool at ~16-way concurrency
+/// beat even the old serial-hardlink baseline outright, safely).
+pub fn materialize_trie(trie: &DigestTrie, destination: &Path) -> Result<()> {
+    let mut jobs = Vec::new();
+    collect_materialize_jobs(trie, destination, &mut jobs)?;
+    materialize_pool::materialize_batch(jobs)
+}
+
+fn collect_materialize_jobs(
+    trie: &DigestTrie,
+    destination: &Path,
+    jobs: &mut Vec<(String, std::path::PathBuf, Option<u32>)>,
+) -> Result<()> {
     std::fs::create_dir_all(destination)
         .with_context(|| format!("create {}", destination.display()))?;
     for entry in trie.entries() {
         let dest = destination.join(entry.name());
         match entry {
             Entry::File(file) => {
-                materialize_file(&file.digest, &dest, link_files)?;
-                restore_file_mode(&dest, file.mode)?;
+                jobs.push((file.digest.clone(), dest, file.mode));
             }
             Entry::Symlink(symlink) => {
                 create_symlink(&symlink.target, &dest)?;
             }
             Entry::Directory(dir) => {
                 let child = DigestTrie::load(&dir.digest)?;
-                materialize_trie(&child, &dest, link_files)?;
+                collect_materialize_jobs(&child, &dest, jobs)?;
             }
         }
     }
     Ok(())
 }
 
-// `dest`'s parent directory is always `destination` from the caller's own
-// materialize_trie() frame, which already created it before iterating
-// entries — re-checking it here per file is pure waste. Measured on
-// Windows: ~50% of this function's own cost on a 3,000-file materialize
-// (2.07s -> 3.08s), since even a no-op CreateDirectory + AlreadyExists
-// probe is a full syscall round trip there.
-fn materialize_file(digest: &str, dest: &Path, link_files: bool) -> Result<()> {
+/// Copies one CAS blob out to `dest` and restores its captured mode. `dest`'s
+/// parent directory must already exist — `collect_materialize_jobs` above
+/// guarantees that for every job it produces, and `materialize_pool`'s
+/// workers are this function's only other caller.
+pub(crate) fn materialize_one_file(digest: &str, dest: &Path, mode: Option<u32>) -> Result<()> {
     crate::usage::record_cas_read(digest);
     let source = cas_blob_path(digest)?;
-    if link_files {
-        match std::fs::hard_link(&source, dest) {
-            Ok(()) => {
-                crate::artifact_trace!("materialize {} <- digest={digest} (link)", dest.display());
-                return Ok(());
-            }
-            Err(_) => {
-                copy_file(&source, dest)?;
-                crate::artifact_trace!(
-                    "materialize {} <- digest={digest} (copy, link failed)",
-                    dest.display()
-                );
-                return Ok(());
-            }
-        }
-    }
     copy_file(&source, dest)?;
+    restore_file_mode(dest, mode)?;
     crate::artifact_trace!("materialize {} <- digest={digest} (copy)", dest.display());
     Ok(())
 }
@@ -1255,7 +1261,7 @@ mod tests {
         let digest = capture_directory(&source).unwrap();
 
         let destination = dir.path().join("dest");
-        materialize_trie(digest.tree().unwrap(), &destination, false).unwrap();
+        materialize_trie(digest.tree().unwrap(), &destination).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(destination.join("nested").join("real.txt")).unwrap(),
@@ -1265,6 +1271,65 @@ mod tests {
         {
             let target = std::fs::read_link(destination.join("nested").join("link.txt")).unwrap();
             assert_eq!(target, Path::new("real.txt"));
+        }
+    }
+
+    // Regression for the switch away from hardlinking sandbox/workspace
+    // inputs: a hardlinked materialized file would alias the same inode as
+    // the shared, permanent CAS blob, so mutating it in place would
+    // silently corrupt that blob for every other consumer of the digest.
+    // materialize_trie() must always produce an independent copy.
+    #[test]
+    fn materialize_trie_produces_independent_copies_not_cas_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("a.txt"), "original");
+
+        let digest = capture_directory(&src).unwrap();
+        let file_digest = match &digest.tree().unwrap().entries()[0] {
+            Entry::File(f) => f.digest.clone(),
+            other => panic!("expected a file entry, got {other:?}"),
+        };
+
+        let destination = dir.path().join("dest");
+        materialize_trie(digest.tree().unwrap(), &destination).unwrap();
+        std::fs::write(destination.join("a.txt"), "mutated by the sandbox").unwrap();
+
+        let blob_content = std::fs::read_to_string(cas_blob_path(&file_digest).unwrap()).unwrap();
+        assert_eq!(
+            blob_content, "original",
+            "mutating a materialized file must never touch the CAS blob it came from"
+        );
+    }
+
+    // Regression for materialize_pool's batching: every file in a tree large
+    // enough to span multiple dispatch rounds must still land with the
+    // right content at the right path, not just "some N files landed
+    // somewhere" — a batch/counter bug could easily drop or misplace an
+    // entry while still reporting success.
+    #[test]
+    fn materialize_trie_handles_many_files_across_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        for i in 0..250 {
+            write(
+                &src.join(format!("sub{}", i % 10)).join(format!("f{i}.txt")),
+                &format!("content-{i}"),
+            );
+        }
+
+        let digest = capture_directory(&src).unwrap();
+        let destination = dir.path().join("dest");
+        materialize_trie(digest.tree().unwrap(), &destination).unwrap();
+
+        for i in 0..250 {
+            let path = destination
+                .join(format!("sub{}", i % 10))
+                .join(format!("f{i}.txt"));
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                format!("content-{i}")
+            );
         }
     }
 
