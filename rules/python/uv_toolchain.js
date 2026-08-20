@@ -242,14 +242,18 @@ export function uvGraphTool(version) {
 		display: `download uv ${resolved} (${plat.os}/${plat.arch})`,
 		unverified: UvToolchain.resolveUnverified(resolved),
 	});
-	// uv's release archives extract a single top-level uv-<triple>/ directory
-	// containing `uv` (and `uvx`) — strip it so the cache root holds the
-	// binaries directly, the same shape ruff and node use.
+	// uv's tar.gz releases (Linux/macOS) extract a single top-level
+	// uv-<triple>/ directory containing `uv` (and `uvx`) — strip it so the
+	// cache root holds the binaries directly, the same shape ruff uses. The
+	// Windows zip release has no such wrapping directory; uv.exe sits at the
+	// archive root, so it must not be stripped (confirmed by inspecting a
+	// real release: stripping it here made unzip's staging mv fail with "cannot
+	// stat '...stage/*/*'", since there was no second path component to glob).
 	const directory = extractArchive({
 		archive,
 		dest: `.imp/uv-toolchains/${key}`,
 		format: plat.os === "windows" ? "zip" : "tar.gz",
-		stripComponents: 1,
+		stripComponents: plat.os === "windows" ? undefined : 1,
 		namedCache: { name: UV_TOOLCHAIN_CACHE, key },
 		display: `extract uv ${resolved} (${plat.os}/${plat.arch})`,
 	});
