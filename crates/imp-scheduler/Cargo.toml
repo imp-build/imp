@@ -5,4 +5,5 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+crossbeam-channel.workspace = true
 tokio.workspace = true

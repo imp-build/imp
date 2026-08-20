@@ -22,6 +22,119 @@ use tokio::sync::{Notify, Semaphore};
 /// High bit marks a scheduler job id, keeping it disjoint from JS memo node ids.
 const JOB_ID_BIT: u64 = 1 << 63;
 
+/// A type-erased unit of dispatch-pool work: run it, and it reports its own
+/// outcome (a submitter's closure captures its own oneshot sender).
+type PoolJob = Box<dyn FnOnce() + Send>;
+
+struct DispatchPoolInner {
+    receiver: crossbeam_channel::Receiver<PoolJob>,
+    /// Upper bound on how many worker threads this pool will ever create.
+    size: usize,
+    /// How many worker threads have been created so far (monotonic).
+    spawned: AtomicUsize,
+    /// How many currently-live worker threads are parked in `recv()` right
+    /// now. Read as a cheap heuristic for "does a burst need a new thread,"
+    /// not as an exact count — see `grow_if_needed`.
+    idle: AtomicUsize,
+}
+
+/// Small, scheduler-owned pool of OS threads that jobs are dispatched onto,
+/// instead of `tokio::task::spawn_blocking` — mirrors `imp-store`'s
+/// `materialize_pool` (threads parked on a channel `recv()`, not tokio's
+/// uncapped, unconditionally-created blocking pool). Bounds live thread
+/// count to `size` regardless of how many jobs are submitted at once, and
+/// keeps jobs that never touch the `--jobs` semaphore (pure cache hits)
+/// running at full pool-sized parallelism, unthrottled.
+///
+/// Threads are grown lazily, one at a time, only when a submission finds no
+/// worker currently idle — not spawned eagerly up front. One `Scheduler` (one
+/// pool) lives for a whole build in production, so eager-vs-lazy doesn't
+/// matter there; it matters a great deal in this crate's own test suite,
+/// which constructs a fresh `Scheduler` per test — eager spawning turned
+/// every one of those into an immediate `size`-thread cost regardless of how
+/// many jobs (often just one or two) the test actually submits, multiplying
+/// out to hundreds of superfluous live threads under `cargo test`'s
+/// parallelism and starving unrelated timing-sensitive tests of OS scheduling
+/// time.
+struct DispatchPool {
+    sender: crossbeam_channel::Sender<PoolJob>,
+    inner: Arc<DispatchPoolInner>,
+}
+
+impl DispatchPool {
+    fn new(size: usize) -> Self {
+        let (tx, rx) = crossbeam_channel::unbounded::<PoolJob>();
+        let inner = Arc::new(DispatchPoolInner {
+            receiver: rx,
+            size: size.max(1),
+            spawned: AtomicUsize::new(0),
+            idle: AtomicUsize::new(0),
+        });
+        Self { sender: tx, inner }
+    }
+
+    /// Spawn one more worker thread if no worker looks idle right now and
+    /// there's still headroom under `size`. A submission racing another
+    /// submission's idle-check can under- or over-grow by one thread; that's
+    /// fine — this only tunes how many threads exist, never correctness (a
+    /// job left in the channel is picked up by any worker, existing or new).
+    fn grow_if_needed(&self) {
+        if self.inner.idle.load(Ordering::SeqCst) > 0 {
+            return;
+        }
+        let spawned_before = self.inner.spawned.fetch_add(1, Ordering::SeqCst);
+        if spawned_before >= self.inner.size {
+            self.inner.spawned.fetch_sub(1, Ordering::SeqCst);
+            return;
+        }
+        let inner = Arc::clone(&self.inner);
+        std::thread::Builder::new()
+            .name(format!("imp-scheduler-{spawned_before}"))
+            .spawn(move || loop {
+                inner.idle.fetch_add(1, Ordering::SeqCst);
+                let job = inner.receiver.recv();
+                inner.idle.fetch_sub(1, Ordering::SeqCst);
+                match job {
+                    Ok(job) => job(),
+                    Err(_) => break,
+                }
+            })
+            .expect("spawn scheduler dispatch worker thread");
+    }
+
+    fn submit(&self, job: PoolJob) {
+        self.grow_if_needed();
+        self.sender
+            .send(job)
+            .expect("scheduler dispatch pool receiver dropped");
+    }
+}
+
+/// Automatic dispatch-pool size for this machine, independent of `--jobs`:
+/// enough physical threads that cache-hit/prep work isn't starved for
+/// concurrency, without letting a wide graph create hundreds of them. Mirrors
+/// `imp-store::materialize_pool::default_worker_count`'s validated `16`
+/// ceiling; duplicated here rather than shared, to avoid an
+/// `imp-scheduler` -> `imp-store` dependency for four lines.
+fn default_pool_size() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(4)
+        .min(16)
+}
+
+/// Extract a human-readable message from a caught panic payload, mirroring
+/// how `std::fmt::Display` for `tokio::task::JoinError` renders one.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        message.to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "Box<dyn Any>".to_string()
+    }
+}
+
 /// Outcome of a finished node, carried on the event stream. The typed result of
 /// a job is returned to its submitter directly, so only success/failure travels
 /// here.
@@ -134,6 +247,12 @@ pub struct Scheduler {
     /// Pulsed whenever `outstanding` changes, so the watchdog can wait cheaply.
     activity: Notify,
     cancellation: Arc<AtomicBool>,
+    /// Fixed-size pool jobs are dispatched onto, instead of
+    /// `tokio::task::spawn_blocking` — see [`DispatchPool`].
+    pool: DispatchPool,
+    /// Lets a job parked on the dispatch pool block on the async `--jobs`
+    /// semaphore (`RunContext::acquire_permit`) instead of busy-spinning.
+    handle: tokio::runtime::Handle,
 }
 
 /// Handle given to a scheduled job so it can announce where it is in its
@@ -152,6 +271,7 @@ pub struct RunContext {
     slots: Arc<Mutex<Vec<usize>>>,
     state: Arc<RunState>,
     cancellation: Arc<AtomicBool>,
+    handle: tokio::runtime::Handle,
 }
 
 struct RunState {
@@ -167,8 +287,9 @@ impl RunContext {
     }
 
     /// Take the concurrency slot that bounds `--jobs`, if this job does not hold
-    /// one already. Spins on the blocking pool because it runs inside a
-    /// `spawn_blocking` closure and cannot await.
+    /// one already. Runs on a dispatch-pool thread (never a tokio async worker
+    /// thread), so it's safe to genuinely block here via `Handle::block_on`
+    /// rather than spin.
     ///
     /// `strict` decides what happens when the run is being canceled. A job that
     /// is only reserving gives up and returns `false`, so a cancellation does not
@@ -180,22 +301,41 @@ impl RunContext {
         if held.is_some() {
             return true;
         }
-        loop {
-            match self.permits.clone().try_acquire_owned() {
-                Ok(permit) => {
-                    *held = Some(permit);
-                    return true;
-                }
-                Err(tokio::sync::TryAcquireError::NoPermits) => {
-                    if !strict && self.cancellation.load(Ordering::SeqCst) {
-                        return false;
+        let permits = Arc::clone(&self.permits);
+        if strict {
+            let permit = self
+                .handle
+                .block_on(permits.acquire_owned())
+                .expect("scheduler semaphore closed");
+            *held = Some(permit);
+            return true;
+        }
+        // No cancellation `Notify` exists today (just a plain `AtomicBool`), so
+        // re-check it on a coarse timer instead of adding a cross-cutting
+        // signal for this alone. Acquiring a freed permit is still immediate —
+        // only cancellation detection is delayed, by at most one tick.
+        let cancellation = Arc::clone(&self.cancellation);
+        let acquired = self.handle.block_on(async move {
+            let mut acquire = std::pin::pin!(permits.acquire_owned());
+            loop {
+                tokio::select! {
+                    res = &mut acquire => {
+                        break Some(res.expect("scheduler semaphore closed"));
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                Err(tokio::sync::TryAcquireError::Closed) => {
-                    panic!("scheduler semaphore closed")
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                        if cancellation.load(Ordering::SeqCst) {
+                            break None;
+                        }
+                    }
                 }
             }
+        });
+        match acquired {
+            Some(permit) => {
+                *held = Some(permit);
+                true
+            }
+            None => false,
         }
     }
 
@@ -270,13 +410,16 @@ impl RunContext {
 
 impl Scheduler {
     /// Create a scheduler bounded to `jobs` concurrent tasks that emits node
-    /// events onto `events`.
+    /// events onto `events`. Must be called from within a tokio runtime (it
+    /// captures the current [`tokio::runtime::Handle`] for the dispatch pool's
+    /// workers to block on the `--jobs` semaphore with).
     pub fn new(
         jobs: usize,
         cancellation: Arc<AtomicBool>,
         events: UnboundedSender<TaskEvent>,
     ) -> Arc<Self> {
         let jobs = jobs.max(1);
+        let pool_size = jobs.max(default_pool_size());
         Arc::new(Self {
             permits: Arc::new(Semaphore::new(jobs)),
             slots: Arc::new(Mutex::new((0..jobs).collect())),
@@ -285,6 +428,8 @@ impl Scheduler {
             outstanding: AtomicUsize::new(0),
             activity: Notify::new(),
             cancellation,
+            pool: DispatchPool::new(pool_size),
+            handle: tokio::runtime::Handle::current(),
         })
     }
 
@@ -370,8 +515,21 @@ impl Scheduler {
             slots: Arc::clone(&self.slots),
             state: Arc::clone(&state),
             cancellation: Arc::clone(&self.cancellation),
+            handle: self.handle.clone(),
         };
-        let result = tokio::task::spawn_blocking(move || f(context)).await;
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        self.pool.submit(Box::new(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(context)))
+                .map_err(panic_message);
+            let _ = result_tx.send(outcome);
+        }));
+        // The pool's worker threads never drop a job without sending a result
+        // (the `catch_unwind` above guarantees that), so a `RecvError` here
+        // would mean a worker thread died some other way — treat it the same
+        // as a panic rather than unwrapping.
+        let result = result_rx
+            .await
+            .unwrap_or_else(|_| Err("lost dispatch pool worker".to_string()));
         if let Some(slot) = state.slot.lock().unwrap().take() {
             let _ = self.events.send(TaskEvent::LaneCleared {
                 kind: LaneKind::Sandbox,
@@ -388,7 +546,7 @@ impl Scheduler {
         let outcome = match &result {
             Ok(Ok(_)) => TaskOutcome::Ok,
             Ok(Err(error)) => TaskOutcome::Err(format!("{error:#}")),
-            Err(join) => TaskOutcome::Err(format!("worker panicked: {join}")),
+            Err(message) => TaskOutcome::Err(format!("worker panicked: {message}")),
         };
         let cached = Some(!state.started.load(Ordering::SeqCst));
         let cache_source = *state.cache_source.lock().unwrap();
@@ -402,7 +560,7 @@ impl Scheduler {
 
         match result {
             Ok(inner) => inner,
-            Err(join) => bail!("scheduler worker panicked: {join}"),
+            Err(message) => bail!("scheduler worker panicked: {message}"),
         }
     }
 }
@@ -411,7 +569,7 @@ impl Scheduler {
 mod tests {
     use super::{Scheduler, TaskEvent, TaskKind};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     #[tokio::test]
     async fn cache_only_sandbox_job_is_classified_without_starting_a_lane() {
@@ -608,5 +766,136 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), work)
             .await
             .expect("reserve-only jobs must not exhaust the permit pool");
+    }
+
+    /// The dispatch pool must reuse a small, fixed set of threads no matter
+    /// how many jobs fan in at once — this is the regression guard for the
+    /// original bug (unconditional `spawn_blocking` letting thread count grow
+    /// unbounded with the graph's width). `JOBS` is picked above
+    /// `default_pool_size()`'s 16-thread ceiling so the pool size is exactly
+    /// `JOBS`, making the bound deterministic and independent of the test
+    /// machine's core count.
+    #[tokio::test]
+    async fn dispatch_pool_bounds_live_thread_count() {
+        const JOBS: usize = 20;
+        let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = Scheduler::new(JOBS, Arc::new(AtomicBool::new(false)), tx);
+        let thread_ids = Arc::new(Mutex::new(std::collections::HashSet::new()));
+
+        let mut handles = Vec::new();
+        for index in 0..(JOBS * 5) {
+            let scheduler = Arc::clone(&scheduler);
+            let thread_ids = Arc::clone(&thread_ids);
+            handles.push(tokio::spawn(async move {
+                scheduler
+                    .run(
+                        None,
+                        format!("job {index}"),
+                        TaskKind::Sandbox,
+                        move |_context| {
+                            thread_ids.lock().unwrap().insert(std::thread::current().id());
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            Ok(())
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let seen = thread_ids.lock().unwrap().len();
+        assert!(
+            seen <= JOBS,
+            "dispatch pool must reuse a fixed set of threads, saw {seen} distinct threads for {} jobs",
+            JOBS * 5
+        );
+    }
+
+    /// A job whose closure panics must be reported as a normal error, not
+    /// crash the process or wedge the caller — and the worker thread that ran
+    /// it must survive to run the next job. Guards the `catch_unwind` wrapper
+    /// the dispatch pool needs (a naive pool would unwind straight out of the
+    /// worker loop and permanently lose that thread).
+    #[tokio::test]
+    async fn a_panicking_job_is_reported_and_its_worker_survives() {
+        let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = Scheduler::new(1, Arc::new(AtomicBool::new(false)), tx);
+
+        let panicked = scheduler
+            .run(None, "boom", TaskKind::Sandbox, |_context| -> anyhow::Result<()> {
+                panic!("deliberate test panic");
+            })
+            .await;
+        let message = panicked.expect_err("a panicking job must surface as an error").to_string();
+        assert!(
+            message.contains("worker panicked"),
+            "unexpected error message: {message}"
+        );
+
+        scheduler
+            .run(None, "after panic", TaskKind::Sandbox, |_context| Ok(()))
+            .await
+            .expect("a later job must still run on a surviving worker thread");
+    }
+
+    /// A queued `reserve()` must give up promptly when the run is canceled,
+    /// rather than waiting for the job ahead of it (which may never finish)
+    /// to release its permit — the behavior `acquire_permit`'s doc comment
+    /// promises. Exercises the `strict = false` `select!`/cancellation-poll
+    /// path the busy-spin was replaced with.
+    #[tokio::test]
+    async fn reserve_gives_up_on_cancellation_without_waiting_out_the_queue() {
+        let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let scheduler = Scheduler::new(1, Arc::clone(&cancellation), tx);
+
+        let (holder_ready_tx, holder_ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder_scheduler = Arc::clone(&scheduler);
+        let holder = tokio::spawn(async move {
+            holder_scheduler
+                .run(None, "holder", TaskKind::Sandbox, move |context| {
+                    context.reserve();
+                    let _ = holder_ready_tx.send(());
+                    let _ = release_rx.recv();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+        holder_ready_rx
+            .await
+            .expect("holder must reserve the sole permit before we queue behind it");
+
+        let queued_scheduler = Arc::clone(&scheduler);
+        let queued = tokio::spawn(async move {
+            queued_scheduler
+                .run(None, "queued", TaskKind::Sandbox, |context| {
+                    context.reserve();
+                    Ok(())
+                })
+                .await
+        });
+
+        // Let the queued job actually start waiting on the held permit before
+        // canceling, so this exercises the wait path and not the up-front
+        // `run()` cancellation check.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        cancellation.store(true, Ordering::SeqCst);
+
+        tokio::time::timeout(std::time::Duration::from_millis(500), queued)
+            .await
+            .expect(
+                "queued reserve() must give up on cancellation instead of \
+                 waiting out the holder, which is never released before this timeout",
+            )
+            .unwrap()
+            .unwrap();
+
+        let _ = release_tx.send(());
+        holder.await.unwrap();
     }
 }
