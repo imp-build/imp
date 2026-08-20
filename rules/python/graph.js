@@ -4,7 +4,14 @@ import { LINT } from "//rules/workflows/lint";
 import { PACKAGE } from "//rules/workflows/package";
 import { RUN } from "//rules/workflows/run";
 import { TEST } from "//rules/workflows/test";
-import { files, output, packagePath, semantic, task } from "imp:core";
+import {
+	files,
+	output,
+	packagePath,
+	platformInfo,
+	semantic,
+	task,
+} from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 import {
 	defaultPexToolchain,
@@ -70,6 +77,17 @@ function resolveArgs(resolve, mode) {
 	return flavor.extra ? ["--extra", flavor.extra] : [];
 }
 
+// uv places the venv's Python interpreter at .venv/bin/python on
+// Linux/macOS but .venv/Scripts/python.exe on Windows (uv follows the
+// native venv layout for the host platform, regardless of which shell is
+// driving it — confirmed by a real "No such file or directory" failure
+// against a hardcoded Unix-only path).
+function venvPythonRelPath() {
+	return platformInfo().os === "windows"
+		? ".venv/Scripts/python.exe"
+		: ".venv/bin/python";
+}
+
 function appBuild(spec) {
 	const shell = nativeTool("sh");
 	const sources = files({
@@ -102,7 +120,7 @@ function appBuild(spec) {
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
-					'src=$1; uv=$2; pex=$3; out=$4; sync=$5; entry=$6; pexargs=$7; "$uv" sync --project "$src" --locked --no-progress $sync && "$src/.venv/bin/python" "$pex" --venv-repository="$src/.venv" --no-transitive --pre -o "$out" ${entry:+-e "$entry"} -D "$src" $pexargs',
+					'src=$1; uv=$2; pex=$3; out=$4; sync=$5; entry=$6; pexargs=$7; venvpy=$8; "$uv" sync --project "$src" --locked --no-progress $sync && "$src/$venvpy" "$pex" --venv-repository="$src/.venv" --no-transitive --pre -o "$out" ${entry:+-e "$entry"} -D "$src" $pexargs',
 					"python-app-build",
 					inputs.resolve.path,
 					exec.tool(inputs.uv, "uv"),
@@ -111,6 +129,7 @@ function appBuild(spec) {
 					syncArgs.join(" "),
 					inputs.entryPoint || "",
 					inputs.extraPexArgs.join(" "),
+					venvPythonRelPath(),
 				],
 				inputs: [inputs.sources],
 				tools: [inputs.shell],
@@ -195,12 +214,13 @@ function testRoot(spec) {
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
-					'src=$1; uv=$2; sync=$3; testargs=$4; "$uv" sync --project "$src" --locked --no-progress $sync && "$src/.venv/bin/python" -m pytest "$src" -rA $testargs',
+					'src=$1; uv=$2; sync=$3; testargs=$4; venvpy=$5; "$uv" sync --project "$src" --locked --no-progress $sync && "$src/$venvpy" -m pytest "$src" -rA $testargs',
 					"python-test",
 					inputs.resolve.path,
 					exec.tool(inputs.uv, "uv"),
 					syncArgs.join(" "),
 					inputs.testArgs.join(" "),
+					venvPythonRelPath(),
 				],
 				inputs: [inputs.sources],
 				tools: [inputs.shell],
