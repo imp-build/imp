@@ -2452,13 +2452,14 @@ fn report_cache_telemetry(
 /// whole resolution) means callers for *different* tool names never
 /// contend with each other, and the outer map lock is only ever held for
 /// the fast get-or-insert, never across the actual filesystem work.
+type NativeToolInflightMap = HashMap<String, Arc<OnceLock<Result<PathBuf, String>>>>;
+
 fn singleflight_register_native_tool(
     service: &Arc<dyn ExecutionService>,
     name: &str,
     resolved: &Path,
 ) -> Result<PathBuf, String> {
-    static INFLIGHT: OnceLock<Mutex<HashMap<String, Arc<OnceLock<Result<PathBuf, String>>>>>> =
-        OnceLock::new();
+    static INFLIGHT: OnceLock<Mutex<NativeToolInflightMap>> = OnceLock::new();
     let map = INFLIGHT.get_or_init(|| Mutex::new(HashMap::new()));
 
     let cell = {
