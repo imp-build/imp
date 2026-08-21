@@ -6,7 +6,6 @@ import { odinTestPackage } from "//rules/odin";
 // `foreign import`, not through CMake. gcc rather than the zig-preferred
 // default — see rules/c/graph_example/BUILD.js's own note on #74.
 export const lib = ccLibrary({
-	path: "rules/odin/example/native",
 	toolchain: defaultGccGraphToolchain(),
 });
 

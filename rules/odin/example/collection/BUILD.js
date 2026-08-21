@@ -6,10 +6,9 @@ import { jsSources } from "//rules/js";
 // the source closure the `lib` collection mapping implies. "core:fmt" covers
 // the other side of that: an unmapped collection stays the toolchain's job.
 export const app = odinPackage({
-	base: "rules/odin/example/collection",
 	path: "app",
 	collections: { lib: "vendor" },
 	toolchain: "dev-2026-03",
 });
 
-export const js = jsSources({ base: "rules/odin/example/collection" });
+export const js = jsSources();

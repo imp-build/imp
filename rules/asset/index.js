@@ -68,7 +68,7 @@ function source_files({ srcs, exclude = [], path = ".", base = packagePath() }, 
  * @category graph
  * @param {object} opts
  * @param {string[]} opts.srcs Source glob patterns, relative to `base`.
- * @param {string} [opts.base=packagePath()] Workspace-relative source base. Pass this explicitly through BUILD helpers.
+ * @param {string} [opts.base=packagePath()] Workspace-relative source base.
  * @returns {{sources: object, [BUILD]: object}} Graph source and build handles.
  */
 export function asset({ srcs, base = packagePath() }) {
@@ -165,7 +165,7 @@ export class ResourcePackage extends Target {
  * @param {string[]} opts.srcs Source glob patterns to include (required, non-empty).
  * @param {string[]} [opts.exclude] Glob patterns to exclude from `srcs`.
  * @param {string} [opts.path] Directory relative to `base`.
- * @param {string} [opts.base=packagePath()] Workspace-relative source base. Pass this explicitly through BUILD helpers.
+ * @param {string} [opts.base=packagePath()] Workspace-relative source base.
  * @returns {ResourcePackage} Legacy-compatible object with a graph `.files` handle.
  */
 export function resourcePackage({

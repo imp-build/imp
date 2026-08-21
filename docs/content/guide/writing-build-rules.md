@@ -92,23 +92,38 @@ Modes and configuration are equally explicit. Put `semantic.mode("opt")` or
 `semantic.config("rust", "edition")` in only the tasks that read those values.
 Changing unrelated invocation context then leaves shared producers untouched.
 
-`files()` roots are workspace-relative. Capture `packagePath()` in the BUILD
-module that owns the sources, then pass it explicitly through helpers:
+`files()` roots are workspace-relative. Rule factories that need one — `asset()`,
+`cargoPackage()`, `odinPackage()`, `ccLibrary()`, `jsSources()`, and others —
+default a `base`/`path` option to `packagePath()`:
 
 ```js
-import { packagePath } from "imp:core";
 import { asset } from "//rules/asset";
 
-const here = packagePath();
-const sources = asset({ base: here, srcs: ["src/**/*.rs"] }).sources;
+export const sources = asset({ srcs: ["src/**/*.rs"] }).sources;
 ```
 
-The default is convenient for a direct BUILD call, but helpers should accept
-and forward `base`: imported BUILD modules do not have one inferable owner.
+`packagePath()` resolves to the BUILD module actually being evaluated, not the
+one nearest on the JS call stack: it walks the whole stack and keeps the
+*outermost* `BUILD.js` frame, so a factory called through an imported helper
+still resolves to the consuming BUILD.js, not to wherever the helper happens
+to be defined (issue #71; see `spike.rs`'s
+`graph_package_path_resolves_to_the_consuming_build_js_through_a_helper`
+test). Inside a `task()`/`expand()` `run()`/`create()` callback, the value is
+captured once at declaration time and delivered ambiently, since by execution
+time the declaring module's stack frame is long gone. This is the durable
+ownership contract, not a migration-era shim — helpers do not need to accept
+and forward `base` defensively. Pass `base`/`path` explicitly only when a
+factory's source root is genuinely not the calling module's own directory
+(e.g. sources actually live in a different, hand-picked package).
 
-During the ruleset migration, `resourcePackage()` from `//rules/asset` still
-works as a legacy dependency and also exposes its graph-native source handle
-as `.files`. New graph tasks should consume that handle directly.
+Exported-root addressing (`//pkg:name`) is unrelated: a root's address is
+always the *exporting* module's own scope plus the export name, regardless of
+where the underlying handle was constructed — aliasing or re-exporting a
+handle across packages does not change ownership or addressing.
+
+`resourcePackage()` from `//rules/asset` still works as a legacy dependency
+for Rust and Odin and also exposes its graph-native source handle as `.files`.
+New graph tasks should consume that handle directly.
 
 An action's named files and directories are normalized into independent CAS
 artifact roots. Downstream tasks consume those handles directly; action

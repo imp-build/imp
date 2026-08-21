@@ -100,12 +100,15 @@ export function sourcesField(opts) {
  * Return the workspace-relative directory of the calling BUILD module.
  *
  * Rule factories use this to keep their public path arguments relative to
- * the BUILD.js that invoked them rather than to the workspace root. Inside
- * a task()/expand() run()/create() callback this still works the same
- * way — the correct value was captured when the task/expansion was
- * declared and is delivered ambiently (see graph_core.js's
- * _graphAmbientPackagePath) rather than by walking the call stack, which
- * by execution time no longer contains the declaring BUILD.js's frame.
+ * the BUILD.js that invoked them rather than to the workspace root. This is
+ * the durable ownership contract, not a migration-era shim: it resolves
+ * correctly through helper indirection (a factory called from an imported
+ * BUILD helper still resolves to the consuming BUILD.js, not wherever the
+ * helper is defined — issue #71) and inside a task()/expand() run()/create()
+ * callback (the correct value was captured when the task/expansion was
+ * declared and is delivered ambiently, see graph_core.js's
+ * _graphAmbientPackagePath, rather than by walking the call stack, which
+ * by execution time no longer contains the declaring BUILD.js's frame).
  *
  * @category graph
  * @returns {string} `"."` for the workspace root.

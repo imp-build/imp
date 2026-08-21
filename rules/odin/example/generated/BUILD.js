@@ -6,7 +6,6 @@ import { odinGen, odinPackage } from "//rules/odin";
 const generatedRelativePath = "value.odin";
 
 const generatedValue = odinGen({
-	base: "rules/odin/example/generated",
 	srcs: ["BUILD.js"],
 	out: generatedRelativePath,
 	cmd: [
@@ -18,7 +17,6 @@ const generatedValue = odinGen({
 });
 
 export const app = odinPackage({
-	base: "rules/odin/example/generated",
 	srcs: ["*.odin"],
 	generatedSrcs: [
 		{ artifact: generatedValue.generated, path: generatedRelativePath },
