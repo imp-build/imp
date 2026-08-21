@@ -2476,7 +2476,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn exec_run_stages_inputs_as_hardlinks_from_cas() {
+    fn exec_run_stages_inputs_as_independent_copies_from_cas() {
         use std::os::unix::fs::MetadataExt;
 
         let root = tempfile::tempdir().unwrap();
@@ -2498,9 +2498,17 @@ mod tests {
         let blob_path = imp_store::cache::cas_blob_path(&digest).unwrap();
         let blob_ino = std::fs::metadata(&blob_path).unwrap().ino();
         let staged_ino = std::fs::metadata(&staged).unwrap().ino();
-        assert_eq!(
+        // Deliberately NOT hardlinked (see 38912a1): a hardlinked sandbox file
+        // would alias the shared, permanent CAS blob, so an action that mutates
+        // its input in place would corrupt that blob for every other consumer.
+        assert_ne!(
             blob_ino, staged_ino,
-            "declared input should be hardlinked from its CAS blob into the sandbox, not copied"
+            "declared input should be an independent copy from its CAS blob into the sandbox, not hardlinked"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&staged).unwrap(),
+            "d",
+            "staged copy should have the same content as the CAS blob"
         );
 
         std::fs::remove_dir_all(sandbox_root).ok();
