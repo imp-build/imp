@@ -54,7 +54,7 @@ import {
 	rustGraphToolchain,
 } from "//rules/rust/toolchain";
 
-import { nativeTool, nativeToolSpec } from "//rules/imp/native-tool";
+import { nativeTool } from "//rules/imp/native-tool";
 
 import { defaultGccGraphToolchain, gccRustLinkDriverEnv } from "//rules/c/gcc";
 import { moldRustLinkerEnv } from "//rules/c/mold";
@@ -78,19 +78,26 @@ import "//rules/rust/generate_build";
 // docstring above)
 // ---------------------------------------------------------------------------
 
-// cargo/rustc need a real C link driver in the hermetic sandbox — rustc
-// shells out to a program literally named "cc" by default. Reuse the gcc
-// toolchain Odin already relies on for the same reason (rules/odin/index.js's
-// odinScriptTools): gccRustLinkDriverEnv() resolves a "clang"-named wrapper
-// script's absolute path that execs the real (prefixed) gcc binary, so
-// pointing rustc's linker at it sidesteps needing a "cc" alias of our own. A
-// workspace can additionally opt into a faster backend linker (e.g. mold)
-// via rustToolchain({ linker: moldGraphToolchain() }); by default no extra
-// -fuse-ld= flag is added.
+// cargo/rustc need a real C link driver in the hermetic sandbox on Linux —
+// rustc shells out to a program literally named "cc" by default there. Reuse
+// the gcc toolchain Odin already relies on for the same reason
+// (rules/odin/index.js's odinScriptTools): gccRustLinkDriverEnv() resolves a
+// "clang"-named wrapper script's absolute path that execs the real (prefixed)
+// gcc binary, so pointing rustc's linker at it sidesteps needing a "cc" alias
+// of our own. A workspace can additionally opt into a faster backend linker
+// (e.g. mold) via rustToolchain({ linker: moldGraphToolchain() }); by default
+// no extra -fuse-ld= flag is added.
 //
-// Windows has no pinned toolchain to plug into this abstraction (the Bootlin
-// gcc archive is Linux-only) — it always uses the host's own MinGW gcc,
-// discovered via PATH, regardless of any declared rustToolchain/linkDriver.
+// Windows has no such link-driver override at all: this repo's Windows Rust
+// toolchain resolves to the *-pc-windows-msvc host triple (see
+// rules/rust/toolchain's PLATFORM_TRIPLES), so rustc's default linker is
+// already MSVC's link.exe — the same one the installed rustc itself needs to
+// have run at all. Forcing `-C linker=gcc` there (an earlier version of this
+// file did) doesn't just add an unpinned host-PATH gcc dependency; it
+// silently swaps the msvc-target link step for a mingw one, mixing mingw- and
+// MSVC-ABI toolchains for no reason. cc-rs-driven build scripts don't need
+// gcc either: on an msvc target, the `cc` crate finds MSVC's own cl.exe via
+// vswhere/registry probing by default.
 //
 // Resolve the graph-native gcc/mold link-driver/linker handles for a Rust
 // toolchain's legacy .attrs.linkDriver/.attrs.linker (or gcc's own default).
@@ -148,12 +155,7 @@ export function linkerToolInputs(linkerHandles) {
 
 export async function rustLinkerTools(exec, input, linkerHandles, kacheActive) {
 	if (platformInfo().os === "windows") {
-		return {
-			tools: [await nativeToolSpec(nativeTool("gcc"))],
-			rustflags: "-C linker=gcc",
-			env: [],
-			pathDirs: [],
-		};
+		return { tools: [], rustflags: "", env: [], pathDirs: [] };
 	}
 	const gccResult = gccRustLinkDriverEnv(
 		exec,
