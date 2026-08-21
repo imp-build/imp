@@ -99,6 +99,15 @@ function noopDoctestTask(display) {
 // whole-workspace build makes a same-named test target in two different
 // crates a real (if unlikely) possibility, so name+kind alone isn't enough
 // to disambiguate.
+//
+// On Windows, cargo's `.executable` is a native path: the buildDir segment
+// keeps the forward slashes it was passed with on the --target-dir flag, but
+// every segment cargo itself appends after that (\debug\deps\...) uses
+// backslashes. `.manifest_path` is a native path too. Normalizing both to
+// forward slashes here keeps them consistent so callers' own forward-slash
+// matching (crateTestTask's `${buildDir}/` prefix strip and its
+// `/${dir}/`-in-manifestPath filter, below) works the same on every
+// platform.
 function parseTestBinaries(stdout, buildDir) {
 	const binaries = [];
 	for (const line of stdout.split("\n")) {
@@ -116,13 +125,16 @@ function parseTestBinaries(stdout, buildDir) {
 			!(msg.profile && msg.profile.test)
 		)
 			continue;
-		const idx = msg.executable.indexOf(buildDir);
-		const executable = idx === -1 ? msg.executable : msg.executable.slice(idx);
+		const normalized = msg.executable.replace(/\\/g, "/");
+		const idx = normalized.indexOf(buildDir);
+		const executable = idx === -1 ? normalized : normalized.slice(idx);
 		binaries.push({
 			name: msg.target.name,
 			kind: (msg.target.kind && msg.target.kind[0]) || "test",
 			executable,
-			manifestPath: msg.manifest_path || null,
+			manifestPath: msg.manifest_path
+				? msg.manifest_path.replace(/\\/g, "/")
+				: null,
 		});
 	}
 	return binaries;
@@ -232,15 +244,23 @@ function manifestSources(root) {
 // join still resolves them there unchanged), and that curated directory is
 // what actually gets captured.
 const CURATED_TEST_BUILD_SCRIPT = [
-	'imp_sandbox_root="$(pwd)"; manifest=$1; target_dir=$2; rustflags=$3; shift 3;',
+	"manifest=$1; target_dir=$2; rustflags=$3; shift 3;",
 	'bins_dir="$target_dir.bins"; report="$target_dir.json";',
 	'mkdir -p "$bins_dir";',
 	'RUSTFLAGS="$rustflags" cargo test --locked --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@" > "$report";',
 	'cat "$report";',
 	'jq -r \'select(.reason=="compiler-artifact" and .profile.test==true and .executable != null) | .executable\' "$report" |',
 	"while IFS= read -r exe; do",
-	"  exe=${exe%$'\\r'};",
-	'  rel=${exe#"$imp_sandbox_root/"}; rel=${rel#"$target_dir/"};',
+	// Strip a trailing CR (native jq.exe writes its stdout pipe in CRT text
+	// mode on Windows, translating \n to \r\n; `read -r` only strips \n) and
+	// normalize backslashes to forward slashes (cargo reports absolute paths
+	// natively on Windows, but only the target_dir segment it was passed
+	// keeps forward slashes — mirrors parseTestBinaries' own normalization).
+	"  exe=${exe%$'\\r'}; exe=${exe//\\\\\\\\//};",
+	'  case "$exe" in',
+	'    *"$target_dir"/*) rel=${exe#*"$target_dir"/} ;;',
+	"    *) rel=$exe ;;",
+	"  esac;",
 	'  case "$rel" in */*) mkdir -p "$bins_dir/${rel%/*}" ;; esac;',
 	'  cp "$exe" "$bins_dir/$rel";',
 	"done",
