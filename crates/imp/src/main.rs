@@ -620,7 +620,16 @@ async fn run() -> Result<()> {
     // the stats block instead. `AlreadyPrinted` tells that catch-all not to
     // print it a second time.
     if let Err(error) = &outcome.result {
-        eprintln!("error: {error:#}");
+        // A goal's own report (fmt/lint/test) is a multi-line, column-aligned
+        // block whose first line is a status row, not a sentence — prefixing
+        // it with "error: " would misalign that row against the rest. Plain
+        // single-line messages still get the prefix.
+        let message = format!("{error:#}");
+        if message.contains('\n') {
+            eprintln!("{message}");
+        } else {
+            eprintln!("error: {message}");
+        }
     }
     if let Some(report) = &outcome.report {
         println!("{report}");

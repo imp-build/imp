@@ -10,7 +10,8 @@
 // //rules/rust/workspace_expansion, //rules/odin). attach(label, "lint", fn)
 // (the `lint()` sugar in imp:core) is a separate, still-supported mechanism
 // and is unaffected.
-import { goal, goalError, goalFlags, logInfo, writeWorkspace } from "imp:core";
+import { goal, goalError, goalFlags, writeWorkspace } from "imp:core";
+import { statusReport } from "//rules/workflows/report";
 
 /** Report graph lint roots using the same result contract as legacy linters. */
 export function graphLintGoal(roots) {
@@ -27,24 +28,24 @@ export function graphLintGoal(roots) {
 			}
 		}
 	}
-	for (const { address, output } of results) {
-		if (output) logInfo(`${address}:\n${output}`);
-	}
-	const fixed = results.filter((result) => result.fixApplied);
-	if (fixed.length > 0) {
-		logInfo(
-			`lint --fix: ${fixed.map((result) => result.address).join(", ")} had fixes applied`,
-		);
-	}
-	const failed = results.filter((result) => !result.ok);
-	logInfo(
-		`lint: ${results.length - failed.length}/${results.length} target(s) clean`,
+	// Returned (on an all-passing run) or thrown as the goalError message (on
+	// any failure) rather than logged — see graphFmtGoal's identical reasoning
+	// (rules/workflows/fmt/index.js).
+	const report = statusReport(
+		results.map((result) => ({
+			key: result.address,
+			status: !result.ok ? "fail" : result.fixApplied ? "fixed" : "clean",
+			output: !result.ok ? result.output : undefined,
+		})),
+		{
+			order: ["fail", "fixed", "clean"],
+			colors: { fail: "red", fixed: "yellow", clean: "green" },
+			summary: (counts) =>
+				`lint: ${counts.clean} clean, ${counts.fixed} fixed, ${counts.fail} failed`,
+		},
 	);
-	if (failed.length > 0) {
-		throw goalError(
-			`lint failed: ${failed.map((result) => result.address).join(", ")}`,
-		);
-	}
+	if (results.some((result) => !result.ok)) throw goalError(report);
+	return report;
 }
 
 export const LINT = goal("lint", undefined, {
