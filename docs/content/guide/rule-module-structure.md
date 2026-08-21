@@ -98,10 +98,10 @@ workspace configuration, or ordinary rule-author helpers. `nativeTool()`
 returns a lazy graph handle: the host `PATH` lookup happens only when selected
 work consumes it. `nativeToolSpec()` resolves that handle into the tool-spec
 shape `exec.action()`'s legacy-tool-spec bridge accepts (`graph_core.js`'s
-`addTool`) — still load-bearing (e.g. the Windows-only rust-linker fallback
-in `rules/rust/index.js`'s `rustLinkerTools()`, tracked in #155), not a
-deprecated shim. `rules/rust/kache`'s build-cache role and `rules/c/mold`'s
-Odin-linker role used to reach this bridge dynamically via
+`addTool`) — still load-bearing (e.g. `rules/python/source.js`'s
+`pythonSourceRunSpec()` resolving `pythonSources({ deps })`'s `nativeTool()`
+entries), not a deprecated shim. `rules/rust/kache`'s build-cache role and
+`rules/c/mold`'s Odin-linker role used to reach this bridge dynamically via
 `productFor(handle, ROLE)`; as of #148 both are plain, statically-imported
 function calls instead.
 
