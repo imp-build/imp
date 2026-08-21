@@ -2,7 +2,7 @@
 // expand(), one child per crate name.
 //
 // A single `cargo clippy --workspace`/`cargo test --no-run --workspace`/
-// `cargo fmt --check`/`cargo test --doc --workspace` run is shared by every
+// `cargo fmt --workspace`/`cargo test --doc --workspace` run is shared by every
 // workspace member's corresponding root instead of one cargo invocation per
 // crate — most crates' own dependency closures already cover most of a
 // typical workspace, so per-crate scoping buys little isolation in practice.
@@ -14,10 +14,12 @@ import { LINT } from "//rules/workflows/lint";
 import { TEST } from "//rules/workflows/test";
 import {
 	configuration,
+	digestOf,
 	expand,
 	files,
 	goalError,
 	output,
+	semantic,
 	task,
 } from "imp:core";
 import {
@@ -198,8 +200,14 @@ function testDepsForDirs(dirs) {
 
 // cargo's own `manifest_path`/`workspace_root` fields are always absolute;
 // every other path used throughout the Rust rules is workspace-relative.
+// On Windows, cargo reports these with backslash separators, so normalize
+// to forward slashes before relativizing.
 function manifestDirRelativeTo(manifestPath, workspaceRoot) {
-	const rel = manifestPath.slice(workspaceRoot.length).replace(/^\/+/, "");
+	const normalizedManifest = manifestPath.replace(/\\/g, "/");
+	const normalizedRoot = workspaceRoot.replace(/\\/g, "/");
+	const rel = normalizedManifest
+		.slice(normalizedRoot.length)
+		.replace(/^\/+/, "");
 	const index = rel.lastIndexOf("/");
 	return index < 0 ? "." : rel.slice(0, index);
 }
@@ -509,15 +517,17 @@ function crateTestTask(dir, testBuild, testTools, deps, testDeps) {
 	});
 }
 
-// One shared `cargo fmt --check` run for a real workspace root. `--all` is
-// load-bearing, not cosmetic: the root manifest of a real Cargo workspace is
-// virtual (a `[workspace]` table with no `[package]` of its own), and
-// `cargo fmt` without `--all` tries to format just "the current crate" —
-// confirmed directly against real cargo (1.93): it exits nonzero with
-// "Failed to find targets" rather than falling back to every member. Reports
-// one "Diff in <abs path> at line N:" header per unformatted file; anything
-// else printed is diagnostic noise (e.g. a trailing summary), ignored the
-// same way clippy's non-JSON stdout lines are.
+// One shared `cargo fmt [--check] --workspace` run for a real workspace
+// root. `--all` is load-bearing, not cosmetic: the root manifest of a real
+// Cargo workspace is virtual (a `[workspace]` table with no `[package]` of
+// its own), and `cargo fmt` without `--all` tries to format just "the
+// current crate" — confirmed directly against real cargo (1.93): it exits
+// nonzero with "Failed to find targets" rather than falling back to every
+// member. Under `--check`, reports one "Diff in <abs path>:N:" header per
+// unformatted file (confirmed against the vendored rustfmt 1.8.0 this repo
+// actually fetches — not the older "at line N:" wording some docs/examples
+// still show); anything else printed is diagnostic noise (e.g. a trailing
+// summary), ignored the same way clippy's non-JSON stdout lines are.
 function workspaceFmtTask(
 	workspaceRootRelative,
 	manifestPath,
@@ -525,8 +535,12 @@ function workspaceFmtTask(
 	toolchainSpec,
 ) {
 	return task({
-		display: `cargo fmt --check --workspace ${workspaceRootRelative}`,
-		inputs: { manifests, ...toolchainInputs(toolchainSpec) },
+		display: `cargo fmt --workspace ${workspaceRootRelative}`,
+		inputs: {
+			manifests,
+			check: semantic.flag("check"),
+			...toolchainInputs(toolchainSpec),
+		},
 		outputs: { report: output.value() },
 		async run(exec, input) {
 			const { tools, env } = await cargoEnv(exec, input, toolchainSpec);
@@ -537,61 +551,73 @@ function workspaceFmtTask(
 					"--manifest-path",
 					manifestPath,
 					"--all",
-					"--check",
+					...(input.check ? ["--check"] : []),
 				],
 				tools,
 				env,
 				inputs: [input.manifests],
+				outputs: { formatted: output.directory(workspaceRootRelative) },
 				allowFailure: true,
 			});
 			const unformatted = [
-				...result.stdout.matchAll(/^Diff in (.+) at line \d+:/gm),
-			].map((m) => m[1]);
+				...result.stdout.matchAll(/^Diff in (.+):\d+:/gm),
+			].map((m) => m[1].replace(/\\/g, "/"));
 			return {
 				report: {
 					exitCode: result.exitCode,
 					unformatted,
 					stdout: result.stdout,
+					formatted: result.outputs.formatted,
 				},
 			};
 		},
 	});
 }
 
-// Per-crate [FMT] root: attributes the shared workspace fmt-check run's
+// Per-crate [FMT] root: attributes the shared workspace fmt run's
 // unformatted-file list back to this one crate by path substring, same
-// attribution technique as crateLintTask.
-function crateFmtTask(dir, fmt) {
+// attribution technique as crateLintTask, and separately lists this crate's
+// own .rs sources (needed in every run, not just failing ones) so write mode
+// has real paths to publish back through //rules/workflows/fmt.
+function crateFmtTask(dir, fmt, manifests) {
 	return task({
-		display: `cargo fmt --check ${dir}`,
-		inputs: { report: fmt.outputs.report, dir },
+		display: `cargo fmt ${dir}`,
+		inputs: {
+			report: fmt.outputs.report,
+			manifests,
+			dir,
+			check: semantic.flag("check"),
+		},
 		outputs: { result: output.value() },
-		async run(_exec, input) {
-			const { exitCode, unformatted, stdout } = input.report;
+		async run(exec, input) {
+			const { exitCode, unformatted, stdout, formatted } = input.report;
 			const own = unformatted.filter((p) => p.includes(`/${input.dir}/`));
-			// cargo fmt --check never writes — no formatted/sourcesDigest, so
-			// //rules/workflows/fmt's status derivation always resolves this to
-			// "unchanged" or "failed", never "changed".
+			const ownPaths = exec
+				.paths(input.manifests)
+				.filter((p) => p.endsWith(".rs") && `/${p}`.includes(`/${input.dir}/`));
 			if (exitCode !== 0 && own.length === 0 && unformatted.length === 0) {
 				// The shared run failed for a reason with no per-file attribution
 				// at all (e.g. a syntax error) — surface it rather than claiming a
 				// clean pass.
 				return {
 					result: {
-						paths: [],
-						check: {
-							requested: true,
-							failed: true,
-						},
-						output:
-							stdout || `cargo fmt --check failed before reaching ${input.dir}`,
+						formatted,
+						sourcesDigest: digestOf(input.manifests.fileset),
+						paths: ownPaths,
+						check: { requested: input.check, failed: true },
+						output: stdout || `cargo fmt failed before reaching ${input.dir}`,
 					},
 				};
 			}
 			return {
 				result: {
-					paths: [],
-					check: { requested: true, failed: own.length > 0 },
+					formatted,
+					sourcesDigest: digestOf(input.manifests.fileset),
+					paths: ownPaths,
+					check: {
+						requested: input.check,
+						failed: input.check ? own.length > 0 : exitCode !== 0,
+					},
 					output: own.length > 0 ? `unformatted: ${own.join(", ")}` : "",
 				},
 			};
@@ -837,7 +863,7 @@ export function cargoWorkspaceExpansion(workspaceRootRelative, toolchainSpec) {
 							: noopDoctestTask(`cargo test --doc ${pkg.name} (disabled)`)
 						).outputs.units,
 					},
-					[FMT]: crateFmtTask(dir, fmt).outputs.result,
+					[FMT]: crateFmtTask(dir, fmt, manifests).outputs.result,
 				};
 			}
 			return children;
@@ -961,8 +987,12 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 			});
 
 			const fmt = task({
-				display: `cargo fmt --check ${path}`,
-				inputs: { manifests, ...toolchainInputs(toolchainSpec) },
+				display: `cargo fmt ${path}`,
+				inputs: {
+					manifests,
+					check: semantic.flag("check"),
+					...toolchainInputs(toolchainSpec),
+				},
 				outputs: { result: output.value() },
 				async run(exec, input) {
 					const { tools, env } = await cargoEnv(exec, input, toolchainSpec);
@@ -973,20 +1003,23 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 							"--manifest-path",
 							manifestPath,
 							"--all",
-							"--check",
+							...(input.check ? ["--check"] : []),
 						],
 						tools,
 						env,
 						inputs: [input.manifests],
+						outputs: { formatted: output.directory(path) },
 						allowFailure: true,
 					});
-					// cargo fmt --check never writes — no formatted/sourcesDigest, so
-					// //rules/workflows/fmt's status derivation always resolves this
-					// to "unchanged" or "failed", never "changed".
+					const paths = exec
+						.paths(input.manifests)
+						.filter((p) => p.endsWith(".rs"));
 					return {
 						result: {
-							paths: [],
-							check: { requested: true, failed: result.exitCode !== 0 },
+							formatted: result.outputs.formatted,
+							sourcesDigest: digestOf(input.manifests.fileset),
+							paths,
+							check: { requested: input.check, failed: result.exitCode !== 0 },
 							output: result.exitCode !== 0 ? result.stdout : "",
 						},
 					};

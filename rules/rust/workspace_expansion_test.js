@@ -36,14 +36,14 @@ function clippyMessage(dir, level) {
 	});
 }
 
-async function resolveHandles(handles) {
+async function resolveHandles(handles, flags = {}) {
 	const roots = handles.map((handle, index) => ({
 		address: `root${index}`,
 		handleId: handle.__graph_id,
 	}));
 	return globalThis.__imp_execute_graph_handles(
 		JSON.stringify(roots),
-		JSON.stringify({}),
+		JSON.stringify({ flags }),
 	);
 }
 
@@ -181,9 +181,9 @@ describe("cargo workspace expansion", () => {
 		});
 	});
 
-	test("shares one cargo fmt --check --workspace run across sibling crates' [FMT] roots", () => {
+	test("shares one cargo fmt --workspace run across sibling crates' [FMT] roots", () => {
 		return withWorkspace(async (host, expansion) => {
-			host.setRunStdout("cargo fmt --check --workspace .", "");
+			host.setRunStdout("cargo fmt --workspace .", "");
 
 			await resolveHandles([
 				expansion.get("crate-a", FMT),
@@ -191,25 +191,77 @@ describe("cargo workspace expansion", () => {
 			]);
 
 			const fmtRuns = host.runs.filter((run) =>
-				run.display.startsWith("cargo fmt --check --workspace"),
+				run.display.startsWith("cargo fmt --workspace"),
 			);
 			expect(fmtRuns.length).toBe(1);
+		});
+	});
+
+	test("plain imp fmt (no --check flag) does not pass --check to cargo fmt", () => {
+		return withWorkspace(async (host, expansion) => {
+			host.setRunStdout("cargo fmt --workspace .", "");
+
+			await resolveHandles([expansion.get("crate-a", FMT)]);
+
+			const [fmtRun] = host.runs.filter((run) =>
+				run.display.startsWith("cargo fmt --workspace"),
+			);
+			expect(fmtRun.argv.includes("--check")).toBe(false);
+		});
+	});
+
+	test("imp fmt --check passes --check to cargo fmt", () => {
+		return withWorkspace(async (host, expansion) => {
+			host.setRunStdout("cargo fmt --workspace .", "");
+
+			await resolveHandles([expansion.get("crate-a", FMT)], { check: true });
+
+			const [fmtRun] = host.runs.filter((run) =>
+				run.display.startsWith("cargo fmt --workspace"),
+			);
+			expect(fmtRun.argv.includes("--check")).toBe(true);
+		});
+	});
+
+	test("write mode (no --check) publishes a formatted output and a real paths list, not the check-only stub", () => {
+		return withWorkspace(async (host, expansion) => {
+			host.setRunStdout("cargo fmt --workspace .", "");
+
+			const [a] = await resolveHandles([expansion.get("crate-a", FMT)]);
+			expect(Array.isArray(a.result.paths)).toBe(true);
+			expect(a.result.formatted != null).toBe(true);
+			expect(a.result.sourcesDigest != null).toBe(true);
+			expect(a.result.check.requested).toBe(false);
 		});
 	});
 
 	test("attributes an unformatted file to the crate it belongs to and leaves the other clean", () => {
 		return withWorkspace(async (host, expansion) => {
 			host.setRunStdout(
-				"cargo fmt --check --workspace .",
-				`Diff in ${manifestPath("crates/a").replace("/Cargo.toml", "/src/lib.rs")} at line 1:\n-x\n+y\n`,
+				"cargo fmt --workspace .",
+				`Diff in ${manifestPath("crates/a").replace("/Cargo.toml", "/src/lib.rs")}:1:\n-x\n+y\n`,
 			);
 
-			const [a] = await resolveHandles([expansion.get("crate-a", FMT)]);
+			const [a] = await resolveHandles([expansion.get("crate-a", FMT)], {
+				check: true,
+			});
 			expect(a.result.check.failed).toBe(true);
 			expect(a.result.output).toContain("unformatted");
 
-			const [b] = await resolveHandles([expansion.get("crate-b", FMT)]);
+			const [b] = await resolveHandles([expansion.get("crate-b", FMT)], {
+				check: true,
+			});
 			expect(b.result.check.failed).toBe(false);
+		});
+	});
+
+	test("write mode: a nonzero cargo fmt exit is a real failure, not silently swallowed", () => {
+		return withWorkspace(async (host, expansion) => {
+			host.setRunStdout("cargo fmt --workspace .", "");
+			host.setRunExitCode("cargo fmt --workspace .", 1);
+
+			const [a] = await resolveHandles([expansion.get("crate-a", FMT)]);
+			expect(a.result.check.failed).toBe(true);
 		});
 	});
 
