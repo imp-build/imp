@@ -256,7 +256,9 @@ const CURATED_TEST_BUILD_SCRIPT = [
 	// normalize backslashes to forward slashes (cargo reports absolute paths
 	// natively on Windows, but only the target_dir segment it was passed
 	// keeps forward slashes — mirrors parseTestBinaries' own normalization).
-	"  exe=${exe%$'\\r'}; exe=${exe//\\\\\\\\//};",
+	// `sh` here is POSIX sh, not bash, so this avoids bash-only ANSI-C
+	// quoting ($'\r') and ${var//pat/rep} global substitution.
+	'  exe=$(printf %s "$exe" | tr -d "\\r" | tr "\\\\\\\\" /);',
 	'  case "$exe" in',
 	'    *"$target_dir"/*) rel=${exe#*"$target_dir"/} ;;',
 	"    *) rel=$exe ;;",
@@ -267,7 +269,13 @@ const CURATED_TEST_BUILD_SCRIPT = [
 ].join(" ");
 
 function curatedTestBuildTools(input) {
-	return [input.jqTool, input.mkdirTool, input.cpTool];
+	return [
+		input.jqTool,
+		input.mkdirTool,
+		input.cpTool,
+		input.catTool,
+		input.trTool,
+	];
 }
 
 function curatedTestBuildToolInputs() {
@@ -275,6 +283,8 @@ function curatedTestBuildToolInputs() {
 		jqTool: nativeTool("jq"),
 		mkdirTool: nativeTool("mkdir"),
 		cpTool: nativeTool("cp"),
+		catTool: nativeTool("cat"),
+		trTool: nativeTool("tr"),
 	};
 }
 
