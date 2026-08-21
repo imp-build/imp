@@ -793,7 +793,10 @@ mod tests {
                         format!("job {index}"),
                         TaskKind::Sandbox,
                         move |_context| {
-                            thread_ids.lock().unwrap().insert(std::thread::current().id());
+                            thread_ids
+                                .lock()
+                                .unwrap()
+                                .insert(std::thread::current().id());
                             std::thread::sleep(std::time::Duration::from_millis(5));
                             Ok(())
                         },
@@ -825,11 +828,18 @@ mod tests {
         let scheduler = Scheduler::new(1, Arc::new(AtomicBool::new(false)), tx);
 
         let panicked = scheduler
-            .run(None, "boom", TaskKind::Sandbox, |_context| -> anyhow::Result<()> {
-                panic!("deliberate test panic");
-            })
+            .run(
+                None,
+                "boom",
+                TaskKind::Sandbox,
+                |_context| -> anyhow::Result<()> {
+                    panic!("deliberate test panic");
+                },
+            )
             .await;
-        let message = panicked.expect_err("a panicking job must surface as an error").to_string();
+        let message = panicked
+            .expect_err("a panicking job must surface as an error")
+            .to_string();
         assert!(
             message.contains("worker panicked"),
             "unexpected error message: {message}"
