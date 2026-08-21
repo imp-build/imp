@@ -239,6 +239,7 @@ const CURATED_TEST_BUILD_SCRIPT = [
 	'cat "$report";',
 	'jq -r \'select(.reason=="compiler-artifact" and .profile.test==true and .executable != null) | .executable\' "$report" |',
 	"while IFS= read -r exe; do",
+	"  exe=${exe%$'\\r'};",
 	'  rel=${exe#"$imp_sandbox_root/"}; rel=${rel#"$target_dir/"};',
 	'  case "$rel" in */*) mkdir -p "$bins_dir/${rel%/*}" ;; esac;',
 	'  cp "$exe" "$bins_dir/$rel";',
