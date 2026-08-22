@@ -712,7 +712,48 @@ export function replayCmakeTarget(
 					...outputPaths.map((p) => `${spec.buildDirPath}/${p}`),
 					...copyOutputs,
 				];
-				const cdCommand = `cd '${spec.buildDirPath}' && ${resolved.command}`;
+				// See ninja_graph.js's resolveEdgeRspfile() docstring: real
+				// ninja writes rspfile_content to rspfile's path before
+				// running the command; replay has to do the same thing
+				// itself. Written via positional params, not interpolated
+				// into the script text, since content is arbitrary
+				// (object-file lists, linker flags) and must not be
+				// re-parsed as shell syntax. Chunked into multiple argv
+				// elements rather than passed as one — confirmed via a
+				// standalone repro (an exec.action() writing a single large
+				// argv string via `sh -c 'printf "%s" "$1" > f'`) that a
+				// single argv element reaching git-bash's sh.exe (an MSYS
+				// binary, spawned here as a plain non-MSYS-aware child via
+				// Rust's std::process::Command — never through another
+				// MSYS/Cygwin parent) silently truncates around 8186 bytes;
+				// BoringSSL's crypto target alone needs ~19KB for its object
+				// list. The same repro with the identical total content
+				// split across many small argv elements instead came through
+				// intact, so chunking sidesteps whatever fixed-size buffer
+				// MSYS's own non-Cygwin-parent command-line reparsing uses,
+				// while staying far under Windows' own ~32K total
+				// command-line limit for any realistic object/library list.
+				const RSPFILE_CHUNK_SIZE = 4000;
+				function chunkRspfileContent(content) {
+					const chunks = [];
+					for (let i = 0; i < content.length; i += RSPFILE_CHUNK_SIZE) {
+						chunks.push(content.slice(i, i + RSPFILE_CHUNK_SIZE));
+					}
+					return chunks;
+				}
+				const cdCommand = resolved.rspfile
+					? `cd '${spec.buildDirPath}' && { rsp=$1; shift; : > "$rsp"; for chunk; do printf '%s' "$chunk" >> "$rsp"; done; } && ${resolved.command}`
+					: `cd '${spec.buildDirPath}' && ${resolved.command}`;
+				const shArgv = resolved.rspfile
+					? [
+							"sh",
+							"-c",
+							cdCommand,
+							"cmake-rsp",
+							resolved.rspfile.path,
+							...chunkRspfileContent(resolved.rspfile.content),
+						]
+					: ["sh", "-c", cdCommand];
 				const outputNames = destPaths.map((_, i) => `out${i}`);
 
 				const compilerInputs = compilerSources
@@ -740,7 +781,7 @@ export function replayCmakeTarget(
 							];
 
 				const result = await exec.action({
-					argv: ["sh", "-c", cdCommand],
+					argv: shArgv,
 					tools: edgeTools,
 					inputs: edgeInputs,
 					outputs: Object.fromEntries(

@@ -598,6 +598,66 @@ describe("ninja_graph command resolution", () => {
 		);
 		expect(toolNames.sort()).toEqual(["ar.exe", "cmake.exe"]);
 	});
+
+	test("resolveEdgeCommand resolves a rule's rspfile path and content", () => {
+		// Confirmed against a real Windows `cmake -G Ninja` configure of
+		// BoringSSL: CXX_STATIC_LIBRARY_LINKER__crypto_Release declares
+		// `rspfile = $RSP_FILE` / `rspfile_content = $in $LINK_PATH
+		// $LINK_LIBRARIES`, with the edge itself setting `RSP_FILE =
+		// CMakeFiles/crypto.rsp`. Real ninja writes rspfile_content to
+		// rspfile's path before running the rule's command — nothing else in
+		// this replay path does that, which is exactly the gap that produced
+		// "ar.exe: @CMakeFiles/crypto.rsp: No such file or directory".
+		const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
+		const libEdge = edges.find((e) => e.outputs.includes("libcore.a"));
+		const rspRule = {
+			...rules[libEdge.rule],
+			command: "/usr/bin/ar qc $TARGET_FILE $LINK_FLAGS @$RSP_FILE",
+			rspfile: "$RSP_FILE",
+			rspfile_content: "$in $LINK_PATH $LINK_LIBRARIES",
+		};
+		const rspEdge = {
+			...libEdge,
+			vars: {
+				...libEdge.vars,
+				RSP_FILE: "CMakeFiles/core.rsp",
+				LINK_PATH: "",
+				LINK_LIBRARIES: "",
+			},
+		};
+		const rulesWithRsp = { ...rules, [libEdge.rule]: rspRule };
+		const root = sandboxRootFromWorkdir(topVars.cmake_ninja_workdir, "build");
+
+		const { command, rspfile } = resolveEdgeCommand(
+			rspEdge,
+			rulesWithRsp,
+			topVars,
+			root,
+			"build",
+		);
+
+		expect(command).toBe("ar qc libcore.a  @CMakeFiles/core.rsp");
+		expect(rspfile).toEqual({
+			path: "CMakeFiles/core.rsp",
+			content: "CMakeFiles/core.dir/src/core.c.o  ",
+		});
+	});
+
+	test("resolveEdgeCommand returns rspfile: null for a rule with no rspfile", () => {
+		const { rules, edges, topVars } = parseNinja(BUILD_NINJA, readInclude);
+		const libEdge = edges.find((e) => e.outputs.includes("libcore.a"));
+		const root = sandboxRootFromWorkdir(topVars.cmake_ninja_workdir, "build");
+
+		const { rspfile } = resolveEdgeCommand(
+			libEdge,
+			rules,
+			topVars,
+			root,
+			"build",
+		);
+
+		expect(rspfile).toBe(null);
+	});
 });
 
 describe("ninja_graph target classification", () => {

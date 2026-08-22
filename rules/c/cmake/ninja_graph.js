@@ -420,12 +420,41 @@ export function rebasePath(path, sandboxRoot) {
 	return path;
 }
 
+// Ninja writes a rule's `rspfile_content` out to `rspfile`'s path before
+// running its command whenever a rule declares those two variables (used by
+// CMake's static-library archive rules to pass a long object-file list to
+// `ar` via `@rspfile` instead of a command line that could overflow argv/
+// CreateProcess limits). Since edges here are replayed directly via `sh -c`
+// rather than through real ninja, nothing else ever materializes that file —
+// confirmed against a real Windows `cmake -G Ninja` run of BoringSSL, whose
+// CXX_STATIC_LIBRARY_LINKER rule reads `rspfile = $RSP_FILE` / `rspfile_content
+// = $in $LINK_PATH $LINK_LIBRARIES` and whose crypto edge sets `RSP_FILE =
+// CMakeFiles/crypto.rsp` — exactly the path ar.exe reports missing
+// ("@CMakeFiles/crypto.rsp: No such file or directory") without this.
+// rspfile is always build-dir-relative (mirroring $out), so no
+// upPrefixForBuildDir rebasing is needed on the path itself, only on any
+// absolute configure-sandbox paths the content's $in-expanded token list
+// might still carry.
+function resolveEdgeRspfile(edge, rule, topVars, sandboxRoot, buildDirPath) {
+	if (!rule.rspfile) return null;
+	const path = expandVar(rule.rspfile, edge, topVars, rule);
+	const rawContent = expandVar(rule.rspfile_content || "", edge, topVars, rule);
+	const content = rebaseAbsolutePaths(
+		rawContent,
+		sandboxRoot,
+		upPrefixForBuildDir(buildDirPath),
+	);
+	return { path, content };
+}
+
 // Fully resolves one edge into a shell command ready to hand to run() with
 // cwd = buildDirPath (matching ninja's own execution convention): rebases
 // any absolute configure-sandbox paths to be relative to the build
 // directory, and rewrites tool-binary invocations (absolute host paths, or
 // imp's own ".imp/tools/..." mount paths) to bare names, resolved via
-// PATH by whatever tools the caller declares for the run().
+// PATH by whatever tools the caller declares for the run(). Also resolves
+// the rule's rspfile (see resolveEdgeRspfile() above), if any, so the
+// caller can write it before invoking the command.
 export function resolveEdgeCommand(
 	edge,
 	rules,
@@ -444,7 +473,14 @@ export function resolveEdgeCommand(
 	);
 	const unwrapped = stripCmdExeWrapper(rebased);
 	const { command, toolNames } = rewriteToolInvocations(unwrapped);
-	return { command, toolNames };
+	const rspfile = resolveEdgeRspfile(
+		edge,
+		rule,
+		topVars,
+		sandboxRoot,
+		buildDirPath,
+	);
+	return { command, toolNames, rspfile };
 }
 
 // Joins a build-dir-relative path onto buildDirPath and normalizes ".."
