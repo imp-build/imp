@@ -6,14 +6,10 @@ Used exclusively as a small, dependency-free test fixture: a real generated
 tree-sitter parser, to dlopen and exercise the full load→parse→query round
 trip in tests, without needing a whole grammar built from a `grammar.js`.
 
-`tree-sitter-json.so` is a prebuilt (linux-x86_64) shared library compiled
-from `parser.c`, checked in rather than compiled by the test suite itself:
-compiling it from within a test action would need a C toolchain available
-at *test-run* time, which imp's own sandboxed test execution deliberately
-doesn't provide (only the earlier *build* step gets one, for bundled
-SQLite/QuickJS) — see the discussion on the tree-sitter-support PR. Rebuild
-it if `parser.c` ever changes:
-
-```sh
-cc -shared -fPIC -I . -o tree-sitter-json.so parser.c
-```
+The shared library isn't checked in: `crates/imp-treesitter/BUILD.js`
+compiles `parser.c` at *build* time, via `ccLibrary({ shared: true })` and
+the graph-provided cc toolchain — producing a real shared library for
+whatever platform imp-treesitter is being built on (`.so` on Linux, `.dll`
+on Windows), never a single vendored binary. See
+`crates/imp-treesitter/tests/common/mod.rs` for how the compiled bytes get
+embedded into the test binary.

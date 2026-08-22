@@ -112,13 +112,27 @@ fn compiled_binary_runs_without_path_or_source_tree_cwd() {
     // Filter to a single real test (by name substring) rather than
     // re-running the whole binary, which would re-enter this very test and
     // recurse forever.
-    let output = std::process::Command::new(&relocated)
-        .arg("--test-threads=1")
+    let mut cmd = std::process::Command::new(&relocated);
+    cmd.arg("--test-threads=1")
         .arg("load_parse_and_dump_sexp")
         .env_clear()
-        .current_dir(&scratch)
-        .output()
-        .expect("spawn relocated test binary");
+        .current_dir(&scratch);
+    // TMP/TEMP survive env_clear(): Windows' GetTempPath() (which
+    // std::env::temp_dir() calls into, needed by common::json_grammar_library())
+    // has no /tmp-style fallback everyone can write to — with no TMP/TEMP it
+    // falls through to the Windows directory itself and fails with
+    // PermissionDenied. imp's own sandbox always sets TMP/TEMP for this exact
+    // reason (see exec.rs's sandbox_command_env), so a real imp-sandboxed run
+    // never hits this; a plain `cargo test` run relies on the ambient host
+    // TMP/TEMP already being set. Everything else this test cares about
+    // (PATH, cwd) still starts genuinely empty/relocated.
+    #[cfg(windows)]
+    for var in ["TMP", "TEMP"] {
+        if let Ok(value) = std::env::var(var) {
+            cmd.env(var, value);
+        }
+    }
+    let output = cmd.output().expect("spawn relocated test binary");
 
     let _ = std::fs::remove_dir_all(&scratch);
 

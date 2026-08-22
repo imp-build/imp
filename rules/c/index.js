@@ -145,6 +145,14 @@ function objectPathFor(outputSlug, source) {
 	return `build/c/obj/${outputSlug}/${source.replace(/[^A-Za-z0-9_.-]/g, "_")}.o`;
 }
 
+// Platform-correct shared-library extension for ccLibrary({shared: true})'s output.
+// macOS isn't a supported target anywhere else in this module (see
+// requireSupportedPlatform() in //rules/c/gcc), so it's not handled here
+// either.
+function sharedLibExt() {
+	return platformInfo().os === "windows" ? ".dll" : ".so";
+}
+
 // ---------------------------------------------------------------------------
 // ccLibrary()/ccBinary() registry — declaration order, read by
 // //rules/c/generate_build's dedup check. Mirrors rules/rust/index.js's own
@@ -167,6 +175,7 @@ function crateSpec(opts) {
 		copts = [],
 		linkopts = [],
 		unsafeSystemPaths = false,
+		shared = false,
 	} = opts || {};
 	const normalizedPath = normalizeWorkspacePath(path);
 	const spec = {
@@ -178,6 +187,7 @@ function crateSpec(opts) {
 		copts: [...copts],
 		linkopts: [...linkopts],
 		outputSlug: outputSlugFor(normalizedPath),
+		shared: !!shared,
 		// Bypasses Bootlin's toolchain-wrapper unsafe-path guard (see
 		// toolchainCommands()'s own comment) — needed to link against host
 		// system packages like libwebkit2gtk-4.1.
@@ -192,11 +202,14 @@ function crateSpec(opts) {
 // factory's own shell_quote()-based script construction) and then either
 // archiving (library) or linking against transitiveArchives (binary).
 function ccTask(spec, isLibrary) {
+	const isShared = isLibrary && spec.shared;
 	const srcs = files({ root: spec.path, include: spec.srcs });
 	const hdrs = files({ root: spec.path, include: spec.hdrs });
-	const outPath = isLibrary
-		? `build/c/${spec.outputSlug}.a`
-		: `build/c/${spec.outputSlug}`;
+	const outPath = isShared
+		? `build/c/${spec.outputSlug}${sharedLibExt()}`
+		: isLibrary
+			? `build/c/${spec.outputSlug}.a`
+			: `build/c/${spec.outputSlug}`;
 	const transitiveArchives = spec.deps.flatMap((d) => d.transitiveArchives);
 	// Own linkopts stays link-step-only (not transitive) — only a dep's own
 	// transitiveLinkopts (e.g. a cmakeLibraryDep()'s pkg-config-derived
@@ -217,7 +230,7 @@ function ccTask(spec, isLibrary) {
 	];
 
 	const built = task({
-		display: `cc ${isLibrary ? "archive" : "link"} ${spec.path}`,
+		display: `cc ${isShared ? "shared-link" : isLibrary ? "archive" : "link"} ${spec.path}`,
 		inputs: {
 			srcs,
 			hdrs,
@@ -236,8 +249,12 @@ function ccTask(spec, isLibrary) {
 			const sourcePaths = exec.paths(input.srcs);
 			exec.paths(input.hdrs);
 			const isCxx = sourcePaths.some(isCxxSource);
+			// -fPIC is needed for shared-object code on ELF platforms; MinGW
+			// targets ignore it (all Windows code is already
+			// position-independent), so it's only added off Windows.
 			const flags = [
 				...optFlags(),
+				...(isShared && platformInfo().os !== "windows" ? ["-fPIC"] : []),
 				...includeDirs.map((dir) => `-I${dir}`),
 				...spec.copts,
 			]
@@ -297,26 +314,36 @@ function ccTask(spec, isLibrary) {
 				input,
 				spec.unsafeSystemPaths,
 			);
-			const finalCmd = isLibrary
-				? `${archiver().map(shellQuote).join(" ")} rcs ${shellQuote(outPath)} ${objectSandboxPaths.map(shellQuote).join(" ")}`
-				: (() => {
-						const needsCxx = sourcePaths.some(isCxxSource);
-						const linker = (needsCxx ? compiler(true) : compiler(false))
-							.map(shellQuote)
-							.join(" ");
-						const linkFlags = [...spec.linkopts, ...transitiveLinkopts]
-							.map(shellQuote)
-							.join(" ");
-						return `${linker} -o ${shellQuote(outPath)} ${objectSandboxPaths.map(shellQuote).join(" ")} ${depArchivePaths.map(shellQuote).join(" ")} ${linkFlags}`;
-					})();
+			const finalCmd =
+				isLibrary && !isShared
+					? `${archiver().map(shellQuote).join(" ")} rcs ${shellQuote(outPath)} ${objectSandboxPaths.map(shellQuote).join(" ")}`
+					: (() => {
+							const needsCxx = sourcePaths.some(isCxxSource);
+							const linker = (needsCxx ? compiler(true) : compiler(false))
+								.map(shellQuote)
+								.join(" ");
+							const linkFlags = [
+								...(isShared ? ["-shared"] : []),
+								...spec.linkopts,
+								...transitiveLinkopts,
+							]
+								.map(shellQuote)
+								.join(" ");
+							return `${linker} -o ${shellQuote(outPath)} ${objectSandboxPaths.map(shellQuote).join(" ")} ${depArchivePaths.map(shellQuote).join(" ")} ${linkFlags}`;
+						})();
+			const actionKind = isShared
+				? "shared-link"
+				: isLibrary
+					? "archive"
+					: "link";
 			const script = `set -e; mkdir -p "$(dirname ${shellQuote(outPath)})"; ${finalCmd}`;
 			const result = await exec.action({
-				argv: ["sh", "-c", script, isLibrary ? "cc-archive" : "cc-link"],
+				argv: ["sh", "-c", script, `cc-${actionKind}`],
 				env,
 				tools: [input.mkdir, input.dirname],
 				inputs: compileResults.map((r) => r.outputs.object),
 				outputs: { artifact: output.file(outPath) },
-				display: `cc ${isLibrary ? "archive" : "link"} ${outPath}`,
+				display: `cc ${actionKind} ${outPath}`,
 			});
 			return { artifact: result.outputs.artifact };
 		},
@@ -340,6 +367,7 @@ function ccTask(spec, isLibrary) {
  * @param {object} [opts.toolchain] gccGraphToolchain()/zigGraphToolchain() result, or the workspace default.
  * @param {string[]} [opts.copts=[]] Extra compiler flags.
  * @param {boolean} [opts.unsafeSystemPaths=false] Bypass Bootlin's toolchain-wrapper unsafe-path guard (which rejects -I/-isystem/-L flags under /usr/include or /usr/lib) so this target can link against host system packages (e.g. libwebkit2gtk-4.1). No-op on a zig toolchain, which has no such guard.
+ * @param {boolean} [opts.shared=false] Build a dynamically-loadable shared object (`-shared`, platform-correct extension: `.dll` on Windows, `.so` elsewhere) instead of a static `.a` archive. A shared `archive` is meant to be dlopen()'d, not statically linked — it's left out of the returned `transitiveArchives` so a dependent ccLibrary()/ccBinary() can't accidentally try to `ar`/link it in.
  * @returns {object} Frozen `{[BUILD], archive, transitiveArchives, transitiveIncludeDirs, transitiveHdrs, transitiveLinkopts, [PACKAGE]}`.
  */
 export function ccLibrary(opts = {}) {
@@ -350,10 +378,9 @@ export function ccLibrary(opts = {}) {
 		spec,
 		[BUILD]: archive,
 		archive,
-		transitiveArchives: [
-			archive,
-			...spec.deps.flatMap((d) => d.transitiveArchives),
-		],
+		transitiveArchives: spec.shared
+			? spec.deps.flatMap((d) => d.transitiveArchives)
+			: [archive, ...spec.deps.flatMap((d) => d.transitiveArchives)],
 		transitiveIncludeDirs: [
 			spec.path,
 			...spec.deps.flatMap((d) => d.transitiveIncludeDirs),
