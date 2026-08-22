@@ -31,7 +31,6 @@ export const rulesTree = resourcePackage({
 export const testTar = nativeTool("tar");
 export const testGzip = nativeTool("gzip");
 export const testCmake = nativeTool("cmake");
-export const testCc = nativeTool("cc");
 export const testAs = nativeTool("as");
 export const testLd = nativeTool("ld");
 export const testAr = nativeTool("ar");
