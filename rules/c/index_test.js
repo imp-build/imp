@@ -172,6 +172,30 @@ describe("graph-native ccLibrary/ccBinary", () => {
 		});
 	});
 
+	test("ccLibrary's archive action materializes object paths via a chunked response file, not inline in its script (#84 follow-up)", () => {
+		return withCcHost(async (host) => {
+			const lib = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+			});
+			await resolveIgnoringArtifactValidation([lib[BUILD]]);
+			const archiveRun = host.runs.find((run) =>
+				run.display.startsWith("cc archive "),
+			);
+			// argv[2] (the sh -c script) must stay a small, fixed script
+			// regardless of how many objects there are — the object list
+			// itself must show up only in the chunked argv elements that
+			// follow, written to a response file at runtime and referenced
+			// via `@rspfile`, never inlined into the script text (that
+			// inlining is exactly what overflowed on Windows once a target
+			// had enough objects — see rspfileArgv() in rules/c/index.js).
+			expect(archiveRun.argv[2]).not.toContain(".o");
+			expect(archiveRun.argv[2]).toContain("@");
+			const content = archiveRun.argv.slice(5).join("");
+			expect(content).toContain(".o");
+		});
+	});
+
 	test("ccLibrary compile actions each declare exactly one output, at the real per-source object path", () => {
 		return withCcHost(async (host) => {
 			const lib = ccLibrary({
@@ -242,13 +266,18 @@ describe("graph-native ccLibrary/ccBinary", () => {
 			const linkRun = host.runs.find((run) =>
 				run.display.startsWith("cc link "),
 			);
-			expect(linkRun.argv[2]).toContain("-lwebkit2gtk-4.1");
-			expect(linkRun.argv[2]).toContain("-L/usr/lib/x86_64-linux-gnu");
+			// The object/archive/linkopt list is materialized via a chunked
+			// response file (see rspfileArgv() in rules/c/index.js), not
+			// inlined into the script at argv[2] — so it shows up further
+			// along argv instead.
+			const linkContent = linkRun.argv.join("");
+			expect(linkContent).toContain("-lwebkit2gtk-4.1");
+			expect(linkContent).toContain("-L/usr/lib/x86_64-linux-gnu");
 			const archiveRuns = host.runs.filter((run) =>
 				run.display.startsWith("cc archive "),
 			);
 			for (const run of archiveRuns) {
-				expect(run.argv[2]).not.toContain("webkitgtk");
+				expect(run.argv.join("")).not.toContain("webkitgtk");
 			}
 		});
 	});

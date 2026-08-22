@@ -21,7 +21,11 @@
 //     action) rather than one script compiling everything — a single shell
 //     command compiling hundreds of sources overflows the argument-string
 //     limit (issue #84). This also gets per-object task-cache reuse back,
-//     unlike cargoPackage()'s single whole-crate cargo invocation.
+//     unlike cargoPackage()'s single whole-crate cargo invocation. The
+//     final archive/link action itself can still list hundreds of object/
+//     archive paths, so those go through a response file materialized via
+//     rspfileArgv() rather than being inlined into that action's own
+//     script — see rspfileArgv()'s own docstring.
 //   - hdrs are tracked as an input (so editing a header invalidates the
 //     compile) but never individually inspected — same conservative
 //     widening rationale as rules/c/cmake's own header handling.
@@ -65,6 +69,46 @@ function outputSlugFor(path) {
 
 function shellQuote(value) {
 	return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+// A single sh -c script listing every object/archive/linkopt inline
+// overflows on Windows once a target has enough sources (issue #84's own
+// compile-step version of this problem): git-bash's sh.exe (spawned
+// directly by imp's exec layer, not through another MSYS/Cygwin parent)
+// silently truncates any single argv element around 8186 bytes — see
+// rules/c/cmake/graph_replay.js's resolveEdgeRspfile()/RSPFILE_CHUNK_SIZE
+// comment for the confirmed repro and rationale. Materializing the
+// variable-length part into a response file, its content spread across
+// many small chunked argv elements instead of one large one, sidesteps
+// that truncation; the fixed small script itself never scales with source
+// count.
+const RSPFILE_CHUNK_SIZE = 4000;
+
+function chunkRspfileContent(content) {
+	const chunks = [];
+	for (let i = 0; i < content.length; i += RSPFILE_CHUNK_SIZE) {
+		chunks.push(content.slice(i, i + RSPFILE_CHUNK_SIZE));
+	}
+	return chunks;
+}
+
+// Builds exec.action() argv that writes `content` to `rspPath` (via
+// chunked positional params, never inlined into the script text) before
+// running `command`, which must itself reference `@`+shellQuote(rspPath)
+// to consume it — ar/ranlib and gcc/clang/zig all support `@file`
+// response files with the same shell-like quoting shellQuote() already
+// produces, so `content` can be reused verbatim from today's inline
+// command construction.
+function rspfileArgv(displayName, rspPath, content, command) {
+	const script = `set -e; rsp=$1; shift; : > "$rsp"; for chunk; do printf '%s' "$chunk" >> "$rsp"; done; ${command}`;
+	return [
+		"sh",
+		"-c",
+		script,
+		displayName,
+		rspPath,
+		...chunkRspfileContent(content),
+	];
 }
 
 // Resolves a graph-native gcc or zig toolchain — distinguished by shape
@@ -314,9 +358,21 @@ function ccTask(spec, isLibrary) {
 				input,
 				spec.unsafeSystemPaths,
 			);
-			const finalCmd =
+			const actionKind = isShared
+				? "shared-link"
+				: isLibrary
+					? "archive"
+					: "link";
+			const rspPath = `build/c/${spec.outputSlug}.rsp`;
+			const mkdirCmd = `mkdir -p "$(dirname ${shellQuote(outPath)})"`;
+			const finalArgv =
 				isLibrary && !isShared
-					? `${archiver().map(shellQuote).join(" ")} rcs ${shellQuote(outPath)} ${objectSandboxPaths.map(shellQuote).join(" ")}`
+					? rspfileArgv(
+							`cc-${actionKind}`,
+							rspPath,
+							objectSandboxPaths.map(shellQuote).join(" "),
+							`${mkdirCmd}; ${archiver().map(shellQuote).join(" ")} rcs ${shellQuote(outPath)} @${shellQuote(rspPath)}`,
+						)
 					: (() => {
 							const needsCxx = sourcePaths.some(isCxxSource);
 							const linker = (needsCxx ? compiler(true) : compiler(false))
@@ -329,16 +385,20 @@ function ccTask(spec, isLibrary) {
 							]
 								.map(shellQuote)
 								.join(" ");
-							return `${linker} -o ${shellQuote(outPath)} ${objectSandboxPaths.map(shellQuote).join(" ")} ${depArchivePaths.map(shellQuote).join(" ")} ${linkFlags}`;
+							const content = [
+								...objectSandboxPaths.map(shellQuote),
+								...depArchivePaths.map(shellQuote),
+								linkFlags,
+							].join(" ");
+							return rspfileArgv(
+								`cc-${actionKind}`,
+								rspPath,
+								content,
+								`${mkdirCmd}; ${linker} -o ${shellQuote(outPath)} @${shellQuote(rspPath)}`,
+							);
 						})();
-			const actionKind = isShared
-				? "shared-link"
-				: isLibrary
-					? "archive"
-					: "link";
-			const script = `set -e; mkdir -p "$(dirname ${shellQuote(outPath)})"; ${finalCmd}`;
 			const result = await exec.action({
-				argv: ["sh", "-c", script, `cc-${actionKind}`],
+				argv: finalArgv,
 				env,
 				tools: [input.mkdir, input.dirname],
 				inputs: compileResults.map((r) => r.outputs.object),
