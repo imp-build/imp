@@ -1810,6 +1810,11 @@ mod tests {
         assert_eq!(result.stdout, "a\n\nb\n\n\nc\n");
     }
 
+    // Gated off Windows: resolve_program finds git-bash's sh.exe via
+    // BUILTIN_SHELL_CANDIDATES, but MSYS transparently maps the Windows temp
+    // dir to /tmp, so $PWD comes back POSIX-translated and never matches the
+    // real Windows sandbox path this test compares against.
+    #[cfg(not(windows))]
     #[test]
     fn exec_run_workspace_cwd_keeps_the_sandboxed_environment() {
         let root = tempfile::tempdir().unwrap();
@@ -2005,6 +2010,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     fn probe_record(task_key: &str) -> TaskCacheRecord {
         TaskCacheRecord {
             version: TASK_CACHE_VERSION,
@@ -2020,6 +2026,11 @@ mod tests {
         }
     }
 
+    // Gated off Windows: unlike the sandboxed exec path (resolve_program),
+    // this spawns "sh" raw, relying on it being literally on PATH. That's
+    // true on Unix but not on Windows, where BUILTIN_SHELL_CANDIDATES finds
+    // git-bash's sh.exe by fixed path, not via PATH lookup.
+    #[cfg(not(windows))]
     fn spawn_probe_child(script: &str) -> Child {
         Command::new("sh")
             .arg("-c")
@@ -2030,6 +2041,7 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn wait_for_child_output_remote_hit_wins_and_kills_child() {
         // A remote answer arriving mid-execution must win the race: the
@@ -2062,6 +2074,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn wait_for_child_output_sandbox_wins_when_remote_channel_disconnects() {
         // The remote lookup can resolve to "no such record" (sender sends
@@ -2079,6 +2092,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn wait_for_child_output_sandbox_wins_when_remote_channel_never_resolves() {
         let (tx, rx) = mpsc::channel::<Option<TaskCacheRecord>>();
@@ -2093,6 +2107,7 @@ mod tests {
         drop(tx); // kept alive (silent) through the wait above, exercising the Empty arm
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn wait_for_child_output_none_receiver_matches_pre_race_behavior() {
         let mut child = spawn_probe_child("printf out");
@@ -2105,6 +2120,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn wait_for_child_output_cancellation_still_bails_with_no_remote_hit_receiver() {
         let cancellation = AtomicBool::new(true);
