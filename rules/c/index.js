@@ -43,7 +43,7 @@ import {
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
 import { nativeTool } from "//rules/imp/native-tool";
 import { defaultZigGraphToolchain } from "//rules/c/zig";
-import { selectCcToolchain } from "//rules/c/toolchain";
+import { selectCcToolchain, shellQuote } from "//rules/c/toolchain";
 
 export const DEFAULT_CPP_SRCS = ["**/*.c", "**/*.cc", "**/*.cpp", "**/*.cxx"];
 export const DEFAULT_CPP_HDRS = ["**/*.h", "**/*.hh", "**/*.hpp", "**/*.hxx"];
@@ -66,10 +66,6 @@ function normalizeWorkspacePath(path) {
 
 function outputSlugFor(path) {
 	return path === "." ? "root" : path.replace(/\//g, "_");
-}
-
-function shellQuote(value) {
-	return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
 // A single sh -c script listing every object/archive/linkopt inline
@@ -133,9 +129,12 @@ function resolveToolchain(toolchain) {
 	return resolved;
 }
 
-function optFlags() {
+// "release"/"debug" only — each toolchain provider (see gcc's/zig's/msvc's
+// own commands()) translates this into its own optimization/debug-flag
+// vocabulary rather than ccTask() handing down literal flags.
+function optMode() {
 	const mode = configuration("imp.mode", {}) || {};
-	return mode.opt === "release" ? ["-O2", "-DNDEBUG"] : ["-O0", "-g"];
+	return mode.opt === "release" ? "release" : "debug";
 }
 
 function objectPathFor(outputSlug, source) {
@@ -202,11 +201,17 @@ function ccTask(spec, isLibrary) {
 	const isShared = isLibrary && spec.shared;
 	const srcs = files({ root: spec.path, include: spec.srcs });
 	const hdrs = files({ root: spec.path, include: spec.hdrs });
+	// A binary's own output extension needs the platform-correct ".exe" on
+	// Windows: gcc/clang/cl.exe all auto-append it to the linked file
+	// themselves when the requested output name has none (PE executables
+	// require it), so a declared output path without it is never actually
+	// produced — confirmed by a real `imp build` failure ("run() output ...
+	// was not created as a file in sandbox").
 	const outPath = isShared
 		? `build/c/${spec.outputSlug}${sharedLibExt()}`
 		: isLibrary
 			? `build/c/${spec.outputSlug}.a`
-			: `build/c/${spec.outputSlug}`;
+			: `build/c/${spec.outputSlug}${platformInfo().os === "windows" ? ".exe" : ""}`;
 	const transitiveArchives = spec.deps.flatMap((d) => d.transitiveArchives);
 	// Own linkopts stays link-step-only (not transitive) — only a dep's own
 	// transitiveLinkopts (e.g. a cmakeLibraryDep()'s pkg-config-derived
@@ -245,18 +250,8 @@ function ccTask(spec, isLibrary) {
 		async run(exec, input) {
 			const sourcePaths = exec.paths(input.srcs);
 			exec.paths(input.hdrs);
-			const isCxx = sourcePaths.some(isCxxSource);
-			// -fPIC is needed for shared-object code on ELF platforms; MinGW
-			// targets ignore it (all Windows code is already
-			// position-independent), so it's only added off Windows.
-			const flags = [
-				...optFlags(),
-				...(isShared && platformInfo().os !== "windows" ? ["-fPIC"] : []),
-				...includeDirs.map((dir) => `-I${dir}`),
-				...spec.copts,
-			]
-				.map(shellQuote)
-				.join(" ");
+			const needsCxx = sourcePaths.some(isCxxSource);
+			const opt = optMode();
 			const objectPaths = sourcePaths.map((source) =>
 				objectPathFor(spec.outputSlug, source),
 			);
@@ -273,16 +268,28 @@ function ccTask(spec, isLibrary) {
 			// action isn't carried over and mounted into the next.
 			const compileResults = await Promise.all(
 				sourcePaths.map(async (source, i) => {
-					const { compiler, env } = await spec.toolchain.commands(exec, input, {
+					const {
+						compileCommand,
+						env,
+						tools: extraTools = [],
+					} = await spec.toolchain.commands(exec, input, {
 						unsafeSystemPaths: spec.unsafeSystemPaths,
 					});
-					const compilerCmd = compiler(isCxx).map(shellQuote).join(" ");
 					const objPath = objectPaths[i];
-					const script = `set -e; mkdir -p "$(dirname ${shellQuote(objPath)})"; ${compilerCmd} -c ${shellQuote(source)} -o ${shellQuote(objPath)} ${flags}`;
+					const commandTokens = compileCommand({
+						source,
+						objPath,
+						isCxx: isCxxSource(source),
+						includeDirs,
+						opt,
+						copts: spec.copts,
+						isShared,
+					});
+					const script = `set -e; mkdir -p "$(dirname ${shellQuote(objPath)})"; ${commandTokens.join(" ")}`;
 					return exec.action({
 						argv: ["sh", "-c", script, "cc-compile"],
 						env,
-						tools: [input.mkdir, input.dirname],
+						tools: [input.mkdir, input.dirname, ...extraTools],
 						inputs: [
 							input.srcs,
 							input.hdrs,
@@ -299,13 +306,28 @@ function ccTask(spec, isLibrary) {
 			// it just needs the compile results listed as inputs: so they get
 			// mounted at all.
 			const objectSandboxPaths = objectPaths;
+			// commands() must be resolved *before* exec.path()'ing the
+			// dependency archives below, not after: a provider's own
+			// commands() can itself issue a nested exec.action() (msvc's
+			// resolveMsvcHost() shells out to vswhere.exe), and
+			// exec.action() clears the consumed exec.tool()/exec.path()
+			// binding set once it returns (see the compile step's own
+			// comment above) — calling commands() after depArchivePaths
+			// silently dropped the archive dependency's mount from this
+			// action entirely (confirmed by a real MSVC `imp build` link
+			// failure: "LNK1181: cannot open input file ...a", the
+			// dependency simply never made it into the sandbox).
+			const {
+				archiveCommand,
+				linkCommand,
+				env,
+				rspQuote,
+				tools: extraTools = [],
+			} = await spec.toolchain.commands(exec, input, {
+				unsafeSystemPaths: spec.unsafeSystemPaths,
+			});
 			const depArchivePaths = transitiveArchives.map((_, i) =>
 				exec.path(input[`archive${i}`]),
-			);
-			const { compiler, archiver, env } = await spec.toolchain.commands(
-				exec,
-				input,
-				{ unsafeSystemPaths: spec.unsafeSystemPaths },
 			);
 			const actionKind = isShared
 				? "shared-link"
@@ -319,37 +341,33 @@ function ccTask(spec, isLibrary) {
 					? rspfileArgv(
 							`cc-${actionKind}`,
 							rspPath,
-							objectSandboxPaths.map(shellQuote).join(" "),
-							`${mkdirCmd}; ${archiver().map(shellQuote).join(" ")} rcs ${shellQuote(outPath)} @${shellQuote(rspPath)}`,
+							objectSandboxPaths.map(rspQuote).join(" "),
+							`${mkdirCmd}; ${archiveCommand({ outPath, rspPath }).join(" ")}`,
 						)
 					: (() => {
-							const needsCxx = sourcePaths.some(isCxxSource);
-							const linker = (needsCxx ? compiler(true) : compiler(false))
-								.map(shellQuote)
-								.join(" ");
-							const linkFlags = [
-								...(isShared ? ["-shared"] : []),
+							// Object/archive paths and linkopts all go through the
+							// response file's own content (rspQuote-quoted, parsed
+							// by the native tool itself), not the outer sh -c
+							// script — see rspfileArgv()'s own docstring for why.
+							const content = [
+								...objectSandboxPaths,
+								...depArchivePaths,
 								...spec.linkopts,
 								...transitiveLinkopts,
 							]
-								.map(shellQuote)
+								.map(rspQuote)
 								.join(" ");
-							const content = [
-								...objectSandboxPaths.map(shellQuote),
-								...depArchivePaths.map(shellQuote),
-								linkFlags,
-							].join(" ");
 							return rspfileArgv(
 								`cc-${actionKind}`,
 								rspPath,
 								content,
-								`${mkdirCmd}; ${linker} -o ${shellQuote(outPath)} @${shellQuote(rspPath)}`,
+								`${mkdirCmd}; ${linkCommand({ outPath, isCxx: needsCxx, isShared, rspPath }).join(" ")}`,
 							);
 						})();
 			const result = await exec.action({
 				argv: finalArgv,
 				env,
-				tools: [input.mkdir, input.dirname],
+				tools: [input.mkdir, input.dirname, ...extraTools],
 				inputs: compileResults.map((r) => r.outputs.object),
 				outputs: { artifact: output.file(outPath) },
 				display: `cc ${actionKind} ${outPath}`,

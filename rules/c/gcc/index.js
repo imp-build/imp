@@ -11,6 +11,7 @@ import {
 } from "imp:core";
 
 import { nativeTool } from "//rules/imp/native-tool";
+import { clangOptFlags, shellQuote } from "//rules/c/toolchain";
 import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
@@ -481,13 +482,60 @@ export function isGccToolchain(toolchain) {
 function gccToolchainCommands(exec, input, opts = {}) {
 	const suffix = opts.unsafeSystemPaths ? "-unsafe-paths" : "";
 	const pipeFlag = platformInfo().os === "windows" ? ["-pipe"] : [];
+	const compiler = (isCxx) => [
+		exec.tool(input.ccTool, isCxx ? `c++${suffix}` : `clang${suffix}`),
+		...pipeFlag,
+	];
+	const archiver = () => [exec.tool(input.ccTool, "ar")];
 	return {
-		compiler: (isCxx) => [
-			exec.tool(input.ccTool, isCxx ? `c++${suffix}` : `clang${suffix}`),
-			...pipeFlag,
-		],
-		archiver: () => [exec.tool(input.ccTool, "ar")],
 		env: [],
+		tools: [],
+		// Response-file content here is parsed by GNU ar/ld's own @file
+		// reader, which (unlike MSVC's) accepts the same shell-like quoting
+		// bash itself uses — see rules/c/msvc's own msvcRspQuote() for the
+		// toolchain this doesn't hold for.
+		rspQuote: shellQuote,
+		// Builds the full "sh -c" script tokens for ccTask()'s compile step
+		// (rules/c/index.js) — the gcc/clang side of the shared cc-toolchain
+		// provider contract's structural argv translation (-c/-o/-I, `ar
+		// rcs`, -shared): see rules/c/msvc's own compileCommand()/
+		// archiveCommand()/linkCommand() for the cl.exe/lib.exe translation
+		// of the same three shapes.
+		compileCommand({ source, objPath, isCxx, includeDirs, opt, copts, isShared }) {
+			return [
+				...compiler(isCxx).map(shellQuote),
+				"-c",
+				shellQuote(source),
+				"-o",
+				shellQuote(objPath),
+				...clangOptFlags(opt).map(shellQuote),
+				// -fPIC is needed for shared-object code on ELF platforms;
+				// MinGW targets ignore it (all Windows code is already
+				// position-independent), so it's only added off Windows.
+				...(isShared && platformInfo().os !== "windows"
+					? [shellQuote("-fPIC")]
+					: []),
+				...includeDirs.map((dir) => shellQuote(`-I${dir}`)),
+				...copts.map(shellQuote),
+			];
+		},
+		archiveCommand({ outPath, rspPath }) {
+			return [
+				...archiver().map(shellQuote),
+				"rcs",
+				shellQuote(outPath),
+				`@${shellQuote(rspPath)}`,
+			];
+		},
+		linkCommand({ outPath, isCxx, isShared, rspPath }) {
+			return [
+				...compiler(isCxx).map(shellQuote),
+				...(isShared ? ["-shared"] : []),
+				"-o",
+				shellQuote(outPath),
+				`@${shellQuote(rspPath)}`,
+			];
+		},
 	};
 }
 

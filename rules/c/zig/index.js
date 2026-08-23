@@ -16,6 +16,7 @@ import {
 	lockedDownloadTools,
 } from "//rules/imp/lockfile";
 import { toolchainBin } from "//rules/imp/toolchain";
+import { clangOptFlags, shellQuote } from "//rules/c/toolchain";
 import {
 	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
@@ -400,10 +401,47 @@ export function isZigToolchain(toolchain) {
 // rules/c/index.js's own toolchainCommands() (its zig branch).
 function zigToolchainCommands(exec, input) {
 	const zigExe = exec.tool(input.ccTool, "zig");
+	const compiler = (isCxx) => [zigExe, isCxx ? "c++" : "cc"];
+	const archiver = () => [zigExe, "ar"];
 	return {
-		compiler: (isCxx) => [zigExe, isCxx ? "c++" : "cc"],
-		archiver: () => [zigExe, "ar"],
 		env: zigGraphCacheEnv(exec, input.ccBuildCacheTool),
+		tools: [],
+		// zig's "ar"/"cc"/"c++" subcommands wrap clang/llvm-ar directly, so
+		// they share gcc's own @file response-file quoting convention — see
+		// rules/c/gcc's own rspQuote().
+		rspQuote: shellQuote,
+		compileCommand({ source, objPath, isCxx, includeDirs, opt, copts, isShared }) {
+			return [
+				...compiler(isCxx).map(shellQuote),
+				"-c",
+				shellQuote(source),
+				"-o",
+				shellQuote(objPath),
+				...clangOptFlags(opt).map(shellQuote),
+				...(isShared && platformInfo().os !== "windows"
+					? [shellQuote("-fPIC")]
+					: []),
+				...includeDirs.map((dir) => shellQuote(`-I${dir}`)),
+				...copts.map(shellQuote),
+			];
+		},
+		archiveCommand({ outPath, rspPath }) {
+			return [
+				...archiver().map(shellQuote),
+				"rcs",
+				shellQuote(outPath),
+				`@${shellQuote(rspPath)}`,
+			];
+		},
+		linkCommand({ outPath, isCxx, isShared, rspPath }) {
+			return [
+				...compiler(isCxx).map(shellQuote),
+				...(isShared ? ["-shared"] : []),
+				"-o",
+				shellQuote(outPath),
+				`@${shellQuote(rspPath)}`,
+			];
+		},
 	};
 }
 

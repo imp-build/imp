@@ -80,4 +80,20 @@ export const hello_cmake_msvc_cxx_main = {
 	[BUILD]: hello_msvc.get("hello_cmake_cxx_main", BUILD),
 };
 
+// Exercises msvcToolchain()'s commands() (see //rules/c/msvc) through the
+// same raw ccLibrary()/ccBinary() path raw_hello/raw_main use with zig
+// above — the fixture the "commands() doesn't support ccLibrary()/
+// ccBinary() yet" gap needed once cl.exe/lib.exe-flavored structural argv
+// translation existed to exercise. Inert to construct off Windows (same as
+// hello_msvc above); only actually runs cl.exe/lib.exe when built there.
+export const raw_hello_msvc = ccLibrary({
+	srcs: ["hello.c"],
+	toolchain: msvcToolchain(),
+});
+export const raw_main_msvc = ccBinary({
+	srcs: ["main.c"],
+	deps: [raw_hello_msvc],
+	toolchain: msvcToolchain(),
+});
+
 export const js = jsSources({ base: "rules/c/cmake/example" });

@@ -15,6 +15,25 @@
 
 import { platformInfo } from "imp:core";
 
+// Shared bash-argv quoting for a single sh -c script token — every provider's
+// compileCommand()/archiveCommand()/linkCommand() (see gcc's/zig's/msvc's own
+// commands()) runs through "sh -c" regardless of which native compiler it
+// invokes, so this level of quoting is the same across every toolchain; only
+// a response-file's own *content* (parsed by the native tool itself, not
+// bash) needs a toolchain-specific quoting function — see each provider's own
+// rspQuote().
+export function shellQuote(value) {
+	return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+// -O2/-DNDEBUG vs -O0/-g: shared between gcc and zig, whose "cc"/"clang"
+// front ends both accept the same clang/gcc-style flag vocabulary — not
+// shared with msvc, which spells the same intent as /O2 /DNDEBUG vs /Od /Zi
+// (see rules/c/msvc's own msvcOptFlags()).
+export function clangOptFlags(opt) {
+	return opt === "release" ? ["-O2", "-DNDEBUG"] : ["-O0", "-g"];
+}
+
 /**
  * Wrap one provider per OS into a single selectable union — "the same
  * logical target keeps one toolchain shape while selecting GCC on Linux and

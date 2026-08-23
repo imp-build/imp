@@ -24,6 +24,7 @@
 // default linker just works.
 
 import { cacheHas, cachePut, namedCache } from "imp:core";
+import { shellQuote } from "//rules/c/toolchain";
 
 // The VS Installer always places vswhere.exe here, regardless of which VS
 // edition/version it goes on to manage — the one fixed, well-known location
@@ -43,6 +44,93 @@ const MSVC_HOST_KEY = "default";
 // it can't share MSVC_HOST_CACHE's single binDirs-relative-to-one-root mount.
 const MSVC_SDK_CACHE = "msvc-host-sdk";
 const MSVC_SDK_KEY = "default";
+
+// -O2/-DNDEBUG vs -O0/-g's cl.exe equivalent. /Zi (debug) emits a separate
+// .pdb rather than embedding symbols the way -g does, but no caller here
+// consumes a .pdb path today, so it's left as a side effect of the flag
+// rather than plumbed through as its own output.
+function msvcOptFlags(opt) {
+	return opt === "release" ? ["/O2", "/DNDEBUG"] : ["/Od", "/Zi"];
+}
+
+// cl.exe/lib.exe/link.exe's own @file response-file reader follows standard
+// Windows command-line quoting (a bare double quote, backslash-escaped), not
+// the single-quote shell style rules/c/gcc's/rules/c/zig's rspQuote() (a
+// plain shellQuote()) relies on — embedding a shellQuote()'d token like
+// 'obj/a.o' here would hand cl.exe a filename containing two literal single
+// quotes, not a quoted "obj/a.o". Object/archive paths at play here don't
+// carry embedded double quotes in practice, so no backslash-escaping beyond
+// wrapping is implemented.
+function msvcRspQuote(value) {
+	const s = String(value);
+	return /\s/.test(s) ? `"${s}"` : s;
+}
+
+// The msvc side of the shared cc-toolchain provider contract's commands()
+// (see rules/c/gcc's/rules/c/zig's own commands()) — resolves the ambient
+// host (resolveMsvcHost()) and returns cl.exe/lib.exe-flavored structural
+// argv builders for ccTask() (rules/c/index.js) to assemble a compile/
+// archive/link "sh -c" script around, translating the same three shapes gcc/
+// zig do (-c/-o/-I -> /c//Fo//I, `ar rcs` -> `lib.exe /OUT:`, -shared ->
+// /LD) instead of the clang/gcc vocabulary ccTask() used to hardcode.
+// Real cl.exe/lib.exe (not clang-cl) — see resolveMsvcHost()'s own
+// docstring for why this module resolves the ambient host toolchain rather
+// than vendoring one.
+async function msvcToolchainCommands(exec) {
+	const host = await resolveMsvcHost(exec);
+	// Unlike gcc/zig (which mount their compiler via an eagerly-declared
+	// taskInputs() binding + exec.tool()'s own consumed-binding tracking),
+	// msvcToolchain() has no such binding — taskInputs() is `{}`, since
+	// there's nothing to install ahead of time (see resolveMsvcHost()'s own
+	// docstring). So the tool specs themselves are handed back here for
+	// ccTask() to splice directly into each exec.action()'s own `tools:`
+	// list instead.
+	const tools = [
+		msvcGraphToolSpec("cl.exe", host),
+		msvcGraphToolSpec("lib.exe", host),
+	];
+	return {
+		env: msvcEnv(host),
+		tools,
+		rspQuote: msvcRspQuote,
+		compileCommand({ source, objPath, isCxx, includeDirs, opt, copts }) {
+			return [
+				"cl.exe",
+				"/nologo",
+				"/c",
+				isCxx ? "/TP" : "/TC",
+				...msvcOptFlags(opt),
+				...includeDirs.map((dir) => shellQuote(`/I${dir}`)),
+				...copts.map(shellQuote),
+				shellQuote(`/Fo${objPath}`),
+				shellQuote(source),
+			];
+		},
+		archiveCommand({ outPath, rspPath }) {
+			return [
+				"lib.exe",
+				"/nologo",
+				shellQuote(`/OUT:${outPath}`),
+				`@${shellQuote(rspPath)}`,
+			];
+		},
+		// cl.exe itself acts as the link driver (as gcc's own compiler
+		// binary does) rather than invoking link.exe directly — it already
+		// knows how to find the CRT startup objects/default libs, the same
+		// reason gcc's own linkCommand() reuses compiler(isCxx) instead of
+		// invoking ld directly. /LD (not link.exe's own /DLL) is cl.exe's
+		// own shared-library spelling of the same intent as gcc's -shared.
+		linkCommand({ outPath, isShared, rspPath }) {
+			return [
+				"cl.exe",
+				"/nologo",
+				...(isShared ? ["/LD"] : []),
+				shellQuote(`/Fe${outPath}`),
+				`@${shellQuote(rspPath)}`,
+			];
+		},
+	};
+}
 
 /**
  * Declare the ambient host MSVC toolchain — pass as `cmakeProject({
@@ -68,20 +156,13 @@ export function msvcToolchain() {
 		kind: "msvc-host-toolchain",
 		version: null,
 		taskInputs: () => ({}),
-		// ccLibrary()/ccBinary()'s surrounding task script (rules/c/index.js's
-		// ccTask()) hardcodes clang/gcc-style flags around whatever commands()
-		// returns (-c/-o/-I, `ar rcs`, -shared) — cl.exe/lib.exe use an
-		// entirely different flag vocabulary (/c, /Fo, /I, no -shared), so a
-		// commands() implementation here would silently produce invalid
-		// invocations rather than a working MSVC build. Left unimplemented
-		// (throws) until that surrounding script is made toolchain-aware, not
-		// just told which compiler binary to invoke; cmakeProject() doesn't
-		// have this problem since CMake itself owns the flag vocabulary.
-		commands: () => {
-			throw new Error(
-				"msvcToolchain() doesn't support ccLibrary()/ccBinary() yet — its compile/archive/link script is hardcoded to clang/gcc flag syntax (-c/-o/-I, `ar rcs`, -shared), which doesn't translate to cl.exe/lib.exe; use cmakeProject({toolchain: msvcToolchain()}) instead, or gccGraphToolchain()/zigGraphToolchain() for raw ccLibrary()/ccBinary() targets",
-			);
-		},
+		// ccTask() (rules/c/index.js) now asks the toolchain to build its own
+		// compile/archive/link argv (see msvcToolchainCommands() above)
+		// instead of hardcoding clang/gcc flag syntax around a bare compiler
+		// path — this is what makes msvcToolchain() usable from ccLibrary()/
+		// ccBinary() directly, not just cmakeProject() (which sidestepped
+		// this by letting CMake itself own the flag vocabulary).
+		commands: (exec) => msvcToolchainCommands(exec),
 		cmakeConfigure: async (exec) => {
 			const host = await resolveMsvcHost(exec);
 			return { compilerArgs: msvcCMakeCompilerArgs(host), env: msvcEnv(host) };
