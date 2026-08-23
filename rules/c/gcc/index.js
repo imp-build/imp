@@ -27,6 +27,48 @@ const GCC_TOOLCHAIN_CACHE = "gcc-toolchains";
 const GCC_LOCKFILE = "//rules/c/gcc/gcc.lock";
 const GCC_WINDOWS_LOCKFILE = "//rules/c/gcc/gcc-windows.lock";
 
+// Bare tool names gcc's own compile/archive commands can appear as in a
+// replayed ninja edge, once ninja_graph.js's rewriteToolInvocations() strips
+// the absolute path gccCMakeCompilerArgs() baked in back to a bare name.
+// Formerly duplicated (as a local, unexported set) in
+// rules/c/cmake/graph_replay.js — exported from here instead, mirroring
+// rules/c/msvc's own MSVC_GRAPH_TOOL_NAMES, so that module's dispatch can go
+// through this toolchain's own resolvesToolName() rather than importing and
+// checking a copy of this set itself.
+export const GCC_GRAPH_TOOL_NAMES = new Set([
+	"clang",
+	"cc",
+	"c++",
+	"ar",
+	"ranlib",
+	// nasm isn't a compiler-driver alias like the others — it's bundled
+	// straight in the toolchain's bin/ dir (see gccCMakeCompilerArgs()'s
+	// -DCMAKE_ASM_NASM_COMPILER) — but it needs the same real-mount
+	// treatment: BoringSSL's Windows build bakes nasm's absolute path into
+	// build.ninja at configure time, and replay rewrites it back to a bare
+	// "nasm"/"nasm.exe" the same way it does for clang/ar/ranlib.
+	"nasm",
+	// The unsafeSystemPaths escape hatch (see gccGraphTool()/
+	// gccCMakeCompilerArgs() below) can bake these aliases into build.ninja
+	// instead of the plain ones above.
+	"clang-unsafe-paths",
+	"cc-unsafe-paths",
+	"c++-unsafe-paths",
+	// gccCMakeCompilerArgs() bakes a ".exe" suffix into every name above on
+	// Windows (see its own doc comment below) — rewriteToolInvocations()
+	// extracts the basename verbatim, extension included, so those literal
+	// names need their own entries here.
+	"clang.exe",
+	"cc.exe",
+	"c++.exe",
+	"ar.exe",
+	"ranlib.exe",
+	"nasm.exe",
+	"clang-unsafe-paths.exe",
+	"cc-unsafe-paths.exe",
+	"c++-unsafe-paths.exe",
+]);
+
 // Linux downloads a Bootlin cross-toolchain; Windows downloads a WinLibs
 // mingw-w64 build (see winlibsDownloadUrl() below) — two unrelated vendors
 // with unrelated version-tag schemes, not a single formula across OSes.
@@ -420,20 +462,82 @@ function gccGraphToolWindows(
 	});
 }
 
+export function isGccToolchain(toolchain) {
+	return !!toolchain && toolchain.kind === "gcc";
+}
+
+// Resolves compiler/archiver argv-prefix and env for a gcc toolchain from
+// inside a task's run() — the gcc side of the shared cc-toolchain provider
+// contract's commands() (see also rules/c/zig's/rules/c/msvc's own
+// commands()). Relocated from rules/c/index.js's own toolchainCommands()
+// (its gcc branch), so callers dispatch through toolchain.commands(...)
+// uniformly instead of duck-typing zig-vs-gcc.
+//
+// -pipe sidesteps a Windows-only MSYS TMP-dropping bug: this whole action
+// runs under "sh -c", and Git-for-Windows' MSYS runtime drops TMP/TEMP when
+// it spawns a native (non-MSYS) child, so gcc's cc1/as stages otherwise fail
+// with "Cannot create temporary file". -pipe connects the compile stages
+// with a pipe instead of temp files, avoiding the need for a real temp dir.
+function gccToolchainCommands(exec, input, opts = {}) {
+	const suffix = opts.unsafeSystemPaths ? "-unsafe-paths" : "";
+	const pipeFlag = platformInfo().os === "windows" ? ["-pipe"] : [];
+	return {
+		compiler: (isCxx) => [
+			exec.tool(input.ccTool, isCxx ? `c++${suffix}` : `clang${suffix}`),
+			...pipeFlag,
+		],
+		archiver: () => [exec.tool(input.ccTool, "ar")],
+		env: [],
+	};
+}
+
+/**
+ * Build the frozen cc-toolchain provider record for a given (tool, version)
+ * pair — the gcc side of the shared contract (`kind`, `taskInputs`,
+ * `commands`, `cmakeConfigure`, `resolvesToolName`, `toolSpec`,
+ * `resolveState`, `edgeEnv`; see rules/c/msvc's and rules/c/zig's own
+ * toolchain constructors for the other two providers, and
+ * rules/c/toolchain.js's ccToolchainForPlatform() for the platform-indexed
+ * union all three plug into). Exported (not just gccGraphToolchain() itself)
+ * so a test can build a record around a fake `tool`/`version` without
+ * gccGraphTool()'s real download+install task chain — see
+ * rules/c/index_test.js's own fakeGccGraphToolchain().
+ *
+ * @param {object} tool
+ * @param {string} version
+ * @returns {{ kind: string, tool: object, version: string }}
+ */
+export function gccToolchainRecord(tool, version) {
+	return Object.freeze({
+		kind: "gcc",
+		tool,
+		version,
+		taskInputs: () => ({ ccTool: tool }),
+		commands: (exec, input, opts) => gccToolchainCommands(exec, input, opts),
+		cmakeConfigure: async (exec, input, opts) => ({
+			compilerArgs: gccCMakeCompilerArgs(version, opts?.unsafeSystemPaths),
+			env: [],
+		}),
+		resolvesToolName: (name) => GCC_GRAPH_TOOL_NAMES.has(name),
+		toolSpec: (name) => gccGraphToolSpec(version, name),
+		resolveState: async () => null,
+		edgeEnv: () => [],
+	});
+}
+
 /**
  * Graph-native gcc toolchain: gccGraphTool() wrapped with version metadata,
  * mirroring rustGraphToolchain()'s shape (//rules/rust/toolchain) but scaled
- * to gcc's single install directory (like Odin's one-directory case).
+ * to gcc's single install directory (like Odin's one-directory case). See
+ * gccToolchainRecord() above for the shared cc-toolchain provider contract
+ * this also conforms to.
  *
  * @param {string} [version]
- * @returns {{ tool: object, version: string }}
+ * @returns {{ kind: string, tool: object, version: string }}
  */
 export function gccGraphToolchain(version) {
 	const resolved = GccToolchain.requireVersion(version);
-	return Object.freeze({
-		tool: gccGraphTool(resolved),
-		version: resolved,
-	});
+	return gccToolchainRecord(gccGraphTool(resolved), resolved);
 }
 
 /**

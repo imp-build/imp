@@ -1,0 +1,83 @@
+// Platform-indexed C/C++ toolchain provider union — follow-up to PR #165's
+// review ("the public abstraction needs to be a platform-indexed ccToolchain
+// union, rather than a single selected provider").
+//
+// gccGraphToolchain()/zigGraphToolchain()/msvcToolchain() (see
+// //rules/c/gcc, //rules/c/zig, //rules/c/msvc) all conform to the same
+// duck-typed provider contract now: `kind`, `taskInputs()`, `commands()`,
+// `cmakeConfigure()`, `resolvesToolName()`, `toolSpec()`, `resolveState()`,
+// `edgeEnv()`. Everything that dispatches on toolchain kind (rules/c/index.js's
+// ccLibrary()/ccBinary(), rules/c/cmake/graph_replay.js's configure/replay)
+// calls through that contract instead of duck-typing/kind-branching per
+// call site. This module adds the one piece the contract doesn't cover on
+// its own: picking *which* provider is active for the current platform,
+// while keeping every other branch inert.
+
+import { platformInfo } from "imp:core";
+
+/**
+ * Wrap one provider per OS into a single selectable union — "the same
+ * logical target keeps one toolchain shape while selecting GCC on Linux and
+ * MSVC on Windows" per the PR #165 review. Pass to cmakeProject()/
+ * ccLibrary()/ccBinary()'s `toolchain` option in place of a bare provider.
+ *
+ * Each `byOs` branch may be an already-constructed provider or a zero-arg
+ * thunk. `msvcToolchain()` is always safe to pass eagerly — it's a plain
+ * inert object literal; no I/O happens until a task's run() actually calls
+ * one of its methods (see //rules/c/msvc's own header comment). By
+ * contrast, gccGraphToolchain()/zigGraphToolchain() are NOT inert — calling
+ * either registers a real download/install task() graph node immediately,
+ * for whichever platform is executing right now — so pass those as thunks
+ * (`() => defaultGccGraphToolchain()`) when eager registration for a
+ * platform this build will never select is undesirable.
+ *
+ * Selection is by `targetPlatform.os` only (no `arch` axis): every provider
+ * today hardcodes x86_64 support, so there is nothing downstream yet that
+ * would act on an arch key.
+ *
+ * @param {{[os: string]: object|(() => object)}} byOs Provider (or thunk)
+ *   per platform `os` string (e.g. "linux", "windows", "darwin").
+ * @returns {{kind: string, byOs: object, select: (targetPlatform?: {os: string, arch: string}) => object}}
+ */
+export function ccToolchainForPlatform(byOs) {
+	return Object.freeze({
+		kind: "cc-toolchain-union",
+		byOs: { ...byOs },
+		// targetPlatform defaults to the current execution host, but is taken
+		// as an explicit parameter rather than calling platformInfo() only
+		// internally — the seam the PR #165 review asked for ("keep execution
+		// platform distinct from output target triple for later
+		// cross-compilation support"). Actually resolving a target you're not
+		// executing on is still unsupported (every provider's own host/version
+		// resolution assumes host === target internally) — this only keeps the
+		// union's own selection call ready for that once it exists.
+		select(targetPlatform = platformInfo()) {
+			const branch = byOs[targetPlatform.os];
+			if (!branch) {
+				throw new Error(
+					`no cc toolchain configured for platform '${targetPlatform.os}' (configured: ${Object.keys(byOs).join(", ") || "none"})`,
+				);
+			}
+			return typeof branch === "function" ? branch() : branch;
+		},
+	});
+}
+
+export function isCcToolchainUnion(toolchain) {
+	return !!toolchain && toolchain.kind === "cc-toolchain-union";
+}
+
+/**
+ * Resolve `toolchain` to a bare provider: a union is passed through
+ * `.select()`, a bare provider (or nullish) is returned unchanged. Lets
+ * cmakeProject()/ccLibrary()/ccBinary() accept either transparently.
+ *
+ * @param {object} [toolchain]
+ * @param {{os: string, arch: string}} [targetPlatform]
+ * @returns {object|undefined}
+ */
+export function selectCcToolchain(toolchain, targetPlatform) {
+	return isCcToolchainUnion(toolchain)
+		? toolchain.select(targetPlatform)
+		: toolchain;
+}

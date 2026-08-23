@@ -391,6 +391,25 @@ function zigGraphBuildCacheTool(version, zigTool) {
 	return graphTool(directory, { binDirs: [] });
 }
 
+export function isZigToolchain(toolchain) {
+	return !!toolchain && toolchain.kind === "zig";
+}
+
+// Zig side of the shared cc-toolchain provider contract's commands() — see
+// rules/c/gcc's/rules/c/msvc's own commands(). Relocated from
+// rules/c/index.js's own toolchainCommands() (its zig branch).
+function zigToolchainCommands(exec, input) {
+	const zigExe = exec.tool(input.ccTool, "zig");
+	return {
+		compiler: (isCxx) => [zigExe, isCxx ? "c++" : "cc"],
+		archiver: () => [zigExe, "ar"],
+		env: zigGraphCacheEnv(exec, input.ccBuildCacheTool),
+	};
+}
+
+const ZIG_CMAKE_UNSUPPORTED_MESSAGE =
+	"cmakeProject() doesn't support a zig toolchain yet — rules/c/zig's zigGraphTool() has no named-cache-backed real path for CMake to bake into build.ninja; pass a gccGraphToolchain() or msvcToolchain() instead";
+
 /**
  * Graph-native Zig toolchain: zigGraphTool() plus its prewarmed build-cache
  * tool, mirroring rustGraphToolchain()'s two-directory shape (//rules/rust/
@@ -398,16 +417,38 @@ function zigGraphBuildCacheTool(version, zigTool) {
  * install itself. Has no Rust-facing role (unlike gcc/mold): this exists to
  * support raw C/C++ consumption of Zig directly.
  *
+ * Also conforms to the shared cc-toolchain provider contract (`kind`,
+ * `taskInputs`, `commands`, `cmakeConfigure`, `resolvesToolName`, `toolSpec`,
+ * `resolveState`, `edgeEnv`) — see rules/c/gcc's and rules/c/msvc's own
+ * toolchain constructors for the other two providers. `cmakeConfigure`/
+ * `resolvesToolName`/`toolSpec` are stubbed (throw/false) until CMake support
+ * for zig exists (see ZIG_CMAKE_UNSUPPORTED_MESSAGE above).
+ *
  * @param {string} [version]
- * @returns {{ tool: object, buildCacheTool: object, version: string }}
+ * @returns {{ kind: string, tool: object, buildCacheTool: object, version: string }}
  */
 export function zigGraphToolchain(version) {
 	const resolved = ZigToolchain.requireVersion(version, "Zig");
 	const tool = zigGraphTool(resolved);
+	const buildCacheTool = zigGraphBuildCacheTool(resolved, tool);
 	return Object.freeze({
+		kind: "zig",
 		tool,
-		buildCacheTool: zigGraphBuildCacheTool(resolved, tool),
+		buildCacheTool,
 		version: resolved,
+		taskInputs: () => ({ ccTool: tool, ccBuildCacheTool: buildCacheTool }),
+		commands: (exec, input) => zigToolchainCommands(exec, input),
+		cmakeConfigure: async () => {
+			throw new Error(ZIG_CMAKE_UNSUPPORTED_MESSAGE);
+		},
+		resolvesToolName: () => false,
+		toolSpec: (name) => {
+			throw new Error(
+				`zig toolchain can't resolve CMake replay tool '${name}' — ${ZIG_CMAKE_UNSUPPORTED_MESSAGE}`,
+			);
+		},
+		resolveState: async () => null,
+		edgeEnv: () => [],
 	});
 }
 

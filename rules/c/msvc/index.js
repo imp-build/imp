@@ -50,10 +50,47 @@ const MSVC_SDK_KEY = "default";
  * zigGraphToolchain()): this always resolves whatever Visual Studio the
  * host has installed, discovered fresh per task via resolveMsvcHost().
  *
- * @returns {{kind: string}} Toolchain handle for cmakeProject()'s `toolchain` option.
+ * Also conforms to the shared cc-toolchain provider contract (`kind`,
+ * `taskInputs`, `commands`, `cmakeConfigure`, `resolvesToolName`, `toolSpec`,
+ * `resolveState`, `edgeEnv`) — see rules/c/gcc's and rules/c/zig's own
+ * toolchain constructors for the other two providers, and
+ * rules/c/toolchain.js's ccToolchainForPlatform() for the platform-indexed
+ * union all three plug into. This object literal is fully inert to
+ * construct (no vswhere lookup, no task/action) — every method that touches
+ * the ambient host defers to resolveMsvcHost(exec) inside a task's run(),
+ * same as before this contract existed (see resolveMsvcHost()'s own
+ * docstring below).
+ *
+ * @returns {object} Toolchain handle for cmakeProject()'s `toolchain` option.
  */
 export function msvcToolchain() {
-	return { kind: "msvc-host-toolchain" };
+	return {
+		kind: "msvc-host-toolchain",
+		version: null,
+		taskInputs: () => ({}),
+		// ccLibrary()/ccBinary()'s surrounding task script (rules/c/index.js's
+		// ccTask()) hardcodes clang/gcc-style flags around whatever commands()
+		// returns (-c/-o/-I, `ar rcs`, -shared) — cl.exe/lib.exe use an
+		// entirely different flag vocabulary (/c, /Fo, /I, no -shared), so a
+		// commands() implementation here would silently produce invalid
+		// invocations rather than a working MSVC build. Left unimplemented
+		// (throws) until that surrounding script is made toolchain-aware, not
+		// just told which compiler binary to invoke; cmakeProject() doesn't
+		// have this problem since CMake itself owns the flag vocabulary.
+		commands: () => {
+			throw new Error(
+				"msvcToolchain() doesn't support ccLibrary()/ccBinary() yet — its compile/archive/link script is hardcoded to clang/gcc flag syntax (-c/-o/-I, `ar rcs`, -shared), which doesn't translate to cl.exe/lib.exe; use cmakeProject({toolchain: msvcToolchain()}) instead, or gccGraphToolchain()/zigGraphToolchain() for raw ccLibrary()/ccBinary() targets",
+			);
+		},
+		cmakeConfigure: async (exec) => {
+			const host = await resolveMsvcHost(exec);
+			return { compilerArgs: msvcCMakeCompilerArgs(host), env: msvcEnv(host) };
+		},
+		resolvesToolName: (name) => MSVC_GRAPH_TOOL_NAMES.has(name),
+		toolSpec: (name, host) => msvcGraphToolSpec(name, host),
+		resolveState: (exec) => resolveMsvcHost(exec),
+		edgeEnv: (host) => msvcEnv(host),
+	};
 }
 
 export function isMsvcToolchain(toolchain) {

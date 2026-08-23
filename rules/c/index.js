@@ -42,7 +42,8 @@ import {
 } from "imp:core";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
 import { nativeTool } from "//rules/imp/native-tool";
-import { defaultZigGraphToolchain, zigGraphCacheEnv } from "//rules/c/zig";
+import { defaultZigGraphToolchain } from "//rules/c/zig";
+import { selectCcToolchain } from "//rules/c/toolchain";
 
 export const DEFAULT_CPP_SRCS = ["**/*.c", "**/*.cc", "**/*.cpp", "**/*.cxx"];
 export const DEFAULT_CPP_HDRS = ["**/*.h", "**/*.hh", "**/*.hpp", "**/*.hxx"];
@@ -111,73 +112,25 @@ function rspfileArgv(displayName, rspPath, content, command) {
 	];
 }
 
-// Resolves a graph-native gcc or zig toolchain — distinguished by shape
-// (zig's carries a buildCacheTool, gcc's doesn't; see rules/c/gcc's
-// gccGraphToolchain()/rules/c/zig's zigGraphToolchain()), not a class/kind
-// tag, since both are plain frozen records. Zig preferred over gcc by
-// default, matching the legacy factory's own default order.
+// Resolves toolchain to a bare provider (a platform-indexed union passed
+// through .select(), a bare provider unchanged — see
+// //rules/c/toolchain's selectCcToolchain()) and falls back to the declared
+// zig/gcc default. Every provider now conforms to the same duck-typed
+// contract (kind/taskInputs/commands/...; see //rules/c/gcc's,
+// //rules/c/zig's, //rules/c/msvc's own toolchain constructors), so callers
+// below dispatch through it rather than shape-sniffing zig vs. gcc. Zig
+// preferred over gcc by default, matching the legacy factory's own default
+// order.
 function resolveToolchain(toolchain) {
+	const selected = selectCcToolchain(toolchain);
 	const resolved =
-		toolchain || defaultZigGraphToolchain() || defaultGccGraphToolchain();
+		selected || defaultZigGraphToolchain() || defaultGccGraphToolchain();
 	if (!resolved) {
 		throw new Error(
 			"ccLibrary()/ccBinary() need an explicit toolchain or a declared gcc/zig default — see //rules/c/gcc, //rules/c/zig",
 		);
 	}
 	return resolved;
-}
-
-function isZigToolchain(toolchain) {
-	return !!toolchain.buildCacheTool;
-}
-
-// The task()-input slice a resolved toolchain contributes — merge into any
-// task's own `inputs:` map, mirroring rules/rust's linkerToolInputs().
-function toolchainTaskInputs(toolchain) {
-	return {
-		ccTool: toolchain.tool,
-		...(isZigToolchain(toolchain)
-			? { ccBuildCacheTool: toolchain.buildCacheTool }
-			: {}),
-	};
-}
-
-// Resolves the executable-token prefix (zig's own tools are invoked as
-// `zig <subcommand>`, two tokens) and env additions for compiling/archiving
-// with a resolved toolchain, from inside a task's run().
-function toolchainCommands(exec, toolchain, input, unsafeSystemPaths) {
-	if (isZigToolchain(toolchain)) {
-		const zigExe = exec.tool(input.ccTool, "zig");
-		return {
-			compiler: (isCxx) => [zigExe, isCxx ? "c++" : "cc"],
-			archiver: () => [zigExe, "ar"],
-			env: zigGraphCacheEnv(exec, input.ccBuildCacheTool),
-		};
-	}
-	// unsafeSystemPaths swaps in the "-unsafe-paths" aliases (see
-	// rules/c/gcc's gccGraphTool() install-step comment), which bypass
-	// Bootlin's toolchain-wrapper unsafe-path guard — a no-op concern for zig
-	// (no such wrapper/guard), so only the gcc branch here checks it.
-	const suffix = unsafeSystemPaths ? "-unsafe-paths" : "";
-	const isWindows = platformInfo().os === "windows";
-	// This whole action runs under "sh -c" (see ccTask's own script), and
-	// Git-for-Windows' MSYS runtime drops TMP/TEMP when it spawns a native
-	// (non-MSYS) child — confirmed directly: neither an inherited nor a
-	// per-command "TMP=... TEMP=... cmd" prefix reaches a native child
-	// spawned from its sh. Without a real temp dir, gcc's cc1/as stages fail
-	// with "Cannot create temporary file in C:\WINDOWS\: Permission denied"
-	// (falling through GetTempPath()'s last resort). -pipe sidesteps this by
-	// connecting the compilation stages with a pipe instead of temp files,
-	// rather than fighting MSYS's env-filtering from the Rust side.
-	const pipeFlag = isWindows ? ["-pipe"] : [];
-	return {
-		compiler: (isCxx) => [
-			exec.tool(input.ccTool, isCxx ? `c++${suffix}` : `clang${suffix}`),
-			...pipeFlag,
-		],
-		archiver: () => [exec.tool(input.ccTool, "ar")],
-		env: [],
-	};
 }
 
 function optFlags() {
@@ -232,9 +185,9 @@ function crateSpec(opts) {
 		linkopts: [...linkopts],
 		outputSlug: outputSlugFor(normalizedPath),
 		shared: !!shared,
-		// Bypasses Bootlin's toolchain-wrapper unsafe-path guard (see
-		// toolchainCommands()'s own comment) — needed to link against host
-		// system packages like libwebkit2gtk-4.1.
+		// Bypasses Bootlin's toolchain-wrapper unsafe-path guard (see gcc's own
+		// gccToolchainCommands()) — needed to link against host system packages
+		// like libwebkit2gtk-4.1.
 		unsafeSystemPaths: !!unsafeSystemPaths,
 	};
 	_ccSpecs.push(spec);
@@ -280,7 +233,7 @@ function ccTask(spec, isLibrary) {
 			hdrs,
 			mkdir: nativeTool("mkdir"),
 			dirname: nativeTool("dirname"),
-			...toolchainTaskInputs(spec.toolchain),
+			...spec.toolchain.taskInputs(),
 			...Object.fromEntries(
 				transitiveArchives.map((archive, i) => [`archive${i}`, archive]),
 			),
@@ -313,19 +266,16 @@ function ccTask(spec, isLibrary) {
 			// restores per-object task-cache reuse the coarse single-script
 			// form gave up.
 			//
-			// toolchainCommands() is re-resolved for every exec.action() call
+			// toolchain.commands() is re-resolved for every exec.action() call
 			// rather than once up front: it consumes exec.tool()/exec.path()
 			// bindings as a side effect, and exec.action() clears the
 			// consumed set once it returns — a binding consumed for one
 			// action isn't carried over and mounted into the next.
 			const compileResults = await Promise.all(
-				sourcePaths.map((source, i) => {
-					const { compiler, env } = toolchainCommands(
-						exec,
-						spec.toolchain,
-						input,
-						spec.unsafeSystemPaths,
-					);
+				sourcePaths.map(async (source, i) => {
+					const { compiler, env } = await spec.toolchain.commands(exec, input, {
+						unsafeSystemPaths: spec.unsafeSystemPaths,
+					});
 					const compilerCmd = compiler(isCxx).map(shellQuote).join(" ");
 					const objPath = objectPaths[i];
 					const script = `set -e; mkdir -p "$(dirname ${shellQuote(objPath)})"; ${compilerCmd} -c ${shellQuote(source)} -o ${shellQuote(objPath)} ${flags}`;
@@ -352,11 +302,10 @@ function ccTask(spec, isLibrary) {
 			const depArchivePaths = transitiveArchives.map((_, i) =>
 				exec.path(input[`archive${i}`]),
 			);
-			const { compiler, archiver, env } = toolchainCommands(
+			const { compiler, archiver, env } = await spec.toolchain.commands(
 				exec,
-				spec.toolchain,
 				input,
-				spec.unsafeSystemPaths,
+				{ unsafeSystemPaths: spec.unsafeSystemPaths },
 			);
 			const actionKind = isShared
 				? "shared-link"
