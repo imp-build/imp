@@ -181,6 +181,15 @@ export function msvcCMakeCompilerArgs(host) {
 		// failed with "no such file or directory".
 		`-DCMAKE_RC_COMPILER=${sdkBinDir}/rc.exe`,
 		`-DCMAKE_MT=${sdkBinDir}/mt.exe`,
+		// GCC/mingw's ld auto-exports every global symbol from a shared
+		// library by default; MSVC's link.exe exports nothing unless told to
+		// (via __declspec(dllexport) or a .def file), and silently skips
+		// producing an import .lib when there's nothing to export. C/C++
+		// dependencies built for the GCC path generally don't carry
+		// dllexport annotations (they were never needed there), so mimic
+		// GCC's default here rather than expecting every dependency to add
+		// them just for the MSVC path.
+		"-DCMAKE_WINDOWS_EXPORT_ALL_SYMBOLS=ON",
 	];
 }
 
@@ -199,12 +208,30 @@ export function msvcCMakeCompilerArgs(host) {
  * argv tokenization at all, so this sidesteps the whole class of problem
  * rather than trying to out-escape it.
  *
+ * Also carries MSYS2_ARG_CONV_EXCL=* — cl.exe/link.exe are native (non-MSYS)
+ * children of the `sh -c` replaying each edge (see graph_replay.js's
+ * executeEdge()), and Git-for-Windows' MSYS runtime auto-mangles any argv
+ * token that looks like a POSIX path into a Windows one before exec'ing a
+ * native child. A single-slash MSVC flag like `/FoCMakeFiles/foo.dir/x.obj`
+ * matches that heuristic and got silently rewritten/dropped in testing — cl
+ * then fell back to its own default output name in cwd, producing a
+ * plausible-looking command that nonetheless wrote its .obj to the wrong
+ * path. Confirmed by reproducing the exact resolved command by hand: it only
+ * matched the real (broken) behavior once this var was unset, and worked
+ * once set — see rules/c/gcc's own PASSTHROUGH_ENV_VARS_WINDOWS comment for
+ * the sibling issue on the gcc path (which doesn't need this only because
+ * clang/gcc flags use `-o` / `--foo`, never a bare leading slash).
+ *
  * @param {{vsRoot: string, mscVersion: string, sdkRoot: string, sdkVersion: string}} host
  * @returns {string[]}
  */
 export function msvcEnv(host) {
 	const { includeDirs, libDirs } = msvcHostDirs(host);
-	return [`INCLUDE=${includeDirs.join(";")}`, `LIB=${libDirs.join(";")}`];
+	return [
+		`INCLUDE=${includeDirs.join(";")}`,
+		`LIB=${libDirs.join(";")}`,
+		"MSYS2_ARG_CONV_EXCL=*",
+	];
 }
 
 // Bare tool names cl.exe's own compile/link commands can appear as in a
