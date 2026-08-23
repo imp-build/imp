@@ -728,6 +728,18 @@ export function gccCMakeCompilerArgs(version, unsafeSystemPaths) {
 		`-DCMAKE_CXX_COMPILER=${dir}/bin/c++${suffix}${exeSuffix}`,
 		`-DCMAKE_RANLIB=${dir}/bin/ranlib${exeSuffix}`,
 		`-DCMAKE_AR=${dir}/bin/ar${exeSuffix}`,
+		// WinLibs bundles nasm.exe in the same bin/ dir as clang/ar/ranlib.
+		// Without this, CMake's enable_language(ASM_NASM) (see BoringSSL's
+		// CMakeLists.txt Windows path) falls back to find_program()'s own
+		// ambient-PATH search, which isn't hermetic and can silently miss the
+		// toolchain's nasm even when one is bundled right here — confirmed by
+		// a real Windows build where BoringSSL's hand-optimized SHA/AES/EC
+		// assembly routines were entirely absent from libcrypto.a, causing
+		// dozens of undefined-symbol link errors downstream, with no
+		// configure-time failure to point at the cause.
+		...(platformInfo().os === "windows"
+			? [`-DCMAKE_ASM_NASM_COMPILER=${dir}/bin/nasm${exeSuffix}`]
+			: []),
 	];
 }
 

@@ -92,6 +92,13 @@ const GCC_GRAPH_TOOL_NAMES = new Set([
 	"c++",
 	"ar",
 	"ranlib",
+	// nasm isn't a compiler-driver alias like the others — it's bundled
+	// straight in the toolchain's bin/ dir (see gccCMakeCompilerArgs()'s
+	// -DCMAKE_ASM_NASM_COMPILER) — but it needs the same real-mount
+	// treatment: BoringSSL's Windows build bakes nasm's absolute path into
+	// build.ninja at configure time, and replay rewrites it back to a bare
+	// "nasm"/"nasm.exe" the same way it does for clang/ar/ranlib.
+	"nasm",
 	// The unsafeSystemPaths escape hatch (see cmakeProjectSpec() below and
 	// rules/c/gcc's gccGraphTool()/gccCMakeCompilerArgs()) can bake these
 	// aliases into build.ninja instead of the plain ones above.
@@ -107,6 +114,7 @@ const GCC_GRAPH_TOOL_NAMES = new Set([
 	"c++.exe",
 	"ar.exe",
 	"ranlib.exe",
+	"nasm.exe",
 	"clang-unsafe-paths.exe",
 	"cc-unsafe-paths.exe",
 	"c++-unsafe-paths.exe",
