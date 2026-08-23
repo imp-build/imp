@@ -64,7 +64,11 @@ import {
 
 import { nativeTool } from "//rules/imp/native-tool";
 
-import { gccGraphTool, defaultGccToolchainVersion } from "//rules/c/gcc";
+import {
+	gccGraphTool,
+	defaultGccToolchainVersion,
+	gccWindowsRuntimeArchives,
+} from "//rules/c/gcc";
 import { moldOdinLinkerEnv } from "//rules/c/mold";
 
 import { ODIN_TOOL } from "//rules/odin/toolchain";
@@ -1060,6 +1064,18 @@ function graphOdinBuild(
 				linker && !lint
 					? moldOdinLinkerEnv(exec, resolved.moldTool, linker.version)
 					: null;
+			// Odin's default Windows linker is MSVC's link.exe, which cannot
+			// read GCC/mingw-produced C++ object files reliably — confirmed by
+			// a real failure linking a mingw-built BoringSSL: "fatal error
+			// LNK1143: invalid or corrupt file: no symbol for COMDAT section".
+			// lld-link handles both MSVC- and GCC-style COFF objects, and
+			// ships bundled at <odin-root>/bin/lld-link.exe (found by Odin
+			// automatically — no separate toolchain/PATH plumbing needed, the
+			// way mold's Linux-only linker handle above requires), so default
+			// to it whenever a package hasn't already picked an explicit
+			// linker via odinToolchain(version, { linker }).
+			const useLldOnWindows =
+				!lint && !linker && platformInfo().os === "windows";
 			// `odin test` already tolerates a package with no `main` (that's the
 			// whole point of the test build mode); `build` and `check` both
 			// default to expecting one. `build` already opts out via
@@ -1083,7 +1099,27 @@ function graphOdinBuild(
 					: []),
 				...(captures ? [`-out:${outputPath}`] : []),
 				...(linkerEnv ? linkerEnv.flags : []),
-				...(lint ? [] : odinExtraLinkerFlagsArgs(resolved.analysis.linkopts)),
+				...(useLldOnWindows ? ["-linker:lld"] : []),
+				...(lint
+					? []
+					: odinExtraLinkerFlagsArgs([
+							...resolved.analysis.linkopts,
+							...(useLldOnWindows
+								? [
+										// WinLibs' libstdc++.a defines __cxa_pure_virtual as a
+										// plain (non-COMDAT) symbol in more than one object file
+										// (e.g. eh_exception.o and system_error.o) — harmless
+										// under GNU ld, which tolerates the duplicate, but a real
+										// `odin build` failure showed lld-link rejecting it as
+										// "duplicate symbol" once both objects get pulled in by a
+										// large C++ dependency closure (BoringSSL + webview).
+										// /force:multiple keeps lld-link's first definition and
+										// only warns, matching GNU ld's existing tolerance.
+										"/force:multiple",
+										...gccWindowsRuntimeArchives(defaultGccToolchainVersion()),
+									]
+								: []),
+						])),
 			];
 			const result = await exec.action({
 				argv: args,

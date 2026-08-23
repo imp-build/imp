@@ -630,6 +630,69 @@ export function gccGraphToolchainDir(version) {
 }
 
 /**
+ * Parse the plain GCC release number out of a WinLibs release tag (see
+ * WINLIBS_TAG_RE's own doc comment for the tag shape), e.g.
+ * "16.1.0posix-14.0.0-ucrt-r4" -> "16.1.0". Needed because WinLibs' archive
+ * lays out its per-version runtime libs (libgcc.a, libgcc_eh.a) under
+ * lib/gcc/x86_64-w64-mingw32/<gcc version>/, and that path segment is the
+ * bare GCC number, not the full WinLibs tag.
+ *
+ * @param {string} version A Windows gcc toolchain version (WinLibs tag).
+ * @returns {string}
+ */
+export function winlibsGccVersion(version) {
+	const match = WINLIBS_TAG_RE.exec(version);
+	if (!match) {
+		throw new Error(
+			`gcc toolchain version '${version}' doesn't look like a WinLibs release tag (expected e.g. "16.1.0posix-14.0.0-ucrt-r4")`,
+		);
+	}
+	return match[1];
+}
+
+/**
+ * Real, absolute paths to the mingw-w64 runtime archives a raw COFF linker
+ * (lld-link, radlink, ...) needs that a normal `gcc`/`clang` frontend
+ * invocation would otherwise add on its own via its default-libs spec: the
+ * C++ ABI/runtime support library (new/delete, RTTI, exceptions), the SEH
+ * unwinder and its thread-local-storage emulation (which itself needs
+ * pthread), the pthreads API BoringSSL's Windows build still compiles
+ * against (mingw's own winpthreads implementation, not real POSIX threads),
+ * the mingw libc extensions GCC-compiled C sources assume (e.g. strcasecmp,
+ * the ___chkstk_ms stack-probe thunk), and — surprisingly, since
+ * this isn't GCC/mingw-specific at all — the UCRT C runtime itself
+ * (memcpy/malloc/strlen/...), which even a pure-Odin object file references
+ * and which Odin's own "default" (MSVC link.exe) backend otherwise supplies
+ * automatically but its lld-link path does not.
+ *
+ * Confirmed necessary by a real `odin build` failure once Odin's Windows
+ * link step was switched to `-linker:lld` (see rules/odin/index.js) to work
+ * around MSVC link.exe rejecting GCC-produced COMDAT sections: without these,
+ * linking anything at all on Windows via lld-link fails with dozens of
+ * "undefined symbol" errors, from plain UCRT functions up through C++-only
+ * ones like `__gxx_personality_seh0`, `_Unwind_Resume`, and `operator new`
+ * once a GCC/mingw-compiled C++ dependency (BoringSSL, webview) is in the
+ * link too.
+ *
+ * @param {string} version A Windows gcc toolchain version (WinLibs tag).
+ * @returns {string[]}
+ */
+export function gccWindowsRuntimeArchives(version) {
+	const dir = gccGraphToolchainDir(version);
+	const gccVersion = winlibsGccVersion(version);
+	return [
+		`${dir}/lib/gcc/x86_64-w64-mingw32/${gccVersion}/libgcc.a`,
+		`${dir}/lib/gcc/x86_64-w64-mingw32/${gccVersion}/libgcc_eh.a`,
+		`${dir}/x86_64-w64-mingw32/lib/libmingwex.a`,
+		`${dir}/x86_64-w64-mingw32/lib/libmingw32.a`,
+		`${dir}/x86_64-w64-mingw32/lib/libucrt.a`,
+		`${dir}/x86_64-w64-mingw32/lib/libwinpthread.a`,
+		`${dir}/lib/libstdc++.a`,
+		`${dir}/lib/libsupc++.a`,
+	];
+}
+
+/**
  * Real, absolute CMAKE_C_COMPILER/CMAKE_CXX_COMPILER/CMAKE_AR/CMAKE_RANLIB
  * arguments for a resolved gcc graph toolchain, for use by rules/c/cmake's
  * graph-native configure step (see #31/#62). Uses gccGraphToolchainDir()'s
