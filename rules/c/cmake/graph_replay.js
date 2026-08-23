@@ -64,6 +64,14 @@ import {
 	gccGraphToolSpec,
 } from "//rules/c/gcc";
 import {
+	MSVC_GRAPH_TOOL_NAMES,
+	isMsvcToolchain,
+	msvcCMakeCompilerArgs,
+	msvcEnv,
+	msvcGraphToolSpec,
+	resolveMsvcHost,
+} from "//rules/c/msvc";
+import {
 	cmakeGraphToolSpec,
 	cmakeGraphToolchainDir,
 	defaultCmakeGraphToolchain,
@@ -125,9 +133,12 @@ function isZigToolchain(toolchain) {
 }
 
 // The task()-input slice a resolved toolchain contributes (mirrors
-// rules/c/graph.js's toolchainTaskInputs()).
+// rules/c/graph.js's toolchainTaskInputs()). MSVC has no task-produced
+// toolchain artifact to depend on — resolveMsvcHost() discovers the ambient
+// host install fresh inside each task's own run() instead (see
+// //rules/c/msvc's own header comment on why).
 function toolchainTaskInputs(toolchain) {
-	return { ccTool: toolchain.tool };
+	return isMsvcToolchain(toolchain) ? {} : { ccTool: toolchain.tool };
 }
 
 function resolveCmakeToolchain(toolchain) {
@@ -141,15 +152,16 @@ function resolveCmakeToolchain(toolchain) {
 }
 
 function requireGccToolchain(toolchain) {
+	if (isMsvcToolchain(toolchain)) return toolchain;
 	const resolved = toolchain || defaultGccGraphToolchain();
 	if (!resolved) {
 		throw new Error(
-			"cmakeProject() needs an explicit gcc toolchain or a declared gcc default — see //rules/c/gcc",
+			"cmakeProject() needs an explicit gcc or msvc toolchain, or a declared gcc default — see //rules/c/gcc and //rules/c/msvc",
 		);
 	}
 	if (isZigToolchain(resolved)) {
 		throw new Error(
-			"cmakeProject() doesn't support a zig toolchain yet — rules/c/zig's zigGraphTool() has no named-cache-backed real path for CMake to bake into build.ninja (see this module's own docstring); pass a gccGraphToolchain() instead",
+			"cmakeProject() doesn't support a zig toolchain yet — rules/c/zig's zigGraphTool() has no named-cache-backed real path for CMake to bake into build.ninja (see this module's own docstring); pass a gccGraphToolchain() or msvcToolchain() instead",
 		);
 	}
 	return resolved;
@@ -243,10 +255,12 @@ export function configureCmakeProject(spec) {
 			sourcePaths: output.value(),
 		},
 		async run(exec, input) {
-			const compilerArgs = gccCMakeCompilerArgs(
-				spec.toolchain.version,
-				spec.unsafeSystemPaths,
-			);
+			const msvcHost = isMsvcToolchain(spec.toolchain)
+				? await resolveMsvcHost(exec)
+				: null;
+			const compilerArgs = msvcHost
+				? msvcCMakeCompilerArgs(msvcHost)
+				: gccCMakeCompilerArgs(spec.toolchain.version, spec.unsafeSystemPaths);
 			const cmakeDir = cmakeGraphToolchainDir(
 				exec,
 				input.cmakeTool,
@@ -286,6 +300,7 @@ export function configureCmakeProject(spec) {
 					...Object.keys(spec.dirInputs).map((key) => input[key]),
 					...spec.deps.map((_, i) => input[`dep${i}`]),
 				],
+				env: msvcHost ? msvcEnv(msvcHost) : [],
 				outputs: { directory: output.directory(spec.buildDirPath) },
 				display: `cmake configure ${spec.path}`,
 			});
@@ -661,6 +676,14 @@ export function replayCmakeTarget(
 			const boundaryInputs = Object.entries(targetDeps).flatMap(([name, dep]) =>
 				(dep.fileIndices ?? [0]).map((i) => input[`dep_${name}_${i}`]),
 			);
+			// Memoized per replay task run(), not per edge: resolveMsvcHost()
+			// shells out to vswhere.exe, and every edge in this target shares
+			// the same host toolchain.
+			let msvcHostPromise = null;
+			function getMsvcHost() {
+				if (!msvcHostPromise) msvcHostPromise = resolveMsvcHost(exec);
+				return msvcHostPromise;
+			}
 
 			async function executeEdge(edge, priorOutputs) {
 				const resolved = resolveEdgeCommand(
@@ -706,8 +729,12 @@ export function replayCmakeTarget(
 						edgeTools.push(cmakeGraphToolSpec(spec.cmakeToolchain.version));
 						continue;
 					}
+					if (MSVC_GRAPH_TOOL_NAMES.has(name)) {
+						edgeTools.push(msvcGraphToolSpec(name, await getMsvcHost()));
+						continue;
+					}
 					throw new Error(
-						`cmake edge needs unsupported host tool '${name}' — only gcc's own clang/cc/c++/ar/ranlib and cmake itself are resolvable from a graph-native CMake replay right now`,
+						`cmake edge needs unsupported host tool '${name}' — only gcc's own clang/cc/c++/ar/ranlib, msvc's cl/link/lib, and cmake itself are resolvable from a graph-native CMake replay right now`,
 					);
 				}
 
@@ -792,6 +819,9 @@ export function replayCmakeTarget(
 					argv: shArgv,
 					tools: edgeTools,
 					inputs: edgeInputs,
+					env: isMsvcToolchain(spec.toolchain)
+						? msvcEnv(await getMsvcHost())
+						: [],
 					outputs: Object.fromEntries(
 						destPaths.map((p, i) => [outputNames[i], output.file(p)]),
 					),

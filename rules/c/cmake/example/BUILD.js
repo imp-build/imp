@@ -3,6 +3,7 @@ import { PACKAGE } from "//rules/workflows/package";
 import { TEST } from "//rules/workflows/test";
 import { cmakeLibraryDep, cmakeProject } from "//rules/c/cmake";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
+import { msvcToolchain } from "//rules/c/msvc";
 import { zigGraphToolchain } from "//rules/c/zig";
 import { ccBinary, ccLibrary } from "//rules/c";
 import { jsSources } from "//rules/js";
@@ -62,5 +63,21 @@ export const uses_cmake_lib = ccBinary({
 	],
 	toolchain: defaultGccGraphToolchain(),
 });
+
+// Exploratory: MSVC as a native cmakeProject() toolchain on Windows (see
+// //rules/c/msvc). Separate buildDir since it shares `path` with `hello`
+// above.
+const hello_msvc = cmakeProject({
+	path: "rules/c/cmake/example",
+	buildDir: "build/rules/c/cmake/example-msvc",
+	cmakeArgs: ["-DCMAKE_BUILD_TYPE=Debug"],
+	toolchain: msvcToolchain(),
+});
+export const hello_cmake_msvc_main = {
+	[BUILD]: hello_msvc.get("hello_cmake_main", BUILD),
+};
+export const hello_cmake_msvc_cxx_main = {
+	[BUILD]: hello_msvc.get("hello_cmake_cxx_main", BUILD),
+};
 
 export const js = jsSources({ base: "rules/c/cmake/example" });

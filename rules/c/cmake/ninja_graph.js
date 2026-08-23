@@ -98,7 +98,16 @@ function parseInto(text, rules, edges, topVars, targetTypes, readInclude) {
 		}
 
 		if (stripped.startsWith("include ")) {
-			const incPath = stripped.slice("include ".length).trim();
+			// MSVC's CMake generator emits this path with backslash
+			// separators (confirmed via a real `include CMakeFiles\rules.ninja`
+			// line) — GCC's never has, so this went unnoticed until now.
+			// unescapeNinjaValue() already normalizes backslashes to forward
+			// slashes for every other path token in this file; apply it here
+			// too, since readInclude() (readFileInDigest() in practice) looks
+			// paths up by their forward-slash digest key.
+			const incPath = unescapeNinjaValue(
+				stripped.slice("include ".length).trim(),
+			);
 			parseInto(
 				readInclude(incPath),
 				rules,
@@ -438,7 +447,12 @@ export function rebasePath(path, sandboxRoot) {
 function resolveEdgeRspfile(edge, rule, topVars, sandboxRoot, buildDirPath) {
 	if (!rule.rspfile) return null;
 	const path = expandVar(rule.rspfile, edge, topVars, rule);
-	const rawContent = expandVar(rule.rspfile_content || "", edge, topVars, rule);
+	const rawContent = expandVar(
+		rule.rspfile_content || "",
+		edge,
+		topVars,
+		rule,
+	).replace(/\\/g, "/");
 	const content = rebaseAbsolutePaths(
 		rawContent,
 		sandboxRoot,
@@ -465,7 +479,23 @@ export function resolveEdgeCommand(
 	const rule = rules[edge.rule];
 	if (!rule || !rule.command) return null;
 
-	const expanded = expandVar(rule.command, edge, topVars, rule);
+	// MSVC's CMake/Ninja generator emits backslash-separated paths in flag
+	// values too, not just the `include` directive fixed above (confirmed by
+	// a real replayed edge silently writing its object file to the wrong
+	// place: an unquoted `/FoCMakeFiles\hello_cmake.dir\hello.c.obj` reaching
+	// `sh -c` has each backslash-letter pair collapsed by bash's own escape
+	// handling, e.g. \h -> h, gluing the path into one nonexistent
+	// component). rebaseAbsolutePaths() below only rewrites *absolute*
+	// sandbox paths, so a relative flag value like this one would otherwise
+	// reach `sh -c` completely unnormalized. Same invariant
+	// unescapeNinjaValue() already documents for this file's own narrow
+	// scope: every backslash CMake's generator emits into a value here is a
+	// path separator, never a literal character with some other meaning —
+	// safe to normalize globally, before any other processing.
+	const expanded = expandVar(rule.command, edge, topVars, rule).replace(
+		/\\/g,
+		"/",
+	);
 	const rebased = rebaseAbsolutePaths(
 		expanded,
 		sandboxRoot,
