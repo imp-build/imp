@@ -23,7 +23,8 @@
 // both problems at once: no ABI mixing, no COMDAT rejection, Odin's plain
 // default linker just works.
 
-import { cacheHas, cachePut, namedCache } from "imp:core";
+import { cacheGet, cacheHas, cachePut, namedCache, output } from "imp:core";
+import { resolveToolLockfile } from "//rules/imp/lockfile";
 import { shellQuote } from "//rules/c/toolchain";
 
 // The VS Installer always places vswhere.exe here, regardless of which VS
@@ -44,6 +45,16 @@ const MSVC_HOST_KEY = "default";
 // it can't share MSVC_HOST_CACHE's single binDirs-relative-to-one-root mount.
 const MSVC_SDK_CACHE = "msvc-host-sdk";
 const MSVC_SDK_KEY = "default";
+
+// MSVC ships no assembler of its own — BoringSSL's Windows CMake build
+// needs a real NASM (see resolveNasmHost() below), downloaded and cached
+// under its own named-cache entry rather than an existing host directory
+// (unlike MSVC_HOST_CACHE/MSVC_SDK_CACHE above, nothing here is ambient).
+const NASM_CACHE = "msvc-nasm";
+const NASM_KEY = "default";
+const NASM_VERSION = "3.02";
+const NASM_PLATFORM = { os: "windows", arch: "x86_64" };
+const NASM_LOCKFILE = "//rules/c/msvc/nasm.lock";
 
 // -O2/-DNDEBUG vs -O0/-g's cl.exe equivalent. /Zi (debug) emits a separate
 // .pdb rather than embedding symbols the way -g does, but no caller here
@@ -165,7 +176,11 @@ export function msvcToolchain() {
 		commands: (exec) => msvcToolchainCommands(exec),
 		cmakeConfigure: async (exec) => {
 			const host = await resolveMsvcHost(exec);
-			return { compilerArgs: msvcCMakeCompilerArgs(host), env: msvcEnv(host) };
+			const nasmPath = await resolveNasmHost(exec);
+			return {
+				compilerArgs: msvcCMakeCompilerArgs(host, nasmPath),
+				env: msvcEnv(host),
+			};
 		},
 		resolvesToolName: (name) => MSVC_GRAPH_TOOL_NAMES.has(name),
 		toolSpec: (name, host) => msvcGraphToolSpec(name, host),
@@ -253,6 +268,94 @@ export async function resolveMsvcHost(exec) {
 }
 
 /**
+ * Resolve a NASM assembler for BoringSSL's Windows CMake build (see
+ * msvcCMakeCompilerArgs()'s own CMAKE_ASM_NASM_COMPILER) — MSVC itself
+ * ships no assembler, unlike gcc's WinLibs distribution, which bundles
+ * nasm.exe alongside clang/ar/ranlib (see rules/c/gcc's own
+ * gccCMakeCompilerArgs()). Downloaded straight from nasm.us, verified
+ * against nasm.lock, rather than routed through imp's Toolchain-class/
+ * GEN_LOCKFILES machinery the way gcc/zig's own pinned toolchains are:
+ * nasm here is an internal implementation detail of the msvc CMake path,
+ * not a user-facing toolchain a workspace would ever declare a version
+ * of — so this stays a small, self-contained download+extract, resolved
+ * entirely inside a task's run() (never at graph-declaration time),
+ * matching resolveMsvcHost()'s own dynamic resolution and
+ * msvcToolchain()'s "fully inert to construct" design (see this module's
+ * own header comment).
+ *
+ * Unlike resolveMsvcHost()'s own ambient, always-re-verified vswhere
+ * lookup, this artifact is an immutable pinned download — the extract
+ * action's own inputs (URL, sha256, version) never change, so imp's
+ * ordinary action cache (not a manual cacheHas() guard) is what makes a
+ * repeat call cheap; the download/extract script itself still runs on
+ * every call, just typically as a cache hit.
+ *
+ * @param {object} exec
+ * @returns {Promise<string>} Real, absolute host path to nasm.exe.
+ */
+export async function resolveNasmHost(exec) {
+	namedCache({ name: NASM_CACHE, shared: true });
+	const lockEntry = resolveToolLockfile({
+		address: NASM_LOCKFILE,
+		tool: "nasm",
+		version: NASM_VERSION,
+		plat: NASM_PLATFORM,
+	});
+	if (!lockEntry) {
+		throw new Error(
+			`no nasm.lock entry for nasm ${NASM_VERSION} (windows/x86_64) — see //rules/c/msvc/nasm.lock`,
+		);
+	}
+	// No `tools:` mount, bare command names (curl/mkdir/unzip/mv/
+	// sha256sum) resolved off ambient PATH — matches resolveMsvcHost()'s
+	// own bare "sh -c" script above, not gcc's hermetic-tool-mounted
+	// install task: nativeTool() only produces a resolved graph binding
+	// when declared as a task's own static `inputs:` (see e.g. rules/c/
+	// gcc's own install-task comment), which isn't available here — this
+	// runs dynamically inside cmakeConfigure()'s already-executing task,
+	// not at graph-declaration time. Same accepted ambient-host departure
+	// from strict hermeticity this whole module already makes (see its own
+	// header comment) — nasm.us isn't vendored/pinned the way gcc/zig's
+	// own toolchains are, but its own transfer *is* still sha256-verified
+	// against nasm.lock, unlike the vswhere lookup above.
+	//
+	// nasm-<version>-win64.zip wraps its contents (nasm.exe, ndisasm.exe,
+	// LICENSE) in one top-level "nasm-<version>/" directory — stripped the
+	// same way gccGraphToolWindows() strips WinLibs' own wrapping
+	// "mingw64/" directory: unzip has no --strip-components equivalent, so
+	// this downloads and stages into a side directory, then moves its
+	// contents up into the real output.
+	const script =
+		'url=$1; sha=$2; size=$3; out=$4; ' +
+		'mkdir -p "$out" "$out.stage" && ' +
+		'curl -fSL -o "$out.zip" "$url" && ' +
+		'actual=$(wc -c < "$out.zip") && ' +
+		'{ [ "$actual" -eq "$size" ] || { echo "size mismatch for nasm download: expected $size bytes, got $actual" >&2; exit 1; }; } && ' +
+		'printf "%s  %s\\n" "$sha" "$out.zip" | sha256sum -c - && ' +
+		'unzip -q "$out.zip" -d "$out.stage" && ' +
+		'mv "$out.stage"/*/* "$out"/';
+	await exec.action({
+		argv: [
+			"sh",
+			"-c",
+			script,
+			"nasm-install",
+			lockEntry.url,
+			lockEntry.sha256,
+			String(lockEntry.size),
+			"nasm-toolchain",
+		],
+		outputs: {
+			directory: output.directory("nasm-toolchain", {
+				namedCache: { name: NASM_CACHE, key: NASM_KEY },
+			}),
+		},
+		display: `install nasm ${NASM_VERSION}`,
+	});
+	return `${cacheGet(NASM_CACHE, NASM_KEY)}/nasm.exe`;
+}
+
+/**
  * The MSVC/Windows-SDK bin/include/lib directories for a resolved host,
  * x86_64 (Hostx64/x64) only.
  *
@@ -285,9 +388,11 @@ export function msvcHostDirs(host) {
  * infers everything else about an MSVC toolchain from cl.exe alone.
  *
  * @param {{vsRoot: string, mscVersion: string, sdkRoot: string, sdkVersion: string}} host
+ * @param {string} nasmPath Real, absolute host path to nasm.exe — see
+ *   resolveNasmHost().
  * @returns {string[]}
  */
-export function msvcCMakeCompilerArgs(host) {
+export function msvcCMakeCompilerArgs(host, nasmPath) {
 	const { binDir, sdkBinDir } = msvcHostDirs(host);
 	const clPath = `${binDir}/cl.exe`;
 	return [
@@ -299,6 +404,15 @@ export function msvcCMakeCompilerArgs(host) {
 		// failed with "no such file or directory".
 		`-DCMAKE_RC_COMPILER=${sdkBinDir}/rc.exe`,
 		`-DCMAKE_MT=${sdkBinDir}/mt.exe`,
+		// MSVC ships no assembler of its own, unlike gcc's WinLibs
+		// distribution (see gccCMakeCompilerArgs()'s own
+		// -DCMAKE_ASM_NASM_COMPILER) — set unconditionally the same way
+		// gcc's own is, harmless for a project that never
+		// enable_language(ASM_NASM)s, required (confirmed by a real
+		// configure failure: "No CMAKE_ASM_NASM_COMPILER could be found")
+		// for one that does, e.g. BoringSSL's hand-optimized Windows
+		// assembly routines.
+		`-DCMAKE_ASM_NASM_COMPILER=${nasmPath}`,
 		// GCC/mingw's ld auto-exports every global symbol from a shared
 		// library by default; MSVC's link.exe exports nothing unless told to
 		// (via __declspec(dllexport) or a .def file), and silently skips
@@ -370,6 +484,13 @@ export const MSVC_GRAPH_TOOL_NAMES = new Set([
 	"rc.exe",
 	"mt",
 	"mt.exe",
+	// BoringSSL's Windows build bakes nasm's absolute path (see
+	// msvcCMakeCompilerArgs()'s own -DCMAKE_ASM_NASM_COMPILER) into
+	// build.ninja at configure time; replay rewrites it back to a bare
+	// name the same way it does for cl/link/lib/rc/mt — mirrors
+	// rules/c/gcc's own GCC_GRAPH_TOOL_NAMES "nasm"/"nasm.exe" entries.
+	"nasm",
+	"nasm.exe",
 ]);
 
 // rc.exe/mt.exe live under the Windows SDK root, not the VS/VC root the rest
@@ -377,17 +498,24 @@ export const MSVC_GRAPH_TOOL_NAMES = new Set([
 // comment.
 const MSVC_SDK_TOOL_NAMES = new Set(["rc", "rc.exe", "mt", "mt.exe"]);
 
+// nasm.exe lives under its own downloaded NASM_CACHE (see resolveNasmHost()),
+// not the VS/VC root or the Windows SDK root the rest of
+// MSVC_GRAPH_TOOL_NAMES resolves against.
+const NASM_TOOL_NAMES = new Set(["nasm", "nasm.exe"]);
+
 /**
- * A `{name, cache, key, binDirs}` tool spec for cl.exe/link.exe/lib.exe,
- * mountable directly via `exec.action({tools: [...]})` — mirrors
+ * A `{name, cache, key, binDirs}` tool spec for cl.exe/link.exe/lib.exe/
+ * nasm.exe, mountable directly via `exec.action({tools: [...]})` — mirrors
  * rules/c/gcc's gccGraphToolSpec(), except the "install" is just
  * cachePut()-registering the ambient VS root resolveMsvcHost() already
  * found (see this module's own header comment on why: there's nothing to
- * download, the toolchain already exists on the host).
+ * download, the toolchain already exists on the host) — nasm.exe is the
+ * one exception, actually downloaded by resolveNasmHost().
  *
  * @param {string} name One of MSVC_GRAPH_TOOL_NAMES.
  * @param {{vsRoot: string, mscVersion: string}} host Already-resolved (and
  *   cachePut()'d) via resolveMsvcHost() earlier in the same task run().
+ *   Unused for nasm.exe, which resolves by cache name alone.
  * @returns {{name: string, cache: string, key: string, binDirs: string[]}}
  */
 export function msvcGraphToolSpec(name, host) {
@@ -395,6 +523,9 @@ export function msvcGraphToolSpec(name, host) {
 	// root (not the whole VS/SDK install — see its own comment), so the
 	// mount's binDirs is just "." here, unlike gcc's toolchain-root-relative
 	// paths.
+	if (NASM_TOOL_NAMES.has(name)) {
+		return { kind: "tool", name, cache: NASM_CACHE, key: NASM_KEY, binDirs: ["."] };
+	}
 	return MSVC_SDK_TOOL_NAMES.has(name)
 		? { kind: "tool", name, cache: MSVC_SDK_CACHE, key: MSVC_SDK_KEY, binDirs: ["."] }
 		: { kind: "tool", name, cache: MSVC_HOST_CACHE, key: MSVC_HOST_KEY, binDirs: ["."] };

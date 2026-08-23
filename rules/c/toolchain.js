@@ -41,14 +41,22 @@ export function clangOptFlags(opt) {
  * ccLibrary()/ccBinary()'s `toolchain` option in place of a bare provider.
  *
  * Each `byOs` branch may be an already-constructed provider or a zero-arg
- * thunk. `msvcToolchain()` is always safe to pass eagerly — it's a plain
- * inert object literal; no I/O happens until a task's run() actually calls
- * one of its methods (see //rules/c/msvc's own header comment). By
- * contrast, gccGraphToolchain()/zigGraphToolchain() are NOT inert — calling
- * either registers a real download/install task() graph node immediately,
- * for whichever platform is executing right now — so pass those as thunks
- * (`() => defaultGccGraphToolchain()`) when eager registration for a
- * platform this build will never select is undesirable.
+ * thunk — pass whichever reads more clearly at the call site; it makes
+ * little practical difference. `msvcToolchain()` is a plain inert object
+ * literal either way (no I/O happens until a task's run() actually calls
+ * one of its methods — see //rules/c/msvc's own header comment).
+ * gccGraphToolchain()/zigGraphToolchain() do register a real download/
+ * install task() graph node when called, for whichever platform is
+ * executing right now — but merely *declaring* that node costs nothing
+ * unless something downstream actually requests its output (imp only
+ * executes reachable task nodes), and both modules already declare their
+ * own pinned-default install node unconditionally as a side effect of
+ * being imported at all (see gcc's/zig's own bottom-of-file
+ * `gccToolchain(..., {default: true})`/`zigToolchain(..., {default:
+ * true})`) — before this union or any thunk here ever runs. So a thunk
+ * only avoids one *additional*, redundant such node on a branch that
+ * never gets selected; it's not the difference between "downloads gcc" and
+ * "doesn't."
  *
  * Selection is by `targetPlatform.os` only (no `arch` axis): every provider
  * today hardcodes x86_64 support, so there is nothing downstream yet that

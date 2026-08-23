@@ -176,10 +176,41 @@ function parseInto(text, rules, edges, topVars, targetTypes, readInclude) {
 // Resolves $in / $out / $VAR references in a template string against an
 // edge's own bindings, falling back to the rule's defaults, then top-level
 // variables — matching Ninja's scoping for the subset CMake emits.
+//
+// $in_newline/$out_newline are real Ninja builtins (see its manual: "a
+// separate variable in_newline may be used, similarly to in but with the
+// filenames separated by newlines rather than spaces"), used specifically
+// so a static-library-archive rule's rspfile_content doesn't pack hundreds
+// of object paths onto one line. CMake's MSVC-targeted Ninja generator's
+// CXX_STATIC_LIBRARY_LINKER rule uses `rspfile_content = $in_newline
+// $LINK_FLAGS` — unlike the gcc-targeted one, which uses plain `$in` (see
+// resolveEdgeRspfile()'s own comment) — so without this, $in_newline fell
+// through to the generic "unknown variable -> empty string" branch below,
+// silently producing a near-empty response file. Confirmed by a real
+// Windows MSVC build: crypto.lib's own archive edge wrote a 2-byte
+// CMakeFiles/crypto.rsp (only $LINK_FLAGS survived) and lib.exe produced no
+// output at all from it.
+//
+// Joined with a plain space here, not a real "\n" byte, even though real
+// Ninja itself would use one: this content is never handed to the real
+// filesystem/tool the way Ninja does it — graph_replay.js's own
+// executeEdge() writes it via chunked argv positional params to a
+// directly-spawned (non-MSYS-parent) "sh -c" (see its own RSPFILE_CHUNK_SIZE
+// comment), and a raw embedded newline byte inside such an argv element gets
+// silently eaten by MSYS's own argv reconstruction — confirmed by a
+// standalone repro (PowerShell invoking git-bash's sh.exe directly with a
+// newline-containing argument: the newlines vanished; the same argument
+// passed through an intermediate bash parent instead survived intact).
+// lib.exe's/link.exe's own response-file reader treats whitespace and
+// newlines as equivalent token separators, so a space-joined list parses
+// identically — sidesteps the whole transport quirk rather than needing to
+// encode/decode real newlines around it.
 export function expandVar(template, edge, topVars, ruleDefaults) {
 	return template.replace(/\$\{?(\w+)\}?/g, (whole, name) => {
 		if (name === "in") return edge.inputs.join(" ");
 		if (name === "out") return edge.outputs.join(" ");
+		if (name === "in_newline") return edge.inputs.join(" ");
+		if (name === "out_newline") return edge.outputs.join(" ");
 		if (Object.prototype.hasOwnProperty.call(edge.vars, name)) {
 			return expandVar(edge.vars[name], edge, topVars, ruleDefaults);
 		}
