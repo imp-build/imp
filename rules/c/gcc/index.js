@@ -371,7 +371,21 @@ function gccGraphToolWindows(
 		"done && " +
 		"for name in clang cc c++ ar ranlib; do " +
 		'"$cp" "$out/bin/$name.exe" "$out/bin-unsafe-paths/$name.exe"; ' +
-		"done";
+		"done && " +
+		// lld-link (see -linker:lld in rules/odin/index.js) can't do GNU
+		// ld's auto-import: it needs a real import-library thunk for every
+		// DLL-exported symbol, not just a "-lmsvcrt" library name. atexit is
+		// genuinely absent as a static or import symbol from every archive
+		// WinLibs ships (confirmed via nm across libucrt.a/libmsvcrt.a/
+		// libmingw32.a) — a normal GCC-frontend link only resolves it via
+		// GNU ld reading msvcrt.dll's export table directly at link time, a
+		// capability lld-link doesn't have. dlltool can synthesize the same
+		// thunk as a proper import library from just the export name and
+		// DLL, which lld-link *can* consume — see gccWindowsRuntimeArchives()
+		// below for where this gets linked in.
+		'"$mkdir" -p "$out/x86_64-w64-mingw32/lib" && ' +
+		'printf "LIBRARY msvcrt.dll\\nEXPORTS\\natexit\\n" > "$out/msvcrt-shim.def" && ' +
+		'"$out/bin/dlltool.exe" -d "$out/msvcrt-shim.def" -l "$out/x86_64-w64-mingw32/lib/libmsvcrt_shim.a" -D msvcrt.dll -m i386:x86-64';
 	const directory = task({
 		display: `install gcc ${version} (${plat.os}/${plat.arch})`,
 		inputs: { archive, shell, mkdir, cp, mv, unzip },
@@ -689,6 +703,25 @@ export function gccWindowsRuntimeArchives(version) {
 		`${dir}/x86_64-w64-mingw32/lib/libwinpthread.a`,
 		`${dir}/lib/libstdc++.a`,
 		`${dir}/lib/libsupc++.a`,
+		// This "ucrt" WinLibs build's own libstdc++.a was itself compiled
+		// against classic msvcrt.dll (its default link spec passes
+		// "-lmsvcrt", confirmed via `c++ -v`), not UCRT — e.g. atexit is a
+		// real exported msvcrt.dll symbol libstdc++'s precompiled internals
+		// (eh_alloc.o, atomicity.o, ...) call directly, and it's absent from
+		// libucrt.a entirely. Likewise Odin's own "system:ws2_32.lib" doesn't
+		// resolve to a library with gai_strerrorA — in the real Windows SDK
+		// that function is a header-only inline, not an exported symbol, so
+		// only mingw's own libws2_32.a (which compiles a real out-of-line
+		// definition) satisfies BoringSSL's Windows socket_helper.cc calling
+		// it directly. Both confirmed by a real `odin build` failure once
+		// -no-crt (see rules/odin/index.js) stopped MSVC's own libcmt.lib
+		// from covering them implicitly.
+		`${dir}/x86_64-w64-mingw32/lib/libmsvcrt.a`,
+		`${dir}/x86_64-w64-mingw32/lib/libws2_32.a`,
+		// dlltool-generated import stub for atexit — see the installScript
+		// comment in gccGraphToolWindows() for why libmsvcrt.a alone isn't
+		// enough for lld-link.
+		`${dir}/x86_64-w64-mingw32/lib/libmsvcrt_shim.a`,
 	];
 }
 

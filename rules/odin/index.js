@@ -1100,6 +1100,19 @@ function graphOdinBuild(
 				...(captures ? [`-out:${outputPath}`] : []),
 				...(linkerEnv ? linkerEnv.flags : []),
 				...(useLldOnWindows ? ["-linker:lld"] : []),
+				// Odin's own generated object code carries MSVC-style
+				// /DEFAULTLIB directives that pull in MSVC's own static CRT
+				// (libcmt.lib) alongside the mingw UCRT/runtime archives
+				// gccWindowsRuntimeArchives() adds below — two incompatible C
+				// runtimes in the same link, confirmed by a real `odin build`
+				// failure: lld-link reported duplicate symbols between
+				// libucrt.a and libcmt.lib, then failed outright on
+				// libcmt-only CRT-init internals (__vcrt_initialize,
+				// __acrt_initialize, ...) that mingw's runtime doesn't
+				// provide. -no-crt stops Odin from auto-linking its own CRT,
+				// leaving the mingw runtime archives as the only C runtime
+				// in the link.
+				...(useLldOnWindows ? ["-no-crt"] : []),
 				...(lint
 					? []
 					: odinExtraLinkerFlagsArgs([
