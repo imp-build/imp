@@ -17,8 +17,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::cache::{
-    cas_blob_path, copy_file, create_symlink, file_mode, restore_file_mode, store_blob,
-    store_file_blob,
+    cas_blob_path, copy_file_into_existing_dir, create_symlink, file_mode, restore_file_mode,
+    store_blob, store_file_blob,
 };
 use crate::materialize_pool;
 
@@ -949,7 +949,7 @@ fn collect_materialize_jobs(
 pub(crate) fn materialize_one_file(digest: &str, dest: &Path, mode: Option<u32>) -> Result<()> {
     crate::usage::record_cas_read(digest);
     let source = cas_blob_path(digest)?;
-    copy_file(&source, dest)?;
+    copy_file_into_existing_dir(&source, dest)?;
     restore_file_mode(dest, mode)?;
     crate::artifact_trace!("materialize {} <- digest={digest} (copy)", dest.display());
     Ok(())

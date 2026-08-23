@@ -828,7 +828,12 @@ pub fn temp_sibling_path(destination: &Path, suffix: &str) -> PathBuf {
     destination.with_file_name(temp_name)
 }
 
-fn copy_file_into_existing_dir(source: &Path, destination: &Path) -> Result<()> {
+/// Copy a file when the destination parent directory already exists.
+///
+/// `digest::collect_materialize_jobs` creates every directory before it
+/// dispatches its file jobs, so materialization can use this hot-path helper
+/// without repeating `create_dir_all` for every file.
+pub(crate) fn copy_file_into_existing_dir(source: &Path, destination: &Path) -> Result<()> {
     std::fs::copy(source, destination)
         .with_context(|| format!("copy {} to {}", source.display(), destination.display()))?;
     Ok(())
