@@ -40,10 +40,10 @@ for a cache miss; unstable cache identity is not established.
 | --- | --- | --- |
 | Mount graph toolchains | Partial | The mount mechanism is tested; GCC and Rust mount named-cache tool roots. Node, Zig, CMake, Odin, and other graph toolchains still use CAS input staging. |
 | Avoid repeated parent-directory creation | Complete; benchmark pending | `materialize_one_file` now uses `copy_file_into_existing_dir`. `collect_materialize_jobs` creates each parent before it dispatches file jobs. |
-| Avoid stat on every CAS read | Open | `record_cas_read` calls `metadata` before `record_use_at` can apply its per-process deduplication. |
+| Avoid stat on every CAS read | Complete | `record_cas_read` checks whether a sized CAS use is already recorded in this process before it calls `metadata`; the first read still backfills the size. |
 | Move usage DB work off the hot path | Open | Usage recording has a process-global mutex and executes SQLite synchronously. WAL mode is enabled, but there is no checkpoint policy. |
 | Shard CAS and task directories | Open | `cas/blobs`, `cas/meta`, and `tasks` remain flat. |
-| Avoid redundant permission updates | Open | Unix `restore_file_mode` always reads and sets permissions after a copy. |
+| Avoid redundant permission updates | Complete | Unix `restore_file_mode` compares the captured permission bits with the copied file before it calls `set_permissions`. |
 | Add input fingerprints | Open | Input capture re-hashes files; there is no persisted `(path, metadata) -> digest` cache. |
 | Parallelize input capture | Open | `capture_directory_trie` and `capture_paths` walk and hash serially. |
 

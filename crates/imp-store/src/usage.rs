@@ -108,11 +108,31 @@ pub fn record_use_sized(kind: UsageKind, id: &str, size_bytes: Option<u64>) {
 /// Record a CAS blob read, sizing the row by stat-ing the blob file — this
 /// backfills sizes for blobs stored before size tracking existed.
 pub fn record_cas_read(digest: &str) {
+    let Ok(root) = crate::cache::cache_root() else {
+        return;
+    };
+    if !needs_sized_recording_at(&root, UsageKind::Cas, digest) {
+        return;
+    }
     let size = crate::cache::cas_blob_path(digest)
         .ok()
         .and_then(|p| std::fs::metadata(p).ok())
         .map(|m| m.len());
-    record_use_sized(UsageKind::Cas, digest, size);
+    record_use_at(&root, UsageKind::Cas, digest, size);
+}
+
+/// True when `kind`/`id` still needs a recording that includes its size.
+///
+/// CAS reads use this before they stat the blob. A first unsized recording
+/// must still be upgraded, but a sized recording is final for this process.
+fn needs_sized_recording_at(root: &std::path::Path, kind: UsageKind, id: &str) -> bool {
+    with_state(root, |state| {
+        if state.connection.is_none() {
+            return false;
+        }
+        !matches!(state.seen.get(&(kind, id.to_owned())), Some(true))
+    })
+    .unwrap_or(false)
 }
 
 /// Run `f` against the (lazily opened) state for `root`; `None` if the state
@@ -363,6 +383,24 @@ mod tests {
         record_use_at(cache.path(), UsageKind::Named, "size-test", None);
         let (_, _, size) = query_row(cache.path(), "named", "size-test");
         assert_eq!(size, Some(42));
+    }
+
+    #[test]
+    fn sized_recordings_do_not_need_a_second_cas_stat() {
+        let cache = tempfile::tempdir().unwrap();
+        let digest = "cas-read-test-digest";
+
+        assert!(needs_sized_recording_at(
+            cache.path(),
+            UsageKind::Cas,
+            digest
+        ));
+        record_use_at(cache.path(), UsageKind::Cas, digest, Some(7));
+        assert!(!needs_sized_recording_at(
+            cache.path(),
+            UsageKind::Cas,
+            digest
+        ));
     }
 
     #[test]

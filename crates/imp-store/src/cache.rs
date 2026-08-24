@@ -802,6 +802,9 @@ pub fn restore_file_mode(path: &Path, mode: Option<u32>) -> Result<()> {
         return Ok(());
     };
     let mut permissions = std::fs::metadata(path)?.permissions();
+    if permissions.mode() & 0o7777 == mode {
+        return Ok(());
+    }
     permissions.set_mode(mode);
     std::fs::set_permissions(path, permissions)
         .with_context(|| format!("set permissions {:o} on {}", mode, path.display()))
@@ -1131,6 +1134,19 @@ mod tests {
             std::fs::read_to_string(destination.join("sub").join("nested.txt")).unwrap(),
             "nested"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn restore_file_mode_keeps_matching_mode_and_applies_a_different_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::write(&path, b"contents").unwrap();
+
+        restore_file_mode(&path, Some(0o640)).unwrap();
+        assert_eq!(file_mode(&path).unwrap(), Some(0o640));
+        restore_file_mode(&path, Some(0o755)).unwrap();
+        assert_eq!(file_mode(&path).unwrap(), Some(0o755));
     }
 
     // Regression for the Windows CAS-publish race: two build tasks producing
