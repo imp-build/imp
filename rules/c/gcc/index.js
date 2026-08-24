@@ -11,6 +11,7 @@ import {
 } from "imp:core";
 
 import { nativeTool } from "//rules/imp/native-tool";
+import { clangOptFlags, shellQuote } from "//rules/c/toolchain";
 import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
@@ -26,6 +27,48 @@ export const GCC_TOOL = toolName("gcc");
 const GCC_TOOLCHAIN_CACHE = "gcc-toolchains";
 const GCC_LOCKFILE = "//rules/c/gcc/gcc.lock";
 const GCC_WINDOWS_LOCKFILE = "//rules/c/gcc/gcc-windows.lock";
+
+// Bare tool names gcc's own compile/archive commands can appear as in a
+// replayed ninja edge, once ninja_graph.js's rewriteToolInvocations() strips
+// the absolute path gccCMakeCompilerArgs() baked in back to a bare name.
+// Formerly duplicated (as a local, unexported set) in
+// rules/c/cmake/graph_replay.js — exported from here instead, mirroring
+// rules/c/msvc's own MSVC_GRAPH_TOOL_NAMES, so that module's dispatch can go
+// through this toolchain's own resolvesToolName() rather than importing and
+// checking a copy of this set itself.
+export const GCC_GRAPH_TOOL_NAMES = new Set([
+	"clang",
+	"cc",
+	"c++",
+	"ar",
+	"ranlib",
+	// nasm isn't a compiler-driver alias like the others — it's bundled
+	// straight in the toolchain's bin/ dir (see gccCMakeCompilerArgs()'s
+	// -DCMAKE_ASM_NASM_COMPILER) — but it needs the same real-mount
+	// treatment: BoringSSL's Windows build bakes nasm's absolute path into
+	// build.ninja at configure time, and replay rewrites it back to a bare
+	// "nasm"/"nasm.exe" the same way it does for clang/ar/ranlib.
+	"nasm",
+	// The unsafeSystemPaths escape hatch (see gccGraphTool()/
+	// gccCMakeCompilerArgs() below) can bake these aliases into build.ninja
+	// instead of the plain ones above.
+	"clang-unsafe-paths",
+	"cc-unsafe-paths",
+	"c++-unsafe-paths",
+	// gccCMakeCompilerArgs() bakes a ".exe" suffix into every name above on
+	// Windows (see its own doc comment below) — rewriteToolInvocations()
+	// extracts the basename verbatim, extension included, so those literal
+	// names need their own entries here.
+	"clang.exe",
+	"cc.exe",
+	"c++.exe",
+	"ar.exe",
+	"ranlib.exe",
+	"nasm.exe",
+	"clang-unsafe-paths.exe",
+	"cc-unsafe-paths.exe",
+	"c++-unsafe-paths.exe",
+]);
 
 // Linux downloads a Bootlin cross-toolchain; Windows downloads a WinLibs
 // mingw-w64 build (see winlibsDownloadUrl() below) — two unrelated vendors
@@ -371,7 +414,21 @@ function gccGraphToolWindows(
 		"done && " +
 		"for name in clang cc c++ ar ranlib; do " +
 		'"$cp" "$out/bin/$name.exe" "$out/bin-unsafe-paths/$name.exe"; ' +
-		"done";
+		"done && " +
+		// lld-link (see -linker:lld in rules/odin/index.js) can't do GNU
+		// ld's auto-import: it needs a real import-library thunk for every
+		// DLL-exported symbol, not just a "-lmsvcrt" library name. atexit is
+		// genuinely absent as a static or import symbol from every archive
+		// WinLibs ships (confirmed via nm across libucrt.a/libmsvcrt.a/
+		// libmingw32.a) — a normal GCC-frontend link only resolves it via
+		// GNU ld reading msvcrt.dll's export table directly at link time, a
+		// capability lld-link doesn't have. dlltool can synthesize the same
+		// thunk as a proper import library from just the export name and
+		// DLL, which lld-link *can* consume — see gccWindowsRuntimeArchives()
+		// below for where this gets linked in.
+		'"$mkdir" -p "$out/x86_64-w64-mingw32/lib" && ' +
+		'printf "LIBRARY msvcrt.dll\\nEXPORTS\\natexit\\n" > "$out/msvcrt-shim.def" && ' +
+		'"$out/bin/dlltool.exe" -d "$out/msvcrt-shim.def" -l "$out/x86_64-w64-mingw32/lib/libmsvcrt_shim.a" -D msvcrt.dll -m i386:x86-64';
 	const directory = task({
 		display: `install gcc ${version} (${plat.os}/${plat.arch})`,
 		inputs: { archive, shell, mkdir, cp, mv, unzip },
@@ -406,20 +463,129 @@ function gccGraphToolWindows(
 	});
 }
 
+export function isGccToolchain(toolchain) {
+	return !!toolchain && toolchain.kind === "gcc";
+}
+
+// Resolves compiler/archiver argv-prefix and env for a gcc toolchain from
+// inside a task's run() — the gcc side of the shared cc-toolchain provider
+// contract's commands() (see also rules/c/zig's/rules/c/msvc's own
+// commands()). Relocated from rules/c/index.js's own toolchainCommands()
+// (its gcc branch), so callers dispatch through toolchain.commands(...)
+// uniformly instead of duck-typing zig-vs-gcc.
+//
+// -pipe sidesteps a Windows-only MSYS TMP-dropping bug: this whole action
+// runs under "sh -c", and Git-for-Windows' MSYS runtime drops TMP/TEMP when
+// it spawns a native (non-MSYS) child, so gcc's cc1/as stages otherwise fail
+// with "Cannot create temporary file". -pipe connects the compile stages
+// with a pipe instead of temp files, avoiding the need for a real temp dir.
+function gccToolchainCommands(exec, input, opts = {}) {
+	const suffix = opts.unsafeSystemPaths ? "-unsafe-paths" : "";
+	const pipeFlag = platformInfo().os === "windows" ? ["-pipe"] : [];
+	const compiler = (isCxx) => [
+		exec.tool(input.ccTool, isCxx ? `c++${suffix}` : `clang${suffix}`),
+		...pipeFlag,
+	];
+	const archiver = () => [exec.tool(input.ccTool, "ar")];
+	return {
+		env: [],
+		tools: [],
+		// Response-file content here is parsed by GNU ar/ld's own @file
+		// reader, which (unlike MSVC's) accepts the same shell-like quoting
+		// bash itself uses — see rules/c/msvc's own msvcRspQuote() for the
+		// toolchain this doesn't hold for.
+		rspQuote: shellQuote,
+		// Builds the full "sh -c" script tokens for ccTask()'s compile step
+		// (rules/c/index.js) — the gcc/clang side of the shared cc-toolchain
+		// provider contract's structural argv translation (-c/-o/-I, `ar
+		// rcs`, -shared): see rules/c/msvc's own compileCommand()/
+		// archiveCommand()/linkCommand() for the cl.exe/lib.exe translation
+		// of the same three shapes.
+		compileCommand({ source, objPath, isCxx, includeDirs, opt, copts, isShared }) {
+			return [
+				...compiler(isCxx).map(shellQuote),
+				"-c",
+				shellQuote(source),
+				"-o",
+				shellQuote(objPath),
+				...clangOptFlags(opt).map(shellQuote),
+				// -fPIC is needed for shared-object code on ELF platforms;
+				// MinGW targets ignore it (all Windows code is already
+				// position-independent), so it's only added off Windows.
+				...(isShared && platformInfo().os !== "windows"
+					? [shellQuote("-fPIC")]
+					: []),
+				...includeDirs.map((dir) => shellQuote(`-I${dir}`)),
+				...copts.map(shellQuote),
+			];
+		},
+		archiveCommand({ outPath, rspPath }) {
+			return [
+				...archiver().map(shellQuote),
+				"rcs",
+				shellQuote(outPath),
+				`@${shellQuote(rspPath)}`,
+			];
+		},
+		linkCommand({ outPath, isCxx, isShared, rspPath }) {
+			return [
+				...compiler(isCxx).map(shellQuote),
+				...(isShared ? ["-shared"] : []),
+				"-o",
+				shellQuote(outPath),
+				`@${shellQuote(rspPath)}`,
+			];
+		},
+	};
+}
+
+/**
+ * Build the frozen cc-toolchain provider record for a given (tool, version)
+ * pair — the gcc side of the shared contract (`kind`, `taskInputs`,
+ * `commands`, `cmakeConfigure`, `resolvesToolName`, `toolSpec`,
+ * `resolveState`, `edgeEnv`; see rules/c/msvc's and rules/c/zig's own
+ * toolchain constructors for the other two providers, and
+ * rules/c/toolchain.js's ccToolchainForPlatform() for the platform-indexed
+ * union all three plug into). Exported (not just gccGraphToolchain() itself)
+ * so a test can build a record around a fake `tool`/`version` without
+ * gccGraphTool()'s real download+install task chain — see
+ * rules/c/index_test.js's own fakeGccGraphToolchain().
+ *
+ * @param {object} tool
+ * @param {string} version
+ * @returns {{ kind: string, tool: object, version: string }}
+ */
+export function gccToolchainRecord(tool, version) {
+	return Object.freeze({
+		kind: "gcc",
+		tool,
+		version,
+		taskInputs: () => ({ ccTool: tool }),
+		commands: (exec, input, opts) => gccToolchainCommands(exec, input, opts),
+		cmakeConfigure: async (exec, input, opts) => ({
+			compilerArgs: gccCMakeCompilerArgs(version, opts?.unsafeSystemPaths),
+			env: [],
+		}),
+		resolvesToolName: (name) => GCC_GRAPH_TOOL_NAMES.has(name),
+		toolSpec: (name) => gccGraphToolSpec(version, name),
+		resolveState: async () => null,
+		edgeEnv: () => [],
+	});
+}
+
 /**
  * Graph-native gcc toolchain: gccGraphTool() wrapped with version metadata,
  * mirroring rustGraphToolchain()'s shape (//rules/rust/toolchain) but scaled
- * to gcc's single install directory (like Odin's one-directory case).
+ * to gcc's single install directory (like Odin's one-directory case). See
+ * gccToolchainRecord() above for the shared cc-toolchain provider contract
+ * this also conforms to.
  *
  * @param {string} [version]
- * @returns {{ tool: object, version: string }}
+ * @returns {{ kind: string, tool: object, version: string }}
  */
 export function gccGraphToolchain(version) {
 	const resolved = GccToolchain.requireVersion(version);
-	return Object.freeze({
-		tool: gccGraphTool(resolved),
-		version: resolved,
-	});
+	return gccToolchainRecord(gccGraphTool(resolved), resolved);
 }
 
 /**
@@ -630,6 +796,88 @@ export function gccGraphToolchainDir(version) {
 }
 
 /**
+ * Parse the plain GCC release number out of a WinLibs release tag (see
+ * WINLIBS_TAG_RE's own doc comment for the tag shape), e.g.
+ * "16.1.0posix-14.0.0-ucrt-r4" -> "16.1.0". Needed because WinLibs' archive
+ * lays out its per-version runtime libs (libgcc.a, libgcc_eh.a) under
+ * lib/gcc/x86_64-w64-mingw32/<gcc version>/, and that path segment is the
+ * bare GCC number, not the full WinLibs tag.
+ *
+ * @param {string} version A Windows gcc toolchain version (WinLibs tag).
+ * @returns {string}
+ */
+export function winlibsGccVersion(version) {
+	const match = WINLIBS_TAG_RE.exec(version);
+	if (!match) {
+		throw new Error(
+			`gcc toolchain version '${version}' doesn't look like a WinLibs release tag (expected e.g. "16.1.0posix-14.0.0-ucrt-r4")`,
+		);
+	}
+	return match[1];
+}
+
+/**
+ * Real, absolute paths to the mingw-w64 runtime archives a raw COFF linker
+ * (lld-link, radlink, ...) needs that a normal `gcc`/`clang` frontend
+ * invocation would otherwise add on its own via its default-libs spec: the
+ * C++ ABI/runtime support library (new/delete, RTTI, exceptions), the SEH
+ * unwinder and its thread-local-storage emulation (which itself needs
+ * pthread), the pthreads API BoringSSL's Windows build still compiles
+ * against (mingw's own winpthreads implementation, not real POSIX threads),
+ * the mingw libc extensions GCC-compiled C sources assume (e.g. strcasecmp,
+ * the ___chkstk_ms stack-probe thunk), and — surprisingly, since
+ * this isn't GCC/mingw-specific at all — the UCRT C runtime itself
+ * (memcpy/malloc/strlen/...), which even a pure-Odin object file references
+ * and which Odin's own "default" (MSVC link.exe) backend otherwise supplies
+ * automatically but its lld-link path does not.
+ *
+ * Confirmed necessary by a real `odin build` failure once Odin's Windows
+ * link step was switched to `-linker:lld` (see rules/odin/index.js) to work
+ * around MSVC link.exe rejecting GCC-produced COMDAT sections: without these,
+ * linking anything at all on Windows via lld-link fails with dozens of
+ * "undefined symbol" errors, from plain UCRT functions up through C++-only
+ * ones like `__gxx_personality_seh0`, `_Unwind_Resume`, and `operator new`
+ * once a GCC/mingw-compiled C++ dependency (BoringSSL, webview) is in the
+ * link too.
+ *
+ * @param {string} version A Windows gcc toolchain version (WinLibs tag).
+ * @returns {string[]}
+ */
+export function gccWindowsRuntimeArchives(version) {
+	const dir = gccGraphToolchainDir(version);
+	const gccVersion = winlibsGccVersion(version);
+	return [
+		`${dir}/lib/gcc/x86_64-w64-mingw32/${gccVersion}/libgcc.a`,
+		`${dir}/lib/gcc/x86_64-w64-mingw32/${gccVersion}/libgcc_eh.a`,
+		`${dir}/x86_64-w64-mingw32/lib/libmingwex.a`,
+		`${dir}/x86_64-w64-mingw32/lib/libmingw32.a`,
+		`${dir}/x86_64-w64-mingw32/lib/libucrt.a`,
+		`${dir}/x86_64-w64-mingw32/lib/libwinpthread.a`,
+		`${dir}/lib/libstdc++.a`,
+		`${dir}/lib/libsupc++.a`,
+		// This "ucrt" WinLibs build's own libstdc++.a was itself compiled
+		// against classic msvcrt.dll (its default link spec passes
+		// "-lmsvcrt", confirmed via `c++ -v`), not UCRT — e.g. atexit is a
+		// real exported msvcrt.dll symbol libstdc++'s precompiled internals
+		// (eh_alloc.o, atomicity.o, ...) call directly, and it's absent from
+		// libucrt.a entirely. Likewise Odin's own "system:ws2_32.lib" doesn't
+		// resolve to a library with gai_strerrorA — in the real Windows SDK
+		// that function is a header-only inline, not an exported symbol, so
+		// only mingw's own libws2_32.a (which compiles a real out-of-line
+		// definition) satisfies BoringSSL's Windows socket_helper.cc calling
+		// it directly. Both confirmed by a real `odin build` failure once
+		// -no-crt (see rules/odin/index.js) stopped MSVC's own libcmt.lib
+		// from covering them implicitly.
+		`${dir}/x86_64-w64-mingw32/lib/libmsvcrt.a`,
+		`${dir}/x86_64-w64-mingw32/lib/libws2_32.a`,
+		// dlltool-generated import stub for atexit — see the installScript
+		// comment in gccGraphToolWindows() for why libmsvcrt.a alone isn't
+		// enough for lld-link.
+		`${dir}/x86_64-w64-mingw32/lib/libmsvcrt_shim.a`,
+	];
+}
+
+/**
  * Real, absolute CMAKE_C_COMPILER/CMAKE_CXX_COMPILER/CMAKE_AR/CMAKE_RANLIB
  * arguments for a resolved gcc graph toolchain, for use by rules/c/cmake's
  * graph-native configure step (see #31/#62). Uses gccGraphToolchainDir()'s
@@ -665,6 +913,18 @@ export function gccCMakeCompilerArgs(version, unsafeSystemPaths) {
 		`-DCMAKE_CXX_COMPILER=${dir}/bin/c++${suffix}${exeSuffix}`,
 		`-DCMAKE_RANLIB=${dir}/bin/ranlib${exeSuffix}`,
 		`-DCMAKE_AR=${dir}/bin/ar${exeSuffix}`,
+		// WinLibs bundles nasm.exe in the same bin/ dir as clang/ar/ranlib.
+		// Without this, CMake's enable_language(ASM_NASM) (see BoringSSL's
+		// CMakeLists.txt Windows path) falls back to find_program()'s own
+		// ambient-PATH search, which isn't hermetic and can silently miss the
+		// toolchain's nasm even when one is bundled right here — confirmed by
+		// a real Windows build where BoringSSL's hand-optimized SHA/AES/EC
+		// assembly routines were entirely absent from libcrypto.a, causing
+		// dozens of undefined-symbol link errors downstream, with no
+		// configure-time failure to point at the cause.
+		...(platformInfo().os === "windows"
+			? [`-DCMAKE_ASM_NASM_COMPILER=${dir}/bin/nasm${exeSuffix}`]
+			: []),
 	];
 }
 

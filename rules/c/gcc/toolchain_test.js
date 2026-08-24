@@ -394,6 +394,7 @@ describe("gcc toolchain on windows", () => {
 				`-DCMAKE_CXX_COMPILER=${dir}/bin/c++.exe`,
 				`-DCMAKE_RANLIB=${dir}/bin/ranlib.exe`,
 				`-DCMAKE_AR=${dir}/bin/ar.exe`,
+				`-DCMAKE_ASM_NASM_COMPILER=${dir}/bin/nasm.exe`,
 			]);
 
 			const { rustflags, env, pathDirs } = gccRustLinkDriverEnv(

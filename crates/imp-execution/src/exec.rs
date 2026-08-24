@@ -757,8 +757,22 @@ pub const PASSTHROUGH_ENV_VARS: &[&str] = &[
 /// this scrub, on a machine with a working VS install. `SystemRoot` is
 /// included alongside it as the standard baseline Windows programs assume is
 /// set, even though this specific failure only required `ProgramData`.
+/// `PROCESSOR_ARCHITEW6432`/`PROCESSOR_ARCHITECTURE` are needed for CMake's
+/// own `CMakeDetermineSystem.cmake` to set `CMAKE_SYSTEM_PROCESSOR` — with
+/// both scrubbed, CMake can't tell it's targeting x86_64 and BoringSSL's
+/// CMakeLists.txt silently falls back to its non-NASM `enable_language(ASM)`
+/// path (identifying the assembler as plain GNU, not NASM) instead of
+/// assembling its hand-optimized Windows SHA/AES/EC routines at all —
+/// confirmed by reproducing the exact "ASM compiler identification is GNU"
+/// (rather than "NASM") message from a manual `cmake` configure with just
+/// these two vars stripped, matching what a real sandboxed configure showed.
 #[cfg(windows)]
-pub const PASSTHROUGH_ENV_VARS_WINDOWS: &[&str] = &["SystemRoot", "ProgramData"];
+pub const PASSTHROUGH_ENV_VARS_WINDOWS: &[&str] = &[
+    "SystemRoot",
+    "ProgramData",
+    "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_ARCHITEW6432",
+];
 #[cfg(not(windows))]
 pub const PASSTHROUGH_ENV_VARS_WINDOWS: &[&str] = &[];
 

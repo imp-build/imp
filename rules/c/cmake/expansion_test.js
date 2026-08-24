@@ -25,6 +25,7 @@ import {
 	replayCmakeTarget,
 } from "//rules/c/cmake/graph_replay";
 import { listNamedCmakeTargets, parseNinja } from "//rules/c/cmake/ninja_graph";
+import { gccToolchainRecord } from "//rules/c/gcc";
 
 // Fixture mirrors rules/c/cmake/example/CMakeLists.txt: a SHARED_LIBRARY
 // (hello_cmake) and an EXECUTABLE (hello_cmake_main) that links it, plus one
@@ -114,7 +115,7 @@ const CONFIGURE_FILES = {
 // technique and rationale.
 function fakeGccGraphToolchain(version = "2025.08-1") {
 	const binRoot = files({ root: "rules/c/gcc", include: ["**/*"] });
-	return { tool: tool(binRoot, { binDirs: ["bin"] }), version };
+	return gccToolchainRecord(tool(binRoot, { binDirs: ["bin"] }), version);
 }
 
 function fakeCmakeGraphToolchain(version = "3.31.0") {

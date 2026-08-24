@@ -98,7 +98,16 @@ function parseInto(text, rules, edges, topVars, targetTypes, readInclude) {
 		}
 
 		if (stripped.startsWith("include ")) {
-			const incPath = stripped.slice("include ".length).trim();
+			// MSVC's CMake generator emits this path with backslash
+			// separators (confirmed via a real `include CMakeFiles\rules.ninja`
+			// line) — GCC's never has, so this went unnoticed until now.
+			// unescapeNinjaValue() already normalizes backslashes to forward
+			// slashes for every other path token in this file; apply it here
+			// too, since readInclude() (readFileInDigest() in practice) looks
+			// paths up by their forward-slash digest key.
+			const incPath = unescapeNinjaValue(
+				stripped.slice("include ".length).trim(),
+			);
 			parseInto(
 				readInclude(incPath),
 				rules,
@@ -167,10 +176,41 @@ function parseInto(text, rules, edges, topVars, targetTypes, readInclude) {
 // Resolves $in / $out / $VAR references in a template string against an
 // edge's own bindings, falling back to the rule's defaults, then top-level
 // variables — matching Ninja's scoping for the subset CMake emits.
+//
+// $in_newline/$out_newline are real Ninja builtins (see its manual: "a
+// separate variable in_newline may be used, similarly to in but with the
+// filenames separated by newlines rather than spaces"), used specifically
+// so a static-library-archive rule's rspfile_content doesn't pack hundreds
+// of object paths onto one line. CMake's MSVC-targeted Ninja generator's
+// CXX_STATIC_LIBRARY_LINKER rule uses `rspfile_content = $in_newline
+// $LINK_FLAGS` — unlike the gcc-targeted one, which uses plain `$in` (see
+// resolveEdgeRspfile()'s own comment) — so without this, $in_newline fell
+// through to the generic "unknown variable -> empty string" branch below,
+// silently producing a near-empty response file. Confirmed by a real
+// Windows MSVC build: crypto.lib's own archive edge wrote a 2-byte
+// CMakeFiles/crypto.rsp (only $LINK_FLAGS survived) and lib.exe produced no
+// output at all from it.
+//
+// Joined with a plain space here, not a real "\n" byte, even though real
+// Ninja itself would use one: this content is never handed to the real
+// filesystem/tool the way Ninja does it — graph_replay.js's own
+// executeEdge() writes it via chunked argv positional params to a
+// directly-spawned (non-MSYS-parent) "sh -c" (see its own RSPFILE_CHUNK_SIZE
+// comment), and a raw embedded newline byte inside such an argv element gets
+// silently eaten by MSYS's own argv reconstruction — confirmed by a
+// standalone repro (PowerShell invoking git-bash's sh.exe directly with a
+// newline-containing argument: the newlines vanished; the same argument
+// passed through an intermediate bash parent instead survived intact).
+// lib.exe's/link.exe's own response-file reader treats whitespace and
+// newlines as equivalent token separators, so a space-joined list parses
+// identically — sidesteps the whole transport quirk rather than needing to
+// encode/decode real newlines around it.
 export function expandVar(template, edge, topVars, ruleDefaults) {
 	return template.replace(/\$\{?(\w+)\}?/g, (whole, name) => {
 		if (name === "in") return edge.inputs.join(" ");
 		if (name === "out") return edge.outputs.join(" ");
+		if (name === "in_newline") return edge.inputs.join(" ");
+		if (name === "out_newline") return edge.outputs.join(" ");
 		if (Object.prototype.hasOwnProperty.call(edge.vars, name)) {
 			return expandVar(edge.vars[name], edge, topVars, ruleDefaults);
 		}
@@ -438,7 +478,12 @@ export function rebasePath(path, sandboxRoot) {
 function resolveEdgeRspfile(edge, rule, topVars, sandboxRoot, buildDirPath) {
 	if (!rule.rspfile) return null;
 	const path = expandVar(rule.rspfile, edge, topVars, rule);
-	const rawContent = expandVar(rule.rspfile_content || "", edge, topVars, rule);
+	const rawContent = expandVar(
+		rule.rspfile_content || "",
+		edge,
+		topVars,
+		rule,
+	).replace(/\\/g, "/");
 	const content = rebaseAbsolutePaths(
 		rawContent,
 		sandboxRoot,
@@ -465,7 +510,23 @@ export function resolveEdgeCommand(
 	const rule = rules[edge.rule];
 	if (!rule || !rule.command) return null;
 
-	const expanded = expandVar(rule.command, edge, topVars, rule);
+	// MSVC's CMake/Ninja generator emits backslash-separated paths in flag
+	// values too, not just the `include` directive fixed above (confirmed by
+	// a real replayed edge silently writing its object file to the wrong
+	// place: an unquoted `/FoCMakeFiles\hello_cmake.dir\hello.c.obj` reaching
+	// `sh -c` has each backslash-letter pair collapsed by bash's own escape
+	// handling, e.g. \h -> h, gluing the path into one nonexistent
+	// component). rebaseAbsolutePaths() below only rewrites *absolute*
+	// sandbox paths, so a relative flag value like this one would otherwise
+	// reach `sh -c` completely unnormalized. Same invariant
+	// unescapeNinjaValue() already documents for this file's own narrow
+	// scope: every backslash CMake's generator emits into a value here is a
+	// path separator, never a literal character with some other meaning —
+	// safe to normalize globally, before any other processing.
+	const expanded = expandVar(rule.command, edge, topVars, rule).replace(
+		/\\/g,
+		"/",
+	);
 	const rebased = rebaseAbsolutePaths(
 		expanded,
 		sandboxRoot,
