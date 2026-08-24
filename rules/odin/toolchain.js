@@ -124,6 +124,18 @@ let graphToolchains = new Map();
 // defaultOdinLinkerToolchain() — mirrors graphToolchains above.
 let odinLinkers = new Map();
 
+// A workspace's Windows C/C++ deps (ccLibrary()/cmakeProject() consumed via
+// foreign import) can be built with either the gcc/mingw toolchain or a real
+// MSVC toolchain (//rules/c/msvc) — nothing in the graph makes that visible
+// to Odin's own Windows link step (a `foreign import` path is a literal
+// string, not a graph edge carrying toolchain identity — see
+// rules/c/cmake's cmakeLibraryDep() docstring for the same structural gap on
+// the CMake side). So which CRT Odin's lld-link step should leave in place
+// is a per-workspace declaration, tracked here the same way opts.linker is
+// (see odinLinkers above), read back via odinUsesMsvcCrt()/
+// defaultOdinUsesMsvcCrt().
+let odinMsvcCrtVersions = new Set();
+
 function graphToolFor(version) {
 	return graphToolchains.get(version) ?? odinGraphTool(version);
 }
@@ -132,6 +144,7 @@ export function __resetOdinToolchainStateForTest() {
 	OdinToolchain.clearDefault();
 	graphToolchains = new Map();
 	odinLinkers = new Map();
+	odinMsvcCrtVersions = new Set();
 }
 
 /**
@@ -147,6 +160,15 @@ export function __resetOdinToolchainStateForTest() {
  *   moldGraphToolchain()'s `{ tool, version }` shape, //rules/c/mold) Odin
  *   should use instead of the gcc toolchain's default `ld`. Read back via
  *   odinLinkerFor()/defaultOdinLinkerToolchain().
+ * @param {boolean} [opts.msvcCrt=false] On Windows, leave Odin's own
+ *   MSVC CRT linking in place (skip `-no-crt` and the gcc/mingw runtime
+ *   archives lld-link would otherwise get) instead of the default
+ *   mingw-CRT lld-link path. Set this when this workspace's Windows
+ *   C/C++ deps (e.g. cmakeProject()/ccLibrary() built via
+ *   //rules/c/msvc's msvcToolchain()) are themselves MSVC-built and so
+ *   need MSVC's CRT/VCRuntime/UCRT symbols (operator new,
+ *   __CxxFrameHandler4, __security_cookie, ...) rather than mingw's.
+ *   Read back via odinUsesMsvcCrt()/defaultOdinUsesMsvcCrt().
  * @returns {object} Tool handle for this Odin toolchain.
  */
 export function odinToolchain(version, opts = {}) {
@@ -157,6 +179,7 @@ export function odinToolchain(version, opts = {}) {
 	const tool = odinGraphTool(version);
 	graphToolchains.set(version, tool);
 	if (opts.linker) odinLinkers.set(version, opts.linker);
+	if (opts.msvcCrt) odinMsvcCrtVersions.add(version);
 	return tool;
 }
 
@@ -180,6 +203,29 @@ export function odinLinkerFor(version) {
 export function defaultOdinLinkerToolchain() {
 	const version = OdinToolchain.defaultVersion();
 	return version ? odinLinkerFor(version) : null;
+}
+
+/**
+ * Whether an Odin toolchain version was declared with
+ * odinToolchain(version, { msvcCrt: true }) — see that option's own
+ * docstring.
+ *
+ * @param {string} version
+ * @returns {boolean}
+ */
+export function odinUsesMsvcCrt(version) {
+	return odinMsvcCrtVersions.has(version);
+}
+
+/**
+ * Whether the currently configured default Odin toolchain version was
+ * declared with odinToolchain(version, { msvcCrt: true }).
+ *
+ * @returns {boolean}
+ */
+export function defaultOdinUsesMsvcCrt() {
+	const version = OdinToolchain.defaultVersion();
+	return version ? odinUsesMsvcCrt(version) : false;
 }
 
 /**

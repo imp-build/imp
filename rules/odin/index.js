@@ -59,6 +59,7 @@ import {
 	defaultOdinToolchainVersion,
 	odinGraphTool,
 	odinLinkerFor,
+	odinUsesMsvcCrt,
 	resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
 
@@ -908,6 +909,12 @@ function odinLinkerHandleFor(spec) {
 	return odinLinkerFor(spec.version || defaultOdinToolchainVersion());
 }
 
+// Same spec.version fallback as odinLinkerHandleFor() above, for
+// odinToolchain(version, { msvcCrt }) instead of { linker }.
+function odinUsesMsvcCrtFor(spec) {
+	return odinUsesMsvcCrt(spec.version || defaultOdinToolchainVersion());
+}
+
 function graphActionInputs(spec, analysis, config) {
 	const closure = graphSourceClosure(spec, analysis, config);
 	const { resources, linkopts } = graphResourceInputs(spec);
@@ -1076,6 +1083,16 @@ function graphOdinBuild(
 			// linker via odinToolchain(version, { linker }).
 			const useLldOnWindows =
 				!lint && !linker && platformInfo().os === "windows";
+			// odinToolchain(version, { msvcCrt: true }) opts a workspace out of
+			// the mingw-CRT substitution below — its Windows C/C++ deps were
+			// built with a real MSVC toolchain (//rules/c/msvc), so their object
+			// code needs MSVC's own CRT/VCRuntime/UCRT symbols (operator new,
+			// __CxxFrameHandler4, __security_cookie, ...), not mingw's. lld-link
+			// still gets used (it reads both MSVC- and GCC-style COFF objects,
+			// per useLldOnWindows's own comment above) — only the CRT choice
+			// changes: Odin's own /DEFAULTLIB directives (see -no-crt's own
+			// comment below) are left in place instead of suppressed.
+			const useMsvcCrt = useLldOnWindows && odinUsesMsvcCrtFor(spec);
 			// `odin test` already tolerates a package with no `main` (that's the
 			// whole point of the test build mode); `build` and `check` both
 			// default to expecting one. `build` already opts out via
@@ -1111,13 +1128,16 @@ function graphOdinBuild(
 				// __acrt_initialize, ...) that mingw's runtime doesn't
 				// provide. -no-crt stops Odin from auto-linking its own CRT,
 				// leaving the mingw runtime archives as the only C runtime
-				// in the link.
-				...(useLldOnWindows ? ["-no-crt"] : []),
+				// in the link. Skipped when useMsvcCrt is set (see its own
+				// comment above) — there, Odin's own MSVC CRT linking is
+				// exactly what's needed, and the mingw runtime archives below
+				// are skipped too rather than fighting it.
+				...(useLldOnWindows && !useMsvcCrt ? ["-no-crt"] : []),
 				...(lint
 					? []
 					: odinExtraLinkerFlagsArgs([
 							...resolved.analysis.linkopts,
-							...(useLldOnWindows
+							...(useLldOnWindows && !useMsvcCrt
 								? [
 										// WinLibs' libstdc++.a defines __cxa_pure_virtual as a
 										// plain (non-COMDAT) symbol in more than one object file
