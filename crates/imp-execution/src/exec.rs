@@ -16,6 +16,8 @@ use std::os::unix::process::CommandExt;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 #[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
 #[cfg(windows)]
 use windows_sys::Win32::System::JobObjects::{
@@ -469,6 +471,18 @@ fn kill_child(child: &mut Child, job: Option<&ChildJob>) {
         }
     }
     let _ = child.kill();
+}
+
+/// Windows-only: run child processes at a lower scheduling priority so a
+/// full `--jobs` batch of compiles doesn't starve the rest of the system —
+/// unlike Unix, Windows has no `nice`-equivalent applied by the shell/job
+/// control, and without this the desktop becomes unresponsive during builds.
+#[cfg(windows)]
+const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+
+#[cfg(windows)]
+fn lower_priority(command: &mut Command) {
+    command.creation_flags(BELOW_NORMAL_PRIORITY_CLASS);
 }
 
 #[cfg(unix)]
@@ -1300,6 +1314,8 @@ fn exec_run_inner_with_start(
     }
     #[cfg(unix)]
     command.process_group(0);
+    #[cfg(windows)]
+    lower_priority(&mut command);
 
     // The remote race may already have resolved during sandbox staging above —
     // check once before spawning. The `--jobs` slot (and its progress lane) is
@@ -1583,6 +1599,8 @@ pub fn exec_run_unsandboxed(
         .stderr(Stdio::piped());
     #[cfg(unix)]
     command.process_group(0);
+    #[cfg(windows)]
+    lower_priority(&mut command);
 
     let mut child = command
         .spawn()
