@@ -1,5 +1,12 @@
 import { FMT } from "//rules/workflows/fmt";
-import { digestOf, output, semantic, task } from "imp:core";
+import {
+	digestOf,
+	file,
+	output,
+	readAddressedFile,
+	semantic,
+	task,
+} from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 import { registerOdinPackageHook } from "//rules/odin";
 import { odinfmtGraphTool, olsTriple } from "//rules/odin/odinfmt/toolchain";
@@ -10,15 +17,34 @@ export {
 	odinfmtToolchain,
 } from "//rules/odin/odinfmt/toolchain";
 
+// odinfmt's own config discovery walks up from the file it's formatting
+// looking for odinfmt.json, but each format runs in a sandbox that only
+// mounts the package's own declared sources — that walk hits the sandbox's
+// synthetic root before it can ever reach a workspace-level odinfmt.json.
+// Resolve the workspace's odinfmt.json (if any) here instead, and pass it
+// explicitly via -config so config resolution doesn't depend on the
+// sandbox's directory structure. Absent a checked-in odinfmt.json, this
+// changes nothing: no -config flag, odinfmt's own default applies.
+const ODINFMT_CONFIG_ADDRESS = "//odinfmt.json";
+
+/** The workspace's odinfmt.json as a source file, or null if none exists. */
+function odinfmtConfigFile() {
+	return readAddressedFile(ODINFMT_CONFIG_ADDRESS) !== null
+		? file("odinfmt.json")
+		: null;
+}
+
 /** Build the CAS formatter result consumed by the shared graph fmt workflow. */
 export function odinFmtRoot({ sources, base, version }) {
 	const shell = nativeTool("sh");
 	const formatter = odinfmtGraphTool(version);
+	const config = odinfmtConfigFile();
 	return task({
 		display: `odinfmt ${base}`,
 		inputs: {
 			sources,
 			formatter,
+			config,
 			check: semantic.flag("check"),
 			shell,
 		},
@@ -70,16 +96,23 @@ export function odinFmtRoot({ sources, base, version }) {
 			// package (base === ".") that swept up and reformatted the
 			// toolchain's own files too. Looping per-file keeps this scoped to
 			// exactly the package's declared sources.
+			// An empty config path means "no workspace odinfmt.json" — the
+			// shell only adds -config when it got a non-empty value, so
+			// odinfmt falls back to its own default exactly as before.
+			const configPath = inputs.config ? exec.path(inputs.config) : "";
 			const result = await exec.action({
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
-					'formatter=$1; shift; status=0; for path in "$@"; do "$formatter" -w "$path" || status=1; done; exit $status',
+					'formatter=$1; config=$2; shift 2; status=0; for path in "$@"; do if [ -n "$config" ]; then "$formatter" -w "-config=$config" "$path" || status=1; else "$formatter" -w "$path" || status=1; fi; done; exit $status',
 					"odinfmt",
 					command,
+					configPath,
 					...paths,
 				],
-				inputs: [inputs.sources],
+				inputs: inputs.config
+					? [inputs.sources, inputs.config]
+					: [inputs.sources],
 				tools: [inputs.shell],
 				outputs: { formatted: output.directory(base) },
 				allowFailure: true,
