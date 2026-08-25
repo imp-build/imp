@@ -59,6 +59,7 @@ import {
 } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
+import { isMsvcToolchain } from "//rules/c/msvc";
 import { isZigToolchain } from "//rules/c/zig";
 import { selectCcToolchain } from "//rules/c/toolchain";
 import {
@@ -73,6 +74,7 @@ import {
 	rebasePath,
 	resolveEdgeCommand,
 	sandboxRootFromWorkdir,
+	joinAndNormalize,
 } from "//rules/c/cmake/ninja_graph";
 import { parseCTestTestfile } from "//rules/c/cmake/ctest_testfile";
 
@@ -380,11 +382,12 @@ const INCLUDE_LIKE_SUFFIXES = [
 	".tpp",
 ];
 
-// CMake emits `deps = gcc` for both C and C++ compiler rules when it uses
-// the Ninja generator. Other edges keep the full project source set because
-// their true runtime inputs are not recoverable from build.ninja alone.
+// CMake emits `deps = gcc` for GCC-like compilers and `deps = msvc` for
+// cl.exe. Other edges keep the full project source set because their true
+// runtime inputs are not recoverable from build.ninja alone.
 export function isCmakeCompilerEdge(edge, rules) {
-	return rules[edge.rule]?.deps === "gcc";
+	const deps = rules[edge.rule]?.deps;
+	return deps === "gcc" || deps === "msvc";
 }
 
 // The path list comes from configure's captured `srcs` input, so generated
@@ -413,6 +416,225 @@ function includeLikeSources(sourcePaths) {
 			return INCLUDE_LIKE_SUFFIXES.some((suffix) => lower.endsWith(suffix));
 		})
 		.sort();
+}
+
+function compilerEdgeKey(edge) {
+	return edge.outputs[0] || edge.implicitOutputs[0] || edge.rule;
+}
+
+function upFromBuildDir(buildDirPath) {
+	const depth = buildDirPath.split("/").filter(Boolean).length;
+	return depth === 0 ? "." : Array(depth).fill("..").join("/");
+}
+
+// Ninja's `-t deps` format is intentionally simple and stable: an output
+// line ends in `: #deps ...`; following indented lines are its dependencies.
+// Keep this narrow parser local to CMake's generated scan file.
+export function parseNinjaDeps(text) {
+	const deps = new Map();
+	let output = null;
+	for (const line of text.split("\n")) {
+		const record = /^(.*): #deps \d+/.exec(line);
+		if (record) {
+			output = record[1];
+			deps.set(output, []);
+			continue;
+		}
+		if (output && /^\s+\S/.test(line)) {
+			deps.get(output).push(line.trim().replace(/\\/g, "/"));
+			continue;
+		}
+		if (line.length === 0) output = null;
+	}
+	return deps;
+}
+
+function scanPathToWorkspacePath(path, buildDirPath, sourcePaths) {
+	const normalized = path.replace(/\\/g, "/");
+	if (sourcePaths.has(normalized)) return normalized;
+	if (/^(?:[A-Za-z]:)?\//.test(normalized)) return null;
+	const workspacePath = joinAndNormalize(buildDirPath, normalized);
+	return sourcePaths.has(workspacePath) ? workspacePath : null;
+}
+
+function scanManifest(
+	ninjaGraph,
+	sourcePaths,
+	buildDirPath,
+	depsText,
+	skipped,
+) {
+	const sourceSet = new Set(sourcePaths);
+	const deps = parseNinjaDeps(depsText || "");
+	const manifest = {};
+	for (const edge of ninjaGraph.edges) {
+		if (!isCmakeCompilerEdge(edge, ninjaGraph.rules)) continue;
+		const key = compilerEdgeKey(edge);
+		if (skipped.has(key)) {
+			manifest[key] = { fallback: skipped.get(key), headers: [] };
+			continue;
+		}
+		const recorded = deps.get(key);
+		if (!recorded) {
+			manifest[key] = {
+				fallback: "Ninja did not report compiler dependencies",
+				headers: [],
+			};
+			continue;
+		}
+		const directSources = new Set(
+			compilerWorkspaceSources(
+				edge,
+				ninjaGraph.rules,
+				ninjaGraph.sandboxRoot,
+				sourcePaths,
+			),
+		);
+		const recordedSources = new Set(
+			recorded
+				.map((path) => scanPathToWorkspacePath(path, buildDirPath, sourceSet))
+				.filter(Boolean),
+		);
+		if (Array.from(directSources).some((path) => !recordedSources.has(path))) {
+			manifest[key] = {
+				fallback: "Ninja dependency record omitted the direct source",
+				headers: [],
+			};
+			continue;
+		}
+		manifest[key] = {
+			headers: Array.from(recordedSources)
+				.filter((path) => !directSources.has(path))
+				.sort(),
+		};
+	}
+	return manifest;
+}
+
+function isCmakeModuleEdge(edge, rules) {
+	return isCmakeCompilerEdge(edge, rules) && Boolean(edge.vars.dyndep);
+}
+
+function scannerToolsForEdges(spec, state, ninjaGraph) {
+	return Promise.all(
+		Array.from(
+			new Set(
+				ninjaGraph.edges
+					.filter((edge) => isCmakeCompilerEdge(edge, ninjaGraph.rules))
+					.flatMap((edge) => {
+						const resolved = resolveEdgeCommand(
+							edge,
+							ninjaGraph.rules,
+							ninjaGraph.topVars,
+							ninjaGraph.sandboxRoot,
+							spec.buildDirPath,
+						);
+						return resolved?.toolNames || [];
+					}),
+			),
+		).map(async (name) => {
+			if (!spec.toolchain.resolvesToolName(name)) return null;
+			return spec.toolchain.toolSpec(name, state);
+		}),
+	);
+}
+
+/**
+ * Run CMake's compiler rules in syntax-only mode once, then return the
+ * workspace headers Ninja recorded for each compiler edge. This task sits
+ * before expand(), so its value can shape later replay tasks without any
+ * action feeding data back into its own cache key.
+ */
+export function scanCmakeCompilerInputs(spec, configured) {
+	return task({
+		display: `cmake scan ${spec.path}`,
+		inputs: {
+			configureDirectory: configured.outputs.directory,
+			ninjaGraph: configured.outputs.ninjaGraph,
+			sourcePaths: configured.outputs.sourcePaths,
+			srcs: spec.srcsInput,
+			...(spec.extraInput ? { extra: spec.extraInput } : {}),
+			...spec.dirInputs,
+			...Object.fromEntries(spec.deps.map((dep, i) => [`dep${i}`, dep])),
+			...spec.toolchain.taskInputs(),
+			ninja: nativeTool("ninja"),
+			sed: nativeTool("sed"),
+		},
+		outputs: { manifest: output.value() },
+		async run(exec, input) {
+			const compilerEdges = input.ninjaGraph.edges.filter((edge) =>
+				isCmakeCompilerEdge(edge, input.ninjaGraph.rules),
+			);
+			if (compilerEdges.length === 0) return { manifest: {} };
+
+			const state = await spec.toolchain.resolveState(exec);
+			const tools = (
+				await scannerToolsForEdges(spec, state, input.ninjaGraph)
+			).filter(Boolean);
+			const ninjaExe = exec.path(input.ninja);
+			const sedExe = exec.path(input.sed);
+			const scan = await exec.action({
+				argv: [
+					"sh",
+					"-c",
+					// Patch only CMake's compiler rules in this action's private copy
+					// of the configured tree. Ninja retains its normal depfile or
+					// showIncludes parser, and no object file is written.
+					"bdir=$1 oldroot=$2 up=$3 ninja=$4 sed=$5 mode=$6; " +
+						'cd "$bdir" || exit 0; ' +
+						'"$sed" -i "s|$oldroot|$up|g" build.ninja CMakeFiles/rules.ninja 2>/dev/null; ' +
+						'if [ "$mode" = msvc ]; then flag=/Zs; else flag=-fsyntax-only; fi; ' +
+						'"$sed" -E -i "/^rule (C|CXX)_COMPILER/,/^$/ { /^  command = / s/$/ $flag/ }" CMakeFiles/rules.ninja; ' +
+						// Let one Ninja invocation schedule all compiler scans. `sed`
+						// is already a configure dependency, so this does not add a
+						// host-tool requirement to replay.
+						'set -- $("$ninja" -f build.ninja -t targets all | "$sed" -n -E "s/: (C|CXX)_COMPILER.*$//p"); ' +
+						'[ "$#" -eq 0 ] || "$ninja" -f build.ninja -k 0 "$@"; ' +
+						'"$ninja" -f build.ninja -t deps > .imp-cmake-deps.txt 2>/dev/null; exit 0',
+					"cmake-dependency-scan",
+					spec.buildDirPath,
+					input.ninjaGraph.sandboxRoot,
+					upFromBuildDir(spec.buildDirPath),
+					ninjaExe,
+					sedExe,
+					isMsvcToolchain(spec.toolchain) ? "msvc" : "gcc",
+				],
+				tools: [input.ninja, input.sed, ...tools],
+				inputs: [
+					input.configureDirectory,
+					input.srcs,
+					...(spec.extraInput ? [input.extra] : []),
+					...Object.keys(spec.dirInputs).map((key) => input[key]),
+					...spec.deps.map((_, i) => input[`dep${i}`]),
+				],
+				env: spec.toolchain.edgeEnv(state),
+				outputs: {
+					scan: output.file(`${spec.buildDirPath}/.imp-cmake-deps.txt`),
+				},
+				display: `cmake scan ${spec.path}`,
+				allowFailure: true,
+			});
+			let depsText = "";
+			try {
+				depsText = readFileInDigest(
+					scan.outputs.scan.digest,
+					`${spec.buildDirPath}/.imp-cmake-deps.txt`,
+				);
+			} catch (_) {
+				// The action deliberately completes after an individual scanner
+				// failure. Missing output becomes an edge-local broad fallback.
+			}
+			return {
+				manifest: scanManifest(
+					input.ninjaGraph,
+					input.sourcePaths,
+					spec.buildDirPath,
+					depsText,
+					new Map(),
+				),
+			};
+		},
+	});
 }
 
 /**
@@ -451,6 +673,8 @@ function includeLikeSources(sourcePaths) {
  *   target with no cross-target dependencies — behaves exactly as before.
  * @param {string[]} [sourcePaths] Exact workspace paths captured by the
  *   configure action's `srcs` input.
+ * @param {object} [compilerManifest] Header paths and fallback reasons from
+ *   scanCmakeCompilerInputs().
  * @returns {object} Task handle with `.outputs.directory` (an artifact: the
  *   build directory after replay, including any POST_BUILD copy
  *   destinations) and, per `exposeOutputs` entry, `.outputs.file<i>`.
@@ -463,6 +687,7 @@ export function replayCmakeTarget(
 	exposeOutputs = [],
 	targetDeps = {},
 	sourcePaths = [],
+	compilerManifest = {},
 ) {
 	const { rules, edges, sandboxRoot } = ninjaGraph;
 	// A dependency's own final output(s) — CMake's Ninja generator names
@@ -525,9 +750,33 @@ export function replayCmakeTarget(
 	const compilerSourcePaths = Array.from(
 		new Set(Array.from(compilerSources.values()).flat()),
 	).sort();
-	const headerPaths = includeLikeSources(sourcePaths).filter(
+	const fallbackHeaderPaths = includeLikeSources(sourcePaths).filter(
 		(path) => !compilerSourcePaths.includes(path),
 	);
+	const compilerHeaders = new Map();
+	const compilerInputPlan = {};
+	for (const edge of reached) {
+		if (!isCmakeCompilerEdge(edge, rules)) continue;
+		if (isCmakeModuleEdge(edge, rules)) {
+			throw new Error(
+				`cmake project '${spec.path}' target '${targetNames.join(",")}' uses C++ module/dyndep edge '${compilerEdgeKey(edge)}'; CMake dependency scanning does not support modules yet`,
+			);
+		}
+		const key = compilerEdgeKey(edge);
+		const scanned = compilerManifest[key];
+		const fallback = scanned?.fallback || !scanned;
+		const headers = fallback ? fallbackHeaderPaths : scanned.headers;
+		compilerHeaders.set(edge, headers);
+		compilerInputPlan[key] = {
+			headers,
+			...(fallback
+				? { fallback: scanned?.fallback || "no scan manifest" }
+				: {}),
+		};
+	}
+	const headerPaths = Array.from(
+		new Set(Array.from(compilerHeaders.values()).flat()),
+	).sort();
 	const compilerSourceInputs = Object.fromEntries(
 		compilerSourcePaths.map((path, i) => [`source${i}`, file(path)]),
 	);
@@ -537,7 +786,9 @@ export function replayCmakeTarget(
 	const sourceInputNames = new Map(
 		compilerSourcePaths.map((path, i) => [path, `source${i}`]),
 	);
-	const headerInputNames = headerPaths.map((_, i) => `header${i}`);
+	const headerInputNames = new Map(
+		headerPaths.map((path, i) => [path, `header${i}`]),
+	);
 	const graphDepInputNames = spec.deps.map((_, i) => `graphDep${i}`);
 
 	return task({
@@ -563,6 +814,7 @@ export function replayCmakeTarget(
 			// resolves to the first target's already-registered task.
 			targetNames,
 			exposeOutputs,
+			compilerInputPlan,
 			// Real graph handles (not plain closure data), so task()'s own
 			// _graphInput() fingerprints each by its producing task's
 			// identity — a dependency target whose own inputs changed (or a
@@ -596,7 +848,12 @@ export function replayCmakeTarget(
 			const dirInputBindings = Object.keys(spec.dirInputs).map(
 				(key) => input[key],
 			);
-			const compilerHeaderInputs = headerInputNames.map((key) => input[key]);
+			const compilerHeaderInputs = new Map(
+				Array.from(compilerHeaders.entries()).map(([edge, paths]) => [
+					edge,
+					paths.map((path) => input[headerInputNames.get(path)]),
+				]),
+			);
 			const graphDepInputs = graphDepInputNames.map((key) => input[key]);
 			// A boundary dependency's own artifact(s) are already captured at
 			// their real buildDirPath-relative paths (same mechanism
@@ -741,7 +998,7 @@ export function replayCmakeTarget(
 					isCmakeCompilerEdge(edge, rules) && sourcePaths.length > 0
 						? [
 								...compilerInputs,
-								...compilerHeaderInputs,
+								...compilerHeaderInputs.get(edge),
 								...(spec.extraInput ? [input.extra] : []),
 								...dirInputBindings,
 								input.configureDirectory,
@@ -758,6 +1015,7 @@ export function replayCmakeTarget(
 								...boundaryInputs,
 							];
 
+				const fallback = compilerInputPlan[compilerEdgeKey(edge)]?.fallback;
 				const result = await exec.action({
 					argv: shArgv,
 					tools: edgeTools,
@@ -766,7 +1024,7 @@ export function replayCmakeTarget(
 					outputs: Object.fromEntries(
 						destPaths.map((p, i) => [outputNames[i], output.file(p)]),
 					),
-					display: `cmake edge ${outputPaths[0] || edge.rule}`,
+					display: `cmake edge ${outputPaths[0] || edge.rule}${fallback ? ` [broad input fallback: ${fallback}]` : ""}`,
 				});
 				return outputNames.map((name) => result.outputs[name]);
 			}
@@ -853,6 +1111,7 @@ function ctestNameFilterArgs(testNames) {
  *   own docstring. Avoids the test executable's own replay re-deriving a
  *   library dependency's edges it already has its own task for.
  * @param {string[]} [sourcePaths] Forwarded to replayCmakeTarget().
+ * @param {object} [compilerManifest] Forwarded to replayCmakeTarget().
  * @returns {object} Task handle whose `units` output resolves to a single-entry
  *   `[{name, ok, output}]` list — see //rules/workflows/test's contract.
  */
@@ -864,6 +1123,7 @@ export function runCTestTask(
 	testNames = [],
 	targetDeps = {},
 	sourcePaths = [],
+	compilerManifest = {},
 ) {
 	const built = replayCmakeTarget(
 		spec,
@@ -873,6 +1133,7 @@ export function runCTestTask(
 		[],
 		targetDeps,
 		sourcePaths,
+		compilerManifest,
 	);
 	const unitName = testNames.length ? testNames.join(",") : spec.path;
 	return task({

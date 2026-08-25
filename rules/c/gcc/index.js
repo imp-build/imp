@@ -501,7 +501,15 @@ function gccToolchainCommands(exec, input, opts = {}) {
 		// rcs`, -shared): see rules/c/msvc's own compileCommand()/
 		// archiveCommand()/linkCommand() for the cl.exe/lib.exe translation
 		// of the same three shapes.
-		compileCommand({ source, objPath, isCxx, includeDirs, opt, copts, isShared }) {
+		compileCommand({
+			source,
+			objPath,
+			isCxx,
+			includeDirs,
+			opt,
+			copts,
+			isShared,
+		}) {
 			return [
 				...compiler(isCxx).map(shellQuote),
 				"-c",

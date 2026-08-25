@@ -410,7 +410,15 @@ function zigToolchainCommands(exec, input) {
 		// they share gcc's own @file response-file quoting convention — see
 		// rules/c/gcc's own rspQuote().
 		rspQuote: shellQuote,
-		compileCommand({ source, objPath, isCxx, includeDirs, opt, copts, isShared }) {
+		compileCommand({
+			source,
+			objPath,
+			isCxx,
+			includeDirs,
+			opt,
+			copts,
+			isShared,
+		}) {
 			return [
 				...compiler(isCxx).map(shellQuote),
 				"-c",

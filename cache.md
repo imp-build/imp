@@ -44,6 +44,7 @@ for a cache miss; unstable cache identity is not established.
 | Move usage DB work off the hot path | Open | Usage recording has a process-global mutex and executes SQLite synchronously. WAL mode is enabled, but there is no checkpoint policy. |
 | Shard CAS and task directories | Open | `cas/blobs`, `cas/meta`, and `tasks` remain flat. |
 | Avoid redundant permission updates | Complete | Unix `restore_file_mode` compares the captured permission bits with the copied file before it calls `set_permissions`. |
+| Discover CMake compiler headers before replay | Complete; benchmark pending | One syntax-only Ninja scan materializes the complete CMake project once, then GCC depfiles or MSVC `/showIncludes` restrict each compiler edge to its direct headers. Unsupported scan records keep the former broad-header input for that edge. |
 | Add input fingerprints | Open | Input capture re-hashes files; there is no persisted `(path, metadata) -> digest` cache. |
 | Parallelize input capture | Open | `capture_directory_trie` and `capture_paths` walk and hash serially. |
 
@@ -59,9 +60,6 @@ a pass or a failure result.
 
 ## Recommended next task
 
-Benchmark **the removed parent-directory creation during CAS materialization**.
-
-The store now uses `copy_file_into_existing_dir` from `materialize_one_file`.
-Measure the before/after syscall count with the same fixed warm-cache workload
-to establish the actual impact. This is lower risk than broad toolchain
-mounting and directly validates the former hot-path claim.
+Move usage-database recording off the execution hot path. This removes
+synchronous SQLite work from every CAS read without requiring a new benchmark
+as part of the implementation.
