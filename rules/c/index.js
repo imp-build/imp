@@ -308,8 +308,8 @@ function ccTask(spec, isLibrary) {
 			const objectSandboxPaths = objectPaths;
 			// commands() must be resolved *before* exec.path()'ing the
 			// dependency archives below, not after: a provider's own
-			// commands() can itself issue a nested exec.action() (msvc's
-			// resolveMsvcHost() shells out to vswhere.exe), and
+			// commands() can itself consume exec.tool()/exec.path() bindings
+			// (e.g. gcc's compiler()/archiver() mounting input.ccTool), and
 			// exec.action() clears the consumed exec.tool()/exec.path()
 			// binding set once it returns (see the compile step's own
 			// comment above) — calling commands() after depArchivePaths

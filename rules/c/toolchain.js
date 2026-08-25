@@ -42,10 +42,12 @@ export function clangOptFlags(opt) {
  *
  * Each `byOs` branch may be an already-constructed provider or a zero-arg
  * thunk — pass whichever reads more clearly at the call site; it makes
- * little practical difference. `msvcToolchain()` is a plain inert object
- * literal either way (no I/O happens until a task's run() actually calls
- * one of its methods — see //rules/c/msvc's own header comment).
- * gccGraphToolchain()/zigGraphToolchain() do register a real download/
+ * little practical difference. Calling `msvcToolchain()` itself is still
+ * inert (a plain object literal, no I/O) — its one graph node (the shared
+ * "discover MSVC host toolchain" task, see //rules/c/msvc's own
+ * msvcHostGraphOutput()) is only registered once some consumer's
+ * `taskInputs()` call actually reaches it, same as any other lazily-declared
+ * task node. gccGraphToolchain()/zigGraphToolchain() do register a real download/
  * install task() graph node when called, for whichever platform is
  * executing right now — but merely *declaring* that node costs nothing
  * unless something downstream actually requests its output (imp only

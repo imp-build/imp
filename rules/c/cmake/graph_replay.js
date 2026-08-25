@@ -567,7 +567,7 @@ export function scanCmakeCompilerInputs(spec, configured) {
 			);
 			if (compilerEdges.length === 0) return { manifest: {} };
 
-			const state = await spec.toolchain.resolveState(exec);
+			const state = await spec.toolchain.resolveState(exec, input);
 			const tools = (
 				await scannerToolsForEdges(spec, state, input.ninjaGraph)
 			).filter(Boolean);
@@ -870,15 +870,17 @@ export function replayCmakeTarget(
 			const boundaryInputs = Object.entries(targetDeps).flatMap(([name, dep]) =>
 				(dep.fileIndices ?? [0]).map((i) => input[`dep_${name}_${i}`]),
 			);
-			// Memoized per replay task run(), not per edge: a provider's own
-			// resolveState() (e.g. msvc's resolveMsvcHost(), which shells out to
-			// vswhere.exe) may be expensive, and every edge in this target
-			// shares the same resolved state (gcc/zig's own resolveState()
-			// returns null trivially).
+			// Memoized per replay task run(), not per edge: even though msvc's
+			// own resolveState() is now just a plain-object read off `input`
+			// (msvcHostGraphOutput()'s dedicated task node resolves it once
+			// per build, not per replay task — see rules/c/msvc's own
+			// docstring), every edge in this target still shares the one
+			// resolution rather than each redundantly re-reading it (gcc/zig's
+			// own resolveState() returns null trivially either way).
 			let toolchainStatePromise = null;
 			function getToolchainState() {
 				if (!toolchainStatePromise) {
-					toolchainStatePromise = spec.toolchain.resolveState(exec);
+					toolchainStatePromise = spec.toolchain.resolveState(exec, input);
 				}
 				return toolchainStatePromise;
 			}

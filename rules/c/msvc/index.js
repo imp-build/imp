@@ -23,7 +23,7 @@
 // both problems at once: no ABI mixing, no COMDAT rejection, Odin's plain
 // default linker just works.
 
-import { cacheGet, cacheHas, cachePut, namedCache, output } from "imp:core";
+import { cacheGet, cacheHas, cachePut, namedCache, output, task } from "imp:core";
 import { resolveToolLockfile } from "//rules/imp/lockfile";
 import { shellQuote } from "//rules/c/toolchain";
 
@@ -78,24 +78,24 @@ function msvcRspQuote(value) {
 }
 
 // The msvc side of the shared cc-toolchain provider contract's commands()
-// (see rules/c/gcc's/rules/c/zig's own commands()) — resolves the ambient
-// host (resolveMsvcHost()) and returns cl.exe/lib.exe-flavored structural
-// argv builders for ccTask() (rules/c/index.js) to assemble a compile/
-// archive/link "sh -c" script around, translating the same three shapes gcc/
-// zig do (-c/-o/-I -> /c//Fo//I, `ar rcs` -> `lib.exe /OUT:`, -shared ->
-// /LD) instead of the clang/gcc vocabulary ccTask() used to hardcode.
-// Real cl.exe/lib.exe (not clang-cl) — see resolveMsvcHost()'s own
-// docstring for why this module resolves the ambient host toolchain rather
-// than vendoring one.
-async function msvcToolchainCommands(exec) {
-	const host = await resolveMsvcHost(exec);
-	// Unlike gcc/zig (which mount their compiler via an eagerly-declared
-	// taskInputs() binding + exec.tool()'s own consumed-binding tracking),
-	// msvcToolchain() has no such binding — taskInputs() is `{}`, since
-	// there's nothing to install ahead of time (see resolveMsvcHost()'s own
-	// docstring). So the tool specs themselves are handed back here for
-	// ccTask() to splice directly into each exec.action()'s own `tools:`
-	// list instead.
+// (see rules/c/gcc's/rules/c/zig's own commands()) — reads the already-
+// resolved ambient host (msvcHostGraphOutput()) and returns cl.exe/lib.exe-
+// flavored structural argv builders for ccTask() (rules/c/index.js) to
+// assemble a compile/archive/link "sh -c" script around, translating the
+// same three shapes gcc/zig do (-c/-o/-I -> /c//Fo//I, `ar rcs` -> `lib.exe
+// /OUT:`, -shared -> /LD) instead of the clang/gcc vocabulary ccTask() used
+// to hardcode. Real cl.exe/lib.exe (not clang-cl) — see discoverMsvcHost()'s
+// own docstring for why this module resolves the ambient host toolchain
+// rather than vendoring one.
+function msvcToolchainCommands(exec, input) {
+	const host = input.msvcHost;
+	// Unlike gcc/zig (whose compiler mount is the *only* thing taskInputs()
+	// carries), msvcToolchain()'s taskInputs() also carries the resolved
+	// host record itself (see msvcHostGraphOutput() below) — discovered once
+	// by its own dedicated task node, not re-shelled-out-to per caller. The
+	// tool specs are still handed back here (rather than mounted via
+	// exec.tool() up front) for ccTask() to splice directly into each
+	// exec.action()'s own `tools:` list instead.
 	const tools = [
 		msvcGraphToolSpec("cl.exe", host),
 		msvcGraphToolSpec("lib.exe", host),
@@ -143,22 +143,68 @@ async function msvcToolchainCommands(exec) {
 	};
 }
 
+// Built once (module-scoped memoization, mirroring rules/c/gcc's own
+// graphToolchains Map) rather than one task() call per msvcToolchain()
+// caller: task() itself dedupes two calls that describe identical work, but
+// this guard avoids relying on that — it's the same node every caller gets,
+// so every ccLibrary()/ccBinary()/cmakeProject() consumer's compile/archive/
+// link/configure task shares one "discover MSVC host toolchain" graph node
+// instead of the graph coincidentally collapsing a pile of look-alike ones.
+let msvcHostGraphTask = null;
+
+export function __resetMsvcHostTaskForTest() {
+	msvcHostGraphTask = null;
+}
+
+// The task-output handle every taskInputs() below hands out as `msvcHost` —
+// a "value" output (see discoverMsvcHost()'s own return value), not a file:
+// the graph resolves it to the plain {vsRoot, mscVersion, sdkRoot,
+// sdkVersion} record directly, no digest/readFileInDigest indirection
+// needed. Declared with `cache: false`, same as the exec.action() this
+// replaces used to be (see discoverMsvcHost()'s own docstring) — this node
+// still re-runs once per `imp build` invocation rather than persisting
+// across builds, so a changed host VS install is still picked up on the
+// next build. What changes is *within* one invocation: every consumer now
+// depends on this one node instead of each independently shelling out to
+// vswhere, so it runs once per build, not once per compiled source file.
+//
+// A real host-identity fingerprint (e.g. the VS instance ID) could replace
+// `cache: false` with a normal cached task keyed on that identity, so a
+// build only re-discovers when the host's VS install actually changes —
+// deferred for now; this task's shape (empty declared inputs today) is
+// exactly where that key would go.
+function msvcHostGraphOutput() {
+	if (!msvcHostGraphTask) {
+		msvcHostGraphTask = task({
+			display: "discover MSVC host toolchain",
+			cache: false,
+			inputs: {},
+			outputs: { host: output.value() },
+			async run(exec) {
+				return { host: await discoverMsvcHost(exec) };
+			},
+		});
+	}
+	return msvcHostGraphTask.outputs.host;
+}
+
 /**
  * Declare the ambient host MSVC toolchain — pass as `cmakeProject({
  * toolchain })`. There is no version to pick (unlike gccGraphToolchain() /
  * zigGraphToolchain()): this always resolves whatever Visual Studio the
- * host has installed, discovered fresh per task via resolveMsvcHost().
+ * host has installed, via one shared "discover MSVC host toolchain" graph
+ * node (msvcHostGraphOutput()) rather than a fresh vswhere shellout per
+ * caller.
  *
  * Also conforms to the shared cc-toolchain provider contract (`kind`,
  * `taskInputs`, `commands`, `cmakeConfigure`, `resolvesToolName`, `toolSpec`,
  * `resolveState`, `edgeEnv`) — see rules/c/gcc's and rules/c/zig's own
  * toolchain constructors for the other two providers, and
  * rules/c/toolchain.js's ccToolchainForPlatform() for the platform-indexed
- * union all three plug into. This object literal is fully inert to
- * construct (no vswhere lookup, no task/action) — every method that touches
- * the ambient host defers to resolveMsvcHost(exec) inside a task's run(),
- * same as before this contract existed (see resolveMsvcHost()'s own
- * docstring below).
+ * union all three plug into. This object literal is still inert to
+ * construct (no vswhere lookup, no action) — only taskInputs() references
+ * the discovery task node, and only calling it (via any consumer's declared
+ * inputs) causes it to actually run.
  *
  * @returns {object} Toolchain handle for cmakeProject()'s `toolchain` option.
  */
@@ -166,16 +212,16 @@ export function msvcToolchain() {
 	return {
 		kind: "msvc-host-toolchain",
 		version: null,
-		taskInputs: () => ({}),
+		taskInputs: () => ({ msvcHost: msvcHostGraphOutput() }),
 		// ccTask() (rules/c/index.js) now asks the toolchain to build its own
 		// compile/archive/link argv (see msvcToolchainCommands() above)
 		// instead of hardcoding clang/gcc flag syntax around a bare compiler
 		// path — this is what makes msvcToolchain() usable from ccLibrary()/
 		// ccBinary() directly, not just cmakeProject() (which sidestepped
 		// this by letting CMake itself own the flag vocabulary).
-		commands: (exec) => msvcToolchainCommands(exec),
-		cmakeConfigure: async (exec) => {
-			const host = await resolveMsvcHost(exec);
+		commands: (exec, input) => msvcToolchainCommands(exec, input),
+		cmakeConfigure: async (exec, input) => {
+			const host = input.msvcHost;
 			const nasmPath = await resolveNasmHost(exec);
 			return {
 				compilerArgs: msvcCMakeCompilerArgs(host, nasmPath),
@@ -184,7 +230,7 @@ export function msvcToolchain() {
 		},
 		resolvesToolName: (name) => MSVC_GRAPH_TOOL_NAMES.has(name),
 		toolSpec: (name, host) => msvcGraphToolSpec(name, host),
-		resolveState: (exec) => resolveMsvcHost(exec),
+		resolveState: (exec, input) => input.msvcHost,
 		edgeEnv: (host) => msvcEnv(host),
 	};
 }
@@ -195,13 +241,16 @@ export function isMsvcToolchain(toolchain) {
 
 /**
  * Discover the ambient host MSVC toolchain (VS install root, MSVC tools
- * version, Windows SDK root/version) by shelling out to vswhere.exe.
+ * version, Windows SDK root/version) by shelling out to vswhere.exe. Runs
+ * exactly once per build invocation, inside msvcHostGraphOutput()'s own
+ * dedicated task node — not called directly by any consumer.
  *
  * The vswhere lookup itself is deliberately not cached across builds the way
- * rules/c/gcc's toolchain install is — this is ambient host state, not
- * something imp itself produced, so re-running vswhere (a few hundred ms)
- * each time a task needs it is simpler and safer than trying to invalidate a
- * stale cache entry if the host's VS install changes.
+ * rules/c/gcc's toolchain install is (see msvcHostGraphOutput()'s own
+ * `cache: false`) — this is ambient host state, not something imp itself
+ * produced, so re-running vswhere (a few hundred ms) once per build is
+ * simpler and safer than trying to invalidate a stale cache entry if the
+ * host's VS install changes between builds.
  *
  * exec.action's `tools:` mounting only ever sees a bare tool name like
  * "cl.exe" (ninja_graph.js's rewriteToolInvocations() strips any absolute
@@ -223,7 +272,7 @@ export function isMsvcToolchain(toolchain) {
  * @param {object} exec
  * @returns {Promise<{vsRoot: string, mscVersion: string, sdkRoot: string, sdkVersion: string}>}
  */
-export async function resolveMsvcHost(exec) {
+async function discoverMsvcHost(exec) {
 	// Each vswhere candidate is its own positional arg (not space-joined into
 	// one string for `for c in $list`): several of the fixed candidate paths
 	// contain spaces themselves ("Program Files (x86)"), which word-splitting
@@ -279,11 +328,11 @@ export async function resolveMsvcHost(exec) {
  * not a user-facing toolchain a workspace would ever declare a version
  * of — so this stays a small, self-contained download+extract, resolved
  * entirely inside a task's run() (never at graph-declaration time),
- * matching resolveMsvcHost()'s own dynamic resolution and
+ * matching discoverMsvcHost()'s own dynamic resolution and
  * msvcToolchain()'s "fully inert to construct" design (see this module's
  * own header comment).
  *
- * Unlike resolveMsvcHost()'s own ambient, always-re-verified vswhere
+ * Unlike discoverMsvcHost()'s own ambient, always-re-verified vswhere
  * lookup, this artifact is an immutable pinned download — the extract
  * action's own inputs (URL, sha256, version) never change, so imp's
  * ordinary action cache (not a manual cacheHas() guard) is what makes a
@@ -307,7 +356,7 @@ export async function resolveNasmHost(exec) {
 		);
 	}
 	// No `tools:` mount, bare command names (curl/mkdir/unzip/mv/
-	// sha256sum) resolved off ambient PATH — matches resolveMsvcHost()'s
+	// sha256sum) resolved off ambient PATH — matches discoverMsvcHost()'s
 	// own bare "sh -c" script above, not gcc's hermetic-tool-mounted
 	// install task: nativeTool() only produces a resolved graph binding
 	// when declared as a task's own static `inputs:` (see e.g. rules/c/
@@ -507,19 +556,19 @@ const NASM_TOOL_NAMES = new Set(["nasm", "nasm.exe"]);
  * A `{name, cache, key, binDirs}` tool spec for cl.exe/link.exe/lib.exe/
  * nasm.exe, mountable directly via `exec.action({tools: [...]})` — mirrors
  * rules/c/gcc's gccGraphToolSpec(), except the "install" is just
- * cachePut()-registering the ambient VS root resolveMsvcHost() already
+ * cachePut()-registering the ambient VS root discoverMsvcHost() already
  * found (see this module's own header comment on why: there's nothing to
  * download, the toolchain already exists on the host) — nasm.exe is the
  * one exception, actually downloaded by resolveNasmHost().
  *
  * @param {string} name One of MSVC_GRAPH_TOOL_NAMES.
  * @param {{vsRoot: string, mscVersion: string}} host Already-resolved (and
- *   cachePut()'d) via resolveMsvcHost() earlier in the same task run().
+ *   cachePut()'d) via discoverMsvcHost() earlier in the same task run().
  *   Unused for nasm.exe, which resolves by cache name alone.
  * @returns {{name: string, cache: string, key: string, binDirs: string[]}}
  */
 export function msvcGraphToolSpec(name, host) {
-	// resolveMsvcHost() cachePut()s the bin directory itself as the cache
+	// discoverMsvcHost() cachePut()s the bin directory itself as the cache
 	// root (not the whole VS/SDK install — see its own comment), so the
 	// mount's binDirs is just "." here, unlike gcc's toolchain-root-relative
 	// paths.
