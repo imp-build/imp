@@ -23,6 +23,10 @@ use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject,
 };
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetProcessAffinityMask, SetProcessAffinityMask,
+};
 
 use imp_store::cache::{
     artifact_relative_path, cached_outputs_present, create_sandbox_root, digest_json, file_mode,
@@ -483,6 +487,48 @@ const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
 #[cfg(windows)]
 fn lower_priority(command: &mut Command) {
     command.creation_flags(BELOW_NORMAL_PRIORITY_CLASS);
+}
+
+/// Windows-only: the lowest two logical CPUs (0 and 1), reserved from build
+/// children so interactive work — audio, input, window management, all of
+/// which Windows tends to schedule onto the low-numbered CPUs — keeps
+/// headroom during a full `--jobs` batch of compiles, instead of hitching and
+/// stuttering while every core is saturated by the build.
+#[cfg(windows)]
+const RESERVED_SYSTEM_CPU_MASK: usize = 0b11;
+
+/// Windows-only: pin `child` off CPUs 0 and 1, best-effort. Failure (or a
+/// system with too few CPUs left after reserving them) must never fail a
+/// `run()` that would otherwise have succeeded — it just leaves the child on
+/// its default affinity, same tolerance as `ChildJob::for_child` above.
+#[cfg(windows)]
+fn restrict_child_affinity(child: &Child, display: &str) {
+    let mut process_mask: usize = 0;
+    let mut system_mask: usize = 0;
+    // SAFETY: straightforward FFI per the documented Win32 contract; both
+    // out-params are plain `usize` and `GetCurrentProcess()` returns a
+    // pseudo-handle that needs no cleanup.
+    if unsafe { GetProcessAffinityMask(GetCurrentProcess(), &mut process_mask, &mut system_mask) }
+        == 0
+    {
+        return;
+    }
+    let build_mask = process_mask & !RESERVED_SYSTEM_CPU_MASK;
+    if build_mask == 0 {
+        // Fewer than 3 CPUs available to this process — reserving any would
+        // leave the build with nothing to run on.
+        return;
+    }
+    let process_handle = child.as_raw_handle() as HANDLE;
+    // SAFETY: `process_handle` is a live handle owned by `child` for the
+    // duration of this call.
+    if unsafe { SetProcessAffinityMask(process_handle, build_mask) } == 0 {
+        eprintln!(
+            "warning: failed to restrict CPU affinity for {display} (error {}); \
+             it may run on CPUs reserved for the desktop",
+            unsafe { GetLastError() }
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -1345,6 +1391,8 @@ fn exec_run_inner_with_start(
                 .spawn()
                 .with_context(|| format!("run() command in {}", command_cwd.display()))?;
             let job = ChildJob::for_child(&child, &opts.display);
+            #[cfg(windows)]
+            restrict_child_affinity(&child, &opts.display);
             wait_for_child_status(&mut child, &opts.display, cancellation, job.as_ref())
         };
         let status = match ui_suspend {
@@ -1357,6 +1405,8 @@ fn exec_run_inner_with_start(
             .spawn()
             .with_context(|| format!("run() command in {}", command_cwd.display()))?;
         let job = ChildJob::for_child(&child, &opts.display);
+        #[cfg(windows)]
+        restrict_child_affinity(&child, &opts.display);
         match wait_for_child_output(
             &mut child,
             &opts.display,
@@ -1606,6 +1656,8 @@ pub fn exec_run_unsandboxed(
         .spawn()
         .with_context(|| format!("run() unsandboxed command in {}", workspace_root.display()))?;
     let job = ChildJob::for_child(&child, &opts.display);
+    #[cfg(windows)]
+    restrict_child_affinity(&child, &opts.display);
 
     let (status, stdout, stderr) = match wait_for_child_output(
         &mut child,

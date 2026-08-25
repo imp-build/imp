@@ -247,7 +247,7 @@ const CURATED_TEST_BUILD_SCRIPT = [
 	"manifest=$1; target_dir=$2; rustflags=$3; shift 3;",
 	'bins_dir="$target_dir.bins"; report="$target_dir.json";',
 	'mkdir -p "$bins_dir";',
-	'RUSTFLAGS="$rustflags" cargo test --locked --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@" > "$report";',
+	'RUSTFLAGS="$rustflags" cargo test -j4 --locked --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@" > "$report";',
 	'cat "$report";',
 	'jq -r \'select(.reason=="compiler-artifact" and .profile.test==true and .executable != null) | .executable\' "$report" |',
 	"while IFS= read -r exe; do",
