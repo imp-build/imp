@@ -69,6 +69,6 @@ export const cConfig = { buildGenerate: true };
 export const odinConfig = { buildGenerate: true };
 
 export const imp = {
-	jobs: 16,
+	jobs: 8,
 	jsWorkers: 1
 };

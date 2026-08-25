@@ -547,8 +547,7 @@ async fn create_live_runtime(
 ) -> Result<LiveWorkspace> {
     imp_logging::ensure_installed(log::LevelFilter::Info);
 
-    let root = root
-        .canonicalize()
+    let root = dunce::canonicalize(root)
         .with_context(|| format!("canonicalize workspace root {}", root.display()))?;
 
     let state: Arc<Mutex<HostState>> = Arc::new(Mutex::new(HostState::default()));

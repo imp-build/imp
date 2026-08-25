@@ -63,6 +63,7 @@ import {
 	defaultOdinToolchainVersion,
 	odinGraphTool,
 	odinLinkerFor,
+	odinUsesLldOnWindows,
 	odinUsesMingwCrt,
 	resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
@@ -919,6 +920,12 @@ function odinUsesMingwCrtFor(spec) {
 	return odinUsesMingwCrt(spec.version || defaultOdinToolchainVersion());
 }
 
+// Same spec.version fallback as odinLinkerHandleFor() above, for
+// odinToolchain(version, { lldOnWindows }) instead of { linker }.
+function odinUsesLldOnWindowsFor(spec) {
+	return odinUsesLldOnWindows(spec.version || defaultOdinToolchainVersion());
+}
+
 function graphActionInputs(spec, analysis, config) {
 	const closure = graphSourceClosure(spec, analysis, config);
 	const { resources, linkopts } = graphResourceInputs(spec);
@@ -1104,18 +1111,30 @@ function graphOdinBuild(
 				linker && !lint
 					? moldOdinLinkerEnv(exec, resolved.moldTool, linker.version)
 					: null;
-			// Odin's default Windows linker is MSVC's link.exe, which cannot
-			// read GCC/mingw-produced C++ object files reliably — confirmed by
-			// a real failure linking a mingw-built BoringSSL: "fatal error
-			// LNK1143: invalid or corrupt file: no symbol for COMDAT section".
-			// lld-link handles both MSVC- and GCC-style COFF objects, and
-			// ships bundled at <odin-root>/bin/lld-link.exe (found by Odin
-			// automatically — no separate toolchain/PATH plumbing needed, the
-			// way mold's Linux-only linker handle above requires), so default
-			// to it whenever a package hasn't already picked an explicit
-			// linker via odinToolchain(version, { linker }).
+			// Odin's default Windows linker is MSVC's link.exe, which does its
+			// own Visual Studio/Windows SDK auto-detection and needs no LIB/
+			// INCLUDE plumbing from this workspace, but cannot read GCC/mingw-
+			// produced C++ object files reliably — confirmed by a real failure
+			// linking a mingw-built BoringSSL: "fatal error LNK1143: invalid or
+			// corrupt file: no symbol for COMDAT section". lld-link handles both
+			// MSVC- and GCC-style COFF objects, and ships bundled at
+			// <odin-root>/bin/lld-link.exe (found by Odin automatically — no
+			// separate toolchain/PATH plumbing needed, the way mold's Linux-only
+			// linker handle above requires) — but unlike system link.exe it does
+			// *not* auto-detect the MSVC/Windows SDK library search path, so
+			// linking anything that actually needs the CRT (memset,
+			// mainCRTStartup, ...) fails outright unless this workspace also
+			// supplies LIB itself (e.g. via //rules/c/msvc's msvcEnv()) —
+			// confirmed by a real `odin build` failure: "lld-link: error:
+			// undefined symbol: memset" with no LIB plumbed. So lld-link is
+			// opt-in via odinToolchain(version, { lldOnWindows: true }), same as
+			// { mingwCrt } below — not used just because a package hasn't picked
+			// an explicit linker via odinToolchain(version, { linker }).
 			const useLldOnWindows =
-				!lint && !linker && platformInfo().os === "windows";
+				!lint &&
+				!linker &&
+				platformInfo().os === "windows" &&
+				odinUsesLldOnWindowsFor(spec);
 			// odinToolchain(version, { mingwCrt: true }) opts a workspace into
 			// the mingw-CRT substitution below — its Windows C/C++ deps are
 			// built with the gcc/mingw toolchain (//rules/c/gcc's default), so

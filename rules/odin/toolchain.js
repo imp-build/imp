@@ -136,6 +136,17 @@ let odinLinkers = new Map();
 // defaultOdinUsesMingwCrt().
 let odinMingwCrtVersions = new Set();
 
+// Whether Odin's own Windows link step should switch from the default system
+// link.exe to Odin's bundled lld-link.exe — a per-workspace declaration for
+// the same reason odinMingwCrtVersions is (see its own comment above): a
+// workspace's Windows C/C++ deps built with gcc/mingw object code need
+// lld-link (it reads both MSVC- and GCC-style COFF objects; system link.exe
+// only reliably reads MSVC's). Opt-in and off by default — system link.exe
+// does its own Visual Studio/Windows SDK auto-detection and needs no LIB/
+// INCLUDE plumbing from this workspace, which lld-link does not do (see
+// useLldOnWindows's own comment in index.js for the failure this caused).
+let odinLldOnWindowsVersions = new Set();
+
 function graphToolFor(version) {
 	return graphToolchains.get(version) ?? odinGraphTool(version);
 }
@@ -145,6 +156,7 @@ export function __resetOdinToolchainStateForTest() {
 	graphToolchains = new Map();
 	odinLinkers = new Map();
 	odinMingwCrtVersions = new Set();
+	odinLldOnWindowsVersions = new Set();
 }
 
 /**
@@ -167,8 +179,20 @@ export function __resetOdinToolchainStateForTest() {
  *   (e.g. cmakeProject()/ccLibrary() built via //rules/c/gcc's default gcc
  *   toolchain) are themselves mingw-built and so need mingw's CRT/UCRT
  *   symbols rather than MSVC's (operator new, __CxxFrameHandler4,
- *   __security_cookie, ...). Read back via odinUsesMingwCrt()/
+ *   __security_cookie, ...). Only meaningful alongside opts.lldOnWindows —
+ *   see that option's own docstring. Read back via odinUsesMingwCrt()/
  *   defaultOdinUsesMingwCrt().
+ * @param {boolean} [opts.lldOnWindows=false] On Windows, switch Odin's link
+ *   step from the default system link.exe to Odin's bundled lld-link.exe.
+ *   Off by default: system link.exe auto-detects the Visual Studio/Windows
+ *   SDK install and needs no further plumbing from this workspace. Set this
+ *   only when this workspace's Windows C/C++ deps include gcc/mingw-built
+ *   object code — lld-link reads both MSVC- and GCC-style COFF objects,
+ *   system link.exe reliably only reads MSVC's — and be prepared to also
+ *   supply the MSVC LIB/INCLUDE search path yourself (e.g. via
+ *   //rules/c/msvc's msvcEnv()), since unlike system link.exe, lld-link does
+ *   not auto-detect it. Read back via odinUsesLldOnWindows()/
+ *   defaultOdinUsesLldOnWindows().
  * @returns {object} Tool handle for this Odin toolchain.
  */
 export function odinToolchain(version, opts = {}) {
@@ -180,6 +204,7 @@ export function odinToolchain(version, opts = {}) {
 	graphToolchains.set(version, tool);
 	if (opts.linker) odinLinkers.set(version, opts.linker);
 	if (opts.mingwCrt) odinMingwCrtVersions.add(version);
+	if (opts.lldOnWindows) odinLldOnWindowsVersions.add(version);
 	return tool;
 }
 
@@ -226,6 +251,29 @@ export function odinUsesMingwCrt(version) {
 export function defaultOdinUsesMingwCrt() {
 	const version = OdinToolchain.defaultVersion();
 	return version ? odinUsesMingwCrt(version) : false;
+}
+
+/**
+ * Whether an Odin toolchain version was declared with
+ * odinToolchain(version, { lldOnWindows: true }) — see that option's own
+ * docstring.
+ *
+ * @param {string} version
+ * @returns {boolean}
+ */
+export function odinUsesLldOnWindows(version) {
+	return odinLldOnWindowsVersions.has(version);
+}
+
+/**
+ * Whether the currently configured default Odin toolchain version was
+ * declared with odinToolchain(version, { lldOnWindows: true }).
+ *
+ * @returns {boolean}
+ */
+export function defaultOdinUsesLldOnWindows() {
+	const version = OdinToolchain.defaultVersion();
+	return version ? odinUsesLldOnWindows(version) : false;
 }
 
 /**

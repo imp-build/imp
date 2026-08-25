@@ -303,15 +303,17 @@ pub fn ensure_native_tool_artifact(name: &str, resolved: &Path) -> Result<PathBu
     if std::fs::read_link(&link).ok().as_deref() != Some(resolved.as_path()) {
         #[cfg(not(unix))]
         {
-            // The artifact is a hard link (or copy) on Windows, never a real
-            // symlink, so read_link above never matches and this branch
-            // always runs. If the host's PATH lookup for `name` resolved to
-            // this exact cached artifact (e.g. a prior registration already
-            // put this tool's own cache dir on PATH — confirmed happening in
-            // practice), removing it first would delete the only copy of the
-            // file, then fail to link/copy from a path that no longer
-            // exists. Comparing canonical paths catches that before doing
-            // anything destructive.
+            // A real symlink (attempted below) makes read_link above match
+            // on every subsequent call, so this branch is only reached the
+            // first time or when symlink creation isn't possible (e.g. no
+            // SeCreateSymbolicLinkPrivilege/Developer Mode) and the artifact
+            // falls back to a hard link or copy instead. If the host's PATH
+            // lookup for `name` resolved to this exact cached artifact (e.g.
+            // a prior registration already put this tool's own cache dir on
+            // PATH — confirmed happening in practice), removing it first
+            // would delete the only copy of the file, then fail to link/copy
+            // from a path that no longer exists. Comparing canonical paths
+            // catches that before doing anything destructive.
             let already_current = std::fs::canonicalize(&link)
                 .map(|existing| existing == resolved)
                 .unwrap_or(false);
@@ -323,10 +325,23 @@ pub fn ensure_native_tool_artifact(name: &str, resolved: &Path) -> Result<PathBu
         #[cfg(unix)]
         std::os::unix::fs::symlink(&resolved, &link)
             .with_context(|| format!("symlink {} -> {}", link.display(), resolved.display()))?;
-        #[cfg(not(unix))]
-        if std::fs::hard_link(&resolved, &link).is_err() {
-            std::fs::copy(&resolved, &link)
-                .with_context(|| format!("copy {} -> {}", resolved.display(), link.display()))?;
+        #[cfg(windows)]
+        {
+            // A real symlink, not a hard link: Windows resolves it at the
+            // filesystem level before launching a process from it, so the
+            // child's DLL search-in-application-directory step looks in
+            // `resolved`'s real directory — where its companion DLLs
+            // actually live (e.g. Git for Windows' git.exe/sh.exe both need
+            // sibling DLLs a hard link's isolated cache dir doesn't have).
+            // Falls back to the pre-existing hard-link/copy behavior when
+            // symlink creation isn't permitted.
+            if std::os::windows::fs::symlink_file(&resolved, &link).is_err()
+                && std::fs::hard_link(&resolved, &link).is_err()
+            {
+                std::fs::copy(&resolved, &link).with_context(|| {
+                    format!("copy {} -> {}", resolved.display(), link.display())
+                })?;
+            }
         }
     }
     Ok(root)

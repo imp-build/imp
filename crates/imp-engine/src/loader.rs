@@ -951,7 +951,8 @@ mod tests {
             searched,
         };
         let message = source.missing_message();
-        assert!(message.contains("share/imp/rules"), "{message}");
-        assert!(message.contains("bin/rules"), "{message}");
+        let normalized = message.replace('\\', "/");
+        assert!(normalized.contains("share/imp/rules"), "{message}");
+        assert!(normalized.contains("bin/rules"), "{message}");
     }
 }
