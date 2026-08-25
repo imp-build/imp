@@ -603,8 +603,7 @@ mod tests {
 
     fn git_in(dir: &Path, args: &[&str]) {
         let out = Command::new("git")
-            .arg("-C")
-            .arg(dir)
+            .current_dir(dir)
             // Isolate from user/system config (hooks, autocrlf, fsmonitor).
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
