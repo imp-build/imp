@@ -124,6 +124,18 @@ let graphToolchains = new Map();
 // defaultOdinLinkerToolchain() — mirrors graphToolchains above.
 let odinLinkers = new Map();
 
+// A workspace's Windows C/C++ deps (ccLibrary()/cmakeProject() consumed via
+// foreign import) can be built with either the gcc/mingw toolchain or a real
+// MSVC toolchain (//rules/c/msvc) — nothing in the graph makes that visible
+// to Odin's own Windows link step (a `foreign import` path is a literal
+// string, not a graph edge carrying toolchain identity — see
+// rules/c/cmake's cmakeLibraryDep() docstring for the same structural gap on
+// the CMake side). So whether Odin's lld-link step should switch to the
+// mingw CRT is a per-workspace declaration, tracked here the same way
+// opts.linker is (see odinLinkers above), read back via odinUsesMingwCrt()/
+// defaultOdinUsesMingwCrt().
+let odinMingwCrtVersions = new Set();
+
 function graphToolFor(version) {
 	return graphToolchains.get(version) ?? odinGraphTool(version);
 }
@@ -132,6 +144,7 @@ export function __resetOdinToolchainStateForTest() {
 	OdinToolchain.clearDefault();
 	graphToolchains = new Map();
 	odinLinkers = new Map();
+	odinMingwCrtVersions = new Set();
 }
 
 /**
@@ -147,6 +160,15 @@ export function __resetOdinToolchainStateForTest() {
  *   moldGraphToolchain()'s `{ tool, version }` shape, //rules/c/mold) Odin
  *   should use instead of the gcc toolchain's default `ld`. Read back via
  *   odinLinkerFor()/defaultOdinLinkerToolchain().
+ * @param {boolean} [opts.mingwCrt=false] On Windows, switch Odin's lld-link
+ *   step to the mingw-CRT path (`-no-crt` plus the gcc/mingw runtime
+ *   archives) instead of the default, which leaves Odin's own MSVC CRT
+ *   linking in place. Set this when this workspace's Windows C/C++ deps
+ *   (e.g. cmakeProject()/ccLibrary() built via //rules/c/gcc's default gcc
+ *   toolchain) are themselves mingw-built and so need mingw's CRT/UCRT
+ *   symbols rather than MSVC's (operator new, __CxxFrameHandler4,
+ *   __security_cookie, ...). Read back via odinUsesMingwCrt()/
+ *   defaultOdinUsesMingwCrt().
  * @returns {object} Tool handle for this Odin toolchain.
  */
 export function odinToolchain(version, opts = {}) {
@@ -157,6 +179,7 @@ export function odinToolchain(version, opts = {}) {
 	const tool = odinGraphTool(version);
 	graphToolchains.set(version, tool);
 	if (opts.linker) odinLinkers.set(version, opts.linker);
+	if (opts.mingwCrt) odinMingwCrtVersions.add(version);
 	return tool;
 }
 
@@ -180,6 +203,29 @@ export function odinLinkerFor(version) {
 export function defaultOdinLinkerToolchain() {
 	const version = OdinToolchain.defaultVersion();
 	return version ? odinLinkerFor(version) : null;
+}
+
+/**
+ * Whether an Odin toolchain version was declared with
+ * odinToolchain(version, { mingwCrt: true }) — see that option's own
+ * docstring.
+ *
+ * @param {string} version
+ * @returns {boolean}
+ */
+export function odinUsesMingwCrt(version) {
+	return odinMingwCrtVersions.has(version);
+}
+
+/**
+ * Whether the currently configured default Odin toolchain version was
+ * declared with odinToolchain(version, { mingwCrt: true }).
+ *
+ * @returns {boolean}
+ */
+export function defaultOdinUsesMingwCrt() {
+	const version = OdinToolchain.defaultVersion();
+	return version ? odinUsesMingwCrt(version) : false;
 }
 
 /**

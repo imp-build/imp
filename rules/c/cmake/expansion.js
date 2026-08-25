@@ -34,6 +34,7 @@ import {
 	correlateCTestEntries,
 	replayCmakeTarget,
 	runCTestTask,
+	scanCmakeCompilerInputs,
 } from "//rules/c/cmake/graph_replay";
 import {
 	listNamedCmakeTargets,
@@ -202,14 +203,16 @@ export function cmakeProjectExpansion(opts = {}) {
 	const spec = cmakeProjectSpec(opts);
 	_cmakeProjectSpecs.push(spec);
 	const configured = configureCmakeProject(spec);
+	const scanned = scanCmakeCompilerInputs(spec, configured);
 
 	return expand({
 		display: `expand cmake project ${spec.path}`,
 		inputs: {
 			ninjaGraph: configured.outputs.ninjaGraph,
 			sourcePaths: configured.outputs.sourcePaths,
+			compilerManifest: scanned.outputs.manifest,
 		},
-		create({ ninjaGraph, sourcePaths }) {
+		create({ ninjaGraph, sourcePaths, compilerManifest }) {
 			const testsByBasename = correlateCTestEntries(ninjaGraph);
 			const named = listNamedCmakeTargets(ninjaGraph);
 			const crossDeps = crossTargetDependencies(named, ninjaGraph);
@@ -231,6 +234,7 @@ export function cmakeProjectExpansion(opts = {}) {
 					t.outputs,
 					targetDeps,
 					sourcePaths,
+					compilerManifest,
 				);
 			}
 
@@ -276,6 +280,7 @@ export function cmakeProjectExpansion(opts = {}) {
 											builtByName,
 										),
 										sourcePaths,
+										compilerManifest,
 									).outputs.units,
 								},
 							}

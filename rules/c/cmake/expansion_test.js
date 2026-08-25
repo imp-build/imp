@@ -22,9 +22,12 @@ import {
 	configureCmakeProject,
 	correlateCTestEntries,
 	isCmakeCompilerEdge,
+	parseNinjaDeps,
 	replayCmakeTarget,
+	scanCmakeCompilerInputs,
 } from "//rules/c/cmake/graph_replay";
 import { listNamedCmakeTargets, parseNinja } from "//rules/c/cmake/ninja_graph";
+import { gccToolchainRecord } from "//rules/c/gcc";
 
 // Fixture mirrors rules/c/cmake/example/CMakeLists.txt: a SHARED_LIBRARY
 // (hello_cmake) and an EXECUTABLE (hello_cmake_main) that links it, plus one
@@ -108,13 +111,22 @@ const CONFIGURE_FILES = {
 	[`${CONFIGURE_BUILD_DIR}/CTestTestfile.cmake`]: CTEST_TESTFILE,
 };
 
+const SCAN_DEPS = [
+	"CMakeFiles/hello_cmake.dir/hello.c.o: #deps 2, deps mtime 0 (STALE)",
+	"    ../../../../../rules/c/cmake/example/hello.c",
+	"    ../../../../../rules/c/cmake/example/hello.h",
+	"",
+	"CMakeFiles/hello_cmake_main.dir/main.c.o: #deps 1, deps mtime 0 (STALE)",
+	"    ../../../../../rules/c/cmake/example/main.c",
+].join("\n");
+
 // Fully fake gcc/cmake toolchains, sidestepping gccGraphToolchain()'s/
 // cmakeGraphToolchain()'s real download+install task chains — see
 // rules/c/index_test.js's own fakeGccGraphToolchain() for the same
 // technique and rationale.
 function fakeGccGraphToolchain(version = "2025.08-1") {
 	const binRoot = files({ root: "rules/c/gcc", include: ["**/*"] });
-	return { tool: tool(binRoot, { binDirs: ["bin"] }), version };
+	return gccToolchainRecord(tool(binRoot, { binDirs: ["bin"] }), version);
 }
 
 function fakeCmakeGraphToolchain(version = "3.31.0") {
@@ -129,6 +141,9 @@ function withCmakeHost(fn) {
 			"directory",
 			CONFIGURE_FILES,
 		);
+		host.setRunOutputFiles("cmake scan rules/c/cmake/example", "scan", {
+			[`${CONFIGURE_BUILD_DIR}/.imp-cmake-deps.txt`]: SCAN_DEPS,
+		});
 		const expansion = cmakeProjectExpansion({
 			path: "rules/c/cmake/example",
 			toolchain: fakeGccGraphToolchain(),
@@ -215,6 +230,60 @@ describe("cmakeProjectExpansion", () => {
 				sourcePaths,
 			),
 		).toEqual([]);
+	});
+
+	test("recognizes Ninja's MSVC dependency mode", () => {
+		const rules = { msvc_compile: { deps: "msvc" } };
+		expect(isCmakeCompilerEdge({ rule: "msvc_compile" }, rules)).toBe(true);
+	});
+
+	test("parses Ninja dependency records", () => {
+		const deps = parseNinjaDeps(
+			[
+				"CMakeFiles/app.dir/main.c.obj: #deps 3, deps mtime 0 (STALE)",
+				"    ../../main.c",
+				"    ../../main.h",
+				"    C:\\SDK\\include\\stdio.h",
+				"",
+			].join("\n"),
+		);
+		expect(deps.get("CMakeFiles/app.dir/main.c.obj")).toEqual([
+			"../../main.c",
+			"../../main.h",
+			"C:/SDK/include/stdio.h",
+		]);
+	});
+
+	test("scanCmakeCompilerInputs() returns exact workspace headers", () => {
+		return withFakeToolchainHost(async (host) => {
+			host.setRunOutputFiles(
+				"cmake configure rules/c/cmake/example",
+				"directory",
+				CONFIGURE_FILES,
+			);
+			host.setRunOutputFiles("cmake scan rules/c/cmake/example", "scan", {
+				[`${CONFIGURE_BUILD_DIR}/.imp-cmake-deps.txt`]: [
+					"CMakeFiles/hello_cmake.dir/hello.c.o: #deps 2, deps mtime 0 (STALE)",
+					"    ../../../../../rules/c/cmake/example/hello.c",
+					"    ../../../../../rules/c/cmake/example/hello.h",
+					"",
+					"CMakeFiles/hello_cmake_main.dir/main.c.o: #deps 2, deps mtime 0 (STALE)",
+					"    ../../../../../rules/c/cmake/example/main.c",
+					"    ../../../../../rules/c/cmake/example/main.h",
+				].join("\n"),
+			});
+			const spec = cmakeProjectSpec({
+				path: "rules/c/cmake/example",
+				toolchain: fakeGccGraphToolchain(),
+				cmakeToolchain: fakeCmakeGraphToolchain(),
+			});
+			const configured = configureCmakeProject(spec);
+			const scanned = scanCmakeCompilerInputs(spec, configured);
+			const [result] = await resolveHandles([scanned.outputs.manifest]);
+			expect(
+				result.result["CMakeFiles/hello_cmake.dir/hello.c.o"].headers,
+			).toEqual(["rules/c/cmake/example/hello.h"]);
+		});
 	});
 
 	test("runs cmake configure exactly once across multiple get() calls for different targets", () => {
@@ -470,6 +539,85 @@ describe("cmakeProjectExpansion", () => {
 
 			expect(base.__graph_id === extra.__graph_id).toBe(false);
 			expect(base.__graph_id === withDep.__graph_id).toBe(false);
+		});
+	});
+
+	test("replayCmakeTarget() folds each compiler header plan into task identity", () => {
+		return withFakeToolchainHost(async () => {
+			const spec = cmakeProjectSpec({
+				path: "rules/c/cmake/example",
+				toolchain: fakeGccGraphToolchain(),
+				cmakeToolchain: fakeCmakeGraphToolchain(),
+			});
+			const configured = configureCmakeProject(spec);
+			const ninjaGraph = {
+				...parseNinja(BUILD_NINJA, (path) => {
+					if (path === "CMakeFiles/rules.ninja") return RULES_NINJA;
+					throw new Error(`unexpected include: ${path}`);
+				}),
+				sandboxRoot: SANDBOX_ROOT,
+			};
+			const sources = [
+				"rules/c/cmake/example/hello.c",
+				"rules/c/cmake/example/hello.h",
+				"rules/c/cmake/example/main.c",
+				"rules/c/cmake/example/main.h",
+			];
+			const target = ["hello_cmake"];
+			const first = replayCmakeTarget(
+				spec,
+				configured,
+				ninjaGraph,
+				target,
+				[],
+				{},
+				sources,
+				{
+					"CMakeFiles/hello_cmake.dir/hello.c.o": {
+						headers: ["rules/c/cmake/example/hello.h"],
+					},
+				},
+			);
+			const second = replayCmakeTarget(
+				spec,
+				configured,
+				ninjaGraph,
+				target,
+				[],
+				{},
+				sources,
+				{
+					"CMakeFiles/hello_cmake.dir/hello.c.o": {
+						headers: ["rules/c/cmake/example/main.h"],
+					},
+				},
+			);
+			expect(first.__graph_id === second.__graph_id).toBe(false);
+		});
+	});
+
+	test("replayCmakeTarget() rejects a selected CMake module edge", () => {
+		return withFakeToolchainHost(async () => {
+			const spec = cmakeProjectSpec({
+				path: "rules/c/cmake/example",
+				toolchain: fakeGccGraphToolchain(),
+				cmakeToolchain: fakeCmakeGraphToolchain(),
+			});
+			const configured = configureCmakeProject(spec);
+			const ninjaGraph = {
+				...parseNinja(BUILD_NINJA, (path) => {
+					if (path === "CMakeFiles/rules.ninja") return RULES_NINJA;
+					throw new Error(`unexpected include: ${path}`);
+				}),
+				sandboxRoot: SANDBOX_ROOT,
+			};
+			const compiler = ninjaGraph.edges.find((edge) =>
+				edge.outputs.includes("CMakeFiles/hello_cmake.dir/hello.c.o"),
+			);
+			compiler.vars.dyndep = "CMakeFiles/hello_cmake.dir/CXX.dd";
+			expect(() =>
+				replayCmakeTarget(spec, configured, ninjaGraph, ["hello_cmake"]),
+			).toThrow("does not support modules yet");
 		});
 	});
 

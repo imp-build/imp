@@ -7,12 +7,13 @@ import { ccLibrary } from "//rules/c";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
 import { defaultMoldGraphToolchain } from "//rules/c/mold";
 import { describe, expect, test } from "//rules/imp/test";
-import { platformInfo } from "imp:core";
+import { configuration, platformInfo } from "imp:core";
 import {
 	odinExtraLinkerFlagsArgs,
 	odinGccLinkerPathDir,
 	odinGen,
 	odinLinkerPathDir,
+	odinModeFlags,
 	odinPackage,
 	odinTestPackage,
 } from "//rules/odin";
@@ -63,6 +64,27 @@ describe("Odin graph rules", () => {
 			.nodes.map((node) => node.display)
 			.filter(Boolean);
 		expect(displays).toContain("odin test rules/odin/example/native");
+	});
+
+	// configure("imp.mode", ...) is host-reserved for real CLI --axis/
+	// --profile resolution (see defineModeAxis), so this rule's own JS unit
+	// tests can't simulate a resolved "release" axis directly — instead
+	// this asserts odinModeFlags() (graphOdinBuild()'s own flag mapping,
+	// applied to whatever "opt" configuration("imp.mode") resolves to) maps
+	// each opt value to the right odin flag. Real --axis opt=release
+	// end-to-end behavior (the emitted -o:speed flag and the resulting
+	// rebuild instead of a stale cache hit) is covered by manual
+	// `imp build --axis opt=...` verification instead of a unit test.
+	test("odinModeFlags() maps the opt axis to odin's debug/release flags", () => {
+		expect(odinModeFlags("debug")).toEqual(["-debug"]);
+		expect(odinModeFlags("release")).toEqual(["-o:speed"]);
+		// Anything unresolved/unrecognized falls back to the axis's own
+		// declared default ("debug"), not a silent no-flags build.
+		expect(odinModeFlags(undefined)).toEqual(["-debug"]);
+	});
+
+	test("build task inputs default to the opt axis's declared debug default", () => {
+		expect(configuration("imp.mode", {}).opt ?? "debug").toBe("debug");
 	});
 
 	test("generators produce a CAS artifact graph", () => {

@@ -1,0 +1,13 @@
+{
+  "tool": "nasm",
+  "versions": {
+    "3.02": {
+      "windows/x86_64": {
+        "url": "https://www.nasm.us/pub/nasm/releasebuilds/3.02/win64/nasm-3.02-win64.zip",
+        "artifact": "nasm-3.02-win64.zip",
+        "size": 641314,
+        "sha256": "161d0bfaff53c2f9e9f3e69fd0672323ebabafd1268976a5cec11be92a19aee7"
+      }
+    }
+  }
+}

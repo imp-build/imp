@@ -24,6 +24,10 @@ import {
 	targetRef,
 	platformInfo,
 } from "imp:core";
+// Side-effect import: registers the shared `opt` (debug/release) mode axis
+// so `--axis opt=...`/`--profile ...` works for Odin targets even in a
+// workspace that doesn't import //rules/imp/mode itself.
+import "//rules/imp/mode";
 /**
  * Declarative workspace configuration schema for Odin.
  *
@@ -59,6 +63,7 @@ import {
 	defaultOdinToolchainVersion,
 	odinGraphTool,
 	odinLinkerFor,
+	odinUsesMingwCrt,
 	resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
 
@@ -908,6 +913,12 @@ function odinLinkerHandleFor(spec) {
 	return odinLinkerFor(spec.version || defaultOdinToolchainVersion());
 }
 
+// Same spec.version fallback as odinLinkerHandleFor() above, for
+// odinToolchain(version, { mingwCrt }) instead of { linker }.
+function odinUsesMingwCrtFor(spec) {
+	return odinUsesMingwCrt(spec.version || defaultOdinToolchainVersion());
+}
+
 function graphActionInputs(spec, analysis, config) {
 	const closure = graphSourceClosure(spec, analysis, config);
 	const { resources, linkopts } = graphResourceInputs(spec);
@@ -924,6 +935,18 @@ function graphActionInputs(spec, analysis, config) {
 			hasMainEntrypoint: analysis.hasMainEntrypoint,
 			collections: closure.collections,
 			linkopts,
+			// Read here (construction time, not inside run()) so the
+			// resolved "debug"/"release" string is baked into this literal
+			// `analysis` task input, same as packagePath/collections/
+			// linkopts above — that's what makes the task's cache key
+			// change when --axis opt=... (or a profile()-wrapped
+			// dependency edge) flips it, instead of reusing a stale build.
+			// configuration() (not modeAxis()) so this defaults cleanly to
+			// "debug" — matching rules/imp/mode's declared default —
+			// instead of throwing when the axis hasn't been resolved yet
+			// (e.g. this rule's own JS unit tests, which don't go through
+			// CLI --axis/--profile resolution).
+			opt: configuration("imp.mode", {}).opt || "debug",
 		},
 	};
 	for (const [index, source] of closure.handles.entries()) {
@@ -939,6 +962,19 @@ function graphActionInputs(spec, analysis, config) {
 		(g) => g.expectedPath,
 	);
 	return inputs;
+}
+
+/**
+ * The `odin build`/`odin test` flags for the shared `opt` mode axis (see
+ * //rules/imp/mode): `-debug` for debug info + runtime bounds/type checks,
+ * `-o:speed` to optimize for speed instead. Any value other than "release"
+ * is treated as "debug", matching the axis's own declared default.
+ *
+ * @param {string} opt Resolved "opt" mode axis value.
+ * @returns {string[]}
+ */
+export function odinModeFlags(opt) {
+	return opt === "release" ? ["-o:speed"] : ["-debug"];
 }
 
 /**
@@ -1027,6 +1063,10 @@ function graphOdinBuild(
 			const flags = resolved.analysis.collections.map(
 				([name, path]) => `-collection:${name}=${path}`,
 			);
+			// `odin check` is a pure type-check with no codegen, so
+			// optimization/debug-info flags don't apply to it — only
+			// build/test actually compile.
+			const modeFlags = lint ? [] : odinModeFlags(resolved.analysis.opt);
 			const allInputs = Object.entries(resolved)
 				.filter(
 					([name]) =>
@@ -1076,6 +1116,15 @@ function graphOdinBuild(
 			// linker via odinToolchain(version, { linker }).
 			const useLldOnWindows =
 				!lint && !linker && platformInfo().os === "windows";
+			// odinToolchain(version, { mingwCrt: true }) opts a workspace into
+			// the mingw-CRT substitution below — its Windows C/C++ deps are
+			// built with the gcc/mingw toolchain (//rules/c/gcc's default), so
+			// their object code needs mingw's own CRT/UCRT symbols rather than
+			// MSVC's. By default (mingwCrt unset) Odin's own MSVC CRT linking
+			// is left in place — lld-link still gets used regardless (it reads
+			// both MSVC- and GCC-style COFF objects, per useLldOnWindows's own
+			// comment above), only the CRT choice changes.
+			const useMingwCrt = useLldOnWindows && odinUsesMingwCrtFor(spec);
 			// `odin test` already tolerates a package with no `main` (that's the
 			// whole point of the test build mode); `build` and `check` both
 			// default to expecting one. `build` already opts out via
@@ -1089,6 +1138,7 @@ function graphOdinBuild(
 				command,
 				resolved.analysis.packagePath,
 				...flags,
+				...modeFlags,
 				...(lint ? ["-vet"] : []),
 				...(!resolved.analysis.hasMainEntrypoint
 					? lint
@@ -1111,13 +1161,16 @@ function graphOdinBuild(
 				// __acrt_initialize, ...) that mingw's runtime doesn't
 				// provide. -no-crt stops Odin from auto-linking its own CRT,
 				// leaving the mingw runtime archives as the only C runtime
-				// in the link.
-				...(useLldOnWindows ? ["-no-crt"] : []),
+				// in the link. Only applied when useMingwCrt is set (see its
+				// own comment above) — by default, Odin's own MSVC CRT linking
+				// is exactly what's needed, and the mingw runtime archives
+				// below are skipped too rather than fighting it.
+				...(useMingwCrt ? ["-no-crt"] : []),
 				...(lint
 					? []
 					: odinExtraLinkerFlagsArgs([
 							...resolved.analysis.linkopts,
-							...(useLldOnWindows
+							...(useMingwCrt
 								? [
 										// WinLibs' libstdc++.a defines __cxa_pure_virtual as a
 										// plain (non-COMDAT) symbol in more than one object file

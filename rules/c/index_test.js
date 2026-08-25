@@ -8,7 +8,11 @@ import {
 	withFakeToolchainHost,
 } from "//rules/imp/test";
 import { ccBinary, ccLibrary } from "//rules/c";
-import { __resetGccToolchainStateForTest, gccToolchain } from "//rules/c/gcc";
+import {
+	__resetGccToolchainStateForTest,
+	gccToolchain,
+	gccToolchainRecord,
+} from "//rules/c/gcc";
 import { __resetZigToolchainStateForTest } from "//rules/c/zig";
 
 function withCcHost(fn) {
@@ -27,9 +31,12 @@ function withCcHost(fn) {
 // A fully fake gcc toolchain, sidestepping gccGraphToolchain()'s real
 // download+install task chain — see rules/rust/index_test.js's
 // fakeGccGraphToolchain() for the same technique and rationale.
+// gccToolchainRecord() builds the same cc-toolchain provider contract
+// (kind/taskInputs/commands/...) gccGraphToolchain() itself does, just
+// around this fake tool/version instead of a real installed one.
 function fakeGccGraphToolchain(version = "2025.08-1") {
 	const binRoot = files({ root: "rules/c/gcc", include: ["**/*"] });
-	return { tool: tool(binRoot, { binDirs: ["bin"] }), version };
+	return gccToolchainRecord(tool(binRoot, { binDirs: ["bin"] }), version);
 }
 
 async function resolveHandles(handles) {

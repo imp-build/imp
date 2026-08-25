@@ -32,11 +32,19 @@ directory, while `dirs` adds complete auxiliary directories needed by
 configure or build steps. `cmakeArgs` appends project-specific options to
 `cmake -S -B`.
 
-Configure receives the full `srcs` input once. During replay, C/C++ compiler
-edges receive their direct source, all captured include-like files (`.h`,
-`.hpp`, `.inc`, and related suffixes), `extraGlobs`, `dirs`, generated CMake
-files, and declared `deps`. Link and custom edges retain the full `srcs`
-input because Ninja does not state all files those commands can read.
+Configure receives the full `srcs` input once. Before replay, imp runs a
+syntax-only Ninja dependency scan over C and C++ compiler edges. Ninja reads
+GCC depfiles and MSVC `/showIncludes` output, then replay gives each compiler
+edge its direct source and only the workspace headers that scan found.
+`extraGlobs`, `dirs`, generated CMake files, and declared `deps` stay inputs.
+Link and custom edges retain the full `srcs` input because Ninja does not
+state all files those commands can read.
+
+If Ninja cannot produce a complete dependency record for one compiler edge,
+imp keeps that edge correct by using the former broad include-like input set.
+The action display marks this as a broad input fallback. CMake C++ module
+edges that use `dyndep` are not supported yet and fail with an explicit error
+when a selected target reaches one.
 
 Use `extraGlobs` for compiler inputs with another suffix, such as generated
 metadata. Use `deps` for artifact handles that CMake must see at configure
