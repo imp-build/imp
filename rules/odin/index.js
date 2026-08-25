@@ -24,6 +24,10 @@ import {
 	targetRef,
 	platformInfo,
 } from "imp:core";
+// Side-effect import: registers the shared `opt` (debug/release) mode axis
+// so `--axis opt=...`/`--profile ...` works for Odin targets even in a
+// workspace that doesn't import //rules/imp/mode itself.
+import "//rules/imp/mode";
 /**
  * Declarative workspace configuration schema for Odin.
  *
@@ -931,6 +935,18 @@ function graphActionInputs(spec, analysis, config) {
 			hasMainEntrypoint: analysis.hasMainEntrypoint,
 			collections: closure.collections,
 			linkopts,
+			// Read here (construction time, not inside run()) so the
+			// resolved "debug"/"release" string is baked into this literal
+			// `analysis` task input, same as packagePath/collections/
+			// linkopts above — that's what makes the task's cache key
+			// change when --axis opt=... (or a profile()-wrapped
+			// dependency edge) flips it, instead of reusing a stale build.
+			// configuration() (not modeAxis()) so this defaults cleanly to
+			// "debug" — matching rules/imp/mode's declared default —
+			// instead of throwing when the axis hasn't been resolved yet
+			// (e.g. this rule's own JS unit tests, which don't go through
+			// CLI --axis/--profile resolution).
+			opt: configuration("imp.mode", {}).opt || "debug",
 		},
 	};
 	for (const [index, source] of closure.handles.entries()) {
@@ -946,6 +962,19 @@ function graphActionInputs(spec, analysis, config) {
 		(g) => g.expectedPath,
 	);
 	return inputs;
+}
+
+/**
+ * The `odin build`/`odin test` flags for the shared `opt` mode axis (see
+ * //rules/imp/mode): `-debug` for debug info + runtime bounds/type checks,
+ * `-o:speed` to optimize for speed instead. Any value other than "release"
+ * is treated as "debug", matching the axis's own declared default.
+ *
+ * @param {string} opt Resolved "opt" mode axis value.
+ * @returns {string[]}
+ */
+export function odinModeFlags(opt) {
+	return opt === "release" ? ["-o:speed"] : ["-debug"];
 }
 
 /**
@@ -1034,6 +1063,10 @@ function graphOdinBuild(
 			const flags = resolved.analysis.collections.map(
 				([name, path]) => `-collection:${name}=${path}`,
 			);
+			// `odin check` is a pure type-check with no codegen, so
+			// optimization/debug-info flags don't apply to it — only
+			// build/test actually compile.
+			const modeFlags = lint ? [] : odinModeFlags(resolved.analysis.opt);
 			const allInputs = Object.entries(resolved)
 				.filter(
 					([name]) =>
@@ -1106,6 +1139,7 @@ function graphOdinBuild(
 				command,
 				resolved.analysis.packagePath,
 				...flags,
+				...modeFlags,
 				...(lint ? ["-vet"] : []),
 				...(!resolved.analysis.hasMainEntrypoint
 					? lint
