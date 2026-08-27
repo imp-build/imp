@@ -33,11 +33,11 @@
 import { BUILD } from "//rules/workflows/build";
 import { PACKAGE } from "//rules/workflows/package";
 import {
-	configuration,
 	files,
 	output,
 	packagePath,
 	platformInfo,
+	semantic,
 	task,
 } from "imp:core";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
@@ -132,9 +132,15 @@ function resolveToolchain(toolchain) {
 // "release"/"debug" only — each toolchain provider (see gcc's/zig's/msvc's
 // own commands()) translates this into its own optimization/debug-flag
 // vocabulary rather than ccTask() handing down literal flags.
-function optMode() {
-	const mode = configuration("imp.mode", {}) || {};
-	return mode.opt === "release" ? "release" : "debug";
+//
+// The value arrives as a declared `semantic.mode("opt")` task input, not
+// from an ambient configuration() read. Only a declared input tells the
+// graph that this task reads the `opt` axis, which is what lets one edge
+// build the task under a different configuration while the tasks that read
+// no axis stay shared. `null` (no axis resolved, e.g. this rule's own JS
+// unit tests) reads as "debug", the declared default of the axis.
+function optModeOf(value) {
+	return value === "release" ? "release" : "debug";
 }
 
 function objectPathFor(outputSlug, source) {
@@ -238,6 +244,7 @@ function ccTask(spec, isLibrary) {
 			hdrs,
 			mkdir: nativeTool("mkdir"),
 			dirname: nativeTool("dirname"),
+			optMode: semantic.mode("opt"),
 			...spec.toolchain.taskInputs(),
 			...Object.fromEntries(
 				transitiveArchives.map((archive, i) => [`archive${i}`, archive]),
@@ -251,7 +258,7 @@ function ccTask(spec, isLibrary) {
 			const sourcePaths = exec.paths(input.srcs);
 			exec.paths(input.hdrs);
 			const needsCxx = sourcePaths.some(isCxxSource);
-			const opt = optMode();
+			const opt = optModeOf(input.optMode);
 			const objectPaths = sourcePaths.map((source) =>
 				objectPathFor(spec.outputSlug, source),
 			);

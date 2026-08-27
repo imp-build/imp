@@ -3,10 +3,9 @@
 # `xN` is the number of separate nodes that have that fingerprint.
 # Write this file again with: ci/graph_golden.py --update
 
-nodes 34  unique 32  edges 55
+nodes 35  unique 33  edges 56
 
 [nodes]
-02b5c63f310e  x1  node  cc link rules/c/cmake/example
 066a0c60911b  x1  node  tool: tar
 0d4dfe53cd06  x1  node  tool: sha256sum
 10319b4025dd  x1  node  install gcc 2025.08-1 (linux/x86_64)
@@ -14,6 +13,8 @@ nodes 34  unique 32  edges 55
 194a9f765fc7  x1  node  cmake scan rules/c/cmake/example · manifest
 24631880e3cd  x1  node  tool: gzip
 2bfe12b52796  x1  node  tool: curl
+2c54f8acd39b  x1  node  cc link rules/c/cmake/example
+2f59c16bc344  x1  root  //rules/c/cmake/example:uses_cmake_lib (build, package)
 2f878c6fcc67  x1  node  tool: sed
 31dfe434f00b  x1  node  tool: mkdir
 3e641d34d089  x1  node  download gcc 2025.08-1 (linux/x86_64)
@@ -26,13 +27,13 @@ nodes 34  unique 32  edges 55
 86018cb4fe8d  x1  node  tool: xz
 8784ed7bf842  x1  node  cmake scan rules/c/cmake/example
 8e076df323c5  x1  node  install cmake 3.31.0 (linux/x86_64)
-8eb3b8d161cd  x1  root  //rules/c/cmake/example:uses_cmake_lib (build, package)
 8fd9e8bc2582  x1  node  tool
 9583b773a11c  x1  node  install gcc 2025.08-1 (linux/x86_64) · directory
 96c553005ad7  x1  node  download gcc 2025.08-1 (linux/x86_64) · artifact
 a70749432774  x1  node  cmake configure rules/c/cmake/example · ninjaGraph
 a93bb6b958d6  x3  node  files(rules/c/cmake/example)
 a9f457ab0201  x1  node  tool: dirname
+d378819ad598  x1  node  semantic: mode(opt)
 d6dd38e14975  x1  node  install cmake 3.31.0 (linux/x86_64) · directory
 e5e1a4f99e12  x1  node  tool: ninja
 eeb577b057a1  x1  node  download cmake 3.31.0 (linux/x86_64)
@@ -40,12 +41,6 @@ f2791ebbe117  x1  node  cmake configure rules/c/cmake/example · sourcePaths
 f694867158ec  x1  node  tool: wc
 
 [edges]
-02b5c63f310e  -archive0->  1119dfa46b9e
-02b5c63f310e  -ccTool->  5af81ea1e0f2
-02b5c63f310e  -dirname->  a9f457ab0201
-02b5c63f310e  -hdrs->  a93bb6b958d6
-02b5c63f310e  -mkdir->  31dfe434f00b
-02b5c63f310e  -srcs->  a93bb6b958d6
 10319b4025dd  -archive->  96c553005ad7
 10319b4025dd  -chmod->  5f6962dee509
 10319b4025dd  -mkdir->  31dfe434f00b
@@ -56,6 +51,14 @@ f694867158ec  x1  node  tool: wc
 1119dfa46b9e  -ninjaGraph->  a70749432774
 1119dfa46b9e  -sourcePaths->  f2791ebbe117
 194a9f765fc7  -task->  8784ed7bf842
+2c54f8acd39b  -archive0->  1119dfa46b9e
+2c54f8acd39b  -ccTool->  5af81ea1e0f2
+2c54f8acd39b  -dirname->  a9f457ab0201
+2c54f8acd39b  -hdrs->  a93bb6b958d6
+2c54f8acd39b  -mkdir->  31dfe434f00b
+2c54f8acd39b  -optMode->  d378819ad598
+2c54f8acd39b  -srcs->  a93bb6b958d6
+2f59c16bc344  -task->  2c54f8acd39b
 3e641d34d089  -tool0->  40b99ab4055b
 3e641d34d089  -tool1->  2bfe12b52796
 3e641d34d089  -tool2->  31dfe434f00b
@@ -82,7 +85,6 @@ f694867158ec  x1  node  tool: wc
 8e076df323c5  -tool1->  31dfe434f00b
 8e076df323c5  -tool2->  066a0c60911b
 8e076df323c5  -tool3->  24631880e3cd
-8eb3b8d161cd  -task->  02b5c63f310e
 8fd9e8bc2582  -artifact->  d6dd38e14975
 9583b773a11c  -task->  10319b4025dd
 96c553005ad7  -task->  3e641d34d089

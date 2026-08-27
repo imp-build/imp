@@ -926,7 +926,7 @@ function odinUsesLldOnWindowsFor(spec) {
 	return odinUsesLldOnWindows(spec.version || defaultOdinToolchainVersion());
 }
 
-function graphActionInputs(spec, analysis, config) {
+function graphActionInputs(spec, analysis, config, { lint = false } = {}) {
 	const closure = graphSourceClosure(spec, analysis, config);
 	const { resources, linkopts } = graphResourceInputs(spec);
 	const linker = odinLinkerHandleFor(spec);
@@ -942,19 +942,22 @@ function graphActionInputs(spec, analysis, config) {
 			hasMainEntrypoint: analysis.hasMainEntrypoint,
 			collections: closure.collections,
 			linkopts,
-			// Read here (construction time, not inside run()) so the
-			// resolved "debug"/"release" string is baked into this literal
-			// `analysis` task input, same as packagePath/collections/
-			// linkopts above — that's what makes the task's cache key
-			// change when --axis opt=... (or a profile()-wrapped
-			// dependency edge) flips it, instead of reusing a stale build.
-			// configuration() (not modeAxis()) so this defaults cleanly to
-			// "debug" — matching rules/imp/mode's declared default —
-			// instead of throwing when the axis hasn't been resolved yet
-			// (e.g. this rule's own JS unit tests, which don't go through
-			// CLI --axis/--profile resolution).
-			opt: configuration("imp.mode", {}).opt || "debug",
 		},
+		// A declared handle, not a construction-time configuration() read.
+		// The value still reaches the action through odinModeFlags() in
+		// argv, which is what makes the cache key change with the axis. What
+		// the declared input adds is visibility: the graph can now see that
+		// this task reads the `opt` axis, thus an edge is able to build it
+		// under a different configuration while every task that reads no
+		// axis stays shared. `null` (no axis resolved, e.g. this rule's own
+		// JS unit tests) reads as "debug", the declared default of the axis
+		// in //rules/imp/mode.
+		//
+		// `odin check -vet` is a type check with no codegen, thus it reads
+		// no mode flags (see run() below). It must not declare the axis
+		// either: a declared input that the action does not use would make
+		// lint build one time for each configuration for the same result.
+		...(lint ? {} : { opt: semantic.mode("opt") }),
 	};
 	for (const [index, source] of closure.handles.entries()) {
 		inputs[`source${index}`] = source;
@@ -1041,7 +1044,7 @@ function graphOdinBuild(
 	config,
 	{ test = false, lint = false } = {},
 ) {
-	const inputs = graphActionInputs(spec, analysis, config);
+	const inputs = graphActionInputs(spec, analysis, config, { lint });
 	// `odin test` compiles and runs in one step and names its binary after the
 	// package, so there is no artifact to declare and no -out: to pass (below):
 	// its exit code is the whole result, the same shape python's testRoot() and
@@ -1073,7 +1076,7 @@ function graphOdinBuild(
 			// `odin check` is a pure type-check with no codegen, so
 			// optimization/debug-info flags don't apply to it — only
 			// build/test actually compile.
-			const modeFlags = lint ? [] : odinModeFlags(resolved.analysis.opt);
+			const modeFlags = lint ? [] : odinModeFlags(resolved.opt || "debug");
 			const allInputs = Object.entries(resolved)
 				.filter(
 					([name]) =>
