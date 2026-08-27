@@ -1848,6 +1848,7 @@ pub async fn walk_graph_for_introspection(
     roots: &[&GraphRoot],
     discover_expansion_get: bool,
     discover_expansion_all: bool,
+    invocation_override: Option<&str>,
 ) -> Result<GraphWalk> {
     if roots.is_empty() {
         return Ok(GraphWalk::default());
@@ -1868,22 +1869,30 @@ pub async fn walk_graph_for_introspection(
             .collect::<Vec<_>>(),
     )
     .context("encode graph introspection roots")?;
-    // Best-effort invocation context for `semantic.*` inputs an expansion's
-    // discovery step might read: the currently resolved mode axes/config, no
-    // CLI args or flags (introspection has none to offer — a goal-specific
-    // invocation only exists inside actual execution).
-    let resolved_config = live.host_state.lock().unwrap().workspace_config.clone();
-    let resolved_mode = resolved_config
-        .get(MODE_AXIS_NAMESPACE)
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
-    let invocation_json = serde_json::to_string(&serde_json::json!({
-        "args": Vec::<String>::new(),
-        "flags": serde_json::Map::<String, serde_json::Value>::new(),
-        "mode": resolved_mode,
-        "config": resolved_config,
-    }))
-    .context("encode graph introspection invocation")?;
+    // Invocation context for `semantic.*` inputs an expansion's discovery
+    // step might read. Goal execution supplies its own real invocation
+    // through `invocation_override`, so that discovery reads the same args
+    // and flags dispatch will, and a value resolved during discovery stays
+    // correct for dispatch. Introspection has no goal-specific invocation
+    // to offer, thus it falls back to the resolved mode axes and config
+    // with no args or flags.
+    let invocation_json = match invocation_override {
+        Some(invocation) => invocation.to_owned(),
+        None => {
+            let resolved_config = live.host_state.lock().unwrap().workspace_config.clone();
+            let resolved_mode = resolved_config
+                .get(MODE_AXIS_NAMESPACE)
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            serde_json::to_string(&serde_json::json!({
+                "args": Vec::<String>::new(),
+                "flags": serde_json::Map::<String, serde_json::Value>::new(),
+                "mode": resolved_mode,
+                "config": resolved_config,
+            }))
+            .context("encode graph introspection invocation")?
+        }
+    };
     let opts_json = serde_json::to_string(&serde_json::json!({
         "discoverExpansionGet": discover_expansion_get,
         "discoverExpansionAll": discover_expansion_all,
@@ -1994,7 +2003,7 @@ async fn expansion_children_for_file(
         if candidates.is_empty() {
             continue;
         }
-        let walk = walk_graph_for_introspection(live, &candidates, false, true).await?;
+        let walk = walk_graph_for_introspection(live, &candidates, false, true, None).await?;
         let matched: Vec<GraphRoot> = walk
             .synthetic_children(&candidates)
             .into_iter()
@@ -2084,6 +2093,7 @@ pub async fn resolve_graph_with_expansion(
     selectors: &[String],
     context: &SelectorContext,
     discover_expansion_get: bool,
+    invocation_override: Option<&str>,
 ) -> Result<GraphResolution> {
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
     let catalog = &live.workspace.graph;
@@ -2119,8 +2129,14 @@ pub async fn resolve_graph_with_expansion(
             }
         }
     }
-    let walk =
-        walk_graph_for_introspection(live, &static_roots, discover_expansion_get, true).await?;
+    let walk = walk_graph_for_introspection(
+        live,
+        &static_roots,
+        discover_expansion_get,
+        true,
+        invocation_override,
+    )
+    .await?;
 
     let mut roots: BTreeMap<(String, String, Option<String>), GraphRoot> = BTreeMap::new();
     let mut nodes: BTreeMap<u32, GraphWalkNode> = BTreeMap::new();
@@ -2169,8 +2185,14 @@ pub async fn resolve_graph_with_expansion(
         if parent_roots.is_empty() {
             continue;
         }
-        let parent_walk =
-            walk_graph_for_introspection(live, &parent_roots, discover_expansion_get, true).await?;
+        let parent_walk = walk_graph_for_introspection(
+            live,
+            &parent_roots,
+            discover_expansion_get,
+            true,
+            invocation_override,
+        )
+        .await?;
         for node in &parent_walk.nodes {
             nodes.entry(node.id).or_insert_with(|| node.clone());
         }
@@ -2280,7 +2302,7 @@ pub async fn resolve_graph_catalog_view(
     static_roots.sort_by(|a, b| {
         (&a.address, &a.workflow, &a.facet).cmp(&(&b.address, &b.workflow, &b.facet))
     });
-    let walk = walk_graph_for_introspection(live, &static_roots, false, false).await?;
+    let walk = walk_graph_for_introspection(live, &static_roots, false, false, None).await?;
     Ok(GraphResolution {
         roots: static_roots.into_iter().cloned().collect(),
         walk,
@@ -2311,7 +2333,7 @@ pub async fn stale_graph_addresses(
     if all_roots.is_empty() || changed_paths.is_empty() {
         return Ok(GraphChangedResult::default());
     }
-    let walk = walk_graph_for_introspection(live, &all_roots, true, true).await?;
+    let walk = walk_graph_for_introspection(live, &all_roots, true, true, None).await?;
     let synthetic = walk.synthetic_children(&all_roots);
     let (stale_ids, covered_paths) = walk.stale_node_ids(changed_paths);
     let addresses = all_roots
@@ -6799,6 +6821,26 @@ pub async fn execute_goal_live_selection(
     live.exec_no_cache.store(no_cache, Ordering::SeqCst);
     live.trace_inputs.store(trace_inputs, Ordering::SeqCst);
     resolve_mode_axes(live, profile, axis_overrides)?;
+    // Build the invocation this goal runs under before the graph is walked,
+    // not only before dispatch. Discovery resolves `semantic.*` inputs too,
+    // so it must read the same args, flags, mode, and config that dispatch
+    // will. If discovery ran under a different invocation, a value it
+    // resolved could not be reused for dispatch. Mode axes are resolved
+    // just above, thus every part is known at this point.
+    let goal_invocation_json = {
+        let resolved_config = live.host_state.lock().unwrap().workspace_config.clone();
+        let resolved_mode = resolved_config
+            .get(MODE_AXIS_NAMESPACE)
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        serde_json::to_string(&serde_json::json!({
+            "args": run_args,
+            "flags": flags,
+            "mode": resolved_mode,
+            "config": resolved_config,
+        }))
+        .context("serialize goal invocation")?
+    };
     // Computed here (rather than alongside `seed_addresses` below, where it
     // used to live) so the graph-native branch of `graph_roots` can reuse
     // it: changed addresses are already statically known, so they don't
@@ -6832,6 +6874,7 @@ pub async fn execute_goal_live_selection(
                 selectors,
                 selector_context,
                 eager_expansion_get(),
+                Some(goal_invocation_json.as_str()),
             )
             .await?;
             graph_unmatched.extend(resolution.unmatched);
@@ -6856,6 +6899,7 @@ pub async fn execute_goal_live_selection(
                 &changed,
                 selector_context,
                 eager_expansion_get(),
+                Some(goal_invocation_json.as_str()),
             )
             .await?
             .roots
@@ -7186,18 +7230,7 @@ pub async fn execute_goal_live_selection(
         .collect();
     let graph_handles_json =
         serde_json::to_string(&graph_handle_ids).context("serialize graph root handles")?;
-    let resolved_config = live.host_state.lock().unwrap().workspace_config.clone();
-    let resolved_mode = resolved_config
-        .get(MODE_AXIS_NAMESPACE)
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
-    let graph_invocation_json = serde_json::to_string(&serde_json::json!({
-        "args": run_args,
-        "flags": flags,
-        "mode": resolved_mode,
-        "config": resolved_config,
-    }))
-    .context("serialize graph invocation")?;
+    let graph_invocation_json = goal_invocation_json;
 
     *live.selected_roots.lock().unwrap() = Some(selection);
     *live.goal_flags.lock().unwrap() = Some(flags.clone());
@@ -8365,11 +8398,18 @@ export const all = { [BUILD]: workspace.all(BUILD) };
 
         // (1) Listing: the aggregate's children are individually addressable
         // even though the BUILD.js never named them.
-        let roots =
-            resolve_graph_with_expansion(&live, p, None, &["//:all".to_owned()], &context, false)
-                .await
-                .unwrap()
-                .roots;
+        let roots = resolve_graph_with_expansion(
+            &live,
+            p,
+            None,
+            &["//:all".to_owned()],
+            &context,
+            false,
+            None,
+        )
+        .await
+        .unwrap()
+        .roots;
         let mut addresses: Vec<_> = roots.iter().map(|r| r.address.clone()).collect();
         addresses.sort();
         assert_eq!(addresses, vec!["//:all", "//:all#a", "//:all#b"]);
@@ -8380,9 +8420,17 @@ export const all = { [BUILD]: workspace.all(BUILD) };
             roots: dep_roots,
             walk,
             ..
-        } = resolve_graph_with_expansion(&live, p, None, &["//:all".to_owned()], &context, false)
-            .await
-            .unwrap();
+        } = resolve_graph_with_expansion(
+            &live,
+            p,
+            None,
+            &["//:all".to_owned()],
+            &context,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
         let dep_roots_ref: Vec<&GraphRoot> = dep_roots.iter().collect();
         let mut out = String::new();
         format_graph_dependencies(&dep_roots_ref, &walk, &mut out).unwrap();
@@ -8455,14 +8503,14 @@ export const all = { [BUILD]: workspace.all(BUILD) };
             .select_catalog(&["//:all".to_owned()], &context)
             .unwrap();
 
-        let undiscovered = walk_graph_for_introspection(&live, &roots, false, false)
+        let undiscovered = walk_graph_for_introspection(&live, &roots, false, false, None)
             .await
             .unwrap();
         let node = undiscovered.node(roots[0].handle_id).unwrap();
         assert_eq!(node.kind, "expansion-all");
         assert!(node.children.is_empty(), "{undiscovered:?}");
 
-        let discovered = walk_graph_for_introspection(&live, &roots, false, true)
+        let discovered = walk_graph_for_introspection(&live, &roots, false, true, None)
             .await
             .unwrap();
         let node = discovered.node(roots[0].handle_id).unwrap();
@@ -8517,6 +8565,7 @@ export const b = { [BUILD]: consumer("b").outputs.value };
             &["//:a".to_owned(), "//:b".to_owned()],
             &context,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -8612,7 +8661,7 @@ export const all = { [BUILD]: workspace.all(BUILD) };
         let context = SelectorContext::root();
         let selectors = ["//:all".to_owned()];
         let GraphResolution { roots, walk, .. } =
-            resolve_graph_with_expansion(&live, p, None, &selectors, &context, false)
+            resolve_graph_with_expansion(&live, p, None, &selectors, &context, false, None)
                 .await
                 .unwrap();
         // Mirrors `cmd_graph`'s own filtering: `resolve_graph_with_expansion`
@@ -8767,6 +8816,7 @@ export const b = { [BUILD]: shellTask("b").outputs.value };
             &["//:a".to_owned(), "//:b".to_owned()],
             &context,
             false,
+            None,
         )
         .await
         .unwrap();

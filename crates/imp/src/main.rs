@@ -1897,6 +1897,7 @@ async fn cmd_targets(selectors: &[String], changed_since: Option<&str>, tree: &T
             selectors,
             &selector_context,
             false,
+            None,
         )
         .await?;
         let graph_roots: Vec<&GraphRoot> = graph.roots.iter().collect();
@@ -2001,6 +2002,7 @@ async fn cmd_dependencies(selectors: &[String], goal: Option<&str>, tree: &Tree)
         selectors,
         &selector_context,
         false,
+        None,
     )
     .await?;
     let graph_walk = graph.walk;
@@ -2108,6 +2110,7 @@ async fn cmd_graph(
                 selectors,
                 &selector_context,
                 false,
+                None,
             )
             .await?
         }
