@@ -1,0 +1,97 @@
+# Structure of the imp build graph. Node numbers are removed.
+# Each line starts with a fingerprint of the content of the node.
+# `xN` is the number of separate nodes that have that fingerprint.
+# Write this file again with: ci/graph_golden.py --update
+
+nodes 34  unique 32  edges 55
+
+[nodes]
+02b5c63f310e  x1  node  cc link rules/c/cmake/example
+066a0c60911b  x1  node  tool: tar
+0d4dfe53cd06  x1  node  tool: sha256sum
+10319b4025dd  x1  node  install gcc 2025.08-1 (linux/x86_64)
+1119dfa46b9e  x1  node  expand cmake project rules/c/cmake/example
+194a9f765fc7  x1  node  cmake scan rules/c/cmake/example · manifest
+24631880e3cd  x1  node  tool: gzip
+2bfe12b52796  x1  node  tool: curl
+2f878c6fcc67  x1  node  tool: sed
+31dfe434f00b  x1  node  tool: mkdir
+3e641d34d089  x1  node  download gcc 2025.08-1 (linux/x86_64)
+3e9b8ff1844a  x1  node  cmake configure rules/c/cmake/example
+40b99ab4055b  x1  node  tool: sh
+5af81ea1e0f2  x1  node  tool
+5f6962dee509  x1  node  tool: chmod
+66cb1faa9496  x1  node  download cmake 3.31.0 (linux/x86_64) · artifact
+68adc9bfc06e  x1  node  cmake configure rules/c/cmake/example · directory
+86018cb4fe8d  x1  node  tool: xz
+8784ed7bf842  x1  node  cmake scan rules/c/cmake/example
+8e076df323c5  x1  node  install cmake 3.31.0 (linux/x86_64)
+8eb3b8d161cd  x1  root  //rules/c/cmake/example:uses_cmake_lib (build, package)
+8fd9e8bc2582  x1  node  tool
+9583b773a11c  x1  node  install gcc 2025.08-1 (linux/x86_64) · directory
+96c553005ad7  x1  node  download gcc 2025.08-1 (linux/x86_64) · artifact
+a70749432774  x1  node  cmake configure rules/c/cmake/example · ninjaGraph
+a93bb6b958d6  x3  node  files(rules/c/cmake/example)
+a9f457ab0201  x1  node  tool: dirname
+d6dd38e14975  x1  node  install cmake 3.31.0 (linux/x86_64) · directory
+e5e1a4f99e12  x1  node  tool: ninja
+eeb577b057a1  x1  node  download cmake 3.31.0 (linux/x86_64)
+f2791ebbe117  x1  node  cmake configure rules/c/cmake/example · sourcePaths
+f694867158ec  x1  node  tool: wc
+
+[edges]
+02b5c63f310e  -archive0->  1119dfa46b9e
+02b5c63f310e  -ccTool->  5af81ea1e0f2
+02b5c63f310e  -dirname->  a9f457ab0201
+02b5c63f310e  -hdrs->  a93bb6b958d6
+02b5c63f310e  -mkdir->  31dfe434f00b
+02b5c63f310e  -srcs->  a93bb6b958d6
+10319b4025dd  -archive->  96c553005ad7
+10319b4025dd  -chmod->  5f6962dee509
+10319b4025dd  -mkdir->  31dfe434f00b
+10319b4025dd  -shell->  40b99ab4055b
+10319b4025dd  -tar->  066a0c60911b
+10319b4025dd  -xz->  86018cb4fe8d
+1119dfa46b9e  -compilerManifest->  194a9f765fc7
+1119dfa46b9e  -ninjaGraph->  a70749432774
+1119dfa46b9e  -sourcePaths->  f2791ebbe117
+194a9f765fc7  -task->  8784ed7bf842
+3e641d34d089  -tool0->  40b99ab4055b
+3e641d34d089  -tool1->  2bfe12b52796
+3e641d34d089  -tool2->  31dfe434f00b
+3e641d34d089  -tool3->  a9f457ab0201
+3e641d34d089  -tool4->  f694867158ec
+3e641d34d089  -tool5->  0d4dfe53cd06
+3e9b8ff1844a  -ccTool->  5af81ea1e0f2
+3e9b8ff1844a  -cmakeTool->  8fd9e8bc2582
+3e9b8ff1844a  -ninja->  e5e1a4f99e12
+3e9b8ff1844a  -sed->  2f878c6fcc67
+3e9b8ff1844a  -srcs->  a93bb6b958d6
+5af81ea1e0f2  -artifact->  9583b773a11c
+66cb1faa9496  -task->  eeb577b057a1
+68adc9bfc06e  -task->  3e9b8ff1844a
+8784ed7bf842  -ccTool->  5af81ea1e0f2
+8784ed7bf842  -configureDirectory->  68adc9bfc06e
+8784ed7bf842  -ninja->  e5e1a4f99e12
+8784ed7bf842  -ninjaGraph->  a70749432774
+8784ed7bf842  -sed->  2f878c6fcc67
+8784ed7bf842  -sourcePaths->  f2791ebbe117
+8784ed7bf842  -srcs->  a93bb6b958d6
+8e076df323c5  -archive->  66cb1faa9496
+8e076df323c5  -tool0->  40b99ab4055b
+8e076df323c5  -tool1->  31dfe434f00b
+8e076df323c5  -tool2->  066a0c60911b
+8e076df323c5  -tool3->  24631880e3cd
+8eb3b8d161cd  -task->  02b5c63f310e
+8fd9e8bc2582  -artifact->  d6dd38e14975
+9583b773a11c  -task->  10319b4025dd
+96c553005ad7  -task->  3e641d34d089
+a70749432774  -task->  3e9b8ff1844a
+d6dd38e14975  -task->  8e076df323c5
+eeb577b057a1  -tool0->  40b99ab4055b
+eeb577b057a1  -tool1->  2bfe12b52796
+eeb577b057a1  -tool2->  31dfe434f00b
+eeb577b057a1  -tool3->  a9f457ab0201
+eeb577b057a1  -tool4->  f694867158ec
+eeb577b057a1  -tool5->  0d4dfe53cd06
+f2791ebbe117  -task->  3e9b8ff1844a

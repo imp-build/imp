@@ -1,0 +1,20 @@
+# Structure of the imp build graph. Node numbers are removed.
+# Each line starts with a fingerprint of the content of the node.
+# `xN` is the number of separate nodes that have that fingerprint.
+# Write this file again with: ci/graph_golden.py --update
+
+nodes 5  unique 5  edges 5
+
+[nodes]
+0e42c31242ae  x1  node  files(rules/python/example/scripts)
+111b75b3bdab  x1  node  python run rules/python/example/scripts/demo.py
+650f2f74d464  x1  node  semantic: mode(python)
+7e543bce6a5e  x1  node  python run rules/python/example/scripts/demo.py · spec
+c0531cc654a0  x1  root  //rules/python/example:scripts#run
+
+[edges]
+111b75b3bdab  -mode->  650f2f74d464
+111b75b3bdab  -sources->  0e42c31242ae
+7e543bce6a5e  -task->  111b75b3bdab
+c0531cc654a0  -#rules/python/example/scripts/demo.py->  7e543bce6a5e
+c0531cc654a0  -sources->  0e42c31242ae

@@ -1,0 +1,54 @@
+# Structure of the imp build graph. Node numbers are removed.
+# Each line starts with a fingerprint of the content of the node.
+# `xN` is the number of separate nodes that have that fingerprint.
+# Write this file again with: ci/graph_golden.py --update
+
+nodes 20  unique 20  edges 24
+
+[nodes]
+0d4dfe53cd06  x1  node  tool: sha256sum
+108e3eea80bc  x1  node  tool: unzip
+25aa7494515e  x1  node  install odinfmt dev-2026-03 (linux/x86_64)
+2bfe12b52796  x1  node  tool: curl
+2fb4552c69c4  x1  node  semantic: config(odin)
+31dfe434f00b  x1  node  tool: mkdir
+3511543c6b08  x1  node  semantic: flag(check)
+36c56ab56640  x1  node  install odinfmt dev-2026-03 (linux/x86_64) · directory
+40b99ab4055b  x1  node  tool: sh
+5d9914dd5a53  x1  node  tool
+74e535d41119  x1  node  odinfmt.json
+78478503f167  x1  node  files(rules/odin/example)
+86315e37fce0  x1  node  odinfmt rules/odin/example
+a77e697d1e89  x1  node  vscode metadata rules/odin/example
+a9f457ab0201  x1  node  tool: dirname
+d23b0747e6d2  x1  root  //rules/odin/example:hello (build, fmt, lint, package, run, vs)
+e826c9f31e56  x1  node  download odinfmt dev-2026-03 (linux/x86_64) · artifact
+f694867158ec  x1  node  tool: wc
+fc01ce87f908  x1  node  download odinfmt dev-2026-03 (linux/x86_64)
+feceb6f76684  x1  node  tool: mv
+
+[edges]
+25aa7494515e  -archive->  e826c9f31e56
+25aa7494515e  -tool0->  40b99ab4055b
+25aa7494515e  -tool1->  31dfe434f00b
+25aa7494515e  -tool2->  108e3eea80bc
+25aa7494515e  -tool3->  feceb6f76684
+36c56ab56640  -task->  25aa7494515e
+5d9914dd5a53  -artifact->  36c56ab56640
+86315e37fce0  -check->  3511543c6b08
+86315e37fce0  -config->  74e535d41119
+86315e37fce0  -formatter->  5d9914dd5a53
+86315e37fce0  -shell->  40b99ab4055b
+86315e37fce0  -sources->  78478503f167
+a77e697d1e89  -sources->  78478503f167
+d23b0747e6d2  -config->  2fb4552c69c4
+d23b0747e6d2  -sources->  78478503f167
+d23b0747e6d2  -task->  86315e37fce0
+d23b0747e6d2  -task->  a77e697d1e89
+e826c9f31e56  -task->  fc01ce87f908
+fc01ce87f908  -tool0->  40b99ab4055b
+fc01ce87f908  -tool1->  2bfe12b52796
+fc01ce87f908  -tool2->  31dfe434f00b
+fc01ce87f908  -tool3->  a9f457ab0201
+fc01ce87f908  -tool4->  f694867158ec
+fc01ce87f908  -tool5->  0d4dfe53cd06

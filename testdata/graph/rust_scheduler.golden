@@ -1,0 +1,103 @@
+# Structure of the imp build graph. Node numbers are removed.
+# Each line starts with a fingerprint of the content of the node.
+# `xN` is the number of separate nodes that have that fingerprint.
+# Write this file again with: ci/graph_golden.py --update
+
+nodes 32  unique 32  edges 61
+
+[nodes]
+066a0c60911b  x1  node  tool: tar
+067b0b917ed2  x1  node  cargo metadata (workspace) .
+0d4dfe53cd06  x1  node  tool: sha256sum
+0e72dce48207  x1  node  install mold 2.41.0 (linux/x86_64) · directory
+10319b4025dd  x1  node  install gcc 2025.08-1 (linux/x86_64)
+24631880e3cd  x1  node  tool: gzip
+2af5c2e6969c  x1  node  download mold 2.41.0 (linux/x86_64)
+2bfe12b52796  x1  node  tool: curl
+31dfe434f00b  x1  node  tool: mkdir
+3e641d34d089  x1  node  download gcc 2025.08-1 (linux/x86_64)
+40b99ab4055b  x1  node  tool: sh
+411bec82a39f  x1  node  tool
+499a16ca18ea  x1  node  download rustup-init for rust 1.93.0 (linux/x86_64)
+530806b9911c  x1  node  cargo metadata (workspace) . · metadata
+5af81ea1e0f2  x1  node  tool
+5f6962dee509  x1  node  tool: chmod
+68d94cba7eba  x1  node  download mold 2.41.0 (linux/x86_64) · artifact
+6b596ff5865b  x1  node  install mold 2.41.0 (linux/x86_64)
+712467e91987  x1  node  install rust 1.93.0 (linux/x86_64) · rustupHome
+86018cb4fe8d  x1  node  tool: xz
+94181ca79529  x1  node  install rust 1.93.0 (linux/x86_64)
+9583b773a11c  x1  node  install gcc 2025.08-1 (linux/x86_64) · directory
+96c553005ad7  x1  node  download gcc 2025.08-1 (linux/x86_64) · artifact
+a42e1d6e0817  x1  root  //crates/imp-scheduler:imp_scheduler (fmt, lint, test)
+a9f457ab0201  x1  node  tool: dirname
+b2a4d03d8c86  x1  node  tool
+b3f128442e90  x1  node  install rust 1.93.0 (linux/x86_64) · cargoHome
+e00f5f841e16  x1  node  tool
+e0ba86302acd  x1  node  download rustup-init for rust 1.93.0 (linux/x86_64) · artifact
+e22d47e45e24  x1  node  files(.)
+ee090c073586  x1  node  tool: cp
+f694867158ec  x1  node  tool: wc
+
+[edges]
+067b0b917ed2  -cargoHomeTool->  b2a4d03d8c86
+067b0b917ed2  -dirnameTool->  a9f457ab0201
+067b0b917ed2  -gccTool->  5af81ea1e0f2
+067b0b917ed2  -manifests->  e22d47e45e24
+067b0b917ed2  -moldTool->  411bec82a39f
+067b0b917ed2  -toolchain->  e00f5f841e16
+0e72dce48207  -task->  6b596ff5865b
+10319b4025dd  -archive->  96c553005ad7
+10319b4025dd  -chmod->  5f6962dee509
+10319b4025dd  -mkdir->  31dfe434f00b
+10319b4025dd  -shell->  40b99ab4055b
+10319b4025dd  -tar->  066a0c60911b
+10319b4025dd  -xz->  86018cb4fe8d
+2af5c2e6969c  -tool0->  40b99ab4055b
+2af5c2e6969c  -tool1->  2bfe12b52796
+2af5c2e6969c  -tool2->  31dfe434f00b
+2af5c2e6969c  -tool3->  a9f457ab0201
+2af5c2e6969c  -tool4->  f694867158ec
+2af5c2e6969c  -tool5->  0d4dfe53cd06
+3e641d34d089  -tool0->  40b99ab4055b
+3e641d34d089  -tool1->  2bfe12b52796
+3e641d34d089  -tool2->  31dfe434f00b
+3e641d34d089  -tool3->  a9f457ab0201
+3e641d34d089  -tool4->  f694867158ec
+3e641d34d089  -tool5->  0d4dfe53cd06
+411bec82a39f  -artifact->  0e72dce48207
+499a16ca18ea  -tool0->  40b99ab4055b
+499a16ca18ea  -tool1->  2bfe12b52796
+499a16ca18ea  -tool2->  31dfe434f00b
+499a16ca18ea  -tool3->  a9f457ab0201
+499a16ca18ea  -tool4->  f694867158ec
+499a16ca18ea  -tool5->  0d4dfe53cd06
+530806b9911c  -task->  067b0b917ed2
+5af81ea1e0f2  -artifact->  9583b773a11c
+68d94cba7eba  -task->  2af5c2e6969c
+6b596ff5865b  -archive->  68d94cba7eba
+6b596ff5865b  -gzip->  24631880e3cd
+6b596ff5865b  -mkdir->  31dfe434f00b
+6b596ff5865b  -tar->  066a0c60911b
+712467e91987  -task->  94181ca79529
+94181ca79529  -installer->  e0ba86302acd
+94181ca79529  -tool0->  2bfe12b52796
+94181ca79529  -tool1->  31dfe434f00b
+94181ca79529  -tool2->  a9f457ab0201
+94181ca79529  -tool3->  f694867158ec
+94181ca79529  -tool4->  0d4dfe53cd06
+94181ca79529  -tool5->  5f6962dee509
+94181ca79529  -tool6->  ee090c073586
+9583b773a11c  -task->  10319b4025dd
+96c553005ad7  -task->  3e641d34d089
+a42e1d6e0817  -cargoHomeTool->  b2a4d03d8c86
+a42e1d6e0817  -dirnameTool->  a9f457ab0201
+a42e1d6e0817  -gccTool->  5af81ea1e0f2
+a42e1d6e0817  -manifests->  e22d47e45e24
+a42e1d6e0817  -metadata->  530806b9911c
+a42e1d6e0817  -moldTool->  411bec82a39f
+a42e1d6e0817  -toolchain->  e00f5f841e16
+b2a4d03d8c86  -artifact->  b3f128442e90
+b3f128442e90  -task->  94181ca79529
+e00f5f841e16  -artifact->  712467e91987
+e0ba86302acd  -task->  499a16ca18ea
