@@ -2045,6 +2045,28 @@ pub struct GraphResolution {
     pub unmatched: Vec<String>,
 }
 
+/// Whether goal execution discovers `expansion.get()` children before it
+/// dispatches. On by default: the shape of the graph is then final before
+/// any action runs, which is what lets a scheduler plan over a fixed graph.
+///
+/// It costs no extra actions. `imp test //crates/...` runs 28 actions with
+/// it on and 28 with it off, once the task memo belongs to the whole run
+/// rather than to one phase (see `__imp_graph_begin_run` in graph_core.js).
+/// Before that change the same walk appeared to cost 10 more actions,
+/// because dispatch dropped what discovery had resolved and ran it again.
+/// What remains is the time of the walk itself, near 0.15 to 0.3s on a warm
+/// cache.
+///
+/// Set `IMP_EAGER_EXPANSION_GET=0` to go back to lazy discovery. Keep this
+/// escape until the leaf-first scheduler lands, because that scheduler
+/// cannot work without a final graph.
+fn eager_expansion_get() -> bool {
+    !matches!(
+        std::env::var("IMP_EAGER_EXPANSION_GET").as_deref(),
+        Ok("0") | Ok("false")
+    )
+}
+
 /// Resolve `selectors` against the graph catalog, then merge in synthetic
 /// `parent#childKey` roots discovered by expanding whatever the selectors
 /// reached — a package/recursive selector picks up every expansion child
@@ -2072,20 +2094,6 @@ pub struct GraphResolution {
 /// fixed graph cannot accept. Introspection (`imp targets`/`imp
 /// dependencies`/`imp graph`) passes `false` to keep its cheaper behavior,
 /// because it only shows what is already addressable.
-/// Experiment switch for the graph rework. Set
-/// `IMP_EAGER_EXPANSION_GET=1` to discover `expansion.get()` children
-/// before dispatch, which makes the shape of the graph final before any
-/// action runs. It is off by default because the walk currently discovers
-/// more children than the goal needs: `imp test //crates/...` goes from 28
-/// to 38 actions and from 2.09s to 2.64s on a warm cache. Turn it on by
-/// default when that discovery is scoped to the requested goal.
-fn eager_expansion_get() -> bool {
-    matches!(
-        std::env::var("IMP_EAGER_EXPANSION_GET").as_deref(),
-        Ok("1") | Ok("true")
-    )
-}
-
 pub async fn resolve_graph_with_expansion(
     live: &LiveWorkspace,
     workspace_root: &Path,

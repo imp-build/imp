@@ -7,6 +7,18 @@ numbers to find an unwanted change while phases 1 to 3 are in work.
 - Host: Linux x86_64 (WSL2), release build of `imp`
 - Cache: warm. Run each command two times and read the second result.
 
+## Change: discovery is now complete by default
+
+Since `graph: make complete expansion discovery the default`, goal execution
+discovers `expansion.get()` children before it dispatches. The shape of the
+graph is thus final before any action runs. Set `IMP_EAGER_EXPANSION_GET=0`
+to go back to the earlier lazy behavior, and `IMP_GRAPH_SHAPE_PROBE=1` to
+see whether the graph grew after dispatch started.
+
+The counts below did not change with that flip, because the task memo now
+belongs to a whole goal run instead of one phase. Wall time went up near
+0.15 to 0.3s for the larger goals, which is the walk itself.
+
 ## What to compare
 
 **Sandbox count is the important number.** It is the count of actions that
