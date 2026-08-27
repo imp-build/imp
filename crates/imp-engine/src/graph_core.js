@@ -17,7 +17,7 @@ let _graphExpansionInflight = new Map();
 // it, a files() node shared by N tasks globs the file system N times,
 // because resolution rebuilds the value at each use. A handle stands for
 // one value by its own definition — that is what its fingerprint means —
-// thus one resolution for each run is enough.
+// thus one resolution per run is enough.
 let _graphValueMemo = new Map();
 let _graphInvocation = null;
 let _graphPhase = "construction";
@@ -1048,7 +1048,10 @@ function _graphDeclaredEdges(record) {
 // `scheduled` below is how many nodes reached a wave. It is less than
 // `total` only if a cycle holds the rest back, which the pull-based
 // executor would instead meet as a deadlock or a stack overflow.
-function _graphPlanWaves(rootHandleIds) {
+// Collect the graph that `rootHandleIds` reach, with the dependencies of
+// each node and the nodes that wait on it. Shared by the wave planner and
+// the ready-queue driver so the two cannot disagree about the graph.
+function _graphReachable(rootHandleIds) {
 	const deps = new Map();
 	const queue = [...rootHandleIds];
 	while (queue.length > 0) {
@@ -1073,7 +1076,11 @@ function _graphPlanWaves(rootHandleIds) {
 			dependents.get(edge).push(id);
 		}
 	}
+	return { total: deps.size, waiting, dependents };
+}
 
+function _graphPlanWaves(rootHandleIds) {
+	const { total, waiting, dependents } = _graphReachable(rootHandleIds);
 	const waves = [];
 	let ready = [];
 	for (const [id, inside] of waiting) if (inside.size === 0) ready.push(id);
@@ -1091,7 +1098,67 @@ function _graphPlanWaves(rootHandleIds) {
 		}
 		ready = next;
 	}
-	return { total: deps.size, scheduled, waves };
+	return { total, scheduled, waves };
+}
+
+// Run the reachable graph from the leaves up, with no barrier between
+// levels.
+//
+// A node starts as soon as its own dependencies are done, not when a whole
+// level is done. Waves are useful to show that the graph can be ordered,
+// but running them one after another makes one slow node hold back every
+// node of the next level, including the ones that do not need it. That is
+// slower than the pull-based executor, which never waits for a node it does
+// not need.
+//
+// The queue keeps the good property of the waves: every node is started
+// here exactly one time, by the node that releases it, thus the graph
+// itself decides the order.
+async function _graphRunReadyQueue(rootHandleIds) {
+	const buildStartedAt = Date.now();
+	const { total, waiting, dependents } = _graphReachable(rootHandleIds);
+	const buildMs = Date.now() - buildStartedAt;
+	const running = [];
+	const started = new Set();
+
+	function start(id) {
+		if (started.has(id)) return;
+		started.add(id);
+		running.push(
+			(async () => {
+				await _graphResolveNode(id);
+				for (const dependent of dependents.get(id) || []) {
+					const inside = waiting.get(dependent);
+					inside.delete(id);
+					if (inside.size === 0) start(dependent);
+				}
+			})(),
+		);
+	}
+
+	for (const [id, inside] of waiting) if (inside.size === 0) start(id);
+	// `running` grows while this loop walks it, because a node that finishes
+	// starts the nodes that waited on it. Reading by index covers what is
+	// added later; the nodes themselves already run together.
+	for (let i = 0; i < running.length; i++) await running[i];
+
+	if (started.size !== total) {
+		throw _graphError(
+			`graph has a cycle: ${total - started.size} of ${total} nodes never became ready`,
+		);
+	}
+	return { total, buildMs };
+}
+
+// Resolve one node of a wave. A task node is executed; anything else is
+// resolved. This is the same pair of calls the root loop makes, named once
+// so the wave driver and the root loop cannot drift apart.
+function _graphResolveNode(handleId) {
+	const record = _graphHandles.get(handleId);
+	if (record === undefined) throw _graphError(`unknown handle id ${handleId}`);
+	return record.kind === "task"
+		? _graphExecuteTask(record.data.taskId, [])
+		: _graphResolveHandle(handleId);
 }
 
 globalThis.__imp_graph_plan = function graphPlan(rootHandleIdsJson) {
@@ -1421,15 +1488,34 @@ globalThis.__imp_execute_graph_handles = async function executeGraphHandles(hand
 				(plan.scheduled === plan.total ? "" : " — CYCLE, nodes unreachable by any wave"),
 		);
 	}
-	const result = await _graphWithInvocation(JSON.parse(invocationJson), () =>
-		Promise.all(roots.map(async ({ address, handleId }) => {
+	const result = await _graphWithInvocation(JSON.parse(invocationJson), async () => {
+		// Leaf-first: run the graph one wave at a time, from the leaves up.
+		// Every node of a wave can start together, because all of its
+		// dependencies are in waves that already finished. The roots below
+		// then only collect what is already resolved.
+		//
+		// Order is the only thing this changes. Each node still resolves
+		// through the same code as before, thus a node reached from inside
+		// another node finds a value instead of starting new work.
+		if (globalThis.__imp_graph_wave_execution) {
+			const startedAt = Date.now();
+			const built = await _graphRunReadyQueue(roots.map((root) => root.handleId));
+			if (globalThis.__imp_graph_shape_probe)
+				__host_log(
+					"warn",
+					`ready queue: ${built.total} nodes, build ${built.buildMs}ms, ` +
+						`drain ${Date.now() - startedAt - built.buildMs}ms`,
+				);
+		}
+		return Promise.all(roots.map(async ({ address, handleId }) => {
 			const record = _graphHandles.get(handleId);
 			if (record === undefined) throw _graphError(`unknown handle id ${handleId}`);
 			const result = record.kind === "task"
 				? await _graphExecuteTask(record.data.taskId, [])
 				: await _graphResolveHandle(handleId);
 			return Object.freeze({ address, result });
-		})));
+		}));
+	});
 	const after = _graphShapeCounts();
 	const grew =
 		after.handles !== before.handles ||

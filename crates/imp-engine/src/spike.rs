@@ -5016,6 +5016,16 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_log", host_log)?;
 
+    // Run the graph from the leaves up, one wave at a time, instead of
+    // pulling from the roots down. Off by default while it is proven.
+    globals.set(
+        "__imp_graph_wave_execution",
+        matches!(
+            std::env::var("IMP_GRAPH_WAVE_EXEC").as_deref(),
+            Ok("1") | Ok("true")
+        ),
+    )?;
+
     // Report whether the graph grew after dispatch started. See
     // `__imp_execute_graph_handles` in graph_core.js.
     globals.set(
