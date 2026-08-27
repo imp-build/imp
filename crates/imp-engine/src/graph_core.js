@@ -28,6 +28,73 @@ const _GRAPH_AXES_ALL = Symbol("graph-axes-all");
 // from being done two times.
 let _graphAxes = new Map();
 
+// The axes the inputs of each expansion can reach. Kept apart from
+// `_graphAxes` because the two answer different questions: the axes of an
+// `expansion.get()` node include what `create()` discovered below it, but
+// `create()` itself sees only the inputs of the expansion. A node forks per
+// configuration on the first; the expansion body forks on the second.
+let _graphExpansionAxes = new Map();
+
+// The configuration a node resolves under.
+//
+// `overlay` holds the mode axes an edge changed for its subtree; `key` is
+// the canonical form of that overlay. The scope is a parameter, not an
+// ambient global: resolution is concurrent, thus a global held across an
+// await is readable by unrelated interleaved work. For the phase marker
+// that mistake gives a wrong error message; for a configuration overlay it
+// gives a wrong build.
+const _GRAPH_ROOT_SCOPE = Object.freeze({ overlay: Object.freeze({}), key: "" });
+
+// Canonical text for an overlay. Sorted, thus two edges that set the same
+// axes in a different order give one key and share one node.
+function _graphScopeKey(overlay) {
+	const names = Object.keys(overlay).sort();
+	if (names.length === 0) return "";
+	return JSON.stringify(names.map((name) => [name, overlay[name]]));
+}
+
+// The part of a scope one node can observe.
+//
+// Keying a memo by the whole scope is correct but forks the whole graph:
+// every glob and every toolchain install would be done one time for each
+// configuration. Keying by the axes the node actually reads forks only what
+// can differ. A node that reads no axis keeps the key of the root scope and
+// stays shared.
+//
+// Must stay synchronous. The memo tables are filled before the first await
+// to make single-flight structural (see `_graphExecuteTask`); a key that
+// could await would let two scopes with one key both pass the lookup and
+// run the node two times.
+function _graphNarrowKey(axes, cfg) {
+	if (cfg.key === "") return "";
+	// No closure recorded (a node made after the planning pass) reads as
+	// "can read anything", which forks. Conservative, never wrong.
+	if (axes === undefined || axes === _GRAPH_AXES_ALL) return cfg.key;
+	const overlay = {};
+	for (const axis of axes) {
+		if (Object.hasOwn(cfg.overlay, axis)) overlay[axis] = cfg.overlay[axis];
+	}
+	return _graphScopeKey(overlay);
+}
+
+function _graphHandleMemoKey(id, cfg) {
+	return cfg.key === "" ? id : `${id}|${_graphNarrowKey(_graphAxes.get(id), cfg)}`;
+}
+
+// A task and its public handle read the same axes, thus the handle carries
+// the closure for both.
+function _graphTaskMemoKey(taskId, cfg) {
+	if (cfg.key === "") return taskId;
+	const record = _graphTasks.get(taskId);
+	const handleId = record?.publicHandle?.__graph_id;
+	return `${taskId}|${_graphNarrowKey(handleId === undefined ? undefined : _graphAxes.get(handleId), cfg)}`;
+}
+
+function _graphExpansionMemoKey(expansionId, cfg) {
+	if (cfg.key === "") return expansionId;
+	return `${expansionId}|${_graphNarrowKey(_graphExpansionAxes.get(expansionId), cfg)}`;
+}
+
 // Resolved value for each handle, for the length of one goal run. Without
 // it, a files() node shared by N tasks globs the file system N times,
 // because resolution rebuilds the value at each use. A handle stands for
@@ -483,18 +550,23 @@ function _graphLookup(value, path) {
 	return current;
 }
 
-async function _graphResolveHandle(id, stack = []) {
-	if (_graphValueMemo.has(id)) return _graphValueMemo.get(id);
-	const promise = _graphResolveHandleUncached(id, stack);
-	_graphValueMemo.set(id, promise);
+async function _graphResolveHandle(id, cfg, stack = []) {
+	const key = _graphHandleMemoKey(id, cfg);
+	if (_graphValueMemo.has(key)) return _graphValueMemo.get(key);
+	const promise = _graphResolveHandleUncached(id, cfg, stack);
+	_graphValueMemo.set(key, promise);
 	return promise;
 }
 
-async function _graphResolveHandleUncached(id, stack = []) {
+async function _graphResolveHandleUncached(id, cfg, stack = []) {
 	const record = _graphHandles.get(id);
 	if (record === undefined) throw _graphError(`unknown handle id ${id}`);
-	if (stack.includes(id)) throw _graphError(`dependency cycle through handle ${id}`);
-	const nextStack = [...stack, id];
+	// The stack holds scoped keys, not bare ids: one handle under two
+	// configurations is two nodes, and only a repeat of the same node is a
+	// cycle.
+	const stackKey = _graphHandleMemoKey(id, cfg);
+	if (stack.includes(stackKey)) throw _graphError(`dependency cycle through handle ${id}`);
+	const nextStack = [...stack, stackKey];
 	switch (record.kind) {
 		case "file":
 			return _graphBinding("source", {
@@ -517,8 +589,22 @@ async function _graphResolveHandleUncached(id, stack = []) {
 			const { kind, name, path } = record.data;
 			if (kind === "args") return Object.freeze([...(_graphInvocation.args || [])]);
 			if (kind === "flag") return _graphInvocation.flags?.[name] === true;
-			if (kind === "mode") return _graphInvocation.mode?.[name] ?? null;
-			if (kind === "config") return _graphLookup(_graphInvocation.config?.[name] ?? null, path);
+			// The scope overlay wins over the bundle of the invocation. This
+			// is the one place a configuration is read, thus the one place an
+			// edge that changed the configuration can be seen.
+			if (kind === "mode")
+				return Object.hasOwn(cfg.overlay, name)
+					? cfg.overlay[name]
+					: (_graphInvocation.mode?.[name] ?? null);
+			if (kind === "config") {
+				const value = _graphInvocation.config?.[name] ?? null;
+				return _graphLookup(
+					name === _GRAPH_MODE_NAMESPACE && cfg.key !== ""
+						? Object.freeze({ ...(value || {}), ...cfg.overlay })
+						: value,
+					path,
+				);
+			}
 			throw _graphError(`unknown semantic input kind '${kind}'`);
 		}
 		case "native-tool": {
@@ -538,7 +624,7 @@ async function _graphResolveHandleUncached(id, stack = []) {
 			});
 		}
 		case "tool": {
-			const artifact = await _graphResolveHandle(record.data.artifact.__graph_id, nextStack);
+			const artifact = await _graphResolveHandle(record.data.artifact.__graph_id, cfg, nextStack);
 			const mount = record.data.options.mount;
 			if (mount !== undefined) {
 				if (
@@ -585,15 +671,15 @@ async function _graphResolveHandleUncached(id, stack = []) {
 			});
 		}
 		case "task":
-			await _graphExecuteTask(record.data.taskId, nextStack);
+			await _graphExecuteTask(record.data.taskId, cfg, nextStack);
 			return undefined;
 		case "task-output": {
-			const result = await _graphExecuteTask(record.data.taskId, nextStack);
+			const result = await _graphExecuteTask(record.data.taskId, cfg, nextStack);
 			return result[record.data.name];
 		}
 		case "expansion-get":
 		case "expansion-all":
-			return _graphResolveExpansionProjection(record, nextStack);
+			return _graphResolveExpansionProjection(record, cfg, nextStack);
 		default:
 			throw _graphError(`unsupported handle kind '${record.kind}'`);
 	}
@@ -849,15 +935,16 @@ function _graphValidateTaskResult(record, value) {
 // The memo is filled before the first await. A second caller therefore
 // always finds the promise of the first, which makes single-flight a
 // property of the graph rather than something a key has to reconstruct.
-function _graphExecuteTask(taskId, stack) {
-	const existing = _graphTaskMemo.get(taskId);
+function _graphExecuteTask(taskId, cfg, stack) {
+	const key = _graphTaskMemoKey(taskId, cfg);
+	const existing = _graphTaskMemo.get(key);
 	if (existing !== undefined) return existing;
-	const promise = _graphExecuteTaskBody(taskId, stack);
-	_graphTaskMemo.set(taskId, promise);
+	const promise = _graphExecuteTaskBody(taskId, cfg, stack);
+	_graphTaskMemo.set(key, promise);
 	return promise;
 }
 
-async function _graphExecuteTaskBody(taskId, stack) {
+async function _graphExecuteTaskBody(taskId, cfg, stack) {
 	const record = _graphTasks.get(taskId);
 	if (record === undefined) throw _graphError(`unknown task ${taskId}`);
 	const resolved = Object.fromEntries(
@@ -867,7 +954,7 @@ async function _graphExecuteTaskBody(taskId, stack) {
 				name,
 				input.kind === "literal"
 					? input.value
-					: await _graphResolveHandle(input.handle.__graph_id, stack),
+					: await _graphResolveHandle(input.handle.__graph_id, cfg, stack),
 			],
 		),
 	);
@@ -953,20 +1040,24 @@ globalThis.__imp_graph_expand = _graphExpand;
 
 // One expansion, one create(). Keyed by identity for the same reason
 // `_graphExecuteTask` above is.
-function _graphExecuteExpansion(expansionId, stack) {
-	const existing = _graphExpansionMemo.get(expansionId);
+function _graphExecuteExpansion(expansionId, cfg, stack) {
+	const key = _graphExpansionMemoKey(expansionId, cfg);
+	const existing = _graphExpansionMemo.get(key);
 	if (existing !== undefined) return existing;
-	const promise = _graphExecuteExpansionBody(expansionId, stack);
-	_graphExpansionMemo.set(expansionId, promise);
+	const promise = _graphExecuteExpansionBody(expansionId, cfg, stack);
+	_graphExpansionMemo.set(key, promise);
 	return promise;
 }
 
-async function _graphExecuteExpansionBody(expansionId, stack) {
+async function _graphExecuteExpansionBody(expansionId, cfg, stack) {
 	const record = _graphExpansions.get(expansionId);
 	if (record === undefined) throw _graphError(`unknown expansion ${expansionId}`);
 	const resolved = {};
 	for (const [name, input] of Object.entries(record.inputs)) {
-		resolved[name] = input.kind === "literal" ? input.value : await _graphResolveHandle(input.handle.__graph_id, stack);
+		resolved[name] =
+			input.kind === "literal"
+				? input.value
+				: await _graphResolveHandle(input.handle.__graph_id, cfg, stack);
 	}
 	return await (async () => {
 		// _graphPhase="expansion" is only held for create()'s own synchronous
@@ -995,14 +1086,14 @@ async function _graphExecuteExpansionBody(expansionId, stack) {
 	})();
 }
 
-async function _graphResolveExpansionProjection(record, stack) {
+async function _graphResolveExpansionProjection(record, cfg, stack) {
 	const { expansionId, workflow, facet } = record.data;
-	const children = await _graphExecuteExpansion(expansionId, stack);
+	const children = await _graphExecuteExpansion(expansionId, cfg, stack);
 	if (record.kind === "expansion-get") {
 		const child = children[record.data.childKey];
 		if (child === undefined) throw _graphError(`expansion has no child '${record.data.childKey}'`);
 		const handle = _graphChildHandle(child, workflow, facet, `expansion.get('${record.data.childKey}')`);
-		return _graphResolveHandle(handle.__graph_id, stack);
+		return _graphResolveHandle(handle.__graph_id, cfg, stack);
 	}
 	return Object.freeze(
 		Object.fromEntries(
@@ -1015,7 +1106,7 @@ async function _graphResolveExpansionProjection(record, stack) {
 						facet,
 						`expansion.all() child '${key}'`,
 					);
-					return [key, await _graphResolveHandle(handle.__graph_id, stack)];
+					return [key, await _graphResolveHandle(handle.__graph_id, cfg, stack)];
 				},
 			),
 		),
@@ -1137,7 +1228,7 @@ function _graphPlanWaves(rootHandleIds) {
 // The queue keeps the good property of the waves: every node is started
 // here exactly one time, by the node that releases it, thus the graph
 // itself decides the order.
-async function _graphRunReadyQueue(rootHandleIds) {
+async function _graphRunReadyQueue(rootHandleIds, cfg) {
 	const buildStartedAt = Date.now();
 	const { total, waiting, dependents } = _graphReachable(rootHandleIds);
 	const buildMs = Date.now() - buildStartedAt;
@@ -1149,7 +1240,7 @@ async function _graphRunReadyQueue(rootHandleIds) {
 		started.add(id);
 		running.push(
 			(async () => {
-				await _graphResolveNode(id);
+				await _graphResolveNode(id, cfg);
 				for (const dependent of dependents.get(id) || []) {
 					const inside = waiting.get(dependent);
 					inside.delete(id);
@@ -1176,12 +1267,12 @@ async function _graphRunReadyQueue(rootHandleIds) {
 // Resolve one node of a wave. A task node is executed; anything else is
 // resolved. This is the same pair of calls the root loop makes, named once
 // so the wave driver and the root loop cannot drift apart.
-function _graphResolveNode(handleId) {
+function _graphResolveNode(handleId, cfg) {
 	const record = _graphHandles.get(handleId);
 	if (record === undefined) throw _graphError(`unknown handle id ${handleId}`);
 	return record.kind === "task"
-		? _graphExecuteTask(record.data.taskId, [])
-		: _graphResolveHandle(handleId);
+		? _graphExecuteTask(record.data.taskId, cfg, [])
+		: _graphResolveHandle(handleId, cfg);
 }
 
 globalThis.__imp_graph_plan = function graphPlan(rootHandleIdsJson) {
@@ -1211,7 +1302,7 @@ function _graphOwnAxes(record) {
 // This is the same memoized call dispatch makes, thus it adds no work.
 async function _graphExpansionChildIds(record) {
 	const { expansionId, workflow, facet } = record.data;
-	const children = await _graphExecuteExpansion(expansionId, []);
+	const children = await _graphExecuteExpansion(expansionId, _GRAPH_ROOT_SCOPE, []);
 	if (record.kind === "expansion-get") {
 		const child = children[record.data.childKey];
 		if (child === undefined) return [];
@@ -1246,8 +1337,29 @@ async function _graphNodeAxes(id, visiting) {
 		if (own === _GRAPH_AXES_ALL) all = true;
 		else if (own !== null) for (const axis of own) axes.add(axis);
 
-		const children = _graphDeclaredEdges(record).map((edge) => edge.handleId);
-		if (record.kind === "expansion-get" || record.kind === "expansion-all") {
+		// The declared edges of an expansion projection are the inputs of the
+		// expansion, which is all `create()` can read. Fold them first and
+		// record that closure by itself, because the expansion body forks on
+		// its inputs while the projection node forks on what it discovered
+		// below as well.
+		const declared = _graphDeclaredEdges(record).map((edge) => edge.handleId);
+		const isExpansion = record.kind === "expansion-get" || record.kind === "expansion-all";
+		if (isExpansion) {
+			const inputAxes = new Set();
+			let inputAll = false;
+			for (const child of declared) {
+				const below = await _graphNodeAxes(child, visiting);
+				if (below === _GRAPH_AXES_ALL) inputAll = true;
+				else for (const axis of below) inputAxes.add(axis);
+			}
+			_graphExpansionAxes.set(
+				record.data.expansionId,
+				inputAll ? _GRAPH_AXES_ALL : inputAxes,
+			);
+		}
+
+		const children = [...declared];
+		if (isExpansion) {
 			try {
 				children.push(...(await _graphExpansionChildIds(record)));
 			} catch (_) {
@@ -1413,7 +1525,7 @@ async function _graphWalkForIntrospectionInner(
 		// inferred Odin imports) only exist once `create()` has run — see #7.
 		if (record.kind === "expansion-all" && discoverExpansionAll) {
 			const { expansionId, workflow, facet } = record.data;
-			const children = await _graphExecuteExpansion(expansionId, []);
+			const children = await _graphExecuteExpansion(expansionId, _GRAPH_ROOT_SCOPE, []);
 			node.expansionId = expansionId;
 			node.children = {};
 			for (const key of Object.keys(children).sort()) {
@@ -1429,7 +1541,7 @@ async function _graphWalkForIntrospectionInner(
 			}
 		} else if (record.kind === "expansion-get" && discoverExpansionGet) {
 			const { expansionId, workflow, facet, childKey } = record.data;
-			const children = await _graphExecuteExpansion(expansionId, []);
+			const children = await _graphExecuteExpansion(expansionId, _GRAPH_ROOT_SCOPE, []);
 			const child = children[childKey];
 			if (child !== undefined) {
 				try {
@@ -1507,6 +1619,7 @@ async function _graphWithInvocation(invocation, fn) {
 		_graphExpansionMemo = new Map();
 		_graphValueMemo = new Map();
 		_graphAxes = new Map();
+		_graphExpansionAxes = new Map();
 	}
 	try {
 		return await fn();
@@ -1532,6 +1645,7 @@ globalThis.__imp_graph_begin_run = function beginRun(invocationJson) {
 	_graphExpansionMemo = new Map();
 	_graphValueMemo = new Map();
 	_graphAxes = new Map();
+	_graphExpansionAxes = new Map();
 	_graphRunActive = true;
 };
 
@@ -1542,12 +1656,13 @@ globalThis.__imp_graph_end_run = function endRun() {
 	_graphExpansionMemo = new Map();
 	_graphValueMemo = new Map();
 	_graphAxes = new Map();
+	_graphExpansionAxes = new Map();
 };
 
 function _graphResolveRecord(handle, record) {
 	return record.kind === "task"
-		? _graphExecuteTask(record.data.taskId, [])
-		: _graphResolveHandle(handle.__graph_id);
+		? _graphExecuteTask(record.data.taskId, _GRAPH_ROOT_SCOPE, [])
+		: _graphResolveHandle(handle.__graph_id, _GRAPH_ROOT_SCOPE);
 }
 
 /**
@@ -1638,7 +1753,10 @@ globalThis.__imp_execute_graph_handles = async function executeGraphHandles(hand
 		}
 		if (globalThis.__imp_graph_wave_execution) {
 			const startedAt = Date.now();
-			const built = await _graphRunReadyQueue(roots.map((root) => root.handleId));
+			const built = await _graphRunReadyQueue(
+			roots.map((root) => root.handleId),
+			_GRAPH_ROOT_SCOPE,
+		);
 			if (globalThis.__imp_graph_shape_probe)
 				__host_log(
 					"warn",
@@ -1650,8 +1768,8 @@ globalThis.__imp_execute_graph_handles = async function executeGraphHandles(hand
 			const record = _graphHandles.get(handleId);
 			if (record === undefined) throw _graphError(`unknown handle id ${handleId}`);
 			const result = record.kind === "task"
-				? await _graphExecuteTask(record.data.taskId, [])
-				: await _graphResolveHandle(handleId);
+				? await _graphExecuteTask(record.data.taskId, _GRAPH_ROOT_SCOPE, [])
+				: await _graphResolveHandle(handleId, _GRAPH_ROOT_SCOPE);
 			return Object.freeze({ address, result });
 		}));
 	});
