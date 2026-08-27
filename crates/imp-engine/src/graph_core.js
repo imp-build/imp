@@ -11,8 +11,8 @@ const _graphHandles = new Map();
 const _graphTasks = new Map();
 const _graphTasksByKey = new Map();
 const _graphExpansions = new Map();
-let _graphTaskInflight = new Map();
-let _graphExpansionInflight = new Map();
+let _graphTaskMemo = new Map();
+let _graphExpansionMemo = new Map();
 // Resolved value for each handle, for the length of one goal run. Without
 // it, a files() node shared by N tasks globs the file system N times,
 // because resolution rebuilds the value at each use. A handle stands for
@@ -584,15 +584,6 @@ async function _graphResolveHandleUncached(id, stack = []) {
 	}
 }
 
-function _graphRuntimeKey(value) {
-	if (value && value.__imp_graph_binding === true) return { binding: value.fingerprint };
-	if (Array.isArray(value)) return value.map(_graphRuntimeKey);
-	if (value && typeof value === "object") {
-		return Object.fromEntries(Object.keys(value).sort().map((key) => [key, _graphRuntimeKey(value[key])]));
-	}
-	return value;
-}
-
 // Resolve independent graph edges together. Return results in the order the
 // caller declares. The outcome wrapper observes later failures and prevents
 // an unhandled rejection. The result order keeps the failure precedence of
@@ -832,7 +823,26 @@ function _graphValidateTaskResult(record, value) {
 	return Object.freeze(result);
 }
 
-async function _graphExecuteTask(taskId, stack) {
+// One node, one execution.
+//
+// The memo holds the identity of the task itself, not a key built from its
+// resolved inputs. A handle gives one value for a run (see
+// `_graphValueMemo`), thus the inputs of a task cannot differ between two
+// calls inside one run, and the identity of the node says everything the
+// old runtime key said.
+//
+// The memo is filled before the first await. A second caller therefore
+// always finds the promise of the first, which makes single-flight a
+// property of the graph rather than something a key has to reconstruct.
+function _graphExecuteTask(taskId, stack) {
+	const existing = _graphTaskMemo.get(taskId);
+	if (existing !== undefined) return existing;
+	const promise = _graphExecuteTaskBody(taskId, stack);
+	_graphTaskMemo.set(taskId, promise);
+	return promise;
+}
+
+async function _graphExecuteTaskBody(taskId, stack) {
 	const record = _graphTasks.get(taskId);
 	if (record === undefined) throw _graphError(`unknown task ${taskId}`);
 	const resolved = Object.fromEntries(
@@ -846,29 +856,22 @@ async function _graphExecuteTask(taskId, stack) {
 			],
 		),
 	);
-	const runtimeKey = `${record.key}:${JSON.stringify(_graphRuntimeKey(resolved))}`;
-	const existing = _graphTaskInflight.get(runtimeKey);
-	if (existing) return existing;
-	const promise = (async () => {
-		const previous = _graphPhase;
-		const previousPackagePath = _graphAmbientPackagePath;
-		_graphPhase = "execution";
-		_graphAmbientPackagePath = record.packagePath;
-		try {
-			const value = await record.run(_graphExec(record), Object.freeze(resolved));
-			return _graphValidateTaskResult(record, value);
-		} catch (error) {
-			throw _graphTaskFailure(
-				`task '${record.display}' failed: ${error?.message || error}`,
-				error,
-			);
-		} finally {
-			_graphPhase = previous;
-			_graphAmbientPackagePath = previousPackagePath;
-		}
-	})();
-	_graphTaskInflight.set(runtimeKey, promise);
-	return promise;
+	const previous = _graphPhase;
+	const previousPackagePath = _graphAmbientPackagePath;
+	_graphPhase = "execution";
+	_graphAmbientPackagePath = record.packagePath;
+	try {
+		const value = await record.run(_graphExec(record), Object.freeze(resolved));
+		return _graphValidateTaskResult(record, value);
+	} catch (error) {
+		throw _graphTaskFailure(
+			`task '${record.display}' failed: ${error?.message || error}`,
+			error,
+		);
+	} finally {
+		_graphPhase = previous;
+		_graphAmbientPackagePath = previousPackagePath;
+	}
 }
 
 function _graphWorkflowName(workflow, api) {
@@ -933,17 +936,24 @@ function _graphExpand(opts) {
 }
 globalThis.__imp_graph_expand = _graphExpand;
 
-async function _graphExecuteExpansion(expansionId, stack) {
+// One expansion, one create(). Keyed by identity for the same reason
+// `_graphExecuteTask` above is.
+function _graphExecuteExpansion(expansionId, stack) {
+	const existing = _graphExpansionMemo.get(expansionId);
+	if (existing !== undefined) return existing;
+	const promise = _graphExecuteExpansionBody(expansionId, stack);
+	_graphExpansionMemo.set(expansionId, promise);
+	return promise;
+}
+
+async function _graphExecuteExpansionBody(expansionId, stack) {
 	const record = _graphExpansions.get(expansionId);
 	if (record === undefined) throw _graphError(`unknown expansion ${expansionId}`);
 	const resolved = {};
 	for (const [name, input] of Object.entries(record.inputs)) {
 		resolved[name] = input.kind === "literal" ? input.value : await _graphResolveHandle(input.handle.__graph_id, stack);
 	}
-	const runtimeKey = `${record.key}:${JSON.stringify(_graphRuntimeKey(resolved))}`;
-	const existing = _graphExpansionInflight.get(runtimeKey);
-	if (existing) return existing;
-	const promise = (async () => {
+	return await (async () => {
 		// _graphPhase="expansion" is only held for create()'s own synchronous
 		// prologue, not its whole (possibly async) lifetime — same contract
 		// _graphAmbientPackagePath already documents above (only meaningful
@@ -968,8 +978,6 @@ async function _graphExecuteExpansion(expansionId, stack) {
 			throw _graphError(`expansion '${record.display}' must return a keyed object`);
 		return children;
 	})();
-	_graphExpansionInflight.set(runtimeKey, promise);
-	return promise;
 }
 
 async function _graphResolveExpansionProjection(record, stack) {
@@ -1372,8 +1380,8 @@ globalThis.__imp_collect_graph_exports = function collectGraphExports(ns, scope)
 // ones, so no state crosses between invocations.
 async function _graphWithInvocation(invocation, fn) {
 	const previousInvocation = _graphInvocation;
-	const previousTaskInflight = _graphTaskInflight;
-	const previousExpansionInflight = _graphExpansionInflight;
+	const previousTaskMemo = _graphTaskMemo;
+	const previousExpansionMemo = _graphExpansionMemo;
 	_graphInvocation = Object.freeze(invocation);
 	// A goal run has two phases: discovery walks the graph and resolves what
 	// `expand()` needs, then dispatch executes it. Both call this function.
@@ -1381,8 +1389,8 @@ async function _graphWithInvocation(invocation, fn) {
 	// each node they share would run a second time. Inside a run, keep the
 	// tables; `__imp_graph_begin_run` already made them fresh for this run.
 	if (!_graphRunActive) {
-		_graphTaskInflight = new Map();
-		_graphExpansionInflight = new Map();
+		_graphTaskMemo = new Map();
+		_graphExpansionMemo = new Map();
 		_graphValueMemo = new Map();
 	}
 	try {
@@ -1390,8 +1398,8 @@ async function _graphWithInvocation(invocation, fn) {
 	} finally {
 		_graphInvocation = previousInvocation;
 		if (!_graphRunActive) {
-			_graphTaskInflight = previousTaskInflight;
-			_graphExpansionInflight = previousExpansionInflight;
+			_graphTaskMemo = previousTaskMemo;
+			_graphExpansionMemo = previousExpansionMemo;
 		}
 	}
 }
@@ -1405,8 +1413,8 @@ async function _graphWithInvocation(invocation, fn) {
 // ends with an error cannot leave a value for the next run to find.
 globalThis.__imp_graph_begin_run = function beginRun(invocationJson) {
 	_graphInvocation = Object.freeze(JSON.parse(invocationJson));
-	_graphTaskInflight = new Map();
-	_graphExpansionInflight = new Map();
+	_graphTaskMemo = new Map();
+	_graphExpansionMemo = new Map();
 	_graphValueMemo = new Map();
 	_graphRunActive = true;
 };
@@ -1414,8 +1422,8 @@ globalThis.__imp_graph_begin_run = function beginRun(invocationJson) {
 globalThis.__imp_graph_end_run = function endRun() {
 	_graphRunActive = false;
 	_graphInvocation = null;
-	_graphTaskInflight = new Map();
-	_graphExpansionInflight = new Map();
+	_graphTaskMemo = new Map();
+	_graphExpansionMemo = new Map();
 	_graphValueMemo = new Map();
 };
 
