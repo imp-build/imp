@@ -13,6 +13,21 @@ const _graphTasksByKey = new Map();
 const _graphExpansions = new Map();
 let _graphTaskMemo = new Map();
 let _graphExpansionMemo = new Map();
+// Mode-axis namespace, mirrored from MODE_AXIS_NAMESPACE in spike.rs. A
+// semantic.config() read of this namespace returns the whole axis bundle,
+// so such a node depends on every axis rather than a named one.
+const _GRAPH_MODE_NAMESPACE = "imp.mode";
+
+// Marks a node that reads the whole mode bundle instead of named axes.
+const _GRAPH_AXES_ALL = Symbol("graph-axes-all");
+
+// Which mode axes the inputs of each node can reach, for the length of one
+// goal run. A node has to be built one time for each configuration only if
+// the axes it reads differ between those configurations; a node that reads
+// no axis stays shared. This map is what keeps configuration-blind work
+// from being done two times.
+let _graphAxes = new Map();
+
 // Resolved value for each handle, for the length of one goal run. Without
 // it, a files() node shared by N tasks globs the file system N times,
 // because resolution rebuilds the value at each use. A handle stands for
@@ -1178,6 +1193,105 @@ globalThis.__imp_graph_plan = function graphPlan(rootHandleIdsJson) {
 	});
 };
 
+// The axes a node reads by itself, before its inputs are folded in.
+// `semantic.mode(name)` reads one named axis; a `semantic.config()` read of
+// the mode namespace sees the whole bundle and therefore reads every axis.
+// Every other kind reads none of its own.
+function _graphOwnAxes(record) {
+	if (record.kind !== "semantic") return null;
+	const { kind, name } = record.data;
+	if (kind === "mode") return new Set([name]);
+	if (kind === "config" && name === _GRAPH_MODE_NAMESPACE) return _GRAPH_AXES_ALL;
+	return null;
+}
+
+// The child handles an expansion projection resolves to. `_graphDeclaredEdges`
+// reports only the inputs of an expansion, not what `create()` discovered, so
+// the axis closure has to run the expansion to see the rest of the graph.
+// This is the same memoized call dispatch makes, thus it adds no work.
+async function _graphExpansionChildIds(record) {
+	const { expansionId, workflow, facet } = record.data;
+	const children = await _graphExecuteExpansion(expansionId, []);
+	if (record.kind === "expansion-get") {
+		const child = children[record.data.childKey];
+		if (child === undefined) return [];
+		return [
+			_graphChildHandle(child, workflow, facet, "expansion.get()").__graph_id,
+		];
+	}
+	return Object.keys(children)
+		.sort()
+		.map(
+			(key) =>
+				_graphChildHandle(children[key], workflow, facet, "expansion.all()")
+					.__graph_id,
+		);
+}
+
+// Fold the axis closure of one node: what it reads itself, plus what every
+// node below it reads. `visiting` guards a declaration cycle — such a node
+// contributes nothing here, and the real cycle errors still come from
+// `_graphResolveHandleUncached` and `_graphRunReadyQueue`.
+async function _graphNodeAxes(id, visiting) {
+	const known = _graphAxes.get(id);
+	if (known !== undefined) return known;
+	if (visiting.has(id)) return new Set();
+	visiting.add(id);
+	try {
+		const record = _graphHandles.get(id);
+		if (record === undefined) return new Set();
+		const axes = new Set();
+		let all = false;
+		const own = _graphOwnAxes(record);
+		if (own === _GRAPH_AXES_ALL) all = true;
+		else if (own !== null) for (const axis of own) axes.add(axis);
+
+		const children = _graphDeclaredEdges(record).map((edge) => edge.handleId);
+		if (record.kind === "expansion-get" || record.kind === "expansion-all") {
+			try {
+				children.push(...(await _graphExpansionChildIds(record)));
+			} catch (_) {
+				// A projection that cannot be read here would fail at dispatch
+				// too. Treat the node as reading every axis so the analysis
+				// stays conservative instead of reporting a smaller closure.
+				all = true;
+			}
+		}
+		for (const child of children) {
+			const below = await _graphNodeAxes(child, visiting);
+			if (below === _GRAPH_AXES_ALL) all = true;
+			else for (const axis of below) axes.add(axis);
+		}
+
+		const result = all ? _GRAPH_AXES_ALL : axes;
+		_graphAxes.set(id, result);
+		return result;
+	} finally {
+		visiting.delete(id);
+	}
+}
+
+// Fill `_graphAxes` for everything the roots reach, and report what it
+// found. Must complete before dispatch: the memo tables are filled before
+// the first await to keep single-flight structural, so the key of a node
+// has to be available without awaiting.
+async function _graphPlanConfigs(rootHandleIds) {
+	for (const id of rootHandleIds) await _graphNodeAxes(id, new Set());
+	let blind = 0;
+	let reading = 0;
+	let all = 0;
+	const names = new Set();
+	for (const axes of _graphAxes.values()) {
+		if (axes === _GRAPH_AXES_ALL) all += 1;
+		else if (axes.size === 0) blind += 1;
+		else {
+			reading += 1;
+			for (const axis of axes) names.add(axis);
+		}
+	}
+	return { total: _graphAxes.size, blind, reading, all, names: [...names].sort() };
+}
+
 // Human label for a node in the introspection walk, reusing whatever
 // `display:` the declaring `task()`/`expand()` call already recorded rather
 // than inventing a second labelling scheme. Returns undefined for kinds with
@@ -1392,6 +1506,7 @@ async function _graphWithInvocation(invocation, fn) {
 		_graphTaskMemo = new Map();
 		_graphExpansionMemo = new Map();
 		_graphValueMemo = new Map();
+		_graphAxes = new Map();
 	}
 	try {
 		return await fn();
@@ -1416,6 +1531,7 @@ globalThis.__imp_graph_begin_run = function beginRun(invocationJson) {
 	_graphTaskMemo = new Map();
 	_graphExpansionMemo = new Map();
 	_graphValueMemo = new Map();
+	_graphAxes = new Map();
 	_graphRunActive = true;
 };
 
@@ -1425,6 +1541,7 @@ globalThis.__imp_graph_end_run = function endRun() {
 	_graphTaskMemo = new Map();
 	_graphExpansionMemo = new Map();
 	_graphValueMemo = new Map();
+	_graphAxes = new Map();
 };
 
 function _graphResolveRecord(handle, record) {
@@ -1505,6 +1622,20 @@ globalThis.__imp_execute_graph_handles = async function executeGraphHandles(hand
 		// Order is the only thing this changes. Each node still resolves
 		// through the same code as before, thus a node reached from inside
 		// another node finds a value instead of starting new work.
+		// Observation only for now: fill the axis closure and report it.
+		// Nothing keys off `_graphAxes` yet — this measures how much of a
+		// real graph is configuration-blind, which is what decides whether
+		// narrow memo keys are worth their complexity.
+		if (globalThis.__imp_graph_shape_probe) {
+			const startedAt = Date.now();
+			const configs = await _graphPlanConfigs(roots.map((root) => root.handleId));
+			__host_log(
+				"warn",
+				`config axes: ${configs.total} nodes — ${configs.blind} read nothing, ` +
+					`${configs.reading} read ${configs.names.length > 0 ? `{${configs.names.join(",")}}` : "{}"}, ` +
+					`${configs.all} read the whole bundle (${Date.now() - startedAt}ms)`,
+			);
+		}
 		if (globalThis.__imp_graph_wave_execution) {
 			const startedAt = Date.now();
 			const built = await _graphRunReadyQueue(roots.map((root) => root.handleId));
