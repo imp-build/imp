@@ -3591,31 +3591,9 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                     rquickjs::Error::new_loading_message("link", format!("parse overrides: {e}"))
                 })?;
             let hs = state_link_overrides.lock().unwrap();
-            let mut rebuild = BTreeMap::new();
-            let mut output_select = BTreeMap::new();
-            for (axis, value) in &overrides {
-                let Some(def) = hs.mode_axes.get(axis) else {
-                    let known: Vec<&str> = hs.mode_axes.keys().map(String::as_str).collect();
-                    return Err(rquickjs::Error::new_loading_message(
-                        "link",
-                        format!(
-                            "link() overrides undeclared mode axis '{axis}'; declared axes: {}",
-                            known.join(", ")
-                        ),
-                    ));
-                };
-                validate_mode_axis_value(axis, value, def, "link()")
+            let (rebuild, output_select) =
+                classify_mode_overrides(&hs.mode_axes, &overrides, "link()")
                     .map_err(|e| rquickjs::Error::new_loading_message("link", e.to_string()))?;
-                match def.get("kind").and_then(|kind| kind.as_str()) {
-                    Some("rebuild") => {
-                        rebuild.insert(axis.clone(), value.clone());
-                    }
-                    Some("output-select") => {
-                        output_select.insert(axis.clone(), value.clone());
-                    }
-                    _ => unreachable!("defineModeAxis validates axis kinds"),
-                }
-            }
             serde_json::to_string(&serde_json::json!({
                 "rebuild": rebuild,
                 "outputSelect": output_select,
@@ -3626,6 +3604,40 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set(
         "__host_classify_link_overrides",
         host_classify_link_overrides,
+    )?;
+
+    // __host_validate_mode_overrides(overridesJson) → JSON
+    // `{ rebuild: {...}, outputSelect: {...} }`. The graph-path counterpart
+    // of __host_classify_link_overrides above, named for configured() in its
+    // error messages. configured() accepts rebuild axes only; the caller
+    // rejects a non-empty outputSelect, because selecting an already-produced
+    // result is a memo-path concept with no graph-path equivalent yet.
+    let state_mode_overrides = Arc::clone(&state);
+    let host_validate_mode_overrides = Function::new(
+        ctx.clone(),
+        move |overrides_json: String| -> rquickjs::Result<String> {
+            let overrides: BTreeMap<String, String> = serde_json::from_str(&overrides_json)
+                .map_err(|e| {
+                    rquickjs::Error::new_loading_message(
+                        "configured",
+                        format!("parse overrides: {e}"),
+                    )
+                })?;
+            let hs = state_mode_overrides.lock().unwrap();
+            let (rebuild, output_select) =
+                classify_mode_overrides(&hs.mode_axes, &overrides, "configured()").map_err(
+                    |e| rquickjs::Error::new_loading_message("configured", e.to_string()),
+                )?;
+            serde_json::to_string(&serde_json::json!({
+                "rebuild": rebuild,
+                "outputSelect": output_select,
+            }))
+            .map_err(|e| rquickjs::Error::new_loading_message("configured", e.to_string()))
+        },
+    )?;
+    globals.set(
+        "__host_validate_mode_overrides",
+        host_validate_mode_overrides,
     )?;
 
     // __host_validate_named_output_axis(axis) — namedOutput() may only be
@@ -6651,6 +6663,40 @@ pub struct GoalExecutionOptions<'a> {
 /// Resolve `--axis KEY=VALUE` CLI overrides against the mode axes declared
 /// via `defineModeAxis` and write the fully-defaulted result into the live
 /// `"imp.mode"` config namespace, before any target executes.
+/// Check a set of `axis=value` overrides against the declared axes and split
+/// them by axis kind: `rebuild` values make a different node, `output-select`
+/// values pick a result the producer already made. `api` names the caller in
+/// the error message, because more than one API accepts overrides
+/// (`link()` on the memo path, `configured()` on the graph path).
+fn classify_mode_overrides(
+    mode_axes: &BTreeMap<String, serde_json::Value>,
+    overrides: &BTreeMap<String, String>,
+    api: &str,
+) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
+    let mut rebuild = BTreeMap::new();
+    let mut output_select = BTreeMap::new();
+    for (axis, value) in overrides {
+        let Some(def) = mode_axes.get(axis) else {
+            let known: Vec<&str> = mode_axes.keys().map(String::as_str).collect();
+            anyhow::bail!(
+                "{api} overrides undeclared mode axis '{axis}'; declared axes: {}",
+                known.join(", ")
+            );
+        };
+        validate_mode_axis_value(axis, value, def, api)?;
+        match def.get("kind").and_then(|kind| kind.as_str()) {
+            Some("rebuild") => {
+                rebuild.insert(axis.clone(), value.clone());
+            }
+            Some("output-select") => {
+                output_select.insert(axis.clone(), value.clone());
+            }
+            _ => unreachable!("defineModeAxis validates axis kinds"),
+        }
+    }
+    Ok((rebuild, output_select))
+}
+
 fn validate_mode_axis_value(
     axis: &str,
     value: &str,
@@ -10315,6 +10361,176 @@ export default { [VERIFY]: verify };
         assert_eq!(
             result,
             r#"{"args":["one","two"],"fix":true,"opt":"release"}"#
+        );
+    }
+
+    /// Run one `build` goal over a graph-native BUILD.js and return what the
+    /// file recorded in `globalThis.configuredResult`.
+    async fn run_configured_probe(p: &Path, axis_overrides: &[String]) -> String {
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        *live.scheduler.lock().unwrap() = Some(imp_scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        ));
+        let selectors = ["//".to_owned()];
+        execute_goal_live_selection(
+            &live,
+            p,
+            &SelectorContext::root(),
+            "build",
+            GoalSelection::Selectors(&selectors),
+            GoalExecutionOptions {
+                no_cache: false,
+                trace_inputs: false,
+                js_workers: 1,
+                flags: serde_json::json!({}),
+                run_args: &[],
+                axis_overrides,
+                profile: None,
+            },
+        )
+        .await
+        .unwrap();
+        live.ctx
+            .async_with(async |ctx| -> rquickjs::Result<String> {
+                let stringify: Function = ctx.eval("JSON.stringify")?;
+                let value: Value = ctx.globals().get("configuredResult")?;
+                stringify.call((value,))
+            })
+            .await
+            .unwrap()
+    }
+
+    fn write_configured_build_file(p: &Path) {
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis } from "imp:core";
+defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
+"#,
+        );
+        // `leaf` reads the axis and must run one time for each configuration
+        // it is reached under. `shared` reads no axis and must run one time
+        // no matter how many configurations are above it. `runs` counts the
+        // executions so the test can tell forking from sharing.
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { configured, goal, output, semantic, task } from "imp:core";
+const BUILD = goal("build");
+globalThis.configuredResult = null;
+globalThis.runs = [];
+
+const leaf = task({
+    display: "leaf",
+    inputs: { opt: semantic.mode("opt") },
+    outputs: { seen: output.value() },
+    run(_exec, input) {
+        globalThis.runs.push(`leaf:${input.opt}`);
+        return { seen: input.opt };
+    },
+});
+
+const shared = task({
+    display: "shared",
+    outputs: { seen: output.value() },
+    run() {
+        globalThis.runs.push("shared");
+        return { seen: "shared" };
+    },
+});
+
+const app = task({
+    display: "app",
+    inputs: {
+        ambient: leaf.outputs.seen,
+        release: configured(leaf, { opt: "release" }).outputs.seen,
+        // Nesting collapses, and the outer value wins.
+        nested: configured(configured(leaf, { opt: "debug" }), { opt: "release" })
+            .outputs.seen,
+        shared: shared.outputs.seen,
+    },
+    run(_exec, input) {
+        globalThis.configuredResult = {
+            ambient: input.ambient,
+            release: input.release,
+            nested: input.nested,
+            shared: input.shared,
+            runs: [...globalThis.runs].sort(),
+        };
+    },
+});
+
+export default { [BUILD]: app };
+"#,
+        );
+    }
+
+    /// One `configured()` edge builds its subtree under a different value of
+    /// the axis without changing what its consumer sees, and a node that
+    /// reads no axis stays shared between the two configurations.
+    #[tokio::test]
+    async fn configured_rebuilds_only_the_nodes_that_read_the_changed_axis() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_configured_build_file(p);
+
+        let result = run_configured_probe(p, &[]).await;
+
+        assert_eq!(
+            result,
+            r#"{"ambient":"debug","release":"release","nested":"release","shared":"shared","runs":["leaf:debug","leaf:release","shared"]}"#
+        );
+    }
+
+    /// When the invocation already selects the value a `configured()` edge
+    /// asks for, the two edges reach one node instead of two. This is what
+    /// the narrow memo key buys: sharing follows the axis values, not the
+    /// shape of the declaration.
+    #[tokio::test]
+    async fn configured_collapses_into_the_invocation_when_the_values_agree() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_configured_build_file(p);
+
+        let axes = ["opt=release".to_owned()];
+        let result = run_configured_probe(p, &axes).await;
+
+        assert_eq!(
+            result,
+            r#"{"ambient":"release","release":"release","nested":"release","shared":"shared","runs":["leaf:release","shared"]}"#
+        );
+    }
+
+    /// An axis no `defineModeAxis` declared is a mistake in the BUILD file,
+    /// not a silently ignored override.
+    #[tokio::test]
+    async fn configured_rejects_an_undeclared_mode_axis() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis } from "imp:core";
+defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { configured, goal, task } from "imp:core";
+const BUILD = goal("build");
+const leaf = task({ display: "leaf", run() {} });
+export default { [BUILD]: configured(leaf, { nosuchaxis: "x" }) };
+"#,
+        );
+
+        let error = format!("{:#}", load_workspace(p).await.err().unwrap());
+        assert!(
+            error.contains("undeclared mode axis 'nosuchaxis'"),
+            "unexpected error: {error}"
         );
     }
 

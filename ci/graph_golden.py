@@ -46,6 +46,9 @@ TARGETS = {
     "odin_hello": "//rules/odin/example:hello",
     "rust_scheduler": "//crates/imp-scheduler:imp_scheduler",
     "cmake_uses_cmake_lib": "//rules/c/cmake/example:uses_cmake_lib",
+    # The one target whose declared shape holds a configuration fork: a
+    # `configured()` edge and the node below it that reads the `opt` axis.
+    "config_probe": "//rules/imp/config/example:probe",
 }
 
 # `  n12["label"]` or `  n12[["label"]]`. A double bracket marks a root.

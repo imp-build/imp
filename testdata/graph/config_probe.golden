@@ -1,0 +1,27 @@
+# Structure of the imp build graph. Node numbers are removed.
+# Each line starts with a fingerprint of the content of the node.
+# `xN` is the number of separate nodes that have that fingerprint.
+# Write this file again with: ci/graph_golden.py --update
+
+nodes 8  unique 8  edges 9
+
+[nodes]
+1c97165d4400  x1  root  //rules/imp/config/example:probe#build
+40b99ab4055b  x1  node  tool: sh
+495d7cb0a2f0  x1  node  config-probe leaf · text
+6618fc11d8ea  x1  node  config-probe shared · text
+8968c86ee6e8  x1  node  configured: opt=release
+b9d9c0185e6d  x1  node  config-probe shared
+cb0ccc29dac7  x1  node  config-probe leaf
+d378819ad598  x1  node  semantic: mode(opt)
+
+[edges]
+1c97165d4400  -debug->  495d7cb0a2f0
+1c97165d4400  -release->  8968c86ee6e8
+1c97165d4400  -shared->  6618fc11d8ea
+495d7cb0a2f0  -task->  cb0ccc29dac7
+6618fc11d8ea  -task->  b9d9c0185e6d
+8968c86ee6e8  -configured->  495d7cb0a2f0
+b9d9c0185e6d  -sh->  40b99ab4055b
+cb0ccc29dac7  -opt->  d378819ad598
+cb0ccc29dac7  -sh->  40b99ab4055b

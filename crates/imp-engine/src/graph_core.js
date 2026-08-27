@@ -53,46 +53,64 @@ function _graphScopeKey(overlay) {
 	return JSON.stringify(names.map((name) => [name, overlay[name]]));
 }
 
+// The value of one axis under a scope: what the edge set, or else what the
+// invocation resolved.
+function _graphEffectiveAxis(axis, cfg) {
+	if (Object.hasOwn(cfg.overlay, axis)) return cfg.overlay[axis];
+	return _graphInvocation?.mode?.[axis] ?? null;
+}
+
 // The part of a scope one node can observe.
 //
 // Keying a memo by the whole scope is correct but forks the whole graph:
 // every glob and every toolchain install would be done one time for each
 // configuration. Keying by the axes the node actually reads forks only what
-// can differ. A node that reads no axis keeps the key of the root scope and
-// stays shared.
+// can differ. A node that reads no axis gets an empty key and stays shared.
+//
+// The key holds the *values* the node reads, not the overlay that set them.
+// An overlay is a diff, and two different diffs can name the same
+// configuration: with `--axis opt=release`, the plain edge and an edge
+// through `configured(x, {opt:"release"})` reach the same build. Keying by
+// the overlay makes those two nodes; keying by the value makes them one.
 //
 // Must stay synchronous. The memo tables are filled before the first await
 // to make single-flight structural (see `_graphExecuteTask`); a key that
 // could await would let two scopes with one key both pass the lookup and
 // run the node two times.
 function _graphNarrowKey(axes, cfg) {
-	if (cfg.key === "") return "";
 	// No closure recorded (a node made after the planning pass) reads as
 	// "can read anything", which forks. Conservative, never wrong.
 	if (axes === undefined || axes === _GRAPH_AXES_ALL) return cfg.key;
-	const overlay = {};
-	for (const axis of axes) {
-		if (Object.hasOwn(cfg.overlay, axis)) overlay[axis] = cfg.overlay[axis];
-	}
-	return _graphScopeKey(overlay);
+	if (axes.size === 0) return "";
+	return JSON.stringify(
+		[...axes].sort().map((axis) => [axis, _graphEffectiveAxis(axis, cfg)]),
+	);
+}
+
+function _graphMemoKey(id, narrow) {
+	return narrow === "" ? id : `${id}|${narrow}`;
 }
 
 function _graphHandleMemoKey(id, cfg) {
-	return cfg.key === "" ? id : `${id}|${_graphNarrowKey(_graphAxes.get(id), cfg)}`;
+	return _graphMemoKey(id, _graphNarrowKey(_graphAxes.get(id), cfg));
 }
 
 // A task and its public handle read the same axes, thus the handle carries
 // the closure for both.
 function _graphTaskMemoKey(taskId, cfg) {
-	if (cfg.key === "") return taskId;
 	const record = _graphTasks.get(taskId);
 	const handleId = record?.publicHandle?.__graph_id;
-	return `${taskId}|${_graphNarrowKey(handleId === undefined ? undefined : _graphAxes.get(handleId), cfg)}`;
+	return _graphMemoKey(
+		taskId,
+		_graphNarrowKey(handleId === undefined ? undefined : _graphAxes.get(handleId), cfg),
+	);
 }
 
 function _graphExpansionMemoKey(expansionId, cfg) {
-	if (cfg.key === "") return expansionId;
-	return `${expansionId}|${_graphNarrowKey(_graphExpansionAxes.get(expansionId), cfg)}`;
+	return _graphMemoKey(
+		expansionId,
+		_graphNarrowKey(_graphExpansionAxes.get(expansionId), cfg),
+	);
 }
 
 // Resolved value for each handle, for the length of one goal run. Without
@@ -351,6 +369,102 @@ export function files(opts = {}) {
 	const spec = _graphJson(opts, "files(options)");
 	const fingerprint = `files:${_graphCanonical(spec)}`;
 	return _graphMemoizedHandle(fingerprint, () => _graphHandle("files", spec, fingerprint));
+}
+
+// Merge an overlay into a scope. The new values win, and the axes the outer
+// scope set and this overlay does not touch stay in force — that is what
+// makes the configuration flow along the edge instead of being replaced at
+// it.
+function _graphScopeWith(cfg, overrides) {
+	const overlay = Object.freeze({ ...cfg.overlay, ...overrides });
+	return Object.freeze({ overlay, key: _graphScopeKey(overlay) });
+}
+
+/**
+ * Build a handle under a changed configuration.
+ *
+ * The returned handle stands for the same work as `handle`, done with the
+ * named mode axes set to the given values. The change applies to the whole
+ * subtree below the handle, and only to it: the same handle used without
+ * `configured()` elsewhere in the graph keeps the configuration of the
+ * invocation.
+ *
+ *     task({ inputs: {
+ *         debug: hello[BUILD],
+ *         release: configured(hello[BUILD], { opt: "release" }),
+ *     }, ... })
+ *
+ * Nested calls collapse into one node at construction, with the outer values
+ * winning, thus the order the wrappers are applied in cannot matter. Only a
+ * node whose inputs actually read one of the named axes is built a second
+ * time; everything else below the handle stays shared with the rest of the
+ * graph.
+ *
+ * @category graph
+ * @param {object} handle A graph handle.
+ * @param {Record<string, string>} overrides Declared `axis: value` pairs.
+ * @returns {object} A handle for the same work under that configuration.
+ */
+export function configured(handle, overrides) {
+	const record = _graphRecord(handle, "configured(handle, overrides)");
+	if (
+		overrides === null ||
+		typeof overrides !== "object" ||
+		Array.isArray(overrides)
+	)
+		throw _graphError("configured(handle, overrides) requires an overrides object");
+	const requested = {};
+	for (const name of Object.keys(overrides).sort()) {
+		const value = overrides[name];
+		if (typeof value !== "string" || value.length === 0)
+			throw _graphError(`configured() override '${name}' must be a non-empty string`);
+		requested[name] = value;
+	}
+	if (Object.keys(requested).length === 0)
+		throw _graphError("configured(handle, overrides) requires at least one axis");
+	const classified = JSON.parse(__host_validate_mode_overrides(JSON.stringify(requested)));
+	const selected = Object.keys(classified.outputSelect || {});
+	if (selected.length > 0) {
+		throw _graphError(
+			`configured() cannot set output-select axes (${selected.sort().join(", ")}); ` +
+				"only rebuild axes make a differently configured node",
+		);
+	}
+
+	// Collapse a wrapper around a wrapper into one node. Two nodes would
+	// resolve to the same value, and one node keeps `configured()` order-
+	// independent the same way profile()'s own reduce does.
+	const inner = record.kind === "configured" ? record.data.handle : handle;
+	const innerRecord = record.kind === "configured" ? _graphHandles.get(inner.__graph_id) : record;
+	const merged = {};
+	for (const name of Object.keys({
+		...(record.kind === "configured" ? record.data.overrides : {}),
+		...classified.rebuild,
+	}).sort()) {
+		merged[name] =
+			classified.rebuild[name] ??
+			(record.kind === "configured" ? record.data.overrides[name] : undefined);
+	}
+	const frozen = Object.freeze(merged);
+	const fingerprint = `configured:${innerRecord.fingerprint}:${_graphCanonical(frozen)}`;
+	return _graphMemoizedHandle(fingerprint, () => {
+		const wrapper = _graphHandle(
+			"configured",
+			{ handle: inner, overrides: frozen },
+			fingerprint,
+		);
+		// Forward the named outputs of a task handle, each wrapped with the
+		// same overrides. Without this an author has to wrap every slot by
+		// hand, and two hand-wrapped slots of one task would not obviously
+		// be the same task.
+		const innerOutputs = inner.outputs;
+		if (innerOutputs === undefined) return wrapper;
+		const outputs = {};
+		for (const name of Object.keys(innerOutputs).sort()) {
+			outputs[name] = configured(innerOutputs[name], frozen);
+		}
+		return Object.freeze({ ...wrapper, outputs: Object.freeze(outputs) });
+	});
 }
 
 /**
@@ -677,6 +791,15 @@ async function _graphResolveHandleUncached(id, cfg, stack = []) {
 			const result = await _graphExecuteTask(record.data.taskId, cfg, nextStack);
 			return result[record.data.name];
 		}
+		case "configured":
+			// The one place the configuration changes: resolve the inner
+			// handle under the merged scope. Everything below sees the new
+			// values through the normal `cfg` parameter.
+			return _graphResolveHandle(
+				record.data.handle.__graph_id,
+				_graphScopeWith(cfg, record.data.overrides),
+				nextStack,
+			);
 		case "expansion-get":
 		case "expansion-all":
 			return _graphResolveExpansionProjection(record, cfg, nextStack);
@@ -727,7 +850,7 @@ function _graphIsWindows() {
 	return _graphIsWindowsCache;
 }
 
-function _graphExec(record) {
+function _graphExec(record, cfg) {
 	let consumed = new Set();
 	const consume = (binding) => {
 		if (!binding || binding.__imp_graph_binding !== true)
@@ -736,6 +859,16 @@ function _graphExec(record) {
 		return binding;
 	};
 	return Object.freeze({
+		// Resolve a handle the task body holds but did not declare as an
+		// input, under the configuration this task is running with. The free
+		// `resolveGraphHandle()` cannot do that — it has no scope, thus it
+		// always resolves at the configuration of the invocation.
+		resolve(handle) {
+			const handleRecord = _graphRecord(handle, "exec.resolve(handle)");
+			return handleRecord.kind === "task"
+				? _graphExecuteTask(handleRecord.data.taskId, cfg, [])
+				: _graphResolveHandle(handle.__graph_id, cfg);
+		},
 		path(binding) {
 			return consume(binding).path;
 		},
@@ -963,7 +1096,7 @@ async function _graphExecuteTaskBody(taskId, cfg, stack) {
 	_graphPhase = "execution";
 	_graphAmbientPackagePath = record.packagePath;
 	try {
-		const value = await record.run(_graphExec(record), Object.freeze(resolved));
+		const value = await record.run(_graphExec(record, cfg), Object.freeze(resolved));
 		return _graphValidateTaskResult(record, value);
 	} catch (error) {
 		throw _graphTaskFailure(
@@ -1134,6 +1267,8 @@ function _graphDeclaredEdges(record) {
 		}
 		case "tool":
 			return [{ name: "artifact", handleId: record.data.artifact.__graph_id }];
+		case "configured":
+			return [{ name: "configured", handleId: record.data.handle.__graph_id }];
 		case "expansion-get":
 		case "expansion-all": {
 			const expansionRecord = _graphExpansions.get(record.data.expansionId);
@@ -1165,16 +1300,35 @@ function _graphDeclaredEdges(record) {
 // Collect the graph that `rootHandleIds` reach, with the dependencies of
 // each node and the nodes that wait on it. Shared by the wave planner and
 // the ready-queue driver so the two cannot disagree about the graph.
-function _graphReachable(rootHandleIds) {
+// A node here is a handle under a configuration, not a handle alone: the
+// same handle below two `configured()` edges is two nodes, and the same
+// handle that reads no axis the two edges change is one shared node. The
+// scoped key from `_graphHandleMemoKey` is what decides which of the two it
+// is, thus the queue and the memo tables always agree.
+function _graphReachable(rootHandleIds, cfg) {
 	const deps = new Map();
-	const queue = [...rootHandleIds];
+	const nodes = new Map();
+	const queue = rootHandleIds.map((id) => ({ id, cfg }));
 	while (queue.length > 0) {
-		const id = queue.shift();
-		if (deps.has(id)) continue;
+		const { id, cfg: scope } = queue.shift();
+		const key = _graphHandleMemoKey(id, scope);
+		if (deps.has(key)) continue;
 		const record = _graphHandles.get(id);
 		if (record === undefined) continue;
-		const edges = _graphDeclaredEdges(record).map((edge) => edge.handleId);
-		deps.set(id, edges);
+		nodes.set(key, { handleId: id, cfg: scope });
+		// The edge below a `configured` node carries the changed
+		// configuration; every other edge carries the one it was reached
+		// with.
+		const childScope =
+			record.kind === "configured" ? _graphScopeWith(scope, record.data.overrides) : scope;
+		const edges = _graphDeclaredEdges(record).map((edge) => ({
+			id: edge.handleId,
+			cfg: childScope,
+		}));
+		deps.set(
+			key,
+			edges.map((edge) => _graphHandleMemoKey(edge.id, edge.cfg)),
+		);
 		for (const edge of edges) queue.push(edge);
 	}
 
@@ -1190,11 +1344,11 @@ function _graphReachable(rootHandleIds) {
 			dependents.get(edge).push(id);
 		}
 	}
-	return { total: deps.size, waiting, dependents };
+	return { total: deps.size, waiting, dependents, nodes };
 }
 
 function _graphPlanWaves(rootHandleIds) {
-	const { total, waiting, dependents } = _graphReachable(rootHandleIds);
+	const { total, waiting, dependents } = _graphReachable(rootHandleIds, _GRAPH_ROOT_SCOPE);
 	const waves = [];
 	let ready = [];
 	for (const [id, inside] of waiting) if (inside.size === 0) ready.push(id);
@@ -1230,7 +1384,7 @@ function _graphPlanWaves(rootHandleIds) {
 // itself decides the order.
 async function _graphRunReadyQueue(rootHandleIds, cfg) {
 	const buildStartedAt = Date.now();
-	const { total, waiting, dependents } = _graphReachable(rootHandleIds);
+	const { total, waiting, dependents, nodes } = _graphReachable(rootHandleIds, cfg);
 	const buildMs = Date.now() - buildStartedAt;
 	const running = [];
 	const started = new Set();
@@ -1238,9 +1392,10 @@ async function _graphRunReadyQueue(rootHandleIds, cfg) {
 	function start(id) {
 		if (started.has(id)) return;
 		started.add(id);
+		const node = nodes.get(id);
 		running.push(
 			(async () => {
-				await _graphResolveNode(id, cfg);
+				await _graphResolveNode(node.handleId, node.cfg);
 				for (const dependent of dependents.get(id) || []) {
 					const inside = waiting.get(dependent);
 					inside.delete(id);
@@ -1375,7 +1530,17 @@ async function _graphNodeAxes(id, visiting) {
 			else for (const axis of below) axes.add(axis);
 		}
 
-		const result = all ? _GRAPH_AXES_ALL : axes;
+		// A `configured` node pins the axes it sets, thus the graph above it
+		// no longer varies with them. This is what stops one
+		// `configured(x, {opt:"release"})` edge from forking every consumer
+		// of that edge as well: the release build below the edge is fixed,
+		// so its consumer reads no `opt` at all.
+		let result = all ? _GRAPH_AXES_ALL : axes;
+		if (record.kind === "configured" && result !== _GRAPH_AXES_ALL) {
+			result = new Set(
+				[...result].filter((axis) => !Object.hasOwn(record.data.overrides, axis)),
+			);
+		}
 		_graphAxes.set(id, result);
 		return result;
 	} finally {
@@ -1428,6 +1593,10 @@ function _graphNodeDisplay(record) {
 			return record.data.self ? "imp (self)" : `tool: ${record.data.name}`;
 		case "semantic":
 			return `semantic: ${record.data.kind}(${record.data.name ?? ""})`;
+		case "configured":
+			return `configured: ${Object.entries(record.data.overrides)
+				.map(([axis, value]) => `${axis}=${value}`)
+				.join(" ")}`;
 		default:
 			return undefined;
 	}
@@ -1737,13 +1906,14 @@ globalThis.__imp_execute_graph_handles = async function executeGraphHandles(hand
 		// Order is the only thing this changes. Each node still resolves
 		// through the same code as before, thus a node reached from inside
 		// another node finds a value instead of starting new work.
-		// Observation only for now: fill the axis closure and report it.
-		// Nothing keys off `_graphAxes` yet — this measures how much of a
-		// real graph is configuration-blind, which is what decides whether
-		// narrow memo keys are worth their complexity.
+		// Fill the axis closure before anything is dispatched. Every scoped
+		// memo key is read synchronously (see `_graphNarrowKey`), thus the
+		// closure has to be known before the first node starts. A node the
+		// pass did not see keeps the whole scope as its key, which builds it
+		// one time for each configuration — correct, only less shared.
+		const startedAt = Date.now();
+		const configs = await _graphPlanConfigs(roots.map((root) => root.handleId));
 		if (globalThis.__imp_graph_shape_probe) {
-			const startedAt = Date.now();
-			const configs = await _graphPlanConfigs(roots.map((root) => root.handleId));
 			__host_log(
 				"warn",
 				`config axes: ${configs.total} nodes — ${configs.blind} read nothing, ` +
