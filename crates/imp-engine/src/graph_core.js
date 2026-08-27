@@ -15,6 +15,9 @@ let _graphTaskInflight = new Map();
 let _graphExpansionInflight = new Map();
 let _graphInvocation = null;
 let _graphPhase = "construction";
+// True while one goal run owns the memo tables. See
+// `__imp_graph_begin_run`.
+let _graphRunActive = false;
 // packagePath() normally derives its answer from the live JS call stack,
 // which only means anything during synchronous BUILD.js evaluation. Any
 // framework that registers a callback for later invocation — task()/
@@ -1222,11 +1225,12 @@ async function _graphWithInvocation(invocation, fn) {
 	const previousTaskInflight = _graphTaskInflight;
 	const previousExpansionInflight = _graphExpansionInflight;
 	_graphInvocation = Object.freeze(invocation);
-	// EXPERIMENT (IMP_GRAPH_SHARE_INFLIGHT=1): keep what discovery already
-	// resolved. Discovery and dispatch are two phases of one run, but a new
-	// map here throws away every promise discovery made, so each shared node
-	// runs a second time.
-	if (!globalThis.__imp_graph_share_inflight) {
+	// A goal run has two phases: discovery walks the graph and resolves what
+	// `expand()` needs, then dispatch executes it. Both call this function.
+	// A new map here would throw away every promise discovery made, thus
+	// each node they share would run a second time. Inside a run, keep the
+	// tables; `__imp_graph_begin_run` already made them fresh for this run.
+	if (!_graphRunActive) {
 		_graphTaskInflight = new Map();
 		_graphExpansionInflight = new Map();
 	}
@@ -1234,10 +1238,33 @@ async function _graphWithInvocation(invocation, fn) {
 		return await fn();
 	} finally {
 		_graphInvocation = previousInvocation;
-		_graphTaskInflight = previousTaskInflight;
-		_graphExpansionInflight = previousExpansionInflight;
+		if (!_graphRunActive) {
+			_graphTaskInflight = previousTaskInflight;
+			_graphExpansionInflight = previousExpansionInflight;
+		}
 	}
 }
+
+// One goal run owns the memo tables for the whole of its discovery and
+// dispatch. More than one run can happen in one process: production runs a
+// single goal for each command, but the tests run several against one
+// workspace, and each of those must start with nothing remembered.
+//
+// `__imp_graph_begin_run` always makes the tables fresh, thus a run that
+// ends with an error cannot leave a value for the next run to find.
+globalThis.__imp_graph_begin_run = function beginRun(invocationJson) {
+	_graphInvocation = Object.freeze(JSON.parse(invocationJson));
+	_graphTaskInflight = new Map();
+	_graphExpansionInflight = new Map();
+	_graphRunActive = true;
+};
+
+globalThis.__imp_graph_end_run = function endRun() {
+	_graphRunActive = false;
+	_graphInvocation = null;
+	_graphTaskInflight = new Map();
+	_graphExpansionInflight = new Map();
+};
 
 function _graphResolveRecord(handle, record) {
 	return record.kind === "task"

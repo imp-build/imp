@@ -5008,14 +5008,6 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_log", host_log)?;
 
-    globals.set(
-        "__imp_graph_share_inflight",
-        matches!(
-            std::env::var("IMP_GRAPH_SHARE_INFLIGHT").as_deref(),
-            Ok("1") | Ok("true")
-        ),
-    )?;
-
     // Report whether the graph grew after dispatch started. See
     // `__imp_execute_graph_handles` in graph_core.js.
     globals.set(
@@ -6841,6 +6833,19 @@ pub async fn execute_goal_live_selection(
         }))
         .context("serialize goal invocation")?
     };
+    // Open the run that owns the memo tables for discovery and dispatch
+    // together. Without this, dispatch makes new tables and runs again every
+    // node that discovery already resolved.
+    {
+        let invocation = goal_invocation_json.clone();
+        live.ctx
+            .async_with(async |ctx| -> rquickjs::Result<()> {
+                let begin: Function = ctx.globals().get("__imp_graph_begin_run")?;
+                begin.call((invocation.as_str(),))
+            })
+            .await
+            .context("begin graph run")?;
+    }
     // Computed here (rather than alongside `seed_addresses` below, where it
     // used to live) so the graph-native branch of `graph_roots` can reuse
     // it: changed addresses are already statically known, so they don't
@@ -7392,6 +7397,16 @@ pub async fn execute_goal_live_selection(
     *live.selected_roots.lock().unwrap() = None;
     *live.goal_flags.lock().unwrap() = None;
     *live.run_args.lock().unwrap() = None;
+    // Close the run and drop what it remembered. This block runs for a
+    // failed goal too, because `result` is held rather than propagated, so
+    // a second run in the same process always starts with nothing.
+    let _ = live
+        .ctx
+        .async_with(async |ctx| -> rquickjs::Result<()> {
+            let end: Function = ctx.globals().get("__imp_graph_end_run")?;
+            end.call(())
+        })
+        .await;
     result
 }
 
