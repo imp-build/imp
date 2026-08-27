@@ -1020,6 +1020,76 @@ function _graphDeclaredEdges(record) {
 	}
 }
 
+// Put the graph that `rootHandleIds` reach into leaf-first waves.
+//
+// Every node in wave 0 has no dependency inside the reachable set, thus it
+// can run first. Every node in wave N has all of its dependencies in waves
+// 0 to N-1. This is what a scheduler needs to run the graph from the leaves
+// up, instead of pulling from the roots down and letting the order fall out
+// of how promises happen to resolve.
+//
+// The plan is only correct if the shape of the graph is final. Goal
+// execution discovers `expansion.get()` children before dispatch for that
+// reason (see `eager_expansion_get` in spike.rs).
+//
+// `scheduled` below is how many nodes reached a wave. It is less than
+// `total` only if a cycle holds the rest back, which the pull-based
+// executor would instead meet as a deadlock or a stack overflow.
+function _graphPlanWaves(rootHandleIds) {
+	const deps = new Map();
+	const queue = [...rootHandleIds];
+	while (queue.length > 0) {
+		const id = queue.shift();
+		if (deps.has(id)) continue;
+		const record = _graphHandles.get(id);
+		if (record === undefined) continue;
+		const edges = _graphDeclaredEdges(record).map((edge) => edge.handleId);
+		deps.set(id, edges);
+		for (const edge of edges) queue.push(edge);
+	}
+
+	// Count only the dependencies that are in the reachable set, and record
+	// the other direction so a finished node can release what waits on it.
+	const waiting = new Map();
+	const dependents = new Map();
+	for (const [id, edges] of deps) {
+		const inside = new Set(edges.filter((edge) => deps.has(edge)));
+		waiting.set(id, inside);
+		for (const edge of inside) {
+			if (!dependents.has(edge)) dependents.set(edge, []);
+			dependents.get(edge).push(id);
+		}
+	}
+
+	const waves = [];
+	let ready = [];
+	for (const [id, inside] of waiting) if (inside.size === 0) ready.push(id);
+	let scheduled = 0;
+	while (ready.length > 0) {
+		waves.push(ready);
+		scheduled += ready.length;
+		const next = [];
+		for (const id of ready) {
+			for (const dependent of dependents.get(id) || []) {
+				const inside = waiting.get(dependent);
+				inside.delete(id);
+				if (inside.size === 0) next.push(dependent);
+			}
+		}
+		ready = next;
+	}
+	return { total: deps.size, scheduled, waves };
+}
+
+globalThis.__imp_graph_plan = function graphPlan(rootHandleIdsJson) {
+	const plan = _graphPlanWaves(JSON.parse(rootHandleIdsJson));
+	return JSON.stringify({
+		total: plan.total,
+		scheduled: plan.scheduled,
+		waves: plan.waves.map((wave) => wave.length),
+	});
+};
+
 // Human label for a node in the introspection walk, reusing whatever
 // `display:` the declaring `task()`/`expand()` call already recorded rather
 // than inventing a second labelling scheme. Returns undefined for kinds with
@@ -1322,6 +1392,19 @@ function _graphShapeCounts() {
 globalThis.__imp_execute_graph_handles = async function executeGraphHandles(handleIdsJson, invocationJson) {
 	const roots = JSON.parse(handleIdsJson);
 	const before = _graphShapeCounts();
+	// Plan the graph into leaf-first waves next to the pull-based run, to
+	// show that a plan exists and covers every node, before anything is
+	// scheduled from it. A node that no wave holds means a cycle.
+	if (globalThis.__imp_graph_shape_probe) {
+		const plan = _graphPlanWaves(roots.map((root) => root.handleId));
+		const widest = plan.waves.reduce((most, wave) => Math.max(most, wave.length), 0);
+		__host_log(
+			"warn",
+			`graph plan: ${plan.scheduled}/${plan.total} nodes in ` +
+				`${plan.waves.length} waves, widest ${widest}` +
+				(plan.scheduled === plan.total ? "" : " — CYCLE, nodes unreachable by any wave"),
+		);
+	}
 	const result = await _graphWithInvocation(JSON.parse(invocationJson), () =>
 		Promise.all(roots.map(async ({ address, handleId }) => {
 			const record = _graphHandles.get(handleId);
