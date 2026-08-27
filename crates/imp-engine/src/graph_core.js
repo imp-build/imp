@@ -13,6 +13,12 @@ const _graphTasksByKey = new Map();
 const _graphExpansions = new Map();
 let _graphTaskInflight = new Map();
 let _graphExpansionInflight = new Map();
+// Resolved value for each handle, for the length of one goal run. Without
+// it, a files() node shared by N tasks globs the file system N times,
+// because resolution rebuilds the value at each use. A handle stands for
+// one value by its own definition — that is what its fingerprint means —
+// thus one resolution for each run is enough.
+let _graphValueMemo = new Map();
 let _graphInvocation = null;
 let _graphPhase = "construction";
 // True while one goal run owns the memo tables. See
@@ -463,6 +469,13 @@ function _graphLookup(value, path) {
 }
 
 async function _graphResolveHandle(id, stack = []) {
+	if (_graphValueMemo.has(id)) return _graphValueMemo.get(id);
+	const promise = _graphResolveHandleUncached(id, stack);
+	_graphValueMemo.set(id, promise);
+	return promise;
+}
+
+async function _graphResolveHandleUncached(id, stack = []) {
 	const record = _graphHandles.get(id);
 	if (record === undefined) throw _graphError(`unknown handle id ${id}`);
 	if (stack.includes(id)) throw _graphError(`dependency cycle through handle ${id}`);
@@ -1303,6 +1316,7 @@ async function _graphWithInvocation(invocation, fn) {
 	if (!_graphRunActive) {
 		_graphTaskInflight = new Map();
 		_graphExpansionInflight = new Map();
+		_graphValueMemo = new Map();
 	}
 	try {
 		return await fn();
@@ -1326,6 +1340,7 @@ globalThis.__imp_graph_begin_run = function beginRun(invocationJson) {
 	_graphInvocation = Object.freeze(JSON.parse(invocationJson));
 	_graphTaskInflight = new Map();
 	_graphExpansionInflight = new Map();
+	_graphValueMemo = new Map();
 	_graphRunActive = true;
 };
 
@@ -1334,6 +1349,7 @@ globalThis.__imp_graph_end_run = function endRun() {
 	_graphInvocation = null;
 	_graphTaskInflight = new Map();
 	_graphExpansionInflight = new Map();
+	_graphValueMemo = new Map();
 };
 
 function _graphResolveRecord(handle, record) {
