@@ -2054,12 +2054,36 @@ pub struct GraphResolution {
 /// context — so this installs `exec_root` itself rather than trusting the
 /// caller to have done it (unlike task execution proper, the caller is
 /// still expected to have already installed a scheduler).
+///
+/// `discover_expansion_get` makes the walk also run discovery for
+/// `"expansion-get"` nodes, not only `"expansion-all"` ones. Goal execution
+/// passes `true`, because it needs the shape of the graph to be final
+/// before it dispatches any action: a lazy `expansion.get()` mints its
+/// child tasks while dispatch runs, which a scheduler that plans over a
+/// fixed graph cannot accept. Introspection (`imp targets`/`imp
+/// dependencies`/`imp graph`) passes `false` to keep its cheaper behavior,
+/// because it only shows what is already addressable.
+/// Experiment switch for the graph rework. Set
+/// `IMP_EAGER_EXPANSION_GET=1` to discover `expansion.get()` children
+/// before dispatch, which makes the shape of the graph final before any
+/// action runs. It is off by default because the walk currently discovers
+/// more children than the goal needs: `imp test //crates/...` goes from 28
+/// to 38 actions and from 2.09s to 2.64s on a warm cache. Turn it on by
+/// default when that discovery is scoped to the requested goal.
+fn eager_expansion_get() -> bool {
+    matches!(
+        std::env::var("IMP_EAGER_EXPANSION_GET").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 pub async fn resolve_graph_with_expansion(
     live: &LiveWorkspace,
     workspace_root: &Path,
     workflow: Option<&str>,
     selectors: &[String],
     context: &SelectorContext,
+    discover_expansion_get: bool,
 ) -> Result<GraphResolution> {
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
     let catalog = &live.workspace.graph;
@@ -2095,7 +2119,8 @@ pub async fn resolve_graph_with_expansion(
             }
         }
     }
-    let walk = walk_graph_for_introspection(live, &static_roots, false, true).await?;
+    let walk =
+        walk_graph_for_introspection(live, &static_roots, discover_expansion_get, true).await?;
 
     let mut roots: BTreeMap<(String, String, Option<String>), GraphRoot> = BTreeMap::new();
     let mut nodes: BTreeMap<u32, GraphWalkNode> = BTreeMap::new();
@@ -2144,7 +2169,8 @@ pub async fn resolve_graph_with_expansion(
         if parent_roots.is_empty() {
             continue;
         }
-        let parent_walk = walk_graph_for_introspection(live, &parent_roots, false, true).await?;
+        let parent_walk =
+            walk_graph_for_introspection(live, &parent_roots, discover_expansion_get, true).await?;
         for node in &parent_walk.nodes {
             nodes.entry(node.id).or_insert_with(|| node.clone());
         }
@@ -4960,6 +4986,16 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_log", host_log)?;
 
+    // Report whether the graph grew after dispatch started. See
+    // `__imp_execute_graph_handles` in graph_core.js.
+    globals.set(
+        "__imp_graph_shape_probe",
+        matches!(
+            std::env::var("IMP_GRAPH_SHAPE_PROBE").as_deref(),
+            Ok("1") | Ok("true")
+        ),
+    )?;
+
     // Expose the current executable path so JS rules can invoke imp as a generator.
     if let Ok(exe) = std::env::current_exe() {
         globals.set("__imp_self_bin", exe.to_string_lossy().into_owned())?;
@@ -6787,6 +6823,7 @@ pub async fn execute_goal_live_selection(
                 Some(goal),
                 selectors,
                 selector_context,
+                eager_expansion_get(),
             )
             .await?;
             graph_unmatched.extend(resolution.unmatched);
@@ -6810,6 +6847,7 @@ pub async fn execute_goal_live_selection(
                 Some(goal),
                 &changed,
                 selector_context,
+                eager_expansion_get(),
             )
             .await?
             .roots
@@ -8319,10 +8357,11 @@ export const all = { [BUILD]: workspace.all(BUILD) };
 
         // (1) Listing: the aggregate's children are individually addressable
         // even though the BUILD.js never named them.
-        let roots = resolve_graph_with_expansion(&live, p, None, &["//:all".to_owned()], &context)
-            .await
-            .unwrap()
-            .roots;
+        let roots =
+            resolve_graph_with_expansion(&live, p, None, &["//:all".to_owned()], &context, false)
+                .await
+                .unwrap()
+                .roots;
         let mut addresses: Vec<_> = roots.iter().map(|r| r.address.clone()).collect();
         addresses.sort();
         assert_eq!(addresses, vec!["//:all", "//:all#a", "//:all#b"]);
@@ -8333,7 +8372,7 @@ export const all = { [BUILD]: workspace.all(BUILD) };
             roots: dep_roots,
             walk,
             ..
-        } = resolve_graph_with_expansion(&live, p, None, &["//:all".to_owned()], &context)
+        } = resolve_graph_with_expansion(&live, p, None, &["//:all".to_owned()], &context, false)
             .await
             .unwrap();
         let dep_roots_ref: Vec<&GraphRoot> = dep_roots.iter().collect();
@@ -8469,6 +8508,7 @@ export const b = { [BUILD]: consumer("b").outputs.value };
             None,
             &["//:a".to_owned(), "//:b".to_owned()],
             &context,
+            false,
         )
         .await
         .unwrap();
@@ -8564,7 +8604,7 @@ export const all = { [BUILD]: workspace.all(BUILD) };
         let context = SelectorContext::root();
         let selectors = ["//:all".to_owned()];
         let GraphResolution { roots, walk, .. } =
-            resolve_graph_with_expansion(&live, p, None, &selectors, &context)
+            resolve_graph_with_expansion(&live, p, None, &selectors, &context, false)
                 .await
                 .unwrap();
         // Mirrors `cmd_graph`'s own filtering: `resolve_graph_with_expansion`
@@ -8718,6 +8758,7 @@ export const b = { [BUILD]: shellTask("b").outputs.value };
             None,
             &["//:a".to_owned(), "//:b".to_owned()],
             &context,
+            false,
         )
         .await
         .unwrap();

@@ -1266,9 +1266,30 @@ export async function resolveGraphHandle(handle) {
 	return _graphWithInvocation({}, () => _graphResolveRecord(handle, record));
 }
 
+// Measure how much the graph grows after dispatch starts.
+//
+// The graph rework wants the shape of the graph to be final before any
+// action runs. Two things stop that today. `expansion.get()` children are
+// found while dispatch runs, not before it. And `expand()` runs `create()`
+// in the "expansion" phase, which task() permits to add nodes, unlike the
+// "execution" phase.
+//
+// This probe counts the nodes at the start and at the end of dispatch. A
+// count that grows shows the size of the hole for one selection. Read it
+// with `--level debug` and look for the "graph shape" line. Delete this
+// probe when the shape is final before dispatch.
+function _graphShapeCounts() {
+	return {
+		handles: _graphHandles.size,
+		tasks: _graphTasks.size,
+		expansions: _graphExpansions.size,
+	};
+}
+
 globalThis.__imp_execute_graph_handles = async function executeGraphHandles(handleIdsJson, invocationJson) {
 	const roots = JSON.parse(handleIdsJson);
-	return _graphWithInvocation(JSON.parse(invocationJson), () =>
+	const before = _graphShapeCounts();
+	const result = await _graphWithInvocation(JSON.parse(invocationJson), () =>
 		Promise.all(roots.map(async ({ address, handleId }) => {
 			const record = _graphHandles.get(handleId);
 			if (record === undefined) throw _graphError(`unknown handle id ${handleId}`);
@@ -1277,4 +1298,18 @@ globalThis.__imp_execute_graph_handles = async function executeGraphHandles(hand
 				: await _graphResolveHandle(handleId);
 			return Object.freeze({ address, result });
 		})));
+	const after = _graphShapeCounts();
+	const grew =
+		after.handles !== before.handles ||
+		after.tasks !== before.tasks ||
+		after.expansions !== before.expansions;
+	if (globalThis.__imp_graph_shape_probe)
+		__host_log(
+			"warn",
+			`graph shape ${grew ? "GREW" : "final"} during dispatch: ` +
+				`handles ${before.handles}->${after.handles} ` +
+				`tasks ${before.tasks}->${after.tasks} ` +
+				`expansions ${before.expansions}->${after.expansions}`,
+		);
+	return result;
 };
