@@ -16,8 +16,12 @@ import { statusReport } from "//rules/workflows/report";
 /** Report graph lint roots using the same result contract as legacy linters. */
 export function graphLintGoal(roots) {
 	const { fix } = goalFlags();
-	const results = roots.map(({ address, result }) => ({
-		address,
+	// One invocation can lint the same target under more than one
+	// configuration (`--profile a --profile b`); name each row by the
+	// configuration so two rows for one address stay apart. `configLabel` is
+	// null for a single-configuration invocation.
+	const results = roots.map(({ address, configLabel, result }) => ({
+		address: configLabel ? `${address} [${configLabel}]` : address,
 		...(result?.result || result),
 	}));
 	if (fix) {

@@ -6624,7 +6624,7 @@ pub async fn execute_goal_live(
             flags,
             run_args: &[],
             axis_overrides: &[],
-            profile: None,
+            profiles: &[],
         },
     )
     .await
@@ -6655,9 +6655,11 @@ pub struct GoalExecutionOptions<'a> {
     /// axes and written into the live workspace config before any target
     /// executes.
     pub axis_overrides: &'a [String],
-    /// Optional `--profile NAME`, applied after axis defaults and before
-    /// explicit axis overrides. See parametrisation.md Phase 2.
-    pub profile: Option<&'a str>,
+    /// Repeated `--profile NAME`. Empty resolves one bundle, the same
+    /// configuration a plain invocation always had. More than one name asks
+    /// for the same targets under each of those configurations in one
+    /// invocation; see `resolve_mode_axis_bundles`.
+    pub profiles: &'a [String],
 }
 
 /// Resolve `--axis KEY=VALUE` CLI overrides against the mode axes declared
@@ -6713,6 +6715,57 @@ fn validate_mode_axis_value(
         }
     }
     Ok(())
+}
+
+/// One configuration an invocation asks for. `label` is the profile that
+/// named it, and is `None` for the single unnamed bundle a plain invocation
+/// resolves.
+#[derive(Debug, Clone)]
+pub struct ModeBundle {
+    pub label: Option<String>,
+    pub axes: serde_json::Value,
+}
+
+/// Resolve every configuration this invocation asks for.
+///
+/// No `--profile` gives one bundle, identical to what `resolve_mode_axes`
+/// always returned. Each `--profile` gives one more bundle, thus one
+/// invocation is able to build the same target more than one time. `--axis`
+/// applies on top of every bundle, because it names a value for the whole
+/// invocation rather than for one of its configurations.
+///
+/// Bundle 0 is the configuration of the invocation itself: it is what
+/// `semantic.mode()` reads without a `configured()` edge, and the only one
+/// the memo path can see.
+pub fn resolve_mode_axis_bundles(
+    live: &LiveWorkspace,
+    profile_names: &[String],
+    axis_overrides: &[String],
+) -> Result<Vec<ModeBundle>> {
+    if profile_names.is_empty() {
+        return Ok(vec![ModeBundle {
+            label: None,
+            axes: resolve_mode_axes(live, None, axis_overrides)?,
+        }]);
+    }
+    let mut bundles = Vec::with_capacity(profile_names.len());
+    let mut seen = std::collections::BTreeSet::new();
+    for name in profile_names {
+        if !seen.insert(name.clone()) {
+            anyhow::bail!("--profile '{name}' is given more than one time");
+        }
+        bundles.push(ModeBundle {
+            label: Some(name.clone()),
+            axes: resolve_mode_axes(live, Some(name), axis_overrides)?,
+        });
+    }
+    // `resolve_mode_axes` writes the bundle it resolved into the workspace
+    // configuration, and the last call won. Put bundle 0 back, because that
+    // is the configuration of the invocation itself.
+    let mut hs = live.host_state.lock().unwrap();
+    hs.workspace_config
+        .insert(MODE_AXIS_NAMESPACE.to_owned(), bundles[0].axes.clone());
+    Ok(bundles)
 }
 
 pub fn resolve_mode_axes(
@@ -6846,7 +6899,7 @@ pub async fn execute_goal_live_selection(
         flags,
         run_args,
         axis_overrides,
-        profile,
+        profiles,
     } = options;
     let goal_def = live.workspace.goals.get(goal).ok_or_else(|| {
         let known: Vec<_> = live.workspace.goals.keys().map(String::as_str).collect();
@@ -6876,7 +6929,7 @@ pub async fn execute_goal_live_selection(
     *live.exec_root.lock().unwrap() = Some(workspace_root.to_owned());
     live.exec_no_cache.store(no_cache, Ordering::SeqCst);
     live.trace_inputs.store(trace_inputs, Ordering::SeqCst);
-    resolve_mode_axes(live, profile, axis_overrides)?;
+    let mode_bundles = resolve_mode_axis_bundles(live, profiles, axis_overrides)?;
     // Build the invocation this goal runs under before the graph is walked,
     // not only before dispatch. Discovery resolves `semantic.*` inputs too,
     // so it must read the same args, flags, mode, and config that dispatch
@@ -7293,9 +7346,34 @@ pub async fn execute_goal_live_selection(
         .collect();
     let selection_json = serde_json::to_string(&selection).context("serialize goal selection")?;
 
+    // One root for each (target, configuration) pair. `config` is the diff
+    // against bundle 0, thus bundle 0 sends `{}` and behaves exactly as it
+    // did before more than one bundle was possible. The diff becomes the
+    // scope overlay in graph_core.js, which is the same machinery a
+    // `configured()` edge uses — a root asking for a configuration and an
+    // edge asking for one are the same thing to the graph.
+    let base_axes = mode_bundles[0].axes.clone();
+    let base_axes = &base_axes;
     let graph_handle_ids: Vec<serde_json::Value> = graph_roots
         .iter()
-        .map(|root| serde_json::json!({ "address": root.address, "handleId": root.handle_id }))
+        .flat_map(|root| {
+            mode_bundles.iter().map(move |bundle| {
+                let mut config = serde_json::Map::new();
+                if let (Some(axes), Some(base)) = (bundle.axes.as_object(), base_axes.as_object()) {
+                    for (axis, value) in axes {
+                        if base.get(axis) != Some(value) {
+                            config.insert(axis.clone(), value.clone());
+                        }
+                    }
+                }
+                serde_json::json!({
+                    "address": root.address,
+                    "handleId": root.handle_id,
+                    "config": config,
+                    "configLabel": bundle.label,
+                })
+            })
+        })
         .collect();
     let graph_handles_json =
         serde_json::to_string(&graph_handle_ids).context("serialize graph root handles")?;
@@ -9503,7 +9581,7 @@ export const answer = { [BUILD]: root };
             .unwrap();
         assert_eq!(
             result,
-            r#"[{"address":"//:answer","result":{"value":{"answer":42}}}]"#
+            r#"[{"address":"//:answer","configLabel":null,"result":{"value":{"answer":42}}}]"#
         );
     }
 
@@ -10344,7 +10422,7 @@ export default { [VERIFY]: verify };
                 flags: serde_json::json!({ "fix": true }),
                 run_args: &args,
                 axis_overrides: &axes,
-                profile: None,
+                profiles: &[],
             },
         )
         .await
@@ -10388,7 +10466,7 @@ export default { [VERIFY]: verify };
                 flags: serde_json::json!({}),
                 run_args: &[],
                 axis_overrides,
-                profile: None,
+                profiles: &[],
             },
         )
         .await
@@ -10502,6 +10580,89 @@ export default { [BUILD]: app };
             result,
             r#"{"ambient":"release","release":"release","nested":"release","shared":"shared","runs":["leaf:release","shared"]}"#
         );
+    }
+
+    /// Two `--profile` names build the same root two times, once under each
+    /// configuration, and the node that reads no axis is still built one
+    /// time for both.
+    #[tokio::test]
+    async fn two_profiles_build_one_root_under_each_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis, defineProfile } from "imp:core";
+defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
+defineProfile("default", { opt: "debug" });
+defineProfile("release", { opt: "release" });
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { goal, output, semantic, task } from "imp:core";
+const BUILD = goal("build");
+globalThis.runs = [];
+
+const shared = task({
+    display: "shared",
+    outputs: { seen: output.value() },
+    run() {
+        globalThis.runs.push("shared");
+        return { seen: "shared" };
+    },
+});
+
+const app = task({
+    display: "app",
+    inputs: { opt: semantic.mode("opt"), shared: shared.outputs.seen },
+    run(_exec, input) {
+        globalThis.runs.push(`app:${input.opt}`);
+    },
+});
+
+export default { [BUILD]: app };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        *live.scheduler.lock().unwrap() = Some(imp_scheduler::Scheduler::new(
+            1,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        ));
+        let selectors = ["//".to_owned()];
+        let profiles = ["default".to_owned(), "release".to_owned()];
+        execute_goal_live_selection(
+            &live,
+            p,
+            &SelectorContext::root(),
+            "build",
+            GoalSelection::Selectors(&selectors),
+            GoalExecutionOptions {
+                no_cache: false,
+                trace_inputs: false,
+                js_workers: 1,
+                flags: serde_json::json!({}),
+                run_args: &[],
+                axis_overrides: &[],
+                profiles: &profiles,
+            },
+        )
+        .await
+        .unwrap();
+        let runs = live
+            .ctx
+            .async_with(async |ctx| -> rquickjs::Result<String> {
+                let stringify: Function = ctx.eval("JSON.stringify")?;
+                let value: Value = ctx.eval("globalThis.runs.slice().sort()")?;
+                stringify.call((value,))
+            })
+            .await
+            .unwrap();
+        assert_eq!(runs, r#"["app:debug","app:release","shared"]"#);
     }
 
     /// An axis no `defineModeAxis` declared is a mistake in the BUILD file,
@@ -11687,7 +11848,7 @@ export const run = product(K_run_args, RUN, toolName("run-args-test-tool"), asyn
                 flags: serde_json::json!({}),
                 run_args: &run_args,
                 axis_overrides: &[],
-                profile: None,
+                profiles: &[],
             },
         )
         .await
@@ -14061,7 +14222,7 @@ export const build = product(K_trace_input_test, BUILD, toolName("trace-input-te
                 flags: serde_json::json!({}),
                 run_args: &[],
                 axis_overrides: &[],
-                profile: None,
+                profiles: &[],
             },
         )
         .await
@@ -14334,6 +14495,7 @@ configure("cache_test_unread", {{ mode: {mode} }});
             tx,
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
+        let profiles: Vec<String> = profile.into_iter().map(str::to_owned).collect();
         execute_goal_live_selection(
             &live,
             p,
@@ -14347,7 +14509,7 @@ configure("cache_test_unread", {{ mode: {mode} }});
                 flags: serde_json::json!({}),
                 run_args: &[],
                 axis_overrides,
-                profile,
+                profiles: &profiles,
             },
         )
         .await
@@ -15275,7 +15437,7 @@ goal("selectorless-changed", () => {
                 flags: serde_json::json!({}),
                 run_args: &[],
                 axis_overrides: &[],
-                profile: None,
+                profiles: &[],
             },
         )
         .await

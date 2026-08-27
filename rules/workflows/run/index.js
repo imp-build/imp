@@ -78,7 +78,11 @@ function templateFor(address, result) {
 
 export async function graphRunGoal(roots) {
 	if (roots.length !== 1) {
-		throw goalError(`run requires a single target, got ${roots.length}: ${roots.map((root) => root.address).join(", ")}`);
+		throw goalError(
+			`run requires a single target, got ${roots.length}: ${roots
+				.map((root) => (root.configLabel ? `${root.address} [${root.configLabel}]` : root.address))
+				.join(", ")}`,
+		);
 	}
 	const { address, result } = roots[0];
 	// A graph-native run root may already have executed its program as an
