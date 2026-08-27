@@ -1464,6 +1464,10 @@ async fn cmd_execute_live_impl(
         let mut task_log_levels: std::collections::HashMap<u64, TaskLogLevel> =
             std::collections::HashMap::new();
         let wall_start = std::time::Instant::now();
+        let trace_actions = matches!(
+            std::env::var("IMP_TRACE_ACTIONS").as_deref(),
+            Ok("1") | Ok("true")
+        );
         let mut cached_count: usize = 0;
         let mut cached_local_count: usize = 0;
         let mut cached_remote_count: usize = 0;
@@ -1534,6 +1538,21 @@ async fn cmd_execute_live_impl(
                         .unwrap_or_else(|| format!("task {id}"));
                     let elapsed = started_at.remove(&id);
                     let log_level = task_log_levels.remove(&id).unwrap_or(TaskLogLevel::Info);
+                    // Name every action that ran, so two runs can be
+                    // compared. The live progress view only shows this on a
+                    // terminal, which makes a captured run impossible to
+                    // compare. Set `IMP_TRACE_ACTIONS=1` to get one line per
+                    // action on stderr.
+                    if trace_actions {
+                        eprintln!(
+                            "[action] {}{label}",
+                            match cached {
+                                Some(true) => "cached ",
+                                Some(false) => "fresh  ",
+                                None => "js     ",
+                            }
+                        );
+                    }
                     match &outcome {
                         TaskOutcome::Ok => {
                             let tag = match cached {

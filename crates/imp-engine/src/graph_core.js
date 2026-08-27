@@ -1222,8 +1222,14 @@ async function _graphWithInvocation(invocation, fn) {
 	const previousTaskInflight = _graphTaskInflight;
 	const previousExpansionInflight = _graphExpansionInflight;
 	_graphInvocation = Object.freeze(invocation);
-	_graphTaskInflight = new Map();
-	_graphExpansionInflight = new Map();
+	// EXPERIMENT (IMP_GRAPH_SHARE_INFLIGHT=1): keep what discovery already
+	// resolved. Discovery and dispatch are two phases of one run, but a new
+	// map here throws away every promise discovery made, so each shared node
+	// runs a second time.
+	if (!globalThis.__imp_graph_share_inflight) {
+		_graphTaskInflight = new Map();
+		_graphExpansionInflight = new Map();
+	}
 	try {
 		return await fn();
 	} finally {

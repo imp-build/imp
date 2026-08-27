@@ -4986,6 +4986,14 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_log", host_log)?;
 
+    globals.set(
+        "__imp_graph_share_inflight",
+        matches!(
+            std::env::var("IMP_GRAPH_SHARE_INFLIGHT").as_deref(),
+            Ok("1") | Ok("true")
+        ),
+    )?;
+
     // Report whether the graph grew after dispatch started. See
     // `__imp_execute_graph_handles` in graph_core.js.
     globals.set(
