@@ -23,16 +23,8 @@ import { statusReport } from "//rules/workflows/report";
 
 /** Aggregate every selected [TEST] root's execution-unit results and report once. */
 export function graphTestGoal(roots) {
-	// Group by address *and* configuration: one invocation can build the
-	// same target under more than one configuration (`--profile a --profile
-	// b`), and two runs of one unit under two configurations are two
-	// results, not one repeated. `configLabel` is null when the invocation
-	// asked for only one configuration, thus the key is the address alone.
-	const units = roots.flatMap(({ address, configLabel, result }) =>
-		(result || []).map((unit) => ({
-			...unit,
-			address: configLabel ? `${address} [${configLabel}]` : address,
-		})),
+	const units = roots.flatMap(({ address, result }) =>
+		(result || []).map((unit) => ({ ...unit, address })),
 	);
 	// Returned (on an all-passing run) or thrown as the goalError message (on
 	// any failure) rather than logged: the live progress UI's logger suspends

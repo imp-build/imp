@@ -284,11 +284,9 @@ struct GoalArgs {
     /// (repeatable). See defineModeAxis/modeAxis in the JS rule API.
     #[arg(long = "axis", value_name = "KEY=VALUE")]
     axis: Vec<String>,
-    /// Select a named bundle of mode-axis defaults for this invocation
-    /// (repeatable). More than one name builds the selected targets one time
-    /// for each of those configurations.
+    /// Select a named bundle of mode-axis defaults for this invocation.
     #[arg(long, value_name = "NAME")]
-    profile: Vec<String>,
+    profile: Option<String>,
 }
 
 /// Opaque capture of a goal subcommand's argv tail. Goal-declared flags (e.g.
@@ -1260,12 +1258,7 @@ async fn cmd_execute_live_impl(
     // Label trace roots include the resolved mode in their invocation key.
     // Resolve it before changed selection, then execute_goal_live_selection
     // applies the same deterministic resolution again before dispatch.
-    // Changed-target detection keys its label trace on one configuration.
-    // It sees bundle 0 — the configuration of the invocation itself. The
-    // memo/label path is being retired and does not build more than one
-    // configuration; a second --profile changes only the graph-native roots.
-    let mode_bundles = spike::resolve_mode_axis_bundles(&workspace, &profile, &axis)?;
-    let resolved_mode = mode_bundles[0].axes.clone();
+    let resolved_mode = spike::resolve_mode_axes(&workspace, profile.as_deref(), &axis)?;
     let label_context = imp_engine::trace_changed::LabelChangeContext {
         goal: goal_name,
         flags: &goal_flags,
@@ -1753,7 +1746,7 @@ async fn cmd_execute_live_impl(
                         flags: goal_flags.clone(),
                         run_args: &run_args,
                         axis_overrides: &axis,
-                        profiles: &profile,
+                        profile: profile.as_deref(),
                     },
                 )
                 .await
@@ -2573,28 +2566,8 @@ mod tests {
         let matches = parse_goal_args("build", &Default::default(), &raw);
         let args = GoalArgs::from_arg_matches(&matches).unwrap();
 
-        assert_eq!(args.profile, vec!["windows-release".to_owned()]);
+        assert_eq!(args.profile.as_deref(), Some("windows-release"));
         assert_eq!(args.axis, vec!["opt=debug".to_owned()]);
-    }
-
-    /// `--profile` is repeatable: one invocation can ask for the same
-    /// targets under more than one configuration.
-    #[test]
-    fn parse_goal_args_reads_repeated_profiles() {
-        let raw = vec![
-            "--profile".to_owned(),
-            "default".to_owned(),
-            "--profile".to_owned(),
-            "release".to_owned(),
-            "//:pkg".to_owned(),
-        ];
-        let matches = parse_goal_args("build", &Default::default(), &raw);
-        let args = GoalArgs::from_arg_matches(&matches).unwrap();
-
-        assert_eq!(
-            args.profile,
-            vec!["default".to_owned(), "release".to_owned()]
-        );
     }
 
     #[test]

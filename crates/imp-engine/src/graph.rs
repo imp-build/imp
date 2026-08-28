@@ -28,17 +28,6 @@ impl GraphRoot {
             None => format!("{}#{}", self.address, self.workflow),
         }
     }
-
-    /// The same name, plus the configuration it was built under. An
-    /// invocation that asks for only one configuration prints no suffix, so
-    /// this reads exactly like `display()` until a second `--profile` makes
-    /// the difference worth showing.
-    pub fn display_with_config(&self, config_label: Option<&str>) -> String {
-        match config_label {
-            Some(label) => format!("{} [{label}]", self.display()),
-            None => self.display(),
-        }
-    }
 }
 
 /// Which of #26's introspection views `imp graph` (#93) is rendering. Kept

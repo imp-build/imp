@@ -371,19 +371,6 @@ export function files(opts = {}) {
 	return _graphMemoizedHandle(fingerprint, () => _graphHandle("files", spec, fingerprint));
 }
 
-// The scope one root resolves under. `config` is the diff the host computed
-// against the configuration of the invocation, thus an absent or empty diff
-// is the root scope every single-configuration invocation has always used.
-function _graphRootScopeFor(config) {
-	if (config === undefined || config === null) return _GRAPH_ROOT_SCOPE;
-	const names = Object.keys(config);
-	if (names.length === 0) return _GRAPH_ROOT_SCOPE;
-	const overlay = {};
-	for (const name of names.sort()) overlay[name] = config[name];
-	const frozen = Object.freeze(overlay);
-	return Object.freeze({ overlay: frozen, key: _graphScopeKey(frozen) });
-}
-
 // Merge an overlay into a scope. The new values win, and the axes the outer
 // scope set and this overlay does not touch stay in force — that is what
 // makes the configuration flow along the edge instead of being replaced at
@@ -1318,10 +1305,10 @@ function _graphDeclaredEdges(record) {
 // handle that reads no axis the two edges change is one shared node. The
 // scoped key from `_graphHandleMemoKey` is what decides which of the two it
 // is, thus the queue and the memo tables always agree.
-function _graphReachable(rootEntries) {
+function _graphReachable(rootHandleIds, cfg) {
 	const deps = new Map();
 	const nodes = new Map();
-	const queue = rootEntries.map(({ handleId, cfg }) => ({ id: handleId, cfg }));
+	const queue = rootHandleIds.map((id) => ({ id, cfg }));
 	while (queue.length > 0) {
 		const { id, cfg: scope } = queue.shift();
 		const key = _graphHandleMemoKey(id, scope);
@@ -1361,9 +1348,7 @@ function _graphReachable(rootEntries) {
 }
 
 function _graphPlanWaves(rootHandleIds) {
-	const { total, waiting, dependents } = _graphReachable(
-		rootHandleIds.map((handleId) => ({ handleId, cfg: _GRAPH_ROOT_SCOPE })),
-	);
+	const { total, waiting, dependents } = _graphReachable(rootHandleIds, _GRAPH_ROOT_SCOPE);
 	const waves = [];
 	let ready = [];
 	for (const [id, inside] of waiting) if (inside.size === 0) ready.push(id);
@@ -1397,9 +1382,9 @@ function _graphPlanWaves(rootHandleIds) {
 // The queue keeps the good property of the waves: every node is started
 // here exactly one time, by the node that releases it, thus the graph
 // itself decides the order.
-async function _graphRunReadyQueue(rootEntries) {
+async function _graphRunReadyQueue(rootHandleIds, cfg) {
 	const buildStartedAt = Date.now();
-	const { total, waiting, dependents, nodes } = _graphReachable(rootEntries);
+	const { total, waiting, dependents, nodes } = _graphReachable(rootHandleIds, cfg);
 	const buildMs = Date.now() - buildStartedAt;
 	const running = [];
 	const started = new Set();
@@ -1939,11 +1924,9 @@ globalThis.__imp_execute_graph_handles = async function executeGraphHandles(hand
 		if (globalThis.__imp_graph_wave_execution) {
 			const startedAt = Date.now();
 			const built = await _graphRunReadyQueue(
-				roots.map((root) => ({
-					handleId: root.handleId,
-					cfg: _graphRootScopeFor(root.config),
-				})),
-			);
+			roots.map((root) => root.handleId),
+			_GRAPH_ROOT_SCOPE,
+		);
 			if (globalThis.__imp_graph_shape_probe)
 				__host_log(
 					"warn",
@@ -1951,19 +1934,13 @@ globalThis.__imp_execute_graph_handles = async function executeGraphHandles(hand
 						`drain ${Date.now() - startedAt - built.buildMs}ms`,
 				);
 		}
-		return Promise.all(roots.map(async ({ address, handleId, configLabel = null, config }) => {
+		return Promise.all(roots.map(async ({ address, handleId }) => {
 			const record = _graphHandles.get(handleId);
 			if (record === undefined) throw _graphError(`unknown handle id ${handleId}`);
-			// A root asking for a configuration and a `configured()` edge
-			// asking for one are the same thing to the graph: both are a
-			// scope overlay. `config` is the diff against the configuration
-			// of the invocation, thus the ordinary root sends `{}` and
-			// resolves at root scope.
-			const cfg = _graphRootScopeFor(config);
 			const result = record.kind === "task"
-				? await _graphExecuteTask(record.data.taskId, cfg, [])
-				: await _graphResolveHandle(handleId, cfg);
-			return Object.freeze({ address, configLabel, result });
+				? await _graphExecuteTask(record.data.taskId, _GRAPH_ROOT_SCOPE, [])
+				: await _graphResolveHandle(handleId, _GRAPH_ROOT_SCOPE);
+			return Object.freeze({ address, result });
 		}));
 	});
 	const after = _graphShapeCounts();
