@@ -1,5 +1,5 @@
 import { describe, expect, test } from "//rules/imp/test";
-import { output, resolveGraphHandle, semantic, task } from "imp:core";
+import { files, output, resolveGraphHandle, semantic, task } from "imp:core";
 
 // A shared helper that builds several different actions from one task() call
 // site, telling them apart with a closure-captured flag — the shape every
@@ -143,5 +143,29 @@ describe("nested graph resolution", () => {
 			message = String(error.message || error);
 		}
 		expect(message).toContain("expects a graph handle");
+	});
+
+	// files() builds a handle now and resolves it much later, so options
+	// glob() would reject used to produce a handle that threw only if
+	// something reached it — and stayed silent if nothing did. The positional
+	// form is the common way in.
+	test("files() rejects options with no include patterns", () => {
+		let message = "";
+		try {
+			files({ root: "rules/imp" });
+		} catch (error) {
+			message = String(error.message || error);
+		}
+		expect(message).toContain("requires include glob patterns");
+	});
+
+	test("files() rejects a bare list of patterns", () => {
+		let message = "";
+		try {
+			files(["rules/imp/*.js"]);
+		} catch (error) {
+			message = String(error.message || error);
+		}
+		expect(message).toContain("not a list of patterns");
 	});
 });

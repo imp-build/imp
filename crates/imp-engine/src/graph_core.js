@@ -366,6 +366,21 @@ export function file(path) {
  * @returns {object} A semantic source-set handle.
  */
 export function files(opts = {}) {
+	// Checked here rather than left to glob(): a handle is built now and
+	// resolved much later, so an options object glob() would reject produces a
+	// handle that throws only if something ever resolves it. A handle nothing
+	// reaches — an unused declaration, or a dep of a shape a rule ignores —
+	// then stays broken and silent. The positional form `files(["*.odin"])` is
+	// the common way in: the array carries no `include`, so it builds a source
+	// set that matches nothing.
+	if (!opts || typeof opts !== "object" || !Array.isArray(opts.include)) {
+		throw _graphError(
+			"files({ root?, include, exclude? }) requires include glob patterns" +
+				(Array.isArray(opts)
+					? " — files() takes an options object, not a list of patterns"
+					: ""),
+		);
+	}
 	const spec = _graphJson(opts, "files(options)");
 	const fingerprint = `files:${_graphCanonical(spec)}`;
 	return _graphMemoizedHandle(fingerprint, () => _graphHandle("files", spec, fingerprint));
