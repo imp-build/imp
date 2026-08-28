@@ -1478,6 +1478,18 @@ async fn cmd_execute_live_impl(
 
         loop {
             let event = tokio::select! {
+                // Drain the event channel before the shutdown signal is
+                // honored. `select!` polls its branches in a random order
+                // unless told otherwise, and goal execution sends the
+                // shutdown signal while `Done` events can still be in the
+                // channel — so on the runs where the random order put the
+                // shutdown branch first, the loop stopped and dropped every
+                // buffered event. That lost actions from the `--trace`
+                // output and from the `sandboxes:` count, more often the
+                // more actions finished together, while the build itself
+                // was unaffected. `biased` makes the shutdown branch win
+                // only when no event is waiting.
+                biased;
                 ev = events.recv() => match ev {
                     Some(ev) => ev,
                     None => break,
