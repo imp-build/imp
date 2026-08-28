@@ -72,8 +72,23 @@ def imp_binary() -> Path:
 
 
 def render(selector: str, show_plumbing: bool) -> str:
-    """Run `imp graph` and return the diagram text."""
-    argv = [str(imp_binary()), "graph", selector, "--expand-children"]
+    """Run `imp graph` and return the diagram text.
+
+    Uses the `execution` view, not the default `planning` one. `planning`
+    keeps each `expansion.get()` node as one box, which left the part of the
+    graph that goal execution really dispatches over — the odin build task
+    and its toolchains, each Rust crate — out of every golden. The `opt` mode
+    axis that the build task reads is in that part, thus a change to the
+    configuration of a build was invisible here.
+    """
+    argv = [
+        str(imp_binary()),
+        "graph",
+        selector,
+        "--view",
+        "execution",
+        "--expand-children",
+    ]
     if show_plumbing:
         argv.append("--show-plumbing")
     result = subprocess.run(

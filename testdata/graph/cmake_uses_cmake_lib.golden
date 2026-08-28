@@ -3,23 +3,25 @@
 # `xN` is the number of separate nodes that have that fingerprint.
 # Write this file again with: ci/graph_golden.py --update
 
-nodes 35  unique 33  edges 56
+nodes 40  unique 38  edges 66
 
 [nodes]
 066a0c60911b  x1  node  tool: tar
+09c8cd99e750  x1  node  rules/c/cmake/example/hello.h
 0d4dfe53cd06  x1  node  tool: sha256sum
 10319b4025dd  x1  node  install gcc 2025.08-1 (linux/x86_64)
-1119dfa46b9e  x1  node  expand cmake project rules/c/cmake/example
 194a9f765fc7  x1  node  cmake scan rules/c/cmake/example · manifest
+224d30dd80bb  x1  node  cmake build rules/c/cmake/example [libhello_cmake.so] · file0
 24631880e3cd  x1  node  tool: gzip
+298564ccf2d2  x1  root  //rules/c/cmake/example:uses_cmake_lib (build, package)
 2bfe12b52796  x1  node  tool: curl
-2c54f8acd39b  x1  node  cc link rules/c/cmake/example
-2f59c16bc344  x1  root  //rules/c/cmake/example:uses_cmake_lib (build, package)
 2f878c6fcc67  x1  node  tool: sed
 31dfe434f00b  x1  node  tool: mkdir
+397e60ea22be  x1  node  expand cmake project rules/c/cmake/example
 3e641d34d089  x1  node  download gcc 2025.08-1 (linux/x86_64)
 3e9b8ff1844a  x1  node  cmake configure rules/c/cmake/example
 40b99ab4055b  x1  node  tool: sh
+4a2f8809c308  x1  node  rules/c/cmake/example/hello.c
 5af81ea1e0f2  x1  node  tool
 5f6962dee509  x1  node  tool: chmod
 66cb1faa9496  x1  node  download cmake 3.31.0 (linux/x86_64) · artifact
@@ -30,12 +32,15 @@ nodes 35  unique 33  edges 56
 8fd9e8bc2582  x1  node  tool
 9583b773a11c  x1  node  install gcc 2025.08-1 (linux/x86_64) · directory
 96c553005ad7  x1  node  download gcc 2025.08-1 (linux/x86_64) · artifact
+9d4bc9454f43  x1  node  cc link rules/c/cmake/example
+9f8c1c65dec2  x1  node  cmake build rules/c/cmake/example [libhello_cmake.so]
 a70749432774  x1  node  cmake configure rules/c/cmake/example · ninjaGraph
 a93bb6b958d6  x3  node  files(rules/c/cmake/example)
 a9f457ab0201  x1  node  tool: dirname
 d378819ad598  x1  node  semantic: mode(opt)
 d6dd38e14975  x1  node  install cmake 3.31.0 (linux/x86_64) · directory
 e5e1a4f99e12  x1  node  tool: ninja
+ee090c073586  x1  node  tool: cp
 eeb577b057a1  x1  node  download cmake 3.31.0 (linux/x86_64)
 f2791ebbe117  x1  node  cmake configure rules/c/cmake/example · sourcePaths
 f694867158ec  x1  node  tool: wc
@@ -47,18 +52,13 @@ f694867158ec  x1  node  tool: wc
 10319b4025dd  -shell->  40b99ab4055b
 10319b4025dd  -tar->  066a0c60911b
 10319b4025dd  -xz->  86018cb4fe8d
-1119dfa46b9e  -compilerManifest->  194a9f765fc7
-1119dfa46b9e  -ninjaGraph->  a70749432774
-1119dfa46b9e  -sourcePaths->  f2791ebbe117
 194a9f765fc7  -task->  8784ed7bf842
-2c54f8acd39b  -archive0->  1119dfa46b9e
-2c54f8acd39b  -ccTool->  5af81ea1e0f2
-2c54f8acd39b  -dirname->  a9f457ab0201
-2c54f8acd39b  -hdrs->  a93bb6b958d6
-2c54f8acd39b  -mkdir->  31dfe434f00b
-2c54f8acd39b  -optMode->  d378819ad598
-2c54f8acd39b  -srcs->  a93bb6b958d6
-2f59c16bc344  -task->  2c54f8acd39b
+224d30dd80bb  -task->  9f8c1c65dec2
+298564ccf2d2  -task->  9d4bc9454f43
+397e60ea22be  -#hello_cmake->  224d30dd80bb
+397e60ea22be  -compilerManifest->  194a9f765fc7
+397e60ea22be  -ninjaGraph->  a70749432774
+397e60ea22be  -sourcePaths->  f2791ebbe117
 3e641d34d089  -tool0->  40b99ab4055b
 3e641d34d089  -tool1->  2bfe12b52796
 3e641d34d089  -tool2->  31dfe434f00b
@@ -88,6 +88,21 @@ f694867158ec  x1  node  tool: wc
 8fd9e8bc2582  -artifact->  d6dd38e14975
 9583b773a11c  -task->  10319b4025dd
 96c553005ad7  -task->  3e641d34d089
+9d4bc9454f43  -archive0->  397e60ea22be
+9d4bc9454f43  -ccTool->  5af81ea1e0f2
+9d4bc9454f43  -dirname->  a9f457ab0201
+9d4bc9454f43  -hdrs->  a93bb6b958d6
+9d4bc9454f43  -mkdir->  31dfe434f00b
+9d4bc9454f43  -optMode->  d378819ad598
+9d4bc9454f43  -srcs->  a93bb6b958d6
+9f8c1c65dec2  -ccTool->  5af81ea1e0f2
+9f8c1c65dec2  -configureDirectory->  68adc9bfc06e
+9f8c1c65dec2  -cp->  ee090c073586
+9f8c1c65dec2  -dirname->  a9f457ab0201
+9f8c1c65dec2  -header0->  09c8cd99e750
+9f8c1c65dec2  -mkdir->  31dfe434f00b
+9f8c1c65dec2  -source0->  4a2f8809c308
+9f8c1c65dec2  -srcs->  a93bb6b958d6
 a70749432774  -task->  3e9b8ff1844a
 d6dd38e14975  -task->  8e076df323c5
 eeb577b057a1  -tool0->  40b99ab4055b

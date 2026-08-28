@@ -3,49 +3,128 @@
 # `xN` is the number of separate nodes that have that fingerprint.
 # Write this file again with: ci/graph_golden.py --update
 
-nodes 20  unique 20  edges 24
+nodes 44  unique 44  edges 79
 
 [nodes]
+066a0c60911b  x1  node  tool: tar
 0d4dfe53cd06  x1  node  tool: sha256sum
+0e72dce48207  x1  node  install mold 2.41.0 (linux/x86_64) · directory
+10319b4025dd  x1  node  install gcc 2025.08-1 (linux/x86_64)
 108e3eea80bc  x1  node  tool: unzip
+205de70bf723  x1  node  odin check -vet rules/odin/example
+24631880e3cd  x1  node  tool: gzip
 25aa7494515e  x1  node  install odinfmt dev-2026-03 (linux/x86_64)
+2af5c2e6969c  x1  node  download mold 2.41.0 (linux/x86_64)
 2bfe12b52796  x1  node  tool: curl
 2fb4552c69c4  x1  node  semantic: config(odin)
 31dfe434f00b  x1  node  tool: mkdir
+3205e821427a  x1  node  odin build rules/odin/example · artifact
 3511543c6b08  x1  node  semantic: flag(check)
 36c56ab56640  x1  node  install odinfmt dev-2026-03 (linux/x86_64) · directory
+3e641d34d089  x1  node  download gcc 2025.08-1 (linux/x86_64)
 40b99ab4055b  x1  node  tool: sh
+411bec82a39f  x1  node  tool
+5354144a2fac  x1  node  install odin dev-2026-03 (linux/x86_64)
+5af81ea1e0f2  x1  node  tool
 5d9914dd5a53  x1  node  tool
+5f39b7672ad0  x1  node  odin build rules/odin/example
+5f6962dee509  x1  node  tool: chmod
+68d94cba7eba  x1  node  download mold 2.41.0 (linux/x86_64) · artifact
+6b596ff5865b  x1  node  install mold 2.41.0 (linux/x86_64)
+6cc4151359ec  x1  node  download odin dev-2026-03 (linux/x86_64)
 74e535d41119  x1  node  odinfmt.json
 78478503f167  x1  node  files(rules/odin/example)
+86018cb4fe8d  x1  node  tool: xz
 86315e37fce0  x1  node  odinfmt rules/odin/example
+9583b773a11c  x1  node  install gcc 2025.08-1 (linux/x86_64) · directory
+96c553005ad7  x1  node  download gcc 2025.08-1 (linux/x86_64) · artifact
 a77e697d1e89  x1  node  vscode metadata rules/odin/example
 a9f457ab0201  x1  node  tool: dirname
-d23b0747e6d2  x1  root  //rules/odin/example:hello (build, fmt, lint, package, run, vs)
+c53bbc3af02c  x1  node  download odin dev-2026-03 (linux/x86_64) · artifact
+cf6b17ad183e  x1  node  install odin dev-2026-03 (linux/x86_64) · directory
+d378819ad598  x1  node  semantic: mode(opt)
+d7bf225b8996  x1  node  tool
+dec1174de8b9  x1  root  //rules/odin/example:hello (build, fmt, lint, package, run, vs)
 e826c9f31e56  x1  node  download odinfmt dev-2026-03 (linux/x86_64) · artifact
 f694867158ec  x1  node  tool: wc
+fa8c4236b768  x1  node  odin check -vet rules/odin/example · result
 fc01ce87f908  x1  node  download odinfmt dev-2026-03 (linux/x86_64)
 feceb6f76684  x1  node  tool: mv
 
 [edges]
+0e72dce48207  -task->  6b596ff5865b
+10319b4025dd  -archive->  96c553005ad7
+10319b4025dd  -chmod->  5f6962dee509
+10319b4025dd  -mkdir->  31dfe434f00b
+10319b4025dd  -shell->  40b99ab4055b
+10319b4025dd  -tar->  066a0c60911b
+10319b4025dd  -xz->  86018cb4fe8d
+205de70bf723  -gcc->  5af81ea1e0f2
+205de70bf723  -moldTool->  411bec82a39f
+205de70bf723  -odin->  d7bf225b8996
+205de70bf723  -sources->  78478503f167
 25aa7494515e  -archive->  e826c9f31e56
 25aa7494515e  -tool0->  40b99ab4055b
 25aa7494515e  -tool1->  31dfe434f00b
 25aa7494515e  -tool2->  108e3eea80bc
 25aa7494515e  -tool3->  feceb6f76684
+2af5c2e6969c  -tool0->  40b99ab4055b
+2af5c2e6969c  -tool1->  2bfe12b52796
+2af5c2e6969c  -tool2->  31dfe434f00b
+2af5c2e6969c  -tool3->  a9f457ab0201
+2af5c2e6969c  -tool4->  f694867158ec
+2af5c2e6969c  -tool5->  0d4dfe53cd06
+3205e821427a  -task->  5f39b7672ad0
 36c56ab56640  -task->  25aa7494515e
+3e641d34d089  -tool0->  40b99ab4055b
+3e641d34d089  -tool1->  2bfe12b52796
+3e641d34d089  -tool2->  31dfe434f00b
+3e641d34d089  -tool3->  a9f457ab0201
+3e641d34d089  -tool4->  f694867158ec
+3e641d34d089  -tool5->  0d4dfe53cd06
+411bec82a39f  -artifact->  0e72dce48207
+5354144a2fac  -archive->  c53bbc3af02c
+5354144a2fac  -tool0->  40b99ab4055b
+5354144a2fac  -tool1->  31dfe434f00b
+5354144a2fac  -tool2->  066a0c60911b
+5354144a2fac  -tool3->  24631880e3cd
+5af81ea1e0f2  -artifact->  9583b773a11c
 5d9914dd5a53  -artifact->  36c56ab56640
+5f39b7672ad0  -gcc->  5af81ea1e0f2
+5f39b7672ad0  -moldTool->  411bec82a39f
+5f39b7672ad0  -odin->  d7bf225b8996
+5f39b7672ad0  -opt->  d378819ad598
+5f39b7672ad0  -sources->  78478503f167
+68d94cba7eba  -task->  2af5c2e6969c
+6b596ff5865b  -archive->  68d94cba7eba
+6b596ff5865b  -gzip->  24631880e3cd
+6b596ff5865b  -mkdir->  31dfe434f00b
+6b596ff5865b  -tar->  066a0c60911b
+6cc4151359ec  -tool0->  40b99ab4055b
+6cc4151359ec  -tool1->  2bfe12b52796
+6cc4151359ec  -tool2->  31dfe434f00b
+6cc4151359ec  -tool3->  a9f457ab0201
+6cc4151359ec  -tool4->  f694867158ec
+6cc4151359ec  -tool5->  0d4dfe53cd06
 86315e37fce0  -check->  3511543c6b08
 86315e37fce0  -config->  74e535d41119
 86315e37fce0  -formatter->  5d9914dd5a53
 86315e37fce0  -shell->  40b99ab4055b
 86315e37fce0  -sources->  78478503f167
+9583b773a11c  -task->  10319b4025dd
+96c553005ad7  -task->  3e641d34d089
 a77e697d1e89  -sources->  78478503f167
-d23b0747e6d2  -config->  2fb4552c69c4
-d23b0747e6d2  -sources->  78478503f167
-d23b0747e6d2  -task->  86315e37fce0
-d23b0747e6d2  -task->  a77e697d1e89
+c53bbc3af02c  -task->  6cc4151359ec
+cf6b17ad183e  -task->  5354144a2fac
+d7bf225b8996  -artifact->  cf6b17ad183e
+dec1174de8b9  -#package-1->  3205e821427a
+dec1174de8b9  -#package-1->  fa8c4236b768
+dec1174de8b9  -config->  2fb4552c69c4
+dec1174de8b9  -sources->  78478503f167
+dec1174de8b9  -task->  86315e37fce0
+dec1174de8b9  -task->  a77e697d1e89
 e826c9f31e56  -task->  fc01ce87f908
+fa8c4236b768  -task->  205de70bf723
 fc01ce87f908  -tool0->  40b99ab4055b
 fc01ce87f908  -tool1->  2bfe12b52796
 fc01ce87f908  -tool2->  31dfe434f00b

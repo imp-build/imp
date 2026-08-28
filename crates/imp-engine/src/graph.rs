@@ -42,7 +42,19 @@ pub enum GraphView {
     /// Exported roots plus every reachable expansion's discovered children —
     /// the same walk `imp targets`/`imp dependencies` already use (see
     /// `spike::resolve_graph_with_expansion`).
+    ///
+    /// This view discovers `expansion.all()` children only. An
+    /// `expansion.get()` node stays one box, because discovery of its child
+    /// can need an action to run first.
     Planning,
+    /// Every node of `Planning`, plus the children of each
+    /// `expansion.get()` node — the graph goal execution dispatches over.
+    ///
+    /// Costs more than `Planning`: discovery of these children runs the
+    /// actions they come from (`cargo metadata`, `cmake` configure). Thus
+    /// introspection keeps `Planning` as its default and this view is asked
+    /// for by name.
+    Execution,
 }
 
 impl GraphView {
@@ -50,6 +62,7 @@ impl GraphView {
         match self {
             GraphView::Catalog => "static-exported-catalog",
             GraphView::Planning => "staged-planning-graph",
+            GraphView::Execution => "final-execution-graph",
         }
     }
 }

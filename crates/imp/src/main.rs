@@ -73,6 +73,9 @@ enum GraphViewArg {
     Catalog,
     /// Exported roots plus discovered expansion children (default)
     Planning,
+    /// Every node of `planning`, plus expansion.get() children; runs the
+    /// actions their discovery needs
+    Execution,
 }
 
 impl From<GraphViewArg> for GraphView {
@@ -80,6 +83,7 @@ impl From<GraphViewArg> for GraphView {
         match view {
             GraphViewArg::Catalog => GraphView::Catalog,
             GraphViewArg::Planning => GraphView::Planning,
+            GraphViewArg::Execution => GraphView::Execution,
         }
     }
 }
@@ -2114,14 +2118,16 @@ async fn cmd_graph(
             spike::resolve_graph_catalog_view(&workspace, goal, selectors, &selector_context)
                 .await?
         }
-        GraphView::Planning => {
+        // The last argument is `discover_expansion_get`: the one difference
+        // between the two views.
+        GraphView::Planning | GraphView::Execution => {
             spike::resolve_graph_with_expansion(
                 &workspace,
                 &workspace_root,
                 goal,
                 selectors,
                 &selector_context,
-                false,
+                view == GraphView::Execution,
                 None,
             )
             .await?
