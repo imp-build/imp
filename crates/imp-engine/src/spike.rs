@@ -7594,6 +7594,11 @@ async fn run_rules_test_script(
         }
     };
     let result = tokio::select! {
+        // Prefer the completed run over the watchdog. `select!` polls in a
+        // random order unless told otherwise, thus a run that finished in
+        // the same poll as the watchdog could be reported as stalled. The
+        // goal-execution driver makes the same choice.
+        biased;
         result = drive => result.map_err(|error| anyhow::anyhow!("{error}")),
         _ = watchdog => Err(anyhow::anyhow!("rules test stalled with no runnable work for 30s")),
     };
