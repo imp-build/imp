@@ -142,6 +142,13 @@ export const app = odinPackage({
 });
 ```
 
+A package's `generatedSrcs` follow it through the source closure, like its
+native deps: declare a generated source on the package that owns it, and every
+package that reaches it gets the file staged. Two packages may name the same
+artifact at the same workspace path — that is one input — but two different
+artifacts claiming one path is a declaration error, since one would overwrite
+the other in the sandbox.
+
 Separately, `imp goal generate-build` can create declarations for unowned
 Odin sources. Opt in with `odinConfig.buildGenerate: true`; it is disabled by
 default.

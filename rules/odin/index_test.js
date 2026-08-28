@@ -314,6 +314,89 @@ describe("Odin graph rules", () => {
 		expect(includes).toContain("*.odin");
 	});
 
+	// A generated file is an ordinary source of the package that declares it,
+	// and one `odin build` compiles that package along with the rest of the
+	// closure — so a consumer needs it staged too. It used to be read off the
+	// root spec alone, so every consumer had to repeat the whole
+	// generatedSrcs list to get a file it does not itself generate.
+	test("a dep package's generatedSrcs reach its consumer's build inputs", async () => {
+		const generated = odinGen({
+			base: "rules/odin/example",
+			srcs: ["*.json"],
+			out: "generated/bindings.odin",
+			cmd: ["echo"],
+		});
+		const lib = odinPackage({
+			path: "rules/odin/example/split",
+			generatedSrcs: [{ artifact: generated.generated, path: "bindings.odin" }],
+			toolchain: "dev-2026-03",
+		});
+		const consumer = odinPackage({
+			path: "rules/odin/example/staleness/pkg_a",
+			deps: [lib],
+			toolchain: "dev-2026-03",
+		});
+		const walkJson = await globalThis.__imp_walk_graph_for_introspection(
+			JSON.stringify([
+				{ address: "pkg", handleId: consumer[BUILD].__graph_id },
+			]),
+			JSON.stringify({ args: [], flags: {}, mode: {}, config: {} }),
+			JSON.stringify({ discoverExpansionGet: true }),
+		);
+		const { nodes } = JSON.parse(walkJson);
+		const build = nodes.find(
+			(node) =>
+				node.display === "odin build rules/odin/example/staleness/pkg_a",
+		);
+		const generatedEdges = build.edges.filter((edge) =>
+			/^generated\d+$/.test(edge.name),
+		);
+		expect(generatedEdges.length).toBe(1);
+		// And that input really is the dep's own generating action.
+		const producer = nodes.find(
+			(node) => node.id === generatedEdges[0].handleId,
+		);
+		expect(producer.display).toContain(
+			"generate rules/odin/example/generated/bindings.odin",
+		);
+	});
+
+	// Two generated sources claiming one workspace path would overwrite each
+	// other in the sandbox, and the winner would depend on input order.
+	test("two artifacts generating one path is rejected", async () => {
+		const first = odinGen({
+			base: "rules/odin/example",
+			srcs: ["*.json"],
+			out: "generated/first.odin",
+			cmd: ["echo", "one"],
+		});
+		const second = odinGen({
+			base: "rules/odin/example",
+			srcs: ["*.json"],
+			out: "generated/second.odin",
+			cmd: ["echo", "two"],
+		});
+		const lib = odinPackage({
+			path: "rules/odin/example/split",
+			generatedSrcs: [{ artifact: first.generated, path: "clash.odin" }],
+			toolchain: "dev-2026-03",
+		});
+		// Same directory, so the two entries resolve to one workspace path.
+		const consumer = odinTestPackage({
+			path: "rules/odin/example/split",
+			deps: [lib],
+			generatedSrcs: [{ artifact: second.generated, path: "clash.odin" }],
+			toolchain: "dev-2026-03",
+		});
+		let message = null;
+		try {
+			await buildFileRoots(consumer);
+		} catch (error) {
+			message = error.message;
+		}
+		expect(message).toContain("cannot claim one workspace path");
+	});
+
 	// A files() handle in deps used to need a { sources: ... } wrapper; passed
 	// directly it was dropped without a word, so the files never reached the
 	// sandbox and the failure surfaced far away, at compile or link time.

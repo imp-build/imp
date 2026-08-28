@@ -766,8 +766,9 @@ function graphResolveImport(imp, fromPath, collections) {
 // error, reported here where the importing package and the resolved path are
 // both still known.
 //
-// Known limitation (#96): a package's generatedSrcs are not part of this
-// closure and are never import-scanned. analysis_for_package() reads real
+// Known limitation (#96): a package's generatedSrcs are staged for every
+// package that reaches it (see graphGeneratedSrcs() below), but they are never
+// import-scanned. analysis_for_package() reads real
 // files via read_file()/glob() at BUILD-evaluation time, before any
 // exec.action() — and thus a generated source's own producing action — has
 // run. Any import a generated file needs must be satisfied by the consuming
@@ -968,6 +969,38 @@ function graphResourceInputs(specs) {
 	return { resources, linkopts: odinMergeLinkopts(linkoptLists) };
 }
 
+// The generated sources one `odin build` needs, over the whole source
+// closure — same reasoning as graphResourceInputs() above. A generated file is
+// an ordinary source of the package that declares it, and one `odin build`
+// compiles that package's directory along with everything else in the closure,
+// so the file has to be staged whether the compilation was reached through the
+// declaring package or through a consumer of it.
+//
+// Keyed by the real workspace path each artifact lands at, because that path
+// is the whole contract (see graphOdinBuild()'s own check of it): two packages
+// naming one artifact at one path are one input, and two *different* artifacts
+// claiming the same path would silently overwrite each other in the sandbox.
+function graphGeneratedSrcs(specs) {
+	const byPath = new Map();
+	for (const spec of specs) {
+		for (const generated of spec.generatedSrcs || []) {
+			const current = byPath.get(generated.expectedPath);
+			if (current === undefined) {
+				byPath.set(generated.expectedPath, generated);
+				continue;
+			}
+			if (current.artifact.__graph_id !== generated.artifact.__graph_id) {
+				throw new Error(
+					`Odin package '${spec.path}' generates '${generated.expectedPath}', ` +
+						"but another package in the same source closure generates a different artifact at that path. " +
+						"Two generated sources cannot claim one workspace path.",
+				);
+			}
+		}
+	}
+	return [...byPath.values()];
+}
+
 function graphPackageExpansion(spec) {
 	if (spec.expansion) return spec.expansion;
 	spec.expansion = expand({
@@ -1053,12 +1086,11 @@ function graphActionInputs(spec, analysis, config, { lint = false } = {}) {
 	for (const [index, resource] of resources.entries()) {
 		inputs[`resource${index}`] = resource;
 	}
-	for (const [index, generated] of (spec.generatedSrcs || []).entries()) {
+	const generatedSrcs = graphGeneratedSrcs([spec, ...closure.packages]);
+	for (const [index, generated] of generatedSrcs.entries()) {
 		inputs[`generated${index}`] = generated.artifact;
 	}
-	inputs.generatedExpectedPaths = (spec.generatedSrcs || []).map(
-		(g) => g.expectedPath,
-	);
+	inputs.generatedExpectedPaths = generatedSrcs.map((g) => g.expectedPath);
 	return inputs;
 }
 
