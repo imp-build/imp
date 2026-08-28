@@ -7,12 +7,13 @@ import { ccLibrary } from "//rules/c";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
 import { defaultMoldGraphToolchain } from "//rules/c/mold";
 import { describe, expect, test } from "//rules/imp/test";
-import { configuration, platformInfo } from "imp:core";
+import { configuration, files, platformInfo } from "imp:core";
 import {
 	odinExtraLinkerFlagsArgs,
 	odinGccLinkerPathDir,
 	odinGen,
 	odinLinkerPathDir,
+	odinMergeLinkopts,
 	odinModeFlags,
 	odinPackage,
 	odinTestPackage,
@@ -175,15 +176,19 @@ describe("Odin graph rules", () => {
 	// reachable package's sources have to be in the sandbox. These walk the
 	// same introspection path as the test above and assert on the `files`
 	// leaves the build action really declares.
-	async function buildFileRoots(pkg) {
+	async function buildFileSpecs(pkg, workflow = BUILD) {
 		const walkJson = await globalThis.__imp_walk_graph_for_introspection(
-			JSON.stringify([{ address: "pkg", handleId: pkg[BUILD].__graph_id }]),
+			JSON.stringify([{ address: "pkg", handleId: pkg[workflow].__graph_id }]),
 			JSON.stringify({ args: [], flags: {}, mode: {}, config: {} }),
 			JSON.stringify({ discoverExpansionGet: true }),
 		);
 		return JSON.parse(walkJson)
 			.nodes.filter((node) => node.kind === "files")
-			.map((node) => node.data && node.data.root);
+			.map((node) => node.data || {});
+	}
+
+	async function buildFileRoots(pkg) {
+		return (await buildFileSpecs(pkg)).map((data) => data.root);
 	}
 
 	test("collection imports become source inputs", async () => {
@@ -247,6 +252,179 @@ describe("Odin graph rules", () => {
 			toolchain: "dev-2026-03",
 		});
 		expect(await buildFileRoots(app)).toContain("rules/odin/example/native");
+	});
+
+	// odinTestPackage() globs the mirror image of odinPackage()'s own default
+	// exclude, so the common case — tests beside the code — needs no srcs at
+	// all on either target.
+	test("odinTestPackage defaults its srcs to the test globs", async () => {
+		const lib = odinPackage({
+			path: "rules/odin/example/split",
+			toolchain: "dev-2026-03",
+		});
+		const tests = odinTestPackage({
+			path: "rules/odin/example/split",
+			deps: [lib],
+			toolchain: "dev-2026-03",
+		});
+		const includes = (await buildFileSpecs(tests, TEST))
+			.filter((data) => data.root === "rules/odin/example/split")
+			.map((data) => (data.include || []).join(","));
+		expect(includes).toContain("*_test.odin,test_*.odin");
+	});
+
+	// An all-tests directory has no package to take the rest from, and its
+	// files need not carry the test suffix — the default glob then matches
+	// nothing, so the error has to name the way out.
+	test("an empty test package explains that srcs is the way out", async () => {
+		const tests = odinTestPackage({
+			path: "rules/odin/example/collection/vendor/util",
+			toolchain: "dev-2026-03",
+		});
+		let message = null;
+		try {
+			await buildFileRoots(tests);
+		} catch (error) {
+			message = error.message;
+		}
+		expect(message).toContain("pass srcs");
+	});
+
+	// Odin compiles a directory as one package, so a test package that globs
+	// only its test files needs the sources of the package it shares that
+	// directory with. Both land at the same sandbox path, which is what makes
+	// `odin test .` see the two halves as one package. The closure used to key
+	// visited packages by path, and the root's own path is visited from the
+	// start, so this dep silently contributed nothing.
+	test("a test package pulls in the same-directory package it depends on", async () => {
+		const lib = odinPackage({
+			path: "rules/odin/example/split",
+			toolchain: "dev-2026-03",
+		});
+		const tests = odinTestPackage({
+			path: "rules/odin/example/split",
+			deps: [lib],
+			toolchain: "dev-2026-03",
+		});
+		const includes = (await buildFileSpecs(tests))
+			.filter((data) => data.root === "rules/odin/example/split")
+			.map((data) => (data.include || []).join(","));
+		// The test package's own glob, and the package under test's glob.
+		expect(includes).toContain("*_test.odin,test_*.odin");
+		expect(includes).toContain("*.odin");
+	});
+
+	// A files() handle in deps used to need a { sources: ... } wrapper; passed
+	// directly it was dropped without a word, so the files never reached the
+	// sandbox and the failure surfaced far away, at compile or link time.
+	test("a bare files() handle in deps is staged as a resource", async () => {
+		const pkg = odinPackage({
+			path: "rules/odin/example/split",
+			deps: [files({ root: "rules/odin/example/native", include: ["*.c"] })],
+			toolchain: "dev-2026-03",
+		});
+		expect(await buildFileRoots(pkg)).toContain("rules/odin/example/native");
+	});
+
+	test("a dep of an unrecognized shape is rejected, not ignored", async () => {
+		const pkg = odinPackage({
+			path: "rules/odin/example/split",
+			deps: [{ notAKnownShape: true }],
+			toolchain: "dev-2026-03",
+		});
+		let message = null;
+		try {
+			await buildFileRoots(pkg);
+		} catch (error) {
+			message = error.message;
+		}
+		expect(message).toContain("would contribute nothing");
+	});
+
+	// One `odin build` compiles the whole import closure, so an archive a dep
+	// package's own `foreign import` names is an archive *this* compilation
+	// needs. The C library sits in a directory no odin package here declares,
+	// so its files() root can only reach these inputs through propagation.
+	test("a dep package's native deps reach its consumer's build inputs", async () => {
+		const native = ccLibrary({
+			path: "rules/odin/example/native",
+			toolchain: defaultGccGraphToolchain(),
+		});
+		const util = odinPackage({
+			path: "rules/odin/example/collection/vendor/util",
+			deps: [native],
+			toolchain: "dev-2026-03",
+		});
+		// pkg_a imports nothing, so the dep edge is the only way across.
+		const consumer = odinPackage({
+			path: "rules/odin/example/staleness/pkg_a",
+			deps: [util],
+			toolchain: "dev-2026-03",
+		});
+		expect(await buildFileRoots(consumer)).toContain(
+			"rules/odin/example/native",
+		);
+	});
+
+	// The case a real workspace hit: a workspace-wide collection made the
+	// import resolve for a package that declared no dep at all, so the missing
+	// archive only showed up as a linker error.
+	test("native deps travel a bare import, not just a declared dep", async () => {
+		const native = ccLibrary({
+			path: "rules/odin/example/native",
+			toolchain: defaultGccGraphToolchain(),
+		});
+		odinPackage({
+			path: "rules/odin/example/collection/vendor/greet",
+			deps: [native],
+			toolchain: "dev-2026-03",
+		});
+		// app declares no deps; it reaches greet through its own "lib:greet".
+		const app = odinPackage({
+			base: "rules/odin/example/collection",
+			path: "app",
+			collections: { lib: "vendor" },
+			toolchain: "dev-2026-03",
+		});
+		expect(await buildFileRoots(app)).toContain("rules/odin/example/native");
+	});
+
+	// One library reachable both directly and through a dep package must not
+	// become two inputs — that would put the same archive in the task key one
+	// time for each path that reaches it.
+	test("an archive reachable two ways is declared one time", async () => {
+		const native = ccLibrary({
+			path: "rules/odin/example/native",
+			toolchain: defaultGccGraphToolchain(),
+		});
+		const util = odinPackage({
+			path: "rules/odin/example/collection/vendor/util",
+			deps: [native],
+			toolchain: "dev-2026-03",
+		});
+		const nativeRoots = async (deps) =>
+			(
+				await buildFileRoots(
+					odinPackage({
+						path: "rules/odin/example/staleness/pkg_a",
+						deps,
+						toolchain: "dev-2026-03",
+					}),
+				)
+			).filter((root) => root === "rules/odin/example/native").length;
+		// Reaching the library both ways declares no more inputs than reaching
+		// it one way.
+		expect(await nativeRoots([util, native])).toBe(await nativeRoots([util]));
+	});
+
+	test("odinMergeLinkopts keeps first occurrence order and drops repeats", () => {
+		expect(odinMergeLinkopts([])).toEqual([]);
+		expect(
+			odinMergeLinkopts([
+				["-L/usr/lib/x86_64-linux-gnu", "-lgtk-3"],
+				["-L/usr/lib/x86_64-linux-gnu", "-lwebkit2gtk-4.1"],
+			]),
+		).toEqual(["-L/usr/lib/x86_64-linux-gnu", "-lgtk-3", "-lwebkit2gtk-4.1"]);
 	});
 
 	// A ccLibrary()/cmakeLibraryDep()-shaped dep's transitiveLinkopts (e.g.

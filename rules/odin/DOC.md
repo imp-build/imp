@@ -47,9 +47,22 @@ export const server_tests = odinTestPackage({
 ```
 
 An `odinPackage` defaults to `*.odin` and excludes `*_test.odin` and
-`test_*.odin`. An `odinTestPackage` includes test files and participates in the
-`test` goal through `odin test`. Override `srcs` and `exclude` with globs
-relative to `path` when a package uses another layout.
+`test_*.odin`. An `odinTestPackage` defaults to exactly those two globs and
+participates in the `test` goal through `odin test`. The two defaults are
+mirror images, so tests beside the code need no `srcs` on either target.
+Override `srcs` and `exclude` with globs relative to `path` when a package uses
+another layout.
+
+Odin compiles a directory as one package, so a test package that shares its
+directory with the package under test cannot link against it — it is the same
+package, compiled with its test files. That is what the `deps: [server]` above
+does: the two source sets land at the same sandbox path and `odin test` sees
+one package. The ordinary sources stay declared one time, rather than in a
+second glob to keep in sync by hand.
+
+A directory that holds only tests needs no such dep — it is an ordinary
+package that happens to be all tests. Give it `srcs` when its files do not
+carry the test suffix, or the default glob matches nothing.
 
 `imp lint --fix` is accepted goal-wide but has no effect for Odin packages:
 `odin check -vet` has no autofix mode, so `--fix` just runs the same plain
@@ -159,6 +172,31 @@ export const app = odinPackage({
 // package's own directory depth.
 foreign import sqlite "build/c/vendor_sqlite.a"
 ```
+
+A native dep belongs to the package whose own source names it. One `odin build`
+compiles the whole import closure, so an archive that any package in that
+closure needs is staged for the compilation — and a package inherits the
+archives and `transitiveLinkopts` of every Odin package it reaches, whether by
+`deps` or by a bare `import`. Declare a native dep one time, on the package
+whose `foreign import` names it; consumers declare only what their own sources
+need.
+
+`deps` also takes a plain graph handle — a `files()` set of fixture data, a
+task output — and stages it into the sandbox as it is:
+
+```js
+const test_pem = files({ include: ["testdata/*.pem"] });
+
+export const client_tests = odinTestPackage({ deps: [client, test_pem] });
+```
+
+A dep of no recognized shape is a declaration error. It would otherwise
+contribute nothing, which reads the same as never declaring it, and shows up
+as a missing file much later.
+
+`unsafeSystemPaths` is the one thing that does **not** travel that path. It
+bypasses a guard, so every package states its own — the same rule `//rules/c`
+already applies to `ccLibrary()` and `ccBinary()`.
 
 A dep's own `transitiveLinkopts` (e.g. a `cmakeLibraryDep({linkopts: [...]})`
 wrapping a shared library that itself depends on host system packages) fold

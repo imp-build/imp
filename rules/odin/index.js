@@ -554,11 +554,14 @@ function default_package_test_file(path) {
 	return name.endsWith("_test.odin") || name.startsWith("test_");
 }
 
-function empty_package_error(handle, path) {
+function empty_package_error(handle, path, { test = false } = {}) {
 	const address = safe_address(handle) || "odinPackage";
+	const reason = test
+		? "odinTestPackage globs *_test.odin and test_*.odin by default, and takes the rest of the package from its deps; pass srcs for a directory whose tests use another name."
+		: "odinPackage excludes *_test.odin and test_*.odin by default; use odinTestPackage for package tests, or pass exclude: [] for a package that intentionally builds test files.";
 	return (
 		`${address} has no Odin source files after applying srcs/exclude filters at '${path}'. ` +
-		"odinPackage excludes *_test.odin and test_*.odin by default; use odinTestPackage for package tests, or pass exclude: [] for a package that intentionally builds test files."
+		reason
 	);
 }
 
@@ -716,6 +719,13 @@ function graphAnalysis(spec) {
 // declared by createGraphPackage() or reached as an undeclared directory.
 const DEFAULT_PACKAGE_EXCLUDE = ["*_test.odin", "test_*.odin"];
 
+// The mirror image, for an odinTestPackage(): exactly the files an ordinary
+// package leaves out. Odin compiles a directory as one package, so a test
+// package declares its test files and takes the rest from a dep on the
+// package under test — one glob for the ordinary sources, in one place. A
+// directory that holds only tests names its own srcs instead.
+const DEFAULT_TEST_PACKAGE_SRCS = ["*_test.odin", "test_*.odin"];
+
 function graphDeclaredPackageIndex() {
 	const index = new Map();
 	for (const candidate of graphPackages) {
@@ -766,20 +776,36 @@ function graphSourceClosure(spec, analysis, config) {
 	const collections = graphCollectionMap(spec, config);
 	const declared = graphDeclaredPackageIndex();
 	const handles = [];
+	const packages = [];
 	const usedCollections = new Set();
+	// Two visited sets, because a declared package and a directory are not the
+	// same kind of thing. Paths stop an undeclared directory from being
+	// globbed one time for each import that reaches it. Keys stop a declared
+	// package from being walked two times.
+	//
+	// They have to be separate: an odinTestPackage() shares its directory with
+	// the package it tests, and Odin compiles that directory as one package.
+	// A test package globbing only `*_test.odin` therefore *needs* the
+	// same-path package's own sources — merged into the same sandbox
+	// directory, which is exactly what makes `odin test .` see both halves.
+	// Keying only by path made that dep a no-op (the root's own path is
+	// visited from the start), so a same-directory test package had to re-glob
+	// every source itself and keep that glob in sync by hand.
 	const visited = new Set([
 		normalize_workspace_path(spec.path || "."),
 		normalize_workspace_path(analysis.packagePath),
 	]);
+	const visitedKeys = new Set([spec.key]);
 	const queue = [{ analysis, owner: spec.path }];
 
 	const enqueueDeclared = (candidate) => {
-		const path = normalize_workspace_path(candidate.path || ".");
-		if (visited.has(path)) return;
-		visited.add(path);
+		if (visitedKeys.has(candidate.key)) return;
+		visitedKeys.add(candidate.key);
 		const candidateAnalysis = graphAnalysis(candidate);
+		visited.add(normalize_workspace_path(candidate.path || "."));
 		visited.add(normalize_workspace_path(candidateAnalysis.packagePath));
 		handles.push(candidate.sources);
+		packages.push(candidate);
 		queue.push({ analysis: candidateAnalysis, owner: candidate.path });
 	};
 
@@ -845,6 +871,10 @@ function graphSourceClosure(spec, analysis, config) {
 
 	return {
 		handles,
+		// Every declared package the closure reached, in visit order, root
+		// excluded — the packages whose own sources this one compilation
+		// compiles. graphResourceInputs() below reads their deps.
+		packages,
 		// Only the collections the closure actually reached: a flag for an
 		// unused collection names a directory we have no reason to declare as
 		// an input, which is the shape of #88 all over again.
@@ -854,33 +884,88 @@ function graphSourceClosure(spec, analysis, config) {
 	};
 }
 
-function graphResourceInputs(spec) {
+// The native inputs one `odin build` needs, collected over every declared
+// package the source closure reached — not over the root package's own deps
+// alone.
+//
+// A `foreign import` is a property of the source that declares it, and one
+// `odin build` compiles the whole import closure. So an archive a dep package
+// needs is an archive *this* compilation needs, whether the dep was reached
+// through `deps` or through a bare `import`. Collecting only the root's deps
+// made every consumer repeat the dep package's own native declarations, and a
+// consumer that forgot got no error until the linker failed to find the
+// archive file.
+//
+// `unsafeSystemPaths` deliberately does not travel this path. It is a
+// guard-bypass flag, and rules/c keeps it out of the transitive contract as
+// well (see ccLibrary()/cmakeLibraryDep()) — every target declares its own.
+function graphResourceInputs(specs) {
 	const resources = [];
-	const linkopts = [];
-	for (const dep of spec.deps) {
-		// Odin package deps travel the source closure above; anything else
-		// contributes its sources/resources as opaque extra inputs.
-		if (dep?.__odin_graph_package === true) continue;
-		if (dep?.sources?.__imp_graph_handle === true) resources.push(dep.sources);
-		if (dep?.resources?.__imp_graph_handle === true)
-			resources.push(dep.resources);
-		// ccLibrary()/cmakeLibraryDep()-shaped deps (issue #100): their
-		// transitiveArchives land in the sandbox at their real captured path
-		// (e.g. build/c/<slug>.a), which is exactly what a `foreign import`
-		// referencing that path needs — no linker flag involved, Odin
-		// resolves foreign imports as literal sandbox-relative paths.
-		if (Array.isArray(dep?.transitiveArchives))
-			resources.push(...dep.transitiveArchives);
-		// A dep's own transitiveLinkopts (e.g. a cmakeLibraryDep()'s
-		// pkg-config-derived -L/-l flags for a shared library's own
-		// dependencies) — unlike transitiveArchives, these aren't files Odin
-		// can resolve as `foreign import` paths, so they instead need to
-		// reach the final `odin build`'s own linker invocation directly (see
-		// graphOdinBuild()'s -extra-linker-flags: handling below).
-		if (Array.isArray(dep?.transitiveLinkopts))
-			linkopts.push(...dep.transitiveLinkopts);
+	const linkoptLists = [];
+	// A package is commonly reachable both directly and through a dep, so the
+	// same archive arrives more than one time. Dedup keeps the action inputs
+	// (and thus the task key) minimal.
+	const seenResources = new Set();
+	const pushResource = (handle) => {
+		const key = handle?.__graph_id ?? handle;
+		if (seenResources.has(key)) return;
+		seenResources.add(key);
+		resources.push(handle);
+	};
+	for (const spec of specs) {
+		for (const dep of spec.deps) {
+			// Odin package deps travel the source closure above; anything else
+			// contributes its sources/resources as opaque extra inputs.
+			if (dep?.__odin_graph_package === true) continue;
+			// A bare graph handle — files(), or a task output — is a resource
+			// in its own right. It used to need a { sources: ... } wrapper, and
+			// a handle passed directly was dropped without a word.
+			if (dep?.__imp_graph_handle === true) {
+				pushResource(dep);
+				continue;
+			}
+			let recognized = false;
+			if (dep?.sources?.__imp_graph_handle === true) {
+				pushResource(dep.sources);
+				recognized = true;
+			}
+			if (dep?.resources?.__imp_graph_handle === true) {
+				pushResource(dep.resources);
+				recognized = true;
+			}
+			// ccLibrary()/cmakeLibraryDep()-shaped deps (issue #100): their
+			// transitiveArchives land in the sandbox at their real captured path
+			// (e.g. build/c/<slug>.a), which is exactly what a `foreign import`
+			// referencing that path needs — no linker flag involved, Odin
+			// resolves foreign imports as literal sandbox-relative paths.
+			if (Array.isArray(dep?.transitiveArchives)) {
+				for (const archive of dep.transitiveArchives) pushResource(archive);
+				recognized = true;
+			}
+			// A dep's own transitiveLinkopts (e.g. a cmakeLibraryDep()'s
+			// pkg-config-derived -L/-l flags for a shared library's own
+			// dependencies) — unlike transitiveArchives, these aren't files Odin
+			// can resolve as `foreign import` paths, so they instead need to
+			// reach the final `odin build`'s own linker invocation directly (see
+			// graphOdinBuild()'s -extra-linker-flags: handling below).
+			if (Array.isArray(dep?.transitiveLinkopts)) {
+				linkoptLists.push(dep.transitiveLinkopts);
+				recognized = true;
+			}
+			// A dep of no recognized shape contributed nothing at all, which is
+			// indistinguishable from not declaring it — the failure then
+			// surfaces as a missing file at compile or link time, far from the
+			// declaration that was meant to supply it.
+			if (!recognized) {
+				throw new Error(
+					`Odin package '${spec.path}' has a dep of an unrecognized shape, which would contribute nothing. ` +
+						"deps accepts an odinPackage()/odinTestPackage(), a ccLibrary()/cmakeLibraryDep(), " +
+						"a graph handle such as files(), or an object with a `sources` or `resources` handle.",
+				);
+			}
+		}
 	}
-	return { resources, linkopts };
+	return { resources, linkopts: odinMergeLinkopts(linkoptLists) };
 }
 
 function graphPackageExpansion(spec) {
@@ -928,7 +1013,10 @@ function odinUsesLldOnWindowsFor(spec) {
 
 function graphActionInputs(spec, analysis, config, { lint = false } = {}) {
 	const closure = graphSourceClosure(spec, analysis, config);
-	const { resources, linkopts } = graphResourceInputs(spec);
+	const { resources, linkopts } = graphResourceInputs([
+		spec,
+		...closure.packages,
+	]);
 	const linker = odinLinkerHandleFor(spec);
 	const inputs = {
 		sources: spec.sources,
@@ -985,6 +1073,28 @@ function graphActionInputs(spec, analysis, config, { lint = false } = {}) {
  */
 export function odinModeFlags(opt) {
 	return opt === "release" ? ["-o:speed"] : ["-debug"];
+}
+
+/**
+ * Merge the transitiveLinkopts of every dep the source closure reached into
+ * one flag list. One library is commonly reachable more than one time (both
+ * directly and through a dep package), so a flag is kept at its first
+ * occurrence only — that keeps the linker's own left-to-right order, which
+ * decides how it resolves symbols.
+ *
+ * @param {string[][]} lists One `transitiveLinkopts` array per dep, in closure
+ *   order.
+ * @returns {string[]}
+ */
+export function odinMergeLinkopts(lists) {
+	const seen = new Set();
+	const merged = [];
+	for (const opt of lists.flat()) {
+		if (seen.has(opt)) continue;
+		seen.add(opt);
+		merged.push(opt);
+	}
+	return merged;
 }
 
 /**
@@ -1257,7 +1367,9 @@ function graphOdinBuild(
 function graphActions(spec, analysis, config) {
 	if (analysis.sourceFiles.length === 0) {
 		throw new Error(
-			empty_package_error({ attrs: {}, __id: spec.key }, spec.path),
+			empty_package_error({ attrs: {}, __id: spec.key }, spec.path, {
+				test: spec.test,
+			}),
 		);
 	}
 	const build = graphOdinBuild(spec, analysis, config);
@@ -1293,7 +1405,10 @@ function createGraphPackage({
 	base = packagePath(),
 	unsafeSystemPaths = false,
 } = {}) {
-	const normalizedSrcs = package_srcs({ srcs });
+	const normalizedSrcs =
+		test && srcs === undefined
+			? [...DEFAULT_TEST_PACKAGE_SRCS]
+			: package_srcs({ srcs });
 	const normalizedExclude =
 		exclude === undefined ? (test ? [] : DEFAULT_PACKAGE_EXCLUDE) : exclude;
 	const version = typeof toolchain === "string" ? toolchain : undefined;
