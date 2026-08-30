@@ -80,6 +80,7 @@ pub fn exec_run_hermetic_with_start(
         }],
         outputs: action.outputs,
         tools: action.tools,
+        cores: action.cores,
         impure: action.impure,
         force_cache: action.force_cache,
         sandbox: true,
@@ -865,7 +866,9 @@ pub fn passthrough_env_snapshot() -> BTreeMap<String, String> {
 /// forwarded with that literal value regardless of host state. Unlike
 /// PASSTHROUGH_ENV_VARS this list is supplied per `run()` call, not global,
 /// but is folded into the base env identically so it is hashed into the
-/// action digest, and it wins over the global allowlist snapshot.
+/// action digest, and it wins over the global allowlist snapshot. A value can
+/// contain `$IMP_CORES`; that is expanded later, on the command environment
+/// only — see `expand_core_placeholders`.
 pub fn resolve_env(entries: &[String]) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     for entry in entries {
@@ -884,6 +887,26 @@ pub fn resolve_env(entries: &[String]) -> Result<BTreeMap<String, String>> {
         }
     }
     Ok(out)
+}
+
+/// Expand the one placeholder a declared `env` value may use: `$IMP_CORES`
+/// (or `${IMP_CORES}`), the core budget the scheduler granted this action.
+/// Expansion happens on the derived command environment, after the action
+/// digest is taken from `base_env`, so a rule can write
+/// `CARGO_BUILD_JOBS=$IMP_CORES` and keep one cache key on every machine while
+/// the child still sees the number it was really given. There is no shell on
+/// the env path, so without this a rule must either hard-code a count that can
+/// disagree with the grant, or wrap the command in `sh -c` only to read the
+/// variable.
+fn expand_core_placeholders(env: &mut BTreeMap<String, String>, cores: u32) {
+    let cores = cores.to_string();
+    for value in env.values_mut() {
+        if value.contains("$IMP_CORES") || value.contains("${IMP_CORES}") {
+            *value = value
+                .replace("${IMP_CORES}", &cores)
+                .replace("$IMP_CORES", &cores);
+        }
+    }
 }
 
 /// Create and return per-sandbox HOME and TMPDIR directories. Pinning these
@@ -1340,6 +1363,13 @@ fn exec_run_inner_with_start(
         "IMP_SANDBOX_ROOT".to_owned(),
         sandbox_root.to_string_lossy().into_owned(),
     );
+    // The core budget the scheduler granted this action, so a command that
+    // parallelises itself can size its own job server to what it was actually
+    // given (`make -j "$IMP_CORES"`). Set here, on the derived command
+    // environment, and not on the digested `base_env`: the same command must
+    // stay cache-compatible across machines with different `--jobs` budgets.
+    command_env.insert("IMP_CORES".to_owned(), opts.cores.to_string());
+    expand_core_placeholders(&mut command_env, opts.cores);
     let command_cwd = if opts.workspace_cwd {
         workspace_root
     } else {
@@ -1633,6 +1663,8 @@ pub fn exec_run_unsandboxed(
     }
     base_env.extend(resolve_env(&opts.env)?);
     let mut command_env = sandbox_command_env(&base_env, &tool_path_entries)?;
+    command_env.insert("IMP_CORES".to_owned(), opts.cores.to_string());
+    expand_core_placeholders(&mut command_env, opts.cores);
     if !command_env.contains_key("PATH") {
         if let Some(path) = std::env::var_os("PATH") {
             command_env.insert("PATH".to_owned(), path.to_string_lossy().into_owned());
@@ -1734,6 +1766,7 @@ mod tests {
 
     fn digest_opts(env: &[(&str, &str)], config_digest: &str) -> ExecRunOpts {
         ExecRunOpts {
+            cores: 1,
             argv: vec!["sh".to_owned(), "-c".to_owned(), "true".to_owned()],
             display: "digest test".to_owned(),
             env: env.iter().map(|(k, v)| format!("{k}={v}")).collect(),
@@ -1829,6 +1862,86 @@ mod tests {
         assert_ne!(a, c);
     }
 
+    /// `cores` is a scheduling weight, not a property of what the command
+    /// produces. Two machines with different `--jobs` budgets run the same
+    /// action and must share cache entries, so the digest must ignore it.
+    #[test]
+    fn action_digest_ignores_cores() {
+        let base_env = env_map(&[("PATH", "/usr/bin")]);
+        let mut one = digest_opts(&[], "cfg");
+        one.cores = 1;
+        let mut many = digest_opts(&[], "cfg");
+        many.cores = 8;
+        assert_eq!(
+            live_action_digest(&one, &base_env).unwrap(),
+            live_action_digest(&many, &base_env).unwrap()
+        );
+    }
+
+    /// The other half of that contract: the count still has to reach the
+    /// command, so a rule can size its own job server with `-j "$IMP_CORES"`.
+    #[test]
+    fn a_sandboxed_run_sees_its_core_budget_as_imp_cores() {
+        let root = tempfile::tempdir().unwrap();
+        let mut opts = run_opts(
+            &["sh", "-c", "printf %s \"$IMP_CORES\" > out.txt"],
+            &[],
+            &["out.txt"],
+        );
+        opts.no_cache = true;
+        opts.cores = 6;
+
+        exec_run_local_with_start(root.path(), opts, None, None, None).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("out.txt")).unwrap(),
+            "6"
+        );
+    }
+
+    #[test]
+    fn an_env_value_can_read_the_core_budget_without_a_shell() {
+        let root = tempfile::tempdir().unwrap();
+        let mut opts = run_opts(
+            &["sh", "-c", "printf %s \"$CARGO_BUILD_JOBS\" > out.txt"],
+            &[],
+            &["out.txt"],
+        );
+        opts.no_cache = true;
+        opts.cores = 5;
+        opts.env = vec!["CARGO_BUILD_JOBS=$IMP_CORES".to_owned()];
+
+        exec_run_local_with_start(root.path(), opts, None, None, None).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("out.txt")).unwrap(),
+            "5"
+        );
+    }
+
+    /// The whole point of expanding late: two machines with different `--jobs`
+    /// budgets must agree on the key for the same action.
+    #[test]
+    fn action_digest_ignores_an_expanded_core_placeholder() {
+        let mut base = env_map(&[("PATH", "/usr/bin")]);
+        base.insert("CARGO_BUILD_JOBS".to_owned(), "$IMP_CORES".to_owned());
+        base.insert("MAKEFLAGS".to_owned(), "-j${IMP_CORES}".to_owned());
+        let mut opts = digest_opts(&[], "cfg-1");
+        opts.env = vec!["CARGO_BUILD_JOBS=$IMP_CORES".to_owned()];
+        assert_eq!(
+            live_action_digest(&opts, &base).unwrap(),
+            live_action_digest(&opts, &base).unwrap()
+        );
+
+        let mut four = base.clone();
+        expand_core_placeholders(&mut four, 4);
+        let mut eight = base.clone();
+        expand_core_placeholders(&mut eight, 8);
+        assert_eq!(four.get("CARGO_BUILD_JOBS").unwrap(), "4");
+        assert_eq!(four.get("MAKEFLAGS").unwrap(), "-j4");
+        assert_eq!(eight.get("CARGO_BUILD_JOBS").unwrap(), "8");
+    }
+
     #[test]
     fn action_digest_keys_config_digest() {
         let base_env = env_map(&[("PATH", "/usr/bin")]);
@@ -1852,6 +1965,7 @@ mod tests {
                 .collect()
         };
         ExecRunOpts {
+            cores: 1,
             argv: argv.iter().map(|a| (*a).to_owned()).collect(),
             display: "exec test".to_owned(),
             env: Vec::new(),
@@ -2466,6 +2580,7 @@ mod tests {
         std::fs::remove_dir_all(p.join("build")).unwrap();
 
         let mut stage2 = ExecRunOpts {
+            cores: 1,
             argv: vec![
                 "sh".to_owned(),
                 "-c".to_owned(),

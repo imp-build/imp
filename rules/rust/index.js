@@ -65,6 +65,7 @@ import {
 } from "//rules/rust/kache";
 
 import {
+	RUST_CORES,
 	cargoStandaloneExpansion,
 	cargoWorkspaceExpansion,
 } from "//rules/rust/workspace_expansion";
@@ -394,7 +395,7 @@ function crateBuildTask(spec) {
 			const { kacheActive, tools, env, rustflags, scriptPreamble } =
 				await toolEnvAndTools(exec, input, spec);
 			const script = cargoScriptPreamble(scriptPreamble).concat(
-				`RUSTFLAGS="$rustflags${cargoRemapFlag(kacheActive)}" cargo build --locked --manifest-path "$manifest" --target-dir "$target_dir" "$@"`,
+				`RUSTFLAGS="$rustflags${cargoRemapFlag(kacheActive)}" cargo build -j "$IMP_CORES" --locked --manifest-path "$manifest" --target-dir "$target_dir" "$@"`,
 			);
 			const exeSuffix = platformInfo().os === "windows" ? ".exe" : "";
 			const result = await exec.action({
@@ -411,6 +412,11 @@ function crateBuildTask(spec) {
 				],
 				tools,
 				env,
+				// This one is already a shell script, so it reads back the
+				// granted budget rather than the declared literal — `-j` tracks
+				// the scheduler's clamp exactly, and being on the command line
+				// it also wins over any CARGO_BUILD_JOBS in the environment.
+				cores: RUST_CORES,
 				inputs: [input.manifests, ...spec.deps.map((_, i) => input[`dep${i}`])],
 				outputs: Object.fromEntries(
 					bins.map((name) => [

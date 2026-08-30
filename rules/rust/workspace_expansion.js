@@ -52,6 +52,20 @@ async function cargoEnv(exec, input, toolchainSpec) {
 	);
 }
 
+// How much of the `--jobs` budget one compiling cargo action costs. cargo
+// defaults to one job per core, so an action that does not declare this fans
+// out to the whole machine while the scheduler counts it as a single lane —
+// eight of those on a 16-core box is what this exists to stop.
+//
+// CARGO_JOBS_ENV carries the granted budget to cargo itself as
+// CARGO_BUILD_JOBS (the env form of `build.jobs`, honored by build, test,
+// clippy and doctests alike), so the grant and cargo's own parallelism are one
+// number. $IMP_CORES is expanded by the executor after the action digest is
+// taken, so a machine with a smaller `--jobs` gets the smaller, clamped count
+// here and still shares the cache key.
+export const RUST_CORES = 8;
+export const CARGO_JOBS_ENV = "CARGO_BUILD_JOBS=$IMP_CORES";
+
 function toolchainInputs(toolchainSpec) {
 	return {
 		toolchain: toolchainSpec.toolchain.tool,
@@ -243,11 +257,16 @@ function manifestSources(root) {
 // relative path so parseTestBinaries/crateTestTask's own prefix-stripping
 // join still resolves them there unchanged), and that curated directory is
 // what actually gets captured.
+//
+// The `-j "$IMP_CORES"` below is the shell-script form of the same cap
+// CARGO_JOBS_ENV applies to the argv-based cargo actions. Both read the
+// budget the scheduler granted, so they track its clamp exactly. Both call
+// sites declare `cores: RUST_CORES`.
 const CURATED_TEST_BUILD_SCRIPT = [
 	"manifest=$1; target_dir=$2; rustflags=$3; shift 3;",
 	'bins_dir="$target_dir.bins"; report="$target_dir.json";',
 	'mkdir -p "$bins_dir";',
-	'RUSTFLAGS="$rustflags" cargo test -j4 --locked --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@" > "$report";',
+	'RUSTFLAGS="$rustflags" cargo test -j "$IMP_CORES" --locked --no-run --message-format=json --manifest-path "$manifest" --target-dir "$target_dir" "$@" > "$report";',
 	'cat "$report";',
 	'jq -r \'select(.reason=="compiler-artifact" and .profile.test==true and .executable != null) | .executable\' "$report" |',
 	"while IFS= read -r exe; do",
@@ -361,7 +380,8 @@ function workspaceClippyTask(
 					"--color=always",
 				],
 				tools,
-				env: [...env, `RUSTFLAGS=${rustflags}`],
+				env: [...env, `RUSTFLAGS=${rustflags}`, CARGO_JOBS_ENV],
+				cores: RUST_CORES,
 				inputs: [input.manifests, ...resolvedExtraInputs("dep", input, deps)],
 				allowFailure: true,
 			});
@@ -473,6 +493,7 @@ function workspaceTestBuildTask(
 				],
 				tools: [...tools, ...curatedTestBuildTools(input)],
 				env,
+				cores: RUST_CORES,
 				inputs: [input.manifests, ...resolvedExtraInputs("dep", input, deps)],
 				outputs: { binaries: output.directory(`${buildDir}.bins`) },
 			});
@@ -702,7 +723,8 @@ function workspaceDoctestTask(
 					buildDir,
 				],
 				tools: [...tools, ...resolvedExtraInputs("tool", input, testTools)],
-				env: [...env, `RUSTFLAGS=${rustflags}`],
+				env: [...env, `RUSTFLAGS=${rustflags}`, CARGO_JOBS_ENV],
+				cores: RUST_CORES,
 				inputs: [
 					input.manifests,
 					...resolvedExtraInputs("dep", input, deps),
@@ -960,7 +982,8 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 							"warnings",
 						],
 						tools,
-						env: [...env, `RUSTFLAGS=${rustflags}`],
+						env: [...env, `RUSTFLAGS=${rustflags}`, CARGO_JOBS_ENV],
+						cores: RUST_CORES,
 						inputs: [
 							input.manifests,
 							...resolvedExtraInputs("dep", input, deps),
@@ -1004,6 +1027,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 						],
 						tools: [...tools, ...curatedTestBuildTools(input)],
 						env,
+						cores: RUST_CORES,
 						inputs: [
 							input.manifests,
 							...resolvedExtraInputs("dep", input, deps),
@@ -1094,7 +1118,8 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 									...tools,
 									...resolvedExtraInputs("tool", input, testToolsForDir(path)),
 								],
-								env: [...env, `RUSTFLAGS=${rustflags}`],
+								env: [...env, `RUSTFLAGS=${rustflags}`, CARGO_JOBS_ENV],
+								cores: RUST_CORES,
 								inputs: [
 									input.manifests,
 									...resolvedExtraInputs("dep", input, deps),

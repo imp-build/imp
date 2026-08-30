@@ -50,6 +50,10 @@ The built-in `imp` configuration also accepts `jobs`, `jsWorkers`, and
 sandbox files. It can be overridden for one goal with `--fs-jobs`, just as
 `--jobs` overrides `jobs`.
 
+`jobs` is a budget of cores, not a count of actions: an action declares what it
+costs with `exec.action({ cores })` (default 1), so one wide action can hold
+several of the lanes `jobs` allows.
+
 ```js
 export const impConfig = {
     fsJobs: 8,

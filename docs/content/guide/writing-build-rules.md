@@ -80,6 +80,38 @@ same named `inputs` object. A task's identity includes only the handles it
 declares, so a task that does not depend on a mode or flag remains shareable
 across those values.
 
+An action gets one core of the `jobs` budget by default. A command that
+parallelises itself across more than one core must say so with
+`exec.action({ cores })`, or the scheduler admits a full lane of them and each
+one fans out to the whole machine. The scheduler grants that many permits and
+gives the command the same number as `IMP_CORES`, so read it back instead of
+repeating the literal:
+
+```js
+await exec.action({
+    argv: ["sh", "-c", 'make -j "$IMP_CORES"'],
+    cores: 4,
+});
+```
+
+A tool that takes its job count from the environment can read the same number
+without a shell: `$IMP_CORES` (or `${IMP_CORES}`) in an `env` value is expanded
+by the executor before the command starts.
+
+```js
+await exec.action({
+    argv: ["cargo", "build"],
+    env: ["CARGO_BUILD_JOBS=$IMP_CORES"],
+    cores: 8,
+});
+```
+
+`cores` is clamped to the total budget, so an action that asks for more than
+`jobs` runs alone rather than waiting on permits that can never be granted. It
+is not part of the action cache key, and neither is the expansion above — the
+digest keeps the literal `$IMP_CORES` — so the same command stays
+cache-compatible across machines with different budgets.
+
 `nativeTool(name)` and `impTool` from `//rules/imp/native-tool` and
 `//rules/imp/self-tool` are lazy tool handles. Consuming them with
 `exec.tool()` makes the resolved executable part of the action identity;

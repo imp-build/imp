@@ -91,6 +91,14 @@ export {
 	resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
 
+// How much of the `--jobs` budget one Odin compile/test action costs. Odin
+// parallelises its own checker and backend, and `odin test` parallelises the
+// test run on top of that, so an undeclared action would fan out to every core
+// on the machine while the scheduler counted it as one. The same number is
+// passed to the tool as -thread-count / -define:ODIN_TEST_THREADS (see
+// odinCompileTask's argv) so the grant and the tool's own parallelism agree.
+const ODIN_CORES = 4;
+
 registerBuildRule({
 	rule: "odinPackage",
 	importFrom: "//rules/odin",
@@ -1301,6 +1309,16 @@ function graphOdinBuild(
 				exec.tool(resolved.odin, "odin"),
 				command,
 				resolved.analysis.packagePath,
+				// Both of these must stay in step with the `cores:` the action
+				// declares below, or the compiler and its test runner each fan
+				// out to every core on the machine while the scheduler thinks
+				// this action costs ODIN_CORES of them. -thread-count caps the
+				// compiler itself (accepted by build, test and check alike);
+				// ODIN_TEST_THREADS caps core:testing's runner, which otherwise
+				// defaults to os.get_processor_core_count() (see runner.odin's
+				// `when TEST_THREADS == 0` branch).
+				`-thread-count:${ODIN_CORES}`,
+				...(test ? [`-define:ODIN_TEST_THREADS=${ODIN_CORES}`] : []),
 				...flags,
 				...modeFlags,
 				...(lint ? ["-vet"] : []),
@@ -1353,6 +1371,7 @@ function graphOdinBuild(
 			];
 			const result = await exec.action({
 				argv: args,
+				cores: ODIN_CORES,
 				inputs: allInputs,
 				env: [
 					`PATH=${[

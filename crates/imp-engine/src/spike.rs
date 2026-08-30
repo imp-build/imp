@@ -4668,6 +4668,13 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                 run_opts.sandbox_retention =
                     SandboxRetention::from_u8(exec_sandbox_retention_run.load(Ordering::SeqCst));
                 let display = run_opts.display.clone();
+                // Clamp here rather than leaving it to `Scheduler::run`: the
+                // executor reports this same number to the command as
+                // IMP_CORES, and telling a command it has 64 cores while the
+                // scheduler admitted it on a budget of 8 is exactly the drift
+                // declaring `cores` is meant to remove.
+                let cores = (run_opts.cores as usize).clamp(1, sched.jobs());
+                run_opts.cores = cores as u32;
                 let cancellation = sched.cancellation_flag();
                 let workspace_id = workspace_cache_id(&root);
                 let ui_multi = ui_multi_run.lock().unwrap().clone();
@@ -4677,6 +4684,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                             parent,
                             display,
                             imp_scheduler::TaskKind::Sandbox,
+                            cores,
                             move |run_context| {
                                 if !run_opts.sandbox || run_opts.workspace_cwd {
                                     if !run_opts.sandbox && !run_opts.impure {
@@ -4725,6 +4733,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                                     input_digest,
                                     outputs: run_opts.outputs,
                                     tools: run_opts.tools,
+                                    cores: run_opts.cores,
                                     impure: run_opts.impure,
                                     force_cache: run_opts.force_cache,
                                     no_cache: run_opts.no_cache,
@@ -4948,6 +4957,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                         parent,
                         display.clone(),
                         imp_scheduler::TaskKind::Workspace,
+                        1,
                         move |run_context| -> Result<_> {
                             let pre = watch
                                 .as_deref()
@@ -5149,6 +5159,10 @@ fn parse_exec_run_opts<'js>(
         workspace_root,
         shared_caches,
     )?;
+    // How much of the `--jobs` budget this action costs while it runs. The
+    // scheduler clamps it to the total budget; the floor is applied here so an
+    // explicit `cores: 0` cannot ask for a weight nothing can grant.
+    let cores = opts.get::<_, Option<u32>>("cores")?.unwrap_or(1).max(1);
     let impure = opts.get::<_, Option<bool>>("impure")?.unwrap_or(false);
     let force_cache = opts.get::<_, Option<bool>>("forceCache")?.unwrap_or(false);
     let allow_failure = opts
@@ -5174,6 +5188,7 @@ fn parse_exec_run_opts<'js>(
         inputs,
         outputs,
         tools,
+        cores,
         impure,
         force_cache,
         sandbox,

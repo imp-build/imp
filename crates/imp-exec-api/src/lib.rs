@@ -11,6 +11,7 @@
 //! | `ExecRunOpts::config_digest`  | `Action.salt`                           |
 //! | `ExecRunOpts::impure`         | `Action.do_not_cache`                   |
 //! | [`ExecToolSpec`]              | platform properties (imp extension)   |
+//! | `ExecRunOpts::cores`          | `Platform` `min-cores` (not in the key) |
 //! | [`ExecRunResult`]             | `ActionResult`                          |
 //! | `ExecutionService::execute`   | `Execution.Execute` + `ActionCache`     |
 //! | `ExecutionService::fetch_url` | Remote Asset API `Fetch`                |
@@ -74,6 +75,19 @@ pub struct ExecRunOpts {
     pub inputs: Vec<ExecIoSpec>,
     pub outputs: Vec<ExecIoSpec>,
     pub tools: Vec<ExecToolSpec>,
+    /// How much of the client's `--jobs` budget this action costs while it
+    /// runs — the REv2 `Platform` `min-cores` analog. `1` for a command that
+    /// keeps one core busy; more for one that parallelises itself (a compiler
+    /// driving its own job server), so the scheduler admits proportionally
+    /// fewer at once instead of letting every lane fan out to `nproc`.
+    ///
+    /// Deliberately outside the action cache key: two machines with different
+    /// `--jobs` budgets run the same command and must share cache entries. See
+    /// `imp-execution`'s `live_action_digest`, which folds in `argv`, `env`,
+    /// `config_digest`, `display`, `tools` and `workspace_cwd` — and not this.
+    /// The executor passes the value to the child as `IMP_CORES`, injected
+    /// into the derived command environment rather than the digested one.
+    pub cores: u32,
     /// Never replay from the task cache — REv2 `do_not_cache`.
     pub impure: bool,
     pub force_cache: bool,
@@ -118,6 +132,19 @@ pub struct ExecAction {
     pub input_digest: String,
     pub outputs: Vec<ExecIoSpec>,
     pub tools: Vec<ExecToolSpec>,
+    /// How much of the client's `--jobs` budget this action costs while it
+    /// runs — the REv2 `Platform` `min-cores` analog. `1` for a command that
+    /// keeps one core busy; more for one that parallelises itself (a compiler
+    /// driving its own job server), so the scheduler admits proportionally
+    /// fewer at once instead of letting every lane fan out to `nproc`.
+    ///
+    /// Deliberately outside the action cache key: two machines with different
+    /// `--jobs` budgets run the same command and must share cache entries. See
+    /// `imp-execution`'s `live_action_digest`, which folds in `argv`, `env`,
+    /// `config_digest`, `display`, `tools` and `workspace_cwd` — and not this.
+    /// The executor passes the value to the child as `IMP_CORES`, injected
+    /// into the derived command environment rather than the digested one.
+    pub cores: u32,
     pub impure: bool,
     pub force_cache: bool,
     pub no_cache: bool,

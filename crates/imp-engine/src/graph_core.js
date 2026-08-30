@@ -913,9 +913,37 @@ function _graphExec(record, cfg) {
 			const exe = _graphIsWindows() ? `${executable}.exe` : executable;
 			return `${prefix}/${exe}`;
 		},
+		/**
+		 * Run one sandboxed command as part of this task.
+		 *
+		 * `cores` declares how much of the `--jobs` budget the command costs
+		 * while it runs. The default, 1, suits a command that keeps one core
+		 * busy. A command that parallelises itself across several cores (a
+		 * compiler with its own job server) must say so, or the scheduler
+		 * admits a full lane's worth of them and each one fans out to the whole
+		 * machine. The count is clamped to the total budget, so an action that
+		 * asks for more cores than `--jobs` runs alone instead of deadlocking.
+		 *
+		 * The granted count reaches the command as `IMP_CORES`, so read it back
+		 * rather than repeating the literal — argv is not shell-expanded, so
+		 * this needs a shell to see it:
+		 * `exec.action({ argv: ["sh", "-c", 'make -j "$IMP_CORES"'], cores: 4 })`.
+		 * An `env` value can use it without a shell: `$IMP_CORES` (or
+		 * `${IMP_CORES}`) there is expanded by the executor, e.g.
+		 * `env: ["CARGO_BUILD_JOBS=$IMP_CORES"]`. Neither `cores` nor that
+		 * expansion is part of the action's cache key — the digest keeps the
+		 * literal `$IMP_CORES` — so the same action stays cache-compatible
+		 * across machines with different budgets.
+		 *
+		 * @param {object} opts
+		 * @param {string[]} opts.argv
+		 * @param {number} [opts.cores] Cores this command uses. Default 1.
+		 */
 		async action(opts) {
 			if (!opts || typeof opts !== "object" || !Array.isArray(opts.argv))
 				throw _graphError("exec.action({ argv, ... }) requires an argv array");
+			if (opts.cores !== undefined && !(Number.isInteger(opts.cores) && opts.cores >= 1))
+				throw _graphError("exec.action({ cores }) must be an integer of 1 or more");
 			const actionInputs = [];
 			const actionTools = [];
 			const mountedTools = new Set();
@@ -1022,6 +1050,7 @@ function _graphExec(record, cfg) {
 				inputs: actionInputs,
 				outputs: outputSpecs,
 				tools: uniqueTools,
+				cores: opts.cores,
 				allowFailure: opts.allowFailure,
 				impure: opts.cache === false || !record.cache,
 				forceCache: opts.forceCache,

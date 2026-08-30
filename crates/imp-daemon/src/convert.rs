@@ -60,6 +60,7 @@ pub fn action_to_proto(action: ExecAction) -> proto::ExecAction {
                 bin_dirs: t.bin_dirs,
             })
             .collect(),
+        cores: action.cores,
         impure: action.impure,
         force_cache: action.force_cache,
         no_cache: action.no_cache,
@@ -104,6 +105,10 @@ pub fn action_from_proto(p: proto::ExecAction) -> Result<ExecAction> {
                 bin_dirs: t.bin_dirs,
             })
             .collect(),
+        // A pre-`cores` peer sends 0, which is not a grantable weight; the
+        // client-side scheduler clamps to at least 1 anyway, so normalize here
+        // and keep the executor's `IMP_CORES` honest.
+        cores: p.cores.max(1),
         impure: p.impure,
         force_cache: p.force_cache,
         no_cache: p.no_cache,

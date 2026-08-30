@@ -1417,15 +1417,13 @@ async fn cmd_execute_live_impl(
             task_to_slot.remove(&id);
         }
 
-        fn update_lane(
-            slots: &mut [SlotState],
-            task_to_slot: &std::collections::HashMap<u64, usize>,
-            slot: usize,
-            id: u64,
-            label: String,
-        ) {
-            if task_to_slot.get(&id) == Some(&slot) {
-                if let Some(state) = slots.get_mut(slot) {
+        // Ownership is checked against the slot itself, not `task_to_slot`: a
+        // job that declared more than one core holds several lanes, and that
+        // map keeps only one slot per task id — consulting it would drop the
+        // phase updates for every lane but that one.
+        fn update_lane(slots: &mut [SlotState], slot: usize, id: u64, label: String) {
+            if let Some(state) = slots.get_mut(slot) {
+                if state.task_id == Some(id) {
                     state.item.set_message(label);
                 }
             }
@@ -1678,10 +1676,8 @@ async fn cmd_execute_live_impl(
                     id,
                     display,
                 } => match kind {
-                    LaneKind::Js => update_lane(&mut js_slots, &js_task_to_slot, slot, id, display),
-                    LaneKind::Sandbox => {
-                        update_lane(&mut sandbox_slots, &sandbox_task_to_slot, slot, id, display)
-                    }
+                    LaneKind::Js => update_lane(&mut js_slots, slot, id, display),
+                    LaneKind::Sandbox => update_lane(&mut sandbox_slots, slot, id, display),
                 },
                 TaskEvent::LaneCleared { kind, slot, id } => match kind {
                     LaneKind::Js => clear_lane(&mut js_slots, &mut js_task_to_slot, slot, id),

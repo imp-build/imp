@@ -232,12 +232,18 @@ pub enum TaskEvent {
 
 /// Bounded, observable `spawn_blocking` executor. Cloneable via `Arc`.
 pub struct Scheduler {
-    /// Bounds concurrent jobs to `jobs`.
+    /// Total permit budget — the `--jobs` value, after the `max(1)` floor.
+    /// Kept so a job's declared `cores` can be clamped to something the
+    /// semaphore can actually grant.
+    jobs: usize,
+    /// Bounds concurrent jobs to `jobs` permits in total. A job takes as many
+    /// permits as it declared cores, so one wide job can hold the whole budget.
     permits: Arc<Semaphore>,
     /// Stable slot ids in `[0, jobs)` handed to running jobs so the UI can show
-    /// a fixed set of lanes. A permit is always held before a slot is taken; the
-    /// reverse does not hold, since a job reserves its permit before staging and
-    /// may finish without ever starting a command.
+    /// a fixed set of lanes. A job takes one slot per permit it holds. The
+    /// permits are always held before the slots are taken; the reverse does not
+    /// hold, since a job reserves its permits before staging and may finish
+    /// without ever starting a command.
     slots: Arc<Mutex<Vec<usize>>>,
     events: UnboundedSender<TaskEvent>,
     next_job: AtomicU64,
@@ -275,7 +281,14 @@ pub struct RunContext {
 }
 
 struct RunState {
-    slot: Mutex<Option<usize>>,
+    /// How many permits (and therefore lanes) this job costs. Already clamped
+    /// to the scheduler's total budget, so it can always be granted.
+    cores: usize,
+    /// The lanes this job holds, `cores` of them once assigned. The first is
+    /// the job's primary lane, the one `started`/`phase` report against.
+    slots: Mutex<Vec<usize>>,
+    /// One owned permit covering all `cores` permits — dropping it returns
+    /// every one of them.
     permit: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
     started: AtomicBool,
     cache_source: Mutex<Option<CacheSource>>,
@@ -286,26 +299,32 @@ impl RunContext {
         &self.display
     }
 
-    /// Take the concurrency slot that bounds `--jobs`, if this job does not hold
-    /// one already. Runs on a dispatch-pool thread (never a tokio async worker
-    /// thread), so it's safe to genuinely block here via `Handle::block_on`
-    /// rather than spin.
+    /// Take the `cores` concurrency permits that bound `--jobs`, if this job
+    /// does not hold them already. Runs on a dispatch-pool thread (never a
+    /// tokio async worker thread), so it's safe to genuinely block here via
+    /// `Handle::block_on` rather than spin.
+    ///
+    /// The permits are taken as one `acquire_many_owned`, so a wide job either
+    /// gets its whole allocation or waits — it can never sit half-admitted
+    /// holding permits nobody else can use. `cores` is clamped to the total
+    /// budget when the job is submitted, so this request is always grantable.
     ///
     /// `strict` decides what happens when the run is being canceled. A job that
     /// is only reserving gives up and returns `false`, so a cancellation does not
     /// have to wait out every queued job's turn; a job reporting `started` waits
     /// regardless, since a progress lane without a permit would break the
-    /// `slots_taken <= permits_held <= jobs` invariant.
+    /// `slots_taken == permits_held <= jobs` invariant.
     fn acquire_permit(&self, strict: bool) -> bool {
         let mut held = self.state.permit.lock().unwrap();
         if held.is_some() {
             return true;
         }
         let permits = Arc::clone(&self.permits);
+        let cores = self.state.cores as u32;
         if strict {
             let permit = self
                 .handle
-                .block_on(permits.acquire_owned())
+                .block_on(permits.acquire_many_owned(cores))
                 .expect("scheduler semaphore closed");
             *held = Some(permit);
             return true;
@@ -316,7 +335,7 @@ impl RunContext {
         // only cancellation detection is delayed, by at most one tick.
         let cancellation = Arc::clone(&self.cancellation);
         let acquired = self.handle.block_on(async move {
-            let mut acquire = std::pin::pin!(permits.acquire_owned());
+            let mut acquire = std::pin::pin!(permits.acquire_many_owned(cores));
             loop {
                 tokio::select! {
                     res = &mut acquire => {
@@ -339,23 +358,49 @@ impl RunContext {
         }
     }
 
-    /// Assign this job a stable lane slot and announce it, unless it already
-    /// holds one. Idempotent, so both `reserve` and `started` can call it
-    /// unconditionally. Never call this while holding the permit lock — a
-    /// permit is always taken first, and the two locks must not nest.
+    /// Assign this job one stable lane slot per permit it holds and announce
+    /// each, unless it already holds its lanes. The first lane carries the
+    /// job's real display; the rest carry a continuation marker, so a wide job
+    /// visibly occupies the lanes it is actually consuming instead of leaving
+    /// them looking idle. Idempotent, so both `reserve` and `started` can call
+    /// it unconditionally. Never call this while holding the permit lock — the
+    /// permits are always taken first, and the two locks must not nest.
     fn assign_slot(&self) {
-        let mut slot = self.state.slot.lock().unwrap();
-        if slot.is_some() {
+        let mut slots = self.state.slots.lock().unwrap();
+        if !slots.is_empty() {
             return;
         }
-        let assigned = self.slots.lock().unwrap().pop().unwrap_or(0);
-        *slot = Some(assigned);
-        let _ = self.events.send(TaskEvent::LaneStarted {
-            kind: LaneKind::Sandbox,
-            slot: assigned,
-            id: self.id,
-            display: self.display.clone(),
-        });
+        {
+            let mut pool = self.slots.lock().unwrap();
+            for _ in 0..self.state.cores {
+                slots.push(pool.pop().unwrap_or(0));
+            }
+        }
+        for (index, &assigned) in slots.iter().enumerate() {
+            let display = if index == 0 {
+                self.display.clone()
+            } else {
+                format!("↳ {}", self.display)
+            };
+            let _ = self.events.send(TaskEvent::LaneStarted {
+                kind: LaneKind::Sandbox,
+                slot: assigned,
+                id: self.id,
+                display,
+            });
+        }
+    }
+
+    /// The lane `started`/`phase` report against — the first of the job's
+    /// lanes, or `0` before any is assigned.
+    fn primary_slot(&self) -> usize {
+        self.state
+            .slots
+            .lock()
+            .unwrap()
+            .first()
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Reserve this job's concurrency slot before it does expensive work such
@@ -378,7 +423,7 @@ impl RunContext {
         // Normally already assigned by `reserve`; this is a fallback for a
         // caller that jumps straight to `started`.
         self.assign_slot();
-        let slot = self.state.slot.lock().unwrap().unwrap_or(0);
+        let slot = self.primary_slot();
         let _ = self.events.send(TaskEvent::Running {
             id: self.id,
             detail: Some(format!("slot {slot}")),
@@ -391,7 +436,7 @@ impl RunContext {
     pub fn phase(&self, display: impl Into<String>) {
         self.acquire_permit(true);
         self.assign_slot();
-        let slot = self.state.slot.lock().unwrap().unwrap_or(0);
+        let slot = self.primary_slot();
         let _ = self.events.send(TaskEvent::LaneUpdated {
             kind: LaneKind::Sandbox,
             slot,
@@ -409,10 +454,13 @@ impl RunContext {
 }
 
 impl Scheduler {
-    /// Create a scheduler bounded to `jobs` concurrent tasks that emits node
-    /// events onto `events`. Must be called from within a tokio runtime (it
-    /// captures the current [`tokio::runtime::Handle`] for the dispatch pool's
-    /// workers to block on the `--jobs` semaphore with).
+    /// Create a scheduler with a total budget of `jobs` permits that emits node
+    /// events onto `events`. A job costs one permit per declared core, so the
+    /// bound is on total cores in flight, not on the number of jobs.
+    ///
+    /// Must be called from within a tokio runtime (it captures the current
+    /// [`tokio::runtime::Handle`] for the dispatch pool's workers to block on
+    /// the `--jobs` semaphore with).
     pub fn new(
         jobs: usize,
         cancellation: Arc<AtomicBool>,
@@ -421,6 +469,7 @@ impl Scheduler {
         let jobs = jobs.max(1);
         let pool_size = jobs.max(default_pool_size());
         Arc::new(Self {
+            jobs,
             permits: Arc::new(Semaphore::new(jobs)),
             slots: Arc::new(Mutex::new((0..jobs).collect())),
             events,
@@ -437,6 +486,14 @@ impl Scheduler {
     /// nodes, which are not scheduler jobs).
     pub fn emit(&self, event: TaskEvent) {
         let _ = self.events.send(event);
+    }
+
+    /// The total permit budget (`--jobs`). A caller that has to tell its
+    /// action how many cores it was granted needs this to apply the same clamp
+    /// [`Scheduler::run`] does, so the granted count and the reported one
+    /// cannot disagree.
+    pub fn jobs(&self) -> usize {
+        self.jobs
     }
 
     /// Number of jobs submitted but not yet finished.
@@ -468,11 +525,20 @@ impl Scheduler {
     /// [`RunContext::reserve`] before it stages anything expensive, and
     /// [`RunContext::started`] when it has crossed its actual work boundary;
     /// cache-only jobs never need to call either.
+    ///
+    /// `cores` is how much of the `--jobs` budget the work costs — the number
+    /// of permits (and lanes) it holds while it runs. Work that keeps one core
+    /// busy passes `1`; work that parallelises itself across several (a
+    /// compiler driving its own job server) declares that many, so the
+    /// scheduler admits proportionally fewer of them at once. It is clamped to
+    /// `[1, jobs]`: an action asking for more cores than the whole budget runs
+    /// alone rather than waiting on permits the semaphore can never grant.
     pub async fn run<T, F>(
         &self,
         parent: Option<u64>,
         display: impl Into<String>,
         kind: TaskKind,
+        cores: usize,
         f: F,
     ) -> Result<T>
     where
@@ -502,7 +568,8 @@ impl Scheduler {
         }
 
         let state = Arc::new(RunState {
-            slot: Mutex::new(None),
+            cores: cores.clamp(1, self.jobs),
+            slots: Mutex::new(Vec::new()),
             permit: Mutex::new(None),
             started: AtomicBool::new(false),
             cache_source: Mutex::new(None),
@@ -530,7 +597,7 @@ impl Scheduler {
         let result = result_rx
             .await
             .unwrap_or_else(|_| Err("lost dispatch pool worker".to_string()));
-        if let Some(slot) = state.slot.lock().unwrap().take() {
+        for slot in state.slots.lock().unwrap().drain(..) {
             let _ = self.events.send(TaskEvent::LaneCleared {
                 kind: LaneKind::Sandbox,
                 slot,
@@ -538,9 +605,9 @@ impl Scheduler {
             });
             self.slots.lock().unwrap().push(slot);
         }
-        // Unconditional, and after the slot: a job that reserved a permit but
-        // never started holds no slot, and leaving its permit behind would retire
-        // one `--jobs` lane for the rest of the run.
+        // Unconditional, and after the slots: a job that reserved its permits
+        // but never started holds no slot, and leaving those permits behind
+        // would retire that much of the `--jobs` budget for the rest of the run.
         drop(state.permit.lock().unwrap().take());
 
         let outcome = match &result {
@@ -577,7 +644,9 @@ mod tests {
         let scheduler = Scheduler::new(1, Arc::new(AtomicBool::new(false)), tx);
 
         scheduler
-            .run(None, "cached command", TaskKind::Sandbox, |_context| Ok(()))
+            .run(None, "cached command", TaskKind::Sandbox, 1, |_context| {
+                Ok(())
+            })
             .await
             .unwrap();
 
@@ -610,7 +679,7 @@ mod tests {
         let scheduler = Scheduler::new(1, Arc::new(AtomicBool::new(false)), tx);
 
         scheduler
-            .run(None, "fresh command", TaskKind::Sandbox, |context| {
+            .run(None, "fresh command", TaskKind::Sandbox, 1, |context| {
                 context.started();
                 Ok(())
             })
@@ -633,7 +702,7 @@ mod tests {
         let scheduler = Scheduler::new(1, Arc::new(AtomicBool::new(false)), tx);
 
         scheduler
-            .run(None, "remote command", TaskKind::Sandbox, |context| {
+            .run(None, "remote command", TaskKind::Sandbox, 1, |context| {
                 context.phase("setting up sandbox: remote command");
                 context.phase("materializing inputs: remote command");
                 Ok(())
@@ -687,6 +756,7 @@ mod tests {
                         None,
                         format!("staging {index}"),
                         TaskKind::Sandbox,
+                        1,
                         move |context| {
                             context.reserve();
                             let now = live.fetch_add(1, Ordering::SeqCst) + 1;
@@ -737,6 +807,131 @@ mod tests {
         );
     }
 
+    /// A wide job must cost its declared weight: on a budget of exactly its
+    /// own `cores`, nothing else may run beside it, and it must occupy that
+    /// many lanes rather than one.
+    #[tokio::test]
+    async fn a_wide_job_holds_its_whole_core_budget_and_its_lanes() {
+        const JOBS: usize = 4;
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = Scheduler::new(JOBS, Arc::new(AtomicBool::new(false)), tx);
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for index in 0..4 {
+            let scheduler = Arc::clone(&scheduler);
+            let live = Arc::clone(&live);
+            let peak = Arc::clone(&peak);
+            handles.push(tokio::spawn(async move {
+                scheduler
+                    .run(
+                        None,
+                        format!("wide {index}"),
+                        TaskKind::Sandbox,
+                        JOBS,
+                        move |context| {
+                            context.reserve();
+                            let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(now, Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                            live.fetch_sub(1, Ordering::SeqCst);
+                            Ok(())
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            1,
+            "a job costing the whole budget must run alone"
+        );
+        let collected: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        let started = collected
+            .iter()
+            .filter(|event| matches!(event, TaskEvent::LaneStarted { .. }))
+            .count();
+        let cleared = collected
+            .iter()
+            .filter(|event| matches!(event, TaskEvent::LaneCleared { .. }))
+            .count();
+        assert_eq!(
+            started,
+            4 * JOBS,
+            "a wide job must occupy one lane per core"
+        );
+        assert_eq!(cleared, 4 * JOBS, "and release every one of them");
+    }
+
+    /// Two half-budget jobs must still overlap — the weight throttles, it does
+    /// not serialize.
+    #[tokio::test]
+    async fn jobs_that_fit_the_budget_together_still_overlap() {
+        let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = Scheduler::new(4, Arc::new(AtomicBool::new(false)), tx);
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for index in 0..2 {
+            let scheduler = Arc::clone(&scheduler);
+            let live = Arc::clone(&live);
+            let peak = Arc::clone(&peak);
+            handles.push(tokio::spawn(async move {
+                scheduler
+                    .run(
+                        None,
+                        format!("half {index}"),
+                        TaskKind::Sandbox,
+                        2,
+                        move |context| {
+                            context.reserve();
+                            let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(now, Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            live.fetch_sub(1, Ordering::SeqCst);
+                            Ok(())
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            2,
+            "two 2-core jobs must run together under a 4-core budget"
+        );
+    }
+
+    /// An action asking for more cores than the whole budget must be clamped
+    /// and run alone. Unclamped, `acquire_many_owned` would wait forever on
+    /// permits the semaphore can never grant; the timeout is what catches it.
+    #[tokio::test]
+    async fn a_job_wider_than_the_budget_is_clamped_instead_of_wedging() {
+        let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = Scheduler::new(2, Arc::new(AtomicBool::new(false)), tx);
+
+        let work = scheduler.run(None, "too wide", TaskKind::Sandbox, 64, |context| {
+            context.started();
+            Ok(())
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), work)
+            .await
+            .expect("an over-wide job must be clamped to the budget, not wait on it forever")
+            .unwrap();
+    }
+
     /// A job that reserves but never starts still holds both a permit and a
     /// slot (reserve takes both now). If either leaked instead of being
     /// released when the job ends, sequential reserve-only jobs against a
@@ -754,6 +949,7 @@ mod tests {
                         None,
                         format!("reserve {index}"),
                         TaskKind::Sandbox,
+                        1,
                         |context| {
                             context.reserve();
                             Ok(())
@@ -792,6 +988,7 @@ mod tests {
                         None,
                         format!("job {index}"),
                         TaskKind::Sandbox,
+                        1,
                         move |_context| {
                             thread_ids
                                 .lock()
@@ -832,6 +1029,7 @@ mod tests {
                 None,
                 "boom",
                 TaskKind::Sandbox,
+                1,
                 |_context| -> anyhow::Result<()> {
                     panic!("deliberate test panic");
                 },
@@ -846,7 +1044,7 @@ mod tests {
         );
 
         scheduler
-            .run(None, "after panic", TaskKind::Sandbox, |_context| Ok(()))
+            .run(None, "after panic", TaskKind::Sandbox, 1, |_context| Ok(()))
             .await
             .expect("a later job must still run on a surviving worker thread");
     }
@@ -867,7 +1065,7 @@ mod tests {
         let holder_scheduler = Arc::clone(&scheduler);
         let holder = tokio::spawn(async move {
             holder_scheduler
-                .run(None, "holder", TaskKind::Sandbox, move |context| {
+                .run(None, "holder", TaskKind::Sandbox, 1, move |context| {
                     context.reserve();
                     let _ = holder_ready_tx.send(());
                     let _ = release_rx.recv();
@@ -883,7 +1081,7 @@ mod tests {
         let queued_scheduler = Arc::clone(&scheduler);
         let queued = tokio::spawn(async move {
             queued_scheduler
-                .run(None, "queued", TaskKind::Sandbox, |context| {
+                .run(None, "queued", TaskKind::Sandbox, 1, |context| {
                     context.reserve();
                     Ok(())
                 })
