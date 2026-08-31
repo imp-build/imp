@@ -697,12 +697,22 @@ async function _graphResolveHandleUncached(id, cfg, stack = []) {
 	if (stack.includes(stackKey)) throw _graphError(`dependency cycle through handle ${id}`);
 	const nextStack = [...stack, stackKey];
 	switch (record.kind) {
-		case "file":
+		case "file": {
+			// Capture the file into CAS the same way the "files" case does via
+			// glob(), so its input is a digest before it reaches the scheduler,
+			// not a raw path the sandbox preamble has to read back. A workspace
+			// file that resolves through a synthetic root (e.g. a config file a
+			// tool would otherwise discover by walking a directory that only
+			// exists inside the sandbox) then stages from the digest, so
+			// resolution no longer depends on the sandbox layout.
+			const fileset = file_set.literal([record.data.path]);
 			return _graphBinding("source", {
 				fingerprint: record.fingerprint,
 				path: record.data.path,
-				inputs: [{ kind: "file", path: record.data.path }],
+				fileset,
+				inputs: [fileset],
 			});
+		}
 		case "files": {
 			const fileset = glob(record.data);
 			return _graphBinding("source-set", {

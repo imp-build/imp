@@ -3734,12 +3734,23 @@ export const file_set = {
 	},
 };
 
-// Reduce any FileSet objects in an inputs array to a single {kind:"digest"} entry
-// each (its already-merged tree digest, staged directly from CAS — see exec.rs),
-// rather than one {kind:"file"} entry per matched file. Plain {kind, path} objects
-// (e.g. from output(), or a prior run()'s outputDigest wrapped as {kind:"digest"})
-// are passed through unchanged.
-function _materialise_inputs(inputs) {
+// Reduce every FileSet in an inputs array to a single {kind:"digest"} entry (its
+// already-merged tree digest, staged directly from CAS — see exec.rs), rather
+// than one {kind:"file"} entry per matched file. A single-file literal keeps its
+// path alongside the digest, as provenance for tooling that reports which
+// workspace file an input came from; the executor keys off the digest only.
+// {kind:"digest"} entries (a prior run()'s outputDigest, a mergeDigests()
+// result) pass through unchanged.
+//
+// `fromGraph` is set for a graph task's exec.action(): graph file()/files()
+// handles always resolve to a digest or a FileSet, so a raw
+// {kind:"file"|"manifest"|"directory", path} reaching here is a caller bug and
+// is rejected — content hashing belongs on this thread, not deferred into the
+// scheduler's dispatch pool where it would run once per action even on a cache
+// hit. The legacy run() surface still allows a raw path (its memo-trace change
+// detection records it via context.runInputs) and defers the capture to
+// sandbox staging.
+function _materialise_inputs(inputs, fromGraph) {
 	const result = [];
 	const context = _effective_context_entry().ctx;
 	for (const input of inputs || []) {
@@ -3753,14 +3764,25 @@ function _materialise_inputs(inputs) {
 				fileset_kind: input.kind,
 				count: files.length,
 			});
-			result.push({ kind: "digest", digest });
+			result.push(
+				spec.kind === "literal" && spec.paths.length === 1
+					? { kind: "digest", digest, path: spec.paths[0] }
+					: { kind: "digest", digest },
+			);
 		} else if (input != null) {
 			if (
 				(input.kind === "file" ||
 					input.kind === "manifest" ||
 					input.kind === "directory") &&
-				typeof input.path === "string"
+				typeof input.path === "string" &&
+				input.__imp_graph_action_output !== true
 			) {
+				if (fromGraph) {
+					throw new Error(
+						`run() input '${input.path}' is a raw ${input.kind} path; ` +
+							"capture it with file()/files()/file_set before passing it as an input",
+					);
+				}
 				const spec = { kind: input.kind, path: input.path };
 				context.runInputs.set(_run_input_spec_key(spec), spec);
 			}
@@ -3898,7 +3920,7 @@ export function run(opts) {
 		throw new Error("graph: sandbox actions are not allowed while an expansion constructs graph nodes");
 	}
 	const contextEntry = _effective_context_entry();
-	const inputs = _materialise_inputs(opts.inputs);
+	const inputs = _materialise_inputs(opts.inputs, !!opts.__graphTaskAction);
 	const outputs = opts.outputs ?? [];
 	if (
 		outputs.length > 0 &&
