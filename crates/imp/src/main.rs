@@ -377,6 +377,9 @@ async fn main() {
     // because that interruption is the only way an entry outlives a successful
     // run; `--keep-sandbox=always` is still honoured.
     imp_execution::sandbox_registry::cleanup_live_sandboxes(true);
+
+    // Drain the background usage-DB writer so a clean run loses no rows.
+    imp_store::usage::flush_and_join();
 }
 
 /// Remove sandboxes still owned by in-flight work, then exit.
@@ -392,6 +395,9 @@ async fn main() {
 /// killed those children and after the progress UI has been shut down, so the
 /// sweep prints cleanly and races with nothing that matters.
 fn exit_after_sandbox_cleanup(code: i32) -> ! {
+    // Flush the background usage-DB writer before the no-unwind exit; the
+    // writer thread's `Drop` would otherwise never run.
+    imp_store::usage::flush_and_join();
     imp_execution::sandbox_registry::cleanup_live_sandboxes(code != 0);
     std::process::exit(code)
 }

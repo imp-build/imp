@@ -204,6 +204,8 @@ mod tests {
         assert_eq!(std::fs::read(slot.join("tool.txt")).unwrap(), b"hello");
 
         // The put/get above must have left a usage row for GC to consume.
+        // Usage recording is async — wait for the background writer to commit.
+        imp_store::usage::flush();
         let db = imp_store::cache::cache_root().unwrap().join("usage.db");
         let conn = rusqlite::Connection::open(db).unwrap();
         let size: Option<u64> = conn
