@@ -356,7 +356,19 @@ export function file(path) {
 	if (typeof path !== "string" || path.length === 0)
 		throw _graphError("file(path) requires a non-empty path");
 	const fingerprint = `file:${path}`;
-	return _graphMemoizedHandle(fingerprint, () => _graphHandle("file", { path }, fingerprint));
+	return _graphMemoizedHandle(fingerprint, () => {
+		// Capture the file into CAS now, at graph-construction time, so the
+		// graph that reaches the scheduler is static: the digest is computed
+		// once here, not re-derived by a lazy handle resolution (or a path
+		// read back inside the sandbox preamble) on every execution. A file()
+		// is only ever a workspace file that exists before the build; anything
+		// an action produces must flow through output() and the action's own
+		// outputs, never file(). The evaluated fileset carries its memoized
+		// digest, so _materialise_inputs re-uses it instead of capturing again.
+		const fileset = file_set.literal([path]);
+		_eval_fileset(fileset);
+		return _graphHandle("file", { path, fileset }, fingerprint);
+	});
 }
 
 /**
@@ -697,22 +709,17 @@ async function _graphResolveHandleUncached(id, cfg, stack = []) {
 	if (stack.includes(stackKey)) throw _graphError(`dependency cycle through handle ${id}`);
 	const nextStack = [...stack, stackKey];
 	switch (record.kind) {
-		case "file": {
-			// Capture the file into CAS the same way the "files" case does via
-			// glob(), so its input is a digest before it reaches the scheduler,
-			// not a raw path the sandbox preamble has to read back. A workspace
-			// file that resolves through a synthetic root (e.g. a config file a
-			// tool would otherwise discover by walking a directory that only
-			// exists inside the sandbox) then stages from the digest, so
-			// resolution no longer depends on the sandbox layout.
-			const fileset = file_set.literal([record.data.path]);
+		case "file":
+			// The digest was captured at construction (see file()); resolution
+			// only wraps the pre-evaluated fileset. `_eval_fileset` in
+			// _materialise_inputs is then a memo hit on `fileset.__digest` — no
+			// second capture, and staging never sees a raw path.
 			return _graphBinding("source", {
 				fingerprint: record.fingerprint,
 				path: record.data.path,
-				fileset,
-				inputs: [fileset],
+				fileset: record.data.fileset,
+				inputs: [record.data.fileset],
 			});
-		}
 		case "files": {
 			const fileset = glob(record.data);
 			return _graphBinding("source-set", {
@@ -1727,7 +1734,11 @@ async function _graphWalkForIntrospectionInner(
 		const edges = _graphDeclaredEdges(record);
 		for (const edge of edges) queue.push(edge.handleId);
 		const node = { id, kind: record.kind, edges };
-		if (record.kind === "file" || record.kind === "files") {
+		if (record.kind === "file") {
+			// record.data also holds the evaluated fileset (a live object with
+			// memo fields); the walk only needs the path.
+			node.data = { path: record.data.path };
+		} else if (record.kind === "files") {
 			node.data = record.data;
 		}
 		const display = _graphNodeDisplay(record);
