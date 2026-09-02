@@ -1114,6 +1114,10 @@ struct GoalSummary {
     fresh_js: usize,
     fresh_sandbox: usize,
     remote_pushed: usize,
+    /// Cache-usage records the background writer dropped because its queue
+    /// stayed full (see `imp_store::usage::dropped`). Filled once the goal's
+    /// work is done, so it counts drops up to summary time.
+    usage_db_dropped: u64,
     failed: usize,
     canceled: usize,
     wall: std::time::Duration,
@@ -1156,6 +1160,15 @@ fn print_goal_summary(summary: &GoalSummary) {
             ));
         }
         println!("{:<SUMMARY_LABEL_WIDTH$}{cache}", "cache:");
+    }
+
+    // Only when the hot-path queue overflowed. A dropped record is lost LRU
+    // signal, not a build failure — GC falls back to file mtime for it.
+    if summary.usage_db_dropped > 0 {
+        println!(
+            "{:<SUMMARY_LABEL_WIDTH$}{} cache-usage records dropped (queue full; GC falls back to file mtime)",
+            "usage-db:", summary.usage_db_dropped
+        );
     }
 
     if summary.failed > 0 || summary.canceled > 0 {
@@ -1721,6 +1734,9 @@ async fn cmd_execute_live_impl(
             // pushes may still be in flight here (see `drain_pending_pushes`
             // below).
             remote_pushed: 0,
+            // Filled next to `remote_pushed` below, once every `record_*` for
+            // this run has fired.
+            usage_db_dropped: 0,
             failed: failed_count,
             canceled: canceled_count,
             wall: wall_start.elapsed(),
@@ -1831,6 +1847,9 @@ async fn cmd_execute_live_impl(
     if let Some(summary) = goal_summary.as_mut() {
         summary.remote_pushed =
             imp_execution::remote_cache::confirmed_pushes().saturating_sub(remote_pushed_baseline);
+        // Every `record_*` for this run has fired by now and the writer itself
+        // never drops, so this count is stable.
+        summary.usage_db_dropped = imp_store::usage::dropped();
     }
 
     let report = result.as_ref().ok().cloned().flatten();

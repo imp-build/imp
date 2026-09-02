@@ -23,8 +23,9 @@
 //!   `INSERT ... ON CONFLICT` upsert is idempotent.
 //! - Backpressure: the channel is bounded (`CHANNEL_CAP`). A send that cannot
 //!   place its message within `SEND_TIMEOUT` drops the record and counts it in
-//!   `DROPPED`. A full queue never stalls a build for more than that timeout
-//!   and never fails it.
+//!   `DROPPED`, which [`dropped`] reports so a run can show how much cache-usage
+//!   signal it lost. A full queue never stalls a build for more than that
+//!   timeout and never fails it.
 //! - Batching: the writer drains up to `DRAIN_CAP` queued messages, groups them
 //!   by cache root, and applies each group in one transaction.
 //! - WAL checkpoint: after a committed batch, if `CHECKPOINT_TXNS` transactions
@@ -364,6 +365,15 @@ pub fn flush_and_join() {
             let _ = handle.join();
         }
     }
+}
+
+/// The number of cache-usage records this process dropped because the hot-path
+/// channel stayed full for `SEND_TIMEOUT`. Best-effort: a dropped record is
+/// lost signal only, and GC falls back to file mtime for a row it cannot find.
+/// The count is "drops up to the read"; a `record_*` call after this read (for
+/// example during post-build sandbox cleanup) is not included.
+pub fn dropped() -> u64 {
+    DROPPED.load(Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------
