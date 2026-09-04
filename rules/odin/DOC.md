@@ -122,25 +122,45 @@ the compiler as a broken collection flag.
 
 ## Generate sources and BUILD files
 
-`odinGen()` declares a generated file and records the generator command or
-target as a dependency. The output path is appended as the command's final
-argument. Exclude that output from any overlapping `odinPackage()` glob so one
-file has one owner:
+Generated sources come from `codegen()` in `//rules/imp/codegen`, which is not
+Odin-specific — it declares files a command writes into the graph, for any
+ecosystem. `generatedSrcs` takes its result directly and stages every file the
+result declares. Exclude a generated path from any overlapping `odinPackage()`
+glob so one file has one owner:
 
 ```js
-import { odinGen, odinPackage } from "//rules/odin";
+import { codegen } from "//rules/imp/codegen";
+import { nativeTool } from "//rules/imp/native-tool";
+import { odinPackage } from "//rules/odin";
+import { files } from "imp:core";
 
-export const bindings = odinGen({
-    srcs: ["schema.json"],
-    out: "generated/bindings.odin",
-    cmd: ["schema-to-odin", "schema.json"],
+const bindings = codegen({
+    display: "generate Odin bindings",
+    tools: { generator: nativeTool("schema-to-odin") },
+    inputs: { schema: files({ root: "app", include: ["schema.json"] }) },
+    outputPaths: ["app/generated/bindings.odin"],
+    argv: (exec, { generator }) => [
+        exec.tool(generator, "schema-to-odin"),
+        "app/schema.json",
+        "app/generated/bindings.odin",
+    ],
 });
 
 export const app = odinPackage({
+    path: "app",
     exclude: ["generated/bindings.odin"],
-    deps: [bindings],
+    generatedSrcs: [bindings],
 });
 ```
+
+`outputPaths` are workspace-relative, and a nested path needs no `mkdir` — the
+executor creates the parent directory of each declared output before the
+program starts. The older explicit form, `generatedSrcs: [{ artifact, path }]`
+with `path` relative to the package, still works.
+
+To write generated files into the workspace instead of into the graph — for
+committed, drift-gated codegen — use `generatedFiles()` from
+`//rules/imp/generate` and `imp generate`.
 
 A package's `generatedSrcs` follow it through the source closure, like its
 native deps: declare a generated source on the package that owns it, and every

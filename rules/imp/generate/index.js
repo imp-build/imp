@@ -52,6 +52,56 @@ import {
  *   generator command line from the resolved tools/inputs.
  * @returns {object} A value handle carrying `{paths, files}`.
  */
+/**
+ * Validate the authoring surface that `generatedFiles()` and //rules/imp/codegen's
+ * `codegen()` have in common, and name one action output slot per output path.
+ *
+ * The two differ only in where their outputs go — the workspace, or the graph —
+ * so they share one set of rules about what a caller may declare. Internal to
+ * the two generator entrypoints; not part of the public rule API.
+ *
+ * @param {string} api Caller name, for error messages.
+ * @returns {{toolNames: string[], inputNames: string[], slots: string[]}}
+ */
+export function planGeneratedOutputs(api, { tools, inputs, outputPaths, argv }) {
+	if (!Array.isArray(outputPaths) || outputPaths.length === 0) {
+		throw new Error(`${api}() requires a non-empty outputPaths array`);
+	}
+	if (typeof argv !== "function") {
+		throw new Error(`${api}() requires an argv(exec, inputs) function`);
+	}
+	const toolNames = Object.keys(tools);
+	const inputNames = Object.keys(inputs);
+	for (const name of [...toolNames, ...inputNames]) {
+		if (name === "outputPaths") {
+			throw new Error(`${api}() reserves the input name 'outputPaths'`);
+		}
+	}
+	const shared = toolNames.filter((name) => inputNames.includes(name));
+	if (shared.length > 0) {
+		throw new Error(
+			`${api}() got the same name in tools and inputs: ${shared.join(", ")}`,
+		);
+	}
+	const seen = new Set();
+	for (const path of outputPaths) {
+		if (typeof path !== "string" || path.length === 0) {
+			throw new Error(`${api}() outputPaths must be non-empty strings`);
+		}
+		if (seen.has(path)) {
+			throw new Error(`${api}() declares the output path '${path}' twice`);
+		}
+		seen.add(path);
+	}
+	// Action output slot names must match [A-Za-z0-9_.-], which output paths
+	// do not, so slots are indexed and mapped back onto their path below.
+	return {
+		toolNames,
+		inputNames,
+		slots: outputPaths.map((_, index) => `out${index}`),
+	};
+}
+
 export function generatedFiles({
 	display,
 	tools = {},
@@ -59,30 +109,10 @@ export function generatedFiles({
 	outputPaths,
 	argv,
 }) {
-	if (!Array.isArray(outputPaths) || outputPaths.length === 0) {
-		throw new Error("generatedFiles() requires a non-empty outputPaths array");
-	}
-	if (typeof argv !== "function") {
-		throw new Error("generatedFiles() requires an argv(exec, inputs) function");
-	}
-	const toolNames = Object.keys(tools);
-	const inputNames = Object.keys(inputs);
-	for (const name of [...toolNames, ...inputNames]) {
-		if (name === "outputPaths") {
-			throw new Error(
-				"generatedFiles() reserves the input name 'outputPaths'",
-			);
-		}
-	}
-	const shared = toolNames.filter((name) => inputNames.includes(name));
-	if (shared.length > 0) {
-		throw new Error(
-			`generatedFiles() got the same name in tools and inputs: ${shared.join(", ")}`,
-		);
-	}
-	// Action output slot names must match [A-Za-z0-9_.-], which output paths
-	// do not, so slots are indexed and mapped back onto their path below.
-	const slots = outputPaths.map((_, index) => `out${index}`);
+	const { toolNames, inputNames, slots } = planGeneratedOutputs(
+		"generatedFiles",
+		{ tools, inputs, outputPaths, argv },
+	);
 	return task({
 		display: display || `generate ${outputPaths.join(" ")}`,
 		inputs: { ...tools, ...inputs, outputPaths },

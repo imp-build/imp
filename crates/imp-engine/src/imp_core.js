@@ -4103,5 +4103,5 @@ export function goalError(message) {
 }
 
 /** Path to the currently running imp executable. Use as the first element of
- *  an odinGen `cmd` to invoke imp subcommands as generators. */
+ *  a codegen() argv to invoke imp subcommands as generators. */
 export const imp_self = globalThis.__imp_self_bin || "imp";

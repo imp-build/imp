@@ -68,7 +68,7 @@ import {
 	resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
 
-import { nativeTool } from "//rules/imp/native-tool";
+import { CODEGEN } from "//rules/imp/codegen";
 
 import {
 	gccGraphTool,
@@ -1242,8 +1242,9 @@ function graphOdinBuild(
 			// them) — a generated file's own imports must be satisfied via
 			// this package's deps/collections like any other source. What is
 			// checked here is the one contract generatedSrcs relies on: the
-			// artifact must land exactly at spec.path + its declared relative
-			// path, since `odin build spec.path` only discovers files that
+			// artifact must land exactly at the workspace path the entry
+			// declares — spec.path + a relative path, or a codegen() output
+			// path — since `odin build spec.path` only discovers files that
 			// are actually inside that directory.
 			for (const [index, expected] of (
 				resolved.generatedExpectedPaths || []
@@ -1251,7 +1252,7 @@ function graphOdinBuild(
 				const actual = exec.path(resolved[`generated${index}`]);
 				if (actual !== expected) {
 					throw new Error(
-						`odinPackage generatedSrcs[${index}] artifact's real path '${actual}' does not match spec.path + generatedSrcs.path ('${expected}') — the generating action's output.file() path must match`,
+						`odinPackage generatedSrcs[${index}] artifact's real path '${actual}' does not match its declared path ('${expected}') — the generating action's output.file() path must match`,
 					);
 				}
 			}
@@ -1502,17 +1503,30 @@ function createGraphPackage({
 	// which is what makes `odin build spec.path` see it as an ordinary package
 	// source once the compile action mounts it there (see graphOdinBuild()'s
 	// own validation of this contract).
-	spec.generatedSrcs = generatedSrcs.map((entry, index) => {
+	// A codegen() result declares its output paths workspace-relative, which is
+	// the same path an explicit entry's `expectedPath` resolves to — so both
+	// forms reach graphGeneratedSrcs() as the one {artifact, expectedPath} pair
+	// the staging contract has always been written in terms of.
+	spec.generatedSrcs = generatedSrcs.flatMap((entry, index) => {
+		if (entry?.[CODEGEN] === true) {
+			return entry.paths.map((expectedPath) => ({
+				artifact: entry.files[expectedPath],
+				path: expectedPath,
+				expectedPath,
+			}));
+		}
 		if (entry?.artifact?.__imp_graph_handle !== true || !entry.path) {
 			throw new Error(
-				`odinPackage/odinTestPackage generatedSrcs[${index}] must be { artifact: <graph handle>, path: "<relative .odin path>" }`,
+				`odinPackage/odinTestPackage generatedSrcs[${index}] must be a codegen() result, or { artifact: <graph handle>, path: "<relative .odin path>" }`,
 			);
 		}
-		return {
-			artifact: entry.artifact,
-			path: entry.path,
-			expectedPath: graphPath(spec.path, entry.path),
-		};
+		return [
+			{
+				artifact: entry.artifact,
+				path: entry.path,
+				expectedPath: graphPath(spec.path, entry.path),
+			},
+		];
 	});
 	graphPackages.push(spec);
 	const value = {
@@ -1560,67 +1574,3 @@ export function odinTestPackage(opts = {}) {
 }
 
 export const odin_test_package = odinTestPackage;
-
-/** Declare a graph-native Odin source generator. */
-export function odinGen({
-	srcs = [],
-	out,
-	cmd,
-	generator,
-	base = packagePath(),
-} = {}) {
-	if (!out) throw new Error("odinGen requires an 'out' path");
-	if (!generator && (!cmd || cmd.length === 0)) {
-		throw new Error("odinGen requires either 'cmd' or 'generator'");
-	}
-	const path = graphPath(base, out);
-	const source = files({ root: base, include: srcs, exclude: [out] });
-	const shell = nativeTool("sh");
-	const commandTool = cmd ? nativeTool(cmd[0]) : null;
-	const generated = task({
-		display: `generate ${path}`,
-		inputs: {
-			source,
-			shell,
-			...(commandTool ? { commandTool } : {}),
-			generator: generator || null,
-			command: cmd || null,
-			path,
-		},
-		outputs: { generated: output.artifact(), path: output.value() },
-		async run(exec, inputs) {
-			if (inputs.generator) {
-				const mod = await import(inputs.generator);
-				const content = await mod.generate({ srcs });
-				const result = await exec.action({
-					argv: [
-						exec.tool(inputs.shell, "sh"),
-						"-c",
-						'mkdir -p "$(dirname "$1")" && printf %s "$2" > "$1"',
-						"odin-gen",
-						inputs.path,
-						content,
-					],
-					inputs: [inputs.source],
-					outputs: { generated: output.file(inputs.path) },
-				});
-				return { generated: result.outputs.generated, path: inputs.path };
-			}
-			const result = await exec.action({
-				argv: [
-					exec.tool(inputs.commandTool, inputs.command[0]),
-					...inputs.command.slice(1),
-					inputs.path,
-				],
-				inputs: [inputs.source],
-				outputs: { generated: output.file(inputs.path) },
-			});
-			return { generated: result.outputs.generated, path: inputs.path };
-		},
-	});
-	return Object.freeze({
-		generated: generated.outputs.generated,
-		path,
-		[BUILD]: generated.outputs.generated,
-	});
-}

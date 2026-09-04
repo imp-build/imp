@@ -6,12 +6,13 @@ import { TEST } from "//rules/workflows/test";
 import { ccLibrary } from "//rules/c";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
 import { defaultMoldGraphToolchain } from "//rules/c/mold";
+import { codegen } from "//rules/imp/codegen";
 import { describe, expect, test } from "//rules/imp/test";
+import { nativeTool } from "//rules/imp/native-tool";
 import { configuration, files, platformInfo } from "imp:core";
 import {
 	odinExtraLinkerFlagsArgs,
 	odinGccLinkerPathDir,
-	odinGen,
 	odinLinkerPathDir,
 	odinMergeLinkopts,
 	odinModeFlags,
@@ -88,43 +89,63 @@ describe("Odin graph rules", () => {
 		expect(configuration("imp.mode", {}).opt ?? "debug").toBe("debug");
 	});
 
-	test("generators produce a CAS artifact graph", () => {
-		const generated = odinGen({
-			srcs: ["*.json"],
-			out: "generated/bindings.odin",
-			cmd: ["echo"],
+	// A codegen() result standing in for a real generator: the tests below care
+	// about how a generated artifact is staged, not about what wrote it.
+	function exampleCodegen(outputPath) {
+		return codegen({
+			tools: { sh: nativeTool("sh") },
+			outputPaths: [outputPath],
+			argv: (exec, { sh }) => [exec.tool(sh, "sh"), "-c", "true"],
 		});
-		expect(generated.generated.__imp_graph_handle).toBe(true);
-		expect(generated[BUILD].__imp_graph_handle).toBe(true);
-	});
-
-	// Issue #96: odinPackage() accepts a generated source artifact (e.g.
-	// odinGen()'s own output) alongside its ordinary workspace srcs.
-	test("odinGen() exposes the real workspace path its artifact lands at", () => {
-		const generated = odinGen({
-			base: "rules/odin/example",
-			srcs: ["*.json"],
-			out: "generated/bindings.odin",
-			cmd: ["echo"],
-		});
-		expect(generated.path).toBe("rules/odin/example/generated/bindings.odin");
-	});
+	}
 
 	test("odinPackage(generatedSrcs) builds a valid graph without throwing", () => {
-		const generated = odinGen({
-			base: "rules/odin/example",
-			srcs: ["*.json"],
-			out: "generated/bindings.odin",
-			cmd: ["echo"],
-		});
+		const generated = exampleCodegen(
+			"rules/odin/example/generated/bindings.odin",
+		);
 		const pkg = odinPackage({
 			path: "rules/odin/example",
 			generatedSrcs: [
-				{ artifact: generated.generated, path: "generated/bindings.odin" },
+				{
+					artifact:
+						generated.files["rules/odin/example/generated/bindings.odin"],
+					path: "generated/bindings.odin",
+				},
 			],
 			toolchain: "dev-2026-03",
 		});
 		expect(pkg[BUILD].__imp_graph_handle).toBe(true);
+	});
+
+	// The whole point of taking a codegen() result directly: a generator that
+	// writes five files should not make the package repeat five entries.
+	test("odinPackage(generatedSrcs) takes a codegen() result directly", async () => {
+		const generated = codegen({
+			tools: { sh: nativeTool("sh") },
+			outputPaths: [
+				"rules/odin/example/generated/one.odin",
+				"rules/odin/example/generated/two.odin",
+			],
+			argv: (exec, { sh }) => [exec.tool(sh, "sh"), "-c", "true"],
+		});
+		const pkg = odinPackage({
+			path: "rules/odin/example",
+			generatedSrcs: [generated],
+			toolchain: "dev-2026-03",
+		});
+		const walkJson = await globalThis.__imp_walk_graph_for_introspection(
+			JSON.stringify([{ address: "pkg", handleId: pkg[BUILD].__graph_id }]),
+			JSON.stringify({ args: [], flags: {}, mode: {}, config: {} }),
+			JSON.stringify({ discoverExpansionGet: true }),
+		);
+		const { nodes } = JSON.parse(walkJson);
+		const build = nodes.find(
+			(node) => node.display === "odin build rules/odin/example",
+		);
+		const generatedEdges = build.edges.filter((edge) =>
+			/^generated\d+$/.test(edge.name),
+		);
+		expect(generatedEdges.length).toBe(2);
 	});
 
 	test("odinPackage(generatedSrcs) rejects an entry missing artifact/path", () => {
@@ -320,15 +341,18 @@ describe("Odin graph rules", () => {
 	// root spec alone, so every consumer had to repeat the whole
 	// generatedSrcs list to get a file it does not itself generate.
 	test("a dep package's generatedSrcs reach its consumer's build inputs", async () => {
-		const generated = odinGen({
-			base: "rules/odin/example",
-			srcs: ["*.json"],
-			out: "generated/bindings.odin",
-			cmd: ["echo"],
-		});
+		const generated = exampleCodegen(
+			"rules/odin/example/generated/bindings.odin",
+		);
 		const lib = odinPackage({
 			path: "rules/odin/example/split",
-			generatedSrcs: [{ artifact: generated.generated, path: "bindings.odin" }],
+			generatedSrcs: [
+				{
+					artifact:
+						generated.files["rules/odin/example/generated/bindings.odin"],
+					path: "bindings.odin",
+				},
+			],
 			toolchain: "dev-2026-03",
 		});
 		const consumer = odinPackage({
@@ -364,28 +388,28 @@ describe("Odin graph rules", () => {
 	// Two generated sources claiming one workspace path would overwrite each
 	// other in the sandbox, and the winner would depend on input order.
 	test("two artifacts generating one path is rejected", async () => {
-		const first = odinGen({
-			base: "rules/odin/example",
-			srcs: ["*.json"],
-			out: "generated/first.odin",
-			cmd: ["echo", "one"],
-		});
-		const second = odinGen({
-			base: "rules/odin/example",
-			srcs: ["*.json"],
-			out: "generated/second.odin",
-			cmd: ["echo", "two"],
-		});
+		const first = exampleCodegen("rules/odin/example/generated/first.odin");
+		const second = exampleCodegen("rules/odin/example/generated/second.odin");
 		const lib = odinPackage({
 			path: "rules/odin/example/split",
-			generatedSrcs: [{ artifact: first.generated, path: "clash.odin" }],
+			generatedSrcs: [
+				{
+					artifact: first.files["rules/odin/example/generated/first.odin"],
+					path: "clash.odin",
+				},
+			],
 			toolchain: "dev-2026-03",
 		});
 		// Same directory, so the two entries resolve to one workspace path.
 		const consumer = odinTestPackage({
 			path: "rules/odin/example/split",
 			deps: [lib],
-			generatedSrcs: [{ artifact: second.generated, path: "clash.odin" }],
+			generatedSrcs: [
+				{
+					artifact: second.files["rules/odin/example/generated/second.odin"],
+					path: "clash.odin",
+				},
+			],
 			toolchain: "dev-2026-03",
 		});
 		let message = null;
