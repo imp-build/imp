@@ -116,8 +116,8 @@ fn load_workspace_labels(root: &std::path::Path) -> std::collections::HashMap<St
         .unwrap_or_default()
 }
 
-/// Recursive file count under `path` (named-cache slots can nest, unlike the
-/// flat `tasks/`/`cas/blobs/` dirs `count_bytes` handles).
+/// Recursive file count under `path` (named-cache slots nest to an arbitrary
+/// depth, unlike the fixed one-level shard buckets `count_bytes` handles).
 fn count_files_recursive(path: &std::path::Path) -> usize {
     let Ok(entries) = std::fs::read_dir(path) else {
         return 0;
@@ -178,21 +178,18 @@ fn collect_at(root: &std::path::Path) -> CacheStats {
     }
 }
 
-/// Count and total size of the immediate files in `dir` (non-recursive —
-/// both `tasks/` and `cas/blobs/` are flat).
+/// Count and total size of the entries in one sharded store namespace
+/// (`tasks/`, `cas/blobs/`). Counts the shard buckets and any entry still at a
+/// pre-shard flat path alike, and skips in-flight temp siblings, so the figure
+/// covers the whole store while the old layout drains.
 fn count_bytes(dir: &std::path::Path) -> CountBytes {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return CountBytes::default();
-    };
     let mut result = CountBytes::default();
-    for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else {
+    for (_, path) in crate::cache::read_store_namespace(dir) {
+        let Ok(meta) = std::fs::metadata(&path) else {
             continue;
         };
-        if meta.is_file() {
-            result.count += 1;
-            result.bytes += meta.len();
-        }
+        result.count += 1;
+        result.bytes += meta.len();
     }
     result
 }
@@ -247,15 +244,19 @@ mod tests {
     fn counts_and_sizes_tasks_blobs_and_named_scopes() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::create_dir_all(root.join("tasks")).unwrap();
-        std::fs::write(root.join("tasks/a.json"), b"12345").unwrap();
+        // One task record in its shard bucket and one still at a pre-shard
+        // flat path: both count while an upgraded cache drains.
+        std::fs::create_dir_all(root.join("tasks/ab")).unwrap();
+        std::fs::write(root.join("tasks/ab/abcd.json"), b"12345").unwrap();
         std::fs::write(root.join("tasks/b.json"), b"12").unwrap();
 
         std::fs::create_dir_all(root.join("memo-traces/workspace-a")).unwrap();
         std::fs::write(root.join("memo-traces/workspace-a/a.json"), b"123").unwrap();
 
-        std::fs::create_dir_all(root.join("cas/blobs")).unwrap();
-        std::fs::write(root.join("cas/blobs/deadbeef"), b"1234567").unwrap();
+        std::fs::create_dir_all(root.join("cas/blobs/de")).unwrap();
+        std::fs::write(root.join("cas/blobs/de/deadbeef"), b"1234567").unwrap();
+        // An in-flight publish is not a store entry.
+        std::fs::write(root.join("cas/blobs/de/.deadbeef.tmp-blob-1-2"), b"xx").unwrap();
 
         std::fs::create_dir_all(root.join("named/shared/tool/v1")).unwrap();
         std::fs::write(root.join("named/shared/tool/v1/bin"), b"1234").unwrap();

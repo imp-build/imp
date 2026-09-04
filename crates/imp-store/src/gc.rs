@@ -26,7 +26,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::cache::TaskCacheRecord;
+use crate::cache::{
+    existing_cas_blob_path_in, existing_cas_meta_path_in, existing_task_record_path_in,
+    read_store_namespace, TaskCacheRecord,
+};
 
 /// One thing gc wants to delete.
 #[derive(Debug, Clone)]
@@ -130,12 +133,12 @@ impl GcPlan {
         }
         for candidate in &self.cas_blobs {
             if delete(candidate) {
-                let meta = self
-                    .root
-                    .join("cas")
-                    .join("meta")
-                    .join(format!("{}.json", candidate.id));
-                let _ = std::fs::remove_file(meta);
+                // Resolved rather than constructed: the sidecar sits in
+                // whichever layout it was last written in, and a blob promoted
+                // into its bucket does not drag its sidecar along.
+                if let Some(meta) = existing_cas_meta_path_in(&self.root, &candidate.id) {
+                    let _ = std::fs::remove_file(meta);
+                }
             }
         }
         for candidate in self
@@ -225,13 +228,16 @@ impl GcPlan {
                 .map(|rows| rows.flatten().collect())
                 .unwrap_or_default();
             for (kind, id) in rows {
-                let path = match kind.as_str() {
-                    "cas" => self.root.join("cas").join("blobs").join(&id),
-                    "task" => self.root.join("tasks").join(format!("{id}.json")),
-                    "named" => self.root.join("named").join(&id),
+                // A row is stale only when the entry is in neither layout;
+                // reconstructing just one of them would read every sharded
+                // entry as vanished and delete the whole table.
+                let present = match kind.as_str() {
+                    "cas" => existing_cas_blob_path_in(&self.root, &id).is_some(),
+                    "task" => existing_task_record_path_in(&self.root, &id).is_some(),
+                    "named" => self.root.join("named").join(&id).exists(),
                     _ => continue,
                 };
-                if !path.exists() {
+                if !present {
                     let _ = conn.execute(
                         "DELETE FROM usage WHERE kind = ?1 AND id = ?2",
                         rusqlite::params![kind, id],
@@ -470,17 +476,8 @@ fn plan_task_records(
 ) -> Result<Vec<TaskCacheRecord>> {
     let tasks = root.join("tasks");
     let mut live = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&tasks) else {
-        return Ok(live);
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(key) = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_suffix(".json"))
-            .map(str::to_owned)
-        else {
+    for (name, path) in read_store_namespace(&tasks) {
+        let Some(key) = name.strip_suffix(".json").map(str::to_owned) else {
             continue;
         };
         let last_used = db.last_used("task", &key, &path);
@@ -495,7 +492,7 @@ fn plan_task_records(
                 last_used_at: last_used,
                 size_bytes: db
                     .size("task", &key)
-                    .or_else(|| entry.metadata().ok().map(|m| m.len()))
+                    .or_else(|| std::fs::metadata(&path).ok().map(|m| m.len()))
                     .unwrap_or(0),
             }),
         }
@@ -538,24 +535,14 @@ fn plan_cas(
     plan: &mut GcPlan,
 ) -> Result<()> {
     let blobs = root.join("cas").join("blobs");
-    let Ok(entries) = std::fs::read_dir(&blobs) else {
-        return Ok(());
-    };
-    for entry in entries.flatten() {
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
+    for (name, path) in read_store_namespace(&blobs) {
         if marked.contains(&name) {
-            continue;
-        }
-        let path = entry.path();
-        if !path.is_file() {
             continue;
         }
         let last_used = db.last_used("cas", &name, &path);
         if last_used < cutoff {
             plan.cas_blobs.push(Candidate {
-                size_bytes: entry.metadata().map(|m| m.len()).unwrap_or(0),
+                size_bytes: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
                 id: name,
                 path,
                 last_used_at: last_used,
@@ -792,6 +779,8 @@ mod tests {
         _dir: tempfile::TempDir,
         root: PathBuf,
         conn: Connection,
+        /// Seed entries at pre-shard flat paths instead of in their buckets.
+        flat: bool,
     }
 
     impl Fixture {
@@ -817,7 +806,49 @@ mod tests {
                 _dir: dir,
                 root,
                 conn,
+                flat: false,
             }
+        }
+
+        /// A store still holding its entries at pre-shard flat paths, as an
+        /// upgraded cache does until it drains. Garbage collection has to see
+        /// and sweep those exactly as it does sharded ones.
+        fn flat_layout() -> Fixture {
+            Fixture {
+                flat: true,
+                ..Fixture::new()
+            }
+        }
+
+        fn blob_path(&self, digest: &str) -> PathBuf {
+            if self.flat {
+                self.root.join("cas/blobs").join(digest)
+            } else {
+                crate::cache::cas_blob_path_in(&self.root, digest)
+            }
+        }
+
+        fn meta_path(&self, digest: &str) -> PathBuf {
+            if self.flat {
+                self.root.join("cas/meta").join(format!("{digest}.json"))
+            } else {
+                crate::cache::cas_meta_path_in(&self.root, digest)
+            }
+        }
+
+        fn record_path(&self, key: &str) -> PathBuf {
+            if self.flat {
+                self.root.join("tasks").join(format!("{key}.json"))
+            } else {
+                crate::cache::task_record_path_in(&self.root, key)
+            }
+        }
+
+        fn write(&self, path: &Path, contents: &[u8]) {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, contents).unwrap();
         }
 
         fn usage(&self, kind: &str, id: &str, last_used: i64) {
@@ -831,12 +862,8 @@ mod tests {
 
         fn blob(&self, contents: &[u8], last_used: i64) -> String {
             let digest = digest_bytes(contents);
-            std::fs::write(self.root.join("cas/blobs").join(&digest), contents).unwrap();
-            std::fs::write(
-                self.root.join("cas/meta").join(format!("{digest}.json")),
-                b"{}",
-            )
-            .unwrap();
+            self.write(&self.blob_path(&digest), contents);
+            self.write(&self.meta_path(&digest), b"{}");
             self.usage("cas", &digest, last_used);
             digest
         }
@@ -852,11 +879,10 @@ mod tests {
                     "value": null, "digest": output_blob, "bytes": 1, "mode": null,
                 }],
             });
-            std::fs::write(
-                self.root.join("tasks").join(format!("{key}.json")),
-                serde_json::to_vec(&record).unwrap(),
-            )
-            .unwrap();
+            self.write(
+                &self.record_path(key),
+                &serde_json::to_vec(&record).unwrap(),
+            );
             self.usage("task", key, last_used);
         }
 
@@ -891,17 +917,14 @@ mod tests {
 
         let outcome = plan.execute();
         assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
-        assert!(!f.root.join("cas/blobs").join(&dead).exists());
+        assert!(!f.blob_path(&dead).exists());
         assert!(
-            !f.root
-                .join("cas/meta")
-                .join(format!("{dead}.json"))
-                .exists(),
+            !f.meta_path(&dead).exists(),
             "meta sidecar goes with its blob"
         );
-        assert!(!f.root.join("tasks/dead-task.json").exists());
+        assert!(!f.record_path("dead-task").exists());
         assert!(
-            f.root.join("cas/blobs").join(&fresh_unmarked).exists(),
+            f.blob_path(&fresh_unmarked).exists(),
             "recent blob survives the grace window"
         );
         let rows: i64 = f
@@ -910,6 +933,67 @@ mod tests {
                 [&dead], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 0, "deleted entries lose their usage rows");
+    }
+
+    /// The same sweep against a cache that has not been read since the shard
+    /// layout landed. Enumerating only the buckets would see 256 directories,
+    /// skip every one of them, and quietly collect nothing at all.
+    #[test]
+    fn a_pre_shard_flat_store_is_still_swept() {
+        let f = Fixture::flat_layout();
+        let dead = f.blob(b"dead output", OLD);
+        f.record("dead-task", &dead, OLD);
+        let kept = f.blob(b"kept output", OLD);
+        f.record("live-task", &kept, NOW);
+
+        let plan = f.plan();
+        assert_eq!(plan.task_records.len(), 1);
+        assert_eq!(plan.cas_blobs.len(), 1);
+        assert_eq!(plan.cas_blobs[0].id, dead);
+        assert_eq!(plan.marked_blobs, 1, "a flat blob is reachable too");
+
+        let outcome = plan.execute();
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        assert!(!f.blob_path(&dead).exists());
+        assert!(
+            !f.meta_path(&dead).exists(),
+            "the flat meta sidecar goes with its flat blob"
+        );
+        assert!(!f.record_path("dead-task").exists());
+        assert!(f.blob_path(&kept).exists());
+    }
+
+    /// `clean_database` decides a row is stale by looking for its entry on
+    /// disk. Reconstructing only one layout's path would make every row in the
+    /// other layout look vanished and drop the whole table.
+    #[test]
+    fn usage_rows_survive_in_either_layout() {
+        for f in [Fixture::new(), Fixture::flat_layout()] {
+            let kept = f.blob(b"kept output", NOW);
+            f.record("live-task", &kept, NOW);
+            f.usage("cas", "never-stored", NOW);
+
+            f.plan().execute();
+
+            let rows: i64 = f
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM usage WHERE id IN (?1, 'live-task')",
+                    [&kept],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(rows, 2, "entries present on disk keep their rows");
+            let orphan: i64 = f
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM usage WHERE id = 'never-stored'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(orphan, 0, "a row with no entry in either layout is stale");
+        }
     }
 
     #[test]
@@ -1069,8 +1153,8 @@ mod tests {
         assert!(!plan.is_empty());
         assert!(plan.total_bytes() > 0);
         // No execute(): everything must still be on disk.
-        assert!(f.root.join("cas/blobs").join(&dead).exists());
-        assert!(f.root.join("tasks/dead-task.json").exists());
+        assert!(f.blob_path(&dead).exists());
+        assert!(f.record_path("dead-task").exists());
     }
 
     #[test]

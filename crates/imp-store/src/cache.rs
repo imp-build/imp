@@ -1,6 +1,6 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use anyhow::{bail, Context, Result};
@@ -185,6 +185,13 @@ pub fn create_sandbox_root() -> Result<PathBuf> {
 /// deleted out-of-band mid-process (self-inflicted; `imp gc` never does
 /// this), that no longer self-heals: the next write into the missing
 /// directory surfaces as a plain I/O error instead of silently recreating it.
+///
+/// The three content-keyed namespaces shard one level below those parents
+/// (see `shard_bucket`), and their 256 buckets each are *not* pre-created
+/// here — `rename_creating_bucket` makes one the first time an entry lands in
+/// it. Pre-creating 768 directories on every process start would cost more,
+/// and more often, than the one `create_dir` per bucket per cache lifetime
+/// that this trades it for.
 pub fn cache_root() -> Result<PathBuf> {
     static ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     ROOT.get_or_init(resolve_cache_root)
@@ -237,6 +244,9 @@ fn resolve_cache_root() -> Result<PathBuf, String> {
         };
 
         ensure_structural_children(&root)?;
+        // Once per process, and only here: every later read consults an atomic
+        // instead of the filesystem. See FLAT_LAYOUT_MAY_HAVE_ENTRIES.
+        FLAT_LAYOUT_MAY_HAVE_ENTRIES.store(probe_flat_layout(&root), Ordering::Relaxed);
         Ok(root)
     })()
     .map_err(|error| format!("{error:#}"))
@@ -365,19 +375,260 @@ pub fn workspace_cache_id(workspace_root: &Path) -> String {
     digest_bytes(workspace_root.to_string_lossy().as_bytes())
 }
 
+// ---------------------------------------------------------------------------
+// Sharded store layout
+// ---------------------------------------------------------------------------
+
+/// The on-disk contract for the three content-keyed namespaces: an entry named
+/// `N` lives at `<namespace>/<bucket(N)>/<N>`, one directory level of 256
+/// buckets. `cas/blobs/de/deadbeef...`, `cas/meta/de/deadbeef....json`,
+/// `tasks/de/deadbeef....json`.
+///
+/// The **full** name stays the filename. That is load-bearing: every
+/// enumerator recovers an entry's id from its file name alone and never has to
+/// reassemble it from the bucket, and a file can never be read as one that
+/// belongs in a different bucket.
+///
+/// Digests and task keys are 64-char lowercase hex (`digest_bytes`,
+/// `digest_json`), so the bucket is their first two hex digits. A name that is
+/// not hex in its first two characters — only test fixtures produce one — goes
+/// in the reserved bucket below, which no hex name can name. The function is
+/// total: it never slices, so a short or non-ASCII name cannot panic it.
+const NON_HEX_BUCKET: &str = "__";
+
+pub fn shard_bucket(name: &str) -> &str {
+    let mut chars = name.char_indices();
+    let hex = |c: char| c.is_ascii_hexdigit() && !c.is_ascii_uppercase();
+    match (chars.next(), chars.next()) {
+        (Some((_, a)), Some((end, b))) if hex(a) && hex(b) => &name[..end + b.len_utf8()],
+        _ => NON_HEX_BUCKET,
+    }
+}
+
+pub fn cas_blob_path_in(root: &Path, digest: &str) -> PathBuf {
+    root.join("cas")
+        .join("blobs")
+        .join(shard_bucket(digest))
+        .join(digest)
+}
+
+pub fn cas_meta_path_in(root: &Path, digest: &str) -> PathBuf {
+    root.join("cas")
+        .join("meta")
+        .join(shard_bucket(digest))
+        .join(format!("{digest}.json"))
+}
+
+pub fn task_record_path_in(root: &Path, task_key: &str) -> PathBuf {
+    root.join("tasks")
+        .join(shard_bucket(task_key))
+        .join(format!("{task_key}.json"))
+}
+
+/// The pre-shard layout an existing cache may still hold entries in. Reads fall
+/// back to these paths and promote what they find (see `resolve_sharded`); the
+/// enumerators count and sweep them in place.
+fn flat_cas_blob_path_in(root: &Path, digest: &str) -> PathBuf {
+    root.join("cas").join("blobs").join(digest)
+}
+
+fn flat_cas_meta_path_in(root: &Path, digest: &str) -> PathBuf {
+    root.join("cas").join("meta").join(format!("{digest}.json"))
+}
+
+fn flat_task_record_path_in(root: &Path, task_key: &str) -> PathBuf {
+    root.join("tasks").join(format!("{task_key}.json"))
+}
+
+/// Whichever layout actually holds this entry, or `None` if neither does.
+/// Used by the sites that reconstruct a path from an id they read back out of
+/// `usage.db` or a GC candidate, where promoting would be a pointless write on
+/// something about to be deleted.
+pub fn existing_cas_blob_path_in(root: &Path, digest: &str) -> Option<PathBuf> {
+    first_existing([
+        cas_blob_path_in(root, digest),
+        flat_cas_blob_path_in(root, digest),
+    ])
+}
+
+pub fn existing_cas_meta_path_in(root: &Path, digest: &str) -> Option<PathBuf> {
+    first_existing([
+        cas_meta_path_in(root, digest),
+        flat_cas_meta_path_in(root, digest),
+    ])
+}
+
+pub fn existing_task_record_path_in(root: &Path, task_key: &str) -> Option<PathBuf> {
+    first_existing([
+        task_record_path_in(root, task_key),
+        flat_task_record_path_in(root, task_key),
+    ])
+}
+
+fn first_existing<const N: usize>(candidates: [PathBuf; N]) -> Option<PathBuf> {
+    candidates.into_iter().find(|path| path.exists())
+}
+
+/// Set while any of the three namespaces may still hold pre-shard entries at
+/// their flat paths. Probed once, in `resolve_cache_root`, so the common case —
+/// a cache that was created sharded, or one that has since drained — pays
+/// nothing at all on the read path. It only ever goes from set to staying set
+/// for the process: clearing it the moment the last entry is promoted would
+/// cost a directory scan per promotion to learn something the next `imp gc`
+/// establishes for free.
+static FLAT_LAYOUT_MAY_HAVE_ENTRIES: AtomicBool = AtomicBool::new(false);
+
+fn probe_flat_layout(root: &Path) -> bool {
+    ["cas/blobs", "cas/meta", "tasks"]
+        .iter()
+        .any(|sub| holds_a_file(&root.join(sub)))
+}
+
+/// Whether a directory holds at least one non-temp file directly. Stops at the
+/// first hit, so this is a partial scan, not a full `read_dir` of a large
+/// cache.
+fn holds_a_file(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        !is_temp_name(&entry.file_name().to_string_lossy())
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
+    })
+}
+
+/// Resolve an entry to its sharded path, promoting a pre-shard file into its
+/// bucket if that is where it still lives. The returned path is always the
+/// sharded one, so every caller — reader, writer, existence check — sees one
+/// layout and no caller needs to know the old one exists.
+///
+/// Promotion is a rename, so it is atomic and cheap, and losing the race with
+/// another process promoting the same entry is harmless: blobs and meta are
+/// content-addressed, so the winner moved identical bytes, and a task record
+/// keeps the same last-writer-wins semantics it already had.
+/// `flat_layout_may_have_entries` is passed in rather than read here so the
+/// promotion can be exercised deterministically against a throwaway root,
+/// without a test having to drive the process-wide flag that the real callers
+/// read.
+fn resolve_sharded(
+    flat_layout_may_have_entries: bool,
+    sharded: PathBuf,
+    flat: impl FnOnce() -> PathBuf,
+) -> PathBuf {
+    if !flat_layout_may_have_entries || sharded.exists() {
+        return sharded;
+    }
+    let flat = flat();
+    if flat.is_file() {
+        let _ = rename_creating_bucket(&flat, &sharded);
+    }
+    sharded
+}
+
+/// Run a write that targets `path`, and if it failed only because `path`'s
+/// bucket directory does not exist yet, create the bucket and run it once more.
+///
+/// `ensure_structural_children` creates the three namespace parents once, but
+/// not their 256 buckets each — pre-creating 768 directories on every process
+/// start would trade one cost for another. Paying on the miss instead costs one
+/// `create_dir_all` per bucket per cache lifetime and nothing at all once the
+/// bucket exists, which is the steady state for every write after the first.
+///
+/// Both the temp file and the rename that publishes it need this: the temp is a
+/// sibling of its destination (see `temp_sibling_path`), so it lands in the same
+/// not-yet-created bucket.
+fn creating_bucket_on_missing<T>(
+    path: &Path,
+    mut write: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    match write() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let Some(bucket) = path.parent() else {
+                return Err(error);
+            };
+            // Not `create_dir`: two workers can reach the same new bucket at
+            // once, and the loser must see success, not AlreadyExists.
+            std::fs::create_dir_all(bucket)?;
+            write()
+        }
+        result => result,
+    }
+}
+
+fn rename_creating_bucket(from: &Path, to: &Path) -> std::io::Result<()> {
+    creating_bucket_on_missing(to, || std::fs::rename(from, to))
+}
+
 pub fn cas_blob_path(digest: &str) -> Result<PathBuf> {
-    Ok(cache_root()?.join("cas").join("blobs").join(digest))
+    let root = cache_root()?;
+    Ok(resolve_sharded(
+        FLAT_LAYOUT_MAY_HAVE_ENTRIES.load(Ordering::Relaxed),
+        cas_blob_path_in(&root, digest),
+        || flat_cas_blob_path_in(&root, digest),
+    ))
 }
 
 fn cas_meta_path(digest: &str) -> Result<PathBuf> {
-    Ok(cache_root()?
-        .join("cas")
-        .join("meta")
-        .join(format!("{digest}.json")))
+    let root = cache_root()?;
+    Ok(resolve_sharded(
+        FLAT_LAYOUT_MAY_HAVE_ENTRIES.load(Ordering::Relaxed),
+        cas_meta_path_in(&root, digest),
+        || flat_cas_meta_path_in(&root, digest),
+    ))
 }
 
 pub fn task_record_path(task_key: &str) -> Result<PathBuf> {
-    Ok(cache_root()?.join("tasks").join(format!("{task_key}.json")))
+    let root = cache_root()?;
+    Ok(resolve_sharded(
+        FLAT_LAYOUT_MAY_HAVE_ENTRIES.load(Ordering::Relaxed),
+        task_record_path_in(&root, task_key),
+        || flat_task_record_path_in(&root, task_key),
+    ))
+}
+
+/// True for a `temp_sibling_path` scratch file. Those live in the same
+/// directory as the entries they publish, so every enumerator has to filter
+/// them out rather than read them as store entries.
+fn is_temp_name(name: &str) -> bool {
+    name.starts_with('.')
+}
+
+/// Every entry in a sharded namespace, as `(name, path)` — including anything
+/// still sitting at a flat pre-shard path, so garbage collection and statistics
+/// see the whole store while the old layout drains. `name` is the file name
+/// verbatim; callers strip their own suffix.
+pub fn read_store_namespace(dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_temp_name(&name) {
+            continue;
+        }
+        match entry.file_type() {
+            // A directory here is a bucket; one more level and no deeper.
+            Ok(kind) if kind.is_dir() => {
+                let Ok(bucket) = std::fs::read_dir(entry.path()) else {
+                    continue;
+                };
+                for entry in bucket.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if is_temp_name(&name) {
+                        continue;
+                    }
+                    if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                        found.push((name, entry.path()));
+                    }
+                }
+            }
+            // A file here is a leftover from the flat layout.
+            Ok(kind) if kind.is_file() => found.push((name, entry.path())),
+            _ => {}
+        }
+    }
+    found
 }
 
 pub fn digest_bytes(bytes: &[u8]) -> String {
@@ -403,7 +654,9 @@ pub fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
     let blob_path = cas_blob_path(&digest)?;
     if !blob_path.is_file() {
         // No create_dir_all(parent) here: cas/blobs is created once by
-        // cache_root()'s resolution and never removed by imp gc.
+        // cache_root()'s resolution and never removed by imp gc, and its
+        // bucket is created by the publishing rename below if this is the
+        // first entry to land in it.
         let temp = temp_sibling_path(&blob_path, "tmp-blob");
         // Explicit sync_all() before rename, not std::fs::write(): closing a
         // handle alone doesn't guarantee NTFS has flushed the write, so a
@@ -415,14 +668,14 @@ pub fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
         // WINDOWS_BSDTAR handling — but this fsync gap is real regardless
         // and cheap to close.)
         {
-            let mut file = std::fs::File::create(&temp)
+            let mut file = creating_bucket_on_missing(&temp, || std::fs::File::create(&temp))
                 .with_context(|| format!("create {}", temp.display()))?;
             file.write_all(bytes)
                 .with_context(|| format!("write {}", temp.display()))?;
             file.sync_all()
                 .with_context(|| format!("sync {}", temp.display()))?;
         }
-        match std::fs::rename(&temp, &blob_path) {
+        match rename_creating_bucket(&temp, &blob_path) {
             Ok(()) => {}
             // Lost a race with a concurrent publish of the same digest (same
             // content, since CAS blobs are content-addressed): on Windows,
@@ -447,16 +700,17 @@ pub fn store_blob(bytes: &[u8], kind: &str) -> Result<String> {
     let meta_path = cas_meta_path(&digest)?;
     if !meta_path.is_file() {
         // No create_dir_all(parent) here either: cas/meta is created
-        // alongside cas/blobs above, same rationale.
+        // alongside cas/blobs above, same rationale, bucket included.
         let metadata = serde_json::json!({
             "digest": digest,
             "kind": kind,
             "bytes": bytes.len(),
         });
         let temp = temp_sibling_path(&meta_path, "tmp-meta");
-        std::fs::write(&temp, serde_json::to_vec_pretty(&metadata)?)
+        let encoded = serde_json::to_vec_pretty(&metadata)?;
+        creating_bucket_on_missing(&temp, || std::fs::write(&temp, &encoded))
             .with_context(|| format!("write {}", temp.display()))?;
-        match std::fs::rename(&temp, &meta_path) {
+        match rename_creating_bucket(&temp, &meta_path) {
             Ok(()) => {}
             // Same redundant-publish race as the blob above.
             Err(_) if meta_path.is_file() => {
@@ -579,11 +833,13 @@ pub fn cached_outputs_present(record: &TaskCacheRecord) -> Result<()> {
 pub fn write_task_cache_record(record: &TaskCacheRecord) -> Result<()> {
     let path = task_record_path(&record.task_key)?;
     // No create_dir_all(parent) here: tasks/ is created once by
-    // cache_root()'s resolution and never removed by imp gc.
+    // cache_root()'s resolution and never removed by imp gc, and its bucket
+    // is created by the write and publish below on the first entry into it.
     let encoded = serde_json::to_vec_pretty(record)?;
     let temp = temp_sibling_path(&path, "tmp-record");
-    std::fs::write(&temp, &encoded).with_context(|| format!("write {}", temp.display()))?;
-    std::fs::rename(&temp, &path)
+    creating_bucket_on_missing(&temp, || std::fs::write(&temp, &encoded))
+        .with_context(|| format!("write {}", temp.display()))?;
+    rename_creating_bucket(&temp, &path)
         .with_context(|| format!("publish task cache record {}", path.display()))?;
     crate::usage::record_use_sized(
         crate::usage::UsageKind::Task,
@@ -1127,6 +1383,174 @@ mod tests {
         };
         write_task_cache_record(&record).unwrap();
         assert!(task_record_path(&record.task_key).unwrap().is_file());
+    }
+
+    // -----------------------------------------------------------------------
+    // Sharded layout
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn shard_bucket_takes_the_first_two_hex_digits() {
+        assert_eq!(shard_bucket("deadbeef"), "de");
+        assert_eq!(shard_bucket(&"0".repeat(64)), "00");
+        assert_eq!(shard_bucket("ffabc"), "ff");
+    }
+
+    #[test]
+    fn shard_bucket_is_total_over_names_that_are_not_hex() {
+        // Only test fixtures produce these, but the function must never
+        // panic on one, and must never collide with a real hex bucket.
+        assert_eq!(shard_bucket("dead-task"), "de");
+        assert_eq!(shard_bucket("live-task"), NON_HEX_BUCKET);
+        assert_eq!(shard_bucket("DEADBEEF"), NON_HEX_BUCKET);
+        assert_eq!(shard_bucket("a"), NON_HEX_BUCKET);
+        assert_eq!(shard_bucket(""), NON_HEX_BUCKET);
+        assert_eq!(shard_bucket("é-key"), NON_HEX_BUCKET);
+    }
+
+    #[test]
+    fn sharded_paths_keep_the_full_name_one_level_down() {
+        let root = Path::new("/cache");
+        let digest = "deadbeef";
+        assert_eq!(
+            cas_blob_path_in(root, digest),
+            Path::new("/cache/cas/blobs/de/deadbeef")
+        );
+        assert_eq!(
+            cas_meta_path_in(root, digest),
+            Path::new("/cache/cas/meta/de/deadbeef.json")
+        );
+        assert_eq!(
+            task_record_path_in(root, digest),
+            Path::new("/cache/tasks/de/deadbeef.json")
+        );
+    }
+
+    #[test]
+    fn store_blob_writes_into_its_shard_bucket() {
+        let digest = store_blob(b"cache.rs shard-bucket layout test", "test").unwrap();
+        let root = cache_root().unwrap();
+
+        assert_eq!(
+            cas_blob_path(&digest).unwrap(),
+            cas_blob_path_in(&root, &digest)
+        );
+        assert!(cas_blob_path_in(&root, &digest).is_file());
+        assert!(cas_meta_path_in(&root, &digest).is_file());
+        assert_eq!(
+            cas_blob_path_in(&root, &digest).parent().unwrap(),
+            root.join("cas").join("blobs").join(shard_bucket(&digest))
+        );
+    }
+
+    /// The compatibility path: an entry left at its pre-shard flat location is
+    /// still found, and the lookup moves it into its bucket on the way through,
+    /// so an upgraded cache drains itself instead of needing a migration pass.
+    #[test]
+    fn a_flat_entry_is_found_and_promoted_into_its_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let digest = "deadbeefcafe";
+        let flat = flat_cas_blob_path_in(root, digest);
+        std::fs::create_dir_all(flat.parent().unwrap()).unwrap();
+        std::fs::write(&flat, b"pre-shard contents").unwrap();
+
+        let resolved = resolve_sharded(true, cas_blob_path_in(root, digest), || {
+            flat_cas_blob_path_in(root, digest)
+        });
+
+        assert_eq!(resolved, cas_blob_path_in(root, digest));
+        assert_eq!(std::fs::read(&resolved).unwrap(), b"pre-shard contents");
+        assert!(!flat.exists(), "the flat entry is moved, not copied");
+    }
+
+    #[test]
+    fn resolution_does_not_touch_the_flat_layout_once_it_is_known_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let digest = "deadbeefcafe";
+        let flat = flat_cas_blob_path_in(root, digest);
+        std::fs::create_dir_all(flat.parent().unwrap()).unwrap();
+        std::fs::write(&flat, b"pre-shard contents").unwrap();
+
+        // The probe said the flat layout was empty, so nothing is promoted —
+        // this is what keeps the fallback off the hot path.
+        let resolved = resolve_sharded(false, cas_blob_path_in(root, digest), || {
+            flat_cas_blob_path_in(root, digest)
+        });
+
+        assert_eq!(resolved, cas_blob_path_in(root, digest));
+        assert!(flat.exists());
+    }
+
+    #[test]
+    fn probe_sees_a_flat_entry_but_not_a_sharded_one_or_a_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        ensure_structural_children(root).unwrap();
+        assert!(
+            !probe_flat_layout(root),
+            "a fresh cache has no flat entries"
+        );
+
+        std::fs::create_dir_all(root.join("cas/blobs/de")).unwrap();
+        std::fs::write(root.join("cas/blobs/de/deadbeef"), b"x").unwrap();
+        assert!(
+            !probe_flat_layout(root),
+            "a bucket directory is not a flat entry"
+        );
+
+        std::fs::write(root.join("cas/blobs/.deadbeef.tmp-blob-1-2"), b"x").unwrap();
+        assert!(
+            !probe_flat_layout(root),
+            "an in-flight publish is not a flat entry"
+        );
+
+        std::fs::write(root.join("tasks/abcd.json"), b"{}").unwrap();
+        assert!(probe_flat_layout(root));
+    }
+
+    #[test]
+    fn concurrent_publishes_into_one_new_bucket_all_succeed() {
+        // Distinct blobs sharing a bucket that does not exist yet: every
+        // thread must create-or-tolerate it, not race into AlreadyExists.
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = dir.path().join("cas").join("blobs").join("de");
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                let bucket = &bucket;
+                scope.spawn(move || {
+                    let destination = bucket.join(format!("deadbeef{index}"));
+                    let temp = temp_sibling_path(&destination, "tmp-blob");
+                    creating_bucket_on_missing(&temp, || std::fs::write(&temp, b"contents"))
+                        .unwrap();
+                    rename_creating_bucket(&temp, &destination).unwrap();
+                });
+            }
+        });
+
+        for index in 0..8 {
+            assert!(bucket.join(format!("deadbeef{index}")).is_file());
+        }
+    }
+
+    #[test]
+    fn read_store_namespace_reports_both_layouts_and_skips_temps() {
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = dir.path().join("cas").join("blobs");
+        std::fs::create_dir_all(blobs.join("de")).unwrap();
+        std::fs::write(blobs.join("de/deadbeef"), b"sharded").unwrap();
+        std::fs::write(blobs.join("cafebabe"), b"flat").unwrap();
+        std::fs::write(blobs.join("de/.deadbeef.tmp-blob-1-2"), b"temp").unwrap();
+        std::fs::write(blobs.join(".cafebabe.tmp-blob-1-2"), b"temp").unwrap();
+
+        let mut found: Vec<String> = read_store_namespace(&blobs)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        found.sort();
+
+        assert_eq!(found, ["cafebabe", "deadbeef"]);
     }
 
     #[test]
