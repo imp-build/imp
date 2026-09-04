@@ -10,11 +10,40 @@ import {
 	odinArtifactName,
 	odinBin,
 	odinCacheKey,
+	odinGenLockfiles,
 	odinGraphTool,
 	odinLinkerFor,
 	odinTool,
 	odinToolchain,
 } from "//rules/odin/toolchain";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+
+const BUNDLED_LOCKFILE = "//rules/odin/odin.lock";
+
+// A one-version, one-platform lock for the platform withFakeToolchainHost
+// reports (linux/x86_64). The sha is what the download argv is checked for,
+// so each lock in a test gets its own.
+function odinLock(version, sha256) {
+	return JSON.stringify({
+		tool: "odin",
+		versions: {
+			[version]: {
+				"linux/x86_64": {
+					url: "https://locked.example/odin.tar.gz",
+					artifact: "odin.tar.gz",
+					size: 42,
+					sha256,
+				},
+			},
+		},
+	});
+}
+
+function readAddresses(host) {
+	return host.calls
+		.filter((call) => call[0] === "readAddressedFile")
+		.map((call) => call[1]);
+}
 
 function withOdinHost(fn) {
 	return withFakeToolchainHost(async (host) => {
@@ -112,6 +141,94 @@ describe("Odin graph toolchain", () => {
 			}
 			expect(message).toContain("no lockfile found");
 			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("the bundled lockfile is the default", async () => {
+		await withOdinHost(async (host) => {
+			host.addFile(BUNDLED_LOCKFILE, odinLock("dev-2026-03", "cafe"));
+			odinToolchain("dev-2026-03", { default: true });
+
+			await odinBin();
+
+			expect(readAddresses(host)).toContain(BUNDLED_LOCKFILE);
+			expect(host.runs[0].argv).toContain("cafe");
+		});
+	});
+
+	test("a custom lockfile address is consulted instead of the bundled one", async () => {
+		await withOdinHost(async (host) => {
+			host.addFile("//locks/odin.lock", odinLock("dev-2026-05", "beef"));
+			odinToolchain("dev-2026-05", {
+				default: true,
+				lockfile: "//locks/odin.lock",
+			});
+
+			await odinBin();
+
+			expect(readAddresses(host)).toContain("//locks/odin.lock");
+			expect(readAddresses(host).includes(BUNDLED_LOCKFILE)).toBe(false);
+			expect(host.runs[0].argv).toContain("beef");
+		});
+	});
+
+	test("a missing selected lockfile fails naming it and gen-lockfiles", async () => {
+		await withOdinHost(async () => {
+			odinToolchain("dev-2026-05", {
+				default: true,
+				lockfile: "//locks/odin.lock",
+			});
+			let message = null;
+			try {
+				await odinBin();
+			} catch (error) {
+				message = error.message;
+			}
+			expect(message).toContain("no lockfile found");
+			expect(message).toContain("//locks/odin.lock");
+			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("a malformed lockfile address fails at declaration", () => {
+		return withOdinHost(() => {
+			expect(() =>
+				odinToolchain("dev-2026-05", { lockfile: "locks/odin.lock" }),
+			).toThrow("must start with //");
+		});
+	});
+
+	test("gen-lockfiles writes the address declared on the toolchain", async () => {
+		await withOdinHost(async (host) => {
+			odinToolchain("dev-2026-05", {
+				default: true,
+				lockfile: "//locks/odin.lock",
+			});
+
+			await host.resolve(odinGenLockfiles()[GEN_LOCKFILES]);
+
+			expect(host.runs.some((r) => r.display === "write locks/odin.lock")).toBe(
+				true,
+			);
+		});
+	});
+
+	test("gen-lockfiles takes an explicit lockfile override", async () => {
+		await withOdinHost(async (host) => {
+			odinToolchain("dev-2026-05", {
+				default: true,
+				lockfile: "//locks/odin.lock",
+			});
+
+			await host.resolve(
+				odinGenLockfiles("dev-2026-05", { lockfile: "//other/odin.lock" })[
+					GEN_LOCKFILES
+				],
+			);
+
+			expect(host.runs.some((r) => r.display === "write other/odin.lock")).toBe(
+				true,
+			);
 		});
 	});
 });

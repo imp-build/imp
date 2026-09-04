@@ -10,7 +10,10 @@ import {
 	odinSupportedPlatforms,
 	resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
-import { downloadToolArtifact } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockfileAddressToPath,
+} from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
@@ -24,7 +27,10 @@ import {
 export const ODINFMT_TOOL = toolName("odinfmt");
 
 const ODINFMT_CACHE = "odinfmt-toolchains";
-const ODINFMT_LOCKFILE = "//rules/odin/odinfmt/odinfmt.lock";
+// The bundled lockfile ships with the rule library (it lives inside
+// rules/**); a workspace overrides it with a file at the same address, or
+// by declaring the toolchain with a `lockfile` address of its own.
+const DEFAULT_LOCKFILE = "//rules/odin/odinfmt/odinfmt.lock";
 
 // odinfmt ships inside the OLS release zips, whose tags track Odin's monthly dev
 // versions, so it is pinned to the same version as the Odin toolchain.
@@ -92,6 +98,18 @@ function graphToolFor(version) {
 	return graphToolchains.get(version) ?? odinfmtGraphTool(version);
 }
 
+// The lockfile setting rides the declared instance's attrs — the one that
+// declared this exact version, else the default instance's. The shipped
+// default declares no version at all (see the odinfmtToolchain() call at the
+// bottom of this file), so the fallback to the default instance is what
+// serves it.
+function lockfileFor(version) {
+	return (
+		OdinfmtToolchain.instanceForVersion(version)?.attrs.lockfile ??
+		DEFAULT_LOCKFILE
+	);
+}
+
 /**
  * Return a named-cache-backed odinfmt tool descriptor plus the on-disk binary
  * name to invoke it with. Downloads and caches the OLS release on first use.
@@ -121,7 +139,7 @@ export function odinfmtGraphTool(version) {
 	const plat = platformInfo();
 	namedCache({ name: ODINFMT_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: ODINFMT_LOCKFILE,
+		lockfile: lockfileFor(resolved),
 		tool: "odinfmt",
 		version: resolved,
 		plat,
@@ -162,12 +180,13 @@ export async function odinfmtBin(version) {
 export class OdinfmtToolchain extends Toolchain {
 	static kind = "odinfmt-toolchain";
 	static tool = ODINFMT_TOOL;
-	constructor({ version, unverified }, opts) {
+	constructor({ version, lockfile, unverified }, opts) {
 		super(
 			{
 				kind: OdinfmtToolchain.kind,
 				attrs: {
 					version: version ?? null,
+					lockfile,
 					...(unverified ? { unverified } : {}),
 				},
 			},
@@ -193,13 +212,20 @@ export function __resetOdinfmtToolchainStateForTest() {
  * @param {string} [version]
  * @param {object} [opts]
  * @param {boolean} [opts.default=false] Set as the default odinfmt target.
+ * @param {string} [opts.lockfile] Lockfile address pinning download SHA-256s;
+ *   defaults to the bundled `//rules/odin/odinfmt/odinfmt.lock`. Point this
+ *   at your own lock (regenerate via `imp goal gen-lockfiles`) when pinning a
+ *   version the bundled lock does not know.
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
  * @returns {object} Target handle for this odinfmt toolchain.
  */
 export function odinfmtToolchain(version, opts = {}) {
+	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	new OdinfmtToolchain(
-		{ version, unverified: opts.unverified },
+		{ version, lockfile, unverified: opts.unverified },
 		{ default: opts.default },
 	);
 	const resolved = resolveOdinToolchainVersion(version);
@@ -217,14 +243,20 @@ export function odinfmtToolchain(version, opts = {}) {
  * default Odin toolchain version, same as odinfmtToolchain() does.
  *
  * @param {string} [version]
+ * @param {object} [opts]
+ * @param {string} [opts.lockfile] Write this lockfile address instead of the
+ *   one declared on the toolchain. Defaults to the address
+ *   odinfmtToolchain(version, { lockfile }) declared, so a workspace states
+ *   it once.
  * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
  */
-export function odinfmtGenLockfiles(version) {
+export function odinfmtGenLockfiles(version, opts = {}) {
 	const resolved = resolveOdinToolchainVersion(version);
 	return {
 		[GEN_LOCKFILES]: graphGenerateToolLockfile({
 			version: resolved,
 			...LOCKFILE_SPEC,
+			lockfile: opts.lockfile ?? lockfileFor(resolved),
 		}),
 	};
 }
@@ -251,7 +283,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		platforms: odinSupportedPlatforms(),
 		downloadUrl: odinfmtDownloadUrl,
 		artifactName: odinfmtArtifactName,
-		lockfile: ODINFMT_LOCKFILE,
+		lockfile: DEFAULT_LOCKFILE,
 	},
 	["dev-2026-03"],
 );

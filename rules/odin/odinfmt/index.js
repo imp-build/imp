@@ -14,6 +14,7 @@ import { platformInfo } from "imp:core";
 
 export {
 	defaultOdinfmtToolchain,
+	odinfmtGenLockfiles,
 	odinfmtToolchain,
 } from "//rules/odin/odinfmt/toolchain";
 

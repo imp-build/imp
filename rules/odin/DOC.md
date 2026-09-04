@@ -30,6 +30,44 @@ This repository's workspace imports `//rules/imp/mode`: the default profile
 keeps Odin's `-debug` build behavior, while `imp build --profile release ...`
 uses Odin's `-o:speed` optimization mode.
 
+### Select a workspace lockfile
+
+The rules ship a lockfile for each managed tool. It pins the download URL,
+size, and SHA-256 of every release artifact, and it knows only the versions
+the rules ship with. To pin a version that the shipped lockfile does not
+know, give the toolchain the address of a lockfile that this workspace owns.
+The shipped lockfiles stay the default.
+
+```js
+export const odinToolchainDefault = odinToolchain("dev-2026-05", {
+	default: true,
+	lockfile: "//locks/odin.lock",
+});
+export const odinfmtDefault = odinfmtToolchain(undefined, {
+	default: true,
+	lockfile: "//locks/odinfmt.lock",
+});
+```
+
+Export the lockfile generation roots, then write the two files:
+
+```js
+import { odinGenLockfiles } from "//rules/odin";
+import { odinfmtGenLockfiles } from "//rules/odin/odinfmt";
+
+export const odinLockfiles = odinGenLockfiles();
+export const odinfmtLockfiles = odinfmtGenLockfiles();
+```
+
+```sh
+imp goal gen-lockfiles //:odinLockfiles //:odinfmtLockfiles
+```
+
+Each generation root writes to the address that its toolchain declares, so
+the address is given one time only. Downloads stay verified: an address with
+no file, or a lockfile with no entry for the selected version and platform,
+makes the acquire fail and points at `imp goal gen-lockfiles`.
+
 ## Declare packages and tests
 
 ```js

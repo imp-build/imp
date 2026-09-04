@@ -6,7 +6,10 @@ import {
 	tool as graphTool,
 } from "imp:core";
 
-import { downloadToolArtifact } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockfileAddressToPath,
+} from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
@@ -20,6 +23,10 @@ import {
 export const ODIN_TOOL = toolName("odin");
 
 const ODIN_TOOLCHAIN_CACHE = "odin-toolchains";
+// The bundled lockfile ships with the rule library (it lives inside
+// rules/**); a workspace overrides it with a file at the same address, or
+// by declaring the toolchain with a `lockfile` address of its own.
+const DEFAULT_LOCKFILE = "//rules/odin/odin.lock";
 
 const osMap = { linux: "linux", macos: "macos", windows: "windows" };
 const archMap = { x86_64: "amd64", aarch64: "arm64" };
@@ -92,12 +99,13 @@ export function odinSupportedPlatforms() {
 export class OdinToolchain extends Toolchain {
 	static kind = "odin-toolchain";
 	static tool = ODIN_TOOL;
-	constructor({ version, unverified }, opts) {
+	constructor({ version, lockfile, unverified }, opts) {
 		super(
 			{
 				kind: OdinToolchain.kind,
 				attrs: {
 					version,
+					lockfile,
 					...(unverified ? { unverified } : {}),
 				},
 			},
@@ -151,6 +159,15 @@ function graphToolFor(version) {
 	return graphToolchains.get(version) ?? odinGraphTool(version);
 }
 
+// The lockfile setting rides the declared instance's attrs — the one that
+// declared this exact version, else the default instance's.
+function lockfileFor(version) {
+	return (
+		OdinToolchain.instanceForVersion(version)?.attrs.lockfile ??
+		DEFAULT_LOCKFILE
+	);
+}
+
 export function __resetOdinToolchainStateForTest() {
 	OdinToolchain.clearDefault();
 	graphToolchains = new Map();
@@ -166,6 +183,10 @@ export function __resetOdinToolchainStateForTest() {
  * @param {string} version Odin release version (matches .odin-version).
  * @param {object} [opts]
  * @param {boolean} [opts.default=false] Set as the default toolchain.
+ * @param {string} [opts.lockfile] Lockfile address pinning download SHA-256s;
+ *   defaults to the bundled `//rules/odin/odin.lock`. Point this at your own
+ *   lock (regenerate via `imp goal gen-lockfiles`) when pinning a version the
+ *   bundled lock does not know.
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
  * @param {object} [opts.linker] Graph-native linker toolchain handle (e.g.
@@ -196,8 +217,11 @@ export function __resetOdinToolchainStateForTest() {
  * @returns {object} Tool handle for this Odin toolchain.
  */
 export function odinToolchain(version, opts = {}) {
+	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	new OdinToolchain(
-		{ version, unverified: opts.unverified },
+		{ version, lockfile, unverified: opts.unverified },
 		{ default: opts.default },
 	);
 	const tool = odinGraphTool(version);
@@ -284,14 +308,20 @@ export function defaultOdinUsesLldOnWindows() {
  * through exec.tool(). A frozen object cannot hold an extra property.
  *
  * @param {string} [version]
+ * @param {object} [opts]
+ * @param {string} [opts.lockfile] Write this lockfile address instead of the
+ *   one declared on the toolchain. Defaults to the address
+ *   odinToolchain(version, { lockfile }) declared, so a workspace states it
+ *   once.
  * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
  */
-export function odinGenLockfiles(version) {
+export function odinGenLockfiles(version, opts = {}) {
 	const resolved = resolveOdinToolchainVersion(version);
 	return {
 		[GEN_LOCKFILES]: graphGenerateToolLockfile({
 			version: resolved,
 			...LOCKFILE_SPEC,
+			lockfile: opts.lockfile ?? lockfileFor(resolved),
 		}),
 	};
 }
@@ -302,7 +332,7 @@ export function odinGraphTool(version) {
 	const plat = platformInfo();
 	namedCache({ name: ODIN_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: "//rules/odin/odin.lock",
+		lockfile: lockfileFor(resolved),
 		tool: "odin",
 		version: resolved,
 		plat,
@@ -403,7 +433,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		platforms: odinSupportedPlatforms(),
 		downloadUrl: odinDownloadUrl,
 		artifactName: odinArtifactName,
-		lockfile: "//rules/odin/odin.lock",
+		lockfile: DEFAULT_LOCKFILE,
 	},
 	["dev-2026-03"],
 );

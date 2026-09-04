@@ -15,3 +15,9 @@ output without parsing diagnostics or relying on timestamps.
 Only sources owned by the selected package are formatted. Dependency packages
 must be selected through their own targets, which prevents one package's
 format operation from unexpectedly rewriting another package's files.
+
+Odinfmt is acquired from the OLS release that matches the Odin compiler
+version. `odinfmtToolchain(version, { lockfile })` selects a lockfile that
+this workspace owns instead of the shipped
+`//rules/odin/odinfmt/odinfmt.lock`. See "Select a workspace lockfile" in
+`rules/odin/DOC.md`.

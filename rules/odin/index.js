@@ -86,6 +86,7 @@ export {
 	odinBin,
 	odinCacheKey,
 	odinDownloadUrl,
+	odinGenLockfiles,
 	odinToolchain,
 	odinTool,
 	resolveOdinToolchainVersion,
