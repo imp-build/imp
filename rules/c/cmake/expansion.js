@@ -327,16 +327,22 @@ export function cmakeProject(opts = {}) {
  * @param {object} [opts]
  * @param {string[]} [opts.includeDirs=[]] Include dirs downstream ccLibrary()/ccBinary() targets need, e.g. the CMake project's own public header directory.
  * @param {string[]} [opts.linkopts=[]] Link flags downstream targets need to resolve this target's own shared-library dependencies, e.g. pkg-config-derived `-L`/`-l` flags for a `.so` linked against host system packages. CMake's own per-target link flags aren't structurally discoverable any more than its include paths are (see `includeDirs` above) — supplied by the caller for the same reason.
- * @returns {object} `{[BUILD], archive, transitiveArchives, transitiveIncludeDirs, transitiveLinkopts}` — usable directly as a ccLibrary()/ccBinary() `deps` entry.
+ * @param {boolean} [opts.shared=false] Declare that this CMake target is a shared library (`add_library(... SHARED ...)`), so its artifact travels as `transitiveSharedLibs` rather than `transitiveArchives` — the same bucket `ccLibrary({shared: true})` uses. Caller-supplied for the same reason as `includeDirs` and `linkopts`: the target's own CMake type is known only after the configure task has run, while this function must report the bucket synchronously at `BUILD.js` declare time.
+ * @returns {object} `{[BUILD], archive, transitiveArchives, transitiveSharedLibs, transitiveIncludeDirs, transitiveLinkopts}` — usable directly as a ccLibrary()/ccBinary() `deps` entry.
  * @category target
  */
 export function cmakeLibraryDep(project, name, opts = {}) {
-	const { includeDirs = [], linkopts = [] } = opts;
+	const { includeDirs = [], linkopts = [], shared = false } = opts;
 	const archive = project.get(name, BUILD);
 	return Object.freeze({
 		[BUILD]: archive,
 		archive,
-		transitiveArchives: [archive],
+		// One bucket or the other, never both — see rules/c/index.js's own
+		// docstring on why an archive and a shared library can't be treated
+		// alike. Without `shared` this function was extension-blind and put a
+		// `.so` among the archives, where a consumer's `ar` step could reach it.
+		transitiveArchives: shared ? [] : [archive],
+		transitiveSharedLibs: shared ? [archive] : [],
 		transitiveIncludeDirs: [...includeDirs],
 		transitiveLinkopts: [...linkopts],
 	});

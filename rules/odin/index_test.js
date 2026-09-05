@@ -275,6 +275,25 @@ describe("Odin graph rules", () => {
 		expect(await buildFileRoots(app)).toContain("rules/odin/example/native");
 	});
 
+	// A shared ccLibrary() dep reports its output as transitiveSharedLibs
+	// rather than transitiveArchives (rules/c keeps a .so off its own `ar`
+	// step). Odin needs the file staged either way, so it reads both buckets —
+	// otherwise a shared dep would contribute nothing at all and fail far away
+	// at link time.
+	test("a shared ccLibrary() dep's building task reaches the build inputs", async () => {
+		const native = ccLibrary({
+			path: "rules/odin/example/native",
+			toolchain: defaultGccGraphToolchain(),
+			shared: true,
+		});
+		const app = odinPackage({
+			path: "rules/odin/example",
+			deps: [native],
+			toolchain: "dev-2026-03",
+		});
+		expect(await buildFileRoots(app)).toContain("rules/odin/example/native");
+	});
+
 	// odinTestPackage() globs the mirror image of odinPackage()'s own default
 	// exclude, so the common case — tests beside the code — needs no srcs at
 	// all on either target.

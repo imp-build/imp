@@ -106,9 +106,9 @@ successful result.
 
 A discovered CMake target's `project.get(name, BUILD)` is a plain resolved
 graph handle — unlike a raw `ccLibrary()` result, it does not itself carry
-`transitiveArchives`/`transitiveIncludeDirs`/`transitiveLinkopts`, so a bare
-`project.get("mylib", BUILD)` does not work directly as a `deps` entry.
-Wrap it with `cmakeLibraryDep()` instead:
+`transitiveArchives`/`transitiveSharedLibs`/`transitiveIncludeDirs`/`transitiveLinkopts`,
+so a bare `project.get("mylib", BUILD)` does not work directly as a `deps`
+entry. Wrap it with `cmakeLibraryDep()` instead:
 
 ```js
 import { cmakeLibraryDep, cmakeProject } from "//rules/c/cmake";
@@ -132,6 +132,33 @@ were, that data is only known once the CMake configure task has actually
 run — too late for `ccTask()`'s own compiler-flag construction, which needs
 plain strings synchronously at `BUILD.js` declare time. This is the same
 kind of manual knowledge a plain `ccLibrary({hdrs})` glob already requires.
+
+### Shared library targets
+
+If the CMake target is `add_library(... SHARED ...)`, say so with
+`shared: true`:
+
+```js
+cmakeLibraryDep(project, "mylib", {
+    includeDirs: ["third_party/mylib/include"],
+    shared: true,
+});
+```
+
+That routes the artifact to `transitiveSharedLibs` instead of
+`transitiveArchives` — the same bucket `ccLibrary({ shared: true })` uses, so
+both kinds of dep behave alike from a consumer's side. Without it a `.so`
+is reported as an archive, where a consumer's `ar` step can reach it.
+
+`shared` is caller-supplied for the same reason `includeDirs` is: the CMake
+target's own type is known only once the configure task has run, while
+`cmakeLibraryDep()` must report the bucket synchronously at `BUILD.js`
+declare time.
+
+This makes a shared CMake dep **link**. The built binary still does not
+**run** — nothing places the library beside the executable and nothing sets
+an rpath, so it fails with `cannot open shared object file` unless
+`LD_LIBRARY_PATH` points at it. That is separate, still-open work.
 
 If the CMake target is a shared library with its own shared-library
 dependencies (e.g. pkg-config-discovered `libwebkit2gtk-4.1`), the final

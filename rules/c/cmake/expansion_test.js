@@ -768,6 +768,30 @@ describe("cmakeLibraryDep", () => {
 		});
 	});
 
+	test("routes a shared target to transitiveSharedLibs, keeping it out of the archives", () => {
+		return withCmakeHost(async (_host, expansion) => {
+			// hello_cmake really is an add_library(... SHARED ...) target. The
+			// caller has to say so: this function only holds a lazy handle, and
+			// the CMake target's own type isn't known until the configure task
+			// has run — long after this returns.
+			const dep = cmakeLibraryDep(expansion, "hello_cmake", {
+				shared: true,
+			});
+			expect(dep.transitiveSharedLibs).toEqual([dep.archive]);
+			expect(dep.transitiveArchives).toEqual([]);
+			// The handle itself is reported the same either way.
+			expect(dep.archive.__graph_id).toBe(dep[BUILD].__graph_id);
+		});
+	});
+
+	test("defaults to a static target, reporting an empty shared bucket", () => {
+		return withCmakeHost(async (_host, expansion) => {
+			const dep = cmakeLibraryDep(expansion, "hello_cmake");
+			expect(dep.transitiveArchives).toEqual([dep.archive]);
+			expect(dep.transitiveSharedLibs).toEqual([]);
+		});
+	});
+
 	test("defaults includeDirs to an empty list", () => {
 		return withCmakeHost(async (_host, expansion) => {
 			const dep = cmakeLibraryDep(expansion, "hello_cmake");

@@ -53,13 +53,45 @@ Source and header globs are evaluated relative to `path`, which defaults
 to the declaring `BUILD.js` directory. A library produces a static archive;
 a binary links an executable. `deps` takes other `ccLibrary()` call results
 directly (handle-passing), which the target's own
-`transitiveArchives`/`transitiveIncludeDirs`/`transitiveLinkopts` fold in
-automatically — not a loose filesystem path or label reference. A discovered
+`transitiveArchives`/`transitiveSharedLibs`/`transitiveIncludeDirs`/`transitiveLinkopts`
+fold in automatically — not a loose filesystem path or label reference. A discovered
 CMake target needs wrapping with `cmakeLibraryDep()` (`//rules/c/cmake`)
 first — see its own docs. Use `linkopts` for options that belong only at
 this target's own link step (not propagated to anything depending on it —
 use a dep's `transitiveLinkopts` for flags a consumer needs, e.g. a shared
 library's own `-L`/`-l` dependencies).
+
+### Static archives and shared libraries
+
+`ccLibrary()` produces a static `.a` archive by default and reports it as
+`transitiveArchives`. With `shared: true` it produces a `.so` (a `.dll` on
+Windows) and reports it as `transitiveSharedLibs` instead. The two buckets
+stay separate because the two kinds of file need different handling: an
+archive is fed both to `ar` and to the linker, while a shared library is
+only ever fed to the linker. A consumer folds in both automatically, so
+either kind of dep links without the caller doing anything.
+
+```js
+export const plugin = ccLibrary({
+    srcs: ["plugin.c"],
+    shared: true,
+});
+
+export const host = ccBinary({
+    srcs: ["main.c"],
+    deps: [plugin],
+});
+```
+
+A discovered CMake target must state which kind it is —
+`cmakeLibraryDep(project, "mylib", { shared: true })`, see `//rules/c/cmake`'s
+own docs.
+
+This makes a shared dep **link**. It does not yet make the built binary
+**run**: the library is not placed beside the executable, and nothing sets an
+rpath, so launching the result fails with `cannot open shared object file`
+unless `LD_LIBRARY_PATH` points at the library. Closing that is separate,
+still-open work.
 
 The default GCC toolchain (`//rules/c/gcc`) is a Bootlin external toolchain
 whose compiler wrapper rejects any `-I`/`-isystem`/`-L` flag pointing under

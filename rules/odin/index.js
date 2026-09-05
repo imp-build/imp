@@ -952,6 +952,17 @@ function graphResourceInputs(specs) {
 				for (const archive of dep.transitiveArchives) pushResource(archive);
 				recognized = true;
 			}
+			// A dep's shared libraries need mounting for the same reason its
+			// archives do — they are files a `foreign import` names by path.
+			// They travel their own bucket because rules/c must keep them off
+			// its own `ar` step (see rules/c/index.js's own docstring); to Odin
+			// the two are alike, so both get staged.
+			if (Array.isArray(dep?.transitiveSharedLibs)) {
+				for (const sharedLib of dep.transitiveSharedLibs) {
+					pushResource(sharedLib);
+				}
+				recognized = true;
+			}
 			// A dep's own transitiveLinkopts (e.g. a cmakeLibraryDep()'s
 			// pkg-config-derived -L/-l flags for a shared library's own
 			// dependencies) — unlike transitiveArchives, these aren't files Odin

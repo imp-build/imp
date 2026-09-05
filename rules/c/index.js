@@ -5,12 +5,25 @@
 // plain frozen object a caller passes directly as ccBinary({deps:[A]})'s
 // dependency — a flat, eagerly-computed transitiveArchives array (mirrors
 // rules/rust's cargoPackage({deps}) pattern). This output shape
-// ({[BUILD], archive, transitiveArchives, transitiveIncludeDirs,
-// transitiveHdrs, [PACKAGE]}) is a deliberate cross-module contract: rules/c/cmake's graph-native
+// ({[BUILD], archive, transitiveArchives, transitiveSharedLibs,
+// transitiveIncludeDirs, transitiveHdrs, [PACKAGE]}) is a deliberate
+// cross-module contract: rules/c/cmake's graph-native
 // per-target expand() children (issue #62) are meant to expose the same
 // shape so a raw ccBinary({deps:[cmakeThing.get("mylib")]}) works
 // transparently — see rules/c/cmake/expansion.js's own docstring for the
 // known gap (issue #67) preventing that today.
+//
+// transitiveArchives and transitiveSharedLibs are separate buckets because a
+// static archive and a shared library need different treatment, and until
+// both existed the rules could not tell them apart: cmakeLibraryDep() put a
+// CMake target's artifact into transitiveArchives whether it was a .a or a
+// .so, while ccLibrary({shared:true}) kept its own .so out of that array and
+// exposed it nowhere else. An archive is fed to both `ar` and the linker; a
+// shared library is only ever fed to the linker, never to `ar`. Both buckets
+// are mounted into the sandbox. Staging a shared library *beside* the
+// consuming executable so the loader can find it at run time is a separate,
+// still-open piece of work — see the decision entry
+// binary-products-carry-shared-libraries.
 //
 // Known simplifications versus the pre-migration factory:
 //   - CMakeLists.txt/main()-detection-driven generate-build support lives in
@@ -219,6 +232,13 @@ function ccTask(spec, isLibrary) {
 			? `build/c/${spec.outputSlug}.a`
 			: `build/c/${spec.outputSlug}${platformInfo().os === "windows" ? ".exe" : ""}`;
 	const transitiveArchives = spec.deps.flatMap((d) => d.transitiveArchives);
+	// A dep's shared libraries travel their own bucket (see this module's own
+	// docstring). They reach the link step and the sandbox, never the `ar`
+	// archive step. A dep predating the field contributes none, same
+	// defaulting as transitiveHdrs/transitiveLinkopts below.
+	const transitiveSharedLibs = spec.deps.flatMap(
+		(d) => d.transitiveSharedLibs || [],
+	);
 	// Own linkopts stays link-step-only (not transitive) — only a dep's own
 	// transitiveLinkopts (e.g. a cmakeLibraryDep()'s pkg-config-derived
 	// -L/-l flags) flows into this target's own link step.
@@ -248,6 +268,12 @@ function ccTask(spec, isLibrary) {
 			...spec.toolchain.taskInputs(),
 			...Object.fromEntries(
 				transitiveArchives.map((archive, i) => [`archive${i}`, archive]),
+			),
+			...Object.fromEntries(
+				transitiveSharedLibs.map((sharedLib, i) => [
+					`sharedLib${i}`,
+					sharedLib,
+				]),
 			),
 			...Object.fromEntries(
 				transitiveHdrs.map((depHdrs, i) => [`depHdrs${i}`, depHdrs]),
@@ -336,6 +362,9 @@ function ccTask(spec, isLibrary) {
 			const depArchivePaths = transitiveArchives.map((_, i) =>
 				exec.path(input[`archive${i}`]),
 			);
+			const depSharedLibPaths = transitiveSharedLibs.map((_, i) =>
+				exec.path(input[`sharedLib${i}`]),
+			);
 			const actionKind = isShared
 				? "shared-link"
 				: isLibrary
@@ -356,9 +385,13 @@ function ccTask(spec, isLibrary) {
 							// response file's own content (rspQuote-quoted, parsed
 							// by the native tool itself), not the outer sh -c
 							// script — see rspfileArgv()'s own docstring for why.
+							// Shared libraries follow the archives: a GNU-style link
+							// line resolves left to right, so a .so listed after the
+							// archives can still satisfy what they leave undefined.
 							const content = [
 								...objectSandboxPaths,
 								...depArchivePaths,
+								...depSharedLibPaths,
 								...spec.linkopts,
 								...transitiveLinkopts,
 							]
@@ -401,8 +434,8 @@ function ccTask(spec, isLibrary) {
  * @param {object} [opts.toolchain] gccGraphToolchain()/zigGraphToolchain() result, or the workspace default.
  * @param {string[]} [opts.copts=[]] Extra compiler flags.
  * @param {boolean} [opts.unsafeSystemPaths=false] Bypass Bootlin's toolchain-wrapper unsafe-path guard (which rejects -I/-isystem/-L flags under /usr/include or /usr/lib) so this target can link against host system packages (e.g. libwebkit2gtk-4.1). No-op on a zig toolchain, which has no such guard.
- * @param {boolean} [opts.shared=false] Build a dynamically-loadable shared object (`-shared`, platform-correct extension: `.dll` on Windows, `.so` elsewhere) instead of a static `.a` archive. A shared `archive` is meant to be dlopen()'d, not statically linked — it's left out of the returned `transitiveArchives` so a dependent ccLibrary()/ccBinary() can't accidentally try to `ar`/link it in.
- * @returns {object} Frozen `{[BUILD], archive, transitiveArchives, transitiveIncludeDirs, transitiveHdrs, transitiveLinkopts, [PACKAGE]}`.
+ * @param {boolean} [opts.shared=false] Build a dynamically-loadable shared object (`-shared`, platform-correct extension: `.dll` on Windows, `.so` elsewhere) instead of a static `.a` archive. The result is reported as `transitiveSharedLibs` rather than `transitiveArchives`, so a dependent ccLibrary()/ccBinary() links against it but never tries to `ar` it in. Note that a consumer's build only *links*; placing the library beside the executable so it also loads at run time is separate, still-open work (see the decision entry binary-products-carry-shared-libraries).
+ * @returns {object} Frozen `{[BUILD], archive, transitiveArchives, transitiveSharedLibs, transitiveIncludeDirs, transitiveHdrs, transitiveLinkopts, [PACKAGE]}`.
  */
 export function ccLibrary(opts = {}) {
 	const spec = crateSpec(opts);
@@ -415,6 +448,12 @@ export function ccLibrary(opts = {}) {
 		transitiveArchives: spec.shared
 			? spec.deps.flatMap((d) => d.transitiveArchives)
 			: [archive, ...spec.deps.flatMap((d) => d.transitiveArchives)],
+		// The mirror of transitiveArchives above: a shared library's own
+		// output goes here and nowhere else, so a consumer's link step can
+		// reach it while its `ar` step cannot.
+		transitiveSharedLibs: spec.shared
+			? [archive, ...spec.deps.flatMap((d) => d.transitiveSharedLibs || [])]
+			: spec.deps.flatMap((d) => d.transitiveSharedLibs || []),
 		transitiveIncludeDirs: [
 			spec.path,
 			...spec.deps.flatMap((d) => d.transitiveIncludeDirs),

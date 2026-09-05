@@ -57,8 +57,12 @@ export const raw_main = ccBinary({
 export const uses_cmake_lib = ccBinary({
 	srcs: ["uses_cmake_lib.c"],
 	deps: [
+		// hello_cmake is an add_library(... SHARED ...) target, so it belongs
+		// in the shared bucket — a caller must say so (see cmakeLibraryDep()'s
+		// own docs on why the CMake target type isn't readable here).
 		cmakeLibraryDep(hello, "hello_cmake", {
 			includeDirs: ["rules/c/cmake/example"],
+			shared: true,
 		}),
 	],
 	toolchain: defaultGccGraphToolchain(),

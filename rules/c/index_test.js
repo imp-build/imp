@@ -91,6 +91,68 @@ describe("graph-native ccLibrary/ccBinary", () => {
 		});
 	});
 
+	test("ccLibrary({shared}) reports its output as a shared library, never as an archive", () => {
+		return withCcHost(() => {
+			const staticLib = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+			});
+			// A static library owns the archive bucket and leaves the shared
+			// one empty; a shared library does exactly the reverse. Before the
+			// two buckets existed, a shared library's own output appeared in
+			// neither and no consumer could reach it.
+			expect(staticLib.transitiveArchives).toEqual([staticLib.archive]);
+			expect(staticLib.transitiveSharedLibs).toEqual([]);
+
+			const sharedLib = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+				shared: true,
+			});
+			expect(sharedLib.transitiveArchives).toEqual([]);
+			expect(sharedLib.transitiveSharedLibs).toEqual([sharedLib.archive]);
+		});
+	});
+
+	test("both transitive buckets flow through a dependent library, each keeping its own kind", () => {
+		return withCcHost(() => {
+			const staticDep = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+			});
+			const sharedDep = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+				shared: true,
+			});
+			const lib = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+				deps: [staticDep, sharedDep],
+			});
+			expect(lib.transitiveArchives).toEqual([lib.archive, staticDep.archive]);
+			expect(lib.transitiveSharedLibs).toEqual([sharedDep.archive]);
+		});
+	});
+
+	test("a dep predating transitiveSharedLibs still builds", () => {
+		return withCcHost(() => {
+			// Same tolerance transitiveHdrs/transitiveLinkopts already give a
+			// hand-rolled dep object: a missing bucket contributes nothing
+			// rather than throwing.
+			const dep = {
+				transitiveArchives: [],
+				transitiveIncludeDirs: [],
+			};
+			const lib = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+				deps: [dep],
+			});
+			expect(lib.transitiveSharedLibs).toEqual([]);
+		});
+	});
+
 	test("ccBinary({deps}) folds a dependency library's transitiveArchives in, handle-passing (not label references)", () => {
 		return withCcHost(() => {
 			const lib = ccLibrary({
@@ -285,6 +347,37 @@ describe("graph-native ccLibrary/ccBinary", () => {
 			);
 			for (const run of archiveRuns) {
 				expect(run.argv.join("")).not.toContain("webkitgtk");
+			}
+		});
+	});
+
+	test("a dep's shared library reaches the link step and is mounted, but never the archive step", () => {
+		return withCcHost(async (host) => {
+			const sharedDep = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+				shared: true,
+			});
+			const bin = ccBinary({
+				path: "rules/c/testdata/mixed_sources",
+				deps: [sharedDep],
+				toolchain: fakeGccGraphToolchain(),
+			});
+			await resolveIgnoringArtifactValidation([bin[BUILD]]);
+			const sharedName = "mixed_sources.so";
+			const linkRun = host.runs.find((run) =>
+				run.display.startsWith("cc link "),
+			);
+			// Same response-file indirection as the transitiveLinkopts test
+			// above — the path shows up further along argv, not at argv[2].
+			expect(linkRun.argv.join("")).toContain(sharedName);
+			// The `ar` step takes objects only. This is the failure the two
+			// buckets exist to prevent: an `ar` invocation handed a .so.
+			const archiveRuns = host.runs.filter((run) =>
+				run.display.startsWith("cc archive "),
+			);
+			for (const run of archiveRuns) {
+				expect(run.argv.join("")).not.toContain(sharedName);
 			}
 		});
 	});
