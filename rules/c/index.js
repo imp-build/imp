@@ -20,10 +20,11 @@
 // .so, while ccLibrary({shared:true}) kept its own .so out of that array and
 // exposed it nowhere else. An archive is fed to both `ar` and the linker; a
 // shared library is only ever fed to the linker, never to `ar`. Both buckets
-// are mounted into the sandbox. Staging a shared library *beside* the
-// consuming executable so the loader can find it at run time is a separate,
-// still-open piece of work — see the decision entry
-// binary-products-carry-shared-libraries.
+// are mounted into the sandbox. A binary that has any shared library in its
+// closure also *carries* it: its product becomes a directory holding the
+// executable plus those libraries, linked with -Wl,-rpath,$ORIGIN so the
+// loader finds them beside it at run time (see ccTask()'s own comment on
+// `bundled`, and the decision entry binary-products-carry-shared-libraries).
 //
 // Known simplifications versus the pre-migration factory:
 //   - CMakeLists.txt/main()-detection-driven generate-build support lives in
@@ -45,6 +46,8 @@
 
 import { BUILD } from "//rules/workflows/build";
 import { PACKAGE } from "//rules/workflows/package";
+import { RUN } from "//rules/workflows/run";
+import { TEST } from "//rules/workflows/test";
 import {
 	files,
 	output,
@@ -226,17 +229,6 @@ function ccTask(spec, isLibrary) {
 	const isShared = isLibrary && spec.shared;
 	const srcs = files({ root: spec.path, include: spec.srcs });
 	const hdrs = files({ root: spec.path, include: spec.hdrs });
-	// A binary's own output extension needs the platform-correct ".exe" on
-	// Windows: gcc/clang/cl.exe all auto-append it to the linked file
-	// themselves when the requested output name has none (PE executables
-	// require it), so a declared output path without it is never actually
-	// produced — confirmed by a real `imp build` failure ("run() output ...
-	// was not created as a file in sandbox").
-	const outPath = isShared
-		? `build/c/${sharedLibFilename(spec.outputSlug)}`
-		: isLibrary
-			? `build/c/${spec.outputSlug}.a`
-			: `build/c/${spec.outputSlug}${platformInfo().os === "windows" ? ".exe" : ""}`;
 	const transitiveArchives = spec.deps.flatMap((d) => d.transitiveArchives);
 	// A dep's shared libraries travel their own bucket (see this module's own
 	// docstring). They reach the link step and the sandbox, never the `ar`
@@ -256,6 +248,31 @@ function ccTask(spec, isLibrary) {
 	// handles) just contributes no headers to mount, same asymmetry already
 	// accepted for transitiveIncludeDirs there.
 	const transitiveHdrs = spec.deps.flatMap((d) => d.transitiveHdrs || []);
+	// A binary that links a workspace-built shared library needs that library
+	// beside it at run time, so its product becomes a *directory* holding the
+	// executable plus every transitive shared library under its own soname,
+	// linked with -Wl,-rpath,$ORIGIN (see rpathOriginArgs() in
+	// //rules/c/toolchain, and the decision entry
+	// binary-products-carry-shared-libraries). A binary with no shared
+	// dependency keeps the single-file product it has always had: nothing has
+	// to travel beside it, and changing its shape would move every packaged
+	// binary's dist/ path for no gain.
+	const bundled = !isLibrary && transitiveSharedLibs.length > 0;
+	// A binary's own output extension needs the platform-correct ".exe" on
+	// Windows: gcc/clang/cl.exe all auto-append it to the linked file
+	// themselves when the requested output name has none (PE executables
+	// require it), so a declared output path without it is never actually
+	// produced — confirmed by a real `imp build` failure ("run() output ...
+	// was not created as a file in sandbox").
+	const exeName = `${spec.outputSlug}${platformInfo().os === "windows" ? ".exe" : ""}`;
+	const bundleDir = `build/c/${spec.outputSlug}.d`;
+	const outPath = isShared
+		? `build/c/${sharedLibFilename(spec.outputSlug)}`
+		: isLibrary
+			? `build/c/${spec.outputSlug}.a`
+			: bundled
+				? `${bundleDir}/${exeName}`
+				: `build/c/${exeName}`;
 	// Own path first, so a target's own headers shadow a same-named header
 	// pulled in transitively.
 	const includeDirs = [
@@ -270,6 +287,7 @@ function ccTask(spec, isLibrary) {
 			hdrs,
 			mkdir: nativeTool("mkdir"),
 			dirname: nativeTool("dirname"),
+			cp: nativeTool("cp"),
 			optMode: semantic.mode("opt"),
 			...spec.toolchain.taskInputs(),
 			...Object.fromEntries(
@@ -378,6 +396,26 @@ function ccTask(spec, isLibrary) {
 					: "link";
 			const rspPath = `build/c/${spec.outputSlug}.rsp`;
 			const mkdirCmd = `mkdir -p "$(dirname ${shellQuote(outPath)})"`;
+			// The bundle's other half: every transitive shared library is
+			// copied next to the executable, under the basename its DT_NEEDED
+			// entry already names (sonameArgs() in //rules/c/toolchain is what
+			// makes that basename bare). mkdirCmd above has already created
+			// the bundle directory — it is the linked executable's own parent.
+			//
+			// These paths go into the script text rather than the response
+			// file: the list scales with a target's shared dependencies, not
+			// with its source count, so it can't reach the argument-string
+			// limit rspfileArgv() exists to dodge.
+			//
+			// Two dependencies whose libraries share a basename would overwrite
+			// each other here. That is the same collision the loader itself
+			// would hit at run time, since DT_NEEDED carries only the basename,
+			// so resolving it needs more than a copy step can decide.
+			const copyCmd = bundled
+				? `; cp ${depSharedLibPaths
+						.map(shellQuote)
+						.join(" ")} ${shellQuote(`${bundleDir}/`)}`
+				: "";
 			const finalArgv =
 				isLibrary && !isShared
 					? rspfileArgv(
@@ -407,21 +445,93 @@ function ccTask(spec, isLibrary) {
 								`cc-${actionKind}`,
 								rspPath,
 								content,
-								`${mkdirCmd}; ${linkCommand({ outPath, isCxx: needsCxx, isShared, rspPath }).join(" ")}`,
+								`${mkdirCmd}; ${linkCommand({ outPath, isCxx: needsCxx, isShared, bundled, rspPath }).join(" ")}${copyCmd}`,
 							);
 						})();
 			const result = await exec.action({
 				argv: finalArgv,
 				env,
-				tools: [input.mkdir, input.dirname, ...extraTools],
+				tools: [input.mkdir, input.dirname, input.cp, ...extraTools],
 				inputs: compileResults.map((r) => r.outputs.object),
-				outputs: { artifact: output.file(outPath) },
+				outputs: {
+					artifact: bundled
+						? output.directory(bundleDir)
+						: output.file(outPath),
+				},
 				display: `cc ${actionKind} ${outPath}`,
 			});
 			return { artifact: result.outputs.artifact };
 		},
 	});
-	return { built, hdrs };
+	// `outPath` is the executable itself either way; the artifact's own path
+	// is the bundle directory when bundled, so a caller that has to *launch*
+	// the binary (ccBinary()'s [RUN], ccTest()) needs both.
+	return { built, hdrs, exePath: outPath, bundled };
+}
+
+// The [RUN] root for a binary. It runs nothing itself: it resolves the built
+// artifact into the `{digest, path}` description //rules/workflows/run stages
+// and launches (see its own docstring for the accepted shapes). `cache: false`
+// mirrors //rules/python/source's own run descriptor — the described program
+// is impure by definition and re-describing it is cheap.
+//
+// `exePath` rather than the artifact's own path: a bundled binary's artifact
+// *is* the product directory, and execing a directory is not a program.
+function runDescriptor(spec, executable, exePath, bundled) {
+	return task({
+		display: `cc run ${spec.path}`,
+		cache: false,
+		inputs: { artifact: executable, exePath, bundled },
+		outputs: { run: output.value() },
+		async run(_exec, input) {
+			return { run: { digest: input.artifact.digest, path: input.exePath } };
+		},
+	});
+}
+
+// ccTest()'s [TEST] root: run the built executable, and report its exit code
+// as one unit in the {name, ok, output} contract graphTestGoal() aggregates
+// (see //rules/workflows/test). `allowFailure` is what makes a failing test a
+// reported unit rather than a thrown build error — the same contract
+// //rules/rust's crateTestTask() and //rules/c/cmake's runCTestTask() use.
+//
+// A bundled binary is launched through its own product directory, so $ORIGIN
+// resolves to the directory holding its shared libraries and the loader needs
+// no LD_LIBRARY_PATH.
+function testTask(spec, executable, exePath, bundled) {
+	return task({
+		display: `cc test ${spec.path}`,
+		inputs: { artifact: executable, exePath, bundled },
+		outputs: { units: output.value() },
+		async run(exec, input) {
+			const root = exec.path(input.artifact);
+			const program = input.bundled
+				? `${root}/${input.exePath.split("/").pop()}`
+				: root;
+			const result = await exec.action({
+				argv: [program],
+				inputs: [input.artifact],
+				allowFailure: true,
+				display: `cc test ${spec.path}`,
+			});
+			const ok = result.exitCode === 0;
+			return {
+				units: [
+					{
+						name: spec.path,
+						ok,
+						...(ok
+							? {}
+							: {
+									output: [result.stdout, result.stderr]
+										.filter(Boolean)
+										.join("\n"),
+								}),
+					},
+				],
+			};
+		},
+	});
 }
 
 /**
@@ -440,7 +550,7 @@ function ccTask(spec, isLibrary) {
  * @param {object} [opts.toolchain] gccGraphToolchain()/zigGraphToolchain() result, or the workspace default.
  * @param {string[]} [opts.copts=[]] Extra compiler flags.
  * @param {boolean} [opts.unsafeSystemPaths=false] Bypass Bootlin's toolchain-wrapper unsafe-path guard (which rejects -I/-isystem/-L flags under /usr/include or /usr/lib) so this target can link against host system packages (e.g. libwebkit2gtk-4.1). No-op on a zig toolchain, which has no such guard.
- * @param {boolean} [opts.shared=false] Build a dynamically-loadable shared object (`-shared`, platform-correct extension: `.dll` on Windows, `.so` elsewhere) instead of a static `.a` archive. The result is reported as `transitiveSharedLibs` rather than `transitiveArchives`, so a dependent ccLibrary()/ccBinary() links against it but never tries to `ar` it in. Note that a consumer's build only *links*; placing the library beside the executable so it also loads at run time is separate, still-open work (see the decision entry binary-products-carry-shared-libraries).
+ * @param {boolean} [opts.shared=false] Build a dynamically-loadable shared object (`-shared`, platform-correct extension: `.dll` on Windows, `.so` elsewhere) instead of a static `.a` archive. The result is reported as `transitiveSharedLibs` rather than `transitiveArchives`, so a dependent ccLibrary()/ccBinary() links against it but never tries to `ar` it in. A consumer's product carries the library beside its own executable and is linked with an `$ORIGIN` rpath, so it also loads at run time — see ccBinary().
  * @returns {object} Frozen `{[BUILD], archive, transitiveArchives, transitiveSharedLibs, transitiveIncludeDirs, transitiveHdrs, transitiveLinkopts, [PACKAGE]}`.
  */
 export function ccLibrary(opts = {}) {
@@ -488,15 +598,42 @@ export function ccLibrary(opts = {}) {
  * @param {string[]} [opts.copts=[]] Extra compiler flags.
  * @param {string[]} [opts.linkopts=[]] Extra linker flags for this binary's own link step (not propagated to anything that might depend on it — deps' own `transitiveLinkopts` are folded in automatically instead).
  * @param {boolean} [opts.unsafeSystemPaths=false] Bypass Bootlin's toolchain-wrapper unsafe-path guard (which rejects -I/-isystem/-L flags under /usr/include or /usr/lib) so this target can link against host system packages (e.g. libwebkit2gtk-4.1). No-op on a zig toolchain, which has no such guard.
- * @returns {object} Frozen `{[BUILD], [PACKAGE]}`.
+ * @returns {object} Frozen `{[BUILD], [PACKAGE], [RUN]}`. The product is a single executable file, or a directory holding the executable plus every transitive shared library when there is one (see this module's own docstring).
  */
 export function ccBinary(opts = {}) {
 	const spec = crateSpec(opts);
-	const { built } = ccTask(spec, false);
+	const { built, exePath, bundled } = ccTask(spec, false);
 	const executable = built.outputs.artifact;
 	return Object.freeze({
 		spec,
 		[BUILD]: executable,
 		[PACKAGE]: executable,
+		[RUN]: runDescriptor(spec, executable, exePath, bundled).outputs.run,
+	});
+}
+
+/**
+ * Declare a graph-native raw C/C++ test binary: a ccBinary() whose exit code
+ * is the test result. Same `deps`/toolchain contract as ccBinary() — see this
+ * module's own docstring.
+ *
+ * The binary is run with no arguments and nothing else mounted, so an
+ * assertion belongs inside `main()` (`return actual == expected ? 0 : 1`).
+ * That is the same granularity //rules/c/cmake reports for a CTest entry and
+ * //rules/rust for a test binary: one unit per executable, not per case.
+ *
+ * @category target
+ * @param {object} [opts] Every ccBinary() option, unchanged.
+ * @returns {object} Frozen `{[BUILD], [RUN], [TEST]}`.
+ */
+export function ccTest(opts = {}) {
+	const spec = crateSpec(opts);
+	const { built, exePath, bundled } = ccTask(spec, false);
+	const executable = built.outputs.artifact;
+	return Object.freeze({
+		spec,
+		[BUILD]: executable,
+		[RUN]: runDescriptor(spec, executable, exePath, bundled).outputs.run,
+		[TEST]: testTask(spec, executable, exePath, bundled).outputs.units,
 	});
 }

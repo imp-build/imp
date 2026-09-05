@@ -11,7 +11,12 @@ import {
 } from "imp:core";
 
 import { nativeTool } from "//rules/imp/native-tool";
-import { clangOptFlags, shellQuote, sonameArgs } from "//rules/c/toolchain";
+import {
+	clangOptFlags,
+	rpathOriginArgs,
+	shellQuote,
+	sonameArgs,
+} from "//rules/c/toolchain";
 import { downloadToolArtifact } from "//rules/imp/lockfile";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
@@ -535,11 +540,12 @@ function gccToolchainCommands(exec, input, opts = {}) {
 				`@${shellQuote(rspPath)}`,
 			];
 		},
-		linkCommand({ outPath, isCxx, isShared, rspPath }) {
+		linkCommand({ outPath, isCxx, isShared, bundled, rspPath }) {
 			return [
 				...compiler(isCxx).map(shellQuote),
 				...(isShared ? ["-shared"] : []),
 				...sonameArgs(outPath, isShared),
+				...rpathOriginArgs(bundled),
 				"-o",
 				shellQuote(outPath),
 				`@${shellQuote(rspPath)}`,

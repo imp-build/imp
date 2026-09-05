@@ -155,10 +155,11 @@ target's own type is known only once the configure task has run, while
 `cmakeLibraryDep()` must report the bucket synchronously at `BUILD.js`
 declare time.
 
-This makes a shared CMake dep **link**. The built binary still does not
-**run** — nothing places the library beside the executable and nothing sets
-an rpath, so it fails with `cannot open shared object file` unless
-`LD_LIBRARY_PATH` points at it. That is separate, still-open work.
+A `ccBinary()` consuming a shared CMake dep both **links** and **runs**: its
+product becomes a directory holding the executable plus that library, linked
+with `-Wl,-rpath,$ORIGIN`, so `LD_LIBRARY_PATH` need not be set. See
+`//rules/c`'s own docs for the product shape. `//rules/c/cmake/example`'s
+`uses_cmake_lib_test` is the in-tree fixture that runs one.
 
 If the CMake target is a shared library with its own shared-library
 dependencies (e.g. pkg-config-discovered `libwebkit2gtk-4.1`), the final

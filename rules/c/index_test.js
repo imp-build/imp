@@ -1,5 +1,7 @@
 import { BUILD } from "//rules/workflows/build";
 import { PACKAGE } from "//rules/workflows/package";
+import { RUN } from "//rules/workflows/run";
+import { TEST } from "//rules/workflows/test";
 import { files, tool } from "imp:core";
 import {
 	describe,
@@ -7,7 +9,7 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
-import { ccBinary, ccLibrary } from "//rules/c";
+import { ccBinary, ccLibrary, ccTest } from "//rules/c";
 import {
 	__resetGccToolchainStateForTest,
 	gccToolchain,
@@ -423,6 +425,78 @@ describe("graph-native ccLibrary/ccBinary", () => {
 			for (const run of archiveRuns) {
 				expect(run.argv.join("")).not.toContain(sharedName);
 			}
+		});
+	});
+
+	test("a binary with a shared dep bundles it beside the executable and links with an $ORIGIN rpath", () => {
+		return withCcHost(async (host) => {
+			const sharedDep = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+				shared: true,
+			});
+			const bin = ccBinary({
+				path: "rules/c/testdata/mixed_sources",
+				deps: [sharedDep],
+				toolchain: fakeGccGraphToolchain(),
+			});
+			await resolveIgnoringArtifactValidation([bin[BUILD]]);
+			const linkRun = host.runs.find((run) =>
+				run.display.startsWith("cc link "),
+			);
+			const script = linkRun.argv.join(" ");
+			// The executable is linked *inside* the product directory, and the
+			// shared library is copied in beside it. Both halves are required:
+			// the rpath alone points at a directory holding no library.
+			expect(linkRun.display).toContain(
+				"build/c/rules_c_testdata_mixed_sources.d/rules_c_testdata_mixed_sources",
+			);
+			expect(script).toContain("-Wl,-rpath,$ORIGIN");
+			expect(script).toContain(
+				"cp 'build/c/librules_c_testdata_mixed_sources.so' 'build/c/rules_c_testdata_mixed_sources.d/'",
+			);
+		});
+	});
+
+	test("a binary with no shared dep keeps its single-file product and gets no rpath", () => {
+		return withCcHost(async (host) => {
+			const staticDep = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+			});
+			const bin = ccBinary({
+				path: "rules/c/testdata/mixed_sources",
+				deps: [staticDep],
+				toolchain: fakeGccGraphToolchain(),
+			});
+			await resolveIgnoringArtifactValidation([bin[BUILD]]);
+			const linkRun = host.runs.find((run) =>
+				run.display.startsWith("cc link "),
+			);
+			expect(linkRun.display).toBe(
+				"cc link build/c/rules_c_testdata_mixed_sources",
+			);
+			const script = linkRun.argv.join(" ");
+			expect(script).not.toContain("-Wl,-rpath");
+			expect(script).not.toContain("cp ");
+		});
+	});
+
+	test("ccTest() exposes a [TEST] root and ccBinary() a [RUN] root", () => {
+		return withCcHost(() => {
+			const bin = ccBinary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+			});
+			const suite = ccTest({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+			});
+			expect(bin[RUN]).toBeTruthy();
+			expect(suite[TEST]).toBeTruthy();
+			expect(suite[RUN]).toBeTruthy();
+			// A test target is not a packaging product — nothing publishes it.
+			expect(suite[PACKAGE]).toBe(undefined);
 		});
 	});
 

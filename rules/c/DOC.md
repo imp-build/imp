@@ -97,12 +97,47 @@ publishes a shared library under this same filename rather than under the
 target name, for the same reason — so a packaged library and a packaged
 consumer in one directory resolve against each other.
 
-This makes a shared dep **link**, and lets a consumer find it when
-`LD_LIBRARY_PATH` names the directory. It does not yet make the built binary
-run on its own: the library is not placed beside the executable, and nothing
-sets an rpath, so launching the result with `LD_LIBRARY_PATH` unset still
-fails with `cannot open shared object file`. Closing that is separate,
-still-open work.
+### A binary's product carries its shared libraries
+
+A binary that links a workspace-built shared library needs that library beside
+it at run time, so its product is a **directory** rather than a single file:
+
+```
+dist/<package>/<target>/
+    <target-slug>          the executable, linked with -Wl,-rpath,$ORIGIN
+    lib<name>.so           every transitive shared library, under its soname
+```
+
+`$ORIGIN` is expanded by the loader to the directory holding the executable,
+which is where the libraries are, so the binary runs with `LD_LIBRARY_PATH`
+unset — under `imp run`, under `imp test`, from `dist/` after `imp package`,
+and when invoked directly. Both halves are needed: staging without the rpath
+gives the loader no reason to look beside the executable, and the rpath
+without staging points at a directory holding no library.
+
+A binary with **no** shared dependency keeps the single-file product it has
+always had at `dist/<package>/<target>`. Nothing has to travel beside it, so
+nothing changes.
+
+Windows is unverified. A `.dll` beside the executable is found by the default
+search order and there is no rpath concept, so the copy alone should suffice
+there; the rpath argument is omitted on Windows and by MSVC.
+
+### Running and testing a binary
+
+`ccBinary()` exposes a `[RUN]` root, so `imp run //pkg:target` launches the
+built executable (a bundled one through its own product directory). `ccTest()`
+takes every `ccBinary()` option and adds a `[TEST]` root that runs the
+executable and reports its exit code as one test unit — the same granularity
+`//rules/c/cmake` reports for a CTest entry. The assertion belongs inside
+`main()`:
+
+```js
+export const adds_test = ccTest({
+    srcs: ["adds_test.c"],   // int main(void) { return add(2, 3) == 5 ? 0 : 1; }
+    deps: [mathlib],
+});
+```
 
 The default GCC toolchain (`//rules/c/gcc`) is a Bootlin external toolchain
 whose compiler wrapper rejects any `-I`/`-isystem`/`-L` flag pointing under

@@ -52,6 +52,27 @@ export function sonameArgs(outPath, isShared) {
 	return [shellQuote(`-Wl,-soname,${base}`)];
 }
 
+// The `-Wl,-rpath,$ORIGIN` argument a bundled binary's link step needs — the
+// run-time half of ccBinary()'s directory product (see rules/c/index.js's own
+// docstring). `$ORIGIN` is read by the loader, not the shell: it expands to
+// the directory that holds the executable itself, which is where ccTask()
+// copies the transitive shared libraries. Without it the loader has no reason
+// to look beside the executable; without the copy the rpath points at a
+// directory that holds no library. Both halves are necessary.
+//
+// The shellQuote() is load-bearing, not cosmetic: linkCommand()'s tokens are
+// interpolated into an outer `sh -c` script, which would otherwise expand
+// `$ORIGIN` to the empty string before the linker ever saw it.
+//
+// Shared between gcc and zig, and left out of msvc, for the same reasons
+// sonameArgs() is: rpath is an ELF concept. Windows finds a DLL beside the
+// executable through its own default search order, so the copy alone is
+// sufficient there.
+export function rpathOriginArgs(bundled) {
+	if (!bundled || platformInfo().os === "windows") return [];
+	return [shellQuote("-Wl,-rpath,$ORIGIN")];
+}
+
 /**
  * Wrap one provider per OS into a single selectable union — "the same
  * logical target keeps one toolchain shape while selecting GCC on Linux and
