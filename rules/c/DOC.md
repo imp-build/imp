@@ -64,8 +64,9 @@ library's own `-L`/`-l` dependencies).
 ### Static archives and shared libraries
 
 `ccLibrary()` produces a static `.a` archive by default and reports it as
-`transitiveArchives`. With `shared: true` it produces a `.so` (a `.dll` on
-Windows) and reports it as `transitiveSharedLibs` instead. The two buckets
+`transitiveArchives`. With `shared: true` it produces a `lib<name>.so`
+(`<name>.dll` on Windows, which uses no `lib` prefix) and reports it as
+`transitiveSharedLibs` instead. The two buckets
 stay separate because the two kinds of file need different handling: an
 archive is fed both to `ar` and to the linker, while a shared library is
 only ever fed to the linker. A consumer folds in both automatically, so
@@ -87,10 +88,20 @@ A discovered CMake target must state which kind it is —
 `cmakeLibraryDep(project, "mylib", { shared: true })`, see `//rules/c/cmake`'s
 own docs.
 
-This makes a shared dep **link**. It does not yet make the built binary
-**run**: the library is not placed beside the executable, and nothing sets an
-rpath, so launching the result fails with `cannot open shared object file`
-unless `LD_LIBRARY_PATH` points at the library. Closing that is separate,
+The filename is not decoration. A shared library is linked with
+`-Wl,-soname,lib<name>.so`, so a consumer records that bare name in its own
+`DT_NEEDED` entry and the loader can answer it from a search path. Without a
+soname the linker records the library's build path instead, and a `DT_NEEDED`
+holding a slash makes the loader skip its search paths entirely. `imp package`
+publishes a shared library under this same filename rather than under the
+target name, for the same reason — so a packaged library and a packaged
+consumer in one directory resolve against each other.
+
+This makes a shared dep **link**, and lets a consumer find it when
+`LD_LIBRARY_PATH` names the directory. It does not yet make the built binary
+run on its own: the library is not placed beside the executable, and nothing
+sets an rpath, so launching the result with `LD_LIBRARY_PATH` unset still
+fails with `cannot open shared object file`. Closing that is separate,
 still-open work.
 
 The default GCC toolchain (`//rules/c/gcc`) is a Bootlin external toolchain

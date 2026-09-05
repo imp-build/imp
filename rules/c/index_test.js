@@ -114,6 +114,50 @@ describe("graph-native ccLibrary/ccBinary", () => {
 		});
 	});
 
+	test("ccLibrary({shared}) builds a lib-prefixed filename and records it as the soname", () => {
+		return withCcHost(async (host) => {
+			const sharedLib = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+				shared: true,
+			});
+			await resolveIgnoringArtifactValidation([sharedLib[BUILD]]);
+			const linkRun = host.runs.find((run) =>
+				run.display.startsWith("cc shared-link "),
+			);
+			const expected = "librules_c_testdata_mixed_sources.so";
+			expect(linkRun.display).toContain(`build/c/${expected}`);
+			// Without -Wl,-soname the consumer's DT_NEEDED records the
+			// link-line path (measured: `build/c/<name>.so`), and a DT_NEEDED
+			// holding a slash makes the loader skip its search paths.
+			expect(linkRun.argv.join(" ")).toContain(`-Wl,-soname,${expected}`);
+		});
+	});
+
+	test("a static library and a binary get no soname and keep their names", () => {
+		return withCcHost(async (host) => {
+			const lib = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+			});
+			const bin = ccBinary({
+				path: "rules/c/testdata/mixed_sources",
+				deps: [lib],
+				toolchain: fakeGccGraphToolchain(),
+			});
+			await resolveIgnoringArtifactValidation([bin[BUILD]]);
+			for (const run of host.runs) {
+				expect(run.argv.join(" ")).not.toContain("-Wl,-soname");
+			}
+			const archiveRun = host.runs.find((run) =>
+				run.display.startsWith("cc archive "),
+			);
+			expect(archiveRun.display).toContain(
+				"build/c/rules_c_testdata_mixed_sources.a",
+			);
+		});
+	});
+
 	test("both transitive buckets flow through a dependent library, each keeping its own kind", () => {
 		return withCcHost(() => {
 			const staticDep = ccLibrary({

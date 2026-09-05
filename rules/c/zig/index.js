@@ -16,7 +16,7 @@ import {
 	lockedDownloadTools,
 } from "//rules/imp/lockfile";
 import { toolchainBin } from "//rules/imp/toolchain";
-import { clangOptFlags, shellQuote } from "//rules/c/toolchain";
+import { clangOptFlags, shellQuote, sonameArgs } from "//rules/c/toolchain";
 import {
 	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
@@ -445,6 +445,7 @@ function zigToolchainCommands(exec, input) {
 			return [
 				...compiler(isCxx).map(shellQuote),
 				...(isShared ? ["-shared"] : []),
+				...sonameArgs(outPath, isShared),
 				"-o",
 				shellQuote(outPath),
 				`@${shellQuote(rspPath)}`,

@@ -30,6 +30,25 @@
 
 import { goal, goalError, logInfo, writeWorkspace } from "imp:core";
 
+// A shared library is published under its own filename, not the target's
+// name — `libfoo.so`, `libfoo.so.1`, `libfoo.dylib`, `foo.dll`. Every other
+// product keeps the target name, which is what a reader expects to find in
+// dist/ and what `imp package` has always written.
+//
+// The exception exists because a shared library's filename is not
+// decoration: a consumer records the name it needs in its own DT_NEEDED
+// entry, and the loader looks for exactly that. Publishing
+// `//pkg:hello_cmake` as `dist/pkg/hello_cmake` when the file is
+// `libhello_cmake.so` produces a directory whose contents cannot satisfy
+// their own consumer, which is what //rules/c/cmake/example measured. An
+// executable has no such constraint — nothing resolves it by name — so it
+// keeps the more useful target-shaped name.
+const SHARED_LIBRARY_RE = /\.(so(\.\d+)*|dylib|dll)$/i;
+
+function baseName(path) {
+	return String(path).split("/").pop();
+}
+
 /** Publish graph package roots at the same workflow boundary as legacy artifacts. */
 export function graphPackageGoal(roots) {
 	const published = [];
@@ -41,7 +60,13 @@ export function graphPackageGoal(roots) {
 		}
 		const withoutSlashes = address.replace(/^\/\//, "");
 		const [dir, name] = withoutSlashes.split(":");
-		const dest = dir ? `dist/${dir}/${name}` : `dist/${name}`;
+		// `result.path` is the artifact's own declared output path, so its
+		// basename is the filename the target really built. A root that
+		// publishes a whole subtree (`from` a directory) or none at all has no
+		// filename to preserve and keeps the target name.
+		const built = result.path ? baseName(result.path) : null;
+		const file = built && SHARED_LIBRARY_RE.test(built) ? built : name;
+		const dest = dir ? `dist/${dir}/${file}` : `dist/${file}`;
 		writeWorkspace(dest, result.digest, { from: result.path });
 		published.push({ address, dest });
 	}

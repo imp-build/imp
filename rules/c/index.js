@@ -160,12 +160,18 @@ function objectPathFor(outputSlug, source) {
 	return `build/c/obj/${outputSlug}/${source.replace(/[^A-Za-z0-9_.-]/g, "_")}.o`;
 }
 
-// Platform-correct shared-library extension for ccLibrary({shared: true})'s output.
+// Platform-correct shared-library filename for ccLibrary({shared: true})'s
+// output. The `lib` prefix is not decoration: with it, the file a consumer
+// looks for at run time and the file imp builds have the same name, so
+// `imp package` can publish it under a name the loader recognizes (see
+// graphPackageGoal() in //rules/workflows/package). Windows uses a bare
+// `<name>.dll` by its own convention.
+//
 // macOS isn't a supported target anywhere else in this module (see
 // requireSupportedPlatform() in //rules/c/gcc), so it's not handled here
-// either.
-function sharedLibExt() {
-	return platformInfo().os === "windows" ? ".dll" : ".so";
+// either — it would want `.dylib`.
+function sharedLibFilename(slug) {
+	return platformInfo().os === "windows" ? `${slug}.dll` : `lib${slug}.so`;
 }
 
 // ---------------------------------------------------------------------------
@@ -227,7 +233,7 @@ function ccTask(spec, isLibrary) {
 	// produced — confirmed by a real `imp build` failure ("run() output ...
 	// was not created as a file in sandbox").
 	const outPath = isShared
-		? `build/c/${spec.outputSlug}${sharedLibExt()}`
+		? `build/c/${sharedLibFilename(spec.outputSlug)}`
 		: isLibrary
 			? `build/c/${spec.outputSlug}.a`
 			: `build/c/${spec.outputSlug}${platformInfo().os === "windows" ? ".exe" : ""}`;

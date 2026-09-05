@@ -34,6 +34,24 @@ export function clangOptFlags(opt) {
 	return opt === "release" ? ["-O2", "-DNDEBUG"] : ["-O0", "-g"];
 }
 
+// The `-Wl,-soname` argument a shared library's own link step needs, or no
+// argument at all for a static one. Shared between gcc and zig for the same
+// reason clangOptFlags() is, and left out of msvc: soname is an ELF concept
+// and Windows has no equivalent.
+//
+// Without it, ld copies the library's link-line path into a consumer's
+// DT_NEEDED entry — measured as `build/c/<name>.so` rather than `<name>.so`.
+// A DT_NEEDED value that holds a slash is read as a path relative to the
+// working directory, and the loader then skips its search paths entirely, so
+// the consumer only runs from the directory the library was built under.
+// Recording the bare filename keeps DT_NEEDED a name, which a search path (or
+// an rpath) can answer.
+export function sonameArgs(outPath, isShared) {
+	if (!isShared || platformInfo().os === "windows") return [];
+	const base = String(outPath).split("/").pop();
+	return [shellQuote(`-Wl,-soname,${base}`)];
+}
+
 /**
  * Wrap one provider per OS into a single selectable union — "the same
  * logical target keeps one toolchain shape while selecting GCC on Linux and

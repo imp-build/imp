@@ -3,8 +3,9 @@
 //!
 //! `crates/imp-treesitter/BUILD.js` compiles it from vendored source
 //! (`testdata/tree-sitter-json/parser.c`) at *build* time, via the
-//! graph-provided cc toolchain, to `build/c/<slug>.so` (`.dll` on Windows) —
-//! a real shared library for whatever platform imp-treesitter is actually
+//! graph-provided cc toolchain, to `build/c/lib<slug>.so` (`<slug>.dll` on
+//! Windows — no `lib` prefix there, by that platform's own convention) — a
+//! real shared library for whatever platform imp-treesitter is actually
 //! being built on, rather than a single vendored linux-x86_64 binary.
 //!
 //! The bytes are embedded into the test binary at compile time
@@ -25,7 +26,7 @@ static GRAMMAR_BYTES: &[u8] =
     include_bytes!("../../../../build/c/crates_imp-treesitter_testdata_tree-sitter-json.dll");
 #[cfg(not(windows))]
 static GRAMMAR_BYTES: &[u8] =
-    include_bytes!("../../../../build/c/crates_imp-treesitter_testdata_tree-sitter-json.so");
+    include_bytes!("../../../../build/c/libcrates_imp-treesitter_testdata_tree-sitter-json.so");
 
 /// Write the embedded fixture grammar to a scratch file (once per test
 /// binary run) and return its path.
