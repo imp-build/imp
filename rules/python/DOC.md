@@ -25,6 +25,49 @@ Projects are built with `uv sync --locked`. Keep `uv.lock` checked in and in
 sync with `pyproject.toml`; builds and tests fail rather than resolving or
 mutating a stale lock file.
 
+### Select a workspace lockfile
+
+The rules ship a lockfile for each managed tool — uv, PEX and Ruff. It pins the
+download URL, size, and SHA-256 of every release artifact, and it knows only
+the versions the rules ship with. To pin a version that the shipped lockfile
+does not know, give the toolchain the address of a lockfile that this
+workspace owns. The shipped lockfiles stay the default.
+
+```js
+export const uvDefault = uvToolchain("0.11.17", {
+	default: true,
+	lockfile: "//locks/uv.lock",
+});
+export const pexDefault = pexToolchain("2.98.0", {
+	default: true,
+	lockfile: "//locks/pex.lock",
+});
+export const ruffDefault = ruffToolchain("0.15.22", {
+	default: true,
+	lockfile: "//locks/ruff.lock",
+});
+```
+
+Export the lockfile generation roots, then write the three files:
+
+```js
+import { pexGenLockfiles, uvGenLockfiles } from "//rules/python";
+import { ruffGenLockfiles } from "//rules/python/ruff_toolchain";
+
+export const uvLockfiles = uvGenLockfiles();
+export const pexLockfiles = pexGenLockfiles();
+export const ruffLockfiles = ruffGenLockfiles();
+```
+
+```sh
+imp goal gen-lockfiles //:uvLockfiles //:pexLockfiles //:ruffLockfiles
+```
+
+Each generation root writes to the address that its toolchain declares, so the
+address is given one time only. Downloads stay verified: an address with no
+file, or a lockfile with no entry for the selected version and platform, makes
+the acquire fail and points at `imp goal gen-lockfiles`.
+
 ## Select a dependency resolve
 
 Declare a `pythonResolve()` for a locked project when applications or tests

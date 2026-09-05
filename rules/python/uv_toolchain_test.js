@@ -15,9 +15,38 @@ import {
 	uvCacheDirTool,
 	uvCacheKey,
 	uvDownloadUrl,
+	uvGenLockfiles,
 	uvTool,
 	uvToolchain,
 } from "//rules/python/uv_toolchain";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+
+const BUNDLED_LOCKFILE = "//rules/python/uv-toolchain.lock";
+
+// A one-version, one-platform lock for the platform withFakeToolchainHost
+// reports (linux/x86_64). The sha is what the download argv is checked for,
+// so each lock in a test gets its own.
+function uvLock(version, sha256) {
+	return JSON.stringify({
+		tool: "uv-toolchain",
+		versions: {
+			[version]: {
+				"linux/x86_64": {
+					url: "https://locked.example/uv.tar.gz",
+					artifact: "uv.tar.gz",
+					size: 42,
+					sha256,
+				},
+			},
+		},
+	});
+}
+
+function readAddresses(host) {
+	return host.calls
+		.filter((call) => call[0] === "readAddressedFile")
+		.map((call) => call[1]);
+}
 
 function withUvHost(fn) {
 	return withFakeToolchainHost(async (host) => {
@@ -121,6 +150,94 @@ describe("uv toolchain", () => {
 			}
 			expect(message).toContain("no lockfile found");
 			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("the bundled lockfile is the default", async () => {
+		await withUvHost(async (host) => {
+			host.addFile(BUNDLED_LOCKFILE, uvLock("0.11.16", "cafe"));
+			uvToolchain("0.11.16", { default: true });
+
+			await uvBin();
+
+			expect(readAddresses(host)).toContain(BUNDLED_LOCKFILE);
+			expect(host.runs[0].argv).toContain("cafe");
+		});
+	});
+
+	test("a custom lockfile address is consulted instead of the bundled one", async () => {
+		await withUvHost(async (host) => {
+			host.addFile("//locks/uv.lock", uvLock("0.11.17", "beef"));
+			uvToolchain("0.11.17", {
+				default: true,
+				lockfile: "//locks/uv.lock",
+			});
+
+			await uvBin();
+
+			expect(readAddresses(host)).toContain("//locks/uv.lock");
+			expect(readAddresses(host).includes(BUNDLED_LOCKFILE)).toBe(false);
+			expect(host.runs[0].argv).toContain("beef");
+		});
+	});
+
+	test("a missing selected lockfile fails naming it and gen-lockfiles", async () => {
+		await withUvHost(async () => {
+			uvToolchain("0.11.17", {
+				default: true,
+				lockfile: "//locks/uv.lock",
+			});
+			let message = null;
+			try {
+				await uvBin();
+			} catch (error) {
+				message = error.message;
+			}
+			expect(message).toContain("no lockfile found");
+			expect(message).toContain("//locks/uv.lock");
+			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("a malformed lockfile address fails at declaration", () => {
+		return withUvHost(() => {
+			expect(() =>
+				uvToolchain("0.11.17", { lockfile: "locks/uv.lock" }),
+			).toThrow("must start with //");
+		});
+	});
+
+	test("gen-lockfiles writes the address declared on the toolchain", async () => {
+		await withUvHost(async (host) => {
+			uvToolchain("0.11.17", {
+				default: true,
+				lockfile: "//locks/uv.lock",
+			});
+
+			await host.resolve(uvGenLockfiles()[GEN_LOCKFILES]);
+
+			expect(host.runs.some((r) => r.display === "write locks/uv.lock")).toBe(
+				true,
+			);
+		});
+	});
+
+	test("gen-lockfiles takes an explicit lockfile override", async () => {
+		await withUvHost(async (host) => {
+			uvToolchain("0.11.17", {
+				default: true,
+				lockfile: "//locks/uv.lock",
+			});
+
+			await host.resolve(
+				uvGenLockfiles("0.11.17", { lockfile: "//other/uv.lock" })[
+					GEN_LOCKFILES
+				],
+			);
+
+			expect(host.runs.some((r) => r.display === "write other/uv.lock")).toBe(
+				true,
+			);
 		});
 	});
 });

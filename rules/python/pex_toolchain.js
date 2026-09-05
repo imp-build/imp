@@ -11,7 +11,10 @@ import {
 } from "imp:core";
 
 import { nativeTool } from "//rules/imp/native-tool";
-import { downloadToolArtifact } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockfileAddressToPath,
+} from "//rules/imp/lockfile";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
 	graphGenerateToolLockfile,
@@ -24,7 +27,10 @@ import {
 export const PEX_TOOL = toolName("pex");
 
 const PEX_TOOLCHAIN_CACHE = "pex-toolchains";
-const PEX_LOCKFILE = "//rules/python/pex-toolchain.lock";
+// The bundled lockfile ships with the rule library (it lives inside
+// rules/**); a workspace overrides it with a file at the same address, or
+// by declaring the toolchain with a `lockfile` address of its own.
+const DEFAULT_LOCKFILE = "//rules/python/pex-toolchain.lock";
 // pex publishes one platform-independent artifact; its lock entries are
 // keyed under this pseudo-platform (see LOCKFILE_SPEC.platforms below).
 const PEX_LOCK_PLATFORM = { os: "any", arch: "any" };
@@ -63,11 +69,15 @@ export function pexDownloadUrl(version) {
 export class PexToolchain extends Toolchain {
 	static kind = "pex-toolchain";
 	static tool = PEX_TOOL;
-	constructor({ version, unverified }, opts) {
+	constructor({ version, lockfile, unverified }, opts) {
 		super(
 			{
 				kind: PexToolchain.kind,
-				attrs: { version, ...(unverified ? { unverified } : {}) },
+				attrs: {
+					version,
+					lockfile,
+					...(unverified ? { unverified } : {}),
+				},
 			},
 			opts,
 		);
@@ -87,6 +97,14 @@ function graphToolFor(version) {
 	return graphToolchains.get(version) ?? pexGraphTool(version);
 }
 
+// The lockfile setting rides the declared instance's attrs — the one that
+// declared this exact version, else the default instance's.
+function lockfileFor(version) {
+	return (
+		PexToolchain.instanceForVersion(version)?.attrs.lockfile ?? DEFAULT_LOCKFILE
+	);
+}
+
 export function __resetPexToolchainStateForTest() {
 	PexToolchain.clearDefault();
 	graphToolchains = new Map();
@@ -98,6 +116,10 @@ export function __resetPexToolchainStateForTest() {
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
+ * @param {string} [opts.lockfile] Lockfile address pinning download SHA-256s;
+ *   defaults to the bundled `//rules/python/pex-toolchain.lock`. Point this at
+ *   your own lock (regenerate via `imp goal gen-lockfiles`) when pinning a
+ *   version the bundled lock does not know.
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
  * @returns {object} Target handle for this pex toolchain.
@@ -106,8 +128,11 @@ export function __resetPexToolchainStateForTest() {
 export function pexToolchain(version, opts = {}) {
 	namedCache({ name: PEX_ROOT_CACHE });
 
+	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	new PexToolchain(
-		{ version, unverified: opts.unverified },
+		{ version, lockfile, unverified: opts.unverified },
 		{ default: opts.default },
 	);
 	const graph = pexGraphTool(version);
@@ -123,14 +148,20 @@ export function pexToolchain(version, opts = {}) {
  * property.
  *
  * @param {string} [version]
+ * @param {object} [opts]
+ * @param {string} [opts.lockfile] Write this lockfile address instead of the
+ *   one declared on the toolchain. Defaults to the address
+ *   pexToolchain(version, { lockfile }) declared, so a workspace states it
+ *   once.
  * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
  */
-export function pexGenLockfiles(version) {
+export function pexGenLockfiles(version, opts = {}) {
 	const resolved = PexToolchain.requireVersion(version);
 	return {
 		[GEN_LOCKFILES]: graphGenerateToolLockfile({
 			version: resolved,
 			...LOCKFILE_SPEC,
+			lockfile: opts.lockfile ?? lockfileFor(resolved),
 		}),
 	};
 }
@@ -141,7 +172,7 @@ export function pexGraphTool(version) {
 	const plat = platformInfo();
 	namedCache({ name: PEX_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: PEX_LOCKFILE,
+		lockfile: lockfileFor(resolved),
 		tool: "pex-toolchain",
 		version: resolved,
 		plat,
@@ -323,7 +354,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		platforms: [{ os: "any", arch: "any" }],
 		downloadUrl: (version) => pexDownloadUrl(version),
 		artifactName: () => "pex",
-		lockfile: PEX_LOCKFILE,
+		lockfile: DEFAULT_LOCKFILE,
 	},
 	["2.97.1"],
 );

@@ -12,9 +12,39 @@ import {
 	pexBin,
 	pexCacheKey,
 	pexDownloadUrl,
+	pexGenLockfiles,
 	pexTool,
 	pexToolchain,
 } from "//rules/python/pex_toolchain";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+
+const BUNDLED_LOCKFILE = "//rules/python/pex-toolchain.lock";
+
+// pex publishes one platform-independent zipapp, so its lock entries key
+// under the "any/any" pseudo-platform, not the linux/x86_64 that
+// withFakeToolchainHost reports. The sha is what the download argv is
+// checked for, so each lock in a test gets its own.
+function pexLock(version, sha256) {
+	return JSON.stringify({
+		tool: "pex-toolchain",
+		versions: {
+			[version]: {
+				"any/any": {
+					url: "https://locked.example/pex",
+					artifact: "pex",
+					size: 42,
+					sha256,
+				},
+			},
+		},
+	});
+}
+
+function readAddresses(host) {
+	return host.calls
+		.filter((call) => call[0] === "readAddressedFile")
+		.map((call) => call[1]);
+}
 
 function withPexHost(fn) {
 	return withFakeToolchainHost(async (host) => {
@@ -108,6 +138,94 @@ describe("pex toolchain", () => {
 			}
 			expect(message).toContain("no lockfile found");
 			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("the bundled lockfile is the default", async () => {
+		await withPexHost(async (host) => {
+			host.addFile(BUNDLED_LOCKFILE, pexLock("2.97.1", "cafe"));
+			pexToolchain("2.97.1", { default: true });
+
+			await pexBin();
+
+			expect(readAddresses(host)).toContain(BUNDLED_LOCKFILE);
+			expect(host.runs[0].argv).toContain("cafe");
+		});
+	});
+
+	test("a custom lockfile address is consulted instead of the bundled one", async () => {
+		await withPexHost(async (host) => {
+			host.addFile("//locks/pex.lock", pexLock("2.98.0", "beef"));
+			pexToolchain("2.98.0", {
+				default: true,
+				lockfile: "//locks/pex.lock",
+			});
+
+			await pexBin();
+
+			expect(readAddresses(host)).toContain("//locks/pex.lock");
+			expect(readAddresses(host).includes(BUNDLED_LOCKFILE)).toBe(false);
+			expect(host.runs[0].argv).toContain("beef");
+		});
+	});
+
+	test("a missing selected lockfile fails naming it and gen-lockfiles", async () => {
+		await withPexHost(async () => {
+			pexToolchain("2.98.0", {
+				default: true,
+				lockfile: "//locks/pex.lock",
+			});
+			let message = null;
+			try {
+				await pexBin();
+			} catch (error) {
+				message = error.message;
+			}
+			expect(message).toContain("no lockfile found");
+			expect(message).toContain("//locks/pex.lock");
+			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("a malformed lockfile address fails at declaration", () => {
+		return withPexHost(() => {
+			expect(() =>
+				pexToolchain("2.98.0", { lockfile: "locks/pex.lock" }),
+			).toThrow("must start with //");
+		});
+	});
+
+	test("gen-lockfiles writes the address declared on the toolchain", async () => {
+		await withPexHost(async (host) => {
+			pexToolchain("2.98.0", {
+				default: true,
+				lockfile: "//locks/pex.lock",
+			});
+
+			await host.resolve(pexGenLockfiles()[GEN_LOCKFILES]);
+
+			expect(host.runs.some((r) => r.display === "write locks/pex.lock")).toBe(
+				true,
+			);
+		});
+	});
+
+	test("gen-lockfiles takes an explicit lockfile override", async () => {
+		await withPexHost(async (host) => {
+			pexToolchain("2.98.0", {
+				default: true,
+				lockfile: "//locks/pex.lock",
+			});
+
+			await host.resolve(
+				pexGenLockfiles("2.98.0", { lockfile: "//other/pex.lock" })[
+					GEN_LOCKFILES
+				],
+			);
+
+			expect(host.runs.some((r) => r.display === "write other/pex.lock")).toBe(
+				true,
+			);
 		});
 	});
 });

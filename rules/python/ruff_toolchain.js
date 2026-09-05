@@ -8,7 +8,10 @@ import {
 	tool as graphTool,
 } from "imp:core";
 
-import { downloadToolArtifact } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockfileAddressToPath,
+} from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin } from "//rules/imp/toolchain";
 import {
@@ -147,6 +150,8 @@ function graphToolFor(version) {
  */
 export function ruffToolchain(version, opts = {}) {
 	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	const unverified = opts.unverified ?? false;
 	new RuffToolchain(
 		{ version, lockfile, unverified },
@@ -166,8 +171,10 @@ export function ruffToolchain(version, opts = {}) {
  *
  * @param {string} [version]
  * @param {object} [opts]
- * @param {string} [opts.lockfile] Use this lockfile address instead of the
- *   default. This matches ruffToolchain()'s own `opts.lockfile`.
+ * @param {string} [opts.lockfile] Write this lockfile address instead of the
+ *   one declared on the toolchain. Defaults to the address
+ *   ruffToolchain(version, { lockfile }) declared, so a workspace states it
+ *   once.
  * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
  */
 export function ruffGenLockfiles(version, opts = {}) {
@@ -176,7 +183,7 @@ export function ruffGenLockfiles(version, opts = {}) {
 		[GEN_LOCKFILES]: graphGenerateToolLockfile({
 			version: resolved,
 			...LOCKFILE_SPEC,
-			lockfile: opts.lockfile ?? DEFAULT_LOCKFILE,
+			lockfile: opts.lockfile ?? lockfileFor(resolved),
 		}),
 	};
 }

@@ -13,8 +13,37 @@ import {
 	ruffBin,
 	ruffCacheKey,
 	ruffDownloadUrl,
+	ruffGenLockfiles,
 	ruffToolchain,
 } from "//rules/python/ruff_toolchain";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
+
+const BUNDLED_LOCKFILE = "//rules/python/ruff-toolchain.lock";
+
+// A one-version, one-platform lock for the platform withFakeToolchainHost
+// reports (linux/x86_64). The sha is what the download argv is checked for,
+// so each lock in a test gets its own.
+function ruffLock(version, sha256) {
+	return JSON.stringify({
+		tool: "ruff-toolchain",
+		versions: {
+			[version]: {
+				"linux/x86_64": {
+					url: "https://locked.example/ruff.tar.gz",
+					artifact: "ruff.tar.gz",
+					size: 99,
+					sha256,
+				},
+			},
+		},
+	});
+}
+
+function readAddresses(host) {
+	return host.calls
+		.filter((call) => call[0] === "readAddressedFile")
+		.map((call) => call[1]);
+}
 
 function withRuffHost(platOrFn, maybeFn) {
 	const fn = typeof platOrFn === "function" ? platOrFn : maybeFn;
@@ -187,6 +216,78 @@ describe("ruff toolchain", () => {
 			const plat = { os: "windows", arch: "x86_64" };
 			expect(ruffArtifactName("0.15.21", plat)).toBe(
 				"ruff-x86_64-pc-windows-msvc.zip",
+			);
+		});
+	});
+
+	test("the bundled lockfile is the default", async () => {
+		await withRuffHost(async (host) => {
+			host.addFile(BUNDLED_LOCKFILE, ruffLock("0.15.21", "cafe"));
+			ruffToolchain("0.15.21", { default: true });
+
+			await ruffBin("0.15.21");
+
+			expect(readAddresses(host)).toContain(BUNDLED_LOCKFILE);
+			expect(host.runs[0].argv).toContain("cafe");
+		});
+	});
+
+	test("a missing selected lockfile fails naming it and gen-lockfiles", async () => {
+		await withRuffHost(async () => {
+			ruffToolchain("0.15.22", {
+				default: true,
+				lockfile: "//locks/ruff.lock",
+			});
+			let message = null;
+			try {
+				await ruffBin("0.15.22");
+			} catch (error) {
+				message = error.message;
+			}
+			expect(message).toContain("no lockfile found");
+			expect(message).toContain("//locks/ruff.lock");
+			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("a malformed lockfile address fails at declaration", () => {
+		return withRuffHost(() => {
+			expect(() =>
+				ruffToolchain("0.15.22", { lockfile: "locks/ruff.lock" }),
+			).toThrow("must start with //");
+		});
+	});
+
+	test("gen-lockfiles writes the address declared on the toolchain", async () => {
+		await withRuffHost(async (host) => {
+			ruffToolchain("0.15.22", {
+				default: true,
+				lockfile: "//locks/ruff.lock",
+			});
+
+			await host.resolve(ruffGenLockfiles()[GEN_LOCKFILES]);
+
+			expect(host.runs.some((r) => r.display === "write locks/ruff.lock")).toBe(
+				true,
+			);
+		});
+	});
+
+	test("gen-lockfiles takes an explicit lockfile override", async () => {
+		await withRuffHost(async (host) => {
+			ruffToolchain("0.15.22", {
+				default: true,
+				lockfile: "//locks/ruff.lock",
+			});
+
+			await host.resolve(
+				ruffGenLockfiles("0.15.22", { lockfile: "//other/ruff.lock" })[
+					GEN_LOCKFILES
+				],
+			);
+
+			expect(host.runs.some((r) => r.display === "write other/ruff.lock")).toBe(
+				true,
 			);
 		});
 	});

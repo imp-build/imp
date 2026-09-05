@@ -12,7 +12,10 @@ import {
 } from "imp:core";
 
 import { nativeTool } from "//rules/imp/native-tool";
-import { downloadToolArtifact } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockfileAddressToPath,
+} from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
@@ -26,7 +29,10 @@ import {
 export const UV_TOOL = toolName("uv");
 
 const UV_TOOLCHAIN_CACHE = "uv-toolchains";
-const UV_LOCKFILE = "//rules/python/uv-toolchain.lock";
+// The bundled lockfile ships with the rule library (it lives inside
+// rules/**); a workspace overrides it with a file at the same address, or
+// by declaring the toolchain with a `lockfile` address of its own.
+const DEFAULT_LOCKFILE = "//rules/python/uv-toolchain.lock";
 
 // uv's own wheel/package download cache ($UV_CACHE_DIR) and the interpreters
 // its automatic Python management provisions. Both are internally content-
@@ -108,11 +114,15 @@ export function uvSupportedPlatforms() {
 export class UvToolchain extends Toolchain {
 	static kind = "uv-toolchain";
 	static tool = UV_TOOL;
-	constructor({ version, unverified }, opts) {
+	constructor({ version, lockfile, unverified }, opts) {
 		super(
 			{
 				kind: UvToolchain.kind,
-				attrs: { version, ...(unverified ? { unverified } : {}) },
+				attrs: {
+					version,
+					lockfile,
+					...(unverified ? { unverified } : {}),
+				},
 			},
 			opts,
 		);
@@ -139,6 +149,14 @@ export function __resetUvToolchainStateForTest() {
 
 function graphToolFor(version) {
 	return graphToolchains.get(version) ?? uvGraphTool(version);
+}
+
+// The lockfile setting rides the declared instance's attrs — the one that
+// declared this exact version, else the default instance's.
+function lockfileFor(version) {
+	return (
+		UvToolchain.instanceForVersion(version)?.attrs.lockfile ?? DEFAULT_LOCKFILE
+	);
 }
 
 /**
@@ -189,6 +207,10 @@ function uvCacheDirSeed() {
  * @param {string} version
  * @param {object} [opts]
  * @param {boolean} [opts.default=false]
+ * @param {string} [opts.lockfile] Lockfile address pinning download SHA-256s;
+ *   defaults to the bundled `//rules/python/uv-toolchain.lock`. Point this at
+ *   your own lock (regenerate via `imp goal gen-lockfiles`) when pinning a
+ *   version the bundled lock does not know.
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
  * @returns {object} Target handle for this uv toolchain.
@@ -197,8 +219,11 @@ function uvCacheDirSeed() {
 export function uvToolchain(version, opts = {}) {
 	uvCacheDirSeed();
 
+	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	new UvToolchain(
-		{ version, unverified: opts.unverified },
+		{ version, lockfile, unverified: opts.unverified },
 		{ default: opts.default },
 	);
 	const graph = uvGraphTool(version);
@@ -214,14 +239,20 @@ export function uvToolchain(version, opts = {}) {
  * property.
  *
  * @param {string} [version]
+ * @param {object} [opts]
+ * @param {string} [opts.lockfile] Write this lockfile address instead of the
+ *   one declared on the toolchain. Defaults to the address
+ *   uvToolchain(version, { lockfile }) declared, so a workspace states it
+ *   once.
  * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
  */
-export function uvGenLockfiles(version) {
+export function uvGenLockfiles(version, opts = {}) {
 	const resolved = UvToolchain.requireVersion(version);
 	return {
 		[GEN_LOCKFILES]: graphGenerateToolLockfile({
 			version: resolved,
 			...LOCKFILE_SPEC,
+			lockfile: opts.lockfile ?? lockfileFor(resolved),
 		}),
 	};
 }
@@ -233,7 +264,7 @@ export function uvGraphTool(version) {
 	const key = uvCacheKey(resolved, plat);
 	namedCache({ name: UV_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: UV_LOCKFILE,
+		lockfile: lockfileFor(resolved),
 		tool: "uv-toolchain",
 		version: resolved,
 		plat,
@@ -400,7 +431,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		platforms: uvSupportedPlatforms(),
 		downloadUrl: uvDownloadUrl,
 		artifactName: uvArtifactName,
-		lockfile: UV_LOCKFILE,
+		lockfile: DEFAULT_LOCKFILE,
 	},
 	["0.11.16"],
 );
