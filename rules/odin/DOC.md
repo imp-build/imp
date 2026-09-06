@@ -246,6 +246,33 @@ archives and `transitiveLinkopts` of every Odin package it reaches, whether by
 whose `foreign import` names it; consumers declare only what their own sources
 need.
 
+### Shared libraries
+
+A `ccLibrary({ shared: true })` dep works the same way, with one addition. An
+archive becomes part of the executable, but a shared library stays a separate
+file that the loader must find again at run time. So a binary that reaches one
+gets a **directory** product: it holds the executable plus every shared library
+the closure contributed, and Odin links every binary with an `$ORIGIN` rpath,
+which makes the loader look in the executable's own directory.
+
+```js
+export const mathlib = ccLibrary({ path: "vendor/mathlib", shared: true });
+
+export const app = odinPackage({ deps: [mathlib] });
+```
+
+```odin
+// A shared library lands at "build/c/lib<slug>.so" ("<slug>.dll" on Windows).
+foreign import mathlib "build/c/libvendor_mathlib.so"
+```
+
+`imp package` publishes the directory, so the library travels with the binary.
+A binary with no shared dep keeps the single-file product it has always had.
+
+`odin test` is the exception: it compiles and runs in one step, so there is no
+product to carry the library in. The staged library's own directory is put on
+`LD_LIBRARY_PATH` for that action instead, which needs nothing from you.
+
 `deps` also takes a plain graph handle — a `files()` set of fixture data, a
 task output — and stages it into the sandbox as it is:
 

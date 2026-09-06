@@ -1376,7 +1376,6 @@ fn exec_run_inner_with_start(
         &sandbox_root
     };
     let resolved_program = resolve_program(program, command_cwd)?;
-    add_executable_library_path(&mut command_env, &resolved_program, &sandbox_root);
     let mut command = Command::new(&resolved_program);
     command
         .args(args)
@@ -1576,45 +1575,6 @@ fn exec_run_inner_with_start(
         outputs: cached_outputs,
         cache_outcome,
     })
-}
-
-/// Native binaries commonly place private shared libraries beside the
-/// executable (for example an Odin-built executable and `libjolt_odin.so`).
-/// Sandboxes intentionally scrub the host loader path, so make that staged
-/// executable directory visible to the platform loader without importing any
-/// host paths.
-fn add_executable_library_path(
-    command_env: &mut BTreeMap<String, String>,
-    program: &Path,
-    sandbox_root: &Path,
-) {
-    #[cfg(unix)]
-    {
-        let program_path = if program.is_absolute() {
-            program.to_owned()
-        } else {
-            sandbox_root.join(program)
-        };
-        let Some(directory) = program_path.parent() else {
-            return;
-        };
-        let key = if cfg!(target_os = "macos") {
-            "DYLD_LIBRARY_PATH"
-        } else {
-            "LD_LIBRARY_PATH"
-        };
-        let mut paths = vec![directory.to_owned()];
-        if let Some(existing) = command_env.get(key) {
-            paths.extend(std::env::split_paths(existing));
-        }
-        if let Ok(joined) = std::env::join_paths(paths) {
-            command_env.insert(key.to_owned(), joined.to_string_lossy().into_owned());
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (command_env, program, sandbox_root);
-    }
 }
 
 pub fn exec_run_unsandboxed(
@@ -1896,6 +1856,33 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.path().join("out.txt")).unwrap(),
             "6"
+        );
+    }
+
+    /// A sandboxed run gets no synthesized loader path. A shared library that
+    /// must travel beside an executable is found through a link-time `$ORIGIN`
+    /// rpath (see //rules/c/toolchain's rpathOriginArgs()), not through a
+    /// variable the executor puts into the environment. An injected value here
+    /// also put a host directory into a sandbox that imports no host paths.
+    #[test]
+    fn a_sandboxed_run_gets_no_loader_path() {
+        let root = tempfile::tempdir().unwrap();
+        let mut opts = run_opts(
+            &[
+                "sh",
+                "-c",
+                "printf %s \"${LD_LIBRARY_PATH-unset}\" > out.txt",
+            ],
+            &[],
+            &["out.txt"],
+        );
+        opts.no_cache = true;
+
+        exec_run_local_with_start(root.path(), opts, None, None, None).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("out.txt")).unwrap(),
+            "unset"
         );
     }
 

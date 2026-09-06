@@ -12,6 +12,7 @@ import { nativeTool } from "//rules/imp/native-tool";
 import { configuration, files, platformInfo } from "imp:core";
 import {
 	odinExtraLinkerFlagsArgs,
+	odinTestLibraryPathEnv,
 	odinGccLinkerPathDir,
 	odinLinkerPathDir,
 	odinMergeLinkopts,
@@ -273,6 +274,57 @@ describe("Odin graph rules", () => {
 			toolchain: "dev-2026-03",
 		});
 		expect(await buildFileRoots(app)).toContain("rules/odin/example/native");
+	});
+
+	// A binary whose dep closure contributed a workspace-built shared library
+	// gets a *directory* product carrying that library beside the executable,
+	// so its [RUN] root can no longer be the product itself — a directory is
+	// not a program. It becomes a run descriptor naming the executable inside,
+	// the same shape ccBinary() uses. Before the bundle the binary built and
+	// then failed at launch: "error while loading shared libraries".
+	test("a binary with a shared dep gets a bundled product and a run descriptor", async () => {
+		const native = ccLibrary({
+			path: "rules/odin/example/native",
+			toolchain: defaultGccGraphToolchain(),
+			shared: true,
+		});
+		const app = odinPackage({
+			path: "rules/odin/example",
+			deps: [native],
+			toolchain: "dev-2026-03",
+		});
+		const walkJson = await globalThis.__imp_walk_graph_for_introspection(
+			JSON.stringify([{ address: "app", handleId: app[RUN].__graph_id }]),
+			JSON.stringify({ args: [], flags: {}, mode: {}, config: {} }),
+			JSON.stringify({ discoverExpansionGet: true }),
+		);
+		const displays = JSON.parse(walkJson)
+			.nodes.map((node) => node.display)
+			.filter(Boolean);
+		expect(displays).toContain("odin bundle rules/odin/example");
+		expect(displays).toContain("odin run rules/odin/example");
+	});
+
+	// The other half of that contract: nothing has to travel beside a binary
+	// with no shared dep, so it keeps the single-file product it has always
+	// had — a different shape would move every packaged Odin binary's dist/
+	// path for no gain.
+	test("a binary with no shared dep keeps its single-file product", async () => {
+		const app = odinPackage({
+			path: "rules/odin/example",
+			toolchain: "dev-2026-03",
+		});
+		const walkJson = await globalThis.__imp_walk_graph_for_introspection(
+			JSON.stringify([{ address: "app", handleId: app[RUN].__graph_id }]),
+			JSON.stringify({ args: [], flags: {}, mode: {}, config: {} }),
+			JSON.stringify({ discoverExpansionGet: true }),
+		);
+		const displays = JSON.parse(walkJson)
+			.nodes.map((node) => node.display)
+			.filter(Boolean);
+		expect(displays).toContain("odin build rules/odin/example");
+		expect(displays).not.toContain("odin bundle rules/odin/example");
+		expect(displays).not.toContain("odin run rules/odin/example");
 	});
 
 	// A shared ccLibrary() dep reports its output as transitiveSharedLibs
@@ -568,6 +620,22 @@ describe("Odin graph rules", () => {
 		).toEqual([
 			"-extra-linker-flags:-L/usr/lib/x86_64-linux-gnu -lwebkit2gtk-4.1",
 		]);
+	});
+
+	// `odin test` runs the binary it builds inside its own action, so it is the
+	// one case that cannot use a product directory to put a shared library
+	// beside the executable. The declared entries are the staged libraries' own
+	// directories, deduped — a build action's cwd is the sandbox root, so a
+	// relative entry resolves against the same root the staged paths use.
+	test("odinTestLibraryPathEnv names each staged library directory one time", () => {
+		expect(odinTestLibraryPathEnv([])).toEqual([]);
+		expect(
+			odinTestLibraryPathEnv([
+				"build/c/libone.so",
+				"build/c/libtwo.so",
+				"build/other/libthree.so",
+			]),
+		).toEqual(["LD_LIBRARY_PATH=build/c:build/other"]);
 	});
 
 	// The GCC graph tool chooses bin/ or bin-unsafe-paths/ before the executor
