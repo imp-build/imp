@@ -4,6 +4,7 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 import {
 	__resetZolaToolchainStateForTest,
 	defaultZolaToolchain,
@@ -166,5 +167,89 @@ describe("zola toolchain", () => {
 			message = error.message;
 		}
 		expect(message).toContain("unsupported zola toolchain platform");
+	});
+});
+
+describe("zola workspace lockfile selection", () => {
+	const BUNDLED = "//rules/zola/zola.lock";
+
+	function zolaLock(version, sha256) {
+		return JSON.stringify({
+			tool: "zola",
+			versions: {
+				[version]: {
+					"linux/x86_64": {
+						url: "https://locked.example/tool.tar.gz",
+						artifact: "tool.tar.gz",
+						size: 42,
+						sha256,
+					},
+				},
+			},
+		});
+	}
+
+	const readAddresses = (host) =>
+		host.calls.filter((c) => c[0] === "readAddressedFile").map((c) => c[1]);
+
+	test("the bundled lockfile is the default", async () => {
+		await withZolaHost(async (host) => {
+			host.addFile(BUNDLED, zolaLock("0.22.1", "cafe"));
+			zolaToolchain("0.22.1", { default: true });
+
+			await zolaBin("0.22.1");
+
+			expect(readAddresses(host)).toContain(BUNDLED);
+			expect(host.runs[0].argv).toContain("cafe");
+		});
+	});
+
+	test("a custom lockfile address is consulted instead of the bundled one", async () => {
+		await withZolaHost(async (host) => {
+			host.addFile("//locks/zola.lock", zolaLock("0.21.0", "beef"));
+			zolaToolchain("0.21.0", { default: true, lockfile: "//locks/zola.lock" });
+
+			await zolaBin("0.21.0");
+
+			expect(readAddresses(host)).toContain("//locks/zola.lock");
+			expect(readAddresses(host).includes(BUNDLED)).toBe(false);
+			expect(host.runs[0].argv).toContain("beef");
+		});
+	});
+
+	test("a missing selected lockfile fails naming it and gen-lockfiles", async () => {
+		await withZolaHost(async () => {
+			zolaToolchain("0.21.0", { default: true, lockfile: "//locks/zola.lock" });
+			let message = null;
+			try {
+				await zolaBin("0.21.0");
+			} catch (error) {
+				message = error.message;
+			}
+			expect(message).toContain("no lockfile found");
+			expect(message).toContain("//locks/zola.lock");
+			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("a malformed lockfile address fails at declaration", () => {
+		return withZolaHost(() => {
+			expect(() =>
+				zolaToolchain("0.21.0", { lockfile: "locks/zola.lock" }),
+			).toThrow("must start with //");
+		});
+	});
+
+	test("gen-lockfiles writes the address declared on the toolchain", async () => {
+		await withZolaHost(async (host) => {
+			const toolchain = zolaToolchain("0.21.0", {
+				default: true,
+				lockfile: "//locks/zola.lock",
+			});
+			await host.resolve(toolchain[GEN_LOCKFILES]);
+			expect(host.runs.some((r) => r.display === "write locks/zola.lock")).toBe(
+				true,
+			);
+		});
 	});
 });

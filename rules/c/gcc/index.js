@@ -17,7 +17,11 @@ import {
 	shellQuote,
 	sonameArgs,
 } from "//rules/c/toolchain";
-import { downloadToolArtifact } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockfileAddressToPath,
+	lockfileFor,
+} from "//rules/imp/lockfile";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
 	graphGenerateToolLockfile,
@@ -30,8 +34,8 @@ import {
 export const GCC_TOOL = toolName("gcc");
 
 const GCC_TOOLCHAIN_CACHE = "gcc-toolchains";
-const GCC_LOCKFILE = "//rules/c/gcc/gcc.lock";
-const GCC_WINDOWS_LOCKFILE = "//rules/c/gcc/gcc-windows.lock";
+const GCC_DEFAULT_LOCKFILE = "//rules/c/gcc/gcc.lock";
+const GCC_WINDOWS_DEFAULT_LOCKFILE = "//rules/c/gcc/gcc-windows.lock";
 
 // Bare tool names gcc's own compile/archive commands can appear as in a
 // replayed ninja edge, once ninja_graph.js's rewriteToolInvocations() strips
@@ -178,11 +182,11 @@ export function gccCacheKey(version, plat) {
 export class GccToolchain extends Toolchain {
 	static kind = "gcc-toolchain";
 	static tool = GCC_TOOL;
-	constructor({ version, unverified }, opts) {
+	constructor({ version, lockfile, unverified }, opts) {
 		super(
 			{
 				kind: GccToolchain.kind,
-				attrs: { version, ...(unverified ? { unverified } : {}) },
+				attrs: { version, lockfile, ...(unverified ? { unverified } : {}) },
 			},
 			opts,
 		);
@@ -221,6 +225,10 @@ function graphToolFor(version) {
  * @param {boolean} [opts.default=false]
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
+ * @param {string|{linux?: string, windows?: string}} [opts.lockfile]
+ *   Address of a workspace-owned lockfile instead of the shipped one; a
+ *   plain string applies to the active platform, an object keyed by os
+ *   pins each.
  * @returns {object} Target handle for this gcc toolchain.
  * @category configuration
  */
@@ -232,8 +240,19 @@ export function gccToolchain(version, opts = {}) {
 			`gcc toolchain version has no entry for platform '${plat.os}'`,
 		);
 	}
+	const optLockfile =
+		typeof opts.lockfile === "string"
+			? opts.lockfile
+			: opts.lockfile?.[plat.os];
+	const lockfile =
+		optLockfile ??
+		(plat.os === "windows"
+			? GCC_WINDOWS_DEFAULT_LOCKFILE
+			: GCC_DEFAULT_LOCKFILE);
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	const toolchain = new GccToolchain(
-		{ version: resolved, unverified: opts.unverified },
+		{ version: resolved, lockfile, unverified: opts.unverified },
 		{ default: opts.default },
 	);
 	const lockfileSpec =
@@ -241,6 +260,7 @@ export function gccToolchain(version, opts = {}) {
 	toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({
 		version: resolved,
 		...lockfileSpec,
+		lockfile,
 	});
 	graphToolchains.set(resolved, gccGraphTool(resolved));
 	return toolchain;
@@ -260,7 +280,13 @@ export function gccGraphTool(version, { unsafeSystemPaths = false } = {}) {
 	namedCache({ name: GCC_TOOLCHAIN_CACHE, shared: true });
 	const cacheKey = gccCacheKey(resolved, plat);
 	const archive = downloadToolArtifact({
-		lockfile: plat.os === "windows" ? GCC_WINDOWS_LOCKFILE : GCC_LOCKFILE,
+		lockfile: lockfileFor(
+			GccToolchain,
+			resolved,
+			plat.os === "windows"
+				? GCC_WINDOWS_DEFAULT_LOCKFILE
+				: GCC_DEFAULT_LOCKFILE,
+		),
 		tool: plat.os === "windows" ? "gcc-windows" : "gcc",
 		version: resolved,
 		plat,
@@ -699,7 +725,7 @@ const LOCKFILE_SPEC_LINUX = registerToolchainLockfile(
 		platforms: gccSupportedPlatforms(),
 		downloadUrl: gccDownloadUrl,
 		artifactName: gccArtifactName,
-		lockfile: GCC_LOCKFILE,
+		lockfile: GCC_DEFAULT_LOCKFILE,
 	},
 	["2025.08-1"],
 );
@@ -716,7 +742,7 @@ const LOCKFILE_SPEC_WINDOWS = registerToolchainLockfile(
 		platforms: [{ os: "windows", arch: "x86_64" }],
 		downloadUrl: gccDownloadUrl,
 		artifactName: gccArtifactName,
-		lockfile: GCC_WINDOWS_LOCKFILE,
+		lockfile: GCC_WINDOWS_DEFAULT_LOCKFILE,
 	},
 	["16.1.0posix-14.0.0-ucrt-r4"],
 );

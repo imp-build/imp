@@ -8,7 +8,11 @@ import {
 	tool as graphTool,
 } from "imp:core";
 
-import { downloadToolArtifact } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockfileAddressToPath,
+	lockfileFor,
+} from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin } from "//rules/imp/toolchain";
 import {
@@ -22,7 +26,7 @@ import {
 export const CMAKE_TOOL = toolName("cmake");
 
 const CMAKE_TOOLCHAIN_CACHE = "cmake-toolchains";
-const CMAKE_LOCKFILE = "//rules/c/cmake/cmake.lock";
+const DEFAULT_LOCKFILE = "//rules/c/cmake/cmake.lock";
 
 // CMake's Windows release archives use "arm64" rather than the "aarch64"
 // naming used elsewhere in this project (and by CMake's own Linux archives).
@@ -92,11 +96,11 @@ export function cmakeCacheKey(version, plat) {
 export class CmakeToolchain extends Toolchain {
 	static kind = "cmake-toolchain";
 	static tool = CMAKE_TOOL;
-	constructor({ version, unverified }, opts) {
+	constructor({ version, lockfile, unverified }, opts) {
 		super(
 			{
 				kind: CmakeToolchain.kind,
-				attrs: { version, ...(unverified ? { unverified } : {}) },
+				attrs: { version, lockfile, ...(unverified ? { unverified } : {}) },
 			},
 			opts,
 		);
@@ -129,17 +133,23 @@ function graphToolFor(version) {
  * @param {boolean} [opts.default=false]
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
+ * @param {string} [opts.lockfile] Address of a workspace-owned lockfile
+ *   to use instead of the shipped one.
  * @returns {object} Target handle for this CMake toolchain.
  * @category configuration
  */
 export function cmakeToolchain(version, opts = {}) {
+	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	const toolchain = new CmakeToolchain(
-		{ version, unverified: opts.unverified },
+		{ version, lockfile, unverified: opts.unverified },
 		{ default: opts.default },
 	);
 	toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({
 		version,
 		...LOCKFILE_SPEC,
+		lockfile,
 	});
 	graphToolchains.set(version, cmakeGraphTool(version));
 	return toolchain;
@@ -225,7 +235,7 @@ export function cmakeGraphTool(version) {
 	const cacheKey = cmakeCacheKey(resolved, plat);
 	namedCache({ name: CMAKE_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: CMAKE_LOCKFILE,
+		lockfile: lockfileFor(CmakeToolchain, resolved, DEFAULT_LOCKFILE),
 		tool: "cmake",
 		version: resolved,
 		plat,
@@ -340,7 +350,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		platforms: cmakeSupportedPlatforms(),
 		downloadUrl: cmakeDownloadUrl,
 		artifactName: cmakeArtifactName,
-		lockfile: CMAKE_LOCKFILE,
+		lockfile: DEFAULT_LOCKFILE,
 	},
 	["3.31.0"],
 );

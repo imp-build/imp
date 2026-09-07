@@ -18,6 +18,32 @@ The release is acquired as an immutable graph artifact on first use. Pure local
 composition of a `"scratch"` image does not invoke Crane, but pulls, publishes,
 mirrors, and builds based on a pulled image do.
 
+### Select a workspace lockfile
+
+The Crane release ships with a lockfile pinning the download URL, size, and
+SHA-256 of every artifact it knows. To pin a version the shipped lockfile does
+not know, give the toolchain the address of a lockfile this workspace owns;
+the shipped lockfile stays the default.
+
+```js
+import { craneToolchain, craneGenLockfiles } from "//rules/oci/toolchain";
+
+export const crane = craneToolchain("0.19.0", {
+	default: true,
+	lockfile: "//locks/crane.lock",
+});
+export const craneLockfiles = craneGenLockfiles();
+```
+
+```sh
+imp goal gen-lockfiles //:craneLockfiles
+```
+
+`craneGenLockfiles()` writes to the address the toolchain declares, so the
+address is given one time only. Downloads stay verified: an address with no
+file, or a lockfile with no entry for the selected version and platform, makes
+the acquire fail and points at `imp goal gen-lockfiles`.
+
 ## Pull a base and build an image
 
 ```js

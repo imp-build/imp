@@ -12,7 +12,11 @@ import {
 
 import { nativeTool } from "//rules/imp/native-tool";
 import { toolchainBin } from "//rules/imp/toolchain";
-import { downloadToolArtifact } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockfileAddressToPath,
+	lockfileFor,
+} from "//rules/imp/lockfile";
 import {
 	graphGenerateToolLockfile,
 	GEN_LOCKFILES,
@@ -24,7 +28,7 @@ import {
 export const BIOME_TOOL = toolName("biome");
 
 const BIOME_TOOLCHAIN_CACHE = "biome-toolchains";
-const BIOME_LOCKFILE = "//rules/js/biome/biome-toolchain.lock";
+const DEFAULT_LOCKFILE = "//rules/js/biome/biome-toolchain.lock";
 
 // biome's own os/arch tokens (github.com/biomejs/biome releases), distinct
 // from imp's plat.os/plat.arch vocabulary — "darwin"/"win32" not
@@ -99,11 +103,11 @@ export function biomeSupportedPlatforms() {
 export class BiomeToolchain extends Toolchain {
 	static kind = "biome-toolchain";
 	static tool = BIOME_TOOL;
-	constructor({ version, unverified }, opts) {
+	constructor({ version, lockfile, unverified }, opts) {
 		super(
 			{
 				kind: BiomeToolchain.kind,
-				attrs: { version, ...(unverified ? { unverified } : {}) },
+				attrs: { version, lockfile, ...(unverified ? { unverified } : {}) },
 			},
 			opts,
 		);
@@ -136,12 +140,17 @@ function graphToolFor(version) {
  * @param {boolean} [opts.default=false]
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
+ * @param {string} [opts.lockfile] Address of a workspace-owned lockfile
+ *   to use instead of the shipped one.
  * @returns {object} Target handle for this biome toolchain.
  * @category configuration
  */
 export function biomeToolchain(version, opts = {}) {
+	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	new BiomeToolchain(
-		{ version, unverified: opts.unverified },
+		{ version, lockfile, unverified: opts.unverified },
 		{ default: opts.default },
 	);
 	const graph = biomeGraphTool(version);
@@ -157,14 +166,19 @@ export function biomeToolchain(version, opts = {}) {
  * property.
  *
  * @param {string} [version]
+ * @param {object} [opts]
+ * @param {string} [opts.lockfile] Address override for the generated lockfile.
  * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
  */
-export function biomeGenLockfiles(version) {
+export function biomeGenLockfiles(version, opts = {}) {
 	const resolved = BiomeToolchain.requireVersion(version);
 	return {
 		[GEN_LOCKFILES]: graphGenerateToolLockfile({
 			version: resolved,
 			...LOCKFILE_SPEC,
+			lockfile:
+				opts.lockfile ??
+				lockfileFor(BiomeToolchain, resolved, DEFAULT_LOCKFILE),
 		}),
 	};
 }
@@ -224,7 +238,7 @@ export function biomeGraphTool(version) {
 	// declaration call — that every path to an installed biome goes through.
 	namedCache({ name: BIOME_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: BIOME_LOCKFILE,
+		lockfile: lockfileFor(BiomeToolchain, resolved, DEFAULT_LOCKFILE),
 		tool: "biome-toolchain",
 		version: resolved,
 		plat,
@@ -305,7 +319,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		platforms: biomeSupportedPlatforms(),
 		downloadUrl: biomeDownloadUrl,
 		artifactName: (_version, plat) => biomeArtifactName(plat),
-		lockfile: BIOME_LOCKFILE,
+		lockfile: DEFAULT_LOCKFILE,
 	},
 	["2.5.4"],
 );

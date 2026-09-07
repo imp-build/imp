@@ -14,6 +14,8 @@ import { nativeTool } from "//rules/imp/native-tool";
 import {
 	downloadToolArtifact,
 	lockedDownloadTools,
+	lockfileAddressToPath,
+	lockfileFor,
 } from "//rules/imp/lockfile";
 import { toolchainBin } from "//rules/imp/toolchain";
 import {
@@ -33,7 +35,7 @@ import {
 export const ZIG_TOOL = toolName("zig");
 
 const ZIG_TOOLCHAIN_CACHE = "zig-toolchains";
-const ZIG_LOCKFILE = "//rules/c/zig/zig.lock";
+const DEFAULT_LOCKFILE = "//rules/c/zig/zig.lock";
 
 function requireSupportedPlatform(plat) {
 	if (plat.os !== "linux" && plat.os !== "windows") {
@@ -170,11 +172,11 @@ function wrapperNames(plat) {
 export class ZigToolchain extends Toolchain {
 	static kind = "zig-toolchain";
 	static tool = ZIG_TOOL;
-	constructor({ version, unverified }, opts) {
+	constructor({ version, lockfile, unverified }, opts) {
 		super(
 			{
 				kind: ZigToolchain.kind,
-				attrs: { version, ...(unverified ? { unverified } : {}) },
+				attrs: { version, lockfile, ...(unverified ? { unverified } : {}) },
 			},
 			opts,
 		);
@@ -207,17 +209,23 @@ function graphToolFor(version) {
  * @param {boolean} [opts.default=false]
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
+ * @param {string} [opts.lockfile] Address of a workspace-owned lockfile
+ *   to use instead of the shipped one.
  * @returns {object} Target handle for this Zig toolchain.
  * @category configuration
  */
 export function zigToolchain(version, opts = {}) {
+	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	const toolchain = new ZigToolchain(
-		{ version, unverified: opts.unverified },
+		{ version, lockfile, unverified: opts.unverified },
 		{ default: opts.default },
 	);
 	toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({
 		version,
 		...LOCKFILE_SPEC,
+		lockfile,
 	});
 	graphToolchains.set(version, zigGraphTool(version));
 	return toolchain;
@@ -248,7 +256,7 @@ export function zigGraphTool(version) {
 	const plat = platformInfo();
 	namedCache({ name: ZIG_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: ZIG_LOCKFILE,
+		lockfile: lockfileFor(ZigToolchain, resolved, DEFAULT_LOCKFILE),
 		tool: "zig",
 		version: resolved,
 		plat,
@@ -571,7 +579,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		platforms: zigSupportedPlatforms(),
 		downloadUrl: zigDownloadUrl,
 		artifactName: zigArtifactName,
-		lockfile: ZIG_LOCKFILE,
+		lockfile: DEFAULT_LOCKFILE,
 	},
 	["0.16.0"],
 );

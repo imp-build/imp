@@ -13,6 +13,7 @@ import {
 import {
 	downloadToolArtifact,
 	lockfileAddressToPath,
+	lockfileFor,
 } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
@@ -98,18 +99,6 @@ function graphToolFor(version) {
 	return graphToolchains.get(version) ?? odinfmtGraphTool(version);
 }
 
-// The lockfile setting rides the declared instance's attrs — the one that
-// declared this exact version, else the default instance's. The shipped
-// default declares no version at all (see the odinfmtToolchain() call at the
-// bottom of this file), so the fallback to the default instance is what
-// serves it.
-function lockfileFor(version) {
-	return (
-		OdinfmtToolchain.instanceForVersion(version)?.attrs.lockfile ??
-		DEFAULT_LOCKFILE
-	);
-}
-
 /**
  * Return a named-cache-backed odinfmt tool descriptor plus the on-disk binary
  * name to invoke it with. Downloads and caches the OLS release on first use.
@@ -139,7 +128,7 @@ export function odinfmtGraphTool(version) {
 	const plat = platformInfo();
 	namedCache({ name: ODINFMT_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: lockfileFor(resolved),
+		lockfile: lockfileFor(OdinfmtToolchain, resolved, DEFAULT_LOCKFILE),
 		tool: "odinfmt",
 		version: resolved,
 		plat,
@@ -256,7 +245,9 @@ export function odinfmtGenLockfiles(version, opts = {}) {
 		[GEN_LOCKFILES]: graphGenerateToolLockfile({
 			version: resolved,
 			...LOCKFILE_SPEC,
-			lockfile: opts.lockfile ?? lockfileFor(resolved),
+			lockfile:
+				opts.lockfile ??
+				lockfileFor(OdinfmtToolchain, resolved, DEFAULT_LOCKFILE),
 		}),
 	};
 }

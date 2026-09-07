@@ -4,12 +4,14 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 import {
 	__resetBiomeToolchainStateForTest,
 	biomeArtifactName,
 	biomeBin,
 	biomeCacheKey,
 	biomeDownloadUrl,
+	biomeGenLockfiles,
 	biomeToolchain,
 	defaultBiomeToolchain,
 	defaultBiomeToolchainVersion,
@@ -165,6 +167,113 @@ describe("biome toolchain", () => {
 		return withBiomeHost({ os: "macos", arch: "aarch64" }, () => {
 			const plat = { os: "macos", arch: "aarch64" };
 			expect(biomeArtifactName(plat)).toBe("biome-darwin-arm64");
+		});
+	});
+});
+
+describe("biome workspace lockfile selection", () => {
+	const BUNDLED = "//rules/js/biome/biome-toolchain.lock";
+
+	function biomeLock(version, sha256) {
+		return JSON.stringify({
+			tool: "biome-toolchain",
+			versions: {
+				[version]: {
+					"linux/x86_64": {
+						url: "https://locked.example/tool.tar.gz",
+						artifact: "tool.tar.gz",
+						size: 42,
+						sha256,
+					},
+				},
+			},
+		});
+	}
+
+	const readAddresses = (host) =>
+		host.calls.filter((c) => c[0] === "readAddressedFile").map((c) => c[1]);
+
+	test("the bundled lockfile is the default", async () => {
+		await withBiomeHost(async (host) => {
+			host.addFile(BUNDLED, biomeLock("2.5.4", "cafe"));
+			biomeToolchain("2.5.4", { default: true });
+
+			await biomeBin("2.5.4");
+
+			expect(readAddresses(host)).toContain(BUNDLED);
+			expect(host.runs[0].argv).toContain("cafe");
+		});
+	});
+
+	test("a custom lockfile address is consulted instead of the bundled one", async () => {
+		await withBiomeHost(async (host) => {
+			host.addFile("//locks/biome.lock", biomeLock("2.4.0", "beef"));
+			biomeToolchain("2.4.0", {
+				default: true,
+				lockfile: "//locks/biome.lock",
+			});
+
+			await biomeBin("2.4.0");
+
+			expect(readAddresses(host)).toContain("//locks/biome.lock");
+			expect(readAddresses(host).includes(BUNDLED)).toBe(false);
+			expect(host.runs[0].argv).toContain("beef");
+		});
+	});
+
+	test("a missing selected lockfile fails naming it and gen-lockfiles", async () => {
+		await withBiomeHost(async () => {
+			biomeToolchain("2.4.0", {
+				default: true,
+				lockfile: "//locks/biome.lock",
+			});
+			let message = null;
+			try {
+				await biomeBin("2.4.0");
+			} catch (error) {
+				message = error.message;
+			}
+			expect(message).toContain("no lockfile found");
+			expect(message).toContain("//locks/biome.lock");
+			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("a malformed lockfile address fails at declaration", () => {
+		return withBiomeHost(() => {
+			expect(() =>
+				biomeToolchain("2.4.0", { lockfile: "locks/biome.lock" }),
+			).toThrow("must start with //");
+		});
+	});
+
+	test("gen-lockfiles writes the address declared on the toolchain", async () => {
+		await withBiomeHost(async (host) => {
+			biomeToolchain("2.4.0", {
+				default: true,
+				lockfile: "//locks/biome.lock",
+			});
+			await host.resolve(biomeGenLockfiles("2.4.0")[GEN_LOCKFILES]);
+			expect(
+				host.runs.some((r) => r.display === "write locks/biome.lock"),
+			).toBe(true);
+		});
+	});
+
+	test("gen-lockfiles takes an explicit lockfile override", async () => {
+		await withBiomeHost(async (host) => {
+			biomeToolchain("2.4.0", {
+				default: true,
+				lockfile: "//locks/biome.lock",
+			});
+			await host.resolve(
+				biomeGenLockfiles("2.4.0", { lockfile: "//other/biome.lock" })[
+					GEN_LOCKFILES
+				],
+			);
+			expect(
+				host.runs.some((r) => r.display === "write other/biome.lock"),
+			).toBe(true);
 		});
 	});
 });

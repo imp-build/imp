@@ -64,6 +64,33 @@ imp build --profile release //path/to/package:server
 `release: true` on an individual `cargoPackage()` remains an unconditional
 opt-in to Cargo's release profile.
 
+### Select a workspace lockfile
+
+The Rust toolchain and its kache sidecar each ship a lockfile pinning the
+download URL, size, and SHA-256 of every release artifact they know. To pin a
+version the shipped lockfile does not know, give the toolchain the address of
+a lockfile this workspace owns; the shipped lockfile stays the default.
+
+```js
+import { rustToolchain } from "//rules/rust/toolchain";
+
+export const rust = rustToolchain("1.90.0", {
+	default: true,
+	lockfile: "//locks/rust.lock",
+});
+```
+
+The toolchain handle is also the lockfile generation root:
+
+```sh
+imp goal gen-lockfiles //:rust
+```
+
+The generation root writes to the address the toolchain declares, so the
+address is given one time only. Downloads stay verified: an address with no
+file, or a lockfile with no entry for the selected version and platform, makes
+the acquire fail and points at `imp goal gen-lockfiles`.
+
 ## Declare a Cargo package
 
 In the directory containing `Cargo.toml`, add a `BUILD.js`:

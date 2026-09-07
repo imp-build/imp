@@ -45,6 +45,24 @@ export function lockfileAddressToPath(address) {
 }
 
 /**
+ * Lockfile address a toolchain version resolves to: the address the declared
+ * instance carries in its attrs (the instance that declared this exact
+ * version, else the default instance), falling back to the rule library's
+ * shipped address. `toolchainClass` is passed in so this module stays free of
+ * a Toolchain import.
+ *
+ * @param {{ instanceForVersion(version: string): { attrs: { lockfile?: string } }|undefined }} toolchainClass
+ * @param {string} version
+ * @param {string} fallbackAddress Shipped lockfile address for this toolchain.
+ * @returns {string}
+ */
+export function lockfileFor(toolchainClass, version, fallbackAddress) {
+	return (
+		toolchainClass.instanceForVersion(version)?.attrs.lockfile ?? fallbackAddress
+	);
+}
+
+/**
  * Resolve the lockfile entry pinning a toolchain artifact for a version and
  * platform.
  *

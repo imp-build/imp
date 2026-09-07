@@ -8,7 +8,11 @@ import {
 	tool as graphTool,
 } from "imp:core";
 
-import { downloadToolArtifact } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockfileAddressToPath,
+	lockfileFor,
+} from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin } from "//rules/imp/toolchain";
 import {
@@ -22,7 +26,7 @@ import {
 export const PNPM_TOOL = toolName("pnpm");
 
 const PNPM_TOOLCHAIN_CACHE = "pnpm-toolchains";
-const PNPM_LOCKFILE = "//rules/js/pnpm/pnpm-toolchain.lock";
+const DEFAULT_LOCKFILE = "//rules/js/pnpm/pnpm-toolchain.lock";
 
 // pnpm's own content-addressed package store — internally addressed by
 // package identity, never by sandbox identity, so sharing one directory
@@ -111,11 +115,11 @@ export function pnpmSupportedPlatforms() {
 export class PnpmToolchain extends Toolchain {
 	static kind = "pnpm-toolchain";
 	static tool = PNPM_TOOL;
-	constructor({ version, unverified }, opts) {
+	constructor({ version, lockfile, unverified }, opts) {
 		super(
 			{
 				kind: PnpmToolchain.kind,
-				attrs: { version, ...(unverified ? { unverified } : {}) },
+				attrs: { version, lockfile, ...(unverified ? { unverified } : {}) },
 			},
 			opts,
 		);
@@ -148,13 +152,18 @@ function graphToolFor(version) {
  * @param {boolean} [opts.default=false]
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
+ * @param {string} [opts.lockfile] Address of a workspace-owned lockfile
+ *   to use instead of the shipped one.
  * @returns {object} Target handle for this pnpm toolchain.
  * @category configuration
  */
 export function pnpmToolchain(version, opts = {}) {
+	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	namedCache({ name: PNPM_STORE_CACHE });
 	new PnpmToolchain(
-		{ version, unverified: opts.unverified },
+		{ version, lockfile, unverified: opts.unverified },
 		{ default: opts.default },
 	);
 	const graph = pnpmGraphTool(version);
@@ -170,14 +179,18 @@ export function pnpmToolchain(version, opts = {}) {
  * property.
  *
  * @param {string} [version]
+ * @param {object} [opts]
+ * @param {string} [opts.lockfile] Address override for the generated lockfile.
  * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
  */
-export function pnpmGenLockfiles(version) {
+export function pnpmGenLockfiles(version, opts = {}) {
 	const resolved = PnpmToolchain.requireVersion(version);
 	return {
 		[GEN_LOCKFILES]: graphGenerateToolLockfile({
 			version: resolved,
 			...LOCKFILE_SPEC,
+			lockfile:
+				opts.lockfile ?? lockfileFor(PnpmToolchain, resolved, DEFAULT_LOCKFILE),
 		}),
 	};
 }
@@ -230,7 +243,7 @@ export function pnpmGraphTool(version) {
 	const key = pnpmCacheKey(resolved, plat);
 	namedCache({ name: PNPM_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: PNPM_LOCKFILE,
+		lockfile: lockfileFor(PnpmToolchain, resolved, DEFAULT_LOCKFILE),
 		tool: "pnpm-toolchain",
 		version: resolved,
 		plat,
@@ -316,7 +329,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		platforms: pnpmSupportedPlatforms(),
 		downloadUrl: pnpmDownloadUrl,
 		artifactName: pnpmArtifactName,
-		lockfile: PNPM_LOCKFILE,
+		lockfile: DEFAULT_LOCKFILE,
 	},
 	["11.13.0"],
 );

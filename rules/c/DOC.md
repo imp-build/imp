@@ -32,6 +32,37 @@ profile builds raw C/C++ with `-O0 -g` and configures CMake with
 `CMAKE_BUILD_TYPE=Release`. Target `copts` and `cmakeArgs` are appended after
 those defaults and can override them for one target.
 
+### Select a workspace lockfile
+
+Each managed C toolchain (Zig, GCC, CMake, mold) ships a lockfile pinning the
+download URL, size, and SHA-256 of every release artifact it knows. To pin a
+version the shipped lockfile does not know, give the toolchain the address of
+a lockfile this workspace owns; the shipped lockfile stays the default.
+
+```js
+import { gccToolchain } from "//rules/c/gcc";
+
+export const gcc = gccToolchain("2024.05-1", {
+	default: true,
+	lockfile: "//locks/gcc.lock",
+});
+```
+
+The toolchain handle is also the lockfile generation root, so write the file
+with:
+
+```sh
+imp goal gen-lockfiles //:gcc
+```
+
+The generation root writes to the address the toolchain declares, so the
+address is given one time only. Downloads stay verified: an address with no
+file, or a lockfile with no entry for the selected version and platform, makes
+the acquire fail and points at `imp goal gen-lockfiles`. `gccToolchain` also
+takes an os-keyed map (`lockfile: { linux: "//locks/gcc.lock", windows:
+"//locks/gcc-windows.lock" }`) to pin each platform, matching its `version`
+argument.
+
 ## Declare raw targets
 
 ```js

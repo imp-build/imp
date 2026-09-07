@@ -4,6 +4,7 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 import {
 	__resetMoldToolchainStateForTest,
 	defaultMoldGraphToolchain,
@@ -277,6 +278,90 @@ describe("mold toolchain", () => {
 			expect(pathDirs).toEqual([
 				"/cache/mold-toolchains/2.41.0/linux-x86_64/bin",
 			]);
+		});
+	});
+});
+
+describe("mold workspace lockfile selection", () => {
+	const BUNDLED = "//rules/c/mold/mold.lock";
+
+	function moldLock(version, sha256) {
+		return JSON.stringify({
+			tool: "mold",
+			versions: {
+				[version]: {
+					"linux/x86_64": {
+						url: "https://locked.example/tool.tar.gz",
+						artifact: "tool.tar.gz",
+						size: 42,
+						sha256,
+					},
+				},
+			},
+		});
+	}
+
+	const readAddresses = (host) =>
+		host.calls.filter((c) => c[0] === "readAddressedFile").map((c) => c[1]);
+
+	test("the bundled lockfile is the default", async () => {
+		await withMoldHost(async (host) => {
+			host.addFile(BUNDLED, moldLock("2.41.0", "cafe"));
+			moldToolchain("2.41.0", { default: true });
+
+			await moldBin("2.41.0");
+
+			expect(readAddresses(host)).toContain(BUNDLED);
+			expect(host.runs[0].argv).toContain("cafe");
+		});
+	});
+
+	test("a custom lockfile address is consulted instead of the bundled one", async () => {
+		await withMoldHost(async (host) => {
+			host.addFile("//locks/mold.lock", moldLock("2.40.0", "beef"));
+			moldToolchain("2.40.0", { default: true, lockfile: "//locks/mold.lock" });
+
+			await moldBin("2.40.0");
+
+			expect(readAddresses(host)).toContain("//locks/mold.lock");
+			expect(readAddresses(host).includes(BUNDLED)).toBe(false);
+			expect(host.runs[0].argv).toContain("beef");
+		});
+	});
+
+	test("a missing selected lockfile fails naming it and gen-lockfiles", async () => {
+		await withMoldHost(async () => {
+			moldToolchain("2.40.0", { default: true, lockfile: "//locks/mold.lock" });
+			let message = null;
+			try {
+				await moldBin("2.40.0");
+			} catch (error) {
+				message = error.message;
+			}
+			expect(message).toContain("no lockfile found");
+			expect(message).toContain("//locks/mold.lock");
+			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("a malformed lockfile address fails at declaration", () => {
+		return withMoldHost(() => {
+			expect(() =>
+				moldToolchain("2.40.0", { lockfile: "locks/mold.lock" }),
+			).toThrow("must start with //");
+		});
+	});
+
+	test("gen-lockfiles writes the address declared on the toolchain", async () => {
+		await withMoldHost(async (host) => {
+			const toolchain = moldToolchain("2.40.0", {
+				default: true,
+				lockfile: "//locks/mold.lock",
+			});
+			await host.resolve(toolchain[GEN_LOCKFILES]);
+			expect(host.runs.some((r) => r.display === "write locks/mold.lock")).toBe(
+				true,
+			);
 		});
 	});
 });

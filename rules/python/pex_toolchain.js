@@ -14,6 +14,7 @@ import { nativeTool } from "//rules/imp/native-tool";
 import {
 	downloadToolArtifact,
 	lockfileAddressToPath,
+	lockfileFor,
 } from "//rules/imp/lockfile";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
@@ -97,14 +98,6 @@ function graphToolFor(version) {
 	return graphToolchains.get(version) ?? pexGraphTool(version);
 }
 
-// The lockfile setting rides the declared instance's attrs — the one that
-// declared this exact version, else the default instance's.
-function lockfileFor(version) {
-	return (
-		PexToolchain.instanceForVersion(version)?.attrs.lockfile ?? DEFAULT_LOCKFILE
-	);
-}
-
 export function __resetPexToolchainStateForTest() {
 	PexToolchain.clearDefault();
 	graphToolchains = new Map();
@@ -161,7 +154,8 @@ export function pexGenLockfiles(version, opts = {}) {
 		[GEN_LOCKFILES]: graphGenerateToolLockfile({
 			version: resolved,
 			...LOCKFILE_SPEC,
-			lockfile: opts.lockfile ?? lockfileFor(resolved),
+			lockfile:
+				opts.lockfile ?? lockfileFor(PexToolchain, resolved, DEFAULT_LOCKFILE),
 		}),
 	};
 }
@@ -172,7 +166,7 @@ export function pexGraphTool(version) {
 	const plat = platformInfo();
 	namedCache({ name: PEX_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: lockfileFor(resolved),
+		lockfile: lockfileFor(PexToolchain, resolved, DEFAULT_LOCKFILE),
 		tool: "pex-toolchain",
 		version: resolved,
 		plat,

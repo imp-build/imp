@@ -7,7 +7,11 @@ import {
 } from "imp:core";
 
 import { extractArchive } from "//rules/imp/archive";
-import { downloadToolArtifact } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockfileAddressToPath,
+	lockfileFor,
+} from "//rules/imp/lockfile";
 import { toolchainBin } from "//rules/imp/toolchain";
 import {
 	graphGenerateToolLockfile,
@@ -17,7 +21,7 @@ import {
 
 export const CRANE_TOOL = toolName("crane");
 
-const CRANE_LOCKFILE = "//rules/oci/crane.lock";
+const DEFAULT_LOCKFILE = "//rules/oci/crane.lock";
 const CRANE_TOOLCHAIN_CACHE = "crane-toolchains";
 
 const TARGET_OS = {
@@ -71,11 +75,11 @@ export class CraneToolchain extends Toolchain {
 	static kind = "crane-toolchain";
 	static tool = CRANE_TOOL;
 
-	constructor({ version, unverified }, opts) {
+	constructor({ version, lockfile, unverified }, opts) {
 		super(
 			{
 				kind: CraneToolchain.kind,
-				attrs: { version, ...(unverified ? { unverified } : {}) },
+				attrs: { version, lockfile, ...(unverified ? { unverified } : {}) },
 			},
 			opts,
 		);
@@ -96,10 +100,21 @@ export function __resetCraneToolchainStateForTest() {
 /**
  * Declare a Crane version and return the graph-native executable tool.
  * Lockfile/default policy remains owned by this configuration API.
+ *
+ * @param {string} version
+ * @param {object} [opts]
+ * @param {boolean} [opts.default=false]
+ * @param {boolean} [opts.unverified=false] Allow downloading without a
+ *   matching lockfile entry (warns instead of failing).
+ * @param {string} [opts.lockfile] Address of a workspace-owned lockfile
+ *   to use instead of the shipped one.
  */
 export function craneToolchain(version, opts = {}) {
+	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	new CraneToolchain(
-		{ version, unverified: opts.unverified },
+		{ version, lockfile, unverified: opts.unverified },
 		{ default: opts.default },
 	);
 	const tool = craneGraphTool(version);
@@ -115,14 +130,17 @@ export function craneToolchain(version, opts = {}) {
  * property.
  *
  * @param {string} [version]
+ * @param {object} [opts]
+ * @param {string} [opts.lockfile] Address override for the generated lockfile.
  * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
  */
-export function craneGenLockfiles(version) {
+export function craneGenLockfiles(version, opts = {}) {
 	const resolved = CraneToolchain.requireVersion(version);
 	return {
 		[GEN_LOCKFILES]: graphGenerateToolLockfile({
 			version: resolved,
 			...LOCKFILE_SPEC,
+			lockfile: opts.lockfile ?? lockfileFor(CraneToolchain, resolved, DEFAULT_LOCKFILE),
 		}),
 	};
 }
@@ -158,7 +176,7 @@ export function craneGraphTool(version) {
 	const plat = platformInfo();
 	namedCache({ name: CRANE_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: CRANE_LOCKFILE,
+		lockfile: lockfileFor(CraneToolchain, resolved, DEFAULT_LOCKFILE),
 		tool: "crane",
 		version: resolved,
 		plat,
@@ -197,7 +215,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		platforms: craneSupportedPlatforms(),
 		downloadUrl: craneDownloadUrl,
 		artifactName: craneArtifactName,
-		lockfile: CRANE_LOCKFILE,
+		lockfile: DEFAULT_LOCKFILE,
 	},
 	["0.20.6"],
 );

@@ -9,6 +9,7 @@ import {
 import {
 	downloadToolArtifact,
 	lockfileAddressToPath,
+	lockfileFor,
 } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
@@ -157,15 +158,6 @@ let odinLldOnWindowsVersions = new Set();
 
 function graphToolFor(version) {
 	return graphToolchains.get(version) ?? odinGraphTool(version);
-}
-
-// The lockfile setting rides the declared instance's attrs — the one that
-// declared this exact version, else the default instance's.
-function lockfileFor(version) {
-	return (
-		OdinToolchain.instanceForVersion(version)?.attrs.lockfile ??
-		DEFAULT_LOCKFILE
-	);
 }
 
 export function __resetOdinToolchainStateForTest() {
@@ -321,7 +313,8 @@ export function odinGenLockfiles(version, opts = {}) {
 		[GEN_LOCKFILES]: graphGenerateToolLockfile({
 			version: resolved,
 			...LOCKFILE_SPEC,
-			lockfile: opts.lockfile ?? lockfileFor(resolved),
+			lockfile:
+				opts.lockfile ?? lockfileFor(OdinToolchain, resolved, DEFAULT_LOCKFILE),
 		}),
 	};
 }
@@ -332,7 +325,7 @@ export function odinGraphTool(version) {
 	const plat = platformInfo();
 	namedCache({ name: ODIN_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: lockfileFor(resolved),
+		lockfile: lockfileFor(OdinToolchain, resolved, DEFAULT_LOCKFILE),
 		tool: "odin",
 		version: resolved,
 		plat,

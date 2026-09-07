@@ -4,6 +4,7 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 import {
 	__resetCmakeToolchainStateForTest,
 	cmakeCacheKey,
@@ -123,6 +124,96 @@ describe("CMake toolchain", () => {
 			expect(extract.argv[2]).toContain("--strip-components=1");
 			expect(extract.outputs[0].namedCache.name).toBe("cmake-toolchains");
 			expect(extract.outputs[0].namedCache.key).toBe(key);
+		});
+	});
+});
+
+describe("CMake workspace lockfile selection", () => {
+	const BUNDLED = "//rules/c/cmake/cmake.lock";
+
+	function cmakeLock(version, sha256) {
+		return JSON.stringify({
+			tool: "cmake",
+			versions: {
+				[version]: {
+					"linux/x86_64": {
+						url: "https://locked.example/tool.tar.gz",
+						artifact: "tool.tar.gz",
+						size: 42,
+						sha256,
+					},
+				},
+			},
+		});
+	}
+
+	const readAddresses = (host) =>
+		host.calls.filter((c) => c[0] === "readAddressedFile").map((c) => c[1]);
+
+	test("the bundled lockfile is the default", async () => {
+		await withCmakeHost(async (host) => {
+			host.addFile(BUNDLED, cmakeLock("3.31.0", "cafe"));
+			cmakeToolchain("3.31.0", { default: true });
+
+			await cmakeBin("3.31.0");
+
+			expect(readAddresses(host)).toContain(BUNDLED);
+			expect(host.runs[0].argv).toContain("cafe");
+		});
+	});
+
+	test("a custom lockfile address is consulted instead of the bundled one", async () => {
+		await withCmakeHost(async (host) => {
+			host.addFile("//locks/cmake.lock", cmakeLock("3.30.5", "beef"));
+			cmakeToolchain("3.30.5", {
+				default: true,
+				lockfile: "//locks/cmake.lock",
+			});
+
+			await cmakeBin("3.30.5");
+
+			expect(readAddresses(host)).toContain("//locks/cmake.lock");
+			expect(readAddresses(host).includes(BUNDLED)).toBe(false);
+			expect(host.runs[0].argv).toContain("beef");
+		});
+	});
+
+	test("a missing selected lockfile fails naming it and gen-lockfiles", async () => {
+		await withCmakeHost(async () => {
+			cmakeToolchain("3.30.5", {
+				default: true,
+				lockfile: "//locks/cmake.lock",
+			});
+			let message = null;
+			try {
+				await cmakeBin("3.30.5");
+			} catch (error) {
+				message = error.message;
+			}
+			expect(message).toContain("no lockfile found");
+			expect(message).toContain("//locks/cmake.lock");
+			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("a malformed lockfile address fails at declaration", () => {
+		return withCmakeHost(() => {
+			expect(() =>
+				cmakeToolchain("3.30.5", { lockfile: "locks/cmake.lock" }),
+			).toThrow("must start with //");
+		});
+	});
+
+	test("gen-lockfiles writes the address declared on the toolchain", async () => {
+		await withCmakeHost(async (host) => {
+			const toolchain = cmakeToolchain("3.30.5", {
+				default: true,
+				lockfile: "//locks/cmake.lock",
+			});
+			await host.resolve(toolchain[GEN_LOCKFILES]);
+			expect(
+				host.runs.some((r) => r.display === "write locks/cmake.lock"),
+			).toBe(true);
 		});
 	});
 });

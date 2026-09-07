@@ -7,6 +7,7 @@ import {
 import {
 	downloadToolArtifact,
 	lockfileAddressToPath,
+	lockfileFor,
 	resolveToolLockfile,
 	lockedDownloadArgv,
 	lockedDownloadTools,
@@ -389,5 +390,38 @@ describe("toolchain lockfiles", () => {
 			"wc",
 			"shasum",
 		]);
+	});
+});
+
+describe("lockfileFor", () => {
+	class FakeToolchain {
+		constructor(lockfile) {
+			this.attrs = lockfile === undefined ? {} : { lockfile };
+		}
+		static _instance = null;
+		static instanceForVersion() {
+			return FakeToolchain._instance;
+		}
+	}
+
+	test("returns the declared instance's lockfile address", () => {
+		FakeToolchain._instance = new FakeToolchain("//locks/tool.lock");
+		expect(lockfileFor(FakeToolchain, "1.0.0", "//shipped/tool.lock")).toBe(
+			"//locks/tool.lock",
+		);
+	});
+
+	test("falls back to the shipped address when the instance carries none", () => {
+		FakeToolchain._instance = new FakeToolchain(undefined);
+		expect(lockfileFor(FakeToolchain, "1.0.0", "//shipped/tool.lock")).toBe(
+			"//shipped/tool.lock",
+		);
+	});
+
+	test("falls back to the shipped address when no instance resolves", () => {
+		FakeToolchain._instance = null;
+		expect(lockfileFor(FakeToolchain, "1.0.0", "//shipped/tool.lock")).toBe(
+			"//shipped/tool.lock",
+		);
 	});
 });

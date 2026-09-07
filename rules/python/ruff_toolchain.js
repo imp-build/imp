@@ -11,6 +11,7 @@ import {
 import {
 	downloadToolArtifact,
 	lockfileAddressToPath,
+	lockfileFor,
 } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin } from "//rules/imp/toolchain";
@@ -110,15 +111,6 @@ export class RuffToolchain extends Toolchain {
 	}
 }
 
-// The lockfile/unverified settings ride the declared instance's attrs —
-// the one that declared this exact version, else the default instance's.
-function lockfileFor(version) {
-	return (
-		RuffToolchain.instanceForVersion(version)?.attrs.lockfile ??
-		DEFAULT_LOCKFILE
-	);
-}
-
 // Built once per declared version, at declaration time: task() refuses to add
 // graph nodes during execution, so anything that resolves a toolchain while
 // the graph is running must find a handle here rather than build one.
@@ -183,7 +175,8 @@ export function ruffGenLockfiles(version, opts = {}) {
 		[GEN_LOCKFILES]: graphGenerateToolLockfile({
 			version: resolved,
 			...LOCKFILE_SPEC,
-			lockfile: opts.lockfile ?? lockfileFor(resolved),
+			lockfile:
+				opts.lockfile ?? lockfileFor(RuffToolchain, resolved, DEFAULT_LOCKFILE),
 		}),
 	};
 }
@@ -195,7 +188,7 @@ export function ruffGraphTool(version) {
 	const key = ruffCacheKey(resolved, plat);
 	namedCache({ name: RUFF_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: lockfileFor(resolved),
+		lockfile: lockfileFor(RuffToolchain, resolved, DEFAULT_LOCKFILE),
 		tool: "ruff-toolchain",
 		version: resolved,
 		plat,

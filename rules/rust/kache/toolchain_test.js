@@ -4,6 +4,7 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 import {
 	__resetKacheToolchainStateForTest,
 	defaultKacheToolchain,
@@ -325,6 +326,96 @@ describe("kache toolchain", () => {
 			);
 			expect(host.runs[0].impure).toBe(true);
 			expect(host.runs[0].sandbox).toBe(false);
+		});
+	});
+});
+
+describe("kache workspace lockfile selection", () => {
+	const BUNDLED = "//rules/rust/kache/kache.lock";
+
+	function kacheLock(version, sha256) {
+		return JSON.stringify({
+			tool: "kache",
+			versions: {
+				[version]: {
+					"linux/x86_64": {
+						url: "https://locked.example/tool.tar.gz",
+						artifact: "tool.tar.gz",
+						size: 42,
+						sha256,
+					},
+				},
+			},
+		});
+	}
+
+	const readAddresses = (host) =>
+		host.calls.filter((c) => c[0] === "readAddressedFile").map((c) => c[1]);
+
+	test("the bundled lockfile is the default", async () => {
+		await withKacheHost(async (host) => {
+			host.addFile(BUNDLED, kacheLock("0.11.0", "cafe"));
+			kacheToolchain("0.11.0", { default: true });
+
+			await kacheBin("0.11.0");
+
+			expect(readAddresses(host)).toContain(BUNDLED);
+			expect(host.runs[0].argv).toContain("cafe");
+		});
+	});
+
+	test("a custom lockfile address is consulted instead of the bundled one", async () => {
+		await withKacheHost(async (host) => {
+			host.addFile("//locks/kache.lock", kacheLock("0.10.0", "beef"));
+			kacheToolchain("0.10.0", {
+				default: true,
+				lockfile: "//locks/kache.lock",
+			});
+
+			await kacheBin("0.10.0");
+
+			expect(readAddresses(host)).toContain("//locks/kache.lock");
+			expect(readAddresses(host).includes(BUNDLED)).toBe(false);
+			expect(host.runs[0].argv).toContain("beef");
+		});
+	});
+
+	test("a missing selected lockfile fails naming it and gen-lockfiles", async () => {
+		await withKacheHost(async () => {
+			kacheToolchain("0.10.0", {
+				default: true,
+				lockfile: "//locks/kache.lock",
+			});
+			let message = null;
+			try {
+				await kacheBin("0.10.0");
+			} catch (error) {
+				message = error.message;
+			}
+			expect(message).toContain("no lockfile found");
+			expect(message).toContain("//locks/kache.lock");
+			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("a malformed lockfile address fails at declaration", () => {
+		return withKacheHost(() => {
+			expect(() =>
+				kacheToolchain("0.10.0", { lockfile: "locks/kache.lock" }),
+			).toThrow("must start with //");
+		});
+	});
+
+	test("gen-lockfiles writes the address declared on the toolchain", async () => {
+		await withKacheHost(async (host) => {
+			const toolchain = kacheToolchain("0.10.0", {
+				default: true,
+				lockfile: "//locks/kache.lock",
+			});
+			await host.resolve(toolchain[GEN_LOCKFILES]);
+			expect(
+				host.runs.some((r) => r.display === "write locks/kache.lock"),
+			).toBe(true);
 		});
 	});
 });

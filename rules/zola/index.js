@@ -8,7 +8,11 @@ import {
 	tool as graphTool,
 } from "imp:core";
 
-import { downloadToolArtifact } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockfileAddressToPath,
+	lockfileFor,
+} from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
@@ -21,7 +25,7 @@ import {
 export const ZOLA_TOOL = toolName("zola");
 
 const ZOLA_TOOLCHAIN_CACHE = "zola-toolchains";
-const ZOLA_LOCKFILE = "//rules/zola/zola.lock";
+const DEFAULT_LOCKFILE = "//rules/zola/zola.lock";
 
 // Zola publishes prebuilt binaries for these targets; see
 // https://github.com/getzola/zola/releases.
@@ -93,11 +97,11 @@ export function zolaCacheKey(version, plat) {
 export class ZolaToolchain extends Toolchain {
 	static kind = "zola-toolchain";
 	static tool = ZOLA_TOOL;
-	constructor({ version, unverified }, opts) {
+	constructor({ version, lockfile, unverified }, opts) {
 		super(
 			{
 				kind: ZolaToolchain.kind,
-				attrs: { version, ...(unverified ? { unverified } : {}) },
+				attrs: { version, lockfile, ...(unverified ? { unverified } : {}) },
 			},
 			opts,
 		);
@@ -130,17 +134,23 @@ function graphToolFor(version) {
  * @param {boolean} [opts.default=false]
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
+ * @param {string} [opts.lockfile] Address of a workspace-owned lockfile
+ *   to use instead of the shipped one.
  * @returns {object} Target handle for this zola toolchain.
  * @category configuration
  */
 export function zolaToolchain(version, opts = {}) {
+	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	const toolchain = new ZolaToolchain(
-		{ version, unverified: opts.unverified },
+		{ version, lockfile, unverified: opts.unverified },
 		{ default: opts.default },
 	);
 	toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({
 		version,
 		...LOCKFILE_SPEC,
+		lockfile,
 	});
 	graphToolchains.set(version, zolaGraphTool(version));
 	return toolchain;
@@ -167,7 +177,7 @@ export function zolaGraphTool(version) {
 	const plat = platformInfo();
 	namedCache({ name: ZOLA_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: ZOLA_LOCKFILE,
+		lockfile: lockfileFor(ZolaToolchain, resolved, DEFAULT_LOCKFILE),
 		tool: "zola",
 		version: resolved,
 		plat,
@@ -258,7 +268,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		platforms: zolaSupportedPlatforms(),
 		downloadUrl: zolaDownloadUrl,
 		artifactName: zolaArtifactName,
-		lockfile: ZOLA_LOCKFILE,
+		lockfile: DEFAULT_LOCKFILE,
 	},
 	["0.22.1"],
 );

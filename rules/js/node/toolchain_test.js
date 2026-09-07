@@ -4,6 +4,7 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 import {
 	__resetNodeToolchainStateForTest,
 	defaultNodeToolchain,
@@ -13,6 +14,7 @@ import {
 	nodeBin,
 	nodeCacheKey,
 	nodeDownloadUrl,
+	nodeGenLockfiles,
 	nodeToolchain,
 } from "//rules/js/node/toolchain";
 
@@ -162,6 +164,113 @@ describe("node toolchain", () => {
 			const plat = { os: "macos", arch: "aarch64" };
 			expect(nodeArtifactName("22.11.0", plat)).toBe(
 				"node-v22.11.0-darwin-arm64.tar.gz",
+			);
+		});
+	});
+});
+
+describe("node workspace lockfile selection", () => {
+	const BUNDLED = "//rules/js/node/node-toolchain.lock";
+
+	function nodeLock(version, sha256) {
+		return JSON.stringify({
+			tool: "node-toolchain",
+			versions: {
+				[version]: {
+					"linux/x86_64": {
+						url: "https://locked.example/tool.tar.gz",
+						artifact: "tool.tar.gz",
+						size: 42,
+						sha256,
+					},
+				},
+			},
+		});
+	}
+
+	const readAddresses = (host) =>
+		host.calls.filter((c) => c[0] === "readAddressedFile").map((c) => c[1]);
+
+	test("the bundled lockfile is the default", async () => {
+		await withNodeHost(async (host) => {
+			host.addFile(BUNDLED, nodeLock("22.11.0", "cafe"));
+			nodeToolchain("22.11.0", { default: true });
+
+			await nodeBin("22.11.0");
+
+			expect(readAddresses(host)).toContain(BUNDLED);
+			expect(host.runs[0].argv).toContain("cafe");
+		});
+	});
+
+	test("a custom lockfile address is consulted instead of the bundled one", async () => {
+		await withNodeHost(async (host) => {
+			host.addFile("//locks/node.lock", nodeLock("20.10.0", "beef"));
+			nodeToolchain("20.10.0", {
+				default: true,
+				lockfile: "//locks/node.lock",
+			});
+
+			await nodeBin("20.10.0");
+
+			expect(readAddresses(host)).toContain("//locks/node.lock");
+			expect(readAddresses(host).includes(BUNDLED)).toBe(false);
+			expect(host.runs[0].argv).toContain("beef");
+		});
+	});
+
+	test("a missing selected lockfile fails naming it and gen-lockfiles", async () => {
+		await withNodeHost(async () => {
+			nodeToolchain("20.10.0", {
+				default: true,
+				lockfile: "//locks/node.lock",
+			});
+			let message = null;
+			try {
+				await nodeBin("20.10.0");
+			} catch (error) {
+				message = error.message;
+			}
+			expect(message).toContain("no lockfile found");
+			expect(message).toContain("//locks/node.lock");
+			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("a malformed lockfile address fails at declaration", () => {
+		return withNodeHost(() => {
+			expect(() =>
+				nodeToolchain("20.10.0", { lockfile: "locks/node.lock" }),
+			).toThrow("must start with //");
+		});
+	});
+
+	test("gen-lockfiles writes the address declared on the toolchain", async () => {
+		await withNodeHost(async (host) => {
+			nodeToolchain("20.10.0", {
+				default: true,
+				lockfile: "//locks/node.lock",
+			});
+			await host.resolve(nodeGenLockfiles("20.10.0")[GEN_LOCKFILES]);
+			expect(host.runs.some((r) => r.display === "write locks/node.lock")).toBe(
+				true,
+			);
+		});
+	});
+
+	test("gen-lockfiles takes an explicit lockfile override", async () => {
+		await withNodeHost(async (host) => {
+			nodeToolchain("20.10.0", {
+				default: true,
+				lockfile: "//locks/node.lock",
+			});
+			await host.resolve(
+				nodeGenLockfiles("20.10.0", { lockfile: "//other/node.lock" })[
+					GEN_LOCKFILES
+				],
+			);
+			expect(host.runs.some((r) => r.display === "write other/node.lock")).toBe(
+				true,
 			);
 		});
 	});

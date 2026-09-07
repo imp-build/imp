@@ -11,7 +11,11 @@ import {
 } from "imp:core";
 
 import { nativeTool } from "//rules/imp/native-tool";
-import { downloadToolArtifact } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockfileAddressToPath,
+	lockfileFor,
+} from "//rules/imp/lockfile";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
 	graphGenerateToolLockfile,
@@ -24,7 +28,7 @@ import {
 export const MOLD_TOOL = toolName("mold");
 
 const MOLD_TOOLCHAIN_CACHE = "mold-toolchains";
-const MOLD_LOCKFILE = "//rules/c/mold/mold.lock";
+const DEFAULT_LOCKFILE = "//rules/c/mold/mold.lock";
 
 // mold has no serious Windows story; this only targets Linux.
 function requireSupportedPlatform(plat) {
@@ -88,11 +92,11 @@ export function moldCacheKey(version, plat) {
 export class MoldToolchain extends Toolchain {
 	static kind = "mold-toolchain";
 	static tool = MOLD_TOOL;
-	constructor({ version, unverified }, opts) {
+	constructor({ version, lockfile, unverified }, opts) {
 		super(
 			{
 				kind: MoldToolchain.kind,
-				attrs: { version, ...(unverified ? { unverified } : {}) },
+				attrs: { version, lockfile, ...(unverified ? { unverified } : {}) },
 			},
 			opts,
 		);
@@ -126,17 +130,23 @@ function graphToolFor(version) {
  * @param {boolean} [opts.default=false]
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
+ * @param {string} [opts.lockfile] Address of a workspace-owned lockfile
+ *   to use instead of the shipped one.
  * @returns {object} Target handle for this mold toolchain.
  * @category configuration
  */
 export function moldToolchain(version, opts = {}) {
+	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	const toolchain = new MoldToolchain(
-		{ version, unverified: opts.unverified },
+		{ version, lockfile, unverified: opts.unverified },
 		{ default: opts.default },
 	);
 	toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({
 		version,
 		...LOCKFILE_SPEC,
+		lockfile,
 	});
 	graphToolchains.set(version, moldGraphTool(version));
 	return toolchain;
@@ -175,7 +185,7 @@ export function moldGraphTool(version) {
 	namedCache({ name: MOLD_TOOLCHAIN_CACHE, shared: true });
 	const cacheKey = moldCacheKey(resolved, plat);
 	const archive = downloadToolArtifact({
-		lockfile: MOLD_LOCKFILE,
+		lockfile: lockfileFor(MoldToolchain, resolved, DEFAULT_LOCKFILE),
 		tool: "mold",
 		version: resolved,
 		plat,
@@ -311,7 +321,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		platforms: moldSupportedPlatforms(),
 		downloadUrl: moldDownloadUrl,
 		artifactName: moldArtifactName,
-		lockfile: MOLD_LOCKFILE,
+		lockfile: DEFAULT_LOCKFILE,
 	},
 	["2.41.0"],
 );

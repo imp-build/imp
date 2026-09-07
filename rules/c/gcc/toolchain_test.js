@@ -4,6 +4,7 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 import {
 	__resetGccToolchainStateForTest,
 	defaultGccGraphToolchain,
@@ -406,6 +407,111 @@ describe("gcc toolchain on windows", () => {
 			expect(rustflags).toEqual(["-C", `linker=${dir}/bin/clang.exe`]);
 			expect(env).toEqual([`CC=${dir}/bin/clang.exe`]);
 			expect(pathDirs).toEqual([`${dir}/bin`]);
+		});
+	});
+});
+
+describe("gcc workspace lockfile selection", () => {
+	const BUNDLED = "//rules/c/gcc/gcc.lock";
+
+	function gccLock(version, sha256) {
+		return JSON.stringify({
+			tool: "gcc",
+			versions: {
+				[version]: {
+					"linux/x86_64": {
+						url: "https://locked.example/gcc.tar.xz",
+						artifact: "gcc.tar.xz",
+						size: 42,
+						sha256,
+					},
+				},
+			},
+		});
+	}
+
+	const readAddresses = (host) =>
+		host.calls.filter((c) => c[0] === "readAddressedFile").map((c) => c[1]);
+
+	test("the bundled lockfile is the default", async () => {
+		await withGccHost(async (host) => {
+			host.addFile(BUNDLED, gccLock("2025.08-1", "cafe"));
+			gccToolchain("2025.08-1", { default: true });
+
+			await gccBin("2025.08-1");
+
+			expect(readAddresses(host)).toContain(BUNDLED);
+			expect(host.runs[0].argv).toContain("cafe");
+		});
+	});
+
+	test("a custom lockfile address is consulted instead of the bundled one", async () => {
+		await withGccHost(async (host) => {
+			host.addFile("//locks/gcc.lock", gccLock("2024.05-1", "beef"));
+			gccToolchain("2024.05-1", {
+				default: true,
+				lockfile: "//locks/gcc.lock",
+			});
+
+			await gccBin("2024.05-1");
+
+			expect(readAddresses(host)).toContain("//locks/gcc.lock");
+			expect(readAddresses(host).includes(BUNDLED)).toBe(false);
+			expect(host.runs[0].argv).toContain("beef");
+		});
+	});
+
+	test("an os-keyed lockfile map selects the active platform's address", async () => {
+		await withGccHost(async (host) => {
+			host.addFile("//locks/gcc.lock", gccLock("2024.05-1", "beef"));
+			gccToolchain("2024.05-1", {
+				default: true,
+				lockfile: { linux: "//locks/gcc.lock" },
+			});
+
+			await gccBin("2024.05-1");
+
+			expect(readAddresses(host)).toContain("//locks/gcc.lock");
+			expect(host.runs[0].argv).toContain("beef");
+		});
+	});
+
+	test("a missing selected lockfile fails naming it and gen-lockfiles", async () => {
+		await withGccHost(async () => {
+			gccToolchain("2024.05-1", {
+				default: true,
+				lockfile: "//locks/gcc.lock",
+			});
+			let message = null;
+			try {
+				await gccBin("2024.05-1");
+			} catch (error) {
+				message = error.message;
+			}
+			expect(message).toContain("no lockfile found");
+			expect(message).toContain("//locks/gcc.lock");
+			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("a malformed lockfile address fails at declaration", () => {
+		return withGccHost(() => {
+			expect(() =>
+				gccToolchain("2024.05-1", { lockfile: "locks/gcc.lock" }),
+			).toThrow("must start with //");
+		});
+	});
+
+	test("gen-lockfiles writes the address declared on the toolchain", async () => {
+		await withGccHost(async (host) => {
+			const toolchain = gccToolchain("2024.05-1", {
+				default: true,
+				lockfile: "//locks/gcc.lock",
+			});
+			await host.resolve(toolchain[GEN_LOCKFILES]);
+			expect(host.runs.some((r) => r.display === "write locks/gcc.lock")).toBe(
+				true,
+			);
 		});
 	});
 });

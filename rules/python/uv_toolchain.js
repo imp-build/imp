@@ -15,6 +15,7 @@ import { nativeTool } from "//rules/imp/native-tool";
 import {
 	downloadToolArtifact,
 	lockfileAddressToPath,
+	lockfileFor,
 } from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
@@ -151,14 +152,6 @@ function graphToolFor(version) {
 	return graphToolchains.get(version) ?? uvGraphTool(version);
 }
 
-// The lockfile setting rides the declared instance's attrs — the one that
-// declared this exact version, else the default instance's.
-function lockfileFor(version) {
-	return (
-		UvToolchain.instanceForVersion(version)?.attrs.lockfile ?? DEFAULT_LOCKFILE
-	);
-}
-
 /**
  * Task that creates UV_CACHE_DIR_CACHE as a real, empty directory.
  *
@@ -252,7 +245,8 @@ export function uvGenLockfiles(version, opts = {}) {
 		[GEN_LOCKFILES]: graphGenerateToolLockfile({
 			version: resolved,
 			...LOCKFILE_SPEC,
-			lockfile: opts.lockfile ?? lockfileFor(resolved),
+			lockfile:
+				opts.lockfile ?? lockfileFor(UvToolchain, resolved, DEFAULT_LOCKFILE),
 		}),
 	};
 }
@@ -264,7 +258,7 @@ export function uvGraphTool(version) {
 	const key = uvCacheKey(resolved, plat);
 	namedCache({ name: UV_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: lockfileFor(resolved),
+		lockfile: lockfileFor(UvToolchain, resolved, DEFAULT_LOCKFILE),
 		tool: "uv-toolchain",
 		version: resolved,
 		plat,

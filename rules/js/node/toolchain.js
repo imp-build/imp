@@ -8,7 +8,11 @@ import {
 	tool as graphTool,
 } from "imp:core";
 
-import { downloadToolArtifact } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockfileAddressToPath,
+	lockfileFor,
+} from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import { toolchainBin, toolchainToolSpec } from "//rules/imp/toolchain";
 import {
@@ -22,7 +26,7 @@ import {
 export const NODE_TOOL = toolName("node");
 
 const NODE_TOOLCHAIN_CACHE = "node-toolchains";
-const NODE_LOCKFILE = "//rules/js/node/node-toolchain.lock";
+const DEFAULT_LOCKFILE = "//rules/js/node/node-toolchain.lock";
 
 // nodejs.org's own os/arch tokens (https://nodejs.org/dist/), distinct from
 // both imp's plat.os/plat.arch vocabulary and every other toolchain's
@@ -95,11 +99,11 @@ export function nodeSupportedPlatforms() {
 export class NodeToolchain extends Toolchain {
 	static kind = "node-toolchain";
 	static tool = NODE_TOOL;
-	constructor({ version, unverified }, opts) {
+	constructor({ version, lockfile, unverified }, opts) {
 		super(
 			{
 				kind: NodeToolchain.kind,
-				attrs: { version, ...(unverified ? { unverified } : {}) },
+				attrs: { version, lockfile, ...(unverified ? { unverified } : {}) },
 			},
 			opts,
 		);
@@ -132,12 +136,17 @@ function graphToolFor(version) {
  * @param {boolean} [opts.default=false]
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
+ * @param {string} [opts.lockfile] Address of a workspace-owned lockfile
+ *   to use instead of the shipped one.
  * @returns {object} Target handle for this node toolchain.
  * @category configuration
  */
 export function nodeToolchain(version, opts = {}) {
+	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	new NodeToolchain(
-		{ version, unverified: opts.unverified },
+		{ version, lockfile, unverified: opts.unverified },
 		{ default: opts.default },
 	);
 	const graph = nodeGraphTool(version);
@@ -153,14 +162,18 @@ export function nodeToolchain(version, opts = {}) {
  * property.
  *
  * @param {string} [version]
+ * @param {object} [opts]
+ * @param {string} [opts.lockfile] Address override for the generated lockfile.
  * @returns {object} `{ [GEN_LOCKFILES]: ... }`.
  */
-export function nodeGenLockfiles(version) {
+export function nodeGenLockfiles(version, opts = {}) {
 	const resolved = NodeToolchain.requireVersion(version);
 	return {
 		[GEN_LOCKFILES]: graphGenerateToolLockfile({
 			version: resolved,
 			...LOCKFILE_SPEC,
+			lockfile:
+				opts.lockfile ?? lockfileFor(NodeToolchain, resolved, DEFAULT_LOCKFILE),
 		}),
 	};
 }
@@ -239,7 +252,7 @@ export function nodeGraphTool(version) {
 	const key = nodeCacheKey(resolved, plat);
 	namedCache({ name: NODE_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: NODE_LOCKFILE,
+		lockfile: lockfileFor(NodeToolchain, resolved, DEFAULT_LOCKFILE),
 		tool: "node-toolchain",
 		version: resolved,
 		plat,
@@ -294,7 +307,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		platforms: nodeSupportedPlatforms(),
 		downloadUrl: nodeDownloadUrl,
 		artifactName: nodeArtifactName,
-		lockfile: NODE_LOCKFILE,
+		lockfile: DEFAULT_LOCKFILE,
 	},
 	["22.11.0"],
 );

@@ -4,6 +4,7 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 import {
 	__resetZigToolchainStateForTest,
 	defaultZigGraphToolchain,
@@ -250,6 +251,90 @@ describe("Zig toolchain", () => {
 			expect(zigGraphCacheEnv(exec, buildCacheTool)).toEqual([
 				"ZIG_GLOBAL_CACHE_DIR=/sandbox/zig-build-cache",
 			]);
+		});
+	});
+});
+
+describe("Zig workspace lockfile selection", () => {
+	const BUNDLED = "//rules/c/zig/zig.lock";
+
+	function zigLock(version, sha256) {
+		return JSON.stringify({
+			tool: "zig",
+			versions: {
+				[version]: {
+					"linux/x86_64": {
+						url: "https://locked.example/tool.tar.gz",
+						artifact: "tool.tar.gz",
+						size: 42,
+						sha256,
+					},
+				},
+			},
+		});
+	}
+
+	const readAddresses = (host) =>
+		host.calls.filter((c) => c[0] === "readAddressedFile").map((c) => c[1]);
+
+	test("the bundled lockfile is the default", async () => {
+		await withZigHost(async (host) => {
+			host.addFile(BUNDLED, zigLock("0.16.0", "cafe"));
+			zigToolchain("0.16.0", { default: true });
+
+			await zigBin("0.16.0");
+
+			expect(readAddresses(host)).toContain(BUNDLED);
+			expect(host.runs[0].argv).toContain("cafe");
+		});
+	});
+
+	test("a custom lockfile address is consulted instead of the bundled one", async () => {
+		await withZigHost(async (host) => {
+			host.addFile("//locks/zig.lock", zigLock("0.14.0", "beef"));
+			zigToolchain("0.14.0", { default: true, lockfile: "//locks/zig.lock" });
+
+			await zigBin("0.14.0");
+
+			expect(readAddresses(host)).toContain("//locks/zig.lock");
+			expect(readAddresses(host).includes(BUNDLED)).toBe(false);
+			expect(host.runs[0].argv).toContain("beef");
+		});
+	});
+
+	test("a missing selected lockfile fails naming it and gen-lockfiles", async () => {
+		await withZigHost(async () => {
+			zigToolchain("0.14.0", { default: true, lockfile: "//locks/zig.lock" });
+			let message = null;
+			try {
+				await zigBin("0.14.0");
+			} catch (error) {
+				message = error.message;
+			}
+			expect(message).toContain("no lockfile found");
+			expect(message).toContain("//locks/zig.lock");
+			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("a malformed lockfile address fails at declaration", () => {
+		return withZigHost(() => {
+			expect(() =>
+				zigToolchain("0.14.0", { lockfile: "locks/zig.lock" }),
+			).toThrow("must start with //");
+		});
+	});
+
+	test("gen-lockfiles writes the address declared on the toolchain", async () => {
+		await withZigHost(async (host) => {
+			const toolchain = zigToolchain("0.14.0", {
+				default: true,
+				lockfile: "//locks/zig.lock",
+			});
+			await host.resolve(toolchain[GEN_LOCKFILES]);
+			expect(host.runs.some((r) => r.display === "write locks/zig.lock")).toBe(
+				true,
+			);
 		});
 	});
 });

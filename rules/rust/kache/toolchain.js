@@ -36,7 +36,11 @@ import {
 } from "imp:core";
 
 import { nativeTool } from "//rules/imp/native-tool";
-import { downloadToolArtifact } from "//rules/imp/lockfile";
+import {
+	downloadToolArtifact,
+	lockfileAddressToPath,
+	lockfileFor,
+} from "//rules/imp/lockfile";
 import { extractArchive } from "//rules/imp/archive";
 import {
 	toolchainBin,
@@ -54,7 +58,7 @@ import {
 export const KACHE_TOOL = toolName("kache");
 
 const KACHE_TOOLCHAIN_CACHE = "kache-toolchains";
-const KACHE_LOCKFILE = "//rules/rust/kache/kache.lock";
+const DEFAULT_LOCKFILE = "//rules/rust/kache/kache.lock";
 const KACHE_DATA_CACHE = "kache-data";
 
 // kache's own default (50 GiB) is the only thing bounding KACHE_CACHE_DIR's
@@ -161,12 +165,13 @@ export function kacheSupportedPlatforms() {
 export class KacheToolchain extends Toolchain {
 	static kind = "kache-toolchain";
 	static tool = KACHE_TOOL;
-	constructor({ version, unverified, cacheSize }, opts) {
+	constructor({ version, unverified, cacheSize, lockfile }, opts) {
 		super(
 			{
 				kind: KacheToolchain.kind,
 				attrs: {
 					version,
+					lockfile,
 					cacheSize: cacheSize || DEFAULT_CACHE_SIZE,
 					...(unverified ? { unverified } : {}),
 				},
@@ -210,6 +215,8 @@ function graphToolFor(version) {
  * @param {boolean} [opts.default=false]
  * @param {boolean} [opts.unverified=false] Allow downloading without a
  *   matching lockfile entry (warns instead of failing).
+ * @param {string} [opts.lockfile] Address of a workspace-owned lockfile
+ *   to use instead of the shipped one.
  * @param {string} [opts.cacheSize="4GiB"] KACHE_MAX_SIZE — caps
  *   KACHE_CACHE_DIR's on-disk size (kache's own default is 50 GiB; imp's
  *   GC can't prune inside it, only delete it wholesale — see
@@ -281,13 +288,22 @@ export function kacheToolchain(version, opts = {}) {
 	});
 	kacheDataSeed();
 
+	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	const toolchain = new KacheToolchain(
-		{ version, unverified: opts.unverified, cacheSize: opts.cacheSize },
+		{
+			version,
+			unverified: opts.unverified,
+			cacheSize: opts.cacheSize,
+			lockfile,
+		},
 		{ default: opts.default },
 	);
 	toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({
 		version,
 		...LOCKFILE_SPEC,
+		lockfile,
 	});
 	graphToolchains.set(version, kacheGraphTool(version));
 	return toolchain;
@@ -331,7 +347,7 @@ export function kacheGraphTool(version) {
 	const key = kacheCacheKey(resolved, plat);
 	namedCache({ name: KACHE_TOOLCHAIN_CACHE, shared: true });
 	const archive = downloadToolArtifact({
-		lockfile: KACHE_LOCKFILE,
+		lockfile: lockfileFor(KacheToolchain, resolved, DEFAULT_LOCKFILE),
 		tool: "kache",
 		version: resolved,
 		plat,
@@ -481,7 +497,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		platforms: kacheSupportedPlatforms(),
 		downloadUrl: kacheDownloadUrl,
 		artifactName: kacheArtifactName,
-		lockfile: KACHE_LOCKFILE,
+		lockfile: DEFAULT_LOCKFILE,
 	},
 	["0.11.0"],
 );

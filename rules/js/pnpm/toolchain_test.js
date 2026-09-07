@@ -4,6 +4,7 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 import {
 	__resetPnpmToolchainStateForTest,
 	defaultPnpmToolchain,
@@ -15,6 +16,7 @@ import {
 	pnpmDownloadUrl,
 	pnpmStoreDirEnv,
 	pnpmStoreDirTool,
+	pnpmGenLockfiles,
 	pnpmToolchain,
 } from "//rules/js/pnpm/toolchain";
 
@@ -166,6 +168,101 @@ describe("pnpm toolchain", () => {
 			expect(
 				pnpmArtifactName("11.13.0", { os: "windows", arch: "aarch64" }),
 			).toBe("pnpm-win32-arm64.zip");
+		});
+	});
+});
+
+describe("pnpm workspace lockfile selection", () => {
+	const BUNDLED = "//rules/js/pnpm/pnpm-toolchain.lock";
+
+	function pnpmLock(version, sha256) {
+		return JSON.stringify({
+			tool: "pnpm-toolchain",
+			versions: {
+				[version]: {
+					"linux/x86_64": {
+						url: "https://locked.example/tool.tar.gz",
+						artifact: "tool.tar.gz",
+						size: 42,
+						sha256,
+					},
+				},
+			},
+		});
+	}
+
+	const readAddresses = (host) =>
+		host.calls.filter((c) => c[0] === "readAddressedFile").map((c) => c[1]);
+
+	test("the bundled lockfile is the default", async () => {
+		await withPnpmHost(async (host) => {
+			host.addFile(BUNDLED, pnpmLock("11.13.0", "cafe"));
+			pnpmToolchain("11.13.0", { default: true });
+
+			await pnpmBin("11.13.0");
+
+			expect(readAddresses(host)).toContain(BUNDLED);
+			expect(host.runs[0].argv).toContain("cafe");
+		});
+	});
+
+	test("a custom lockfile address is consulted instead of the bundled one", async () => {
+		await withPnpmHost(async (host) => {
+			host.addFile("//locks/pnpm.lock", pnpmLock("10.5.0", "beef"));
+			pnpmToolchain("10.5.0", { default: true, lockfile: "//locks/pnpm.lock" });
+
+			await pnpmBin("10.5.0");
+
+			expect(readAddresses(host)).toContain("//locks/pnpm.lock");
+			expect(readAddresses(host).includes(BUNDLED)).toBe(false);
+			expect(host.runs[0].argv).toContain("beef");
+		});
+	});
+
+	test("a missing selected lockfile fails naming it and gen-lockfiles", async () => {
+		await withPnpmHost(async () => {
+			pnpmToolchain("10.5.0", { default: true, lockfile: "//locks/pnpm.lock" });
+			let message = null;
+			try {
+				await pnpmBin("10.5.0");
+			} catch (error) {
+				message = error.message;
+			}
+			expect(message).toContain("no lockfile found");
+			expect(message).toContain("//locks/pnpm.lock");
+			expect(message).toContain("gen-lockfiles");
+		});
+	});
+
+	test("a malformed lockfile address fails at declaration", () => {
+		return withPnpmHost(() => {
+			expect(() =>
+				pnpmToolchain("10.5.0", { lockfile: "locks/pnpm.lock" }),
+			).toThrow("must start with //");
+		});
+	});
+
+	test("gen-lockfiles writes the address declared on the toolchain", async () => {
+		await withPnpmHost(async (host) => {
+			pnpmToolchain("10.5.0", { default: true, lockfile: "//locks/pnpm.lock" });
+			await host.resolve(pnpmGenLockfiles("10.5.0")[GEN_LOCKFILES]);
+			expect(host.runs.some((r) => r.display === "write locks/pnpm.lock")).toBe(
+				true,
+			);
+		});
+	});
+
+	test("gen-lockfiles takes an explicit lockfile override", async () => {
+		await withPnpmHost(async (host) => {
+			pnpmToolchain("10.5.0", { default: true, lockfile: "//locks/pnpm.lock" });
+			await host.resolve(
+				pnpmGenLockfiles("10.5.0", { lockfile: "//other/pnpm.lock" })[
+					GEN_LOCKFILES
+				],
+			);
+			expect(host.runs.some((r) => r.display === "write other/pnpm.lock")).toBe(
+				true,
+			);
 		});
 	});
 });

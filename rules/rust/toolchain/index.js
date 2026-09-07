@@ -14,6 +14,8 @@ import { nativeTool } from "//rules/imp/native-tool";
 import {
 	downloadToolArtifact,
 	lockedDownloadTools,
+	lockfileAddressToPath,
+	lockfileFor,
 } from "//rules/imp/lockfile";
 import { toolchainBin, toolchainDir } from "//rules/imp/toolchain";
 import {
@@ -30,7 +32,7 @@ export const RUST_TOOL = toolName("rust");
 // RUSTUP_HOME (rustup itself + installed toolchains) and CARGO_HOME (cargo
 // registry + proxies). We give each its own named cache and point rustup at
 // them so it never touches ~/.rustup / ~/.cargo.
-const RUST_LOCKFILE = "//rules/rust/rust.lock";
+const DEFAULT_LOCKFILE = "//rules/rust/rust.lock";
 const RUSTUP_HOME_CACHE = "rustup-home";
 const CARGO_HOME_CACHE = "cargo-home";
 
@@ -143,12 +145,16 @@ function coreToolNames(plat) {
 export class RustToolchain extends Toolchain {
 	static kind = "rust-toolchain";
 	static tool = RUST_TOOL;
-	constructor({ version, linkDriver, linker, kache, unverified }, opts) {
+	constructor(
+		{ version, linkDriver, linker, kache, unverified, lockfile },
+		opts,
+	) {
 		super(
 			{
 				kind: RustToolchain.kind,
 				attrs: {
 					version,
+					lockfile,
 					...(linkDriver ? { linkDriver } : {}),
 					...(linker ? { linker } : {}),
 					...(kache ? { kache } : {}),
@@ -191,6 +197,8 @@ function declareBothCaches() {
  * @param {boolean} [opts.default=false] Set as the default toolchain.
  * @param {boolean} [opts.unverified=false] Allow downloading rustup-init
  *   without a matching lockfile entry (warns instead of failing).
+ * @param {string} [opts.lockfile] Address of a workspace-owned lockfile to
+ *   use instead of the shipped one.
  * @param {object} [opts.linkDriver] C link driver toolchain handle (e.g.
  *   gccToolchain()) registering a "rust-link-driver" product. Falls back to
  *   defaultGccToolchain() if omitted.
@@ -209,6 +217,9 @@ export function rustToolchain(version, opts = {}) {
 	requirePinnedVersion(version);
 	declareBothCaches();
 
+	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
 	const toolchain = new RustToolchain(
 		{
 			version,
@@ -216,12 +227,14 @@ export function rustToolchain(version, opts = {}) {
 			linker: opts.linker,
 			kache: opts.kache,
 			unverified: opts.unverified,
+			lockfile,
 		},
 		{ default: opts.default },
 	);
 	toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({
 		version,
 		...LOCKFILE_SPEC,
+		lockfile,
 	});
 	graphToolchains.set(version, rustGraphToolchain(version));
 	return toolchain;
@@ -259,7 +272,7 @@ function rustGraphInstallTask(version, plat) {
 		plat.os === "windows" ? "rustup-init.exe" : "rustup-init";
 
 	const installer = downloadToolArtifact({
-		lockfile: RUST_LOCKFILE,
+		lockfile: lockfileFor(RustToolchain, version, DEFAULT_LOCKFILE),
 		tool: "rust",
 		version,
 		plat,
@@ -515,7 +528,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		platforms: rustSupportedPlatforms(),
 		downloadUrl: rustDownloadUrl,
 		artifactName: rustArtifactName,
-		lockfile: RUST_LOCKFILE,
+		lockfile: DEFAULT_LOCKFILE,
 	},
 	["1.93.0"],
 );
