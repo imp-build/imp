@@ -3,7 +3,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::cache::{cache_root, digest_bytes, temp_sibling_path, workspace_cache_id};
+use std::collections::HashSet;
+
+use crate::cache::{
+    cache_root, digest_bytes, scope_shard_dir_in, temp_sibling_path, workspace_cache_id,
+};
 
 pub const MEMO_TRACE_VERSION: u32 = 1;
 
@@ -33,7 +37,16 @@ pub struct MemoTraceRecord {
     pub deps: Vec<String>,
 }
 
+/// The sharded scope directory for a workspace's memo traces:
+/// `memo-traces/<bucket>/<workspace-id>/`. See `scope_shard_dir_in`.
 pub fn memo_trace_scope_path(workspace_root: &Path) -> Result<PathBuf> {
+    let id = workspace_cache_id(workspace_root);
+    Ok(scope_shard_dir_in(&cache_root()?, "memo-traces", &id))
+}
+
+/// The pre-shard flat scope directory an upgraded cache may still hold
+/// records in until garbage collection drains it.
+fn flat_memo_trace_scope_path(workspace_root: &Path) -> Result<PathBuf> {
     Ok(cache_root()?
         .join("memo-traces")
         .join(workspace_cache_id(workspace_root)))
@@ -44,18 +57,38 @@ pub fn memo_trace_record_path(workspace_root: &Path, key: &str) -> Result<PathBu
     Ok(memo_trace_scope_path(workspace_root)?.join(format!("{hash}.json")))
 }
 
-/// Every trace record for one workspace. Invalid or older-format records are
-/// ignored so cache corruption or schema turnover only makes change detection
+/// Every trace record for one workspace, from the sharded scope directory
+/// unioned with the pre-shard flat one (sharded wins a same-name collision,
+/// though the bytes are equal). Invalid or older-format records are ignored
+/// so cache corruption or schema turnover only makes change detection
 /// conservative.
 pub fn list_memo_trace_records(workspace_root: &Path) -> Result<Vec<MemoTraceRecord>> {
-    let dir = memo_trace_scope_path(workspace_root)?;
     let mut records = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(records);
+    let mut seen = HashSet::new();
+    for dir in [
+        memo_trace_scope_path(workspace_root)?,
+        flat_memo_trace_scope_path(workspace_root)?,
+    ] {
+        collect_trace_records(&dir, &mut seen, &mut records);
+    }
+    Ok(records)
+}
+
+fn collect_trace_records(
+    dir: &Path,
+    seen: &mut HashSet<String>,
+    records: &mut Vec<MemoTraceRecord>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !seen.insert(name) {
             continue;
         }
         let Ok(bytes) = std::fs::read(&path) else {
@@ -68,7 +101,6 @@ pub fn list_memo_trace_records(workspace_root: &Path) -> Result<Vec<MemoTraceRec
             records.push(record);
         }
     }
-    Ok(records)
 }
 
 pub fn write_memo_trace_record(workspace_root: &Path, record: &MemoTraceRecord) -> Result<()> {
@@ -120,5 +152,39 @@ mod tests {
         std::fs::write(scope.join("garbage.json"), b"{ not valid").unwrap();
         std::fs::write(scope.join("not-json.txt"), b"ignore me").unwrap();
         assert_eq!(list_memo_trace_records(&workspace_a).unwrap(), vec![record]);
+    }
+
+    #[test]
+    fn a_pre_shard_flat_scope_is_unioned_with_the_sharded_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let record = |key: &str| MemoTraceRecord {
+            version: MEMO_TRACE_VERSION,
+            key: key.to_owned(),
+            fn_id: "f@rules/x.js:1:1".to_owned(),
+            module_digest: "d".to_owned(),
+            input_specs: vec![],
+            deps: vec![],
+        };
+
+        // A record left behind at the pre-shard flat path.
+        let flat_dir = flat_memo_trace_scope_path(&workspace).unwrap();
+        std::fs::create_dir_all(&flat_dir).unwrap();
+        let flat_record = record("flat-key");
+        std::fs::write(
+            flat_dir.join(format!("{}.json", digest_bytes(b"flat-key"))),
+            serde_json::to_vec(&flat_record).unwrap(),
+        )
+        .unwrap();
+
+        // A record written the new way, sharded.
+        let sharded_record = record("sharded-key");
+        write_memo_trace_record(&workspace, &sharded_record).unwrap();
+
+        let mut got = list_memo_trace_records(&workspace).unwrap();
+        got.sort_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(got, vec![flat_record, sharded_record]);
     }
 }

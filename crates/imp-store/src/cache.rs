@@ -100,12 +100,13 @@ pub fn named_cache_scope_id(shared: bool, workspace_id: &str) -> &str {
 }
 
 pub fn named_cache_key_path_by_id(workspace_id: &str, name: &str, key: &str) -> Result<PathBuf> {
-    let root = cache_root()?
-        .join("named")
-        .join(workspace_id)
-        .join(name)
-        .join(key);
-    Ok(root)
+    let root = cache_root()?;
+    let tail = Path::new(name).join(key);
+    Ok(resolve_scope_sharded(
+        FLAT_LAYOUT_MAY_HAVE_ENTRIES.load(Ordering::Relaxed),
+        scope_shard_dir_in(&root, "named", workspace_id).join(&tail),
+        || flat_scope_dir_in(&root, "named", workspace_id).join(&tail),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -482,6 +483,24 @@ fn probe_flat_layout(root: &Path) -> bool {
     ["cas/blobs", "cas/meta", "tasks"]
         .iter()
         .any(|sub| holds_a_file(&root.join(sub)))
+        || ["memo-traces", "named"]
+            .iter()
+            .any(|sub| holds_a_flat_scope(&root.join(sub)))
+}
+
+/// Whether a scope-sharded namespace directory holds at least one pre-shard
+/// flat scope directly — a child directory whose name is not a shard bucket.
+/// Stops at the first hit.
+fn holds_a_flat_scope(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        !is_temp_name(&name)
+            && !is_bucket_name(&name)
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+    })
 }
 
 /// Whether a directory holds at least one non-temp file directly. Stops at the
@@ -626,6 +645,112 @@ pub fn read_store_namespace(dir: &Path) -> Vec<(String, PathBuf)> {
             // A file here is a leftover from the flat layout.
             Ok(kind) if kind.is_file() => found.push((name, entry.path())),
             _ => {}
+        }
+    }
+    found
+}
+
+// ---------------------------------------------------------------------------
+// Scope-sharded namespaces (memo-traces, named caches)
+// ---------------------------------------------------------------------------
+//
+// `memo-traces/<workspace-id>/…` and `named/<scope>/…` grow one top-level
+// directory per distinct workspace-root path and never bound it — a
+// well-used cache holds thousands. They shard exactly like the CAS
+// namespaces: one level of 256 buckets keyed on the first two hex digits of
+// the scope id (`shard_bucket`), with the full scope id kept as the
+// directory name one level down. `shared` is not hex, so it lands in the
+// reserved `__` bucket: `named/__/shared/…`.
+//
+// Unlike the CAS namespaces, nothing is promoted on read. Scope directories
+// hold many entries written by concurrent processes, and renaming a whole
+// scope directory is not atomic with respect to those writes. Instead every
+// write goes to the sharded path, every reader unions the sharded and flat
+// scope directories, and garbage collection sweeps both — so a pre-shard
+// flat scope drains only when `imp gc` empties it.
+
+/// A directory name at bucket depth: two lowercase hex digits, or the
+/// reserved non-hex bucket. Scope ids are 64-char hex digests or the literal
+/// `shared`, so a two-character directory name is unambiguously a bucket and
+/// never a scope.
+fn is_bucket_name(name: &str) -> bool {
+    name == NON_HEX_BUCKET
+        || (name.len() == 2
+            && name
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()))
+}
+
+/// `<root>/<namespace>/<bucket>/<scope>` — the sharded scope directory.
+pub fn scope_shard_dir_in(root: &Path, namespace: &str, scope: &str) -> PathBuf {
+    root.join(namespace).join(shard_bucket(scope)).join(scope)
+}
+
+/// `<root>/<namespace>/<scope>` — the pre-shard flat scope directory.
+fn flat_scope_dir_in(root: &Path, namespace: &str, scope: &str) -> PathBuf {
+    root.join(namespace).join(scope)
+}
+
+/// Whichever scope-sharded layout an entry named `tail` (a path relative to
+/// the scope directory, e.g. `<name>/<key>`) actually lives in, or `None` if
+/// neither does. For sites that reconstruct a path from an id read back out
+/// of `usage.db` or a GC candidate.
+pub fn existing_named_slot_path_in(root: &Path, id: &str) -> Option<PathBuf> {
+    let (scope, tail) = id.split_once('/')?;
+    first_existing([
+        scope_shard_dir_in(root, "named", scope).join(tail),
+        flat_scope_dir_in(root, "named", scope).join(tail),
+    ])
+}
+
+/// Resolve a scope-sharded entry to the layout that holds it: the sharded
+/// path unless the flat layout may still have entries and this specific
+/// entry is only there. New entries resolve to the sharded path. Never
+/// promotes — see the module comment above.
+fn resolve_scope_sharded(
+    flat_layout_may_have_entries: bool,
+    sharded: PathBuf,
+    flat: impl FnOnce() -> PathBuf,
+) -> PathBuf {
+    if !flat_layout_may_have_entries || sharded.exists() {
+        return sharded;
+    }
+    let flat = flat();
+    if flat.exists() {
+        flat
+    } else {
+        sharded
+    }
+}
+
+/// Every scope directory in a scope-sharded namespace, as `(scope, path)` —
+/// both sharded (`<bucket>/<scope>`) and any pre-shard flat scope still
+/// sitting one level up, so garbage collection and statistics see the whole
+/// namespace while the old layout drains.
+pub fn read_sharded_scopes(dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_temp_name(&name) || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        if is_bucket_name(&name) {
+            let Ok(bucket) = std::fs::read_dir(entry.path()) else {
+                continue;
+            };
+            for scope in bucket.flatten() {
+                let scope_name = scope.file_name().to_string_lossy().into_owned();
+                if is_temp_name(&scope_name) || !scope.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    continue;
+                }
+                found.push((scope_name, scope.path()));
+            }
+        } else {
+            // A non-bucket directory here is a leftover flat scope.
+            found.push((name, entry.path()));
         }
     }
     found
@@ -1552,6 +1677,133 @@ mod tests {
         found.sort();
 
         assert_eq!(found, ["cafebabe", "deadbeef"]);
+    }
+
+    #[test]
+    fn is_bucket_name_only_matches_a_two_char_shard_token() {
+        assert!(is_bucket_name("de"));
+        assert!(is_bucket_name("00"));
+        assert!(is_bucket_name(NON_HEX_BUCKET));
+        assert!(!is_bucket_name("shared"));
+        assert!(!is_bucket_name("d")); // too short
+        assert!(!is_bucket_name("dead")); // a scope id, not a bucket
+        assert!(!is_bucket_name("DE")); // digests are lowercase
+        assert!(!is_bucket_name("zz"));
+    }
+
+    #[test]
+    fn scope_shard_dir_routes_hex_scopes_to_a_bucket_and_shared_to_the_reserved_one() {
+        let root = Path::new("/cache");
+        let scope = "a".repeat(64);
+        assert_eq!(
+            scope_shard_dir_in(root, "memo-traces", &scope),
+            root.join("memo-traces").join("aa").join(&scope)
+        );
+        assert_eq!(
+            scope_shard_dir_in(root, "named", "shared"),
+            root.join("named").join(NON_HEX_BUCKET).join("shared")
+        );
+    }
+
+    #[test]
+    fn read_sharded_scopes_reports_both_layouts_and_skips_buckets_and_temps() {
+        let dir = tempfile::tempdir().unwrap();
+        let named = dir.path().join("named");
+        let sharded = scope_shard_dir_in(dir.path(), "named", &"d".repeat(64));
+        std::fs::create_dir_all(sharded.join("toolchains").join("v1")).unwrap();
+        std::fs::create_dir_all(named.join("shared").join("toolchains")).unwrap();
+        std::fs::create_dir_all(named.join(".tmp-scope-1-2")).unwrap();
+
+        let mut scopes: Vec<String> = read_sharded_scopes(&named)
+            .into_iter()
+            .map(|(scope, _)| scope)
+            .collect();
+        scopes.sort();
+
+        assert_eq!(scopes, ["d".repeat(64), "shared".to_owned()]);
+    }
+
+    #[test]
+    fn a_flat_named_slot_is_resolved_without_being_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let scope = "e".repeat(64);
+        let flat = flat_scope_dir_in(root, "named", &scope)
+            .join("toolchains")
+            .join("v1");
+        std::fs::create_dir_all(&flat).unwrap();
+
+        let tail = Path::new("toolchains").join("v1");
+        let resolved = resolve_scope_sharded(
+            true,
+            scope_shard_dir_in(root, "named", &scope).join(&tail),
+            || flat_scope_dir_in(root, "named", &scope).join(&tail),
+        );
+
+        assert_eq!(resolved, flat, "a pre-shard slot resolves to its flat path");
+        assert!(flat.exists(), "scope directories are never promoted");
+    }
+
+    #[test]
+    fn a_new_named_slot_resolves_to_its_shard_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let scope = "f".repeat(64);
+        let tail = Path::new("toolchains").join("v1");
+        let sharded = scope_shard_dir_in(root, "named", &scope).join(&tail);
+
+        assert_eq!(
+            resolve_scope_sharded(true, sharded.clone(), || flat_scope_dir_in(
+                root, "named", &scope
+            )
+            .join(&tail)),
+            sharded
+        );
+    }
+
+    #[test]
+    fn existing_named_slot_path_checks_both_layouts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let scope = "a".repeat(64);
+        assert!(existing_named_slot_path_in(root, &format!("{scope}/tc/v1")).is_none());
+
+        let flat = flat_scope_dir_in(root, "named", &scope)
+            .join("tc")
+            .join("v1");
+        std::fs::create_dir_all(&flat).unwrap();
+        assert_eq!(
+            existing_named_slot_path_in(root, &format!("{scope}/tc/v1")),
+            Some(flat)
+        );
+
+        let sharded = scope_shard_dir_in(root, "named", &scope)
+            .join("tc")
+            .join("v2");
+        std::fs::create_dir_all(&sharded).unwrap();
+        assert_eq!(
+            existing_named_slot_path_in(root, &format!("{scope}/tc/v2")),
+            Some(sharded)
+        );
+    }
+
+    #[test]
+    fn probe_sees_a_flat_scope_but_not_a_sharded_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        ensure_structural_children(root).unwrap();
+        std::fs::create_dir_all(root.join("named")).unwrap();
+        std::fs::create_dir_all(root.join("memo-traces")).unwrap();
+        assert!(!probe_flat_layout(root));
+
+        std::fs::create_dir_all(scope_shard_dir_in(root, "named", &"a".repeat(64))).unwrap();
+        assert!(
+            !probe_flat_layout(root),
+            "a shard bucket is not a flat scope"
+        );
+
+        std::fs::create_dir_all(root.join("memo-traces").join("b".repeat(64))).unwrap();
+        assert!(probe_flat_layout(root));
     }
 
     #[test]

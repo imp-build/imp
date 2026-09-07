@@ -234,7 +234,7 @@ impl GcPlan {
                 let present = match kind.as_str() {
                     "cas" => existing_cas_blob_path_in(&self.root, &id).is_some(),
                     "task" => existing_task_record_path_in(&self.root, &id).is_some(),
-                    "named" => self.root.join("named").join(&id).exists(),
+                    "named" => crate::cache::existing_named_slot_path_in(&self.root, &id).is_some(),
                     _ => continue,
                 };
                 if !present {
@@ -322,17 +322,7 @@ fn plan_at(root: &Path, cutoff: i64) -> Result<GcPlan> {
 /// work, so traces never act as reachability roots for either store.
 fn plan_memo_traces(root: &Path, db: &Database, cutoff: i64, plan: &mut GcPlan) {
     let traces = root.join("memo-traces");
-    let Ok(scopes) = std::fs::read_dir(&traces) else {
-        return;
-    };
-    for scope_entry in scopes.flatten() {
-        let scope_path = scope_entry.path();
-        if !scope_path.is_dir() {
-            continue;
-        }
-        let Ok(scope) = scope_entry.file_name().into_string() else {
-            continue;
-        };
+    for (scope, scope_path) in crate::cache::read_sharded_scopes(&traces) {
         if db
             .workspaces
             .get(&scope)
@@ -554,18 +544,7 @@ fn plan_cas(
 
 fn plan_named(root: &Path, db: &Database, cutoff: i64, plan: &mut GcPlan) -> Result<()> {
     let named = root.join("named");
-    let Ok(scopes) = std::fs::read_dir(&named) else {
-        return Ok(());
-    };
-    for scope_entry in scopes.flatten() {
-        let Ok(scope) = scope_entry.file_name().into_string() else {
-            continue;
-        };
-        let scope_path = scope_entry.path();
-        if !scope_path.is_dir() {
-            continue;
-        }
-
+    for (scope, scope_path) in crate::cache::read_sharded_scopes(&named) {
         // A workspace scope whose recorded checkout vanished is dead
         // wholesale — every slot in it belonged to that checkout.
         if scope != "shared" {
@@ -727,17 +706,12 @@ fn newest_mtime(path: &Path) -> i64 {
     newest
 }
 
-/// Remove empty scope (`named/<scope>`) and name (`named/<scope>/<name>`)
-/// dirs. Only these two container levels — anything deeper could be a slot.
+/// Remove empty name (`named/<bucket>/<scope>/<name>`), scope and shard
+/// bucket dirs, plus any pre-shard flat scope left empty. Only these
+/// container levels — anything deeper could be a slot. `remove_dir` refuses a
+/// non-empty directory, so each call is self-guarding.
 fn remove_empty_containers(named: &Path) {
-    let Ok(scopes) = std::fs::read_dir(named) else {
-        return;
-    };
-    for scope in scopes.flatten() {
-        let scope_path = scope.path();
-        if !scope_path.is_dir() {
-            continue;
-        }
+    for (_scope, scope_path) in crate::cache::read_sharded_scopes(named) {
         if let Ok(names) = std::fs::read_dir(&scope_path) {
             for name in names.flatten() {
                 let name_path = name.path();
@@ -747,6 +721,14 @@ fn remove_empty_containers(named: &Path) {
             }
         }
         let _ = std::fs::remove_dir(&scope_path);
+    }
+    // Sweep shard buckets that just lost their last scope.
+    if let Ok(buckets) = std::fs::read_dir(named) {
+        for bucket in buckets.flatten() {
+            if bucket.file_type().is_ok_and(|kind| kind.is_dir()) {
+                let _ = std::fs::remove_dir(bucket.path());
+            }
+        }
     }
 }
 
@@ -994,6 +976,83 @@ mod tests {
                 .unwrap();
             assert_eq!(orphan, 0, "a row with no entry in either layout is stale");
         }
+    }
+
+    /// The new layout: scopes live one level down in a shard bucket. GC must
+    /// enumerate through the buckets, not read `named/` / `memo-traces/` one
+    /// level deep — that would see 256 bucket dirs and collect nothing.
+    #[test]
+    fn sharded_scopes_are_enumerated_and_swept() {
+        let f = Fixture::new();
+        let scope = "a".repeat(64);
+        let slot = crate::cache::scope_shard_dir_in(&f.root, "named", &scope)
+            .join("tool-cache")
+            .join("v1");
+        std::fs::create_dir_all(&slot).unwrap();
+        std::fs::write(slot.join("bin"), b"x").unwrap();
+        let trace_scope = crate::cache::scope_shard_dir_in(&f.root, "memo-traces", &scope);
+        std::fs::create_dir_all(&trace_scope).unwrap();
+        std::fs::write(trace_scope.join("record.json"), b"trace").unwrap();
+        f.conn
+            .execute(
+                "INSERT INTO workspaces VALUES (?1, '/nonexistent/checkout', ?2)",
+                rusqlite::params![scope, OLD],
+            )
+            .unwrap();
+        f.usage("named", &format!("{scope}/tool-cache/v1"), NOW);
+
+        let plan = f.plan();
+        assert_eq!(plan.orphaned_scopes.len(), 1, "sharded named scope planned");
+        assert_eq!(plan.memo_traces.len(), 1, "sharded memo scope planned");
+        plan.execute();
+        assert!(!crate::cache::scope_shard_dir_in(&f.root, "named", &scope).exists());
+        assert!(!crate::cache::scope_shard_dir_in(&f.root, "memo-traces", &scope).exists());
+        assert!(
+            !f.root.join("named").join("aa").exists(),
+            "the emptied shard bucket is swept too"
+        );
+    }
+
+    /// `clean_database`'s stale-row probe for a `named` row must resolve the
+    /// slot in whichever layout holds it. Reconstructing only `named/<id>`
+    /// would read every sharded slot as vanished and drop the table.
+    #[test]
+    fn a_named_usage_row_survives_when_its_slot_is_sharded() {
+        let f = Fixture::new();
+        let scope = "b".repeat(64);
+        let slot = crate::cache::scope_shard_dir_in(&f.root, "named", &scope)
+            .join("toolchains")
+            .join("v1");
+        std::fs::create_dir_all(&slot).unwrap();
+        f.conn
+            .execute(
+                "INSERT INTO declared_caches VALUES (?1, 'toolchains', 0, ?2)",
+                rusqlite::params![scope, NOW],
+            )
+            .unwrap();
+        f.usage("named", &format!("{scope}/toolchains/v1"), NOW);
+        f.usage("named", "gone/toolchains/v1", NOW);
+
+        f.plan().execute();
+
+        let kept: i64 = f
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage WHERE id = ?1",
+                [format!("{scope}/toolchains/v1")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1, "a sharded slot's row is not stale");
+        let orphan: i64 = f
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage WHERE id = 'gone/toolchains/v1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan, 0, "a slot in neither layout is still stale");
     }
 
     #[test]

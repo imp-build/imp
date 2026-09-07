@@ -58,18 +58,9 @@ pub fn collect_named_details() -> Result<Vec<NamedCacheDetail>> {
 fn collect_named_details_at(root: &std::path::Path) -> Vec<NamedCacheDetail> {
     let workspace_labels = load_workspace_labels(root);
     let named_root = root.join("named");
-    let Ok(scope_entries) = std::fs::read_dir(&named_root) else {
-        return Vec::new();
-    };
 
     let mut details = Vec::new();
-    for scope_entry in scope_entries.flatten() {
-        if !scope_entry.path().is_dir() {
-            continue;
-        }
-        let Ok(scope) = scope_entry.file_name().into_string() else {
-            continue;
-        };
+    for (scope, scope_path) in crate::cache::read_sharded_scopes(&named_root) {
         let scope_label = if scope == "shared" {
             scope.clone()
         } else {
@@ -79,7 +70,7 @@ fn collect_named_details_at(root: &std::path::Path) -> Vec<NamedCacheDetail> {
                 .unwrap_or_else(|| scope.clone())
         };
 
-        let Ok(name_entries) = std::fs::read_dir(scope_entry.path()) else {
+        let Ok(name_entries) = std::fs::read_dir(&scope_path) else {
             continue;
         };
         for name_entry in name_entries.flatten() {
@@ -144,9 +135,7 @@ fn collect_at(root: &std::path::Path) -> CacheStats {
     let cas_blobs = count_bytes(&root.join("cas").join("blobs"));
 
     let named_root = root.join("named");
-    let named_scopes = std::fs::read_dir(&named_root)
-        .map(|entries| entries.flatten().filter(|e| e.path().is_dir()).count())
-        .unwrap_or(0);
+    let named_scopes = crate::cache::read_sharded_scopes(&named_root).len();
     let named_bytes = crate::usage::dir_size_bytes(&named_root).unwrap_or(0);
 
     let legacy_bytes = crate::usage::dir_size_bytes(&root.join("cas").join("trees")).unwrap_or(0)
@@ -311,5 +300,29 @@ mod tests {
         assert_eq!(details[1].scope_label, "shared");
         assert_eq!(details[1].name, "small");
         assert_eq!(details[1].bytes, 2);
+    }
+
+    #[test]
+    fn scope_counts_span_shard_buckets_and_pre_shard_flat_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // One scope in its shard bucket, one still flat.
+        let sharded = crate::cache::scope_shard_dir_in(root, "named", &"a".repeat(64));
+        std::fs::create_dir_all(sharded.join("tool").join("v1")).unwrap();
+        std::fs::write(sharded.join("tool").join("v1").join("f"), b"12345").unwrap();
+        std::fs::create_dir_all(root.join("named/shared/tool/v1")).unwrap();
+        std::fs::write(root.join("named/shared/tool/v1/f"), b"12").unwrap();
+
+        std::fs::write(root.join("usage.db"), b"1").unwrap();
+
+        let stats = collect_at(root);
+        assert_eq!(stats.named_scopes, 2, "a bucket is not counted as a scope");
+        assert_eq!(stats.named_bytes, 7);
+
+        let details = collect_named_details_at(root);
+        assert_eq!(details.len(), 2);
+        assert_eq!(details[0].name, "tool");
+        assert_eq!(details[0].bytes, 5);
     }
 }
