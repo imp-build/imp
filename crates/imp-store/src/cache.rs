@@ -1130,6 +1130,7 @@ pub fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
         if entry.file_type().is_dir() {
             std::fs::create_dir_all(&target)
                 .with_context(|| format!("create {}", target.display()))?;
+            crate::trace::note_materialize_dir_create();
         } else if entry.file_type().is_file() {
             // The dir entry for target's parent is always walked before its
             // file entries (WalkDir's default pre-order traversal), so the

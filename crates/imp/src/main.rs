@@ -1187,6 +1187,16 @@ fn print_goal_summary(summary: &GoalSummary) {
         "time:",
         summary.wall.as_secs_f64()
     );
+
+    // Machine-independent materialize workload, for `ci/cache_baseline.py`.
+    // Gated on the artifact-trace flag so a normal build gains nothing but the
+    // relaxed counter adds; a nested `imp` prints its own line and the script
+    // sums them. `dir_creates` is the only signal for the "one create_dir_all
+    // per directory, not per file" work — see `imp_store::trace`.
+    if imp_store::trace::enabled() {
+        let (files, dir_creates) = imp_store::trace::materialize_totals();
+        eprintln!("[artifact-trace] materialize totals: files={files} dir_creates={dir_creates}");
+    }
 }
 
 async fn cmd_execute_live(

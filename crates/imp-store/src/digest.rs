@@ -924,6 +924,7 @@ fn collect_materialize_jobs(
 ) -> Result<()> {
     std::fs::create_dir_all(destination)
         .with_context(|| format!("create {}", destination.display()))?;
+    crate::trace::note_materialize_dir_create();
     for entry in trie.entries() {
         let dest = destination.join(entry.name());
         match entry {
@@ -951,6 +952,7 @@ pub(crate) fn materialize_one_file(digest: &str, dest: &Path, mode: Option<u32>)
     let source = cas_blob_path(digest)?;
     copy_file_into_existing_dir(&source, dest)?;
     restore_file_mode(dest, mode)?;
+    crate::trace::note_materialize_file();
     crate::artifact_trace!("materialize {} <- digest={digest} (copy)", dest.display());
     Ok(())
 }
@@ -1331,6 +1333,53 @@ mod tests {
                 format!("content-{i}")
             );
         }
+    }
+
+    // `collect_materialize_jobs` must call `create_dir_all` once per directory
+    // node, never once per file — that is item (a) of the cache backlog, and
+    // `trace::MATERIALIZE_DIR_CREATES` is its only machine-independent signal.
+    // The trie here is 50 directories holding 400 files, so the three regimes
+    // are far apart: correct code advances `dir_creates` by ~50, a regression
+    // to per-file `create_dir_all` advances it by 400+, and a dropped counter
+    // call advances it by 0. Deltas (not absolutes) because the counter is
+    // process-wide and other tests in this binary run concurrently; the 40/200
+    // bounds clear the largest concurrent contributor (11 dirs) with room.
+    #[test]
+    fn materialize_creates_one_dir_per_directory_not_per_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        for d in 0..50 {
+            for f in 0..8 {
+                write(
+                    &src.join(format!("d{d:02}")).join(format!("f{f}.txt")),
+                    &format!("content-{d}-{f}"),
+                );
+            }
+        }
+
+        let digest = capture_directory(&src).unwrap();
+        let destination = dir.path().join("dest");
+
+        let (files_before, dirs_before) = crate::trace::materialize_totals();
+        materialize_trie(digest.tree().unwrap(), &destination).unwrap();
+        let (files_after, dirs_after) = crate::trace::materialize_totals();
+
+        let files_delta = files_after - files_before;
+        let dirs_delta = dirs_after - dirs_before;
+
+        assert!(
+            files_delta >= 400,
+            "expected >= 400 file materializations, saw {files_delta}"
+        );
+        assert!(
+            dirs_delta >= 40,
+            "dir_creates must advance once per directory (~50), saw {dirs_delta} \
+             — is the counter call still there?"
+        );
+        assert!(
+            dirs_delta < 200,
+            "dir_creates must not scale with file count (would be 400+), saw {dirs_delta}"
+        );
     }
 
     #[test]
