@@ -22,6 +22,10 @@
 // no JavaScript-callback form on purpose: it would run workspace code inside
 // the build engine instead of in the sandbox. A JS generator is a command like
 // any other — use `imp_self` as its argv[0] to invoke imp itself.
+//
+// `stampFile()` is the degenerate case of the same idea: the output is fixed
+// text, so there is no generator command and no declared tool. It lives here
+// because it produces a graph artifact, like `codegen()`.
 import { output, task } from "imp:core";
 import { BUILD } from "//rules/workflows/build";
 import { planGeneratedOutputs } from "//rules/imp/generate";
@@ -129,4 +133,43 @@ export function codegen({
 		// generator and warms the cache, and writes nothing to the workspace.
 		[BUILD]: generated,
 	});
+}
+
+/**
+ * Declare a graph artifact containing fixed text.
+ *
+ * The degenerate `codegen()`: the content is a literal, so there is no
+ * generator command and no declared tool. `argv[0]` is a bare `sh`, the
+ * resolved built-in shell, not an undeclared tool.
+ *
+ * @category graph
+ * @param {object} opts
+ * @param {string} opts.output Workspace-relative output path.
+ * @param {string} opts.text Text to write.
+ * @returns {{file: object, [BUILD]: object}} Produced file artifact and build root.
+ */
+export function stampFile({
+	output: outputPath,
+	text,
+}) {
+	const stamp = task({
+		display: `write ${outputPath}`,
+		inputs: { outputPath, text },
+		outputs: { file: output.artifact() },
+		async run(exec, { outputPath, text }) {
+			const result = await exec.action({
+				argv: [
+					"sh",
+					"-c",
+					'printf \'%s\\n\' "$2" > "$1"',
+					"imp-stamp",
+					outputPath,
+					text,
+				],
+				outputs: { file: output.file(outputPath) },
+			});
+			return { file: result.outputs.file };
+		},
+	});
+	return Object.freeze({ file: stamp.outputs.file, [BUILD]: stamp.outputs.file });
 }

@@ -361,7 +361,7 @@ def stage_windows_release_steps(target, archive_cmd):
     stage = stage_dir(target)
     checks = "\n".join(
         f'if (-not (Test-Path "{stage}/share/imp/{f}")) {{ throw "missing {f}" }}'
-        for f in ("rules/init/index.js", "rules/rust/rust.lock", "rules/gen/index.js")
+        for f in ("rules/init/index.js", "rules/rust/rust.lock", "rules/imp/codegen/index.js")
     )
     return [
         {

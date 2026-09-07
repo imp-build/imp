@@ -45,11 +45,11 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 cat >"$work/imp.workspace.js" <<'EOF'
-import "//rules/gen";
+import "//rules/imp/codegen";
 EOF
 
 cat >"$work/BUILD.js" <<'EOF'
-import { stampFile } from "//rules/gen";
+import { stampFile } from "//rules/imp/codegen";
 
 export const stamp = stampFile({
     output: "generated/smoke.txt",
@@ -77,4 +77,4 @@ grep -q '//:stamp' "$work/out" || {
     exit 1
 }
 
-echo "smoke: ok — $bin resolved //rules/gen from $rules"
+echo "smoke: ok — $bin resolved //rules/imp/codegen from $rules"

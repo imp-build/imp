@@ -1,7 +1,7 @@
 import { resourcePackage } from "//rules/asset";
 import { nativeTool } from "//rules/imp/native-tool";
 
-import { stampFile } from "//rules/gen";
+import { stampFile } from "//rules/imp/codegen";
 
 export const generated_stamp = stampFile({
 	output: "generated/imp-stamp.txt",

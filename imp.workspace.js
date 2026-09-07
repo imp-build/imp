@@ -7,7 +7,6 @@ import "//rules/c";
 import "//rules/c/cmake";
 import "//rules/c/generate_build";
 import { defaultMoldGraphToolchain } from "//rules/c/mold";
-import "//rules/gen";
 import { defaultBiomeToolchain } from "//rules/js/biome";
 import { odinToolchain } from "//rules/odin";
 import { defaultOdinfmtToolchain } from "//rules/odin/odinfmt";

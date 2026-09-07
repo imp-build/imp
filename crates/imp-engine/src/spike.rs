@@ -9645,7 +9645,7 @@ export const inspect = { [BUILD]: inspection.outputs.value };
             r#"
 import { goal, task } from "imp:core";
 const BUILD = goal("build");
-import { stampFile } from "//rules/gen";
+import { stampFile } from "//rules/imp/codegen";
 
 const stamp = stampFile({ output: "generated/stamp.txt", text: "graph stamp" });
 const inspect = task({

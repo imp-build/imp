@@ -30,7 +30,7 @@ import "//rules/c/cmake";
 Targets are declared in `BUILD.js` files anywhere in the workspace tree — imp discovers them automatically:
 
 ```js
-import { stampFile } from "//rules/gen";
+import { stampFile } from "//rules/imp/codegen";
 
 export const hello = stampFile({
     output: "generated/hello.txt",

@@ -69,7 +69,7 @@ difference is the whole choice:
 | --- | --- | --- |
 | `codegen()` (`//rules/imp/codegen`) | the graph | a package consumes the generated sources; nothing lands on disk |
 | `generatedFiles()` (`//rules/imp/generate`) | the workspace | the file is committed and CI checks it for drift |
-| `stampFile()` (`//rules/gen`) | the graph | the content is fixed text, not the output of a program |
+| `stampFile()` (`//rules/imp/codegen`) | the graph | the content is fixed text, not the output of a program |
 
 ### The `codegen()` contract
 
@@ -171,15 +171,16 @@ way: change the generator and run `imp generate`.
 ### `stampFile()`, for fixed text
 
 ```js
-import { stampFile } from "//rules/gen";
+import { stampFile } from "//rules/imp/codegen";
 
 export const version = stampFile({ output: "build/version.txt", text: "1.4.0" });
 ```
 
-`stampFile()` produces a graph artifact holding fixed text. It is a degenerate
-generator: there is no program and no input to read. Its `argv[0]` is a bare
-`sh`, which is the resolved built-in shell described above, not an undeclared
-tool.
+`stampFile()` produces a graph artifact holding fixed text. It is the degenerate
+`codegen()`: the content is a literal, so there is no generator command and no
+declared tool. Its `argv[0]` is a bare `sh`, which is the resolved built-in
+shell described above, not an undeclared tool. It ships in the same module as
+`codegen()` because it produces the same kind of thing — a graph artifact.
 
 ### Why `codegen()` and `generatedFiles()` stay separate
 
@@ -192,14 +193,10 @@ given path while the graph is still being constructed, so `codegen()` declares
 one output slot per path and returns those handles directly. The split is
 deliberate; the shared authoring rules live in one place, `planGeneratedOutputs()`.
 
-Two things here are worth revisiting, and are recorded as follow-up work rather
-than settled by this document:
-
-- `stampFile()` lives in `//rules/gen`, outside this namespace, although it is a
-  fixed-text `codegen()`.
-- `odinPackage` is the only rule that consumes a `codegen()` result today, so
-  the helper is language-neutral where it produces and Odin-only where it is
-  consumed.
+One thing here is worth revisiting, and is recorded as follow-up work rather
+than settled by this document: `odinPackage` is the only rule that consumes a
+`codegen()` result today, so the helper is language-neutral where it produces
+and Odin-only where it is consumed.
 
 ## Acquire a toolchain
 
