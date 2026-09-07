@@ -35,6 +35,12 @@ import {
 export const ZIG_TOOL = toolName("zig");
 
 const ZIG_TOOLCHAIN_CACHE = "zig-toolchains";
+// The prewarmed $ZIG_GLOBAL_CACHE_DIR is mutable — Zig rewrites it as it
+// JIT-builds runtime support code — so it is not `shared: true` (that scope
+// is for immutable version-keyed content). One fixed key: the content is
+// addressed by what Zig compiles into it, not by which zig version reads it.
+const ZIG_BUILD_CACHE_CACHE = "zig-build-cache";
+const ZIG_BUILD_CACHE_KEY = "shared";
 const DEFAULT_LOCKFILE = "//rules/c/zig/zig.lock";
 
 function requireSupportedPlatform(plat) {
@@ -329,7 +335,14 @@ export function zigGraphTool(version) {
 			return { directory: result.outputs.directory };
 		},
 	}).outputs.directory;
-	return graphTool(directory, { binDirs: ["."] });
+	return graphTool(directory, {
+		binDirs: ["."],
+		mount: {
+			name: "zig",
+			cache: ZIG_TOOLCHAIN_CACHE,
+			key: zigCacheKey(resolved, plat),
+		},
+	});
 }
 
 /**
@@ -360,18 +373,16 @@ function zigGraphBuildCacheTool(version, zigTool) {
 	const resolved = ZigToolchain.requireVersion(version, "Zig");
 	const plat = platformInfo();
 	const mkdir = nativeTool("mkdir");
+	namedCache({ name: ZIG_BUILD_CACHE_CACHE });
 	const directory = task({
 		display: `prewarm zig build cache ${resolved} (${plat.os}/${plat.arch})`,
 		inputs: { zigTool, mkdir },
 		outputs: { directory: output.artifact() },
 		async run(exec, resolvedInputs) {
-			// zigTool is a produced tool() binding (zigGraphTool()'s own
-			// install task output) — it can't be listed in exec.action()'s
-			// `tools:` array (only native tool bindings/legacy tool specs can;
-			// see gccRustLinkDriverEnv()'s docstring in //rules/c/gcc for the
-			// same constraint and a confirmed real-build failure). exec.tool()
-			// resolves its absolute path instead, used directly in place of a
-			// bare "zig" the script would otherwise need PATH to find.
+			// zigTool is a named-cache mount now (zigGraphTool()'s tool(...,
+			// { mount })), so exec.tool() returns its sandbox mount path and
+			// exec.action() mounts the tree instead of staging it file by
+			// file — same as the bare "zig" a PATH lookup would find.
 			const zigExe = exec.tool(resolvedInputs.zigTool, "zig");
 			// srcDir/srcfile are fixed literals (not derived from user input),
 			// so the script can avoid needing a `dirname` tool mounted at all.
@@ -397,12 +408,26 @@ function zigGraphBuildCacheTool(version, zigTool) {
 					zigExe,
 				],
 				tools: [resolvedInputs.mkdir],
-				outputs: { directory: output.directory("zig-build-cache") },
+				outputs: {
+					directory: output.directory("zig-build-cache", {
+						namedCache: {
+							name: ZIG_BUILD_CACHE_CACHE,
+							key: ZIG_BUILD_CACHE_KEY,
+						},
+					}),
+				},
 			});
 			return { directory: result.outputs.directory };
 		},
 	}).outputs.directory;
-	return graphTool(directory, { binDirs: [] });
+	return graphTool(directory, {
+		binDirs: [],
+		mount: {
+			name: ZIG_BUILD_CACHE_CACHE,
+			cache: ZIG_BUILD_CACHE_CACHE,
+			key: ZIG_BUILD_CACHE_KEY,
+		},
+	});
 }
 
 export function isZigToolchain(toolchain) {
@@ -535,7 +560,12 @@ export function defaultZigGraphToolchain() {
  * @returns {string[]}
  */
 export function zigGraphCacheEnv(exec, resolvedBuildCacheTool) {
-	return [`ZIG_GLOBAL_CACHE_DIR=${exec.path(resolvedBuildCacheTool)}`];
+	// Consume the binding so exec.action() mounts it; exec.path() returns the
+	// staged path, so the env value is the fixed mount alias instead (the
+	// tool has binDirs: [], so its mount root is .imp/tools/<name>). Same
+	// pattern as //rules/c/gcc's own relative .imp/tools/... env entries.
+	exec.path(resolvedBuildCacheTool);
+	return [`ZIG_GLOBAL_CACHE_DIR=.imp/tools/${ZIG_BUILD_CACHE_CACHE}`];
 }
 
 /**

@@ -282,7 +282,10 @@ export function uvGraphTool(version) {
 		namedCache: { name: UV_TOOLCHAIN_CACHE, key },
 		display: `extract uv ${resolved} (${plat.os}/${plat.arch})`,
 	});
-	return graphTool(directory, { binDirs: ["."] });
+	return graphTool(directory, {
+		binDirs: ["."],
+		mount: { name: "uv", cache: UV_TOOLCHAIN_CACHE, key },
+	});
 }
 
 /**

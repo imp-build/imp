@@ -195,7 +195,14 @@ export function craneGraphTool(version) {
 		},
 		display: `install crane ${resolved} (${plat.os}/${plat.arch})`,
 	});
-	return graphTool(directory, { binDirs: ["."] });
+	return graphTool(directory, {
+		binDirs: ["."],
+		mount: {
+			name: "crane",
+			cache: CRANE_TOOLCHAIN_CACHE,
+			key: craneCacheKey(resolved, plat),
+		},
+	});
 }
 
 export function defaultCraneToolchainVersion() {

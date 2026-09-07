@@ -257,7 +257,10 @@ export function cmakeGraphTool(version) {
 		namedCache: { name: CMAKE_TOOLCHAIN_CACHE, key: cacheKey },
 		display: `install cmake ${resolved} (${plat.os}/${plat.arch})`,
 	});
-	return graphTool(directory, { binDirs: ["bin"] });
+	return graphTool(directory, {
+		binDirs: ["bin"],
+		mount: { name: "cmake", cache: CMAKE_TOOLCHAIN_CACHE, key: cacheKey },
+	});
 }
 
 /**

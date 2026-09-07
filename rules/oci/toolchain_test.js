@@ -12,6 +12,7 @@ import {
 	craneCacheKey,
 	craneDownloadUrl,
 	craneGenLockfiles,
+	craneGraphTool,
 	craneSupportedPlatforms,
 	craneToolchain,
 	defaultCraneToolchain,
@@ -65,6 +66,21 @@ describe("crane workspace lockfile selection", () => {
 
 	const readAddresses = (host) =>
 		host.calls.filter((c) => c[0] === "readAddressedFile").map((c) => c[1]);
+
+	test("the graph crane tool is a named-cache mount, not a staged tree", async () => {
+		await withCraneHost(async (host) => {
+			craneToolchain("0.20.6", { default: true, unverified: true });
+			const key = craneCacheKey("0.20.6", { os: "linux", arch: "x86_64" });
+
+			const binding = await host.resolve(craneGraphTool("0.20.6"));
+
+			expect(binding.type).toBe("tool");
+			expect(binding.mountName).toBe("crane");
+			expect(binding.cache).toBe("crane-toolchains");
+			expect(binding.key).toBe(key);
+			expect(binding.binDirs.join(",")).toBe(".");
+		});
+	});
 
 	test("the bundled lockfile is the default", async () => {
 		await withCraneHost(async (host) => {

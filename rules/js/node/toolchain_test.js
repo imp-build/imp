@@ -15,6 +15,7 @@ import {
 	nodeCacheKey,
 	nodeDownloadUrl,
 	nodeGenLockfiles,
+	nodeGraphTool,
 	nodeToolchain,
 } from "//rules/js/node/toolchain";
 
@@ -119,6 +120,21 @@ describe("node toolchain", () => {
 			expect(download.argv).toContain("deadbeef");
 			expect(download.argv[2]).toContain("sha256sum -c -");
 			expect(extract.argv[2]).toContain("--strip-components=1");
+		});
+	});
+
+	test("the graph node tool is a named-cache mount, not a staged tree", async () => {
+		await withNodeHost(async (host) => {
+			nodeToolchain("22.11.0", { default: true, unverified: true });
+			const key = nodeCacheKey("22.11.0", { os: "linux", arch: "x86_64" });
+
+			const binding = await host.resolve(nodeGraphTool("22.11.0"));
+
+			expect(binding.type).toBe("tool");
+			expect(binding.mountName).toBe("node");
+			expect(binding.cache).toBe("node-toolchains");
+			expect(binding.key).toBe(key);
+			expect(binding.binDirs.join(",")).toBe("bin");
 		});
 	});
 

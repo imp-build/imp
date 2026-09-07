@@ -275,6 +275,7 @@ export function nodeGraphTool(version) {
 	});
 	return graphTool(directory, {
 		binDirs: [plat.os === "windows" ? "." : "bin"],
+		mount: { name: "node", cache: NODE_TOOLCHAIN_CACHE, key },
 	});
 }
 

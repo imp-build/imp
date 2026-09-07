@@ -262,7 +262,10 @@ export function pnpmGraphTool(version) {
 		namedCache: { name: PNPM_TOOLCHAIN_CACHE, key },
 		display: `extract pnpm ${resolved} (${plat.os}/${plat.arch})`,
 	});
-	return graphTool(directory, { binDirs: ["."] });
+	return graphTool(directory, {
+		binDirs: ["."],
+		mount: { name: "pnpm", cache: PNPM_TOOLCHAIN_CACHE, key },
+	});
 }
 
 /**

@@ -243,14 +243,43 @@ describe("Zig toolchain", () => {
 		});
 	});
 
-	test("zigGraphCacheEnv resolves ZIG_GLOBAL_CACHE_DIR via exec.path()", () => {
+	test("zigGraphCacheEnv points ZIG_GLOBAL_CACHE_DIR at the build-cache mount", () => {
 		return withZigHost(() => {
-			const exec = { path: (binding) => binding.__fakePath };
+			const consumed = [];
+			const exec = {
+				path: (binding) => {
+					consumed.push(binding);
+					return binding.__fakePath;
+				},
+			};
 			const buildCacheTool = { __fakePath: "/sandbox/zig-build-cache" };
 
 			expect(zigGraphCacheEnv(exec, buildCacheTool)).toEqual([
-				"ZIG_GLOBAL_CACHE_DIR=/sandbox/zig-build-cache",
+				"ZIG_GLOBAL_CACHE_DIR=.imp/tools/zig-build-cache",
 			]);
+			// still consumed, so exec.action() mounts the tree
+			expect(consumed).toEqual([buildCacheTool]);
+		});
+	});
+
+	test("the graph zig tools are named-cache mounts, not staged trees", async () => {
+		await withZigHost(async (host) => {
+			zigToolchain("0.16.0", { default: true, unverified: true });
+			const key = zigCacheKey("0.16.0", { os: "linux", arch: "x86_64" });
+			const graph = zigGraphToolchain("0.16.0");
+
+			const compiler = await host.resolve(graph.tool);
+			expect(compiler.type).toBe("tool");
+			expect(compiler.mountName).toBe("zig");
+			expect(compiler.cache).toBe("zig-toolchains");
+			expect(compiler.key).toBe(key);
+			expect(compiler.binDirs.join(",")).toBe(".");
+
+			const buildCache = await host.resolve(graph.buildCacheTool);
+			expect(buildCache.mountName).toBe("zig-build-cache");
+			expect(buildCache.cache).toBe("zig-build-cache");
+			expect(buildCache.key).toBe("shared");
+			expect(buildCache.binDirs).toEqual([]);
 		});
 	});
 });

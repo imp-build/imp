@@ -214,7 +214,14 @@ export function pexGraphTool(version) {
 			return { directory: result.outputs.directory };
 		},
 	});
-	return graphTool(install.outputs.directory, { binDirs: ["."] });
+	return graphTool(install.outputs.directory, {
+		binDirs: ["."],
+		mount: {
+			name: "pex",
+			cache: PEX_TOOLCHAIN_CACHE,
+			key: pexCacheKey(resolved),
+		},
+	});
 }
 
 /**

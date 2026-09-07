@@ -9,6 +9,7 @@ import {
 	__resetCmakeToolchainStateForTest,
 	cmakeCacheKey,
 	cmakeBin,
+	cmakeGraphTool,
 	cmakeGraphToolSpec,
 	cmakeToolchain,
 	defaultCmakeToolchainVersion,
@@ -84,6 +85,21 @@ describe("CMake toolchain", () => {
 			expect(tool.cache).toBe("cmake-toolchains");
 			expect(tool.key).toBe("3.30.5/linux-x86_64");
 			expect(tool.binDirs.join(",")).toBe("bin");
+		});
+	});
+
+	test("the graph cmake tool is a named-cache mount, not a staged tree", async () => {
+		await withCmakeHost(async (host) => {
+			cmakeToolchain("3.30.5", { default: true, unverified: true });
+			const key = cmakeCacheKey("3.30.5", { os: "linux", arch: "x86_64" });
+
+			const binding = await host.resolve(cmakeGraphTool("3.30.5"));
+
+			expect(binding.type).toBe("tool");
+			expect(binding.mountName).toBe("cmake");
+			expect(binding.cache).toBe("cmake-toolchains");
+			expect(binding.key).toBe(key);
+			expect(binding.binDirs.join(",")).toBe("bin");
 		});
 	});
 

@@ -130,6 +130,21 @@ describe("Odin graph toolchain", () => {
 		});
 	});
 
+	test("the graph odin tool is a named-cache mount, not a staged tree", async () => {
+		await withOdinHost(async (host) => {
+			odinToolchain("dev-2026-03", { default: true, unverified: true });
+			const key = odinCacheKey("dev-2026-03", { os: "linux", arch: "x86_64" });
+
+			const binding = await host.resolve(odinGraphTool("dev-2026-03"));
+
+			expect(binding.type).toBe("tool");
+			expect(binding.mountName).toBe("odin");
+			expect(binding.cache).toBe("odin-toolchains");
+			expect(binding.key).toBe(key);
+			expect(binding.binDirs.join(",")).toBe(".");
+		});
+	});
+
 	test("cold acquire without a lockfile fails pointing at gen-lockfiles", async () => {
 		await withOdinHost(async () => {
 			odinToolchain("dev-2026-03", { default: true });

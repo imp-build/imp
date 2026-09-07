@@ -14,6 +14,7 @@ import {
 	pnpmBin,
 	pnpmCacheKey,
 	pnpmDownloadUrl,
+	pnpmGraphTool,
 	pnpmStoreDirEnv,
 	pnpmStoreDirTool,
 	pnpmGenLockfiles,
@@ -123,6 +124,21 @@ describe("pnpm toolchain", () => {
 			);
 			expect(download.argv).toContain("deadbeef");
 			expect(extract.argv[2]).not.toContain("--strip-components");
+		});
+	});
+
+	test("the graph pnpm tool is a named-cache mount, not a staged tree", async () => {
+		await withPnpmHost(async (host) => {
+			pnpmToolchain("11.13.0", { default: true, unverified: true });
+			const key = pnpmCacheKey("11.13.0", { os: "linux", arch: "x86_64" });
+
+			const binding = await host.resolve(pnpmGraphTool("11.13.0"));
+
+			expect(binding.type).toBe("tool");
+			expect(binding.mountName).toBe("pnpm");
+			expect(binding.cache).toBe("pnpm-toolchains");
+			expect(binding.key).toBe(key);
+			expect(binding.binDirs.join(",")).toBe(".");
 		});
 	});
 

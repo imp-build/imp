@@ -14,6 +14,7 @@ import {
 	ruffCacheKey,
 	ruffDownloadUrl,
 	ruffGenLockfiles,
+	ruffGraphTool,
 	ruffToolchain,
 } from "//rules/python/ruff_toolchain";
 import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
@@ -146,6 +147,21 @@ describe("ruff toolchain", () => {
 			expect(download.argv).toContain("deadbeef");
 			expect(download.argv[2]).toContain("sha256sum -c -");
 			expect(extract.argv[2]).toContain("--strip-components=1");
+		});
+	});
+
+	test("the graph ruff tool is a named-cache mount, not a staged tree", async () => {
+		await withRuffHost(async (host) => {
+			ruffToolchain("0.15.21", { default: true, unverified: true });
+			const key = ruffCacheKey("0.15.21", { os: "linux", arch: "x86_64" });
+
+			const binding = await host.resolve(ruffGraphTool("0.15.21"));
+
+			expect(binding.type).toBe("tool");
+			expect(binding.mountName).toBe("ruff");
+			expect(binding.cache).toBe("ruff-toolchains");
+			expect(binding.key).toBe(key);
+			expect(binding.binDirs.join(",")).toBe(".");
 		});
 	});
 

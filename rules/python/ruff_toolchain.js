@@ -210,7 +210,10 @@ export function ruffGraphTool(version) {
 		namedCache: { name: RUFF_TOOLCHAIN_CACHE, key },
 		display: `extract ruff ${resolved} (${plat.os}/${plat.arch})`,
 	});
-	return graphTool(directory, { binDirs: ["."] });
+	return graphTool(directory, {
+		binDirs: ["."],
+		mount: { name: "ruff", cache: RUFF_TOOLCHAIN_CACHE, key },
+	});
 }
 
 /**

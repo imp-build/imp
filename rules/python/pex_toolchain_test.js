@@ -13,6 +13,7 @@ import {
 	pexCacheKey,
 	pexDownloadUrl,
 	pexGenLockfiles,
+	pexGraphTool,
 	pexTool,
 	pexToolchain,
 } from "//rules/python/pex_toolchain";
@@ -112,6 +113,20 @@ describe("pex toolchain", () => {
 			expect(install.argv[2]).toContain("chmod +x");
 			expect(install.outputs[0].namedCache.name).toBe("pex-toolchains");
 			expect(install.outputs[0].namedCache.key).toBe("2.97.1");
+		});
+	});
+
+	test("the graph pex tool is a named-cache mount, not a staged tree", async () => {
+		await withPexHost(async (host) => {
+			pexToolchain("2.97.1", { default: true, unverified: true });
+
+			const binding = await host.resolve(pexGraphTool("2.97.1"));
+
+			expect(binding.type).toBe("tool");
+			expect(binding.mountName).toBe("pex");
+			expect(binding.cache).toBe("pex-toolchains");
+			expect(binding.key).toBe("2.97.1");
+			expect(binding.binDirs.join(",")).toBe(".");
 		});
 	});
 

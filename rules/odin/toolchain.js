@@ -347,7 +347,14 @@ export function odinGraphTool(version) {
 		},
 		display: `install odin ${resolved} (${plat.os}/${plat.arch})`,
 	});
-	return graphTool(directory, { binDirs: ["."] });
+	return graphTool(directory, {
+		binDirs: ["."],
+		mount: {
+			name: "odin",
+			cache: ODIN_TOOLCHAIN_CACHE,
+			key: odinCacheKey(resolved, plat),
+		},
+	});
 }
 
 /**

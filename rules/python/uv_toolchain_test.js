@@ -16,6 +16,7 @@ import {
 	uvCacheKey,
 	uvDownloadUrl,
 	uvGenLockfiles,
+	uvGraphTool,
 	uvTool,
 	uvToolchain,
 } from "//rules/python/uv_toolchain";
@@ -114,6 +115,21 @@ describe("uv toolchain", () => {
 			expect(extract.argv[2]).toContain("--strip-components=1");
 			expect(extract.outputs[0].namedCache.name).toBe("uv-toolchains");
 			expect(extract.outputs[0].namedCache.key).toBe(key);
+		});
+	});
+
+	test("the graph uv tool is a named-cache mount, not a staged tree", async () => {
+		await withUvHost(async (host) => {
+			uvToolchain("0.11.16", { default: true, unverified: true });
+			const key = uvCacheKey("0.11.16", { os: "linux", arch: "x86_64" });
+
+			const binding = await host.resolve(uvGraphTool("0.11.16"));
+
+			expect(binding.type).toBe("tool");
+			expect(binding.mountName).toBe("uv");
+			expect(binding.cache).toBe("uv-toolchains");
+			expect(binding.key).toBe(key);
+			expect(binding.binDirs.join(",")).toBe(".");
 		});
 	});
 
