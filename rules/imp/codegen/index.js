@@ -136,6 +136,104 @@ export function codegen({
 }
 
 /**
+ * Normalize a rule's `generatedSrcs` list into the one shape the staging
+ * contract is written in: `[{ artifact, expectedPath }]`, where `expectedPath`
+ * is the workspace-relative path the artifact must land at.
+ *
+ * An entry is either a `codegen()` result — expanded to one pair per declared
+ * output path — or the bare `{ artifact, path }` form. `resolvePath` maps a
+ * bare entry's rule-relative `path` onto a workspace-relative one; its default
+ * is identity, which is also what a `codegen()` result already carries.
+ *
+ * Internal to the language rules that consume generated sources
+ * (`odinPackage`, `ccLibrary`/`ccBinary`, ...); not part of the public API.
+ *
+ * @param {Array<object>} entries The rule's `generatedSrcs` option.
+ * @param {object} opts
+ * @param {string} opts.rule Consuming rule name, for error messages.
+ * @param {(path: string) => string} [opts.resolvePath] Maps a bare entry's
+ *   `path` to its workspace-relative form. Default: identity.
+ * @returns {Array<{artifact: object, expectedPath: string}>}
+ */
+export function normalizeGeneratedSrcs(
+	entries,
+	{ rule, resolvePath = (path) => path } = {},
+) {
+	return (entries || []).flatMap((entry, index) => {
+		if (entry?.[CODEGEN] === true) {
+			return entry.paths.map((expectedPath) => ({
+				artifact: entry.files[expectedPath],
+				expectedPath,
+			}));
+		}
+		if (entry?.artifact?.__imp_graph_handle !== true || !entry.path) {
+			throw new Error(
+				`${rule} generatedSrcs[${index}] must be a codegen() result, or ` +
+					'{ artifact: <graph handle>, path: "<relative path>" }',
+			);
+		}
+		return [
+			{ artifact: entry.artifact, expectedPath: resolvePath(entry.path) },
+		];
+	});
+}
+
+/**
+ * Collapse generated sources that share one workspace path, and reject a real
+ * conflict: two *different* artifacts both claiming that path, which would
+ * overwrite each other in the sandbox with the winner decided by input order.
+ *
+ * A rule that stages generated sources over a whole dependency closure (one
+ * `odin build` compiles every package it reaches) runs the merged list through
+ * this; a rule that stages only its own package still gets the within-list
+ * dedupe.
+ *
+ * @param {Array<{artifact: object, expectedPath: string}>} list
+ * @param {object} opts
+ * @param {string} opts.rule Consuming rule name, for error messages.
+ * @returns {Array<{artifact: object, expectedPath: string}>}
+ */
+export function dedupeGeneratedSrcs(list, { rule } = {}) {
+	const byPath = new Map();
+	for (const generated of list || []) {
+		const current = byPath.get(generated.expectedPath);
+		if (current === undefined) {
+			byPath.set(generated.expectedPath, generated);
+			continue;
+		}
+		if (current.artifact.__graph_id !== generated.artifact.__graph_id) {
+			throw new Error(
+				`${rule}: two different generated sources cannot claim one ` +
+					`workspace path ('${generated.expectedPath}')`,
+			);
+		}
+	}
+	return [...byPath.values()];
+}
+
+/**
+ * The run-time half of the staging contract: a generated source's artifact
+ * must land at exactly the workspace path its entry declared, since a language
+ * compiler only discovers files that are actually inside the package
+ * directory. Called from a consuming rule's `run()` once the sandbox path is
+ * known.
+ *
+ * @param {string} rule Consuming rule name, for the error message.
+ * @param {number} index Position in the rule's `generatedSrcs`, for the message.
+ * @param {string} actual The artifact's real sandbox path (`exec.path(handle)`).
+ * @param {string} expected The declared workspace-relative output path.
+ */
+export function assertGeneratedSrcPath(rule, index, actual, expected) {
+	if (actual !== expected) {
+		throw new Error(
+			`${rule} generatedSrcs[${index}] artifact's real path '${actual}' does ` +
+				`not match its declared path ('${expected}') — the generating ` +
+				"action's output.file() path must match",
+		);
+	}
+}
+
+/**
  * Declare a graph artifact containing fixed text.
  *
  * The degenerate `codegen()`: the content is a literal, so there is no

@@ -1,4 +1,11 @@
-import { CODEGEN, codegen, stampFile } from "//rules/imp/codegen";
+import {
+	CODEGEN,
+	assertGeneratedSrcPath,
+	codegen,
+	dedupeGeneratedSrcs,
+	normalizeGeneratedSrcs,
+	stampFile,
+} from "//rules/imp/codegen";
 import { BUILD } from "//rules/workflows/build";
 import { describe, expect, test } from "//rules/imp/test";
 import { nativeTool } from "//rules/imp/native-tool";
@@ -103,6 +110,109 @@ describe("codegen", () => {
 		});
 		expect(result.exitCode).toBe(0);
 		expect(result.stderr).toBe("");
+	});
+});
+
+describe("normalizeGeneratedSrcs", () => {
+	test("expands a codegen() result to one {artifact, expectedPath} per path", () => {
+		const generated = shCodegen(["pkg/one.odin", "pkg/two.odin"]);
+		const normalized = normalizeGeneratedSrcs([generated], {
+			rule: "odinPackage",
+		});
+		expect(normalized).toEqual([
+			{
+				artifact: generated.files["pkg/one.odin"],
+				expectedPath: "pkg/one.odin",
+			},
+			{
+				artifact: generated.files["pkg/two.odin"],
+				expectedPath: "pkg/two.odin",
+			},
+		]);
+	});
+
+	test("accepts the bare { artifact, path } form and applies resolvePath", () => {
+		const generated = shCodegen(["pkg/gen/bindings.odin"]);
+		const artifact = generated.files["pkg/gen/bindings.odin"];
+		const normalized = normalizeGeneratedSrcs(
+			[{ artifact, path: "bindings.odin" }],
+			{ rule: "odinPackage", resolvePath: (p) => `pkg/${p}` },
+		);
+		expect(normalized).toEqual([
+			{ artifact, expectedPath: "pkg/bindings.odin" },
+		]);
+	});
+
+	test("resolvePath defaults to identity", () => {
+		const generated = shCodegen(["pkg/gen/bindings.odin"]);
+		const artifact = generated.files["pkg/gen/bindings.odin"];
+		const normalized = normalizeGeneratedSrcs(
+			[{ artifact, path: "pkg/bindings.odin" }],
+			{ rule: "ccLibrary/ccBinary" },
+		);
+		expect(normalized[0].expectedPath).toBe("pkg/bindings.odin");
+	});
+
+	test("rejects an entry that is neither a codegen() result nor { artifact, path }", () => {
+		expect(() =>
+			normalizeGeneratedSrcs([{ path: "bindings.odin" }], {
+				rule: "odinPackage",
+			}),
+		).toThrow("generatedSrcs[0]");
+	});
+});
+
+describe("dedupeGeneratedSrcs", () => {
+	test("collapses entries that share a path and the same artifact", () => {
+		const generated = shCodegen(["pkg/gen/bindings.odin"]);
+		const artifact = generated.files["pkg/gen/bindings.odin"];
+		const deduped = dedupeGeneratedSrcs(
+			[
+				{ artifact, expectedPath: "pkg/bindings.odin" },
+				{ artifact, expectedPath: "pkg/bindings.odin" },
+			],
+			{ rule: "odinPackage" },
+		);
+		expect(deduped.length).toBe(1);
+	});
+
+	test("rejects two different artifacts claiming one path", () => {
+		const first = shCodegen(["pkg/gen/first.odin"]);
+		const second = shCodegen(["pkg/gen/second.odin"]);
+		expect(() =>
+			dedupeGeneratedSrcs(
+				[
+					{
+						artifact: first.files["pkg/gen/first.odin"],
+						expectedPath: "pkg/clash.odin",
+					},
+					{
+						artifact: second.files["pkg/gen/second.odin"],
+						expectedPath: "pkg/clash.odin",
+					},
+				],
+				{ rule: "odinPackage" },
+			),
+		).toThrow("cannot claim one workspace path");
+	});
+});
+
+describe("assertGeneratedSrcPath", () => {
+	test("passes when the real path equals the declared path", () => {
+		expect(() =>
+			assertGeneratedSrcPath("ccLibrary/ccBinary", 0, "pkg/gen.c", "pkg/gen.c"),
+		).not.toThrow();
+	});
+
+	test("throws when the real path differs from the declared path", () => {
+		expect(() =>
+			assertGeneratedSrcPath(
+				"ccLibrary/ccBinary",
+				2,
+				"other/gen.c",
+				"pkg/gen.c",
+			),
+		).toThrow("does not match its declared path");
 	});
 });
 

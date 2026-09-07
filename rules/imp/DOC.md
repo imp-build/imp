@@ -193,10 +193,15 @@ given path while the graph is still being constructed, so `codegen()` declares
 one output slot per path and returns those handles directly. The split is
 deliberate; the shared authoring rules live in one place, `planGeneratedOutputs()`.
 
-One thing here is worth revisiting, and is recorded as follow-up work rather
-than settled by this document: `odinPackage` is the only rule that consumes a
-`codegen()` result today, so the helper is language-neutral where it produces
-and Odin-only where it is consumed.
+`odinPackage` and `ccLibrary()`/`ccBinary()` both consume a `codegen()` result
+through `generatedSrcs`. The staging contract they share lives in this module:
+`normalizeGeneratedSrcs()` turns an entry (a `codegen()` result or the bare
+`{ artifact, path }` form) into `{ artifact, expectedPath }` pairs,
+`dedupeGeneratedSrcs()` rejects two different artifacts claiming one workspace
+path, and `assertGeneratedSrcPath()` is the run-time check that a staged
+artifact landed where its entry declared. A new language rule adds a consumer
+by calling those three and wiring the artifacts into its own compile action;
+`rules/python` does not consume generated sources yet.
 
 ## Acquire a toolchain
 

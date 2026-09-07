@@ -58,6 +58,11 @@ import {
 } from "imp:core";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
 import { nativeTool } from "//rules/imp/native-tool";
+import {
+	assertGeneratedSrcPath,
+	dedupeGeneratedSrcs,
+	normalizeGeneratedSrcs,
+} from "//rules/imp/codegen";
 import { defaultZigGraphToolchain } from "//rules/c/zig";
 import { selectCcToolchain, shellQuote } from "//rules/c/toolchain";
 
@@ -66,6 +71,14 @@ export const DEFAULT_CPP_HDRS = ["**/*.h", "**/*.hh", "**/*.hpp", "**/*.hxx"];
 
 function isCxxSource(path) {
 	return /\.(cc|cpp|cxx)$/i.test(path);
+}
+
+function isCcSource(path) {
+	return /\.(c|cc|cpp|cxx)$/i.test(path);
+}
+
+function isCcHeader(path) {
+	return /\.(h|hh|hpp|hxx)$/i.test(path);
 }
 
 function normalizeWorkspacePath(path) {
@@ -194,6 +207,7 @@ function crateSpec(opts) {
 		path = packagePath(),
 		srcs = DEFAULT_CPP_SRCS,
 		hdrs = DEFAULT_CPP_HDRS,
+		generatedSrcs = [],
 		deps = [],
 		toolchain,
 		copts = [],
@@ -206,6 +220,13 @@ function crateSpec(opts) {
 		path: normalizedPath,
 		srcs: [...srcs],
 		hdrs: [...hdrs],
+		// Generated sources/headers from the graph (a codegen() result, or the
+		// bare { artifact, path } form), staged at the workspace path each one
+		// declares — see //rules/imp/codegen and ccTask()'s run().
+		generatedSrcs: dedupeGeneratedSrcs(
+			normalizeGeneratedSrcs(generatedSrcs, { rule: "ccLibrary/ccBinary" }),
+			{ rule: "ccLibrary/ccBinary" },
+		),
 		deps: deps || [],
 		toolchain: resolveToolchain(toolchain),
 		copts: [...copts],
@@ -229,6 +250,27 @@ function ccTask(spec, isLibrary) {
 	const isShared = isLibrary && spec.shared;
 	const srcs = files({ root: spec.path, include: spec.srcs });
 	const hdrs = files({ root: spec.path, include: spec.hdrs });
+	// Each generated source/header is its own artifact handle, not part of a
+	// files() glob. A generated `.c` compiles like any globbed source; a
+	// generated `.h` is mounted and resolves against the `-I<spec.path>`
+	// already on every compile line. run() checks each one lands where its
+	// entry declared before it is used.
+	const generatedSrcs = spec.generatedSrcs;
+	for (const { expectedPath } of generatedSrcs) {
+		if (!isCcSource(expectedPath) && !isCcHeader(expectedPath)) {
+			throw new Error(
+				`ccLibrary/ccBinary generatedSrcs '${expectedPath}' is neither a ` +
+					"C/C++ source nor a header",
+			);
+		}
+	}
+	const generatedInputs = Object.fromEntries(
+		generatedSrcs.map((g, i) => [`generated${i}`, g.artifact]),
+	);
+	const generatedSourceKeys = generatedSrcs
+		.map((g, i) => (isCcSource(g.expectedPath) ? `generated${i}` : null))
+		.filter((key) => key !== null);
+	const generatedHandleKeys = generatedSrcs.map((_, i) => `generated${i}`);
 	const transitiveArchives = spec.deps.flatMap((d) => d.transitiveArchives);
 	// A dep's shared libraries travel their own bucket (see this module's own
 	// docstring). They reach the link step and the sandbox, never the `ar`
@@ -285,6 +327,7 @@ function ccTask(spec, isLibrary) {
 		inputs: {
 			srcs,
 			hdrs,
+			...generatedInputs,
 			mkdir: nativeTool("mkdir"),
 			dirname: nativeTool("dirname"),
 			cp: nativeTool("cp"),
@@ -305,7 +348,18 @@ function ccTask(spec, isLibrary) {
 		},
 		outputs: { artifact: output.artifact() },
 		async run(exec, input) {
-			const sourcePaths = exec.paths(input.srcs);
+			for (const [index, g] of generatedSrcs.entries()) {
+				assertGeneratedSrcPath(
+					"ccLibrary/ccBinary",
+					index,
+					exec.path(input[`generated${index}`]),
+					g.expectedPath,
+				);
+			}
+			const sourcePaths = [
+				...exec.paths(input.srcs),
+				...generatedSourceKeys.map((key) => exec.path(input[key])),
+			];
 			exec.paths(input.hdrs);
 			const needsCxx = sourcePaths.some(isCxxSource);
 			const opt = optModeOf(input.optMode);
@@ -351,6 +405,7 @@ function ccTask(spec, isLibrary) {
 							input.srcs,
 							input.hdrs,
 							...transitiveHdrs.map((_, j) => input[`depHdrs${j}`]),
+							...generatedHandleKeys.map((key) => input[key]),
 						],
 						outputs: { object: output.file(objPath) },
 						display: `cc compile ${objPath}`,

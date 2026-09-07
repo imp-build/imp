@@ -61,6 +61,52 @@ this target's own link step (not propagated to anything depending on it —
 use a dep's `transitiveLinkopts` for flags a consumer needs, e.g. a shared
 library's own `-L`/`-l` dependencies).
 
+### Generated sources
+
+`generatedSrcs` takes a `codegen()` result from `//rules/imp/codegen` and
+stages every file it declares into the compile sandbox — a `.c`/`.cc`/`.cpp`
+is compiled like any globbed source, a `.h` is mounted and resolves against
+the `-I<path>` already on every compile line. `codegen()` is not
+C-specific; it declares files a command writes into the graph, for any
+ecosystem. Exclude a generated path from any overlapping `srcs`/`hdrs` glob
+so one file has one owner:
+
+```js
+import { ccBinary } from "//rules/c";
+import { codegen } from "//rules/imp/codegen";
+import { nativeTool } from "//rules/imp/native-tool";
+import { files } from "imp:core";
+
+const proto = codegen({
+    display: "generate protocol bindings",
+    tools: { protoc: nativeTool("protoc") },
+    inputs: { schema: files({ root: "app", include: ["wire.proto"] }) },
+    outputPaths: ["app/generated/wire.c", "app/generated/wire.h"],
+    argv: (exec, { protoc }) => [
+        exec.tool(protoc, "protoc"),
+        "--c_out=app/generated",
+        "app/wire.proto",
+    ],
+});
+
+export const app = ccBinary({
+    path: "app",
+    srcs: ["main.c"],
+    generatedSrcs: [proto],
+});
+```
+
+`outputPaths` are workspace-relative, and a nested path needs no `mkdir` —
+the executor creates the parent directory of each declared output before the
+program starts. The build fails if a staged artifact's real path differs
+from the path its entry declared. The older explicit form,
+`generatedSrcs: [{ artifact, path }]` with `path` relative to the package,
+also works.
+
+To write generated files into the workspace instead of into the graph — for
+committed, drift-gated codegen — use `generatedFiles()` from
+`//rules/imp/generate` and `imp generate`.
+
 ### Static archives and shared libraries
 
 `ccLibrary()` produces a static `.a` archive by default and reports it as

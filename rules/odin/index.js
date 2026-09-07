@@ -68,7 +68,11 @@ import {
 	resolveOdinToolchainVersion,
 } from "//rules/odin/toolchain";
 
-import { CODEGEN } from "//rules/imp/codegen";
+import {
+	assertGeneratedSrcPath,
+	dedupeGeneratedSrcs,
+	normalizeGeneratedSrcs,
+} from "//rules/imp/codegen";
 
 import {
 	gccGraphTool,
@@ -1011,24 +1015,10 @@ function graphResourceInputs(specs) {
 // naming one artifact at one path are one input, and two *different* artifacts
 // claiming the same path would silently overwrite each other in the sandbox.
 function graphGeneratedSrcs(specs) {
-	const byPath = new Map();
-	for (const spec of specs) {
-		for (const generated of spec.generatedSrcs || []) {
-			const current = byPath.get(generated.expectedPath);
-			if (current === undefined) {
-				byPath.set(generated.expectedPath, generated);
-				continue;
-			}
-			if (current.artifact.__graph_id !== generated.artifact.__graph_id) {
-				throw new Error(
-					`Odin package '${spec.path}' generates '${generated.expectedPath}', ` +
-						"but another package in the same source closure generates a different artifact at that path. " +
-						"Two generated sources cannot claim one workspace path.",
-				);
-			}
-		}
-	}
-	return [...byPath.values()];
+	return dedupeGeneratedSrcs(
+		specs.flatMap((spec) => spec.generatedSrcs || []),
+		{ rule: "odinPackage" },
+	);
 }
 
 function graphPackageExpansion(spec) {
@@ -1323,12 +1313,12 @@ function graphOdinBuild(
 			for (const [index, expected] of (
 				resolved.generatedExpectedPaths || []
 			).entries()) {
-				const actual = exec.path(resolved[`generated${index}`]);
-				if (actual !== expected) {
-					throw new Error(
-						`odinPackage generatedSrcs[${index}] artifact's real path '${actual}' does not match its declared path ('${expected}') — the generating action's output.file() path must match`,
-					);
-				}
+				assertGeneratedSrcPath(
+					"odinPackage",
+					index,
+					exec.path(resolved[`generated${index}`]),
+					expected,
+				);
 			}
 			const command = lint ? "check" : test ? "test" : "build";
 			// `odin check` never links (it's a pure type-check, no -out: even)
@@ -1699,34 +1689,15 @@ function createGraphPackage({
 	});
 	// Generated sources aren't workspace files, so they can't join spec.sources'
 	// files() glob — each is declared as its own artifact input, paired with
-	// the real path it's expected to land at (spec.path + its relative path),
-	// which is what makes `odin build spec.path` see it as an ordinary package
-	// source once the compile action mounts it there (see graphOdinBuild()'s
-	// own validation of this contract).
-	// A codegen() result declares its output paths workspace-relative, which is
-	// the same path an explicit entry's `expectedPath` resolves to — so both
-	// forms reach graphGeneratedSrcs() as the one {artifact, expectedPath} pair
-	// the staging contract has always been written in terms of.
-	spec.generatedSrcs = generatedSrcs.flatMap((entry, index) => {
-		if (entry?.[CODEGEN] === true) {
-			return entry.paths.map((expectedPath) => ({
-				artifact: entry.files[expectedPath],
-				path: expectedPath,
-				expectedPath,
-			}));
-		}
-		if (entry?.artifact?.__imp_graph_handle !== true || !entry.path) {
-			throw new Error(
-				`odinPackage/odinTestPackage generatedSrcs[${index}] must be a codegen() result, or { artifact: <graph handle>, path: "<relative .odin path>" }`,
-			);
-		}
-		return [
-			{
-				artifact: entry.artifact,
-				path: entry.path,
-				expectedPath: graphPath(spec.path, entry.path),
-			},
-		];
+	// the real path it's expected to land at, which is what makes
+	// `odin build spec.path` see it as an ordinary package source once the
+	// compile action mounts it there (see graphOdinBuild()'s own validation of
+	// this contract). A codegen() result already carries workspace-relative
+	// paths; the bare { artifact, path } form is package-relative and joined
+	// here.
+	spec.generatedSrcs = normalizeGeneratedSrcs(generatedSrcs, {
+		rule: "odinPackage/odinTestPackage",
+		resolvePath: (path) => graphPath(spec.path, path),
 	});
 	graphPackages.push(spec);
 	const value = {

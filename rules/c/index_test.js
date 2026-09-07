@@ -10,6 +10,8 @@ import {
 	withFakeToolchainHost,
 } from "//rules/imp/test";
 import { ccBinary, ccLibrary, ccTest } from "//rules/c";
+import { codegen } from "//rules/imp/codegen";
+import { nativeTool } from "//rules/imp/native-tool";
 import {
 	__resetGccToolchainStateForTest,
 	gccToolchain,
@@ -533,6 +535,79 @@ describe("graph-native ccLibrary/ccBinary", () => {
 			expect(message).toContain(
 				"ccLibrary()/ccBinary() need an explicit toolchain",
 			);
+		});
+	});
+});
+
+describe("ccLibrary/ccBinary generatedSrcs", () => {
+	function cCodegen(outputPath) {
+		return codegen({
+			tools: { sh: nativeTool("sh") },
+			outputPaths: [outputPath],
+			argv: (exec, { sh }) => [exec.tool(sh, "sh"), "-c", "true"],
+		});
+	}
+
+	test("a codegen() .c result reaches the build task as a generated input", async () => {
+		await withCcHost(async () => {
+			const generated = cCodegen(
+				"rules/c/testdata/mixed_sources/generated/extra.c",
+			);
+			const lib = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				generatedSrcs: [generated],
+				toolchain: fakeGccGraphToolchain(),
+			});
+			const walkJson = await globalThis.__imp_walk_graph_for_introspection(
+				JSON.stringify([{ address: "lib", handleId: lib[BUILD].__graph_id }]),
+				JSON.stringify({ args: [], flags: {}, mode: {}, config: {} }),
+				JSON.stringify({}),
+			);
+			const { nodes } = JSON.parse(walkJson);
+			const build = nodes.find(
+				(node) => node.display === "cc archive rules/c/testdata/mixed_sources",
+			);
+			const generatedEdges = build.edges.filter((edge) =>
+				/^generated\d+$/.test(edge.name),
+			);
+			expect(generatedEdges.length).toBe(1);
+			// And it is the generator's own action, not a workspace file.
+			const producer = nodes.find(
+				(node) => node.id === generatedEdges[0].handleId,
+			);
+			expect(producer.display).toContain(
+				"generate rules/c/testdata/mixed_sources/generated/extra.c",
+			);
+		});
+	});
+
+	test("a codegen() .h result is accepted (staged, not compiled)", () => {
+		return withCcHost(() => {
+			const generated = cCodegen(
+				"rules/c/testdata/mixed_sources/generated/api.h",
+			);
+			expect(() =>
+				ccLibrary({
+					path: "rules/c/testdata/mixed_sources",
+					generatedSrcs: [generated],
+					toolchain: fakeGccGraphToolchain(),
+				}),
+			).not.toThrow();
+		});
+	});
+
+	test("rejects a generated path that is neither a C source nor a header", () => {
+		return withCcHost(() => {
+			const generated = cCodegen(
+				"rules/c/testdata/mixed_sources/generated/notes.txt",
+			);
+			expect(() =>
+				ccLibrary({
+					path: "rules/c/testdata/mixed_sources",
+					generatedSrcs: [generated],
+					toolchain: fakeGccGraphToolchain(),
+				}),
+			).toThrow("neither a C/C++ source nor a header");
 		});
 	});
 });
