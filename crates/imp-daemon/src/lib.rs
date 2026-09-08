@@ -6,5 +6,8 @@ pub mod convert;
 pub mod lifecycle;
 pub mod server;
 
+#[cfg(test)]
+mod tests;
+
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");

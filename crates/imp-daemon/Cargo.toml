@@ -15,6 +15,9 @@ imp-exec-api = { path = "../imp-exec-api" }
 imp-execution = { path = "../imp-execution" }
 imp-store = { path = "../imp-store" }
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [build-dependencies]
 protox.workspace = true
 tonic-build.workspace = true

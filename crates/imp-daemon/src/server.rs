@@ -4,11 +4,15 @@ use std::sync::Arc;
 use tokio_stream::{wrappers::ReceiverStream, Stream};
 use tonic::{Request, Response, Status};
 
-use crate::{convert, proto, BUILD_VERSION, PROTOCOL_VERSION};
+use crate::{convert, proto, BUILD_VERSION};
 
 pub struct ExecutionServer {
     pub service: Arc<LocalExecutionService>,
     pub shutdown: Arc<tokio::sync::Notify>,
+    /// The protocol version this server reports through `GetCapabilities`.
+    /// Defaults to [`PROTOCOL_VERSION`] in production; a test overrides it to
+    /// exercise the client's mismatch detection.
+    pub protocol_version: u32,
 }
 
 #[tonic::async_trait]
@@ -236,7 +240,7 @@ impl proto::execution_server::Execution for ExecutionServer {
     ) -> Result<Response<proto::Capabilities>, Status> {
         let c = self.service.capabilities().map_err(err)?;
         Ok(Response::new(proto::Capabilities {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: self.protocol_version,
             build_version: BUILD_VERSION.to_owned(),
             exe_fingerprint: String::new(),
             pid: std::process::id(),

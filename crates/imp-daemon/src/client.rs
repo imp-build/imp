@@ -13,6 +13,27 @@ pub struct RemoteExecutionService {
     rt: Option<tokio::runtime::Runtime>,
 }
 
+/// The result of one liveness probe against the daemon endpoint.
+enum ProbeOutcome {
+    /// The daemon answered and its protocol matches.
+    Ok,
+    /// No daemon answered (nothing listening, or the RPC failed).
+    Unreachable(anyhow::Error),
+    /// A daemon answered but reports a different protocol version. This is
+    /// fatal — starting another daemon would not help — so `connect` surfaces
+    /// it instead of spawning one.
+    ProtocolMismatch(anyhow::Error),
+}
+
+/// Compare the client and server protocol versions. Split out so the check is
+/// unit-testable without a running server.
+pub(crate) fn ensure_protocol_match(client: u32, server: u32) -> Result<()> {
+    if client != server {
+        bail!("imp daemon protocol mismatch: client {client}, server {server}");
+    }
+    Ok(())
+}
+
 impl RemoteExecutionService {
     pub fn connect() -> Result<Self> {
         // `connect` is part of a synchronous factory but is called while the
@@ -25,43 +46,48 @@ impl RemoteExecutionService {
                 .enable_all()
                 .build()?;
             let service = Self { rt: Some(rt) };
-            if service
+            match service
                 .rt
                 .as_ref()
                 .unwrap()
-                .block_on(service.probe())
-                .is_err()
+                .block_on(service.probe_outcome())
             {
-                let exe = std::env::current_exe()?;
-                let mut command = std::process::Command::new(exe);
-                command
-                    .args(["daemon", "serve"])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                #[cfg(unix)]
+                ProbeOutcome::Ok => return Ok(service),
+                // A wrong-protocol daemon is already running; spawning a second
+                // one cannot fix it. Report the mismatch rather than the
+                // generic connect failure and rather than starting a rival.
+                ProbeOutcome::ProtocolMismatch(error) => return Err(error),
+                ProbeOutcome::Unreachable(_) => {}
+            }
+            let exe = std::env::current_exe()?;
+            let mut command = std::process::Command::new(exe);
+            command
+                .args(["daemon", "serve"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
+            let _ = command.spawn();
+            let mut connected = false;
+            for _ in 0..50 {
+                if service
+                    .rt
+                    .as_ref()
+                    .unwrap()
+                    .block_on(service.probe())
+                    .is_ok()
                 {
-                    use std::os::unix::process::CommandExt;
-                    command.process_group(0);
+                    connected = true;
+                    break;
                 }
-                let _ = command.spawn();
-                let mut connected = false;
-                for _ in 0..50 {
-                    if service
-                        .rt
-                        .as_ref()
-                        .unwrap()
-                        .block_on(service.probe())
-                        .is_ok()
-                    {
-                        connected = true;
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-                if !connected {
-                    bail!("could not connect to imp daemon; try `imp daemon stop`");
-                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if !connected {
+                bail!("could not connect to imp daemon; try `imp daemon stop`");
             }
             Ok(service)
         })
@@ -75,20 +101,27 @@ impl RemoteExecutionService {
         Ok(endpoint.connect().await?)
     }
 
-    async fn probe(&self) -> Result<()> {
-        let mut client = proto::execution_client::ExecutionClient::new(self.channel().await?);
-        let capabilities = client
-            .get_capabilities(Request::new(proto::Empty {}))
-            .await?
-            .into_inner();
-        if capabilities.protocol_version != PROTOCOL_VERSION {
-            bail!(
-                "imp daemon protocol mismatch: client {}, server {}",
-                PROTOCOL_VERSION,
-                capabilities.protocol_version
-            );
+    async fn probe_outcome(&self) -> ProbeOutcome {
+        let channel = match self.channel().await {
+            Ok(channel) => channel,
+            Err(error) => return ProbeOutcome::Unreachable(error),
+        };
+        let mut client = proto::execution_client::ExecutionClient::new(channel);
+        let capabilities = match client.get_capabilities(Request::new(proto::Empty {})).await {
+            Ok(response) => response.into_inner(),
+            Err(error) => return ProbeOutcome::Unreachable(error.into()),
+        };
+        match ensure_protocol_match(PROTOCOL_VERSION, capabilities.protocol_version) {
+            Ok(()) => ProbeOutcome::Ok,
+            Err(error) => ProbeOutcome::ProtocolMismatch(error),
         }
-        Ok(())
+    }
+
+    async fn probe(&self) -> Result<()> {
+        match self.probe_outcome().await {
+            ProbeOutcome::Ok => Ok(()),
+            ProbeOutcome::Unreachable(error) | ProbeOutcome::ProtocolMismatch(error) => Err(error),
+        }
     }
 
     pub async fn is_running() -> bool {

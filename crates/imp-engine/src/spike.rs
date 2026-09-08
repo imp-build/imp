@@ -65,8 +65,15 @@ fn is_github_actions() -> bool {
     std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
 }
 
+/// Whether execution should route through the loopback daemon. The `--daemon`
+/// CLI flag sets `IMP_DAEMON=1`; anything else runs in-process. Split out so
+/// the decision is testable without connecting.
+fn daemon_execution_requested(env_value: Option<&str>) -> bool {
+    env_value == Some("1")
+}
+
 fn make_execution_service() -> Result<Arc<dyn ExecutionService>> {
-    if std::env::var("IMP_DAEMON").ok().as_deref() == Some("1") {
+    if daemon_execution_requested(std::env::var("IMP_DAEMON").ok().as_deref()) {
         return Ok(Arc::new(RemoteExecutionService::connect()?));
     }
     Ok(Arc::new(LocalExecutionService::new()))
@@ -8301,6 +8308,14 @@ mod tests {
     };
     use imp_store::digest::{list_files_in_digest, merge_digests};
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn daemon_execution_is_requested_only_by_the_exact_env_marker() {
+        assert!(daemon_execution_requested(Some("1")));
+        assert!(!daemon_execution_requested(None));
+        assert!(!daemon_execution_requested(Some("0")));
+        assert!(!daemon_execution_requested(Some("true")));
+    }
 
     // Regression for the cross-JS-runtime native-tool resolution race: many
     // concurrent callers resolving the same tool name (the normal case

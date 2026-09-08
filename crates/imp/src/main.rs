@@ -193,7 +193,6 @@ enum Cmd {
         fixture: String,
     },
     /// Run or inspect the local execution daemon.
-    #[command(hide = true)]
     Daemon {
         #[command(subcommand)]
         command: DaemonCmd,
@@ -2395,6 +2394,28 @@ mod tests {
                 .is_err()
         );
         assert!(validate_changed_selector_overrides(None, &["//:app#check".to_owned()],).is_ok());
+    }
+
+    #[test]
+    fn daemon_flag_is_global_and_off_by_default() {
+        let default = Cli::parse_from(["imp", "targets"]);
+        assert!(
+            !default.daemon,
+            "execution stays in-process without --daemon"
+        );
+
+        let routed = Cli::parse_from(["imp", "--daemon", "targets", "//..."]);
+        assert!(routed.daemon, "--daemon selects daemon execution");
+        assert!(matches!(routed.command, Cmd::Targets { .. }));
+
+        // The `imp daemon` subcommand is a real, listed command.
+        let sub = Cli::parse_from(["imp", "daemon", "status"]);
+        assert!(matches!(
+            sub.command,
+            Cmd::Daemon {
+                command: DaemonCmd::Status
+            }
+        ));
     }
 
     #[test]
