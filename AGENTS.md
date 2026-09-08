@@ -13,7 +13,7 @@
 - Planned builds write task/CAS cache data under `XDG_CACHE_HOME/imp`, falling back to
   `$HOME/.cache/imp` and then `/tmp/imp/cache`. In sandboxed runs where `$HOME` is read-only,
   set `XDG_CACHE_HOME` to a writable location such as `/tmp/imp`. Do NOT create a per-task cache-directory.
-- The repo is a cargo workspace: the `imp` bin crate lives at the root (frontend: CLI, JS engine, graph), with `crates/imp-store` (CAS/digests/caches), `crates/imp-exec-api` (the REv2-shaped execution API boundary), and `crates/imp-execution` (sandboxed runs, workers, toolchain fetch). Run Rust tests with `cargo test --workspace` — a bare `cargo test` only covers the root crate.
+- The repo is a cargo workspace: the `imp` bin crate lives at the root (frontend: CLI, JS engine, graph), with `crates/imp-store` (CAS/digests/caches), `crates/imp-exec-api` (the REv2-shaped execution API boundary), and `crates/imp-execution` (sandboxed runs, workers, toolchain fetch). Run Rust tests with `cargo test --workspace` — a bare `cargo test` only covers the root crate. The `imp-treesitter` grammar round-trip is not a cargo test: it is a binary that loads a JSON grammar only an `imp` build compiles, run by `imp test //crates/imp-treesitter:roundtrip` (and covered by `imp test //...`).
 - If formatting changes unrelated files; do not go around trying to undo - just liberally format to avoid that happening in the first place.
 - Always run `imp fmt //...`, `imp lint //...`, and `imp test //...` before committing — `cargo build`/`cargo test` alone don't cover lint or the project's own formatting conventions.
 - When writing messages and comments use ASD-STE100 Simplified Technical English (STE).
