@@ -777,6 +777,13 @@ async fn cmd_cache_stats(details: bool) -> Result<()> {
             human_bytes(stats.legacy_bytes)
         );
     }
+    if stats.unrecognised.count > 0 {
+        println!(
+            "  unrecognised:  {} in {} files (not store entries; run `cache gc` to remove)",
+            human_bytes(stats.unrecognised.bytes),
+            stats.unrecognised.count
+        );
+    }
     println!("  usage.db:      {}", human_bytes(stats.db_bytes));
     println!("total on disk:   {}", human_bytes(stats.total_bytes));
     println!(

@@ -406,6 +406,19 @@ pub fn shard_bucket(name: &str) -> &str {
     }
 }
 
+/// The one rule for a content-keyed store id. A CAS digest and a task key are
+/// both the output of `digest_bytes` / `digest_json`: exactly 64 lowercase
+/// hexadecimal characters. CAS blobs use the id as the file name; task and
+/// meta records append `.json`. Enumerators strip that suffix and check the
+/// stem against this rule; anything else in `cas/blobs/` or `tasks/` that is
+/// not a `.`-prefixed temp sibling is not a store entry.
+pub fn is_store_entry_id(name: &str) -> bool {
+    name.len() == 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
 pub fn cas_blob_path_in(root: &Path, digest: &str) -> PathBuf {
     root.join("cas")
         .join("blobs")
@@ -612,14 +625,38 @@ fn is_temp_name(name: &str) -> bool {
     name.starts_with('.')
 }
 
-/// Every entry in a sharded namespace, as `(name, path)` — including anything
-/// still sitting at a flat pre-shard path, so garbage collection and statistics
-/// see the whole store while the old layout drains. `name` is the file name
-/// verbatim; callers strip their own suffix.
-pub fn read_store_namespace(dir: &Path) -> Vec<(String, PathBuf)> {
-    let mut found = Vec::new();
+/// The result of enumerating one content-keyed namespace (`cas/blobs/`,
+/// `tasks/`). `entries` are the files whose name is a well-formed store id
+/// (`is_store_entry_id`) sitting in the right place; `foreign` is everything
+/// else that is not a `.`-prefixed temp sibling — a corrupt or hand-placed
+/// file, a crashed writer's leftover, a well-formed id in the wrong shard
+/// bucket, or a stray directory. Enumerators must not read a `foreign` path
+/// as an entry; `imp cache gc` sweeps them and `imp cache stats` counts them.
+#[derive(Debug, Default)]
+pub struct StoreNamespace {
+    /// `(id, path)` per recognised entry. `id` is the file name with the
+    /// namespace `suffix` removed.
+    pub entries: Vec<(String, PathBuf)>,
+    /// Paths that are not recognised entries and are not temp siblings.
+    pub foreign: Vec<PathBuf>,
+}
+
+/// Enumerate a sharded namespace — buckets one level deep, plus any file still
+/// at a flat pre-shard path so garbage collection and statistics see the whole
+/// store while the old layout drains. `suffix` is the namespace file suffix
+/// (`""` for CAS blobs, `".json"` for task records); it is stripped before the
+/// stem is checked against `is_store_entry_id`. A file inside a shard bucket
+/// must also match `shard_bucket(stem)` for that bucket, so a file can never be
+/// read as one that belongs elsewhere.
+pub fn read_store_namespace(dir: &Path, suffix: &str) -> StoreNamespace {
+    let mut result = StoreNamespace::default();
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return found;
+        return result;
+    };
+    let classify = |name: &str, bucket: Option<&str>| -> Option<String> {
+        let stem = name.strip_suffix(suffix)?;
+        let placed = bucket.is_none_or(|b| shard_bucket(stem) == b);
+        (is_store_entry_id(stem) && placed).then(|| stem.to_owned())
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -627,27 +664,37 @@ pub fn read_store_namespace(dir: &Path) -> Vec<(String, PathBuf)> {
             continue;
         }
         match entry.file_type() {
-            // A directory here is a bucket; one more level and no deeper.
-            Ok(kind) if kind.is_dir() => {
+            // A bucket directory: one more level and no deeper.
+            Ok(kind) if kind.is_dir() && is_bucket_name(&name) => {
                 let Ok(bucket) = std::fs::read_dir(entry.path()) else {
                     continue;
                 };
                 for entry in bucket.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if is_temp_name(&name) {
+                    let child = entry.file_name().to_string_lossy().into_owned();
+                    if is_temp_name(&child) {
                         continue;
                     }
-                    if entry.file_type().is_ok_and(|kind| kind.is_file()) {
-                        found.push((name, entry.path()));
+                    if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                        result.foreign.push(entry.path());
+                    } else if let Some(id) = classify(&child, Some(&name)) {
+                        result.entries.push((id, entry.path()));
+                    } else {
+                        result.foreign.push(entry.path());
                     }
                 }
             }
             // A file here is a leftover from the flat layout.
-            Ok(kind) if kind.is_file() => found.push((name, entry.path())),
+            Ok(kind) if kind.is_file() => match classify(&name, None) {
+                Some(id) => result.entries.push((id, entry.path())),
+                None => result.foreign.push(entry.path()),
+            },
+            // A non-bucket directory does not belong in a content-keyed
+            // namespace.
+            Ok(kind) if kind.is_dir() => result.foreign.push(entry.path()),
             _ => {}
         }
     }
-    found
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -1661,22 +1708,75 @@ mod tests {
     }
 
     #[test]
-    fn read_store_namespace_reports_both_layouts_and_skips_temps() {
+    fn is_store_entry_id_accepts_only_64_lowercase_hex() {
+        assert!(is_store_entry_id(&"a".repeat(64)));
+        assert!(is_store_entry_id(&format!("de{}", "0".repeat(62))));
+        assert!(!is_store_entry_id(&"a".repeat(63))); // too short
+        assert!(!is_store_entry_id(&"a".repeat(65))); // too long
+        assert!(!is_store_entry_id(&"A".repeat(64))); // digests are lowercase
+        assert!(!is_store_entry_id(&format!("{}g", "a".repeat(63)))); // non-hex
+        assert!(!is_store_entry_id("")); // empty
+        assert!(!is_store_entry_id("notes.txt"));
+    }
+
+    #[test]
+    fn read_store_namespace_splits_recognised_entries_from_foreign_files() {
         let dir = tempfile::tempdir().unwrap();
         let blobs = dir.path().join("cas").join("blobs");
+        let sharded = format!("de{}", "1".repeat(62));
+        let flat = format!("ca{}", "2".repeat(62));
         std::fs::create_dir_all(blobs.join("de")).unwrap();
-        std::fs::write(blobs.join("de/deadbeef"), b"sharded").unwrap();
-        std::fs::write(blobs.join("cafebabe"), b"flat").unwrap();
-        std::fs::write(blobs.join("de/.deadbeef.tmp-blob-1-2"), b"temp").unwrap();
-        std::fs::write(blobs.join(".cafebabe.tmp-blob-1-2"), b"temp").unwrap();
+        std::fs::write(blobs.join("de").join(&sharded), b"sharded").unwrap();
+        std::fs::write(blobs.join(&flat), b"flat").unwrap();
+        // Temp siblings, at both levels, are skipped entirely.
+        std::fs::write(blobs.join("de").join(format!(".{sharded}.tmp-1-2")), b"t").unwrap();
+        std::fs::write(blobs.join(format!(".{flat}.tmp-1-2")), b"t").unwrap();
+        // Foreign: a non-id name, a well-formed id in the wrong bucket, and a
+        // stray non-bucket directory.
+        std::fs::write(blobs.join("de").join("notes.txt"), b"junk").unwrap();
+        std::fs::create_dir_all(blobs.join("ff")).unwrap();
+        std::fs::write(blobs.join("ff").join(&sharded), b"misbucketed").unwrap();
+        std::fs::create_dir_all(blobs.join("subdir")).unwrap();
 
-        let mut found: Vec<String> = read_store_namespace(&blobs)
+        let namespace = read_store_namespace(&blobs, "");
+        let mut ids: Vec<String> = namespace.entries.into_iter().map(|(id, _)| id).collect();
+        ids.sort();
+        assert_eq!(ids, [flat.clone(), sharded.clone()]);
+
+        let mut foreign: Vec<String> = namespace
+            .foreign
             .into_iter()
-            .map(|(name, _)| name)
+            .map(|p| {
+                p.strip_prefix(&blobs)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
-        found.sort();
+        foreign.sort();
+        assert_eq!(
+            foreign,
+            [
+                "de/notes.txt".to_owned(),
+                format!("ff/{sharded}"),
+                "subdir".to_owned()
+            ]
+        );
+    }
 
-        assert_eq!(found, ["cafebabe", "deadbeef"]);
+    #[test]
+    fn read_store_namespace_strips_the_suffix_before_checking_the_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = dir.path().join("tasks");
+        let key = format!("ab{}", "3".repeat(62));
+        std::fs::create_dir_all(tasks.join("ab")).unwrap();
+        std::fs::write(tasks.join("ab").join(format!("{key}.json")), b"{}").unwrap();
+        std::fs::write(tasks.join("ab").join(&key), b"no suffix").unwrap();
+
+        let namespace = read_store_namespace(&tasks, ".json");
+        let ids: Vec<String> = namespace.entries.into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, [key.clone()]);
+        assert_eq!(namespace.foreign.len(), 1, "the suffixless file is foreign");
     }
 
     #[test]

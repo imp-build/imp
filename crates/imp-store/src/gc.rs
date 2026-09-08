@@ -64,6 +64,10 @@ pub struct GcPlan {
     pub memo_traces: Vec<Candidate>,
     /// Known-legacy directories deleted outright (`cas/trees` and `memo`).
     pub legacy: Vec<Candidate>,
+    /// Files under `cas/blobs/` or `tasks/` whose name is not a well-formed
+    /// store id (`cache::is_store_entry_id`), or a well-formed id in the wrong
+    /// shard bucket, or a stray directory. Deleted outright like `legacy`.
+    pub foreign: Vec<Candidate>,
     /// Already-empty scope/name container dirs under `named/` (left behind
     /// by an interrupted gc or pre-gc deletions). Containers emptied *by*
     /// this run are swept during execute instead.
@@ -73,7 +77,7 @@ pub struct GcPlan {
 }
 
 impl GcPlan {
-    pub fn categories(&self) -> [(&'static str, &[Candidate]); 8] {
+    pub fn categories(&self) -> [(&'static str, &[Candidate]); 9] {
         [
             ("task records", self.task_records.as_slice()),
             ("cas blobs", self.cas_blobs.as_slice()),
@@ -83,6 +87,7 @@ impl GcPlan {
             ("stale memo traces", self.memo_traces.as_slice()),
             ("legacy dirs", self.legacy.as_slice()),
             ("empty dirs", self.empty_dirs.as_slice()),
+            ("unrecognised files", self.foreign.as_slice()),
         ]
     }
 
@@ -149,6 +154,7 @@ impl GcPlan {
             .chain(&self.memo_traces)
             .chain(&self.legacy)
             .chain(&self.empty_dirs)
+            .chain(&self.foreign)
         {
             delete(candidate);
         }
@@ -311,6 +317,7 @@ fn plan_at(root: &Path, cutoff: i64) -> Result<GcPlan> {
         &mut plan.undeclared_names,
         &mut plan.named_slots,
         &mut plan.memo_traces,
+        &mut plan.foreign,
     ] {
         candidates.sort_by_key(|c| c.last_used_at);
     }
@@ -455,6 +462,30 @@ impl Database {
     }
 }
 
+/// Turn the paths `read_store_namespace` could not recognise into deletion
+/// candidates. They have no `usage.db` row, so age does not apply — `id` is
+/// just a store-relative label for the report.
+fn collect_foreign(root: &Path, paths: Vec<PathBuf>, out: &mut Vec<Candidate>) {
+    for path in paths {
+        let id = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        let size_bytes = if path.is_dir() {
+            crate::usage::dir_size_bytes(&path).unwrap_or(0)
+        } else {
+            std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+        };
+        out.push(Candidate {
+            id,
+            path,
+            last_used_at: 0,
+            size_bytes,
+        });
+    }
+}
+
 /// Expire old task records into `plan.task_records`; parse and return the
 /// surviving ones for the mark phase. Unparsable records are treated as
 /// expired garbage regardless of age.
@@ -466,10 +497,9 @@ fn plan_task_records(
 ) -> Result<Vec<TaskCacheRecord>> {
     let tasks = root.join("tasks");
     let mut live = Vec::new();
-    for (name, path) in read_store_namespace(&tasks) {
-        let Some(key) = name.strip_suffix(".json").map(str::to_owned) else {
-            continue;
-        };
+    let namespace = read_store_namespace(&tasks, ".json");
+    collect_foreign(root, namespace.foreign, &mut plan.foreign);
+    for (key, path) in namespace.entries {
         let last_used = db.last_used("task", &key, &path);
         let parsed = std::fs::read_to_string(&path)
             .ok()
@@ -525,7 +555,9 @@ fn plan_cas(
     plan: &mut GcPlan,
 ) -> Result<()> {
     let blobs = root.join("cas").join("blobs");
-    for (name, path) in read_store_namespace(&blobs) {
+    let namespace = read_store_namespace(&blobs, "");
+    collect_foreign(root, namespace.foreign, &mut plan.foreign);
+    for (name, path) in namespace.entries {
         if marked.contains(&name) {
             continue;
         }
@@ -818,11 +850,20 @@ mod tests {
             }
         }
 
-        fn record_path(&self, key: &str) -> PathBuf {
+        /// Map a readable test label to a real on-disk task key. Production
+        /// keys are `digest_json` output (64-char hex); the enumerators now
+        /// reject anything else, so a fixture cannot seed `"dead-task"`
+        /// literally any more.
+        fn task_key(label: &str) -> String {
+            digest_bytes(label.as_bytes())
+        }
+
+        fn record_path(&self, label: &str) -> PathBuf {
+            let key = Self::task_key(label);
             if self.flat {
                 self.root.join("tasks").join(format!("{key}.json"))
             } else {
-                crate::cache::task_record_path_in(&self.root, key)
+                crate::cache::task_record_path_in(&self.root, &key)
             }
         }
 
@@ -850,7 +891,8 @@ mod tests {
             digest
         }
 
-        fn record(&self, key: &str, output_blob: &str, last_used: i64) {
+        fn record(&self, label: &str, output_blob: &str, last_used: i64) {
+            let key = Self::task_key(label);
             let record = serde_json::json!({
                 "version": crate::cache::TASK_CACHE_VERSION,
                 "task_id": key, "task_key": key,
@@ -862,10 +904,23 @@ mod tests {
                 }],
             });
             self.write(
-                &self.record_path(key),
+                &self.record_path(label),
                 &serde_json::to_vec(&record).unwrap(),
             );
-            self.usage("task", key, last_used);
+            self.usage("task", &key, last_used);
+        }
+
+        /// Write a file that is not a well-formed store entry into a namespace
+        /// directory. `sub` is `"cas/blobs"` or `"tasks"`; the file lands in
+        /// its shard bucket (or flat, matching the fixture layout).
+        fn foreign(&self, sub: &str, name: &str, contents: &[u8]) -> PathBuf {
+            let path = if self.flat {
+                self.root.join(sub).join(name)
+            } else {
+                self.root.join(sub).join("ab").join(name)
+            };
+            self.write(&path, contents);
+            path
         }
 
         fn plan(&self) -> GcPlan {
@@ -957,11 +1012,12 @@ mod tests {
 
             f.plan().execute();
 
+            let live_key = Fixture::task_key("live-task");
             let rows: i64 = f
                 .conn
                 .query_row(
-                    "SELECT COUNT(*) FROM usage WHERE id IN (?1, 'live-task')",
-                    [&kept],
+                    "SELECT COUNT(*) FROM usage WHERE id IN (?1, ?2)",
+                    [&kept, &live_key],
                     |row| row.get(0),
                 )
                 .unwrap();
@@ -975,6 +1031,37 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(orphan, 0, "a row with no entry in either layout is stale");
+        }
+    }
+
+    /// A file in `cas/blobs/` or `tasks/` whose name is not a well-formed
+    /// store id is neither a blob nor a task record. GC lists it as an
+    /// unrecognised file and deletes it; real entries are left alone. Runs
+    /// against both layouts.
+    #[test]
+    fn unrecognised_files_are_swept() {
+        for f in [Fixture::new(), Fixture::flat_layout()] {
+            let kept = f.blob(b"kept output", NOW);
+            f.record("live-task", &kept, NOW);
+            let junk_blob = f.foreign("cas/blobs", "notes.txt", b"hand-placed");
+            let junk_task = f.foreign("tasks", "scratch.json", b"not a record");
+
+            let plan = f.plan();
+            assert_eq!(
+                plan.foreign.len(),
+                2,
+                "both stray files are flagged, in either layout"
+            );
+
+            let outcome = plan.execute();
+            assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+            assert!(!junk_blob.exists(), "the stray blob-dir file is swept");
+            assert!(!junk_task.exists(), "the stray task-dir file is swept");
+            assert!(f.blob_path(&kept).exists(), "a real blob is untouched");
+            assert!(
+                f.record_path("live-task").exists(),
+                "a real task record is untouched"
+            );
         }
     }
 

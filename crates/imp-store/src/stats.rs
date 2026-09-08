@@ -22,6 +22,10 @@ pub struct CacheStats {
     pub named_scopes: usize,
     pub named_bytes: u64,
     pub legacy_bytes: u64,
+    /// Files under `tasks/` or `cas/blobs/` whose name is not a well-formed
+    /// store id (`cache::is_store_entry_id`). Not store entries; `cache gc`
+    /// removes them.
+    pub unrecognised: CountBytes,
     pub db_bytes: u64,
     pub total_bytes: u64,
     /// Actual disk usage of the whole cache root (allocated blocks, like
@@ -126,13 +130,17 @@ fn count_files_recursive(path: &std::path::Path) -> usize {
 }
 
 fn collect_at(root: &std::path::Path) -> CacheStats {
-    let task_records = count_bytes(&root.join("tasks"));
+    let (task_records, task_foreign) = count_bytes(&root.join("tasks"), ".json");
     let memo_trace_root = root.join("memo-traces");
     let memo_traces = CountBytes {
         count: count_files_recursive(&memo_trace_root),
         bytes: crate::usage::dir_size_bytes(&memo_trace_root).unwrap_or(0),
     };
-    let cas_blobs = count_bytes(&root.join("cas").join("blobs"));
+    let (cas_blobs, cas_foreign) = count_bytes(&root.join("cas").join("blobs"), "");
+    let unrecognised = CountBytes {
+        count: task_foreign.count + cas_foreign.count,
+        bytes: task_foreign.bytes + cas_foreign.bytes,
+    };
 
     let named_root = root.join("named");
     let named_scopes = crate::cache::read_sharded_scopes(&named_root).len();
@@ -161,26 +169,39 @@ fn collect_at(root: &std::path::Path) -> CacheStats {
         named_scopes,
         named_bytes,
         legacy_bytes,
+        unrecognised,
         db_bytes,
         total_bytes,
         raw_bytes,
     }
 }
 
-/// Count and total size of the entries in one sharded store namespace
-/// (`tasks/`, `cas/blobs/`). Counts the shard buckets and any entry still at a
-/// pre-shard flat path alike, and skips in-flight temp siblings, so the figure
-/// covers the whole store while the old layout drains.
-fn count_bytes(dir: &std::path::Path) -> CountBytes {
-    let mut result = CountBytes::default();
-    for (_, path) in crate::cache::read_store_namespace(dir) {
+/// Count and total size of one sharded store namespace (`tasks/`,
+/// `cas/blobs/`), split into recognised entries and unrecognised files.
+/// Counts the shard buckets and any entry still at a pre-shard flat path
+/// alike, and skips in-flight temp siblings, so the figure covers the whole
+/// store while the old layout drains. `suffix` is the namespace file suffix
+/// passed through to `read_store_namespace`.
+fn count_bytes(dir: &std::path::Path, suffix: &str) -> (CountBytes, CountBytes) {
+    let namespace = crate::cache::read_store_namespace(dir, suffix);
+    let mut entries = CountBytes::default();
+    for (_, path) in namespace.entries {
         let Ok(meta) = std::fs::metadata(&path) else {
             continue;
         };
-        result.count += 1;
-        result.bytes += meta.len();
+        entries.count += 1;
+        entries.bytes += meta.len();
     }
-    result
+    let mut foreign = CountBytes::default();
+    for path in namespace.foreign {
+        foreign.count += 1;
+        foreign.bytes += if path.is_dir() {
+            crate::usage::dir_size_bytes(&path).unwrap_or(0)
+        } else {
+            std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+        };
+    }
+    (entries, foreign)
 }
 
 /// Sum of allocated disk blocks under `path` (files and directory entries
@@ -233,19 +254,35 @@ mod tests {
     fn counts_and_sizes_tasks_blobs_and_named_scopes() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
+        let sharded_key = format!("ab{}", "0".repeat(62));
+        let flat_key = format!("cd{}", "1".repeat(62));
+        let blob_digest = format!("de{}", "2".repeat(62));
         // One task record in its shard bucket and one still at a pre-shard
         // flat path: both count while an upgraded cache drains.
         std::fs::create_dir_all(root.join("tasks/ab")).unwrap();
-        std::fs::write(root.join("tasks/ab/abcd.json"), b"12345").unwrap();
-        std::fs::write(root.join("tasks/b.json"), b"12").unwrap();
+        std::fs::write(
+            root.join("tasks/ab").join(format!("{sharded_key}.json")),
+            b"12345",
+        )
+        .unwrap();
+        std::fs::write(root.join("tasks").join(format!("{flat_key}.json")), b"12").unwrap();
+        // Neither a task key nor a blob digest: counted as unrecognised.
+        std::fs::write(root.join("tasks/ab/scratch.json"), b"1234").unwrap();
 
         std::fs::create_dir_all(root.join("memo-traces/workspace-a")).unwrap();
         std::fs::write(root.join("memo-traces/workspace-a/a.json"), b"123").unwrap();
 
         std::fs::create_dir_all(root.join("cas/blobs/de")).unwrap();
-        std::fs::write(root.join("cas/blobs/de/deadbeef"), b"1234567").unwrap();
+        std::fs::write(root.join("cas/blobs/de").join(&blob_digest), b"1234567").unwrap();
         // An in-flight publish is not a store entry.
-        std::fs::write(root.join("cas/blobs/de/.deadbeef.tmp-blob-1-2"), b"xx").unwrap();
+        std::fs::write(
+            root.join("cas/blobs/de")
+                .join(format!(".{blob_digest}.tmp-blob-1-2")),
+            b"xx",
+        )
+        .unwrap();
+        // A hand-placed file, likewise unrecognised.
+        std::fs::write(root.join("cas/blobs/de/notes.txt"), b"123").unwrap();
 
         std::fs::create_dir_all(root.join("named/shared/tool/v1")).unwrap();
         std::fs::write(root.join("named/shared/tool/v1/bin"), b"1234").unwrap();
@@ -256,6 +293,11 @@ mod tests {
         let stats = collect_at(root);
         assert_eq!(stats.task_records.count, 2);
         assert_eq!(stats.task_records.bytes, 7);
+        assert_eq!(
+            stats.unrecognised.count, 2,
+            "one stray file in each namespace"
+        );
+        assert_eq!(stats.unrecognised.bytes, 7);
         assert_eq!(stats.memo_traces.count, 1);
         assert_eq!(stats.memo_traces.bytes, 3);
         assert_eq!(stats.cas_blobs.count, 1);
