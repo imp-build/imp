@@ -621,7 +621,7 @@ pub fn task_record_path(task_key: &str) -> Result<PathBuf> {
 /// True for a `temp_sibling_path` scratch file. Those live in the same
 /// directory as the entries they publish, so every enumerator has to filter
 /// them out rather than read them as store entries.
-fn is_temp_name(name: &str) -> bool {
+pub(crate) fn is_temp_name(name: &str) -> bool {
     name.starts_with('.')
 }
 

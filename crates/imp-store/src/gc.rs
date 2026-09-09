@@ -28,7 +28,7 @@ use rusqlite::Connection;
 
 use crate::cache::{
     existing_cas_blob_path_in, existing_cas_meta_path_in, existing_task_record_path_in,
-    read_store_namespace, TaskCacheRecord,
+    is_temp_name, read_store_namespace, TaskCacheRecord,
 };
 
 /// One thing gc wants to delete.
@@ -74,6 +74,11 @@ pub struct GcPlan {
     pub empty_dirs: Vec<Candidate>,
     /// Blobs kept because a live task record reaches them.
     pub marked_blobs: usize,
+    /// Scope ids whose `workspaces` row points at a vanished checkout and
+    /// whose `memo-traces/<scope>` dir is being reclaimed wholesale. Not a
+    /// deletion category — the dir is already listed in `memo_traces`; this
+    /// only tells `clean_database` which now-dead rows to drop.
+    dead_workspace_rows: Vec<String>,
 }
 
 impl GcPlan {
@@ -221,6 +226,13 @@ impl GcPlan {
                 [&candidate.id],
             );
         }
+        // A memo-trace scope reclaimed for a vanished checkout (branch (a) of
+        // `plan_memo_traces`) leaves the same dead `workspaces` row behind
+        // unless it also had a `named/<scope>` orphan above. Drop it here too.
+        // Idempotent with the loop above when both dirs existed.
+        for id in &self.dead_workspace_rows {
+            let _ = conn.execute("DELETE FROM workspaces WHERE id = ?1", [id]);
+        }
         let _ = conn.execute(
             "DELETE FROM declared_caches WHERE last_declared_at < ?1",
             [self.cutoff],
@@ -330,24 +342,61 @@ fn plan_at(root: &Path, cutoff: i64) -> Result<GcPlan> {
 fn plan_memo_traces(root: &Path, db: &Database, cutoff: i64, plan: &mut GcPlan) {
     let traces = root.join("memo-traces");
     for (scope, scope_path) in crate::cache::read_sharded_scopes(&traces) {
-        if db
-            .workspaces
-            .get(&scope)
-            .is_some_and(|workspace| !Path::new(workspace).exists())
-        {
+        let row = db.workspaces.get(&scope);
+
+        // (a) A registered workspace whose checkout is gone: reclaim the whole
+        //     scope independent of age, and delete its dead `workspaces` row.
+        if row.is_some_and(|workspace| !Path::new(workspace).exists()) {
             plan.memo_traces.push(Candidate {
                 id: format!("memo-traces/{scope}"),
                 last_used_at: 0,
                 size_bytes: crate::usage::dir_size_bytes(&scope_path).unwrap_or(0),
                 path: scope_path,
             });
+            plan.dead_workspace_rows.push(scope);
             continue;
         }
-        let Ok(records) = std::fs::read_dir(&scope_path) else {
+
+        // Collect the record files in the scope with their mtime and size.
+        // A `.`-prefixed temp sibling from an interrupted write is not a
+        // record — skip it here and in the per-record pass below.
+        let Ok(entries) = std::fs::read_dir(&scope_path) else {
             continue;
         };
-        let records: Vec<_> = records.flatten().collect();
-        if records.is_empty() {
+        let mut files: Vec<(PathBuf, i64, u64)> = Vec::new();
+        for entry in entries.flatten() {
+            if is_temp_name(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_file() {
+                let len = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+                let mtime = mtime_unix(&path);
+                files.push((path, mtime, len));
+            }
+        }
+
+        // (c') An unregistered scope (a scratch, sandbox or one-off root, never
+        //      written to `workspaces`) that is empty, or whose newest record
+        //      is older than the cutoff: reclaim the whole directory, so a
+        //      stray file or subdirectory cannot keep it. A scope touched
+        //      within `max_age` keeps `newest >= cutoff` and goes to the
+        //      per-record pass, the grace window every other category uses.
+        if row.is_none() {
+            let newest = files.iter().map(|(_, mtime, _)| *mtime).max();
+            if newest.is_none_or(|mtime| mtime < cutoff) {
+                plan.memo_traces.push(Candidate {
+                    id: format!("memo-traces/{scope} (unregistered)"),
+                    last_used_at: newest.unwrap_or(0),
+                    size_bytes: crate::usage::dir_size_bytes(&scope_path).unwrap_or(0),
+                    path: scope_path,
+                });
+                continue;
+            }
+        }
+
+        // (b) A registered, still-live scope that has drained to nothing.
+        if files.is_empty() {
             plan.memo_traces.push(Candidate {
                 id: format!("memo-traces/{scope} (empty)"),
                 path: scope_path,
@@ -356,24 +405,21 @@ fn plan_memo_traces(root: &Path, db: &Database, cutoff: i64, plan: &mut GcPlan) 
             });
             continue;
         }
-        for record in records {
-            let path = record.path();
-            if path.is_file() {
-                let last_used_at = mtime_unix(&path);
-                if last_used_at < cutoff {
-                    plan.memo_traces.push(Candidate {
-                        id: format!(
-                            "memo-traces/{scope}/{}",
-                            record.file_name().to_string_lossy()
-                        ),
-                        path,
-                        last_used_at,
-                        size_bytes: record
-                            .metadata()
-                            .map(|metadata| metadata.len())
-                            .unwrap_or(0),
-                    });
-                }
+
+        // (c) Per-record aging for a live-checkout scope, or an unregistered
+        //     one that is still fresh overall.
+        for (path, last_used_at, size_bytes) in files {
+            if last_used_at < cutoff {
+                let id = format!(
+                    "memo-traces/{scope}/{}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                );
+                plan.memo_traces.push(Candidate {
+                    id,
+                    path,
+                    last_used_at,
+                    size_bytes,
+                });
             }
         }
     }
@@ -1204,6 +1250,95 @@ mod tests {
         plan.execute();
         assert!(!f.root.join("named/deadbeef").exists());
         assert!(!f.root.join("memo-traces/deadbeef").exists());
+        let rows: i64 = f
+            .conn
+            .query_row("SELECT COUNT(*) FROM workspaces", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    /// A scratch / sandbox / one-off workspace root is never written to the
+    /// `workspaces` table, so gc used only to age the individual records
+    /// inside its scope dir and never the dir itself. Now a stale unregistered
+    /// scope goes wholesale, in one candidate. Reverting the new branch makes
+    /// this fail two ways: two per-record candidates, and a file path instead
+    /// of the scope dir.
+    #[test]
+    fn unregistered_memo_scope_reclaimed_wholesale_when_stale() {
+        let f = Fixture::flat_layout();
+        let scope = f.root.join("memo-traces").join("c".repeat(64));
+        std::fs::create_dir_all(&scope).unwrap();
+        std::fs::write(scope.join("rec-a.json"), b"trace").unwrap();
+        std::fs::write(scope.join("rec-b.json"), b"trace").unwrap();
+
+        let plan = plan_at(&f.root, i64::MAX).unwrap();
+        assert_eq!(plan.memo_traces.len(), 1);
+        assert!(plan.memo_traces[0].id.ends_with("(unregistered)"));
+        assert_eq!(plan.memo_traces[0].path, scope);
+
+        let outcome = plan.execute();
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        assert!(!scope.exists());
+    }
+
+    /// The record-level mtime cutoff still protects a fresh unregistered
+    /// scope: a freshness-blind "no row means reclaim" rule would fail this.
+    /// The full-revert direction is covered by
+    /// `unregistered_memo_scope_reclaimed_wholesale_when_stale`.
+    #[test]
+    fn fresh_unregistered_memo_scope_survives() {
+        let f = Fixture::flat_layout();
+        let scope = f.root.join("memo-traces").join("d".repeat(64));
+        std::fs::create_dir_all(&scope).unwrap();
+        std::fs::write(scope.join("fresh.json"), b"trace").unwrap();
+
+        assert!(
+            plan_at(&f.root, 0).unwrap().memo_traces.is_empty(),
+            "fresh unregistered scope must not be reclaimed"
+        );
+        assert!(f.plan().memo_traces.is_empty());
+    }
+
+    /// An unregistered scope drained to nothing (or holding only a stray
+    /// non-record file) is reclaimed regardless of cutoff, and labelled as the
+    /// unregistered rule's, not branch (b)'s `(empty)`.
+    #[test]
+    fn empty_unregistered_memo_scope_reclaimed() {
+        let f = Fixture::flat_layout();
+        let scope = f.root.join("memo-traces").join("e".repeat(64));
+        std::fs::create_dir_all(&scope).unwrap();
+
+        let plan = plan_at(&f.root, 0).unwrap();
+        assert_eq!(plan.memo_traces.len(), 1);
+        assert!(plan.memo_traces[0].id.ends_with("(unregistered)"));
+
+        plan.execute();
+        assert!(!scope.exists());
+    }
+
+    /// Reclaiming a memo-trace scope for a vanished checkout also drops the
+    /// dead `workspaces` row, even when the workspace has no `named/` scope to
+    /// carry that cleanup. Reverting the `clean_database` addition leaves the
+    /// row behind.
+    #[test]
+    fn reclaiming_a_dead_workspace_memo_scope_deletes_its_row() {
+        let f = Fixture::flat_layout();
+        let scope_id = "f".repeat(64);
+        let scope = f.root.join("memo-traces").join(&scope_id);
+        std::fs::create_dir_all(&scope).unwrap();
+        std::fs::write(scope.join("record.json"), b"trace").unwrap();
+        f.conn
+            .execute(
+                "INSERT INTO workspaces VALUES (?1, '/nonexistent/checkout', ?2)",
+                rusqlite::params![scope_id, OLD],
+            )
+            .unwrap();
+
+        let plan = f.plan();
+        assert_eq!(plan.memo_traces.len(), 1);
+        plan.execute();
+
+        assert!(!scope.exists());
         let rows: i64 = f
             .conn
             .query_row("SELECT COUNT(*) FROM workspaces", [], |row| row.get(0))
