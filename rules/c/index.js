@@ -328,8 +328,6 @@ function ccTask(spec, isLibrary) {
 			srcs,
 			hdrs,
 			...generatedInputs,
-			mkdir: nativeTool("mkdir"),
-			dirname: nativeTool("dirname"),
 			cp: nativeTool("cp"),
 			optMode: semantic.mode("opt"),
 			...spec.toolchain.taskInputs(),
@@ -396,11 +394,13 @@ function ccTask(spec, isLibrary) {
 						copts: spec.copts,
 						isShared,
 					});
-					const script = `set -e; mkdir -p "$(dirname ${shellQuote(objPath)})"; ${commandTokens.join(" ")}`;
+					// The executor pre-creates the parent of every declared
+					// file output, so this script does not mkdir objPath's dir.
+					const script = `set -e; ${commandTokens.join(" ")}`;
 					return exec.action({
 						argv: ["sh", "-c", script, "cc-compile"],
 						env,
-						tools: [input.mkdir, input.dirname, ...extraTools],
+						tools: [...extraTools],
 						inputs: [
 							input.srcs,
 							input.hdrs,
@@ -450,12 +450,13 @@ function ccTask(spec, isLibrary) {
 					? "archive"
 					: "link";
 			const rspPath = `build/c/${spec.outputSlug}.rsp`;
-			const mkdirCmd = `mkdir -p "$(dirname ${shellQuote(outPath)})"`;
 			// The bundle's other half: every transitive shared library is
 			// copied next to the executable, under the basename its DT_NEEDED
 			// entry already names (sonameArgs() in //rules/c/toolchain is what
-			// makes that basename bare). mkdirCmd above has already created
-			// the bundle directory — it is the linked executable's own parent.
+			// makes that basename bare). The executor pre-creates the declared
+			// directory output (bundleDir) before this action runs — it is the
+			// linked executable's own parent — so copyCmd writes straight into
+			// it with no mkdir.
 			//
 			// These paths go into the script text rather than the response
 			// file: the list scales with a target's shared dependencies, not
@@ -477,7 +478,7 @@ function ccTask(spec, isLibrary) {
 							`cc-${actionKind}`,
 							rspPath,
 							objectSandboxPaths.map(rspQuote).join(" "),
-							`${mkdirCmd}; ${archiveCommand({ outPath, rspPath }).join(" ")}`,
+							`${archiveCommand({ outPath, rspPath }).join(" ")}`,
 						)
 					: (() => {
 							// Object/archive paths and linkopts all go through the
@@ -500,13 +501,13 @@ function ccTask(spec, isLibrary) {
 								`cc-${actionKind}`,
 								rspPath,
 								content,
-								`${mkdirCmd}; ${linkCommand({ outPath, isCxx: needsCxx, isShared, bundled, rspPath }).join(" ")}${copyCmd}`,
+								`${linkCommand({ outPath, isCxx: needsCxx, isShared, bundled, rspPath }).join(" ")}${copyCmd}`,
 							);
 						})();
 			const result = await exec.action({
 				argv: finalArgv,
 				env,
-				tools: [input.mkdir, input.dirname, input.cp, ...extraTools],
+				tools: [input.cp, ...extraTools],
 				inputs: compileResults.map((r) => r.outputs.object),
 				outputs: {
 					artifact: bundled
