@@ -34,8 +34,8 @@ those defaults and can override them for one target.
 
 ### Select a workspace lockfile
 
-Each managed C toolchain (Zig, GCC, CMake, mold) ships a lockfile pinning the
-download URL, size, and SHA-256 of every release artifact it knows. To pin a
+Each managed C toolchain (Zig, GCC, CMake, mold, NASM) ships a lockfile pinning
+the download URL, size, and SHA-256 of every release artifact it knows. To pin a
 version the shipped lockfile does not know, give the toolchain the address of
 a lockfile this workspace owns; the shipped lockfile stays the default.
 
@@ -62,6 +62,23 @@ the acquire fail and points at `imp goal gen-lockfiles`. `gccToolchain` also
 takes an os-keyed map (`lockfile: { linux: "//locks/gcc.lock", windows:
 "//locks/gcc-windows.lock" }`) to pin each platform, matching its `version`
 argument.
+
+NASM is the assembler an MSVC-driven `cmakeProject()` uses for projects that
+`enable_language(ASM_NASM)` (e.g. BoringSSL). Declare `nasmToolchain` from
+`//rules/c/msvc` in `imp.workspace.js`; `msvcToolchain()` picks up the default.
+
+```js
+import { nasmToolchain } from "//rules/c/msvc";
+
+export const nasm = nasmToolchain("3.02", {
+	default: true,
+	lockfile: "//locks/nasm.lock",
+});
+```
+
+```sh
+imp goal gen-lockfiles //:nasm
+```
 
 ## Declare raw targets
 

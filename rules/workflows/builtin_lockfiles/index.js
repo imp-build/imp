@@ -19,6 +19,7 @@ import {
 import "//rules/c/cmake";
 import "//rules/c/gcc";
 import "//rules/c/mold";
+import "//rules/c/msvc";
 import "//rules/c/zig";
 import "//rules/js/biome/toolchain";
 import "//rules/js/node/toolchain";

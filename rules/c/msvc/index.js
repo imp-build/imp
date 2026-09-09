@@ -23,9 +23,31 @@
 // both problems at once: no ABI mixing, no COMDAT rejection, Odin's plain
 // default linker just works.
 
-import { cacheGet, cacheHas, cachePut, namedCache, output, task } from "imp:core";
-import { resolveToolLockfile } from "//rules/imp/lockfile";
+import {
+	Toolchain,
+	cacheGet,
+	cacheHas,
+	cachePut,
+	namedCache,
+	output,
+	platformInfo,
+	task,
+	tool as graphTool,
+	toolName,
+} from "imp:core";
+import { nativeTool } from "//rules/imp/native-tool";
+import {
+	downloadToolArtifact,
+	lockfileAddressToPath,
+	lockfileFor,
+} from "//rules/imp/lockfile";
+import { toolchainBin } from "//rules/imp/toolchain";
 import { shellQuote } from "//rules/c/toolchain";
+import {
+	GEN_LOCKFILES,
+	graphGenerateToolLockfile,
+	registerToolchainLockfile,
+} from "//rules/workflows/lockfiles";
 
 // The VS Installer always places vswhere.exe here, regardless of which VS
 // edition/version it goes on to manage — the one fixed, well-known location
@@ -54,7 +76,51 @@ const NASM_CACHE = "msvc-nasm";
 const NASM_KEY = "default";
 const NASM_VERSION = "3.02";
 const NASM_PLATFORM = { os: "windows", arch: "x86_64" };
-const NASM_LOCKFILE = "//rules/c/msvc/nasm.lock";
+const DEFAULT_LOCKFILE = "//rules/c/msvc/nasm.lock";
+
+// Declared tool identity for the "nasm-toolchain" kind's TOOLCHAIN product
+// (imp @nasm dispatch). Distinct from NASM_TOOL_NAMES below, which is the set
+// of bare names a replayed ninja edge can name nasm as.
+export const NASM_TOOL = toolName("nasm");
+
+// NASM publishes one Windows x86_64 build per release.
+const NASM_SUPPORTED_PLATFORMS = [{ os: "windows", arch: "x86_64" }];
+
+/**
+ * Return the platforms NASM publishes release archives for.
+ *
+ * @returns {Array<{ os: string, arch: string }>}
+ */
+export function nasmSupportedPlatforms() {
+	return NASM_SUPPORTED_PLATFORMS.map((plat) => ({ ...plat }));
+}
+
+/**
+ * Return the NASM release archive filename for a version and platform.
+ *
+ * @param {string} version
+ * @param {{ os: string, arch: string }} plat
+ * @returns {string}
+ */
+export function nasmArtifactName(version, plat) {
+	if (plat.os !== "windows" || plat.arch !== "x86_64") {
+		throw new Error(
+			`unsupported NASM platform: ${plat.os}/${plat.arch} (windows/x86_64 only)`,
+		);
+	}
+	return `nasm-${version}-win64.zip`;
+}
+
+/**
+ * Return the NASM release download URL for a version and platform.
+ *
+ * @param {string} version
+ * @param {{ os: string, arch: string }} plat
+ * @returns {string}
+ */
+export function nasmDownloadUrl(version, plat) {
+	return `https://www.nasm.us/pub/nasm/releasebuilds/${version}/win64/${nasmArtifactName(version, plat)}`;
+}
 
 // -O2/-DNDEBUG vs -O0/-g's cl.exe equivalent. /Zi (debug) emits a separate
 // .pdb rather than embedding symbols the way -g does, but no caller here
@@ -212,7 +278,15 @@ export function msvcToolchain() {
 	return {
 		kind: "msvc-host-toolchain",
 		version: null,
-		taskInputs: () => ({ msvcHost: msvcHostGraphOutput() }),
+		taskInputs: () => ({
+			msvcHost: msvcHostGraphOutput(),
+			// nasm is Windows-only, and so is this whole toolchain provider —
+			// declaring it off Windows would only accumulate dead graph nodes
+			// for a msvcToolchain() target configured on a Linux CI host.
+			...(platformInfo().os === "windows"
+				? { nasm: nasmGraphToolFor(resolveNasmVersion()) }
+				: {}),
+		}),
 		// ccTask() (rules/c/index.js) now asks the toolchain to build its own
 		// compile/archive/link argv (see msvcToolchainCommands() above)
 		// instead of hardcoding clang/gcc flag syntax around a bare compiler
@@ -222,7 +296,7 @@ export function msvcToolchain() {
 		commands: (exec, input) => msvcToolchainCommands(exec, input),
 		cmakeConfigure: async (exec, input) => {
 			const host = input.msvcHost;
-			const nasmPath = await resolveNasmHost(exec);
+			const nasmPath = resolveNasmHost(exec, input.nasm);
 			return {
 				compilerArgs: msvcCMakeCompilerArgs(host, nasmPath),
 				env: msvcEnv(host),
@@ -316,91 +390,203 @@ async function discoverMsvcHost(exec) {
 	return host;
 }
 
-/**
- * Resolve a NASM assembler for BoringSSL's Windows CMake build (see
- * msvcCMakeCompilerArgs()'s own CMAKE_ASM_NASM_COMPILER) — MSVC itself
- * ships no assembler, unlike gcc's WinLibs distribution, which bundles
- * nasm.exe alongside clang/ar/ranlib (see rules/c/gcc's own
- * gccCMakeCompilerArgs()). Downloaded straight from nasm.us, verified
- * against nasm.lock, rather than routed through imp's Toolchain-class/
- * GEN_LOCKFILES machinery the way gcc/zig's own pinned toolchains are:
- * nasm here is an internal implementation detail of the msvc CMake path,
- * not a user-facing toolchain a workspace would ever declare a version
- * of — so this stays a small, self-contained download+extract, resolved
- * entirely inside a task's run() (never at graph-declaration time),
- * matching discoverMsvcHost()'s own dynamic resolution and
- * msvcToolchain()'s "fully inert to construct" design (see this module's
- * own header comment).
- *
- * Unlike discoverMsvcHost()'s own ambient, always-re-verified vswhere
- * lookup, this artifact is an immutable pinned download — the extract
- * action's own inputs (URL, sha256, version) never change, so imp's
- * ordinary action cache (not a manual cacheHas() guard) is what makes a
- * repeat call cheap; the download/extract script itself still runs on
- * every call, just typically as a cache hit.
- *
- * @param {object} exec
- * @returns {Promise<string>} Real, absolute host path to nasm.exe.
- */
-export async function resolveNasmHost(exec) {
-	namedCache({ name: NASM_CACHE, shared: true });
-	const lockEntry = resolveToolLockfile({
-		address: NASM_LOCKFILE,
-		tool: "nasm",
-		version: NASM_VERSION,
-		plat: NASM_PLATFORM,
-	});
-	if (!lockEntry) {
-		throw new Error(
-			`no nasm.lock entry for nasm ${NASM_VERSION} (windows/x86_64) — see //rules/c/msvc/nasm.lock`,
+// NASM is a Group-A workspace-selectable toolchain (see nasmToolchain()),
+// same shape as //rules/c/mold: a real Toolchain class, a declaration-time
+// nasmGraphTool() built on the shared downloadToolArtifact helper, a
+// [GEN_LOCKFILES] root, and a registerToolchainLockfile() spec so
+// `imp goal gen-builtin-lockfiles` regenerates the shipped lock. MSVC ships
+// no assembler of its own, unlike gcc's WinLibs distribution, which bundles
+// nasm.exe (see gccCMakeCompilerArgs()); a msvcToolchain()-driven
+// cmakeProject() that enable_language(ASM_NASM)s (e.g. BoringSSL's
+// hand-optimized Windows assembly) needs one.
+export class NasmToolchain extends Toolchain {
+	static kind = "nasm-toolchain";
+	static tool = NASM_TOOL;
+	constructor({ version, lockfile, unverified }, opts) {
+		super(
+			{
+				kind: NasmToolchain.kind,
+				attrs: { version, lockfile, ...(unverified ? { unverified } : {}) },
+			},
+			opts,
 		);
 	}
-	// No `tools:` mount, bare command names (curl/mkdir/unzip/mv/
-	// sha256sum) resolved off ambient PATH — matches discoverMsvcHost()'s
-	// own bare "sh -c" script above, not gcc's hermetic-tool-mounted
-	// install task: nativeTool() only produces a resolved graph binding
-	// when declared as a task's own static `inputs:` (see e.g. rules/c/
-	// gcc's own install-task comment), which isn't available here — this
-	// runs dynamically inside cmakeConfigure()'s already-executing task,
-	// not at graph-declaration time. Same accepted ambient-host departure
-	// from strict hermeticity this whole module already makes (see its own
-	// header comment) — nasm.us isn't vendored/pinned the way gcc/zig's
-	// own toolchains are, but its own transfer *is* still sha256-verified
-	// against nasm.lock, unlike the vswhere lookup above.
-	//
-	// nasm-<version>-win64.zip wraps its contents (nasm.exe, ndisasm.exe,
-	// LICENSE) in one top-level "nasm-<version>/" directory — stripped the
-	// same way gccGraphToolWindows() strips WinLibs' own wrapping
-	// "mingw64/" directory: unzip has no --strip-components equivalent, so
-	// this downloads and stages into a side directory, then moves its
-	// contents up into the real output.
-	const script =
-		'url=$1; sha=$2; size=$3; out=$4; ' +
-		'mkdir -p "$out" "$out.stage" && ' +
-		'curl -fSL -o "$out.zip" "$url" && ' +
-		'actual=$(wc -c < "$out.zip") && ' +
-		'{ [ "$actual" -eq "$size" ] || { echo "size mismatch for nasm download: expected $size bytes, got $actual" >&2; exit 1; }; } && ' +
-		'printf "%s  %s\\n" "$sha" "$out.zip" | sha256sum -c - && ' +
-		'unzip -q "$out.zip" -d "$out.stage" && ' +
-		'mv "$out.stage"/*/* "$out"/';
-	await exec.action({
-		argv: [
-			"sh",
-			"-c",
-			script,
-			"nasm-install",
-			lockEntry.url,
-			lockEntry.sha256,
-			String(lockEntry.size),
-			"nasm-toolchain",
-		],
-		outputs: {
-			directory: output.directory("nasm-toolchain", {
-				namedCache: { name: NASM_CACHE, key: NASM_KEY },
-			}),
-		},
-		display: `install nasm ${NASM_VERSION}`,
+
+	bin() {
+		return nasmHostBin(this.attrs.version);
+	}
+}
+
+// Built once per declared version, at declaration time: task() refuses to add
+// graph nodes during execution, and resolveNasmHost() (below) resolves nasm
+// while cmakeConfigure()'s task is already running, so it must find a handle
+// here rather than build one. Mirrors //rules/c/mold's own graphToolchains Map.
+let nasmGraphTools = new Map();
+
+export function __resetNasmToolchainStateForTest() {
+	NasmToolchain.clearDefault();
+	nasmGraphTools = new Map();
+}
+
+function resolveNasmVersion(version) {
+	return NasmToolchain.resolveVersion(version) ?? NASM_VERSION;
+}
+
+function nasmGraphToolFor(version) {
+	return nasmGraphTools.get(version) ?? nasmGraphTool(version);
+}
+
+/**
+ * Build the managed NASM assembler as a graph-native tool: the shared
+ * verified download (downloadToolArtifact) plus a wrapper-strip extract task
+ * that publishes nasm.exe into NASM_CACHE. Mirrors moldGraphTool() in
+ * //rules/c/mold.
+ *
+ * @param {string} [version]
+ * @returns {object} Graph tool handle for the installed NASM directory.
+ */
+export function nasmGraphTool(version) {
+	const resolved = resolveNasmVersion(version);
+	// NASM ships a Windows x86_64 build only, and the whole MSVC path is
+	// Windows-only — hardcode the platform so this stays inert and crash-free
+	// when the graph is built on a Linux CI host for a msvcToolchain() target.
+	const plat = NASM_PLATFORM;
+	namedCache({ name: NASM_CACHE, shared: true });
+	const archive = downloadToolArtifact({
+		lockfile: lockfileFor(NasmToolchain, resolved, DEFAULT_LOCKFILE),
+		tool: "nasm",
+		version: resolved,
+		plat,
+		url: nasmDownloadUrl(resolved, plat),
+		output: `nasm-downloads/${resolved}/${nasmArtifactName(resolved, plat)}`,
+		display: `download nasm ${resolved} (windows/x86_64)`,
+		unverified: NasmToolchain.resolveUnverified(resolved),
 	});
+	const mkdir = nativeTool("mkdir");
+	const unzip = nativeTool("unzip");
+	const mv = nativeTool("mv");
+	const sh = nativeTool("sh");
+	const directory = task({
+		display: `install nasm ${resolved} (windows/x86_64)`,
+		inputs: { archive, mkdir, unzip, mv, sh },
+		outputs: { directory: output.artifact() },
+		async run(exec, inputs) {
+			// nasm-<version>-win64.zip wraps its payload (nasm.exe, ndisasm.exe,
+			// LICENSE) in one top-level "nasm-<version>/" directory. unzip has no
+			// --strip-components, so stage into a side directory and move the
+			// contents up — the same strip gccGraphToolWindows() does for
+			// WinLibs' "mingw64/" wrapper. Size and sha256 are already verified
+			// by downloadToolArtifact above.
+			const result = await exec.action({
+				argv: [
+					"sh",
+					"-c",
+					'mkdir -p "$2" "$2.stage" && unzip -q "$1" -d "$2.stage" && mv "$2.stage"/*/* "$2"',
+					"nasm-install",
+					exec.path(inputs.archive),
+					"nasm-toolchain",
+				],
+				tools: [inputs.mkdir, inputs.unzip, inputs.mv, inputs.sh],
+				outputs: {
+					directory: output.directory("nasm-toolchain", {
+						namedCache: { name: NASM_CACHE, key: NASM_KEY },
+					}),
+				},
+			});
+			return { directory: result.outputs.directory };
+		},
+	}).outputs.directory;
+	return graphTool(directory, { binDirs: ["."] });
+}
+
+/**
+ * Declare the NASM assembler toolchain and optionally set it as the default.
+ * A msvcToolchain()-driven cmakeProject() picks up whatever default is
+ * declared — see resolveNasmHost().
+ *
+ * @param {string} [version]
+ * @param {object} [opts]
+ * @param {boolean} [opts.default=false]
+ * @param {boolean} [opts.unverified=false] Allow downloading without a
+ *   matching lockfile entry (warns instead of failing).
+ * @param {string} [opts.lockfile] Address of a workspace-owned lockfile to
+ *   use instead of the shipped one, so the address is stated one time only.
+ * @returns {object} Target handle for this NASM toolchain.
+ * @category configuration
+ */
+export function nasmToolchain(version, opts = {}) {
+	const resolved = version ?? NASM_VERSION;
+	const lockfile = opts.lockfile ?? DEFAULT_LOCKFILE;
+	// Fail on a malformed address at declaration time, not at first acquire.
+	lockfileAddressToPath(lockfile);
+	const toolchain = new NasmToolchain(
+		{ version: resolved, lockfile, unverified: opts.unverified },
+		{ default: opts.default },
+	);
+	toolchain[GEN_LOCKFILES] = graphGenerateToolLockfile({
+		version: resolved,
+		...LOCKFILE_SPEC,
+		lockfile,
+	});
+	nasmGraphTools.set(resolved, nasmGraphTool(resolved));
+	return toolchain;
+}
+
+/**
+ * Lockfile generation root for a NASM toolchain declared elsewhere (e.g. via
+ * a frozen handle), mirroring odinfmtGenLockfiles(). A workspace that
+ * captured the nasmToolchain() handle can use handle[GEN_LOCKFILES] directly
+ * instead.
+ *
+ * @param {string} [version]
+ * @param {object} [opts]
+ * @param {string} [opts.lockfile] Override the address to write.
+ * @returns {object}
+ */
+export function nasmGenLockfiles(version, opts = {}) {
+	const resolved = resolveNasmVersion(version);
+	return {
+		[GEN_LOCKFILES]: graphGenerateToolLockfile({
+			version: resolved,
+			...LOCKFILE_SPEC,
+			lockfile:
+				opts.lockfile ?? lockfileFor(NasmToolchain, resolved, DEFAULT_LOCKFILE),
+		}),
+	};
+}
+
+/**
+ * The real, absolute host path to nasm.exe, installing it if necessary.
+ * Backs NasmToolchain.bin() / `imp @nasm`.
+ *
+ * @param {string} [version]
+ * @returns {Promise<string>}
+ */
+export async function nasmHostBin(version) {
+	const resolved = resolveNasmVersion(version);
+	return toolchainBin(nasmGraphToolFor(resolved), {
+		name: NASM_CACHE,
+		key: NASM_KEY,
+		exe: "nasm.exe",
+	});
+}
+
+/**
+ * Resolve the NASM assembler for a msvcToolchain()-driven cmakeProject().
+ *
+ * Acquisition is declared at graph-declaration time by nasmGraphTool() (the
+ * shared downloadToolArtifact plus a wrapper-strip extract task) and reaches
+ * this helper as the task's already-resolved `nasm` input
+ * (msvcToolchain().taskInputs()). exec.path() is called only to consume() the
+ * binding so the graph scheduler orders the install task first — the same
+ * shape as moldBinDir() in //rules/c/mold.
+ *
+ * @param {object} exec Task's exec.
+ * @param {object} resolvedNasmTool The task's resolved `nasm` input.
+ * @returns {string} Real, absolute host path to nasm.exe.
+ */
+export function resolveNasmHost(exec, resolvedNasmTool) {
+	exec.path(resolvedNasmTool);
 	return `${cacheGet(NASM_CACHE, NASM_KEY)}/nasm.exe`;
 }
 
@@ -559,7 +745,7 @@ const NASM_TOOL_NAMES = new Set(["nasm", "nasm.exe"]);
  * cachePut()-registering the ambient VS root discoverMsvcHost() already
  * found (see this module's own header comment on why: there's nothing to
  * download, the toolchain already exists on the host) — nasm.exe is the
- * one exception, actually downloaded by resolveNasmHost().
+ * one exception, actually downloaded by nasmGraphTool().
  *
  * @param {string} name One of MSVC_GRAPH_TOOL_NAMES.
  * @param {{vsRoot: string, mscVersion: string}} host Already-resolved (and
@@ -573,9 +759,47 @@ export function msvcGraphToolSpec(name, host) {
 	// mount's binDirs is just "." here, unlike gcc's toolchain-root-relative
 	// paths.
 	if (NASM_TOOL_NAMES.has(name)) {
-		return { kind: "tool", name, cache: NASM_CACHE, key: NASM_KEY, binDirs: ["."] };
+		return {
+			kind: "tool",
+			name,
+			cache: NASM_CACHE,
+			key: NASM_KEY,
+			binDirs: ["."],
+		};
 	}
 	return MSVC_SDK_TOOL_NAMES.has(name)
-		? { kind: "tool", name, cache: MSVC_SDK_CACHE, key: MSVC_SDK_KEY, binDirs: ["."] }
-		: { kind: "tool", name, cache: MSVC_HOST_CACHE, key: MSVC_HOST_KEY, binDirs: ["."] };
+		? {
+				kind: "tool",
+				name,
+				cache: MSVC_SDK_CACHE,
+				key: MSVC_SDK_KEY,
+				binDirs: ["."],
+			}
+		: {
+				kind: "tool",
+				name,
+				cache: MSVC_HOST_CACHE,
+				key: MSVC_HOST_KEY,
+				binDirs: ["."],
+			};
+}
+
+const LOCKFILE_SPEC = registerToolchainLockfile(
+	{
+		name: "nasm",
+		platforms: nasmSupportedPlatforms(),
+		downloadUrl: nasmDownloadUrl,
+		artifactName: nasmArtifactName,
+		lockfile: DEFAULT_LOCKFILE,
+	},
+	[NASM_VERSION],
+);
+
+// Importing this rule provisions the pinned default — Windows only: nasm has
+// no other platform, and the whole msvcToolchain()/cmakeConfigure() path is
+// Windows-only, so an eager build must not run on a Linux/macOS workspace
+// import. A workspace can still declare its own nasmToolchain(..., { default:
+// true }) explicitly.
+if (platformInfo().os === "windows") {
+	nasmToolchain(NASM_VERSION, { default: true });
 }

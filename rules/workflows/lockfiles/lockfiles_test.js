@@ -374,6 +374,7 @@ describe("generateBuiltinLockfile", () => {
 			"gcc-windows",
 			"kache",
 			"mold",
+			"nasm",
 			"node-toolchain",
 			"odin",
 			"odinfmt",
