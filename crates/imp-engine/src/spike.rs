@@ -9922,6 +9922,9 @@ export const check = { [BUILD]: expansion.get("child", BUILD) };
         ] {
             let root = tempfile::tempdir().unwrap();
             let p = root.path();
+            if module == "//rules/odin" {
+                copy_tree_sitter_dependency(p);
+            }
             write_file(&p.join(WORKSPACE_FILE), &format!("import {module:?};"));
 
             let live = load_workspace_with_rules(p, RulesSource::directory(repo_rules_dir()))
@@ -10829,6 +10832,27 @@ export const ui = asset({ srcs: ["**/*.png"] });
     /// workspace root has no `rules/` of its own to shadow it with.
     fn repo_rules_dir() -> PathBuf {
         crate::loader::test_rules_dir().expect("locate the repo's rules/ tree")
+    }
+
+    fn copy_tree_sitter_dependency(root: &Path) {
+        let source_root = repo_rules_dir()
+            .parent()
+            .expect("rules/ has a repository parent")
+            .join("crates/imp-treesitter");
+        for entry in WalkDir::new(&source_root) {
+            let entry = entry.expect("walk imp-treesitter dependency");
+            let relative = entry
+                .path()
+                .strip_prefix(&source_root)
+                .expect("dependency path is below its root");
+            let destination = root.join("crates/imp-treesitter").join(relative);
+            if entry.file_type().is_dir() {
+                std::fs::create_dir_all(destination).unwrap();
+            } else {
+                std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                std::fs::copy(entry.path(), destination).unwrap();
+            }
+        }
     }
 
     fn js_string_path(path: &Path) -> String {

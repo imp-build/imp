@@ -713,7 +713,9 @@ export function rulesTest({ root, tools = [] }) {
 		root: relativeRoot,
 		testModules: files({ root: relativeRoot, include: ["*_test.js"] }),
 		rootSources: files({ root: relativeRoot, include: ["**/*"] }),
-		sharedSources: files({ include: ["rules/**/*", "imp.workspace.js"] }),
+		sharedSources: files({
+			include: ["rules/**/*", "crates/imp-treesitter/**/*", "imp.workspace.js"],
+		}),
 		imp: impTool,
 		toolNames,
 		cacheDir: globalThis.__imp_cache_dir,

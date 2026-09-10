@@ -466,6 +466,29 @@ mod tests {
         )
     }
 
+    fn copy_tree_sitter_dependency(root: &Path) {
+        let rules_root =
+            imp_engine::loader::test_rules_dir().expect("locate the repo's rules/ tree");
+        let source_root = rules_root
+            .parent()
+            .expect("rules/ has a repository parent")
+            .join("crates/imp-treesitter");
+        for entry in WalkDir::new(&source_root) {
+            let entry = entry.expect("walk imp-treesitter dependency");
+            let relative = entry
+                .path()
+                .strip_prefix(&source_root)
+                .expect("dependency path is below its root");
+            let destination = root.join("crates/imp-treesitter").join(relative);
+            if entry.file_type().is_dir() {
+                std::fs::create_dir_all(destination).unwrap();
+            } else {
+                std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                std::fs::copy(entry.path(), destination).unwrap();
+            }
+        }
+    }
+
     /// Every group and every feature the built-in catalog offers.
     async fn whole_catalog(rules: &RulesSource, platform: &Platform) -> Vec<String> {
         load_catalog(rules, platform)
@@ -504,6 +527,7 @@ mod tests {
             .await
             .unwrap();
         let root = tempfile::tempdir().unwrap();
+        copy_tree_sitter_dependency(root.path());
         std::fs::write(root.path().join(WORKSPACE_FILE), &source).unwrap();
         std::fs::write(root.path().join("BUILD.js"), "").unwrap();
         let live = imp_engine::runtime::load_workspace(root.path())
@@ -759,6 +783,7 @@ mod tests {
     #[tokio::test]
     async fn fully_generated_workspace_loads_normally() {
         let root = tempfile::tempdir().unwrap();
+        copy_tree_sitter_dependency(root.path());
         let selected = whole_catalog(&repo_rules(), &linux()).await;
         let source = render_workspace(&repo_rules(), &linux(), &selected, &BTreeSet::new())
             .await

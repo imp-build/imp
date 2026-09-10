@@ -11,6 +11,10 @@ name = "treesitter-roundtrip"
 # tests and reports a misleading pass.
 test = false
 
+[[bin]]
+name = "imp-treesitter-parse"
+test = false
+
 [dependencies]
 anyhow.workspace = true
 tree-sitter.workspace = true

@@ -24,10 +24,12 @@ import {
 	targetRef,
 	platformInfo,
 } from "imp:core";
+import { odinGrammarFixture, odinAnalyzer } from "//crates/imp-treesitter";
 // Side-effect import: registers the shared `opt` (debug/release) mode axis
 // so `--axis opt=...`/`--profile ...` works for Odin targets even in a
 // workspace that doesn't import //rules/imp/mode itself.
 import "//rules/imp/mode";
+
 /**
  * Declarative workspace configuration schema for Odin.
  *
@@ -82,7 +84,6 @@ import {
 import { moldOdinLinkerEnv } from "//rules/c/mold";
 import { shellQuote } from "//rules/c/toolchain";
 import { nativeTool } from "//rules/imp/native-tool";
-
 import { ODIN_TOOL } from "//rules/odin/toolchain";
 
 export {
@@ -349,6 +350,49 @@ function scan_odin_source(content) {
 		hasMainEntrypoint,
 	});
 }
+
+function decode_odin_import_string(text) {
+	if (text.length < 2) return null;
+	const quote = text[0];
+	if ((quote !== '"' && quote !== "`") || text[text.length - 1] !== quote)
+		return null;
+	if (quote === "`") return text.slice(1, -1);
+	try {
+		return JSON.parse(text);
+	} catch (_) {
+		return null;
+	}
+}
+
+function odin_source_analysis_task() {
+	const sources = files({
+		root: ".",
+		include: ["**/*.odin"],
+		exclude: ["build/**"],
+	});
+	return task({
+		display: "tree-sitter analyze Odin sources",
+		inputs: {
+			sources,
+			grammar: odinGrammarFixture.outputs.archive,
+			analyzer: odinAnalyzer[BUILD]["imp-treesitter-parse"],
+		},
+		outputs: { index: output.value() },
+		async run(exec, input) {
+			const result = await exec.action({
+				argv: [
+					exec.path(input.analyzer),
+					exec.path(input.grammar),
+					...exec.paths(input.sources),
+				],
+				inputs: [input.analyzer, input.grammar, input.sources],
+			});
+			return { index: JSON.parse(result.stdout) };
+		},
+	});
+}
+
+const odinSourceAnalysis = odin_source_analysis_task();
 
 function workspace_join(base, path) {
 	const parts = [];
@@ -726,8 +770,34 @@ function graphPackageSpec(spec) {
 	};
 }
 
-function graphAnalysis(spec) {
-	return analysis_for_package(graphPackageSpec(spec));
+function graphAnalysis(spec, index, sourceFiles) {
+	const filesByPath = index?.files || {};
+	const imports = new Set();
+	let hasMainEntrypoint = false;
+	for (const path of sourceFiles) {
+		const file = filesByPath[path];
+		if (!file) continue;
+		for (const imp of file.imports) imports.add(imp);
+		hasMainEntrypoint = hasMainEntrypoint || file.hasMainEntrypoint;
+	}
+	const packagePath = infer_package_path(graphPackageSpec(spec), sourceFiles);
+	const collections = Array.from(
+		new Set(
+			Array.from(imports)
+				.map((imp) => {
+					const index = imp.indexOf(":");
+					return index > 0 ? imp.slice(0, index) : null;
+				})
+				.filter(Boolean),
+		),
+	).sort();
+	return new OdinPackageAnalysis({
+		sourceFiles,
+		packagePath,
+		imports: Array.from(imports).sort(),
+		collections,
+		hasMainEntrypoint,
+	});
 }
 
 // Default exclusions for an ordinary (non-test) Odin package, whether it was
@@ -788,7 +858,7 @@ function graphResolveImport(imp, fromPath, collections) {
 // exec.action() — and thus a generated source's own producing action — has
 // run. Any import a generated file needs must be satisfied by the consuming
 // package's own deps/collections, same as any other source.
-function graphSourceClosure(spec, analysis, config) {
+function graphSourceClosure(spec, analysis, config, analysisIndex) {
 	const collections = graphCollectionMap(spec, config);
 	const declared = graphDeclaredPackageIndex();
 	const handles = [];
@@ -817,7 +887,11 @@ function graphSourceClosure(spec, analysis, config) {
 	const enqueueDeclared = (candidate) => {
 		if (visitedKeys.has(candidate.key)) return;
 		visitedKeys.add(candidate.key);
-		const candidateAnalysis = graphAnalysis(candidate);
+		const candidateAnalysis = graphAnalysis(
+			candidate,
+			analysisIndex,
+			paths(candidate.sources),
+		);
 		visited.add(normalize_workspace_path(candidate.path || "."));
 		visited.add(normalize_workspace_path(candidateAnalysis.packagePath));
 		handles.push(candidate.sources);
@@ -852,19 +926,25 @@ function graphSourceClosure(spec, analysis, config) {
 			if (visited.has(path)) continue;
 			visited.add(path);
 
-			let vendored = null;
-			try {
-				vendored = analysis_for_package({
-					address: `//${path}`,
-					path,
-					srcs: ["*.odin"],
-					exclude: DEFAULT_PACKAGE_EXCLUDE,
-				});
-			} catch (_) {
-				// glob() rejects a root that is not a directory at all; that is
-				// the same declaration error as an empty one, reported below
-				// with the import that asked for it.
-			}
+			const vendoredSpec = {
+				address: `//${path}`,
+				path,
+				srcs: ["*.odin"],
+				exclude: DEFAULT_PACKAGE_EXCLUDE,
+			};
+			const vendoredFiles = Object.keys(analysisIndex.files || {})
+				.filter((file) => file.startsWith(`${path}/`))
+				.filter((file) => file.slice(path.length + 1).indexOf("/") < 0)
+				.filter(
+					(file) =>
+						!file.endsWith("_test.odin") &&
+						!file.split("/").pop().startsWith("test_"),
+				);
+			const vendored = graphAnalysis(
+				vendoredSpec,
+				analysisIndex,
+				vendoredFiles,
+			);
 			if (vendored === null || vendored.sourceFiles.length === 0) {
 				throw new Error(
 					`Odin package '${entry.owner}' imports '${imp}', which resolves to '${path}', ` +
@@ -1025,14 +1105,24 @@ function graphPackageExpansion(spec) {
 	if (spec.expansion) return spec.expansion;
 	spec.expansion = expand({
 		display: `expand Odin package ${spec.path}`,
-		inputs: { sources: spec.sources, config: semantic.config("odin") },
+		inputs: {
+			sources: spec.sources,
+			analysis: odinSourceAnalysis.outputs.index,
+			config: semantic.config("odin"),
+		},
 		async create(inputs) {
-			// analysis_for_package deliberately reads the semantic source set while
-			// expansion is running; the expansion is recreated for each invocation,
-			// while the resulting task keys include this analysis JSON.
-			const analysis = graphAnalysis(spec);
+			const analysis = graphAnalysis(
+				spec,
+				inputs.analysis,
+				paths(inputs.sources.fileset),
+			);
 			return {
-				[spec.key]: graphActions(spec, analysis, inputs.config || {}),
+				[spec.key]: graphActions(
+					spec,
+					analysis,
+					inputs.config || {},
+					inputs.analysis,
+				),
 			};
 		},
 	});
@@ -1064,8 +1154,14 @@ function odinUsesLldOnWindowsFor(spec) {
 	return odinUsesLldOnWindows(spec.version || defaultOdinToolchainVersion());
 }
 
-function graphActionInputs(spec, analysis, config, { lint = false } = {}) {
-	const closure = graphSourceClosure(spec, analysis, config);
+function graphActionInputs(
+	spec,
+	analysis,
+	config,
+	analysisIndex,
+	{ lint = false } = {},
+) {
+	const closure = graphSourceClosure(spec, analysis, config, analysisIndex);
 	const { resources, sharedLibs, linkopts } = graphResourceInputs([
 		spec,
 		...closure.packages,
@@ -1258,9 +1354,12 @@ function graphOdinBuild(
 	spec,
 	analysis,
 	config,
+	analysisIndex,
 	{ test = false, lint = false } = {},
 ) {
-	const inputs = graphActionInputs(spec, analysis, config, { lint });
+	const inputs = graphActionInputs(spec, analysis, config, analysisIndex, {
+		lint,
+	});
 	// `odin test` compiles and runs in one step and names its binary after the
 	// package, so there is no artifact to declare and no -out: to pass (below):
 	// its exit code is the whole result, the same shape python's testRoot() and
@@ -1490,8 +1589,8 @@ function graphOdinBuild(
 // The workspace-built shared libraries this package's own dep closure
 // contributed — the subset of graphResourceInputs()' resources that must also
 // travel beside the executable at run time (see graphOdinBundle() below).
-function graphSharedLibs(spec, analysis, config) {
-	const closure = graphSourceClosure(spec, analysis, config);
+function graphSharedLibs(spec, analysis, config, analysisIndex) {
+	const closure = graphSourceClosure(spec, analysis, config, analysisIndex);
 	return graphResourceInputs([spec, ...closure.packages]).sharedLibs;
 }
 
@@ -1524,9 +1623,16 @@ function graphSharedLibs(spec, analysis, config) {
 // Two dependencies whose libraries share a basename overwrite each other here.
 // That is the same collision the loader hits at run time, because DT_NEEDED
 // carries only the basename, so a copy step cannot decide it.
-function graphOdinBundle(spec, analysis, config, build, exeName) {
+function graphOdinBundle(
+	spec,
+	analysis,
+	config,
+	analysisIndex,
+	build,
+	exeName,
+) {
 	if (!analysis.hasMainEntrypoint) return null;
-	const sharedLibs = graphSharedLibs(spec, analysis, config);
+	const sharedLibs = graphSharedLibs(spec, analysis, config, analysisIndex);
 	if (sharedLibs.length === 0) return null;
 	const bundleDir = `build/odin/${addressSlug(spec.path)}.d`;
 	return {
@@ -1597,7 +1703,7 @@ function graphOdinRunDescriptor(spec, analysis, bundle) {
 	});
 }
 
-function graphActions(spec, analysis, config) {
+function graphActions(spec, analysis, config, analysisIndex) {
 	if (analysis.sourceFiles.length === 0) {
 		throw new Error(
 			empty_package_error({ attrs: {}, __id: spec.key }, spec.path, {
@@ -1605,22 +1711,30 @@ function graphActions(spec, analysis, config) {
 			}),
 		);
 	}
-	const build = graphOdinBuild(spec, analysis, config);
+	const build = graphOdinBuild(spec, analysis, config, analysisIndex);
 	// A binary whose dep closure contributed a workspace-built shared library
 	// gets a directory product that carries the library beside it; everything
 	// else keeps the single-file product (see graphOdinBundle()).
-	const bundle = graphOdinBundle(spec, analysis, config, build, odinExeName());
+	const bundle = graphOdinBundle(
+		spec,
+		analysis,
+		config,
+		analysisIndex,
+		build,
+		odinExeName(),
+	);
 	const product = bundle
 		? bundle.task.outputs.artifact
 		: build.outputs.artifact;
 	const actions = {
 		[BUILD]: product,
-		[LINT]: graphOdinBuild(spec, analysis, config, { lint: true }).outputs
-			.result,
+		[LINT]: graphOdinBuild(spec, analysis, config, analysisIndex, {
+			lint: true,
+		}).outputs.result,
 		[PACKAGE]: product,
 	};
 	if (spec.test) {
-		actions[TEST] = graphOdinBuild(spec, analysis, config, {
+		actions[TEST] = graphOdinBuild(spec, analysis, config, analysisIndex, {
 			test: true,
 		}).outputs.units;
 	} else if (analysis.hasMainEntrypoint) {
@@ -1729,7 +1843,7 @@ function createGraphPackage({
 	for (const hook of graphPackageHooks)
 		Object.assign(
 			value,
-			hook(Object.freeze({ ...value }), () => graphAnalysis(spec)),
+			hook(Object.freeze({ ...value }), () => odinSourceAnalysis.outputs.index),
 		);
 	return Object.freeze(value);
 }
