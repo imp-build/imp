@@ -47,7 +47,7 @@ import { FMT } from "//rules/workflows/fmt";
 import { LINT } from "//rules/workflows/lint";
 import { PACKAGE } from "//rules/workflows/package";
 import { TEST } from "//rules/workflows/test";
-import { file, files, output, packagePath, platformInfo, task } from "imp:core";
+import { file, output, packagePath, platformInfo, task } from "imp:core";
 import {
 	defaultRustToolchain,
 	rustGraphToolEnv,
@@ -69,6 +69,10 @@ import {
 	cargoStandaloneExpansion,
 	cargoWorkspaceExpansion,
 } from "//rules/rust/workspace_expansion";
+import {
+	cargoManifestSources,
+	cargoTaskInputs,
+} from "//rules/rust/cargo_task_inputs";
 
 // Registers the direct "generate-build" callback (declaring cargoPackage()
 // declarations for unowned Cargo.toml files) for the same reason.
@@ -264,14 +268,6 @@ function normalizeWorkspacePath(path) {
 	return parts.length === 0 ? "." : parts.join("/");
 }
 
-function manifestSources(root) {
-	return files({
-		root,
-		include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
-		exclude: ["target/**"],
-	});
-}
-
 function outputSlugFor(path) {
 	return path === "." ? "root" : path.replace(/\//g, "_");
 }
@@ -304,10 +300,6 @@ function resolveToolchain(toolchain) {
 		);
 	}
 	return { graph: rustGraphToolchain(legacy.attrs.version), legacy };
-}
-
-function extraInputs(deps) {
-	return (deps || []).filter((dep) => dep && dep.__imp_graph_handle === true);
 }
 
 function kacheActiveFor(legacyToolchainHandle) {
@@ -373,9 +365,10 @@ export async function toolEnvAndTools(exec, input, spec) {
 // resolve a no-op task.
 function crateBuildTask(spec) {
 	const manifest = file(`${spec.path}/Cargo.toml`);
+	const packageInputs = cargoTaskInputs({ deps: spec.deps });
 	const manifests = spec.workspaceMember
-		? manifestSources(".")
-		: manifestSources(spec.path);
+		? cargoManifestSources(".")
+		: cargoManifestSources(spec.path);
 	const bins = spec.bin;
 	const profile = spec.release ? "release" : "debug";
 	const buildDir = `build/rust/${spec.outputSlug}`;
@@ -388,7 +381,7 @@ function crateBuildTask(spec) {
 			rustupHomeTool: spec.toolchain.tool,
 			cargoHomeTool: spec.toolchain.cargoHomeTool,
 			...linkerToolInputs(linkerHandlesForSpec(spec)),
-			...Object.fromEntries(spec.deps.map((d, i) => [`dep${i}`, d])),
+			...packageInputs.bindings("compile"),
 		},
 		outputs: Object.fromEntries(bins.map((name) => [name, output.artifact()])),
 		async run(exec, input) {
@@ -417,7 +410,7 @@ function crateBuildTask(spec) {
 				// the scheduler's clamp exactly, and being on the command line
 				// it also wins over any CARGO_BUILD_JOBS in the environment.
 				cores: RUST_CORES,
-				inputs: [input.manifests, ...spec.deps.map((_, i) => input[`dep${i}`])],
+				inputs: [input.manifests, ...packageInputs.resolved(input, "compile")],
 				outputs: Object.fromEntries(
 					bins.map((name) => [
 						name,
@@ -456,8 +449,10 @@ function crateSpec(opts) {
 		cargoArgs: [...cargoArgs],
 		testArgs: [...testArgs],
 		testTools: [...testTools],
-		deps: extraInputs(deps),
-		testDeps: extraInputs(testDeps),
+		deps: (deps || []).filter((dep) => dep && dep.__imp_graph_handle === true),
+		testDeps: (testDeps || []).filter(
+			(dep) => dep && dep.__imp_graph_handle === true,
+		),
 		workspaceMember,
 		outputSlug: outputSlugFor(normalizedPath),
 	};

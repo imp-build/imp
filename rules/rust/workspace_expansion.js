@@ -16,7 +16,6 @@ import {
 	configuration,
 	digestOf,
 	expand,
-	files,
 	goalError,
 	output,
 	semantic,
@@ -28,6 +27,10 @@ import {
 	linkerToolInputs,
 	toolEnvAndTools,
 } from "//rules/rust";
+import {
+	cargoManifestSources,
+	cargoTaskInputs,
+} from "//rules/rust/cargo_task_inputs";
 
 import { nativeTool } from "//rules/imp/native-tool";
 
@@ -72,17 +75,6 @@ function toolchainInputs(toolchainSpec) {
 		cargoHomeTool: toolchainSpec.toolchain.cargoHomeTool,
 		...linkerToolInputs(linkerHandlesForSpec(toolchainSpec)),
 	};
-}
-
-// Extra graph-native input handles (cargoPackage({deps})/{testDeps}) keyed
-// for a task()'s own `inputs:` map, and the matching resolved-binding list
-// for exec.action()'s `inputs:` array.
-function extraInputs(prefix, deps) {
-	return Object.fromEntries(deps.map((d, i) => [`${prefix}${i}`, d]));
-}
-
-function resolvedExtraInputs(prefix, input, deps) {
-	return deps.map((_, i) => input[`${prefix}${i}`]);
 }
 
 // The workspace-wide `rustConfig.doctest` default (see
@@ -238,14 +230,6 @@ function manifestDirRelativeTo(manifestPath, workspaceRoot) {
 	return index < 0 ? "." : rel.slice(0, index);
 }
 
-function manifestSources(root) {
-	return files({
-		root,
-		include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
-		exclude: ["target/**"],
-	});
-}
-
 // A `cargo test --no-run --target-dir <dir>`'s full target dir also holds
 // every dependency's .rlib/.rmeta, incremental compilation state, and
 // fingerprints — none of which any downstream task ever reads, only the
@@ -354,12 +338,13 @@ function workspaceClippyTask(
 	toolchainSpec,
 	deps,
 ) {
+	const packageInputs = cargoTaskInputs({ deps });
 	return task({
 		display: `cargo clippy --workspace ${workspaceRootRelative}`,
 		inputs: {
 			manifests,
 			...toolchainInputs(toolchainSpec),
-			...extraInputs("dep", deps),
+			...packageInputs.bindings("compile"),
 		},
 		outputs: { report: output.value() },
 		async run(exec, input) {
@@ -382,7 +367,7 @@ function workspaceClippyTask(
 				tools,
 				env: [...env, `RUSTFLAGS=${rustflags}`, CARGO_JOBS_ENV],
 				cores: RUST_CORES,
-				inputs: [input.manifests, ...resolvedExtraInputs("dep", input, deps)],
+				inputs: [input.manifests, ...packageInputs.resolved(input, "compile")],
 				allowFailure: true,
 			});
 			const messages = [];
@@ -464,13 +449,14 @@ function workspaceTestBuildTask(
 	toolchainSpec,
 	deps,
 ) {
+	const packageInputs = cargoTaskInputs({ deps });
 	const buildDir = `build/rust/${workspaceRootRelative === "." ? "root" : workspaceRootRelative}`;
 	return task({
 		display: `cargo test --no-run --workspace ${workspaceRootRelative}`,
 		inputs: {
 			manifests,
 			...toolchainInputs(toolchainSpec),
-			...extraInputs("dep", deps),
+			...packageInputs.bindings("compile"),
 			...curatedTestBuildToolInputs(),
 		},
 		outputs: { binaries: output.artifact(), report: output.value() },
@@ -494,7 +480,7 @@ function workspaceTestBuildTask(
 				tools: [...tools, ...curatedTestBuildTools(input)],
 				env,
 				cores: RUST_CORES,
-				inputs: [input.manifests, ...resolvedExtraInputs("dep", input, deps)],
+				inputs: [input.manifests, ...packageInputs.resolved(input, "compile")],
 				outputs: { binaries: output.directory(`${buildDir}.bins`) },
 			});
 			return {
@@ -515,15 +501,15 @@ function workspaceTestBuildTask(
 // declares its own rules/ tree as `deps`, but its tests read it from disk at
 // runtime, not compile time.
 function crateTestTask(dir, testBuild, testTools, deps, testDeps) {
+	const packageInputs = cargoTaskInputs({ deps, testDeps, testTools });
 	return task({
 		display: `cargo test ${dir}`,
 		inputs: {
 			binaries: testBuild.outputs.binaries,
 			report: testBuild.outputs.report,
 			dir,
-			...extraInputs("dep", deps),
-			...extraInputs("testDep", testDeps),
-			...extraInputs("tool", testTools),
+			...packageInputs.bindings("runtime"),
+			...packageInputs.bindings("tools"),
 		},
 		outputs: { units: output.value() },
 		async run(exec, input) {
@@ -537,9 +523,8 @@ function crateTestTask(dir, testBuild, testTools, deps, testDeps) {
 			);
 			const binariesRoot = exec.path(input.binaries);
 			const prefix = `${input.report.buildDir}/`;
-			const depInputs = resolvedExtraInputs("dep", input, deps);
-			const testDepInputs = resolvedExtraInputs("testDep", input, testDeps);
-			const resolvedTestTools = resolvedExtraInputs("tool", input, testTools);
+			const runtimeInputs = packageInputs.resolved(input, "runtime");
+			const resolvedTestTools = packageInputs.resolved(input, "tools");
 			const units = [];
 			for (const bin of own) {
 				const relative = bin.executable.startsWith(prefix)
@@ -548,7 +533,7 @@ function crateTestTask(dir, testBuild, testTools, deps, testDeps) {
 				const result = await exec.action({
 					argv: [`${binariesRoot}/${relative}`, "--test-threads=1"],
 					tools: resolvedTestTools,
-					inputs: [input.binaries, ...depInputs, ...testDepInputs],
+					inputs: [input.binaries, ...runtimeInputs],
 					allowFailure: true,
 				});
 				const ok = result.exitCode === 0;
@@ -692,15 +677,15 @@ function workspaceDoctestTask(
 	deps,
 	testDeps,
 ) {
+	const packageInputs = cargoTaskInputs({ deps, testDeps, testTools });
 	const buildDir = `build/rust-doctest/${workspaceRootRelative === "." ? "root" : workspaceRootRelative}`;
 	return task({
 		display: `cargo test --doc --workspace ${workspaceRootRelative}`,
 		inputs: {
 			manifests,
 			...toolchainInputs(toolchainSpec),
-			...extraInputs("dep", deps),
-			...extraInputs("testDep", testDeps),
-			...extraInputs("tool", testTools),
+			...packageInputs.bindings("runtime"),
+			...packageInputs.bindings("tools"),
 		},
 		outputs: { stderr: output.value() },
 		async run(exec, input) {
@@ -722,14 +707,10 @@ function workspaceDoctestTask(
 					"--target-dir",
 					buildDir,
 				],
-				tools: [...tools, ...resolvedExtraInputs("tool", input, testTools)],
+				tools: [...tools, ...packageInputs.resolved(input, "tools")],
 				env: [...env, `RUSTFLAGS=${rustflags}`, CARGO_JOBS_ENV],
 				cores: RUST_CORES,
-				inputs: [
-					input.manifests,
-					...resolvedExtraInputs("dep", input, deps),
-					...resolvedExtraInputs("testDep", input, testDeps),
-				],
+				inputs: [input.manifests, ...packageInputs.resolved(input, "runtime")],
 				allowFailure: true,
 			});
 			return { stderr: result.stderr };
@@ -825,7 +806,7 @@ export function cargoWorkspaceExpansion(workspaceRootRelative, toolchainSpec) {
 	const prefix =
 		workspaceRootRelative === "." ? "" : `${workspaceRootRelative}/`;
 	const manifestPath = `${prefix}Cargo.toml`;
-	const manifests = manifestSources(workspaceRootRelative);
+	const manifests = cargoManifestSources(workspaceRootRelative);
 
 	const metadata = metadataTask(
 		`cargo metadata (workspace) ${workspaceRootRelative}`,
@@ -931,7 +912,7 @@ export function cargoWorkspaceExpansion(workspaceRootRelative, toolchainSpec) {
 // precedent of always going through expand().
 export function cargoStandaloneExpansion(path, toolchainSpec) {
 	const manifestPath = `${path}/Cargo.toml`;
-	const manifests = manifestSources(path);
+	const manifests = cargoManifestSources(path);
 
 	const metadata = metadataTask(
 		`cargo metadata ${path}`,
@@ -953,13 +934,16 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 		create() {
 			const deps = depsForDir(path);
 			const testDeps = testDepsForDir(path);
+			const testTools = testToolsForDir(path);
+			const compileInputs = cargoTaskInputs({ deps });
+			const runtimeInputs = cargoTaskInputs({ deps, testDeps, testTools });
 
 			const clippy = task({
 				display: `cargo clippy ${path}`,
 				inputs: {
 					manifests,
 					...toolchainInputs(toolchainSpec),
-					...extraInputs("dep", deps),
+					...compileInputs.bindings("compile"),
 				},
 				outputs: { report: output.value() },
 				async run(exec, input) {
@@ -986,7 +970,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 						cores: RUST_CORES,
 						inputs: [
 							input.manifests,
-							...resolvedExtraInputs("dep", input, deps),
+							...compileInputs.resolved(input, "compile"),
 						],
 						allowFailure: true,
 					});
@@ -1004,7 +988,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 				inputs: {
 					manifests,
 					...toolchainInputs(toolchainSpec),
-					...extraInputs("dep", deps),
+					...compileInputs.bindings("compile"),
 					...curatedTestBuildToolInputs(),
 				},
 				outputs: { binaries: output.artifact(), report: output.value() },
@@ -1030,7 +1014,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 						cores: RUST_CORES,
 						inputs: [
 							input.manifests,
-							...resolvedExtraInputs("dep", input, deps),
+							...compileInputs.resolved(input, "compile"),
 						],
 						outputs: { binaries: output.directory(`${buildDir}.bins`) },
 					});
@@ -1094,9 +1078,8 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 						inputs: {
 							manifests,
 							...toolchainInputs(toolchainSpec),
-							...extraInputs("dep", deps),
-							...extraInputs("testDep", testDeps),
-							...extraInputs("tool", testToolsForDir(path)),
+							...runtimeInputs.bindings("runtime"),
+							...runtimeInputs.bindings("tools"),
 						},
 						outputs: { units: output.value() },
 						async run(exec, input) {
@@ -1114,16 +1097,12 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 									"--manifest-path",
 									manifestPath,
 								],
-								tools: [
-									...tools,
-									...resolvedExtraInputs("tool", input, testToolsForDir(path)),
-								],
+								tools: [...tools, ...runtimeInputs.resolved(input, "tools")],
 								env: [...env, `RUSTFLAGS=${rustflags}`, CARGO_JOBS_ENV],
 								cores: RUST_CORES,
 								inputs: [
 									input.manifests,
-									...resolvedExtraInputs("dep", input, deps),
-									...resolvedExtraInputs("testDep", input, testDeps),
+									...runtimeInputs.resolved(input, "runtime"),
 								],
 								allowFailure: true,
 							});
@@ -1166,9 +1145,8 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 							inputs: {
 								binaries: testBuild.outputs.binaries,
 								report: testBuild.outputs.report,
-								...extraInputs("dep", deps),
-								...extraInputs("testDep", testDeps),
-								...extraInputs("tool", testToolsForDir(path)),
+								...runtimeInputs.bindings("runtime"),
+								...runtimeInputs.bindings("tools"),
 							},
 							outputs: { units: output.value() },
 							async run(exec, input) {
@@ -1178,16 +1156,10 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 								);
 								const binariesRoot = exec.path(input.binaries);
 								const prefix = `${input.report.buildDir}/`;
-								const depInputs = resolvedExtraInputs("dep", input, deps);
-								const testDepInputs = resolvedExtraInputs(
-									"testDep",
+								const testInputs = runtimeInputs.resolved(input, "runtime");
+								const resolvedTestTools = runtimeInputs.resolved(
 									input,
-									testDeps,
-								);
-								const resolvedTestTools = resolvedExtraInputs(
-									"tool",
-									input,
-									testToolsForDir(path),
+									"tools",
 								);
 								const units = [];
 								for (const bin of binaries) {
@@ -1197,7 +1169,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec) {
 									const result = await exec.action({
 										argv: [`${binariesRoot}/${relative}`, "--test-threads=1"],
 										tools: resolvedTestTools,
-										inputs: [input.binaries, ...depInputs, ...testDepInputs],
+										inputs: [input.binaries, ...testInputs],
 										allowFailure: true,
 									});
 									const ok = result.exitCode === 0;
