@@ -11,3 +11,4 @@ mod tests;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const BUILD_FINGERPRINT: &str = env!("IMP_DAEMON_BUILD_FINGERPRINT");

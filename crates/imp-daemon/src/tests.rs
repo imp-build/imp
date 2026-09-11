@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::{Mutex, MutexGuard, Once, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -20,7 +21,7 @@ use tokio::sync::Notify;
 use tonic::transport::Channel;
 use tonic::Request;
 
-use crate::client::{ensure_protocol_match, RemoteExecutionService};
+use crate::client::{compatibility_warnings, ensure_protocol_match, RemoteExecutionService};
 use crate::proto::{self, execution_client::ExecutionClient};
 use crate::server::ExecutionServer;
 use crate::{convert, lifecycle, PROTOCOL_VERSION};
@@ -91,6 +92,30 @@ fn nonce_action(nonce: &str) -> ExecAction {
         no_cache: false,
         sandbox_retention: SandboxRetention::Never,
         allow_failure: false,
+    }
+}
+
+#[cfg(not(windows))]
+fn cancellable_action(marker: &Path) -> ExecAction {
+    let marker = marker.to_string_lossy();
+    ExecAction {
+        argv: vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            format!("trap 'printf canceled > {}' TERM; sleep 30", marker),
+        ],
+        display: "daemon cancellation test".to_owned(),
+        env: BTreeMap::new(),
+        config_digest: format!("daemon-cancellation-{marker}"),
+        input_digest: empty_input_digest(),
+        outputs: Vec::new(),
+        tools: Vec::new(),
+        cores: 1,
+        impure: false,
+        force_cache: false,
+        no_cache: true,
+        sandbox_retention: SandboxRetention::Never,
+        allow_failure: true,
     }
 }
 
@@ -227,11 +252,40 @@ async fn get_capabilities_reports_the_servers_protocol_version() {
         .expect("capabilities rpc")
         .into_inner();
     assert_eq!(caps.protocol_version, PROTOCOL_VERSION + 1);
+    assert_eq!(caps.build_version, crate::BUILD_VERSION);
+    assert_eq!(caps.exe_fingerprint, crate::BUILD_FINGERPRINT);
     assert!(
         ensure_protocol_match(PROTOCOL_VERSION, caps.protocol_version).is_err(),
         "the client must reject a server one version ahead"
     );
     server.stop().await;
+}
+
+#[test]
+fn capability_build_skew_is_reported_without_being_fatal() {
+    let matching = proto::Capabilities {
+        protocol_version: PROTOCOL_VERSION,
+        build_version: crate::BUILD_VERSION.to_owned(),
+        exe_fingerprint: crate::BUILD_FINGERPRINT.to_owned(),
+        pid: 1,
+        os: String::new(),
+        arch: String::new(),
+    };
+    assert!(compatibility_warnings(&matching).is_empty());
+
+    let skewed = proto::Capabilities {
+        build_version: "older".to_owned(),
+        exe_fingerprint: "other-build".to_owned(),
+        ..matching
+    };
+    let warnings = compatibility_warnings(&skewed);
+    assert_eq!(warnings.len(), 2);
+    assert!(warnings
+        .iter()
+        .any(|warning| warning.contains("build version")));
+    assert!(warnings
+        .iter()
+        .any(|warning| warning.contains("build identity")));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -356,6 +410,67 @@ async fn daemon_and_in_process_outcomes_match_on_miss_and_hit() {
     assert_outcome_eq(&local_hit, &daemon_hit);
     assert_eq!(daemon_miss.stdout, "hi\n");
 
+    server.stop().await;
+}
+
+#[cfg(not(windows))]
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_execute_stream_cancels_the_running_action() {
+    isolate_cache_env();
+    let marker_dir = tempfile::tempdir().expect("create cancellation marker dir");
+    let marker = marker_dir.path().join("canceled");
+    let server = start_server(PROTOCOL_VERSION).await;
+    let mut client = server.client().await;
+    let mut stream = client
+        .execute(Request::new(proto::ExecuteRequest {
+            workspace_id: "daemon-tests".to_owned(),
+            action: Some(convert::action_to_proto(cancellable_action(&marker))),
+        }))
+        .await
+        .expect("execute rpc")
+        .into_inner();
+
+    tokio::time::timeout(Duration::from_secs(2), stream.message())
+        .await
+        .expect("action did not start")
+        .expect("read initial event")
+        .expect("daemon closed stream before cancellation");
+    drop(stream);
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !marker.exists() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        marker.exists(),
+        "dropping the client stream did not cancel the action"
+    );
+    server.stop().await;
+}
+
+#[cfg(not(windows))]
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_client_does_not_stall_the_executor_thread() {
+    isolate_cache_env();
+    let server = start_server(PROTOCOL_VERSION).await;
+    let mut stalled_client = server.client().await;
+    let stalled = stalled_client
+        .execute(Request::new(proto::ExecuteRequest {
+            workspace_id: "daemon-tests".to_owned(),
+            action: Some(convert::action_to_proto(nonce_action("slow-client"))),
+        }))
+        .await
+        .expect("stalled execute rpc")
+        .into_inner();
+
+    // Do not consume the first stream. Its bounded network channel fills
+    // while the daemon must still finish and cache the action.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut observer = server.client().await;
+    let (_, outcome) = execute_collect(&mut observer, nonce_action("slow-client")).await;
+    assert_eq!(outcome.cache_outcome, CacheOutcome::HitLocal);
+
+    drop(stalled);
     server.stop().await;
 }
 

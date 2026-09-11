@@ -1343,6 +1343,7 @@ dependencies = [
  "imp-exec-api",
  "imp-execution",
  "imp-store",
+ "log",
  "prost 0.13.5",
  "protox",
  "tempfile",

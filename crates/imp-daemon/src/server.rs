@@ -1,10 +1,37 @@
 use imp_exec_api::ExecutionService;
 use imp_execution::service::LocalExecutionService;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tokio_stream::{wrappers::ReceiverStream, Stream};
 use tonic::{Request, Response, Status};
 
-use crate::{convert, proto, BUILD_VERSION};
+use crate::{convert, proto, BUILD_FINGERPRINT, BUILD_VERSION};
+
+struct CancellationStream {
+    inner: ReceiverStream<Result<proto::ExecuteEvent, Status>>,
+    cancellation: Arc<AtomicBool>,
+}
+
+impl Stream for CancellationStream {
+    type Item = Result<proto::ExecuteEvent, Status>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.inner).poll_next(cx)
+    }
+}
+
+impl Drop for CancellationStream {
+    fn drop(&mut self) {
+        self.cancellation.store(true, Ordering::SeqCst);
+    }
+}
 
 pub struct ExecutionServer {
     pub service: Arc<LocalExecutionService>,
@@ -30,30 +57,59 @@ impl proto::execution_server::Execution for ExecutionServer {
         )
         .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let svc = Arc::clone(&self.service);
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let execution_cancellation = Arc::clone(&cancellation);
+        let forwarding_cancellation = Arc::clone(&cancellation);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (tx, rx) = tokio::sync::mpsc::channel(2);
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                if tx.send(event).await.is_err() {
+                    forwarding_cancellation.store(true, Ordering::SeqCst);
+                    break;
+                }
+            }
+        });
         tokio::task::spawn_blocking(move || {
             let display = action.display.clone();
             // The daemon has no client scheduler slot to reserve. It forwards
             // every cache-miss lifecycle event to the client instead.
-            let started_tx = tx.clone();
-            let phase_tx = tx.clone();
+            let started_tx = event_tx.clone();
+            let started_cancellation = Arc::clone(&execution_cancellation);
+            let phase_tx = event_tx.clone();
+            let phase_cancellation = Arc::clone(&execution_cancellation);
             let gate = imp_exec_api::StartedGate {
                 started: move || {
-                    let _ = started_tx.blocking_send(Ok(proto::ExecuteEvent {
-                        event: Some(proto::execute_event::Event::Started(proto::Started {
-                            display: display.clone(),
-                        })),
-                    }));
+                    if started_tx
+                        .send(Ok(proto::ExecuteEvent {
+                            event: Some(proto::execute_event::Event::Started(proto::Started {
+                                display: display.clone(),
+                            })),
+                        }))
+                        .is_err()
+                    {
+                        started_cancellation.store(true, Ordering::SeqCst);
+                    }
                 },
                 phase: move |phase| {
-                    let _ = phase_tx.blocking_send(Ok(proto::ExecuteEvent {
-                        event: Some(proto::execute_event::Event::Phase(proto::Phase {
-                            phase: phase.as_u32(),
-                        })),
-                    }));
+                    if phase_tx
+                        .send(Ok(proto::ExecuteEvent {
+                            event: Some(proto::execute_event::Event::Phase(proto::Phase {
+                                phase: phase.as_u32(),
+                            })),
+                        }))
+                        .is_err()
+                    {
+                        phase_cancellation.store(true, Ordering::SeqCst);
+                    }
                 },
             };
-            let result = svc.execute_with_start(&req.workspace_id, action, None, &gate);
+            let result = svc.execute_with_start(
+                &req.workspace_id,
+                action,
+                Some(execution_cancellation.as_ref()),
+                &gate,
+            );
             let event = match result {
                 Ok(o) => proto::ExecuteEvent {
                     event: Some(proto::execute_event::Event::Finished(proto::Finished {
@@ -70,9 +126,12 @@ impl proto::execution_server::Execution for ExecutionServer {
                     })),
                 },
             };
-            let _ = tx.blocking_send(Ok(event));
+            let _ = event_tx.send(Ok(event));
         });
-        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+        Ok(Response::new(Box::pin(CancellationStream {
+            inner: ReceiverStream::new(rx),
+            cancellation,
+        })))
     }
     async fn cache_dir_get(
         &self,
@@ -242,7 +301,7 @@ impl proto::execution_server::Execution for ExecutionServer {
         Ok(Response::new(proto::Capabilities {
             protocol_version: self.protocol_version,
             build_version: BUILD_VERSION.to_owned(),
-            exe_fingerprint: String::new(),
+            exe_fingerprint: BUILD_FINGERPRINT.to_owned(),
             pid: std::process::id(),
             os: c.os.to_owned(),
             arch: c.arch.to_owned(),

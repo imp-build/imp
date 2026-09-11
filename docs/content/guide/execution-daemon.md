@@ -43,6 +43,8 @@ imp daemon stop       # ask a running daemon to exit
 - **Protocol check.** The client verifies the daemon's protocol version on
   connect. A mismatch fails fast with a clear message rather than starting a
   second daemon — restart the old one with `imp daemon stop`.
+- **Build identity.** The client warns when the daemon's package version or
+  compile-time build identity differs, but it keeps the connection usable.
 
 ## Parity with in-process execution
 
@@ -50,10 +52,13 @@ A daemon run uses the same executor, the same local and remote cache lookups,
 and reports the same `CacheOutcome` (`Fresh`, `HitLocal`, `HitRemote`) and the
 same lifecycle events, in the same order, as an in-process run.
 
+The daemon also mirrors cancellation: dropping the client stream requests
+cancellation of the action running in the daemon. Progress delivery uses a
+separate forwarding task, so a slow client does not stall the daemon's
+execution thread.
+
 Not yet mirrored on the daemon path:
 
-- Cancellation is not threaded to an action already running in the daemon;
-  dropping the client does not stop it.
 - An action's in-memory output value (for manifest artifacts) is not carried
   over the wire — only its digest and captured files.
 - The daemon path takes no local `--jobs` slot, because the sandbox is staged

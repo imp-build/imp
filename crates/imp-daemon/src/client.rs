@@ -1,4 +1,4 @@
-use crate::{convert, lifecycle, proto, PROTOCOL_VERSION};
+use crate::{convert, lifecycle, proto, BUILD_FINGERPRINT, BUILD_VERSION, PROTOCOL_VERSION};
 use anyhow::{bail, Result};
 use imp_exec_api::{
     Capabilities, ExecAction, ExecOutcome, ExecutionService, JobGate, NoGate, WorkerHandle,
@@ -32,6 +32,23 @@ pub(crate) fn ensure_protocol_match(client: u32, server: u32) -> Result<()> {
         bail!("imp daemon protocol mismatch: client {client}, server {server}");
     }
     Ok(())
+}
+
+pub(crate) fn compatibility_warnings(capabilities: &proto::Capabilities) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if capabilities.build_version != BUILD_VERSION {
+        warnings.push(format!(
+            "imp daemon build version differs: client {BUILD_VERSION}, server {}",
+            capabilities.build_version
+        ));
+    }
+    if capabilities.exe_fingerprint != BUILD_FINGERPRINT {
+        warnings.push(format!(
+            "imp daemon build identity differs: client {BUILD_FINGERPRINT}, server {}",
+            capabilities.exe_fingerprint
+        ));
+    }
+    warnings
 }
 
 impl RemoteExecutionService {
@@ -112,7 +129,12 @@ impl RemoteExecutionService {
             Err(error) => return ProbeOutcome::Unreachable(error.into()),
         };
         match ensure_protocol_match(PROTOCOL_VERSION, capabilities.protocol_version) {
-            Ok(()) => ProbeOutcome::Ok,
+            Ok(()) => {
+                for warning in compatibility_warnings(&capabilities) {
+                    log::warn!("{warning}");
+                }
+                ProbeOutcome::Ok
+            }
             Err(error) => ProbeOutcome::ProtocolMismatch(error),
         }
     }
