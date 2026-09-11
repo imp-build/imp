@@ -74,10 +74,11 @@ pub struct GcPlan {
     /// Blobs kept because a live task record reaches them.
     pub marked_blobs: usize,
     /// Scope ids whose `workspaces` row points at a vanished checkout and
-    /// whose `memo-traces/<scope>` dir is being reclaimed wholesale. Not a
-    /// deletion category — the dir is already listed in `memo_traces`; this
-    /// only tells `clean_database` which now-dead rows to drop.
+    /// whose metadata should be removed. Not a deletion category — workspace
+    /// metadata has no filesystem candidate or byte count.
     dead_workspace_rows: Vec<String>,
+    /// Number of declarations belonging to the dead workspace rows.
+    dead_declared_cache_rows: usize,
 }
 
 impl GcPlan {
@@ -104,7 +105,17 @@ impl GcPlan {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.categories().iter().all(|(_, c)| c.is_empty())
+        self.categories().iter().all(|(_, c)| c.is_empty()) && self.dead_workspace_rows.is_empty()
+    }
+
+    /// Number of workspace metadata rows that will be removed on apply.
+    pub fn dead_workspace_count(&self) -> usize {
+        self.dead_workspace_rows.len()
+    }
+
+    /// Number of declared-cache metadata rows that belong to dead workspaces.
+    pub fn dead_declared_cache_count(&self) -> usize {
+        self.dead_declared_cache_rows
     }
 
     /// Delete everything the plan lists and clean up the matching usage.db
@@ -218,19 +229,27 @@ impl GcPlan {
                 [&candidate.id],
             );
         }
-        for candidate in &self.orphaned_scopes {
-            let _ = conn.execute("DELETE FROM workspaces WHERE id = ?1", [&candidate.id]);
-            let _ = conn.execute(
-                "DELETE FROM declared_caches WHERE workspace_id = ?1",
-                [&candidate.id],
-            );
-        }
-        // A memo-trace scope reclaimed for a vanished checkout (branch (a) of
-        // `plan_memo_traces`) leaves the same dead `workspaces` row behind
-        // unless it also had a `named/<scope>` orphan above. Drop it here too.
-        // Idempotent with the loop above when both dirs existed.
+        // Remove all metadata for dead checkouts, including workspaces that
+        // have no named-cache or memo-trace directory left. Recheck the path
+        // at apply time because a checkout can be recreated after planning.
         for id in &self.dead_workspace_rows {
-            let _ = conn.execute("DELETE FROM workspaces WHERE id = ?1", [id]);
+            let still_dead = conn
+                .query_row("SELECT path FROM workspaces WHERE id = ?1", [id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map(|path| !Path::new(&path).exists())
+                .unwrap_or(false);
+            if !still_dead {
+                continue;
+            }
+            if let Ok(removed) = conn.execute("DELETE FROM workspaces WHERE id = ?1", [id]) {
+                outcome.dead_workspace_rows_removed += removed;
+            }
+            if let Ok(removed) =
+                conn.execute("DELETE FROM declared_caches WHERE workspace_id = ?1", [id])
+            {
+                outcome.dead_declared_cache_rows_removed += removed;
+            }
         }
         let _ = conn.execute(
             "DELETE FROM declared_caches WHERE last_declared_at < ?1",
@@ -272,6 +291,8 @@ pub struct GcOutcome {
     pub deleted: usize,
     pub freed_bytes: u64,
     pub stale_rows_removed: usize,
+    pub dead_workspace_rows_removed: usize,
+    pub dead_declared_cache_rows_removed: usize,
     pub errors: Vec<String>,
 }
 
@@ -300,6 +321,7 @@ fn plan_at(root: &Path, cutoff: i64) -> Result<GcPlan> {
     plan_cas(root, &db, cutoff, &marked, &mut plan)?;
     plan_named(root, &db, cutoff, &mut plan)?;
     plan_memo_traces(root, &db, cutoff, &mut plan);
+    plan_dead_workspaces(&db, &mut plan);
 
     let trees = root.join("cas").join("trees");
     if trees.is_dir() {
@@ -335,6 +357,26 @@ fn plan_at(root: &Path, cutoff: i64) -> Result<GcPlan> {
     Ok(plan)
 }
 
+/// Plan cleanup for every workspace whose recorded checkout no longer exists.
+/// This is independent of whether any cache namespace remains for the scope.
+fn plan_dead_workspaces(db: &Database, plan: &mut GcPlan) {
+    let mut ids: HashSet<String> = plan.dead_workspace_rows.drain(..).collect();
+    ids.extend(
+        db.workspaces
+            .iter()
+            .filter(|(_, path)| !Path::new(path).exists())
+            .map(|(id, _)| id.clone()),
+    );
+    let mut ids: Vec<String> = ids.into_iter().collect();
+    ids.sort();
+    plan.dead_declared_cache_rows = db
+        .declared
+        .keys()
+        .filter(|(workspace_id, _)| ids.binary_search(workspace_id).is_ok())
+        .count();
+    plan.dead_workspace_rows = ids;
+}
+
 /// Age result-free memo provenance independently from CAS and named caches.
 /// Losing a trace only makes change detection conservatively select more
 /// work, so traces never act as reachability roots for either store.
@@ -354,7 +396,6 @@ fn plan_memo_traces(root: &Path, db: &Database, cutoff: i64, plan: &mut GcPlan) 
                 size_bytes: crate::usage::dir_size_bytes(&scope_path).unwrap_or(0),
                 path: scope_path,
             });
-            plan.dead_workspace_rows.push(scope);
             continue;
         }
 
@@ -1362,6 +1403,87 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM workspaces", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    /// Workspace metadata is swept even when no named-cache or memo-trace
+    /// directory remains. A fresh timestamp does not preserve a vanished
+    /// checkout, while an old timestamp does not make a live checkout stale.
+    #[test]
+    fn dead_workspace_rows_are_swept_in_both_layouts() {
+        for f in [Fixture::new(), Fixture::flat_layout()] {
+            let dead = "dead-workspace";
+            let live = "live-workspace";
+            let live_path = f.root.join("live-checkout");
+            std::fs::create_dir(&live_path).unwrap();
+            f.conn
+                .execute(
+                    "INSERT INTO workspaces VALUES (?1, ?2, ?3), (?4, ?5, ?6)",
+                    rusqlite::params![
+                        dead,
+                        f.root.join("missing-checkout").to_string_lossy(),
+                        NOW,
+                        live,
+                        live_path.to_string_lossy(),
+                        OLD,
+                    ],
+                )
+                .unwrap();
+            f.conn
+                .execute(
+                    "INSERT INTO declared_caches VALUES (?1, 'dead-tools', 0, ?2),
+                            (?3, 'live-tools', 0, ?4)",
+                    rusqlite::params![dead, NOW, live, NOW],
+                )
+                .unwrap();
+
+            let plan = f.plan();
+            assert_eq!(plan.dead_workspace_count(), 1);
+            assert_eq!(plan.dead_declared_cache_count(), 1);
+
+            let outcome = plan.execute();
+            assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+            assert_eq!(outcome.dead_workspace_rows_removed, 1);
+            assert_eq!(outcome.dead_declared_cache_rows_removed, 1);
+
+            let dead_rows: i64 = f
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM workspaces WHERE id = ?1",
+                    [dead],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let live_rows: i64 = f
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM workspaces WHERE id = ?1",
+                    [live],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(dead_rows, 0);
+            assert_eq!(live_rows, 1);
+            assert_eq!(
+                f.conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM declared_caches WHERE workspace_id = ?1",
+                        [dead],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                f.conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM declared_caches WHERE workspace_id = ?1",
+                        [live],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                1
+            );
+        }
     }
 
     #[test]

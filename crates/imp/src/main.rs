@@ -691,6 +691,18 @@ async fn cmd_cache_gc(max_age_cli: Option<u64>, apply: bool) -> Result<()> {
             human_bytes(bytes)
         );
     }
+    if plan.dead_workspace_count() > 0 {
+        println!(
+            "  {verb} {} dead workspace rows",
+            plan.dead_workspace_count()
+        );
+    }
+    if plan.dead_declared_cache_count() > 0 {
+        println!(
+            "  {verb} {} dead declared-cache rows",
+            plan.dead_declared_cache_count()
+        );
+    }
     println!("total: {}", human_bytes(plan.total_bytes()));
     if !apply {
         println!("dry run — pass --apply to delete");
@@ -698,10 +710,12 @@ async fn cmd_cache_gc(max_age_cli: Option<u64>, apply: bool) -> Result<()> {
     }
     let outcome = plan.execute();
     println!(
-        "deleted {} entries, freed {} ({} stale usage rows cleaned)",
+        "deleted {} entries, freed {} ({} stale usage rows, {} dead workspace rows, {} dead declared-cache rows cleaned)",
         outcome.deleted,
         human_bytes(outcome.freed_bytes),
-        outcome.stale_rows_removed
+        outcome.stale_rows_removed,
+        outcome.dead_workspace_rows_removed,
+        outcome.dead_declared_cache_rows_removed
     );
     for error in &outcome.errors {
         eprintln!("warning: {error}");
