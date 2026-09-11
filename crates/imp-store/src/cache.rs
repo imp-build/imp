@@ -87,6 +87,42 @@ pub fn named_cache_key_path(workspace_root: &Path, name: &str, key: &str) -> Res
     named_cache_key_path_by_id(&workspace_cache_id(workspace_root), name, key)
 }
 
+/// Validate the scope component of a named-cache path. Workspace scopes are
+/// cache ids; shared caches use the literal `shared` namespace.
+pub fn validate_named_cache_scope(scope: &str) -> Result<()> {
+    if scope != "shared" && !is_store_entry_id(scope) {
+        bail!("named cache scope '{scope}' must be 'shared' or a 64-character lowercase hex id");
+    }
+    Ok(())
+}
+
+/// Validate one name or key component in a named-cache path. `.` and `..`
+/// are rejected even though their characters are otherwise path-safe: they
+/// would change the meaning of a `Path::join` operation.
+pub fn validate_named_cache_component(component: &str) -> Result<()> {
+    if component.is_empty()
+        || component == "."
+        || component == ".."
+        || !component
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '+'))
+    {
+        bail!("named cache path component '{component}' must contain only ASCII letters, digits, '-', '_', '.', or '+' and must not be '.' or '..'");
+    }
+    Ok(())
+}
+
+/// Validate a named-cache name and its slash-separated key. Keys retain their
+/// existing nested layout, but every component must be path-safe.
+pub fn validate_named_cache_path(scope: &str, name: &str, key: &str) -> Result<()> {
+    validate_named_cache_scope(scope)?;
+    validate_named_cache_component(name)?;
+    for component in key.split('/') {
+        validate_named_cache_component(component)?;
+    }
+    Ok(())
+}
+
 /// Namespace segment for a named cache slot: shared caches (immutable,
 /// version-keyed toolchains) collapse into a single `shared` namespace so
 /// every checkout resolves the same slot; everything else stays under the
@@ -100,6 +136,7 @@ pub fn named_cache_scope_id(shared: bool, workspace_id: &str) -> &str {
 }
 
 pub fn named_cache_key_path_by_id(workspace_id: &str, name: &str, key: &str) -> Result<PathBuf> {
+    validate_named_cache_path(workspace_id, name, key)?;
     let root = cache_root()?;
     let tail = Path::new(name).join(key);
     Ok(resolve_scope_sharded(
@@ -744,6 +781,8 @@ fn flat_scope_dir_in(root: &Path, namespace: &str, scope: &str) -> PathBuf {
 /// of `usage.db` or a GC candidate.
 pub fn existing_named_slot_path_in(root: &Path, id: &str) -> Option<PathBuf> {
     let (scope, tail) = id.split_once('/')?;
+    let (name, key) = tail.split_once('/')?;
+    validate_named_cache_path(scope, name, key).ok()?;
     first_existing([
         scope_shard_dir_in(root, "named", scope).join(tail),
         flat_scope_dir_in(root, "named", scope).join(tail),
@@ -770,12 +809,19 @@ fn resolve_scope_sharded(
     }
 }
 
-/// Every scope directory in a scope-sharded namespace, as `(scope, path)` —
-/// both sharded (`<bucket>/<scope>`) and any pre-shard flat scope still
-/// sitting one level up, so garbage collection and statistics see the whole
-/// namespace while the old layout drains.
-pub fn read_sharded_scopes(dir: &Path) -> Vec<(String, PathBuf)> {
-    let mut found = Vec::new();
+/// The result of enumerating a scope-sharded namespace. Invalid scope
+/// directories are foreign and must not be passed to readers as cache data.
+#[derive(Debug, Default)]
+pub struct ScopeNamespace {
+    pub scopes: Vec<(String, PathBuf)>,
+    pub foreign: Vec<PathBuf>,
+}
+
+/// Every valid scope directory in a scope-sharded namespace, as `(scope,
+/// path)` — both sharded (`<bucket>/<scope>`) and any pre-shard flat scope
+/// still sitting one level up. Invalid directories are returned as `foreign`.
+pub fn read_sharded_scopes(dir: &Path) -> ScopeNamespace {
+    let mut found = ScopeNamespace::default();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return found;
     };
@@ -793,11 +839,19 @@ pub fn read_sharded_scopes(dir: &Path) -> Vec<(String, PathBuf)> {
                 if is_temp_name(&scope_name) || !scope.file_type().is_ok_and(|kind| kind.is_dir()) {
                     continue;
                 }
-                found.push((scope_name, scope.path()));
+                if validate_named_cache_scope(&scope_name).is_ok() {
+                    found.scopes.push((scope_name, scope.path()));
+                } else {
+                    found.foreign.push(scope.path());
+                }
             }
         } else {
             // A non-bucket directory here is a leftover flat scope.
-            found.push((name, entry.path()));
+            if validate_named_cache_scope(&name).is_ok() {
+                found.scopes.push((name, entry.path()));
+            } else {
+                found.foreign.push(entry.path());
+            }
         }
     }
     found
@@ -1806,6 +1860,26 @@ mod tests {
     }
 
     #[test]
+    fn named_cache_paths_accept_shared_and_nested_safe_keys_only() {
+        validate_named_cache_path("shared", "toolchains", "1.93.0/linux-x86_64").unwrap();
+        validate_named_cache_path(&"a".repeat(64), "toolchains", "v1").unwrap();
+
+        for (scope, name, key) in [
+            ("workspace", "toolchains", "v1"),
+            ("shared", "tool chains", "v1"),
+            ("shared", "toolchains", ""),
+            ("shared", "toolchains", "v1//linux"),
+            ("shared", "toolchains", "v1/../escape"),
+            ("shared", "toolchains", "v1/bad key"),
+        ] {
+            assert!(
+                validate_named_cache_path(scope, name, key).is_err(),
+                "expected invalid named-cache path: {scope}/{name}/{key}"
+            );
+        }
+    }
+
+    #[test]
     fn read_sharded_scopes_reports_both_layouts_and_skips_buckets_and_temps() {
         let dir = tempfile::tempdir().unwrap();
         let named = dir.path().join("named");
@@ -1813,14 +1887,17 @@ mod tests {
         std::fs::create_dir_all(sharded.join("toolchains").join("v1")).unwrap();
         std::fs::create_dir_all(named.join("shared").join("toolchains")).unwrap();
         std::fs::create_dir_all(named.join(".tmp-scope-1-2")).unwrap();
+        std::fs::create_dir_all(named.join("not-a-scope").join("toolchains")).unwrap();
 
         let mut scopes: Vec<String> = read_sharded_scopes(&named)
+            .scopes
             .into_iter()
             .map(|(scope, _)| scope)
             .collect();
         scopes.sort();
 
         assert_eq!(scopes, ["d".repeat(64), "shared".to_owned()]);
+        assert_eq!(read_sharded_scopes(&named).foreign.len(), 1);
     }
 
     #[test]
@@ -1885,6 +1962,7 @@ mod tests {
             existing_named_slot_path_in(root, &format!("{scope}/tc/v2")),
             Some(sharded)
         );
+        assert!(existing_named_slot_path_in(root, "shared/tc/../escape").is_none());
     }
 
     #[test]

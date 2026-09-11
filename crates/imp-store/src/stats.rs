@@ -22,9 +22,8 @@ pub struct CacheStats {
     pub named_scopes: usize,
     pub named_bytes: u64,
     pub legacy_bytes: u64,
-    /// Files under `tasks/` or `cas/blobs/` whose name is not a well-formed
-    /// store id (`cache::is_store_entry_id`). Not store entries; `cache gc`
-    /// removes them.
+    /// Paths in cache namespaces that do not match their namespace contract.
+    /// Not store entries; `cache gc` removes them.
     pub unrecognised: CountBytes,
     pub db_bytes: u64,
     pub total_bytes: u64,
@@ -64,7 +63,7 @@ fn collect_named_details_at(root: &std::path::Path) -> Vec<NamedCacheDetail> {
     let named_root = root.join("named");
 
     let mut details = Vec::new();
-    for (scope, scope_path) in crate::cache::read_sharded_scopes(&named_root) {
+    for (scope, scope_path) in crate::cache::read_sharded_scopes(&named_root).scopes {
         let scope_label = if scope == "shared" {
             scope.clone()
         } else {
@@ -84,6 +83,9 @@ fn collect_named_details_at(root: &std::path::Path) -> Vec<NamedCacheDetail> {
             let Ok(name) = name_entry.file_name().into_string() else {
                 continue;
             };
+            if crate::cache::validate_named_cache_component(&name).is_err() {
+                continue;
+            }
             details.push(NamedCacheDetail {
                 scope_label: scope_label.clone(),
                 name,
@@ -136,14 +138,50 @@ fn collect_at(root: &std::path::Path) -> CacheStats {
         count: count_files_recursive(&memo_trace_root),
         bytes: crate::usage::dir_size_bytes(&memo_trace_root).unwrap_or(0),
     };
+    let memo_namespace = crate::cache::read_sharded_scopes(&memo_trace_root);
+    let memo_foreign = count_foreign(&memo_namespace.foreign);
     let (cas_blobs, cas_foreign) = count_bytes(&root.join("cas").join("blobs"), "");
+    let named_root = root.join("named");
+    let named_namespace = crate::cache::read_sharded_scopes(&named_root);
+    let mut named_foreign = named_namespace.foreign;
+    for (_, scope_path) in &named_namespace.scopes {
+        let Ok(entries) = std::fs::read_dir(scope_path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if crate::cache::is_temp_name(&name) {
+                continue;
+            }
+            if !entry.path().is_dir()
+                || crate::cache::validate_named_cache_component(&name).is_err()
+            {
+                named_foreign.push(entry.path());
+                continue;
+            }
+            let Ok(keys) = std::fs::read_dir(entry.path()) else {
+                continue;
+            };
+            for key in keys.flatten() {
+                let key_name = key.file_name().to_string_lossy().into_owned();
+                if crate::cache::is_temp_name(&key_name) {
+                    continue;
+                }
+                if !key.path().is_dir()
+                    || crate::cache::validate_named_cache_component(&key_name).is_err()
+                {
+                    named_foreign.push(key.path());
+                }
+            }
+        }
+    }
+    let named_foreign = count_foreign(&named_foreign);
     let unrecognised = CountBytes {
-        count: task_foreign.count + cas_foreign.count,
-        bytes: task_foreign.bytes + cas_foreign.bytes,
+        count: task_foreign.count + cas_foreign.count + memo_foreign.count + named_foreign.count,
+        bytes: task_foreign.bytes + cas_foreign.bytes + memo_foreign.bytes + named_foreign.bytes,
     };
 
-    let named_root = root.join("named");
-    let named_scopes = crate::cache::read_sharded_scopes(&named_root).len();
+    let named_scopes = named_namespace.scopes.len();
     let named_bytes = crate::usage::dir_size_bytes(&named_root).unwrap_or(0);
 
     let legacy_bytes = crate::usage::dir_size_bytes(&root.join("cas").join("trees")).unwrap_or(0)
@@ -174,6 +212,19 @@ fn collect_at(root: &std::path::Path) -> CacheStats {
         total_bytes,
         raw_bytes,
     }
+}
+
+fn count_foreign(paths: &[std::path::PathBuf]) -> CountBytes {
+    let mut count = CountBytes::default();
+    for path in paths {
+        count.count += 1;
+        count.bytes += if path.is_dir() {
+            crate::usage::dir_size_bytes(path).unwrap_or(0)
+        } else {
+            std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+        };
+    }
+    count
 }
 
 /// Count and total size of one sharded store namespace (`tasks/`,
@@ -269,8 +320,13 @@ mod tests {
         // Neither a task key nor a blob digest: counted as unrecognised.
         std::fs::write(root.join("tasks/ab/scratch.json"), b"1234").unwrap();
 
-        std::fs::create_dir_all(root.join("memo-traces/workspace-a")).unwrap();
-        std::fs::write(root.join("memo-traces/workspace-a/a.json"), b"123").unwrap();
+        let memo_scope = "a".repeat(64);
+        std::fs::create_dir_all(root.join("memo-traces").join(&memo_scope)).unwrap();
+        std::fs::write(
+            root.join("memo-traces").join(&memo_scope).join("a.json"),
+            b"123",
+        )
+        .unwrap();
 
         std::fs::create_dir_all(root.join("cas/blobs/de")).unwrap();
         std::fs::write(root.join("cas/blobs/de").join(&blob_digest), b"1234567").unwrap();
@@ -286,7 +342,7 @@ mod tests {
 
         std::fs::create_dir_all(root.join("named/shared/tool/v1")).unwrap();
         std::fs::write(root.join("named/shared/tool/v1/bin"), b"1234").unwrap();
-        std::fs::create_dir_all(root.join("named/workspace-a/other/v1")).unwrap();
+        std::fs::create_dir_all(root.join("named").join(&memo_scope).join("other/v1")).unwrap();
 
         std::fs::write(root.join("usage.db"), b"12").unwrap();
 
@@ -317,8 +373,13 @@ mod tests {
 
         std::fs::create_dir_all(root.join("named/shared/small/v1")).unwrap();
         std::fs::write(root.join("named/shared/small/v1/f"), b"12").unwrap();
-        std::fs::create_dir_all(root.join("named/deadbeef/big/v1")).unwrap();
-        std::fs::write(root.join("named/deadbeef/big/v1/f"), b"1234567890").unwrap();
+        let named_scope = "b".repeat(64);
+        std::fs::create_dir_all(root.join("named").join(&named_scope).join("big/v1")).unwrap();
+        std::fs::write(
+            root.join("named").join(&named_scope).join("big/v1/f"),
+            b"1234567890",
+        )
+        .unwrap();
 
         let conn = rusqlite::Connection::open(root.join("usage.db")).unwrap();
         conn.execute(
@@ -327,8 +388,8 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO workspaces (id, path, last_seen_at) VALUES ('deadbeef', '/checkout/a', 0)",
-            [],
+            "INSERT INTO workspaces (id, path, last_seen_at) VALUES (?1, '/checkout/a', 0)",
+            [&named_scope],
         )
         .unwrap();
         drop(conn);
@@ -366,5 +427,25 @@ mod tests {
         assert_eq!(details.len(), 2);
         assert_eq!(details[0].name, "tool");
         assert_eq!(details[0].bytes, 5);
+    }
+
+    #[test]
+    fn malformed_named_paths_are_unrecognised() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("named/shared/good/v1")).unwrap();
+        std::fs::write(root.join("named/shared/good/v1/file"), b"valid").unwrap();
+        std::fs::create_dir_all(root.join("named/not-a-scope/tool/v1")).unwrap();
+        std::fs::write(root.join("named/not-a-scope/tool/v1/file"), b"scope").unwrap();
+        std::fs::create_dir_all(root.join("named/shared/bad name/v1")).unwrap();
+        std::fs::write(root.join("named/shared/bad name/v1/file"), b"name").unwrap();
+        std::fs::create_dir_all(root.join("named/shared/good/bad key")).unwrap();
+        std::fs::write(root.join("named/shared/good/bad key/file"), b"key").unwrap();
+
+        let stats = collect_at(root);
+        assert_eq!(stats.named_scopes, 1);
+        assert_eq!(stats.unrecognised.count, 3);
+        assert!(stats.unrecognised.bytes >= 3);
+        assert_eq!(collect_named_details_at(root).len(), 1);
     }
 }

@@ -64,9 +64,8 @@ pub struct GcPlan {
     pub memo_traces: Vec<Candidate>,
     /// Known-legacy directories deleted outright (`cas/trees` and `memo`).
     pub legacy: Vec<Candidate>,
-    /// Files under `cas/blobs/` or `tasks/` whose name is not a well-formed
-    /// store id (`cache::is_store_entry_id`), or a well-formed id in the wrong
-    /// shard bucket, or a stray directory. Deleted outright like `legacy`.
+    /// Paths in enumerated cache namespaces that do not match their namespace
+    /// contract. Deleted outright like `legacy`.
     pub foreign: Vec<Candidate>,
     /// Already-empty scope/name container dirs under `named/` (left behind
     /// by an interrupted gc or pre-gc deletions). Containers emptied *by*
@@ -341,7 +340,9 @@ fn plan_at(root: &Path, cutoff: i64) -> Result<GcPlan> {
 /// work, so traces never act as reachability roots for either store.
 fn plan_memo_traces(root: &Path, db: &Database, cutoff: i64, plan: &mut GcPlan) {
     let traces = root.join("memo-traces");
-    for (scope, scope_path) in crate::cache::read_sharded_scopes(&traces) {
+    let scopes = crate::cache::read_sharded_scopes(&traces);
+    collect_foreign(root, scopes.foreign, &mut plan.foreign);
+    for (scope, scope_path) in scopes.scopes {
         let row = db.workspaces.get(&scope);
 
         // (a) A registered workspace whose checkout is gone: reclaim the whole
@@ -622,7 +623,9 @@ fn plan_cas(
 
 fn plan_named(root: &Path, db: &Database, cutoff: i64, plan: &mut GcPlan) -> Result<()> {
     let named = root.join("named");
-    for (scope, scope_path) in crate::cache::read_sharded_scopes(&named) {
+    let scopes = crate::cache::read_sharded_scopes(&named);
+    collect_foreign(root, scopes.foreign, &mut plan.foreign);
+    for (scope, scope_path) in scopes.scopes {
         // A workspace scope whose recorded checkout vanished is dead
         // wholesale — every slot in it belonged to that checkout.
         if scope != "shared" {
@@ -657,7 +660,12 @@ fn plan_named(root: &Path, db: &Database, cutoff: i64, plan: &mut GcPlan) -> Res
                 continue;
             };
             let name_path = name_entry.path();
+            if crate::cache::validate_named_cache_component(&name).is_err() {
+                collect_foreign(root, vec![name_path], &mut plan.foreign);
+                continue;
+            }
             if !name_path.is_dir() {
+                collect_foreign(root, vec![name_path], &mut plan.foreign);
                 continue;
             }
             if std::fs::read_dir(&name_path)
@@ -688,7 +696,7 @@ fn plan_named(root: &Path, db: &Database, cutoff: i64, plan: &mut GcPlan) -> Res
                 });
                 continue;
             }
-            plan_slots(db, cutoff, &scope, &name, &name_path, plan);
+            plan_slots(root, db, cutoff, &scope, &name, &name_path, plan);
         }
     }
     Ok(())
@@ -699,6 +707,7 @@ fn plan_named(root: &Path, db: &Database, cutoff: i64, plan: &mut GcPlan) -> Res
 /// row records; directories no row covers fall back to their newest mtime,
 /// pruned at the first uncovered level.
 fn plan_slots(
+    root: &Path,
     db: &Database,
     cutoff: i64,
     scope: &str,
@@ -710,7 +719,11 @@ fn plan_slots(
     let known: Vec<(&str, i64, Option<u64>)> = db
         .usage
         .iter()
-        .filter(|((kind, id), _)| kind == "named" && id.starts_with(&prefix))
+        .filter(|((kind, id), _)| {
+            kind == "named"
+                && id.starts_with(&prefix)
+                && crate::cache::validate_named_cache_path(scope, name, &id[prefix.len()..]).is_ok()
+        })
         .map(|((_, id), &(last_used, size))| (id[prefix.len()..].as_ref(), last_used, size))
         .collect();
 
@@ -747,6 +760,10 @@ fn plan_slots(
             continue;
         }
         let path = child.path();
+        if crate::cache::validate_named_cache_component(&child_name).is_err() {
+            collect_foreign(root, vec![path], &mut plan.foreign);
+            continue;
+        }
         let last_used = newest_mtime(&path);
         if last_used < cutoff {
             plan.named_slots.push(Candidate {
@@ -789,7 +806,7 @@ fn newest_mtime(path: &Path) -> i64 {
 /// container levels — anything deeper could be a slot. `remove_dir` refuses a
 /// non-empty directory, so each call is self-guarding.
 fn remove_empty_containers(named: &Path) {
-    for (_scope, scope_path) in crate::cache::read_sharded_scopes(named) {
+    for (_scope, scope_path) in crate::cache::read_sharded_scopes(named).scopes {
         if let Ok(names) = std::fs::read_dir(&scope_path) {
             for name in names.flatten() {
                 let name_path = name.path();
@@ -1191,7 +1208,7 @@ mod tests {
     #[test]
     fn memo_traces_age_independently_and_legacy_results_are_removed() {
         let f = Fixture::new();
-        let scope = f.root.join("memo-traces/workspace-a");
+        let scope = f.root.join("memo-traces").join("a".repeat(64));
         std::fs::create_dir_all(&scope).unwrap();
         std::fs::write(scope.join("old.json"), b"trace").unwrap();
         std::fs::create_dir_all(f.root.join("memo")).unwrap();
@@ -1206,14 +1223,14 @@ mod tests {
 
         let outcome = plan.execute();
         assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
-        assert!(!f.root.join("memo-traces/workspace-a").exists());
+        assert!(!f.root.join("memo-traces").join("a".repeat(64)).exists());
         assert!(!f.root.join("memo").exists());
     }
 
     #[test]
     fn fresh_memo_trace_survives_and_does_not_pin_cas() {
         let f = Fixture::new();
-        let scope = f.root.join("memo-traces/workspace-a");
+        let scope = f.root.join("memo-traces").join("b".repeat(64));
         std::fs::create_dir_all(&scope).unwrap();
         std::fs::write(scope.join("fresh.json"), b"trace").unwrap();
         let dead = f.blob(b"not referenced by traces", OLD);
@@ -1230,26 +1247,27 @@ mod tests {
     #[test]
     fn orphaned_workspace_scope_deletes_wholesale() {
         let f = Fixture::new();
-        let slot = f.root.join("named/deadbeef/tool-cache/v1");
+        let scope_id = "d".repeat(64);
+        let slot = f.root.join("named").join(&scope_id).join("tool-cache/v1");
         std::fs::create_dir_all(&slot).unwrap();
         std::fs::write(slot.join("bin"), b"x").unwrap();
-        let trace_scope = f.root.join("memo-traces/deadbeef");
+        let trace_scope = f.root.join("memo-traces").join(&scope_id);
         std::fs::create_dir_all(&trace_scope).unwrap();
         std::fs::write(trace_scope.join("record.json"), b"trace").unwrap();
         f.conn
             .execute(
-                "INSERT INTO workspaces VALUES ('deadbeef', '/nonexistent/checkout', ?1)",
-                [OLD],
+                "INSERT INTO workspaces VALUES (?1, '/nonexistent/checkout', ?2)",
+                rusqlite::params![scope_id, OLD],
             )
             .unwrap();
-        f.usage("named", "deadbeef/tool-cache/v1", NOW); // recency doesn't save an orphan
+        f.usage("named", &format!("{scope_id}/tool-cache/v1"), NOW); // recency doesn't save an orphan
 
         let plan = f.plan();
         assert_eq!(plan.orphaned_scopes.len(), 1);
         assert_eq!(plan.memo_traces.len(), 1);
         plan.execute();
-        assert!(!f.root.join("named/deadbeef").exists());
-        assert!(!f.root.join("memo-traces/deadbeef").exists());
+        assert!(!f.root.join("named").join(&scope_id).exists());
+        assert!(!f.root.join("memo-traces").join(&scope_id).exists());
         let rows: i64 = f
             .conn
             .query_row("SELECT COUNT(*) FROM workspaces", [], |row| row.get(0))
@@ -1381,12 +1399,14 @@ mod tests {
             .unwrap();
         // A workspace scope whose only name is undeclared: pruning the name
         // must take the now-empty scope dir with it.
-        std::fs::create_dir_all(f.root.join("named/somescope/junk-cache/v1")).unwrap();
+        let scope_id = "e".repeat(64);
+        std::fs::create_dir_all(f.root.join("named").join(&scope_id).join("junk-cache/v1"))
+            .unwrap();
 
         let plan = f.plan();
         assert_eq!(plan.undeclared_names.len(), 1);
         plan.execute();
-        assert!(!f.root.join("named/somescope").exists());
+        assert!(!f.root.join("named").join(&scope_id).exists());
     }
 
     #[test]
@@ -1422,6 +1442,26 @@ mod tests {
             .root
             .join("named/shared/toolchains/1.0.0/windows")
             .exists());
+    }
+
+    #[test]
+    fn malformed_named_paths_are_foreign_and_swept() {
+        let f = Fixture::new();
+        let valid = f.root.join("named/shared/good/v1");
+        std::fs::create_dir_all(&valid).unwrap();
+        std::fs::write(valid.join("file"), b"valid").unwrap();
+        std::fs::create_dir_all(f.root.join("named/not-a-scope/tool/v1")).unwrap();
+        std::fs::create_dir_all(f.root.join("named/shared/bad name/v1")).unwrap();
+        std::fs::create_dir_all(f.root.join("named/shared/good/bad key")).unwrap();
+
+        let plan = f.plan();
+        assert_eq!(plan.foreign.len(), 3);
+        plan.execute();
+
+        assert!(valid.exists());
+        assert!(!f.root.join("named/not-a-scope").exists());
+        assert!(!f.root.join("named/shared/bad name").exists());
+        assert!(!f.root.join("named/shared/good/bad key").exists());
     }
 
     #[test]
