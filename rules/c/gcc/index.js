@@ -799,16 +799,15 @@ export function gccRustLinkDriverEnv(
 	const plat = platformInfo();
 	const exeSuffix = plat.os === "windows" ? ".exe" : "";
 	const cacheDir = cacheGet(GCC_TOOLCHAIN_CACHE, gccCacheKey(version, plat));
-	const mounted = !kacheActive && resolvedGccTool?.mountName !== undefined;
-	const clangPath = mounted
-		? exec.tool(resolvedGccTool, "clang")
-		: `${cacheDir}/bin/clang${exeSuffix}`;
-	const cxxPath = mounted
-		? exec.tool(resolvedGccTool, "c++")
-		: `${cacheDir}/bin/c++${exeSuffix}`;
-	const pathDirs = [
-		mounted ? ".imp/tools/gcc-toolchain/bin" : `${cacheDir}/bin`,
-	];
+	// Cargo can invoke rustc from a package or build-script working directory,
+	// so a sandbox-relative `.imp/tools/...` linker path is not stable. Keep
+	// the graph tool as an input so its install task is ordered before this
+	// action, but point rustc and cc-rs at the named-cache path they can use
+	// from any nested Cargo process.
+	if (resolvedGccTool) exec.path(resolvedGccTool);
+	const clangPath = `${cacheDir}/bin/clang${exeSuffix}`;
+	const cxxPath = `${cacheDir}/bin/c++${exeSuffix}`;
+	const pathDirs = [`${cacheDir}/bin`];
 	const rustflags = ["-C", `linker=${clangPath}`];
 	if (!kacheActive) {
 		return { rustflags, env: [`CC=${clangPath}`], pathDirs };
