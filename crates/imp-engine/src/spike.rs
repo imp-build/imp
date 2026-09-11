@@ -569,7 +569,6 @@ async fn create_live_runtime(
     let run_args: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
     let import_graph: Arc<Mutex<crate::changed::ImportGraph>> =
         Arc::new(Mutex::new(crate::changed::ImportGraph::default()));
-    let grammar_registry = Arc::new(imp_treesitter::GrammarRegistry::new());
     let rt = Runtime::new().context("create QuickJS runtime")?;
     rt.set_loader(
         ImpResolver {
@@ -628,7 +627,6 @@ async fn create_live_runtime(
                     goal_flags: Arc::clone(&goal_flags),
                     run_args: Arc::clone(&run_args),
                     service: Arc::clone(&service),
-                    grammar_registry: Arc::clone(&grammar_registry),
                 },
             )
         })
@@ -682,7 +680,6 @@ async fn create_live_runtime(
         expansion_children: Arc::new(Mutex::new(BTreeMap::new())),
         discovered_labels: Arc::new(Mutex::new(DiscoveredLabels::default())),
         service,
-        grammar_registry,
     })
 }
 
@@ -2445,7 +2442,6 @@ struct RegisterGlobalsArgs {
     goal_flags: Arc<Mutex<Option<serde_json::Value>>>,
     run_args: Arc<Mutex<Option<Vec<String>>>>,
     service: Arc<dyn ExecutionService>,
-    grammar_registry: Arc<imp_treesitter::GrammarRegistry>,
 }
 
 /// Translate a completed action's `CacheOutcome` into the generic
@@ -2555,7 +2551,6 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         goal_flags,
         run_args,
         service,
-        grammar_registry,
     } = args;
     let globals = ctx.globals();
 
@@ -3798,68 +3793,6 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_extract", host_extract)?;
 
     // ------------------------------------------------------------------
-    // __host_ts_load_grammar(path, symbolName) → handle
-    // __host_ts_parse(grammarHandle, source) → handle
-    // __host_ts_tree_sexp(treeHandle) → String
-    // __host_ts_query(grammarHandle, treeHandle, querySource) → JSON string
-    //
-    // Loads tree-sitter grammar shared libraries in-process via dlopen (see
-    // `imp_treesitter::ffi` for the trust tradeoff this implies — unlike
-    // every other native integration here, there is no subprocess boundary).
-    // ------------------------------------------------------------------
-    let grammar_registry_load = Arc::clone(&grammar_registry);
-    let host_ts_load_grammar = Function::new(
-        ctx.clone(),
-        move |path: String, symbol_name: Option<String>| -> rquickjs::Result<f64> {
-            grammar_registry_load
-                .load_grammar(Path::new(&path), symbol_name.as_deref())
-                .map(|id| id as f64)
-                .map_err(|e| rquickjs::Error::new_loading_message("loadGrammar", format!("{e:#}")))
-        },
-    )?;
-    globals.set("__host_ts_load_grammar", host_ts_load_grammar)?;
-
-    let grammar_registry_parse = Arc::clone(&grammar_registry);
-    let host_ts_parse = Function::new(
-        ctx.clone(),
-        move |grammar_handle: f64, source: String| -> rquickjs::Result<f64> {
-            grammar_registry_parse
-                .parse(grammar_handle as u32, source)
-                .map(|id| id as f64)
-                .map_err(|e| rquickjs::Error::new_loading_message("parseSource", format!("{e:#}")))
-        },
-    )?;
-    globals.set("__host_ts_parse", host_ts_parse)?;
-
-    let grammar_registry_sexp = Arc::clone(&grammar_registry);
-    let host_ts_tree_sexp = Function::new(
-        ctx.clone(),
-        move |tree_handle: f64| -> rquickjs::Result<String> {
-            grammar_registry_sexp
-                .tree_sexp(tree_handle as u32)
-                .map_err(|e| rquickjs::Error::new_loading_message("treeSexp", format!("{e:#}")))
-        },
-    )?;
-    globals.set("__host_ts_tree_sexp", host_ts_tree_sexp)?;
-
-    let grammar_registry_query = Arc::clone(&grammar_registry);
-    let host_ts_query = Function::new(
-        ctx.clone(),
-        move |grammar_handle: f64,
-              tree_handle: f64,
-              query_source: String|
-              -> rquickjs::Result<String> {
-            let matches = grammar_registry_query
-                .run_query(grammar_handle as u32, tree_handle as u32, &query_source)
-                .map_err(|e| rquickjs::Error::new_loading_message("tsQuery", format!("{e:#}")))?;
-            serde_json::to_string(&matches).map_err(|e| {
-                rquickjs::Error::new_loading_message("tsQuery", format!("serialize matches: {e}"))
-            })
-        },
-    )?;
-    globals.set("__host_ts_query", host_ts_query)?;
-
-    // ------------------------------------------------------------------
     // __host_platform_info() → JSON string { "os": "...", "arch": "..." }
     // ------------------------------------------------------------------
     let service_platform = Arc::clone(&service);
@@ -4316,6 +4249,40 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         },
     )?;
     globals.set("__host_glob", host_glob)?;
+
+    // __host_builtin_glob(root, includeJson, excludeJson) → JSON string[]
+    // Capture source files from the installed rules bundle. This keeps
+    // builtin packages independent from the consuming workspace while still
+    // giving graph actions ordinary CAS-backed inputs.
+    let builtin_root = rules_source.root().map(PathBuf::from);
+    let host_builtin_glob = Function::new(
+        ctx.clone(),
+        move |root: String,
+              include_json: String,
+              exclude_json: String|
+              -> rquickjs::Result<String> {
+            let Some(bundle) = builtin_root.as_ref() else {
+                return Err(rquickjs::Error::new_loading_message(
+                    "builtinFiles",
+                    "no built-in rules directory available",
+                ));
+            };
+            let include: Vec<String> = serde_json::from_str(&include_json)
+                .map_err(|e| rquickjs::Error::new_loading_message("builtinFiles", e.to_string()))?;
+            let exclude: Vec<String> = serde_json::from_str(&exclude_json)
+                .map_err(|e| rquickjs::Error::new_loading_message("builtinFiles", e.to_string()))?;
+            workspace_glob_files_captured(bundle, &root, &include, &exclude)
+                .and_then(|r| {
+                    serde_json::to_string(&serde_json::json!({
+                        "files": r.files,
+                        "digest": r.digest.digest(),
+                    }))
+                    .context("encode builtin glob results")
+                })
+                .map_err(|e| rquickjs::Error::new_loading_message("builtinFiles", format!("{e:#}")))
+        },
+    )?;
+    globals.set("__host_builtin_glob", host_builtin_glob)?;
 
     // __host_merge_digests(digestsJson) → merged digest string
     let host_merge_digests = Function::new(
@@ -9922,9 +9889,6 @@ export const check = { [BUILD]: expansion.get("child", BUILD) };
         ] {
             let root = tempfile::tempdir().unwrap();
             let p = root.path();
-            if module == "//rules/odin" {
-                copy_tree_sitter_dependency(p);
-            }
             write_file(&p.join(WORKSPACE_FILE), &format!("import {module:?};"));
 
             let live = load_workspace_with_rules(p, RulesSource::directory(repo_rules_dir()))
@@ -10832,27 +10796,6 @@ export const ui = asset({ srcs: ["**/*.png"] });
     /// workspace root has no `rules/` of its own to shadow it with.
     fn repo_rules_dir() -> PathBuf {
         crate::loader::test_rules_dir().expect("locate the repo's rules/ tree")
-    }
-
-    fn copy_tree_sitter_dependency(root: &Path) {
-        let source_root = repo_rules_dir()
-            .parent()
-            .expect("rules/ has a repository parent")
-            .join("crates/imp-treesitter");
-        for entry in WalkDir::new(&source_root) {
-            let entry = entry.expect("walk imp-treesitter dependency");
-            let relative = entry
-                .path()
-                .strip_prefix(&source_root)
-                .expect("dependency path is below its root");
-            let destination = root.join("crates/imp-treesitter").join(relative);
-            if entry.file_type().is_dir() {
-                std::fs::create_dir_all(destination).unwrap();
-            } else {
-                std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
-                std::fs::copy(entry.path(), destination).unwrap();
-            }
-        }
     }
 
     fn js_string_path(path: &Path) -> String {

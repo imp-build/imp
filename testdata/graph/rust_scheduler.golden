@@ -27,7 +27,7 @@ nodes 67  unique 64  edges 141
 411bec82a39f  x1  node  tool
 4322eb4f669d  x1  node  cargo test crates/imp-scheduler
 499a16ca18ea  x1  node  download rustup-init for rust 1.93.0 (linux/x86_64)
-4d2154e15d6f  x2  node  files(crates/imp-treesitter/testdata/tree-sitter-json)
+4d2154e15d6f  x2  node  files(rules/treesitter/testdata/tree-sitter-json)
 4de074fc3454  x1  node  cargo clippy crates/imp-scheduler
 530806b9911c  x1  node  cargo metadata (workspace) . · metadata
 5538f45de9b3  x1  node  tool
@@ -41,7 +41,7 @@ nodes 67  unique 64  edges 141
 712467e91987  x1  node  install rust 1.93.0 (linux/x86_64) · rustupHome
 82efdc1dc39e  x1  node  cargo clippy --workspace . · report
 86018cb4fe8d  x1  node  tool: xz
-885b2c5cd9d5  x1  node  cc shared-link crates/imp-treesitter/testdata/tree-sitter-json
+885b2c5cd9d5  x1  node  cc shared-link rules/treesitter/testdata/tree-sitter-json
 94181ca79529  x1  node  install rust 1.93.0 (linux/x86_64)
 9583b773a11c  x1  node  install gcc 2025.08-1 (linux/x86_64) · directory
 96c553005ad7  x1  node  download gcc 2025.08-1 (linux/x86_64) · artifact
@@ -51,7 +51,7 @@ a0f713556f34  x1  node  files(crates/imp-daemon)
 a499bdeaf664  x1  node  cargo test --doc imp-scheduler (disabled) · units
 a9f457ab0201  x1  node  tool: dirname
 aa2fc92287dd  x1  node  cargo fmt crates/imp-scheduler
-ad0c10a8e6b0  x1  node  cc shared-link crates/imp-treesitter/testdata/tree-sitter-json · artifact
+ad0c10a8e6b0  x1  node  cc shared-link rules/treesitter/testdata/tree-sitter-json · artifact
 b2a4d03d8c86  x1  node  tool
 b3f128442e90  x1  node  install rust 1.93.0 (linux/x86_64) · cargoHome
 bc4a33d2a277  x1  node  tool: cat

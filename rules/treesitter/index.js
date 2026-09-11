@@ -1,54 +1,83 @@
 import { BUILD } from "//rules/workflows/build";
-import {
-	file,
-	loadGrammar,
-	output,
-	parseSource,
-	task,
-	treeSexp,
-	tsQuery,
-} from "imp:core";
-/**
- * Load a grammar, parse source text, and (optionally) run a tree-sitter
- * query against the result, as one coarse graph task.
- *
- * `loadGrammar`/`parseSource`/`treeSexp`/`tsQuery` are native, in-process
- * calls (`dlopen`, no subprocess boundary, no engine read tracking of their
- * own) — they run as ordinary calls inside this task's `run()` rather than
- * as separate graph nodes. The compiled grammar is still declared as a
- * `file()` input so cache invalidation reacts to it.
- *
- * @category graph
- * @param {object} opts
- * @param {string} opts.grammarPath Workspace-relative path to a compiled
- *   tree-sitter grammar shared library.
- * @param {string} [opts.symbolName] The grammar's C symbol, e.g.
- *   "tree_sitter_json". Inferred from `grammarPath`'s file name when omitted.
- * @param {string} opts.source Source text to parse.
- * @param {string} [opts.query] Tree-sitter query source to run against the
- *   parsed tree. Omit to skip querying.
- * @returns {{sexp: object, matches: object, [BUILD]: object}} Graph value
- *   handles for the tree's s-expression dump and query captures, and the
- *   build root.
- */
-export function parseTree({ grammarPath, symbolName, source, query, display }) {
-	const grammar = file(grammarPath);
-	const parse = task({
-		display: display ?? `tree-sitter parse ${grammarPath}`,
-		inputs: { grammar, symbolName: symbolName ?? null, source, query: query ?? null },
-		outputs: { sexp: output.value(), matches: output.value() },
-		run(exec, input) {
-			const handle = loadGrammar(exec.path(input.grammar), input.symbolName);
-			const tree = parseSource(handle, input.source);
-			return {
-				sexp: treeSexp(tree),
-				matches: input.query ? tsQuery(handle, tree, input.query) : [],
-			};
+import { TEST } from "//rules/workflows/test";
+import { builtinFiles, output, task } from "imp:core";
+import { cargoPackage } from "//rules/rust";
+import { nativeTool } from "//rules/imp/native-tool";
+
+function grammarFixture(name, root, include, includeDir) {
+	const sources = builtinFiles({ root, include });
+	const cc = nativeTool("cc");
+	const assembler = nativeTool("as");
+	const linker = nativeTool("ld");
+	const outputPath = `build/treesitter/${name}.so`;
+	const compile = task({
+		display: `compile Tree-sitter ${name} grammar`,
+		inputs: { sources, cc, assembler, linker },
+		outputs: { archive: output.artifact() },
+		async run(exec, input) {
+			const sourcePaths = exec.paths(input.sources).filter((path) => /\.c$/.test(path));
+			const result = await exec.action({
+				argv: [exec.tool(input.cc, "cc"), "-shared", "-fPIC", `-I${includeDir}`, ...sourcePaths, "-o", outputPath],
+				inputs: [input.sources],
+				tools: [input.cc, input.assembler, input.linker],
+				outputs: { archive: output.file(outputPath) },
+			});
+			return { archive: result.outputs.archive };
 		},
 	});
-	return Object.freeze({
-		sexp: parse.outputs.sexp,
-		matches: parse.outputs.matches,
-		[BUILD]: parse.outputs.sexp,
-	});
+	return Object.freeze({ sources, [BUILD]: compile, archive: compile.outputs.archive });
 }
+
+export const jsonGrammarFixture = grammarFixture(
+	"json",
+	"treesitter/testdata/tree-sitter-json",
+	["parser.c", "tree_sitter/*.h"],
+	"treesitter/testdata/tree-sitter-json",
+);
+
+export const odinGrammarFixture = grammarFixture(
+	"odin",
+	"treesitter/testdata/tree-sitter-odin",
+	["parser.c", "scanner.c", "tree_sitter/*.h"],
+	"treesitter/testdata/tree-sitter-odin",
+);
+
+export const impTreesitter = cargoPackage({
+	path: "treesitter",
+	bin: "treesitter-roundtrip",
+	builtin: true,
+});
+
+export const odinAnalyzer = cargoPackage({
+	path: "treesitter",
+	bin: "imp-treesitter-parse",
+	builtin: true,
+});
+
+const roundtripRun = task({
+	display: "Tree-sitter grammar round-trip",
+	inputs: {
+		bin: impTreesitter[BUILD]["treesitter-roundtrip"],
+		fixture: jsonGrammarFixture.archive,
+	},
+	outputs: { units: output.value() },
+	async run(exec, input) {
+		const result = await exec.action({
+			argv: [exec.path(input.bin), exec.path(input.fixture)],
+			inputs: [input.bin, input.fixture],
+			allowFailure: true,
+		});
+		const ok = result.exitCode === 0;
+		return {
+			units: [
+				{
+					name: "grammar-roundtrip",
+					ok,
+					...(ok ? {} : { output: [result.stdout, result.stderr].filter(Boolean).join("\n") }),
+				},
+			],
+		};
+	},
+});
+
+export const roundtrip = { [TEST]: roundtripRun.outputs.units };

@@ -90,11 +90,6 @@ pub struct LiveWorkspace {
     /// captured it.
     #[allow(dead_code)]
     pub service: std::sync::Arc<dyn imp_exec_api::ExecutionService>,
-    /// Loaded tree-sitter grammars and parsed trees, backing `loadGrammar()`/
-    /// `parseSource()`/`treeSexp()`/`tsQuery()`. Held here so grammar
-    /// libraries (dlopen'd once, never unloaded) live exactly as long as the
-    /// JS runtime that may still reference their parsed trees.
-    pub grammar_registry: Arc<imp_treesitter::GrammarRegistry>,
 }
 
 impl std::fmt::Debug for LiveWorkspace {
@@ -115,7 +110,6 @@ impl std::fmt::Debug for LiveWorkspace {
             .field("expansion_children", &"Arc<Mutex<..>>")
             .field("discovered_labels", &"Arc<Mutex<..>>")
             .field("service", &"Arc<dyn ExecutionService>")
-            .field("grammar_registry", &"Arc<GrammarRegistry>")
             .finish()
     }
 }

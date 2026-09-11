@@ -47,7 +47,14 @@ import { FMT } from "//rules/workflows/fmt";
 import { LINT } from "//rules/workflows/lint";
 import { PACKAGE } from "//rules/workflows/package";
 import { TEST } from "//rules/workflows/test";
-import { file, output, packagePath, platformInfo, task } from "imp:core";
+import {
+	builtinFiles,
+	file,
+	output,
+	packagePath,
+	platformInfo,
+	task,
+} from "imp:core";
 import {
 	defaultRustToolchain,
 	rustGraphToolEnv,
@@ -70,6 +77,7 @@ import {
 	cargoWorkspaceExpansion,
 } from "//rules/rust/workspace_expansion";
 import {
+	builtinCargoManifestSources,
 	cargoManifestSources,
 	cargoTaskInputs,
 } from "//rules/rust/cargo_task_inputs";
@@ -364,11 +372,15 @@ export async function toolEnvAndTools(exec, input, spec) {
 // callers should omit [BUILD]/[PACKAGE] entirely in that case rather than
 // resolve a no-op task.
 function crateBuildTask(spec) {
-	const manifest = file(`${spec.path}/Cargo.toml`);
+	const manifest = spec.builtin
+		? builtinFiles({ root: spec.path, include: ["Cargo.toml"] })
+		: file(`${spec.path}/Cargo.toml`);
 	const packageInputs = cargoTaskInputs({ deps: spec.deps });
 	const manifests = spec.workspaceMember
 		? cargoManifestSources(".")
-		: cargoManifestSources(spec.path);
+		: spec.builtin
+			? builtinCargoManifestSources(spec.path)
+			: cargoManifestSources(spec.path);
 	const bins = spec.bin;
 	const profile = spec.release ? "release" : "debug";
 	const buildDir = `build/rust/${spec.outputSlug}`;
@@ -397,7 +409,9 @@ function crateBuildTask(spec) {
 					"-c",
 					script,
 					"cargo-build",
-					exec.path(input.manifest),
+					spec.builtin
+						? exec.paths(input.manifest)[0]
+						: exec.path(input.manifest),
 					buildDir,
 					rustflags,
 					...(spec.release ? ["--release"] : []),
@@ -437,6 +451,7 @@ function crateSpec(opts) {
 		deps = [],
 		testDeps = [],
 		workspaceMember = false,
+		builtin = false,
 	} = opts || {};
 	const normalizedPath = normalizeWorkspacePath(path);
 	const { graph, legacy } = resolveToolchain(toolchain);
@@ -454,6 +469,7 @@ function crateSpec(opts) {
 			(dep) => dep && dep.__imp_graph_handle === true,
 		),
 		workspaceMember,
+		builtin,
 		outputSlug: outputSlugFor(normalizedPath),
 	};
 }
@@ -477,6 +493,7 @@ function crateSpec(opts) {
  * @param {Array<object>} [opts.deps=[]] Extra graph-native input handles the build needs (e.g. a resourcePackage()'s `.files`).
  * @param {Array<object>} [opts.testDeps=[]] Extra graph-native input handles the test run needs but the build doesn't.
  * @param {boolean} [opts.workspaceMember=false] This package is a member of a workspace rooted at "." (see module docstring's limitation on non-root workspace roots).
+ * @param {boolean} [opts.builtin=false] Read the package from the installed rules bundle instead of the consumer workspace.
  * @returns {object} Frozen object with lazy `[BUILD]`/`[TEST]`/`[LINT]`/`[FMT]`/`[PACKAGE]` getters.
  */
 export function cargoPackage(opts = {}) {
@@ -493,7 +510,7 @@ export function cargoPackage(opts = {}) {
 	};
 	const expansion = spec.workspaceMember
 		? cargoWorkspaceExpansion(".", toolchainSpec)
-		: cargoStandaloneExpansion(spec.path, toolchainSpec);
+		: cargoStandaloneExpansion(spec.path, toolchainSpec, spec.builtin);
 	// A workspaceMember crate is keyed by its real crate *name* in the shared
 	// expansion (see workspace_expansion.js), not its path — but this
 	// factory only knows the declared `path`. For this repo's real crates,

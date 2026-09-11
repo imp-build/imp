@@ -24,7 +24,7 @@ import {
 	targetRef,
 	platformInfo,
 } from "imp:core";
-import { odinGrammarFixture, odinAnalyzer } from "//crates/imp-treesitter";
+import { odinGrammarFixture, odinAnalyzer } from "//rules/treesitter";
 // Side-effect import: registers the shared `opt` (debug/release) mode axis
 // so `--axis opt=...`/`--profile ...` works for Odin targets even in a
 // workspace that doesn't import //rules/imp/mode itself.
@@ -374,7 +374,7 @@ function odin_source_analysis_task() {
 		display: "tree-sitter analyze Odin sources",
 		inputs: {
 			sources,
-			grammar: odinGrammarFixture.outputs.archive,
+			grammar: odinGrammarFixture.archive,
 			analyzer: odinAnalyzer[BUILD]["imp-treesitter-parse"],
 		},
 		outputs: { index: output.value() },
@@ -890,7 +890,13 @@ function graphSourceClosure(spec, analysis, config, analysisIndex) {
 		const candidateAnalysis = graphAnalysis(
 			candidate,
 			analysisIndex,
-			paths(candidate.sources),
+			paths(
+				glob({
+					root: candidate.path,
+					include: candidate.srcs,
+					exclude: candidate.exclude,
+				}),
+			),
 		);
 		visited.add(normalize_workspace_path(candidate.path || "."));
 		visited.add(normalize_workspace_path(candidateAnalysis.packagePath));

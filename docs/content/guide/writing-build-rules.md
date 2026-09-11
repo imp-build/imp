@@ -301,30 +301,3 @@ untracked JavaScript APIs.
 `memo()` deduplicates calls only within the current process. Every new
 invocation re-enters rule logic; expensive `run()` work is reused through the
 task cache and CAS. Use `--no-cache` to bypass that action cache.
-
-## Parsing source with tree-sitter
-
-`loadGrammar`/`parseSource`/`treeSexp`/`tsQuery` let rule code parse source
-files with a [tree-sitter](https://tree-sitter.github.io/tree-sitter/) grammar
-— e.g. to extract `use`/`import` paths for dependency discovery, or to run
-custom analysis over a target's sources:
-
-```js
-import { loadGrammar, parseSource, tsQuery, read_file } from "imp:core";
-
-const grammar = loadGrammar("/path/to/tree-sitter-rust.so");
-const tree = parseSource(grammar, read_file(rustFilePath));
-const matches = tsQuery(grammar, tree, "(use_declaration argument: (_) @import)");
-const imports = matches.flatMap((m) => m.captures.map((c) => c.text));
-```
-
-**Trust tradeoff:** unlike every other native integration in this codebase
-(which shells out to a subprocess via `run()`), a loaded grammar is dlopen'd
-directly into the `imp` process — there is no subprocess boundary. A
-malicious or buggy grammar library runs with `imp`'s own privileges and can
-corrupt or crash the whole process. Only load grammars you trust, the same
-standard you'd apply to any binary passed to `run()`.
-
-`loadGrammar` currently takes a local path to an already-compiled grammar
-shared library (`.so`/`.dylib`/`.dll`); acquiring one (downloading or
-compiling it from source) is left to the caller for now.

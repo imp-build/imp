@@ -32,9 +32,6 @@ protox       = "0.7"
 tokio-stream = { version = "0.1", features = ["net"] }
 hyper-util   = { version = "0.1", features = ["tokio"] }
 tower        = "0.5"
-tree-sitter  = "0.26"
-tree-sitter-language = "0.1"
-libloading   = "0.9"
 opendal      = { version = "0.57", default-features = false }
 dunce        = "1"
 app_dirs2    = "2.5"

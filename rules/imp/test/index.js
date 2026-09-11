@@ -656,7 +656,7 @@ async function runRulesTest(exec, inputs) {
 		argv: [exec.tool(inputs.imp, "imp"), "rules-test", ...testModules],
 		inputs: [inputs.sharedSources, inputs.rootSources],
 		tools,
-		env: [`IMP_CACHE_DIR=${inputs.cacheDir}`],
+		env: [`IMP_CACHE_DIR=${inputs.cacheDir}`, "IMP_RULES_DIR=rules"],
 		display: `test JS rules //${inputs.root}`,
 		allowFailure: true,
 	});
@@ -714,7 +714,7 @@ export function rulesTest({ root, tools = [] }) {
 		testModules: files({ root: relativeRoot, include: ["*_test.js"] }),
 		rootSources: files({ root: relativeRoot, include: ["**/*"] }),
 		sharedSources: files({
-			include: ["rules/**/*", "crates/imp-treesitter/**/*", "imp.workspace.js"],
+			include: ["rules/**/*", "imp.workspace.js"],
 		}),
 		imp: impTool,
 		toolNames,

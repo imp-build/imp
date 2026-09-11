@@ -28,6 +28,7 @@ import {
 	toolEnvAndTools,
 } from "//rules/rust";
 import {
+	builtinCargoManifestSources,
 	cargoManifestSources,
 	cargoTaskInputs,
 } from "//rules/rust/cargo_task_inputs";
@@ -910,9 +911,11 @@ export function cargoWorkspaceExpansion(workspaceRootRelative, toolchainSpec) {
 // Routes through expand() for uniformity with cargoWorkspaceExpansion()
 // rather than a structurally different code path, matching rules/odin's
 // precedent of always going through expand().
-export function cargoStandaloneExpansion(path, toolchainSpec) {
+export function cargoStandaloneExpansion(path, toolchainSpec, builtin = false) {
 	const manifestPath = `${path}/Cargo.toml`;
-	const manifests = cargoManifestSources(path);
+	const manifests = builtin
+		? builtinCargoManifestSources(path)
+		: cargoManifestSources(path);
 
 	const metadata = metadataTask(
 		`cargo metadata ${path}`,

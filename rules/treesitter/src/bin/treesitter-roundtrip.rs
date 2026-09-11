@@ -4,8 +4,8 @@
 //!
 //! This is deliberately a plain binary, not a `cargo` test. The grammar it
 //! needs is a shared library that only an `imp` build compiles
-//! (`crates/imp-treesitter/BUILD.js`'s `ccLibrary({ shared: true })`), so the
-//! check is driven by `imp test //crates/imp-treesitter:roundtrip`, which
+//! (`rules/treesitter`'s graph-built grammar), so the check is driven by
+//! `imp test //rules/treesitter:roundtrip`, which
 //! builds this binary and runs it with that library staged, passing its path
 //! as the first argument. Nothing here is reachable from `cargo test
 //! --workspace`, so a plain checkout with no `build/` directory still builds.
@@ -25,7 +25,7 @@ use imp_treesitter::GrammarRegistry;
 fn main() -> Result<()> {
     let fixture = std::env::args_os().nth(1).map(PathBuf::from).context(
         "usage: treesitter-roundtrip <path-to-json-grammar.so>; run it via \
-         `imp test //crates/imp-treesitter:roundtrip`",
+         `imp test //rules/treesitter:roundtrip`",
     )?;
     ensure!(
         fixture.is_file(),
@@ -35,7 +35,7 @@ fn main() -> Result<()> {
 
     // `GrammarRegistry::load_grammar` infers the C entry-point symbol from the
     // file stem (`tree-sitter-json.so` -> `tree_sitter_json`). The staged
-    // artifact is named `libcrates_imp-treesitter_testdata_tree-sitter-json.so`,
+    // artifact is named after the graph output path,
     // which does not infer, so copy it once to a scratch file with a name that
     // does. This also keeps the loaded path off the source tree.
     let grammar = stage_grammar(&fixture).context("stage grammar library for loading")?;

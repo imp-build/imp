@@ -1,4 +1,4 @@
-import { files } from "imp:core";
+import { builtinFiles, files } from "imp:core";
 
 // Keep package-owned inputs grouped by the workflows that consume them. A new
 // per-package input can be assigned here once instead of being threaded
@@ -19,6 +19,14 @@ export function cargoManifestSources(root) {
 	return files({
 		root,
 		include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
+		exclude: ["target/**"],
+	});
+}
+
+export function builtinCargoManifestSources(root) {
+	return builtinFiles({
+		root,
+		include: ["Cargo.toml", "Cargo.lock", "**/*.rs"],
 		exclude: ["target/**"],
 	});
 }

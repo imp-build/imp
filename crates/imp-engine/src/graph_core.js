@@ -398,6 +398,24 @@ export function files(opts = {}) {
 	return _graphMemoizedHandle(fingerprint, () => _graphHandle("files", spec, fingerprint));
 }
 
+/**
+ * Declare source files from the installed rules bundle.
+ *
+ * Unlike files(), builtinFiles() is rooted at the rules directory selected by
+ * the host and is intended for builtin rule packages that need to provide
+ * source inputs to graph actions.
+ */
+export function builtinFiles(opts = {}) {
+	if (!opts || typeof opts !== "object" || !Array.isArray(opts.include)) {
+		throw _graphError("builtinFiles({ root?, include, exclude? }) requires include patterns");
+	}
+	const spec = _graphJson(opts, "builtinFiles(options)");
+	const fingerprint = `builtin-files:${_graphCanonical(spec)}`;
+	return _graphMemoizedHandle(fingerprint, () =>
+		_graphHandle("builtin-files", spec, fingerprint),
+	);
+}
+
 // Merge an overlay into a scope. The new values win, and the axes the outer
 // scope set and this overlay does not touch stay in force — that is what
 // makes the configuration flow along the edge instead of being replaced at
@@ -722,6 +740,15 @@ async function _graphResolveHandleUncached(id, cfg, stack = []) {
 			});
 		case "files": {
 			const fileset = glob(record.data);
+			return _graphBinding("source-set", {
+				fingerprint: record.fingerprint,
+				path: record.data.root || ".",
+				fileset,
+				inputs: [fileset],
+			});
+		}
+		case "builtin-files": {
+			const fileset = builtinGlob(record.data);
 			return _graphBinding("source-set", {
 				fingerprint: record.fingerprint,
 				path: record.data.root || ".",
