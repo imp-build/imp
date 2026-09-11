@@ -17,13 +17,25 @@
 //! Exit code 0 means every check passed; any failure prints a message and
 //! exits non-zero.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{bail, ensure, Context, Result};
 use imp_treesitter::GrammarRegistry;
 
+const RELOCATED_CHECK: &str = "--relocated-check";
+
 fn main() -> Result<()> {
-    let fixture = std::env::args_os().nth(1).map(PathBuf::from).context(
+    let first_argument = std::env::args_os().nth(1);
+    let relocated_check = first_argument.as_deref() == Some(OsStr::new(RELOCATED_CHECK));
+    let fixture = (if relocated_check {
+        std::env::args_os().nth(2)
+    } else {
+        first_argument
+    })
+    .map(PathBuf::from)
+    .context(
         "usage: treesitter-roundtrip <path-to-json-grammar.so>; run it via \
          `imp test //rules/treesitter:roundtrip`",
     )?;
@@ -32,6 +44,24 @@ fn main() -> Result<()> {
         "grammar library {} does not exist or is not a file",
         fixture.display()
     );
+    let fixture = fixture
+        .canonicalize()
+        .with_context(|| format!("canonicalize grammar library {}", fixture.display()))?;
+    // The source tree is intentionally absent from an Imp run sandbox, so do
+    // not try to read it. `CARGO_MANIFEST_DIR` is an absolute build-time path;
+    // canonicalizing the supplied fixture is enough to catch source-tree
+    // paths, including symlinks into the checkout.
+    let source_tree = Path::new(env!("CARGO_MANIFEST_DIR"));
+    ensure!(
+        !fixture.starts_with(&source_tree),
+        "grammar library {} is inside the source tree {}",
+        fixture.display(),
+        source_tree.display()
+    );
+
+    if !relocated_check {
+        verify_relocated_execution(&fixture)?;
+    }
 
     // `GrammarRegistry::load_grammar` infers the C entry-point symbol from the
     // file stem (`tree-sitter-json.so` -> `tree_sitter_json`). The staged
@@ -51,6 +81,50 @@ fn main() -> Result<()> {
     explicit_symbol_name_is_honored(&grammar)?;
 
     println!("ok: grammar round-trip passed");
+    Ok(())
+}
+
+/// Verify that the binary does not need the source tree, the working directory,
+/// or PATH at run time.
+fn verify_relocated_execution(fixture: &Path) -> Result<()> {
+    let executable = std::env::current_exe().context("resolve roundtrip executable")?;
+    let scratch = std::env::temp_dir().join(format!(
+        "imp-treesitter-relocated-roundtrip-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&scratch).with_context(|| format!("create {}", scratch.display()))?;
+    let relocated = scratch.join("treesitter-roundtrip");
+    std::fs::copy(&executable, &relocated).with_context(|| {
+        format!(
+            "copy roundtrip executable {} -> {}",
+            executable.display(),
+            relocated.display()
+        )
+    })?;
+
+    let mut command = Command::new(&relocated);
+    command
+        .arg(RELOCATED_CHECK)
+        .arg(fixture)
+        .env_clear()
+        .current_dir(&scratch);
+    #[cfg(windows)]
+    for variable in ["TMP", "TEMP"] {
+        if let Ok(value) = std::env::var(variable) {
+            command.env(variable, value);
+        }
+    }
+
+    let output = command
+        .output()
+        .context("run relocated roundtrip executable")?;
+    let _ = std::fs::remove_dir_all(&scratch);
+    ensure!(
+        output.status.success(),
+        "relocated roundtrip executable failed outside the source tree with an empty environment:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
     Ok(())
 }
 
