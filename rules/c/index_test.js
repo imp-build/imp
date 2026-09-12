@@ -162,6 +162,79 @@ describe("graph-native ccLibrary/ccBinary", () => {
 		});
 	});
 
+	test("outputName separates same-directory artifacts and object paths", async () => {
+		await withCcHost(async (host) => {
+			const first = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				outputName: "first",
+				toolchain: fakeGccGraphToolchain(),
+			});
+			const second = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				outputName: "second",
+				toolchain: fakeGccGraphToolchain(),
+			});
+			await resolveIgnoringArtifactValidation([first[BUILD], second[BUILD]]);
+
+			const archiveDisplays = host.runs
+				.filter((run) => run.display.startsWith("cc archive "))
+				.map((run) => run.display);
+			expect(archiveDisplays).toContain("cc archive build/c/first.a");
+			expect(archiveDisplays).toContain("cc archive build/c/second.a");
+			const compileDisplays = host.runs
+				.filter((run) => run.display.startsWith("cc compile "))
+				.map((run) => run.display);
+			expect(
+				compileDisplays.some((display) => display.includes("obj/first/")),
+			).toBe(true);
+			expect(
+				compileDisplays.some((display) => display.includes("obj/second/")),
+			).toBe(true);
+		});
+	});
+
+	test("outputName changes a shared library soname and a bundled executable name", () => {
+		return withCcHost(async (host) => {
+			const sharedDep = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				outputName: "runtime",
+				toolchain: fakeGccGraphToolchain(),
+				shared: true,
+			});
+			const bin = ccBinary({
+				path: "rules/c/testdata/mixed_sources",
+				outputName: "app",
+				deps: [sharedDep],
+				toolchain: fakeGccGraphToolchain(),
+			});
+			await resolveIgnoringArtifactValidation([bin[BUILD]]);
+
+			const sharedRun = host.runs.find((run) =>
+				run.display.startsWith("cc shared-link "),
+			);
+			expect(sharedRun.display).toContain("build/c/libruntime.so");
+			expect(sharedRun.argv.join(" ")).toContain("-Wl,-soname,libruntime.so");
+			const linkRun = host.runs.find((run) =>
+				run.display.startsWith("cc link "),
+			);
+			expect(linkRun.display).toContain(
+				"build/c/rules_c_testdata_mixed_sources.d/app",
+			);
+		});
+	});
+
+	test("outputName rejects non-portable filename stems", () => {
+		return withCcHost(() => {
+			expect(() =>
+				ccBinary({
+					path: "rules/c/testdata/mixed_sources",
+					outputName: "../app",
+					toolchain: fakeGccGraphToolchain(),
+				}),
+			).toThrow("C/C++ outputName must be a non-empty portable filename stem");
+		});
+	});
+
 	test("both transitive buckets flow through a dependent library, each keeping its own kind", () => {
 		return withCcHost(() => {
 			const staticDep = ccLibrary({

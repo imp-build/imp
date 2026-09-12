@@ -109,6 +109,26 @@ this target's own link step (not propagated to anything depending on it —
 use a dep's `transitiveLinkopts` for flags a consumer needs, e.g. a shared
 library's own `-L`/`-l` dependencies).
 
+The output filename stem defaults to the directory slug. If two targets in
+one directory need the same kind of artifact name, set `outputName` on each
+declaration to give them distinct stems. This does not change the directory
+slug used for build namespaces or the target name used by `imp package`:
+
+```js
+export const client = ccBinary({
+    srcs: ["client.c"],
+    outputName: "client",
+});
+export const server = ccBinary({
+    srcs: ["server.c"],
+    outputName: "server",
+});
+```
+
+`outputName` is a portable filename stem. Do not include `.a`, `.so`, `.dll`
+or `.exe`; the rule adds the platform-specific suffix and the `lib` prefix
+for Unix shared libraries.
+
 ### Generated sources
 
 `generatedSrcs` takes a `codegen()` result from `//rules/imp/codegen` and
@@ -198,9 +218,12 @@ it at run time, so its product is a **directory** rather than a single file:
 
 ```
 dist/<package>/<target>/
-    <target-slug>          the executable, linked with -Wl,-rpath,$ORIGIN
+    <output-name>          the executable, linked with -Wl,-rpath,$ORIGIN
     lib<name>.so           every transitive shared library, under its soname
 ```
+
+The executable uses `outputName` when one is supplied, or the directory slug
+otherwise. The bundle directory itself remains directory-derived.
 
 `$ORIGIN` is expanded by the loader to the directory holding the executable,
 which is where the libraries are, so the binary runs with `LD_LIBRARY_PATH`

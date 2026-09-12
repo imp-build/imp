@@ -97,6 +97,23 @@ function outputSlugFor(path) {
 	return path === "." ? "root" : path.replace(/\//g, "_");
 }
 
+function outputNameFor(path, outputName) {
+	if (outputName === undefined) return outputSlugFor(path);
+	if (
+		typeof outputName !== "string" ||
+		outputName.length === 0 ||
+		outputName === "." ||
+		outputName === ".." ||
+		/\.(a|so|dll|exe)$/i.test(outputName) ||
+		!/^[A-Za-z0-9_.-]+$/.test(outputName)
+	) {
+		throw new Error(
+			"C/C++ outputName must be a non-empty portable filename stem containing only A-Z, a-z, 0-9, '.', '_' or '-'",
+		);
+	}
+	return outputName;
+}
+
 // A single sh -c script listing every object/archive/linkopt inline
 // overflows on Windows once a target has enough sources (issue #84's own
 // compile-step version of this problem): git-bash's sh.exe (spawned
@@ -214,6 +231,7 @@ function crateSpec(opts) {
 		linkopts = [],
 		unsafeSystemPaths = false,
 		shared = false,
+		outputName,
 	} = opts || {};
 	const normalizedPath = normalizeWorkspacePath(path);
 	const spec = {
@@ -231,7 +249,11 @@ function crateSpec(opts) {
 		toolchain: resolveToolchain(toolchain),
 		copts: [...copts],
 		linkopts: [...linkopts],
+		// The directory slug remains the build namespace. outputName is an
+		// opt-in artifact stem for two same-directory targets that need distinct
+		// filenames; omitting it preserves every existing output and cache path.
 		outputSlug: outputSlugFor(normalizedPath),
+		outputName: outputNameFor(normalizedPath, outputName),
 		shared: !!shared,
 		// Bypasses Bootlin's toolchain-wrapper unsafe-path guard (see gcc's own
 		// gccToolchainCommands()) — needed to link against host system packages
@@ -306,12 +328,12 @@ function ccTask(spec, isLibrary) {
 	// require it), so a declared output path without it is never actually
 	// produced — confirmed by a real `imp build` failure ("run() output ...
 	// was not created as a file in sandbox").
-	const exeName = `${spec.outputSlug}${platformInfo().os === "windows" ? ".exe" : ""}`;
+	const exeName = `${spec.outputName}${platformInfo().os === "windows" ? ".exe" : ""}`;
 	const bundleDir = `build/c/${spec.outputSlug}.d`;
 	const outPath = isShared
-		? `build/c/${sharedLibFilename(spec.outputSlug)}`
+		? `build/c/${sharedLibFilename(spec.outputName)}`
 		: isLibrary
-			? `build/c/${spec.outputSlug}.a`
+			? `build/c/${spec.outputName}.a`
 			: bundled
 				? `${bundleDir}/${exeName}`
 				: `build/c/${exeName}`;
@@ -324,6 +346,9 @@ function ccTask(spec, isLibrary) {
 
 	const built = task({
 		display: `cc ${isShared ? "shared-link" : isLibrary ? "archive" : "link"} ${spec.path}`,
+		// Different explicit output names must remain different graph nodes even
+		// when they share the same path, sources, and toolchain.
+		id: spec.outputName === spec.outputSlug ? undefined : spec.outputName,
 		inputs: {
 			srcs,
 			hdrs,
@@ -362,7 +387,7 @@ function ccTask(spec, isLibrary) {
 			const needsCxx = sourcePaths.some(isCxxSource);
 			const opt = optModeOf(input.optMode);
 			const objectPaths = sourcePaths.map((source) =>
-				objectPathFor(spec.outputSlug, source),
+				objectPathFor(spec.outputName, source),
 			);
 			// One exec.action() per source file, not one script compiling all
 			// of them: a target with hundreds of sources overflows a single
@@ -449,7 +474,7 @@ function ccTask(spec, isLibrary) {
 				: isLibrary
 					? "archive"
 					: "link";
-			const rspPath = `build/c/${spec.outputSlug}.rsp`;
+			const rspPath = `build/c/${spec.outputName}.rsp`;
 			// The bundle's other half: every transitive shared library is
 			// copied next to the executable, under the basename its DT_NEEDED
 			// entry already names (sonameArgs() in //rules/c/toolchain is what
@@ -605,6 +630,7 @@ function testTask(spec, executable, exePath, bundled) {
  * @param {Array<object>} [opts.deps=[]] Other ccLibrary()/cmake-target results this library links against.
  * @param {object} [opts.toolchain] gccGraphToolchain()/zigGraphToolchain() result, or the workspace default.
  * @param {string[]} [opts.copts=[]] Extra compiler flags.
+ * @param {string} [opts.outputName] Portable artifact filename stem. Defaults to the directory-derived slug; rules add the platform-specific library suffix.
  * @param {boolean} [opts.unsafeSystemPaths=false] Bypass Bootlin's toolchain-wrapper unsafe-path guard (which rejects -I/-isystem/-L flags under /usr/include or /usr/lib) so this target can link against host system packages (e.g. libwebkit2gtk-4.1). No-op on a zig toolchain, which has no such guard.
  * @param {boolean} [opts.shared=false] Build a dynamically-loadable shared object (`-shared`, platform-correct extension: `.dll` on Windows, `.so` elsewhere) instead of a static `.a` archive. The result is reported as `transitiveSharedLibs` rather than `transitiveArchives`, so a dependent ccLibrary()/ccBinary() links against it but never tries to `ar` it in. A consumer's product carries the library beside its own executable and is linked with an `$ORIGIN` rpath, so it also loads at run time — see ccBinary().
  * @returns {object} Frozen `{[BUILD], archive, transitiveArchives, transitiveSharedLibs, transitiveIncludeDirs, transitiveHdrs, transitiveLinkopts, [PACKAGE]}`.
@@ -653,6 +679,7 @@ export function ccLibrary(opts = {}) {
  * @param {object} [opts.toolchain] gccGraphToolchain()/zigGraphToolchain() result, or the workspace default.
  * @param {string[]} [opts.copts=[]] Extra compiler flags.
  * @param {string[]} [opts.linkopts=[]] Extra linker flags for this binary's own link step (not propagated to anything that might depend on it — deps' own `transitiveLinkopts` are folded in automatically instead).
+ * @param {string} [opts.outputName] Portable executable filename stem. Defaults to the directory-derived slug; `.exe` is added on Windows.
  * @param {boolean} [opts.unsafeSystemPaths=false] Bypass Bootlin's toolchain-wrapper unsafe-path guard (which rejects -I/-isystem/-L flags under /usr/include or /usr/lib) so this target can link against host system packages (e.g. libwebkit2gtk-4.1). No-op on a zig toolchain, which has no such guard.
  * @returns {object} Frozen `{[BUILD], [PACKAGE], [RUN]}`. The product is a single executable file, or a directory holding the executable plus every transitive shared library when there is one (see this module's own docstring).
  */
@@ -680,6 +707,7 @@ export function ccBinary(opts = {}) {
  *
  * @category target
  * @param {object} [opts] Every ccBinary() option, unchanged.
+ * @param {string} [opts.outputName] Portable executable filename stem. Defaults to the directory-derived slug; `.exe` is added on Windows.
  * @returns {object} Frozen `{[BUILD], [RUN], [TEST]}`.
  */
 export function ccTest(opts = {}) {
