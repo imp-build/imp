@@ -87,6 +87,29 @@ function _graphNarrowKey(axes, cfg) {
 	);
 }
 
+// Persistent graph actions cannot use the ambient memo context for their
+// configuration salt: graph tasks execute concurrently, and the context may
+// belong to an unrelated memo or task by the time an action reaches run().
+// Build the salt from the same axis closure that keys the graph node instead.
+// A missing closure is the conservative case used for handles resolved
+// outside the normal graph planning pass.
+function _graphActionConfigDigest(record, cfg) {
+	const handleId = record.publicHandle?.__graph_id;
+	const axes = handleId === undefined ? undefined : _graphAxes.get(handleId);
+	if (axes === undefined || axes === _GRAPH_AXES_ALL) {
+		const mode = { ...(_graphInvocation?.mode || {}) };
+		for (const name of Object.keys(cfg.overlay).sort()) mode[name] = cfg.overlay[name];
+		return __host_graph_configuration_digest(
+			JSON.stringify({ scope: "all", mode }),
+		);
+	}
+	const selected = {};
+	for (const name of [...axes].sort()) selected[name] = _graphEffectiveAxis(name, cfg);
+	return __host_graph_configuration_digest(
+		JSON.stringify({ scope: "axes", values: selected }),
+	);
+}
+
 function _graphMemoKey(id, narrow) {
 	return narrow === "" ? id : `${id}|${narrow}`;
 }
@@ -911,6 +934,7 @@ function _graphIsWindows() {
 
 function _graphExec(record, cfg) {
 	let consumed = new Set();
+	const configDigest = _graphActionConfigDigest(record, cfg);
 	const consume = (binding) => {
 		if (!binding || binding.__imp_graph_binding !== true)
 			throw _graphError("exec path/tool helpers expect a resolved task input");
@@ -1099,6 +1123,7 @@ function _graphExec(record, cfg) {
 				impure: opts.cache === false || !record.cache,
 				forceCache: opts.forceCache,
 				materialize: false,
+				__graphConfigDigest: configDigest,
 				__graphOutputNames: outputNames,
 			}));
 			const normalizedOutputs = Object.fromEntries(

@@ -3915,10 +3915,12 @@ export function run(opts) {
 		argv: opts.argv,
 		display: opts.display,
 		env: opts.env,
-		configDigest: __host_configuration_digest(
-			JSON.stringify(Array.from(contextEntry.ctx.readNamespaces).sort()),
-			JSON.stringify(contextEntry.ctx.modeOverrides || {}),
-		),
+		configDigest:
+			opts.__graphConfigDigest ??
+			__host_configuration_digest(
+				JSON.stringify(Array.from(contextEntry.ctx.readNamespaces).sort()),
+				JSON.stringify(contextEntry.ctx.modeOverrides || {}),
+			),
 		inputs,
 		outputs,
 		tools: opts.tools,

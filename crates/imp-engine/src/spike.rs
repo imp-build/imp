@@ -3762,6 +3762,30 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     )?;
     globals.set("__host_configuration_digest", host_configuration_digest)?;
 
+    // Graph-native actions pass a canonical, axis-scoped payload directly so
+    // their persistent cache salt does not depend on an ambient memo context.
+    let host_graph_configuration_digest = Function::new(
+        ctx.clone(),
+        move |value_json: String| -> rquickjs::Result<String> {
+            let value: serde_json::Value = serde_json::from_str(&value_json).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    "graphConfigurationDigest",
+                    format!("parse value: {e}"),
+                )
+            })?;
+            digest_json(&value).map_err(|e| {
+                rquickjs::Error::new_loading_message(
+                    "graphConfigurationDigest",
+                    format!("digest value: {e:#}"),
+                )
+            })
+        },
+    )?;
+    globals.set(
+        "__host_graph_configuration_digest",
+        host_graph_configuration_digest,
+    )?;
+
     // ------------------------------------------------------------------
     // __host_download(url) → path string
     // ------------------------------------------------------------------
@@ -10471,6 +10495,37 @@ export default { [BUILD]: app };
         );
     }
 
+    async fn run_graph_action_config_probe(
+        live: &LiveWorkspace,
+        root: &Path,
+        selectors: &[String],
+    ) {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        *live.scheduler.lock().unwrap() = Some(imp_scheduler::Scheduler::new(
+            4,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tx,
+        ));
+        execute_goal_live_selection(
+            live,
+            root,
+            &SelectorContext::root(),
+            "build",
+            GoalSelection::Selectors(selectors),
+            GoalExecutionOptions {
+                no_cache: false,
+                trace_inputs: false,
+                js_workers: 4,
+                flags: serde_json::json!({}),
+                run_args: &[],
+                axis_overrides: &[],
+                profile: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
     /// One `configured()` edge builds its subtree under a different value of
     /// the axis without changing what its consumer sees, and a node that
     /// reads no axis stays shared between the two configurations.
@@ -10486,6 +10541,101 @@ export default { [BUILD]: app };
             result,
             r#"{"ambient":"debug","release":"release","nested":"release","shared":"shared","runs":["leaf:debug","leaf:release","shared"]}"#
         );
+    }
+
+    #[tokio::test]
+    async fn graph_action_config_salt_is_scoped_and_stable_across_concurrent_branches() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis } from "imp:core";
+defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { configured, goal, output, semantic, task } from "imp:core";
+const BUILD = goal("build");
+
+const configuredAction = task({
+    display: "configured action",
+    inputs: { opt: semantic.mode("opt") },
+    outputs: { result: output.value() },
+    async run(exec) {
+        const result = await exec.action({ argv: ["sh", "-c", "printf '%s:%s' \"$PPID\" \"$$\""] });
+        return { result: result.stdout };
+    },
+});
+
+const sharedAction = task({
+    display: "configuration-blind action",
+    outputs: { result: output.value() },
+    async run(exec) {
+        const result = await exec.action({ argv: ["sh", "-c", "printf '%s:%s' \"$PPID\" \"$$\""] });
+        return { result: result.stdout };
+    },
+});
+
+const app = task({
+    display: "configuration salt probe",
+    inputs: {
+        debug: configuredAction.outputs.result,
+        release: configured(configuredAction, { opt: "release" }).outputs.result,
+        shared: sharedAction.outputs.result,
+        sharedRelease: configured(sharedAction, { opt: "release" }).outputs.result,
+    },
+    outputs: { result: output.value() },
+    run(_exec, input) {
+        globalThis.graphActionConfigResult = input;
+        return { result: input };
+    },
+});
+
+export default { [BUILD]: app };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        let selectors = ["//".to_owned()];
+        run_graph_action_config_probe(&live, p, &selectors).await;
+        let first = live
+            .ctx
+            .async_with(async |ctx| -> rquickjs::Result<serde_json::Value> {
+                let value: Value = ctx.globals().get("graphActionConfigResult")?;
+                let stringify: Function = ctx.eval("JSON.stringify")?;
+                let json: String = stringify.call((value,))?;
+                serde_json::from_str(&json).map_err(|error| {
+                    rquickjs::Error::new_loading_message(
+                        "graphActionConfigResult",
+                        error.to_string(),
+                    )
+                })
+            })
+            .await
+            .unwrap();
+        assert_ne!(first["debug"], first["release"]);
+        assert_eq!(first["shared"], first["sharedRelease"]);
+
+        run_graph_action_config_probe(&live, p, &selectors).await;
+        let second = live
+            .ctx
+            .async_with(async |ctx| -> rquickjs::Result<serde_json::Value> {
+                let value: Value = ctx.globals().get("graphActionConfigResult")?;
+                let stringify: Function = ctx.eval("JSON.stringify")?;
+                let json: String = stringify.call((value,))?;
+                serde_json::from_str(&json).map_err(|error| {
+                    rquickjs::Error::new_loading_message(
+                        "graphActionConfigResult",
+                        error.to_string(),
+                    )
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(first, second);
     }
 
     /// When the invocation already selects the value a `configured()` edge
