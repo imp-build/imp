@@ -47,6 +47,7 @@ jobs:
         with:
           name: imp-linux
           path: target/release/imp
+          retention-days: 1
 
   check:
     needs: build
