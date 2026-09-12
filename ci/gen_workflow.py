@@ -87,7 +87,11 @@ BUILD_STEPS = [
     {
         "name": "Upload imp binary",
         "uses": "actions/upload-artifact@v4",
-        "with": {"name": IMP_ARTIFACT, "path": "target/release/imp"},
+        "with": {
+            "name": IMP_ARTIFACT,
+            "path": "target/release/imp",
+            "retention-days": 1,
+        },
     },
 ]
 
