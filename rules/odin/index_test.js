@@ -17,6 +17,7 @@ import {
 	odinLinkerPathDir,
 	odinMergeLinkopts,
 	odinModeFlags,
+	odin_output_path,
 	odinPackage,
 	odinTestPackage,
 } from "//rules/odin";
@@ -88,6 +89,15 @@ describe("Odin graph rules", () => {
 
 	test("build task inputs default to the opt axis's declared debug default", () => {
 		expect(configuration("imp.mode", {}).opt ?? "debug").toBe("debug");
+	});
+
+	test("main entrypoints use an executable output path", () => {
+		expect(odin_output_path("output", { hasMainEntrypoint: true })).toBe(
+			"output",
+		);
+		expect(odin_output_path("output", { hasMainEntrypoint: false })).toBe(
+			"output.a",
+		);
 	});
 
 	// A codegen() result standing in for a real generator: the tests below care

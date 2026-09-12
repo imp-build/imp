@@ -44,20 +44,36 @@ fn main() -> Result<()> {
         let source = fs::read_to_string(&path)
             .with_context(|| format!("read Odin source {}", path.display()))?;
         let tree = registry.parse(grammar_id, source)?;
-        let import_matches =
-            registry.run_query(grammar_id, tree, "(import_declaration (string) @path)")?;
+        let import_matches = registry.run_query(
+            grammar_id,
+            tree,
+            "(import_declaration (string) @path) @declaration",
+        )?;
         let imports: Vec<String> = import_matches
             .into_iter()
-            .flat_map(|m| m.captures)
-            .filter(|capture| capture.name == "path")
-            .filter_map(|capture| decode_import(&capture.text))
+            .filter_map(|m| {
+                let declaration = m
+                    .captures
+                    .iter()
+                    .find(|capture| capture.name == "declaration")?;
+                // The Odin grammar represents `foreign import` with the same
+                // declaration node as a package import. Keep the graph edge
+                // only when the declaration itself starts with `import`.
+                if !declaration.text.trim_start().starts_with("import") {
+                    return None;
+                }
+                m.captures
+                    .into_iter()
+                    .find(|capture| capture.name == "path")
+                    .and_then(|capture| decode_import(&capture.text))
+            })
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
         let main_matches = registry.run_query(
             grammar_id,
             tree,
-            "(procedure_declaration (expression (identifier) @name) (#eq? @name \"main\"))",
+            "(procedure_declaration (identifier) @name (#eq? @name \"main\"))",
         )?;
         analyzed.insert(
             path.to_string_lossy().into_owned(),
