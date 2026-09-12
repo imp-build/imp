@@ -2,24 +2,23 @@ import { BUILD } from "//rules/workflows/build";
 import { TEST } from "//rules/workflows/test";
 import { builtinFiles, output, task } from "imp:core";
 import { cargoPackage } from "//rules/rust";
-import { nativeTool } from "//rules/imp/native-tool";
+import { defaultGccGraphToolchain } from "//rules/c/gcc";
+
+const gccToolchain = defaultGccGraphToolchain();
 
 function grammarFixture(name, root, include, includeDir) {
 	const sources = builtinFiles({ root, include });
-	const cc = nativeTool("cc");
-	const assembler = nativeTool("as");
-	const linker = nativeTool("ld");
 	const outputPath = `build/treesitter/${name}.so`;
 	const compile = task({
 		display: `compile Tree-sitter ${name} grammar`,
-		inputs: { sources, cc, assembler, linker },
+		inputs: { sources, gcc: gccToolchain.tool },
 		outputs: { archive: output.artifact() },
 		async run(exec, input) {
 			const sourcePaths = exec.paths(input.sources).filter((path) => /\.c$/.test(path));
 			const result = await exec.action({
-				argv: [exec.tool(input.cc, "cc"), "-shared", "-fPIC", `-I${includeDir}`, ...sourcePaths, "-o", outputPath],
+				argv: [exec.tool(input.gcc, "cc"), "-shared", "-fPIC", `-I${includeDir}`, ...sourcePaths, "-o", outputPath],
 				inputs: [input.sources],
-				tools: [input.cc, input.assembler, input.linker],
+				tools: [input.gcc],
 				outputs: { archive: output.file(outputPath) },
 			});
 			return { archive: result.outputs.archive };

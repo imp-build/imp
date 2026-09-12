@@ -9,9 +9,6 @@ export const rules_test = rulesTest({
 	root: "//rules/odin",
 	tools: [
 		gccToolchain.tool,
-		nativeTool("cc"),
-		nativeTool("as"),
-		nativeTool("ld"),
 		nativeTool("chmod"),
 		nativeTool("cp"),
 		nativeTool("xz"),
