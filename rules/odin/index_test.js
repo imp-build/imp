@@ -590,19 +590,23 @@ describe("Odin graph rules", () => {
 			deps: [native],
 			toolchain: "dev-2026-03",
 		});
-		const nativeRoots = async (deps) =>
-			(
-				await buildFileRoots(
-					odinPackage({
-						path: "rules/odin/example/staleness/pkg_a",
-						deps,
-						toolchain: "dev-2026-03",
-					}),
-				)
-			).filter((root) => root === "rules/odin/example/native").length;
+		const direct = odinPackage({
+			path: "rules/odin/example/staleness/pkg_a",
+			deps: [util, native],
+			toolchain: "dev-2026-03",
+		});
+		const transitive = odinPackage({
+			path: "rules/odin/example/staleness/pkg_a",
+			deps: [util],
+			toolchain: "dev-2026-03",
+		});
+		const nativeRoots = async (pkg) =>
+			(await buildFileRoots(pkg)).filter(
+				(root) => root === "rules/odin/example/native",
+			).length;
 		// Reaching the library both ways declares no more inputs than reaching
 		// it one way.
-		expect(await nativeRoots([util, native])).toBe(await nativeRoots([util]));
+		expect(await nativeRoots(direct)).toBe(await nativeRoots(transitive));
 	});
 
 	test("odinMergeLinkopts keeps first occurrence order and drops repeats", () => {
