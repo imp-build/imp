@@ -727,7 +727,7 @@ const LOCKFILE_SPEC_LINUX = registerToolchainLockfile(
 		artifactName: gccArtifactName,
 		lockfile: GCC_DEFAULT_LOCKFILE,
 	},
-	["2025.08-1"],
+	["2025.08-1", "2026.08-1"],
 );
 
 // WinLibs' tag shares no version vocabulary with Bootlin's (see
@@ -744,14 +744,14 @@ const LOCKFILE_SPEC_WINDOWS = registerToolchainLockfile(
 		artifactName: gccArtifactName,
 		lockfile: GCC_WINDOWS_DEFAULT_LOCKFILE,
 	},
-	["16.1.0posix-14.0.0-ucrt-r4"],
+	["16.1.0posix-14.0.0-ucrt-r4", "16.2.0posix-14.0.0-ucrt-r1"],
 );
 
 // Importing this rule provisions the pinned default for whichever platform
 // is active. A workspace can replace it by declaring another
 // gccToolchain(..., { default: true }).
 gccToolchain(
-	{ linux: "2025.08-1", windows: "16.1.0posix-14.0.0-ucrt-r4" },
+	{ linux: "2026.08-1", windows: "16.2.0posix-14.0.0-ucrt-r1" },
 	{ default: true },
 );
 

@@ -32,6 +32,70 @@
         "size": 16341183,
         "sha256": "399491efa1d88d1ee18c6642d025aa0c67a49bfe8297033fb485b1272ad70c9d"
       }
+    },
+    "0.21.9": {
+      "linux/x86_64": {
+        "url": "https://github.com/google/go-containerregistry/releases/download/v0.21.9/go-containerregistry_Linux_x86_64.tar.gz",
+        "artifact": "go-containerregistry_Linux_x86_64.tar.gz",
+        "size": 16532182,
+        "sha256": "5c16d8ddb971cb1d5e6ed8b1e743da8224414eeba2c2762d8f1a61b2f095699e"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/google/go-containerregistry/releases/download/v0.21.9/go-containerregistry_Linux_arm64.tar.gz",
+        "artifact": "go-containerregistry_Linux_arm64.tar.gz",
+        "size": 14910547,
+        "sha256": "1f4c647b7bb260ab5435661df5b526cf59950ebf95201790db7183ac189cbcbd"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/google/go-containerregistry/releases/download/v0.21.9/go-containerregistry_Darwin_x86_64.tar.gz",
+        "artifact": "go-containerregistry_Darwin_x86_64.tar.gz",
+        "size": 16815221,
+        "sha256": "f31075b3375f79b406a600e090d5c4778b3c6598a01c817dc7898c05c7c00a56"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/google/go-containerregistry/releases/download/v0.21.9/go-containerregistry_Darwin_arm64.tar.gz",
+        "artifact": "go-containerregistry_Darwin_arm64.tar.gz",
+        "size": 15514218,
+        "sha256": "11cc3640e53473eb0d8c501068573e52a259f4d82177e6dd11b7bacb8955459e"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/google/go-containerregistry/releases/download/v0.21.9/go-containerregistry_Windows_x86_64.tar.gz",
+        "artifact": "go-containerregistry_Windows_x86_64.tar.gz",
+        "size": 17007999,
+        "sha256": "2309f41ce9a31b6096fd590a57b00b0fd1d6dc41d315dc820795f64be070fe03"
+      }
+    },
+    "0.22.1": {
+      "linux/x86_64": {
+        "url": "https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_x86_64.tar.gz",
+        "artifact": "go-containerregistry_Linux_x86_64.tar.gz",
+        "size": 16496784,
+        "sha256": "0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_arm64.tar.gz",
+        "artifact": "go-containerregistry_Linux_arm64.tar.gz",
+        "size": 14831376,
+        "sha256": "898c0cff975f898a33e8c4580bdafb0e7c02c7faa33374e946762f97c4ab7110"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Darwin_x86_64.tar.gz",
+        "artifact": "go-containerregistry_Darwin_x86_64.tar.gz",
+        "size": 16785187,
+        "sha256": "6fedd06a648c11335f0e8b9547e4783002c30e9336047fec292942cd518bb799"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Darwin_arm64.tar.gz",
+        "artifact": "go-containerregistry_Darwin_arm64.tar.gz",
+        "size": 15441389,
+        "sha256": "2231fc8df8806d20d680ff1225db44e095a55dd6ac1ae8eced4faf4b278b78fb"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Windows_x86_64.tar.gz",
+        "artifact": "go-containerregistry_Windows_x86_64.tar.gz",
+        "size": 16978582,
+        "sha256": "0e073ea8192c3b8442ec8aaf44d53c1050a09084669fae3a6ceb0f2026cf8b21"
+      }
     }
   }
 }

@@ -38,6 +38,424 @@
         "size": 8030317,
         "sha256": "997da5e1c6793641ed6ff6f25f6593c54b69651ce471253aee1b2a5592c1fd55"
       }
+    },
+    "0.12.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.12.0/kache-x86_64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-x86_64-unknown-linux-musl.tar.gz",
+        "size": 7536037,
+        "sha256": "eae89d07fbc3a8155e39f5b1a6b1880ace773a0c3f522772f1c04a35c3cf0245"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.12.0/kache-aarch64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-aarch64-unknown-linux-musl.tar.gz",
+        "size": 7031964,
+        "sha256": "3ddce83d02125aa028d85cdc27870d13f90d7d72a6b436c6813c3147bc1ea6f0"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.12.0/kache-x86_64-apple-darwin.tar.gz",
+        "artifact": "kache-x86_64-apple-darwin.tar.gz",
+        "size": 7267451,
+        "sha256": "7e3f6f6e4eb67a68ee4891e1808e6c30e13cc460d8a074a76379019f393eeef1"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.12.0/kache-aarch64-apple-darwin.tar.gz",
+        "artifact": "kache-aarch64-apple-darwin.tar.gz",
+        "size": 6025294,
+        "sha256": "a425cfc46792e0c0eec45cde87000709ef8bab99c7980353bc9c7f3ab702503c"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.12.0/kache-x86_64-pc-windows-msvc.zip",
+        "artifact": "kache-x86_64-pc-windows-msvc.zip",
+        "size": 7647437,
+        "sha256": "6b8bd8653acd7b4c6cc25d7c9c232d1ab3999430fac1f97977c66892e532ea69"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.12.0/kache-aarch64-pc-windows-msvc.zip",
+        "artifact": "kache-aarch64-pc-windows-msvc.zip",
+        "size": 7074860,
+        "sha256": "628a3aae28dc17606d94018189d19ffd03352c71c690b8c6329b8c3f7427130e"
+      }
+    },
+    "0.13.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.13.0/kache-x86_64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-x86_64-unknown-linux-musl.tar.gz",
+        "size": 7572524,
+        "sha256": "30aeded4dc6e620c400aa3aaf7ab163dc95c703a0f3ddb4d0ba56c51f23f0bd0"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.13.0/kache-aarch64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-aarch64-unknown-linux-musl.tar.gz",
+        "size": 7062858,
+        "sha256": "b61de3de6a9abb21a375fa9c6513d47bb8cf7391f4eeb24c5be2972738b83ce3"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.13.0/kache-x86_64-apple-darwin.tar.gz",
+        "artifact": "kache-x86_64-apple-darwin.tar.gz",
+        "size": 7299874,
+        "sha256": "c1a51d039d834f6aadbac1a166b9544d5320b3ca8cb048520f45c7d67aac1bb5"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.13.0/kache-aarch64-apple-darwin.tar.gz",
+        "artifact": "kache-aarch64-apple-darwin.tar.gz",
+        "size": 6063151,
+        "sha256": "f3f4d7cfece20d251f8740dae224777d096a5ed2b1608b1cae996e98f6018a31"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.13.0/kache-x86_64-pc-windows-msvc.zip",
+        "artifact": "kache-x86_64-pc-windows-msvc.zip",
+        "size": 7685858,
+        "sha256": "e4126036482044ce820019b09dcc9d13e06fd4603c2aa24e512662d797e7ec57"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.13.0/kache-aarch64-pc-windows-msvc.zip",
+        "artifact": "kache-aarch64-pc-windows-msvc.zip",
+        "size": 7107496,
+        "sha256": "de21a7aeade5f5f88cd31cc6bc2ff54dc819b949054bcb0929566a1662c940be"
+      }
+    },
+    "0.14.2": {
+      "linux/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.14.2/kache-x86_64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-x86_64-unknown-linux-musl.tar.gz",
+        "size": 7909965,
+        "sha256": "8cc4a3eb1621268732c030b3c74bbf3066fae905e4ed0f27e32aeca836b3e95a"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.14.2/kache-aarch64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-aarch64-unknown-linux-musl.tar.gz",
+        "size": 7358244,
+        "sha256": "2892fd7d6243ec791879c5538691ddc501934ae8a70f5bdf497567eafcce1d39"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.14.2/kache-x86_64-apple-darwin.tar.gz",
+        "artifact": "kache-x86_64-apple-darwin.tar.gz",
+        "size": 7635750,
+        "sha256": "e3e45224bda05159952061ff4156140e090088b13b5b226d9c589d5d9b6ed317"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.14.2/kache-aarch64-apple-darwin.tar.gz",
+        "artifact": "kache-aarch64-apple-darwin.tar.gz",
+        "size": 6362194,
+        "sha256": "69292fe742f054c863e9d3f3bced2a8e5c46ee97c9bb6742432cc75dd82c39b3"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.14.2/kache-x86_64-pc-windows-msvc.zip",
+        "artifact": "kache-x86_64-pc-windows-msvc.zip",
+        "size": 8071042,
+        "sha256": "596ee87c24c6c129b830d7e01b1477b4523e095ad1e3bea712048c2ec0fa1269"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.14.2/kache-aarch64-pc-windows-msvc.zip",
+        "artifact": "kache-aarch64-pc-windows-msvc.zip",
+        "size": 7451417,
+        "sha256": "f6ef5b8bc6c8f004b49957bf9f3a036391ea7398387f8ed3df53ae6199de6433"
+      }
+    },
+    "0.15.1": {
+      "linux/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.15.1/kache-x86_64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-x86_64-unknown-linux-musl.tar.gz",
+        "size": 8138856,
+        "sha256": "21a6e50fff5eeab6a4c76a17af3878369d5d3cb57b38b85d7c8a5bcd8479d300"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.15.1/kache-aarch64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-aarch64-unknown-linux-musl.tar.gz",
+        "size": 7558775,
+        "sha256": "50e8cc75fdac50e304ee3e1827c06135cc758e3a0024190d8951a00c3779da31"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.15.1/kache-x86_64-apple-darwin.tar.gz",
+        "artifact": "kache-x86_64-apple-darwin.tar.gz",
+        "size": 7867313,
+        "sha256": "373788f65e41cbedc313612906da3fbe9a42656f8ed7be1e73145cd663cbee41"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.15.1/kache-aarch64-apple-darwin.tar.gz",
+        "artifact": "kache-aarch64-apple-darwin.tar.gz",
+        "size": 6555245,
+        "sha256": "abfea79fcddad10aef742ead099e6349a0405e919dd6023d6402cc68a866705a"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.15.1/kache-x86_64-pc-windows-msvc.zip",
+        "artifact": "kache-x86_64-pc-windows-msvc.zip",
+        "size": 8309564,
+        "sha256": "c165b40284b881426e6082a951c4fb177149ca8e4dc4e88dfbde5d4a6d1efe10"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.15.1/kache-aarch64-pc-windows-msvc.zip",
+        "artifact": "kache-aarch64-pc-windows-msvc.zip",
+        "size": 7655550,
+        "sha256": "67b4865dadbf4700924abf69773f3874917f1edb2a2dcefab2bbf80559e7199f"
+      }
+    },
+    "0.16.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.16.0/kache-x86_64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-x86_64-unknown-linux-musl.tar.gz",
+        "size": 8169471,
+        "sha256": "caee657c662379475af2a0a7611ad32a6d053822036c1ec191bb8fd1c826d54b"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.16.0/kache-aarch64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-aarch64-unknown-linux-musl.tar.gz",
+        "size": 7589746,
+        "sha256": "6eabb67867022eecdbfffe43c16e75b5c5b561983742bda3c900a4cb4c50e4a7"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.16.0/kache-x86_64-apple-darwin.tar.gz",
+        "artifact": "kache-x86_64-apple-darwin.tar.gz",
+        "size": 7904256,
+        "sha256": "fef8184980ba65e9c8eaddbac7da31a7f782d994d442e23cc0ec89f396d7e889"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.16.0/kache-aarch64-apple-darwin.tar.gz",
+        "artifact": "kache-aarch64-apple-darwin.tar.gz",
+        "size": 6590737,
+        "sha256": "6ad80d3bbb33d7db1715d5a919edbdf755dc19ca22fa83797c659147f1f9e229"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.16.0/kache-x86_64-pc-windows-msvc.zip",
+        "artifact": "kache-x86_64-pc-windows-msvc.zip",
+        "size": 8347923,
+        "sha256": "b4b53a54926e5cdc8c084562fdf215780306c9d5dc7eeaff9e4eb70c0b47fe2a"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.16.0/kache-aarch64-pc-windows-msvc.zip",
+        "artifact": "kache-aarch64-pc-windows-msvc.zip",
+        "size": 7681900,
+        "sha256": "4dbd93909ac11a8bfba40dbba9bc1d936dac99999d5354958506f93a2e02d641"
+      }
+    },
+    "0.17.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.17.0/kache-x86_64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-x86_64-unknown-linux-musl.tar.gz",
+        "size": 8198084,
+        "sha256": "65ed65abbe4af2cd13c2e83052adccc26547d18a486f8de001e8996cadfc9bf7"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.17.0/kache-aarch64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-aarch64-unknown-linux-musl.tar.gz",
+        "size": 7635242,
+        "sha256": "bcb1319225419e9f9f6d465f81c9135b3eb541397eac1bad81adae7a9ca4821b"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.17.0/kache-x86_64-apple-darwin.tar.gz",
+        "artifact": "kache-x86_64-apple-darwin.tar.gz",
+        "size": 7925265,
+        "sha256": "a4a4afbf47a5ff1831472d801b61cb77e267aa4ddff5a1c8d486ffee86a1b0b8"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.17.0/kache-aarch64-apple-darwin.tar.gz",
+        "artifact": "kache-aarch64-apple-darwin.tar.gz",
+        "size": 6630908,
+        "sha256": "8bb4140f6bbe2a69f75c7ac1c6d1746eab2215c58bdfb29931fb9d214823cb24"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.17.0/kache-x86_64-pc-windows-msvc.zip",
+        "artifact": "kache-x86_64-pc-windows-msvc.zip",
+        "size": 8478121,
+        "sha256": "d2c72841d7937841dde6cd6765b93e9d06b52e47e045cf4d370e6c96f40ad6e9"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.17.0/kache-aarch64-pc-windows-msvc.zip",
+        "artifact": "kache-aarch64-pc-windows-msvc.zip",
+        "size": 7802699,
+        "sha256": "de352dd4787919732fe87093c36291608c25646f0439b21a8f9ad1367e63995a"
+      }
+    },
+    "0.18.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.18.0/kache-x86_64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-x86_64-unknown-linux-musl.tar.gz",
+        "size": 8285196,
+        "sha256": "2209e1e4de2c49a3a732a6ba86ad9ad4502c5cdc139b53723aa1e6c33efd8662"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.18.0/kache-aarch64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-aarch64-unknown-linux-musl.tar.gz",
+        "size": 7714882,
+        "sha256": "0a895ca560e17cdbf00c596a67c6af54baa907a95fac4d6cd04adb66268d7434"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.18.0/kache-x86_64-apple-darwin.tar.gz",
+        "artifact": "kache-x86_64-apple-darwin.tar.gz",
+        "size": 8009671,
+        "sha256": "c96eef46bec2999d8c7393e04452926d2b3f66bebef4ff485b115c6e8fafa363"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.18.0/kache-aarch64-apple-darwin.tar.gz",
+        "artifact": "kache-aarch64-apple-darwin.tar.gz",
+        "size": 6707938,
+        "sha256": "48decca430d16cb84a9cd055f7a352e35b3d8d18bace646be8eda734f516ea74"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.18.0/kache-x86_64-pc-windows-msvc.zip",
+        "artifact": "kache-x86_64-pc-windows-msvc.zip",
+        "size": 8548393,
+        "sha256": "bb9eb0ebcff7d07d3b596638d0fd4eceadbb6ad0071e9e470e017b52effd69ee"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.18.0/kache-aarch64-pc-windows-msvc.zip",
+        "artifact": "kache-aarch64-pc-windows-msvc.zip",
+        "size": 7864284,
+        "sha256": "78fafb83e3459b4ed0c2d08b65ead83288036b6a45736a7e4429c049263954c7"
+      }
+    },
+    "0.19.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.19.0/kache-x86_64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-x86_64-unknown-linux-musl.tar.gz",
+        "size": 8329304,
+        "sha256": "64d8e10abc1e916859ce5bf2937887df15933e1b65e66a1efe7dc769bcaa7798"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.19.0/kache-aarch64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-aarch64-unknown-linux-musl.tar.gz",
+        "size": 7745275,
+        "sha256": "cf9880200d28ca8b2cc33b5227b9cc26094c47c0927f7791734c02ba1a5cd6ac"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.19.0/kache-x86_64-apple-darwin.tar.gz",
+        "artifact": "kache-x86_64-apple-darwin.tar.gz",
+        "size": 8046920,
+        "sha256": "162646f94403c2a2e30dc3357b9ba97acbc788a297634cd7559beb33d83c0d4c"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.19.0/kache-aarch64-apple-darwin.tar.gz",
+        "artifact": "kache-aarch64-apple-darwin.tar.gz",
+        "size": 6738263,
+        "sha256": "8dcdaa95f3678b00696ca4742d8ad67c1f00d9baa7d142cbf9337b3f3ecb03b7"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.19.0/kache-x86_64-pc-windows-msvc.zip",
+        "artifact": "kache-x86_64-pc-windows-msvc.zip",
+        "size": 8583397,
+        "sha256": "42f842eeb377fbb10614ec18922d3eccbb68f418c7846c9b2fbcff0639a736d5"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.19.0/kache-aarch64-pc-windows-msvc.zip",
+        "artifact": "kache-aarch64-pc-windows-msvc.zip",
+        "size": 7884106,
+        "sha256": "a8e9b63e083d5bd7b77b0989b7cdca58b3ac896deb5aea0da848e1dfea13e550"
+      }
+    },
+    "0.20.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.20.0/kache-x86_64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-x86_64-unknown-linux-musl.tar.gz",
+        "size": 8339705,
+        "sha256": "fe5ce52406e0dcb8c9a49798671a073440cae13a88731b1b712b7c0fa372b85b"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.20.0/kache-aarch64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-aarch64-unknown-linux-musl.tar.gz",
+        "size": 7757176,
+        "sha256": "e7f0ebf18dbbef64d23acbf25009baab1987951bb69742697f59094a1bb04b37"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.20.0/kache-x86_64-apple-darwin.tar.gz",
+        "artifact": "kache-x86_64-apple-darwin.tar.gz",
+        "size": 8054349,
+        "sha256": "2eadbf652a63e8cae80af70419a6abf48a789958765424daa9b1ec4ed377dbb5"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.20.0/kache-aarch64-apple-darwin.tar.gz",
+        "artifact": "kache-aarch64-apple-darwin.tar.gz",
+        "size": 6754886,
+        "sha256": "bc19c7015b1ca449c13f827cff7235e9adcba3f48c01ac2ff902e3f93e78dc7c"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.20.0/kache-x86_64-pc-windows-msvc.zip",
+        "artifact": "kache-x86_64-pc-windows-msvc.zip",
+        "size": 8589847,
+        "sha256": "85de3cb4bc2f6f2460a6805715dad2900f279722eb71bed28cbdb9e6da6fc165"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.20.0/kache-aarch64-pc-windows-msvc.zip",
+        "artifact": "kache-aarch64-pc-windows-msvc.zip",
+        "size": 7890568,
+        "sha256": "97e2e5ec090dc3948ce3cec6d995f32c9d27384ff0b9a7999dfbeb6a7fef9144"
+      }
+    },
+    "0.21.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.21.0/kache-x86_64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-x86_64-unknown-linux-musl.tar.gz",
+        "size": 8494859,
+        "sha256": "6354bb76414be68f8f906206c87c1394e5b79fdebcb3a9d31e2254ddfadc2820"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.21.0/kache-aarch64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-aarch64-unknown-linux-musl.tar.gz",
+        "size": 7886769,
+        "sha256": "7c8b0e718b040f26c35a435eee1dbdf2ead42af8529b13be7cacc97f5bc8dec4"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.21.0/kache-x86_64-apple-darwin.tar.gz",
+        "artifact": "kache-x86_64-apple-darwin.tar.gz",
+        "size": 8204157,
+        "sha256": "5fd7b52ea71f3366e4c27801f952c5dfc74a91aa4ee6243f7ffd090768d637eb"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.21.0/kache-aarch64-apple-darwin.tar.gz",
+        "artifact": "kache-aarch64-apple-darwin.tar.gz",
+        "size": 6876079,
+        "sha256": "19469430e4c7f1a8bcc561c28c15fd487d32b51ebc62c922d71ee7de21f060f0"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.21.0/kache-x86_64-pc-windows-msvc.zip",
+        "artifact": "kache-x86_64-pc-windows-msvc.zip",
+        "size": 8762083,
+        "sha256": "5cfe8e91c4f05af605aa724d630b59baa7c723f4e87cb4556cfe593bfedb3014"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.21.0/kache-aarch64-pc-windows-msvc.zip",
+        "artifact": "kache-aarch64-pc-windows-msvc.zip",
+        "size": 8037736,
+        "sha256": "a579ccf887fcf87fcc81b3dae434a203f126ed2084cd9af8101262ebd7b1a8a3"
+      }
+    },
+    "0.22.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.22.0/kache-x86_64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-x86_64-unknown-linux-musl.tar.gz",
+        "size": 8492692,
+        "sha256": "5e3066c7e2f2792cf4a365d2b3ae9f5077a8cd20d21639b942289b226e64928a"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.22.0/kache-aarch64-unknown-linux-musl.tar.gz",
+        "artifact": "kache-aarch64-unknown-linux-musl.tar.gz",
+        "size": 7895149,
+        "sha256": "5c95ce19f5e1277f49fdb763f4e89594f2fa16aad8e40f85924807bc9b37f977"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.22.0/kache-x86_64-apple-darwin.tar.gz",
+        "artifact": "kache-x86_64-apple-darwin.tar.gz",
+        "size": 8206421,
+        "sha256": "db8b8b28961fbc024740835a23fbef6880992795249d049997c57b870c59aaf4"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.22.0/kache-aarch64-apple-darwin.tar.gz",
+        "artifact": "kache-aarch64-apple-darwin.tar.gz",
+        "size": 6882239,
+        "sha256": "594836372cabd4ad6a73888fb41896af5c93f16deea8c1b05c04c06aa9f0a102"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.22.0/kache-x86_64-pc-windows-msvc.zip",
+        "artifact": "kache-x86_64-pc-windows-msvc.zip",
+        "size": 8760681,
+        "sha256": "8e35ad707884526e93a72d868967147de8e7e2d313d1c0f805467e1b2ae0ab74"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/kunobi-ninja/kache/releases/download/v0.22.0/kache-aarch64-pc-windows-msvc.zip",
+        "artifact": "kache-aarch64-pc-windows-msvc.zip",
+        "size": 8039721,
+        "sha256": "a5f7ed66928ad01f14cd773a176f0eb324d27d8e996a6d5a7c15d96761d4052d"
+      }
     }
   }
 }

@@ -26,6 +26,136 @@
         "size": 45173910,
         "sha256": "3bae17886ad47909aadd89e41932a109a8b6a708faef6f28de2d4554c7c08276"
       }
+    },
+    "4.0.7": {
+      "linux/x86_64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.0.7/cmake-4.0.7-linux-x86_64.tar.gz",
+        "artifact": "cmake-4.0.7-linux-x86_64.tar.gz",
+        "size": 55495562,
+        "sha256": "dba36a8e7898e02c3a66dbe169dc776ffc81c2ee6d5bcab3c526d3f3976b4e91"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.0.7/cmake-4.0.7-linux-aarch64.tar.gz",
+        "artifact": "cmake-4.0.7-linux-aarch64.tar.gz",
+        "size": 56812004,
+        "sha256": "ad77fb21981b774f5d33b5ec0987071d93fee1d080599f7f61e59545f4cb0b50"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.0.7/cmake-4.0.7-windows-x86_64.zip",
+        "artifact": "cmake-4.0.7-windows-x86_64.zip",
+        "size": 47650281,
+        "sha256": "3c0bfe3ef9956b39a741afe1385499969bcd100dba7b5076d648bd2fbc56131c"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.0.7/cmake-4.0.7-windows-arm64.zip",
+        "artifact": "cmake-4.0.7-windows-arm64.zip",
+        "size": 46430308,
+        "sha256": "790049744f7a414f44e9d921600f5190a363e83629567e7096613603c18ff17d"
+      }
+    },
+    "4.1.6": {
+      "linux/x86_64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.1.6/cmake-4.1.6-linux-x86_64.tar.gz",
+        "artifact": "cmake-4.1.6-linux-x86_64.tar.gz",
+        "size": 56413738,
+        "sha256": "d5c2e72820e01f1c3a07092d0a29e209263a7d22f55b4ad7f414ee870ae6b8e0"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.1.6/cmake-4.1.6-linux-aarch64.tar.gz",
+        "artifact": "cmake-4.1.6-linux-aarch64.tar.gz",
+        "size": 57730038,
+        "sha256": "8b3e3af8e4b4e95224a4490f4772adb7a512be34c8380fe76e7be003e0fd4394"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.1.6/cmake-4.1.6-windows-x86_64.zip",
+        "artifact": "cmake-4.1.6-windows-x86_64.zip",
+        "size": 48623936,
+        "sha256": "d06278857a65a7a6cdd042c7f033d8a9fda67923fd6654e13296fa22186dca9e"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.1.6/cmake-4.1.6-windows-arm64.zip",
+        "artifact": "cmake-4.1.6-windows-arm64.zip",
+        "size": 47400126,
+        "sha256": "bfbab6426a36504d3b9c7b858c8a0dae3cf5de7a19e2cd077b06e38cb2189967"
+      }
+    },
+    "4.2.8": {
+      "linux/x86_64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.2.8/cmake-4.2.8-linux-x86_64.tar.gz",
+        "artifact": "cmake-4.2.8-linux-x86_64.tar.gz",
+        "size": 58195651,
+        "sha256": "fdc99bf2cc077f3a7dc783bc1a064fcb3d1deb806add09a355814ccff6e40914"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.2.8/cmake-4.2.8-linux-aarch64.tar.gz",
+        "artifact": "cmake-4.2.8-linux-aarch64.tar.gz",
+        "size": 59517287,
+        "sha256": "a7f1974cc46ac494a0e02833f9ecaff394aafdc2729fbe751e829dbbe322c313"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.2.8/cmake-4.2.8-windows-x86_64.zip",
+        "artifact": "cmake-4.2.8-windows-x86_64.zip",
+        "size": 50407107,
+        "sha256": "d33720a4e03114ae7c964c184e88f68a640be419f973bf4fb685f0900d1864ee"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.2.8/cmake-4.2.8-windows-arm64.zip",
+        "artifact": "cmake-4.2.8-windows-arm64.zip",
+        "size": 49501638,
+        "sha256": "01a3c1c619b882973feade8a4fcd2c798269827bf4f7cf6d9b12fc200bb41bfa"
+      }
+    },
+    "4.3.5": {
+      "linux/x86_64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.3.5/cmake-4.3.5-linux-x86_64.tar.gz",
+        "artifact": "cmake-4.3.5-linux-x86_64.tar.gz",
+        "size": 64036374,
+        "sha256": "ecb787a0439cf4324a3554b08bf0bb4894fb8c497763a43c6895d2a1bfd6a9fa"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.3.5/cmake-4.3.5-linux-aarch64.tar.gz",
+        "artifact": "cmake-4.3.5-linux-aarch64.tar.gz",
+        "size": 51279536,
+        "sha256": "0ccecc2ba6b5ed4a97fbfd1f52136a9120262908185d8419c1ed2abb09199245"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.3.5/cmake-4.3.5-windows-x86_64.zip",
+        "artifact": "cmake-4.3.5-windows-x86_64.zip",
+        "size": 52979296,
+        "sha256": "c05a60d22d5df22d75a72ae9b6628ef5f20daee4f4ba380920e1fbbeaf244fc1"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.3.5/cmake-4.3.5-windows-arm64.zip",
+        "artifact": "cmake-4.3.5-windows-arm64.zip",
+        "size": 51306135,
+        "sha256": "c33af80e37ba676c120c9c6ff305276b683f3a24d7914602c067a35314bee0b3"
+      }
+    },
+    "4.4.3": {
+      "linux/x86_64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-linux-x86_64.tar.gz",
+        "artifact": "cmake-4.4.3-linux-x86_64.tar.gz",
+        "size": 64872980,
+        "sha256": "d6c83076c575bc00b823522ac974bda66d0af05d6ddc30e739c12385cf32c6cc"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-linux-aarch64.tar.gz",
+        "artifact": "cmake-4.4.3-linux-aarch64.tar.gz",
+        "size": 52036576,
+        "sha256": "2efc974dbd63b4444c0e8494b92f2e80c2d7e635b4b80eac2916985ddd8f72a6"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-windows-x86_64.zip",
+        "artifact": "cmake-4.4.3-windows-x86_64.zip",
+        "size": 54408599,
+        "sha256": "4d52ebab7193a698651639ed80d8d04fd903358843572cf44c7fd234cb7c26ab"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-windows-arm64.zip",
+        "artifact": "cmake-4.4.3-windows-arm64.zip",
+        "size": 52561255,
+        "sha256": "7b410ddd00e24c7250eec7452da2348a4a70437aa87e9cda0a20d6a85662fcff"
+      }
     }
   }
 }

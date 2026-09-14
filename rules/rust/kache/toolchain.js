@@ -499,12 +499,25 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		artifactName: kacheArtifactName,
 		lockfile: DEFAULT_LOCKFILE,
 	},
-	["0.11.0"],
+	[
+		"0.11.0",
+		"0.12.0",
+		"0.13.0",
+		"0.14.2",
+		"0.15.1",
+		"0.16.0",
+		"0.17.0",
+		"0.18.0",
+		"0.19.0",
+		"0.20.0",
+		"0.21.0",
+		"0.22.0",
+	],
 );
 
 // Importing this rule provisions the pinned default. A workspace can replace
 // it by declaring another kacheToolchain(..., { default: true }).
-kacheToolchain("0.11.0", { default: true });
+kacheToolchain("0.22.0", { default: true });
 
 /**
  * Expose a kache toolchain as Rust's RUSTC_WRAPPER, sharing a persistent

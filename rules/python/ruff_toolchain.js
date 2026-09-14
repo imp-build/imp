@@ -278,7 +278,7 @@ export function defaultRuffToolchain() {
 
 // Importing this rule provisions the pinned default. A workspace can replace
 // it by declaring another ruffToolchain(..., { default: true }).
-ruffToolchain("0.15.21", { default: true });
+ruffToolchain("0.16.7", { default: true });
 
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
@@ -288,5 +288,5 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		artifactName: ruffArtifactName,
 		lockfile: DEFAULT_LOCKFILE,
 	},
-	["0.15.20", "0.15.21"],
+	["0.15.20", "0.15.21", "0.16.7"],
 );

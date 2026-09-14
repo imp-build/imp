@@ -32,6 +32,614 @@
         "size": 36757707,
         "sha256": "6296b40ce7a3734003f905e9319b04df48aa66df998882a5c2eff91d3c9bb818"
       }
+    },
+    "11.14.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.14.0/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 50966263,
+        "sha256": "d78ce4e1ebcc39c1213fcb5a8686eda5b09835195a318408a6361efbd450166d"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.14.0/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 51239112,
+        "sha256": "6ec5224012d46e96747caed6b7ea02498f56e838c68df72acd9f8de46969b1a9"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.14.0/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 47958051,
+        "sha256": "5c389e50afcf5c825e533f203f2c0cb84546ffb1fee056772489c5088d01600f"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.14.0/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 40797317,
+        "sha256": "3bad9a8cf971b4a223c31c2063081c4d35ce8ce503f9ca2d3ece241e966eafb9"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.14.0/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 36763167,
+        "sha256": "cf93211bb21ad4093cd53add2958a128cefab90613a4a879a31f90e8f299420d"
+      }
+    },
+    "11.15.1": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.15.1/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 50967777,
+        "sha256": "0c1373b6390f6b89ff8b896d3647c9826577ddc49173a2f732da69b36569f9e0"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.15.1/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 51240321,
+        "sha256": "361e385867146972d0635a41a1871cb44c9c23f65acce78a5f1ca1d44ac0afcd"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.15.1/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 47959324,
+        "sha256": "4ff53ecc9de8df115d4efef60eab77f91be4f8237cdaca078351a22e707d1849"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.15.1/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 40797838,
+        "sha256": "e9179d727211d5556e969fccfa36f828392892c54728a711c9da1cc3093f7900"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.15.1/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 36763688,
+        "sha256": "f552fb1a974d1e58c5825df60812fa9c1f78326eee1d152179225864236e2834"
+      }
+    },
+    "11.16.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.16.0/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 50976943,
+        "sha256": "2abc4593a4a502a221d3bd5bbaf18c9d269e4dd7bf53d143ba6c6ee1faf9149d"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.16.0/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 51247781,
+        "sha256": "6a4aabc26a3f8ad2f41b760f4907a54fedd0a88f0947bb56cf90fdcaff98ca80"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.16.0/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 47967329,
+        "sha256": "b8c9bb892908cbb08993ebdf57df375ccb2afba791de65f5b356707fd4ecb5c7"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.16.0/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 40807242,
+        "sha256": "85999cd5c2d66393cc2b5a2d60110d5b4331abf71243da4a9932834195fde9fe"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.16.0/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 36773092,
+        "sha256": "209297fb1db249824188316977fa691653803ddb9f8b1b1c5d3b4aa0924430c9"
+      }
+    },
+    "11.17.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.17.0/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 50975875,
+        "sha256": "bdb1db01bf0f757495405a59a09c5c287f315889dc98d3b14bc374b9fe43a0bf"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.17.0/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 51247006,
+        "sha256": "730d17de742a3efbb020ba91d7acfc0456c6ba6ad1cd8eb49f4c229fe9f504d3"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.17.0/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 47966169,
+        "sha256": "1e9a35d76f9d382af365d95c64f3abf7815e24350653f5bb1a37e4546265bc2b"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.17.0/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 40804920,
+        "sha256": "3025c174a6dcffec14a071a5c854cb0c350a09a8c7c2857a75f75cc7b29b939c"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.17.0/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 36770770,
+        "sha256": "46cb743b10cdf613de8e5d26edf1982ffc757a3393ec44d320b2a33f40d728d4"
+      }
+    },
+    "11.18.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.18.0/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 50996120,
+        "sha256": "f4e62794c56f7a1ad01097f94b90ca95680080aa2e83ebc3d0a751fb8aa8e4ad"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.18.0/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 51271051,
+        "sha256": "f9c09bb564421d9d39dfff60af41df88a4864af5637afdabe5f54d12853f8426"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.18.0/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 47989823,
+        "sha256": "c3ace80f45e3550503310c2669616602f2c514f46a2f475f481088887a55abc1"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.18.0/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 40827108,
+        "sha256": "16cc9dbbf86f723936eb9aa5dd37f9d13bdb2068fc7319162236c86746706249"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.18.0/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 36792958,
+        "sha256": "9d77b3dd6c5a218495dea5f1edc9dbdbb324694ed9cc5fabf9d7e8ba454b0e2f"
+      }
+    },
+    "11.19.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.19.0/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 50997758,
+        "sha256": "01562375e2b05b5cdc8d67e0bbfed549221c8a739b485ee0dac13d32d383ec24"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.19.0/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 51272818,
+        "sha256": "1b1630c3ae133448a9445911499ab2d59bd77f860abbd595dbc89da4eb82c22b"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.19.0/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 47991397,
+        "sha256": "00075435e24d20f5d369c9aec1ee1c29ebb78b52de8ea9807013fc70187ea0e5"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.19.0/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 40827982,
+        "sha256": "00ba922ef628d6879332af58cc3fcfe4177c71677f714406467047eb39902d22"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.19.0/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 36793832,
+        "sha256": "280fea20d193319d38a4858e5800503c73f74ee1b47e1717179fbeb866786419"
+      }
+    },
+    "11.20.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.20.0/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 51001582,
+        "sha256": "b4ad6ad2b21db2f8cd50af416c3aa148ba704c31c84893f465a770a01c2c4572"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.20.0/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 51275543,
+        "sha256": "f00fc2041bb41742b7943bf2bb24183ad20320e8384824a8031eb94edf2f57a5"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.20.0/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 47994348,
+        "sha256": "4bc97fea72e5c92eec1fefc8d410c35d01e0d0d52f3160c59f38c32db58b5cd2"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.20.0/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 40833076,
+        "sha256": "ea2528bdc3d96a1ff3c35587dc48ca692b39d77f08f26df4adeaaa9eb427024e"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.20.0/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 36798926,
+        "sha256": "5b39112b344ac95cc44531464ae9c19520ed062f3956a528f7ca19baf2802af6"
+      }
+    },
+    "11.21.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.21.0/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 51007454,
+        "sha256": "aadc489ce4473c2af0fec06a5c19e113b5793d404eac49853c8153bf4b0d8263"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.21.0/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 51281138,
+        "sha256": "64eb219b008f7a4c176d81fbce919c20b0b7e093e815cbb669d46e681451f43b"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.21.0/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 48000084,
+        "sha256": "860a96978a79ca5132bdc247375f94150a3c98edbecbee36e9f8e0c9e2f7f056"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.21.0/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 40840350,
+        "sha256": "6643043caa3b01c65c431039926a2af954326d5cefbdb4da7baceceb17f5051f"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.21.0/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 36806200,
+        "sha256": "694fbb992c1631983729887318fc26f0921ecc826655fcfa29514d470a6725d1"
+      }
+    },
+    "11.22.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.22.0/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 51236118,
+        "sha256": "4c592fa410eb23b69691a9efb9bf21c87c15b3e9d88c6ec8acdd354a0eb8de71"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.22.0/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 51510358,
+        "sha256": "f1426231f365bdfd46c15fa3d1211c3936ee2c4e557afd304f6c66dbf1b2a8bf"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.22.0/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 48228220,
+        "sha256": "2000dcc8f0718852c2806ba4dca1edaedf18a4a39264474d5a1c8fcee250adfd"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.22.0/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 41066942,
+        "sha256": "1de83ad5100acfd2adb5c8bc6f8a428cee9ff4e365deff57c22bfc0cccaa4ddb"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.22.0/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 37032792,
+        "sha256": "a4ad81ba3f41400d3b2a77dfd622b58f1c235a8da0c72123acb5dc9bd5167be2"
+      }
+    },
+    "11.23.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.23.0/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 51251402,
+        "sha256": "a4b2db2abce199330fe50d45fe8d608582c362c5cc8139f8f36cf116d9c72117"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.23.0/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 51522891,
+        "sha256": "e866ac26be184623027515f85087b760aa6479960e13c67f64c8955f2ef5a633"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.23.0/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 48243030,
+        "sha256": "fd591816355faf0a77864b6bd9cee7c1fdb3953d339ea32dd197d7ceccbdc4b1"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.23.0/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 41080430,
+        "sha256": "55f9836c9fa93ca48d0e27ed0864f8bc91b0d3df8cb4b8ece43cfb6da3b090c2"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.23.0/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 37046280,
+        "sha256": "1861dcc076242b15d91a29c9212d6aac50fba7995f407948cc43bf0b7e258076"
+      }
+    },
+    "11.24.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.24.0/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 51252978,
+        "sha256": "0a9b76dedb5fe8cc5e7f3a9fd70854181cfb08a487ebaf0c9cfb044dc860936c"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.24.0/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 51525093,
+        "sha256": "52f9cd410ef3bbb1cdd79c399b27772fa6d929bc3cf7c80ff3923a81e1c93be3"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.24.0/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 48244745,
+        "sha256": "c4df428b6c348b3037ba851359215065ce070d711dc96a9750052fdbfbe240d3"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.24.0/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 41081522,
+        "sha256": "c5ca642230551342a9fffafe508c181f346e2c79fcae2b1cae4c37ceb423481a"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.24.0/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 37047372,
+        "sha256": "1b4bfaa430c16059f72cee665591f4e3f3e424eb97f88e343b16035479d47edb"
+      }
+    },
+    "11.25.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.25.0/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 51293579,
+        "sha256": "11caeed8b581d460638f836f10f6ead19cbf08d774a5b8e502628b20ebf3ac43"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.25.0/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 51564978,
+        "sha256": "6d62b433b7a77b77e814dfaca8032bae57bb79c1a5ad50442e688c4f7fed3c8a"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.25.0/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 48283262,
+        "sha256": "cdcf7130ed2e7aa324c7c76ab597de66db0529b6b1e0db9e489bde538fdc0d04"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.25.0/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 41121270,
+        "sha256": "2d0203af85fc6fbb40f786a2671f175e9119a7c6dfcc4f30b1fa17e0f072c301"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.25.0/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 37087120,
+        "sha256": "07244c16ae5c6a38c4c1b24798d4d587f0f5492f603504fd608a5916890ec427"
+      }
+    },
+    "11.26.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.26.0/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 51303707,
+        "sha256": "9d877d4804bd586dc51f51167fffb0c20e45d97540bffa9b0179701cb51a94c0"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.26.0/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 51577662,
+        "sha256": "61b245dbb66b09c47012b4c37ccb5fee34cc5b7d1e5d5a5b12345adce31ad3ce"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.26.0/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 48296766,
+        "sha256": "d01944238b464ea66a8836fcb1945ee08a9c187ca6742b2e13f37e40ab0bd88d"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.26.0/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 41132875,
+        "sha256": "c7a0af5bd38d7ad88229585baf9c228e4e7619bc7a858cf828221088f1296670"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.26.0/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 37098725,
+        "sha256": "f8bd804f6168474b2f095827fb4fc98e0c7d26a31889cf547fd0c29088716289"
+      }
+    },
+    "11.27.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.27.0/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 51330354,
+        "sha256": "14ed04e631e4563abf3570dda1a365316683149a482b741a2db37e495f6b9cdb"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.27.0/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 51604530,
+        "sha256": "1f3c5dbdfe20b011ea86950b4fd61b5918cbde874c099032fe9064f7a53816bf"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.27.0/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 48323661,
+        "sha256": "9e8724db1d733d651cfe9a55d6de3d59fc8c5e472b9b4e9c2844acafd38c015e"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.27.0/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 41159800,
+        "sha256": "fed6d7039f9379d446b9edebb7b9d6db79e5c336bc4a86bf854730ec6c7dd53a"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.27.0/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 37125650,
+        "sha256": "35e6d3fa706fc0eb05b58d5b6f82ffb2dda4d76760a71b59dcf3745b29deb537"
+      }
+    },
+    "12.0.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.0.0/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 19164310,
+        "sha256": "d93497ba07d5dfc7d527b30905fdd24f55c87618ea23ea3af287cdff061510e0"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.0.0/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 17424858,
+        "sha256": "04ae74abf0f620189f1dd6cbb2586f8f6267e42268f7992e2f9dfaa67e9b323c"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.0.0/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 16636902,
+        "sha256": "c31f5abe796dfc8489ea980cb438844053ad6b402bb4f3eb9abd71086279d75b"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.0.0/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 17786130,
+        "sha256": "092f60a1304fd61df44c6c534d424144146e41cc9b3cb0557372baadc00f29d5"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.0.0/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 16514098,
+        "sha256": "d490be0273d9d86f0ca2313a30bee1c57456d3cf2f966a9c7ad7fc655908dfd9"
+      }
+    },
+    "12.1.0": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.1.0/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 19814261,
+        "sha256": "ef4c3e31c8f6e587c9f04ca4b42b63d47f331247930617304ffa63354c11db79"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.1.0/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 17989473,
+        "sha256": "24b202af01579ae885c8b3dc39a29c03d418a0c85eea274a969b216612abcd07"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.1.0/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 17215138,
+        "sha256": "927542783706b6966b6792f263b9b958dcd9909c5174965cd1aae0f4ab7f613c"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.1.0/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 18368774,
+        "sha256": "69c0d1d46cdc12bbefad653e859636179927aed292f9af286460a0d38d1d99d2"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.1.0/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 17012308,
+        "sha256": "84769c7cbe683b9fa36d4734e0c66169478e623c014a446d71c62e8b6d6c0c11"
+      }
+    },
+    "12.2.1": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.2.1/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 19904153,
+        "sha256": "06a69a4f33447096fdc8bc071ad322a153ba1d8aebf9ccbd720cb082f7e497ed"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.2.1/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 18067421,
+        "sha256": "b42fe17d2a6a7035ae1762377ff5ecd530746bd5d49db6d77c74986db8efda48"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.2.1/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 17312905,
+        "sha256": "ba343408b8479857fde5c42b2285e78e068f0e18c35824cd0a551197c6d8b774"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.2.1/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 18449553,
+        "sha256": "de76abf628ea248ab9e9c23430543a227b0e471e38c9618f178a4d87a84435b1"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.2.1/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 17077037,
+        "sha256": "aec3de537915843bc93f859bbc576b0fdac09ceb1b684e25e62f365c989c043b"
+      }
+    },
+    "12.3.4": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.3.4/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 19865651,
+        "sha256": "9705e5704b4679fb503c963a18d1ac4f105e39aafafca8a2ed346facdf820cd0"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.3.4/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 18014315,
+        "sha256": "95e71a2a30bbc0b77511f95cf096779068dcad6ffcbbfdf0cd4dde9de2b2b97c"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.3.4/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 17248571,
+        "sha256": "9560243d4e92780c4466bac2ee6aac4166c8bb601ad3c63f070cdd701b28f360"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.3.4/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 18411812,
+        "sha256": "ada0d8b62adff9884686d473e27d0f57ef2ca4a044d23a7c6782af86b9a8a6cf"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.3.4/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 17011945,
+        "sha256": "410872aaccbe38b36e2c1d648aa8d2964b42c71708ccf38f55652e92675aad85"
+      }
+    },
+    "12.4.1": {
+      "linux/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.4.1/pnpm-linux-x64.tar.gz",
+        "artifact": "pnpm-linux-x64.tar.gz",
+        "size": 21401125,
+        "sha256": "66e9886299085dade56e203ae0e3586f35787f8801a68d33ec07ac17b0de2001"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.4.1/pnpm-linux-arm64.tar.gz",
+        "artifact": "pnpm-linux-arm64.tar.gz",
+        "size": 19462224,
+        "sha256": "14f7a3e67d658d4ca8002c2aa0567f27dc5fe056a9f29f98ba7d2bfd6c81591b"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.4.1/pnpm-darwin-arm64.tar.gz",
+        "artifact": "pnpm-darwin-arm64.tar.gz",
+        "size": 18580151,
+        "sha256": "432fd151c10477630cf5c9f41209c2a7b75ac6dce7b2533a459519daf8954c52"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.4.1/pnpm-win32-x64.zip",
+        "artifact": "pnpm-win32-x64.zip",
+        "size": 19882702,
+        "sha256": "356092adbd4f69670945ed24c7fca994ba4dd9fbaf23b028bb9708afd7bc676e"
+      },
+      "windows/aarch64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v12.4.1/pnpm-win32-arm64.zip",
+        "artifact": "pnpm-win32-arm64.zip",
+        "size": 18379111,
+        "sha256": "6536c3c8647648005a347c3480040b9fb67763f07fbca43df0738a95c1a41188"
+      }
     }
   }
 }

@@ -276,5 +276,5 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		artifactName: odinfmtArtifactName,
 		lockfile: DEFAULT_LOCKFILE,
 	},
-	["dev-2026-03"],
+	["dev-2026-03", "dev-2026-08"],
 );

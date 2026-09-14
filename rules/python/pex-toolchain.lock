@@ -1,12 +1,52 @@
 {
   "tool": "pex-toolchain",
   "versions": {
+    "2.100.7": {
+      "any/any": {
+        "url": "https://github.com/pantsbuild/pex/releases/download/v2.100.7/pex",
+        "artifact": "pex",
+        "size": 5312490,
+        "sha256": "e6767a724f5375413355e0f0999418e7062a781cb8c86e4cb6cea47e5088b505"
+      }
+    },
+    "2.101.6": {
+      "any/any": {
+        "url": "https://github.com/pantsbuild/pex/releases/download/v2.101.6/pex",
+        "artifact": "pex",
+        "size": 5317838,
+        "sha256": "b46f0b05cbcb28ae11e1bd2d8ee80d4f75c3398292c347f2421f1d8e86985554"
+      }
+    },
+    "2.102.0": {
+      "any/any": {
+        "url": "https://github.com/pantsbuild/pex/releases/download/v2.102.0/pex",
+        "artifact": "pex",
+        "size": 5318386,
+        "sha256": "bc13a30fe36d29628442c150e41f3542dc4f89b83f7de2ab42f3e4b1f6d41e06"
+      }
+    },
     "2.97.1": {
       "any/any": {
         "url": "https://github.com/pantsbuild/pex/releases/download/v2.97.1/pex",
         "artifact": "pex",
         "size": 5040985,
         "sha256": "7aa97828d587883ddacc7cb1bdef71ed101b4d90e694a397a1cceaeac08e80b7"
+      }
+    },
+    "2.98.5": {
+      "any/any": {
+        "url": "https://github.com/pantsbuild/pex/releases/download/v2.98.5/pex",
+        "artifact": "pex",
+        "size": 5130867,
+        "sha256": "12eca13cbdce53ce99c16af935604b38df1f25dc4b39e11dd44c5d1ac6274d03"
+      }
+    },
+    "2.99.0": {
+      "any/any": {
+        "url": "https://github.com/pantsbuild/pex/releases/download/v2.99.0/pex",
+        "artifact": "pex",
+        "size": 5130861,
+        "sha256": "4ed98d6414194046710ec7fd3661484f019fedaf1d32f848f930f8c664b057a4"
       }
     }
   }

@@ -530,9 +530,9 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		artifactName: rustArtifactName,
 		lockfile: DEFAULT_LOCKFILE,
 	},
-	["1.93.0"],
+	["1.93.0", "1.94.1", "1.95.0", "1.96.1", "1.97.1", "1.98.1"],
 );
 
 // Importing this rule provisions the pinned default. A workspace can replace
 // it by declaring another rustToolchain(..., { default: true }).
-rustToolchain("1.93.0", { default: true });
+rustToolchain("1.98.1", { default: true });

@@ -214,7 +214,7 @@ export function defaultCraneToolchain() {
 	return version ? (graphToolchains.get(version) ?? null) : null;
 }
 
-craneToolchain("0.20.6", { default: true });
+craneToolchain("0.22.1", { default: true });
 
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
@@ -224,5 +224,5 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		artifactName: craneArtifactName,
 		lockfile: DEFAULT_LOCKFILE,
 	},
-	["0.20.6"],
+	["0.20.6", "0.21.9", "0.22.1"],
 );

@@ -323,7 +323,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		artifactName: moldArtifactName,
 		lockfile: DEFAULT_LOCKFILE,
 	},
-	["2.41.0"],
+	["2.41.0", "2.42.1"],
 );
 
 // Importing this rule provisions the pinned default — but only on Linux
@@ -332,7 +332,7 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 // workspace import on a platform mold doesn't support. A workspace can
 // still declare its own moldToolchain(..., { default: true }) explicitly.
 if (platformInfo().os === "linux") {
-	moldToolchain("2.41.0", { default: true });
+	moldToolchain("2.42.1", { default: true });
 }
 
 /**

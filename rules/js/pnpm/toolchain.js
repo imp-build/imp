@@ -324,7 +324,7 @@ export function defaultPnpmToolchain() {
 
 // Importing this rule provisions the pinned default. A workspace can replace
 // it by declaring another pnpmToolchain(..., { default: true }).
-pnpmToolchain("11.13.0", { default: true });
+pnpmToolchain("12.4.1", { default: true });
 
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
@@ -334,5 +334,26 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		artifactName: pnpmArtifactName,
 		lockfile: DEFAULT_LOCKFILE,
 	},
-	["11.13.0"],
+	[
+		"11.13.0",
+		"11.14.0",
+		"11.15.1",
+		"11.16.0",
+		"11.17.0",
+		"11.18.0",
+		"11.19.0",
+		"11.20.0",
+		"11.21.0",
+		"11.22.0",
+		"11.23.0",
+		"11.24.0",
+		"11.25.0",
+		"11.26.0",
+		"11.27.0",
+		"12.0.0",
+		"12.1.0",
+		"12.2.1",
+		"12.3.4",
+		"12.4.1",
+	],
 );

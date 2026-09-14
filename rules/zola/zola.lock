@@ -32,6 +32,38 @@
         "size": 14750691,
         "sha256": "2c8b368f5abdf2b2478748f9549a761fd6599238e18948eccb76a7cae51f5dc1"
       }
+    },
+    "0.23.6": {
+      "linux/x86_64": {
+        "url": "https://github.com/getzola/zola/releases/download/v0.23.6/zola-v0.23.6-x86_64-unknown-linux-gnu.tar.gz",
+        "artifact": "zola-v0.23.6-x86_64-unknown-linux-gnu.tar.gz",
+        "size": 16482712,
+        "sha256": "8f5132b3522412d04e395e0b25f6d68613ad272a873e54a2b3ebf664873024a4"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/getzola/zola/releases/download/v0.23.6/zola-v0.23.6-aarch64-unknown-linux-gnu.tar.gz",
+        "artifact": "zola-v0.23.6-aarch64-unknown-linux-gnu.tar.gz",
+        "size": 15510431,
+        "sha256": "266448fffbf7c7004ca399d0e76dd699541771096d8a42aede98cebe2a029d02"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/getzola/zola/releases/download/v0.23.6/zola-v0.23.6-x86_64-apple-darwin.tar.gz",
+        "artifact": "zola-v0.23.6-x86_64-apple-darwin.tar.gz",
+        "size": 16086637,
+        "sha256": "79a4d0ab51a4d863c068e6e594c6fce36f0aa17429a414ea63066f5910d14460"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/getzola/zola/releases/download/v0.23.6/zola-v0.23.6-aarch64-apple-darwin.tar.gz",
+        "artifact": "zola-v0.23.6-aarch64-apple-darwin.tar.gz",
+        "size": 15034094,
+        "sha256": "cbffbd29b3f59c3f52633507c8cb945a7a02d8b1399b43b235f5932912297aa3"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/getzola/zola/releases/download/v0.23.6/zola-v0.23.6-x86_64-pc-windows-msvc.zip",
+        "artifact": "zola-v0.23.6-x86_64-pc-windows-msvc.zip",
+        "size": 17092134,
+        "sha256": "79179284f816febc281adbedb27189806cf22f83e8be4d0fca6835fbeeb09587"
+      }
     }
   }
 }

@@ -342,7 +342,7 @@ export function defaultPexToolchain() {
 
 // Importing this rule provisions the pinned default. A workspace can replace
 // it by declaring another pexToolchain(..., { default: true }).
-pexToolchain("2.97.1", { default: true });
+pexToolchain("2.102.0", { default: true });
 
 // pex has exactly one artifact for all platforms, so generateToolLockfile
 // (which expects a per-platform downloadUrl/artifactName) is given a single
@@ -357,5 +357,5 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		artifactName: () => "pex",
 		lockfile: DEFAULT_LOCKFILE,
 	},
-	["2.97.1"],
+	["2.97.1", "2.98.5", "2.99.0", "2.100.7", "2.101.6", "2.102.0"],
 );

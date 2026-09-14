@@ -32,6 +32,38 @@
         "size": 1125525,
         "sha256": "9bbd36691716f8f84fcd3d8161cfef1eb1cf094963ac68010410852e7e716073"
       }
+    },
+    "dev-2026-08": {
+      "linux/x86_64": {
+        "url": "https://github.com/DanielGavin/ols/releases/download/dev-2026-08/ols-x86_64-unknown-linux-gnu.zip",
+        "artifact": "ols-x86_64-unknown-linux-gnu.zip",
+        "size": 1102597,
+        "sha256": "6fbeef39393476ad8c0601ad2fcc75e5df789f1c4990809fe87cd6f3f3680807"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/DanielGavin/ols/releases/download/dev-2026-08/ols-arm64-unknown-linux-gnu.zip",
+        "artifact": "ols-arm64-unknown-linux-gnu.zip",
+        "size": 1015908,
+        "sha256": "a06b0fd6f72413cbced80b59cf8bd36cd66bc5cdffbb7ddbd01efd680a8dad89"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/DanielGavin/ols/releases/download/dev-2026-08/ols-x86_64-darwin.zip",
+        "artifact": "ols-x86_64-darwin.zip",
+        "size": 999084,
+        "sha256": "b317a575e1f5dfa1922bf894b302a28e8d93b162130db8a6e3aa90a012f071e1"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/DanielGavin/ols/releases/download/dev-2026-08/ols-arm64-darwin.zip",
+        "artifact": "ols-arm64-darwin.zip",
+        "size": 979565,
+        "sha256": "40b80c582c1a3b218d43e4c8bba73aef82ae21a8e569f5846e01f5150c294cd1"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/DanielGavin/ols/releases/download/dev-2026-08/ols-x86_64-pc-windows-msvc.zip",
+        "artifact": "ols-x86_64-pc-windows-msvc.zip",
+        "size": 1194978,
+        "sha256": "4ae3528756bea3b0ecb1521e3f053f0990ba0af310d9c753384b6486943ed625"
+      }
     }
   }
 }

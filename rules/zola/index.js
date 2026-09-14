@@ -270,9 +270,9 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		artifactName: zolaArtifactName,
 		lockfile: DEFAULT_LOCKFILE,
 	},
-	["0.22.1"],
+	["0.22.1", "0.23.6"],
 );
 
 // Importing this rule provisions the pinned default. A workspace can replace
 // it by declaring another zolaToolchain(..., { default: true }).
-zolaToolchain("0.22.1", { default: true });
+zolaToolchain("0.23.6", { default: true });

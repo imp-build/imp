@@ -425,7 +425,7 @@ export function defaultOdinToolchain() {
 
 // Importing this rule provisions the pinned default. A workspace can replace
 // it by declaring another odinToolchain(..., { default: true }).
-odinToolchain("dev-2026-03", { default: true });
+odinToolchain("dev-2026-08", { default: true });
 
 const LOCKFILE_SPEC = registerToolchainLockfile(
 	{
@@ -435,5 +435,5 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		artifactName: odinArtifactName,
 		lockfile: DEFAULT_LOCKFILE,
 	},
-	["dev-2026-03"],
+	["dev-2026-03", "dev-2026-08"],
 );

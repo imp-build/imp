@@ -32,6 +32,38 @@
         "size": 23236992,
         "sha256": "dd9d6d6554bfab265bfa98aa8e8a406c5c3a7b97582f93de1f4d48d9154a0395"
       }
+    },
+    "0.12.13": {
+      "linux/x86_64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.13/uv-x86_64-unknown-linux-gnu.tar.gz",
+        "artifact": "uv-x86_64-unknown-linux-gnu.tar.gz",
+        "size": 19391575,
+        "sha256": "745765a3b6e360ad76743599ae5c42e9278c7edf8bbff9fc76d05bf2623a04dd"
+      },
+      "linux/aarch64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.13/uv-aarch64-unknown-linux-gnu.tar.gz",
+        "artifact": "uv-aarch64-unknown-linux-gnu.tar.gz",
+        "size": 18581057,
+        "sha256": "2eaa5d94f5db7b3a1a092156b9420459e42ab0217d917fe74a876309cef9b5e9"
+      },
+      "macos/x86_64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.13/uv-x86_64-apple-darwin.tar.gz",
+        "artifact": "uv-x86_64-apple-darwin.tar.gz",
+        "size": 20284513,
+        "sha256": "5e287ef61cb6a9b61b3a83fef124fd143e400468a7dac794230147a810e17119"
+      },
+      "macos/aarch64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.13/uv-aarch64-apple-darwin.tar.gz",
+        "artifact": "uv-aarch64-apple-darwin.tar.gz",
+        "size": 16674623,
+        "sha256": "7e6ddb9316acc00f2296c82ff4d99977870ee34b2f0ddcae9444d714db9364ed"
+      },
+      "windows/x86_64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.13/uv-x86_64-pc-windows-msvc.zip",
+        "artifact": "uv-x86_64-pc-windows-msvc.zip",
+        "size": 17612025,
+        "sha256": "a86c9dc7bad9b03f388583b7187c05fe9951c2e0d392217e8fd43d97787f6ec2"
+      }
     }
   }
 }

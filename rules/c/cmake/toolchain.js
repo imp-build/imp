@@ -355,9 +355,9 @@ const LOCKFILE_SPEC = registerToolchainLockfile(
 		artifactName: cmakeArtifactName,
 		lockfile: DEFAULT_LOCKFILE,
 	},
-	["3.31.0"],
+	["3.31.0", "4.0.7", "4.1.6", "4.2.8", "4.3.5", "4.4.3"],
 );
 
 // Importing this rule provisions the pinned default. A workspace can replace
 // it by declaring another cmakeToolchain(..., { default: true }).
-cmakeToolchain("3.31.0", { default: true });
+cmakeToolchain("4.4.3", { default: true });
