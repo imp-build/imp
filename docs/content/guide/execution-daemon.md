@@ -19,6 +19,8 @@ same action produce the same outcome.
 
 Pass the global `--daemon` flag on any command that executes actions:
 
+**Illustrative example**
+
 ```
 imp --daemon build //app
 ```

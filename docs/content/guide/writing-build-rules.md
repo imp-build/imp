@@ -8,6 +8,8 @@ A rule module exposes factories that synchronously construct immutable graph
 handles. A stamp rule is a small example: its output is a reusable file
 artifact, and the `BUILD` property makes that same artifact selectable.
 
+**Illustrative example**
+
 ```js
 import { output, task } from "imp:core";
 import { BUILD } from "//rules/workflows/build";

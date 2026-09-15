@@ -13,6 +13,8 @@ make clear what it enables.
 Every user-selectable rule, toolchain, or workflow lives in a named directory
 whose `index.js` is its public import path:
 
+**Illustrative example**
+
 ```text
 rules/
   js/

@@ -24,6 +24,8 @@ themselves; this page is about how a package puts them together.
 A goal is a symbol, and the module that implements a goal exports it. A rule
 package imports one symbol per goal it supports:
 
+**Illustrative example**
+
 ```js
 import { BUILD } from "//rules/workflows/build";
 import { FMT } from "//rules/workflows/fmt";

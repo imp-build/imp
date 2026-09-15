@@ -53,6 +53,8 @@ deploys the resulting Pages artifact.
 
 The workflow files are generated. Change `ci/gen_workflow.py` and regenerate them with:
 
+**Runnable example**
+
 ```sh
 imp generate //ci:docs_workflow
 ```

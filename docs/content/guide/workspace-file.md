@@ -10,6 +10,8 @@ Imports here are what enable things. Importing a workflow module enables its
 goal; importing a rule module registers that rule's configuration schema and
 supplies its pinned default toolchain, so `BUILD.js` files can use it.
 
+**Illustrative example**
+
 ```js
 import "//rules/workflows/build";
 import "//rules/workflows/fmt";

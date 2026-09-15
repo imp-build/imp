@@ -222,6 +222,11 @@ CHECK_STEPS = [
         "name": "Test",
         "run": './imp test //... --changed-since "$IMP_CHANGED_SINCE"',
     },
+    {
+        "name": "Documentation quality",
+        "run": "./imp lint //docs && ./imp test //docs",
+    },
+    {"name": "Package docs site", "run": f"./imp package {SITE_TARGET}"},
     {"name": "Cache stats", "run": "./imp cache stats --details"},
     {"name": "Cache gc", "run": "./imp cache gc --apply"},
 ]

@@ -9,6 +9,8 @@ selectors use `:name`; package selectors omit the colon. A selector without a
 leading `//` is relative to the current package, while `//` is relative to the
 workspace root.
 
+**Illustrative example**
+
 ```sh
 # One target
 imp build //apps/server:server

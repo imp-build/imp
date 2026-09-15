@@ -114,6 +114,12 @@ jobs:
       - name: Test
         run: ./imp test //... --changed-since "$IMP_CHANGED_SINCE"
 
+      - name: Documentation quality
+        run: ./imp lint //docs && ./imp test //docs
+
+      - name: Package docs site
+        run: ./imp package //docs:site
+
       - name: Cache stats
         run: ./imp cache stats --details
 

@@ -6,6 +6,8 @@ template = "page.html"
 
 Initialize a workspace from the repository root:
 
+**Illustrative example**
+
 ```sh
 imp init
 ```

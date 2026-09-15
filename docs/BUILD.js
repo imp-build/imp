@@ -1,7 +1,10 @@
 import { BUILD } from "//rules/workflows/build";
+import { LINT } from "//rules/workflows/lint";
 import { PACKAGE } from "//rules/workflows/package";
+import { TEST } from "//rules/workflows/test";
 import {
 	configurationSchemas,
+	file,
 	files,
 	label,
 	memo,
@@ -61,11 +64,16 @@ const api_reference_build = task({
             ...extractUserApiReference(jsFiles, configurationSchemas(), ruleCapabilities(), guides).map(({ path, markdown }) => [`user-api/${path}`, markdown]),
         ];
 
+        const manifest = JSON.stringify({
+            sources: srcPaths,
+            pages: pages.map(([name]) => name).sort(),
+        });
         const script = 'out=$1; shift; mkdir -p "$out"; while [ "$#" -gt 0 ]; do name=$1; content=$2; shift 2; mkdir -p "$out/$(dirname "$name")"; printf "%s" "$content" > "$out/$name"; done';
         const argv = ["sh", "-c", script, "docs-api-reference", "out"];
         for (const [name, content] of pages) {
             argv.push(name, content);
         }
+        argv.push("manifest.json", manifest);
 
         const result = await exec.action({
             argv,
@@ -83,7 +91,7 @@ export const api_reference = Object.freeze({
 
 const siteSources = files({
     root: ".",
-    include: ["docs/config.toml", "docs/content/**", "docs/templates/**", "docs/static/**"],
+    include: ["docs/config.toml", "docs/EDITORIAL.md", "docs/content/**", "docs/templates/**", "docs/static/**"],
 });
 
 const site_build = task({
@@ -96,6 +104,7 @@ const site_build = task({
             "root=$1; apiref=$2; zola_bin=$3",
             'mkdir -p "$root/content/reference/js-api" "$root/content/reference/user-api" "$root/templates" "$root/static"',
             'cp docs/config.toml "$root/config.toml"',
+            'cp docs/EDITORIAL.md "$root/static/EDITORIAL.md"',
             'cp -r docs/content/. "$root/content/"',
             'cp -r docs/templates/. "$root/templates/"',
             'cp -r docs/static/. "$root/static/"',
@@ -118,6 +127,87 @@ export const site = Object.freeze({
     [BUILD]: site_build.outputs.dir,
     [PACKAGE]: site_build.outputs.dir,
 });
+
+const python3 = nativeTool("python3");
+const qualityScript = file("docs/quality_check.py");
+const qualityTests = file("docs/quality_check_test.py");
+const qualitySources = files({
+    root: ".",
+    include: [
+        "README.md",
+        "docs/EDITORIAL.md",
+        "docs/content/**",
+        "docs/templates/**",
+        "docs/config.toml",
+        "rules/**/*.js",
+        "rules/**/DOC.md",
+    ],
+    exclude: ["**/*_test.js", "docs/content/reference/**"],
+});
+
+const docs_quality = task({
+    display: "check documentation quality",
+    inputs: {
+        sources: qualitySources,
+        checker: qualityScript,
+        apiReference: api_reference_build.outputs.dir,
+        site: site_build.outputs.dir,
+        python3,
+    },
+    outputs: { result: output.value() },
+    async run(exec, { sources, checker, apiReference, site, python3 }) {
+        const result = await exec.action({
+            argv: [
+                exec.tool(python3, "python3"),
+                exec.path(checker),
+                "--site",
+                exec.path(site),
+                "--api-reference",
+                exec.path(apiReference),
+            ],
+            inputs: [sources, checker, apiReference, site],
+            tools: [python3],
+            allowFailure: true,
+        });
+        return {
+            result: {
+                ok: result.exitCode === 0,
+                output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
+            },
+        };
+    },
+});
+
+export const quality = Object.freeze({ [LINT]: docs_quality.outputs.result });
+
+const docs_quality_tests = task({
+    display: "test documentation quality checker",
+    inputs: { checker: qualityScript, tests: qualityTests, python3 },
+    outputs: { units: output.value() },
+    async run(exec, { checker, tests, python3 }) {
+        const result = await exec.action({
+            argv: [
+                exec.tool(python3, "python3"),
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "docs",
+                "-p",
+                "quality_check_test.py",
+            ],
+            inputs: [checker, tests],
+            tools: [python3],
+            allowFailure: true,
+        });
+        const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
+        return {
+            units: [{ name: "docs/quality_check_test.py", ok: result.exitCode === 0, output }],
+        };
+    },
+});
+
+export const quality_tests = Object.freeze({ [TEST]: docs_quality_tests.outputs.units });
 
 // `imp run //docs:site_serve` supervises a "serve while editing" loop: every
 // second it re-invokes the fully-sandboxed, cache-backed `package` goal for

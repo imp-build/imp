@@ -34,6 +34,8 @@ in the cache. Keep those boundaries intact when changing code.
 
 Run commands from the repository root. While iterating, use a focused selector:
 
+**Runnable example**
+
 ```sh
 imp lint //docs
 imp test //docs
@@ -52,6 +54,10 @@ cargo test --workspace
 Use `cargo test --workspace`, not bare `cargo test`; the workspace contains
 several crates. The Imp checks cover graph, rule, formatting, lint, and
 packaging behavior that Cargo does not.
+
+The documentation lint also checks source and rendered links, guide navigation,
+generated reference output, and example status labels. It does not execute
+arbitrary documentation commands.
 
 ## Do not edit generated output
 

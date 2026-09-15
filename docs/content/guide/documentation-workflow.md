@@ -41,6 +41,8 @@ symptom, likely cause when known, and next diagnostic action.
 
 From the repository root, use the focused documentation checks while editing:
 
+**Runnable example**
+
 ```sh
 imp fmt //docs
 imp lint //docs
@@ -51,6 +53,12 @@ imp package //docs:site
 `docs/BUILD.js` extracts JavaScript and user API references from source files, schemas,
 capabilities, and rule guides before Zola builds the site. Packaging therefore checks both authored
 pages and generated reference inputs.
+
+`imp lint //docs` checks source links, rendered links and fragments, guide navigation, generated
+reference output, and example status labels. `imp test //docs` tests the checker. These checks do
+not execute arbitrary documentation commands. A **Runnable example** must include complete setup
+and expected context. An **Illustrative example** is an intentional code fragment that does not
+claim to run as written.
 
 Before review, also check the generated workflows and the full repository:
 
