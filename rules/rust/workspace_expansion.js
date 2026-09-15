@@ -32,6 +32,7 @@ import {
 	cargoManifestSources,
 	cargoTaskInputs,
 } from "//rules/rust/cargo_task_inputs";
+import { dedupeGeneratedSrcs } from "//rules/imp/codegen";
 
 import { nativeTool } from "//rules/imp/native-tool";
 
@@ -217,6 +218,12 @@ function testDepsForDirs(dirs) {
 	return registryValuesForDirs(dirs, "testDeps");
 }
 
+function generatedSrcsForDirs(dirs) {
+	return dedupeGeneratedSrcs(registryValuesForDirs(dirs, "generatedSrcs"), {
+		rule: "cargoPackage",
+	});
+}
+
 // cargo's own `manifest_path`/`workspace_root` fields are always absolute;
 // every other path used throughout the Rust rules is workspace-relative.
 // On Windows, cargo reports these with backslash separators, so normalize
@@ -338,8 +345,9 @@ function workspaceClippyTask(
 	manifests,
 	toolchainSpec,
 	deps,
+	generatedSrcs,
 ) {
-	const packageInputs = cargoTaskInputs({ deps });
+	const packageInputs = cargoTaskInputs({ deps, generatedSrcs });
 	return task({
 		display: `cargo clippy --workspace ${workspaceRootRelative}`,
 		inputs: {
@@ -349,6 +357,7 @@ function workspaceClippyTask(
 		},
 		outputs: { report: output.value() },
 		async run(exec, input) {
+			packageInputs.validateGeneratedSrcs(exec, input);
 			const { tools, env, rustflags } = await cargoEnv(
 				exec,
 				input,
@@ -449,8 +458,9 @@ function workspaceTestBuildTask(
 	manifests,
 	toolchainSpec,
 	deps,
+	generatedSrcs,
 ) {
-	const packageInputs = cargoTaskInputs({ deps });
+	const packageInputs = cargoTaskInputs({ deps, generatedSrcs });
 	const buildDir = `build/rust/${workspaceRootRelative === "." ? "root" : workspaceRootRelative}`;
 	return task({
 		display: `cargo test --no-run --workspace ${workspaceRootRelative}`,
@@ -462,6 +472,7 @@ function workspaceTestBuildTask(
 		},
 		outputs: { binaries: output.artifact(), report: output.value() },
 		async run(exec, input) {
+			packageInputs.validateGeneratedSrcs(exec, input);
 			const { tools, env, rustflags } = await cargoEnv(
 				exec,
 				input,
@@ -677,8 +688,14 @@ function workspaceDoctestTask(
 	testTools,
 	deps,
 	testDeps,
+	generatedSrcs,
 ) {
-	const packageInputs = cargoTaskInputs({ deps, testDeps, testTools });
+	const packageInputs = cargoTaskInputs({
+		deps,
+		testDeps,
+		testTools,
+		generatedSrcs,
+	});
 	const buildDir = `build/rust-doctest/${workspaceRootRelative === "." ? "root" : workspaceRootRelative}`;
 	return task({
 		display: `cargo test --doc --workspace ${workspaceRootRelative}`,
@@ -690,6 +707,7 @@ function workspaceDoctestTask(
 		},
 		outputs: { stderr: output.value() },
 		async run(exec, input) {
+			packageInputs.validateGeneratedSrcs(exec, input);
 			const { tools, env, rustflags } = await cargoEnv(
 				exec,
 				input,
@@ -846,6 +864,7 @@ export function cargoWorkspaceExpansion(workspaceRootRelative, toolchainSpec) {
 			const memberDirs = members.map((m) => m.dir);
 			const deps = depsForDirs(memberDirs);
 			const testDeps = testDepsForDirs(memberDirs);
+			const generatedSrcs = generatedSrcsForDirs(memberDirs);
 
 			const clippy = workspaceClippyTask(
 				workspaceRootRelative,
@@ -853,6 +872,7 @@ export function cargoWorkspaceExpansion(workspaceRootRelative, toolchainSpec) {
 				manifests,
 				toolchainSpec,
 				deps,
+				generatedSrcs,
 			);
 			const testBuild = workspaceTestBuildTask(
 				workspaceRootRelative,
@@ -860,6 +880,7 @@ export function cargoWorkspaceExpansion(workspaceRootRelative, toolchainSpec) {
 				manifests,
 				toolchainSpec,
 				deps,
+				generatedSrcs,
 			);
 			const fmt = workspaceFmtTask(
 				workspaceRootRelative,
@@ -877,6 +898,7 @@ export function cargoWorkspaceExpansion(workspaceRootRelative, toolchainSpec) {
 						testToolsForDirs(memberDirs),
 						deps,
 						testDeps,
+						generatedSrcs,
 					)
 				: null;
 
@@ -911,7 +933,12 @@ export function cargoWorkspaceExpansion(workspaceRootRelative, toolchainSpec) {
 // Routes through expand() for uniformity with cargoWorkspaceExpansion()
 // rather than a structurally different code path, matching rules/odin's
 // precedent of always going through expand().
-export function cargoStandaloneExpansion(path, toolchainSpec, builtin = false) {
+export function cargoStandaloneExpansion(
+	path,
+	toolchainSpec,
+	builtin = false,
+	generatedSrcs = [],
+) {
 	const manifestPath = `${path}/Cargo.toml`;
 	const manifests = builtin
 		? builtinCargoManifestSources(path)
@@ -938,8 +965,13 @@ export function cargoStandaloneExpansion(path, toolchainSpec, builtin = false) {
 			const deps = depsForDir(path);
 			const testDeps = testDepsForDir(path);
 			const testTools = testToolsForDir(path);
-			const compileInputs = cargoTaskInputs({ deps });
-			const runtimeInputs = cargoTaskInputs({ deps, testDeps, testTools });
+			const compileInputs = cargoTaskInputs({ deps, generatedSrcs });
+			const runtimeInputs = cargoTaskInputs({
+				deps,
+				testDeps,
+				testTools,
+				generatedSrcs,
+			});
 
 			const clippy = task({
 				display: `cargo clippy ${path}`,
@@ -950,6 +982,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec, builtin = false) {
 				},
 				outputs: { report: output.value() },
 				async run(exec, input) {
+					compileInputs.validateGeneratedSrcs(exec, input);
 					const { tools, env, rustflags } = await cargoEnv(
 						exec,
 						input,
@@ -996,6 +1029,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec, builtin = false) {
 				},
 				outputs: { binaries: output.artifact(), report: output.value() },
 				async run(exec, input) {
+					compileInputs.validateGeneratedSrcs(exec, input);
 					const { tools, env, rustflags } = await cargoEnv(
 						exec,
 						input,
@@ -1086,6 +1120,7 @@ export function cargoStandaloneExpansion(path, toolchainSpec, builtin = false) {
 						},
 						outputs: { units: output.value() },
 						async run(exec, input) {
+							runtimeInputs.validateGeneratedSrcs(exec, input);
 							const { tools, env, rustflags } = await cargoEnv(
 								exec,
 								input,

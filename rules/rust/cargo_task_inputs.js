@@ -1,11 +1,12 @@
 import { builtinFiles, files } from "imp:core";
+import { assertGeneratedSrcPath } from "//rules/imp/codegen";
 
 // Keep package-owned inputs grouped by the workflows that consume them. A new
 // per-package input can be assigned here once instead of being threaded
 // through every Cargo task builder.
 const INPUT_ROLES = {
-	compile: ["dep"],
-	runtime: ["dep", "testDep"],
+	compile: ["dep", "generated"],
+	runtime: ["dep", "testDep", "generated"],
 	tools: ["tool"],
 };
 
@@ -35,9 +36,16 @@ export function cargoTaskInputs({
 	deps = [],
 	testDeps = [],
 	testTools = [],
+	generatedSrcs = [],
 } = {}) {
-	const groups = { dep: deps, testDep: testDeps, tool: testTools };
+	const groups = {
+		dep: deps,
+		testDep: testDeps,
+		tool: testTools,
+		generated: generatedSrcs.map(({ artifact }) => artifact),
+	};
 	return {
+		generatedSrcs,
 		bindings(role) {
 			return Object.fromEntries(
 				INPUT_ROLES[role].flatMap((prefix) =>
@@ -49,6 +57,16 @@ export function cargoTaskInputs({
 			return INPUT_ROLES[role].flatMap((prefix) =>
 				groups[prefix].map((_, index) => input[`${prefix}${index}`]),
 			);
+		},
+		validateGeneratedSrcs(exec, input, rule = "cargoPackage") {
+			for (const [index, generated] of generatedSrcs.entries()) {
+				assertGeneratedSrcPath(
+					rule,
+					index,
+					exec.path(input[`generated${index}`]),
+					generated.expectedPath,
+				);
+			}
 		},
 	};
 }

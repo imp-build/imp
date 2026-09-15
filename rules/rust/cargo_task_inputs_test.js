@@ -44,4 +44,18 @@ describe("cargo task inputs", () => {
 		]);
 		expect(inputs.resolved(resolved, "tools")).toEqual(["resolved-tool-0"]);
 	});
+
+	test("carries generated artifacts through compile and runtime roles", () => {
+		const generated = [
+			{ artifact: "generated-0", expectedPath: "crate/src/generated.rs" },
+		];
+		const inputs = cargoTaskInputs({ generatedSrcs: generated });
+
+		expect(inputs.bindings("compile")).toEqual({ generated0: "generated-0" });
+		expect(inputs.bindings("runtime")).toEqual({ generated0: "generated-0" });
+		expect(inputs.bindings("tools")).toEqual({});
+		expect(
+			inputs.resolved({ generated0: "resolved-generated" }, "compile"),
+		).toEqual(["resolved-generated"]);
+	});
 });

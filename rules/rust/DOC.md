@@ -116,6 +116,41 @@ For a package declared inside an enclosing Cargo workspace, set
 dependencies so Cargo can resolve the outer `[workspace]`. Leave it false for
 a standalone crate or for the target representing the workspace root itself.
 
+### Generated sources
+
+`generatedSrcs` accepts a `codegen()` result from `//rules/imp/codegen` and
+stages its outputs at their declared workspace paths for Cargo build, lint,
+test-build, and doctest actions. The explicit form,
+`{ artifact, path }`, uses a path relative to the Cargo package:
+
+```js
+import { cargoPackage } from "//rules/rust";
+import { codegen } from "//rules/imp/codegen";
+import { nativeTool } from "//rules/imp/native-tool";
+
+const generated = codegen({
+    tools: { sh: nativeTool("sh") },
+    outputPaths: ["app/src/generated.rs"],
+    argv: (exec, { sh }) => [
+        exec.tool(sh, "sh"),
+        "-c",
+        'printf "pub const VALUE: u32 = 42;\\n" > "$1"',
+        "generate",
+        "app/src/generated.rs",
+    ],
+});
+
+export const app = cargoPackage({
+    path: "app",
+    bin: "app",
+    generatedSrcs: [generated],
+});
+```
+
+The artifact must land at the path declared by the entry. Two different
+artifacts cannot claim the same path. Generated files stay in the graph and do
+not get written into the workspace.
+
 ## Run goals
 
 ```sh

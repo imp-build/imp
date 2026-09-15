@@ -11,6 +11,7 @@ import {
 	withFakeToolchainHost,
 } from "//rules/imp/test";
 import { cargoPackage, cargoPackageHandles } from "//rules/rust";
+import { codegen } from "//rules/imp/codegen";
 import { nativeTool } from "//rules/imp/native-tool";
 import {
 	__resetGccToolchainStateForTest,
@@ -68,6 +69,14 @@ function fakeGraphToolchain() {
 function fakeGccGraphToolchain(version = "2025.08-1") {
 	const binRoot = files({ root: "rules/c/gcc", include: ["**/*"] });
 	return { tool: tool(binRoot, { binDirs: ["bin"] }), version };
+}
+
+function rustCodegen(outputPath) {
+	return codegen({
+		tools: { sh: nativeTool("sh") },
+		outputPaths: [outputPath],
+		argv: (exec, { sh }) => [exec.tool(sh, "sh"), "-c", "true"],
+	});
 }
 
 async function resolveHandles(handles) {
@@ -247,6 +256,118 @@ describe("graph-native cargoPackage", () => {
 			const own = handles[handles.length - 1];
 			expect(own.path).toBe("crates/registry-fixture");
 			expect(own.testTools).toEqual([tar]);
+		});
+	});
+
+	test("cargoPackage normalizes generated codegen and explicit package paths", () => {
+		return withRustHost(() => {
+			const generated = rustCodegen("rules/rust/example/src/generated.rs");
+			const explicit = {
+				artifact: generated.files["rules/rust/example/src/generated.rs"],
+				path: "src/generated.rs",
+			};
+			const pkg = cargoPackage({
+				path: "rules/rust/example",
+				generatedSrcs: [generated, explicit],
+				toolchain: fakeGraphToolchain(),
+			});
+
+			expect(pkg.spec.generatedSrcs.length).toBe(1);
+			expect(pkg.spec.generatedSrcs[0].expectedPath).toBe(
+				"rules/rust/example/src/generated.rs",
+			);
+		});
+	});
+
+	test("cargoPackage rejects conflicting generated paths", () => {
+		return withRustHost(() => {
+			const first = rustCodegen("rules/rust/example/src/generated-a.rs");
+			const second = rustCodegen("rules/rust/example/src/generated-b.rs");
+			expect(() =>
+				cargoPackage({
+					path: "rules/rust/example",
+					generatedSrcs: [
+						{
+							artifact: first.files["rules/rust/example/src/generated-a.rs"],
+							path: "src/generated.rs",
+						},
+						{
+							artifact: second.files["rules/rust/example/src/generated-b.rs"],
+							path: "src/generated.rs",
+						},
+					],
+					toolchain: fakeGraphToolchain(),
+				}),
+			).toThrow(
+				"two different generated sources cannot claim one workspace path",
+			);
+		});
+	});
+
+	test("cargo build carries generated artifacts as task inputs", async () => {
+		await withRustHost(async () => {
+			const generated = rustCodegen("rules/rust/example/src/generated.rs");
+			const pkg = cargoPackage({
+				path: "rules/rust/example",
+				bin: "hello",
+				generatedSrcs: [generated],
+				toolchain: fakeGraphToolchain(),
+			});
+			const walkJson = await globalThis.__imp_walk_graph_for_introspection(
+				JSON.stringify([
+					{ address: "hello", handleId: pkg[BUILD].hello.__graph_id },
+				]),
+				JSON.stringify({ args: [], flags: {}, mode: {}, config: {} }),
+				JSON.stringify({}),
+			);
+			const { nodes } = JSON.parse(walkJson);
+			const build = nodes.find(
+				(node) => node.display === "cargo build rules/rust/example",
+			);
+			const generatedEdges = build.edges.filter((edge) =>
+				/^generated\d+$/.test(edge.name),
+			);
+			expect(generatedEdges.length).toBe(1);
+		});
+	});
+
+	test("workspace member cargo builds carry sibling generated artifacts", async () => {
+		await withRustHost(async () => {
+			const firstGenerated = rustCodegen(
+				"rules/rust/workspace-first/src/generated.rs",
+			);
+			const secondGenerated = rustCodegen(
+				"rules/rust/workspace-second/src/generated.rs",
+			);
+			const first = cargoPackage({
+				path: "rules/rust/workspace-first",
+				bin: "first",
+				workspaceMember: true,
+				generatedSrcs: [firstGenerated],
+				toolchain: fakeGraphToolchain(),
+			});
+			cargoPackage({
+				path: "rules/rust/workspace-second",
+				workspaceMember: true,
+				generatedSrcs: [secondGenerated],
+				toolchain: fakeGraphToolchain(),
+			});
+
+			const walkJson = await globalThis.__imp_walk_graph_for_introspection(
+				JSON.stringify([
+					{ address: "first", handleId: first[BUILD].first.__graph_id },
+				]),
+				JSON.stringify({ args: [], flags: {}, mode: {}, config: {} }),
+				JSON.stringify({}),
+			);
+			const { nodes } = JSON.parse(walkJson);
+			const build = nodes.find(
+				(node) => node.display === "cargo build rules/rust/workspace-first",
+			);
+			const generatedEdges = build.edges.filter((edge) =>
+				/^generated\d+$/.test(edge.name),
+			);
+			expect(generatedEdges.length).toBe(2);
 		});
 	});
 });
