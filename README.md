@@ -6,16 +6,21 @@ cache.
 
 ## Start here
 
+- [Installing Imp](docs/content/guide/installing.md) — install a published
+  archive and check the prerequisites.
 - [Getting started](docs/content/guide/getting-started.md) — create a
   workspace and build a first target.
-- [Writing build rules](docs/content/guide/writing-build-rules.md) — declare
-  graph-native rules and actions.
-- [Contributing and maintaining Imp](docs/content/guide/contributing.md) —
-  understand the repository, development workflow, and validation gates.
-- [Releases](docs/content/guide/releases.md) — understand the release
-  artifacts and current CI workflow.
-- [Documentation workflow](docs/content/guide/documentation-workflow.md) —
-  update authored docs and generated references.
+- [Configure a workspace](docs/content/guide/workspace-file.md) — select rules,
+  workflows, profiles, and execution limits.
+- [Writing build files](docs/content/guide/writing-build-rules.md) — declare
+  graph-native targets and actions.
+- [Advanced user workflows](docs/content/guide/toolchains-and-caches.md) —
+  use toolchains, caches, CI, packaging, and diagnostics.
+
+For repository work, see [Contributing and maintaining
+Imp](docs/content/guide/contributing.md). Maintainers can also read the
+[release workflow](docs/content/guide/releases.md) and [documentation
+workflow](docs/content/guide/documentation-workflow.md).
 
 From a workspace root, initialize Imp and build a target:
 

@@ -1,8 +1,12 @@
 +++
 title = "Getting started"
-weight = 1
+weight = 2
 template = "page.html"
 +++
+
+This page is for users who have installed `imp` and want to create a workspace
+and build a first target. You will create `imp.workspace.js`, declare a small
+target, and run it from the workspace root.
 
 Initialize a workspace from the repository root:
 

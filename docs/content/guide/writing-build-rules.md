@@ -1,8 +1,12 @@
 +++
-title = "Writing build rules"
-weight = 3
+title = "Writing build files"
+weight = 4
 template = "page.html"
 +++
+
+This page is for users who declare targets in `BUILD.js`. It explains how to
+describe inputs, tools, outputs, and dependencies so Imp can build the graph
+and run actions in sandboxes.
 
 A rule module exposes factories that synchronously construct immutable graph
 handles. A stamp rule is a small example: its output is a reusable file

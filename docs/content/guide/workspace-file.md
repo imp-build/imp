@@ -1,8 +1,11 @@
 +++
-title = "The workspace file"
-weight = 2
+title = "Configure a workspace"
+weight = 3
 template = "page.html"
 +++
+
+This page is for users who need to select rules, workflows, toolchains, or
+execution limits. It explains the workspace file that controls those choices.
 
 `imp.workspace.js` is the root marker imp looks for when finding the workspace root. It's evaluated once, before any `BUILD.js` file.
 

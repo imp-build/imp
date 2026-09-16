@@ -1,19 +1,20 @@
 +++
-title = "The execution daemon"
-weight = 15
+title = "Use the execution daemon"
+weight = 25
+extra = { sidebar_heading = true }
 template = "page.html"
 +++
+
+This page is for advanced users who want a long-lived local executor. It is
+optional; normal commands use in-process execution.
 
 By default `imp` runs every sandboxed action in its own process. The execution
 daemon is an opt-in alternative: a long-lived local service that runs those
 actions on behalf of short-lived `imp` invocations, so a sandbox executor and
 its warm state outlive a single command.
 
-The daemon speaks `imp.exec.v1`, a gRPC service shaped after the Bazel Remote
-Execution API v2 (the same CAS + action-cache split, the same
-Action/Command/Directory digests). It fronts the **same** in-process executor
-and the **same** shared cache root, so a daemon run and an in-process run of the
-same action produce the same outcome.
+It fronts the same executor and shared cache root as in-process execution, so
+the same action can produce the same result through either path.
 
 ## Selecting daemon execution
 

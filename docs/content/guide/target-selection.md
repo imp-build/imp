@@ -1,6 +1,6 @@
 +++
 title = "Target selection"
-weight = 10
+weight = 5
 extra = { sidebar_heading = true }
 +++
 
