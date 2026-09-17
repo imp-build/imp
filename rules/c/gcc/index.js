@@ -751,7 +751,7 @@ const LOCKFILE_SPEC_WINDOWS = registerToolchainLockfile(
 // is active. A workspace can replace it by declaring another
 // gccToolchain(..., { default: true }).
 gccToolchain(
-	{ linux: "2026.08-1", windows: "16.2.0posix-14.0.0-ucrt-r1" },
+	{ linux: "2025.08-1", windows: "16.2.0posix-14.0.0-ucrt-r1" },
 	{ default: true },
 );
 
