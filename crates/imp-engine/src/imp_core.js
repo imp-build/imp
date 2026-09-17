@@ -112,7 +112,7 @@ export function sourcesField(opts) {
 }
 
 /**
- * Return the workspace-relative directory of the calling BUILD module.
+ * Return the workspace-relative directory of the active BUILD module.
  *
  * Rule factories use this to keep their public path arguments relative to
  * the BUILD.js that invoked them rather than to the workspace root. This is
@@ -121,17 +121,16 @@ export function sourcesField(opts) {
  * BUILD helper still resolves to the consuming BUILD.js, not wherever the
  * helper is defined — issue #71) and inside a task()/expand() run()/create()
  * callback (the correct value was captured when the task/expansion was
- * declared and is delivered ambiently, see graph_core.js's
- * _graphAmbientPackagePath, rather than by walking the call stack, which
- * by execution time no longer contains the declaring BUILD.js's frame).
+ * declared and is delivered by graph_core.js's package context).
  *
  * @category graph
  * @returns {string} `"."` for the workspace root.
  */
 export function packagePath() {
+	const packageContext = _graphPackageContexts.get(_current_memo_context_id);
+	if (packageContext !== undefined) return packageContext;
 	if (_graphAmbientPackagePath !== null) return _graphAmbientPackagePath;
-	const stack = new Error().stack || "";
-	return __host_package_path(stack);
+	throw new Error("packagePath() requires an active workspace BUILD module");
 }
 
 /**
@@ -3395,6 +3394,9 @@ export function resetMemoState() {
 	_promise_job_context_stack = [];
 	_promise_context_override = null;
 	_promise_context_override_stack = [];
+	_graphPackageContexts.clear();
+	_graphPackagePathOverride = null;
+	_graphAmbientPackagePath = null;
 	_memo_node_counter = 0;
 	_memo_node_labels = new Map();
 	_memo_context_labels = new Map([[0, ""]]);

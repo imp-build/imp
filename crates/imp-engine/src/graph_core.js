@@ -169,24 +169,54 @@ let _graphPhase = "construction";
 // True while one goal run owns the memo tables. See
 // `__imp_graph_begin_run`.
 let _graphRunActive = false;
-// packagePath() normally derives its answer from the live JS call stack,
-// which only means anything during synchronous BUILD.js evaluation. Any
-// framework that registers a callback for later invocation — task()/
-// expand()'s run()/create(), or a test runner's deferred test bodies (see
-// rules/imp/test) — breaks that: by execution time the declaring module's
-// frame is gone from the stack entirely, not just distant on it. The fix
-// is the same shape everywhere: capture packagePath() once, synchronously,
-// at registration time (still inside the declaring module's real
-// evaluation), and deliver it through this one ambient slot instead,
-// scoped for the callback's duration via withCapturedPackagePath(). Safe
-// even under this engine's real concurrent root resolution (see
-// __imp_execute_graph_handles's Promise.all) because JS is single-threaded
-// — nothing can run between "we set this" and the callback's own
-// synchronous prologue reading it. It only covers that synchronous
-// prologue, though: a packagePath() call made after the callback itself
-// awaits something is calling it out of contract, same as it always has
-// been for anything but synchronous declare-time code.
+// packagePath() is supplied by the loader while a workspace module evaluates.
+// BUILD.js modules enter their own package context; rule modules and helpers
+// inherit the active consumer context. Deferred graph callbacks capture the
+// value at registration time because their declaring module has finished
+// evaluating by the time the callback runs.
+//
+// Package contexts use explicit memo context IDs while synchronous code runs.
+// Deferred callbacks must capture their path before awaiting: QuickJS does not
+// propagate arbitrary JavaScript context across native Promise continuations.
 let _graphAmbientPackagePath = null;
+let _graphPackagePathOverride = null;
+const _graphPackageContexts = new Map();
+
+globalThis.__imp_package_context_enter = function (packagePath) {
+	if (typeof packagePath !== "string" || packagePath.length === 0)
+		throw _graphError("package context must be a non-empty path");
+	const previousContextId = _current_memo_context_id;
+	const contextId = _fork_context(null, _effective_context(), "package");
+	_graphPackageContexts.set(contextId, packagePath);
+	_current_memo_context_id = contextId;
+	_graphPackagePathOverride = packagePath;
+	_graphAmbientPackagePath = packagePath;
+	let released = false;
+	return function releasePackageContext() {
+		if (released) return;
+		released = true;
+		_graphPackagePathOverride = null;
+		_graphAmbientPackagePath = null;
+		_current_memo_context_id = previousContextId;
+	};
+};
+
+globalThis.__imp_package_context_call = function (packagePath, fn) {
+	if (typeof fn !== "function") throw _graphError("package context callback must be a function");
+	const previousContextId = _current_memo_context_id;
+	const contextId = _fork_context(null, _effective_context(), "package");
+	_graphPackageContexts.set(contextId, packagePath);
+	_graphPackagePathOverride = packagePath;
+	_graphAmbientPackagePath = packagePath;
+	_current_memo_context_id = contextId;
+	try {
+		return fn();
+	} finally {
+		_graphPackagePathOverride = null;
+		_graphAmbientPackagePath = null;
+		_current_memo_context_id = previousContextId;
+	}
+};
 
 function _graphCapturePackagePath() {
 	try {
@@ -199,21 +229,14 @@ function _graphCapturePackagePath() {
 /**
  * Run `fn` with packagePath() resolving to `capturedPath` — captured
  * earlier, synchronously, via packagePath() itself at the point `fn` was
- * registered — for `fn`'s own synchronous prologue. Restores the previous
- * ambient value afterward. For frameworks that defer invoking a callback
- * past the point where normal stack-based packagePath() resolution would
- * still find the right module (see this file's own task()/expand() use,
- * and rules/imp/test's test runner).
+ * registered. Restores the previous package context afterward. This is used
+ * by frameworks that defer invoking a callback past the BUILD module's
+ * evaluation (see this file's own task()/expand() use and
+ * rules/imp/test's test runner).
  * @category graph
  */
 export async function withCapturedPackagePath(capturedPath, fn) {
-	const previous = _graphAmbientPackagePath;
-	_graphAmbientPackagePath = capturedPath;
-	try {
-		return await fn();
-	} finally {
-		_graphAmbientPackagePath = previous;
-	}
+	return await globalThis.__imp_package_context_call(capturedPath, fn);
 }
 
 function _graphError(message) {
@@ -1297,11 +1320,13 @@ async function _graphExecuteTaskBody(taskId, cfg, stack) {
 		),
 	);
 	const previous = _graphPhase;
-	const previousPackagePath = _graphAmbientPackagePath;
 	_graphPhase = "execution";
-	_graphAmbientPackagePath = record.packagePath;
 	try {
-		const value = await record.run(_graphExec(record, cfg), Object.freeze(resolved));
+		const value = await (record.packagePath === null
+			? record.run(_graphExec(record, cfg), Object.freeze(resolved))
+			: globalThis.__imp_package_context_call(record.packagePath, () =>
+				record.run(_graphExec(record, cfg), Object.freeze(resolved)),
+			));
 		return _graphValidateTaskResult(record, value);
 	} catch (error) {
 		throw _graphTaskFailure(
@@ -1310,7 +1335,6 @@ async function _graphExecuteTaskBody(taskId, cfg, stack) {
 		);
 	} finally {
 		_graphPhase = previous;
-		_graphAmbientPackagePath = previousPackagePath;
 	}
 }
 
@@ -1407,15 +1431,16 @@ async function _graphExecuteExpansionBody(expansionId, cfg, stack) {
 		// how this guard used to produce false positives against completely
 		// unrelated concurrent task execution.
 		const previous = _graphPhase;
-		const previousPackagePath = _graphAmbientPackagePath;
 		_graphPhase = "expansion";
-		_graphAmbientPackagePath = record.packagePath;
 		let pending;
 		try {
-			pending = record.create(Object.freeze(resolved));
+			pending = record.packagePath === null
+				? record.create(Object.freeze(resolved))
+				: globalThis.__imp_package_context_call(record.packagePath, () =>
+					record.create(Object.freeze(resolved)),
+				);
 		} finally {
 			_graphPhase = previous;
-			_graphAmbientPackagePath = previousPackagePath;
 		}
 		const children = await pending;
 		if (children === null || typeof children !== "object" || Array.isArray(children))

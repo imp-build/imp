@@ -140,19 +140,27 @@ import { asset } from "//rules/asset";
 export const sources = asset({ srcs: ["src/**/*.rs"] }).sources;
 ```
 
-`packagePath()` resolves to the BUILD module actually being evaluated, not the
-one nearest on the JS call stack: it walks the whole stack and keeps the
-*outermost* `BUILD.js` frame, so a factory called through an imported helper
-still resolves to the consuming BUILD.js, not to wherever the helper happens
-to be defined (issue #71; see `spike.rs`'s
+`packagePath()` resolves to the BUILD module currently being evaluated. The
+loader supplies that package context explicitly, so a factory called through
+an imported helper still resolves to the consuming BUILD.js, not to wherever
+the helper happens to be defined (issue #71; see `spike.rs`'s
 `graph_package_path_resolves_to_the_consuming_build_js_through_a_helper`
 test). Inside a `task()`/`expand()` `run()`/`create()` callback, the value is
-captured once at declaration time and delivered ambiently, since by execution
-time the declaring module's stack frame is long gone. This is the durable
-ownership contract, not a migration-era shim — helpers do not need to accept
-and forward `base` defensively. Pass `base`/`path` explicitly only when a
+captured once at declaration time and delivered through the recorded package
+context when the callback runs later. Helpers do not need to accept and
+forward `base` defensively. Pass `base`/`path` explicitly only when a
 factory's source root is genuinely not the calling module's own directory
 (e.g. sources actually live in a different, hand-picked package).
+
+In a deferred `task()` or `expand()` callback, call `packagePath()` before
+the callback's first `await`. The package context is synchronous for that
+prologue; after an `await`, use the path captured before the await.
+
+`packagePath()` is defined only while a workspace `BUILD.js`, or one of its
+recorded callbacks, is active. A direct call from a rule module, an ordinary
+workspace module, or code running without a BUILD context throws an error.
+Workspace BUILD evaluation errors stop workspace loading; they do not leave a
+usable package context behind.
 
 Exported-root addressing (`//pkg:name`) is unrelated: a root's address is
 always the *exporting* module's own scope plus the export name, regardless of

@@ -14,8 +14,8 @@ use std::sync::{
 
 use crate::graph::{GraphCatalog, GraphFormat, GraphRoot, GraphView, GraphWalk, GraphWalkNode};
 use crate::loader::{
-    resolve_workspace_module, validate_workspace_module_path, ImpLoader, ImpResolver, ModuleForm,
-    ModuleKind, RulesSource,
+    instrument_build_source, resolve_workspace_module, validate_workspace_module_path, ImpLoader,
+    ImpResolver, ModuleForm, ModuleKind, RulesSource,
 };
 use crate::runtime::LiveWorkspace;
 use crate::selector::{
@@ -946,6 +946,7 @@ async fn eval_workspace_file(
 ) -> Result<ModuleExports> {
     let source =
         std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let source = instrument_build_source(&source, ".");
     let module_name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -2968,26 +2969,6 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         move |stack: String| -> rquickjs::Result<Option<String>> { Ok(call_site_location(&stack)) },
     )?;
     globals.set("__host_call_site_identity", host_call_site_identity)?;
-
-    // ------------------------------------------------------------------
-    // __host_package_path(stack) → workspace-relative directory
-    //
-    // The graph API needs a BUILD-module-relative source root without
-    // exposing loader implementation details to JavaScript. Walk past core
-    // and rule implementation frames to the nearest workspace module, then
-    // derive its physical parent relative to the workspace root.
-    // ------------------------------------------------------------------
-    let package_path_root = workspace_root.clone();
-    let package_path_rules = rules_source.clone();
-    let host_package_path = Function::new(
-        ctx.clone(),
-        move |stack: String| -> rquickjs::Result<String> {
-            package_path_from_stack(&package_path_root, &package_path_rules, &stack).map_err(
-                |error| rquickjs::Error::new_loading_message("packagePath", format!("{error:#}")),
-            )
-        },
-    )?;
-    globals.set("__host_package_path", host_package_path)?;
 
     // ------------------------------------------------------------------
     // __host_product(specJson, fn, registrationStack) — specJson carries
@@ -5758,83 +5739,6 @@ fn call_site_location(stack: &str) -> Option<String> {
     None
 }
 
-fn package_path_from_stack(
-    workspace_root: &Path,
-    rules_source: &RulesSource,
-    stack: &str,
-) -> Result<String> {
-    // A top-level declaration in an imported BUILD.js has the importing
-    // BUILD.js farther out on the stack, but the imported module is the
-    // package that owns the declaration. A helper function is different: its
-    // own BUILD.js frame is a normal function call, and the outer top-level
-    // BUILD.js is the package that owns the helper's result. Select the first
-    // top-level BUILD frame for the former and retain the outermost BUILD
-    // fallback for stack shapes without an identifiable top-level marker.
-    // `Build`-vs-not is decided by resolving each frame and checking its real
-    // ModuleKind, not by guessing from a `//rules/...` prefix — this repo's
-    // rule library keeps real BUILD.js files under a top-level `rules/`
-    // directory, so a prefix guess misclassifies them (issue #71).
-    // Relative (`./`, `../`) imports are rejected by the loader, so every
-    // frame that matters is either `imp:core`/native or `//`-rooted —
-    // nothing else can appear here.
-    let mut package_path = None;
-    let mut top_level_package_path = None;
-    let mut saw_workspace_module = false;
-    for line in stack.lines() {
-        let line = line.trim();
-        let rest = line.strip_prefix("at ").unwrap_or(line);
-        let (frame_name, location) = match rest.rfind('(') {
-            Some(open) => (
-                rest[..open].trim(),
-                rest[open + 1..].trim_end_matches(')').trim(),
-            ),
-            None => ("", rest),
-        };
-        let module = module_name_from_site(location);
-        if module == "imp:core" || !module.starts_with("//") {
-            continue;
-        }
-        let Ok(resolution) = resolve_workspace_module(workspace_root, rules_source, module) else {
-            continue;
-        };
-        // Only a module physically inside the workspace has a meaningful
-        // workspace-relative package path — a built-in rule module served
-        // from the external rules library root doesn't, and isn't a real
-        // candidate; skip it and keep looking for an outer frame.
-        let Some(parent) = resolution.path.parent() else {
-            continue;
-        };
-        let Ok(relative) = parent.strip_prefix(workspace_root) else {
-            continue;
-        };
-        saw_workspace_module = true;
-        if resolution.kind != ModuleKind::Build {
-            continue;
-        }
-        let path = if relative.as_os_str().is_empty() {
-            ".".to_owned()
-        } else {
-            relative
-                .to_string_lossy()
-                .replace(std::path::MAIN_SEPARATOR, "/")
-        };
-        if matches!(frame_name, "<anonymous>" | "<eval>") && top_level_package_path.is_none() {
-            top_level_package_path = Some(path.clone());
-        }
-        package_path = Some(path);
-    }
-    package_path = top_level_package_path.or(package_path);
-    // No BUILD.js anywhere in the chain — e.g. a rule constructor called
-    // directly from a unit test, with no wrapping BUILD.js at all. Default
-    // to the workspace root rather than erroring, matching how an explicit,
-    // workspace-root-relative `path:`/`base:` opt has always been usable in
-    // that situation.
-    if package_path.is_none() && saw_workspace_module {
-        package_path = Some(".".to_owned());
-    }
-    package_path.ok_or_else(|| anyhow::anyhow!("packagePath() requires a calling workspace module"))
-}
-
 /// Rule group a product module belongs to — its first path segment under
 /// `//rules/`. Groups map onto the per-directory DOC.md guide tree, so they
 /// stay path-derived; tool identity, by contrast, is declared at product
@@ -7670,20 +7574,28 @@ async fn run_rules_test_script(
                 .await?;
             let set_js_workers: Function = ctx.globals().get("__imp_set_js_workers")?;
             set_js_workers.call::<_, ()>((1,))?;
-            let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
-            let result_value: Value = ctx
-                .eval(script.as_bytes())
-                .catch(&ctx)
-                .map_err(|e| rquickjs::Error::new_loading_message("rules-test", format!("{e}")))?;
-            let promise: MaybePromise = promise_resolve
-                .call((result_value,))
-                .catch(&ctx)
-                .map_err(|e| rquickjs::Error::new_loading_message("rules-test", format!("{e}")))?;
-            promise
-                .into_future::<String>()
-                .await
-                .catch(&ctx)
-                .map_err(|e| rquickjs::Error::new_loading_message("rules-test", format!("{e}")))
+            let enter_context: Function = ctx.globals().get("__imp_package_context_enter")?;
+            let release_context: Function = enter_context.call((".".to_owned(),))?;
+            let result = async {
+                let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
+                let result_value: Value = ctx.eval(script.as_bytes()).catch(&ctx).map_err(|e| {
+                    rquickjs::Error::new_loading_message("rules-test", format!("{e}"))
+                })?;
+                let promise: MaybePromise = promise_resolve
+                    .call((result_value,))
+                    .catch(&ctx)
+                    .map_err(|e| {
+                        rquickjs::Error::new_loading_message("rules-test", format!("{e}"))
+                    })?;
+                promise
+                    .into_future::<String>()
+                    .await
+                    .catch(&ctx)
+                    .map_err(|e| rquickjs::Error::new_loading_message("rules-test", format!("{e}")))
+            }
+            .await;
+            release_context.call::<_, ()>(())?;
+            result
         });
     let watchdog = async {
         const STALL_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
@@ -9825,9 +9737,8 @@ export const noop = asset({ base: packagePath(), srcs: ["*.txt"] });
         // helper relies on ccLibrary()'s packagePath()-as-default. The
         // package that owns the resulting target is the one actually being
         // processed (consumer) — not wherever the helper happens to live
-        // (issue #71: a naive "nearest BUILD.js frame" stack walk gets this
-        // backwards, since helper/BUILD.js is itself a Build module and
-        // sits closer to packagePath() on the call stack).
+        // (issue #71: package ownership comes from the active loader context,
+        // not from the helper's defining module).
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
@@ -9952,6 +9863,54 @@ export const same = { [BUILD]: sources };
     }
 
     #[tokio::test]
+    async fn graph_package_path_survives_top_level_await() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join("pkg/BUILD.js"),
+            r#"
+import { goal, output, packagePath, task } from "imp:core";
+const BUILD = goal("build");
+
+const before = packagePath();
+await Promise.resolve();
+globalThis.packagePathAfterTopLevelAwait = packagePath();
+
+const check = task({
+    inputs: {},
+    outputs: { value: output.value() },
+    run() {
+        return { value: null };
+    },
+});
+
+export const target = { [BUILD]: check };
+globalThis.packagePathBeforeTopLevelAwait = before;
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        run_goal_live(&live, p, "build", &["//pkg:target".to_owned()])
+            .await
+            .unwrap();
+        let (before, after) = live
+            .ctx
+            .async_with(async |ctx| {
+                Ok::<_, rquickjs::Error>((
+                    ctx.globals()
+                        .get::<_, String>("packagePathBeforeTopLevelAwait")?,
+                    ctx.globals()
+                        .get::<_, String>("packagePathAfterTopLevelAwait")?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(before, "pkg");
+        assert_eq!(after, "pkg");
+    }
+
+    #[tokio::test]
     async fn graph_build_js_can_import_sibling_child_and_parent_files_by_relative_path() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
@@ -10009,10 +9968,8 @@ export const check = { [BUILD]: inspection };
     #[tokio::test]
     async fn graph_package_path_inside_expand_create_resolves_to_the_declaring_build_js() {
         // expand()'s create() runs later, asynchronously, driven by the
-        // graph executor — the declaring BUILD.js's frame is off the call
-        // stack entirely by then. packagePath() must still resolve
-        // correctly there, via the captured-at-declare-time ambient value
-        // (graph_core.js's _graphAmbientPackagePath), not stack-walking.
+        // graph executor. packagePath() must still resolve correctly there,
+        // via the captured-at-declare-time package context.
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
@@ -10118,20 +10075,6 @@ export const check = { [BUILD]: expansion.get("child", BUILD) };
             format!("{error:#}").contains("escapes the workspace"),
             "{error:#}"
         );
-    }
-
-    #[test]
-    fn graph_package_path_rejects_non_workspace_callers() {
-        let root = tempfile::tempdir().unwrap();
-        let error = package_path_from_stack(
-            root.path(),
-            &RulesSource::none(),
-            "at packagePath (imp:core:1:1)\nat helper (native:1:1)",
-        )
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("requires a calling workspace module"));
     }
 
     #[tokio::test]

@@ -37,6 +37,32 @@ pub struct ImpLoader {
     pub rules_source: RulesSource,
 }
 
+/// Install the package context owned by a workspace BUILD module while its
+/// source evaluates. The context is part of the module source, rather than
+/// inferred from a QuickJS stack, so imported BUILD modules and helper calls
+/// have deterministic ownership.
+pub(crate) fn instrument_build_source(source: &str, package_path: &str) -> String {
+    let package_path = serde_json::to_string(package_path)
+        .expect("workspace package paths are always JSON strings");
+    format!(
+        "const __imp_package_context_release = __imp_package_context_enter({package_path});\n{source}\n__imp_package_context_release();\n"
+    )
+}
+
+fn build_package_path(root: &Path, path: &Path) -> Option<String> {
+    let parent = path.parent()?;
+    let relative = parent.strip_prefix(root).ok()?;
+    if relative.as_os_str().is_empty() {
+        Some(".".to_owned())
+    } else {
+        Some(
+            relative
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/"),
+        )
+    }
+}
+
 /// Where imp's built-in `//rules/...` modules come from. Only consulted as
 /// a fallback when a `//rules/...` specifier isn't found under the workspace
 /// root itself (e.g. a project vendoring/overriding its own copy).
@@ -425,6 +451,13 @@ impl Loader for ImpLoader {
                     format!("read {}: {e}", resolution.path.display()),
                 )
             })?;
+            let source = if resolution.kind == ModuleKind::Build {
+                build_package_path(&self.workspace_root, &resolution.path)
+                    .map(|package_path| instrument_build_source(&source, &package_path))
+                    .unwrap_or(source)
+            } else {
+                source
+            };
             return Module::declare(ctx.clone(), name, source);
         }
 
@@ -704,6 +737,15 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(contents.contains("graphFmtGoal"));
+    }
+
+    #[test]
+    fn build_source_releases_package_context_after_evaluation() {
+        let instrumented = instrument_build_source("export const value = 1;", "pkg");
+        assert!(instrumented.starts_with(
+            "const __imp_package_context_release = __imp_package_context_enter(\"pkg\");"
+        ));
+        assert!(instrumented.ends_with("__imp_package_context_release();\n"));
     }
 
     #[test]
