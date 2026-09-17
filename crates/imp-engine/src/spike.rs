@@ -350,6 +350,9 @@ pub struct HostState {
     product_fn_ids: BTreeMap<(String, String, String), String>,
     build_rules: BTreeMap<String, BuildRuleRender>,
     workspace_config: BTreeMap<String, serde_json::Value>,
+    /// Per-goal configuration overlay used while resolving and dispatching
+    /// classic target products under an invocation profile.
+    active_invocation_config: Option<BTreeMap<String, serde_json::Value>>,
     config_schemas: BTreeMap<String, serde_json::Value>,
     target_schemas: BTreeMap<String, serde_json::Value>,
     /// Mode axes declared via `defineModeAxis(name, {kind, values?, default})`
@@ -357,10 +360,10 @@ pub struct HostState {
     /// CLI overrides land in `workspace_config["imp.mode"]`, written only
     /// by `execute_goal_live_selection`.
     mode_axes: BTreeMap<String, serde_json::Value>,
-    /// Named partial mode-axis value bundles declared via `defineProfile`.
-    /// Resolved after every rule module has registered its axes, before goal
-    /// execution; see parametrisation.md Phase 2.
-    mode_profiles: BTreeMap<String, BTreeMap<String, String>>,
+    /// Named partial mode-axis and rule-configuration bundles declared via
+    /// `defineProfile`. Resolved after every rule module has registered its
+    /// axes, before goal execution.
+    mode_profiles: BTreeMap<String, serde_json::Value>,
     owned_files: BTreeSet<String>,
     named_caches: BTreeMap<String, NamedCache>,
     named_cache_details: BTreeMap<String, String>,
@@ -445,6 +448,7 @@ impl Default for HostState {
             product_fn_ids: BTreeMap::new(),
             build_rules: BTreeMap::new(),
             workspace_config: BTreeMap::new(),
+            active_invocation_config: None,
             config_schemas: BTreeMap::new(),
             target_schemas: BTreeMap::new(),
             mode_axes: BTreeMap::new(),
@@ -3518,8 +3522,9 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_define_mode_axis", host_define_mode_axis)?;
 
     // __host_define_profile(name, valuesJson) — valuesJson is a partial
-    // `{axis: value}` map. Axis/value validation happens after all modules
-    // have loaded, so profiles may be declared before their axes.
+    // `{axis: value}` map with optional namespaced rule configuration. Axis /
+    // value validation happens after all modules have loaded, so profiles may
+    // be declared before their axes.
     let state_mode_profiles = Arc::clone(&state);
     let host_define_profile = Function::new(
         ctx.clone(),
@@ -3534,21 +3539,11 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                     "values must be an object mapping axis names to strings",
                 ));
             };
-            let mut profile = BTreeMap::new();
-            for (axis, value) in values {
-                let Some(value) = value.as_str() else {
-                    return Err(rquickjs::Error::new_loading_message(
-                        "defineProfile",
-                        "values must be an object mapping axis names to strings",
-                    ));
-                };
-                profile.insert(axis.clone(), value.to_owned());
-            }
             state_mode_profiles
                 .lock()
                 .unwrap()
                 .mode_profiles
-                .insert(name, profile);
+                .insert(name, serde_json::Value::Object(values.clone()));
             Ok(())
         },
     )?;
@@ -3573,7 +3568,27 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                     ),
                 )
             })?;
-            serde_json::to_string(profile)
+            let Some(values) = profile.as_object() else {
+                return Err(rquickjs::Error::new_loading_message(
+                    "profile",
+                    "profile values must be an object",
+                ));
+            };
+            let mut axes = serde_json::Map::new();
+            let mut config = serde_json::Map::new();
+            for (key, value) in values {
+                if key == "odin" {
+                    config.insert(key.clone(), value.clone());
+                } else if value.as_str().is_some() {
+                    axes.insert(key.clone(), value.clone());
+                } else {
+                    return Err(rquickjs::Error::new_loading_message(
+                        "profile",
+                        "profile values must map axes to strings; namespaced configuration must use `odin`",
+                    ));
+                }
+            }
+            serde_json::to_string(&serde_json::json!({ "axes": axes, "config": config }))
                 .map_err(|e| rquickjs::Error::new_loading_message("profile", e.to_string()))
         },
     )?;
@@ -3698,7 +3713,9 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
         move |namespace: String| -> rquickjs::Result<Option<String>> {
             validate_config_namespace(&namespace)?;
             let hs = state_cfg.lock().unwrap();
-            hs.workspace_config
+            hs.active_invocation_config
+                .as_ref()
+                .unwrap_or(&hs.workspace_config)
                 .get(&namespace)
                 .map(|value| {
                     serde_json::to_string(value).map_err(|e| {
@@ -3734,7 +3751,12 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                 rquickjs::Error::new_loading_message("configurationDigest", format!("{e:#}"))
             };
             match namespaces_json {
-                None => digest_json(&hs.workspace_config).map_err(digest_error),
+                None => digest_json(
+                    hs.active_invocation_config
+                        .as_ref()
+                        .unwrap_or(&hs.workspace_config),
+                )
+                .map_err(digest_error),
                 Some(json) => {
                     let namespaces: Vec<String> = serde_json::from_str(&json).map_err(|e| {
                         rquickjs::Error::new_loading_message(
@@ -3754,8 +3776,14 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                             )
                         })?
                         .unwrap_or_default();
-                    scoped_configuration_digest(&hs.workspace_config, &namespaces, &overrides)
-                        .map_err(digest_error)
+                    scoped_configuration_digest(
+                        hs.active_invocation_config
+                            .as_ref()
+                            .unwrap_or(&hs.workspace_config),
+                        &namespaces,
+                        &overrides,
+                    )
+                    .map_err(digest_error)
                 }
             }
         },
@@ -6743,7 +6771,34 @@ pub fn resolve_mode_axes(
     let mode_profiles = hs.mode_profiles.clone();
 
     for (profile_name, profile) in &mode_profiles {
-        for (axis, value) in profile {
+        let values = profile
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("profile '{profile_name}' values must be an object"))?;
+        for (axis, value) in values {
+            if axis == "odin" {
+                let defines = value
+                    .get("defines")
+                    .and_then(|value| value.as_object())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "profile '{profile_name}' odin payload requires a `defines` object"
+                        )
+                    })?;
+                if !defines
+                    .iter()
+                    .all(|(name, value)| !name.is_empty() && value.as_str().is_some())
+                {
+                    anyhow::bail!(
+                        "profile '{profile_name}' odin defines must map non-empty names to strings"
+                    );
+                }
+                continue;
+            }
+            let value = value.as_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "profile '{profile_name}' values must map axes to strings; namespaced configuration must use `odin`"
+                )
+            })?;
             let Some(def) = mode_axes.get(axis) else {
                 let known: Vec<&str> = mode_axes.keys().map(String::as_str).collect();
                 anyhow::bail!(
@@ -6789,10 +6844,7 @@ pub fn resolve_mode_axes(
         let value = overrides
             .get(name)
             .map(|v| serde_json::Value::String(v.clone()))
-            .or_else(|| {
-                profile
-                    .and_then(|profile| profile.get(name).cloned().map(serde_json::Value::String))
-            })
+            .or_else(|| profile.and_then(|profile| profile.get(name).cloned()))
             .unwrap_or_else(|| {
                 def.get("default")
                     .cloned()
@@ -6804,6 +6856,44 @@ pub fn resolve_mode_axes(
     hs.workspace_config
         .insert(MODE_AXIS_NAMESPACE.to_owned(), resolved.clone());
     Ok(resolved)
+}
+
+fn invocation_config(
+    live: &LiveWorkspace,
+    profile_name: Option<&str>,
+) -> Result<BTreeMap<String, serde_json::Value>> {
+    let hs = live.host_state.lock().unwrap();
+    let mut config = hs.workspace_config.clone();
+    if let Some(name) = profile_name {
+        let profile = hs.mode_profiles.get(name).ok_or_else(|| {
+            anyhow::anyhow!("profile '{name}' was not found while building the invocation")
+        })?;
+        if let Some(odin) = profile.get("odin") {
+            let existing = config
+                .entry("odin".to_owned())
+                .or_insert_with(|| serde_json::json!({}));
+            merge_workspace_config(existing, odin.clone());
+        }
+    }
+    Ok(config)
+}
+
+struct InvocationConfigGuard {
+    state: Arc<Mutex<HostState>>,
+}
+
+impl InvocationConfigGuard {
+    fn install(live: &LiveWorkspace, config: BTreeMap<String, serde_json::Value>) -> Self {
+        let state = Arc::clone(&live.host_state);
+        state.lock().unwrap().active_invocation_config = Some(config);
+        Self { state }
+    }
+}
+
+impl Drop for InvocationConfigGuard {
+    fn drop(&mut self) {
+        self.state.lock().unwrap().active_invocation_config = None;
+    }
 }
 
 /// A failure a workflow raised on purpose with `goalError()`. Its `Display` is
@@ -6901,8 +6991,9 @@ pub async fn execute_goal_live_selection(
     // will. If discovery ran under a different invocation, a value it
     // resolved could not be reused for dispatch. Mode axes are resolved
     // just above, thus every part is known at this point.
+    let resolved_config = invocation_config(live, profile)?;
+    let _invocation_config_guard = InvocationConfigGuard::install(live, resolved_config.clone());
     let goal_invocation_json = {
-        let resolved_config = live.host_state.lock().unwrap().workspace_config.clone();
         let resolved_mode = resolved_config
             .get(MODE_AXIS_NAMESPACE)
             .cloned()
@@ -10625,6 +10716,67 @@ export default { [BUILD]: app };
             result,
             r#"{"ambient":"debug","release":"release","nested":"release","shared":"shared","runs":["leaf:debug","leaf:release","shared"]}"#
         );
+    }
+
+    #[tokio::test]
+    async fn graph_profiles_merge_configuration_and_preserve_named_outputs() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis, defineProfile } from "imp:core";
+defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
+defineProfile("shipping", { opt: "release", odin: { defines: { SHIPPING: "true" } } });
+defineProfile("instrumented", { odin: { defines: { INSTRUMENTED: "true" } } });
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { goal, output, profile, semantic, task } from "imp:core";
+const BUILD = goal("build");
+
+const base = task({
+    display: "profile output probe",
+    inputs: { config: semantic.config("odin") },
+    outputs: { value: output.value() },
+    run(_exec, input) {
+        return { value: input.config };
+    },
+});
+
+const profiled = profile(profile(base, "shipping"), "instrumented");
+const app = task({
+    display: "profile result",
+    inputs: { value: profiled.outputs.value },
+    outputs: { value: output.value() },
+    run(_exec, input) {
+        globalThis.graphProfileResult = input.value;
+        return { value: input.value };
+    },
+});
+
+export default { [BUILD]: app };
+"#,
+        );
+
+        let live = load_workspace(p).await.unwrap();
+        run_graph_action_config_probe(&live, p, &["//".to_owned()]).await;
+        let result = live
+            .ctx
+            .async_with(async |ctx| -> rquickjs::Result<serde_json::Value> {
+                let value: Value = ctx.globals().get("graphProfileResult")?;
+                let stringify: Function = ctx.eval("JSON.stringify")?;
+                let json: String = stringify.call((value,))?;
+                serde_json::from_str(&json).map_err(|error| {
+                    rquickjs::Error::new_loading_message("graphProfileResult", error.to_string())
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(result["defines"]["SHIPPING"], "true", "{result}");
+        assert_eq!(result["defines"]["INSTRUMENTED"], "true", "{result}");
     }
 
     #[tokio::test]
@@ -14676,6 +14828,7 @@ class Dep extends Target {
     static kind = "profiled-dependency-dep";
     constructor(leaf) { super({ kind: Dep.kind, attrs: { leaf }, deps: [leaf] }); }
 }
+
 class Leaf extends Target {
     static kind = "profiled-dependency-leaf";
     constructor() { super({ kind: Leaf.kind, attrs: {} }); }
@@ -14714,6 +14867,38 @@ export const build = product(App, BUILD, TOOL, async function build(handle) {
 const leaf = new Leaf();
 const dep = new Dep(leaf);
 export const app = new App(profile(dep, "release"));
+"#,
+        );
+    }
+
+    fn write_profile_config_build_file(p: &Path) {
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import { defineModeAxis, defineProfile } from "imp:core";
+defineModeAxis("opt", { kind: "rebuild", values: ["debug", "release"], default: "debug" });
+defineProfile("shipping", { opt: "release", odin: { defines: { SHIPPING: "true" } } });
+"#,
+        );
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { configuration, goal, modeAxis, output, product, run, target, targetKind, toolName } from "imp:core";
+const BUILD = goal("build");
+const K = targetKind("profile-config-test");
+
+export const app = target({ kind: "profile-config-test" });
+
+export const build = product(K, BUILD, toolName("profile-config-test-tool"), async function build() {
+    const config = configuration("odin", {}) || {};
+    const defines = config.defines || {};
+    return run({
+        argv: ["sh", "-c", "mkdir -p build && printf '%s/%s' \"$1\" \"$2\" > build/marker.txt", "profile-config", modeAxis("opt"), defines.SHIPPING || "false"],
+        outputs: [output("build/marker.txt")],
+        materialize: true,
+        display: "profile config test",
+    });
+});
 "#,
         );
     }
@@ -15160,6 +15345,22 @@ export const app = new Consumer({{
         assert_eq!(
             std::fs::read_to_string(p.join("build/marker.txt")).unwrap(),
             "release/windows/none"
+        );
+    }
+
+    #[tokio::test]
+    async fn mode_profile_carries_namespaced_odin_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_profile_config_build_file(p);
+
+        run_mode_axis_test_goal(p, Some("shipping"), &[])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/marker.txt")).unwrap(),
+            "release/true"
         );
     }
 

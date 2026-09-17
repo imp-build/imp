@@ -171,6 +171,39 @@ function package_srcs(attrs) {
 	return attrs.srcs;
 }
 
+function normalize_odin_defines(value, api = "odinPackage") {
+	if (value === undefined) return Object.freeze({});
+	if (value === null || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error(`${api}({ defines }) requires an object`);
+	}
+	const result = {};
+	for (const name of Object.keys(value).sort()) {
+		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+			throw new Error(`${api}({ defines }) has invalid define name '${name}'`);
+		}
+		if (typeof value[name] !== "string") {
+			throw new Error(
+				`${api}({ defines }) requires string values; '${name}' was ${typeof value[name]}`,
+			);
+		}
+		result[name] = value[name];
+	}
+	return Object.freeze(result);
+}
+
+/**
+ * Convert an Odin define map into deterministic compiler arguments.
+ *
+ * @param {object.<string, string>} defines
+ * @returns {string[]}
+ */
+export function odinDefineArgs(defines = {}) {
+	const normalized = normalize_odin_defines(defines, "odinDefineArgs");
+	return Object.keys(normalized).map(
+		(name) => `-define:${name}=${normalized[name]}`,
+	);
+}
+
 function collection_entries_from_config(value, resolvePath) {
 	if (value === null || value === undefined) return [];
 	if (Array.isArray(value)) {
@@ -1172,6 +1205,23 @@ function graphActionInputs(
 		spec,
 		...closure.packages,
 	]);
+	const packageDefines = new Map();
+	const defines = {
+		...normalize_odin_defines(config?.defines, "odin profile"),
+	};
+	for (const packageSpec of [spec, ...closure.packages]) {
+		for (const [name, value] of Object.entries(packageSpec.defines || {})) {
+			const previous = packageDefines.get(name);
+			if (previous !== undefined && previous !== value) {
+				throw new Error(
+					`Odin package '${spec.path}' reaches conflicting define '${name}': ` +
+						`'${previous}' and '${value}'`,
+				);
+			}
+			packageDefines.set(name, value);
+			defines[name] = value;
+		}
+	}
 	const linker = odinLinkerHandleFor(spec);
 	const inputs = {
 		sources: spec.sources,
@@ -1185,6 +1235,11 @@ function graphActionInputs(
 			hasMainEntrypoint: analysis.hasMainEntrypoint,
 			collections: closure.collections,
 			linkopts,
+			defines: Object.freeze(
+				Object.fromEntries(
+					Object.entries(defines).sort(([a], [b]) => a.localeCompare(b)),
+				),
+			),
 		},
 		// A declared handle, not a construction-time configuration() read.
 		// The value still reaches the action through odinModeFlags() in
@@ -1489,6 +1544,7 @@ function graphOdinBuild(
 				// `when TEST_THREADS == 0` branch).
 				`-thread-count:${ODIN_CORES}`,
 				...(test ? [`-define:ODIN_TEST_THREADS=${ODIN_CORES}`] : []),
+				...odinDefineArgs(resolved.analysis.defines),
 				...flags,
 				...modeFlags,
 				...(lint ? ["-vet"] : []),
@@ -1766,6 +1822,7 @@ function createGraphPackage({
 	test = false,
 	base = packagePath(),
 	unsafeSystemPaths = false,
+	defines = {},
 } = {}) {
 	const normalizedSrcs =
 		test && srcs === undefined
@@ -1798,6 +1855,7 @@ function createGraphPackage({
 		// transitiveLinkopts pointing at host system packages like
 		// libwebkit2gtk-4.1.
 		unsafeSystemPaths: !!unsafeSystemPaths,
+		defines: normalize_odin_defines(defines),
 	};
 	if (!spec.toolchain) {
 		spec.toolchain = defaultOdinToolchain();
@@ -1858,7 +1916,8 @@ function createGraphPackage({
  * Declare an immutable, graph-native Odin package.
  *
  * @category target
- * @param {object} [opts] Odin package, source, dependency, and toolchain options.
+ * @param {object} [opts] Odin package, source, dependency, toolchain, and define options.
+ * @param {object.<string, string>} [opts.defines] Compile-time Odin defines.
  * @returns {object} Frozen build, run, test, lint, and package roots.
  */
 export function odinPackage(opts = {}) {
@@ -1869,7 +1928,7 @@ export function odinPackage(opts = {}) {
  * Declare an immutable, graph-native Odin test package.
  *
  * @category target
- * @param {object} [opts] Odin package options.
+ * @param {object} [opts] Odin package options, including compile-time defines.
  * @returns {object} Frozen build and test roots.
  */
 export function odinTestPackage(opts = {}) {

@@ -43,14 +43,22 @@ let _graphExpansionAxes = new Map();
 // await is readable by unrelated interleaved work. For the phase marker
 // that mistake gives a wrong error message; for a configuration overlay it
 // gives a wrong build.
-const _GRAPH_ROOT_SCOPE = Object.freeze({ overlay: Object.freeze({}), key: "" });
+const _GRAPH_ROOT_SCOPE = Object.freeze({
+	overlay: Object.freeze({}),
+	configOverlay: Object.freeze({}),
+	key: "",
+});
 
 // Canonical text for an overlay. Sorted, thus two edges that set the same
 // axes in a different order give one key and share one node.
-function _graphScopeKey(overlay) {
+function _graphScopeKey(overlay, configOverlay = {}) {
 	const names = Object.keys(overlay).sort();
-	if (names.length === 0) return "";
-	return JSON.stringify(names.map((name) => [name, overlay[name]]));
+	const configNames = Object.keys(configOverlay).sort();
+	if (names.length === 0 && configNames.length === 0) return "";
+	return JSON.stringify({
+		axes: names.map((name) => [name, overlay[name]]),
+		config: configNames.map((name) => [name, configOverlay[name]]),
+	});
 }
 
 // The value of one axis under a scope: what the edge set, or else what the
@@ -58,6 +66,19 @@ function _graphScopeKey(overlay) {
 function _graphEffectiveAxis(axis, cfg) {
 	if (Object.hasOwn(cfg.overlay, axis)) return cfg.overlay[axis];
 	return _graphInvocation?.mode?.[axis] ?? null;
+}
+
+function _graphEffectiveConfig(namespace, cfg) {
+	const value = _graphInvocation?.config?.[namespace] ?? null;
+	const overlay = cfg.configOverlay?.[namespace];
+	if (overlay === undefined) return value;
+	if (
+		value && typeof value === "object" && !Array.isArray(value) &&
+		overlay && typeof overlay === "object" && !Array.isArray(overlay)
+	) {
+		return Object.freeze(_merge_config_values(value, overlay));
+	}
+	return overlay;
 }
 
 // The part of a scope one node can observe.
@@ -81,6 +102,7 @@ function _graphNarrowKey(axes, cfg) {
 	// No closure recorded (a node made after the planning pass) reads as
 	// "can read anything", which forks. Conservative, never wrong.
 	if (axes === undefined || axes === _GRAPH_AXES_ALL) return cfg.key;
+	if (Object.keys(cfg.configOverlay || {}).length > 0) return cfg.key;
 	if (axes.size === 0) return "";
 	return JSON.stringify(
 		[...axes].sort().map((axis) => [axis, _graphEffectiveAxis(axis, cfg)]),
@@ -100,13 +122,13 @@ function _graphActionConfigDigest(record, cfg) {
 		const mode = { ...(_graphInvocation?.mode || {}) };
 		for (const name of Object.keys(cfg.overlay).sort()) mode[name] = cfg.overlay[name];
 		return __host_graph_configuration_digest(
-			JSON.stringify({ scope: "all", mode }),
+			JSON.stringify({ scope: "all", mode, config: cfg.configOverlay || {} }),
 		);
 	}
 	const selected = {};
 	for (const name of [...axes].sort()) selected[name] = _graphEffectiveAxis(name, cfg);
 	return __host_graph_configuration_digest(
-		JSON.stringify({ scope: "axes", values: selected }),
+		JSON.stringify({ scope: "axes", values: selected, config: cfg.configOverlay || {} }),
 	);
 }
 
@@ -443,9 +465,16 @@ export function builtinFiles(opts = {}) {
 // scope set and this overlay does not touch stay in force — that is what
 // makes the configuration flow along the edge instead of being replaced at
 // it.
-function _graphScopeWith(cfg, overrides) {
-	const overlay = Object.freeze({ ...cfg.overlay, ...overrides });
-	return Object.freeze({ overlay, key: _graphScopeKey(overlay) });
+function _graphScopeWith(cfg, overrides, configOverrides = {}) {
+	const overlay = Object.freeze({ ...cfg.overlay, ...(overrides || {}) });
+	const configOverlay = Object.freeze(
+		_merge_config_values(cfg.configOverlay || {}, configOverrides || {}),
+	);
+	return Object.freeze({
+		overlay,
+		configOverlay,
+		key: _graphScopeKey(overlay, configOverlay),
+	});
 }
 
 /**
@@ -534,6 +563,67 @@ export function configured(handle, overrides) {
 		return Object.freeze({ ...wrapper, outputs: Object.freeze(outputs) });
 	});
 }
+
+// The graph equivalent of imp_core.js's profile(Target, name). The files are
+// concatenated into one module, but keeping the dispatch hook here avoids a
+// second public export named profile.
+globalThis.__imp_graph_profile = function graphProfile(handle, name) {
+	const record = _graphRecord(handle, "profile(handle, name)");
+	if (typeof name !== "string" || name.length === 0)
+		throw _graphError("profile(handle, name) requires a non-empty profile name");
+	const descriptor = JSON.parse(__host_mode_profile(name));
+	const classified = JSON.parse(
+		__host_validate_mode_overrides(JSON.stringify(descriptor.axes || {})),
+	);
+	const selected = Object.keys(classified.outputSelect || {});
+	if (selected.length > 0)
+		throw _graphError(
+			`profile() cannot set output-select axes (${selected.sort().join(", ")})`,
+		);
+	const inner = record.kind === "configured" ? record.data.handle : handle;
+	const innerRecord =
+		record.kind === "configured" ? _graphHandles.get(inner.__graph_id) : record;
+	const overrides = Object.freeze({
+		...(record.kind === "configured" ? record.data.overrides : {}),
+		...(classified.rebuild || {}),
+	});
+	const configOverrides = Object.freeze(
+		_merge_config_values(
+			record.kind === "configured" ? record.data.configOverrides || {} : {},
+			descriptor.config || {},
+		),
+	);
+	const fingerprint = `profile:${innerRecord.fingerprint}:${_graphCanonical({
+		overrides,
+		configOverrides,
+	})}`;
+	return _graphMemoizedHandle(fingerprint, () => {
+		const wrapper = _graphHandle(
+			"configured",
+			{ handle: inner, overrides, configOverrides },
+			fingerprint,
+		);
+		const innerOutputs = inner.outputs;
+		if (innerOutputs === undefined) return wrapper;
+		const outputs = {};
+		for (const outputName of Object.keys(innerOutputs).sort()) {
+			const outputHandle = innerOutputs[outputName];
+			const outputRecord = _graphHandles.get(outputHandle.__graph_id);
+			const outputFingerprint = `profile:${outputRecord.fingerprint}:${_graphCanonical({
+				overrides,
+				configOverrides,
+			})}`;
+			outputs[outputName] = _graphMemoizedHandle(outputFingerprint, () =>
+				_graphHandle(
+					"configured",
+					{ handle: outputHandle, overrides, configOverrides },
+					outputFingerprint,
+				),
+			);
+		}
+		return Object.freeze({ ...wrapper, outputs: Object.freeze(outputs) });
+	});
+};
 
 /**
  * Interpret an artifact handle as an executable tool.
@@ -793,11 +883,13 @@ async function _graphResolveHandleUncached(id, cfg, stack = []) {
 					? cfg.overlay[name]
 					: (_graphInvocation.mode?.[name] ?? null);
 			if (kind === "config") {
-				const value = _graphInvocation.config?.[name] ?? null;
 				return _graphLookup(
 					name === _GRAPH_MODE_NAMESPACE && cfg.key !== ""
-						? Object.freeze({ ...(value || {}), ...cfg.overlay })
-						: value,
+						? Object.freeze({
+								...(_graphInvocation.config?.[name] || {}),
+								...cfg.overlay,
+							})
+						: _graphEffectiveConfig(name, cfg),
 					path,
 				);
 			}
@@ -879,7 +971,7 @@ async function _graphResolveHandleUncached(id, cfg, stack = []) {
 			// values through the normal `cfg` parameter.
 			return _graphResolveHandle(
 				record.data.handle.__graph_id,
-				_graphScopeWith(cfg, record.data.overrides),
+				_graphScopeWith(cfg, record.data.overrides, record.data.configOverrides),
 				nextStack,
 			);
 		case "expansion-get":
@@ -1433,7 +1525,13 @@ function _graphReachable(rootHandleIds, cfg) {
 		// configuration; every other edge carries the one it was reached
 		// with.
 		const childScope =
-			record.kind === "configured" ? _graphScopeWith(scope, record.data.overrides) : scope;
+			record.kind === "configured"
+				? _graphScopeWith(
+						scope,
+						record.data.overrides,
+						record.data.configOverrides,
+				  )
+				: scope;
 		const edges = _graphDeclaredEdges(record).map((edge) => ({
 			id: edge.handleId,
 			cfg: childScope,

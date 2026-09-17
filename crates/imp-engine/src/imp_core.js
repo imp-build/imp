@@ -7,6 +7,7 @@ function _unwrap_dep_edge(value) {
 	let outputOverrides = null;
 	let profiles = null;
 	let modeOverrides = null;
+	let configOverrides = null;
 	while (
 		value &&
 		typeof value === "object" &&
@@ -17,10 +18,24 @@ function _unwrap_dep_edge(value) {
 		} else {
 			profiles = value.profiles;
 			modeOverrides = value.overrides;
+			configOverrides = value.configOverrides;
 		}
 		value = value.handle;
 	}
-	return { handle: value, outputOverrides, profiles, modeOverrides };
+	return { handle: value, outputOverrides, profiles, modeOverrides, configOverrides };
+}
+
+function _merge_config_values(base, overlay) {
+	if (
+		base && typeof base === "object" && !Array.isArray(base) &&
+		overlay && typeof overlay === "object" && !Array.isArray(overlay)
+	) {
+		const result = { ...base };
+		for (const [name, value] of Object.entries(overlay))
+			result[name] = _merge_config_values(result[name], value);
+		return result;
+	}
+	return overlay;
 }
 
 function _serialize_attrs(value) {
@@ -754,7 +769,11 @@ export function configuration(namespace, fallback = undefined) {
 		namespace,
 		configured: encoded != null,
 	});
-	return encoded == null ? fallback : JSON.parse(encoded);
+	const configured = encoded == null ? fallback : JSON.parse(encoded);
+	const overlay = _effective_context_entry().ctx.configOverrides?.[namespace];
+	return overlay === undefined
+		? configured
+		: _merge_config_values(configured, overlay);
 }
 
 /**
@@ -797,7 +816,7 @@ export function defineModeAxis(name, def) {
  *
  * @category configuration
  * @param {string} name Profile name, e.g. "windows-release".
- * @param {object.<string, string>} values Axis values to apply for this profile.
+ * @param {object.<string, string>|{opt: string, odin?: {defines: object.<string, string>}}} values Axis values and optional rule configuration payloads.
  * @returns {void}
  */
 export function defineProfile(name, values) {
@@ -824,6 +843,8 @@ export function defineProfile(name, values) {
  * @returns {object} Target-like configured dependency handle.
  */
 export function profile(handle, name) {
+	if (handle?.__imp_graph_handle === true && globalThis.__imp_graph_profile)
+		return globalThis.__imp_graph_profile(handle, name);
 	if (!handle || handle.__imp !== true) {
 		throw new Error("profile(handle, name) expects a Target handle");
 	}
@@ -835,12 +856,18 @@ export function profile(handle, name) {
 		...(handle.__imp_profile === true ? handle.profiles : []),
 		name,
 	]);
+	const descriptors = profiles.map((profileName) =>
+		JSON.parse(__host_mode_profile(profileName)),
+	);
 	const overrides = Object.freeze(
-		profiles.reduce(
-			(values, profileName) => ({
-				...values,
-				...JSON.parse(__host_mode_profile(profileName)),
-			}),
+		descriptors.reduce(
+			(values, descriptor) => ({ ...values, ...(descriptor.axes || {}) }),
+			{},
+		),
+	);
+	const configOverrides = Object.freeze(
+		descriptors.reduce(
+			(values, descriptor) => _merge_config_values(values, descriptor.config || {}),
 			{},
 		),
 	);
@@ -853,6 +880,7 @@ export function profile(handle, name) {
 		handle: base,
 		profiles,
 		overrides,
+		configOverrides,
 	};
 	Object.defineProperty(configured, "label", {
 		get: () => base.label,
@@ -2186,6 +2214,7 @@ function _clone_context(ctx) {
 		// Link overrides are ambient for a linked product call and therefore
 		// must flow to all async children of that call.
 		modeOverrides: ctx.modeOverrides,
+		configOverrides: ctx.configOverrides,
 	};
 }
 
@@ -2202,6 +2231,7 @@ function _current_context() {
 			runInputs: new Map(),
 			runFilesets: new Map(),
 			modeOverrides: null,
+			configOverrides: null,
 		};
 		_memo_contexts.set(_current_memo_context_id, ctx);
 	}
@@ -2252,6 +2282,21 @@ function _with_mode_overrides(overrides, fn) {
 		...(base.modeOverrides || {}),
 		...overrides,
 	});
+	_memo_contexts.set(contextId, ctx);
+	return _with_context(contextId, fn);
+}
+
+function _with_profile_overrides(modeOverrides, configOverrides, fn) {
+	const base = _effective_context_entry().ctx;
+	const contextId = ++_memo_context_counter;
+	const ctx = _clone_context(base);
+	ctx.modeOverrides = Object.freeze({
+		...(base.modeOverrides || {}),
+		...(modeOverrides || {}),
+	});
+	ctx.configOverrides = Object.freeze(
+		_merge_config_values(base.configOverrides || {}, configOverrides || {}),
+	);
 	_memo_contexts.set(contextId, ctx);
 	return _with_context(contextId, fn);
 }
@@ -3271,9 +3316,12 @@ export function memo(fn, opts) {
 					let promise;
 					try {
 						promise = hasProfile
-							? _with_mode_overrides(unwrapped.modeOverrides, () =>
+							? _with_profile_overrides(
+									unwrapped.modeOverrides,
+									unwrapped.configOverrides,
+									() =>
 									Promise.resolve(fn(...callArgs)),
-								)
+								  )
 							: Promise.resolve(fn(...callArgs));
 					} catch (e) {
 						_pop_call(key_string, childContextId);

@@ -13,6 +13,15 @@ Use `odinPackage()` and `odinTestPackage()` for Odin build and test roots. The
 static project description. Analysis classes and path helpers remain internal
 implementation details.
 
+Pass compile-time defines as a name-to-string map. Imp emits the defines in
+sorted order for every applicable Odin build, test, and lint action:
+
+```js
+export const server = odinPackage({
+    defines: { SHIPPING: "true" },
+});
+```
+
 ## Set up the workspace
 
 Import the compiler and formatter rules in `imp.workspace.js`, then load the
@@ -90,6 +99,22 @@ export const server_tests = odinTestPackage({
     deps: [server],
 });
 ```
+
+The selected profile may provide default Odin defines. A target's own defines
+override profile values with the same name:
+
+```js
+import { defineProfile } from "imp:core";
+
+defineProfile("shipping", {
+    opt: "release",
+    odin: { defines: { SHIPPING: "true" } },
+});
+```
+
+When one Odin action reaches several declared packages, their define maps are
+merged. Two packages that assign different values to one define are rejected,
+because Odin compiles the complete import closure in one action.
 
 An `odinPackage` defaults to `*.odin` and excludes `*_test.odin` and
 `test_*.odin`. An `odinTestPackage` defaults to exactly those two globs and

@@ -324,6 +324,20 @@ that reads an axis forks per configuration —
 `//rules/imp/config/example` is a probe that shows which nodes fork and which
 stay shared.
 
+Profiles may also carry namespaced rule configuration. Existing flat entries
+remain mode-axis values; the `odin` namespace can provide compile defines for
+Odin rules:
+
+```js
+defineProfile("shipping", {
+    opt: "release",
+    odin: { defines: { SHIPPING: "true" } },
+});
+```
+
+Explicit `--axis` values override profile axis values. The same profile payload
+is applied when a target or graph handle is wrapped with `profile()`.
+
 ## Test the rules
 
 Each directory of rule sources declares its own test root in its `BUILD.js`.

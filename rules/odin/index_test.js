@@ -12,6 +12,7 @@ import { nativeTool } from "//rules/imp/native-tool";
 import { configuration, files, platformInfo } from "imp:core";
 import {
 	odinExtraLinkerFlagsArgs,
+	odinDefineArgs,
 	odinTestLibraryPathEnv,
 	odinGccLinkerPathDir,
 	odinLinkerPathDir,
@@ -85,6 +86,17 @@ describe("Odin graph rules", () => {
 		// Anything unresolved/unrecognized falls back to the axis's own
 		// declared default ("debug"), not a silent no-flags build.
 		expect(odinModeFlags(undefined)).toEqual(["-debug"]);
+	});
+
+	test("odinDefineArgs() sorts and formats compile defines", () => {
+		expect(odinDefineArgs({ SHIPPING: "true", DEBUG_UI: "false" })).toEqual([
+			"-define:DEBUG_UI=false",
+			"-define:SHIPPING=true",
+		]);
+		expect(() => odinDefineArgs({ "bad-name": "true" })).toThrow(
+			"invalid define name",
+		);
+		expect(() => odinDefineArgs({ SHIPPING: true })).toThrow("string values");
 	});
 
 	test("build task inputs default to the opt axis's declared debug default", () => {
