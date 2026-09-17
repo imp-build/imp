@@ -1,5 +1,6 @@
 import { TEST } from "//rules/workflows/test";
 import {
+	builtinFiles,
 	files,
 	output,
 	packagePath,
@@ -654,9 +655,11 @@ async function runRulesTest(exec, inputs) {
 	const tools = inputs.toolNames.map((_, index) => inputs[`tool${index}`]);
 	const result = await exec.action({
 		argv: [exec.tool(inputs.imp, "imp"), "rules-test", ...testModules],
-		inputs: [inputs.sharedSources, inputs.rootSources],
+		// Stage the builtin bundle at the sandbox root. Workspace rules remain
+		// the first resolver choice, and the bundle provides the fallback.
+		inputs: [inputs.builtinSources, inputs.sharedSources, inputs.rootSources],
 		tools,
-		env: [`IMP_CACHE_DIR=${inputs.cacheDir}`, "IMP_RULES_DIR=rules"],
+		env: [`IMP_CACHE_DIR=${inputs.cacheDir}`, "IMP_RULES_DIR=."],
 		display: `test JS rules //${inputs.root}`,
 		allowFailure: true,
 	});
@@ -713,6 +716,7 @@ export function rulesTest({ root, tools = [] }) {
 		root: relativeRoot,
 		testModules: files({ root: relativeRoot, include: ["*_test.js"] }),
 		rootSources: files({ root: relativeRoot, include: ["**/*"] }),
+		builtinSources: builtinFiles({ include: ["**/*"] }),
 		sharedSources: files({
 			include: ["rules/**/*", "imp.workspace.js"],
 		}),

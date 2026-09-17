@@ -50,10 +50,29 @@ EOF
 
 cat >"$work/BUILD.js" <<'EOF'
 import { stampFile } from "//rules/imp/codegen";
+import { rulesTest } from "//rules/imp/test";
 
 export const stamp = stampFile({
     output: "generated/smoke.txt",
     text: "packaged rules resolved from disk",
+});
+
+export const rules_test = rulesTest({
+    root: "//consumer",
+});
+EOF
+
+mkdir -p "$work/consumer"
+cat >"$work/consumer/rules_test.js" <<'EOF'
+import { BUILD } from "//rules/workflows/build";
+import { describe, test } from "//rules/imp/test";
+
+describe("builtin rules", () => {
+    test("resolve from the packaged bundle", () => {
+        if (typeof BUILD !== "symbol") {
+            throw new Error("expected the builtin BUILD workflow");
+        }
+    });
 });
 EOF
 
@@ -77,4 +96,19 @@ grep -q '//:stamp' "$work/out" || {
     exit 1
 }
 
-echo "smoke: ok — $bin resolved //rules/imp/codegen from $rules"
+unset IMP_RULES_DIR
+XDG_CACHE_HOME="$work/cache" "$bin" test //:rules_test >"$work/test-out" 2>"$work/test-err" || {
+  echo "smoke: rulesTest failed" >&2
+  cat "$work/test-out" >&2
+  cat "$work/test-err" >&2
+  exit 1
+}
+
+grep -q 'test: 1/1 unit(s) passed' "$work/test-out" || {
+  echo "smoke: rulesTest did not report a passing unit" >&2
+  cat "$work/test-out" >&2
+  cat "$work/test-err" >&2
+  exit 1
+}
+
+echo "smoke: ok — $bin resolved packaged builtin rules from $rules"

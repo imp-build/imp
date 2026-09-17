@@ -363,3 +363,7 @@ so a test can assert the argv and inputs a rule builds without running anything.
 Declare `tools` only for a suite that performs a real PATH lookup instead of
 stubbing one: the sandboxed test subprocess has no PATH of its own, so an
 undeclared real lookup fails.
+
+Consumer workspaces do not need to vendor Imp's builtin rules; `rulesTest()`
+stages the builtin bundle for its nested runner while keeping workspace rules
+overrides first.
