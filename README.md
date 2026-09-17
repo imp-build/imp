@@ -1,8 +1,8 @@
-# imp
+# Imp
 
-Imp is a hermetic, content-addressed build system. It describes work as a
-graph, runs actions in sandboxes, and stores outputs in a content-addressed
-cache.
+Imp is a graph-native build system and task runner for polyglot repositories.
+It describes work as a graph, runs actions in sandboxes, and stores declared
+results in a content-addressed cache.
 
 ## Start here
 
@@ -14,15 +14,22 @@ cache.
   workflows, profiles, and execution limits.
 - [Writing build files](docs/content/guide/writing-build-rules.md) — declare
   graph-native targets and actions.
-- [Advanced user workflows](docs/content/guide/toolchains-and-caches.md) —
-  use toolchains, caches, CI, packaging, and diagnostics.
+- [Toolchains and caches](docs/content/guide/toolchains-and-caches.md) — use
+  pinned tools and maintain local or optional remote caches.
+- [Target selection](docs/content/guide/target-selection.md) — select one
+  target, a package, a subtree, or changed targets.
+- [CI and packaging](docs/content/guide/continuous-integration.md) — run Imp
+  in CI and publish build products.
+- [Troubleshooting](docs/content/guide/troubleshooting.md) — separate
+  repository, environment, platform, and Imp failures.
 
 For repository work, see [Contributing and maintaining
 Imp](docs/content/guide/contributing.md). Maintainers can also read the
 [release workflow](docs/content/guide/releases.md) and [documentation
 workflow](docs/content/guide/documentation-workflow.md).
 
-From a workspace root, initialize Imp and build a target:
+From a workspace root, initialize Imp and build a target. `imp init` asks
+which detected languages and capabilities the workspace needs:
 
 ```sh
 imp init
@@ -30,4 +37,6 @@ imp build //:target
 ```
 
 The [public documentation site](https://imps.build/) contains the complete
-guide and generated API references.
+guide and generated API references. The source links above are useful when
+working from an Imp checkout; the site links are the canonical user-facing
+version.
