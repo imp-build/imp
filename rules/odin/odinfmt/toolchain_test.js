@@ -11,6 +11,7 @@ import {
 	odinfmtGenLockfiles,
 	odinfmtGraphTool,
 	odinfmtToolchain,
+	defaultOdinfmtToolchain,
 } from "//rules/odin/odinfmt/toolchain";
 import {
 	__resetOdinToolchainStateForTest,
@@ -69,6 +70,53 @@ describe("odinfmt graph toolchain", () => {
 		).toContain("ols-x86_64-unknown-linux-gnu.zip");
 		expect(odinfmtToolchain("dev-2026-03").__imp_graph_handle).toBe(true);
 		expect(odinfmtGraphTool("dev-2026-03").__imp_graph_handle).toBe(true);
+	});
+
+	test("the graph odinfmt tool is a named-cache mount, not a staged tree", async () => {
+		await withOdinfmtHost(async (host) => {
+			odinfmtToolchain("dev-2026-05", { default: true, unverified: true });
+			const binding = await host.resolve(odinfmtGraphTool("dev-2026-05"));
+
+			expect(binding.type).toBe("tool");
+			expect(binding.mountName).toBe("odinfmt");
+			expect(binding.cache).toBe("odinfmt-toolchains");
+			expect(binding.key).toBe("dev-2026-05/linux-x86_64");
+			expect(binding.binDirs.join(",")).toBe(".");
+		});
+	});
+
+	test("implicit default follows the current Odin default", async () => {
+		await withOdinfmtHost(async (host) => {
+			odinfmtToolchain(undefined, { default: true, unverified: true });
+			const binding = await host.resolve(defaultOdinfmtToolchain());
+
+			expect(binding.mountName).toBe("odinfmt");
+			expect(binding.key).toBe("dev-2026-05/linux-x86_64");
+		});
+	});
+
+	test("implicit default follows a later Odin default change", async () => {
+		await withOdinfmtHost(async (host) => {
+			odinfmtToolchain(undefined, { default: true, unverified: true });
+			let binding = await host.resolve(defaultOdinfmtToolchain());
+			expect(binding.key).toBe("dev-2026-05/linux-x86_64");
+
+			odinToolchain("dev-2026-08", { default: true, unverified: true });
+			binding = await host.resolve(defaultOdinfmtToolchain());
+			expect(binding.key).toBe("dev-2026-08/linux-x86_64");
+		});
+	});
+
+	test("explicit odinfmt default takes precedence", async () => {
+		await withOdinfmtHost(async (host) => {
+			odinfmtToolchain("dev-2026-03", {
+				default: true,
+				unverified: true,
+			});
+			const binding = await host.resolve(defaultOdinfmtToolchain());
+
+			expect(binding.key).toBe("dev-2026-03/linux-x86_64");
+		});
 	});
 
 	test("the bundled lockfile is the default", async () => {

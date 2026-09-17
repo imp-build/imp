@@ -4,10 +4,16 @@ import {
 	test,
 	withFakeDiff,
 	withFakeGoalFlags,
+	withFakeToolchainHost,
 	withFakeWriteWorkspace,
 } from "//rules/imp/test";
 import { nativeTool } from "//rules/imp/native-tool";
 import { generatedFiles, generatedFileIsStale } from "//rules/imp/generate";
+import {
+	odinfmtGraphTool,
+	odinfmtToolchain,
+} from "//rules/odin/odinfmt/toolchain";
+import { odinToolchain } from "//rules/odin/toolchain";
 import { graphGenerateGoal } from "//rules/workflows/generate";
 
 // These outputPaths are never actually created — withFakeGraphRun stubs
@@ -100,6 +106,27 @@ describe("generatedFiles()", () => {
 			// Declared tools reach the action as tools, not as inputs.
 			expect(payload.tools.length).toBe(1);
 			expect(payload.inputs).toEqual([]);
+		});
+	});
+
+	test("accepts a mounted graph tool in tools", async () => {
+		await withFakeToolchainHost(async (host) => {
+			odinToolchain("dev-2026-05", { default: true, unverified: true });
+			odinfmtToolchain("dev-2026-05", { unverified: true });
+			const handle = generatedFiles({
+				display: "test generate with odinfmt",
+				tools: { formatter: odinfmtGraphTool("dev-2026-05") },
+				outputPaths: [A],
+				argv: (exec, { formatter }) => [exec.tool(formatter, "odinfmt"), A],
+			});
+			await resolve(handle);
+
+			const generateRun = host.runs.find(
+				(run) => run.display === "test generate with odinfmt",
+			);
+			expect(generateRun).toBeTruthy();
+			expect(generateRun.tools.length).toBe(1);
+			expect(generateRun.inputs).toEqual([]);
 		});
 	});
 

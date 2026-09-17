@@ -126,6 +126,7 @@ export async function odinfmtTool(version) {
 export function odinfmtGraphTool(version) {
 	const resolved = resolveOdinToolchainVersion(version);
 	const plat = platformInfo();
+	const key = odinfmtCacheKey(resolved, plat);
 	namedCache({ name: ODINFMT_CACHE, shared: true });
 	const archive = downloadToolArtifact({
 		lockfile: lockfileFor(OdinfmtToolchain, resolved, DEFAULT_LOCKFILE),
@@ -133,7 +134,7 @@ export function odinfmtGraphTool(version) {
 		version: resolved,
 		plat,
 		url: odinfmtDownloadUrl(resolved, plat),
-		output: `odinfmt-downloads/${odinfmtCacheKey(resolved, plat)}/${odinfmtArtifactName(resolved, plat)}`,
+		output: `odinfmt-downloads/${key}/${odinfmtArtifactName(resolved, plat)}`,
 		display: `download odinfmt ${resolved} (${plat.os}/${plat.arch})`,
 		unverified: OdinfmtToolchain.resolveUnverified(resolved),
 	});
@@ -143,11 +144,14 @@ export function odinfmtGraphTool(version) {
 		format: plat.os === "windows" ? "zip" : "zip-unix",
 		namedCache: {
 			name: ODINFMT_CACHE,
-			key: odinfmtCacheKey(resolved, plat),
+			key,
 		},
 		display: `install odinfmt ${resolved} (${plat.os}/${plat.arch})`,
 	});
-	return graphTool(directory, { binDirs: ["."] });
+	return graphTool(directory, {
+		binDirs: ["."],
+		mount: { name: "odinfmt", cache: ODINFMT_CACHE, key },
+	});
 }
 
 /**
@@ -254,13 +258,14 @@ export function odinfmtGenLockfiles(version, opts = {}) {
 
 /**
  * Return the currently configured default odinfmt toolchain target handle.
+ * An implicit odinfmt default follows the current Odin default version.
  *
- * @returns {object|null}
+ * @returns {object}
  */
 export function defaultOdinfmtToolchain() {
 	const version = OdinfmtToolchain.defaultVersion();
-	const resolved = version ? resolveOdinToolchainVersion(version) : null;
-	return resolved ? graphToolFor(resolved) : null;
+	const resolved = resolveOdinToolchainVersion(version ?? undefined);
+	return graphToolFor(resolved);
 }
 
 // Odinfmt follows the default Odin compiler version when no explicit version
