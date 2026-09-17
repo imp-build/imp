@@ -267,6 +267,15 @@ function buildAppValue(spec, buildOutput, install, dist) {
  * Declare a plain JavaScript application: dependency install only, no
  * type-checking. `entry` is a path relative to the app root. Use tsApp() for
  * a TypeScript application.
+ *
+ * @category target
+ * @param {object} [opts]
+ * @param {string} [opts.src] Application source directory.
+ * @param {string} [opts.entry="index.js"] Entry path relative to the app root.
+ * @param {string} [opts.nodeVersion] Node version override.
+ * @param {string} [opts.pnpmVersion] pnpm version override.
+ * @param {string} [opts.base=packagePath()] Workspace-relative base directory.
+ * @returns {object} Frozen application build and run handles.
  */
 export function jsApp(opts = {}) {
 	const spec = appSpec(opts);
@@ -279,6 +288,10 @@ export function jsApp(opts = {}) {
  * type-checks and emits against the app's own `tsconfig.json` (which must set
  * `outDir: "dist"`). `entry` is a path relative to that emitted `dist/`
  * directory. Requires `typescript` as a declared dependency.
+ *
+ * @category target
+ * @param {object} [opts] Application options accepted by `jsApp()`.
+ * @returns {object} Frozen application build and run handles.
  */
 export function tsApp(opts = {}) {
 	const spec = appSpec(opts);

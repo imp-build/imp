@@ -38,6 +38,12 @@ function workspacePath(base, src) {
  * Declare JavaScript/TypeScript sources and their exported graph roots.
  * Importing an extension such as //rules/js/biome adds its facets at
  * construction time, without mutating this object after the fact.
+ *
+ * @category target
+ * @param {object} [opts]
+ * @param {string} [opts.src="."] Source directory relative to `base`.
+ * @param {string} [opts.base=packagePath()] Workspace-relative base directory.
+ * @returns {object} Frozen source and build handles.
  */
 export function jsSources({ src = ".", base = packagePath() } = {}) {
 	const root = workspacePath(base, src);

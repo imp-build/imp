@@ -8,6 +8,13 @@ another `ccLibrary()` call's result directly, not a label reference.
 
 <!-- capabilities -->
 
+## Public API
+
+The C family exposes `ccLibrary()`, `ccBinary()`, and `ccTest()` targets. The
+same guide covers the CMake, GCC, mold, MSVC/NASM, and Zig toolchain modules.
+Their implementation helpers and graph expansion functions are developer
+reference details, not separate user APIs.
+
 ## Set up a compiler
 
 Import the C rules in `imp.workspace.js`. Raw C targets prefer the default

@@ -32,3 +32,8 @@ imp lint --fix //services/acme:app
 files back into the workspace. Unsafe or otherwise unfixable violations are
 still reported, so the lint goal still fails for anything left over after
 fixing.
+## Public API
+
+Import the Ruff formatter or linter facet from the documented entrypoints.
+Users select the resulting products with `imp fmt` and `imp lint`; toolchain
+download helpers are not user BUILD APIs.

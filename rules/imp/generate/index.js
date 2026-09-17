@@ -102,6 +102,13 @@ export function planGeneratedOutputs(api, { tools, inputs, outputPaths, argv }) 
 	};
 }
 
+/**
+ * Declare generated files that `imp generate` writes at the workflow boundary.
+ *
+ * @category target
+ * @param {object} opts Generator tools, inputs, output paths, and argv callback.
+ * @returns {object} Value handle carrying `{paths, files}`.
+ */
 export function generatedFiles({
 	display,
 	tools = {},

@@ -1854,12 +1854,24 @@ function createGraphPackage({
 	return Object.freeze(value);
 }
 
-/** Declare an immutable, graph-native Odin package. */
+/**
+ * Declare an immutable, graph-native Odin package.
+ *
+ * @category target
+ * @param {object} [opts] Odin package, source, dependency, and toolchain options.
+ * @returns {object} Frozen build, run, test, lint, and package roots.
+ */
 export function odinPackage(opts = {}) {
 	return createGraphPackage(opts);
 }
 
-/** Declare an immutable, graph-native Odin test package. */
+/**
+ * Declare an immutable, graph-native Odin test package.
+ *
+ * @category target
+ * @param {object} [opts] Odin package options.
+ * @returns {object} Frozen build and test roots.
+ */
 export function odinTestPackage(opts = {}) {
 	return createGraphPackage({ ...opts, test: true });
 }

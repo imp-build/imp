@@ -4,7 +4,7 @@
 // (docs/BUILD.js's api_reference_build task) so this module stays a plain,
 // easily unit-testable string-in/string-out parser.
 
-const EXPORT_FUNCTION_RE = /^export function (\w+)\s*\(([^)]*)\)/;
+const EXPORT_FUNCTION_RE = /^export function (\w+)\s*\(/;
 const EXPORT_CLASS_RE = /^export class (\w+)\b/;
 const EXPORT_CONST_RE = /^export const (\w+)\s*=/;
 const PARAM_TAG_RE = /^@param\b\s*(.*)$/;
@@ -127,6 +127,31 @@ export function parseModule(sourceText) {
     let inComment = false;
     let commentBuffer = null;
     let pendingDocLines = null;
+    let pendingFunction = null;
+
+    function closingParenIndex(text) {
+        let depth = 1;
+        for (let index = 0; index < text.length; index++) {
+            if (text[index] === "(") depth++;
+            else if (text[index] === ")") {
+                depth--;
+                if (depth === 0) return index;
+            }
+        }
+        return -1;
+    }
+
+    function addFunction(name, signature, doc) {
+        const close = closingParenIndex(signature);
+        if (close < 0) return false;
+        entries.push({
+            name,
+            params: signature.slice(0, close).trim(),
+            kind: "function",
+            doc: doc ? parseDocBlock(doc) : null,
+        });
+        return true;
+    }
 
     for (const rawLine of lines) {
         const trimmed = rawLine.trim();
@@ -140,6 +165,18 @@ export function parseModule(sourceText) {
                 commentBuffer = null;
             } else {
                 commentBuffer.push(stripCommentMarker(trimmed));
+            }
+            continue;
+        }
+
+        if (pendingFunction) {
+            if (trimmed !== "") pendingFunction.signature += ` ${trimmed}`;
+            if (addFunction(
+                pendingFunction.name,
+                pendingFunction.signature,
+                pendingFunction.doc,
+            )) {
+                pendingFunction = null;
             }
             continue;
         }
@@ -184,12 +221,14 @@ export function parseModule(sourceText) {
                 pendingDocLines = null;
                 continue;
             }
-            entries.push({
-                name: fnMatch[1],
-                params: fnMatch[2],
-                kind: "function",
-                doc: pendingDocLines ? parseDocBlock(pendingDocLines) : null,
-            });
+            const signature = trimmed.slice(trimmed.indexOf("(") + 1);
+            if (!addFunction(fnMatch[1], signature, pendingDocLines)) {
+                pendingFunction = {
+                    name: fnMatch[1],
+                    signature,
+                    doc: pendingDocLines,
+                };
+            }
             pendingDocLines = null;
             continue;
         }

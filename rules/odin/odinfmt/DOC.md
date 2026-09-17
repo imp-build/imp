@@ -21,3 +21,8 @@ version. `odinfmtToolchain(version, { lockfile })` selects a lockfile that
 this workspace owns instead of the shipped
 `//rules/odin/odinfmt/odinfmt.lock`. See "Select a workspace lockfile" in
 `rules/odin/DOC.md`.
+## Public API
+
+Import this module to attach the managed `odinfmt` formatter to Odin targets.
+The formatter root and toolchain helpers are implementation details; users
+select formatting through `imp fmt`.

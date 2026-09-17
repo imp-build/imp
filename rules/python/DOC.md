@@ -5,6 +5,13 @@ format and lint products for application targets.
 
 <!-- capabilities -->
 
+## Public API
+
+Use `pythonApp()`, `pythonTest()`, `pythonSources()`, and `pythonProject()` for
+locked Python applications, tests, source runs, and dependency resolves. The
+uv, Ruff, and PEX toolchain modules expose configuration declarations; their
+download and cache helpers are implementation details.
+
 ## Set up the workspace
 
 Import the Python rules in `imp.workspace.js`; they provide default uv, PEX,

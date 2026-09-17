@@ -4,6 +4,12 @@ discovers every real CMake target (`add_library`/`add_executable`) as a
 separately selectable, separately buildable/testable child, keyed by its
 CMake target name.
 
+## Public API
+
+Use `cmakeProject()` to import a CMake project and `cmakeLibraryDep()` to
+connect a discovered target to raw C/C++ targets. Ninja parsing and expansion
+helpers are implementation details.
+
 ## Declare the project root
 
 ```js

@@ -6,6 +6,13 @@ handles registry operations.
 
 <!-- capabilities -->
 
+## Public API
+
+Use `ociPull()`, `ociBuild()`, `ociPush()`, and `ociMirror()` for immutable
+image inputs, deterministic local image builds, and explicitly selected
+registry operations. Crane toolchain helpers are documented here but remain
+configuration details rather than standalone target constructors.
+
 ## Set up Crane
 
 Registry operations use the pinned Crane release provided by the OCI rule:

@@ -3,7 +3,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from quality_check import check_api_reference, check_examples, check_navigation, check_rendered_links
+from quality_check import (
+    check_api_reference,
+    check_examples,
+    check_navigation,
+    check_rendered_links,
+    check_rule_namespace_guides,
+)
 
 
 class QualityCheckTest(unittest.TestCase):
@@ -61,6 +67,31 @@ class QualityCheckTest(unittest.TestCase):
             errors = check_api_reference(root, api)
             self.assertEqual(len(errors), 1)
             self.assertIn("page set differs", errors[0])
+
+    def test_rule_namespace_guides_require_public_api_sections(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for namespace in (
+                "asset",
+                "c",
+                "imp",
+                "init",
+                "js",
+                "oci",
+                "odin",
+                "python",
+                "rust",
+                "treesitter",
+                "workflows",
+                "zola",
+            ):
+                path = root / "rules" / namespace / "DOC.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# Guide\n\n## Public API\n", encoding="utf-8")
+            (root / "rules" / "js" / "DOC.md").write_text("# Guide\n", encoding="utf-8")
+            errors = check_rule_namespace_guides(root)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("Public API section", errors[0])
 
 
 if __name__ == "__main__":

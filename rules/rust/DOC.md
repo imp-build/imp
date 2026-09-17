@@ -15,6 +15,13 @@ requirements.
 | `imp fmt` | rustfmt | `//rules/rust` |
 | `imp lint` | Clippy | `//rules/rust` |
 
+## Public API
+
+Use `cargoPackage()` for Cargo package and workspace targets. The Rust
+toolchain and kache modules provide configuration declarations and cache
+integration. Cargo expansion, manifest, and linker helpers are implementation
+details even though they appear in the developer reference.
+
 ## Set up the workspace
 
 Import the Rust rules in `imp.workspace.js`. They provide the default Rust

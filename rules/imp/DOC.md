@@ -17,6 +17,13 @@ language rule imports these helpers and supplies the goals.
 | `//rules/imp/mode` | The `opt` axis and the `default`/`release` profiles |
 | `//rules/imp/test` | `rulesTest()` and the rule-test harness |
 
+## Public API
+
+The supported rule-author APIs include `nativeTool()`, `codegen()`,
+`generatedFiles()`, `stampFile()`, toolchain accessors, and `rulesTest()`.
+Archive, lockfile, graph-expansion, and test-helper internals remain in the
+developer reference unless a guide section names them as stable API.
+
 ## What the sandbox gives an action
 
 Two properties hold for every action, and the rest of this document depends on

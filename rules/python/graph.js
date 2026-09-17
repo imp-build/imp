@@ -277,6 +277,22 @@ function pythonVersionOrDefault(value) {
 	return selected;
 }
 
+/**
+ * Declare a Python application and its PEX build and run roots.
+ *
+ * @category target
+ * @param {object} opts Application source, resolve, toolchain, and dependency options.
+ * @param {string} [opts.src] Application source directory.
+ * @param {string} [opts.entryPoint] Application entry point.
+ * @param {string} [opts.uvVersion] uv version override.
+ * @param {string} [opts.pexVersion] PEX version override.
+ * @param {string} [opts.pythonVersion] CPython version override.
+ * @param {string[]} [opts.extraPexArgs=[]] Extra PEX arguments.
+ * @param {object} [opts.resolve] Locked Python dependency resolve.
+ * @param {object[]} [opts.deps=[]] Extra native tools.
+ * @param {string} [opts.base=packagePath()] Workspace-relative base directory.
+ * @returns {object} Frozen build, package, run, and source handles.
+ */
 export function pythonApp({
 	src,
 	entryPoint,
@@ -328,6 +344,19 @@ export function pythonApp({
 	return Object.freeze(value);
 }
 
+/**
+ * Declare a Python test suite backed by the selected locked resolve.
+ *
+ * @category target
+ * @param {object} opts Test source, resolve, toolchain, and dependency options.
+ * @param {string} [opts.src] Test source directory.
+ * @param {string[]} [opts.testArgs=[]] Arguments passed to pytest.
+ * @param {string} [opts.uvVersion] uv version override.
+ * @param {object} [opts.resolve] Locked Python dependency resolve.
+ * @param {object[]} [opts.deps=[]] Extra native tools.
+ * @param {string} [opts.base=packagePath()] Workspace-relative base directory.
+ * @returns {object} Frozen test root.
+ */
 export function pythonTest({
 	src,
 	testArgs = [],

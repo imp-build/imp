@@ -86,6 +86,7 @@ export const CODEGEN = Symbol.for("imp.codegen");
  *   generator command line from the resolved tools/inputs.
  * @returns {object} Frozen `{paths, files, [CODEGEN], [BUILD]}`, where
  *   `files[path]` is the artifact handle for that output path.
+ * @category target
  */
 export function codegen({
 	display,

@@ -91,6 +91,12 @@ function require_default_uv_version() {
  * label intentionally models the selected version, not a second downloader.
  * A handleless label, like pythonResolve() — addressable, referenced by
  * `pythonSources()`-discovered children via `.data`, no goal handlers.
+ *
+ * @category configuration
+ * @param {string} version CPython version label.
+ * @param {object} [opts]
+ * @param {boolean} [opts.default=false] Make this the default runtime.
+ * @returns {object} Python runtime label.
  */
 export function pythonToolchain(version, { default: isDefault = false } = {}) {
 	if (typeof version !== "string" || version === "") {
@@ -115,6 +121,13 @@ pythonToolchain("3.13.0", { default: true });
 /**
  * Declare the optional workspace-default locked uv project used to supply
  * third-party dependencies for Python source runs.
+ *
+ * @category configuration
+ * @param {object} [opts]
+ * @param {string} [opts.path="."] Workspace-relative project directory.
+ * @param {object} [opts.flavors] Resolve flavor selections.
+ * @param {boolean} [opts.default=false] Make this the default project.
+ * @returns {object} Locked Python resolve handle.
  */
 export function pythonProject({
 	path = ".",
@@ -201,6 +214,7 @@ function sourceRunDescriptor(spec, file) {
  *   inside each source's run: nativeTool() specifications.
  * @returns {object} An exportable object whose `[RUN]` root expands to one
  *   selectable child per discovered file.
+ * @category target
  */
 export function pythonSources({
 	root,

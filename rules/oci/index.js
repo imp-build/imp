@@ -280,7 +280,16 @@ function packageLayout(layout) {
 	}).outputs.archive;
 }
 
-/** Declare an immutable OCI pull graph. */
+/**
+ * Declare an immutable OCI pull graph.
+ *
+ * @category target
+ * @param {object} opts
+ * @param {string} opts.repo Registry repository.
+ * @param {string} [opts.tag] Mutable tag resolved to a digest at graph load.
+ * @param {string} [opts.digest] Immutable content digest.
+ * @returns {object} Image layout with build and package roots.
+ */
 export function ociPull({ repo, tag, digest }) {
 	if (!repo) throw new Error("ociPull requires 'repo'");
 	if (!tag === !digest) {
@@ -296,7 +305,23 @@ export function ociPull({ repo, tag, digest }) {
 	});
 }
 
-/** Declare a deterministic single-platform OCI image build graph. */
+/**
+ * Declare a deterministic single-platform OCI image build graph.
+ *
+ * @category target
+ * @param {object} opts Image layout and metadata options.
+ * @param {string} [opts.path="."] Workspace-relative layer source directory.
+ * @param {string} [opts.base] Base image returned by `ociPull()`, or `"scratch"`.
+ * @param {object[]} opts.layers Non-empty image layers with source globs and destinations.
+ * @param {string|string[]} [opts.entrypoint] Image entrypoint.
+ * @param {string|string[]} [opts.cmd] Image command.
+ * @param {object} [opts.env] Image environment variables.
+ * @param {object} [opts.labels] OCI image labels.
+ * @param {string} [opts.user] Image user.
+ * @param {string} [opts.workdir] Image working directory.
+ * @param {string} [opts.sourceBase=packagePath()] Workspace-relative source base.
+ * @returns {object} Image layout with build and package roots.
+ */
 export function ociBuild({
 	path = ".",
 	base,
@@ -366,7 +391,16 @@ function publishImage({ image, repo, tag }) {
 	});
 }
 
-/** Declare an explicitly selected registry publication. */
+/**
+ * Declare an explicitly selected registry publication.
+ *
+ * @category target
+ * @param {object} opts
+ * @param {object} opts.image Image returned by `ociPull()` or `ociBuild()`.
+ * @param {string} opts.repo Destination repository.
+ * @param {string} opts.tag Destination tag.
+ * @returns {object} Publish workflow root.
+ */
 export function ociPush({ image, repo, tag }) {
 	const source = imageOf(image, "ociPush's 'image'");
 	if (!repo) throw new Error("ociPush requires 'repo'");
@@ -376,7 +410,15 @@ export function ociPush({ image, repo, tag }) {
 	});
 }
 
-/** Declare an explicitly selected registry-to-registry copy. */
+/**
+ * Declare an explicitly selected registry-to-registry copy.
+ *
+ * @category target
+ * @param {object} opts
+ * @param {object} opts.from Source repository and tag or digest.
+ * @param {object} opts.to Destination repository and tag.
+ * @returns {object} Publish workflow root.
+ */
 export function ociMirror({ from, to }) {
 	if (!from || !from.repo || !(from.tag || from.digest)) {
 		throw new Error("ociMirror requires 'from: { repo, tag|digest }'");

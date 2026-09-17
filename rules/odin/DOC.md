@@ -6,6 +6,13 @@ flags, native link inputs, and managed tools needed by the sandboxed command.
 
 <!-- capabilities -->
 
+## Public API
+
+Use `odinPackage()` and `odinTestPackage()` for Odin build and test roots. The
+`//rules/odin/odinfmt` module adds formatting, and the VS Code workflow adds a
+static project description. Analysis classes and path helpers remain internal
+implementation details.
+
 ## Set up the workspace
 
 Import the compiler and formatter rules in `imp.workspace.js`, then load the

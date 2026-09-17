@@ -17,6 +17,20 @@ from urllib.parse import urljoin, urlsplit
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)|href=[\"']([^\"']+)")
 FENCE_RE = re.compile(r"^\s*```")
 STATUS_RE = re.compile(r"^\s*\*\*(Runnable|Illustrative) example\*\*\s*$")
+PUBLIC_RULE_NAMESPACES = (
+    "asset",
+    "c",
+    "imp",
+    "init",
+    "js",
+    "oci",
+    "odin",
+    "python",
+    "rust",
+    "treesitter",
+    "workflows",
+    "zola",
+)
 
 
 def _route_for_html(path: Path) -> str:
@@ -200,6 +214,19 @@ def check_examples(files: list[Path]) -> list[str]:
     return errors
 
 
+def check_rule_namespace_guides(root: Path) -> list[str]:
+    errors: list[str] = []
+    for namespace in PUBLIC_RULE_NAMESPACES:
+        path = root / "rules" / namespace / "DOC.md"
+        if not path.is_file():
+            errors.append(f"public rule namespace is missing DOC.md: {namespace}")
+            continue
+        text = path.read_text(encoding="utf-8")
+        if not re.search(r"^## Public API\s*$", text, re.MULTILINE):
+            errors.append(f"rule guide is missing a Public API section: {path}")
+    return errors
+
+
 def check_api_reference(root: Path, api_reference: Path) -> list[str]:
     manifest_path = api_reference / "manifest.json"
     errors: list[str] = []
@@ -235,6 +262,7 @@ def validate(root: Path, site: Path, api_reference: Path) -> list[str]:
         *sorted((root / "rules").rglob("DOC.md")),
     ]
     errors = []
+    errors.extend(check_rule_namespace_guides(root))
     errors.extend(check_source_links(root, source_files))
     errors.extend(check_examples(source_files))
     errors.extend(check_api_reference(root, api_reference))

@@ -65,7 +65,7 @@ function source_files({ srcs, exclude = [], path = ".", base = packagePath() }, 
 /**
  * Declare a graph-native asset source collection and validation build action.
  *
- * @category graph
+ * @category target
  * @param {object} opts
  * @param {string[]} opts.srcs Source glob patterns, relative to `base`.
  * @param {string} [opts.base=packagePath()] Workspace-relative source base.
@@ -160,7 +160,7 @@ export class ResourcePackage extends Target {
  * the returned object remains usable as a legacy dependency and exposes its
  * graph-native source collection as `.files`.
  *
- * @category graph
+ * @category target
  * @param {object} opts
  * @param {string[]} opts.srcs Source glob patterns to include (required, non-empty).
  * @param {string[]} [opts.exclude] Glob patterns to exclude from `srcs`.

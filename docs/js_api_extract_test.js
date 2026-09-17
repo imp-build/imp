@@ -93,6 +93,27 @@ test("attaches the nearest preceding doc comment to export function", () => {
     expect(entries[0].doc.returns.description).toBe("The sum.");
 });
 
+test("parses multiline signatures and default calls without truncating params", () => {
+    const entries = parseModule([
+        "/** Build an asset. */",
+        "export function asset({ srcs, base = packagePath() } = {}) {",
+        "    return { srcs, base };",
+        "}",
+        "",
+        "/** Build an OCI image. */",
+        "export function ociBuild({",
+        "    path = \".\",",
+        "    layers = [],",
+        "}) {",
+        "    return { path, layers };",
+        "}",
+    ].join("\n"));
+
+    expect(entries.length).toBe(2);
+    expect(entries[0].params).toBe("{ srcs, base = packagePath() } = {}");
+    expect(entries[1].params).toBe("{ path = \".\", layers = [], }");
+});
+
 test("tolerates blank lines between a doc comment and its export", () => {
     const src = [
         "/**",

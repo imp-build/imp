@@ -16,17 +16,29 @@ import {
 	task,
 } from "imp:core";
 import { rulesTest } from "//rules/imp/test";
+import "//rules/asset";
 // The reference catalog describes imp's built-in rules, independently of
 // which subset this repository happens to import from imp.workspace.js.
 import "//rules/c";
 import "//rules/c/cmake";
+import "//rules/js";
+import "//rules/js/biome";
+import "//rules/js/node";
+import "//rules/js/pnpm";
 import "//rules/oci";
 import "//rules/odin";
+import "//rules/odin/odinfmt";
 import "//rules/python";
 import "//rules/python/test";
 import "//rules/rust";
+import "//rules/workflows/generate";
+import "//rules/workflows/generate_build";
 import "//rules/workflows/fmt";
 import "//rules/workflows/lint";
+import "//rules/workflows/lockfiles";
+import "//rules/workflows/publish";
+import "//rules/workflows/run";
+import "//rules/workflows/vs";
 import { nativeTool } from "//rules/imp/native-tool";
 import { extractCodeReference, extractUserApiReference } from "//docs/js_api_extract";
 import { zolaBin, zolaGraphTool, zolaToolchain } from "//rules/zola";
