@@ -5735,34 +5735,33 @@ fn package_path_from_stack(
     rules_source: &RulesSource,
     stack: &str,
 ) -> Result<String> {
-    // ES module evaluation is strictly dependency-ordered: every module a
-    // frame belongs to has already fully finished its own top-level
-    // evaluation before that frame could run, so the *outermost* `Build`-
-    // kind frame on the stack is always the one BUILD.js whose top-level
-    // body is actually mid-evaluation right now — regardless of how many
-    // rule-library or workspace-helper calls sit between it and this
-    // packagePath() call. Nearer Build frames are just ordinary function
-    // calls into already-loaded modules (e.g. a helper defined in one
-    // BUILD.js and called from another) and don't indicate "current
-    // module" at all, so this walks the whole stack and keeps the last
-    // Build match rather than returning at the first one. `Build`-vs-not is
-    // decided by resolving each frame and checking its real ModuleKind, not
-    // by guessing from a `//rules/...` prefix — this repo's own rule
-    // library keeps real BUILD.js files under a top-level `rules/`
+    // A top-level declaration in an imported BUILD.js has the importing
+    // BUILD.js farther out on the stack, but the imported module is the
+    // package that owns the declaration. A helper function is different: its
+    // own BUILD.js frame is a normal function call, and the outer top-level
+    // BUILD.js is the package that owns the helper's result. Select the first
+    // top-level BUILD frame for the former and retain the outermost BUILD
+    // fallback for stack shapes without an identifiable top-level marker.
+    // `Build`-vs-not is decided by resolving each frame and checking its real
+    // ModuleKind, not by guessing from a `//rules/...` prefix — this repo's
+    // rule library keeps real BUILD.js files under a top-level `rules/`
     // directory, so a prefix guess misclassifies them (issue #71).
     // Relative (`./`, `../`) imports are rejected by the loader, so every
     // frame that matters is either `imp:core`/native or `//`-rooted —
     // nothing else can appear here.
     let mut package_path = None;
+    let mut top_level_package_path = None;
     let mut saw_workspace_module = false;
     for line in stack.lines() {
         let line = line.trim();
         let rest = line.strip_prefix("at ").unwrap_or(line);
-        let location = match rest.rfind('(') {
-            Some(open) => rest[open + 1..].trim_end_matches(')'),
-            None => rest,
-        }
-        .trim();
+        let (frame_name, location) = match rest.rfind('(') {
+            Some(open) => (
+                rest[..open].trim(),
+                rest[open + 1..].trim_end_matches(')').trim(),
+            ),
+            None => ("", rest),
+        };
         let module = module_name_from_site(location);
         if module == "imp:core" || !module.starts_with("//") {
             continue;
@@ -5784,14 +5783,19 @@ fn package_path_from_stack(
         if resolution.kind != ModuleKind::Build {
             continue;
         }
-        package_path = Some(if relative.as_os_str().is_empty() {
+        let path = if relative.as_os_str().is_empty() {
             ".".to_owned()
         } else {
             relative
                 .to_string_lossy()
                 .replace(std::path::MAIN_SEPARATOR, "/")
-        });
+        };
+        if matches!(frame_name, "<anonymous>" | "<eval>") && top_level_package_path.is_none() {
+            top_level_package_path = Some(path.clone());
+        }
+        package_path = Some(path);
     }
+    package_path = top_level_package_path.or(package_path);
     // No BUILD.js anywhere in the chain — e.g. a rule constructor called
     // directly from a unit test, with no wrapping BUILD.js at all. Default
     // to the workspace root rather than erroring, matching how an explicit,
@@ -9774,6 +9778,86 @@ export const mylib = makeLib();
             .await
             .unwrap();
         assert_eq!(helper_saw, "consumer");
+    }
+
+    #[tokio::test]
+    async fn graph_package_path_in_imported_build_uses_its_own_module() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(&p.join("z_owner/owned.txt"), "z_owner");
+        write_file(
+            &p.join("z_owner/BUILD.js"),
+            r#"
+import { files, goal, output, packagePath, task } from "imp:core";
+const BUILD = goal("build");
+
+const sourceFiles = files({ root: packagePath(), include: ["*.txt"] });
+const sources = task({
+    display: "build same target",
+    inputs: { sourceFiles },
+    outputs: { value: output.value() },
+    async run(exec, inputs) {
+        globalThis.importedBuildSources.push(...exec.paths(inputs.sourceFiles));
+        return { value: null };
+    },
+});
+
+export const same = { [BUILD]: sources };
+"#,
+        );
+        write_file(&p.join("a_consumer/owned.txt"), "a_consumer");
+        // The consumer sorts first and imports z_owner/BUILD.js as a
+        // dependency, which is the case that previously captured the
+        // consumer's package path.
+        write_file(
+            &p.join("a_consumer/BUILD.js"),
+            r#"
+import { files, goal, output, packagePath, task } from "imp:core";
+import "//z_owner";
+const BUILD = goal("build");
+
+const sourceFiles = files({ root: packagePath(), include: ["*.txt"] });
+const sources = task({
+    display: "build same target",
+    inputs: { sourceFiles },
+    outputs: { value: output.value() },
+    async run(exec, inputs) {
+        globalThis.importedBuildSources.push(...exec.paths(inputs.sourceFiles));
+        return { value: null };
+    },
+});
+
+export const same = { [BUILD]: sources };
+"#,
+        );
+
+        let live = load_workspace_with_rules(p, RulesSource::directory(repo_rules_dir()))
+            .await
+            .unwrap();
+        live.ctx
+            .async_with(async |ctx| {
+                ctx.globals()
+                    .set("importedBuildSources", Vec::<String>::new())
+            })
+            .await
+            .unwrap();
+        run_goal_live(
+            &live,
+            p,
+            "build",
+            &["//a_consumer:same".to_owned(), "//z_owner:same".to_owned()],
+        )
+        .await
+        .unwrap();
+        let sources = live
+            .ctx
+            .async_with(async |ctx| {
+                ctx.eval::<String, _>("JSON.stringify(globalThis.importedBuildSources.sort())")
+            })
+            .await
+            .unwrap();
+        assert_eq!(sources, r#"["a_consumer/owned.txt","z_owner/owned.txt"]"#);
     }
 
     #[tokio::test]
