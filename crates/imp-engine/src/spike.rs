@@ -9914,6 +9914,170 @@ export const same = { [BUILD]: sources };
     }
 
     #[tokio::test]
+    async fn odin_packages_with_the_same_export_name_keep_independent_source_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(
+            &p.join(WORKSPACE_FILE),
+            r#"
+import "//rules/odin";
+import "//rules/odin/odinfmt";
+import "//rules/workflows/build";
+import "//rules/workflows/fmt";
+import "//rules/workflows/lint";
+import "//rules/workflows/package";
+import "//rules/workflows/run";
+import "//rules/workflows/test";
+import "//rules/imp/mode";
+
+import { odinToolchain } from "//rules/odin";
+import { odinfmtToolchain } from "//rules/odin/odinfmt/toolchain";
+
+export const odinToolchainDefault = odinToolchain("dev-2026-05", {
+    default: true,
+});
+export const odinfmtToolchainDefault = odinfmtToolchain("dev-2026-05", {
+    default: true,
+});
+export const odinConfig = { buildGenerate: true };
+export const imp = { jobs: 8, jsWorkers: 1 };
+"#,
+        );
+        write_file(&p.join("root.odin"), "package root\n");
+        write_file(&p.join("builtin/runtime.odin"), "package builtin\n");
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { resourcePackage } from "//rules/asset";
+import { odinPackage, odinTestPackage } from "//rules/odin";
+
+export const builtin_source = resourcePackage({ srcs: ["builtin/**"] });
+export const root = odinPackage({
+    deps: [builtin_source.files],
+});
+export const root_test = odinTestPackage({ deps: [root] });
+"#,
+        );
+        write_file(&p.join("ext/lsp/service.odin"), "package lsp\n");
+        write_file(
+            &p.join("ext/lsp/BUILD.js"),
+            r#"
+import { root } from "//";
+import { odinPackage, odinTestPackage } from "//rules/odin";
+
+export const same = odinPackage({
+    deps: [root],
+    srcs: ["*.odin"],
+    toolchain: "dev-2026-05",
+});
+export const same_test = odinTestPackage({ deps: [same] });
+"#,
+        );
+        write_file(
+            &p.join("examples/lsp/main.odin"),
+            "package main\nimport lsp \"../../ext/lsp\"\n",
+        );
+        write_file(
+            &p.join("examples/lsp/BUILD.js"),
+            r#"
+import { root } from "//";
+import { same as owner } from "//ext/lsp";
+import { odinPackage } from "//rules/odin";
+
+export const same = odinPackage({
+    deps: [root, owner],
+    srcs: ["*.odin"],
+    toolchain: "dev-2026-05",
+});
+"#,
+        );
+
+        let live = load_workspace_with_rules(p, RulesSource::directory(repo_rules_dir()))
+            .await
+            .unwrap();
+        let context = SelectorContext::root();
+        for workflow in ["build", "lint", "fmt"] {
+            let resolution = resolve_graph_with_expansion(
+                &live,
+                p,
+                Some(workflow),
+                &[
+                    "//examples/lsp:same".to_owned(),
+                    "//ext/lsp:same".to_owned(),
+                ],
+                &context,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+
+            for (address, expected_root) in [
+                ("//examples/lsp:same", "examples/lsp"),
+                ("//ext/lsp:same", "ext/lsp"),
+            ] {
+                let root = resolution
+                    .roots
+                    .iter()
+                    .find(|root| root.address == address && root.workflow == workflow)
+                    .unwrap_or_else(|| panic!("{workflow}: missing root {address}"));
+                let mut current_handle = root.handle_id;
+                let source_handle = (0..8)
+                    .find_map(|_| {
+                        let node = resolution
+                            .walk
+                            .nodes
+                            .iter()
+                            .find(|node| node.id == current_handle)?;
+                        if let Some(edge) = node.edges.iter().find(|edge| edge.name == "sources") {
+                            return Some(edge.handle_id);
+                        }
+                        current_handle = node
+                            .edges
+                            .iter()
+                            .find(|edge| edge.name == "task")?
+                            .handle_id;
+                        None
+                    })
+                    .unwrap_or_else(|| panic!("{workflow}: {address} has no sources edge"));
+                let actual_root = resolution
+                    .walk
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == source_handle && node.kind == "files")
+                    .and_then(|node| node.data.as_ref())
+                    .and_then(|data| data.get("root"))
+                    .and_then(|root| root.as_str())
+                    .unwrap_or_else(|| panic!("{workflow}: {address} sources is not a files node"));
+                assert_eq!(actual_root, expected_root, "{workflow}: {address}");
+            }
+        }
+
+        let test_resolution = resolve_graph_with_expansion(
+            &live,
+            p,
+            Some("test"),
+            &["//ext/lsp:same_test".to_owned()],
+            &context,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let test_roots: BTreeSet<String> = test_resolution
+            .walk
+            .nodes
+            .iter()
+            .filter(|node| node.kind == "files")
+            .filter_map(|node| node.data.as_ref())
+            .filter_map(|data| data.get("root"))
+            .filter_map(|root| root.as_str())
+            .map(str::to_owned)
+            .collect();
+        assert!(test_roots.contains("ext/lsp"), "test: {test_roots:?}");
+    }
+
+    #[tokio::test]
     async fn graph_package_path_survives_top_level_await() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
