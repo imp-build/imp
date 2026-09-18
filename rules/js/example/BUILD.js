@@ -10,6 +10,7 @@ export const hello_src = jsSources({ src: "src" });
 export const app = jsApp({
 	src: "app",
 	entry: "src/index.js",
+	sources: ["src/**/*.js"],
 });
 
 // TypeScript app: [BUILD] type-checks and emits via tsc, [RUN] executes the
@@ -17,4 +18,5 @@ export const app = jsApp({
 export const app_ts = tsApp({
 	src: "app_ts",
 	entry: "index.js",
+	sources: ["src/**/*.ts"],
 });

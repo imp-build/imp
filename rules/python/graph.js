@@ -26,11 +26,16 @@ import {
 	uvTool,
 } from "//rules/python/uv_toolchain";
 
-export const PYTHON_PROJECT_SOURCE_INCLUDES = [
-	"pyproject.toml",
-	"uv.lock",
-	"**/*.py",
-];
+export const PYTHON_PROJECT_SOURCE_INCLUDES = ["pyproject.toml", "uv.lock"];
+export const PYTHON_SOURCE_INCLUDES = ["*.py"];
+
+function sourcePatterns(value, api) {
+	if (!Array.isArray(value) || value.length === 0)
+		throw new Error(`${api}({ sources }) requires source glob patterns`);
+	if (value.some((pattern) => typeof pattern !== "string" || pattern === ""))
+		throw new Error(`${api}({ sources }) expects non-empty glob patterns`);
+	return [...value];
+}
 
 const appHooks = [];
 
@@ -92,11 +97,11 @@ function appBuild(spec) {
 	const shell = nativeTool("sh");
 	const sources = files({
 		root: spec.resolve.path,
-		include: PYTHON_PROJECT_SOURCE_INCLUDES,
+		include: [...PYTHON_PROJECT_SOURCE_INCLUDES, ...spec.sources],
 	});
 	const pythonSources = files({
 		root: spec.resolve.path,
-		include: ["**/*.py"],
+		include: spec.sources,
 	});
 	const build = task({
 		display: `python-app build ${spec.resolve.path}`,
@@ -193,7 +198,7 @@ function testRoot(spec) {
 	const shell = nativeTool("sh");
 	const sources = files({
 		root: spec.resolve.path,
-		include: PYTHON_PROJECT_SOURCE_INCLUDES,
+		include: [...PYTHON_PROJECT_SOURCE_INCLUDES, ...spec.sources],
 	});
 	return task({
 		display: `python test ${spec.resolve.path}`,
@@ -283,6 +288,7 @@ function pythonVersionOrDefault(value) {
  * @category target
  * @param {object} opts Application source, resolve, toolchain, and dependency options.
  * @param {string} [opts.src] Application source directory.
+ * @param {string[]} [opts.sources=["*.py"]] Source patterns relative to the project directory.
  * @param {string} [opts.entryPoint] Application entry point.
  * @param {string} [opts.uvVersion] uv version override.
  * @param {string} [opts.pexVersion] PEX version override.
@@ -295,6 +301,7 @@ function pythonVersionOrDefault(value) {
  */
 export function pythonApp({
 	src,
+	sources: sourceGlobs = PYTHON_SOURCE_INCLUDES,
 	entryPoint,
 	uvVersion,
 	pexVersion,
@@ -306,6 +313,7 @@ export function pythonApp({
 } = {}) {
 	const spec = {
 		resolve: resolveSpec({ src, resolve, base }),
+		sources: sourcePatterns(sourceGlobs, "pythonApp"),
 		entryPoint,
 		extraPexArgs: [...extraPexArgs],
 		deps: [...deps],
@@ -350,6 +358,7 @@ export function pythonApp({
  * @category target
  * @param {object} opts Test source, resolve, toolchain, and dependency options.
  * @param {string} [opts.src] Test source directory.
+ * @param {string[]} [opts.sources=["*.py"]] Source patterns relative to the project directory.
  * @param {string[]} [opts.testArgs=[]] Arguments passed to pytest.
  * @param {string} [opts.uvVersion] uv version override.
  * @param {object} [opts.resolve] Locked Python dependency resolve.
@@ -359,6 +368,7 @@ export function pythonApp({
  */
 export function pythonTest({
 	src,
+	sources: sourceGlobs = PYTHON_SOURCE_INCLUDES,
 	testArgs = [],
 	uvVersion,
 	resolve,
@@ -367,6 +377,7 @@ export function pythonTest({
 } = {}) {
 	const spec = {
 		resolve: resolveSpec({ src, resolve, base }),
+		sources: sourcePatterns(sourceGlobs, "pythonTest"),
 		testArgs: [...testArgs],
 		deps: [...deps],
 		uv: graphTool(

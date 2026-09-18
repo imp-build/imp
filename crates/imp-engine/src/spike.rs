@@ -45,7 +45,6 @@ use rquickjs::{
     FromJs, Function, Module, Object, Value,
 };
 use serde::{Deserialize, Serialize};
-use walkdir::WalkDir;
 
 pub const WORKSPACE_FILE: &str = "imp.workspace.js";
 static MEMO_DEPRECATION_WARNED: AtomicBool = AtomicBool::new(false);
@@ -4011,14 +4010,15 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
     globals.set("__host_workspace_files", host_workspace_files)?;
 
     // ------------------------------------------------------------------
-    // __host_workspace_source_files(root, includeJson, excludeJson)
+    // __host_workspace_source_files(root, includeJson, excludeJson, recursive)
     // ------------------------------------------------------------------
     let wc = workspace_root.clone();
     let host_workspace_source_files = Function::new(
         ctx.clone(),
         move |root: String,
               include_json: String,
-              exclude_json: String|
+              exclude_json: String,
+              recursive: bool|
               -> rquickjs::Result<String> {
             let include: Vec<String> = serde_json::from_str(&include_json).map_err(|e| {
                 rquickjs::Error::new_loading_message(
@@ -4032,7 +4032,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
                     format!("parse exclude regexes: {e}"),
                 )
             })?;
-            workspace_source_files(&wc, &root, &include, &exclude)
+            workspace_source_files(&wc, &root, &include, &exclude, recursive)
                 .and_then(|files| serde_json::to_string(&files).context("encode source files"))
                 .map_err(|e| {
                     rquickjs::Error::new_loading_message("workspaceSourceFiles", format!("{e:#}"))
@@ -5229,15 +5229,25 @@ fn workspace_files(
         );
     }
 
-    let mut files = Vec::new();
-    let mut walk = WalkDir::new(&directory);
+    let mut walker = ignore::WalkBuilder::new(&directory);
+    walker
+        .hidden(false)
+        .ignore(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .parents(true)
+        .require_git(false)
+        .filter_entry(|entry| entry.file_name() != ".git");
     if !recursive {
-        walk = walk.max_depth(1);
+        walker.max_depth(Some(1));
     }
-    for entry in walk
-        .into_iter()
+
+    let mut files = Vec::new();
+    for entry in walker
+        .build()
         .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
     {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -5262,8 +5272,9 @@ fn workspace_source_files(
     root: &str,
     include: &[String],
     exclude: &[String],
+    recursive: bool,
 ) -> Result<Vec<String>> {
-    matching_workspace_source_paths(workspace_root, root, include, exclude)
+    matching_workspace_source_paths(workspace_root, root, include, exclude, recursive)
 }
 
 pub fn workspace_glob_files(
@@ -5275,6 +5286,17 @@ pub fn workspace_glob_files(
     if include.is_empty() {
         bail!("glob include must not be empty");
     }
+    let max_depth = if include.iter().any(|pattern| pattern.contains("**")) {
+        None
+    } else {
+        Some(
+            include
+                .iter()
+                .map(|pattern| pattern.matches('/').count() + 1)
+                .max()
+                .unwrap_or(1),
+        )
+    };
     let include = compile_globs("include", include)?;
     let exclude = compile_globs("exclude", exclude)?;
     let directory = workspace_root.join(workspace_relative_directory(root)?);
@@ -5282,11 +5304,25 @@ pub fn workspace_glob_files(
         bail!("glob root '{}' is not a directory", directory.display());
     }
 
+    let mut walker = ignore::WalkBuilder::new(&directory);
+    walker
+        .hidden(false)
+        .ignore(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .parents(true)
+        .require_git(false)
+        .filter_entry(|entry| entry.file_name() != ".git");
+    if let Some(depth) = max_depth {
+        walker.max_depth(Some(depth));
+    }
+
     let mut files = Vec::new();
-    for entry in WalkDir::new(&directory)
-        .into_iter()
+    for entry in walker
+        .build()
         .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
     {
         let workspace_relative = entry
             .path()
@@ -5339,6 +5375,7 @@ fn matching_workspace_source_paths(
     root: &str,
     include: &[String],
     exclude: &[String],
+    recursive: bool,
 ) -> Result<Vec<String>> {
     if include.is_empty() {
         bail!("workspaceSourceFiles include must not be empty");
@@ -5353,11 +5390,25 @@ fn matching_workspace_source_paths(
         );
     }
 
+    let mut walker = ignore::WalkBuilder::new(&directory);
+    walker
+        .hidden(false)
+        .ignore(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .parents(true)
+        .require_git(false)
+        .filter_entry(|entry| entry.file_name() != ".git");
+    if !recursive {
+        walker.max_depth(Some(1));
+    }
+
     let mut files = Vec::new();
-    for entry in WalkDir::new(&directory)
-        .into_iter()
+    for entry in walker
+        .build()
         .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
     {
         let relative = entry
             .path()
@@ -5382,7 +5433,7 @@ fn snapshot_watched_files(
     workspace_root: &Path,
     patterns: &[String],
 ) -> Result<std::collections::HashMap<String, String>> {
-    let paths = matching_workspace_source_paths(workspace_root, ".", patterns, &[])?;
+    let paths = matching_workspace_source_paths(workspace_root, ".", patterns, &[], true)?;
     let mut snap = std::collections::HashMap::new();
     for path in paths {
         let abs = workspace_root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -11120,6 +11171,30 @@ export const ui = asset({ srcs: ["**/*.png"] });
         std::fs::write(path, contents).unwrap();
     }
 
+    #[test]
+    fn source_globs_respect_gitignore_and_explicit_depth() {
+        let root = tempfile::tempdir().unwrap();
+        write_file(&root.path().join(".gitignore"), "ignored/\n");
+        write_file(&root.path().join("root.rs"), "fn main() {}\n");
+        write_file(&root.path().join("src/nested.rs"), "fn nested() {}\n");
+        write_file(&root.path().join("ignored/hidden.rs"), "ignored\n");
+        write_file(&root.path().join(".hidden/visible.rs"), "visible\n");
+
+        let direct = workspace_glob_files(root.path(), ".", &["*.rs".to_owned()], &[]).unwrap();
+        assert_eq!(direct, vec!["root.rs"]);
+
+        let explicit_directory =
+            workspace_glob_files(root.path(), ".", &["src/*.rs".to_owned()], &[]).unwrap();
+        assert_eq!(explicit_directory, vec!["src/nested.rs"]);
+
+        let recursive =
+            workspace_glob_files(root.path(), ".", &["**/*.rs".to_owned()], &[]).unwrap();
+        assert_eq!(
+            recursive,
+            vec![".hidden/visible.rs", "root.rs", "src/nested.rs",]
+        );
+    }
+
     /// imp's own rule library, as an installed binary would see it. Tests
     /// that import real rules from a tempdir workspace need this because the
     /// workspace root has no `rules/` of its own to shadow it with.
@@ -11168,6 +11243,38 @@ export const ui = asset({ srcs: ["**/*.png"] });
         assert_eq!(
             workspace_files(p, "//rules/pkg", "", false).unwrap(),
             ["//rules/pkg/direct", "//rules/pkg/direct_test"],
+        );
+    }
+
+    #[test]
+    fn workspace_discovery_respects_gitignore_and_explicit_recursion() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(".gitignore"), "rules/pkg/ignored/\n");
+        write_file(&p.join("rules/pkg/direct_test.js"), "");
+        write_file(&p.join("rules/pkg/nested/nested_test.js"), "");
+        write_file(&p.join("rules/pkg/ignored/ignored_test.js"), "");
+
+        assert_eq!(
+            workspace_files(p, "//rules/pkg", "_test.js", false).unwrap(),
+            ["//rules/pkg/direct_test"],
+        );
+        assert_eq!(
+            workspace_files(p, "//rules/pkg", "_test.js", true).unwrap(),
+            ["//rules/pkg/direct_test", "//rules/pkg/nested/nested_test"],
+        );
+
+        let include = [r"rules/pkg/.*_test\.js$".to_owned()];
+        assert_eq!(
+            workspace_source_files(p, "rules/pkg", &include, &[], false).unwrap(),
+            ["rules/pkg/direct_test.js"],
+        );
+        assert_eq!(
+            workspace_source_files(p, "rules/pkg", &include, &[], true).unwrap(),
+            [
+                "rules/pkg/direct_test.js",
+                "rules/pkg/nested/nested_test.js"
+            ],
         );
     }
 

@@ -38,6 +38,12 @@ directory, while `dirs` adds complete auxiliary directories needed by
 configure or build steps. `cmakeArgs` appends project-specific options to
 `cmake -S -B`.
 
+The default `srcs` includes C and C++ files recursively. This is an explicit
+CMake exception: CMake is an executable configuration language, so imp cannot
+derive the complete source set from `CMakeLists.txt` without running CMake.
+Use an explicit `srcs` list when the project can provide a narrower set. All
+patterns still respect Git ignore rules.
+
 Configure receives the full `srcs` input once. Before replay, imp runs a
 syntax-only Ninja dependency scan over C and C++ compiler edges. Ninja reads
 GCC depfiles and MSVC `/showIncludes` output, then replay gives each compiler

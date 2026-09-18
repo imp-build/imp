@@ -116,6 +116,10 @@ this target's own link step (not propagated to anything depending on it —
 use a dep's `transitiveLinkopts` for flags a consumer needs, e.g. a shared
 library's own `-L`/`-l` dependencies).
 
+The default source and header patterns match only files directly under
+`path`. Use an explicit recursive pattern such as `src/**/*.c` when a target
+needs nested source directories. Ignored files are never staged.
+
 The output filename stem defaults to the directory slug. If two targets in
 one directory need the same kind of artifact name, set `outputName` on each
 declaration to give them distinct stems. This does not change the directory

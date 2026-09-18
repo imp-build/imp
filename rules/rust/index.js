@@ -403,10 +403,10 @@ function crateBuildTask(spec) {
 		generatedSrcs: generatedSrcsForBuild(spec),
 	});
 	const manifests = spec.workspaceMember
-		? cargoManifestSources(".")
+		? cargoManifestSources(".", { recursive: true })
 		: spec.builtin
-			? builtinCargoManifestSources(spec.path)
-			: cargoManifestSources(spec.path);
+			? builtinCargoManifestSources(spec.path, { recursive: true })
+			: cargoManifestSources(spec.path, { recursive: true });
 	const bins = spec.bin;
 	const profile = spec.release ? "release" : "debug";
 	const buildDir = `build/rust/${spec.outputSlug}`;

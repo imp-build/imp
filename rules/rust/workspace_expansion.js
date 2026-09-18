@@ -825,7 +825,9 @@ export function cargoWorkspaceExpansion(workspaceRootRelative, toolchainSpec) {
 	const prefix =
 		workspaceRootRelative === "." ? "" : `${workspaceRootRelative}/`;
 	const manifestPath = `${prefix}Cargo.toml`;
-	const manifests = cargoManifestSources(workspaceRootRelative);
+	const manifests = cargoManifestSources(workspaceRootRelative, {
+		recursive: true,
+	});
 
 	const metadata = metadataTask(
 		`cargo metadata (workspace) ${workspaceRootRelative}`,
@@ -941,8 +943,8 @@ export function cargoStandaloneExpansion(
 ) {
 	const manifestPath = `${path}/Cargo.toml`;
 	const manifests = builtin
-		? builtinCargoManifestSources(path)
-		: cargoManifestSources(path);
+		? builtinCargoManifestSources(path, { recursive: true })
+		: cargoManifestSources(path, { recursive: true });
 
 	const metadata = metadataTask(
 		`cargo metadata ${path}`,

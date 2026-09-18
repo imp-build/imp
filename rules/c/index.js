@@ -66,8 +66,8 @@ import {
 import { defaultZigGraphToolchain } from "//rules/c/zig";
 import { selectCcToolchain, shellQuote } from "//rules/c/toolchain";
 
-export const DEFAULT_CPP_SRCS = ["**/*.c", "**/*.cc", "**/*.cpp", "**/*.cxx"];
-export const DEFAULT_CPP_HDRS = ["**/*.h", "**/*.hh", "**/*.hpp", "**/*.hxx"];
+export const DEFAULT_CPP_SRCS = ["*.c", "*.cc", "*.cpp", "*.cxx"];
+export const DEFAULT_CPP_HDRS = ["*.h", "*.hh", "*.hpp", "*.hxx"];
 
 function isCxxSource(path) {
 	return /\.(cc|cpp|cxx)$/i.test(path);

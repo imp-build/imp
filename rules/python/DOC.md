@@ -121,10 +121,12 @@ defineProfile("cu124", { python: "cu124" });
 import { pythonApp, pythonTest } from "//rules/python";
 
 export const app = pythonApp({
+    sources: ["src/**/*.py", "tests/**/*.py"],
     entryPoint: "acme.__main__",
 });
 
 export const tests = pythonTest({
+    sources: ["src/**/*.py", "tests/**/*.py"],
     testArgs: ["-q"],
 });
 ```
@@ -134,6 +136,10 @@ point at another project directory. `pythonApp` syncs the locked environment
 and asks PEX to package the project and its installed dependencies. `entryPoint`
 becomes the PEX entry point, while `extraPexArgs` is available for PEX options
 that do not yet have a dedicated field.
+
+`sources` defaults to direct `*.py` files in the project directory. Nested
+source directories must be declared explicitly with patterns such as
+`src/**/*.py` and `tests/**/*.py`; ignored files are never staged.
 
 `pythonTest` is intentionally separate from `pythonApp`: it does not build a
 PEX first, and its `testArgs` are appended to `python -m pytest`. Successful

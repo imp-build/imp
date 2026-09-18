@@ -441,6 +441,8 @@ export function file(path) {
 
 /**
  * Declare a source set using the same root/include/exclude shape as glob().
+ * Include patterns match files directly below root unless they contain `**`,
+ * and Git-ignored files are excluded.
  * @category graph
  * @param {object} [opts]
  * @returns {object} A semantic source-set handle.

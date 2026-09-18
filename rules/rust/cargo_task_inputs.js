@@ -16,18 +16,22 @@ function namedInputs(prefix, values) {
 	);
 }
 
-export function cargoManifestSources(root) {
+export function cargoManifestSources(root, { recursive = false } = {}) {
 	return files({
 		root,
-		include: ["**/Cargo.toml", "Cargo.lock", "**/*.rs"],
+		include: recursive
+			? ["**/Cargo.toml", "Cargo.lock", "**/*.rs"]
+			: ["Cargo.toml", "Cargo.lock", "*.rs"],
 		exclude: ["target/**"],
 	});
 }
 
-export function builtinCargoManifestSources(root) {
+export function builtinCargoManifestSources(root, { recursive = false } = {}) {
 	return builtinFiles({
 		root,
-		include: ["Cargo.toml", "Cargo.lock", "**/*.rs"],
+		include: recursive
+			? ["Cargo.toml", "Cargo.lock", "**/*.rs"]
+			: ["Cargo.toml", "Cargo.lock", "*.rs"],
 		exclude: ["target/**"],
 	});
 }

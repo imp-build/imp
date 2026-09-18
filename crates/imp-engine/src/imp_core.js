@@ -1078,7 +1078,7 @@ export function workerGet(name) {
  * @param {object} opts
  * @param {string} opts.root Workspace-rooted directory, e.g. "//rules/odin".
  * @param {string} [opts.suffix] File suffix to include, e.g. "_test.js".
- * @param {boolean} [opts.recursive=true] Whether to descend into subdirectories.
+ * @param {boolean} [opts.recursive=false] Whether to descend into subdirectories.
  * @returns {string[]} Sorted workspace module specifiers.
  */
 export function workspaceFiles(opts) {
@@ -1086,7 +1086,7 @@ export function workspaceFiles(opts) {
 		__host_workspace_files(
 			opts.root,
 			opts.suffix || "",
-			opts.recursive !== false,
+			opts.recursive === true,
 		),
 	);
 }
@@ -1100,7 +1100,9 @@ export function workspaceFiles(opts) {
  * @param {string} [opts.root="."] Workspace-relative directory to search.
  * @param {string[]} opts.include Regexes; a file is included if any matches.
  * @param {string[]} [opts.exclude=[]] Regexes; a file is excluded if any matches.
- * @returns {string[]} Sorted workspace-relative file paths.
+ * @param {boolean} [opts.recursive=false] Whether to descend into subdirectories.
+ * @returns {string[]} Sorted workspace-relative file paths. Git-ignored files
+ *   are excluded.
  */
 export function workspaceSourceFiles(opts) {
 	if (!opts || !Array.isArray(opts.include)) {
@@ -1113,6 +1115,7 @@ export function workspaceSourceFiles(opts) {
 			opts.root || ".",
 			JSON.stringify(opts.include),
 			JSON.stringify(opts.exclude || []),
+			opts.recursive === true,
 		),
 	);
 }
@@ -1124,9 +1127,11 @@ export function workspaceSourceFiles(opts) {
  *
  * @param {object} opts
  * @param {string} [opts.root="."] Workspace-relative directory to search.
- * @param {string[]} opts.include Glob patterns matched relative to root.
+ * @param {string[]} opts.include Glob patterns matched relative to root. A
+ *   pattern does not recurse unless it contains `**`.
  * @param {string[]} [opts.exclude=[]] Glob patterns excluded relative to root.
- * @returns {string[]} Sorted workspace-relative file paths.
+ * @returns {string[]} Sorted workspace-relative file paths. Git-ignored files
+ *   are excluded.
  */
 export function allUnowned(opts) {
 	if (!opts || !Array.isArray(opts.include)) {
@@ -3443,8 +3448,9 @@ globalThis.__imp_assert_trace_inputs = function () {
 // Tracked runtime APIs (Phase 3)
 // ---------------------------------------------------------------------------
 
-// glob() returns a lazy FileSet descriptor — no I/O happens here.
-// Call paths(fileset) to evaluate it.
+// glob() returns a lazy FileSet descriptor — no I/O happens here. Patterns
+// match files directly below root unless they contain `**`; Git-ignored files
+// are excluded. Call paths(fileset) to evaluate it.
 export function glob(opts) {
 	if (!opts || !Array.isArray(opts.include)) {
 		throw new Error(

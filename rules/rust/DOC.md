@@ -123,6 +123,11 @@ For a package declared inside an enclosing Cargo workspace, set
 dependencies so Cargo can resolve the outer `[workspace]`. Leave it false for
 a standalone crate or for the target representing the workspace root itself.
 
+Cargo source discovery is an explicit recursive exception. Cargo manifests can
+refer to nested modules, build scripts, and path dependencies without listing
+them in `BUILD.js`, so the Rust rules capture the package tree recursively.
+Ignored files remain excluded from the captured inputs.
+
 ### Generated sources
 
 `generatedSrcs` accepts a `codegen()` result from `//rules/imp/codegen` and

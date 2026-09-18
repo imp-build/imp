@@ -22,17 +22,12 @@ import {
 	pnpmGraphTool,
 } from "//rules/js/pnpm/toolchain";
 
-// Recursive whole-app tree, distinct from jsSources()'s shallow per-directory
-// glob (see //rules/js) — an app's build/run/lint needs every source file
-// under its root, not just the ones directly in it.
-export const JS_APP_SOURCE_INCLUDES = [
+export const JS_APP_SOURCE_INCLUDES = ["*.js", "*.jsx", "*.ts", "*.tsx"];
+
+const JS_APP_METADATA_INCLUDES = [
 	"package.json",
 	"pnpm-lock.yaml",
 	"tsconfig.json",
-	"**/*.js",
-	"**/*.jsx",
-	"**/*.ts",
-	"**/*.tsx",
 ];
 
 // Dependency install only re-runs when the manifest/lockfile change, not on
@@ -40,6 +35,14 @@ export const JS_APP_SOURCE_INCLUDES = [
 const JS_APP_INSTALL_INCLUDES = ["package.json", "pnpm-lock.yaml"];
 
 const appHooks = [];
+
+function sourcePatterns(value, api) {
+	if (!Array.isArray(value) || value.length === 0)
+		throw new Error(`${api}({ sources }) requires source glob patterns`);
+	if (value.some((pattern) => typeof pattern !== "string" || pattern === ""))
+		throw new Error(`${api}({ sources }) expects non-empty glob patterns`);
+	return [...value];
+}
 
 /** Register an internal facet hook enabled by importing a JS rules extension. */
 export function registerJsAppHook(hook) {
@@ -69,6 +72,7 @@ function graphTool(value, tool, defaultTool, defaultVersion, name) {
 function appSpec({
 	src,
 	entry,
+	sources: sourceGlobs = JS_APP_SOURCE_INCLUDES,
 	nodeVersion,
 	pnpmVersion,
 	base = packagePath(),
@@ -77,7 +81,13 @@ function appSpec({
 	return {
 		root,
 		entry: entry ?? "index.js",
-		sources: files({ root, include: JS_APP_SOURCE_INCLUDES }),
+		sources: files({
+			root,
+			include: [
+				...JS_APP_METADATA_INCLUDES,
+				...sourcePatterns(sourceGlobs, "jsApp"),
+			],
+		}),
 		node: graphTool(
 			nodeVersion,
 			nodeGraphTool,
@@ -271,6 +281,7 @@ function buildAppValue(spec, buildOutput, install, dist) {
  * @category target
  * @param {object} [opts]
  * @param {string} [opts.src] Application source directory.
+ * @param {string[]} [opts.sources] Source patterns relative to the app root.
  * @param {string} [opts.entry="index.js"] Entry path relative to the app root.
  * @param {string} [opts.nodeVersion] Node version override.
  * @param {string} [opts.pnpmVersion] pnpm version override.

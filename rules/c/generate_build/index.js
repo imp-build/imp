@@ -44,6 +44,9 @@ const DEFAULT_GENERATE_BUILD_EXCLUDES = [
 	"**/vendor/**",
 ];
 
+const GENERATE_BUILD_CPP_SRCS = DEFAULT_CPP_SRCS.map((pattern) => `**/${pattern}`);
+const GENERATE_BUILD_CPP_HDRS = DEFAULT_CPP_HDRS.map((pattern) => `**/${pattern}`);
+
 function normalize_workspace_path(path) {
 	const parts = [];
 	for (const part of path.split("/")) {
@@ -199,7 +202,11 @@ export async function generateBuild({
 } = {}) {
 	const files = allUnowned({
 		root,
-		include: ["**/CMakeLists.txt", ...DEFAULT_CPP_SRCS, ...DEFAULT_CPP_HDRS],
+		include: [
+			"**/CMakeLists.txt",
+			...GENERATE_BUILD_CPP_SRCS,
+			...GENERATE_BUILD_CPP_HDRS,
+		],
 		exclude,
 	});
 

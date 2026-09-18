@@ -19,8 +19,13 @@ import { tsApp } from "//rules/js";
 export const app = tsApp({
     src: "app",
     entry: "main.js",
+    sources: ["src/**/*.ts"],
 });
 ```
+
+Application source patterns default to direct JavaScript and TypeScript files
+under the app root. Declare nested directories explicitly with patterns such as
+`src/**/*.js` or `src/**/*.ts`; ignored files are never staged.
 
 The `registerJsSourcesHook()` and `registerJsAppHook()` exports are extension
 hooks. They are not application BUILD APIs. Toolchain declarations belong to
