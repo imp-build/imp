@@ -1324,7 +1324,6 @@ dependencies = [
  "imp-store",
  "indicatif",
  "log",
- "regex",
  "rquickjs",
  "serde",
  "serde_json",

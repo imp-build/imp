@@ -1,4 +1,3 @@
-mod codegen;
 mod commands;
 mod ui;
 
@@ -158,11 +157,6 @@ enum Cmd {
     Rules {
         #[command(subcommand)]
         command: Option<RulesCmd>,
-    },
-    /// Generate the Odin module/component/asset registration file
-    CodegenRegister {
-        /// Output path for the generated file
-        output: PathBuf,
     },
     /// Run any registered goal by name, e.g. `imp goal vs //:target`
     #[command(disable_help_flag = true)]
@@ -967,18 +961,6 @@ async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> RunO
             .into(),
         Cmd::Daemon { .. } | Cmd::Cache { .. } => {
             unreachable!("handled before UI setup")
-        }
-        Cmd::CodegenRegister { output } => {
-            let odinfmt = match std::env::var_os("ODINFMT_BIN") {
-                Some(path) => PathBuf::from(path),
-                None => match resolve_workspace_tool_bin("odinfmt").await {
-                    Ok(path) => path,
-                    Err(error) => return Err(error).into(),
-                },
-            };
-            commands::codegen_register::run(output, &odinfmt)
-                .await
-                .into()
         }
     }
 }
