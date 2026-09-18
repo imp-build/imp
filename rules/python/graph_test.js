@@ -28,13 +28,28 @@ describe("Python graph declarations", () => {
 			expect(app[workflow].__imp_graph_handle).toBe(true);
 	});
 
-	test("application accepts an explicit pythonVersion override", () => {
-		const app = pythonApp({
-			base: "rules/python/example",
-			entryPoint: "hello.__main__",
-			pythonVersion: "3.12.4",
+	test("pins application build and run to the same Python version", async () => {
+		await withFakeToolchainHost(async (host) => {
+			uvToolchain("0.11.16", { default: true, unverified: true });
+			pexToolchain("2.97.1", { default: true, unverified: true });
+			const app = pythonApp({
+				base: "rules/python/example",
+				entryPoint: "hello.__main__",
+				pythonVersion: "3.12.4",
+			});
+
+			await host.resolve(app[BUILD]);
+			const buildRun = host.runs.find(
+				(run) => run.display === "python-app build rules/python/example",
+			);
+			expect(buildRun.argv[2]).toContain(
+				'--managed-python --python "$version"',
+			);
+			expect(buildRun.argv).toContain("3.12.4");
+
+			const description = await host.resolve(app[RUN]);
+			expect(description.argv).toContain("3.12.4");
 		});
-		expect(app[RUN].__imp_graph_handle).toBe(true);
 	});
 
 	test("test roots carry their resolve and test options into a graph task", () => {
