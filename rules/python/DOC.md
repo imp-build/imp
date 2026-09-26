@@ -15,12 +15,15 @@ download and cache helpers are implementation details.
 ## Set up the workspace
 
 Import the Python rules in `imp.workspace.js`; they provide default uv, PEX,
-and CPython toolchains. Add Ruff when Python targets should participate in
-formatting and linting:
+and CPython toolchains. To format and lint Python targets with Ruff, import
+`//rules/python/ruff/fmt` and `//rules/python/ruff/lint`. Each module adds one
+product to `pythonApp()` targets. Without these imports, `imp fmt` and
+`imp lint` select no Python targets:
 
 ```js
 import "//rules/python";
-import "//rules/python/ruff_toolchain";
+import "//rules/python/ruff/fmt";
+import "//rules/python/ruff/lint";
 import "//rules/workflows/fmt";
 import "//rules/workflows/lint";
 import "//rules/workflows/package";
