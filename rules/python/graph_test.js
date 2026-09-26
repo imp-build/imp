@@ -13,6 +13,7 @@ import {
 import { pythonApp, pythonTest } from "//rules/python";
 import { pexToolchain } from "//rules/python/pex_toolchain";
 import { pythonResolve } from "//rules/python/resolve";
+import { defaultPythonRuntimeVersion } from "//rules/python/runtime";
 import { uvToolchain } from "//rules/python/uv_toolchain";
 import {
 	__resetRuffToolchainStateForTest,
@@ -158,6 +159,28 @@ describe("Python graph declarations", () => {
 		const suite = pythonTest({ resolve, testArgs: ["-q"] });
 		expect(suite.root).toBe("rules/python/example");
 		expect(suite[TEST].__imp_graph_handle).toBe(true);
+	});
+
+	test("pins test sync to the Python version the application uses", async () => {
+		await withFakeToolchainHost(async (host) => {
+			uvToolchain("0.11.16", { default: true, unverified: true });
+			const display = "python test rules/python/example";
+			const pinned = pythonTest({
+				base: "rules/python/example",
+				pythonVersion: "3.12.4",
+			});
+			await host.resolve(pinned[TEST]);
+			const pinnedRun = host.runs.find((run) => run.display === display);
+			expect(pinnedRun.argv[2]).toContain(
+				'--managed-python --python "$version"',
+			);
+			expect(pinnedRun.argv[8]).toBe("3.12.4");
+
+			const suite = pythonTest({ base: "rules/python/example" });
+			await host.resolve(suite[TEST]);
+			const defaultRun = host.runs.findLast((run) => run.display === display);
+			expect(defaultRun.argv[8]).toBe(defaultPythonRuntimeVersion());
+		});
 	});
 
 	test("[RUN] describes its program for graphRunGoal to execute, rather than running it itself", async () => {

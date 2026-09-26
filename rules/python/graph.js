@@ -209,6 +209,7 @@ function testRoot(spec) {
 			uv: spec.uv,
 			shell,
 			resolve: spec.resolve,
+			pythonVersion: spec.pythonVersion,
 			mode: semantic.mode("python"),
 			testArgs: spec.testArgs,
 			deps: spec.deps,
@@ -221,12 +222,13 @@ function testRoot(spec) {
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
-					'src=$1; uv=$2; sync=$3; testargs=$4; venvpy=$5; "$uv" sync --project "$src" --locked --no-progress $sync && "$src/$venvpy" -m pytest "$src" -rA $testargs',
+					'src=$1; uv=$2; sync=$3; testargs=$4; version=$5; venvpy=$6; "$uv" sync --project "$src" --locked --no-progress --managed-python --python "$version" $sync && "$src/$venvpy" -m pytest "$src" -rA $testargs',
 					"python-test",
 					inputs.resolve.path,
 					exec.tool(inputs.uv, "uv"),
 					syncArgs.join(" "),
 					inputs.testArgs.join(" "),
+					inputs.pythonVersion,
 					venvPythonRelPath(),
 				],
 				inputs: [inputs.sources],
@@ -369,6 +371,7 @@ export function pythonApp({
  * @param {string[]} [opts.sources=["*.py"]] Source patterns relative to the project directory.
  * @param {string[]} [opts.testArgs=[]] Arguments passed to pytest.
  * @param {string} [opts.uvVersion] uv version override.
+ * @param {string} [opts.pythonVersion] CPython version override.
  * @param {object} [opts.resolve] Locked Python dependency resolve.
  * @param {object[]} [opts.deps=[]] Extra native tools.
  * @param {string} [opts.base=packagePath()] Workspace-relative base directory.
@@ -379,6 +382,7 @@ export function pythonTest({
 	sources: sourceGlobs = PYTHON_SOURCE_INCLUDES,
 	testArgs = [],
 	uvVersion,
+	pythonVersion,
 	resolve,
 	deps = [],
 	base = packagePath(),
@@ -388,6 +392,7 @@ export function pythonTest({
 		sources: sourcePatterns(sourceGlobs, "pythonTest"),
 		testArgs: [...testArgs],
 		deps: [...deps],
+		pythonVersion: pythonVersionOrDefault(pythonVersion),
 		uv: graphTool(
 			uvVersion,
 			uvGraphTool,

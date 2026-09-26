@@ -140,6 +140,12 @@ and asks PEX to package the project and its installed dependencies. `entryPoint`
 becomes the PEX entry point, while `extraPexArgs` is available for PEX options
 that do not yet have a dedicated field.
 
+`pythonApp` and `pythonTest` sync the project with the CPython version that
+`pythonRuntime()` sets (default `3.13.0`). Tests therefore run on the same
+interpreter as the application. To use a different version for one target, set
+`pythonVersion` on it. Source runs from `pythonSources()` use a separate
+default that `pythonToolchain()` sets.
+
 `sources` defaults to direct `*.py` files in the project directory. Nested
 source directories must be declared explicitly with patterns such as
 `src/**/*.py` and `tests/**/*.py`; ignored files are never staged.
