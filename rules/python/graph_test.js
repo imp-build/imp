@@ -57,6 +57,54 @@ describe("Python graph declarations", () => {
 		});
 	});
 
+	test("a root-level application gives PEX only its declared sources", async () => {
+		await withFakeToolchainHost(async (host) => {
+			uvToolchain("0.11.16", { default: true, unverified: true });
+			pexToolchain("2.97.1", { default: true, unverified: true });
+			const app = pythonApp({
+				base: ".",
+				entryPoint: "hello.__main__",
+				sources: ["rules/python/example/src/**/*.py"],
+			});
+
+			await host.resolve(app[BUILD]);
+			const buildRun = host.runs.find(
+				(run) => run.display === "python-app build .",
+			);
+			expect(buildRun.argv[2]).toContain('-D "$stage"');
+			expect(buildRun.argv[2]).not.toContain('-D "$src"');
+			const stageIndex = buildRun.argv.indexOf(".imp-pex-sources");
+			// sh, -c, the script and $0 come first, so ${10} is at index 13.
+			expect(stageIndex).toBe(13);
+			expect(buildRun.argv.slice(stageIndex + 1).sort()).toEqual([
+				"rules/python/example/src/hello/__init__.py",
+				"rules/python/example/src/hello/__main__.py",
+			]);
+		});
+	});
+
+	test("a nested application stages sources relative to the project", async () => {
+		await withFakeToolchainHost(async (host) => {
+			uvToolchain("0.11.16", { default: true, unverified: true });
+			pexToolchain("2.97.1", { default: true, unverified: true });
+			const app = pythonApp({
+				base: "rules/python/example",
+				entryPoint: "hello.__main__",
+				sources: ["src/**/*.py"],
+			});
+
+			await host.resolve(app[BUILD]);
+			const buildRun = host.runs.find(
+				(run) => run.display === "python-app build rules/python/example",
+			);
+			const stageIndex = buildRun.argv.indexOf(".imp-pex-sources");
+			expect(buildRun.argv.slice(stageIndex + 1).sort()).toEqual([
+				"src/hello/__init__.py",
+				"src/hello/__main__.py",
+			]);
+		});
+	});
+
 	test("Ruff fmt and lint stage the Ruff config files that apply to the sources", async () => {
 		await withFakeToolchainHost(async (host) => {
 			try {

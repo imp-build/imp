@@ -148,7 +148,9 @@ default that `pythonToolchain()` sets.
 
 `sources` defaults to direct `*.py` files in the project directory. Nested
 source directories must be declared explicitly with patterns such as
-`src/**/*.py` and `tests/**/*.py`; ignored files are never staged.
+`src/**/*.py` and `tests/**/*.py`; ignored files are never staged. PEX adds
+only the `sources` files from the project directory, so the project can be at
+the workspace root.
 
 `pythonTest` is intentionally separate from `pythonApp`: it does not build a
 PEX first, and its `testArgs` are appended to `python -m pytest`. Successful

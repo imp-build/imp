@@ -93,8 +93,26 @@ function venvPythonRelPath() {
 		: ".venv/bin/python";
 }
 
+// PEX copies its -D directory into TMPDIR, and the sandbox TMPDIR is
+// .imp/tmp under the sandbox root. For a project at the workspace root the
+// project directory is the sandbox root, so -D "$src" copies into itself
+// until the paths are too long. It also adds .venv and the staged tools.
+// For this reason, the build copies only the declared sources into this
+// directory and gives it to -D.
+const PEX_SOURCES_DIR = ".imp-pex-sources";
+
+function projectRelativePath(root, path) {
+	if (root === ".") return path;
+	if (!path.startsWith(`${root}/`))
+		throw new Error(`python source ${path} is not below ${root}`);
+	return path.slice(root.length + 1);
+}
+
 function appBuild(spec) {
 	const shell = nativeTool("sh");
+	const cp = nativeTool("cp");
+	const mkdir = nativeTool("mkdir");
+	const dirname = nativeTool("dirname");
 	const sources = files({
 		root: spec.resolve.path,
 		include: [...PYTHON_PROJECT_SOURCE_INCLUDES, ...spec.sources],
@@ -107,9 +125,13 @@ function appBuild(spec) {
 		display: `python-app build ${spec.resolve.path}`,
 		inputs: {
 			sources,
+			pythonSources,
 			uv: spec.uv,
 			pex: spec.pex,
 			shell,
+			cp,
+			mkdir,
+			dirname,
 			resolve: spec.resolve,
 			pythonVersion: spec.pythonVersion,
 			mode: semantic.mode("python"),
@@ -122,11 +144,14 @@ function appBuild(spec) {
 			for (const dep of inputs.deps) exec.path(dep);
 			const syncArgs = resolveArgs(inputs.resolve, inputs.mode);
 			const outputPath = ".imp-out/app.pex";
+			const sourcePaths = exec
+				.paths(inputs.pythonSources)
+				.map((path) => projectRelativePath(inputs.resolve.path, path));
 			const result = await exec.action({
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
-					'src=$1; uv=$2; pex=$3; out=$4; sync=$5; entry=$6; pexargs=$7; version=$8; venvpy=$9; "$uv" sync --project "$src" --locked --no-progress --managed-python --python "$version" $sync && "$src/$venvpy" "$pex" --venv-repository="$src/.venv" --no-transitive --pre -o "$out" ${entry:+-e "$entry"} -D "$src" $pexargs',
+					'src=$1; uv=$2; pex=$3; out=$4; sync=$5; entry=$6; pexargs=$7; version=$8; venvpy=$9; stage=${10}; shift 10; "$uv" sync --project "$src" --locked --no-progress --managed-python --python "$version" $sync && mkdir -p "$stage" && for path in "$@"; do mkdir -p "$stage/$(dirname -- "$path")" && cp "$src/$path" "$stage/$path" || exit 1; done && "$src/$venvpy" "$pex" --venv-repository="$src/.venv" --no-transitive --pre -o "$out" ${entry:+-e "$entry"} -D "$stage" $pexargs',
 					"python-app-build",
 					inputs.resolve.path,
 					exec.tool(inputs.uv, "uv"),
@@ -137,9 +162,11 @@ function appBuild(spec) {
 					inputs.extraPexArgs.join(" "),
 					inputs.pythonVersion,
 					venvPythonRelPath(),
+					PEX_SOURCES_DIR,
+					...sourcePaths,
 				],
 				inputs: [inputs.sources],
-				tools: [inputs.shell],
+				tools: [inputs.shell, inputs.cp, inputs.mkdir, inputs.dirname],
 				outputs: { artifact: output.file(outputPath) },
 			});
 			return { artifact: result.outputs.artifact };
