@@ -349,8 +349,14 @@ export function pythonApp({
 		[PACKAGE]: build.outputs.artifact,
 		[RUN]: run.outputs.description,
 	};
+	// Hooks also get the source glob patterns, so a hook can find files that
+	// sit beside the sources (for example Ruff config files). The patterns are
+	// not part of the target.
 	for (const hook of appHooks)
-		Object.assign(value, hook(Object.freeze({ ...value })));
+		Object.assign(
+			value,
+			hook(Object.freeze({ ...value, sourcePatterns: spec.sources })),
+		);
 	return Object.freeze(value);
 }
 

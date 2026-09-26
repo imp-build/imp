@@ -1,0 +1,2 @@
+# Ruff config for the test sources.
+extend = "../pyproject.toml"

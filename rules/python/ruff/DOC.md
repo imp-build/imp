@@ -16,6 +16,23 @@ imp fmt --check //services/acme:app
 imp lint //services/acme:app
 ```
 
+Ruff reads the project's own configuration. Formatting and linting stage
+`pyproject.toml`, `ruff.toml`, and `.ruff.toml` from these directories:
+
+- the application's project directory;
+- each parent directory up to the workspace root;
+- the directories below the project directory that the `sources` patterns
+  can match. For `src/**/*.py`, this is `src/` and each directory below it.
+
+Ruff uses the closest configuration file, as it does in an editor. A change
+to one of these files makes the next fmt or lint run again. Imp does not
+stage a configuration file that `.gitignore` or `.ignore` excludes.
+
+An `extend` path must point to a file that Imp stages. If it points to a
+file in a directory that Imp does not stage, for example
+`extend = "../shared/ruff.toml"`, Ruff cannot load the file and the fmt or
+lint result fails.
+
 Formatting runs `ruff format` over the target's `.py` files. Write mode
 materializes only files whose content changed; check mode uses Ruff's native
 `ruff format --check` and leaves the workspace untouched.
