@@ -3,6 +3,7 @@ import {
 	expect,
 	test,
 	withFakeToolchainHost,
+	withFakeWriteWorkspace,
 } from "//rules/imp/test";
 import {
 	generateToolLockfile,
@@ -324,7 +325,31 @@ describe("graphGenLockfilesGoal", () => {
 			graphGenLockfilesGoal([
 				{ address: "//workspace:tool", result: { ok: true } },
 			]),
-		).toThrow("must resolve to a generateToolLockfile() result");
+		).toThrow("must resolve to a generateToolLockfile()");
+	});
+
+	test("publishes Python project lock roots to their project uv.lock", async () => {
+		await withFakeWriteWorkspace(async (writes) => {
+			graphGenLockfilesGoal([
+				{
+					address: "//workspace:project",
+					result: {
+						kind: "python-project-lock",
+						project: "services/demo",
+						path: "services/demo/uv.lock",
+						lockfile: { digest: "digest:services/demo/uv.lock" },
+					},
+				},
+			]);
+
+			expect(writes).toEqual([
+				{
+					path: "services/demo/uv.lock",
+					digest: "digest:services/demo/uv.lock",
+					from: "services/demo/uv.lock",
+				},
+			]);
+		});
 	});
 });
 

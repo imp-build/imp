@@ -1,5 +1,6 @@
 import { BUILD } from "//rules/workflows/build";
 import { FMT } from "//rules/workflows/fmt";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 import { LINT } from "//rules/workflows/lint";
 import { PACKAGE } from "//rules/workflows/package";
 import { RUN } from "//rules/workflows/run";
@@ -29,8 +30,50 @@ describe("Python graph declarations", () => {
 			entryPoint: "hello.__main__",
 		});
 		expect(app.root).toBe("rules/python/example");
-		for (const workflow of [BUILD, PACKAGE, RUN, FMT, LINT])
+		for (const workflow of [BUILD, PACKAGE, RUN, FMT, LINT, GEN_LOCKFILES])
 			expect(app[workflow].__imp_graph_handle).toBe(true);
+	});
+
+	test("application lock root runs uv lock and publishes only uv.lock", async () => {
+		await withFakeToolchainHost(async (host) => {
+			uvToolchain("0.11.16", { default: true, unverified: true });
+			pexToolchain("2.97.1", { default: true, unverified: true });
+			const app = pythonApp({
+				base: "rules/python/example",
+				entryPoint: "hello.__main__",
+				pythonVersion: "3.12.4",
+			});
+
+			const result = await host.resolve(app[GEN_LOCKFILES]);
+			expect(result.kind).toBe("python-project-lock");
+			expect(result.project).toBe("rules/python/example");
+			expect(result.path).toBe("rules/python/example/uv.lock");
+			expect(result.lockfile.path).toBe("rules/python/example/uv.lock");
+			expect(result.lockfile.digest).toBe(
+				"digest:rules/python/example/uv.lock",
+			);
+
+			const lockRun = host.runs.find(
+				(run) => run.display === "lock Python project rules/python/example",
+			);
+			expect(lockRun.argv[1]).toBe("-c");
+			expect(lockRun.argv[2]).toContain(
+				'UV_CACHE_DIR="$IMP_SANDBOX_ROOT/.imp/tools/uv-cache-dir"',
+			);
+			expect(lockRun.argv[2]).toContain(
+				'UV_PYTHON_INSTALL_DIR="$IMP_SANDBOX_ROOT/.imp/tools/uv-cache-dir/python-install"',
+			);
+			expect(lockRun.argv[4]).toContain("/uv/");
+			expect(lockRun.argv.slice(5)).toEqual(["rules/python/example", "3.12.4"]);
+			expect(lockRun.tools.map((tool) => tool.cache)).toEqual([
+				"native-tools",
+				"uv-toolchains",
+				"uv-cache-dir",
+			]);
+			expect(lockRun.outputs).toEqual([
+				{ path: "rules/python/example/uv.lock", kind: "file" },
+			]);
+		});
 	});
 
 	test("pins application build and run to the same Python version", async () => {

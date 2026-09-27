@@ -1,5 +1,6 @@
 import { BUILD } from "//rules/workflows/build";
 import { FMT } from "//rules/workflows/fmt";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 import { LINT } from "//rules/workflows/lint";
 import { PACKAGE } from "//rules/workflows/package";
 import { RUN } from "//rules/workflows/run";
@@ -13,6 +14,7 @@ import {
 	task,
 } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
+import { pythonProjectLock } from "//rules/python/lock";
 import {
 	defaultPexToolchain,
 	defaultPexToolchainVersion,
@@ -378,10 +380,16 @@ export function pythonApp({
 		),
 	};
 	const { build, run, sources, pythonSources } = appBuild(spec);
+	const lockfiles = pythonProjectLock({
+		project: spec.resolve.path,
+		uv: spec.uv,
+		pythonVersion: spec.pythonVersion,
+	});
 	const value = {
 		sources,
 		pythonSources,
 		root: spec.resolve.path,
+		[GEN_LOCKFILES]: lockfiles,
 		[BUILD]: build.outputs.artifact,
 		[PACKAGE]: build.outputs.artifact,
 		[RUN]: run.outputs.description,

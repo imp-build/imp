@@ -1,4 +1,5 @@
 import { RUN } from "//rules/workflows/run";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 import {
 	describe,
 	expect,
@@ -133,6 +134,19 @@ describe("python sources", () => {
 			expect(described.argv[2]).toContain("uv sync --project");
 			expect(described.argv[2]).toContain("--no-install-project");
 			expect(described.argv).toContain("rules/python/example/.venv");
+		});
+	});
+
+	test("pythonProject exposes a project lock root", async () => {
+		await withPythonHost(async (host) => {
+			uvToolchain("0.11.16", { default: true, unverified: true });
+			pythonToolchain("3.13.0", { default: true });
+			const project = pythonProject({ path: "rules/python/example" });
+
+			expect(project[GEN_LOCKFILES].__imp_graph_handle).toBe(true);
+			const result = await host.resolve(project[GEN_LOCKFILES]);
+			expect(result.kind).toBe("python-project-lock");
+			expect(result.project).toBe("rules/python/example");
 		});
 	});
 

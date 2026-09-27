@@ -12,6 +12,7 @@
 // tree to make a script runnable.
 
 import { RUN } from "//rules/workflows/run";
+import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 import {
 	digestOf,
 	expand,
@@ -27,12 +28,16 @@ import {
 	task,
 } from "imp:core";
 import {
+	defaultUvToolchainVersion,
 	resolveUvToolchainVersion,
 	uvCacheDirEnv,
 	uvCacheDirTool,
+	uvGraphTool,
 	uvTool,
 } from "//rules/python/uv_toolchain";
 import { pythonResolve, pythonResolveSyncArgs } from "//rules/python/resolve";
+import { defaultPythonRuntimeVersion } from "//rules/python/runtime";
+import { pythonProjectLock } from "//rules/python/lock";
 
 import { nativeToolSpec } from "//rules/imp/native-tool";
 
@@ -138,13 +143,19 @@ export function pythonProject({
 		path: normalize_workspace_path(path),
 		flavors,
 	});
+	const uvVersion = resolveUvToolchainVersion() || defaultUvToolchainVersion();
+	const lockfiles = pythonProjectLock({
+		project: handle.path,
+		uv: uvGraphTool(uvVersion),
+		pythonVersion: defaultPythonRuntimeVersion(),
+	});
 	if (isDefault) {
 		if (default_python_project) {
 			throw new Error("only one default pythonProject() may be declared");
 		}
 		default_python_project = handle;
 	}
-	return handle;
+	return Object.freeze({ ...handle, [GEN_LOCKFILES]: lockfiles });
 }
 
 export function defaultPythonProject() {

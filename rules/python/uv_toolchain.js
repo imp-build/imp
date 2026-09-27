@@ -162,7 +162,7 @@ function graphToolFor(version) {
  * key, so materialize_named_cache_artifacts skips a destination that already
  * exists (crates/imp-store/src/cache.rs).
  */
-function uvCacheDirSeed() {
+export function uvCacheDirSeed() {
 	if (cacheDirSeed) return cacheDirSeed;
 	namedCache({ name: UV_CACHE_DIR_CACHE });
 	const shell = nativeTool("sh");

@@ -78,6 +78,37 @@ address is given one time only. Downloads stay verified: an address with no
 file, or a lockfile with no entry for the selected version and platform, makes
 the acquire fail and points at `imp goal gen-lockfiles`.
 
+### Update a project lockfile
+
+`pythonApp()` and `pythonProject()` also expose a `gen-lockfiles` root for the
+project's own `uv.lock`. The root runs the selected uv toolchain with the
+project's pinned Python version and writes only `uv.lock` into the workspace.
+
+**Warning:** This command writes the generated `uv.lock` into the workspace.
+It does not write a `.venv` or other project artifact.
+
+```js
+import { pythonProject } from "//rules/python";
+
+export const project = pythonProject({ path: "services/acme" });
+```
+
+From the workspace root, run:
+
+```sh
+imp goal gen-lockfiles //:project
+```
+
+An application target can be selected instead:
+
+```sh
+imp goal gen-lockfiles //services/acme:app
+```
+
+The command follows the dependency declarations in `pyproject.toml`. To
+upgrade one package, change that package's declaration, then run the command.
+The goal does not accept a separate package-upgrade argument.
+
 ## Select a dependency resolve
 
 Declare a `pythonResolve()` for a locked project when applications or tests

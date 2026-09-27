@@ -52,6 +52,7 @@ import {
 	sha256,
 	file_size,
 	readAddressedFile,
+	writeWorkspace,
 	task,
 } from "imp:core";
 import { lockfileAddressToPath } from "//rules/imp/lockfile";
@@ -100,13 +101,23 @@ export function graphGenerateToolLockfile({
 	}).outputs.result;
 }
 
-/** Check each selected [GEN_LOCKFILES] root, then log the toolchains it locked. */
+/** Check each selected [GEN_LOCKFILES] root, then publish its lockfiles. */
 export function graphGenLockfilesGoal(roots) {
 	const names = [];
 	for (const { address, result } of roots) {
+		if (
+			result?.kind === "python-project-lock" &&
+			typeof result.project === "string" &&
+			typeof result.path === "string" &&
+			result.lockfile?.digest
+		) {
+			writeWorkspace(result.path, result.lockfile.digest, { from: result.path });
+			names.push(`Python ${result.project}`);
+			continue;
+		}
 		if (!result || typeof result.tool !== "string" || !result.versions) {
 			throw goalError(
-				`${address}: gen-lockfiles graph root must resolve to a generateToolLockfile() result`,
+				`${address}: gen-lockfiles graph root must resolve to a generateToolLockfile() or Python project lock result`,
 			);
 		}
 		names.push(result.tool);
