@@ -112,6 +112,12 @@ await exec.action({
 });
 ```
 
+Actions also receive the workspace's configured `imp.passthroughEnv` entries.
+A label may add entries for its own handlers with
+`label({ data: { passthroughEnv: [...] } })`. The label entries are inherited
+by `run()` calls made after an `await`, so a rule does not need to repeat the
+same environment list in every nested action.
+
 `cores` is clamped to the total budget, so an action that asks for more than
 `jobs` runs alone rather than waiting on permits that can never be granted. It
 is not part of the action cache key, and neither is the expansion above — the

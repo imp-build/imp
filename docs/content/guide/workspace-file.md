@@ -55,6 +55,32 @@ The built-in `imp` configuration also accepts `jobs`, `jsWorkers`, and
 sandbox files. It can be overridden for one goal with `--fs-jobs`, just as
 `--jobs` overrides `jobs`.
 
+`passthroughEnv` adds explicit environment entries to every sandboxed action in
+the workspace. A bare name forwards the current host value when it is set. A
+`NAME=value` entry supplies a fixed value. The normal built-in baseline remains
+in place; an empty list adds no configurable host variables.
+
+```js
+export const impConfig = {
+    passthroughEnv: ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"],
+};
+```
+
+Use label data when one selectable target needs additional entries. Those
+entries are added to the workspace list for actions run by that label:
+
+```js
+import { label } from "imp:core";
+
+export const guiCheck = label({
+    data: { passthroughEnv: ["GPU_DEVICE", "CHECK_MODE=gui"] },
+});
+```
+
+Imp includes the resolved environment in the action identity, so a changed
+passthrough value does not reuse an incompatible cached result. Environment
+values do not appear in ordinary action diagnostics.
+
 `jobs` is a budget of cores, not a count of actions: an action declares what it
 costs with `exec.action({ cores })` (default 1), so one wide action can hold
 several of the lanes `jobs` allows.

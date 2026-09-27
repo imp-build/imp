@@ -704,6 +704,7 @@ defineConfigSchema("imp", {
 	jsWorkers: field.int({ default: 1 }),
 	jobs: field.int({ default: 1 }),
 	fsJobs: field.int(),
+	passthroughEnv: field.array(field.string(), { default: [] }),
 	logLevel: field.enum(["trace", "debug", "info", "warn", "error"], {
 		default: "info",
 	}),
@@ -2013,6 +2014,7 @@ let _memo_contexts = new Map([
 			readFilesets: [],
 			runInputs: new Map(),
 			runFilesets: new Map(),
+			passthroughEnv: [],
 			modeOverrides: null,
 		},
 	],
@@ -2215,6 +2217,7 @@ function _clone_context(ctx) {
 		readFilesets: [],
 		runInputs: new Map(),
 		runFilesets: new Map(),
+		passthroughEnv: ctx.passthroughEnv.slice(),
 		// Link overrides are ambient for a linked product call and therefore
 		// must flow to all async children of that call.
 		modeOverrides: ctx.modeOverrides,
@@ -2234,6 +2237,7 @@ function _current_context() {
 			readFilesets: [],
 			runInputs: new Map(),
 			runFilesets: new Map(),
+			passthroughEnv: [],
 			modeOverrides: null,
 			configOverrides: null,
 		};
@@ -2257,6 +2261,28 @@ function _effective_context_entry() {
 
 function _effective_context() {
 	return _effective_context_entry().ctx;
+}
+
+function _normalize_passthrough_env(value, caller) {
+	if (value === undefined) return [];
+	if (!Array.isArray(value)) {
+		throw new Error(`${caller} passthroughEnv must be an array of strings`);
+	}
+	for (const entry of value) {
+		if (typeof entry !== "string" || entry.length === 0) {
+			throw new Error(
+				`${caller} passthroughEnv entries must be non-empty strings`,
+			);
+		}
+	}
+	return [...value];
+}
+
+function _redact_env_entries(entries) {
+	return entries.map((entry) => {
+		const equals = entry.indexOf("=");
+		return equals < 0 ? entry : `${entry.slice(0, equals)}=<redacted>`;
+	});
 }
 
 function _fork_context(owner, baseContext = _effective_context(), label = "") {
@@ -2599,11 +2625,12 @@ export function product(kindClass, nameToken, toolToken, fn, opts) {
  * Allocate a selectable root with no kind or schema.
  *
  * @param {object} [opts]
- * @param {*} [opts.data] Opaque data a reusable factory wants to close over
- *   (e.g. `cargoPackage()` stashing its derived cargo options for its own
+ * @param {*} [opts.data] Data a reusable factory wants to close over (for
+ *   example, `cargoPackage()` stashing derived cargo options for its own
  *   handlers to read back via `label.data`, or the equivalent `label.attrs`
  *   — a same-reference alias kept for interop with `Target.attrs`-shaped
- *   consumers). Nothing here is schema-checked or read by the host.
+ *   consumers). When this is an object, its optional `passthroughEnv` string
+ *   array adds environment entries to actions run by this label.
  * @returns {object} A label handle. Give it a workspace address by exporting
  *   it (`export const foo = label()`), the same way `new Target()` gets one.
  *   A label may be exported under more than one name — every export becomes
@@ -2612,6 +2639,11 @@ export function product(kindClass, nameToken, toolToken, fn, opts) {
 export function label(opts) {
 	const id = __host_label();
 	const data = opts && opts.data !== undefined ? opts.data : undefined;
+	const passthroughEnv = _normalize_passthrough_env(
+		data && typeof data === "object" ? data.passthroughEnv : undefined,
+		"label()",
+	);
+	_label_passthrough_env.set(id, passthroughEnv);
 	const handle = {
 		__imp_label: true,
 		__id: id,
@@ -2643,6 +2675,7 @@ const _label_handler_fns = new Map();
 // Host-side metadata mirrors these entries after sealing; functions remain
 // live-only in this table.
 const _label_handlers = new Map();
+const _label_passthrough_env = new Map();
 let _label_handler_fallback_id = 0;
 let _active_extension_provenance = null;
 
@@ -2762,7 +2795,13 @@ export const packageGoal = _goal_sugar("package");
 // every attached handler concurrently and
 // waits for all of them, mirroring how several tools implementing one
 // product are dispatched today.
-function _trace_label_handler(handler, goalName, selectorAddress, ctx) {
+function _trace_label_handler(
+	handler,
+	goalName,
+	selectorAddress,
+	ctx,
+	passthroughEnv,
+) {
 	const fn_id = `label-handler:${goalName}:${handler.identity}`;
 	const moduleDigest = _memo_module_digest(fn_id);
 	// Same address-first/unaddressed-rejects-tracing policy as
@@ -2772,6 +2811,7 @@ function _trace_label_handler(handler, goalName, selectorAddress, ctx) {
 	const { digest: args_digest, unaddressed } = _stable_digest([
 		selectorAddress,
 		ctx,
+		passthroughEnv,
 	]);
 	const key_string = JSON.stringify({
 		fn_id,
@@ -2799,6 +2839,11 @@ function _trace_label_handler(handler, goalName, selectorAddress, ctx) {
 			display,
 		);
 		return _with_context(childContextId, () => {
+			const childContext = _memo_contexts.get(childContextId);
+			childContext.passthroughEnv = [
+				...childContext.passthroughEnv,
+				...passthroughEnv,
+			];
 			_emit_task("running", nodeId, owner, display);
 			_push_call(key_string);
 			let result;
@@ -2873,6 +2918,7 @@ function _materialize_package_artifacts(results, selectorAddress) {
 
 function _dispatch_label_handlers(labelId, goalName, selectorAddress) {
 	const handlers = _label_handlers.get(`${labelId}::${goalName}`) || [];
+	const passthroughEnv = _label_passthrough_env.get(labelId) || [];
 	const ctx = {
 		flags: goalFlags(),
 		selector: selectorAddress,
@@ -2881,7 +2927,13 @@ function _dispatch_label_handlers(labelId, goalName, selectorAddress) {
 	};
 	const dispatched = Promise.all(
 		handlers.map((handler) =>
-			_trace_label_handler(handler, goalName, selectorAddress, ctx),
+			_trace_label_handler(
+				handler,
+				goalName,
+				selectorAddress,
+				ctx,
+				passthroughEnv,
+			),
 		),
 	);
 	if (goalName !== "package") return dispatched;
@@ -3390,6 +3442,7 @@ export function resetMemoState() {
 				readFilesets: [],
 				runInputs: new Map(),
 				runFilesets: new Map(),
+				passthroughEnv: [],
 				modeOverrides: null,
 			},
 		],
@@ -3934,6 +3987,12 @@ export function run(opts) {
 		throw new Error("graph: sandbox actions are not allowed while an expansion constructs graph nodes");
 	}
 	const contextEntry = _effective_context_entry();
+	const impConfig = configuration("imp", {}) || {};
+	const passthroughEnv = [
+		...(impConfig.passthroughEnv || []),
+		...contextEntry.ctx.passthroughEnv,
+		...(opts.env ?? []),
+	];
 	const inputs = _materialise_inputs(opts.inputs, !!opts.__graphTaskAction);
 	const outputs = opts.outputs ?? [];
 	if (
@@ -3951,7 +4010,7 @@ export function run(opts) {
 		kind: "run",
 		display: opts.display ?? (opts.argv && opts.argv[0]),
 		argv: opts.argv ?? [],
-		env: opts.env ?? [],
+		env: _redact_env_entries(passthroughEnv),
 		inputs,
 		outputs,
 		tools: opts.tools ?? [],
@@ -3970,7 +4029,7 @@ export function run(opts) {
 	const hostPayload = {
 		argv: opts.argv,
 		display: opts.display,
-		env: opts.env,
+		env: passthroughEnv,
 		configDigest:
 			opts.__graphConfigDigest ??
 			__host_configuration_digest(

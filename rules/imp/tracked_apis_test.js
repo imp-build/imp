@@ -135,6 +135,20 @@ describe("tracked runtime APIs", () => {
 		expect(effects[0].display).toBe("test-run");
 	});
 
+	test("run redacts literal environment values in its effect trace", async () => {
+		await run({
+			argv: ["sh", "-c", "true"],
+			env: ["IMP_TEST_TRACE_SECRET=do-not-log"],
+			display: "redacted-env-run",
+		});
+		const { trace } = getMemoTrace();
+		const effects = trace.filter(
+			(t) => t.event === "effect" && t.kind === "run",
+		);
+		const effect = effects.find((t) => t.display === "redacted-env-run");
+		expect(effect.env).toEqual(["IMP_TEST_TRACE_SECRET=<redacted>"]);
+	});
+
 	test("memo calling env still deduplicates on repeated calls", async () => {
 		let calls = 0;
 		const fn_ = memo(async function read_env() {

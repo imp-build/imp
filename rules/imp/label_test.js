@@ -20,6 +20,22 @@ describe("label/attach", () => {
 		expect(h.attrs).toBe(h.data);
 	});
 
+	test("label() accepts passthrough environment entries in its data", () => {
+		const h = label({
+			data: { passthroughEnv: ["DISPLAY", "CI=1"] },
+		});
+		expect(h.data.passthroughEnv).toEqual(["DISPLAY", "CI=1"]);
+	});
+
+	test("label() rejects invalid passthrough environment entries", () => {
+		expect(() => label({ data: { passthroughEnv: "DISPLAY" } })).toThrow(
+			"passthroughEnv must be an array of strings",
+		);
+		expect(() => label({ data: { passthroughEnv: [""] } })).toThrow(
+			"passthroughEnv entries must be non-empty strings",
+		);
+	});
+
 	test("labelAddress rejects non-label handles", () => {
 		expect(() => labelAddress({})).toThrow("expected a label handle");
 	});

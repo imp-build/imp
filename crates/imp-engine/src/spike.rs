@@ -16693,6 +16693,49 @@ export const hasher = makeHasher({ variant: "release" });
     }
 
     #[tokio::test]
+    async fn label_passthrough_env_merges_workspace_and_label_entries() {
+        std::env::set_var("IMP_TEST_WORKSPACE_ENV", "workspace");
+        std::env::set_var("IMP_TEST_LABEL_ENV", "label");
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::write(
+            p.join(WORKSPACE_FILE),
+            "export const imp = { passthroughEnv: [\"IMP_TEST_WORKSPACE_ENV\"] };\n",
+        )
+        .unwrap();
+        write_file(
+            &p.join(BUILD_FILE),
+            r#"
+import { build, label, run } from "imp:core";
+
+const app = label({ data: { passthroughEnv: ["IMP_TEST_LABEL_ENV"] } });
+build(app, async function labelBuild() {
+    await run({
+        argv: ["sh", "-c", "printf '%s/%s' \"$IMP_TEST_WORKSPACE_ENV\" \"$IMP_TEST_LABEL_ENV\" > out.txt"],
+        outputs: [{ path: "out.txt", kind: "file" }],
+        materialize: true,
+        display: "label passthrough env",
+    });
+});
+export { app };
+"#,
+        );
+
+        let workspace = load_workspace(p).await.unwrap();
+        run_goal_live(&workspace, p, "build", &["//:app".to_owned()])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(p.join("out.txt")).unwrap(),
+            "workspace/label"
+        );
+        std::fs::remove_file(p.join("out.txt")).unwrap();
+        std::env::remove_var("IMP_TEST_WORKSPACE_ENV");
+        std::env::remove_var("IMP_TEST_LABEL_ENV");
+    }
+
+    #[tokio::test]
     async fn label_one_arg_shorthand_creates_and_selects_a_label() {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
