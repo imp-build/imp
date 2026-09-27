@@ -205,6 +205,7 @@ function appBuild(spec) {
 						inputs.app.path,
 						inputs.pythonVersion,
 					],
+					env: [`IMP_PYTHON_BUILD_VERSION=${inputs.pythonVersion}`],
 					tools: [uv],
 					digest: inputs.app.digest,
 				},

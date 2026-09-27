@@ -54,6 +54,7 @@ describe("Python graph declarations", () => {
 
 			const description = await host.resolve(app[RUN]);
 			expect(description.argv).toContain("3.12.4");
+			expect(description.env).toEqual(["IMP_PYTHON_BUILD_VERSION=3.12.4"]);
 		});
 	});
 
