@@ -3,7 +3,8 @@
 // provenance; importing this module enables `lint` without pulling in
 // formatting, for packages declared before or after the import.
 import { LINT } from "//rules/workflows/lint";
-import { registerPythonAppHook } from "//rules/python";
+import { registerPythonAppHook, registerPythonTestHook } from "//rules/python";
 import { ruffLintRoot } from "//rules/python/ruff_graph";
 
 registerPythonAppHook((source) => ({ [LINT]: ruffLintRoot(source) }));
+registerPythonTestHook((source) => ({ [LINT]: ruffLintRoot(source) }));

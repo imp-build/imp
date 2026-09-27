@@ -4,7 +4,7 @@ import { jsSources } from "//rules/js";
 export const hello = pythonApp({
 	base: "rules/python/example",
 	entryPoint: "hello.__main__",
-	sources: ["src/**/*.py", "tests/**/*.py"],
+	sources: ["src/**/*.py"],
 });
 
 // Direct script execution, separate from the packaged app above: each file
@@ -15,6 +15,6 @@ export const scripts = pythonSources({
 
 export const hello_test = pythonTest({
 	base: "rules/python/example",
-	sources: ["src/**/*.py", "tests/**/*.py"],
+	sources: ["tests/**/*.py"],
 });
 export const js = jsSources({ base: "rules/python/example" });

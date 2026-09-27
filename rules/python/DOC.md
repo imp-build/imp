@@ -124,21 +124,23 @@ defineProfile("cu124", { python: "cu124" });
 import { pythonApp, pythonTest } from "//rules/python";
 
 export const app = pythonApp({
-    sources: ["src/**/*.py", "tests/**/*.py"],
+    sources: ["src/**/*.py"],
     entryPoint: "acme.__main__",
 });
 
 export const tests = pythonTest({
-    sources: ["src/**/*.py", "tests/**/*.py"],
+    sources: ["tests/**/*.py"],
     testArgs: ["-q"],
 });
 ```
 
 Both targets default to the directory containing `BUILD.js`; set `src` to
 point at another project directory. `pythonApp` syncs the locked environment
-and asks PEX to package the project and its installed dependencies. `entryPoint`
-becomes the PEX entry point, while `extraPexArgs` is available for PEX options
-that do not yet have a dedicated field.
+without development dependencies and asks PEX to package the project and its
+installed runtime dependencies. Its `sources` are application files only;
+`pythonTest` owns test files and supplies the pytest, fmt, and lint roots.
+`entryPoint` becomes the PEX entry point, while `extraPexArgs` is available
+for PEX options that do not yet have a dedicated field.
 
 `pythonApp` and `pythonTest` sync the project with the CPython version that
 `pythonRuntime()` sets (default `3.13.0`). Tests therefore run on the same
@@ -147,10 +149,11 @@ interpreter as the application. To use a different version for one target, set
 default that `pythonToolchain()` sets.
 
 `sources` defaults to direct `*.py` files in the project directory. Nested
-source directories must be declared explicitly with patterns such as
-`src/**/*.py` and `tests/**/*.py`; ignored files are never staged. PEX adds
-only the `sources` files from the project directory, so the project can be at
-the workspace root.
+source directories must be declared explicitly. Use application patterns such
+as `src/**/*.py` on `pythonApp` and test patterns such as `tests/**/*.py`
+on `pythonTest`; ignored files are never staged. PEX adds only the
+application sources, so tests and development-only files do not enter the
+application archive.
 
 `pythonTest` is intentionally separate from `pythonApp`: it does not build a
 PEX first, and its `testArgs` are appended to `python -m pytest`. Successful

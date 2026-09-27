@@ -48,7 +48,7 @@ describe("Python graph declarations", () => {
 				(run) => run.display === "python-app build rules/python/example",
 			);
 			expect(buildRun.argv[2]).toContain(
-				'--managed-python --python "$version"',
+				'--locked --no-dev --no-progress --managed-python --python "$version"',
 			);
 			expect(buildRun.argv).toContain("3.12.4");
 
@@ -105,7 +105,7 @@ describe("Python graph declarations", () => {
 		});
 	});
 
-	test("Ruff fmt and lint stage the Ruff config files that apply to the sources", async () => {
+	test("Ruff fmt and lint stage the app config files that apply to the sources", async () => {
 		await withFakeToolchainHost(async (host) => {
 			try {
 				ruffToolchain("0.15.20", { default: true, unverified: true });
@@ -113,7 +113,7 @@ describe("Python graph declarations", () => {
 				const app = pythonApp({
 					base: `${fixture}/app`,
 					entryPoint: "pkg.mod",
-					sources: ["src/**/*.py", "tests/*.py"],
+					sources: ["src/**/*.py"],
 				});
 				await host.resolve(app[FMT]);
 				await host.resolve(app[LINT]);
@@ -132,22 +132,55 @@ describe("Python graph declarations", () => {
 				).toEqual([
 					`${fixture}/app/pyproject.toml`,
 					`${fixture}/app/src/pkg/.ruff.toml`,
-					`${fixture}/app/tests/ruff.toml`,
 					`${fixture}/ruff.toml`,
 				]);
 				expect(lintRun.argv.slice(7 + count)).toEqual([
 					`${fixture}/app/src/pkg/mod.py`,
-					`${fixture}/app/tests/test_mod.py`,
 				]);
 				expect(lintRun.argv[2]).toContain("--no-cache");
 				// fmt runs Ruff in place, so it stages the same configs but
 				// does not name them in its argv.
 				expect(fmtRun.inputs).toEqual(lintRun.inputs);
-				expect(fmtRun.argv.slice(6)).toEqual([
-					`${fixture}/app/src/pkg/mod.py`,
+				expect(fmtRun.argv.slice(6)).toEqual([`${fixture}/app/src/pkg/mod.py`]);
+				expect(fmtRun.argv[2]).toContain("--no-cache");
+			} finally {
+				__resetRuffToolchainStateForTest();
+			}
+		});
+	});
+
+	test("Ruff fmt and lint attach to pythonTest sources", async () => {
+		await withFakeToolchainHost(async (host) => {
+			try {
+				ruffToolchain("0.15.20", { default: true, unverified: true });
+				const fixture = "rules/python/testdata/ruff_config";
+				const suite = pythonTest({
+					base: `${fixture}/app`,
+					sources: ["tests/*.py"],
+				});
+				await host.resolve(suite[FMT]);
+				await host.resolve(suite[LINT]);
+				const fmtRun = host.runs.find(
+					(run) => run.display === `ruff fmt ${fixture}/app`,
+				);
+				const lintRun = host.runs.find(
+					(run) => run.display === `ruff lint ${fixture}/app`,
+				);
+				const count = Number(lintRun.argv[6]);
+				const configs = lintRun.argv.slice(7, 7 + count);
+				expect(
+					configs.filter((path) => path.startsWith(`${fixture}/`)).sort(),
+				).toEqual([
+					`${fixture}/app/pyproject.toml`,
+					`${fixture}/app/tests/ruff.toml`,
+					`${fixture}/ruff.toml`,
+				]);
+				expect(lintRun.argv.slice(7 + count)).toEqual([
 					`${fixture}/app/tests/test_mod.py`,
 				]);
-				expect(fmtRun.argv[2]).toContain("--no-cache");
+				expect(fmtRun.argv.slice(6)).toEqual([
+					`${fixture}/app/tests/test_mod.py`,
+				]);
 			} finally {
 				__resetRuffToolchainStateForTest();
 			}

@@ -38,11 +38,18 @@ function sourcePatterns(value, api) {
 }
 
 const appHooks = [];
+const testHooks = [];
 
 export function registerPythonAppHook(hook) {
 	if (typeof hook !== "function")
 		throw new Error("registerPythonAppHook(hook) expects a function");
 	if (!appHooks.includes(hook)) appHooks.push(hook);
+}
+
+export function registerPythonTestHook(hook) {
+	if (typeof hook !== "function")
+		throw new Error("registerPythonTestHook(hook) expects a function");
+	if (!testHooks.includes(hook)) testHooks.push(hook);
 }
 
 function workspacePath(base, path) {
@@ -151,7 +158,7 @@ function appBuild(spec) {
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
-					'src=$1; uv=$2; pex=$3; out=$4; sync=$5; entry=$6; pexargs=$7; version=$8; venvpy=$9; stage=${10}; shift 10; "$uv" sync --project "$src" --locked --no-progress --managed-python --python "$version" $sync && mkdir -p "$stage" && for path in "$@"; do mkdir -p "$stage/$(dirname -- "$path")" && cp "$src/$path" "$stage/$path" || exit 1; done && "$src/$venvpy" "$pex" --venv-repository="$src/.venv" --no-transitive --pre -o "$out" ${entry:+-e "$entry"} -D "$stage" $pexargs',
+					'src=$1; uv=$2; pex=$3; out=$4; sync=$5; entry=$6; pexargs=$7; version=$8; venvpy=$9; stage=${10}; shift 10; "$uv" sync --project "$src" --locked --no-dev --no-progress --managed-python --python "$version" $sync && mkdir -p "$stage" && for path in "$@"; do mkdir -p "$stage/$(dirname -- "$path")" && cp "$src/$path" "$stage/$path" || exit 1; done && "$src/$venvpy" "$pex" --venv-repository="$src/.venv" --no-transitive --pre -o "$out" ${entry:+-e "$entry"} -D "$stage" $pexargs',
 					"python-app-build",
 					inputs.resolve.path,
 					exec.tool(inputs.uv, "uv"),
@@ -428,8 +435,24 @@ export function pythonTest({
 			"uv",
 		),
 	};
-	return Object.freeze({
+	const pythonSources = files({
+		root: spec.resolve.path,
+		include: spec.sources,
+	});
+	const value = {
 		root: spec.resolve.path,
 		[TEST]: testRoot(spec).outputs.units,
-	});
+	};
+	for (const hook of testHooks)
+		Object.assign(
+			value,
+			hook(
+				Object.freeze({
+					...value,
+					pythonSources,
+					sourcePatterns: spec.sources,
+				}),
+			),
+		);
+	return Object.freeze(value);
 }

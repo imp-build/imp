@@ -14,6 +14,7 @@ export {
 	pythonApp,
 	pythonTest,
 	registerPythonAppHook,
+	registerPythonTestHook,
 } from "//rules/python/graph";
 export {
 	defaultPythonRuntimeVersion,

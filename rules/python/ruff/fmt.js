@@ -3,7 +3,8 @@
 // provenance; importing this module enables `fmt` without pulling in
 // linting, for packages declared before or after the import.
 import { FMT } from "//rules/workflows/fmt";
-import { registerPythonAppHook } from "//rules/python";
+import { registerPythonAppHook, registerPythonTestHook } from "//rules/python";
 import { ruffFmtRoot } from "//rules/python/ruff_graph";
 
 registerPythonAppHook((source) => ({ [FMT]: ruffFmtRoot(source) }));
+registerPythonTestHook((source) => ({ [FMT]: ruffFmtRoot(source) }));
