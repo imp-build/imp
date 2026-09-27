@@ -32,7 +32,20 @@ in the cache. Keep those boundaries intact when changing code.
 
 ## Develop and test
 
-Run commands from the repository root. While iterating, use a focused selector:
+Run commands from the repository root. The executable must be able to find the
+built-in `rules/` tree. For checkout development, install the local shim with
+`./install.sh --local`; it rebuilds Imp and sets `IMP_RULES_DIR` to this
+checkout's `rules/` directory. If you run `target/release/imp` directly, set
+`IMP_RULES_DIR="$PWD/rules"` for each command. Without a rules path, a command
+can stop while it loads a rule that calls `builtinFiles()`, before it runs the
+selected graph actions. Treat `no built-in rules directory available` as a
+rules-path setup failure, not as a lint or test result.
+
+Focused selectors check only the selected graph. The `//...` selectors below
+discover and check the full repository graph. Record which scope you ran and
+report setup failures separately from rule or code failures.
+
+While iterating, use a focused selector:
 
 **Runnable example**
 
