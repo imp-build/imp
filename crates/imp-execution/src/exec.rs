@@ -915,6 +915,8 @@ pub fn sandbox_home_tmp(sandbox_root: &Path) -> Result<(PathBuf, PathBuf)> {
     let home = sandbox_root.join(".imp").join("home");
     let tmp = sandbox_root.join(".imp").join("tmp");
     std::fs::create_dir_all(&home).with_context(|| format!("create {}", home.display()))?;
+    std::fs::create_dir_all(home.join(".cache"))
+        .with_context(|| format!("create {}", home.join(".cache").display()))?;
     std::fs::create_dir_all(&tmp).with_context(|| format!("create {}", tmp.display()))?;
     Ok((home, tmp))
 }
@@ -1347,6 +1349,13 @@ fn exec_run_inner_with_start(
     let (home_dir, tmp_dir) = sandbox_home_tmp(&sandbox_root)?;
     command_env.insert("HOME".to_owned(), home_dir.to_string_lossy().into_owned());
     command_env.insert("TMPDIR".to_owned(), tmp_dir.to_string_lossy().into_owned());
+    // Cache-using tools must stay inside the sandbox too. This is added after
+    // the action digest, like HOME and TMPDIR, because the sandbox path is
+    // fresh for each execution and must not fragment the task cache key.
+    command_env.insert(
+        "XDG_CACHE_HOME".to_owned(),
+        home_dir.join(".cache").to_string_lossy().into_owned(),
+    );
     // Native Windows programs (e.g. a WinLibs gcc.exe driving cc1/as/ld as
     // subprocesses) look up their temp directory via GetTempPath(), which
     // checks TMP/TEMP, not the POSIX-convention TMPDIR set above — without
