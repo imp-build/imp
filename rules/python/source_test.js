@@ -5,13 +5,9 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
+import { pythonRuntime } from "//rules/python/runtime";
 import { pythonProject } from "//rules/python/project";
-import {
-	__resetPythonSourceStateForTest,
-	pythonSourceRunSpec,
-	pythonSources,
-	pythonToolchain,
-} from "//rules/python/source";
+import { pythonSourceRunSpec, pythonSources } from "//rules/python/source";
 import { pythonWorkspace } from "//rules/python/workspace";
 import {
 	__resetUvToolchainStateForTest,
@@ -20,12 +16,12 @@ import {
 
 function withPythonHost(fn) {
 	return withFakeToolchainHost(async (host) => {
-		__resetPythonSourceStateForTest();
 		__resetUvToolchainStateForTest();
+		pythonRuntime("3.13.0");
 		try {
 			return await fn(host);
 		} finally {
-			__resetPythonSourceStateForTest();
+			pythonRuntime("3.13.0");
 			__resetUvToolchainStateForTest();
 		}
 	});
@@ -42,7 +38,6 @@ describe("python sources", () => {
 	test("requires an explicit root and rejects recursive source patterns", async () => {
 		await withPythonHost(async () => {
 			uvToolchain("0.11.16", { default: true, unverified: true });
-			pythonToolchain("3.13.0", { default: true });
 			expect(() => pythonSources()).toThrow("workspace-relative root");
 			expect(() =>
 				pythonSources({ root: "rules/python", sources: ["**/*.py"] }),
@@ -53,7 +48,6 @@ describe("python sources", () => {
 	test("exports one expandable RUN root rather than a label per file", async () => {
 		await withPythonHost(async () => {
 			uvToolchain("0.11.16", { default: true, unverified: true });
-			pythonToolchain("3.13.0", { default: true });
 
 			const scripts = pythonSources({
 				root: "rules/python/example/src/hello",
@@ -68,13 +62,13 @@ describe("python sources", () => {
 	test("runs an unprojected source through the pinned interpreter", async () => {
 		await withPythonHost(async () => {
 			uvToolchain("0.11.16", { default: true, unverified: true });
-			const runtime = pythonToolchain("3.13.0", { default: true });
+			pythonRuntime("3.12.4");
 
 			const described = await pythonSourceRunSpec(
 				{
 					file: "tools/demo.py",
 					root: "tools",
-					pythonVersion: runtime.attrs.version,
+					pythonVersion: "3.12.4",
 					uvVersion: "0.11.16",
 				},
 				fakeUvTool,
@@ -83,15 +77,26 @@ describe("python sources", () => {
 			expect(described.argv[2]).toContain(
 				"uv run --no-project --managed-python",
 			);
-			expect(described.argv).toContain("3.13.0");
+			expect(described.argv).toContain("3.12.4");
 			expect(described.argv).toContain("tools/demo.py");
+		});
+	});
+
+	test("pythonSources uses the shared pythonRuntime default", async () => {
+		await withPythonHost(async (host) => {
+			uvToolchain("0.11.16", { default: true, unverified: true });
+			pythonRuntime("3.12.4");
+			const scripts = pythonSources({
+				root: "rules/python/example/src/hello",
+			});
+			const described = await host.resolve(scripts[RUN]);
+			expect(JSON.stringify(described)).toContain("3.12.4");
 		});
 	});
 
 	test("infers the containing workspace for source runs", async () => {
 		await withPythonHost(async () => {
 			uvToolchain("0.11.16", { default: true, unverified: true });
-			pythonToolchain("3.13.0", { default: true });
 
 			const scripts = pythonSources({
 				root: "rules/python/testdata/workspace/packages/app/src",

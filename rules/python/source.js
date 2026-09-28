@@ -18,7 +18,6 @@ import {
 	files,
 	glob,
 	group,
-	label,
 	mergeDigests,
 	output,
 	paths,
@@ -36,14 +35,9 @@ import {
 	findPythonProject,
 	pythonWorkspaceSources,
 } from "//rules/python/project";
+import { defaultPythonRuntimeVersion } from "//rules/python/runtime";
 
 import { nativeToolSpec } from "//rules/imp/native-tool";
-
-let default_python_toolchain = null;
-
-export function __resetPythonSourceStateForTest() {
-	default_python_toolchain = null;
-}
 
 function normalize_workspace_path(path) {
 	const parts = [];
@@ -66,13 +60,10 @@ function sandboxRootEnvExports(envEntries) {
 	});
 }
 
-function require_default_python_toolchain() {
-	if (!default_python_toolchain) {
-		throw new Error(
-			"pythonSources() requires the Python rule default or an explicit pythonToolchain() override",
-		);
-	}
-	return default_python_toolchain;
+export function pythonSourceVersionOrDefault() {
+	const version = defaultPythonRuntimeVersion();
+	if (!version) throw new Error("no default python runtime version configured");
+	return version;
 }
 
 function require_default_uv_version() {
@@ -84,40 +75,6 @@ function require_default_uv_version() {
 	}
 	return version;
 }
-
-/**
- * Declare a pinned CPython runtime used by source-file runs.
- *
- * The interpreter is provisioned by uv into its existing shared cache; this
- * label intentionally models the selected version, not a second downloader.
- * A handleless label. The selected runtime version is carried by
- * `pythonSources()`-discovered children via `.data`.
- *
- * @category configuration
- * @param {string} version CPython version label.
- * @param {object} [opts]
- * @param {boolean} [opts.default=false] Make this the default runtime.
- * @returns {object} Python runtime label.
- */
-export function pythonToolchain(version, { default: isDefault = false } = {}) {
-	if (typeof version !== "string" || version === "") {
-		throw new Error(
-			"pythonToolchain(version) requires a non-empty version string",
-		);
-	}
-	const handle = label({ data: { version } });
-	if (isDefault) default_python_toolchain = handle;
-	return handle;
-}
-
-export function defaultPythonToolchain() {
-	return default_python_toolchain;
-}
-
-// Importing the Python rules provisions the CPython runtime used by source
-// execution. A workspace can replace it with pythonToolchain(..., { default:
-// true }) when it needs another interpreter version.
-pythonToolchain("3.13.0", { default: true });
 
 // One [RUN] root per discovered file. It runs nothing itself: it resolves the
 // staged digest and assembles the program description //rules/workflows/run
@@ -204,7 +161,7 @@ export function pythonSources({
 		project: project
 			? assertPythonProject(project, "pythonSources")
 			: findPythonProject(normalize_workspace_path(root)),
-		pythonVersion: require_default_python_toolchain().attrs.version,
+		pythonVersion: pythonSourceVersionOrDefault(),
 		uvVersion: require_default_uv_version(),
 		deps: [...deps],
 	};

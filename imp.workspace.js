@@ -14,7 +14,7 @@ import "//rules/odin/vscode";
 import "//rules/python/ruff/fmt";
 import "//rules/python/ruff/lint";
 import { defaultRuffToolchain } from "//rules/python/ruff_toolchain";
-import { defaultPythonToolchain } from "//rules/python";
+import { pythonRuntime } from "//rules/python";
 import "//rules/js/biome/fmt";
 import "//rules/rust/generate_build";
 import { defaultKacheToolchain } from "//rules/rust/kache";
@@ -45,7 +45,7 @@ export const odinToolchainDefault = odinToolchain("dev-2026-03", {
 });
 export const odinfmt = defaultOdinfmtToolchain();
 export const ruff = defaultRuffToolchain();
-export const python = defaultPythonToolchain();
+pythonRuntime("3.13.0");
 // kache wraps rustc with a content-keyed compiler cache backed by a
 // host-managed persistent worker (see src/worker.rs) — sidesteps cargo's own
 // mtime-based incremental compilation, which imp's fresh-per-sandbox

@@ -151,11 +151,13 @@ installed runtime dependencies. Its `sources` are application files only;
 `entryPoint` becomes the PEX entry point, while `extraPexArgs` is available
 for PEX options that do not yet have a dedicated field.
 
-`pythonApp` and `pythonTest` sync the project with the CPython version that
-`pythonRuntime()` sets (default `3.13.0`). Tests therefore run on the same
-interpreter as the application. To use a different version for one target, set
-`pythonVersion` on it. Source runs from `pythonSources()` use a separate
-default that `pythonToolchain()` sets.
+`pythonApp`, `pythonTest`, and `pythonSources()` use the CPython version that
+`pythonRuntime()` sets (default `3.13.0`). Apps and tests therefore use the
+same interpreter, and source runs use it too. Call `pythonRuntime("3.12.4")`
+in the workspace to change the default for all three target types. To use a
+different version for one app or test, set `pythonVersion` on that target.
+`pythonWorkspace()` also accepts `pythonVersion` to override the version used
+to lock that workspace.
 
 `sources` defaults to direct `*.py` files in the project directory. Nested
 source directories must be declared explicitly. Use application patterns such

@@ -1,11 +1,9 @@
 let defaultVersion = null;
 
 /**
- * Register the version of Python that `uv run --managed-python` should
- * launch when pythonApp() isn't given an explicit pythonVersion. Last call
- * wins, mirroring uvToolchain()/pexToolchain()'s { default: true } intent,
- * but there is no non-default variant to register — nothing else ever looks
- * up a python version by name, so this is a single overwritable default.
+ * Set the default CPython version for pythonApp(), pythonTest(),
+ * pythonSources(), and pythonWorkspace(). Each call replaces the previous
+ * default; app and test targets can still set their own pythonVersion.
  *
  * @param {string} version
  */
@@ -22,6 +20,6 @@ export function defaultPythonRuntimeVersion() {
 	return defaultVersion;
 }
 
-// Importing this rule provisions the pinned default. A workspace can replace
-// it by calling pythonRuntime(...) again.
+// Importing this rule sets the pinned default. A workspace can replace it by
+// calling pythonRuntime(...) again.
 pythonRuntime("3.13.0");

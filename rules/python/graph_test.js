@@ -18,7 +18,11 @@ import {
 	pythonWorkspace,
 } from "//rules/python";
 import { pexToolchain } from "//rules/python/pex_toolchain";
-import { defaultPythonRuntimeVersion } from "//rules/python/runtime";
+import { pythonSourceVersionOrDefault } from "//rules/python/source";
+import {
+	defaultPythonRuntimeVersion,
+	pythonRuntime,
+} from "//rules/python/runtime";
 import { uvToolchain } from "//rules/python/uv_toolchain";
 import {
 	__resetRuffToolchainStateForTest,
@@ -108,6 +112,52 @@ describe("Python graph declarations", () => {
 			const description = await host.resolve(app[RUN]);
 			expect(description.argv).toContain("3.12.4");
 			expect(description.env).toEqual(["IMP_PYTHON_BUILD_VERSION=3.12.4"]);
+		});
+	});
+
+	test("pythonRuntime configures app, test, source, and workspace versions", async () => {
+		await withFakeToolchainHost(async (host) => {
+			uvToolchain("0.11.16", { default: true, unverified: true });
+			pexToolchain("2.97.1", { default: true, unverified: true });
+			pythonRuntime("3.12.4");
+			try {
+				const app = pythonApp({
+					base: "rules/python/example",
+					entryPoint: "hello.__main__",
+				});
+				const suite = pythonTest({ base: "rules/python/example" });
+				const workspace = pythonWorkspace({
+					path: "rules/python/testdata/workspace",
+				});
+				expect(pythonSourceVersionOrDefault()).toBe("3.12.4");
+
+				await host.resolve(app[BUILD]);
+				const buildRun = host.runs.find(
+					(run) => run.display === "python-app build rules/python/example",
+				);
+				expect(buildRun.argv).toContain("3.12.4");
+				const description = await host.resolve(app[RUN]);
+				expect(description.argv).toContain("3.12.4");
+
+				await host.resolve(suite[TEST]);
+				const testRun = host.runs.find(
+					(run) => run.display === "python test rules/python/example",
+				);
+				expect(testRun.argv).toContain("3.12.4");
+
+				await host.resolve(workspace[GEN_LOCKFILES]);
+				const lockRun = host.runs.find(
+					(run) =>
+						run.display ===
+						"lock Python workspace rules/python/testdata/workspace",
+				);
+				expect(lockRun.argv.slice(5)).toEqual([
+					"rules/python/testdata/workspace",
+					"3.12.4",
+				]);
+			} finally {
+				pythonRuntime("3.13.0");
+			}
 		});
 	});
 
