@@ -77,6 +77,7 @@ import {
 	joinAndNormalize,
 } from "//rules/c/cmake/ninja_graph";
 import { parseCTestTestfile } from "//rules/c/cmake/ctest_testfile";
+import { testVehicle } from "//rules/workflows/test";
 
 function resolveCmakeToolchain(toolchain) {
 	const resolved = toolchain || defaultCmakeGraphToolchain();
@@ -1173,22 +1174,7 @@ export function runCTestTask(
 				display: `ctest ${spec.path}`,
 				allowFailure: true,
 			});
-			const ok = result.exitCode === 0;
-			return {
-				units: [
-					{
-						name: unitName,
-						ok,
-						...(ok
-							? {}
-							: {
-									output: [result.stdout, result.stderr]
-										.filter(Boolean)
-										.join("\n"),
-								}),
-					},
-				],
-			};
+			return { units: testVehicle(unitName, result) };
 		},
 	});
 }

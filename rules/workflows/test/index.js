@@ -21,6 +21,28 @@
 import { goal, goalError } from "imp:core";
 import { statusReport } from "//rules/workflows/report";
 
+/** Convert one action result into the shared test unit list.
+ * @param {string} name The name of the test unit.
+ * @param {{exitCode: number, stdout: string, stderr: string}} result The completed test action.
+ * @returns {{name: string, ok: boolean, output?: string}[]} A list with the test unit result.
+ */
+export function testVehicle(name, result) {
+	const ok = result.exitCode === 0;
+	return [
+		{
+			name,
+			ok,
+			...(ok
+				? {}
+				: {
+						output: [result.stdout, result.stderr]
+							.filter(Boolean)
+							.join("\n"),
+					}),
+		},
+	];
+}
+
 /** Aggregate every selected [TEST] root's execution-unit results and report once. */
 export function graphTestGoal(roots) {
 	const units = roots.flatMap(({ address, result }) =>

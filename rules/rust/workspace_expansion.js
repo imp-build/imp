@@ -11,7 +11,7 @@
 
 import { FMT } from "//rules/workflows/fmt";
 import { LINT } from "//rules/workflows/lint";
-import { TEST } from "//rules/workflows/test";
+import { TEST, testVehicle } from "//rules/workflows/test";
 import {
 	configuration,
 	digestOf,
@@ -548,18 +548,7 @@ function crateTestTask(dir, testBuild, testTools, deps, testDeps) {
 					inputs: [input.binaries, ...runtimeInputs],
 					allowFailure: true,
 				});
-				const ok = result.exitCode === 0;
-				units.push({
-					name: `${bin.name}:${bin.kind}`,
-					ok,
-					...(ok
-						? {}
-						: {
-								output: [result.stdout, result.stderr]
-									.filter(Boolean)
-									.join("\n"),
-							}),
-				});
+				units.push(...testVehicle(`${bin.name}:${bin.kind}`, result));
 			}
 			return { units };
 		},

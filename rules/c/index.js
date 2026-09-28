@@ -48,7 +48,7 @@
 import { BUILD } from "//rules/workflows/build";
 import { PACKAGE, binaryProduct } from "//rules/workflows/package";
 import { RUN } from "//rules/workflows/run";
-import { TEST } from "//rules/workflows/test";
+import { TEST, testVehicle } from "//rules/workflows/test";
 import {
 	files,
 	output,
@@ -548,22 +548,7 @@ function testTask(spec, executable, exePath, bundled) {
 				allowFailure: true,
 				display: `cc test ${spec.path}`,
 			});
-			const ok = result.exitCode === 0;
-			return {
-				units: [
-					{
-						name: spec.path,
-						ok,
-						...(ok
-							? {}
-							: {
-									output: [result.stdout, result.stderr]
-										.filter(Boolean)
-										.join("\n"),
-								}),
-					},
-				],
-			};
+			return { units: testVehicle(spec.path, result) };
 		},
 	});
 }

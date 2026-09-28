@@ -2,7 +2,7 @@ import { BUILD } from "//rules/workflows/build";
 import { LINT } from "//rules/workflows/lint";
 import { PACKAGE, binaryProduct } from "//rules/workflows/package";
 import { RUN } from "//rules/workflows/run";
-import { TEST } from "//rules/workflows/test";
+import { TEST, testVehicle } from "//rules/workflows/test";
 import {
 	field,
 	defineConfigSchema,
@@ -1624,21 +1624,8 @@ function graphOdinBuild(
 				};
 			}
 			if (test) {
-				const ok = result.exitCode === 0;
 				return {
-					units: [
-						{
-							name: resolved.analysis.packagePath,
-							ok,
-							...(ok
-								? {}
-								: {
-										output: [result.stdout, result.stderr]
-											.filter(Boolean)
-											.join("\n"),
-									}),
-						},
-					],
+					units: testVehicle(resolved.analysis.packagePath, result),
 				};
 			}
 			return { artifact: result.outputs.artifact, executablePath: outputPath };

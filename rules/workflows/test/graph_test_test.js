@@ -1,9 +1,33 @@
-import { graphTestGoal } from "//rules/workflows/test";
+import { graphTestGoal, testVehicle } from "//rules/workflows/test";
 import { expect, test } from "//rules/imp/test";
 
 const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
 const RESET = "\x1b[0m";
+
+test("testVehicle returns a named passing unit without output", () => {
+	expect(
+		testVehicle("unit-a", { exitCode: 0, stdout: "ok", stderr: "" }),
+	).toEqual([{ name: "unit-a", ok: true }]);
+});
+
+test("testVehicle combines output for a failing unit", () => {
+	expect(
+		testVehicle("unit-a", {
+			exitCode: 1,
+			stdout: "assertion failed",
+			stderr: "trace",
+		}),
+	).toEqual([
+		{ name: "unit-a", ok: false, output: "assertion failed\ntrace" },
+	]);
+});
+
+test("testVehicle keeps an empty output for a failure with no captured text", () => {
+	expect(
+		testVehicle("unit-a", { exitCode: 1, stdout: "", stderr: "" }),
+	).toEqual([{ name: "unit-a", ok: false, output: "" }]);
+});
 
 test("graphTestGoal returns a sorted, aligned, colored report instead of throwing when every unit is ok", () => {
 	const report = graphTestGoal([
