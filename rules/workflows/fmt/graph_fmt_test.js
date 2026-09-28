@@ -90,7 +90,10 @@ describe("graphFmtGoal", () => {
 	// `imp fmt //...` end-to-end check instead — fabricating a second, valid
 	// "formatted" tree with different content but the same real root isn't
 	// possible from a plain rules-test without actually running a formatter.
-	test("unchanged is a real digest comparison against the sources tree, not just exit code", () => {
+	test(
+		"unchanged is a real digest comparison against the sources tree, not just exit code",
+		{ fixture: "workspace" },
+		() => {
 		const sources = digestOf(
 			glob({ root: "rules/workflows/fmt", include: ["*.js"] }),
 		);
@@ -110,7 +113,8 @@ describe("graphFmtGoal", () => {
 				expect(report).toContain("UNCHANGED");
 			});
 		});
-	});
+		},
+	);
 
 	test("--check never writes, even for an unchanged result", () => {
 		return withFakeWriteWorkspace(async (calls) => {

@@ -14,20 +14,19 @@ import {
 // config, as it does in an editor. A missing file matches nothing.
 const RUFF_CONFIG_NAMES = ["pyproject.toml", "ruff.toml", ".ruff.toml"];
 
-/** The Ruff config files in root and in each parent directory up to the workspace root. */
-function ruffAncestorConfigFiles(root) {
+/** One shallow Ruff config fileset for each directory up to the workspace root. */
+function ruffAncestorConfigInputs(root) {
 	const parts = root.split("/").filter((part) => part && part !== ".");
-	const include = [];
+	const inputs = {};
+	let index = 0;
 	for (let i = parts.length; i >= 0; i--) {
-		// Escape glob characters, so that a directory name matches only itself.
-		const dir = parts
-			.slice(0, i)
-			.join("/")
-			.replace(/[[\]*?\\]/g, "\\$&");
-		for (const name of RUFF_CONFIG_NAMES)
-			include.push(dir ? `${dir}/${name}` : name);
+		const dir = parts.slice(0, i).join("/") || ".";
+		inputs[`ancestorConfig${index++}`] = files({
+			root: dir,
+			include: RUFF_CONFIG_NAMES,
+		});
 	}
-	return files({ root: ".", include });
+	return inputs;
 }
 
 /**
@@ -56,11 +55,14 @@ function ruffRoot(source, kind) {
 	const dirname = nativeTool("dirname");
 	const ruff = ruffGraphTool(defaultRuffToolchainVersion());
 	const flag = kind === "fmt" ? semantic.flag("check") : semantic.flag("fix");
+	const ancestorConfigInputs = ruffAncestorConfigInputs(source.root);
+	const ancestorConfigInputNames = Object.keys(ancestorConfigInputs);
 	return task({
 		display: `ruff ${kind} ${source.root}`,
 		inputs: {
 			sources: source.pythonSources,
-			configs: ruffAncestorConfigFiles(source.root),
+			...ancestorConfigInputs,
+			ancestorConfigInputNames,
 			nestedConfigs: ruffNestedConfigFiles(source.root, source.sourcePatterns),
 			ruff,
 			shell,
@@ -91,9 +93,12 @@ function ruffRoot(source, kind) {
 			// lint still copies into fixed/, since --fix's output is a
 			// deliberately separate artifact from the (untouched) sources.
 			// A `**/` pattern also matches root, so a path can come from both sets.
+			const ancestorConfigBindings = inputs.ancestorConfigInputNames.map(
+				(name) => inputs[name],
+			);
 			const configPaths = [
 				...new Set([
-					...exec.paths(inputs.configs),
+					...ancestorConfigBindings.flatMap((binding) => exec.paths(binding)),
 					...(inputs.nestedConfigs ? exec.paths(inputs.nestedConfigs) : []),
 				]),
 			];
@@ -117,9 +122,11 @@ function ruffRoot(source, kind) {
 						? paths
 						: [String(configPaths.length), ...configPaths, ...paths]),
 				],
-				inputs: [inputs.sources, inputs.configs, inputs.nestedConfigs].filter(
-					Boolean,
-				),
+				inputs: [
+					inputs.sources,
+					...ancestorConfigBindings,
+					inputs.nestedConfigs,
+				].filter(Boolean),
 				tools:
 					kind === "fmt"
 						? [inputs.shell]

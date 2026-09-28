@@ -111,7 +111,9 @@ describe("Python graph declarations", () => {
 		});
 	});
 
-	test("a root-level application gives PEX only its declared sources", async () => {
+	test("a root-level application gives PEX only its declared sources", {
+		fixture: "workspace",
+	}, async () => {
 		await withFakeToolchainHost(async (host) => {
 			uvToolchain("0.11.16", { default: true, unverified: true });
 			pexToolchain("2.97.1", { default: true, unverified: true });
@@ -137,7 +139,9 @@ describe("Python graph declarations", () => {
 		});
 	});
 
-	test("a nested application stages sources relative to the project", async () => {
+	test("a nested application stages sources relative to the project", {
+		fixture: "workspace",
+	}, async () => {
 		await withFakeToolchainHost(async (host) => {
 			uvToolchain("0.11.16", { default: true, unverified: true });
 			pexToolchain("2.97.1", { default: true, unverified: true });
@@ -159,7 +163,9 @@ describe("Python graph declarations", () => {
 		});
 	});
 
-	test("Ruff fmt and lint stage the app config files that apply to the sources", async () => {
+	test("Ruff fmt and lint stage the app config files that apply to the sources", {
+		fixture: "workspace",
+	}, async () => {
 		await withFakeToolchainHost(async (host) => {
 			try {
 				ruffToolchain("0.15.20", { default: true, unverified: true });
@@ -203,7 +209,45 @@ describe("Python graph declarations", () => {
 		});
 	});
 
-	test("Ruff fmt and lint attach to pythonTest sources", async () => {
+	test("Ruff stages ancestor configs for a deeply nested application", {
+		fixture: "workspace",
+	}, async () => {
+		await withFakeToolchainHost(async (host) => {
+			try {
+				ruffToolchain("0.15.20", { default: true, unverified: true });
+				const base = "rules/python/testdata/ruff_config/app";
+				const app = pythonApp({
+					base,
+					entryPoint: "src.pkg.mod",
+					sources: ["src/pkg/*.py"],
+				});
+				await host.resolve(app[FMT]);
+				await host.resolve(app[LINT]);
+				const fmtRun = host.runs.find(
+					(run) => run.display === `ruff fmt ${base}`,
+				);
+				const lintRun = host.runs.find(
+					(run) => run.display === `ruff lint ${base}`,
+				);
+				const count = Number(lintRun.argv[6]);
+				expect(lintRun.argv.slice(7, 7 + count).sort()).toEqual([
+					"rules/python/testdata/ruff_config/app/pyproject.toml",
+					"rules/python/testdata/ruff_config/app/src/pkg/.ruff.toml",
+					"rules/python/testdata/ruff_config/ruff.toml",
+				]);
+				expect(lintRun.argv.slice(7 + count)).toEqual([
+					"rules/python/testdata/ruff_config/app/src/pkg/mod.py",
+				]);
+				expect(fmtRun.inputs).toEqual(lintRun.inputs);
+			} finally {
+				__resetRuffToolchainStateForTest();
+			}
+		});
+	});
+
+	test("Ruff fmt and lint attach to pythonTest sources", {
+		fixture: "workspace",
+	}, async () => {
 		await withFakeToolchainHost(async (host) => {
 			try {
 				ruffToolchain("0.15.20", { default: true, unverified: true });
@@ -241,7 +285,9 @@ describe("Python graph declarations", () => {
 		});
 	});
 
-	test("Ruff lint accepts the default root-level source pattern", async () => {
+	test("Ruff lint accepts the default root-level source pattern", {
+		fixture: "workspace",
+	}, async () => {
 		await withFakeToolchainHost(async (host) => {
 			try {
 				ruffToolchain("0.15.20", { default: true, unverified: true });
@@ -257,7 +303,9 @@ describe("Python graph declarations", () => {
 		});
 	});
 
-	test("Ruff lint does not stage configs from unrelated project fixtures", async () => {
+	test("Ruff lint does not stage configs from unrelated project fixtures", {
+		fixture: "workspace",
+	}, async () => {
 		await withFakeToolchainHost(async (host) => {
 			try {
 				ruffToolchain("0.15.20", { default: true, unverified: true });

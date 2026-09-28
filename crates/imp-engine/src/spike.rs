@@ -739,8 +739,16 @@ async fn load_workspace_with_rules_and_service(
     // ".claude" denylist) for free. Hermetic execution supplies a source
     // tree without `.git`, so workspace `.gitignore` files must not depend on
     // repository metadata being present.
-    let mut build_files: Vec<PathBuf> = ignore::WalkBuilder::new(&root)
-        .require_git(false)
+    let mut build_walker = ignore::WalkBuilder::new(&root);
+    build_walker
+        // A workspace can live under an ignored cache or temp directory.
+        // Read ignore files inside the workspace, but do not inherit rules
+        // from its parents.
+        .git_ignore(false)
+        .add_custom_ignore_filename(".gitignore")
+        .parents(false)
+        .require_git(false);
+    let mut build_files: Vec<PathBuf> = build_walker
         .build()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()) && e.file_name() == BUILD_FILE)
@@ -5233,12 +5241,22 @@ fn workspace_files(
     walker
         .hidden(false)
         .ignore(true)
-        .git_ignore(true)
+        // Keep parent cache or temp-directory .gitignore files outside the
+        // workspace from hiding this workspace. Load workspace .gitignore
+        // explicitly, then use scoped files for nested directories.
+        .git_ignore(false)
+        .add_custom_ignore_filename(".gitignore")
         .git_global(true)
         .git_exclude(true)
-        .parents(true)
+        .parents(false)
         .require_git(false)
         .filter_entry(|entry| entry.file_name() != ".git");
+    let workspace_gitignore = workspace_root.join(".gitignore");
+    if workspace_gitignore.is_file() {
+        walker
+            .current_dir(workspace_root)
+            .add_ignore(workspace_gitignore);
+    }
     if !recursive {
         walker.max_depth(Some(1));
     }
@@ -5308,12 +5326,23 @@ pub fn workspace_glob_files(
     walker
         .hidden(false)
         .ignore(true)
-        .git_ignore(true)
+        // Do not use the walker's Git discovery for .gitignore files. It
+        // walks above the workspace root to find a repository, where an
+        // unrelated parent (such as /tmp/imp's cache .gitignore) can hide the
+        // whole workspace. Treat .gitignore as a scoped ignore file instead.
+        .git_ignore(false)
+        .add_custom_ignore_filename(".gitignore")
         .git_global(true)
         .git_exclude(true)
-        .parents(true)
+        .parents(false)
         .require_git(false)
         .filter_entry(|entry| entry.file_name() != ".git");
+    let workspace_gitignore = workspace_root.join(".gitignore");
+    if workspace_gitignore.is_file() {
+        walker
+            .current_dir(workspace_root)
+            .add_ignore(workspace_gitignore);
+    }
     if let Some(depth) = max_depth {
         walker.max_depth(Some(depth));
     }
@@ -5394,12 +5423,19 @@ fn matching_workspace_source_paths(
     walker
         .hidden(false)
         .ignore(true)
-        .git_ignore(true)
+        .git_ignore(false)
+        .add_custom_ignore_filename(".gitignore")
         .git_global(true)
         .git_exclude(true)
-        .parents(true)
+        .parents(false)
         .require_git(false)
         .filter_entry(|entry| entry.file_name() != ".git");
+    let workspace_gitignore = workspace_root.join(".gitignore");
+    if workspace_gitignore.is_file() {
+        walker
+            .current_dir(workspace_root)
+            .add_ignore(workspace_gitignore);
+    }
     if !recursive {
         walker.max_depth(Some(1));
     }
@@ -11337,22 +11373,24 @@ export const ui = asset({ srcs: ["**/*.png"] });
 
     #[test]
     fn source_globs_respect_gitignore_and_explicit_depth() {
-        let root = tempfile::tempdir().unwrap();
-        write_file(&root.path().join(".gitignore"), "ignored/\n");
-        write_file(&root.path().join("root.rs"), "fn main() {}\n");
-        write_file(&root.path().join("src/nested.rs"), "fn nested() {}\n");
-        write_file(&root.path().join("ignored/hidden.rs"), "ignored\n");
-        write_file(&root.path().join(".hidden/visible.rs"), "visible\n");
+        let parent = tempfile::tempdir().unwrap();
+        write_file(&parent.path().join(".gitignore"), "*\n");
+        let root = parent.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        write_file(&root.join(".gitignore"), "ignored/\n");
+        write_file(&root.join("root.rs"), "fn main() {}\n");
+        write_file(&root.join("src/nested.rs"), "fn nested() {}\n");
+        write_file(&root.join("ignored/hidden.rs"), "ignored\n");
+        write_file(&root.join(".hidden/visible.rs"), "visible\n");
 
-        let direct = workspace_glob_files(root.path(), ".", &["*.rs".to_owned()], &[]).unwrap();
+        let direct = workspace_glob_files(&root, ".", &["*.rs".to_owned()], &[]).unwrap();
         assert_eq!(direct, vec!["root.rs"]);
 
         let explicit_directory =
-            workspace_glob_files(root.path(), ".", &["src/*.rs".to_owned()], &[]).unwrap();
+            workspace_glob_files(&root, ".", &["src/*.rs".to_owned()], &[]).unwrap();
         assert_eq!(explicit_directory, vec!["src/nested.rs"]);
 
-        let recursive =
-            workspace_glob_files(root.path(), ".", &["**/*.rs".to_owned()], &[]).unwrap();
+        let recursive = workspace_glob_files(&root, ".", &["**/*.rs".to_owned()], &[]).unwrap();
         assert_eq!(
             recursive,
             vec![".hidden/visible.rs", "root.rs", "src/nested.rs",]
