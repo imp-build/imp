@@ -1,6 +1,6 @@
 import { BUILD } from "//rules/workflows/build";
 import { LINT } from "//rules/workflows/lint";
-import { PACKAGE } from "//rules/workflows/package";
+import { PACKAGE, binaryProduct } from "//rules/workflows/package";
 import { RUN } from "//rules/workflows/run";
 import { TEST } from "//rules/workflows/test";
 import {
@@ -82,8 +82,6 @@ import {
 	gccWindowsRuntimeArchives,
 } from "//rules/c/gcc";
 import { moldOdinLinkerEnv } from "//rules/c/mold";
-import { shellQuote } from "//rules/c/toolchain";
-import { nativeTool } from "//rules/imp/native-tool";
 import { ODIN_TOOL } from "//rules/odin/toolchain";
 
 export {
@@ -1039,7 +1037,7 @@ function graphResourceInputs(specs) {
 	const linkoptLists = [];
 	// The shared libraries, kept as their own list as well as being staged
 	// with the other resources. The link step treats them the same as an
-	// archive, but graphOdinBundle() below has to know which resources are
+	// archive, but binaryProduct() below has to know which resources are
 	// files that must also travel beside the executable at run time.
 	const sharedLibs = [];
 	// A package is commonly reachable both directly and through a dep, so the
@@ -1368,7 +1366,7 @@ export function odinGccLinkerPathDir(exec, resolvedGccTool) {
  * The `LD_LIBRARY_PATH` entry an `odin test` action needs, or no entry at all.
  *
  * `odin test` compiles *and runs* in one action, so unlike `odin build` it has
- * no product for graphOdinBundle() to carry a shared library in. Odin's own
+ * no product for binaryProduct() to carry a shared library in. Odin's own
  * `$ORIGIN` rpath does not help either: it resolves to wherever odin put the
  * test binary (the sandbox root), not to the `build/c/` directory the library
  * is staged under. Measured as a real failure before this: "error while
@@ -1405,7 +1403,7 @@ export function odinTestLibraryPathEnv(sharedLibPaths) {
 // The filename `odin build -out:` writes an executable to. Odin's Windows
 // linker rejects an output path with no extension ("must have an appropriate
 // extension") — confirmed by a real `odin build` failure. Shared with
-// graphOdinBundle(), which copies that file into the product directory under
+// binaryProduct(), which copies that file into the product directory under
 // the same name.
 function odinExeName() {
 	return `output${platformInfo().os === "windows" ? ".exe" : ""}`;
@@ -1650,119 +1648,11 @@ function graphOdinBuild(
 
 // The workspace-built shared libraries this package's own dep closure
 // contributed — the subset of graphResourceInputs()' resources that must also
-// travel beside the executable at run time (see graphOdinBundle() below).
+// travel beside the executable at run time (see binaryProduct() in
+// //rules/workflows/package).
 function graphSharedLibs(spec, analysis, config, analysisIndex) {
 	const closure = graphSourceClosure(spec, analysis, config, analysisIndex);
 	return graphResourceInputs([spec, ...closure.packages]).sharedLibs;
-}
-
-// A binary that links a workspace-built shared library needs that library
-// beside it at run time. Odin already links with an `$ORIGIN` rpath of its own
-// accord — measured on a real `odin build` as `RPATH [$ORIGIN]` under this
-// workspace's own gcc toolchain, and as `RUNPATH [$ORIGIN]` under a host
-// linker with new dtags — so the loader does look in the executable's own
-// directory. What is missing is the library actually being there.
-//
-// So the product becomes a *directory* holding the executable plus every
-// shared library the closure contributed, which is the same shape ccBinary()
-// produces (see rules/c/index.js's own docstring and the decision entry
-// binary-products-carry-shared-libraries). Only the copy is needed here, not
-// the link flag: rules/c must pass -Wl,-rpath,$ORIGIN itself because it drives
-// the linker directly, while Odin adds the rpath for every binary it builds.
-//
-// This is a task of its own, not one more command on the build action, because
-// `odin build` is exec'd directly and not through `sh -c`: there is no script
-// to append a `cp` to, and mergeDigests() merges trees at their declared paths
-// and never relocates a file, so the executable and the library would stay in
-// different directories. A separate action also keeps the hot compile action —
-// with its Windows quoting and its PATH env — untouched.
-//
-// A binary with no shared dependency keeps the single-file product it has
-// always had: nothing must travel beside it, and a different shape would move
-// every packaged Odin binary's dist/ path for no gain. That is the same
-// reasoning rules/c/index.js records for its own `bundled` condition.
-//
-// Two dependencies whose libraries share a basename overwrite each other here.
-// That is the same collision the loader hits at run time, because DT_NEEDED
-// carries only the basename, so a copy step cannot decide it.
-function graphOdinBundle(
-	spec,
-	analysis,
-	config,
-	analysisIndex,
-	build,
-	exeName,
-) {
-	if (!analysis.hasMainEntrypoint) return null;
-	const sharedLibs = graphSharedLibs(spec, analysis, config, analysisIndex);
-	if (sharedLibs.length === 0) return null;
-	const bundleDir = `build/odin/${addressSlug(spec.path)}.d`;
-	return {
-		bundleDir,
-		exePath: `${bundleDir}/${exeName}`,
-		task: task({
-			display: `odin bundle ${analysis.packagePath}`,
-			inputs: {
-				artifact: build.outputs.artifact,
-				mkdir: nativeTool("mkdir"),
-				cp: nativeTool("cp"),
-				bundleDir,
-				exeName,
-				...Object.fromEntries(
-					sharedLibs.map((sharedLib, index) => [
-						`sharedLib${index}`,
-						sharedLib,
-					]),
-				),
-			},
-			outputs: { artifact: output.artifact() },
-			async run(exec, input) {
-				const libraryPaths = sharedLibs.map((_, index) =>
-					exec.path(input[`sharedLib${index}`]),
-				);
-				const directory = shellQuote(input.bundleDir);
-				const script = [
-					`mkdir -p ${directory}`,
-					`cp ${shellQuote(exec.path(input.artifact))} ${shellQuote(
-						`${input.bundleDir}/${input.exeName}`,
-					)}`,
-					`cp ${libraryPaths.map(shellQuote).join(" ")} ${shellQuote(
-						`${input.bundleDir}/`,
-					)}`,
-				].join("; ");
-				const result = await exec.action({
-					argv: ["sh", "-c", script],
-					tools: [input.mkdir, input.cp],
-					inputs: [
-						input.artifact,
-						...sharedLibs.map((_, index) => input[`sharedLib${index}`]),
-					],
-					outputs: { artifact: output.directory(input.bundleDir) },
-					display: `odin bundle ${input.bundleDir}`,
-				});
-				return { artifact: result.outputs.artifact };
-			},
-		}),
-	};
-}
-
-// The [RUN] root for a bundled binary. It runs nothing itself: it resolves the
-// product directory into the `{digest, path}` description
-// //rules/workflows/run stages and launches. A non-bundled Odin binary needs
-// none of this — its product *is* the executable, which the run workflow
-// accepts directly — but a directory is not a program, so a bundled one has to
-// name the executable inside it. Mirrors ccBinary()'s own runDescriptor()
-// (rules/c/index.js); `cache: false` for the same reason it uses there.
-function graphOdinRunDescriptor(spec, analysis, bundle) {
-	return task({
-		display: `odin run ${analysis.packagePath}`,
-		cache: false,
-		inputs: { artifact: bundle.task.outputs.artifact, exePath: bundle.exePath },
-		outputs: { run: output.value() },
-		async run(_exec, input) {
-			return { run: { digest: input.artifact.digest, path: input.exePath } };
-		},
-	});
 }
 
 function graphActions(spec, analysis, config, analysisIndex) {
@@ -1774,35 +1664,32 @@ function graphActions(spec, analysis, config, analysisIndex) {
 		);
 	}
 	const build = graphOdinBuild(spec, analysis, config, analysisIndex);
-	// A binary whose dep closure contributed a workspace-built shared library
-	// gets a directory product that carries the library beside it; everything
-	// else keeps the single-file product (see graphOdinBundle()).
-	const bundle = graphOdinBundle(
-		spec,
-		analysis,
-		config,
-		analysisIndex,
-		build,
-		odinExeName(),
-	);
-	const product = bundle
-		? bundle.task.outputs.artifact
-		: build.outputs.artifact;
+	const productPlan = analysis.hasMainEntrypoint
+		? binaryProduct({
+				namespace: "odin",
+				targetSlug: addressSlug(spec.path),
+				executableName: odinExeName(),
+				sharedLibraries: graphSharedLibs(spec, analysis, config, analysisIndex),
+				bundleDisplay: `odin bundle ${analysis.packagePath}`,
+				runDisplay: `odin run ${analysis.packagePath}`,
+			})
+		: null;
+	const product = productPlan
+		? productPlan.finish(build.outputs.artifact)
+		: { artifact: build.outputs.artifact, run: build.outputs.artifact };
 	const actions = {
-		[BUILD]: product,
+		[BUILD]: product.artifact,
 		[LINT]: graphOdinBuild(spec, analysis, config, analysisIndex, {
 			lint: true,
 		}).outputs.result,
-		[PACKAGE]: product,
+		[PACKAGE]: product.artifact,
 	};
 	if (spec.test) {
 		actions[TEST] = graphOdinBuild(spec, analysis, config, analysisIndex, {
 			test: true,
 		}).outputs.units;
 	} else if (analysis.hasMainEntrypoint) {
-		actions[RUN] = bundle
-			? graphOdinRunDescriptor(spec, analysis, bundle).outputs.run
-			: build.outputs.artifact;
+		actions[RUN] = product.run;
 	}
 	return actions;
 }

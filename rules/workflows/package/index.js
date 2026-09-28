@@ -28,7 +28,104 @@
 // + binary composed into a distributable zip) than the plain binary publish
 // below, and still a TODO if that's needed again.
 
-import { goal, goalError, logInfo, writeWorkspace } from "imp:core";
+import {
+	goal,
+	goalError,
+	logInfo,
+	output,
+	task,
+	writeWorkspace,
+} from "imp:core";
+import { nativeTool } from "//rules/imp/native-tool";
+
+/**
+ * Plan and finish the common product shape for a native binary.
+ *
+ * The rule supplies its stable namespace and target slug because those are
+ * part of the existing build paths. The workflow owns the directory layout
+ * inside that path, the shared-library condition, and the run descriptor for
+ * directory products.
+ */
+export function binaryProduct({
+	namespace,
+	targetSlug,
+	executableName,
+	sharedLibraries = [],
+	bundleDisplay,
+	runDisplay,
+}) {
+	const bundled = sharedLibraries.length > 0;
+	const bundleDir = `build/${namespace}/${targetSlug}.d`;
+	const executablePath = bundled ? `${bundleDir}/${executableName}` : null;
+
+	return {
+		bundled,
+		bundleDir,
+		executablePath,
+		finish(artifact) {
+			if (!bundled) return { artifact, run: artifact, bundled, executablePath };
+
+			// The loader resolves shared libraries by basename. Two libraries
+			// with the same basename would overwrite each other here and collide
+			// at run time, so the workflow cannot resolve that case.
+			const bundle = task({
+				display: bundleDisplay,
+				inputs: {
+					artifact,
+					cp: nativeTool("cp"),
+					...Object.fromEntries(
+						sharedLibraries.map((library, index) => [
+							`sharedLib${index}`,
+							library,
+						]),
+					),
+				},
+				outputs: { artifact: output.artifact() },
+				async run(exec, input) {
+					const sources = [
+						exec.path(input.artifact),
+						...sharedLibraries.map((_, index) =>
+							exec.path(input[`sharedLib${index}`]),
+						),
+					];
+					const result = await exec.action({
+						argv: ["cp", ...sources, `${bundleDir}/`],
+						tools: [input.cp],
+						inputs: [
+							input.artifact,
+							...sharedLibraries.map(
+								(_, index) => input[`sharedLib${index}`],
+							),
+						],
+						outputs: { artifact: output.directory(bundleDir) },
+						display: bundleDisplay,
+					});
+					return { artifact: result.outputs.artifact };
+				},
+			});
+			const run = task({
+				display: runDisplay,
+				cache: false,
+				inputs: { artifact: bundle.outputs.artifact, executablePath },
+				outputs: { run: output.value() },
+				async run(_exec, input) {
+					return {
+						run: {
+							digest: input.artifact.digest,
+							path: input.executablePath,
+						},
+					};
+				},
+			});
+			return {
+				artifact: bundle.outputs.artifact,
+				run: run.outputs.run,
+				bundled,
+				executablePath,
+			};
+		},
+	};
+}
 
 // A shared library is published under its own filename, not the target's
 // name — `libfoo.so`, `libfoo.so.1`, `libfoo.dylib`, `foo.dll`. Every other

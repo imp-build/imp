@@ -217,8 +217,14 @@ describe("graph-native ccLibrary/ccBinary", () => {
 			const linkRun = host.runs.find((run) =>
 				run.display.startsWith("cc link "),
 			);
-			expect(linkRun.display).toContain(
-				"build/c/rules_c_testdata_mixed_sources.d/app",
+			expect(linkRun.display).toBe("cc link build/c/app");
+			const bundleRun = host.runs.find((run) =>
+				run.display.startsWith("cc bundle "),
+			);
+			expect(bundleRun.argv).toContain("build/c/app");
+			expect(bundleRun.argv).toContain("build/c/libruntime.so");
+			expect(bundleRun.argv).toContain(
+				"build/c/rules_c_testdata_mixed_sources.d/",
 			);
 		});
 	});
@@ -503,7 +509,7 @@ describe("graph-native ccLibrary/ccBinary", () => {
 		});
 	});
 
-	test("a binary with a shared dep bundles it beside the executable and links with an $ORIGIN rpath", () => {
+	test("a binary with a shared dep uses the workflow bundle action and links with an $ORIGIN rpath", () => {
 		return withCcHost(async (host) => {
 			const sharedDep = ccLibrary({
 				path: "rules/c/testdata/mixed_sources",
@@ -520,15 +526,23 @@ describe("graph-native ccLibrary/ccBinary", () => {
 				run.display.startsWith("cc link "),
 			);
 			const script = linkRun.argv.join(" ");
-			// The executable is linked *inside* the product directory, and the
-			// shared library is copied in beside it. Both halves are required:
-			// the rpath alone points at a directory holding no library.
-			expect(linkRun.display).toContain(
-				"build/c/rules_c_testdata_mixed_sources.d/rules_c_testdata_mixed_sources",
+			expect(linkRun.display).toBe(
+				"cc link build/c/rules_c_testdata_mixed_sources",
 			);
 			expect(script).toContain("-Wl,-rpath,$ORIGIN");
-			expect(script).toContain(
-				"cp 'build/c/librules_c_testdata_mixed_sources.so' 'build/c/rules_c_testdata_mixed_sources.d/'",
+			expect(script).not.toContain("cp ");
+			const bundleRun = host.runs.find((run) =>
+				run.display.startsWith("cc bundle "),
+			);
+			expect(bundleRun.argv[0]).toBe("cp");
+			expect(bundleRun.argv).toContain(
+				"build/c/rules_c_testdata_mixed_sources",
+			);
+			expect(bundleRun.argv).toContain(
+				"build/c/librules_c_testdata_mixed_sources.so",
+			);
+			expect(bundleRun.argv).toContain(
+				"build/c/rules_c_testdata_mixed_sources.d/",
 			);
 		});
 	});
@@ -554,6 +568,9 @@ describe("graph-native ccLibrary/ccBinary", () => {
 			const script = linkRun.argv.join(" ");
 			expect(script).not.toContain("-Wl,-rpath");
 			expect(script).not.toContain("cp ");
+			expect(
+				host.runs.some((run) => run.display.startsWith("cc bundle ")),
+			).toBe(false);
 		});
 	});
 

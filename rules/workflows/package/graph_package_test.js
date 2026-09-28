@@ -1,5 +1,64 @@
 import { graphPackageGoal } from "//rules/workflows/package";
-import { expect, test, withFakeWriteWorkspace } from "//rules/imp/test";
+import { binaryProduct } from "//rules/workflows/package";
+import { output, task } from "imp:core";
+import {
+	expect,
+	test,
+	withFakeToolchainHost,
+	withFakeWriteWorkspace,
+} from "//rules/imp/test";
+
+test("binary products keep a single artifact without shared libraries", () => {
+	const built = task({
+		outputs: { artifact: output.artifact() },
+		async run() {
+			return { artifact: null };
+		},
+	});
+	const plan = binaryProduct({
+		namespace: "c",
+		targetSlug: "app",
+		executableName: "app",
+	});
+	const product = plan.finish(built.outputs.artifact);
+
+	expect(plan.bundled).toBe(false);
+	expect(product.artifact).toBe(built.outputs.artifact);
+	expect(product.run).toBe(built.outputs.artifact);
+	expect(product.executablePath).toBe(null);
+});
+
+test("binary products bundle the executable and describe its path", () => {
+	return withFakeToolchainHost(async () => {
+		const built = task({
+			outputs: { artifact: output.artifact() },
+			async run() {
+				return { artifact: null };
+			},
+		});
+		const library = task({
+			outputs: { artifact: output.artifact() },
+			async run() {
+				return { artifact: null };
+			},
+		});
+		const plan = binaryProduct({
+			namespace: "odin",
+			targetSlug: "app",
+			executableName: "output",
+			sharedLibraries: [library.outputs.artifact],
+			bundleDisplay: "odin bundle app",
+			runDisplay: "odin run app",
+		});
+		const product = plan.finish(built.outputs.artifact);
+
+		expect(plan.bundled).toBe(true);
+		expect(plan.bundleDir).toBe("build/odin/app.d");
+		expect(plan.executablePath).toBe("build/odin/app.d/output");
+		expect(product.artifact.__imp_graph_handle).toBe(true);
+		expect(product.run.__imp_graph_handle).toBe(true);
+	});
+});
 
 test("graph package roots are materialized at the workflow boundary", async () => {
 	await withFakeWriteWorkspace(async (calls) => {

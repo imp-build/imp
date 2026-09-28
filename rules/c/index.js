@@ -23,8 +23,9 @@
 // are mounted into the sandbox. A binary that has any shared library in its
 // closure also *carries* it: its product becomes a directory holding the
 // executable plus those libraries, linked with -Wl,-rpath,$ORIGIN so the
-// loader finds them beside it at run time (see ccTask()'s own comment on
-// `bundled`, and the decision entry binary-products-carry-shared-libraries).
+// loader finds them beside it at run time (see binaryProduct() in
+// //rules/workflows/package and the decision entry
+// binary-products-carry-shared-libraries).
 //
 // Known simplifications versus the pre-migration factory:
 //   - CMakeLists.txt/main()-detection-driven generate-build support lives in
@@ -45,7 +46,7 @@
 //     widening rationale as rules/c/cmake's own header handling.
 
 import { BUILD } from "//rules/workflows/build";
-import { PACKAGE } from "//rules/workflows/package";
+import { PACKAGE, binaryProduct } from "//rules/workflows/package";
 import { RUN } from "//rules/workflows/run";
 import { TEST } from "//rules/workflows/test";
 import {
@@ -57,7 +58,6 @@ import {
 	task,
 } from "imp:core";
 import { defaultGccGraphToolchain } from "//rules/c/gcc";
-import { nativeTool } from "//rules/imp/native-tool";
 import {
 	assertGeneratedSrcPath,
 	dedupeGeneratedSrcs,
@@ -312,16 +312,6 @@ function ccTask(spec, isLibrary) {
 	// handles) just contributes no headers to mount, same asymmetry already
 	// accepted for transitiveIncludeDirs there.
 	const transitiveHdrs = spec.deps.flatMap((d) => d.transitiveHdrs || []);
-	// A binary that links a workspace-built shared library needs that library
-	// beside it at run time, so its product becomes a *directory* holding the
-	// executable plus every transitive shared library under its own soname,
-	// linked with -Wl,-rpath,$ORIGIN (see rpathOriginArgs() in
-	// //rules/c/toolchain, and the decision entry
-	// binary-products-carry-shared-libraries). A binary with no shared
-	// dependency keeps the single-file product it has always had: nothing has
-	// to travel beside it, and changing its shape would move every packaged
-	// binary's dist/ path for no gain.
-	const bundled = !isLibrary && transitiveSharedLibs.length > 0;
 	// A binary's own output extension needs the platform-correct ".exe" on
 	// Windows: gcc/clang/cl.exe all auto-append it to the linked file
 	// themselves when the requested output name has none (PE executables
@@ -329,14 +319,21 @@ function ccTask(spec, isLibrary) {
 	// produced — confirmed by a real `imp build` failure ("run() output ...
 	// was not created as a file in sandbox").
 	const exeName = `${spec.outputName}${platformInfo().os === "windows" ? ".exe" : ""}`;
-	const bundleDir = `build/c/${spec.outputSlug}.d`;
+	const product = isLibrary
+		? null
+		: binaryProduct({
+				namespace: "c",
+				targetSlug: spec.outputSlug,
+				executableName: exeName,
+				sharedLibraries: transitiveSharedLibs,
+				bundleDisplay: `cc bundle ${spec.path}`,
+				runDisplay: `cc run ${spec.path}`,
+			});
 	const outPath = isShared
 		? `build/c/${sharedLibFilename(spec.outputName)}`
 		: isLibrary
 			? `build/c/${spec.outputName}.a`
-			: bundled
-				? `${bundleDir}/${exeName}`
-				: `build/c/${exeName}`;
+			: `build/c/${exeName}`;
 	// Own path first, so a target's own headers shadow a same-named header
 	// pulled in transitively.
 	const includeDirs = [
@@ -353,7 +350,6 @@ function ccTask(spec, isLibrary) {
 			srcs,
 			hdrs,
 			...generatedInputs,
-			cp: nativeTool("cp"),
 			optMode: semantic.mode("opt"),
 			...spec.toolchain.taskInputs(),
 			...Object.fromEntries(
@@ -475,28 +471,6 @@ function ccTask(spec, isLibrary) {
 					? "archive"
 					: "link";
 			const rspPath = `build/c/${spec.outputName}.rsp`;
-			// The bundle's other half: every transitive shared library is
-			// copied next to the executable, under the basename its DT_NEEDED
-			// entry already names (sonameArgs() in //rules/c/toolchain is what
-			// makes that basename bare). The executor pre-creates the declared
-			// directory output (bundleDir) before this action runs — it is the
-			// linked executable's own parent — so copyCmd writes straight into
-			// it with no mkdir.
-			//
-			// These paths go into the script text rather than the response
-			// file: the list scales with a target's shared dependencies, not
-			// with its source count, so it can't reach the argument-string
-			// limit rspfileArgv() exists to dodge.
-			//
-			// Two dependencies whose libraries share a basename would overwrite
-			// each other here. That is the same collision the loader itself
-			// would hit at run time, since DT_NEEDED carries only the basename,
-			// so resolving it needs more than a copy step can decide.
-			const copyCmd = bundled
-				? `; cp ${depSharedLibPaths
-						.map(shellQuote)
-						.join(" ")} ${shellQuote(`${bundleDir}/`)}`
-				: "";
 			const finalArgv =
 				isLibrary && !isShared
 					? rspfileArgv(
@@ -526,48 +500,27 @@ function ccTask(spec, isLibrary) {
 								`cc-${actionKind}`,
 								rspPath,
 								content,
-								`${linkCommand({ outPath, isCxx: needsCxx, isShared, bundled, rspPath }).join(" ")}${copyCmd}`,
+								`${linkCommand({
+									outPath,
+									isCxx: needsCxx,
+									isShared,
+									bundled: product?.bundled || false,
+									rspPath,
+								}).join(" ")}`,
 							);
 						})();
 			const result = await exec.action({
 				argv: finalArgv,
 				env,
-				tools: [input.cp, ...extraTools],
+				tools: extraTools,
 				inputs: compileResults.map((r) => r.outputs.object),
-				outputs: {
-					artifact: bundled
-						? output.directory(bundleDir)
-						: output.file(outPath),
-				},
+				outputs: { artifact: output.file(outPath) },
 				display: `cc ${actionKind} ${outPath}`,
 			});
 			return { artifact: result.outputs.artifact };
 		},
 	});
-	// `outPath` is the executable itself either way; the artifact's own path
-	// is the bundle directory when bundled, so a caller that has to *launch*
-	// the binary (ccBinary()'s [RUN], ccTest()) needs both.
-	return { built, hdrs, exePath: outPath, bundled };
-}
-
-// The [RUN] root for a binary. It runs nothing itself: it resolves the built
-// artifact into the `{digest, path}` description //rules/workflows/run stages
-// and launches (see its own docstring for the accepted shapes). `cache: false`
-// mirrors //rules/python/source's own run descriptor — the described program
-// is impure by definition and re-describing it is cheap.
-//
-// `exePath` rather than the artifact's own path: a bundled binary's artifact
-// *is* the product directory, and execing a directory is not a program.
-function runDescriptor(spec, executable, exePath, bundled) {
-	return task({
-		display: `cc run ${spec.path}`,
-		cache: false,
-		inputs: { artifact: executable, exePath, bundled },
-		outputs: { run: output.value() },
-		async run(_exec, input) {
-			return { run: { digest: input.artifact.digest, path: input.exePath } };
-		},
-	});
+	return { built, hdrs, product };
 }
 
 // ccTest()'s [TEST] root: run the built executable, and report its exit code
@@ -685,13 +638,13 @@ export function ccLibrary(opts = {}) {
  */
 export function ccBinary(opts = {}) {
 	const spec = crateSpec(opts);
-	const { built, exePath, bundled } = ccTask(spec, false);
-	const executable = built.outputs.artifact;
+	const { built, product: plan } = ccTask(spec, false);
+	const product = plan.finish(built.outputs.artifact);
 	return Object.freeze({
 		spec,
-		[BUILD]: executable,
-		[PACKAGE]: executable,
-		[RUN]: runDescriptor(spec, executable, exePath, bundled).outputs.run,
+		[BUILD]: product.artifact,
+		[PACKAGE]: product.artifact,
+		[RUN]: product.run,
 	});
 }
 
@@ -712,12 +665,17 @@ export function ccBinary(opts = {}) {
  */
 export function ccTest(opts = {}) {
 	const spec = crateSpec(opts);
-	const { built, exePath, bundled } = ccTask(spec, false);
-	const executable = built.outputs.artifact;
+	const { built, product: plan } = ccTask(spec, false);
+	const product = plan.finish(built.outputs.artifact);
 	return Object.freeze({
 		spec,
-		[BUILD]: executable,
-		[RUN]: runDescriptor(spec, executable, exePath, bundled).outputs.run,
-		[TEST]: testTask(spec, executable, exePath, bundled).outputs.units,
+		[BUILD]: product.artifact,
+		[RUN]: product.run,
+		[TEST]: testTask(
+			spec,
+			product.artifact,
+			product.executablePath,
+			product.bundled,
+		).outputs.units,
 	});
 }
