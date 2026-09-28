@@ -1,8 +1,8 @@
 # Workflow rules
 
 Workflow rules connect graph roots to Imp goals. They define the behavior of
-`build`, `fmt`, `generate`, `generate-build`, `gen-lockfiles`, `lint`,
-`package`, `publish`, `run`, `test`, and `vs`.
+`build`, `codegen`, `fmt`, `generate`, `generate-build`, `gen-lockfiles`,
+`lint`, `package`, `publish`, `run`, `test`, and `vs`.
 
 ## Public API
 
@@ -14,6 +14,7 @@ helpers are implementation APIs, not BUILD constructors.
 Important boundaries:
 
 - `build` warms the graph and task cache but does not publish ordinary files.
+- `codegen` publishes selected `codegen()` outputs under `dist/codegen/`.
 - `package` publishes graph artifacts under `dist/`.
 - `fmt`, `lint`, and `generate` publish workspace changes only at their goal
   boundary; their graph tasks remain sandboxed.

@@ -9,7 +9,7 @@ import { files } from "imp:core";
 const generatedRelativePath = "value.odin";
 const generatedPath = `rules/odin/example/generated/${generatedRelativePath}`;
 
-const generatedValue = codegen({
+export const generatedValue = codegen({
 	display: "generate the example Odin source",
 	tools: { sh: nativeTool("sh") },
 	inputs: {

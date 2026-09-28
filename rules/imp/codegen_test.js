@@ -7,12 +7,52 @@ import {
 	stampFile,
 } from "//rules/imp/codegen";
 import { BUILD } from "//rules/workflows/build";
+import { CODEGEN as CODEGEN_WORKFLOW } from "//rules/workflows/codegen";
 import { describe, expect, test } from "//rules/imp/test";
 import { nativeTool } from "//rules/imp/native-tool";
 import { nativeToolSpec } from "//rules/imp/native-tool";
 import { output, run } from "imp:core";
 
 const SH = nativeTool("sh");
+
+async function withFakeGraphRun(fn) {
+	const real = globalThis.__host_run;
+	globalThis.__host_run = async (payload) => {
+		const names = payload.__graphOutputNames
+			? JSON.parse(payload.__graphOutputNames)
+			: {};
+		const graphOutputs = {};
+		for (const [name, path] of Object.entries(names)) {
+			const digest = `digest:${path}`;
+			graphOutputs[name] = {
+				__imp_graph_artifact: true,
+				__imp_graph_binding: true,
+				type: "artifact",
+				kind: "file",
+				digest,
+				path,
+				fingerprint: `artifact:file:${digest}`,
+				inputs: [{ kind: "digest", digest }],
+			};
+		}
+		return { stdout: "", stderr: "", exitCode: 0, graphOutputs };
+	};
+	try {
+		return await fn();
+	} finally {
+		globalThis.__host_run = real;
+	}
+}
+
+async function resolve(handle) {
+	const results = await globalThis.__imp_execute_graph_handles(
+		JSON.stringify([
+			{ address: "//rules/imp:codegen", handleId: handle.__graph_id },
+		]),
+		JSON.stringify({}),
+	);
+	return results[0].result;
+}
 
 function shCodegen(outputPaths, script = "true") {
 	return codegen({
@@ -30,8 +70,20 @@ describe("codegen", () => {
 		expect(generated.files["b/nested/two.txt"].__imp_graph_handle).toBe(true);
 		expect(generated[CODEGEN]).toBe(true);
 		expect(generated[BUILD].__imp_graph_handle).toBe(true);
+		expect(generated[CODEGEN_WORKFLOW].__imp_graph_handle).toBe(true);
 		expect(Object.isFrozen(generated)).toBe(true);
 		expect(Object.isFrozen(generated.files)).toBe(true);
+	});
+
+	test("the exported codegen workflow resolves its declared artifacts", async () => {
+		const generated = shCodegen(["a/one.txt", "b/two.txt"]);
+		await withFakeGraphRun(async () => {
+			const result = await resolve(generated[CODEGEN_WORKFLOW]);
+			expect(result.paths).toEqual(["a/one.txt", "b/two.txt"]);
+			expect(result.files["a/one.txt"].digest).toBe("digest:a/one.txt");
+			expect(result.files["a/one.txt"].path).toBe("a/one.txt");
+			expect(result.files["b/two.txt"].digest).toBe("digest:b/two.txt");
+		});
 	});
 
 	test("names the action after its outputs when no display is given", async () => {

@@ -1,9 +1,9 @@
 The imp rules are the language-neutral layer the other rule namespaces are
 built on. They declare tools, acquire and read back toolchains, generate files
 into the graph or into the workspace, define build-mode profiles, and run the
-rule library's own JavaScript tests. Nothing here is specific to a language, and
-the namespace registers no product, so it adds no `imp <goal>` of its own — a
-language rule imports these helpers and supplies the goals.
+rule library's own JavaScript tests. Nothing here is specific to a language.
+Importing `//rules/imp/codegen` also registers `imp codegen` for exported
+`codegen()` results.
 
 | Module | What it gives you |
 | --- | --- |
@@ -74,7 +74,7 @@ difference is the whole choice:
 
 | Surface | Where the output goes | Reach for it when |
 | --- | --- | --- |
-| `codegen()` (`//rules/imp/codegen`) | the graph | a package consumes the generated sources; nothing lands on disk |
+| `codegen()` (`//rules/imp/codegen`) | the graph, or `dist/codegen/` when selected with `imp codegen` | a package consumes generated sources, or you need to inspect an exported generator's outputs |
 | `generatedFiles()` (`//rules/imp/generate`) | the workspace | the file is committed and CI checks it for drift |
 | `stampFile()` (`//rules/imp/codegen`) | the graph | the content is fixed text, not the output of a program |
 
@@ -128,6 +128,10 @@ A caller can rely on these properties:
 - **`[BUILD]` is a bare completion handle.** `imp build` on the target runs the
   generator and warms the cache. It writes nothing into the workspace; that is
   `imp generate`'s job, and a different declaration.
+- **Export the result to select it.** Write `export const bindings = codegen(...)`
+  to make `imp codegen //package:bindings` publish its files under
+  `dist/codegen/` at their declared paths. A result used only in
+  `generatedSrcs` is not selected through its consumer.
 
 `codegen()` rejects an empty or missing `outputPaths`, an `argv` that is not a
 function, a repeated output path, the reserved input name `outputPaths`, and a

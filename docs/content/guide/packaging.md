@@ -24,6 +24,37 @@ target's rule guide to find the exact output shape. Package output
 is separate from the graph and cache: changing or deleting `dist/` does not
 change the cached graph result.
 
+## Export graph-generated files
+
+Use `imp codegen` to inspect outputs from selected `codegen()` declarations.
+The declaration must be exported from its `BUILD.js` file:
+
+**Illustrative example**
+
+```js
+import { codegen } from "//rules/imp/codegen";
+
+export const bindings = codegen({
+    outputPaths: ["app/generated/bindings.odin"],
+    // Declare the generator's tools, inputs, and argv.
+});
+```
+
+From the workspace root, select that exported value:
+
+**Illustrative example**
+
+```sh
+imp codegen //app:bindings
+```
+
+Imp writes the output to `dist/codegen/app/generated/bindings.odin`. This
+workflow leaves `codegen()` outputs in the graph for package consumers and
+publishes a copy under `dist/codegen/` when selected. Use `imp generate` for
+files that belong in the workspace and must stay up to date with a drift check.
+Use `imp package` for a target's package result. `imp codegen` does not remove
+files from `dist/codegen/` that are not part of the current selection.
+
 ## Build an OCI image
 
 The OCI rules build images without requiring a Docker daemon. Use

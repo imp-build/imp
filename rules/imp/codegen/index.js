@@ -28,6 +28,7 @@
 // because it produces a graph artifact, like `codegen()`.
 import { output, task } from "imp:core";
 import { BUILD } from "//rules/workflows/build";
+import { CODEGEN as CODEGEN_WORKFLOW } from "//rules/workflows/codegen";
 import { planGeneratedOutputs } from "//rules/imp/generate";
 
 /**
@@ -126,6 +127,26 @@ export function codegen({
 	const files = Object.fromEntries(
 		outputPaths.map((path, index) => [path, generated.outputs[slots[index]]]),
 	);
+	const codegenResult = task({
+		display: `collect codegen outputs ${outputPaths.join(" ")}`,
+		inputs: Object.fromEntries(
+			outputPaths.map((_, index) => [
+				`file${index}`,
+				generated.outputs[slots[index]],
+			]),
+		),
+		outputs: { result: output.value() },
+		run(_exec, resolved) {
+			return {
+				result: {
+					paths: [...outputPaths],
+					files: Object.fromEntries(
+						outputPaths.map((path, index) => [path, resolved[`file${index}`]]),
+					),
+				},
+			};
+		},
+	});
 	return Object.freeze({
 		paths: Object.freeze([...outputPaths]),
 		files: Object.freeze(files),
@@ -133,6 +154,9 @@ export function codegen({
 		// A bare completion handle: `imp build` on this target runs the
 		// generator and warms the cache, and writes nothing to the workspace.
 		[BUILD]: generated,
+		// Exporting this value makes its files directly selectable with
+		// `imp codegen`; source consumers can keep using the same value.
+		[CODEGEN_WORKFLOW]: codegenResult.outputs.result,
 	});
 }
 
