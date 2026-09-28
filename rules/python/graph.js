@@ -1,20 +1,16 @@
 import { BUILD } from "//rules/workflows/build";
 import { FMT } from "//rules/workflows/fmt";
-import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 import { LINT } from "//rules/workflows/lint";
 import { PACKAGE } from "//rules/workflows/package";
 import { RUN } from "//rules/workflows/run";
 import { TEST } from "//rules/workflows/test";
-import {
-	files,
-	output,
-	packagePath,
-	platformInfo,
-	semantic,
-	task,
-} from "imp:core";
+import { files, output, packagePath, platformInfo, task } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
-import { pythonProjectLock } from "//rules/python/lock";
+import {
+	assertPythonProject,
+	inferPythonProject,
+	pythonWorkspaceSources,
+} from "//rules/python/project";
 import {
 	defaultPexToolchain,
 	defaultPexToolchainVersion,
@@ -28,7 +24,6 @@ import {
 	uvTool,
 } from "//rules/python/uv_toolchain";
 
-export const PYTHON_PROJECT_SOURCE_INCLUDES = ["pyproject.toml", "uv.lock"];
 export const PYTHON_SOURCE_INCLUDES = ["*.py"];
 
 function sourcePatterns(value, api) {
@@ -54,41 +49,10 @@ export function registerPythonTestHook(hook) {
 	if (!testHooks.includes(hook)) testHooks.push(hook);
 }
 
-function workspacePath(base, path) {
-	if (typeof path !== "string") throw new Error("python path must be a string");
-	const parts = [...base.split("/"), ...path.split("/")].filter(
-		(part) => part && part !== ".",
-	);
-	if (parts.includes(".."))
-		throw new Error(`python paths must stay within the workspace: ${path}`);
-	return parts.join("/") || ".";
-}
-
-function resolveSpec({ src, resolve, base }) {
-	if (resolve && resolve.__python_resolve !== true)
-		throw new Error("Python targets expect resolve: pythonResolve(...)");
-	if (src !== undefined && resolve)
-		throw new Error("Python targets accept either src or resolve, not both");
-	return (
-		resolve ||
-		Object.freeze({
-			__python_resolve: true,
-			path: workspacePath(base, src ?? "."),
-			flavors: { default: {} },
-		})
-	);
-}
-
-function resolveArgs(resolve, mode) {
-	const flavors = resolve.flavors;
-	const name =
-		Object.keys(flavors).length === 1 ? "default" : mode || "default";
-	const flavor = flavors[name];
-	if (!flavor)
-		throw new Error(
-			`python resolve at '${resolve.path}' does not define flavor '${name}' (available: ${Object.keys(flavors).join(", ")})`,
-		);
-	return flavor.extra ? ["--extra", flavor.extra] : [];
+function projectSpec({ project, base, api }) {
+	return project
+		? assertPythonProject(project, api)
+		: inferPythonProject(base, api);
 }
 
 // uv places the venv's Python interpreter at .venv/bin/python on
@@ -110,11 +74,11 @@ function venvPythonRelPath() {
 // directory and gives it to -D.
 const PEX_SOURCES_DIR = ".imp-pex-sources";
 
-function projectRelativePath(root, path) {
-	if (root === ".") return path;
-	if (!path.startsWith(`${root}/`))
-		throw new Error(`python source ${path} is not below ${root}`);
-	return path.slice(root.length + 1);
+function projectRelativePath(project, path) {
+	if (project === ".") return path;
+	if (!path.startsWith(`${project}/`))
+		throw new Error(`python source ${path} is not below ${project}`);
+	return path.slice(project.length + 1);
 }
 
 function appBuild(spec) {
@@ -122,28 +86,26 @@ function appBuild(spec) {
 	const cp = nativeTool("cp");
 	const mkdir = nativeTool("mkdir");
 	const dirname = nativeTool("dirname");
-	const sources = files({
-		root: spec.resolve.path,
-		include: [...PYTHON_PROJECT_SOURCE_INCLUDES, ...spec.sources],
-	});
+	const sources = files({ root: spec.project.path, include: spec.sources });
 	const pythonSources = files({
-		root: spec.resolve.path,
+		root: spec.project.path,
 		include: spec.sources,
 	});
+	const workspaceSources = pythonWorkspaceSources(spec.project.workspace);
 	const build = task({
-		display: `python-app build ${spec.resolve.path}`,
+		display: `python-app build ${spec.project.path}`,
 		inputs: {
 			sources,
 			pythonSources,
+			workspaceSources,
 			uv: spec.uv,
 			pex: spec.pex,
 			shell,
 			cp,
 			mkdir,
 			dirname,
-			resolve: spec.resolve,
+			project: spec.project,
 			pythonVersion: spec.pythonVersion,
-			mode: semantic.mode("python"),
 			entryPoint: spec.entryPoint ?? null,
 			extraPexArgs: spec.extraPexArgs,
 			deps: spec.deps,
@@ -151,30 +113,29 @@ function appBuild(spec) {
 		outputs: { artifact: output.artifact() },
 		async run(exec, inputs) {
 			for (const dep of inputs.deps) exec.path(dep);
-			const syncArgs = resolveArgs(inputs.resolve, inputs.mode);
 			const outputPath = ".imp-out/app.pex";
 			const sourcePaths = exec
 				.paths(inputs.pythonSources)
-				.map((path) => projectRelativePath(inputs.resolve.path, path));
+				.map((path) => projectRelativePath(inputs.project.path, path));
 			const result = await exec.action({
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
-					'src=$1; uv=$2; pex=$3; out=$4; sync=$5; entry=$6; pexargs=$7; version=$8; venvpy=$9; stage=${10}; shift 10; "$uv" sync --project "$src" --locked --no-dev --no-progress --managed-python --python "$version" $sync && mkdir -p "$stage" && for path in "$@"; do mkdir -p "$stage/$(dirname -- "$path")" && cp "$src/$path" "$stage/$path" || exit 1; done && "$src/$venvpy" "$pex" --venv-repository="$src/.venv" --no-transitive --pre -o "$out" ${entry:+-e "$entry"} -D "$stage" $pexargs',
+					'project=$1; workspace=$2; uv=$3; pex=$4; out=$5; version=$6; entry=$7; pexargs=$8; venvpy=$9; stage=${10}; shift 10; "$uv" sync --project "$workspace" --all-packages --locked --no-dev --no-progress --managed-python --python "$version" && mkdir -p "$stage" && for path in "$@"; do mkdir -p "$stage/$(dirname -- "$path")" && cp "$project/$path" "$stage/$path" || exit 1; done && "$workspace/$venvpy" "$pex" --venv-repository="$workspace/.venv" --no-transitive --pre -o "$out" ${entry:+-e "$entry"} -D "$stage" $pexargs',
 					"python-app-build",
-					inputs.resolve.path,
+					inputs.project.path,
+					inputs.project.workspace.path,
 					exec.tool(inputs.uv, "uv"),
 					exec.tool(inputs.pex, "pex"),
 					outputPath,
-					syncArgs.join(" "),
+					inputs.pythonVersion,
 					inputs.entryPoint || "",
 					inputs.extraPexArgs.join(" "),
-					inputs.pythonVersion,
 					venvPythonRelPath(),
 					PEX_SOURCES_DIR,
 					...sourcePaths,
 				],
-				inputs: [inputs.sources],
+				inputs: [inputs.workspaceSources, inputs.sources],
 				tools: [inputs.shell, inputs.cp, inputs.mkdir, inputs.dirname],
 				outputs: { artifact: output.file(outputPath) },
 			});
@@ -188,7 +149,7 @@ function appBuild(spec) {
 	// PATH entry inside whatever sandbox graphRunGoal spawns), the same bridge
 	// rules/rust/kache's kacheTool() uses.
 	const run = task({
-		display: `python run ${spec.resolve.path}`,
+		display: `python run ${spec.project.path}`,
 		inputs: {
 			app: build.outputs.artifact,
 			uv: spec.uv,
@@ -235,40 +196,37 @@ function pytestFilesByOutcome(stdout) {
 
 function testRoot(spec) {
 	const shell = nativeTool("sh");
-	const sources = files({
-		root: spec.resolve.path,
-		include: [...PYTHON_PROJECT_SOURCE_INCLUDES, ...spec.sources],
-	});
+	const sources = files({ root: spec.project.path, include: spec.sources });
+	const workspaceSources = pythonWorkspaceSources(spec.project.workspace);
 	return task({
-		display: `python test ${spec.resolve.path}`,
+		display: `python test ${spec.project.path}`,
 		inputs: {
 			sources,
+			workspaceSources,
 			uv: spec.uv,
 			shell,
-			resolve: spec.resolve,
+			project: spec.project,
 			pythonVersion: spec.pythonVersion,
-			mode: semantic.mode("python"),
 			testArgs: spec.testArgs,
 			deps: spec.deps,
 		},
 		outputs: { units: output.value() },
 		async run(exec, inputs) {
 			for (const dep of inputs.deps) exec.path(dep);
-			const syncArgs = resolveArgs(inputs.resolve, inputs.mode);
 			const result = await exec.action({
 				argv: [
 					exec.tool(inputs.shell, "sh"),
 					"-c",
-					'src=$1; uv=$2; sync=$3; testargs=$4; version=$5; venvpy=$6; "$uv" sync --project "$src" --locked --no-progress --managed-python --python "$version" $sync && "$src/$venvpy" -m pytest "$src" -rA $testargs',
+					'project=$1; workspace=$2; uv=$3; testargs=$4; version=$5; venvpy=$6; "$uv" sync --project "$workspace" --all-packages --locked --no-progress --managed-python --python "$version" && "$workspace/$venvpy" -m pytest "$project" -rA $testargs',
 					"python-test",
-					inputs.resolve.path,
+					inputs.project.path,
+					inputs.project.workspace.path,
 					exec.tool(inputs.uv, "uv"),
-					syncArgs.join(" "),
 					inputs.testArgs.join(" "),
 					inputs.pythonVersion,
 					venvPythonRelPath(),
 				],
-				inputs: [inputs.sources],
+				inputs: [inputs.workspaceSources, inputs.sources],
 				tools: [inputs.shell],
 				allowFailure: true,
 			});
@@ -287,7 +245,7 @@ function testRoot(spec) {
 							? []
 							: [
 									{
-										name: inputs.resolve.path,
+										name: inputs.project.path,
 										ok: false,
 										output: combinedOutput,
 									},
@@ -327,33 +285,31 @@ function pythonVersionOrDefault(value) {
  * Declare a Python application and its PEX build and run roots.
  *
  * @category target
- * @param {object} opts Application source, resolve, toolchain, and dependency options.
- * @param {string} [opts.src] Application source directory.
+ * @param {object} opts Project, toolchain, and dependency options.
  * @param {string[]} [opts.sources=["*.py"]] Source patterns relative to the project directory.
  * @param {string} [opts.entryPoint] Application entry point.
  * @param {string} [opts.uvVersion] uv version override.
  * @param {string} [opts.pexVersion] PEX version override.
  * @param {string} [opts.pythonVersion] CPython version override.
  * @param {string[]} [opts.extraPexArgs=[]] Extra PEX arguments.
- * @param {object} [opts.resolve] Locked Python dependency resolve.
+ * @param {object} [opts.project] Project handle. Inferred from the target path when omitted.
  * @param {object[]} [opts.deps=[]] Extra native tools.
  * @param {string} [opts.base=packagePath()] Workspace-relative base directory.
  * @returns {object} Frozen build, package, run, and source handles.
  */
 export function pythonApp({
-	src,
 	sources: sourceGlobs = PYTHON_SOURCE_INCLUDES,
 	entryPoint,
 	uvVersion,
 	pexVersion,
 	pythonVersion,
 	extraPexArgs = [],
-	resolve,
+	project,
 	deps = [],
 	base = packagePath(),
 } = {}) {
 	const spec = {
-		resolve: resolveSpec({ src, resolve, base }),
+		project: projectSpec({ project, base, api: "pythonApp" }),
 		sources: sourcePatterns(sourceGlobs, "pythonApp"),
 		entryPoint,
 		extraPexArgs: [...extraPexArgs],
@@ -380,16 +336,10 @@ export function pythonApp({
 		),
 	};
 	const { build, run, sources, pythonSources } = appBuild(spec);
-	const lockfiles = pythonProjectLock({
-		project: spec.resolve.path,
-		uv: spec.uv,
-		pythonVersion: spec.pythonVersion,
-	});
 	const value = {
 		sources,
 		pythonSources,
-		root: spec.resolve.path,
-		[GEN_LOCKFILES]: lockfiles,
+		root: spec.project.path,
 		[BUILD]: build.outputs.artifact,
 		[PACKAGE]: build.outputs.artifact,
 		[RUN]: run.outputs.description,
@@ -406,32 +356,30 @@ export function pythonApp({
 }
 
 /**
- * Declare a Python test suite backed by the selected locked resolve.
+ * Declare a Python test suite backed by its project's uv workspace.
  *
  * @category target
- * @param {object} opts Test source, resolve, toolchain, and dependency options.
- * @param {string} [opts.src] Test source directory.
+ * @param {object} opts Project, toolchain, and dependency options.
  * @param {string[]} [opts.sources=["*.py"]] Source patterns relative to the project directory.
  * @param {string[]} [opts.testArgs=[]] Arguments passed to pytest.
  * @param {string} [opts.uvVersion] uv version override.
  * @param {string} [opts.pythonVersion] CPython version override.
- * @param {object} [opts.resolve] Locked Python dependency resolve.
+ * @param {object} [opts.project] Project handle. Inferred from the target path when omitted.
  * @param {object[]} [opts.deps=[]] Extra native tools.
  * @param {string} [opts.base=packagePath()] Workspace-relative base directory.
  * @returns {object} Frozen test root.
  */
 export function pythonTest({
-	src,
 	sources: sourceGlobs = PYTHON_SOURCE_INCLUDES,
 	testArgs = [],
 	uvVersion,
 	pythonVersion,
-	resolve,
+	project,
 	deps = [],
 	base = packagePath(),
 } = {}) {
 	const spec = {
-		resolve: resolveSpec({ src, resolve, base }),
+		project: projectSpec({ project, base, api: "pythonTest" }),
 		sources: sourcePatterns(sourceGlobs, "pythonTest"),
 		testArgs: [...testArgs],
 		deps: [...deps],
@@ -445,11 +393,11 @@ export function pythonTest({
 		),
 	};
 	const pythonSources = files({
-		root: spec.resolve.path,
+		root: spec.project.path,
 		include: spec.sources,
 	});
 	const value = {
-		root: spec.resolve.path,
+		root: spec.project.path,
 		[TEST]: testRoot(spec).outputs.units,
 	};
 	for (const hook of testHooks)

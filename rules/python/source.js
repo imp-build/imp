@@ -12,7 +12,6 @@
 // tree to make a script runnable.
 
 import { RUN } from "//rules/workflows/run";
-import { GEN_LOCKFILES } from "//rules/workflows/lockfiles";
 import {
 	digestOf,
 	expand,
@@ -24,29 +23,26 @@ import {
 	output,
 	paths,
 	registerBuildRule,
-	semantic,
 	task,
 } from "imp:core";
 import {
-	defaultUvToolchainVersion,
 	resolveUvToolchainVersion,
 	uvCacheDirEnv,
 	uvCacheDirTool,
-	uvGraphTool,
 	uvTool,
 } from "//rules/python/uv_toolchain";
-import { pythonResolve, pythonResolveSyncArgs } from "//rules/python/resolve";
-import { defaultPythonRuntimeVersion } from "//rules/python/runtime";
-import { pythonProjectLock } from "//rules/python/lock";
+import {
+	assertPythonProject,
+	findPythonProject,
+	pythonWorkspaceSources,
+} from "//rules/python/project";
 
 import { nativeToolSpec } from "//rules/imp/native-tool";
 
 let default_python_toolchain = null;
-let default_python_project = null;
 
 export function __resetPythonSourceStateForTest() {
 	default_python_toolchain = null;
-	default_python_project = null;
 }
 
 function normalize_workspace_path(path) {
@@ -94,8 +90,8 @@ function require_default_uv_version() {
  *
  * The interpreter is provisioned by uv into its existing shared cache; this
  * label intentionally models the selected version, not a second downloader.
- * A handleless label, like pythonResolve() — addressable, referenced by
- * `pythonSources()`-discovered children via `.data`, no goal handlers.
+ * A handleless label. The selected runtime version is carried by
+ * `pythonSources()`-discovered children via `.data`.
  *
  * @category configuration
  * @param {string} version CPython version label.
@@ -123,66 +119,24 @@ export function defaultPythonToolchain() {
 // true }) when it needs another interpreter version.
 pythonToolchain("3.13.0", { default: true });
 
-/**
- * Declare the optional workspace-default locked uv project used to supply
- * third-party dependencies for Python source runs.
- *
- * @category configuration
- * @param {object} [opts]
- * @param {string} [opts.path="."] Workspace-relative project directory.
- * @param {object} [opts.flavors] Resolve flavor selections.
- * @param {boolean} [opts.default=false] Make this the default project.
- * @returns {object} Locked Python resolve handle.
- */
-export function pythonProject({
-	path = ".",
-	flavors,
-	default: isDefault = false,
-} = {}) {
-	const handle = pythonResolve({
-		path: normalize_workspace_path(path),
-		flavors,
-	});
-	const uvVersion = resolveUvToolchainVersion() || defaultUvToolchainVersion();
-	const lockfiles = pythonProjectLock({
-		project: handle.path,
-		uv: uvGraphTool(uvVersion),
-		pythonVersion: defaultPythonRuntimeVersion(),
-	});
-	if (isDefault) {
-		if (default_python_project) {
-			throw new Error("only one default pythonProject() may be declared");
-		}
-		default_python_project = handle;
-	}
-	return Object.freeze({ ...handle, [GEN_LOCKFILES]: lockfiles });
-}
-
-export function defaultPythonProject() {
-	return default_python_project;
-}
-
-const PROJECT_SOURCES = ["pyproject.toml", "uv.lock"];
-
 // One [RUN] root per discovered file. It runs nothing itself: it resolves the
 // staged digest and assembles the program description //rules/workflows/run
 // executes. `cache: false` keeps it out of the action cache — the described
 // program is impure by definition, and re-describing it is cheap.
 function sourceRunDescriptor(spec, file) {
-	const projectSet = spec.resolve
-		? files({ root: spec.resolve.path, include: PROJECT_SOURCES })
+	const workspaceSet = spec.project
+		? pythonWorkspaceSources(spec.project.workspace)
 		: null;
 	return task({
 		display: `python run ${file}`,
 		cache: false,
 		inputs: {
 			sources: files({ root: spec.root, include: spec.sources }),
-			...(projectSet ? { project: projectSet } : {}),
+			...(workspaceSet ? { workspace: workspaceSet } : {}),
 			file,
 			root: spec.root,
 			pythonVersion: spec.pythonVersion,
 			uvVersion: spec.uvVersion,
-			mode: semantic.mode("python"),
 		},
 		outputs: { spec: output.value() },
 		async run(_exec, input) {
@@ -190,14 +144,13 @@ function sourceRunDescriptor(spec, file) {
 			// exposes what _eval_fileset computed), so the input sets collapse
 			// into the single digest the runner stages.
 			const digests = [digestOf(input.sources.fileset)];
-			if (input.project) digests.push(digestOf(input.project.fileset));
+			if (input.workspace) digests.push(digestOf(input.workspace.fileset));
 			const described = await pythonSourceRunSpec({
 				file: input.file,
 				root: input.root,
-				resolve: spec.resolve,
+				project: spec.project,
 				pythonVersion: input.pythonVersion,
 				uvVersion: input.uvVersion,
-				mode: input.mode,
 				deps: spec.deps,
 			});
 			return {
@@ -218,9 +171,7 @@ function sourceRunDescriptor(spec, file) {
  * @param {object} opts
  * @param {string} opts.root Workspace-relative directory to scan (no recursion).
  * @param {string[]} [opts.sources=["*.py"]] Direct glob patterns matched under root.
- * @param {object} [opts.resolve] Locked Python resolve supplying third-party dependencies.
- * @param {object} [opts.project] Deprecated alias for `resolve`, kept for the
- *   previous single-default-project source-run API; exclusive with `resolve`.
+ * @param {object} [opts.project] Project supplying third-party dependencies.
  * @param {Array} [opts.deps=[]] Extra tool providers made available on PATH
  *   inside each source's run: nativeTool() specifications.
  * @returns {object} An exportable object whose `[RUN]` root expands to one
@@ -231,7 +182,6 @@ export function pythonSources({
 	root,
 	sources = ["*.py"],
 	project,
-	resolve,
 	deps = [],
 } = {}) {
 	if (typeof root !== "string" || root === "") {
@@ -248,15 +198,12 @@ export function pythonSources({
 	) {
 		throw new Error("pythonSources source patterns must be direct (no '**')");
 	}
-	if (project && resolve) {
-		throw new Error(
-			"pythonSources accepts either project or resolve, not both",
-		);
-	}
 	const spec = {
 		root: normalize_workspace_path(root),
 		sources: [...sources],
-		resolve: resolve || project || default_python_project,
+		project: project
+			? assertPythonProject(project, "pythonSources")
+			: findPythonProject(normalize_workspace_path(root)),
 		pythonVersion: require_default_python_toolchain().attrs.version,
 		uvVersion: require_default_uv_version(),
 		deps: [...deps],
@@ -296,24 +243,21 @@ export function pythonSources({
  * @returns {Promise<{argv: string[], env: string[], tools: object[], display: string}>}
  */
 export async function pythonSourceRunSpec(
-	{ file, root, resolve, pythonVersion, uvVersion, mode, deps = [] },
+	{ file, root, project, pythonVersion, uvVersion, deps = [] },
 	resolveUvTool = uvTool,
 ) {
-	const project = resolve ? resolve.path : "";
-	const syncArgs = pythonResolveSyncArgs(resolve, mode)
-		.map((value) => `'${value.replaceAll("'", `'"'"'`)}'`)
-		.join(" ");
-	const venv = project ? `${project}/.venv` : "";
+	const workspace = project ? project.workspace.path : "";
+	const venv = workspace ? `${workspace}/.venv` : "";
 	const uvToolSpec = await resolveUvTool(uvVersion);
 	const uvCacheToolSpec = uvCacheDirTool();
 	const depToolSpecs = await group(deps.map(nativeToolSpec));
 	const envExports = sandboxRootEnvExports(uvCacheDirEnv());
 	const script =
-		`file=$1; root=$2; project=$3; venv=$4; version=$5; shift 5; ` +
+		`file=$1; root=$2; workspace=$3; venv=$4; version=$5; shift 5; ` +
 		`${envExports.join(" && ")} && ` +
 		'export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" && ' +
-		'if [ -n "$project" ]; then ' +
-		`uv sync --project "$project" --locked --no-progress --no-install-project --managed-python --python "$version"${syncArgs ? ` ${syncArgs}` : ""} && ` +
+		'if [ -n "$workspace" ]; then ' +
+		`uv sync --project "$workspace" --all-packages --locked --no-progress --no-install-workspace --managed-python --python "$version" && ` +
 		'"$venv/bin/python" "$file" "$@"; ' +
 		'else uv run --no-project --managed-python --python "$version" -- "$file" "$@"; fi';
 
@@ -325,7 +269,7 @@ export async function pythonSourceRunSpec(
 			"python-source-run",
 			file,
 			root,
-			project,
+			workspace,
 			venv,
 			pythonVersion,
 		],

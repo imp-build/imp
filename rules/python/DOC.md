@@ -1,16 +1,17 @@
-The Python rules model applications and pytest suites backed by a locked
-`pyproject.toml` project. Applications build into self-contained PEX files;
-tests create an isolated uv environment and run pytest. Ruff supplies the
-format and lint products for application targets.
+The Python rules model projects declared in `pyproject.toml` files and uv
+workspaces that lock several projects together. Applications build into
+self-contained PEX files; tests use the locked workspace environment and run
+pytest. Ruff supplies the format and lint products for application targets.
 
 <!-- capabilities -->
 
 ## Public API
 
-Use `pythonApp()`, `pythonTest()`, `pythonSources()`, and `pythonProject()` for
-locked Python applications, tests, source runs, and dependency resolves. The
-uv, Ruff, and PEX toolchain modules expose configuration declarations; their
-download and cache helpers are implementation details.
+Use `pythonWorkspace()` to declare a lock boundary and `pythonProject()` to
+identify one member project. Use `pythonApp()`, `pythonTest()`, and
+`pythonSources()` to declare build and run targets. The uv, Ruff, and PEX
+toolchain modules expose configuration declarations; their download and cache
+helpers are implementation details.
 
 ## Set up the workspace
 
@@ -31,9 +32,10 @@ import "//rules/workflows/test";
 
 ```
 
-Projects are built with `uv sync --locked`. Keep `uv.lock` checked in and in
-sync with `pyproject.toml`; builds and tests fail rather than resolving or
-mutating a stale lock file.
+Keep one `uv.lock` at each uv workspace root. Imp locks all projects declared
+as workspace members and syncs all member dependencies for Python targets in
+that workspace. Builds and tests use `uv sync --locked`, so they fail rather
+than resolve or mutate a stale lock file.
 
 ### Select a workspace lockfile
 
@@ -78,76 +80,52 @@ address is given one time only. Downloads stay verified: an address with no
 file, or a lockfile with no entry for the selected version and platform, makes
 the acquire fail and points at `imp goal gen-lockfiles`.
 
-### Update a project lockfile
+### Update a workspace lockfile
 
-`pythonApp()` and `pythonProject()` also expose a `gen-lockfiles` root for the
-project's own `uv.lock`. The root runs the selected uv toolchain with the
-project's pinned Python version and writes only `uv.lock` into the workspace.
+Declare a `pythonWorkspace()` at the uv workspace root. It exposes a
+`gen-lockfiles` root that runs uv with the workspace's pyproject files and
+writes only the workspace's `uv.lock`.
 
 **Warning:** This command writes the generated `uv.lock` into the workspace.
 It does not write a `.venv` or other project artifact.
 
 ```js
-import { pythonProject } from "//rules/python";
+import { pythonWorkspace } from "//rules/python";
 
-export const project = pythonProject({ path: "services/acme" });
+export const workspace = pythonWorkspace({ path: "." });
 ```
 
 From the workspace root, run:
 
 ```sh
-imp goal gen-lockfiles //:project
+imp goal gen-lockfiles //:workspace
 ```
 
-An application target can be selected instead:
-
-```sh
-imp goal gen-lockfiles //services/acme:app
-```
-
-The command follows the dependency declarations in `pyproject.toml`. To
-upgrade one package, change that package's declaration, then run the command.
+The command follows every project declared by the uv workspace. To upgrade one
+package, change that project's dependency declaration, then run the command.
 The goal does not accept a separate package-upgrade argument.
 
-## Select a dependency resolve
+## Select a project
 
-Declare a `pythonResolve()` for a locked project when applications or tests
-need optional dependency flavors. A resolve uses uv's checked-in `uv.lock` as
-the source of truth; each flavor selects one project extra at sync time.
+Each project maps to one `pyproject.toml`. A uv workspace can contain several
+projects and shares one lockfile across them. By default, targets infer the
+nearest project and its enclosing workspace from their `BUILD.js` directory.
+Pass `project:` when a target must use another project:
 
 ```js
-import { pythonResolve } from "//rules/python";
+import { pythonProject, pythonWorkspace } from "//rules/python";
 
-export const ml = pythonResolve({
+const workspace = pythonWorkspace({ path: "." });
+const ml = pythonProject({
+    workspace,
     path: "services/ml",
-    flavors: {
-        default: { extra: "cpu" },
-        cpu: { extra: "cpu" },
-        cu124: { extra: "cu124" },
-    },
 });
+export const app = pythonApp({ project: ml, entryPoint: "acme.__main__" });
+export const tests = pythonTest({ project: ml });
 ```
 
-Then pass it to targets; the resolve supplies their project path (so do not
-also set `src`):
-
-```js
-export const app = pythonApp({ resolve: ml, entryPoint: "acme.__main__" });
-export const tests = pythonTest({ resolve: ml });
-```
-
-Choose a flavor with `--axis python=cu124`. A workspace can also define a
-named `--profile` containing `python: "cu124"`. The resolve's `pyproject.toml`
-must declare the matching uv extra and use uv's explicit indexes/sources to
-bind PyTorch packages to the CPU or CUDA index. Flavors are deliberately
-extras rather than package-version syntax: uv locks the real PyTorch local
-version (for example `+cu124`) and PEX packages the resulting synced venv.
-
-```js
-// imp.workspace.js
-import { defineProfile } from "imp:core";
-defineProfile("cu124", { python: "cu124" });
-```
+Current Python workspaces use the default dependency set. Axis-selected uv
+extras are deferred.
 
 ## Declare an application and tests
 
@@ -165,9 +143,9 @@ export const tests = pythonTest({
 });
 ```
 
-Both targets default to the directory containing `BUILD.js`; set `src` to
-point at another project directory. `pythonApp` syncs the locked environment
-without development dependencies and asks PEX to package the project and its
+Both targets use the nearest project by default. Set `project` to select a
+different project. `pythonApp` syncs the full locked workspace without
+development dependencies and asks PEX to package the project and its
 installed runtime dependencies. Its `sources` are application files only;
 `pythonTest` owns test files and supplies the pytest, fmt, and lint roots.
 `entryPoint` becomes the PEX entry point, while `extraPexArgs` is available
@@ -230,31 +208,26 @@ directory to the real workspace, so files written by the script persist there.
 Nested directories need their own `pythonSources()` declaration; recursive
 `**` patterns are rejected.
 
-Sources do not require a project. They run with the pinned interpreter and
-the standard library by default. A workspace may declare one optional locked
-project to supply third-party dependencies:
+Sources do not require a project. They run with the pinned interpreter and the
+standard library when no enclosing project exists. Otherwise, they use the
+nearest project and its workspace. Pass `project:` to select another project:
 
 ```js
-import { pythonResolve } from "//rules/python";
+import { pythonProject, pythonWorkspace } from "//rules/python";
 
-export const project = pythonResolve({ path: "python" });
+const workspace = pythonWorkspace({ path: "." });
+export const project = pythonProject({ workspace, path: "python" });
 ```
 
-Pass that resolve to a source set when it needs third-party dependencies:
+Pass that project handle to a source set when it needs third-party dependencies:
 
 ```js
 export const scripts = pythonSources({
     root: "tools",
     sources: ["*.py"],
-    resolve: project,
+    project,
 });
 ```
-
-The resolve is synchronized from its checked-in `pyproject.toml` and `uv.lock`
-without becoming the source owner. `pythonProject({ default: true })` remains
-as a compatibility alias for the previous single-default-project source-run
-API. Import/dependency inference and multiple project resolutions are
-intentionally future work.
 
 ## Run goals and find outputs
 

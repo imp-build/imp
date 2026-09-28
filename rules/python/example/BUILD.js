@@ -1,7 +1,17 @@
-import { pythonApp, pythonSources, pythonTest } from "//rules/python";
+import {
+	pythonApp,
+	pythonProject,
+	pythonSources,
+	pythonTest,
+	pythonWorkspace,
+} from "//rules/python";
 import { jsSources } from "//rules/js";
 
+export const workspace = pythonWorkspace({ path: "rules/python/example" });
+const project = pythonProject({ workspace, path: "." });
+
 export const hello = pythonApp({
+	project,
 	base: "rules/python/example",
 	entryPoint: "hello.__main__",
 	sources: ["src/**/*.py"],
@@ -14,6 +24,7 @@ export const scripts = pythonSources({
 });
 
 export const hello_test = pythonTest({
+	project,
 	base: "rules/python/example",
 	sources: ["tests/**/*.py"],
 });

@@ -11,9 +11,13 @@ import {
 	test,
 	withFakeToolchainHost,
 } from "//rules/imp/test";
-import { pythonApp, pythonTest } from "//rules/python";
+import {
+	pythonApp,
+	pythonProject,
+	pythonTest,
+	pythonWorkspace,
+} from "//rules/python";
 import { pexToolchain } from "//rules/python/pex_toolchain";
-import { pythonResolve } from "//rules/python/resolve";
 import { defaultPythonRuntimeVersion } from "//rules/python/runtime";
 import { uvToolchain } from "//rules/python/uv_toolchain";
 import {
@@ -30,31 +34,34 @@ describe("Python graph declarations", () => {
 			entryPoint: "hello.__main__",
 		});
 		expect(app.root).toBe("rules/python/example");
-		for (const workflow of [BUILD, PACKAGE, RUN, FMT, LINT, GEN_LOCKFILES])
+		for (const workflow of [BUILD, PACKAGE, RUN, FMT, LINT])
 			expect(app[workflow].__imp_graph_handle).toBe(true);
 	});
 
-	test("application lock root runs uv lock and publishes only uv.lock", async () => {
+	test("workspace lock root runs uv lock and publishes only uv.lock", async () => {
 		await withFakeToolchainHost(async (host) => {
 			uvToolchain("0.11.16", { default: true, unverified: true });
 			pexToolchain("2.97.1", { default: true, unverified: true });
-			const app = pythonApp({
-				base: "rules/python/example",
-				entryPoint: "hello.__main__",
+			const workspace = pythonWorkspace({
+				path: "rules/python/testdata/workspace",
 				pythonVersion: "3.12.4",
 			});
 
-			const result = await host.resolve(app[GEN_LOCKFILES]);
-			expect(result.kind).toBe("python-project-lock");
-			expect(result.project).toBe("rules/python/example");
-			expect(result.path).toBe("rules/python/example/uv.lock");
-			expect(result.lockfile.path).toBe("rules/python/example/uv.lock");
+			const result = await host.resolve(workspace[GEN_LOCKFILES]);
+			expect(result.kind).toBe("python-workspace-lock");
+			expect(result.workspace).toBe("rules/python/testdata/workspace");
+			expect(result.path).toBe("rules/python/testdata/workspace/uv.lock");
+			expect(result.lockfile.path).toBe(
+				"rules/python/testdata/workspace/uv.lock",
+			);
 			expect(result.lockfile.digest).toBe(
-				"digest:rules/python/example/uv.lock",
+				"digest:rules/python/testdata/workspace/uv.lock",
 			);
 
 			const lockRun = host.runs.find(
-				(run) => run.display === "lock Python project rules/python/example",
+				(run) =>
+					run.display ===
+					"lock Python workspace rules/python/testdata/workspace",
 			);
 			expect(lockRun.argv[1]).toBe("-c");
 			expect(lockRun.argv[2]).toContain(
@@ -64,14 +71,17 @@ describe("Python graph declarations", () => {
 				'UV_PYTHON_INSTALL_DIR="$IMP_SANDBOX_ROOT/.imp/tools/uv-cache-dir/python-install"',
 			);
 			expect(lockRun.argv[4]).toContain("/uv/");
-			expect(lockRun.argv.slice(5)).toEqual(["rules/python/example", "3.12.4"]);
+			expect(lockRun.argv.slice(5)).toEqual([
+				"rules/python/testdata/workspace",
+				"3.12.4",
+			]);
 			expect(lockRun.tools.map((tool) => tool.cache)).toEqual([
 				"native-tools",
 				"uv-toolchains",
 				"uv-cache-dir",
 			]);
 			expect(lockRun.outputs).toEqual([
-				{ path: "rules/python/example/uv.lock", kind: "file" },
+				{ path: "rules/python/testdata/workspace/uv.lock", kind: "file" },
 			]);
 		});
 	});
@@ -91,7 +101,7 @@ describe("Python graph declarations", () => {
 				(run) => run.display === "python-app build rules/python/example",
 			);
 			expect(buildRun.argv[2]).toContain(
-				'--locked --no-dev --no-progress --managed-python --python "$version"',
+				'--all-packages --locked --no-dev --no-progress --managed-python --python "$version"',
 			);
 			expect(buildRun.argv).toContain("3.12.4");
 
@@ -106,14 +116,14 @@ describe("Python graph declarations", () => {
 			uvToolchain("0.11.16", { default: true, unverified: true });
 			pexToolchain("2.97.1", { default: true, unverified: true });
 			const app = pythonApp({
-				base: ".",
+				base: "rules/python/example",
 				entryPoint: "hello.__main__",
-				sources: ["rules/python/example/src/**/*.py"],
+				sources: ["src/**/*.py"],
 			});
 
 			await host.resolve(app[BUILD]);
 			const buildRun = host.runs.find(
-				(run) => run.display === "python-app build .",
+				(run) => run.display === "python-app build rules/python/example",
 			);
 			expect(buildRun.argv[2]).toContain('-D "$stage"');
 			expect(buildRun.argv[2]).not.toContain('-D "$src"');
@@ -121,8 +131,8 @@ describe("Python graph declarations", () => {
 			// sh, -c, the script and $0 come first, so ${10} is at index 13.
 			expect(stageIndex).toBe(13);
 			expect(buildRun.argv.slice(stageIndex + 1).sort()).toEqual([
-				"rules/python/example/src/hello/__init__.py",
-				"rules/python/example/src/hello/__main__.py",
+				"src/hello/__init__.py",
+				"src/hello/__main__.py",
 			]);
 		});
 	});
@@ -247,24 +257,24 @@ describe("Python graph declarations", () => {
 		});
 	});
 
-	test("Ruff lint stages no fixture config for a project outside the fixture", async () => {
+	test("Ruff lint does not stage configs from unrelated project fixtures", async () => {
 		await withFakeToolchainHost(async (host) => {
 			try {
 				ruffToolchain("0.15.20", { default: true, unverified: true });
 				const app = pythonApp({
-					base: "rules/python",
+					base: "rules/python/example",
 					entryPoint: "hello.__main__",
-					sources: ["example/src/**/*.py"],
+					sources: ["src/**/*.py"],
 				});
 				await host.resolve(app[LINT]);
 				const lintRun = host.runs.find(
-					(run) => run.display === "ruff lint rules/python",
+					(run) => run.display === "ruff lint rules/python/example",
 				);
 				const count = Number(lintRun.argv[6]);
 				expect(
 					lintRun.argv
 						.slice(7, 7 + count)
-						.filter((path) => path.startsWith("rules/")),
+						.filter((path) => path.includes("testdata/ruff_config")),
 				).toEqual([]);
 				expect(lintRun.argv.slice(7 + count)).toEqual([
 					"rules/python/example/src/hello/__init__.py",
@@ -276,14 +286,30 @@ describe("Python graph declarations", () => {
 		});
 	});
 
-	test("test roots carry their resolve and test options into a graph task", () => {
-		const resolve = pythonResolve({
-			path: "rules/python/example",
-			flavors: { default: {}, cpu: { extra: "cpu" } },
-		});
-		const suite = pythonTest({ resolve, testArgs: ["-q"] });
+	test("project handles supply source roots to Python test tasks", () => {
+		const workspace = pythonWorkspace({ path: "rules/python/example" });
+		const project = pythonProject({ workspace, path: "." });
+		const suite = pythonTest({ project, testArgs: ["-q"] });
 		expect(suite.root).toBe("rules/python/example");
 		expect(suite[TEST].__imp_graph_handle).toBe(true);
+	});
+
+	test("a target infers its project and locks the containing workspace", async () => {
+		await withFakeToolchainHost(async (host) => {
+			uvToolchain("0.11.16", { default: true, unverified: true });
+			const base = "rules/python/testdata/workspace/packages/app";
+			const suite = pythonTest({ base, sources: ["tests/*.py"] });
+			expect(suite.root).toBe(base);
+			await host.resolve(suite[TEST]);
+			const run = host.runs.find(
+				(item) => item.display === `python test ${base}`,
+			);
+			expect(run.argv[2]).toContain(
+				'--project "$workspace" --all-packages --locked',
+			);
+			expect(run.argv).toContain("rules/python/testdata/workspace");
+			expect(run.argv).toContain(base);
+		});
 	});
 
 	test("pins test sync to the Python version the application uses", async () => {
@@ -340,7 +366,10 @@ describe("Python graph declarations", () => {
 			);
 			host.setRunExitCode(display, 1);
 			const suite = pythonTest({
-				resolve: pythonResolve({ path: "rules/python/example" }),
+				project: pythonProject({
+					workspace: pythonWorkspace({ path: "rules/python/example" }),
+					path: ".",
+				}),
 			});
 			const units = await host.resolve(suite[TEST]);
 			expect(units.length).toBe(2);

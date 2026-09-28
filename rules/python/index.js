@@ -3,13 +3,12 @@ import { registerBuildRule } from "imp:core";
 // Keep direct source-file discovery separate until #8 can expose dynamic graph
 // roots in the selector catalog.
 export {
-	pythonProject,
 	pythonSources,
 	pythonToolchain,
-	defaultPythonProject,
 	defaultPythonToolchain,
 } from "//rules/python/source";
-export { pythonResolve, pythonResolveSyncArgs } from "//rules/python/resolve";
+export { pythonProject } from "//rules/python/project";
+export { pythonWorkspace } from "//rules/python/workspace";
 export {
 	pythonApp,
 	pythonTest,

@@ -1,12 +1,10 @@
-import { files, output, resolveGraphHandle, task } from "imp:core";
+import { output, resolveGraphHandle, task } from "imp:core";
 import { nativeTool } from "//rules/imp/native-tool";
 import {
 	uvCacheDirEnv,
 	uvCacheDirSeed,
 	uvCacheDirTool,
 } from "//rules/python/uv_toolchain";
-
-const PROJECT_LOCK_INPUTS = ["pyproject.toml", "uv.lock"];
 
 function sandboxRootEnvExports(envEntries) {
 	return envEntries.map((entry) => {
@@ -15,26 +13,26 @@ function sandboxRootEnvExports(envEntries) {
 	});
 }
 
-function projectLockPath(project) {
-	return project === "." ? "uv.lock" : `${project}/uv.lock`;
+function workspaceLockPath(workspace) {
+	return workspace === "." ? "uv.lock" : `${workspace}/uv.lock`;
 }
 
 /**
- * Declare a graph root that re-locks one Python project with uv.
+ * Declare a graph root that re-locks one uv workspace with uv.
  *
- * The task stages the project metadata and existing lock, then publishes only
- * the resulting uv.lock at the gen-lockfiles goal boundary.
+ * The task stages workspace metadata and the existing lock, then publishes
+ * only the resulting uv.lock at the gen-lockfiles goal boundary.
  */
-export function pythonProjectLock({ project, uv, pythonVersion }) {
-	const lockPath = projectLockPath(project);
+export function pythonWorkspaceLock({ workspace, sources, uv, pythonVersion }) {
+	const lockPath = workspaceLockPath(workspace);
 	return task({
-		display: `gen Python lockfile ${project}`,
+		display: `gen Python workspace lockfile ${workspace}`,
 		// uv lock reads live package indexes and writes a workspace file. Do not
 		// reuse a previous result when the operation is selected explicitly.
 		cache: false,
 		inputs: {
-			sources: files({ root: project, include: PROJECT_LOCK_INPUTS }),
-			project,
+			sources,
+			workspace,
 			shell: nativeTool("sh"),
 			uv,
 			pythonVersion,
@@ -48,20 +46,20 @@ export function pythonProjectLock({ project, uv, pythonVersion }) {
 					exec.tool(inputs.shell, "sh"),
 					"-c",
 					`${envExports.join(" && ")} && exec "$1" lock --project "$2" --no-progress --managed-python --python "$3"`,
-					"python-project-lock",
+					"python-workspace-lock",
 					exec.tool(inputs.uv, "uv"),
-					inputs.project,
+					inputs.workspace,
 					inputs.pythonVersion,
 				],
 				inputs: [inputs.sources],
 				tools: [inputs.shell, inputs.uv, uvCacheDirTool()],
 				outputs: { lockfile: output.file(lockPath) },
-				display: `lock Python project ${inputs.project}`,
+				display: `lock Python workspace ${inputs.workspace}`,
 			});
 			return {
 				result: {
-					kind: "python-project-lock",
-					project: inputs.project,
+					kind: "python-workspace-lock",
+					workspace: inputs.workspace,
 					path: lockPath,
 					lockfile: action.outputs.lockfile,
 				},
