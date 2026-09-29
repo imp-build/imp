@@ -33,3 +33,5 @@ dunce.workspace = true
 imp-logging = { path = "../imp-logging", features = ["test-support"] }
 tempfile.workspace = true
 sha2.workspace = true
+lune = { version = "0.10.5", default-features = false }
+mlua = { version = "0.11.6", features = ["luau"] }
