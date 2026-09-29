@@ -1,9 +1,17 @@
 # Luau authoring and module contract
 
-**Status: Planned.** This document defines the authoring contract for the Luau
-runtime migration. It is a maintainer design, not a claim about the current
-JavaScript runtime. Until the migration lands, the existing JavaScript modules
-remain the supported authoring interface.
+**Status: Pilot.** This document describes the Luau runtime slice available in
+the current Imp source tree. The existing JavaScript runtime remains the
+default. Select Luau by adding `imp.workspace.luau` to the workspace root. A
+workspace cannot contain both `imp.workspace.js` and `imp.workspace.luau`.
+
+The pilot loads workspace `BUILD.luau` files and installed Luau rules. It
+provides the `asset` and `resource_package` rules and runs their `build` tasks
+through Imp's hermetic executor. The pilot does not migrate the complete rule
+catalog, implement toolchain downloads, or provide all JavaScript workspace
+configuration and introspection features. Treat other APIs and behavior in
+this document as planned unless this section or a later section marks them
+available.
 
 The contract keeps Imp's graph values explicit across workspace files, BUILD
 files, and rule modules. Every imported source has one stable identity, and
@@ -28,7 +36,10 @@ installed source by copying a file to the same relative path.
 
 The root workspace BUILD module is `@workspace/BUILD`. Other workspace BUILD
 modules use `@workspace/<package>/BUILD`. The workspace configuration module
-is `@workspace/imp.workspace`.
+is `@workspace/imp.workspace`. On GitHub Actions, the loader also evaluates
+`@workspace/imp.workspace.ci` when `imp.workspace.ci.luau` exists. Both
+modules may return an `imp` table; the CI table deep-merges over the workspace
+table. Other configuration namespaces are outside the pilot.
 
 An address is a slash-separated path. It may omit `.luau`; if present, the
 resolver removes that suffix before checking these source forms in order:
@@ -126,10 +137,33 @@ particular, the contract provides no JavaScript globals, prototypes,
 runtime's supported async calls. Imp does not add npm-style bare-package
 lookup; imports use the explicit Imp and workspace addresses defined above.
 
-## Illustrative example
+## Available asset API
 
-This example shows the planned shape. It is not runnable with the current
-JavaScript runtime.
+The installed module `@imp/rules/asset` exports `asset(options)` and
+`resource_package(options)`. Both accept `srcs`, with optional `base`, `path`,
+and `exclude` fields. The module returns `sources`, `BUILD`, and (for
+`resource_package`) `files`. `srcs` contains workspace-relative glob patterns.
+`asset` accepts an empty source list at declaration time; `resource_package`
+requires at least one pattern.
+
+The `BUILD` task declares the host `sh` executable and runs `sh -c true` with
+the matched files as inputs. This verifies graph loading and hermetic action
+execution. It does not create a bundle or output file. The asset rule disables
+action caching. `native_tool("sh")` resolves an executable already on `PATH`;
+it does not download or provision a toolchain.
+
+```lua
+local asset = require("@imp/rules/asset")
+
+return {
+	assets = asset.asset({ srcs = { "*.png", "*.svg" } }),
+}
+```
+
+## Planned behavior
+
+The following example shows planned APIs. It is not runnable with the current
+pilot.
 
 ```lua
 local imp = require("@imp/core")
@@ -152,9 +186,8 @@ return {
 }
 ```
 
-The host API spellings in this example are illustrative. The migrated core
-API will define the exact Luau function names when the runtime vertical slice
-lands.
+The host API spellings in this example are illustrative. The pilot currently
+provides only the APIs needed by the asset rule and build workflow.
 
 In this example, `app` and `check` are graph roots because their values are
 opaque graph handles. `shared` is workspace-owned because the relative import

@@ -111,4 +111,37 @@ grep -q 'test: 1/1 unit(s) passed' "$work/test-out" || {
   exit 1
 }
 
-echo "smoke: ok — $bin resolved packaged builtin rules from $rules"
+# Exercise the installed Luau loader and asset rule from a separate workspace.
+# This also proves that the Luau rule files ship in the release tree.
+[ -f "$rules/asset/index.luau" ] || fail "missing $rules/asset/index.luau"
+mkdir -p "$work/luau"
+cat >"$work/luau/imp.workspace.luau" <<'EOF'
+return {}
+EOF
+cat >"$work/luau/BUILD.luau" <<'EOF'
+local asset = require("@imp/rules/asset")
+
+return {
+    assets = asset.asset({ srcs = { "*.txt" } }),
+}
+EOF
+echo "packaged Luau rule input" >"$work/luau/payload.txt"
+cd "$work/luau"
+unset IMP_RULES_DIR
+XDG_CACHE_HOME="$work/cache" "$bin" targets //:assets >"$work/luau-out" 2>"$work/luau-err" || {
+    echo "smoke: Luau target discovery failed" >&2
+    cat "$work/luau-out" >&2
+    cat "$work/luau-err" >&2
+    exit 1
+}
+grep -q '//:assets' "$work/luau-out" || fail "expected //:assets in Luau target list"
+
+unset IMP_RULES_DIR
+XDG_CACHE_HOME="$work/cache" "$bin" build //:assets >"$work/luau-build-out" 2>"$work/luau-build-err" || {
+    echo "smoke: Luau asset build failed" >&2
+    cat "$work/luau-build-out" >&2
+    cat "$work/luau-build-err" >&2
+    exit 1
+}
+
+echo "smoke: ok — $bin resolved packaged JS and Luau rules from $rules"

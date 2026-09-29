@@ -47,6 +47,7 @@ use rquickjs::{
 use serde::{Deserialize, Serialize};
 
 pub const WORKSPACE_FILE: &str = "imp.workspace.js";
+pub const WORKSPACE_LUAU_FILE: &str = "imp.workspace.luau";
 static MEMO_DEPRECATION_WARNED: AtomicBool = AtomicBool::new(false);
 /// CI-only overlay, loaded (if present) immediately after `imp.workspace.js`
 /// when running on GitHub Actions. Its config exports (e.g. `export const
@@ -56,6 +57,7 @@ static MEMO_DEPRECATION_WARNED: AtomicBool = AtomicBool::new(false);
 /// exported by `imp.workspace.js` is *not* overridden (first export wins),
 /// so give CI-only targets distinct names.
 pub const CI_WORKSPACE_FILE: &str = "imp.workspace.ci.js";
+pub const CI_WORKSPACE_LUAU_FILE: &str = "imp.workspace.ci.luau";
 pub const BUILD_FILE: &str = "BUILD.js";
 
 /// Whether we're running as a GitHub Actions job, per GitHub's own
@@ -498,7 +500,8 @@ struct PendingDependency {
 // Workspace discovery
 // ---------------------------------------------------------------------------
 
-/// Find the nearest ancestor directory that contains `imp.workspace.js`.
+/// Find the nearest ancestor directory that selects a JavaScript or Luau
+/// workspace. A workspace cannot select both runtimes at once.
 pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
     let mut directory = dunce::canonicalize(start)
         .with_context(|| format!("canonicalize workspace start {}", start.display()))?;
@@ -509,7 +512,14 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
             .to_owned();
     }
     loop {
-        if directory.join(WORKSPACE_FILE).is_file() {
+        let has_js = directory.join(WORKSPACE_FILE).is_file();
+        let has_luau = directory.join(WORKSPACE_LUAU_FILE).is_file();
+        if has_js && has_luau {
+            bail!(
+                "workspace contains both {WORKSPACE_FILE} and {WORKSPACE_LUAU_FILE}; select one runtime"
+            );
+        }
+        if has_js || has_luau {
             return Ok(directory);
         }
         if !directory.pop() {
@@ -666,6 +676,7 @@ async fn create_live_runtime(
 
     Ok(LiveWorkspace {
         workspace,
+        luau: None,
         runtime: rt,
         ctx,
         exec_root,
@@ -694,7 +705,35 @@ async fn load_workspace_with_rules_and_service(
     let root = root
         .canonicalize()
         .with_context(|| format!("canonicalize workspace root {}", root.display()))?;
-    let mut live = create_live_runtime(&root, rules_source, service).await?;
+    let js_workspace = root.join(WORKSPACE_FILE);
+    let luau_workspace = root.join(WORKSPACE_LUAU_FILE);
+    if js_workspace.is_file() && luau_workspace.is_file() {
+        bail!(
+            "workspace contains both {WORKSPACE_FILE} and {WORKSPACE_LUAU_FILE}; select one runtime"
+        );
+    }
+    let mut live = create_live_runtime(&root, rules_source.clone(), Arc::clone(&service)).await?;
+    if luau_workspace.is_file() {
+        let rules_root = rules_source
+            .root()
+            .with_context(|| "Luau workspaces require an installed rules tree or IMP_RULES_DIR")?;
+        let mut luau = crate::luau::LuauWorkspace::new_with_service(&root, rules_root, service)?;
+        live.workspace.graph.roots = luau.load_modules().await?;
+        live.workspace.workspace_config = luau.workspace_config();
+        // The shared goal lifecycle still uses graph-core run bookkeeping,
+        // even though Luau owns the pilot handles and callbacks.
+        live.ctx
+            .async_with(async |ctx| -> rquickjs::Result<()> {
+                Module::import(&ctx, "imp:core")?
+                    .into_future::<Object>()
+                    .await?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("initialize graph core for Luau: {error}"))?;
+        live.luau = Some(std::cell::RefCell::new(luau));
+        return Ok(live);
+    }
     let state = Arc::clone(&live.host_state);
     let ctx = live.ctx.clone();
 
@@ -2127,6 +2166,34 @@ pub async fn resolve_graph_with_expansion(
             None => catalog.select_catalog(selectors, context),
         }
     };
+    // The pilot's Luau graph handles live in the Luau VM, so the JavaScript
+    // graph walker cannot inspect or expand them. Resolve the statically
+    // exported pilot roots directly; the focused pilot has no expansions.
+    if live.luau.is_some() {
+        let mut roots = BTreeMap::new();
+        let mut unmatched = Vec::new();
+        for selector in selectors {
+            let selected = select_static(std::slice::from_ref(selector))?;
+            if selected.is_empty() {
+                unmatched.push(selector.clone());
+            }
+            for root in selected {
+                roots.insert(
+                    (
+                        root.address.clone(),
+                        root.workflow.clone(),
+                        root.facet.clone(),
+                    ),
+                    root.clone(),
+                );
+            }
+        }
+        return Ok(GraphResolution {
+            roots: roots.into_values().collect(),
+            walk: GraphWalk::default(),
+            unmatched,
+        });
+    }
     // Selection is per-selector rather than one call over the whole list, so
     // a selector that contributes no root stays identifiable — `select`
     // unions its results and loses that. The two fallbacks below then clear
@@ -2524,7 +2591,7 @@ fn report_cache_telemetry(
 /// the fast get-or-insert, never across the actual filesystem work.
 type NativeToolInflightMap = HashMap<String, Arc<OnceLock<Result<PathBuf, String>>>>;
 
-fn singleflight_register_native_tool(
+pub(crate) fn singleflight_register_native_tool(
     service: &Arc<dyn ExecutionService>,
     name: &str,
     resolved: &Path,
@@ -5102,7 +5169,7 @@ fn register_globals<'js>(ctx: Ctx<'js>, args: RegisterGlobalsArgs) -> rquickjs::
 #[cfg(windows)]
 const WINDOWS_BSDTAR: &str = r"C:\Windows\System32\tar.exe";
 
-fn which_executable(name: &str) -> Option<String> {
+pub(crate) fn which_executable(name: &str) -> Option<String> {
     #[cfg(windows)]
     if name == "tar" && Path::new(WINDOWS_BSDTAR).is_file() {
         return Some(WINDOWS_BSDTAR.to_owned());
@@ -6930,6 +6997,7 @@ fn goal_execution_error(context: &str, error: CaughtError<'_>) -> anyhow::Error 
     anyhow::anyhow!("{context}: {error}")
 }
 
+#[allow(clippy::await_holding_refcell_ref)] // Luau Runtime is single-threaded and must stay borrowed while its async VM call runs.
 pub async fn execute_goal_live_selection(
     live: &LiveWorkspace,
     workspace_root: &Path,
@@ -7407,153 +7475,174 @@ pub async fn execute_goal_live_selection(
 
     let goal_owned = goal.to_owned();
     let graph_goal_handler_name = live.workspace.graph_goal_handlers.get(goal).cloned();
-    let result = live
-        .ctx
-        .async_with(async move |ctx| -> Result<Option<String>> {
-            let set_js_workers: Function = ctx.globals().get("__imp_set_js_workers")?;
-            set_js_workers.call::<_, ()>((js_workers.max(1),))?;
-            let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
-            let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
+    let luau_roots: Vec<GraphRoot> = graph_roots.iter().map(|root| (*root).clone()).collect();
+    let result = if let Some(luau) = &live.luau {
+        let result = if luau_roots.is_empty() {
+            Ok(None)
+        } else {
+            let cancellation = live
+                .scheduler
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|scheduler| scheduler.cancellation_flag())
+                .context("Luau graph execution requires an installed scheduler")?;
+            luau.borrow_mut()
+                .execute_graph(goal, &luau_roots, cancellation)
+                .await
+                .map(|()| None)
+        };
+        result.map_err(|error| anyhow::anyhow!("execute goal '{goal}': {error:#}"))
+    } else {
+        live.ctx
+            .async_with(async move |ctx| -> Result<Option<String>> {
+                let set_js_workers: Function = ctx.globals().get("__imp_set_js_workers")?;
+                set_js_workers.call::<_, ()>((js_workers.max(1),))?;
+                let resolve_fn: Function = ctx.globals().get("__imp_resolve_handle")?;
+                let promise_resolve: Function = ctx.eval("(value) => Promise.resolve(value)")?;
 
-            if run_goal_callback {
-                let callback_fn_name = goal_callback_name
-                    .as_ref()
-                    .expect("run_goal_callback requires a registered callback");
-                let json_parse: Function = ctx.eval("(s) => JSON.parse(s)")?;
-                let selection_value: Value = json_parse.call((selection_json.as_str(),))?;
-                let callback_fn: Function = ctx.globals().get(callback_fn_name.as_str())?;
-                let callback_context = format!("goal '{goal_owned}' callback");
-                let result_value: Value = callback_fn
-                    .call((selection_value,))
-                    .catch(&ctx)
-                    .map_err(|e| goal_execution_error(&callback_context, e))?;
-                let promise: MaybePromise = promise_resolve
-                    .call((result_value,))
-                    .catch(&ctx)
-                    .map_err(|e| goal_execution_error(&callback_context, e))?;
-                promise
-                    .into_future::<Value>()
-                    .await
-                    .catch(&ctx)
-                    .map_err(|e| goal_execution_error(&callback_context, e))?;
-            }
-
-            let mut promises = Vec::with_capacity(calls.len());
-            for (js_id, fn_name, label) in &calls {
-                let handle: Object = resolve_fn.call((*js_id,))?;
-                let product_fn: Function = ctx.globals().get(fn_name.as_str())?;
-                let result_value: Value = product_fn
-                    .call((handle,))
-                    .catch(&ctx)
-                    .map_err(|e| goal_execution_error(label, e))?;
-                let promise: MaybePromise = promise_resolve
-                    .call((result_value,))
-                    .catch(&ctx)
-                    .map_err(|e| goal_execution_error(label, e))?;
-                promises.push((label, promise));
-            }
-
-            for (label, promise) in promises {
-                promise
-                    .into_future::<Value>()
-                    .await
-                    .catch(&ctx)
-                    .map_err(|e| goal_execution_error(label, e))?;
-            }
-
-            // Label handler dispatch runs
-            // after every target-based call above has fully completed —
-            // "target-based calls first, then label-based calls" is the
-            // simplest correct coexistence rule for a goal that selects
-            // both, chosen because it's deterministic and needs no cross-
-            // system ordering knob; see the doc comment on
-            // `execute_goal_live_selection`. A callback owns only the legacy
-            // target side of dispatch; selected label handlers remain
-            // additive and run after it completes.
-            if !label_roots.is_empty() {
-                let dispatch_label: Function =
-                    ctx.globals().get("__imp_dispatch_label_handlers")?;
-                let mut label_promises = Vec::with_capacity(label_roots.len());
-                for (label_id, address) in &label_roots {
-                    let call_label = format!("{address}#{goal_owned}");
-                    let result_value: Value = dispatch_label
-                        .call((*label_id, goal_owned.as_str(), address.as_str()))
+                if run_goal_callback {
+                    let callback_fn_name = goal_callback_name
+                        .as_ref()
+                        .expect("run_goal_callback requires a registered callback");
+                    let json_parse: Function = ctx.eval("(s) => JSON.parse(s)")?;
+                    let selection_value: Value = json_parse.call((selection_json.as_str(),))?;
+                    let callback_fn: Function = ctx.globals().get(callback_fn_name.as_str())?;
+                    let callback_context = format!("goal '{goal_owned}' callback");
+                    let result_value: Value = callback_fn
+                        .call((selection_value,))
                         .catch(&ctx)
-                        .map_err(|e| goal_execution_error(&call_label, e))?;
+                        .map_err(|e| goal_execution_error(&callback_context, e))?;
                     let promise: MaybePromise =
                         promise_resolve
                             .call((result_value,))
                             .catch(&ctx)
-                            .map_err(|e| goal_execution_error(&call_label, e))?;
-                    label_promises.push((call_label, promise));
-                }
-                for (call_label, promise) in label_promises {
+                            .map_err(|e| goal_execution_error(&callback_context, e))?;
                     promise
                         .into_future::<Value>()
                         .await
                         .catch(&ctx)
-                        .map_err(|e| goal_execution_error(&call_label, e))?;
+                        .map_err(|e| goal_execution_error(&callback_context, e))?;
                 }
-            }
-            // A graph goal handler may return a plain string report (e.g.
-            // [TEST]'s per-unit pass/fail listing) — captured here and handed
-            // back to the caller to print with `println!` once the live
-            // progress UI has been torn down, rather than through the
-            // logger, which suspends/redraws indicatif per line and fights
-            // it for the terminal on a burst of output. `undefined`/`null`/
-            // non-string returns (every other graph goal today) mean "no
-            // report", same as before this existed.
-            let mut report: Option<String> = None;
-            if !graph_handle_ids.is_empty() {
-                let execute_graph: Function = ctx.globals().get("__imp_execute_graph_handles")?;
-                let graph_context = format!("goal '{goal_owned}' graph execution");
-                let result_value: Value = execute_graph
-                    .call((graph_handles_json.as_str(), graph_invocation_json.as_str()))
-                    .catch(&ctx)
-                    .map_err(|error| goal_execution_error(&graph_context, error))?;
-                let promise: MaybePromise = promise_resolve.call((result_value,))?;
-                let graph_results: Value = promise
-                    .into_future::<Value>()
-                    .await
-                    .catch(&ctx)
-                    .map_err(|error| goal_execution_error(&graph_context, error))?;
-                if let Some(handler_name) = &graph_goal_handler_name {
-                    let handler: Function = ctx.globals().get(handler_name.as_str())?;
-                    let handler_context = format!("goal '{goal_owned}' graph handler");
-                    let handler_result: Value = handler
-                        .call((graph_results,))
+
+                let mut promises = Vec::with_capacity(calls.len());
+                for (js_id, fn_name, label) in &calls {
+                    let handle: Object = resolve_fn.call((*js_id,))?;
+                    let product_fn: Function = ctx.globals().get(fn_name.as_str())?;
+                    let result_value: Value = product_fn
+                        .call((handle,))
                         .catch(&ctx)
-                        .map_err(|e| goal_execution_error(&handler_context, e))?;
-                    let handler_promise: MaybePromise = promise_resolve.call((handler_result,))?;
-                    let resolved: Value = handler_promise
+                        .map_err(|e| goal_execution_error(label, e))?;
+                    let promise: MaybePromise = promise_resolve
+                        .call((result_value,))
+                        .catch(&ctx)
+                        .map_err(|e| goal_execution_error(label, e))?;
+                    promises.push((label, promise));
+                }
+
+                for (label, promise) in promises {
+                    promise
                         .into_future::<Value>()
                         .await
                         .catch(&ctx)
-                        .map_err(|e| goal_execution_error(&handler_context, e))?;
-                    if resolved.is_string() {
-                        report = Some(String::from_js(&ctx, resolved)?);
+                        .map_err(|e| goal_execution_error(label, e))?;
+                }
+
+                // Label handler dispatch runs
+                // after every target-based call above has fully completed —
+                // "target-based calls first, then label-based calls" is the
+                // simplest correct coexistence rule for a goal that selects
+                // both, chosen because it's deterministic and needs no cross-
+                // system ordering knob; see the doc comment on
+                // `execute_goal_live_selection`. A callback owns only the legacy
+                // target side of dispatch; selected label handlers remain
+                // additive and run after it completes.
+                if !label_roots.is_empty() {
+                    let dispatch_label: Function =
+                        ctx.globals().get("__imp_dispatch_label_handlers")?;
+                    let mut label_promises = Vec::with_capacity(label_roots.len());
+                    for (label_id, address) in &label_roots {
+                        let call_label = format!("{address}#{goal_owned}");
+                        let result_value: Value = dispatch_label
+                            .call((*label_id, goal_owned.as_str(), address.as_str()))
+                            .catch(&ctx)
+                            .map_err(|e| goal_execution_error(&call_label, e))?;
+                        let promise: MaybePromise = promise_resolve
+                            .call((result_value,))
+                            .catch(&ctx)
+                            .map_err(|e| goal_execution_error(&call_label, e))?;
+                        label_promises.push((call_label, promise));
+                    }
+                    for (call_label, promise) in label_promises {
+                        promise
+                            .into_future::<Value>()
+                            .await
+                            .catch(&ctx)
+                            .map_err(|e| goal_execution_error(&call_label, e))?;
                     }
                 }
-            }
-            if trace_inputs {
-                let assert_trace_inputs: Function =
-                    ctx.globals().get("__imp_assert_trace_inputs")?;
-                assert_trace_inputs.call::<_, ()>(())?;
-            }
-            Ok(report)
-        })
-        .await
-        // A workflow that refused on purpose already wrote the sentence the
-        // user must read. Only an engine or rule fault gets the outer context,
-        // and it stays a flat message: callers show `to_string()`, not the
-        // anyhow chain.
-        .map_err(|e| {
-            if e.downcast_ref::<UserFacingGoalError>().is_some() {
-                e
-            } else {
-                anyhow::anyhow!("execute goal '{goal}' failed: {e}")
-            }
-        });
+                // A graph goal handler may return a plain string report (e.g.
+                // [TEST]'s per-unit pass/fail listing) — captured here and handed
+                // back to the caller to print with `println!` once the live
+                // progress UI has been torn down, rather than through the
+                // logger, which suspends/redraws indicatif per line and fights
+                // it for the terminal on a burst of output. `undefined`/`null`/
+                // non-string returns (every other graph goal today) mean "no
+                // report", same as before this existed.
+                let mut report: Option<String> = None;
+                if !graph_handle_ids.is_empty() {
+                    let execute_graph: Function =
+                        ctx.globals().get("__imp_execute_graph_handles")?;
+                    let graph_context = format!("goal '{goal_owned}' graph execution");
+                    let result_value: Value = execute_graph
+                        .call((graph_handles_json.as_str(), graph_invocation_json.as_str()))
+                        .catch(&ctx)
+                        .map_err(|error| goal_execution_error(&graph_context, error))?;
+                    let promise: MaybePromise = promise_resolve.call((result_value,))?;
+                    let graph_results: Value = promise
+                        .into_future::<Value>()
+                        .await
+                        .catch(&ctx)
+                        .map_err(|error| goal_execution_error(&graph_context, error))?;
+                    if let Some(handler_name) = &graph_goal_handler_name {
+                        let handler: Function = ctx.globals().get(handler_name.as_str())?;
+                        let handler_context = format!("goal '{goal_owned}' graph handler");
+                        let handler_result: Value = handler
+                            .call((graph_results,))
+                            .catch(&ctx)
+                            .map_err(|e| goal_execution_error(&handler_context, e))?;
+                        let handler_promise: MaybePromise =
+                            promise_resolve.call((handler_result,))?;
+                        let resolved: Value = handler_promise
+                            .into_future::<Value>()
+                            .await
+                            .catch(&ctx)
+                            .map_err(|e| goal_execution_error(&handler_context, e))?;
+                        if resolved.is_string() {
+                            report = Some(String::from_js(&ctx, resolved)?);
+                        }
+                    }
+                }
+                if trace_inputs {
+                    let assert_trace_inputs: Function =
+                        ctx.globals().get("__imp_assert_trace_inputs")?;
+                    assert_trace_inputs.call::<_, ()>(())?;
+                }
+                Ok(report)
+            })
+            .await
+            // A workflow that refused on purpose already wrote the sentence the
+            // user must read. Only an engine or rule fault gets the outer context,
+            // and it stays a flat message: callers show `to_string()`, not the
+            // anyhow chain.
+            .map_err(|e| {
+                if e.downcast_ref::<UserFacingGoalError>().is_some() {
+                    e
+                } else {
+                    anyhow::anyhow!("execute goal '{goal}' failed: {e}")
+                }
+            })
+    };
     live.exec_no_cache.store(false, Ordering::SeqCst);
     live.trace_inputs.store(false, Ordering::SeqCst);
     live.exec_sandbox_retention
@@ -7564,13 +7653,15 @@ pub async fn execute_goal_live_selection(
     // Close the run and drop what it remembered. This block runs for a
     // failed goal too, because `result` is held rather than propagated, so
     // a second run in the same process always starts with nothing.
-    let _ = live
-        .ctx
-        .async_with(async |ctx| -> rquickjs::Result<()> {
-            let end: Function = ctx.globals().get("__imp_graph_end_run")?;
-            end.call(())
-        })
-        .await;
+    if live.luau.is_none() {
+        let _ = live
+            .ctx
+            .async_with(async |ctx| -> rquickjs::Result<()> {
+                let end: Function = ctx.globals().get("__imp_graph_end_run")?;
+                end.call(())
+            })
+            .await;
+    }
     result
 }
 

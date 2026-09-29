@@ -3,6 +3,7 @@
 //! This module is the public home for the embedded JavaScript runtime APIs
 //! while the larger runtime implementation is split down further.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{
@@ -23,6 +24,8 @@ use imp_scheduler::Scheduler;
 /// [`Workspace`] for planning and inspection.
 pub struct LiveWorkspace {
     pub workspace: Workspace,
+    /// Present when `imp.workspace.luau` selected the Luau pilot runtime.
+    pub luau: Option<RefCell<crate::luau::LuauWorkspace>>,
     #[allow(dead_code)]
     pub runtime: Runtime,
     pub ctx: JsContext,
@@ -96,6 +99,7 @@ impl std::fmt::Debug for LiveWorkspace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LiveWorkspace")
             .field("workspace", &self.workspace)
+            .field("luau", &self.luau.as_ref().map(|_| "LuauWorkspace { .. }"))
             .field("runtime", &"AsyncRuntime { .. }")
             .field("ctx", &"AsyncContext { .. }")
             .field("exec_root", &"Arc<Mutex<..>>")
