@@ -18,14 +18,11 @@ tokio.workspace = true
 clap.workspace = true
 indicatif.workspace = true
 anyhow.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-walkdir.workspace = true
 tempfile.workspace = true
 rquickjs.workspace = true
 signal-hook.workspace = true
 log.workspace = true
-dialoguer.workspace = true
 
 [dev-dependencies]
 imp-engine = { path = "../imp-engine", features = ["test-support"] }

@@ -171,15 +171,6 @@ impl RulesSource {
         message
     }
 
-    /// Reads a file from the rule library by path relative to its root, for
-    /// callers with no workspace to fall back on (see `imp init`).
-    pub fn read_builtin(&self, rel: &str) -> std::result::Result<String, String> {
-        let Some(root) = self.root() else {
-            return Err(self.missing_message());
-        };
-        let path = root.join(rel);
-        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))
-    }
 }
 
 /// imp's own rule library, located from a test binary.
@@ -196,7 +187,7 @@ pub fn test_rules_dir() -> Option<PathBuf> {
         .ok()?
         .ancestors()
         .map(|dir| dir.join("rules"))
-        .find(|candidate| candidate.join("init").join("index.js").is_file())
+        .find(|candidate| candidate.join("BUILD.js").is_file())
 }
 
 /// Candidate rule libraries for an executable at `exe`, in precedence order:

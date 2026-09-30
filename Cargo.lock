@@ -1437,7 +1437,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "dialoguer",
  "imp-daemon",
  "imp-engine",
  "imp-execution",
@@ -1447,12 +1446,10 @@ dependencies = [
  "indicatif",
  "log",
  "rquickjs",
- "serde",
  "serde_json",
  "signal-hook",
  "tempfile",
  "tokio",
- "walkdir",
 ]
 
 [[package]]

@@ -71,7 +71,7 @@ Do not present implementation-only exports as user API examples.
 Use the current command form. For example:
 
 ```sh
-# From the workspace root, after `imp init` created imp.workspace.js:
+# From the workspace root, after you create imp.workspace.js:
 imp build //:hello
 ```
 

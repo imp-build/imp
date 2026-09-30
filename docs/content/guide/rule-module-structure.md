@@ -83,7 +83,7 @@ and avoid adding a public entrypoint unless a real user capability emerges.
 These consumers must import public entrypoints only — a directory's `index.js`,
 or one of its facet modules as described above:
 
-- `imp.workspace.js` and generated output from `imp init`;
+- `imp.workspace.js`;
 - user `BUILD.js` files and repository examples;
 - user guides, rule `DOC.md` files, and documentation build definitions.
 
@@ -122,8 +122,8 @@ For each migration:
 
 1. Move the public module into its named directory and make `index.js` the
    public surface.
-2. Repoint workspace, `BUILD.js`, initializer, example, and documentation
-   imports to the directory path.
+2. Repoint workspace, `BUILD.js`, example, and documentation imports to the
+   directory path.
 3. Update path-sensitive loader, API-reference, and registration tests.
 4. Remove the old path, then verify the canonical import both loads and
    registers what its capability requires.

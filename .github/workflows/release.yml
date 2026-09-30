@@ -81,7 +81,6 @@ jobs:
 
       - name: Smoke test packaged tree
         run: |
-          if (-not (Test-Path "imp-x86_64-pc-windows-msvc/share/imp/rules/init/index.js")) { throw "missing rules/init/index.js" }
           if (-not (Test-Path "imp-x86_64-pc-windows-msvc/share/imp/rules/rust/rust.lock")) { throw "missing rules/rust/rust.lock" }
           if (-not (Test-Path "imp-x86_64-pc-windows-msvc/share/imp/rules/imp/codegen/index.js")) { throw "missing rules/imp/codegen/index.js" }
           ./imp-x86_64-pc-windows-msvc/bin/imp.exe --help

@@ -13,6 +13,28 @@ configuration and introspection features. Treat other APIs and behavior in
 this document as planned unless this section or a later section marks them
 available.
 
+## Current host capabilities
+
+**Verified:** The current implementation is in
+`crates/imp-engine/src/luau.rs`. This table records its public host surface and
+the gaps that block catalog migration.
+
+| Area | Current Luau behavior | Migration gap |
+| --- | --- | --- |
+| Module loading | Loads `@imp/core`, `@imp/rules/...`, and `@workspace/...`; caches canonical module values and rejects namespace escapes. | The full catalog and its loader-dependent workspace features are not migrated. |
+| Workspace configuration | Loads `imp.workspace.luau`; on GitHub Actions it can deep-merge `imp.workspace.ci.luau`. | JavaScript configuration fields and introspection APIs are not at full parity. |
+| BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. | Generated BUILD discovery and mixed catalog dependencies are not supported. |
+| Graph construction | Exposes `files`, `glob`, `task`, `native_tool`, `package_path`, `goal`, and opaque handles. `memo`, `sources_field`, `register_build_rule`, and `write_workspace` are pilot shims. | APIs such as `output`, `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
+| Action execution | Runs hermetic argv actions with captured file-set inputs, native PATH tools, and a cache toggle. | Actions do not yet expose declared outputs, output values, tool/path helpers, environment configuration, or allow-failure results. |
+| Tests and workflows | The pilot can execute its asset build task. | The JavaScript test runner, `TEST` graph values, standard workflow APIs, and catalog test discovery are not available in Luau. |
+| Installed rules | The pilot tree contains Luau `asset`, `resource_package`, `workflows/build`, and `imp/native-tool` modules. | Other packages remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
+
+The existing Tree-sitter rule is a useful next capability probe. It imports
+`output`, `cargoPackage`, workflow and test modules, and uses action outputs,
+tool handles, and path helpers. Those APIs must land with focused host tests
+before that package can migrate. See `rules/treesitter/index.js` for the
+current consumer surface.
+
 The contract keeps Imp's graph values explicit across workspace files, BUILD
 files, and rule modules. Every imported source has one stable identity, and
 module ownership is clear from its address.

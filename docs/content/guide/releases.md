@@ -37,8 +37,8 @@ manually review the draft before publishing it.
 ### Smoke tests
 
 The packaged-tree smoke test runs from a scratch workspace with `IMP_RULES_DIR` unset. It checks
-that the installed executable can resolve `//rules/imp/codegen`, that the initializer is present,
-and that runtime toolchain lockfiles are present beside the binary.
+that the installed executable can resolve `//rules/imp/codegen` and that runtime toolchain
+lockfiles are present beside the binary.
 
 The release workflow also runs `imp --help` for each binary. These checks do not prove that every
 rule or platform workflow works. A release description must state what was checked and must call out

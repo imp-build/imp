@@ -28,11 +28,17 @@ Imp](docs/content/guide/contributing.md). Maintainers can also read the
 [release workflow](docs/content/guide/releases.md) and [documentation
 workflow](docs/content/guide/documentation-workflow.md).
 
-From a workspace root, initialize Imp and build a target. `imp init` asks
-which detected languages and capabilities the workspace needs:
+Create `imp.workspace.js` at the workspace root, import the rule modules your
+workspace uses, and build a target:
+
+```js
+import "//rules/c";
+import "//rules/workflows/test";
+```
+
+Then run:
 
 ```sh
-imp init
 imp build //:target
 ```
 

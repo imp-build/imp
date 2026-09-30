@@ -12,26 +12,7 @@ You need an Imp installation and a supported compiler toolchain. The C rules
 use a pinned managed toolchain by default; the first build may download it.
 See [Installing Imp](../installing/) if the `imp` command is not available.
 
-Initialize a workspace from the repository root. This command is interactive:
-it detects source languages and asks which rules and capabilities to enable.
-Run it directly from a terminal. It does not read answers from a pipe.
-
-**Illustrative example**
-
-```sh
-imp init
-```
-
-The checklist detects C/C++, JavaScript/TypeScript, Odin, Python, and Rust
-sources. Select the languages and capabilities the workspace needs; Imp then
-creates `imp.workspace.js` importing the rules that provide them. A language's
-rules bring the workflows they support with them, so the generated file names
-only what the selection adds. Those rules provide pinned default toolchains.
-Initialization never overwrites an existing workspace or creates a nested
-workspace.
-
-Every Imp workspace has a root marker file, `imp.workspace.js`. For a small
-workspace, you can create the file manually. Import the rule modules your
+Create `imp.workspace.js` at the workspace root. Import the rule modules your
 `BUILD.js` files will use (see [The workspace file](../workspace-file/) for
 the other configuration options):
 

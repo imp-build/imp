@@ -1,4 +1,3 @@
-mod commands;
 mod ui;
 
 use std::path::Path;
@@ -104,8 +103,6 @@ impl From<GraphFormatArg> for GraphFormat {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Initialize an imp workspace in the current directory
-    Init,
     /// List selectable targets and exported labels in the workspace
     Targets {
         /// Target, label, or package selectors, e.g. :app, dir, dir/..., or //...
@@ -604,9 +601,6 @@ async fn run() -> Result<()> {
             CacheCmd::Stats { details } => return cmd_cache_stats(*details).await,
         }
     }
-    if let Cmd::Init = &cli.command {
-        return commands::init::run().await;
-    }
     let cancellation = install_termination_signal_flag()?;
 
     let level = cli
@@ -884,7 +878,6 @@ impl From<Result<()>> for RunOutcome {
 
 async fn run_inner(cli: Cli, tree: &Tree, cancellation: Arc<AtomicBool>) -> RunOutcome {
     match &cli.command {
-        Cmd::Init => unreachable!("handled before UI setup"),
         Cmd::Targets {
             selectors,
             changed_since,

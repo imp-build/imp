@@ -16,8 +16,7 @@ can cache Imp's toolchain and build store.
 ## Prepare the job
 
 Commit `imp.workspace.js` and the `BUILD.js` files that define the targets.
-Do not run the interactive initializer in a non-interactive CI step. Use
-`setup-imp` or install a published Imp archive before running the job.
+Use `setup-imp` or install a published Imp archive before running the job.
 
 Run the checks from the workspace root:
 

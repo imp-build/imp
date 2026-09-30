@@ -4,8 +4,8 @@
 //
 // Importing this module registers the "fmt" goal but enables no formatter on
 // its own — each language's fmt integration (e.g. //rules/python/ruff/fmt,
-// //rules/js/biome/fmt) is a separate opt-in import, so callers such as
-// `imp init` can enable only the integrations a workspace selected.
+// //rules/js/biome/fmt) is a separate opt-in import. Workspace authors select
+// integrations by importing the entrypoints they need.
 //
 // The legacy target()/product() dispatch this goal used to fall back to has
 // been retired — every selected target now needs a real [FMT] graph handle.
