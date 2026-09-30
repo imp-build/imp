@@ -974,6 +974,40 @@ return { assets = declared }
     }
 
     #[tokio::test]
+    async fn workspace_modules_preserve_luau_local_shadowing_semantics() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = tempfile::tempdir().unwrap();
+        fs::write(
+            workspace_root.path().join("bindings.luau"),
+            r#"
+local binding = "first"
+local binding = "second"
+
+local nested = "outer"
+do
+    local nested = "inner"
+    assert(nested == "inner")
+end
+
+return { binding = binding, nested = nested }
+"#,
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+
+        let exports = runtime
+            .evaluate("@workspace/bindings")
+            .await
+            .unwrap()
+            .as_table()
+            .cloned()
+            .unwrap();
+
+        assert_eq!(exports.get::<String>("binding").unwrap(), "second");
+        assert_eq!(exports.get::<String>("nested").unwrap(), "outer");
+    }
+
+    #[tokio::test]
     async fn canceled_luau_actions_stop_through_the_goal_scheduler() {
         let workspace_root = tempfile::tempdir().unwrap();
         fs::write(

@@ -170,7 +170,6 @@ impl RulesSource {
         ));
         message
     }
-
 }
 
 /// imp's own rule library, located from a test binary.
