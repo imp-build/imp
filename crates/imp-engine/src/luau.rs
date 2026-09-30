@@ -6,7 +6,7 @@
 //! workspace runtime while the migration is in progress.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
@@ -14,9 +14,13 @@ use std::sync::{atomic::AtomicBool, Arc};
 
 use crate::graph::GraphRoot;
 use anyhow::{bail, Context, Result};
-use imp_exec_api::{ExecAction, ExecIoSpec, ExecToolSpec, ExecutionService, SandboxRetention};
+use imp_exec_api::{
+    CacheOutcome, ExecAction, ExecIoSpec, ExecToolSpec, ExecutionService, SandboxRetention,
+};
+use imp_store::digest::{nest_directory, nest_file, DirectoryDigest};
 use lune::Runtime;
 use mlua::prelude::*;
+use mlua::{MetaMethod, UserDataFields, UserDataMethods};
 
 #[derive(Clone)]
 struct ModuleLoader {
@@ -31,13 +35,51 @@ struct ModuleLoader {
 struct GraphHandle {
     id: u64,
     kind: &'static str,
+    outputs: Option<LuaTable>,
 }
 
-impl LuaUserData for GraphHandle {}
+impl LuaUserData for GraphHandle {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("outputs", |_, this| {
+            this.outputs
+                .clone()
+                .ok_or_else(|| LuaError::external(format!("{} has no named outputs", this.kind)))
+        });
+    }
 
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(MetaMethod::Index, |_, this, key: String| {
+            this.outputs
+                .as_ref()
+                .and_then(|outputs| outputs.get::<LuaValue>(key.clone()).ok())
+                .ok_or_else(|| LuaError::external(format!("{} has no output '{key}'", this.kind)))
+        });
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TaskOutputKind {
+    Value,
+    Artifact,
+}
+
+#[derive(Clone)]
+enum OutputDeclaration {
+    Value,
+    Artifact,
+    File(String),
+    Directory(String),
+}
+
+struct OutputDeclarationHandle(OutputDeclaration);
+
+impl LuaUserData for OutputDeclarationHandle {}
+
+#[derive(Clone)]
 struct Task {
     run: LuaFunction,
     inputs: LuaTable,
+    outputs: BTreeMap<String, TaskOutputKind>,
 }
 
 #[derive(Clone)]
@@ -52,14 +94,18 @@ enum GraphNode {
     Files(FileSetSpec),
     NativeTool(String),
     Task,
+    TaskOutput { task_id: u64, name: String },
+    Artifact(imp_store::cache::CachedArtifact),
 }
 
 struct HostState {
     next_id: u64,
     tasks: HashMap<u64, Task>,
+    task_results: HashMap<u64, LuaTable>,
     nodes: HashMap<u64, GraphNode>,
     filesets: HashMap<String, u64>,
     action_count: usize,
+    cache_hit_count: usize,
     goals: HashMap<String, LuaFunction>,
     workspace_root: PathBuf,
     workspace_id: String,
@@ -113,9 +159,11 @@ impl LuauWorkspace {
         let host = Rc::new(RefCell::new(HostState {
             next_id: 0,
             tasks: HashMap::new(),
+            task_results: HashMap::new(),
             nodes: HashMap::new(),
             filesets: HashMap::new(),
             action_count: 0,
+            cache_hit_count: 0,
             goals: HashMap::new(),
             workspace_id,
             workspace_root: workspace_root.clone(),
@@ -291,6 +339,7 @@ impl LuauWorkspace {
         if goal != "build" {
             bail!("Luau pilot does not implement the '{goal}' workflow");
         }
+        self.host.borrow_mut().task_results.clear();
         self.host.borrow_mut().cancellation = cancellation;
         for root in roots {
             let script = format!("return __imp_execute_task({})", root.handle_id);
@@ -343,6 +392,16 @@ impl LuauWorkspace {
     /// integration tests.
     pub fn action_count(&self) -> usize {
         self.host.borrow().action_count
+    }
+
+    #[cfg(test)]
+    fn cache_hit_count(&self) -> usize {
+        self.host.borrow().cache_hit_count
+    }
+
+    #[cfg(test)]
+    fn task_result_count(&self) -> usize {
+        self.host.borrow().task_results.len()
     }
 
     /// Return the merged workspace configuration exported by Luau config
@@ -429,43 +488,211 @@ fn install_require(
 
 fn install_task_executor(lua: &Lua, host: Rc<RefCell<HostState>>) -> LuaResult<()> {
     let execute = lua.create_async_function(move |lua, id: u64| {
-        let prepared = (|| {
-            let task = host
-                .borrow()
-                .tasks
-                .get(&id)
-                .map(|task| (task.run.clone(), task.inputs.clone()))
-                .ok_or_else(|| LuaError::external(format!("unknown Luau task handle {id}")))?;
-            let action_inputs = task.1.clone();
-            let exec = lua.create_table()?;
-            let action_host = Rc::clone(&host);
-            exec.set(
-                "action",
-                lua.create_async_function(move |_, options: LuaTable| {
-                    let action_host = Rc::clone(&action_host);
-                    let action_inputs = action_inputs.clone();
-                    async move {
-                        if let Err(error) =
-                            run_action(Rc::clone(&action_host), options, action_inputs).await
-                        {
-                            action_host.borrow_mut().task_failure = Some(format!("{error:#}"));
-                            return Err(LuaError::external(format!("{error:#}")));
-                        }
-                        Ok(())
-                    }
-                })?,
-            )?;
-            Ok::<_, LuaError>((task, exec))
-        })();
+        let order = dependency_order(&host.borrow(), id);
+        let host = Rc::clone(&host);
         async move {
-            let (task, exec) = prepared?;
-            task.0
-                .call_async::<()>((exec, task.1))
-                .await
-                .map_err(|error| LuaError::external(error.to_string()))
+            for task_id in order? {
+                if host.borrow().task_results.contains_key(&task_id) {
+                    continue;
+                }
+                let task = host.borrow().tasks.get(&task_id).cloned().ok_or_else(|| {
+                    LuaError::external(format!("unknown Luau task handle {task_id}"))
+                })?;
+                let inputs = resolve_task_inputs(&lua, &host, &task.inputs)?;
+                let returns_outputs = !task.outputs.is_empty();
+                let exec = lua.create_table()?;
+                let action_host = Rc::clone(&host);
+                let action_lua = lua.clone();
+                let action_inputs = inputs.clone();
+                exec.set(
+                    "action",
+                    lua.create_async_function(move |_, options: LuaTable| {
+                        let action_host = Rc::clone(&action_host);
+                        let action_inputs = action_inputs.clone();
+                        let action_lua = action_lua.clone();
+                        async move {
+                            match run_action(
+                                action_lua,
+                                Rc::clone(&action_host),
+                                options,
+                                action_inputs,
+                            )
+                            .await
+                            {
+                                Ok(result) if returns_outputs => Ok(LuaValue::Table(result)),
+                                Ok(_) => Ok(LuaValue::Nil),
+                                Err(error) => {
+                                    action_host.borrow_mut().task_failure =
+                                        Some(format!("{error:#}"));
+                                    Err(LuaError::external(format!("{error:#}")))
+                                }
+                            }
+                        }
+                    })?,
+                )?;
+                let result = task
+                    .run
+                    .call_async::<LuaValue>((exec, inputs))
+                    .await
+                    .map_err(|error| LuaError::external(error.to_string()))?;
+                let outputs = validate_task_result(&lua, &host, &task, result)?;
+                host.borrow_mut().task_results.insert(task_id, outputs);
+            }
+            Ok(())
         }
     })?;
     lua.globals().set("__imp_execute_task", execute)
+}
+
+fn dependency_order(host: &HostState, root: u64) -> LuaResult<Vec<u64>> {
+    fn visit(
+        host: &HostState,
+        id: u64,
+        visiting: &mut Vec<u64>,
+        visited: &mut std::collections::HashSet<u64>,
+        order: &mut Vec<u64>,
+    ) -> LuaResult<()> {
+        if visited.contains(&id) {
+            return Ok(());
+        }
+        if visiting.contains(&id) {
+            return Err(LuaError::external(format!(
+                "cyclic Luau task dependency at {id}"
+            )));
+        }
+        let task = host
+            .tasks
+            .get(&id)
+            .ok_or_else(|| LuaError::external(format!("unknown Luau task handle {id}")))?;
+        visiting.push(id);
+        for pair in task.inputs.pairs::<LuaValue, LuaValue>() {
+            let (_, value) = pair?;
+            let LuaValue::UserData(value) = value else {
+                continue;
+            };
+            let Ok(handle) = value.borrow::<GraphHandle>() else {
+                continue;
+            };
+            if handle.kind != "task_output" {
+                continue;
+            }
+            let Some(GraphNode::TaskOutput { task_id, .. }) = host.nodes.get(&handle.id) else {
+                return Err(LuaError::external("invalid Luau task output handle"));
+            };
+            visit(host, *task_id, visiting, visited, order)?;
+        }
+        visiting.pop();
+        visited.insert(id);
+        order.push(id);
+        Ok(())
+    }
+
+    let mut order = Vec::new();
+    visit(
+        host,
+        root,
+        &mut Vec::new(),
+        &mut std::collections::HashSet::new(),
+        &mut order,
+    )?;
+    Ok(order)
+}
+
+fn resolve_task_inputs(
+    lua: &Lua,
+    host: &Rc<RefCell<HostState>>,
+    inputs: &LuaTable,
+) -> LuaResult<LuaTable> {
+    let resolved = lua.create_table()?;
+    for pair in inputs.pairs::<LuaValue, LuaValue>() {
+        let (key, value) = pair?;
+        let value = if let LuaValue::UserData(userdata) = &value {
+            if let Ok(handle) = userdata.borrow::<GraphHandle>() {
+                if handle.kind == "task_output" {
+                    let node = host.borrow().nodes.get(&handle.id).cloned();
+                    let Some(GraphNode::TaskOutput { task_id, name }) = node else {
+                        return Err(LuaError::external("invalid Luau task output handle"));
+                    };
+                    let result = host
+                        .borrow()
+                        .task_results
+                        .get(&task_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            LuaError::external("Luau task dependency did not produce a result")
+                        })?;
+                    result.get::<LuaValue>(name)?
+                } else {
+                    value
+                }
+            } else {
+                value
+            }
+        } else {
+            value
+        };
+        resolved.set(key, value)?;
+    }
+    Ok(resolved)
+}
+
+fn validate_task_result(
+    lua: &Lua,
+    host: &Rc<RefCell<HostState>>,
+    task: &Task,
+    result: LuaValue,
+) -> LuaResult<LuaTable> {
+    if task.outputs.is_empty() {
+        if !matches!(result, LuaValue::Nil) {
+            return Err(LuaError::external(
+                "Luau task with no declared outputs must return nil",
+            ));
+        }
+        return lua.create_table();
+    }
+    let LuaValue::Table(result) = result else {
+        return Err(LuaError::external(
+            "Luau task must return its named output table",
+        ));
+    };
+    let mut actual = Vec::new();
+    for pair in result.pairs::<String, LuaValue>() {
+        actual.push(pair?.0);
+    }
+    actual.sort();
+    let expected: Vec<_> = task.outputs.keys().cloned().collect();
+    if actual != expected {
+        return Err(LuaError::external(format!(
+            "Luau task returned outputs {actual:?}, expected {expected:?}"
+        )));
+    }
+    for (name, kind) in &task.outputs {
+        let value = result.get::<LuaValue>(name.as_str())?;
+        match kind {
+            TaskOutputKind::Value => {
+                serde_json::to_value(&value).map_err(LuaError::external)?;
+            }
+            TaskOutputKind::Artifact => {
+                let LuaValue::UserData(userdata) = value else {
+                    return Err(LuaError::external(format!(
+                        "Luau task output '{name}' must be an action artifact"
+                    )));
+                };
+                let handle = userdata.borrow::<GraphHandle>()?;
+                if handle.kind != "artifact"
+                    || !matches!(
+                        host.borrow().nodes.get(&handle.id),
+                        Some(GraphNode::Artifact(_))
+                    )
+                {
+                    return Err(LuaError::external(format!(
+                        "Luau task output '{name}' must be an action artifact"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn install_goal_executor(lua: &Lua, host: Rc<RefCell<HostState>>) -> LuaResult<()> {
@@ -498,6 +725,35 @@ fn create_core(
     let core = lua.create_table()?;
     core.set("BUILD", "BUILD")?;
 
+    let output = lua.create_table()?;
+    output.set(
+        "value",
+        lua.create_function(|lua, ()| {
+            lua.create_userdata(OutputDeclarationHandle(OutputDeclaration::Value))
+        })?,
+    )?;
+    output.set(
+        "artifact",
+        lua.create_function(|lua, ()| {
+            lua.create_userdata(OutputDeclarationHandle(OutputDeclaration::Artifact))
+        })?,
+    )?;
+    output.set(
+        "file",
+        lua.create_function(|lua, path: String| {
+            validate_output_path(&path)?;
+            lua.create_userdata(OutputDeclarationHandle(OutputDeclaration::File(path)))
+        })?,
+    )?;
+    output.set(
+        "directory",
+        lua.create_function(|lua, path: String| {
+            validate_output_path(&path)?;
+            lua.create_userdata(OutputDeclarationHandle(OutputDeclaration::Directory(path)))
+        })?,
+    )?;
+    core.set("output", output)?;
+
     let graph_host = Rc::clone(&host);
     core.set(
         "files",
@@ -520,16 +776,62 @@ fn create_core(
             let inputs = options
                 .get::<Option<LuaTable>>("inputs")?
                 .unwrap_or(lua.create_table()?);
+            let mut outputs = BTreeMap::new();
+            if let Some(declarations) = options.get::<Option<LuaTable>>("outputs")? {
+                for pair in declarations.pairs::<String, LuaAnyUserData>() {
+                    let (name, declaration) = pair?;
+                    if !valid_output_name(&name) {
+                        return Err(LuaError::external(format!(
+                            "task.outputs has invalid slot name '{name}'"
+                        )));
+                    }
+                    let declaration = declaration.borrow::<OutputDeclarationHandle>()?;
+                    let kind = match &declaration.0 {
+                        OutputDeclaration::Value => TaskOutputKind::Value,
+                        OutputDeclaration::Artifact => TaskOutputKind::Artifact,
+                        OutputDeclaration::File(_) | OutputDeclaration::Directory(_) => {
+                            return Err(LuaError::external(format!(
+                                "task.outputs.{name} must be output.value() or output.artifact()"
+                            )))
+                        }
+                    };
+                    outputs.insert(name, kind);
+                }
+            }
             let handle = allocate_handle(&graph_host, "task");
-            graph_host
-                .borrow_mut()
-                .nodes
-                .insert(handle.id, GraphNode::Task);
-            graph_host
-                .borrow_mut()
-                .tasks
-                .insert(handle.id, Task { run, inputs });
-            lua.create_userdata(handle)
+            let output_handles = lua.create_table()?;
+            {
+                let mut host = graph_host.borrow_mut();
+                host.nodes.insert(handle.id, GraphNode::Task);
+                for name in outputs.keys() {
+                    host.next_id += 1;
+                    let output_handle = GraphHandle {
+                        id: host.next_id,
+                        kind: "task_output",
+                        outputs: None,
+                    };
+                    host.nodes.insert(
+                        output_handle.id,
+                        GraphNode::TaskOutput {
+                            task_id: handle.id,
+                            name: name.clone(),
+                        },
+                    );
+                    output_handles.set(name.as_str(), lua.create_userdata(output_handle)?)?;
+                }
+                host.tasks.insert(
+                    handle.id,
+                    Task {
+                        run,
+                        inputs,
+                        outputs,
+                    },
+                );
+            }
+            lua.create_userdata(GraphHandle {
+                outputs: Some(output_handles),
+                ..handle
+            })
         })?,
     )?;
     let graph_host = Rc::clone(&host);
@@ -614,7 +916,11 @@ fn create_files_handle(
         spec.exclude.join("\n")
     );
     if let Some(id) = host.borrow().filesets.get(&fingerprint).copied() {
-        return lua.create_userdata(GraphHandle { id, kind: "files" });
+        return lua.create_userdata(GraphHandle {
+            id,
+            kind: "files",
+            outputs: None,
+        });
     }
     let handle = allocate_handle(host, "files");
     let mut host = host.borrow_mut();
@@ -630,14 +936,42 @@ fn allocate_handle(host: &Rc<RefCell<HostState>>, kind: &'static str) -> GraphHa
     GraphHandle {
         id: host.next_id,
         kind,
+        outputs: None,
     }
 }
 
+fn validate_output_path(path: &str) -> LuaResult<()> {
+    if path.is_empty() {
+        return Err(LuaError::external(
+            "output path must be a non-empty workspace-relative path",
+        ));
+    }
+    let path = Path::new(path);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(LuaError::external(
+            "output path must stay within the workspace",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_output_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "_.-".contains(ch))
+}
+
 async fn run_action(
+    lua: Lua,
     host: Rc<RefCell<HostState>>,
     options: LuaTable,
     task_inputs: LuaTable,
-) -> Result<()> {
+) -> Result<LuaTable> {
     let argv = options
         .get::<Option<Vec<String>>>("argv")
         .map_err(|error| anyhow::anyhow!(error.to_string()))?
@@ -685,6 +1019,14 @@ async fn run_action(
                     digest: Some(captured.digest.digest().to_owned()),
                     named_cache: None,
                 });
+            } else if let Some(GraphNode::Artifact(artifact)) = nodes.get(&handle.id) {
+                let tree = normalize_luau_artifact(artifact)?;
+                input_specs.push(ExecIoSpec {
+                    path: None,
+                    kind: "digest".to_owned(),
+                    digest: Some(tree.digest().to_owned()),
+                    named_cache: None,
+                });
             }
         }
     }
@@ -725,13 +1067,55 @@ async fn run_action(
         });
     }
 
+    let mut declared_outputs = BTreeMap::new();
+    let mut output_paths = std::collections::HashSet::new();
+    let mut output_specs = Vec::new();
+    if let Some(outputs) = options
+        .get::<Option<LuaTable>>("outputs")
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?
+    {
+        for pair in outputs.pairs::<String, LuaAnyUserData>() {
+            let (name, declaration) = pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            if !valid_output_name(&name) {
+                bail!("exec.action().outputs has invalid name '{name}'");
+            }
+            let declaration = declaration
+                .borrow::<OutputDeclarationHandle>()
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let (kind, path) = match &declaration.0 {
+                OutputDeclaration::File(path) => ("file", path),
+                OutputDeclaration::Directory(path) => ("directory", path),
+                OutputDeclaration::Value | OutputDeclaration::Artifact => {
+                    bail!(
+                        "exec.action outputs must use output.file(path) or output.directory(path)"
+                    )
+                }
+            };
+            if !output_paths.insert(path.clone()) {
+                bail!("exec.action declares output path '{path}' twice");
+            }
+            if declared_outputs
+                .insert(name.clone(), path.clone())
+                .is_some()
+            {
+                bail!("exec.action declares output '{name}' more than once");
+            }
+            output_specs.push(ExecIoSpec {
+                path: Some(path.clone()),
+                kind: kind.to_owned(),
+                digest: None,
+                named_cache: None,
+            });
+        }
+    }
+
     let action = ExecAction {
         argv,
         display: display.clone(),
         env: imp_execution::staging::resolve_base_env(&[])?,
         config_digest: String::new(),
         input_digest,
-        outputs: Vec::new(),
+        outputs: output_specs,
         tools,
         cores: 1,
         impure: false,
@@ -753,8 +1137,73 @@ async fn run_action(
             outcome.stderr
         );
     }
-    host.borrow_mut().action_count += 1;
-    Ok(())
+    {
+        let mut host = host.borrow_mut();
+        host.action_count += 1;
+        if matches!(
+            outcome.cache_outcome,
+            CacheOutcome::HitLocal | CacheOutcome::HitRemote
+        ) {
+            host.cache_hit_count += 1;
+        }
+    }
+    let artifacts = lua
+        .create_table()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    for (name, path) in declared_outputs {
+        let artifact = outcome
+            .outputs
+            .iter()
+            .find(|artifact| artifact.path.as_deref() == Some(path.as_str()))
+            .cloned()
+            .with_context(|| {
+                format!("execution service did not return declared output '{name}'")
+            })?;
+        let handle = allocate_handle(&host, "artifact");
+        host.borrow_mut()
+            .nodes
+            .insert(handle.id, GraphNode::Artifact(artifact));
+        artifacts
+            .set(
+                name,
+                lua.create_userdata(handle)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    }
+    let result = lua
+        .create_table()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    result
+        .set("outputs", artifacts)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(result)
+}
+
+fn normalize_luau_artifact(artifact: &imp_store::cache::CachedArtifact) -> Result<DirectoryDigest> {
+    let path = artifact
+        .path
+        .as_deref()
+        .context("graph action output has no captured path")?;
+    match artifact.kind.as_str() {
+        "file" | "manifest" => Ok(nest_file(
+            path,
+            artifact.digest.clone(),
+            artifact.bytes.unwrap_or_default(),
+            artifact.mode,
+        )?),
+        "directory" => {
+            let digest = artifact
+                .tree_digest
+                .as_ref()
+                .with_context(|| format!("directory output '{path}' has no tree digest"))?;
+            Ok(nest_directory(
+                path,
+                &DirectoryDigest::from_digest(digest.clone()),
+            )?)
+        }
+        other => bail!("graph action output '{path}' has unsupported kind '{other}'"),
+    }
 }
 
 fn current_package_path(loader: &ModuleLoader) -> String {
@@ -895,6 +1344,18 @@ fn normalize_relative(base: &Path, requested: &str) -> LuaResult<String> {
 mod tests {
     use super::*;
 
+    async fn execute_luau_task_source(source: &str) -> anyhow::Error {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = tempfile::tempdir().unwrap();
+        fs::write(workspace_root.path().join("bad.luau"), source).unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let handle = runtime.evaluate("@workspace/bad").await.unwrap();
+        let LuaValue::UserData(handle) = handle else {
+            panic!("test module must return a task handle");
+        };
+        runtime.execute_task(&handle).await.unwrap_err()
+    }
+
     #[tokio::test]
     async fn opt_in_luau_workspace_loads_installed_asset_and_executes_hermetically() {
         let workspace_root = tempfile::tempdir().unwrap();
@@ -948,6 +1409,239 @@ return { assets = declared }
             1,
             "the hermetic action must run through the Luau host"
         );
+    }
+
+    #[tokio::test]
+    async fn luau_task_outputs_flow_through_cas_to_downstream_actions() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        fs::write(
+            workspace_root.path().join("imp.workspace.luau"),
+            "return {}\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local output = core.output
+local producer = core.task({
+    outputs = { generated = output.artifact(), directory = output.artifact() },
+    run = function(exec)
+        local result = exec.action({
+            argv = { "sh", "-c", "mkdir -p generated bundle; printf payload > generated/value.txt; printf bundle > bundle/item" },
+            outputs = {
+                generated_file = output.file("generated/value.txt"),
+                generated_dir = output.directory("bundle"),
+            },
+        })
+        return {
+            generated = result.outputs.generated_file,
+            directory = result.outputs.generated_dir,
+        }
+    end,
+})
+local consumer = core.task({
+    inputs = { generated = producer.outputs.generated },
+    outputs = { accepted = output.value() },
+    run = function(exec, inputs)
+        exec.action({
+            argv = { "sh", "-c", "test \"$(cat generated/value.txt)\" = payload" },
+            inputs = { inputs.generated },
+        })
+        return { accepted = "payload" }
+    end,
+})
+local final = core.task({
+    inputs = { status = consumer.outputs.accepted },
+    run = function(_, inputs)
+        assert(inputs.status == "payload")
+    end,
+})
+return { final = final }
+"#,
+        )
+        .unwrap();
+
+        let live = crate::spike::load_workspace_with_rules(
+            workspace_root.path(),
+            crate::loader::RulesSource::discover(),
+        )
+        .await
+        .unwrap();
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        *live.scheduler.lock().unwrap() = Some(imp_scheduler::Scheduler::new(
+            1,
+            Arc::new(AtomicBool::new(false)),
+            events,
+        ));
+
+        crate::spike::execute_goal_live(
+            &live,
+            workspace_root.path(),
+            "build",
+            &["//:final".to_owned()],
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+
+        let luau = live.luau.as_ref().unwrap().borrow();
+        assert_eq!(luau.action_count(), 2);
+        assert_eq!(luau.task_result_count(), 3);
+        let first_cache_hits = luau.cache_hit_count();
+        drop(luau);
+        assert!(!workspace_root.path().join("generated/value.txt").exists());
+        assert!(!workspace_root.path().join("bundle").exists());
+
+        crate::spike::execute_goal_live(
+            &live,
+            workspace_root.path(),
+            "build",
+            &["//:final".to_owned()],
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let luau = live.luau.as_ref().unwrap().borrow();
+        assert_eq!(luau.action_count(), 4);
+        assert!(luau.cache_hit_count() >= first_cache_hits + 2);
+    }
+
+    #[tokio::test]
+    async fn luau_task_output_declarations_reject_action_output_descriptors() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = tempfile::tempdir().unwrap();
+        fs::write(
+            workspace_root.path().join("bad.luau"),
+            r#"
+local core = require("@imp/core")
+local ok, message = pcall(function()
+    core.task({
+    outputs = { result = core.output.file("result.txt") },
+    run = function() end,
+})
+end)
+assert(not ok)
+assert(string.find(tostring(message), "task.outputs.result must be output.value() or output.artifact()", 1, true))
+return {}
+"#,
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+
+        runtime.evaluate("@workspace/bad").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn action_output_names_follow_graph_slot_rules() {
+        let error = execute_luau_task_source(
+            r#"
+local core = require("@imp/core")
+return core.task({
+    run = function(exec)
+        exec.action({
+            argv = { "sh", "-c", "true" },
+            outputs = { ["bad name"] = core.output.file("output.txt") },
+        })
+    end,
+})
+"#,
+        )
+        .await;
+
+        assert!(format!("{error:#}").contains("exec.action().outputs has invalid name 'bad name'"));
+    }
+
+    #[tokio::test]
+    async fn action_outputs_reject_duplicate_paths() {
+        let error = execute_luau_task_source(
+            r#"
+local core = require("@imp/core")
+return core.task({
+    run = function(exec)
+        exec.action({
+            argv = { "sh", "-c", "true" },
+            outputs = {
+                first = core.output.file("same.txt"),
+                second = core.output.file("same.txt"),
+            },
+        })
+    end,
+})
+"#,
+        )
+        .await;
+
+        assert!(format!("{error:#}").contains("exec.action declares output path 'same.txt' twice"));
+    }
+
+    #[tokio::test]
+    async fn failed_luau_output_producer_does_not_run_its_consumer() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        fs::write(
+            workspace_root.path().join("imp.workspace.luau"),
+            "return {}\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local output = core.output
+local producer = core.task({
+    outputs = { artifact = output.artifact() },
+    run = function(exec)
+        local result = exec.action({
+            argv = { "sh", "-c", "exit 7" },
+            outputs = { file = output.file("failed.txt") },
+        })
+        return { artifact = result.outputs.file }
+    end,
+})
+local consumer = core.task({
+    inputs = { artifact = producer.outputs.artifact },
+    run = function(exec, inputs)
+        exec.action({ argv = { "sh", "-c", "true" }, inputs = { inputs.artifact } })
+    end,
+})
+return { consumer = consumer }
+"#,
+        )
+        .unwrap();
+
+        let live = crate::spike::load_workspace_with_rules(
+            workspace_root.path(),
+            crate::loader::RulesSource::discover(),
+        )
+        .await
+        .unwrap();
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        *live.scheduler.lock().unwrap() = Some(imp_scheduler::Scheduler::new(
+            1,
+            Arc::new(AtomicBool::new(false)),
+            events,
+        ));
+
+        let error = crate::spike::execute_goal_live(
+            &live,
+            workspace_root.path(),
+            "build",
+            &["//:consumer".to_owned()],
+            false,
+            1,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("exit code 7"), "{error:#}");
+        let luau = live.luau.as_ref().unwrap().borrow();
+        assert_eq!(luau.action_count(), 0);
+        assert_eq!(luau.task_result_count(), 0);
     }
 
     #[tokio::test]

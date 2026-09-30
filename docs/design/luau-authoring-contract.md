@@ -24,8 +24,8 @@ the gaps that block catalog migration.
 | Module loading | Loads `@imp/core`, `@imp/rules/...`, and `@workspace/...`; caches canonical module values and rejects namespace escapes. | The full catalog and its loader-dependent workspace features are not migrated. |
 | Workspace configuration | Loads `imp.workspace.luau`; on GitHub Actions it can deep-merge `imp.workspace.ci.luau`. | JavaScript configuration fields and introspection APIs are not at full parity. |
 | BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. | Generated BUILD discovery and mixed catalog dependencies are not supported. |
-| Graph construction | Exposes `files`, `glob`, `task`, `native_tool`, `package_path`, `goal`, and opaque handles. `memo`, `sources_field`, `register_build_rule`, and `write_workspace` are pilot shims. | APIs such as `output`, `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
-| Action execution | Runs hermetic argv actions with captured file-set inputs, native PATH tools, and a cache toggle. | Actions do not yet expose declared outputs, output values, tool/path helpers, environment configuration, or allow-failure results. |
+| Graph construction | Exposes `files`, `glob`, `task`, `output`, `native_tool`, `package_path`, `goal`, and opaque handles. Tasks declare named `value` or `artifact` outputs. `memo`, `sources_field`, `register_build_rule`, and `write_workspace` are pilot shims. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
+| Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native PATH tools, and a cache toggle. Captured artifacts can flow to downstream tasks through named outputs. | Tool/path helpers, environment configuration, and allow-failure results are not available. |
 | Tests and workflows | The pilot can execute its asset build task. | The JavaScript test runner, `TEST` graph values, standard workflow APIs, and catalog test discovery are not available in Luau. |
 | Installed rules | The pilot tree contains Luau `asset`, `resource_package`, `workflows/build`, and `imp/native-tool` modules. | Other packages remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
 
@@ -38,6 +38,52 @@ current consumer surface.
 The contract keeps Imp's graph values explicit across workspace files, BUILD
 files, and rule modules. Every imported source has one stable identity, and
 module ownership is clear from its address.
+
+### Task and action outputs
+
+Read the `output` table from `@imp/core`. A task declares named `output.value()` or
+`output.artifact()` slots. Its `run(exec, inputs)` callback returns a table
+with the same names. Value slots carry JSON-compatible data. Artifact slots
+carry artifact handles returned by an action.
+
+An action declares workspace-relative paths with `output.file(path)` or
+`output.directory(path)`. The execution service captures these outputs in CAS
+and returns them under `result.outputs`. A task may return one of those handles
+from its matching artifact slot. A downstream task may declare that task
+output in `inputs`; Imp executes the producer first and supplies the resolved
+value or artifact handle to the consumer. When an action consumes an artifact,
+Imp stages its CAS digest as an action input. Graph actions keep outputs in
+CAS and do not write them into the workspace.
+
+**Illustrative example:**
+
+```luau
+local core = require("@imp/core")
+local output = core.output
+
+local generate = core.task({
+	outputs = { source = output.artifact() },
+	run = function(exec)
+		local result = exec.action({
+			argv = { "sh", "-c", "printf generated > generated.txt" },
+			outputs = { source = output.file("generated.txt") },
+		})
+		return { source = result.outputs.source }
+	end,
+})
+
+local consume = core.task({
+	inputs = { source = generate.outputs.source },
+	outputs = { status = output.value() },
+	run = function(exec, inputs)
+		exec.action({
+			argv = { "sh", "-c", "test -s generated.txt" },
+			inputs = { inputs.source },
+		})
+		return { status = "ok" }
+	end,
+})
+```
 
 ## Module addresses
 
