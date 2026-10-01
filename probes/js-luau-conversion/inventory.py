@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import collections
+import dataclasses
 import pathlib
 import re
 import subprocess
@@ -19,6 +20,371 @@ ENGINE_MODULES = {
     "crates/imp-engine/src/graph_core.js",
     "crates/imp-engine/src/imp_core.js",
 }
+
+
+@dataclasses.dataclass(frozen=True)
+class MigrationBoundary:
+    title: str
+    task: str
+    source: str
+    host_prerequisites: tuple[str, ...]
+
+
+BOUNDARIES: dict[str, MigrationBoundary] = {
+    "workspace-integration": MigrationBoundary(
+        "Workspace, CI, documentation, and repository BUILD modules",
+        "2026-09-30-integrate-luau-workspace-tests-and-docs",
+        "Repository BUILD modules, workspace configuration, CI, docs, and proposed-rule examples",
+        ("workspace configuration", "workspace/catalog discovery", "test discovery"),
+    ),
+    "catalog-discovery": MigrationBoundary(
+        "Installed catalog root",
+        "2026-09-30-luau-workspace-and-catalog-discovery",
+        "rules/BUILD.js",
+        ("workspace/catalog discovery",),
+    ),
+    "asset-pilot": MigrationBoundary(
+        "Completed asset pilot",
+        "2026-09-29-port-luau-graph-host-pilot",
+        "rules/asset",
+        ("graph outputs",),
+    ),
+    "example-decision": MigrationBoundary(
+        "JavaScript application examples",
+        "2026-09-30-decide-luau-example-migration",
+        "rules/js/example",
+        (),
+    ),
+    "quickjs-removal": MigrationBoundary(
+        "Legacy JavaScript graph host",
+        "2026-09-30-remove-quickjs-after-luau-cutover",
+        "crates/imp-engine/src/{graph_core,imp_core}.js",
+        (),
+    ),
+    "imp-host-foundation": MigrationBoundary(
+        "Imp host-facing foundation",
+        "split from 2026-09-30-port-luau-imp-host-and-test-rules",
+        "rules/imp/{mode,native-tool,self-tool}",
+        ("tool/path host APIs", "workspace/catalog discovery"),
+    ),
+    "imp-core-foundation": MigrationBoundary(
+        "Imp archive, generate, lockfile, and toolchain rules",
+        "split from 2026-09-30-port-luau-imp-core-rules",
+        "rules/imp/{archive,codegen,generate,lockfile,toolchain}",
+        ("graph outputs", "tool/path host APIs", "workspace/catalog discovery"),
+    ),
+    "compiled-language-island": MigrationBoundary(
+        "Rust graph island",
+        "split from 2026-09-30-port-luau-rust-rules",
+        "The three-module static-import cycle in rules/rust",
+        ("graph outputs", "tool/path host APIs", "workspace/catalog discovery"),
+    ),
+    "imp-validation": MigrationBoundary(
+        "Imp test framework and focused validation modules",
+        "split from 2026-09-30-port-luau-imp-host-and-test-rules",
+        "Remaining rules/imp BUILD and test modules",
+        ("test discovery", "workspace/catalog discovery"),
+    ),
+    "workflow-core-runtime": MigrationBoundary(
+        "Core workflow implementations",
+        "split from 2026-09-30-port-luau-workflow-core",
+        "rules/workflows/{build,fmt,lint,report,run,test} implementations",
+        ("graph outputs", "workspace/catalog discovery"),
+    ),
+    "workflow-core-validation": MigrationBoundary(
+        "Core workflow BUILD and test modules",
+        "split from 2026-09-30-port-luau-workflow-core",
+        "Core workflow BUILD and test modules",
+        ("test discovery", "workspace/catalog discovery"),
+    ),
+    "workflow-codegen-runtime": MigrationBoundary(
+        "Code-generation workflow implementations",
+        "split from 2026-09-30-port-luau-workflow-codegen",
+        "rules/workflows/{codegen,generate,generate_build} implementations",
+        ("workspace/catalog discovery",),
+    ),
+    "workflow-codegen-validation": MigrationBoundary(
+        "Code-generation workflow BUILD and test modules",
+        "split from 2026-09-30-port-luau-workflow-codegen",
+        "Code-generation workflow BUILD and test modules",
+        ("test discovery", "workspace/catalog discovery"),
+    ),
+    "workflow-lockfiles-runtime": MigrationBoundary(
+        "Base lockfile workflow",
+        "split from 2026-09-30-port-luau-workflow-packaging",
+        "rules/workflows/lockfiles/index.js",
+        ("tool/path host APIs", "workspace/catalog discovery"),
+    ),
+    "workflow-packaging-runtime": MigrationBoundary(
+        "Package, publish, and VS workflow implementations",
+        "split from 2026-09-30-port-luau-workflow-packaging",
+        "rules/workflows/{package,publish,vs} implementations",
+        ("graph outputs", "tool/path host APIs", "workspace/catalog discovery"),
+    ),
+    "workflow-packaging-validation": MigrationBoundary(
+        "Lockfile and packaging workflow validation modules",
+        "split from 2026-09-30-port-luau-workflow-packaging",
+        "Lockfile, package, publish, and VS BUILD and test modules",
+        ("test discovery", "workspace/catalog discovery"),
+    ),
+    "builtin-lockfiles": MigrationBoundary(
+        "Built-in lockfile aggregator",
+        "split from 2026-09-30-port-luau-workflow-packaging",
+        "rules/workflows/builtin_lockfiles/index.js",
+        ("tool/path host APIs", "workspace/catalog discovery"),
+    ),
+    "c-shared-toolchain": MigrationBoundary(
+        "Shared C toolchain contract",
+        "split from 2026-09-30-port-luau-c-catalog-root",
+        "rules/c/toolchain.js",
+        ("tool/path host APIs", "workspace/catalog discovery"),
+    ),
+    "c-toolchains": MigrationBoundary(
+        "C compiler toolchains",
+        "2026-09-30-port-luau-c-toolchains",
+        "rules/c/{gcc,mold,msvc,zig}",
+        ("graph outputs", "tool/path host APIs", "workspace/catalog discovery"),
+    ),
+    "c-cmake": MigrationBoundary(
+        "CMake rules",
+        "2026-09-30-port-luau-cmake-rules",
+        "rules/c/cmake",
+        ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
+    ),
+    "c-catalog-root": MigrationBoundary(
+        "C catalog root",
+        "split from 2026-09-30-port-luau-c-catalog-root",
+        "rules/c root modules and graph example",
+        ("graph outputs", "test discovery", "workspace/catalog discovery"),
+    ),
+    "c-generate-build": MigrationBoundary(
+        "C BUILD generation",
+        "split from 2026-09-30-port-luau-c-catalog-root",
+        "rules/c/generate_build",
+        ("workspace/catalog discovery",),
+    ),
+    "js-biome": MigrationBoundary(
+        "Biome rules",
+        "2026-09-30-port-luau-js-biome",
+        "rules/js/biome",
+        ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
+    ),
+    "js-node-pnpm": MigrationBoundary(
+        "JavaScript, Node, and pnpm rules",
+        "2026-09-30-port-luau-js-node-pnpm",
+        "rules/js root, node, and pnpm modules",
+        ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
+    ),
+    "python-core": MigrationBoundary(
+        "Python project and runtime rules",
+        "2026-09-30-port-luau-python-core",
+        "rules/python core, project, runtime, source, workspace, and tests",
+        ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
+    ),
+    "python-pex-uv": MigrationBoundary(
+        "Python lock, PEX, and uv rules",
+        "2026-09-30-port-luau-python-pex-uv",
+        "rules/python/{lock,pex_toolchain,uv_toolchain}",
+        ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
+    ),
+    "python-ruff": MigrationBoundary(
+        "Python Ruff rules",
+        "2026-09-30-port-luau-python-ruff",
+        "rules/python/ruff and Ruff graph/toolchain modules",
+        ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
+    ),
+    "rust-remainder": MigrationBoundary(
+        "Rust rules outside the compiled-language island",
+        "split from 2026-09-30-port-luau-rust-rules",
+        "Remaining rules/rust modules",
+        ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
+    ),
+    "odin-remainder": MigrationBoundary(
+        "Odin rules outside the compiled-language island",
+        "split from 2026-09-30-port-luau-odin-rules",
+        "Remaining rules/odin modules",
+        ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
+    ),
+    "treesitter-validation": MigrationBoundary(
+        "Tree-sitter BUILD and test modules",
+        "split from 2026-09-30-port-luau-treesitter",
+        "Remaining rules/treesitter modules",
+        ("test discovery", "workspace/catalog discovery"),
+    ),
+    "treesitter-runtime": MigrationBoundary(
+        "Tree-sitter runtime rules",
+        "split from 2026-09-30-port-luau-treesitter",
+        "rules/treesitter/index.js",
+        ("graph outputs", "tool/path host APIs", "workspace/catalog discovery"),
+    ),
+    "oci": MigrationBoundary(
+        "OCI rules",
+        "2026-09-30-port-luau-oci",
+        "rules/oci",
+        ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
+    ),
+    "zola": MigrationBoundary(
+        "Zola rules",
+        "2026-09-30-port-luau-zola",
+        "rules/zola",
+        ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
+    ),
+}
+
+
+WORKSPACE_INTEGRATION_FILES = {
+    "BUILD.js",
+    "ci/BUILD.js",
+    "crates/imp-daemon/BUILD.js",
+    "crates/imp-engine/BUILD.js",
+    "crates/imp-exec-api/BUILD.js",
+    "crates/imp-exec-bridge/BUILD.js",
+    "crates/imp-execution/BUILD.js",
+    "crates/imp-logging/BUILD.js",
+    "crates/imp-remote-cache/BUILD.js",
+    "crates/imp-scheduler/BUILD.js",
+    "crates/imp-store/BUILD.js",
+    "crates/imp/BUILD.js",
+    "crates/imp/src/BUILD.js",
+    "docs/BUILD.js",
+    "docs/js_api_extract.js",
+    "docs/js_api_extract_test.js",
+    "examples/proposed-rules/BUILD.js",
+    "imp.workspace.ci.js",
+    "imp.workspace.js",
+}
+
+COMPILED_LANGUAGE_ISLAND = {
+    "rules/rust/generate_build/index.js",
+    "rules/rust/index.js",
+    "rules/rust/workspace_expansion.js",
+}
+
+WORKFLOW_CORE_RUNTIME = {
+    "rules/workflows/build/index.js",
+    "rules/workflows/fmt/index.js",
+    "rules/workflows/lint/index.js",
+    "rules/workflows/report.js",
+    "rules/workflows/run/index.js",
+    "rules/workflows/test/index.js",
+}
+
+WORKFLOW_CODEGEN_RUNTIME = {
+    "rules/workflows/codegen/index.js",
+    "rules/workflows/generate/index.js",
+    "rules/workflows/generate_build/index.js",
+}
+
+WORKFLOW_PACKAGING_RUNTIME = {
+    "rules/workflows/package/index.js",
+    "rules/workflows/publish/index.js",
+    "rules/workflows/vs/index.js",
+}
+
+
+def migration_boundary_for(path: str) -> str | None:
+    if path in WORKSPACE_INTEGRATION_FILES:
+        return "workspace-integration"
+    if path == "rules/BUILD.js":
+        return "catalog-discovery"
+    if path.startswith("rules/asset/"):
+        return "asset-pilot"
+    if path.startswith("rules/js/example/"):
+        return "example-decision"
+    if path in ENGINE_MODULES:
+        return "quickjs-removal"
+    if path in {
+        "rules/imp/mode/index.js",
+        "rules/imp/native-tool/index.js",
+        "rules/imp/self-tool/index.js",
+    }:
+        return "imp-host-foundation"
+    if path.startswith((
+        "rules/imp/archive",
+        "rules/imp/codegen",
+        "rules/imp/generate",
+        "rules/imp/lockfile",
+        "rules/imp/toolchain",
+    )):
+        return "imp-core-foundation"
+    if path in COMPILED_LANGUAGE_ISLAND:
+        return "compiled-language-island"
+    if path.startswith("rules/imp/"):
+        return "imp-validation"
+    if path in WORKFLOW_CORE_RUNTIME:
+        return "workflow-core-runtime"
+    if path.startswith((
+        "rules/workflows/build/",
+        "rules/workflows/fmt/",
+        "rules/workflows/lint/",
+        "rules/workflows/run/",
+        "rules/workflows/test/",
+    )) or path in {"rules/workflows/BUILD.js", "rules/workflows/report_test.js"}:
+        return "workflow-core-validation"
+    if path in WORKFLOW_CODEGEN_RUNTIME:
+        return "workflow-codegen-runtime"
+    if path.startswith((
+        "rules/workflows/codegen/",
+        "rules/workflows/generate/",
+        "rules/workflows/generate_build/",
+    )):
+        return "workflow-codegen-validation"
+    if path == "rules/workflows/lockfiles/index.js":
+        return "workflow-lockfiles-runtime"
+    if path == "rules/workflows/builtin_lockfiles/index.js":
+        return "builtin-lockfiles"
+    if path in WORKFLOW_PACKAGING_RUNTIME:
+        return "workflow-packaging-runtime"
+    if path.startswith((
+        "rules/workflows/lockfiles/",
+        "rules/workflows/package/",
+        "rules/workflows/publish/",
+        "rules/workflows/vs/",
+    )):
+        return "workflow-packaging-validation"
+    if path == "rules/c/toolchain.js":
+        return "c-shared-toolchain"
+    if path.startswith(("rules/c/gcc/", "rules/c/mold/", "rules/c/msvc/", "rules/c/zig/")):
+        return "c-toolchains"
+    if path.startswith("rules/c/cmake/"):
+        return "c-cmake"
+    if path.startswith("rules/c/generate_build/"):
+        return "c-generate-build"
+    if path.startswith("rules/c/"):
+        return "c-catalog-root"
+    if path.startswith("rules/js/biome/"):
+        return "js-biome"
+    if path.startswith(("rules/js/node/", "rules/js/pnpm/")) or path in {
+        "rules/js/BUILD.js",
+        "rules/js/graph.js",
+        "rules/js/graph_test.js",
+        "rules/js/index.js",
+        "rules/js/index_test.js",
+    }:
+        return "js-node-pnpm"
+    if path.startswith("rules/python/ruff/") or path.startswith("rules/python/ruff_"):
+        return "python-ruff"
+    if path.startswith((
+        "rules/python/lock.",
+        "rules/python/pex_toolchain",
+        "rules/python/uv_toolchain",
+    )):
+        return "python-pex-uv"
+    if path.startswith("rules/python/"):
+        return "python-core"
+    if path.startswith("rules/rust/"):
+        return "rust-remainder"
+    if path.startswith("rules/odin/"):
+        return "odin-remainder"
+    if path == "rules/treesitter/index.js":
+        return "treesitter-runtime"
+    if path.startswith("rules/treesitter/"):
+        return "treesitter-validation"
+    if path.startswith("rules/oci/"):
+        return "oci"
+    if path.startswith("rules/zola/"):
+        return "zola"
+    return None
 
 
 def tracked_javascript() -> list[str]:
@@ -280,7 +646,155 @@ def inspect_file(path: str) -> dict[str, object]:
         "category": category,
         "reason": reason,
         "features": features,
+        "boundary": migration_boundary_for(path),
     }
+
+
+STATIC_RULE_IMPORT = re.compile(
+    r"(?:\bfrom\s+|^\s*import\s+)(['\"])(//rules/[^'\"]+)\1",
+    re.MULTILINE,
+)
+
+
+def static_rule_imports(source: str) -> list[str]:
+    """Return static catalog imports without treating addressed data as modules."""
+    code = mask_comments_and_literals(source)
+    imports = []
+    for match in STATIC_RULE_IMPORT.finditer(source):
+        keyword_start = match.start()
+        keyword = code[keyword_start : keyword_start + 6].lstrip()
+        if keyword.startswith("import") or keyword.startswith("from"):
+            imports.append(match.group(2))
+    return imports
+
+
+def resolve_rule_import(specifier: str, tracked: set[str]) -> str | None:
+    """Resolve a //rules import with the catalog's file and index conventions."""
+    base = specifier.removeprefix("//")
+    for candidate in (base, base + ".js", base + "/index.js", base + "/BUILD.js"):
+        if candidate in tracked:
+            return candidate
+    return None
+
+
+def import_graph(rows: list[dict[str, object]]) -> dict[str, set[str]]:
+    tracked = {str(row["path"]) for row in rows}
+    graph = {path: set() for path in tracked}
+    for path in sorted(tracked):
+        source = (ROOT / path).read_text(encoding="utf-8")
+        for specifier in static_rule_imports(source):
+            target = resolve_rule_import(specifier, tracked)
+            if target is not None:
+                graph[path].add(target)
+    return graph
+
+
+def strongly_connected_components(graph: dict[str, set[str]]) -> list[list[str]]:
+    """Return Tarjan components in deterministic discovery order."""
+    next_index = 0
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    components: list[list[str]] = []
+
+    def visit(node: str) -> None:
+        nonlocal next_index
+        indices[node] = next_index
+        lowlinks[node] = next_index
+        next_index += 1
+        stack.append(node)
+        on_stack.add(node)
+
+        for target in sorted(graph[node]):
+            if target not in indices:
+                visit(target)
+                lowlinks[node] = min(lowlinks[node], lowlinks[target])
+            elif target in on_stack:
+                lowlinks[node] = min(lowlinks[node], indices[target])
+
+        if lowlinks[node] != indices[node]:
+            return
+        component: list[str] = []
+        while True:
+            member = stack.pop()
+            on_stack.remove(member)
+            component.append(member)
+            if member == node:
+                break
+        components.append(sorted(component))
+
+    for node in sorted(graph):
+        if node not in indices:
+            visit(node)
+    return components
+
+
+def module_island_stages(graph: dict[str, set[str]]) -> list[list[list[str]]]:
+    """Group static-import components into prerequisite-first stages."""
+    components = strongly_connected_components(graph)
+    component_for = {
+        path: component_index
+        for component_index, component in enumerate(components)
+        for path in component
+    }
+    component_dependencies = {index: set() for index in range(len(components))}
+    for source, targets in graph.items():
+        source_component = component_for[source]
+        for target in targets:
+            target_component = component_for[target]
+            if source_component != target_component:
+                component_dependencies[source_component].add(target_component)
+
+    component_depth: dict[int, int] = {}
+
+    def depth(component: int) -> int:
+        if component not in component_depth:
+            required = component_dependencies[component]
+            component_depth[component] = 1 + max(
+                (depth(dependency) for dependency in required),
+                default=0,
+            )
+        return component_depth[component]
+
+    for component in component_dependencies:
+        depth(component)
+
+    staged: dict[int, list[list[str]]] = collections.defaultdict(list)
+    for component_index, component in enumerate(components):
+        staged[component_depth[component_index]].append(component)
+    return [
+        sorted(staged[stage], key=lambda component: component)
+        for stage in sorted(staged)
+    ]
+
+
+def boundary_graph(
+    rows: list[dict[str, object]],
+    graph: dict[str, set[str]],
+) -> tuple[dict[str, set[str]], dict[tuple[str, str], tuple[str, str]]]:
+    by_path = {str(row["path"]): row for row in rows}
+    used = {
+        str(row["boundary"])
+        for row in rows
+        if row["boundary"] is not None
+    }
+    dependencies = {boundary: set() for boundary in used}
+    evidence: dict[tuple[str, str], tuple[str, str]] = {}
+    for source_path in sorted(graph):
+        targets = graph[source_path]
+        source_boundary = by_path[source_path]["boundary"]
+        if source_boundary is None:
+            continue
+        for target_path in sorted(targets):
+            target_boundary = by_path[target_path]["boundary"]
+            if target_boundary is None or target_boundary == source_boundary:
+                continue
+            source = str(source_boundary)
+            target = str(target_boundary)
+            dependencies[source].add(target)
+            evidence.setdefault((source, target), (source_path, target_path))
+    return dependencies, evidence
 
 
 def print_report(rows: list[dict[str, object]]) -> None:
@@ -291,6 +805,8 @@ def print_report(rows: list[dict[str, object]]) -> None:
         "excluded/non-authoring JavaScript",
     ]
     role_names = ["production", "workspace/build", "test", "excluded"]
+    graph = import_graph(rows)
+    dependencies, dependency_evidence = boundary_graph(rows, graph)
 
     print("# JavaScript-to-Luau conversion inventory")
     print()
@@ -339,6 +855,96 @@ def print_report(rows: list[dict[str, object]]) -> None:
         print(f"| `{family}` | {mechanical} | {review} | {redesign} | {mechanical + review + redesign} |")
 
     print()
+    print("## Migration boundary coverage")
+    print()
+    assigned = [row for row in rows if row["boundary"] is not None]
+    unassigned = [row for row in rows if row["boundary"] is None]
+    excluded = [row for row in rows if row["role"] == "excluded"]
+    print(f"- Assigned tracked files: {len(assigned)}/{len(rows)}")
+    print(f"- Explicit exclusions: {len(excluded)}")
+    if unassigned:
+        print("- Unassigned files: " + ", ".join(f"`{row['path']}`" for row in unassigned))
+    else:
+        print("- Unassigned files: none")
+
+    print()
+    print("| Boundary | Modules | Owning task | Host prerequisites |")
+    print("| --- | ---: | --- | --- |")
+    boundary_rows: dict[str, list[dict[str, object]]] = collections.defaultdict(list)
+    for row in assigned:
+        boundary_rows[str(row["boundary"])].append(row)
+    for boundary, selected in sorted(boundary_rows.items()):
+        definition = BOUNDARIES[boundary]
+        prerequisites = ", ".join(definition.host_prerequisites) or "none"
+        print(
+            f"| `{boundary}` | {len(selected)} | `{definition.task}` | {prerequisites} |"
+        )
+
+    print()
+    print("Every boundary above has at most 20 tracked JavaScript files. The task names identify current ownership or the task that must be split during backlog reconciliation.")
+
+    print()
+    print("### Files by migration boundary")
+    for boundary, selected in sorted(boundary_rows.items()):
+        definition = BOUNDARIES[boundary]
+        print()
+        print(f"#### `{boundary}` — {definition.title}")
+        print()
+        print(f"Source boundary: {definition.source}.")
+        for row in sorted(selected, key=lambda item: str(item["path"])):
+            role = row["role"]
+            category = row["category"]
+            print(f"- `{row['path']}` — {role}; {category}")
+
+    print()
+    print("## Static-import islands")
+    print()
+    cycles = [
+        component
+        for component in strongly_connected_components(graph)
+        if len(component) > 1
+    ]
+    if not cycles:
+        print("No multi-module static-import cycles found.")
+    for component in sorted(cycles, key=lambda item: (-len(item), item)):
+        print(f"- {len(component)}-module island:")
+        for path in component:
+            print(f"  - `{path}`")
+
+    print()
+    print("## Boundary dependency table")
+    print()
+    print("An edge means that a source boundary has a static import from the prerequisite boundary. Host prerequisites are planning estimates recorded in BOUNDARIES; compare them with the verified host surface and gaps in docs/design/luau-authoring-contract.md before scheduling.")
+    print()
+    print("| Boundary | Static-import prerequisites | Example edge | Host prerequisites |")
+    print("| --- | --- | --- | --- |")
+    for boundary in sorted(dependencies):
+        required = sorted(dependencies[boundary])
+        imports = ", ".join(f"`{item}`" for item in required) or "none"
+        if required:
+            source, target = dependency_evidence[(boundary, required[0])]
+            example = f"`{source}` → `{target}`"
+        else:
+            example = "none"
+        host = ", ".join(BOUNDARIES[boundary].host_prerequisites) or "none"
+        print(f"| `{boundary}` | {imports} | {example} | {host} |")
+
+    print()
+    print("### Module island order")
+    print()
+    print("Review boundaries express ownership and may contain modules from more than one dependency stage. The module islands below form the acyclic execution order.")
+    print()
+    for number, stage in enumerate(module_island_stages(graph), start=1):
+        module_count = sum(len(component) for component in stage)
+        multi_module = [component for component in stage if len(component) > 1]
+        suffix = ""
+        if multi_module:
+            paths = ", ".join(f"`{path}`" for path in multi_module[0])
+            suffix = f"; multi-module island: {paths}"
+        print(f"- Stage {number}: {len(stage)} island(s), {module_count} module(s){suffix}")
+    print("- Condensed module graph: acyclic")
+
+    print()
     print("## Module paths by category")
     print()
     for category in category_names:
@@ -353,16 +959,17 @@ def print_report(rows: list[dict[str, object]]) -> None:
     print("## Cutover surfaces to review")
     print()
     print("- The engine module loader and runtime host files must load `.luau` sources and preserve module identity.")
-    print("- Workspace config and `BUILD.js` naming must align with the Luau resolver and the files generated by `imp init`.")
+    print("- Workspace config and generated BUILD naming must align with the Luau resolver; Imp no longer has an `imp init` command.")
     print("- `docs/BUILD.js` filters JavaScript sources for generated API references; its extractor, tests, generated `docs/content/reference/` pages, and documentation text need a migration decision.")
     print("- The installed `share/imp/rules/` tree and release smoke test must continue to package and load rule files beside the executable.")
 
     print()
-    print("## Pilot and bounded batch proposal")
+    print("## Island and boundary policy")
     print()
-    print("- Pilot: `rules/asset` with its implementation, BUILD module, and tests. It is a small graph-native rule package with imports, option tables, callbacks, and async actions.")
-    print("- Batch by rule package, keep each batch at or below 20 authoring modules, and include each package's BUILD and test modules with production modules. Split larger families at their subpackage boundaries.")
-    print("- Use the family counts above to group small packages. Start with mechanical packages, then mechanical-with-review packages, and schedule manual-redesign packages as separate bounded work.")
+    print("- Do not run JavaScript and Luau modules together in one graph.")
+    print("- A boundary may land before its island is runnable. Validate the complete dependency-closed island before activation.")
+    print("- Keep each review boundary at or below 20 authoring modules. Split runtime and validation files when their imports require different ordering.")
+    print("- Treat conversion categories as review signals only. Review every module in its named boundary.")
 
 
 def main() -> int:
