@@ -24,7 +24,16 @@ return {}
         .parent()
         .and_then(std::path::Path::parent)
         .expect("find repository root");
-    let output = Command::new(env!("CARGO_BIN_EXE_imp"))
+    let imp_binary = std::path::Path::new(env!("CARGO_BIN_EXE_imp"));
+    // Imp runs Rust test binaries in an isolated sandbox. Its Cargo test
+    // action stages the test binaries, but not this separate CLI binary.
+    // Direct `cargo test` runs this CLI regression with the binary present.
+    if !imp_binary.is_file() {
+        eprintln!("skip config schema CLI check: cargo did not stage the imp binary");
+        return;
+    }
+
+    let output = Command::new(imp_binary)
         .current_dir(root.path())
         .args(["config", "schema", "--effective"])
         .env("IMP_RULES_DIR", repository_root.join("rules"))

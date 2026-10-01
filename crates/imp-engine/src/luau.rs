@@ -76,7 +76,10 @@ enum OutputDeclaration {
     Value,
     Artifact,
     File(String),
-    Directory(String),
+    Directory {
+        path: String,
+        named_cache: Option<imp_store::cache::OutputNamedCache>,
+    },
 }
 
 struct OutputDeclarationHandle(OutputDeclaration);
@@ -101,8 +104,21 @@ struct FileSetSpec {
 enum GraphNode {
     Files(FileSetSpec),
     NativeTool(String),
+    Path {
+        source_id: u64,
+        owner_package: String,
+    },
+    Tool {
+        name: String,
+        bin_dirs: Vec<String>,
+        source_id: u64,
+        owner_package: String,
+    },
     Task,
-    TaskOutput { task_id: u64, name: String },
+    TaskOutput {
+        task_id: u64,
+        name: String,
+    },
     Artifact(imp_store::cache::CachedArtifact),
 }
 
@@ -114,6 +130,8 @@ struct HostState {
     filesets: HashMap<String, u64>,
     action_count: usize,
     cache_hit_count: usize,
+    tools: HashMap<String, u64>,
+    paths: HashMap<String, u64>,
     goals: HashMap<String, LuaFunction>,
     workspace_root: PathBuf,
     workspace_id: String,
@@ -172,6 +190,8 @@ impl LuauWorkspace {
             filesets: HashMap::new(),
             action_count: 0,
             cache_hit_count: 0,
+            tools: HashMap::new(),
+            paths: HashMap::new(),
             goals: HashMap::new(),
             workspace_id,
             workspace_root: workspace_root.clone(),
@@ -731,6 +751,41 @@ fn install_task_executor(
                 let inputs = resolve_task_inputs(&lua, &host, &task.inputs)?;
                 let returns_outputs = !task.outputs.is_empty();
                 let exec = lua.create_table()?;
+                let path_host = Rc::clone(&host);
+                let path_inputs = inputs.clone();
+                exec.set(
+                    "path",
+                    lua.create_function(move |_, handle: LuaAnyUserData| {
+                        let graph_handle = handle.borrow::<GraphHandle>()?;
+                        let mut declared = false;
+                        for pair in path_inputs.pairs::<LuaValue, LuaValue>() {
+                            let (_, value) = pair?;
+                            if let LuaValue::UserData(value) = value {
+                                if value
+                                    .borrow::<GraphHandle>()
+                                    .is_ok_and(|input| input.id == graph_handle.id)
+                                {
+                                    declared = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !declared {
+                            return Err(LuaError::external(
+                                "exec.path(handle) requires a declared task input",
+                            ));
+                        }
+                        let (source_id, owner_package) = match path_host.borrow().nodes.get(&graph_handle.id) {
+                            Some(GraphNode::Path { source_id, owner_package }) => (*source_id, owner_package.clone()),
+                            Some(GraphNode::Artifact(_)) => (graph_handle.id, String::new()),
+                            _ => return Err(LuaError::external("exec.path(handle) requires a path or artifact handle")),
+                        };
+                        let artifact = resolve_source_artifact(&path_host.borrow(), source_id)?;
+                        artifact.path.ok_or_else(|| LuaError::external(
+                            format!("exec.path(handle) artifact declared in package '{owner_package}' has no captured path"),
+                        ))
+                    })?,
+                )?;
                 let action_host = Rc::clone(&host);
                 let action_configuration = Rc::clone(&configuration);
                 let action_lua = lua.clone();
@@ -806,13 +861,22 @@ fn dependency_order(host: &HostState, root: u64) -> LuaResult<Vec<u64>> {
             let Ok(handle) = value.borrow::<GraphHandle>() else {
                 continue;
             };
-            if handle.kind != "task_output" {
-                continue;
+            match host.nodes.get(&handle.id) {
+                Some(GraphNode::TaskOutput { task_id, .. }) => {
+                    visit(host, *task_id, visiting, visited, order)?;
+                }
+                Some(GraphNode::Path { source_id, .. })
+                | Some(GraphNode::Tool { source_id, .. }) => {
+                    let Some(GraphNode::TaskOutput { task_id, .. }) = host.nodes.get(source_id)
+                    else {
+                        return Err(LuaError::external(
+                            "invalid Luau tool or path source handle",
+                        ));
+                    };
+                    visit(host, *task_id, visiting, visited, order)?;
+                }
+                _ => {}
             }
-            let Some(GraphNode::TaskOutput { task_id, .. }) = host.nodes.get(&handle.id) else {
-                return Err(LuaError::external("invalid Luau task output handle"));
-            };
-            visit(host, *task_id, visiting, visited, order)?;
         }
         visiting.pop();
         visited.insert(id);
@@ -958,6 +1022,108 @@ fn create_core(
 ) -> LuaResult<LuaValue> {
     let core = lua.create_table()?;
     core.set("BUILD", "BUILD")?;
+
+    let platform_host = Rc::clone(&host);
+    core.set(
+        "platform_info",
+        lua.create_function(move |lua, ()| {
+            let capabilities = platform_host
+                .borrow()
+                .service
+                .capabilities()
+                .map_err(LuaError::external)?;
+            let platform = lua.create_table()?;
+            platform.set("os", capabilities.os)?;
+            platform.set("arch", capabilities.arch)?;
+            Ok(platform)
+        })?,
+    )?;
+
+    let path_host = Rc::clone(&host);
+    let path_loader = loader.clone();
+    core.set(
+        "path",
+        lua.create_function(move |lua, source: LuaAnyUserData| {
+            let source_id = artifact_output_source(&path_host, &source)?;
+            let owner_package = current_package_path(&path_loader);
+            let fingerprint = format!("{owner_package}\n{source_id}");
+            if let Some(id) = path_host.borrow().paths.get(&fingerprint).copied() {
+                return lua.create_userdata(GraphHandle {
+                    id,
+                    kind: "path",
+                    outputs: None,
+                });
+            }
+            let handle = allocate_handle(&path_host, "path");
+            let mut host = path_host.borrow_mut();
+            host.paths.insert(fingerprint, handle.id);
+            host.nodes.insert(
+                handle.id,
+                GraphNode::Path {
+                    source_id,
+                    owner_package,
+                },
+            );
+            drop(host);
+            lua.create_userdata(handle)
+        })?,
+    )?;
+
+    let tool_host = Rc::clone(&host);
+    let tool_loader = loader.clone();
+    core.set(
+        "tool",
+        lua.create_function(move |lua, (source, options): (LuaAnyUserData, LuaTable)| {
+            let source_id = artifact_output_source(&tool_host, &source)?;
+            for pair in options.pairs::<String, LuaValue>() {
+                let (key, _) = pair?;
+                if key != "name" && key != "bin_dirs" {
+                    return Err(LuaError::external(format!(
+                        "tool options do not accept '{key}'"
+                    )));
+                }
+            }
+            let name = options.get::<String>("name")?;
+            let bin_dirs = options
+                .get::<Option<Vec<String>>>("bin_dirs")?
+                .unwrap_or_else(|| vec![".".to_owned()]);
+            if name.trim().is_empty() {
+                return Err(LuaError::external("tool({ source, name }) requires a name"));
+            }
+            if bin_dirs.is_empty() {
+                return Err(LuaError::external("tool.bin_dirs must not be empty"));
+            }
+            for directory in &bin_dirs {
+                validate_tool_bin_dir(directory)?;
+            }
+            let owner_package = current_package_path(&tool_loader);
+            let fingerprint = format!(
+                "{owner_package}\n{source_id}\n{name}\n{}",
+                bin_dirs.join("\n")
+            );
+            if let Some(id) = tool_host.borrow().tools.get(&fingerprint).copied() {
+                return lua.create_userdata(GraphHandle {
+                    id,
+                    kind: "tool",
+                    outputs: None,
+                });
+            }
+            let handle = allocate_handle(&tool_host, "tool");
+            let mut host = tool_host.borrow_mut();
+            host.tools.insert(fingerprint, handle.id);
+            host.nodes.insert(
+                handle.id,
+                GraphNode::Tool {
+                    name,
+                    bin_dirs,
+                    source_id,
+                    owner_package,
+                },
+            );
+            drop(host);
+            lua.create_userdata(handle)
+        })?,
+    )?;
 
     // Keep the CLI-owned schema available in every Luau workspace. Rule
     // modules register their own namespace schemas through this same API.
@@ -1113,9 +1279,26 @@ fn create_core(
     )?;
     output.set(
         "directory",
-        lua.create_function(|lua, path: String| {
+        lua.create_function(|lua, (path, options): (String, Option<LuaTable>)| {
             validate_output_path(&path)?;
-            lua.create_userdata(OutputDeclarationHandle(OutputDeclaration::Directory(path)))
+            let named_cache = match options {
+                Some(options) => {
+                    for pair in options.pairs::<String, LuaValue>() {
+                        let (key, _) = pair?;
+                        if key != "named_cache" {
+                            return Err(LuaError::external(format!(
+                                "output.directory options do not accept '{key}'"
+                            )));
+                        }
+                    }
+                    parse_named_cache(&options)?
+                }
+                None => None,
+            };
+            lua.create_userdata(OutputDeclarationHandle(OutputDeclaration::Directory {
+                path,
+                named_cache,
+            }))
         })?,
     )?;
     core.set("output", output)?;
@@ -1155,7 +1338,7 @@ fn create_core(
                     let kind = match &declaration.0 {
                         OutputDeclaration::Value => TaskOutputKind::Value,
                         OutputDeclaration::Artifact => TaskOutputKind::Artifact,
-                        OutputDeclaration::File(_) | OutputDeclaration::Directory(_) => {
+                        OutputDeclaration::File(_) | OutputDeclaration::Directory { .. } => {
                             return Err(LuaError::external(format!(
                                 "task.outputs.{name} must be output.value() or output.artifact()"
                             )))
@@ -1334,6 +1517,91 @@ fn create_files_handle(
     lua.create_userdata(handle)
 }
 
+fn parse_named_cache(options: &LuaTable) -> LuaResult<Option<imp_store::cache::OutputNamedCache>> {
+    let Some(cache) = options.get::<Option<LuaTable>>("named_cache")? else {
+        return Ok(None);
+    };
+    for pair in cache.pairs::<String, LuaValue>() {
+        let (key, _) = pair?;
+        if key != "name" && key != "key" {
+            return Err(LuaError::external(format!(
+                "output.directory named_cache options do not accept '{key}'"
+            )));
+        }
+    }
+    let name = cache.get::<String>("name")?;
+    let key = cache.get::<String>("key")?;
+    imp_store::cache::validate_named_cache_path("shared", &name, &key)
+        .map_err(LuaError::external)?;
+    Ok(Some(imp_store::cache::OutputNamedCache {
+        name,
+        key,
+        shared: false,
+    }))
+}
+
+fn artifact_output_source(
+    host: &Rc<RefCell<HostState>>,
+    source: &LuaAnyUserData,
+) -> LuaResult<u64> {
+    let handle = source.borrow::<GraphHandle>()?;
+    let state = host.borrow();
+    let Some(GraphNode::TaskOutput { task_id, name }) = state.nodes.get(&handle.id) else {
+        return Err(LuaError::external(
+            "tool/path source must be a declared task artifact output",
+        ));
+    };
+    if !state
+        .tasks
+        .get(task_id)
+        .and_then(|task| task.outputs.get(name))
+        .is_some_and(|kind| *kind == TaskOutputKind::Artifact)
+    {
+        return Err(LuaError::external(
+            "tool/path source must be a task output declared with output.artifact()",
+        ));
+    }
+    Ok(handle.id)
+}
+
+fn resolve_source_artifact(
+    host: &HostState,
+    source_id: u64,
+) -> LuaResult<imp_store::cache::CachedArtifact> {
+    match host.nodes.get(&source_id) {
+        Some(GraphNode::Artifact(artifact)) => Ok(artifact.clone()),
+        Some(GraphNode::TaskOutput { task_id, name }) => {
+            let result = host.task_results.get(task_id).ok_or_else(|| {
+                LuaError::external("Luau task dependency did not produce a result")
+            })?;
+            let value = result.get::<LuaValue>(name.as_str())?;
+            let LuaValue::UserData(value) = value else {
+                return Err(LuaError::external("task output is not an artifact handle"));
+            };
+            let artifact_handle = value.borrow::<GraphHandle>()?;
+            match host.nodes.get(&artifact_handle.id) {
+                Some(GraphNode::Artifact(artifact)) => Ok(artifact.clone()),
+                _ => Err(LuaError::external("task output is not an artifact handle")),
+            }
+        }
+        _ => Err(LuaError::external("invalid Luau artifact source handle")),
+    }
+}
+
+fn validate_tool_bin_dir(directory: &str) -> LuaResult<()> {
+    if directory.is_empty()
+        || Path::new(directory).is_absolute()
+        || Path::new(directory)
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(LuaError::external(
+            "tool.bin_dirs entries must be relative paths inside the tool root",
+        ));
+    }
+    Ok(())
+}
+
 fn allocate_handle(host: &Rc<RefCell<HostState>>, kind: &'static str) -> GraphHandle {
     let mut host = host.borrow_mut();
     host.next_id += 1;
@@ -1415,6 +1683,9 @@ async fn run_action(
         .get::<Option<bool>>("cache")
         .map_err(|error| anyhow::anyhow!(error.to_string()))?
         .unwrap_or(true);
+    let action_env = options
+        .get::<Option<LuaTable>>("env")
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let action_inputs = options
         .get::<Option<LuaTable>>("inputs")
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -1457,12 +1728,23 @@ async fn run_action(
                     digest: Some(tree.digest().to_owned()),
                     named_cache: None,
                 });
+            } else if let Some(GraphNode::Path { source_id, .. }) = nodes.get(&handle.id) {
+                let artifact = resolve_source_artifact(&host.borrow(), *source_id)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                let tree = normalize_luau_artifact(&artifact)?;
+                input_specs.push(ExecIoSpec {
+                    path: None,
+                    kind: "digest".to_owned(),
+                    digest: Some(tree.digest().to_owned()),
+                    named_cache: None,
+                });
             }
         }
     }
     let input_digest = imp_execution::staging::resolve_input_digest(&root, &input_specs)?;
 
     let mut tools = Vec::new();
+    let mut tool_names = std::collections::HashSet::new();
     for pair in task_inputs.pairs::<LuaValue, LuaValue>() {
         let (_, value) = pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let LuaValue::UserData(value) = value else {
@@ -1472,29 +1754,68 @@ async fn run_action(
             Ok(handle) => handle,
             Err(_) => continue,
         };
-        let Some(GraphNode::NativeTool(name)) = nodes.get(&handle.id) else {
-            continue;
-        };
-        let resolved = crate::spike::which_executable(name)
-            .with_context(|| format!("native tool '{name}' was not found on PATH"))?;
-        let resolved = dunce::canonicalize(&resolved)
-            .with_context(|| format!("canonicalize native tool {resolved}"))?;
-        let content_digest = service
-            .file_sha256(&resolved)
-            .with_context(|| format!("digest native tool {}", resolved.display()))?;
-        let path = crate::spike::singleflight_register_native_tool(&service, name, &resolved)
-            .map_err(anyhow::Error::msg)?;
-        let key = imp_store::cache::digest_json(&serde_json::json!({
-            "path": resolved,
-            "digest": content_digest,
-        }))?;
-        tools.push(ExecToolSpec {
-            name: name.clone(),
-            cache: "native-tools".to_owned(),
-            key,
-            path,
-            bin_dirs: vec![".".to_owned()],
-        });
+        match nodes.get(&handle.id) {
+            Some(GraphNode::NativeTool(name)) => {
+                if !tool_names.insert(name.clone()) {
+                    bail!("exec.action received tool name '{name}' more than once");
+                }
+                let resolved = crate::spike::which_executable(name)
+                    .with_context(|| format!("native tool '{name}' was not found on PATH"))?;
+                let resolved = dunce::canonicalize(&resolved)
+                    .with_context(|| format!("canonicalize native tool {resolved}"))?;
+                let content_digest = service
+                    .file_sha256(&resolved)
+                    .with_context(|| format!("digest native tool {}", resolved.display()))?;
+                let path =
+                    crate::spike::singleflight_register_native_tool(&service, name, &resolved)
+                        .map_err(anyhow::Error::msg)?;
+                let key = imp_store::cache::digest_json(&serde_json::json!({
+                    "path": resolved,
+                    "digest": content_digest,
+                }))?;
+                tools.push(ExecToolSpec {
+                    name: name.clone(),
+                    cache: "native-tools".to_owned(),
+                    key,
+                    path,
+                    bin_dirs: vec![".".to_owned()],
+                });
+            }
+            Some(GraphNode::Tool {
+                name,
+                bin_dirs,
+                source_id,
+                owner_package,
+            }) => {
+                if !tool_names.insert(name.clone()) {
+                    bail!("exec.action received tool name '{name}' more than once");
+                }
+                let artifact = resolve_source_artifact(&host.borrow(), *source_id)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                if artifact.kind != "directory" {
+                    bail!("tool '{name}' declared in package '{owner_package}' must use a directory artifact");
+                }
+                let cache = artifact.named_cache.as_ref().with_context(|| {
+                    format!("tool '{name}' declared in package '{owner_package}' must come from an output with named_cache")
+                })?;
+                let path = service
+                    .cache_dir_get(&workspace_id, &cache.name, &cache.key)?
+                    .with_context(|| {
+                        format!(
+                            "tool '{}' cache '{}/{}' is missing",
+                            name, cache.name, cache.key
+                        )
+                    })?;
+                tools.push(ExecToolSpec {
+                    name: name.clone(),
+                    cache: cache.name.clone(),
+                    key: cache.key.clone(),
+                    path,
+                    bin_dirs: bin_dirs.clone(),
+                });
+            }
+            _ => {}
+        }
     }
 
     let mut declared_outputs = BTreeMap::new();
@@ -1512,9 +1833,11 @@ async fn run_action(
             let declaration = declaration
                 .borrow::<OutputDeclarationHandle>()
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            let (kind, path) = match &declaration.0 {
-                OutputDeclaration::File(path) => ("file", path),
-                OutputDeclaration::Directory(path) => ("directory", path),
+            let (kind, path, named_cache) = match &declaration.0 {
+                OutputDeclaration::File(path) => ("file", path, None),
+                OutputDeclaration::Directory { path, named_cache } => {
+                    ("directory", path, named_cache.as_ref())
+                }
                 OutputDeclaration::Value | OutputDeclaration::Artifact => {
                     bail!(
                         "exec.action outputs must use output.file(path) or output.directory(path)"
@@ -1534,15 +1857,26 @@ async fn run_action(
                 path: Some(path.clone()),
                 kind: kind.to_owned(),
                 digest: None,
-                named_cache: None,
+                named_cache: named_cache.cloned(),
             });
         }
     }
 
+    let mut env = configured_base_env(&configuration.borrow())?;
+    if let Some(action_env) = action_env {
+        for pair in action_env.pairs::<String, String>() {
+            let (name, value) = pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            if name.is_empty() || name.contains('=') || name.contains('\0') || value.contains('\0')
+            {
+                bail!("exec.action().env requires valid environment names and values");
+            }
+            env.insert(name, value);
+        }
+    }
     let action = ExecAction {
         argv,
         display: display.clone(),
-        env: configured_base_env(&configuration.borrow())?,
+        env,
         config_digest: String::new(),
         input_digest,
         outputs: output_specs,
@@ -2187,6 +2521,131 @@ return { final = final }
         let luau = live.luau.as_ref().unwrap().borrow();
         assert_eq!(luau.action_count(), 4);
         assert!(luau.cache_hit_count() >= first_cache_hits + 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn luau_acquired_tool_handles_stage_in_sandbox_and_apply_action_env() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = tempfile::tempdir().unwrap();
+        fs::write(
+            workspace_root.path().join("imp.workspace.luau"),
+            "return {}\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local platform = core.platform_info()
+assert(type(platform.os) == "string" and platform.os ~= "")
+assert(type(platform.arch) == "string" and platform.arch ~= "")
+local output = core.output
+local producer = core.task({
+    inputs = {
+        shell = core.native_tool("sh"),
+        mkdir = core.native_tool("mkdir"),
+        chmod = core.native_tool("chmod"),
+    },
+    outputs = { tool = output.artifact() },
+    run = function(exec)
+        local result = exec.action({
+            argv = {
+                "sh", "-c",
+                "mkdir -p staged && printf '#!/bin/sh\n[ \"$TOOL_SETTING\" = set ]\n' > staged/fixture-tool && chmod +x staged/fixture-tool",
+            },
+            outputs = {
+                tool = output.directory("staged", {
+                    named_cache = { name = "luau-test-tools", key = "fixture-v1" },
+                }),
+            },
+        })
+        return { tool = result.outputs.tool }
+    end,
+})
+local path = core.path(producer.outputs.tool)
+local tool = core.tool(producer.outputs.tool, {
+    name = "fixture-tool",
+    bin_dirs = { "." },
+})
+local consumer = core.task({
+    inputs = { tool = tool, path = path },
+    run = function(exec, inputs)
+        assert(exec.path(inputs.path) == "staged")
+        exec.action({
+            argv = { "fixture-tool" },
+            inputs = { inputs.path },
+            env = { TOOL_SETTING = "set" },
+        })
+    end,
+})
+return { consume = consumer }
+"#,
+        )
+        .unwrap();
+
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let exports = runtime
+            .evaluate("@workspace/BUILD")
+            .await
+            .unwrap()
+            .as_table()
+            .cloned()
+            .unwrap();
+        let root = exports.get::<LuaAnyUserData>("consume").unwrap();
+        runtime.execute_task(&root).await.unwrap();
+        assert_eq!(runtime.action_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn luau_tool_and_path_handles_keep_package_owner_and_stable_identity() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace_root.path().join("pkg")).unwrap();
+        fs::write(
+            workspace_root.path().join("pkg/BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local producer = core.task({
+    outputs = { directory = core.output.artifact() },
+    run = function() return { directory = nil } end,
+})
+return {
+    path_a = core.path(producer.outputs.directory),
+    path_b = core.path(producer.outputs.directory),
+    tool_a = core.tool(producer.outputs.directory, { name = "sample" }),
+    tool_b = core.tool(producer.outputs.directory, { name = "sample" }),
+}
+"#,
+        )
+        .unwrap();
+
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let exports = runtime
+            .evaluate("@workspace/pkg/BUILD")
+            .await
+            .unwrap()
+            .as_table()
+            .cloned()
+            .unwrap();
+        let path_a = exports.get::<LuaAnyUserData>("path_a").unwrap();
+        let path_b = exports.get::<LuaAnyUserData>("path_b").unwrap();
+        let tool_a = exports.get::<LuaAnyUserData>("tool_a").unwrap();
+        let tool_b = exports.get::<LuaAnyUserData>("tool_b").unwrap();
+        let path_a = path_a.borrow::<GraphHandle>().unwrap().id;
+        let path_b = path_b.borrow::<GraphHandle>().unwrap().id;
+        let tool_a = tool_a.borrow::<GraphHandle>().unwrap().id;
+        let tool_b = tool_b.borrow::<GraphHandle>().unwrap().id;
+        assert_eq!(path_a, path_b);
+        assert_eq!(tool_a, tool_b);
+        match runtime.host.borrow().nodes.get(&path_a).unwrap() {
+            GraphNode::Path { owner_package, .. } => assert_eq!(owner_package, "pkg"),
+            _ => panic!("expected path node"),
+        }
+        match runtime.host.borrow().nodes.get(&tool_a).unwrap() {
+            GraphNode::Tool { owner_package, .. } => assert_eq!(owner_package, "pkg"),
+            _ => panic!("expected tool node"),
+        };
     }
 
     #[tokio::test]

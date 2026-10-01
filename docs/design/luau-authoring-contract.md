@@ -24,16 +24,16 @@ the gaps that block catalog migration.
 | Module loading | Loads `@imp/core`, `@imp/rules/...`, and `@workspace/...`; caches canonical module values and rejects namespace escapes. | The full catalog and its loader-dependent workspace features are not migrated. |
 | Workspace configuration | Loads `imp.workspace.luau`; on GitHub Actions it deep-merges `imp.workspace.ci.luau`. Luau rule modules can register schemas, read or write configuration, and expose schemas and resolved values to the CLI. | JavaScript and Luau use different field spellings. Luau configuration uses `snake_case`; the JavaScript runtime remains the default. |
 | BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. | Generated BUILD discovery and mixed catalog dependencies are not supported. |
-| Graph construction | Exposes `files`, `glob`, `task`, `output`, `native_tool`, `package_path`, `goal`, and opaque handles. Tasks declare named `value` or `artifact` outputs. `memo`, `sources_field`, `register_build_rule`, and `write_workspace` are pilot shims. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
-| Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native PATH tools, and a cache toggle. Captured artifacts can flow to downstream tasks through named outputs. | Tool/path helpers, environment configuration, and allow-failure results are not available. |
+| Graph construction | Exposes `files`, `glob`, `task`, `output`, `native_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, and opaque handles. Tasks declare named `value` or `artifact` outputs. `memo`, `sources_field`, `register_build_rule`, and `write_workspace` are pilot shims. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
+| Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, and a cache toggle. Captured artifacts can flow to downstream tasks through named outputs. | Allow-failure results and broader toolchain conveniences are not available. |
 | Tests and workflows | The pilot can execute its asset build task. | The JavaScript test runner, `TEST` graph values, standard workflow APIs, and catalog test discovery are not available in Luau. |
 | Installed rules | The pilot tree contains Luau `asset`, `resource_package`, `workflows/build`, and `imp/native-tool` modules. | Other packages remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
 
-The existing Tree-sitter rule is a useful next capability probe. It imports
-`output`, `cargoPackage`, workflow and test modules, and uses action outputs,
-tool handles, and path helpers. Those APIs must land with focused host tests
-before that package can migrate. See `rules/treesitter/index.js` for the
-current consumer surface.
+The shared C toolchain is the first consumer of `platform_info()`. C compiler
+toolchains and Imp host rules are the first consumers of acquired tool handles,
+path handles, and explicit action environment settings. The broader Tree-sitter
+rule remains a later capability probe; its test and workspace requirements are
+outside this host task.
 
 The contract keeps Imp's graph values explicit across workspace files, BUILD
 files, and rule modules. Every imported source has one stable identity, and
@@ -47,13 +47,79 @@ with the same names. Value slots carry JSON-compatible data. Artifact slots
 carry artifact handles returned by an action.
 
 An action declares workspace-relative paths with `output.file(path)` or
-`output.directory(path)`. The execution service captures these outputs in CAS
-and returns them under `result.outputs`. A task may return one of those handles
-from its matching artifact slot. A downstream task may declare that task
-output in `inputs`; Imp executes the producer first and supplies the resolved
-value or artifact handle to the consumer. When an action consumes an artifact,
-Imp stages its CAS digest as an action input. Graph actions keep outputs in
-CAS and do not write them into the workspace.
+`output.directory(path)`. A directory may also declare a named cache with
+`output.directory(path, { named_cache = { name, key } })`. The execution
+service captures outputs in CAS, writes named-cache outputs to the tool cache,
+and returns artifact handles under `result.outputs`. A task may return one of
+those handles from its matching artifact slot. A downstream task may declare
+that task output in `inputs`; Imp executes the producer first and supplies the
+resolved value or artifact handle to the consumer. When an action consumes an
+artifact or path handle, Imp stages its CAS digest as an action input. Graph
+actions keep outputs in CAS and do not write them into the workspace.
+
+### Tool, path, platform, and environment APIs
+
+`platform_info()` returns the host `os` and `arch` values used for toolchain
+selection. `path(artifact_output)` and `tool(artifact_output, options)` create
+opaque handles from declared task artifact outputs. Each handle captures the
+active BUILD package context and has a stable graph identity for equivalent
+declarations in that package. Tool options require `name` and may set
+`bin_dirs`, which defaults to `{ "." }`. A tool source must be a directory
+artifact with a named-cache declaration.
+
+Pass tool and path handles through a task's `inputs`. The tool handle makes the
+cached tool available on the sandbox action's `PATH`. `exec.path(path_handle)`
+returns the artifact's workspace-relative path inside the sandbox; include the
+same path handle in `exec.action({ inputs = ... })` to stage the artifact.
+`exec.action({ env = { NAME = "value" } })` adds explicit environment values
+to the action. These values are part of the action environment and cache key.
+Lockfile selection, checksum verification, downloads, and archive extraction
+remain rule-module policy built from graph tasks and actions.
+
+**Illustrative example:**
+
+```luau
+local core = require("@imp/core")
+local output = core.output
+local install = core.task({
+    inputs = {
+        sh = core.native_tool("sh"),
+        mkdir = core.native_tool("mkdir"),
+        chmod = core.native_tool("chmod"),
+    },
+    outputs = { root = output.artifact() },
+    run = function(exec)
+        local result = exec.action({
+            argv = {
+                "sh", "-c",
+                "mkdir -p .imp/tool && printf '#!/bin/sh\\nexit 0\\n' > .imp/tool/example && chmod +x .imp/tool/example",
+            },
+            outputs = {
+                root = output.directory(".imp/tool", {
+                    named_cache = { name = "example-tools", key = "1.0/linux-x86_64" },
+                }),
+            },
+        })
+        return { root = result.outputs.root }
+    end,
+})
+local tool = core.tool(install.outputs.root, { name = "example" })
+local root_path = core.path(install.outputs.root)
+local check = core.task({
+    inputs = { example = tool, root = root_path },
+    run = function(exec, inputs)
+        assert(exec.path(inputs.root) == ".imp/tool")
+        exec.action({
+            argv = { "example" },
+            inputs = { inputs.root },
+        })
+    end,
+})
+```
+
+The example shows host handle declarations. A rule module must build or
+acquire the tool directory and name the cache key from its pinned version and
+platform data before it declares the tool handle.
 
 **Illustrative example:**
 
