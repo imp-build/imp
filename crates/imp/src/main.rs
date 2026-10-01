@@ -647,7 +647,11 @@ fn effective_gc_max_age_days(workspace: &spike::Workspace, cli_value: Option<u64
     workspace
         .workspace_config
         .get("cache")
-        .and_then(|config| config.get("gcMaxAgeDays"))
+        .and_then(|config| {
+            config
+                .get("gc_max_age_days")
+                .or_else(|| config.get("gcMaxAgeDays"))
+        })
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(30)
 }
@@ -965,15 +969,28 @@ async fn load_workspace_with_messages(
     runtime::load_workspace(workspace_root).await
 }
 
+fn config_setting<'a>(
+    workspace: &'a spike::Workspace,
+    namespace: &str,
+    luau_name: &str,
+    javascript_name: &str,
+) -> Option<&'a serde_json::Value> {
+    workspace
+        .workspace_config
+        .get(namespace)
+        .and_then(|config| {
+            config
+                .get(luau_name)
+                .or_else(|| config.get(javascript_name))
+        })
+}
+
 fn effective_js_workers(workspace: &spike::Workspace, cli_value: Option<usize>) -> Result<usize> {
     if let Some(value) = cli_value {
         return Ok(value.max(1));
     }
 
-    Ok(workspace
-        .workspace_config
-        .get("imp")
-        .and_then(|config| config.get("jsWorkers"))
+    Ok(config_setting(workspace, "imp", "js_workers", "jsWorkers")
         .and_then(serde_json::Value::as_u64)
         .and_then(|count| usize::try_from(count).ok())
         .unwrap_or(1))
@@ -984,10 +1001,7 @@ fn effective_jobs(workspace: &spike::Workspace, cli_value: Option<usize>) -> Res
         return Ok(value.max(1));
     }
 
-    Ok(workspace
-        .workspace_config
-        .get("imp")
-        .and_then(|config| config.get("jobs"))
+    Ok(config_setting(workspace, "imp", "jobs", "jobs")
         .and_then(serde_json::Value::as_u64)
         .and_then(|count| usize::try_from(count).ok())
         .unwrap_or(1))
@@ -998,10 +1012,7 @@ fn effective_fs_jobs(workspace: &spike::Workspace, cli_value: Option<usize>) -> 
         return Ok(value.max(1));
     }
 
-    Ok(workspace
-        .workspace_config
-        .get("imp")
-        .and_then(|config| config.get("fsJobs"))
+    Ok(config_setting(workspace, "imp", "fs_jobs", "fsJobs")
         .and_then(serde_json::Value::as_u64)
         .and_then(|count| usize::try_from(count).ok())
         .unwrap_or_else(imp_store::default_worker_count)
@@ -1016,10 +1027,7 @@ fn effective_log_level(
         return value;
     }
 
-    workspace
-        .workspace_config
-        .get("imp")
-        .and_then(|config| config.get("logLevel"))
+    config_setting(workspace, "imp", "log_level", "logLevel")
         .and_then(serde_json::Value::as_str)
         .and_then(|level| level.parse().ok())
         .unwrap_or(log::LevelFilter::Info)
@@ -2348,6 +2356,32 @@ mod tests {
             .workspace_config
             .insert("cache".to_owned(), json!({ "gcMaxAgeDays": 3 }));
         assert_eq!(effective_gc_max_age_days(&workspace, None), 3);
+    }
+
+    #[test]
+    fn effective_settings_read_luau_snake_case_fields() {
+        let mut workspace = spike::Workspace::default();
+        workspace.workspace_config.insert(
+            "imp".to_owned(),
+            json!({
+                "js_workers": 2,
+                "jobs": 5,
+                "fs_jobs": 7,
+                "log_level": "debug"
+            }),
+        );
+        workspace
+            .workspace_config
+            .insert("cache".to_owned(), json!({ "gc_max_age_days": 4 }));
+
+        assert_eq!(effective_js_workers(&workspace, None).unwrap(), 2);
+        assert_eq!(effective_jobs(&workspace, None).unwrap(), 5);
+        assert_eq!(effective_fs_jobs(&workspace, None).unwrap(), 7);
+        assert_eq!(
+            effective_log_level(&workspace, None),
+            log::LevelFilter::Debug
+        );
+        assert_eq!(effective_gc_max_age_days(&workspace, None), 4);
     }
 
     #[test]

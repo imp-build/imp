@@ -720,6 +720,7 @@ async fn load_workspace_with_rules_and_service(
         let mut luau = crate::luau::LuauWorkspace::new_with_service(&root, rules_root, service)?;
         live.workspace.graph.roots = luau.load_modules().await?;
         live.workspace.workspace_config = luau.workspace_config();
+        live.workspace.config_schemas = luau.configuration_schemas();
         // The shared goal lifecycle still uses graph-core run bookkeeping,
         // even though Luau owns the pilot handles and callbacks.
         live.ctx

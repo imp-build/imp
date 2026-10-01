@@ -20,7 +20,15 @@ use imp_exec_api::{
 use imp_store::digest::{nest_directory, nest_file, DirectoryDigest};
 use lune::Runtime;
 use mlua::prelude::*;
-use mlua::{MetaMethod, UserDataFields, UserDataMethods};
+use mlua::{LuaSerdeExt, MetaMethod, UserDataFields, UserDataMethods};
+
+#[derive(Default)]
+struct ConfigurationState {
+    schemas: BTreeMap<String, serde_json::Value>,
+    values: BTreeMap<String, serde_json::Value>,
+    declarations: BTreeMap<String, serde_json::Value>,
+    sources: BTreeMap<String, String>,
+}
 
 #[derive(Clone)]
 struct ModuleLoader {
@@ -123,7 +131,7 @@ pub struct LuauWorkspace {
     runtime: Runtime,
     loader: ModuleLoader,
     host: Rc<RefCell<HostState>>,
-    workspace_config: std::collections::BTreeMap<String, serde_json::Value>,
+    configuration: Rc<RefCell<ConfigurationState>>,
 }
 
 impl LuauWorkspace {
@@ -171,18 +179,26 @@ impl LuauWorkspace {
             cancellation: Arc::new(AtomicBool::new(false)),
             task_failure: None,
         }));
+        let configuration = Rc::new(RefCell::new(ConfigurationState::default()));
 
         let core_loader = loader.clone();
         let core_host = Rc::clone(&host);
+        let core_configuration = Rc::clone(&configuration);
         let runtime = Runtime::new()
             .map_err(|error| anyhow::anyhow!(error.to_string()))?
             .with_lib("@imp/core", move |lua| {
-                create_core(lua, core_host.clone(), core_loader.clone())
+                create_core(
+                    lua,
+                    core_host.clone(),
+                    core_loader.clone(),
+                    core_configuration.clone(),
+                )
             })
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
         let bootstrap_loader = loader.clone();
         let bootstrap_host = Rc::clone(&host);
+        let bootstrap_configuration = Rc::clone(&configuration);
         let runtime = runtime
             .with_lib("@imp/bootstrap", move |lua| {
                 let core = lua
@@ -190,7 +206,11 @@ impl LuauWorkspace {
                     .get::<LuaFunction>("require")?
                     .call::<LuaTable>("@imp/core")?;
                 install_require(lua, core, bootstrap_loader.clone(), bootstrap_host.clone())?;
-                install_task_executor(lua, bootstrap_host.clone())?;
+                install_task_executor(
+                    lua,
+                    bootstrap_host.clone(),
+                    bootstrap_configuration.clone(),
+                )?;
                 install_goal_executor(lua, bootstrap_host.clone())?;
                 Ok(LuaValue::Nil)
             })
@@ -200,7 +220,7 @@ impl LuauWorkspace {
             runtime,
             loader,
             host,
-            workspace_config: std::collections::BTreeMap::new(),
+            configuration,
         })
     }
 
@@ -231,12 +251,21 @@ impl LuauWorkspace {
     /// Evaluate Luau workspace config and BUILD modules, then return their
     /// exported build graph roots.
     pub async fn load_modules(&mut self) -> Result<Vec<GraphRoot>> {
+        self.load_modules_with_ci_overlay(std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true"))
+            .await
+    }
+
+    async fn load_modules_with_ci_overlay(
+        &mut self,
+        include_ci_overlay: bool,
+    ) -> Result<Vec<GraphRoot>> {
         let workspace_config = self.loader.workspace_root.join("imp.workspace.luau");
         if workspace_config.is_file() {
             let value = self.evaluate("@workspace/imp.workspace").await?;
-            self.merge_config_value(value)?;
+            self.merge_config_value(value, "@workspace/imp.workspace")?;
         }
-        if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+        self.materialize_config_defaults()?;
+        if include_ci_overlay
             && self
                 .loader
                 .workspace_root
@@ -244,8 +273,9 @@ impl LuauWorkspace {
                 .is_file()
         {
             let value = self.evaluate("@workspace/imp.workspace.ci").await?;
-            self.merge_config_value(value)?;
+            self.merge_config_value(value, "@workspace/imp.workspace.ci")?;
         }
+        self.finalize_config_values()?;
 
         let mut walker = ignore::WalkBuilder::new(&self.loader.workspace_root);
         walker
@@ -404,32 +434,83 @@ impl LuauWorkspace {
         self.host.borrow().task_results.len()
     }
 
-    /// Return the merged workspace configuration exported by Luau config
-    /// modules. The loader currently accepts the Imp-owned `imp` namespace.
+    /// Return the merged and defaulted configuration exported by Luau config
+    /// modules, including values configured by loaded rule or BUILD modules.
     pub fn workspace_config(&self) -> std::collections::BTreeMap<String, serde_json::Value> {
-        self.workspace_config.clone()
+        self.configuration.borrow().values.clone()
     }
 
-    fn merge_config_value(&mut self, value: LuaValue) -> Result<()> {
+    /// Return the schemas registered by loaded Luau rule modules.
+    pub fn configuration_schemas(&self) -> BTreeMap<String, serde_json::Value> {
+        self.configuration.borrow().schemas.clone()
+    }
+
+    fn merge_config_value(&mut self, value: LuaValue, source: &str) -> Result<()> {
         let LuaValue::Table(table) = value else {
-            bail!("Luau workspace config must return a table");
+            bail!("{source}: workspace config must return a table");
         };
-        let Some(imp) = table
-            .get::<Option<LuaValue>>("imp")
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?
-        else {
-            return Ok(());
-        };
-        let config: serde_json::Value = serde_json::to_value(imp)
-            .map_err(|error| anyhow::anyhow!("convert Luau imp config: {error}"))?;
-        if !config.is_object() {
-            bail!("Luau workspace config field 'imp' must be a table");
+        let schemas = self.configuration.borrow().schemas.clone();
+        for (namespace, schema) in schemas {
+            let Some(config) = table
+                .get::<Option<LuaValue>>(namespace.as_str())
+                .map_err(|error| anyhow::anyhow!("{source}: read config.{namespace}: {error}"))?
+            else {
+                continue;
+            };
+            let config: serde_json::Value = serde_json::to_value(config).map_err(|error| {
+                anyhow::anyhow!("{source}: config.{namespace} is not JSON-compatible: {error}")
+            })?;
+            let config = validate_config_value(&schema, &config, &namespace, false, false)
+                .with_context(|| format!("{source}: invalid workspace configuration"))?;
+            let mut state = self.configuration.borrow_mut();
+            let declaration = state
+                .declarations
+                .entry(namespace.clone())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            merge_config_json(declaration, config.clone());
+            let value = state
+                .values
+                .entry(namespace.clone())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            merge_config_json(value, config);
+            state
+                .sources
+                .entry(namespace)
+                .or_insert_with(|| source.to_owned());
         }
-        let existing = self
-            .workspace_config
-            .entry("imp".to_owned())
-            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-        merge_config_json(existing, config);
+        Ok(())
+    }
+
+    fn finalize_config_values(&self) -> Result<()> {
+        self.materialize_config_values(true)
+    }
+
+    fn materialize_config_defaults(&self) -> Result<()> {
+        self.materialize_config_values(false)
+    }
+
+    fn materialize_config_values(&self, check_required: bool) -> Result<()> {
+        let mut state = self.configuration.borrow_mut();
+        let declarations = state.declarations.clone();
+        for (namespace, declaration) in declarations {
+            let schema = state
+                .schemas
+                .get(&namespace)
+                .with_context(|| format!("configuration namespace '{namespace}' has no schema"))?;
+            let source = state
+                .sources
+                .get(&namespace)
+                .map(String::as_str)
+                .unwrap_or("workspace configuration");
+            let validated =
+                validate_config_value(schema, &declaration, &namespace, true, check_required)
+                    .with_context(|| format!("{source}: invalid workspace configuration"))?;
+            let value = state
+                .values
+                .entry(namespace)
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            merge_config_json(value, validated);
+        }
         Ok(())
     }
 }
@@ -446,6 +527,150 @@ fn merge_config_json(existing: &mut serde_json::Value, patch: serde_json::Value)
             }
         }
         (existing, patch) => *existing = patch,
+    }
+}
+
+fn validate_config_value(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+    path: &str,
+    apply_defaults: bool,
+    check_required: bool,
+) -> Result<serde_json::Value> {
+    if schema.get("__imp_field").is_none() {
+        let input = value
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("config '{path}' must be a table"))?;
+        let shape = schema
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("config schema at '{path}' must be a table"))?;
+        for key in input.keys() {
+            if !shape.contains_key(key) {
+                bail!("config '{path}.{key}' is not declared in the schema");
+            }
+        }
+        let mut output = serde_json::Map::new();
+        for (key, field) in shape {
+            let field_path = format!("{path}.{key}");
+            if let Some(field_value) = input.get(key) {
+                output.insert(
+                    key.clone(),
+                    validate_config_value(
+                        field,
+                        field_value,
+                        &field_path,
+                        apply_defaults,
+                        check_required,
+                    )?,
+                );
+            } else if apply_defaults {
+                if let Some(default) = field.get("default") {
+                    output.insert(
+                        key.clone(),
+                        validate_config_value(field, default, &field_path, true, check_required)?,
+                    );
+                } else if check_required
+                    && field
+                        .get("required")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                {
+                    bail!("missing required config field '{field_path}'");
+                }
+            }
+        }
+        return Ok(serde_json::Value::Object(output));
+    }
+
+    let kind = schema
+        .get("__imp_field")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("config schema at '{path}' has invalid field type"))?;
+    match kind {
+        "int" if value.as_i64().is_some() || value.as_u64().is_some() => Ok(value.clone()),
+        "string" if value.is_string() => Ok(value.clone()),
+        "bool" if value.is_boolean() => Ok(value.clone()),
+        "enum" => {
+            let values = schema
+                .get("values")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("config schema at '{path}' has invalid enum values")
+                })?;
+            if values.contains(value) {
+                Ok(value.clone())
+            } else {
+                bail!("config '{path}' must be one of {values:?}");
+            }
+        }
+        "object" => {
+            let shape = schema
+                .get("shape")
+                .ok_or_else(|| anyhow::anyhow!("config schema at '{path}' has no object shape"))?;
+            validate_config_value(shape, value, path, apply_defaults, check_required)
+        }
+        "map" => {
+            let input = value
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("config '{path}' must be a table"))?;
+            let key_schema = schema
+                .get("key")
+                .ok_or_else(|| anyhow::anyhow!("config schema at '{path}' has no map key type"))?;
+            let value_schema = schema.get("value").ok_or_else(|| {
+                anyhow::anyhow!("config schema at '{path}' has no map value type")
+            })?;
+            let mut output = serde_json::Map::new();
+            for (key, item) in input {
+                let item_path = format!("{path}.{key}");
+                validate_config_value(
+                    key_schema,
+                    &serde_json::Value::String(key.clone()),
+                    &item_path,
+                    apply_defaults,
+                    check_required,
+                )?;
+                output.insert(
+                    key.clone(),
+                    validate_config_value(
+                        value_schema,
+                        item,
+                        &item_path,
+                        apply_defaults,
+                        check_required,
+                    )?,
+                );
+            }
+            Ok(serde_json::Value::Object(output))
+        }
+        "array" => {
+            let item_schema = schema.get("item").ok_or_else(|| {
+                anyhow::anyhow!("config schema at '{path}' has no array item type")
+            })?;
+            if value.as_object().is_some_and(serde_json::Map::is_empty) {
+                return Ok(serde_json::Value::Array(Vec::new()));
+            }
+            let items = value
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("config '{path}' must be an array"))?;
+            items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    validate_config_value(
+                        item_schema,
+                        item,
+                        &format!("{path}[{index}]"),
+                        apply_defaults,
+                        check_required,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(serde_json::Value::Array)
+        }
+        "int" => bail!("config '{path}' must be an integer"),
+        "string" => bail!("config '{path}' must be a string"),
+        "bool" => bail!("config '{path}' must be a boolean"),
+        other => bail!("config schema at '{path}' has unknown field type '{other}'"),
     }
 }
 
@@ -486,10 +711,15 @@ fn install_require(
     lua.globals().set("require", require)
 }
 
-fn install_task_executor(lua: &Lua, host: Rc<RefCell<HostState>>) -> LuaResult<()> {
+fn install_task_executor(
+    lua: &Lua,
+    host: Rc<RefCell<HostState>>,
+    configuration: Rc<RefCell<ConfigurationState>>,
+) -> LuaResult<()> {
     let execute = lua.create_async_function(move |lua, id: u64| {
         let order = dependency_order(&host.borrow(), id);
         let host = Rc::clone(&host);
+        let configuration = Rc::clone(&configuration);
         async move {
             for task_id in order? {
                 if host.borrow().task_results.contains_key(&task_id) {
@@ -502,18 +732,21 @@ fn install_task_executor(lua: &Lua, host: Rc<RefCell<HostState>>) -> LuaResult<(
                 let returns_outputs = !task.outputs.is_empty();
                 let exec = lua.create_table()?;
                 let action_host = Rc::clone(&host);
+                let action_configuration = Rc::clone(&configuration);
                 let action_lua = lua.clone();
                 let action_inputs = inputs.clone();
                 exec.set(
                     "action",
                     lua.create_async_function(move |_, options: LuaTable| {
                         let action_host = Rc::clone(&action_host);
+                        let action_configuration = Rc::clone(&action_configuration);
                         let action_inputs = action_inputs.clone();
                         let action_lua = action_lua.clone();
                         async move {
                             match run_action(
                                 action_lua,
                                 Rc::clone(&action_host),
+                                Rc::clone(&action_configuration),
                                 options,
                                 action_inputs,
                             )
@@ -721,9 +954,142 @@ fn create_core(
     lua: &Lua,
     host: Rc<RefCell<HostState>>,
     loader: ModuleLoader,
+    configuration: Rc<RefCell<ConfigurationState>>,
 ) -> LuaResult<LuaValue> {
     let core = lua.create_table()?;
     core.set("BUILD", "BUILD")?;
+
+    // Keep the CLI-owned schema available in every Luau workspace. Rule
+    // modules register their own namespace schemas through this same API.
+    {
+        let mut state = configuration.borrow_mut();
+        state.schemas.insert(
+            "imp".to_owned(),
+            serde_json::json!({
+                "js_workers": {"__imp_field": "int", "default": 1},
+                "jobs": {"__imp_field": "int", "default": 1},
+                "fs_jobs": {"__imp_field": "int"},
+                "passthrough_env": {
+                    "__imp_field": "array",
+                    "item": {"__imp_field": "string"},
+                    "default": []
+                },
+                "log_level": {
+                    "__imp_field": "enum",
+                    "values": ["trace", "debug", "info", "warn", "error"],
+                    "default": "info"
+                }
+            }),
+        );
+        state.schemas.insert(
+            "cache".to_owned(),
+            serde_json::json!({
+                "gc_max_age_days": {"__imp_field": "int", "default": 30}
+            }),
+        );
+    }
+
+    let field = lua.create_table()?;
+    for kind in ["int", "string", "bool"] {
+        field.set(
+            kind,
+            lua.create_function(move |lua, options: Option<LuaTable>| {
+                make_field_descriptor(lua, kind, options, &[])
+            })?,
+        )?;
+    }
+    field.set(
+        "enum",
+        lua.create_function(|lua, (values, options): (LuaTable, Option<LuaTable>)| {
+            let extra = [("values", LuaValue::Table(values))];
+            make_field_descriptor(lua, "enum", options, &extra)
+        })?,
+    )?;
+    field.set(
+        "object",
+        lua.create_function(|lua, (shape, options): (LuaTable, Option<LuaTable>)| {
+            let extra = [("shape", LuaValue::Table(shape))];
+            make_field_descriptor(lua, "object", options, &extra)
+        })?,
+    )?;
+    field.set(
+        "map",
+        lua.create_function(
+            |lua, (key, value, options): (LuaTable, LuaTable, Option<LuaTable>)| {
+                let extra = [
+                    ("key", LuaValue::Table(key)),
+                    ("value", LuaValue::Table(value)),
+                ];
+                make_field_descriptor(lua, "map", options, &extra)
+            },
+        )?,
+    )?;
+    field.set(
+        "array",
+        lua.create_function(|lua, (item, options): (LuaTable, Option<LuaTable>)| {
+            let extra = [("item", LuaValue::Table(item))];
+            make_field_descriptor(lua, "array", options, &extra)
+        })?,
+    )?;
+    core.set("field", field)?;
+
+    let config_state = Rc::clone(&configuration);
+    core.set(
+        "define_config_schema",
+        lua.create_function(move |_, (namespace, shape): (String, LuaTable)| {
+            validate_config_namespace(&namespace)?;
+            let schema: serde_json::Value = serde_json::to_value(shape)
+                .map_err(|error| LuaError::external(format!("serialize config schema: {error}")))?;
+            if !schema.is_object() {
+                return Err(LuaError::external(
+                    "define_config_schema shape must be a table",
+                ));
+            }
+            config_state
+                .borrow_mut()
+                .schemas
+                .insert(namespace.clone(), schema);
+            Ok(())
+        })?,
+    )?;
+
+    let config_state = Rc::clone(&configuration);
+    core.set(
+        "configure",
+        lua.create_function(move |_, (namespace, value): (String, LuaValue)| {
+            validate_config_namespace(&namespace)?;
+            let value: serde_json::Value = serde_json::to_value(value)
+                .map_err(|error| LuaError::external(format!("serialize config value: {error}")))?;
+            let mut state = config_state.borrow_mut();
+            let existing = state
+                .values
+                .entry(namespace)
+                .or_insert(serde_json::Value::Null);
+            merge_config_json(existing, value);
+            Ok(())
+        })?,
+    )?;
+
+    let config_state = Rc::clone(&configuration);
+    core.set(
+        "configuration",
+        lua.create_function(
+            move |lua, (namespace, fallback): (String, Option<LuaValue>)| {
+                validate_config_namespace(&namespace)?;
+                let value = config_state.borrow().values.get(&namespace).cloned();
+                match value {
+                    Some(value) => lua.to_value(&value),
+                    None => Ok(fallback.unwrap_or(LuaValue::Nil)),
+                }
+            },
+        )?,
+    )?;
+
+    let config_state = Rc::clone(&configuration);
+    core.set(
+        "configuration_schemas",
+        lua.create_function(move |lua, ()| lua.to_value(&config_state.borrow().schemas.clone()))?,
+    )?;
 
     let output = lua.create_table()?;
     output.set(
@@ -890,6 +1256,44 @@ fn create_core(
     Ok(LuaValue::Table(core))
 }
 
+fn make_field_descriptor(
+    lua: &Lua,
+    kind: &str,
+    options: Option<LuaTable>,
+    extra: &[(&str, LuaValue)],
+) -> LuaResult<LuaTable> {
+    let descriptor = lua.create_table()?;
+    descriptor.set("__imp_field", kind)?;
+    for (key, value) in extra {
+        descriptor.set(*key, value.clone())?;
+    }
+    if let Some(options) = options {
+        for pair in options.pairs::<String, LuaValue>() {
+            let (key, value) = pair?;
+            if key != "default" && key != "required" {
+                return Err(LuaError::external(format!(
+                    "field.{kind} options only accept 'default' and 'required'"
+                )));
+            }
+            descriptor.set(key, value)?;
+        }
+    }
+    Ok(descriptor)
+}
+
+fn validate_config_namespace(namespace: &str) -> LuaResult<()> {
+    if namespace.is_empty()
+        || !namespace.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+    {
+        return Err(LuaError::external(format!(
+            "configuration namespace '{namespace}' must use ASCII letters, digits, '.', '-', or '_'"
+        )));
+    }
+    Ok(())
+}
+
 fn create_files_handle(
     lua: &Lua,
     host: &Rc<RefCell<HostState>>,
@@ -966,9 +1370,35 @@ fn valid_output_name(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || "_.-".contains(ch))
 }
 
+fn configured_base_env(configuration: &ConfigurationState) -> Result<BTreeMap<String, String>> {
+    let entries = configuration
+        .values
+        .get("imp")
+        .and_then(|config| config.get("passthrough_env"))
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| {
+                    entry
+                        .as_str()
+                        .filter(|entry| !entry.is_empty())
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("imp.passthrough_env entries must be non-empty strings")
+                        })
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    imp_execution::staging::resolve_base_env(&entries)
+}
+
 async fn run_action(
     lua: Lua,
     host: Rc<RefCell<HostState>>,
+    configuration: Rc<RefCell<ConfigurationState>>,
     options: LuaTable,
     task_inputs: LuaTable,
 ) -> Result<LuaTable> {
@@ -1112,7 +1542,7 @@ async fn run_action(
     let action = ExecAction {
         argv,
         display: display.clone(),
-        env: imp_execution::staging::resolve_base_env(&[])?,
+        env: configured_base_env(&configuration.borrow())?,
         config_digest: String::new(),
         input_digest,
         outputs: output_specs,
@@ -1361,7 +1791,7 @@ mod tests {
         let workspace_root = tempfile::tempdir().unwrap();
         fs::write(
             workspace_root.path().join("imp.workspace.luau"),
-            "return { imp = { jobs = 3, pilot = { enabled = true } } }\n",
+            "local core = require('@imp/core')\ncore.define_config_schema('pilot', { enabled = core.field.bool() })\nreturn { imp = { jobs = 3 }, pilot = { enabled = true } }\n",
         )
         .unwrap();
         fs::write(
@@ -1385,7 +1815,13 @@ return { assets = declared }
         assert!(live.luau.is_some());
         assert_eq!(
             live.workspace.workspace_config.get("imp"),
-            Some(&serde_json::json!({ "jobs": 3, "pilot": { "enabled": true } }))
+            Some(
+                &serde_json::json!({ "jobs": 3, "js_workers": 1, "passthrough_env": [], "log_level": "info" })
+            )
+        );
+        assert_eq!(
+            live.workspace.workspace_config.get("pilot"),
+            Some(&serde_json::json!({ "enabled": true }))
         );
         assert_eq!(live.workspace.graph.roots.len(), 1);
         assert_eq!(live.workspace.graph.roots[0].address, "//:assets");
@@ -1409,6 +1845,248 @@ return { assets = declared }
             1,
             "the hermetic action must run through the Luau host"
         );
+    }
+
+    #[tokio::test]
+    async fn luau_configuration_schema_and_dynamic_apis_validate_values() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(rules_root.path().join("sample")).unwrap();
+        fs::write(
+            rules_root.path().join("sample/index.luau"),
+            r#"
+local core = require("@imp/core")
+local field = core.field
+core.define_config_schema("sample", {
+    mode = field.enum({ "fast", "safe" }, { required = true }),
+    nested = field.object({ enabled = field.bool({ default = false }) }),
+    labels = field.map(field.string(), field.string(), { default = {} }),
+    tags = field.array(field.string(), { default = {} }),
+})
+return {}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("imp.workspace.luau"),
+            r#"
+local core = require("@imp/core")
+require("@imp/rules/sample")
+return {
+    imp = {
+        jobs = 3,
+        fs_jobs = 4,
+        passthrough_env = { "DISPLAY", "MODE=fast" },
+        log_level = "warn",
+    },
+    cache = { gc_max_age_days = 5 },
+    sample = { mode = "fast", nested = { enabled = true }, labels = { ["local"] = "yes" } },
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+assert(core.configuration("sample").mode == "fast")
+assert(core.configuration("imp").jobs == 3)
+assert(core.configuration_schemas().sample ~= nil)
+core.configure("dynamic", { enabled = true })
+assert(core.configuration("dynamic").enabled == true)
+return {}
+"#,
+        )
+        .unwrap();
+
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        runtime.load_modules().await.unwrap();
+        let config = runtime.workspace_config();
+        assert_eq!(config["imp"]["jobs"], 3);
+        assert_eq!(config["imp"]["fs_jobs"], 4);
+        assert_eq!(config["imp"]["js_workers"], 1);
+        assert_eq!(
+            config["imp"]["passthrough_env"],
+            serde_json::json!(["DISPLAY", "MODE=fast"])
+        );
+        assert_eq!(config["imp"]["log_level"], "warn");
+        assert_eq!(config["cache"]["gc_max_age_days"], 5);
+        assert_eq!(config["sample"]["mode"], "fast");
+        assert_eq!(config["sample"]["nested"]["enabled"], true);
+        assert_eq!(
+            config["sample"]["nested"]["missing"],
+            serde_json::Value::Null
+        );
+        assert_eq!(config["sample"]["tags"], serde_json::json!([]));
+        assert_eq!(config["sample"]["labels"]["local"], "yes");
+        assert!(runtime.configuration_schemas().contains_key("sample"));
+    }
+
+    #[tokio::test]
+    async fn luau_ci_configuration_deep_merges_before_required_validation() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(rules_root.path().join("sample")).unwrap();
+        fs::write(
+            rules_root.path().join("sample/index.luau"),
+            r#"
+local core = require("@imp/core")
+core.define_config_schema("sample", {
+    mode = core.field.enum({ "fast", "safe" }, { required = true }),
+    nested = core.field.object(
+        { enabled = core.field.bool({ default = false }) },
+        { default = {} }
+    ),
+})
+return {}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("imp.workspace.luau"),
+            "require('@imp/rules/sample')\nreturn { sample = { mode = 'fast' } }\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("imp.workspace.ci.luau"),
+            "local core = require('@imp/core')\nassert(core.configuration('sample').nested.enabled == false)\nreturn { sample = { nested = { enabled = true } } }\n",
+        )
+        .unwrap();
+
+        let mut local_runtime =
+            LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        local_runtime
+            .load_modules_with_ci_overlay(false)
+            .await
+            .unwrap();
+        assert_eq!(
+            local_runtime.workspace_config()["sample"]["nested"]["enabled"],
+            false
+        );
+
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        runtime.load_modules_with_ci_overlay(true).await.unwrap();
+        assert_eq!(
+            runtime.workspace_config()["sample"],
+            serde_json::json!({ "mode": "fast", "nested": { "enabled": true } })
+        );
+
+        fs::write(
+            workspace_root.path().join("imp.workspace.ci.luau"),
+            "return { sample = { nested = { enabled = 'yes' } } }\n",
+        )
+        .unwrap();
+        let mut invalid_runtime =
+            LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let error = format!(
+            "{:#}",
+            invalid_runtime
+                .load_modules_with_ci_overlay(true)
+                .await
+                .unwrap_err()
+        );
+        assert!(error.contains("@workspace/imp.workspace.ci"), "{error}");
+        assert!(error.contains("sample.nested.enabled"), "{error}");
+
+        fs::write(
+            workspace_root.path().join("imp.workspace.luau"),
+            "require('@imp/rules/sample')\nreturn { sample = {} }\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("imp.workspace.ci.luau"),
+            "return { sample = { nested = { enabled = true } } }\n",
+        )
+        .unwrap();
+        let mut missing_required_runtime =
+            LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let error = format!(
+            "{:#}",
+            missing_required_runtime
+                .load_modules_with_ci_overlay(true)
+                .await
+                .unwrap_err()
+        );
+        assert!(error.contains("@workspace/imp.workspace:"), "{error}");
+        assert!(error.contains("sample.mode"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn luau_configuration_errors_name_source_and_field_path() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = tempfile::tempdir().unwrap();
+        fs::write(
+            workspace_root.path().join("imp.workspace.luau"),
+            "return { imp = { unknown_setting = true } }\n",
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let error = format!("{:#}", runtime.load_modules().await.unwrap_err());
+        assert!(error.contains("@workspace/imp.workspace"), "{error}");
+        assert!(error.contains("imp.unknown_setting"), "{error}");
+
+        fs::write(
+            workspace_root.path().join("imp.workspace.luau"),
+            "return { imp = { jobs = 'many' } }\n",
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let error = format!("{:#}", runtime.load_modules().await.unwrap_err());
+        assert!(error.contains("@workspace/imp.workspace"), "{error}");
+        assert!(
+            error.contains("config 'imp.jobs' must be an integer"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn luau_workspace_passthrough_env_entries_reach_action_environment() {
+        let state = ConfigurationState {
+            values: BTreeMap::from([(
+                "imp".to_owned(),
+                serde_json::json!({ "passthrough_env": ["IMP_LUAU_CONFIG_TEST=value"] }),
+            )]),
+            ..ConfigurationState::default()
+        };
+        let environment = configured_base_env(&state).unwrap();
+        assert_eq!(
+            environment.get("IMP_LUAU_CONFIG_TEST"),
+            Some(&"value".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn luau_workspace_passthrough_env_reaches_sandboxed_actions() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = tempfile::tempdir().unwrap();
+        fs::write(
+            workspace_root.path().join("imp.workspace.luau"),
+            "return { imp = { passthrough_env = { 'IMP_LUAU_CONFIG_TEST=value' } } }\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local check = core.task({
+    run = function(exec)
+        exec.action({
+            argv = { "sh", "-c", "test \"$IMP_LUAU_CONFIG_TEST\" = value" },
+            cache = false,
+        })
+    end,
+})
+return { check = check }
+"#,
+        )
+        .unwrap();
+
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        runtime
+            .execute_graph("build", &roots, Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

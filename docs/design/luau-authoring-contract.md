@@ -22,7 +22,7 @@ the gaps that block catalog migration.
 | Area | Current Luau behavior | Migration gap |
 | --- | --- | --- |
 | Module loading | Loads `@imp/core`, `@imp/rules/...`, and `@workspace/...`; caches canonical module values and rejects namespace escapes. | The full catalog and its loader-dependent workspace features are not migrated. |
-| Workspace configuration | Loads `imp.workspace.luau`; on GitHub Actions it can deep-merge `imp.workspace.ci.luau`. | JavaScript configuration fields and introspection APIs are not at full parity. |
+| Workspace configuration | Loads `imp.workspace.luau`; on GitHub Actions it deep-merges `imp.workspace.ci.luau`. Luau rule modules can register schemas, read or write configuration, and expose schemas and resolved values to the CLI. | JavaScript and Luau use different field spellings. Luau configuration uses `snake_case`; the JavaScript runtime remains the default. |
 | BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. | Generated BUILD discovery and mixed catalog dependencies are not supported. |
 | Graph construction | Exposes `files`, `glob`, `task`, `output`, `native_tool`, `package_path`, `goal`, and opaque handles. Tasks declare named `value` or `artifact` outputs. `memo`, `sources_field`, `register_build_rule`, and `write_workspace` are pilot shims. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
 | Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native PATH tools, and a cache toggle. Captured artifacts can flow to downstream tasks through named outputs. | Tool/path helpers, environment configuration, and allow-failure results are not available. |
@@ -106,8 +106,34 @@ The root workspace BUILD module is `@workspace/BUILD`. Other workspace BUILD
 modules use `@workspace/<package>/BUILD`. The workspace configuration module
 is `@workspace/imp.workspace`. On GitHub Actions, the loader also evaluates
 `@workspace/imp.workspace.ci` when `imp.workspace.ci.luau` exists. Both
-modules may return an `imp` table; the CI table deep-merges over the workspace
-table. Other configuration namespaces are outside the pilot.
+modules may return a table keyed by registered configuration namespace; the
+CI table deep-merges over the workspace table. Rule modules register their
+namespaces before the workspace configuration is validated.
+
+## Workspace configuration
+
+Luau rule modules use `define_config_schema(namespace, shape)` to register a
+namespace. The `field` table provides `int`, `string`, `bool`, `enum`,
+`object`, `map`, and `array` descriptors. Descriptor options are `default` and
+`required`. Configuration fields use `snake_case`, even when the matching
+JavaScript field uses `camelCase`.
+
+The Imp-owned `imp` namespace accepts `js_workers` (JavaScript workers),
+`jobs`, `fs_jobs`, `passthrough_env`, and `log_level`. The `cache` namespace
+accepts `gc_max_age_days`. These retain the JavaScript runtime's behavior.
+The JavaScript runtime continues to use `jsWorkers`, `fsJobs`,
+`passthroughEnv`, `logLevel`, and `gcMaxAgeDays`.
+
+Workspace configuration returns one table with namespace names as keys. The
+loader validates declared fields, applies defaults, and reports the source
+module address and field path for invalid values. `configure(namespace,
+value)` merges a value into a namespace. `configuration(namespace, fallback)`
+reads it. `configuration_schemas()` returns the schemas registered by loaded
+rule modules.
+
+Run `imp config schema` to print registered schemas. Add `--effective` to
+include the resolved workspace configuration. CLI option names use
+`kebab-case`; existing option names remain unchanged.
 
 An address is a slash-separated path. It may omit `.luau`; if present, the
 resolver removes that suffix before checking these source forms in order:

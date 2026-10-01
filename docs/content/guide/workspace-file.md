@@ -81,6 +81,39 @@ Imp includes the resolved environment in the action identity, so a changed
 passthrough value does not reuse an incompatible cached result. Environment
 values do not appear in ordinary action diagnostics.
 
+## Luau workspace configuration
+
+For a Luau workspace, create `imp.workspace.luau` and return a table keyed by
+configuration namespace. Luau field names use `snake_case`; the JavaScript
+workspace file keeps its existing field names.
+
+```lua
+return {
+    imp = {
+        jobs = 8,
+        js_workers = 2,
+        fs_jobs = 4,
+        passthrough_env = { "DISPLAY", "WAYLAND_DISPLAY" },
+        log_level = "info",
+    },
+    cache = {
+        gc_max_age_days = 30,
+    },
+}
+```
+
+The `imp` namespace matches the JavaScript settings `jsWorkers`, `jobs`,
+`fsJobs`, `passthroughEnv`, and `logLevel`. The `cache` namespace maps
+`gc_max_age_days` to `gcMaxAgeDays`. Luau rule modules register other
+namespaces with `define_config_schema` from `@imp/core`. The loader validates
+declared fields and applies defaults. On GitHub Actions, values from
+`imp.workspace.ci.luau` deep-merge over the base table.
+
+Use `imp config schema` to inspect registered schemas. Add `--effective` to
+include the resolved configuration. CLI overrides keep their existing flag
+names: `--jobs`, `--fs-jobs`, and `--js-workers`; `--level` sets log verbosity.
+Use `imp cache gc --max-age` to override `gc_max_age_days`.
+
 `jobs` is a budget of cores, not a count of actions: an action declares what it
 costs with `exec.action({ cores })` (default 1), so one wide action can hold
 several of the lanes `jobs` allows.
