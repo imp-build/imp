@@ -24,9 +24,9 @@ the gaps that block catalog migration.
 | Module loading | Loads `@imp/core`, `@imp/rules/...`, and `@workspace/...`; caches canonical module values and rejects namespace escapes. | The full catalog and its loader-dependent workspace features are not migrated. |
 | Workspace configuration | Loads `imp.workspace.luau`; on GitHub Actions it deep-merges `imp.workspace.ci.luau`. Luau rule modules can register schemas, read or write configuration, and expose schemas and resolved values to the CLI. | JavaScript and Luau use different field spellings. Luau configuration uses `snake_case`; the JavaScript runtime remains the default. |
 | BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. | Generated BUILD discovery and mixed catalog dependencies are not supported. |
-| Graph construction | Exposes `files`, `glob`, `task`, `output`, `native_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, and opaque handles. Tasks declare named `value` or `artifact` outputs. `memo`, `sources_field`, `register_build_rule`, and `write_workspace` are pilot shims. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
+| Graph construction | Exposes `files`, `glob`, `task`, `output`, `native_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. `memo`, `sources_field`, `register_build_rule`, and `write_workspace` are pilot shims. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
 | Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, and a cache toggle. Captured artifacts can flow to downstream tasks through named outputs. | Allow-failure results and broader toolchain conveniences are not available. |
-| Tests and workflows | The pilot can execute its asset build task. | The JavaScript test runner, `TEST` graph values, standard workflow APIs, and catalog test discovery are not available in Luau. |
+| Tests and workflows | Luau BUILD modules can expose a `TEST` root. The root discovers package-local `.test.luau` modules and runs named cases and suites in fresh Luau runtimes. | The standard workflow rule modules and mixed JavaScript/Luau test discovery are not available in Luau. |
 | Installed rules | The pilot tree contains Luau `asset`, `resource_package`, `workflows/build`, and `imp/native-tool` modules. | Other packages remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
 
 The shared C toolchain is the first consumer of `platform_info()`. C compiler
@@ -38,6 +38,40 @@ outside this host task.
 The contract keeps Imp's graph values explicit across workspace files, BUILD
 files, and rule modules. Every imported source has one stable identity, and
 module ownership is clear from its address.
+
+### Luau tests
+
+A Luau BUILD module declares a test root by using `TEST` in the exported value
+table:
+
+```luau
+local core = require("@imp/core")
+
+return {
+    rule_tests = { TEST = core.test_root() },
+}
+```
+
+The root discovers `.test.luau` files directly inside its BUILD package. A
+nested package owns its test modules through its own BUILD module and test
+root. Each test module returns an array of `core.test.case(name, fn)` values or
+`core.test.suite(name, cases)` values. Imp runs each case in a fresh Luau
+runtime in the Imp process. Imp evaluates each test module once to discover its
+cases and again for each selected case, so keep module-level code declarative
+and free of side effects. Test modules and cases do not run inside action
+sandboxes. The case and suite structure follows the [Lute test guide](https://lute.luau.org/guide/writing-tests/),
+but Imp uses its embedded host and does not invoke the Lute CLI.
+
+Select a Luau test root with `imp test //pkg:rule_tests`. Add `--case NAME` to
+run a named case or `--suite NAME` to run a named suite. These flags apply only
+to Luau workspaces. Imp reports each case as a test unit. Failures include the
+test module's canonical workspace address and source location. If a filter
+matches no tests, Imp reports that as a test failure.
+
+A workspace selects one authoring runtime: it cannot contain both
+`imp.workspace.js` and `imp.workspace.luau`. Luau test roots discover only
+`.test.luau` modules. JavaScript test roots retain their existing
+`_test.js` discovery path.
 
 ### Task and action outputs
 

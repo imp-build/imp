@@ -302,9 +302,25 @@ fn parse_goal_args(
     goal: &str,
     flag_defs: &std::collections::BTreeMap<String, spike::GoalFlagDef>,
     raw: &[String],
+    luau_workspace: bool,
 ) -> clap::ArgMatches {
     let mut cmd = Command::new(goal.to_owned());
     cmd = GoalArgs::augment_args(cmd);
+    if goal == "test" && luau_workspace {
+        cmd = cmd.arg(
+            Arg::new("case")
+                .long("case")
+                .value_name("NAME")
+                .help("Run only the named Luau test case"),
+        );
+        cmd = cmd.arg(
+            Arg::new("suite")
+                .long("suite")
+                .value_name("NAME")
+                .help("Run only the named Luau test suite")
+                .conflicts_with("case"),
+        );
+    }
     for (name, def) in flag_defs {
         let mut arg = Arg::new(name.clone())
             .long(name.clone())
@@ -1259,7 +1275,8 @@ async fn cmd_execute_live_impl(
             } else {
                 (raw, Vec::new())
             };
-            let matches = parse_goal_args(goal, &goal_def.flags, goal_raw);
+            let matches =
+                parse_goal_args(goal, &goal_def.flags, goal_raw, workspace.luau.is_some());
             let args = GoalArgs::from_arg_matches(&matches).context("parse goal arguments")?;
             let mut flags = serde_json::Map::new();
             for name in goal_def.flags.keys() {
@@ -1267,6 +1284,13 @@ async fn cmd_execute_live_impl(
                     name.clone(),
                     serde_json::Value::Bool(matches.get_flag(name)),
                 );
+            }
+            if goal == "test" && workspace.luau.is_some() {
+                for name in ["case", "suite"] {
+                    if let Some(value) = matches.get_one::<String>(name) {
+                        flags.insert(name.to_owned(), serde_json::Value::String(value.clone()));
+                    }
+                }
             }
             (args, serde_json::Value::Object(flags), run_args)
         }
@@ -2624,7 +2648,7 @@ mod tests {
                 description: Some("Verify without writing".to_owned()),
             },
         )]);
-        let matches = parse_goal_args("fmt", &flag_defs, &raw);
+        let matches = parse_goal_args("fmt", &flag_defs, &raw, false);
         let args = GoalArgs::from_arg_matches(&matches).unwrap();
         assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
         assert_eq!(args.jobs, Some(2));
@@ -2641,7 +2665,7 @@ mod tests {
             "--axis=target=x86_64-unknown-linux-gnu".to_owned(),
             "//:pkg".to_owned(),
         ];
-        let matches = parse_goal_args("build", &Default::default(), &raw);
+        let matches = parse_goal_args("build", &Default::default(), &raw, false);
         let args = GoalArgs::from_arg_matches(&matches).unwrap();
 
         assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
@@ -2663,7 +2687,7 @@ mod tests {
             "opt=debug".to_owned(),
             "//:pkg".to_owned(),
         ];
-        let matches = parse_goal_args("build", &Default::default(), &raw);
+        let matches = parse_goal_args("build", &Default::default(), &raw, false);
         let args = GoalArgs::from_arg_matches(&matches).unwrap();
 
         assert_eq!(args.profile.as_deref(), Some("windows-release"));
@@ -2677,10 +2701,37 @@ mod tests {
             "check".to_owned(),
             spike::GoalFlagDef { description: None },
         )]);
-        let matches = parse_goal_args("fmt", &flag_defs, &raw);
+        let matches = parse_goal_args("fmt", &flag_defs, &raw, false);
         let args = GoalArgs::from_arg_matches(&matches).unwrap();
         assert_eq!(args.selectors, vec!["//:pkg".to_owned()]);
         assert!(matches.get_flag("check"));
+    }
+
+    #[test]
+    fn parse_goal_args_accepts_luau_test_case_and_suite_filters_only_for_luau() {
+        let case_args = vec![
+            "--case".to_owned(),
+            "parses.value".to_owned(),
+            "//pkg:tests".to_owned(),
+        ];
+        let case_matches = parse_goal_args("test", &Default::default(), &case_args, true);
+        let parsed = GoalArgs::from_arg_matches(&case_matches).unwrap();
+        assert_eq!(parsed.selectors, vec!["//pkg:tests".to_owned()]);
+        assert_eq!(
+            case_matches.get_one::<String>("case").map(String::as_str),
+            Some("parses.value")
+        );
+
+        let suite_args = vec![
+            "--suite".to_owned(),
+            "parses".to_owned(),
+            "//pkg:tests".to_owned(),
+        ];
+        let suite_matches = parse_goal_args("test", &Default::default(), &suite_args, true);
+        assert_eq!(
+            suite_matches.get_one::<String>("suite").map(String::as_str),
+            Some("parses")
+        );
     }
 
     #[tokio::test]

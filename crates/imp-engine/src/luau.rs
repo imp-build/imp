@@ -10,7 +10,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use crate::graph::GraphRoot;
 use anyhow::{bail, Context, Result};
@@ -94,6 +97,49 @@ struct Task {
 }
 
 #[derive(Clone)]
+struct LuauTestCase {
+    name: String,
+    suite: Option<String>,
+    run: LuaFunction,
+}
+
+struct TestUnit {
+    name: String,
+    ok: bool,
+    output: String,
+}
+
+fn render_test_report(units: &mut [TestUnit], passed: usize) -> String {
+    units.sort_by(|left, right| {
+        left.ok
+            .cmp(&right.ok)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let width = units
+        .iter()
+        .map(|unit| unit.name.len())
+        .max()
+        .unwrap_or_default()
+        + 2;
+    let mut lines = units
+        .iter()
+        .map(|unit| {
+            let (status, color) = if unit.ok {
+                ("PASS", "\x1b[32m")
+            } else {
+                ("FAIL", "\x1b[31m")
+            };
+            format!("{:<width$}{color}{status}\x1b[0m", unit.name, width = width)
+        })
+        .collect::<Vec<_>>();
+    for unit in units.iter().filter(|unit| !unit.output.is_empty()) {
+        lines.push(format!("{}:\n{}", unit.name, unit.output));
+    }
+    lines.push(format!("test: {passed}/{} unit(s) passed", units.len()));
+    lines.join("\n")
+}
+
+#[derive(Clone)]
 struct FileSetSpec {
     root: String,
     include: Vec<String>,
@@ -115,6 +161,9 @@ enum GraphNode {
         owner_package: String,
     },
     Task,
+    TestRoot {
+        package: String,
+    },
     TaskOutput {
         task_id: u64,
         name: String,
@@ -338,38 +387,45 @@ impl LuauWorkspace {
                 .unwrap_or_default();
             for pair in exports.pairs::<String, LuaValue>() {
                 let (name, value) = pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                let handle = match value {
-                    LuaValue::UserData(userdata) => userdata
-                        .borrow::<GraphHandle>()
-                        .ok()
-                        .map(|h| (h.id, h.kind)),
-                    LuaValue::Table(table) => table
-                        .get::<Option<LuaAnyUserData>>("BUILD")
-                        .ok()
-                        .flatten()
-                        .and_then(|userdata| {
-                            userdata
-                                .borrow::<GraphHandle>()
-                                .ok()
-                                .map(|h| (h.id, h.kind))
-                        }),
-                    _ => None,
-                };
-                let Some((handle_id, "task")) = handle else {
-                    continue;
-                };
+                let mut handles = Vec::new();
+                match value {
+                    LuaValue::UserData(userdata) => {
+                        if let Ok(handle) = userdata.borrow::<GraphHandle>() {
+                            handles.push((handle.id, handle.kind, "build"));
+                        }
+                    }
+                    LuaValue::Table(table) => {
+                        for (field, workflow) in [("BUILD", "build"), ("TEST", "test")] {
+                            if let Some(userdata) =
+                                table.get::<Option<LuaAnyUserData>>(field).ok().flatten()
+                            {
+                                if let Ok(handle) = userdata.borrow::<GraphHandle>() {
+                                    handles.push((handle.id, handle.kind, workflow));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
                 let address = if package.is_empty() {
                     format!("//:{name}")
                 } else {
                     format!("//{package}:{name}")
                 };
-                roots.push(GraphRoot {
-                    address,
-                    workflow: "build".to_owned(),
-                    facet: None,
-                    handle_id: handle_id as u32,
-                    is_default: false,
-                });
+                for (handle_id, kind, workflow) in handles {
+                    if (workflow == "build" && kind != "task")
+                        || (workflow == "test" && kind != "test_root")
+                    {
+                        continue;
+                    }
+                    roots.push(GraphRoot {
+                        address: address.clone(),
+                        workflow: workflow.to_owned(),
+                        facet: None,
+                        handle_id: handle_id as u32,
+                        is_default: false,
+                    });
+                }
             }
         }
         crate::graph::GraphCatalog {
@@ -385,17 +441,54 @@ impl LuauWorkspace {
         goal: &str,
         roots: &[GraphRoot],
         cancellation: Arc<AtomicBool>,
-    ) -> Result<()> {
-        if goal != "build" {
+        case_filter: Option<&str>,
+        suite_filter: Option<&str>,
+    ) -> Result<Option<String>> {
+        if goal != "build" && goal != "test" {
             bail!("Luau pilot does not implement the '{goal}' workflow");
         }
         self.host.borrow_mut().task_results.clear();
         self.host.borrow_mut().cancellation = cancellation;
+        let mut test_units = Vec::new();
         for root in roots {
+            if goal == "test" {
+                let package = match self.host.borrow().nodes.get(&(root.handle_id as u64)) {
+                    Some(GraphNode::TestRoot { package }) => package.clone(),
+                    _ => bail!("Luau test root {} is invalid", root.address),
+                };
+                test_units.extend(
+                    self.run_test_root(&root.address, &package, case_filter, suite_filter)
+                        .await?,
+                );
+                continue;
+            }
             let script = format!("return __imp_execute_task({})", root.handle_id);
             self.run_script("@imp/pilot-execute", &script)
                 .await
                 .with_context(|| format!("execute Luau graph root {}", root.address))?;
+        }
+        if goal == "test" {
+            if test_units.is_empty() {
+                let filter = case_filter
+                    .map(|name| format!("case '{name}'"))
+                    .or_else(|| suite_filter.map(|name| format!("suite '{name}'")))
+                    .unwrap_or_else(|| "tests".to_owned());
+                test_units.push(TestUnit {
+                    name: roots
+                        .first()
+                        .map(|root| root.address.clone())
+                        .unwrap_or_else(|| "Luau tests".to_owned()),
+                    ok: false,
+                    output: format!("no {filter} found in selected test roots"),
+                });
+            }
+            let passed = test_units.iter().filter(|unit| unit.ok).count();
+            let failed = test_units.len().saturating_sub(passed);
+            let report = render_test_report(&mut test_units, passed);
+            if failed > 0 {
+                bail!("{report}");
+            }
+            return Ok(Some(report));
         }
         if self.host.borrow().goals.contains_key(goal) {
             let script = format!(
@@ -404,7 +497,201 @@ impl LuauWorkspace {
             );
             self.run_script("@imp/pilot-goal", &script).await?;
         }
-        Ok(())
+        Ok(None)
+    }
+
+    async fn run_test_root(
+        &self,
+        address: &str,
+        package: &str,
+        case_filter: Option<&str>,
+        suite_filter: Option<&str>,
+    ) -> Result<Vec<TestUnit>> {
+        let directory = if package == "." {
+            self.loader.workspace_root.clone()
+        } else {
+            self.loader.workspace_root.join(package)
+        };
+        let workspace_root = self.loader.workspace_root.clone();
+        let package_directory = directory.clone();
+        let package_depth = if package == "." {
+            1
+        } else {
+            Path::new(package).components().count() + 1
+        };
+        let workspace_root_for_filter = workspace_root.clone();
+        let mut walker = ignore::WalkBuilder::new(&workspace_root);
+        walker
+            .hidden(false)
+            .ignore(true)
+            .git_ignore(false)
+            .add_custom_ignore_filename(".gitignore")
+            .git_global(true)
+            .git_exclude(true)
+            .parents(false)
+            .require_git(false)
+            .max_depth(Some(package_depth))
+            .filter_entry(move |entry| {
+                entry.file_name() != ".git"
+                    && (entry.path() == workspace_root_for_filter
+                        || package_directory.starts_with(entry.path())
+                        || entry.path().starts_with(&package_directory))
+            });
+        let workspace_gitignore = workspace_root.join(".gitignore");
+        if workspace_gitignore.is_file() {
+            walker
+                .current_dir(&workspace_root)
+                .add_ignore(workspace_gitignore);
+        }
+        let mut modules = Vec::new();
+        for entry in walker.build() {
+            let entry = entry
+                .with_context(|| format!("discover test modules in {}", directory.display()))?;
+            if entry.file_type().is_some_and(|kind| kind.is_file())
+                && entry.file_name().to_string_lossy().ends_with(".test.luau")
+            {
+                modules.push(entry.into_path());
+            }
+        }
+        modules.sort();
+        if modules.is_empty() {
+            if case_filter.is_some() || suite_filter.is_some() {
+                return Ok(Vec::new());
+            }
+            return Ok(vec![TestUnit {
+                name: address.to_owned(),
+                ok: false,
+                output: format!("no .test.luau modules found in {}", directory.display()),
+            }]);
+        }
+
+        let rules_root = self.loader.rules_root.clone();
+        let service = Arc::clone(&self.host.borrow().service);
+        let mut units = Vec::new();
+        for path in modules {
+            if self.host.borrow().cancellation.load(Ordering::SeqCst) {
+                bail!("Luau test run canceled");
+            }
+            let relative = path
+                .strip_prefix(&workspace_root)
+                .context("test module is outside the workspace")?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let module = format!("@workspace/{}", relative.trim_end_matches(".luau"));
+            let mut discovery = LuauWorkspace::new_with_service(
+                &workspace_root,
+                &rules_root,
+                Arc::clone(&service),
+            )?;
+            let cases = match discovery.evaluate(&module).await {
+                Ok(value) => match flatten_test_cases(value) {
+                    Ok(cases) => cases,
+                    Err(error) => {
+                        units.push(TestUnit {
+                            name: module.clone(),
+                            ok: false,
+                            output: format!("{module}: {error:#}"),
+                        });
+                        continue;
+                    }
+                },
+                Err(error) => {
+                    units.push(TestUnit {
+                        name: module.clone(),
+                        ok: false,
+                        output: format!("{error:#}"),
+                    });
+                    continue;
+                }
+            };
+            if cases.is_empty() {
+                units.push(TestUnit {
+                    name: module.clone(),
+                    ok: false,
+                    output: "test module returned no cases".to_owned(),
+                });
+                continue;
+            }
+            let selected = cases
+                .iter()
+                .enumerate()
+                .filter(|(_, case)| {
+                    case_filter.is_none_or(|filter| {
+                        case.name == filter || case.name.ends_with(&format!(".{filter}"))
+                    }) && suite_filter.is_none_or(|filter| {
+                        case.suite.as_deref().is_some_and(|suite| {
+                            suite == filter || suite.starts_with(&format!("{filter}."))
+                        })
+                    })
+                })
+                .map(|(ordinal, case)| {
+                    let occurrence = cases[..ordinal]
+                        .iter()
+                        .filter(|previous| {
+                            previous.name == case.name && previous.suite == case.suite
+                        })
+                        .count();
+                    (case.name.clone(), case.suite.clone(), occurrence)
+                })
+                .collect::<Vec<_>>();
+            for (case_name, case_suite, occurrence) in selected {
+                if self.host.borrow().cancellation.load(Ordering::SeqCst) {
+                    bail!("Luau test run canceled");
+                }
+                let mut runtime = match LuauWorkspace::new_with_service(
+                    &workspace_root,
+                    &rules_root,
+                    Arc::clone(&service),
+                ) {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        units.push(TestUnit {
+                            name: format!("{address} {module} {case_name}"),
+                            ok: false,
+                            output: format!("{error:#}"),
+                        });
+                        continue;
+                    }
+                };
+                runtime.host.borrow_mut().cancellation =
+                    Arc::clone(&self.host.borrow().cancellation);
+                let result = match runtime.evaluate(&module).await {
+                    Ok(value) => match flatten_test_cases(value) {
+                        Ok(cases) => {
+                            let mut matches = cases
+                                .into_iter()
+                                .filter(|case| case.name == case_name && case.suite == case_suite);
+                            if let Some(case) = matches.nth(occurrence) {
+                                case.run
+                                    .call_async::<LuaValue>(())
+                                    .await
+                                    .map(|_| ())
+                                    .map_err(|error| anyhow::anyhow!("{module}: {error}"))
+                            } else {
+                                Err(anyhow::anyhow!(
+                                    "test case disappeared during isolated evaluation"
+                                ))
+                            }
+                        }
+                        Err(error) => Err(anyhow::anyhow!("{module}: {error}")),
+                    },
+                    Err(error) => Err(anyhow::anyhow!("{error:#}")),
+                };
+                units.push(match result {
+                    Ok(()) => TestUnit {
+                        name: format!("{address} {module} {case_name}"),
+                        ok: true,
+                        output: String::new(),
+                    },
+                    Err(error) => TestUnit {
+                        name: format!("{address} {module} {case_name}"),
+                        ok: false,
+                        output: format!("{error:#}"),
+                    },
+                });
+            }
+        }
+        Ok(units)
     }
 
     /// Execute a graph task created by `task()` through Imp's local or remote
@@ -1022,6 +1309,51 @@ fn create_core(
 ) -> LuaResult<LuaValue> {
     let core = lua.create_table()?;
     core.set("BUILD", "BUILD")?;
+    core.set("TEST", "TEST")?;
+
+    let graph_host = Rc::clone(&host);
+    let test_loader = loader.clone();
+    core.set(
+        "test_root",
+        lua.create_function(move |lua, ()| {
+            let package = current_package_path(&test_loader);
+            let handle = allocate_handle(&graph_host, "test_root");
+            graph_host
+                .borrow_mut()
+                .nodes
+                .insert(handle.id, GraphNode::TestRoot { package });
+            lua.create_userdata(handle)
+        })?,
+    )?;
+
+    let test_api = lua.create_table()?;
+    test_api.set(
+        "case",
+        lua.create_function(|lua, (name, run): (String, LuaFunction)| {
+            if name.trim().is_empty() {
+                return Err(LuaError::external("test.case requires a non-empty name"));
+            }
+            let case = lua.create_table()?;
+            case.set("__imp_test_case", true)?;
+            case.set("name", name)?;
+            case.set("run", run)?;
+            Ok(case)
+        })?,
+    )?;
+    test_api.set(
+        "suite",
+        lua.create_function(|lua, (name, cases): (String, LuaTable)| {
+            if name.trim().is_empty() {
+                return Err(LuaError::external("test.suite requires a non-empty name"));
+            }
+            let suite = lua.create_table()?;
+            suite.set("__imp_test_suite", true)?;
+            suite.set("name", name)?;
+            suite.set("cases", cases)?;
+            Ok(suite)
+        })?,
+    )?;
+    core.set("test", test_api)?;
 
     let platform_host = Rc::clone(&host);
     core.set(
@@ -1970,6 +2302,54 @@ fn normalize_luau_artifact(artifact: &imp_store::cache::CachedArtifact) -> Resul
     }
 }
 
+fn flatten_test_cases(value: LuaValue) -> Result<Vec<LuauTestCase>> {
+    fn visit(value: LuaValue, suite: Option<&str>, cases: &mut Vec<LuauTestCase>) -> LuaResult<()> {
+        let table = match value {
+            LuaValue::Table(table) => table,
+            other => {
+                return Err(LuaError::external(format!(
+                    "test module must return a list of test cases or suites, got {}",
+                    other.type_name()
+                )))
+            }
+        };
+        if table
+            .get::<Option<bool>>("__imp_test_case")?
+            .unwrap_or(false)
+        {
+            let name: String = table.get("name")?;
+            let run: LuaFunction = table.get("run")?;
+            cases.push(LuauTestCase {
+                name: suite.map(|suite| format!("{suite}.{name}")).unwrap_or(name),
+                suite: suite.map(str::to_owned),
+                run,
+            });
+            return Ok(());
+        }
+        if table
+            .get::<Option<bool>>("__imp_test_suite")?
+            .unwrap_or(false)
+        {
+            let name: String = table.get("name")?;
+            let nested_suite = suite.map(|parent| format!("{parent}.{name}"));
+            let nested_suite = nested_suite.as_deref().unwrap_or(&name);
+            let nested: LuaTable = table.get("cases")?;
+            for value in nested.sequence_values::<LuaValue>() {
+                visit(value?, Some(nested_suite), cases)?;
+            }
+            return Ok(());
+        }
+        for value in table.sequence_values::<LuaValue>() {
+            visit(value?, suite, cases)?;
+        }
+        Ok(())
+    }
+
+    let mut cases = Vec::new();
+    visit(value, None, &mut cases).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(cases)
+}
+
 fn current_package_path(loader: &ModuleLoader) -> String {
     let Some(address) = loader.stack.borrow().last().cloned() else {
         return ".".to_owned();
@@ -2118,6 +2498,123 @@ mod tests {
             panic!("test module must return a task handle");
         };
         runtime.execute_task(&handle).await.unwrap_err()
+    }
+
+    #[tokio::test]
+    async fn luau_test_roots_discover_cases_and_report_through_test_goal() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace_root.path().join("pkg/nested")).unwrap();
+        fs::write(
+            workspace_root.path().join("pkg/BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+return { tests = { TEST = core.test_root() } }
+"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("pkg/basic.test.luau"),
+            r#"
+local core = require("@imp/core")
+return {
+    core.test.case("passes", function() assert(2 + 2 == 4) end),
+    core.test.suite("group", {
+        core.test.case("nested", function() assert("ok" == "ok") end),
+    }),
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("pkg/nested/ignored.test.luau"),
+            "error('nested package has no TEST root')\n",
+        )
+        .unwrap();
+
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].workflow, "test");
+        assert_eq!(roots[0].address, "//pkg:tests");
+        let report = runtime
+            .execute_graph("test", &roots, Arc::new(AtomicBool::new(false)), None, None)
+            .await
+            .unwrap();
+        assert!(report
+            .as_deref()
+            .unwrap()
+            .contains("test: 2/2 unit(s) passed"));
+
+        let report = runtime
+            .execute_graph(
+                "test",
+                &roots,
+                Arc::new(AtomicBool::new(false)),
+                Some("passes"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(report
+            .as_deref()
+            .unwrap()
+            .contains("test: 1/1 unit(s) passed"));
+        let report = runtime
+            .execute_graph(
+                "test",
+                &roots,
+                Arc::new(AtomicBool::new(false)),
+                None,
+                Some("group"),
+            )
+            .await
+            .unwrap();
+        assert!(report
+            .as_deref()
+            .unwrap()
+            .contains("test: 1/1 unit(s) passed"));
+        let error = runtime
+            .execute_graph(
+                "test",
+                &roots,
+                Arc::new(AtomicBool::new(false)),
+                Some("missing"),
+                None,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no case 'missing' found"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn luau_test_failure_reports_canonical_module_and_source_location() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace_root.path().join("pkg")).unwrap();
+        fs::write(
+            workspace_root.path().join("pkg/BUILD.luau"),
+            "local core = require('@imp/core')\nreturn { tests = { TEST = core.test_root() } }\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("pkg/failure.test.luau"),
+            "local core = require('@imp/core')\nreturn { core.test.case('fails', function()\n    error('expected failure')\nend) }\n",
+        )
+        .unwrap();
+
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let error = runtime
+            .execute_graph("test", &roots, Arc::new(AtomicBool::new(false)), None, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("//pkg:tests"), "{error}");
+        assert!(error.contains("@workspace/pkg/failure.test"), "{error}");
+        assert!(error.contains(":3:"), "{error}");
+        assert!(error.contains("expected failure"), "{error}");
     }
 
     #[tokio::test]
@@ -2418,7 +2915,13 @@ return { check = check }
         let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
         let roots = runtime.load_modules().await.unwrap();
         runtime
-            .execute_graph("build", &roots, Arc::new(AtomicBool::new(false)))
+            .execute_graph(
+                "build",
+                &roots,
+                Arc::new(AtomicBool::new(false)),
+                None,
+                None,
+            )
             .await
             .unwrap();
     }

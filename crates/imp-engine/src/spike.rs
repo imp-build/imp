@@ -7478,8 +7478,10 @@ pub async fn execute_goal_live_selection(
     let graph_goal_handler_name = live.workspace.graph_goal_handlers.get(goal).cloned();
     let luau_roots: Vec<GraphRoot> = graph_roots.iter().map(|root| (*root).clone()).collect();
     let result = if let Some(luau) = &live.luau {
-        let result = if luau_roots.is_empty() {
+        let result = if luau_roots.is_empty() && goal != "test" {
             Ok(None)
+        } else if luau_roots.is_empty() {
+            Err(anyhow::anyhow!("no Luau test roots selected"))
         } else {
             let cancellation = live
                 .scheduler
@@ -7489,9 +7491,14 @@ pub async fn execute_goal_live_selection(
                 .map(|scheduler| scheduler.cancellation_flag())
                 .context("Luau graph execution requires an installed scheduler")?;
             luau.borrow_mut()
-                .execute_graph(goal, &luau_roots, cancellation)
+                .execute_graph(
+                    goal,
+                    &luau_roots,
+                    cancellation,
+                    flags.get("case").and_then(serde_json::Value::as_str),
+                    flags.get("suite").and_then(serde_json::Value::as_str),
+                )
                 .await
-                .map(|()| None)
         };
         result.map_err(|error| anyhow::anyhow!("execute goal '{goal}': {error:#}"))
     } else {
