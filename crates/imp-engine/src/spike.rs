@@ -2143,6 +2143,15 @@ fn eager_expansion_get() -> bool {
     )
 }
 
+// Lune must keep its RefCell borrow while an asynchronous host call runs.
+#[allow(clippy::await_holding_refcell_ref)]
+async fn resolve_luau_expansion(
+    luau: &std::cell::RefCell<crate::luau::LuauWorkspace>,
+    root: &GraphRoot,
+) -> Result<Vec<GraphRoot>> {
+    luau.borrow_mut().resolve_expansion_root(root).await
+}
+
 /// Resolve `selectors` against the graph catalog, then merge in synthetic
 /// `parent#childKey` roots discovered by expanding whatever the selectors
 /// reached — a package/recursive selector picks up every expansion child
@@ -2187,26 +2196,99 @@ pub async fn resolve_graph_with_expansion(
             None => catalog.select_catalog(selectors, context),
         }
     };
-    // The pilot's Luau graph handles live in the Luau VM, so the JavaScript
-    // graph walker cannot inspect or expand them. Resolve the statically
-    // exported pilot roots directly; the focused pilot has no expansions.
-    if live.luau.is_some() {
+    // Luau graph handles live in the Luau VM. Its host resolves selected
+    // expansion projections directly, while the JavaScript graph walker
+    // handles the legacy runtime below.
+    if let Some(luau) = &live.luau {
+        let cancellation = live
+            .scheduler
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|scheduler| scheduler.cancellation_flag())
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        luau.borrow_mut().begin_graph_run(cancellation);
         let mut roots = BTreeMap::new();
         let mut unmatched = Vec::new();
         for selector in selectors {
-            let selected = select_static(std::slice::from_ref(selector))?;
+            let (address_part, facet) = crate::graph::split_facet(selector)?;
+            if let Some((parent_address, child_key)) = address_part.split_once('#') {
+                let parent_selector = match facet {
+                    Some(facet) => format!("{parent_address}@{facet}"),
+                    None => parent_address.to_owned(),
+                };
+                let parents: Vec<GraphRoot> =
+                    select_static(std::slice::from_ref(&parent_selector))?
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                let mut matched_expansion = false;
+                let mut found_child = false;
+                for parent in parents {
+                    if luau.borrow().expansion_projection_is_all(parent.handle_id) != Some(true) {
+                        continue;
+                    }
+                    matched_expansion = true;
+                    let discovered = resolve_luau_expansion(luau, &parent).await?;
+                    let expected = format!("{}#{child_key}", parent.address);
+                    if let Some(child) = discovered
+                        .into_iter()
+                        .find(|child| child.address == expected)
+                    {
+                        found_child = true;
+                        roots.insert(
+                            (
+                                child.address.clone(),
+                                child.workflow.clone(),
+                                child.facet.clone(),
+                            ),
+                            child,
+                        );
+                    }
+                }
+                if matched_expansion {
+                    if !found_child {
+                        bail!("expansion has no child '{child_key}'");
+                    }
+                } else {
+                    unmatched.push(selector.clone());
+                }
+                continue;
+            }
+
+            let selected: Vec<GraphRoot> = select_static(std::slice::from_ref(selector))?
+                .into_iter()
+                .cloned()
+                .collect();
             if selected.is_empty() {
                 unmatched.push(selector.clone());
+                continue;
             }
             for root in selected {
-                roots.insert(
-                    (
-                        root.address.clone(),
-                        root.workflow.clone(),
-                        root.facet.clone(),
-                    ),
-                    root.clone(),
-                );
+                let mut pending = vec![root];
+                let mut seen = BTreeSet::new();
+                while let Some(root) = pending.pop() {
+                    let key = (root.address.clone(), root.handle_id);
+                    if !seen.insert(key) {
+                        bail!("cyclic Luau graph expansion at {}", root.address);
+                    }
+                    if luau
+                        .borrow()
+                        .expansion_projection_is_all(root.handle_id)
+                        .is_some()
+                    {
+                        pending.extend(resolve_luau_expansion(luau, &root).await?);
+                    } else {
+                        roots.insert(
+                            (
+                                root.address.clone(),
+                                root.workflow.clone(),
+                                root.facet.clone(),
+                            ),
+                            root,
+                        );
+                    }
+                }
             }
         }
         return Ok(GraphResolution {
@@ -8659,6 +8741,135 @@ mod tests {
         );
         *live.scheduler.lock().unwrap() = Some(scheduler);
         execute_goal_live(live, root, goal, selectors, false, 1, serde_json::json!({})).await
+    }
+
+    #[tokio::test]
+    async fn luau_dynamic_expansion_selects_children_shares_inputs_and_publishes_packages() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path();
+        write_file(&workspace.join(WORKSPACE_LUAU_FILE), "return {}\n");
+        write_file(
+            &workspace.join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local package = require("@imp/rules/workflows/package")
+local output = core.output
+local sh = core.native_tool("sh")
+local metadata = core.task({
+    inputs = { sh = sh },
+    outputs = { targets = output.value() },
+    run = function(exec)
+        exec.action({ argv = { "sh", "-c", "true" }, tools = { sh } })
+        return { targets = { alpha = true, beta = true } }
+    end,
+})
+local targets = core.expand({
+    display = "discover Luau test targets",
+    inputs = { targets = metadata.outputs.targets },
+    create = function(inputs)
+        local children = {}
+        for name in pairs(inputs.targets) do
+            local child = name
+            local build = core.task({
+                inputs = { sh = sh },
+                outputs = { selected = output.value() },
+                run = function(exec)
+                    exec.action({ argv = { "sh", "-c", "true" }, tools = { sh } })
+                    return { selected = child }
+                end,
+            })
+            local package_task = core.task({
+                inputs = { sh = sh },
+                outputs = { artifact = output.artifact() },
+                run = function(exec)
+                    local path = "build/package/"
+                    if child == "alpha" then
+                        path ..= "libalpha.so"
+                    else
+                        path ..= child .. ".txt"
+                    end
+                    local result = exec.action({
+                        argv = { "sh", "-c", "printf " .. child .. " > " .. path },
+                        tools = { sh },
+                        outputs = { artifact = output.file(path) },
+                    })
+                    return { artifact = result.outputs.artifact }
+                end,
+            })
+            children[child] = {
+                BUILD = build,
+                PACKAGE = package_task.outputs.artifact,
+                TEST = build.outputs.selected,
+            }
+        end
+        return children
+    end,
+})
+return {
+    targets = {
+        BUILD = targets:all(core.BUILD),
+        PACKAGE = targets:all(package.PACKAGE),
+        TEST = targets:all(core.TEST),
+    },
+    alpha = { BUILD = targets:get("alpha", core.BUILD) },
+}
+"#,
+        );
+        let live = load_workspace_with_rules(workspace, RulesSource::discover())
+            .await
+            .unwrap();
+
+        run_goal_live(&live, workspace, "build", &["//:alpha".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(
+            live.luau.as_ref().unwrap().borrow().action_count(),
+            2,
+            "named selection must run its producer and selected child only"
+        );
+
+        run_goal_live(
+            &live,
+            workspace,
+            "build",
+            &["//:targets#alpha".to_owned(), "//:targets#beta".to_owned()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            live.luau.as_ref().unwrap().borrow().action_count(),
+            5,
+            "the two selected children must share one producer execution"
+        );
+
+        run_goal_live(&live, workspace, "package", &["//:targets".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("dist/libalpha.so")).unwrap(),
+            "alpha"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("dist/targets#beta")).unwrap(),
+            "beta"
+        );
+
+        run_goal_live(&live, workspace, "test", &["//:targets".to_owned()])
+            .await
+            .unwrap();
+
+        let error = run_goal_live(
+            &live,
+            workspace,
+            "build",
+            &["//:targets#missing".to_owned()],
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("expansion has no child 'missing'"),
+            "{error:#}"
+        );
     }
 
     #[tokio::test]

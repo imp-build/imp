@@ -24,10 +24,10 @@ the gaps that block catalog migration.
 | Module loading | Loads `@imp/core`, `@imp/rules/...`, and `@workspace/...`; caches canonical module values and rejects namespace escapes. | The full catalog and its loader-dependent workspace features are not migrated. |
 | Workspace configuration | Loads `imp.workspace.luau`; on GitHub Actions it deep-merges `imp.workspace.ci.luau`. Luau rule modules can register schemas, read or write configuration, and expose schemas and resolved values to the CLI. | JavaScript and Luau use different field spellings. Luau configuration uses `snake_case`; the JavaScript runtime remains the default. |
 | BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. `imp goal generate-build` can write and check generated `BUILD.luau` files from registered Luau generators. | Language-specific generators must be ported to Luau before a Luau workspace can use them. |
-| Graph construction | Exposes `files`, `glob`, `task`, `output`, `native_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. `register_build_rule` and `register_build_generator` provide the Luau BUILD renderer interface. `memo`, `sources_field`, and `write_workspace` remain pilot shims. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
+| Graph construction | Exposes `files`, `glob`, `task`, `expand`, `output`, `native_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. Expansions derive keyed `BUILD`, `PACKAGE`, and `TEST` children from resolved inputs; `get()` selects one child and `all()` selects every child. `register_build_rule` and `register_build_generator` provide the Luau BUILD renderer interface. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
 | Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, and a cache toggle. Captured artifacts can flow to downstream tasks through named outputs. | Allow-failure results and broader toolchain conveniences are not available. |
-| Tests and workflows | Luau BUILD modules can expose a `TEST` root. The root discovers package-local `.test.luau` modules and runs named cases and suites in fresh Luau runtimes. | The standard workflow rule modules and mixed JavaScript/Luau test discovery are not available in Luau. |
-| Installed rules | The pilot tree contains Luau `asset`, `resource_package`, `workflows/build`, and `imp/native-tool` modules. | Other packages remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
+| Tests and workflows | Luau BUILD modules can expose `BUILD`, `PACKAGE`, and `TEST` roots. `imp package` gathers selected artifact roots and publishes them under `dist/`. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. | The standard workflow rule modules and mixed JavaScript/Luau test discovery are not available in Luau. |
+| Installed rules | The pilot tree contains Luau `asset`, `resource_package`, `workflows/build`, `workflows/package`, and `imp/native-tool` modules. | Other packages remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
 
 The shared C toolchain is the first consumer of `platform_info()`. C compiler
 toolchains and Imp host rules are the first consumers of acquired tool handles,
@@ -90,6 +90,47 @@ that task output in `inputs`; Imp executes the producer first and supplies the
 resolved value or artifact handle to the consumer. When an action consumes an
 artifact or path handle, Imp stages its CAS digest as an action input. Graph
 actions keep outputs in CAS and do not write them into the workspace.
+
+### Dynamic graph expansion
+
+Use `expand()` when task output names graph children that Imp must select
+separately. The `create` callback receives resolved inputs and returns a table
+keyed by child name. Each child table may contain `BUILD`, `PACKAGE`, or
+`TEST` graph handles. Use `get()` to select one child or `all()` to select the
+children as a group:
+
+**Illustrative example:**
+
+```luau
+local expansion = core.expand({
+    inputs = { metadata = discovery.outputs.metadata },
+    create = function(inputs)
+        local children = {}
+        for name in pairs(inputs.metadata.targets) do
+            children[name] = {
+                BUILD = buildTarget(name),
+                PACKAGE = packageTarget(name),
+            }
+        end
+        return children
+    end,
+})
+
+return {
+    targets = {
+        BUILD = expansion:all(core.BUILD),
+        PACKAGE = expansion:get("app", core.PACKAGE),
+    },
+}
+```
+
+Selecting an aggregate root also makes each child addressable as
+`<target-address>#<child-key>`. Imp resolves only expansions reachable from
+selected targets. It resolves expansion inputs before it dispatches child
+tasks, so children that use the same producer share its result during one
+goal invocation. `imp package` publishes artifact outputs from selected
+`PACKAGE` roots under `dist/`, using the JavaScript package workflow's naming
+rules.
 
 ### Tool, path, platform, and environment APIs
 

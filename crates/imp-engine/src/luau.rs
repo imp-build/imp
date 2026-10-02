@@ -49,6 +49,37 @@ struct GraphHandle {
     outputs: Option<LuaTable>,
 }
 
+#[derive(Clone)]
+struct ExpansionHandle {
+    id: u64,
+    host: Rc<RefCell<HostState>>,
+}
+
+impl LuaUserData for ExpansionHandle {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method(
+            "get",
+            |lua, this, (key, workflow, facet): (String, String, Option<String>)| {
+                create_expansion_projection(lua, &this.host, this.id, key, workflow, facet, false)
+            },
+        );
+        methods.add_method(
+            "all",
+            |lua, this, (workflow, facet): (String, Option<String>)| {
+                create_expansion_projection(
+                    lua,
+                    &this.host,
+                    this.id,
+                    String::new(),
+                    workflow,
+                    facet,
+                    true,
+                )
+            },
+        );
+    }
+}
+
 impl LuaUserData for GraphHandle {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("outputs", |_, this| {
@@ -94,6 +125,13 @@ struct Task {
     run: LuaFunction,
     inputs: LuaTable,
     outputs: BTreeMap<String, TaskOutputKind>,
+}
+
+#[derive(Clone)]
+struct Expansion {
+    inputs: LuaTable,
+    create: LuaFunction,
+    display: String,
 }
 
 #[derive(Clone)]
@@ -192,12 +230,27 @@ enum GraphNode {
         task_id: u64,
         name: String,
     },
+    ExpansionGet {
+        expansion_id: u64,
+        key: String,
+        workflow: String,
+        facet: Option<String>,
+    },
+    ExpansionAll {
+        expansion_id: u64,
+        workflow: String,
+        facet: Option<String>,
+    },
     Artifact(imp_store::cache::CachedArtifact),
 }
 
 struct HostState {
     next_id: u64,
+    next_expansion_id: u64,
     tasks: HashMap<u64, Task>,
+    expansions: HashMap<u64, Expansion>,
+    expansion_results: HashMap<u64, LuaTable>,
+    graph_run_active: bool,
     task_results: HashMap<u64, LuaTable>,
     nodes: HashMap<u64, GraphNode>,
     filesets: HashMap<String, u64>,
@@ -206,6 +259,7 @@ struct HostState {
     tools: HashMap<String, u64>,
     paths: HashMap<String, u64>,
     goals: HashMap<String, LuaFunction>,
+    goal_root_results: Option<LuaTable>,
     build_generators: Vec<LuauBuildGenerator>,
     build_rules: BTreeMap<String, LuauBuildRule>,
     workspace_root: PathBuf,
@@ -259,7 +313,11 @@ impl LuauWorkspace {
         };
         let host = Rc::new(RefCell::new(HostState {
             next_id: 0,
+            next_expansion_id: 0,
             tasks: HashMap::new(),
+            expansions: HashMap::new(),
+            expansion_results: HashMap::new(),
+            graph_run_active: false,
             task_results: HashMap::new(),
             nodes: HashMap::new(),
             filesets: HashMap::new(),
@@ -268,6 +326,7 @@ impl LuauWorkspace {
             tools: HashMap::new(),
             paths: HashMap::new(),
             goals: HashMap::new(),
+            goal_root_results: None,
             build_generators: Vec::new(),
             build_rules: BTreeMap::new(),
             workspace_id,
@@ -308,6 +367,8 @@ impl LuauWorkspace {
                     bootstrap_host.clone(),
                     bootstrap_configuration.clone(),
                 )?;
+                install_package_executor(lua, bootstrap_host.clone())?;
+                install_expansion_executor(lua, bootstrap_host.clone())?;
                 install_goal_executor(lua, bootstrap_host.clone())?;
                 Ok(LuaValue::Nil)
             })
@@ -350,6 +411,119 @@ impl LuauWorkspace {
     pub async fn load_modules(&mut self) -> Result<Vec<GraphRoot>> {
         self.load_modules_with_ci_overlay(std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true"))
             .await
+    }
+
+    pub fn begin_graph_run(&mut self, cancellation: Arc<AtomicBool>) {
+        let mut host = self.host.borrow_mut();
+        host.task_results.clear();
+        host.expansion_results.clear();
+        host.goal_root_results = None;
+        host.graph_run_active = true;
+        host.cancellation = cancellation;
+    }
+
+    pub fn expansion_projection_is_all(&self, handle_id: u32) -> Option<bool> {
+        match self.host.borrow().nodes.get(&(handle_id as u64)) {
+            Some(GraphNode::ExpansionAll { .. }) => Some(true),
+            Some(GraphNode::ExpansionGet { .. }) => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Resolve one selected expansion projection to its concrete graph roots.
+    /// The expansion callback runs once per graph invocation, after its input
+    /// tasks have completed.
+    pub async fn resolve_expansion_root(&mut self, root: &GraphRoot) -> Result<Vec<GraphRoot>> {
+        let node = self
+            .host
+            .borrow()
+            .nodes
+            .get(&(root.handle_id as u64))
+            .cloned();
+        let projection = match node {
+            Some(GraphNode::ExpansionGet {
+                expansion_id,
+                key,
+                workflow,
+                facet,
+            }) => Some((expansion_id, Some(key), workflow, facet)),
+            Some(GraphNode::ExpansionAll {
+                expansion_id,
+                workflow,
+                facet,
+            }) => Some((expansion_id, None, workflow, facet)),
+            _ => None,
+        };
+        let Some((expansion_id, selected_key, workflow, facet)) = projection else {
+            return Ok(vec![root.clone()]);
+        };
+        let source = format!("return __imp_discover_expansion({expansion_id})");
+        let children_value = self
+            .run_script_value("@imp/expand", &source)
+            .await
+            .with_context(|| format!("discover Luau expansion for {}", root.address))?;
+        let children = children_value
+            .as_table()
+            .cloned()
+            .with_context(|| format!("expansion for {} must return a keyed table", root.address))?;
+        let keys = if let Some(key) = selected_key.as_ref() {
+            if children
+                .get::<Option<LuaValue>>(key.as_str())
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                .is_none()
+            {
+                bail!("expansion has no child '{key}'");
+            }
+            vec![key.clone()]
+        } else {
+            let mut keys = Vec::new();
+            for pair in children.pairs::<String, LuaValue>() {
+                keys.push(pair.map_err(|error| anyhow::anyhow!(error.to_string()))?.0);
+            }
+            keys.sort();
+            keys
+        };
+        let mut roots = Vec::with_capacity(keys.len());
+        for key in keys {
+            let child = children.get::<LuaValue>(key.as_str()).map_err(|error| {
+                anyhow::anyhow!("expansion child '{key}' could not be read: {error}")
+            })?;
+            let workflow_value = match child {
+                LuaValue::Table(table) => table
+                    .get::<LuaValue>(workflow.as_str())
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+                _ => bail!("expansion child '{key}' must contain workflow handles"),
+            };
+            let workflow_value = if let Some(facet) = facet.as_deref() {
+                workflow_value
+                    .as_table()
+                    .with_context(|| format!("expansion child '{key}' has no facet '{facet}'"))?
+                    .get::<LuaValue>(facet)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?
+            } else {
+                workflow_value
+            };
+            let LuaValue::UserData(userdata) = workflow_value else {
+                bail!("expansion child '{key}' has no requested {workflow} workflow handle");
+            };
+            let handle = userdata
+                .borrow::<GraphHandle>()
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            validate_expansion_child(&self.host.borrow(), handle.id, &workflow, &key)?;
+            let address = if selected_key.is_some() {
+                root.address.clone()
+            } else {
+                format!("{}#{key}", root.address)
+            };
+            roots.push(GraphRoot {
+                address,
+                workflow: root.workflow.clone(),
+                facet: root.facet.clone(),
+                handle_id: handle.id as u32,
+                is_default: false,
+            });
+        }
+        Ok(roots)
     }
 
     async fn load_modules_with_ci_overlay(
@@ -419,16 +593,18 @@ impl LuauWorkspace {
                 match value {
                     LuaValue::UserData(userdata) => {
                         if let Ok(handle) = userdata.borrow::<GraphHandle>() {
-                            handles.push((handle.id, handle.kind, "build"));
+                            handles.push((handle.id, "build"));
                         }
                     }
                     LuaValue::Table(table) => {
-                        for (field, workflow) in [("BUILD", "build"), ("TEST", "test")] {
+                        for (field, workflow) in
+                            [("BUILD", "build"), ("PACKAGE", "package"), ("TEST", "test")]
+                        {
                             if let Some(userdata) =
                                 table.get::<Option<LuaAnyUserData>>(field).ok().flatten()
                             {
                                 if let Ok(handle) = userdata.borrow::<GraphHandle>() {
-                                    handles.push((handle.id, handle.kind, workflow));
+                                    handles.push((handle.id, workflow));
                                 }
                             }
                         }
@@ -440,10 +616,53 @@ impl LuauWorkspace {
                 } else {
                     format!("//{package}:{name}")
                 };
-                for (handle_id, kind, workflow) in handles {
-                    if (workflow == "build" && kind != "task")
-                        || (workflow == "test" && kind != "test_root")
-                    {
+                for (handle_id, workflow) in handles {
+                    let state = self.host.borrow();
+                    let node = state.nodes.get(&handle_id);
+                    let valid = match workflow {
+                        "build" => matches!(
+                            node,
+                            Some(
+                                GraphNode::Task
+                                    | GraphNode::TaskOutput { .. }
+                                    | GraphNode::ExpansionGet { .. }
+                                    | GraphNode::ExpansionAll { .. }
+                            )
+                        ),
+                        "package" => match node {
+                            Some(GraphNode::TaskOutput { task_id, name }) => state
+                                .tasks
+                                .get(task_id)
+                                .and_then(|task| task.outputs.get(name))
+                                .is_some_and(|kind| *kind == TaskOutputKind::Artifact),
+                            Some(GraphNode::Task) => {
+                                state.tasks.get(&handle_id).is_some_and(|task| {
+                                    task.outputs
+                                        .values()
+                                        .filter(|kind| **kind == TaskOutputKind::Artifact)
+                                        .count()
+                                        == 1
+                                })
+                            }
+                            Some(
+                                GraphNode::ExpansionGet { .. } | GraphNode::ExpansionAll { .. },
+                            ) => true,
+                            _ => false,
+                        },
+                        "test" => matches!(
+                            node,
+                            Some(
+                                GraphNode::Task
+                                    | GraphNode::TaskOutput { .. }
+                                    | GraphNode::TestRoot { .. }
+                                    | GraphNode::ExpansionGet { .. }
+                                    | GraphNode::ExpansionAll { .. }
+                            )
+                        ),
+                        _ => false,
+                    };
+                    drop(state);
+                    if !valid {
                         continue;
                     }
                     roots.push(GraphRoot {
@@ -484,28 +703,67 @@ impl LuauWorkspace {
         case_filter: Option<&str>,
         suite_filter: Option<&str>,
     ) -> Result<Option<String>> {
-        if goal != "build" && goal != "test" {
+        if !self.host.borrow().graph_run_active {
+            self.begin_graph_run(Arc::clone(&cancellation));
+        } else {
+            self.host.borrow_mut().cancellation = Arc::clone(&cancellation);
+        }
+        let result = self
+            .execute_graph_inner(goal, roots, cancellation, case_filter, suite_filter)
+            .await;
+        let mut host = self.host.borrow_mut();
+        host.graph_run_active = false;
+        host.goal_root_results = None;
+        result
+    }
+
+    async fn execute_graph_inner(
+        &mut self,
+        goal: &str,
+        roots: &[GraphRoot],
+        cancellation: Arc<AtomicBool>,
+        case_filter: Option<&str>,
+        suite_filter: Option<&str>,
+    ) -> Result<Option<String>> {
+        if goal != "build" && goal != "test" && goal != "package" {
             bail!("Luau pilot does not implement the '{goal}' workflow");
         }
-        self.host.borrow_mut().task_results.clear();
         self.host.borrow_mut().cancellation = cancellation;
         let mut test_units = Vec::new();
         for root in roots {
             if goal == "test" {
                 let package = match self.host.borrow().nodes.get(&(root.handle_id as u64)) {
-                    Some(GraphNode::TestRoot { package }) => package.clone(),
-                    _ => bail!("Luau test root {} is invalid", root.address),
+                    Some(GraphNode::TestRoot { package }) => Some(package.clone()),
+                    _ => None,
                 };
-                test_units.extend(
-                    self.run_test_root(&root.address, &package, case_filter, suite_filter)
-                        .await?,
-                );
-                continue;
+                if let Some(package) = package {
+                    test_units.extend(
+                        self.run_test_root(&root.address, &package, case_filter, suite_filter)
+                            .await?,
+                    );
+                    continue;
+                }
             }
             let script = format!("return __imp_execute_task({})", root.handle_id);
-            self.run_script("@imp/pilot-execute", &script)
+            self.run_script_value("@imp/pilot-execute", &script)
                 .await
                 .with_context(|| format!("execute Luau graph root {}", root.address))?;
+            if goal == "package" {
+                let address = serde_json::to_string(&root.address)?;
+                let script = format!(
+                    "return __imp_add_package_root({}, {})",
+                    root.handle_id, address
+                );
+                self.run_script("@imp/package-root", &script)
+                    .await
+                    .with_context(|| format!("collect Luau package root {}", root.address))?;
+            } else if goal == "test" {
+                test_units.push(TestUnit {
+                    name: root.address.clone(),
+                    ok: true,
+                    output: String::new(),
+                });
+            }
         }
         if goal == "test" {
             if test_units.is_empty() {
@@ -529,6 +787,9 @@ impl LuauWorkspace {
                 bail!("{report}");
             }
             return Ok(Some(report));
+        }
+        if goal == "package" && !self.host.borrow().goals.contains_key("package") {
+            bail!("Luau package roots require @imp/rules/workflows/package");
         }
         if self.host.borrow().goals.contains_key(goal) {
             let script = format!(
@@ -763,6 +1024,24 @@ impl LuauWorkspace {
             );
         }
         Ok(())
+    }
+
+    async fn run_script_value(&mut self, name: &str, source: &str) -> Result<LuaValue> {
+        let result = self
+            .runtime
+            .run_custom(name, source)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        if let Some(failure) = self.host.borrow_mut().task_failure.take() {
+            bail!("{failure}");
+        }
+        if !result.success() {
+            bail!(
+                "Luau script '{name}' failed with status {}",
+                result.status()
+            );
+        }
+        Ok(result.values.front().cloned().unwrap_or(LuaValue::Nil))
     }
 
     /// Number of actions accepted by the pilot adapter. Exposed for focused
@@ -1064,11 +1343,21 @@ fn install_task_executor(
     configuration: Rc<RefCell<ConfigurationState>>,
 ) -> LuaResult<()> {
     let execute = lua.create_async_function(move |lua, id: u64| {
-        let order = dependency_order(&host.borrow(), id);
         let host = Rc::clone(&host);
         let configuration = Rc::clone(&configuration);
         async move {
-            for task_id in order? {
+            let (task_id, output_name) = match host.borrow().nodes.get(&id) {
+                Some(GraphNode::Task) => (id, None),
+                Some(GraphNode::TaskOutput { task_id, name }) => (*task_id, Some(name.clone())),
+                Some(_) => {
+                    return Err(LuaError::external(format!(
+                        "Luau graph handle {id} is not an executable task or task output"
+                    )))
+                }
+                None => return Err(LuaError::external(format!("unknown Luau graph handle {id}"))),
+            };
+            let order = dependency_order(&host.borrow(), task_id)?;
+            for task_id in order {
                 if host.borrow().task_results.contains_key(&task_id) {
                     continue;
                 }
@@ -1153,10 +1442,105 @@ fn install_task_executor(
                 let outputs = validate_task_result(&lua, &host, &task, result)?;
                 host.borrow_mut().task_results.insert(task_id, outputs);
             }
-            Ok(())
+            let result = host
+                .borrow()
+                .task_results
+                .get(&task_id)
+                .cloned()
+                .ok_or_else(|| LuaError::external("Luau task did not produce a result"))?;
+            match output_name {
+                Some(name) => result.get::<LuaValue>(name),
+                None => Ok(LuaValue::Table(result)),
+            }
         }
     })?;
     lua.globals().set("__imp_execute_task", execute)
+}
+
+fn install_package_executor(lua: &Lua, host: Rc<RefCell<HostState>>) -> LuaResult<()> {
+    let append = lua.create_function(move |lua, (handle_id, address): (u64, String)| {
+        let node = host.borrow().nodes.get(&handle_id).cloned();
+        let (task_id, output_name) = match node {
+            Some(GraphNode::TaskOutput { task_id, name }) => (task_id, name),
+            Some(GraphNode::Task) => {
+                let task = host
+                    .borrow()
+                    .tasks
+                    .get(&handle_id)
+                    .cloned()
+                    .ok_or_else(|| LuaError::external("package root references an unknown task"))?;
+                let outputs: Vec<_> = task
+                    .outputs
+                    .iter()
+                    .filter(|(_, kind)| **kind == TaskOutputKind::Artifact)
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                if outputs.len() != 1 {
+                    return Err(LuaError::external(format!(
+                        "package root {address} must expose exactly one artifact output"
+                    )));
+                }
+                (handle_id, outputs[0].clone())
+            }
+            _ => {
+                return Err(LuaError::external(format!(
+                    "package root {address} is not an artifact task handle"
+                )))
+            }
+        };
+        if !host
+            .borrow()
+            .tasks
+            .get(&task_id)
+            .and_then(|task| task.outputs.get(&output_name))
+            .is_some_and(|kind| *kind == TaskOutputKind::Artifact)
+        {
+            return Err(LuaError::external(format!(
+                "package root {address} must expose an artifact output"
+            )));
+        }
+        let result = host
+            .borrow()
+            .task_results
+            .get(&task_id)
+            .cloned()
+            .ok_or_else(|| LuaError::external("package root task did not produce a result"))?;
+        let value = result.get::<LuaValue>(output_name.as_str())?;
+        let LuaValue::UserData(value) = value else {
+            return Err(LuaError::external(format!(
+                "package root {address} did not return an artifact handle"
+            )));
+        };
+        let artifact_handle = value.borrow::<GraphHandle>()?;
+        let artifact = match host.borrow().nodes.get(&artifact_handle.id) {
+            Some(GraphNode::Artifact(artifact)) => artifact.clone(),
+            _ => {
+                return Err(LuaError::external(format!(
+                    "package root {address} did not return a captured artifact"
+                )))
+            }
+        };
+        let digest = normalize_luau_artifact(&artifact)
+            .map_err(|error| LuaError::external(format!("normalize package artifact: {error:#}")))?
+            .digest()
+            .to_owned();
+        let artifact_value = lua.create_table()?;
+        artifact_value.set("type", "artifact")?;
+        artifact_value.set("digest", digest)?;
+        artifact_value.set("path", artifact.path)?;
+        let root_value = lua.create_table()?;
+        root_value.set("address", address)?;
+        root_value.set("result", artifact_value)?;
+        let roots = host
+            .borrow()
+            .goal_root_results
+            .clone()
+            .unwrap_or(lua.create_table()?);
+        roots.set(roots.raw_len() + 1, root_value)?;
+        host.borrow_mut().goal_root_results = Some(roots);
+        Ok(())
+    })?;
+    lua.globals().set("__imp_add_package_root", append)
 }
 
 fn dependency_order(host: &HostState, root: u64) -> LuaResult<Vec<u64>> {
@@ -1321,15 +1705,19 @@ fn validate_task_result(
 
 fn install_goal_executor(lua: &Lua, host: Rc<RefCell<HostState>>) -> LuaResult<()> {
     let execute = lua.create_async_function(move |lua, name: String| {
-        let prepared =
-            (|| {
-                let callback =
-                    host.borrow().goals.get(&name).cloned().ok_or_else(|| {
-                        LuaError::external(format!("unknown Luau workflow '{name}'"))
-                    })?;
-                let roots = lua.create_table()?;
-                Ok::<_, LuaError>((callback, roots))
-            })();
+        let prepared = (|| {
+            let state = host.borrow();
+            let callback = state
+                .goals
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| LuaError::external(format!("unknown Luau workflow '{name}'")))?;
+            let roots = state
+                .goal_root_results
+                .clone()
+                .unwrap_or(lua.create_table()?);
+            Ok::<_, LuaError>((callback, roots))
+        })();
         async move {
             let (callback, roots) = prepared?;
             callback
@@ -1341,6 +1729,95 @@ fn install_goal_executor(lua: &Lua, host: Rc<RefCell<HostState>>) -> LuaResult<(
     lua.globals().set("__imp_execute_goal", execute)
 }
 
+fn install_expansion_executor(lua: &Lua, host: Rc<RefCell<HostState>>) -> LuaResult<()> {
+    let execute = lua.globals().get::<LuaFunction>("__imp_execute_task")?;
+    let discover = lua.create_async_function(move |lua, expansion_id: u64| {
+        let existing = host.borrow().expansion_results.get(&expansion_id).cloned();
+        let expansion = host.borrow().expansions.get(&expansion_id).cloned();
+        let host = Rc::clone(&host);
+        let execute = execute.clone();
+        async move {
+            if let Some(result) = existing {
+                return Ok(LuaValue::Table(result));
+            }
+            let expansion = expansion.ok_or_else(|| {
+                LuaError::external(format!("unknown Luau expansion {expansion_id}"))
+            })?;
+            let input_tasks = {
+                let host_state = host.borrow();
+                input_task_roots(&host_state, &expansion.inputs)?
+            };
+            for task_id in input_tasks {
+                execute
+                    .call_async::<()>(task_id)
+                    .await
+                    .map_err(|error| LuaError::external(error.to_string()))?;
+            }
+            let inputs = resolve_task_inputs(&lua, &host, &expansion.inputs)?;
+            let children = expansion
+                .create
+                .call_async::<LuaValue>(inputs)
+                .await
+                .map_err(|error| {
+                    LuaError::external(format!("expansion '{}' failed: {error}", expansion.display))
+                })?;
+            let LuaValue::Table(children) = children else {
+                return Err(LuaError::external(format!(
+                    "expansion '{}' must return a keyed table",
+                    expansion.display
+                )));
+            };
+            for pair in children.pairs::<String, LuaValue>() {
+                let (key, _) = pair.map_err(|error| {
+                    LuaError::external(format!(
+                        "expansion '{}' child keys must be strings: {error}",
+                        expansion.display
+                    ))
+                })?;
+                if key.is_empty() {
+                    return Err(LuaError::external(format!(
+                        "expansion '{}' returned an empty child key",
+                        expansion.display
+                    )));
+                }
+            }
+            host.borrow_mut()
+                .expansion_results
+                .insert(expansion_id, children.clone());
+            Ok(LuaValue::Table(children))
+        }
+    })?;
+    lua.globals().set("__imp_discover_expansion", discover)
+}
+
+fn input_task_roots(host: &HostState, inputs: &LuaTable) -> LuaResult<Vec<u64>> {
+    let mut roots = std::collections::BTreeSet::new();
+    for pair in inputs.pairs::<LuaValue, LuaValue>() {
+        let (_, value) = pair?;
+        let LuaValue::UserData(userdata) = value else {
+            continue;
+        };
+        let Ok(handle) = userdata.borrow::<GraphHandle>() else {
+            continue;
+        };
+        match host.nodes.get(&handle.id) {
+            Some(GraphNode::Task) => {
+                roots.insert(handle.id);
+            }
+            Some(GraphNode::TaskOutput { task_id, .. }) => {
+                roots.insert(*task_id);
+            }
+            Some(GraphNode::Path { source_id, .. }) | Some(GraphNode::Tool { source_id, .. }) => {
+                if let Some(GraphNode::TaskOutput { task_id, .. }) = host.nodes.get(source_id) {
+                    roots.insert(*task_id);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(roots.into_iter().collect())
+}
+
 fn create_core(
     lua: &Lua,
     host: Rc<RefCell<HostState>>,
@@ -1349,7 +1826,45 @@ fn create_core(
 ) -> LuaResult<LuaValue> {
     let core = lua.create_table()?;
     core.set("BUILD", "BUILD")?;
+    core.set("PACKAGE", "PACKAGE")?;
     core.set("TEST", "TEST")?;
+
+    let expansion_host = Rc::clone(&host);
+    core.set(
+        "expand",
+        lua.create_function(move |lua, options: LuaTable| {
+            let create = options.get::<LuaFunction>("create")?;
+            let inputs = options
+                .get::<Option<LuaTable>>("inputs")?
+                .unwrap_or(lua.create_table()?);
+            let display = options
+                .get::<Option<String>>("display")?
+                .unwrap_or_else(|| "Luau graph expansion".to_owned());
+            if display.trim().is_empty() {
+                return Err(LuaError::external(
+                    "expand.display must be a non-empty string",
+                ));
+            }
+            let id = {
+                let mut host = expansion_host.borrow_mut();
+                host.next_expansion_id += 1;
+                let id = host.next_expansion_id;
+                host.expansions.insert(
+                    id,
+                    Expansion {
+                        inputs,
+                        create,
+                        display,
+                    },
+                );
+                id
+            };
+            lua.create_userdata(ExpansionHandle {
+                id,
+                host: Rc::clone(&expansion_host),
+            })
+        })?,
+    )?;
 
     let graph_host = Rc::clone(&host);
     let test_loader = loader.clone();
@@ -1945,9 +2460,48 @@ fn create_core(
             Ok(goal)
         })?,
     )?;
+    let workspace_for_write = host.borrow().workspace_root.clone();
     core.set(
         "write_workspace",
-        lua.create_function(|_, _: LuaValue| Ok(()))?,
+        lua.create_function(
+            move |_, (path, digest, options): (String, String, Option<LuaTable>)| {
+                validate_output_path(&path)?;
+                let from = match options {
+                    Some(options) => {
+                        let mut from = None;
+                        for pair in options.pairs::<String, LuaValue>() {
+                            let (key, value) = pair?;
+                            if key != "from" {
+                                return Err(LuaError::external(format!(
+                                    "write_workspace options do not accept '{key}'"
+                                )));
+                            }
+                            from = Some(
+                                value
+                                    .as_string()
+                                    .ok_or_else(|| {
+                                        LuaError::external(
+                                            "write_workspace option 'from' must be a string",
+                                        )
+                                    })?
+                                    .to_string_lossy()
+                                    .to_string(),
+                            );
+                        }
+                        from
+                    }
+                    None => None,
+                };
+                imp_store::cache::write_workspace(
+                    &digest,
+                    from.as_deref(),
+                    &workspace_for_write.join(path),
+                )
+                .map_err(|error| {
+                    LuaError::external(format!("publish workspace artifact: {error:#}"))
+                })
+            },
+        )?,
     )?;
     Ok(LuaValue::Table(core))
 }
@@ -2123,6 +2677,105 @@ fn allocate_handle(host: &Rc<RefCell<HostState>>, kind: &'static str) -> GraphHa
         kind,
         outputs: None,
     }
+}
+
+fn create_expansion_projection(
+    lua: &Lua,
+    host: &Rc<RefCell<HostState>>,
+    expansion_id: u64,
+    key: String,
+    workflow: String,
+    facet: Option<String>,
+    all: bool,
+) -> LuaResult<LuaAnyUserData> {
+    if !matches!(workflow.as_str(), "BUILD" | "PACKAGE" | "TEST") {
+        return Err(LuaError::external(format!(
+            "expansion workflow must be BUILD, PACKAGE, or TEST; got '{workflow}'"
+        )));
+    }
+    if !all && key.is_empty() {
+        return Err(LuaError::external(
+            "expansion.get(key, workflow) requires a non-empty child key",
+        ));
+    }
+    if facet.as_deref() == Some("") {
+        return Err(LuaError::external("expansion facet must be non-empty"));
+    }
+    if !host.borrow().expansions.contains_key(&expansion_id) {
+        return Err(LuaError::external(format!(
+            "unknown Luau expansion {expansion_id}"
+        )));
+    }
+    let kind = if all {
+        "expansion_all"
+    } else {
+        "expansion_get"
+    };
+    let handle = allocate_handle(host, kind);
+    host.borrow_mut().nodes.insert(
+        handle.id,
+        if all {
+            GraphNode::ExpansionAll {
+                expansion_id,
+                workflow,
+                facet,
+            }
+        } else {
+            GraphNode::ExpansionGet {
+                expansion_id,
+                key,
+                workflow,
+                facet,
+            }
+        },
+    );
+    lua.create_userdata(handle)
+}
+
+fn validate_expansion_child(
+    host: &HostState,
+    handle_id: u64,
+    workflow: &str,
+    key: &str,
+) -> Result<()> {
+    let kind = host.nodes.get(&handle_id);
+    let valid = matches!(
+        (workflow, kind),
+        (
+            "BUILD" | "PACKAGE",
+            Some(
+                GraphNode::Task
+                    | GraphNode::TaskOutput { .. }
+                    | GraphNode::ExpansionGet { .. }
+                    | GraphNode::ExpansionAll { .. }
+            )
+        ) | (
+            "TEST",
+            Some(
+                GraphNode::Task
+                    | GraphNode::TaskOutput { .. }
+                    | GraphNode::TestRoot { .. }
+                    | GraphNode::ExpansionGet { .. }
+                    | GraphNode::ExpansionAll { .. }
+            )
+        )
+    );
+    if !valid {
+        bail!("expansion child '{key}' has no requested {workflow} workflow handle");
+    }
+    if workflow == "PACKAGE" {
+        if let Some(GraphNode::TaskOutput { task_id, name }) = kind {
+            if !host
+                .tasks
+                .get(task_id)
+                .and_then(|task| task.outputs.get(name))
+                .is_some_and(|output| *output == TaskOutputKind::Artifact)
+            {
+                bail!("expansion child '{key}' PACKAGE handle must be an artifact output");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_output_path(path: &str) -> LuaResult<()> {
