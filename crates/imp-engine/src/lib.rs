@@ -10,7 +10,7 @@ pub mod trace_changed;
 #[cfg(test)]
 mod environment_tests {
     #[test]
-    fn imp_sandbox_test_has_writable_xdg_cache_home() {
+    fn imp_sandbox_test_reuses_imp_cache_and_has_writable_xdg_cache_home() {
         // Host Cargo tests do not have Imp's sandbox contract. The check is
         // only meaningful for a test binary launched by the Imp executor.
         if std::env::var_os("IMP_SANDBOX_ROOT").is_none() {
@@ -34,5 +34,21 @@ mod environment_tests {
         std::fs::write(&probe, b"probe")
             .unwrap_or_else(|error| panic!("XDG_CACHE_HOME is not writable: {error}"));
         std::fs::remove_file(probe).expect("remove XDG cache write probe");
+
+        let shared_cache =
+            std::env::var_os("IMP_CACHE_DIR").expect("Imp test sandboxes must share IMP_CACHE_DIR");
+        let shared_cache = std::path::PathBuf::from(shared_cache);
+        assert!(
+            shared_cache.is_dir(),
+            "IMP_CACHE_DIR is not a directory: {}",
+            shared_cache.display()
+        );
+        let probe = shared_cache.join(format!(
+            ".imp-shared-cache-write-probe-{}",
+            std::process::id()
+        ));
+        std::fs::write(&probe, b"probe")
+            .unwrap_or_else(|error| panic!("IMP_CACHE_DIR is not writable: {error}"));
+        std::fs::remove_file(probe).expect("remove shared cache write probe");
     }
 }

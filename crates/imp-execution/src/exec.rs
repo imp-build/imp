@@ -1356,6 +1356,19 @@ fn exec_run_inner_with_start(
         "XDG_CACHE_HOME".to_owned(),
         home_dir.join(".cache").to_string_lossy().into_owned(),
     );
+    // Nested Imp processes must use the same cache as their parent. In
+    // particular, test binaries can invoke Imp and reuse downloaded tools
+    // instead of fetching them into a cache that disappears with this
+    // action's sandbox. Keep this out of the action digest, like the other
+    // sandbox paths above, and preserve an explicit action override.
+    if !command_env.contains_key("IMP_CACHE_DIR") {
+        command_env.insert(
+            "IMP_CACHE_DIR".to_owned(),
+            imp_store::cache::cache_root()?
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
     // Native Windows programs (e.g. a WinLibs gcc.exe driving cc1/as/ld as
     // subprocesses) look up their temp directory via GetTempPath(), which
     // checks TMP/TEMP, not the POSIX-convention TMPDIR set above — without
@@ -2824,6 +2837,40 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
             "fixed-value"
+        );
+    }
+
+    #[test]
+    fn exec_run_preserves_explicit_imp_cache_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let expected = p.join("explicit-cache");
+        let expected = expected.to_string_lossy().into_owned();
+        let cmd = "mkdir -p build && printf %s \"$IMP_CACHE_DIR\" > build/out.txt";
+        let mut opts = run_opts(&["sh", "-c", cmd], &[], &["build/out.txt"]);
+        opts.env = vec![format!("IMP_CACHE_DIR={expected}")];
+        opts.no_cache = true;
+        exec_run_inner(p, opts, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn exec_run_defaults_imp_cache_dir_to_the_parent_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let cmd = "mkdir -p build && printf %s \"$IMP_CACHE_DIR\" > build/out.txt";
+        let mut opts = run_opts(&["sh", "-c", cmd], &[], &["build/out.txt"]);
+        opts.no_cache = true;
+        exec_run_inner(p, opts, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("build/out.txt")).unwrap(),
+            imp_store::cache::cache_root()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
         );
     }
 
