@@ -254,6 +254,7 @@ struct HostState {
     task_results: HashMap<u64, LuaTable>,
     nodes: HashMap<u64, GraphNode>,
     filesets: HashMap<String, u64>,
+    loaded_roots: Vec<u64>,
     action_count: usize,
     cache_hit_count: usize,
     tools: HashMap<String, u64>,
@@ -321,6 +322,7 @@ impl LuauWorkspace {
             task_results: HashMap::new(),
             nodes: HashMap::new(),
             filesets: HashMap::new(),
+            loaded_roots: Vec::new(),
             action_count: 0,
             cache_hit_count: 0,
             tools: HashMap::new(),
@@ -530,6 +532,7 @@ impl LuauWorkspace {
         &mut self,
         include_ci_overlay: bool,
     ) -> Result<Vec<GraphRoot>> {
+        self.host.borrow_mut().loaded_roots.clear();
         let workspace_config = self.loader.workspace_root.join("imp.workspace.luau");
         if workspace_config.is_file() {
             let value = self.evaluate("@workspace/imp.workspace").await?;
@@ -679,6 +682,8 @@ impl LuauWorkspace {
             roots: roots.clone(),
         }
         .validate()?;
+        self.host.borrow_mut().loaded_roots =
+            roots.iter().map(|root| root.handle_id as u64).collect();
         Ok(roots)
     }
 
@@ -2204,6 +2209,34 @@ fn create_core(
             create_files_handle(lua, &graph_host, options)
         })?,
     )?;
+    let unowned_host = Rc::clone(&host);
+    core.set(
+        "all_unowned",
+        lua.create_function(move |lua, options: LuaTable| {
+            let root = options
+                .get::<Option<String>>("root")?
+                .unwrap_or_else(|| ".".to_owned());
+            let include = options.get::<Vec<String>>("include")?;
+            if include.is_empty() {
+                return Err(LuaError::external(
+                    "all_unowned({ include }) requires glob patterns",
+                ));
+            }
+            let exclude = options
+                .get::<Option<Vec<String>>>("exclude")?
+                .unwrap_or_default();
+            let files = {
+                let host = unowned_host.borrow();
+                all_unowned_workspace_files(&host.workspace_root, &host, &root, &include, &exclude)
+                    .map_err(|error| LuaError::external(format!("{error:#}")))?
+            };
+            let result = lua.create_table_with_capacity(files.len(), 0)?;
+            for (index, file) in files.into_iter().enumerate() {
+                result.raw_set(index + 1, file)?;
+            }
+            Ok(result)
+        })?,
+    )?;
     let graph_host = Rc::clone(&host);
     core.set(
         "task",
@@ -2582,6 +2615,149 @@ fn create_files_handle(
     host.nodes.insert(handle.id, GraphNode::Files(spec));
     drop(host);
     lua.create_userdata(handle)
+}
+
+fn all_unowned_workspace_files(
+    workspace_root: &Path,
+    host: &HostState,
+    root: &str,
+    include: &[String],
+    exclude: &[String],
+) -> Result<Vec<String>> {
+    if include.is_empty() {
+        bail!("all_unowned include must not be empty");
+    }
+    let mut owned = std::collections::BTreeSet::new();
+    let mut visited_nodes = std::collections::HashSet::new();
+    let mut visited_tables = std::collections::HashSet::new();
+    for &root_id in &host.loaded_roots {
+        collect_luau_owned_files(
+            workspace_root,
+            host,
+            root_id,
+            &mut owned,
+            &mut visited_nodes,
+            &mut visited_tables,
+        )?;
+    }
+
+    let mut files = crate::spike::workspace_glob_files(workspace_root, root, include, exclude)?;
+    files.retain(|file| !owned.contains(file));
+    Ok(files)
+}
+
+fn collect_luau_owned_files(
+    workspace_root: &Path,
+    host: &HostState,
+    node_id: u64,
+    owned: &mut std::collections::BTreeSet<String>,
+    visited_nodes: &mut std::collections::HashSet<u64>,
+    visited_tables: &mut std::collections::HashSet<usize>,
+) -> Result<()> {
+    if !visited_nodes.insert(node_id) {
+        return Ok(());
+    }
+    match host.nodes.get(&node_id) {
+        Some(GraphNode::Files(spec)) => {
+            let files = crate::spike::workspace_glob_files(
+                workspace_root,
+                &spec.root,
+                &spec.include,
+                &spec.exclude,
+            )
+            .with_context(|| format!("expand loaded Luau sources rooted at '{}'", spec.root))?;
+            owned.extend(files);
+        }
+        Some(GraphNode::Task) => {
+            if let Some(task) = host.tasks.get(&node_id) {
+                collect_luau_owned_files_in_value(
+                    workspace_root,
+                    host,
+                    &LuaValue::Table(task.inputs.clone()),
+                    owned,
+                    visited_nodes,
+                    visited_tables,
+                )?;
+            }
+        }
+        Some(GraphNode::TaskOutput { task_id, .. }) => {
+            collect_luau_owned_files(
+                workspace_root,
+                host,
+                *task_id,
+                owned,
+                visited_nodes,
+                visited_tables,
+            )?;
+        }
+        Some(GraphNode::Path { source_id, .. }) | Some(GraphNode::Tool { source_id, .. }) => {
+            collect_luau_owned_files(
+                workspace_root,
+                host,
+                *source_id,
+                owned,
+                visited_nodes,
+                visited_tables,
+            )?;
+        }
+        Some(GraphNode::ExpansionGet { expansion_id, .. })
+        | Some(GraphNode::ExpansionAll { expansion_id, .. }) => {
+            if let Some(expansion) = host.expansions.get(expansion_id) {
+                collect_luau_owned_files_in_value(
+                    workspace_root,
+                    host,
+                    &LuaValue::Table(expansion.inputs.clone()),
+                    owned,
+                    visited_nodes,
+                    visited_tables,
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn collect_luau_owned_files_in_value(
+    workspace_root: &Path,
+    host: &HostState,
+    value: &LuaValue,
+    owned: &mut std::collections::BTreeSet<String>,
+    visited_nodes: &mut std::collections::HashSet<u64>,
+    visited_tables: &mut std::collections::HashSet<usize>,
+) -> Result<()> {
+    match value {
+        LuaValue::UserData(userdata) => {
+            if let Ok(handle) = userdata.borrow::<GraphHandle>() {
+                collect_luau_owned_files(
+                    workspace_root,
+                    host,
+                    handle.id,
+                    owned,
+                    visited_nodes,
+                    visited_tables,
+                )?;
+            }
+        }
+        LuaValue::Table(table) => {
+            if !visited_tables.insert(table.to_pointer() as usize) {
+                return Ok(());
+            }
+            for pair in table.pairs::<LuaValue, LuaValue>() {
+                let (_, value) = pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                collect_luau_owned_files_in_value(
+                    workspace_root,
+                    host,
+                    &value,
+                    owned,
+                    visited_nodes,
+                    visited_tables,
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn parse_named_cache(options: &LuaTable) -> LuaResult<Option<imp_store::cache::OutputNamedCache>> {
@@ -4251,6 +4427,126 @@ return {
             fs::read_to_string(path).unwrap(),
             "return { hand_written = true }\n"
         );
+    }
+
+    #[tokio::test]
+    async fn luau_build_generator_discovers_unowned_workspace_files() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = tempfile::tempdir().unwrap();
+        for directory in [
+            "crates/a",
+            "crates/z",
+            "crates/owned",
+            "crates/ignored",
+            "crates/vendor/vendor_crate",
+        ] {
+            fs::create_dir_all(workspace_root.path().join(directory)).unwrap();
+            fs::write(
+                workspace_root.path().join(directory).join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            )
+            .unwrap();
+        }
+        fs::write(
+            workspace_root.path().join(".gitignore"),
+            "crates/ignored/\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("imp.workspace.luau"),
+            r#"
+local core = require("@imp/core")
+core.define_config_schema("rust", {
+    build_generate = core.field.bool({ default = false }),
+})
+core.register_build_rule({
+    rule = "cargoPackage",
+    module = "@imp/rules/rust",
+    export = "cargo_package",
+})
+core.register_build_generator({
+    namespace = "rust",
+    generate = function()
+        local ok, message = pcall(function()
+            core.all_unowned({ root = ".", include = {} })
+        end)
+        assert(not ok)
+        assert(string.find(tostring(message), "all_unowned({ include }) requires glob patterns", 1, true))
+        local manifests = core.all_unowned({
+            root = "crates",
+            include = { "**/Cargo.toml" },
+            exclude = { "**/vendor/**" },
+        })
+        assert(#manifests == 2)
+        assert(manifests[1] == "crates/a/Cargo.toml")
+        assert(manifests[2] == "crates/z/Cargo.toml")
+        local files = {}
+        for _, manifest in ipairs(manifests) do
+            local directory = string.match(manifest, "^(.*)/[^/]+$")
+            local name = string.gsub(directory, "[^%w_$]", "_")
+            files[directory .. "/BUILD.luau"] = {
+                { name = name, rule = "cargoPackage", props = { manifest = manifest } },
+            }
+        end
+        return files
+    end,
+})
+return { rust = { build_generate = true } }
+"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local owned_manifests = core.files({
+    root = ".",
+    include = { "crates/owned/Cargo.toml" },
+})
+return {
+    owned = core.task({
+        inputs = { source_sets = { owned_manifests } },
+        run = function() end,
+    }),
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            rules_root.path().join("rust.luau"),
+            r#"
+local core = require("@imp/core")
+return {
+    cargo_package = function(_props)
+        return core.task({ run = function() end })
+    end,
+}
+"#,
+        )
+        .unwrap();
+
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        runtime.load_modules().await.unwrap();
+        runtime.execute_build_generation(false).await.unwrap();
+
+        let generated_a =
+            fs::read_to_string(workspace_root.path().join("crates/a/BUILD.luau")).unwrap();
+        let generated_z =
+            fs::read_to_string(workspace_root.path().join("crates/z/BUILD.luau")).unwrap();
+        assert!(generated_a.contains("manifest = \"crates/a/Cargo.toml\""));
+        assert!(generated_z.contains("manifest = \"crates/z/Cargo.toml\""));
+        assert!(!workspace_root
+            .path()
+            .join("crates/owned/BUILD.luau")
+            .exists());
+        assert!(!workspace_root
+            .path()
+            .join("crates/ignored/BUILD.luau")
+            .exists());
+        assert!(!workspace_root
+            .path()
+            .join("crates/vendor/vendor_crate/BUILD.luau")
+            .exists());
     }
 
     #[tokio::test]
