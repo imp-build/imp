@@ -23,8 +23,8 @@ the gaps that block catalog migration.
 | --- | --- | --- |
 | Module loading | Loads `@imp/core`, `@imp/rules/...`, and `@workspace/...`; caches canonical module values and rejects namespace escapes. | The full catalog and its loader-dependent workspace features are not migrated. |
 | Workspace configuration | Loads `imp.workspace.luau`; on GitHub Actions it deep-merges `imp.workspace.ci.luau`. Luau rule modules can register schemas, read or write configuration, and expose schemas and resolved values to the CLI. | JavaScript and Luau use different field spellings. Luau configuration uses `snake_case`; the JavaScript runtime remains the default. |
-| BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. | Generated BUILD discovery and mixed catalog dependencies are not supported. |
-| Graph construction | Exposes `files`, `glob`, `task`, `output`, `native_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. `memo`, `sources_field`, `register_build_rule`, and `write_workspace` are pilot shims. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
+| BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. `imp goal generate-build` can write and check generated `BUILD.luau` files from registered Luau generators. | Language-specific generators must be ported to Luau before a Luau workspace can use them. |
+| Graph construction | Exposes `files`, `glob`, `task`, `output`, `native_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. `register_build_rule` and `register_build_generator` provide the Luau BUILD renderer interface. `memo`, `sources_field`, and `write_workspace` remain pilot shims. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
 | Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, and a cache toggle. Captured artifacts can flow to downstream tasks through named outputs. | Allow-failure results and broader toolchain conveniences are not available. |
 | Tests and workflows | Luau BUILD modules can expose a `TEST` root. The root discovers package-local `.test.luau` modules and runs named cases and suites in fresh Luau runtimes. | The standard workflow rule modules and mixed JavaScript/Luau test discovery are not available in Luau. |
 | Installed rules | The pilot tree contains Luau `asset`, `resource_package`, `workflows/build`, and `imp/native-tool` modules. | Other packages remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
@@ -267,6 +267,28 @@ must return the same module value within one runtime. Workspace and installed
 rule sources remain distinct even when their relative paths match. The cache
 uses logical addresses, not absolute host paths, so it does not change when a
 checkout moves.
+
+## Generated BUILD modules
+
+Luau rule modules may register a BUILD renderer with
+`core.register_build_rule({ rule, module, export })`. `module` must name a
+file-backed `@imp/rules/...` or `@workspace/...` module. `export` defaults to
+`rule`.
+
+Register a generator with
+`core.register_build_generator({ namespace, generate })`. The namespace must
+have a `build_generate` boolean configuration field. Imp runs the generator
+only when that value is true. The callback returns a table keyed by
+workspace-relative `BUILD.luau` paths. Each value is an array of
+`{ name, rule, props }` targets. Imp merges targets from all enabled
+generators before it renders each file.
+
+Run `imp goal generate-build` to write generated files. Run
+`imp goal generate-build --check` to report stale files without writing.
+Generated files have an Imp header and Imp refuses to replace a hand-written
+file at the same path. Target names and registered exports must be Luau
+identifiers. The loader discovers generated files through the same canonical
+`@workspace/<package>/BUILD` addresses as hand-written BUILD modules.
 
 Resolution errors identify the importing canonical address, requested
 specifier, and the import call's source location when available. Source

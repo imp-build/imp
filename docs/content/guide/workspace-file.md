@@ -114,6 +114,45 @@ include the resolved configuration. CLI overrides keep their existing flag
 names: `--jobs`, `--fs-jobs`, and `--js-workers`; `--level` sets log verbosity.
 Use `imp cache gc --max-age` to override `gc_max_age_days`.
 
+## Luau BUILD modules
+
+In a Luau workspace, Imp discovers each `BUILD.luau` file and gives its
+returned task handles canonical target addresses. The root file is
+`@workspace/BUILD`; a nested file at `pkg/BUILD.luau` is
+`@workspace/pkg/BUILD`. Exported task names become target addresses such as
+`//:app` and `//pkg:library`.
+
+Use `require()` to import a workspace helper or an installed rule:
+
+```luau
+local asset = require("@imp/rules/asset")
+
+return {
+    assets = asset.asset({ srcs = { "*.txt" } }),
+}
+```
+
+`@workspace/...` modules belong to the current workspace. `@imp/rules/...`
+modules belong to the installed Imp rules tree. The Luau loader does not use a
+workspace file as a fallback for an installed rule. The Luau authoring
+contract in `docs/design/luau-authoring-contract.md` defines address, cache,
+package ownership, and BUILD generator behavior.
+
+Luau rule modules can register generators that return targets for one or more
+workspace `BUILD.luau` files. Imp combines the targets and uses registered
+rule exports to render each file. Set the generator's `build_generate`
+configuration field to `true` to enable it.
+
+Run this check from the workspace root to find generated files that need an
+update:
+
+```sh
+imp goal generate-build --check
+```
+
+**Warning:** `imp goal generate-build` writes generated `BUILD.luau` files
+into the workspace. Imp refuses to replace a hand-written BUILD file.
+
 `jobs` is a budget of cores, not a count of actions: an action declares what it
 costs with `exec.action({ cores })` (default 1), so one wide action can hold
 several of the lanes `jobs` allows.

@@ -103,6 +103,30 @@ struct LuauTestCase {
     run: LuaFunction,
 }
 
+#[derive(Clone)]
+struct LuauBuildGenerator {
+    namespace: String,
+    generate: LuaFunction,
+}
+
+#[derive(Clone)]
+struct LuauBuildRule {
+    module: String,
+    export: String,
+}
+
+#[derive(serde::Deserialize)]
+struct GeneratedLuauBuildTarget {
+    name: String,
+    rule: String,
+    #[serde(default = "empty_json_object")]
+    props: serde_json::Value,
+}
+
+fn empty_json_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
 struct TestUnit {
     name: String,
     ok: bool,
@@ -182,6 +206,8 @@ struct HostState {
     tools: HashMap<String, u64>,
     paths: HashMap<String, u64>,
     goals: HashMap<String, LuaFunction>,
+    build_generators: Vec<LuauBuildGenerator>,
+    build_rules: BTreeMap<String, LuauBuildRule>,
     workspace_root: PathBuf,
     workspace_id: String,
     service: Arc<dyn ExecutionService>,
@@ -242,6 +268,8 @@ impl LuauWorkspace {
             tools: HashMap::new(),
             paths: HashMap::new(),
             goals: HashMap::new(),
+            build_generators: Vec::new(),
+            build_rules: BTreeMap::new(),
             workspace_id,
             workspace_root: workspace_root.clone(),
             service,
@@ -433,6 +461,18 @@ impl LuauWorkspace {
         }
         .validate()?;
         Ok(roots)
+    }
+
+    pub fn has_build_generators(&self) -> bool {
+        !self.host.borrow().build_generators.is_empty()
+    }
+
+    pub async fn execute_build_generation(&mut self, check: bool) -> Result<()> {
+        let source = format!(
+            "return require('@imp/core').generate_build({})",
+            if check { "true" } else { "false" }
+        );
+        self.run_script("@imp/generate-build", &source).await
     }
 
     /// Run selected graph task handles and then the Luau build-goal callback.
@@ -1740,9 +1780,150 @@ fn create_core(
         "package_path",
         lua.create_function(move |_, ()| Ok(current_package_path(&loader)))?,
     )?;
+    let rule_host = Rc::clone(&host);
     core.set(
         "register_build_rule",
-        lua.create_function(|_, _: LuaValue| Ok(()))?,
+        lua.create_function(move |_, options: LuaTable| {
+            let rule = options.get::<String>("rule")?;
+            let module = options.get::<String>("module")?;
+            let export = options
+                .get::<Option<String>>("export")?
+                .unwrap_or_else(|| rule.clone());
+            if rule.trim().is_empty()
+                || export.trim().is_empty()
+                || !(module.starts_with("@imp/rules/") || module.starts_with("@workspace/"))
+            {
+                return Err(LuaError::external(
+                    "register_build_rule requires rule, export, and a file-backed module address",
+                ));
+            }
+            rule_host
+                .borrow_mut()
+                .build_rules
+                .insert(rule, LuauBuildRule { module, export });
+            Ok(())
+        })?,
+    )?;
+    let generator_host = Rc::clone(&host);
+    let generator_configuration = Rc::clone(&configuration);
+    core.set(
+        "register_build_generator",
+        lua.create_function(move |_, options: LuaTable| {
+            let namespace = options.get::<String>("namespace")?;
+            let generate = options.get::<LuaFunction>("generate")?;
+            if namespace.trim().is_empty() {
+                return Err(LuaError::external(
+                    "register_build_generator requires a namespace",
+                ));
+            }
+            let has_build_generate = generator_configuration
+                .borrow()
+                .schemas
+                .get(&namespace)
+                .and_then(|schema| schema.get("build_generate"))
+                .and_then(|field| field.get("__imp_field"))
+                .and_then(serde_json::Value::as_str)
+                == Some("bool");
+            if !has_build_generate {
+                return Err(LuaError::external(format!(
+                    "register_build_generator namespace '{namespace}' must declare a boolean build_generate field"
+                )));
+            }
+            generator_host
+                .borrow_mut()
+                .build_generators
+                .push(LuauBuildGenerator {
+                    namespace,
+                    generate,
+                });
+            Ok(())
+        })?,
+    )?;
+    let generation_host = Rc::clone(&host);
+    let generation_configuration = Rc::clone(&configuration);
+    let generation_root = host.borrow().workspace_root.clone();
+    core.set(
+        "generate_build",
+        lua.create_async_function(move |lua, check: bool| {
+            let generators = generation_host.borrow().build_generators.clone();
+            let rules = generation_host.borrow().build_rules.clone();
+            let configuration = generation_configuration.borrow().values.clone();
+            let workspace_root = generation_root.clone();
+            async move {
+                let mut edits = BTreeMap::<String, Vec<GeneratedLuauBuildTarget>>::new();
+                for generator in generators {
+                    let enabled = configuration
+                        .get(&generator.namespace)
+                        .and_then(|value| value.get("build_generate"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    if !enabled {
+                        continue;
+                    }
+                    let value = generator.generate.call_async::<LuaValue>(()).await?;
+                    let generated: BTreeMap<String, Vec<GeneratedLuauBuildTarget>> =
+                        lua.from_value(value)?;
+                    for (file, targets) in generated {
+                        edits.entry(file).or_default().extend(targets);
+                    }
+                }
+
+                let mut changed = Vec::new();
+                for (file, targets) in edits {
+                    let destination = generated_build_destination(&workspace_root, &file)
+                        .map_err(LuaError::external)?;
+                    let rendered = render_generated_luau_build(&file, &targets, &rules)
+                        .map_err(LuaError::external)?;
+                    let existing = match fs::read_to_string(&destination) {
+                        Ok(source) => source,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                        Err(error) => {
+                            return Err(LuaError::external(format!(
+                                "read generated BUILD file {}: {error}",
+                                destination.display()
+                            )))
+                        }
+                    };
+                    if existing == rendered {
+                        continue;
+                    }
+                    changed.push(file.clone());
+                    if check {
+                        continue;
+                    }
+                    if !existing.is_empty()
+                        && !existing.starts_with("-- Generated by Imp. Do not edit.\n")
+                    {
+                        return Err(LuaError::external(format!(
+                            "refusing to replace hand-written BUILD file '{file}'"
+                        )));
+                    }
+                    if let Some(parent) = destination.parent() {
+                        fs::create_dir_all(parent).map_err(|error| {
+                            LuaError::external(format!(
+                                "create generated BUILD directory {}: {error}",
+                                parent.display()
+                            ))
+                        })?;
+                    }
+                    fs::write(&destination, rendered).map_err(|error| {
+                        LuaError::external(format!(
+                            "write generated BUILD file {}: {error}",
+                            destination.display()
+                        ))
+                    })?;
+                }
+                if check && !changed.is_empty() {
+                    return Err(LuaError::external(format!(
+                        "generated BUILD files are out of date: {}",
+                        changed.join(", ")
+                    )));
+                }
+                let report = lua.create_table()?;
+                report.set("changed", changed)?;
+                Ok(report)
+            }
+        })?,
     )?;
     core.set(
         "sources_field",
@@ -2363,6 +2544,151 @@ fn current_package_path(loader: &ModuleLoader) -> String {
         ".".to_owned()
     } else {
         parts.join("/")
+    }
+}
+
+fn generated_build_destination(root: &Path, file: &str) -> Result<PathBuf> {
+    let relative = Path::new(file);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || relative.file_name().is_none_or(|name| name != "BUILD.luau")
+    {
+        bail!("generated BUILD path must be a workspace-relative BUILD.luau file: {file}");
+    }
+    let destination = root.join(relative);
+    let mut existing = destination.as_path();
+    while !existing.exists() {
+        existing = existing
+            .parent()
+            .context("generated BUILD path has no existing workspace parent")?;
+    }
+    let canonical = dunce::canonicalize(existing)
+        .with_context(|| format!("resolve generated BUILD path {}", existing.display()))?;
+    if !canonical.starts_with(root) {
+        bail!("generated BUILD path escapes the workspace: {file}");
+    }
+    Ok(destination)
+}
+
+fn render_generated_luau_build(
+    file: &str,
+    targets: &[GeneratedLuauBuildTarget],
+    rules: &BTreeMap<String, LuauBuildRule>,
+) -> Result<String> {
+    let mut modules = BTreeMap::<String, String>::new();
+    let mut names = std::collections::BTreeSet::new();
+    for target in targets {
+        if !is_luau_identifier(&target.name) {
+            bail!(
+                "{file}: generated target name '{}' is not a Luau identifier",
+                target.name
+            );
+        }
+        if !names.insert(target.name.as_str()) {
+            bail!("{file}: duplicate generated target name '{}'", target.name);
+        }
+        let rule = rules.get(&target.rule).with_context(|| {
+            format!(
+                "{file}: no render metadata registered for rule '{}'",
+                target.rule
+            )
+        })?;
+        if !is_luau_identifier(&rule.export) {
+            bail!(
+                "{file}: generated rule export '{}' is not a Luau identifier",
+                rule.export
+            );
+        }
+        modules.insert(rule.module.clone(), String::new());
+    }
+    let module_names = modules.keys().cloned().collect::<Vec<_>>();
+    for (index, module) in module_names.into_iter().enumerate() {
+        modules.insert(module, format!("__imp_rule_{index}"));
+    }
+
+    let mut rendered = String::from("-- Generated by Imp. Do not edit.\n");
+    for (module, alias) in &modules {
+        let address = serde_json::to_string(module)?;
+        rendered.push_str(&format!("local {alias} = require({address})\n"));
+    }
+    rendered.push_str("\nreturn {\n");
+    let mut targets = targets.iter().collect::<Vec<_>>();
+    targets.sort_by(|left, right| left.name.cmp(&right.name));
+    for target in targets {
+        let rule = &rules[&target.rule];
+        let alias = &modules[&rule.module];
+        let props = render_luau_value(&target.props, 1)?;
+        rendered.push_str(&format!(
+            "    {} = {alias}.{}({props}),\n",
+            target.name, rule.export
+        ));
+    }
+    rendered.push_str("}\n");
+    Ok(rendered)
+}
+
+fn is_luau_identifier(value: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "and", "break", "continue", "do", "else", "elseif", "end", "export", "false", "for",
+        "function", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true",
+        "type", "until", "while",
+    ];
+    if KEYWORDS.contains(&value) {
+        return false;
+    }
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn render_luau_value(value: &serde_json::Value, depth: usize) -> Result<String> {
+    let indent = "    ".repeat(depth);
+    let child_indent = "    ".repeat(depth + 1);
+    match value {
+        serde_json::Value::Null => Ok("nil".to_owned()),
+        serde_json::Value::Bool(value) => Ok(value.to_string()),
+        serde_json::Value::Number(value) => Ok(value.to_string()),
+        serde_json::Value::String(value) => Ok(serde_json::to_string(value)?),
+        serde_json::Value::Array(values) => {
+            if values.is_empty() {
+                return Ok("{}".to_owned());
+            }
+            let mut rendered = String::from("{\n");
+            for value in values {
+                rendered.push_str(&child_indent);
+                rendered.push_str(&render_luau_value(value, depth + 1)?);
+                rendered.push_str(",\n");
+            }
+            rendered.push_str(&indent);
+            rendered.push('}');
+            Ok(rendered)
+        }
+        serde_json::Value::Object(values) => {
+            if values.is_empty() {
+                return Ok("{}".to_owned());
+            }
+            let mut rendered = String::from("{\n");
+            for (key, value) in values {
+                rendered.push_str(&child_indent);
+                if is_luau_identifier(key) {
+                    rendered.push_str(key);
+                } else {
+                    rendered.push('[');
+                    rendered.push_str(&serde_json::to_string(key)?);
+                    rendered.push(']');
+                }
+                rendered.push_str(" = ");
+                rendered.push_str(&render_luau_value(value, depth + 1)?);
+                rendered.push_str(",\n");
+            }
+            rendered.push_str(&indent);
+            rendered.push('}');
+            Ok(rendered)
+        }
     }
 }
 
@@ -3152,6 +3478,129 @@ return {
     }
 
     #[tokio::test]
+    async fn workspace_discovers_root_and_nested_build_modules_by_canonical_address() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace_root.path().join("pkg")).unwrap();
+        fs::write(
+            workspace_root.path().join("pkg/shared.luau"),
+            "return { name = 'shared' }\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local first = require("@workspace/pkg/shared")
+local same_module = require("@workspace/pkg/shared.luau")
+assert(first == same_module)
+return { root_task = core.task({ run = function() end }) }
+"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("pkg/BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local shared = require("./shared")
+assert(shared.name == "shared")
+return { nested_task = core.task({ run = function() end }) }
+"#,
+        )
+        .unwrap();
+
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+
+        let mut addresses = roots
+            .into_iter()
+            .map(|root| root.address)
+            .collect::<Vec<_>>();
+        addresses.sort();
+        assert_eq!(addresses, ["//:root_task", "//pkg:nested_task"]);
+    }
+
+    #[tokio::test]
+    async fn luau_build_generators_merge_targets_write_and_check_native_build_files() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = tempfile::tempdir().unwrap();
+        fs::write(
+            workspace_root.path().join("imp.workspace.luau"),
+            r#"
+local core = require("@imp/core")
+core.define_config_schema("sample", {
+    build_generate = core.field.bool({ default = false }),
+})
+core.register_build_rule({
+    rule = "sample",
+    module = "@imp/rules/sample",
+    export = "sample",
+})
+core.register_build_generator({
+    namespace = "sample",
+    generate = function()
+        return {
+            ["generated/BUILD.luau"] = {
+                { name = "first", rule = "sample", props = { value = 1 } },
+            },
+        }
+    end,
+})
+core.register_build_generator({
+    namespace = "sample",
+            generate = function()
+                return {
+                    ["generated/BUILD.luau"] = {
+                        { name = "second", rule = "sample" },
+                    },
+                }
+    end,
+})
+return { sample = { build_generate = true } }
+"#,
+        )
+        .unwrap();
+        fs::write(
+            rules_root.path().join("sample.luau"),
+            r#"
+local core = require("@imp/core")
+return {
+    sample = function(_props)
+        return core.task({ run = function() end })
+    end,
+}
+"#,
+        )
+        .unwrap();
+
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        runtime.load_modules().await.unwrap();
+        assert!(runtime.has_build_generators());
+        runtime.execute_build_generation(false).await.unwrap();
+        let generated =
+            fs::read_to_string(workspace_root.path().join("generated/BUILD.luau")).unwrap();
+        assert!(generated.contains("first = __imp_rule_0.sample"));
+        assert!(generated.contains("second = __imp_rule_0.sample"));
+        assert!(generated.contains("second = __imp_rule_0.sample({})"));
+        runtime.execute_build_generation(true).await.unwrap();
+
+        let mut discovered = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let roots = discovered.load_modules().await.unwrap();
+        assert!(roots.iter().any(|root| root.address == "//generated:first"));
+        assert!(roots
+            .iter()
+            .any(|root| root.address == "//generated:second"));
+
+        let path = workspace_root.path().join("generated/BUILD.luau");
+        fs::write(&path, "return { hand_written = true }\n").unwrap();
+        assert!(runtime.execute_build_generation(false).await.is_err());
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "return { hand_written = true }\n"
+        );
+    }
+
+    #[tokio::test]
     async fn luau_task_output_declarations_reject_action_output_descriptors() {
         let workspace_root = tempfile::tempdir().unwrap();
         let rules_root = tempfile::tempdir().unwrap();
@@ -3412,6 +3861,74 @@ return {
         };
         let error = resolve_address(&loader, "@workspace/../outside", None).unwrap_err();
         assert!(error.to_string().contains("escapes its namespace root"));
+    }
+
+    #[test]
+    fn resolver_maps_generated_build_names_to_one_canonical_module() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace.path().join("pkg")).unwrap();
+        fs::write(workspace.path().join("pkg/BUILD.luau"), "return {}\n").unwrap();
+        let loader = ModuleLoader {
+            workspace_root: workspace.path().to_path_buf(),
+            rules_root: rules.path().to_path_buf(),
+            stack: Rc::new(RefCell::new(Vec::new())),
+            cache: Rc::new(RefCell::new(HashMap::new())),
+            failure: Rc::new(RefCell::new(None)),
+        };
+
+        let generated_name = resolve_address(&loader, "@workspace/pkg", None).unwrap();
+        let explicit_build = resolve_address(&loader, "@workspace/pkg/BUILD.luau", None).unwrap();
+
+        assert_eq!(generated_name.0, workspace.path().join("pkg/BUILD.luau"));
+        assert_eq!(generated_name, explicit_build);
+        assert_eq!(generated_name.1, "@workspace/pkg/BUILD");
+    }
+
+    #[test]
+    fn resolver_reports_missing_workspace_modules_and_keeps_rule_ownership() {
+        let workspace = tempfile::tempdir().unwrap();
+        let rules = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace.path().join("rules/sample")).unwrap();
+        fs::write(
+            workspace.path().join("rules/sample/index.luau"),
+            "return { owner = 'workspace' }\n",
+        )
+        .unwrap();
+        let loader = ModuleLoader {
+            workspace_root: workspace.path().to_path_buf(),
+            rules_root: rules.path().to_path_buf(),
+            stack: Rc::new(RefCell::new(Vec::new())),
+            cache: Rc::new(RefCell::new(HashMap::new())),
+            failure: Rc::new(RefCell::new(None)),
+        };
+
+        let missing = resolve_address(&loader, "@workspace/missing", None).unwrap_err();
+        let missing_rule = resolve_address(&loader, "@imp/rules/sample", None).unwrap_err();
+
+        assert!(missing.to_string().contains("@workspace/missing"));
+        assert!(missing
+            .to_string()
+            .contains(&workspace.path().display().to_string()));
+        assert!(missing_rule.to_string().contains("@imp/rules/sample"));
+        assert!(missing_rule
+            .to_string()
+            .contains(&rules.path().display().to_string()));
+    }
+
+    #[test]
+    fn generated_build_paths_must_stay_in_the_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        assert!(generated_build_destination(workspace.path(), "pkg/BUILD.luau").is_ok());
+        assert!(generated_build_destination(workspace.path(), "../outside/BUILD.luau").is_err());
+        assert!(generated_build_destination(workspace.path(), "pkg/not-a-build.luau").is_err());
+    }
+
+    #[test]
+    fn generated_build_identifiers_reject_luau_keywords() {
+        assert!(!is_luau_identifier("end"));
+        assert!(!is_luau_identifier("local"));
+        assert!(is_luau_identifier("asset_rule"));
     }
 
     #[test]
