@@ -26,7 +26,7 @@ the gaps that block catalog migration.
 | BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. `imp goal generate-build` can write and check generated `BUILD.luau` files from registered Luau generators. | Language-specific generators must be ported to Luau before a Luau workspace can use them. |
 | Graph construction | Exposes `files`, `glob`, `task`, `expand`, `output`, `native_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. Expansions derive keyed `BUILD`, `PACKAGE`, and `TEST` children from resolved inputs; `get()` selects one child and `all()` selects every child. `register_build_rule` and `register_build_generator` provide the Luau BUILD renderer interface. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
 | Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, and a cache toggle. Captured artifacts can flow to downstream tasks through named outputs. | Allow-failure results and broader toolchain conveniences are not available. |
-| Tests and workflows | Luau BUILD modules can expose `BUILD`, `PACKAGE`, and `TEST` roots. `imp package` gathers selected artifact roots and publishes them under `dist/`. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. | The standard workflow rule modules and mixed JavaScript/Luau test discovery are not available in Luau. |
+| Tests and workflows | Luau BUILD modules can expose `BUILD`, `PACKAGE`, and `TEST` roots. `imp package` gathers selected artifact roots and publishes them under `dist/`. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. Test cases can resolve tasks and fake action runs, the toolchain platform, and workspace writes. | The standard workflow rule modules and mixed JavaScript/Luau test discovery are not available in Luau. Test fakes for goal flags, digest diffs, target addresses, and memo traces wait for those host APIs. |
 | Installed rules | The pilot tree contains Luau `asset`, `resource_package`, `workflows/build`, `workflows/package`, and `imp/native-tool` modules. | Other packages remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
 
 The shared C toolchain is the first consumer of `platform_info()`. C compiler
@@ -72,6 +72,119 @@ A workspace selects one authoring runtime: it cannot contain both
 `imp.workspace.js` and `imp.workspace.luau`. Luau test roots discover only
 `.test.luau` modules. JavaScript test roots retain their existing
 `_test.js` discovery path.
+
+### Test host fakes
+
+**Verified:** A running test case can replace host functions with test fakes,
+so that it can run rule code without downloads, process runs, or workspace
+writes. The `core.test` table provides these functions:
+
+| Function | Effect | Replaces in JavaScript |
+| --- | --- | --- |
+| `core.test.resolve(handle)` | Runs a task or task output handle and returns its result table or output value. | `resolveGraphHandle(handle)` and the toolchain host `resolve(handle)` method |
+| `core.test.with_fake_run(fn)` | Records each `exec.action` call instead of running it. | `withFakeRun`, and `globalThis.__host_run` patches such as `withFakeGraphRun` |
+| `core.test.with_fake_toolchain_host([platform,] fn)` | Fakes `exec.action` as `with_fake_run` does, and replaces `platform_info()`. `platform` defaults to `{ os = "linux", arch = "x86_64" }`. | `withFakeToolchainHost` |
+| `core.test.with_fake_write_workspace(fn)` | Records each `write_workspace` call instead of writing to the workspace. | `withFakeWriteWorkspace` |
+
+Each `with_fake_*` function installs its fake, calls `fn` with a recorder
+table, removes the fake, and returns the values that `fn` returns. Imp removes
+the fake also when `fn` fails. A fake therefore applies only inside `fn`.
+Later code in the same case, and every later case, uses the real host.
+
+The recorder tables contain these fields:
+
+- `runs`: one entry for each faked action, in call order. An entry has `argv`,
+  `display`, `cache`, `env` (the action `env` table only), `input_count` (the
+  number of `inputs` handles), `tools` (sorted tool names from the task
+  inputs), and `outputs` (output name to declared path).
+- `calls` (toolchain host only): entries in call order. Imp records
+  `{ "platform_info" }` for each `platform_info()` call. It records
+  `{ "native_tool", name }` when a faked action receives a `native_tool()`
+  handle through its task inputs, not when the handle is declared. It records
+  `{ "named_cache", name, key }` for each faked action output that declares a
+  named cache. The JavaScript `namedCache` entry records a cache lookup
+  instead.
+- `calls` (workspace writes): entries with `path`, `digest`, and `from`.
+
+A faked action does not stage inputs, look up native tools on `PATH`, read a
+named cache, or call the execution service. It applies the same checks as the
+real host to input handles, tool names, tool source artifacts, outputs, and
+`env` values, in the same order. It returns placeholder artifact handles for
+the declared outputs. `exec.path()` returns the declared path of a placeholder.
+Downstream tasks in the same scope can use placeholders as inputs and tools.
+
+Imp clears cached task and expansion results when a fake scope starts and when
+it ends. Thus a task resolved inside the scope runs again against the fake, and
+a task resolved after the scope runs again against the real host. Imp does not
+clear values that `fn` returns. Do not give a placeholder artifact handle from
+a fake scope to the real host.
+
+**Illustrative example:** a `.test.luau` module in a package whose BUILD module declares a `TEST` root.
+
+```luau
+local core = require("@imp/core")
+local output = core.output
+
+local install = core.task({
+    inputs = { cmake = core.native_tool("cmake") },
+    outputs = { root = output.artifact() },
+    run = function(exec)
+        local platform = core.platform_info()
+        local result = exec.action({
+            argv = { "cmake", "--install", "build" },
+            outputs = {
+                root = output.directory(".imp/cmake", {
+                    named_cache = { name = "cmake", key = platform.os .. "-" .. platform.arch },
+                }),
+            },
+        })
+        return { root = result.outputs.root }
+    end,
+})
+
+return {
+    core.test.case("installs cmake", function()
+        core.test.with_fake_toolchain_host({ os = "linux", arch = "aarch64" }, function(host)
+            core.test.resolve(install)
+            assert(#host.runs == 1)
+            assert(host.runs[1].tools[1] == "cmake")
+            assert(host.calls[3][3] == "linux-aarch64")
+        end)
+    end),
+}
+```
+
+Each function fails with a deterministic message when it is used incorrectly:
+
+- A call outside a running `core.test.case`, for example at module level,
+  fails with `<function> can only run inside a running core.test.case`.
+- A fake that replaces a host function that another active fake already
+  replaces fails with `<function> cannot run while another fake replaces the
+  same host function`. `with_fake_run` and `with_fake_toolchain_host` replace
+  the same action runner.
+- A call from inside a task `run` callback or an expansion `create` callback
+  fails with `<function> cannot run inside a task run or expansion create
+  callback`. Install the fake in the case body, around `core.test.resolve`.
+- A toolchain platform without non-empty `os` and `arch` strings fails and
+  names the missing field. A platform table without a function fails with
+  `core.test.with_fake_toolchain_host expects ([platform,] fn)`.
+- `core.test.resolve` with a handle that is not a task or task output fails
+  and names the handle kind. An argument that is not a handle, or a fake body
+  that is not a function, fails with the Luau argument conversion error.
+
+**Limits:** A Luau action result contains only `outputs`, so the fakes do not
+provide the JavaScript `setRunStdout`, `setRunStderr`, `setRunExitCode`, or
+`setRunOutputFiles` controls. The JavaScript toolchain host also replaces
+download, archive, checksum, cache, and worker host functions. Luau rules
+express these steps as graph tasks and actions, so `with_fake_toolchain_host`
+covers them through the action fake.
+
+**Planned:** Luau has no goal flag, digest diff, target address, or memo trace
+host API. Thus there is no Luau replacement yet for `withFakeGoalFlags`,
+`__host_current_goal_flags`, `withFakeDiff`, `__host_target_address`, or
+`__host_memo_trace_write`. Each fake is planned together with its host API. There is
+no plan to add `withFakeSelectedTargets` or `withFakeMergeDigests`, because no
+rule test uses them.
 
 ### Task and action outputs
 

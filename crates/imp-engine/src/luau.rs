@@ -268,6 +268,20 @@ struct HostState {
     service: Arc<dyn ExecutionService>,
     cancellation: Arc<AtomicBool>,
     task_failure: Option<String>,
+    test_case_active: bool,
+    graph_callback_depth: usize,
+    fakes: TestFakes,
+}
+
+/// Host replacements that a running Luau test case installs with the
+/// `core.test.with_fake_*` functions. Each field holds the recorder table that
+/// the fake writes to. `None` means that the real host is active.
+#[derive(Default)]
+struct TestFakes {
+    run: Option<LuaTable>,
+    toolchain: Option<LuaTable>,
+    platform: Option<(String, String)>,
+    write_workspace: Option<LuaTable>,
 }
 
 /// An opt-in Luau workspace runtime for the graph-host pilot.
@@ -336,6 +350,9 @@ impl LuauWorkspace {
             service,
             cancellation: Arc::new(AtomicBool::new(false)),
             task_failure: None,
+            test_case_active: false,
+            graph_callback_depth: 0,
+            fakes: TestFakes::default(),
         }));
         let configuration = Rc::new(RefCell::new(ConfigurationState::default()));
 
@@ -968,11 +985,15 @@ impl LuauWorkspace {
                                 .into_iter()
                                 .filter(|case| case.name == case_name && case.suite == case_suite);
                             if let Some(case) = matches.nth(occurrence) {
-                                case.run
+                                runtime.host.borrow_mut().test_case_active = true;
+                                let result = case
+                                    .run
                                     .call_async::<LuaValue>(())
                                     .await
                                     .map(|_| ())
-                                    .map_err(|error| anyhow::anyhow!("{module}: {error}"))
+                                    .map_err(|error| anyhow::anyhow!("{module}: {error}"));
+                                runtime.host.borrow_mut().test_case_active = false;
+                                result
                             } else {
                                 Err(anyhow::anyhow!(
                                     "test case disappeared during isolated evaluation"
@@ -1439,11 +1460,10 @@ fn install_task_executor(
                         }
                     })?,
                 )?;
-                let result = task
-                    .run
-                    .call_async::<LuaValue>((exec, inputs))
-                    .await
-                    .map_err(|error| LuaError::external(error.to_string()))?;
+                host.borrow_mut().graph_callback_depth += 1;
+                let result = task.run.call_async::<LuaValue>((exec, inputs)).await;
+                host.borrow_mut().graph_callback_depth -= 1;
+                let result = result.map_err(|error| LuaError::external(error.to_string()))?;
                 let outputs = validate_task_result(&lua, &host, &task, result)?;
                 host.borrow_mut().task_results.insert(task_id, outputs);
             }
@@ -1759,13 +1779,12 @@ fn install_expansion_executor(lua: &Lua, host: Rc<RefCell<HostState>>) -> LuaRes
                     .map_err(|error| LuaError::external(error.to_string()))?;
             }
             let inputs = resolve_task_inputs(&lua, &host, &expansion.inputs)?;
-            let children = expansion
-                .create
-                .call_async::<LuaValue>(inputs)
-                .await
-                .map_err(|error| {
-                    LuaError::external(format!("expansion '{}' failed: {error}", expansion.display))
-                })?;
+            host.borrow_mut().graph_callback_depth += 1;
+            let children = expansion.create.call_async::<LuaValue>(inputs).await;
+            host.borrow_mut().graph_callback_depth -= 1;
+            let children = children.map_err(|error| {
+                LuaError::external(format!("expansion '{}' failed: {error}", expansion.display))
+            })?;
             let LuaValue::Table(children) = children else {
                 return Err(LuaError::external(format!(
                     "expansion '{}' must return a keyed table",
@@ -1913,20 +1932,37 @@ fn create_core(
             Ok(suite)
         })?,
     )?;
+    install_test_host_api(lua, &test_api, Rc::clone(&host))?;
     core.set("test", test_api)?;
 
     let platform_host = Rc::clone(&host);
     core.set(
         "platform_info",
         lua.create_function(move |lua, ()| {
-            let capabilities = platform_host
-                .borrow()
-                .service
-                .capabilities()
-                .map_err(LuaError::external)?;
+            let (toolchain, platform, service) = {
+                let host = platform_host.borrow();
+                (
+                    host.fakes.toolchain.clone(),
+                    host.fakes.platform.clone(),
+                    Arc::clone(&host.service),
+                )
+            };
+            if let Some(toolchain) = toolchain {
+                push_record(
+                    &toolchain.raw_get::<LuaTable>("calls")?,
+                    LuaValue::Table(lua.create_sequence_from(["platform_info"])?),
+                )?;
+            }
+            let (os, arch) = match platform {
+                Some(platform) => platform,
+                None => {
+                    let capabilities = service.capabilities().map_err(LuaError::external)?;
+                    (capabilities.os.to_owned(), capabilities.arch.to_owned())
+                }
+            };
             let platform = lua.create_table()?;
-            platform.set("os", capabilities.os)?;
-            platform.set("arch", capabilities.arch)?;
+            platform.set("os", os)?;
+            platform.set("arch", arch)?;
             Ok(platform)
         })?,
     )?;
@@ -2494,10 +2530,11 @@ fn create_core(
         })?,
     )?;
     let workspace_for_write = host.borrow().workspace_root.clone();
+    let write_host = Rc::clone(&host);
     core.set(
         "write_workspace",
         lua.create_function(
-            move |_, (path, digest, options): (String, String, Option<LuaTable>)| {
+            move |lua, (path, digest, options): (String, String, Option<LuaTable>)| {
                 validate_output_path(&path)?;
                 let from = match options {
                     Some(options) => {
@@ -2525,6 +2562,17 @@ fn create_core(
                     }
                     None => None,
                 };
+                let recorder = write_host.borrow().fakes.write_workspace.clone();
+                if let Some(recorder) = recorder {
+                    let call = lua.create_table()?;
+                    call.set("path", path)?;
+                    call.set("digest", digest)?;
+                    call.set("from", from)?;
+                    return push_record(
+                        &recorder.raw_get::<LuaTable>("calls")?,
+                        LuaValue::Table(call),
+                    );
+                }
                 imp_store::cache::write_workspace(
                     &digest,
                     from.as_deref(),
@@ -2537,6 +2585,210 @@ fn create_core(
         )?,
     )?;
     Ok(LuaValue::Table(core))
+}
+
+/// Which host replacement a `core.test.with_fake_*` scope installs.
+#[derive(Clone, Copy)]
+enum FakeKind {
+    Run,
+    ToolchainHost,
+    WriteWorkspace,
+}
+
+impl FakeKind {
+    fn function_name(self) -> &'static str {
+        match self {
+            FakeKind::Run => "core.test.with_fake_run",
+            FakeKind::ToolchainHost => "core.test.with_fake_toolchain_host",
+            FakeKind::WriteWorkspace => "core.test.with_fake_write_workspace",
+        }
+    }
+}
+
+fn require_active_test_case(host: &HostState, function: &str) -> LuaResult<()> {
+    if host.test_case_active {
+        Ok(())
+    } else {
+        Err(LuaError::external(format!(
+            "{function} can only run inside a running core.test.case"
+        )))
+    }
+}
+
+/// Install a fake, call `body` with its recorder, and then restore the real
+/// host. The fake is removed when `body` returns or fails. Task and expansion
+/// results are cleared on entry and exit, so that a result computed with a
+/// fake never reaches code that runs against the real host, or the reverse.
+async fn with_test_fake(
+    host: Rc<RefCell<HostState>>,
+    kind: FakeKind,
+    recorder: LuaTable,
+    platform: Option<(String, String)>,
+    body: LuaFunction,
+) -> LuaResult<LuaMultiValue> {
+    {
+        let mut state = host.borrow_mut();
+        require_active_test_case(&state, kind.function_name())?;
+        if state.graph_callback_depth > 0 {
+            return Err(LuaError::external(format!(
+                "{} cannot run inside a task run or expansion create callback",
+                kind.function_name()
+            )));
+        }
+        let occupied = match kind {
+            FakeKind::Run | FakeKind::ToolchainHost => state.fakes.run.is_some(),
+            FakeKind::WriteWorkspace => state.fakes.write_workspace.is_some(),
+        };
+        if occupied {
+            return Err(LuaError::external(format!(
+                "{} cannot run while another fake replaces the same host function",
+                kind.function_name()
+            )));
+        }
+        match kind {
+            FakeKind::Run => state.fakes.run = Some(recorder.clone()),
+            FakeKind::ToolchainHost => {
+                state.fakes.run = Some(recorder.clone());
+                state.fakes.toolchain = Some(recorder.clone());
+                state.fakes.platform = platform;
+            }
+            FakeKind::WriteWorkspace => state.fakes.write_workspace = Some(recorder.clone()),
+        }
+        state.task_results.clear();
+        state.expansion_results.clear();
+    }
+    let result = body.call_async::<LuaMultiValue>(recorder).await;
+    {
+        let mut state = host.borrow_mut();
+        match kind {
+            FakeKind::Run => state.fakes.run = None,
+            FakeKind::ToolchainHost => {
+                state.fakes.run = None;
+                state.fakes.toolchain = None;
+                state.fakes.platform = None;
+            }
+            FakeKind::WriteWorkspace => state.fakes.write_workspace = None,
+        }
+        state.task_results.clear();
+        state.expansion_results.clear();
+    }
+    result
+}
+
+fn parse_fake_platform(value: LuaTable) -> LuaResult<(String, String)> {
+    let field = |name: &str| -> LuaResult<String> {
+        value
+            .get::<Option<String>>(name)?
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                LuaError::external(format!(
+                    "core.test.with_fake_toolchain_host platform requires a non-empty '{name}' string"
+                ))
+            })
+    };
+    Ok((field("os")?, field("arch")?))
+}
+
+fn install_test_host_api(
+    lua: &Lua,
+    test_api: &LuaTable,
+    host: Rc<RefCell<HostState>>,
+) -> LuaResult<()> {
+    let resolve_host = Rc::clone(&host);
+    test_api.set(
+        "resolve",
+        lua.create_async_function(move |lua, handle: LuaAnyUserData| {
+            let host = Rc::clone(&resolve_host);
+            async move {
+                require_active_test_case(&host.borrow(), "core.test.resolve")?;
+                let id = {
+                    let handle = handle.borrow::<GraphHandle>().map_err(|_| {
+                        LuaError::external(
+                            "core.test.resolve requires a task or task output handle",
+                        )
+                    })?;
+                    if handle.kind != "task" && handle.kind != "task_output" {
+                        return Err(LuaError::external(format!(
+                            "core.test.resolve requires a task or task output handle, got {}",
+                            handle.kind
+                        )));
+                    }
+                    handle.id
+                };
+                let execute = lua.globals().get::<LuaFunction>("__imp_execute_task")?;
+                let result = execute.call_async::<LuaValue>(id).await;
+                host.borrow_mut().task_failure = None;
+                result
+            }
+        })?,
+    )?;
+
+    let run_host = Rc::clone(&host);
+    test_api.set(
+        "with_fake_run",
+        lua.create_async_function(move |lua, body: LuaFunction| {
+            let host = Rc::clone(&run_host);
+            async move {
+                let recorder = lua.create_table()?;
+                recorder.set("runs", lua.create_table()?)?;
+                with_test_fake(host, FakeKind::Run, recorder, None, body).await
+            }
+        })?,
+    )?;
+
+    let toolchain_host = Rc::clone(&host);
+    test_api.set(
+        "with_fake_toolchain_host",
+        lua.create_async_function(
+            move |lua, (first, second): (LuaValue, Option<LuaFunction>)| {
+                let host = Rc::clone(&toolchain_host);
+                async move {
+                    let (platform, body) = match (first, second) {
+                        (LuaValue::Function(body), None) => {
+                            (("linux".to_owned(), "x86_64".to_owned()), body)
+                        }
+                        (LuaValue::Table(platform), Some(body)) => {
+                            (parse_fake_platform(platform)?, body)
+                        }
+                        _ => {
+                            return Err(LuaError::external(
+                                "core.test.with_fake_toolchain_host expects ([platform,] fn)",
+                            ))
+                        }
+                    };
+                    let recorder = lua.create_table()?;
+                    recorder.set("runs", lua.create_table()?)?;
+                    recorder.set("calls", lua.create_table()?)?;
+                    with_test_fake(
+                        host,
+                        FakeKind::ToolchainHost,
+                        recorder,
+                        Some(platform),
+                        body,
+                    )
+                    .await
+                }
+            },
+        )?,
+    )?;
+
+    let write_host = Rc::clone(&host);
+    test_api.set(
+        "with_fake_write_workspace",
+        lua.create_async_function(move |lua, body: LuaFunction| {
+            let host = Rc::clone(&write_host);
+            async move {
+                let recorder = lua.create_table()?;
+                recorder.set("calls", lua.create_table()?)?;
+                with_test_fake(host, FakeKind::WriteWorkspace, recorder, None, body).await
+            }
+        })?,
+    )?;
+    Ok(())
+}
+
+fn push_record(list: &LuaTable, record: LuaValue) -> LuaResult<()> {
+    list.raw_set(list.raw_len() + 1, record)
 }
 
 fn make_field_descriptor(
@@ -3005,6 +3257,243 @@ fn configured_base_env(configuration: &ConfigurationState) -> Result<BTreeMap<St
     imp_execution::staging::resolve_base_env(&entries)
 }
 
+/// Read `exec.action({ outputs })` into the output names, their declared
+/// paths, and the output specifications for the execution service.
+fn parse_action_outputs(options: &LuaTable) -> Result<(BTreeMap<String, String>, Vec<ExecIoSpec>)> {
+    let mut declared_outputs = BTreeMap::new();
+    let mut output_paths = std::collections::HashSet::new();
+    let mut output_specs = Vec::new();
+    if let Some(outputs) = options
+        .get::<Option<LuaTable>>("outputs")
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?
+    {
+        for pair in outputs.pairs::<String, LuaAnyUserData>() {
+            let (name, declaration) = pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            if !valid_output_name(&name) {
+                bail!("exec.action().outputs has invalid name '{name}'");
+            }
+            let declaration = declaration
+                .borrow::<OutputDeclarationHandle>()
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let (kind, path, named_cache) = match &declaration.0 {
+                OutputDeclaration::File(path) => ("file", path, None),
+                OutputDeclaration::Directory { path, named_cache } => {
+                    ("directory", path, named_cache.as_ref())
+                }
+                OutputDeclaration::Value | OutputDeclaration::Artifact => {
+                    bail!(
+                        "exec.action outputs must use output.file(path) or output.directory(path)"
+                    )
+                }
+            };
+            if !output_paths.insert(path.clone()) {
+                bail!("exec.action declares output path '{path}' twice");
+            }
+            if declared_outputs
+                .insert(name.clone(), path.clone())
+                .is_some()
+            {
+                bail!("exec.action declares output '{name}' more than once");
+            }
+            output_specs.push(ExecIoSpec {
+                path: Some(path.clone()),
+                kind: kind.to_owned(),
+                digest: None,
+                named_cache: named_cache.cloned(),
+            });
+        }
+    }
+    Ok((declared_outputs, output_specs))
+}
+
+/// Return the named cache of a `core.tool()` source artifact. The fake and
+/// the real action paths both use this check.
+fn tool_named_cache(
+    host: &HostState,
+    name: &str,
+    source_id: u64,
+    owner_package: &str,
+) -> Result<imp_store::cache::OutputNamedCache> {
+    let artifact = resolve_source_artifact(host, source_id)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    if artifact.kind != "directory" {
+        bail!("tool '{name}' declared in package '{owner_package}' must use a directory artifact");
+    }
+    artifact.named_cache.with_context(|| {
+        format!("tool '{name}' declared in package '{owner_package}' must come from an output with named_cache")
+    })
+}
+
+/// Read and validate the `exec.action({ env })` table.
+fn action_env_entries(action_env: Option<&LuaTable>) -> Result<Vec<(String, String)>> {
+    let mut entries = Vec::new();
+    if let Some(action_env) = action_env {
+        for pair in action_env.pairs::<String, String>() {
+            let (name, value) = pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            if name.is_empty() || name.contains('=') || name.contains('\0') || value.contains('\0')
+            {
+                bail!("exec.action().env requires valid environment names and values");
+            }
+            entries.push((name, value));
+        }
+    }
+    Ok(entries)
+}
+
+struct FakeActionRequest {
+    argv: Vec<String>,
+    display: String,
+    cache: bool,
+    env: Option<LuaTable>,
+    inputs: Option<LuaTable>,
+    task_inputs: LuaTable,
+}
+
+/// Record an action request in a test fake and return placeholder artifacts
+/// for its declared outputs. The fake does not stage inputs, resolve tools,
+/// or call the execution service.
+fn run_fake_action(
+    lua: &Lua,
+    host: &Rc<RefCell<HostState>>,
+    recorder: &LuaTable,
+    request: FakeActionRequest,
+    options: &LuaTable,
+) -> Result<LuaTable> {
+    let lua_error = |error: LuaError| anyhow::anyhow!(error.to_string());
+    let mut input_count = 0;
+    if let Some(inputs) = &request.inputs {
+        for value in inputs.sequence_values::<LuaAnyUserData>() {
+            let value = value.map_err(lua_error)?;
+            value.borrow::<GraphHandle>().map_err(lua_error)?;
+            input_count += 1;
+        }
+    }
+    let toolchain = host.borrow().fakes.toolchain.clone();
+    let toolchain_calls = toolchain
+        .map(|toolchain| toolchain.raw_get::<LuaTable>("calls"))
+        .transpose()
+        .map_err(lua_error)?;
+
+    let mut tool_names = Vec::new();
+    let mut seen_tools = std::collections::HashSet::new();
+    for pair in request.task_inputs.pairs::<LuaValue, LuaValue>() {
+        let (_, value) = pair.map_err(lua_error)?;
+        let LuaValue::UserData(value) = value else {
+            continue;
+        };
+        let Ok(handle) = value.borrow::<GraphHandle>() else {
+            continue;
+        };
+        let node = host.borrow().nodes.get(&handle.id).cloned();
+        match node {
+            Some(GraphNode::NativeTool(name)) => {
+                if !seen_tools.insert(name.clone()) {
+                    bail!("exec.action received tool name '{name}' more than once");
+                }
+                if let Some(calls) = &toolchain_calls {
+                    push_record(
+                        calls,
+                        LuaValue::Table(
+                            lua.create_sequence_from(["native_tool", name.as_str()])
+                                .map_err(lua_error)?,
+                        ),
+                    )
+                    .map_err(lua_error)?;
+                }
+                tool_names.push(name);
+            }
+            Some(GraphNode::Tool {
+                name,
+                source_id,
+                owner_package,
+                ..
+            }) => {
+                if !seen_tools.insert(name.clone()) {
+                    bail!("exec.action received tool name '{name}' more than once");
+                }
+                tool_named_cache(&host.borrow(), &name, source_id, &owner_package)?;
+                tool_names.push(name);
+            }
+            _ => {}
+        }
+    }
+    tool_names.sort();
+
+    let (declared_outputs, output_specs) = parse_action_outputs(options)?;
+    let env_entries = action_env_entries(request.env.as_ref())?;
+
+    let record = lua.create_table().map_err(lua_error)?;
+    record
+        .set("argv", request.argv.clone())
+        .map_err(lua_error)?;
+    record
+        .set("display", request.display.clone())
+        .map_err(lua_error)?;
+    record.set("cache", request.cache).map_err(lua_error)?;
+    let env = lua.create_table().map_err(lua_error)?;
+    for (name, value) in env_entries {
+        env.set(name, value).map_err(lua_error)?;
+    }
+    record.set("env", env).map_err(lua_error)?;
+    record.set("input_count", input_count).map_err(lua_error)?;
+    record.set("tools", tool_names).map_err(lua_error)?;
+    let recorded_outputs = lua.create_table().map_err(lua_error)?;
+
+    let artifacts = lua.create_table().map_err(lua_error)?;
+    for (name, path) in declared_outputs {
+        let spec = output_specs
+            .iter()
+            .find(|spec| spec.path.as_deref() == Some(path.as_str()))
+            .context("fake action lost a declared output")?;
+        if let (Some(calls), Some(cache)) = (&toolchain_calls, &spec.named_cache) {
+            push_record(
+                calls,
+                LuaValue::Table(
+                    lua.create_sequence_from([
+                        "named_cache",
+                        cache.name.as_str(),
+                        cache.key.as_str(),
+                    ])
+                    .map_err(lua_error)?,
+                ),
+            )
+            .map_err(lua_error)?;
+        }
+        recorded_outputs
+            .set(name.as_str(), path.as_str())
+            .map_err(lua_error)?;
+        let digest = format!("fake-digest:{} {name}", request.display);
+        let artifact = imp_store::cache::CachedArtifact {
+            artifact_id: format!("fake:{} {name}", request.display),
+            kind: spec.kind.clone(),
+            path: Some(path),
+            value: None,
+            digest: digest.clone(),
+            bytes: Some(0),
+            mode: None,
+            tree_digest: (spec.kind == "directory").then_some(digest),
+            named_cache: spec.named_cache.clone(),
+        };
+        let handle = allocate_handle(host, "artifact");
+        host.borrow_mut()
+            .nodes
+            .insert(handle.id, GraphNode::Artifact(artifact));
+        artifacts
+            .set(name, lua.create_userdata(handle).map_err(lua_error)?)
+            .map_err(lua_error)?;
+    }
+    record.set("outputs", recorded_outputs).map_err(lua_error)?;
+    push_record(
+        &recorder.raw_get::<LuaTable>("runs").map_err(lua_error)?,
+        LuaValue::Table(record),
+    )
+    .map_err(lua_error)?;
+
+    let result = lua.create_table().map_err(lua_error)?;
+    result.set("outputs", artifacts).map_err(lua_error)?;
+    Ok(result)
+}
+
 async fn run_action(
     lua: Lua,
     host: Rc<RefCell<HostState>>,
@@ -3031,6 +3520,23 @@ async fn run_action(
     let action_inputs = options
         .get::<Option<LuaTable>>("inputs")
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let fake_run = host.borrow().fakes.run.clone();
+    if let Some(recorder) = fake_run {
+        return run_fake_action(
+            &lua,
+            &host,
+            &recorder,
+            FakeActionRequest {
+                argv,
+                display,
+                cache,
+                env: action_env,
+                inputs: action_inputs,
+                task_inputs,
+            },
+            &options,
+        );
+    }
     let (root, workspace_id, service, nodes, cancellation) = {
         let host = host.borrow();
         (
@@ -3132,14 +3638,7 @@ async fn run_action(
                 if !tool_names.insert(name.clone()) {
                     bail!("exec.action received tool name '{name}' more than once");
                 }
-                let artifact = resolve_source_artifact(&host.borrow(), *source_id)
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                if artifact.kind != "directory" {
-                    bail!("tool '{name}' declared in package '{owner_package}' must use a directory artifact");
-                }
-                let cache = artifact.named_cache.as_ref().with_context(|| {
-                    format!("tool '{name}' declared in package '{owner_package}' must come from an output with named_cache")
-                })?;
+                let cache = tool_named_cache(&host.borrow(), name, *source_id, owner_package)?;
                 let path = service
                     .cache_dir_get(&workspace_id, &cache.name, &cache.key)?
                     .with_context(|| {
@@ -3160,61 +3659,10 @@ async fn run_action(
         }
     }
 
-    let mut declared_outputs = BTreeMap::new();
-    let mut output_paths = std::collections::HashSet::new();
-    let mut output_specs = Vec::new();
-    if let Some(outputs) = options
-        .get::<Option<LuaTable>>("outputs")
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?
-    {
-        for pair in outputs.pairs::<String, LuaAnyUserData>() {
-            let (name, declaration) = pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            if !valid_output_name(&name) {
-                bail!("exec.action().outputs has invalid name '{name}'");
-            }
-            let declaration = declaration
-                .borrow::<OutputDeclarationHandle>()
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            let (kind, path, named_cache) = match &declaration.0 {
-                OutputDeclaration::File(path) => ("file", path, None),
-                OutputDeclaration::Directory { path, named_cache } => {
-                    ("directory", path, named_cache.as_ref())
-                }
-                OutputDeclaration::Value | OutputDeclaration::Artifact => {
-                    bail!(
-                        "exec.action outputs must use output.file(path) or output.directory(path)"
-                    )
-                }
-            };
-            if !output_paths.insert(path.clone()) {
-                bail!("exec.action declares output path '{path}' twice");
-            }
-            if declared_outputs
-                .insert(name.clone(), path.clone())
-                .is_some()
-            {
-                bail!("exec.action declares output '{name}' more than once");
-            }
-            output_specs.push(ExecIoSpec {
-                path: Some(path.clone()),
-                kind: kind.to_owned(),
-                digest: None,
-                named_cache: named_cache.cloned(),
-            });
-        }
-    }
+    let (declared_outputs, output_specs) = parse_action_outputs(&options)?;
 
     let mut env = configured_base_env(&configuration.borrow())?;
-    if let Some(action_env) = action_env {
-        for pair in action_env.pairs::<String, String>() {
-            let (name, value) = pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            if name.is_empty() || name.contains('=') || name.contains('\0') || value.contains('\0')
-            {
-                bail!("exec.action().env requires valid environment names and values");
-            }
-            env.insert(name, value);
-        }
-    }
+    env.extend(action_env_entries(action_env.as_ref())?);
     let action = ExecAction {
         argv,
         display: display.clone(),
@@ -3741,6 +4189,304 @@ return {
             .unwrap_err()
             .to_string();
         assert!(error.contains("no case 'missing' found"), "{error}");
+    }
+
+    async fn run_luau_test_module(source: &str) -> (tempfile::TempDir, Result<Option<String>>) {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace_root.path().join("pkg")).unwrap();
+        fs::write(
+            workspace_root.path().join("pkg/BUILD.luau"),
+            "local core = require('@imp/core')\nreturn { tests = { TEST = core.test_root() } }\n",
+        )
+        .unwrap();
+        fs::write(workspace_root.path().join("pkg/fakes.test.luau"), source).unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let report = runtime
+            .execute_graph("test", &roots, Arc::new(AtomicBool::new(false)), None, None)
+            .await;
+        (workspace_root, report)
+    }
+
+    #[tokio::test]
+    async fn luau_test_fakes_replace_host_functions_and_record_calls() {
+        let (workspace_root, report) = run_luau_test_module(
+            r#"
+local core = require("@imp/core")
+local output = core.output
+
+local function toolchain()
+    local install = core.task({
+        inputs = { cmake = core.native_tool("cmake-not-on-path") },
+        outputs = { root = output.artifact() },
+        run = function(exec)
+            local platform = core.platform_info()
+            local result = exec.action({
+                argv = { "cmake-not-on-path", "--install", platform.os },
+                display = "install cmake",
+                env = { MODE = "fake" },
+                outputs = {
+                    root = output.directory(".imp/cmake", {
+                        named_cache = { name = "cmake", key = platform.os .. "-" .. platform.arch },
+                    }),
+                },
+            })
+            return { root = result.outputs.root }
+        end,
+    })
+    local tool = core.tool(install.outputs.root, { name = "cmake" })
+    local root = core.path(install.outputs.root)
+    return core.task({
+        inputs = { cmake = tool, root = root },
+        outputs = { version = output.value() },
+        run = function(exec, inputs)
+            exec.action({ argv = { "cmake", "--version" }, inputs = { inputs.root } })
+            return { version = exec.path(inputs.root) }
+        end,
+    })
+end
+
+return {
+    core.test.case("toolchain host", function()
+        local version = core.test.with_fake_toolchain_host({ os = "fake-os", arch = "fake-arch" }, function(host)
+            local version = core.test.resolve(toolchain().outputs.version)
+            assert(#host.runs == 2, "expected two runs")
+            local install = host.runs[1]
+            assert(install.display == "install cmake")
+            assert(install.argv[3] == "fake-os")
+            assert(install.env.MODE == "fake")
+            assert(install.tools[1] == "cmake-not-on-path")
+            assert(install.outputs.root == ".imp/cmake")
+            assert(host.runs[2].display == "cmake --version")
+            assert(host.runs[2].tools[1] == "cmake")
+            assert(host.runs[2].input_count == 1)
+            assert(host.calls[1][1] == "platform_info")
+            assert(host.calls[2][1] == "native_tool" and host.calls[2][2] == "cmake-not-on-path")
+            assert(host.calls[3][1] == "named_cache" and host.calls[3][2] == "cmake")
+            assert(host.calls[3][3] == "fake-os-fake-arch")
+            return version
+        end)
+        assert(version == ".imp/cmake")
+        assert(core.platform_info().os ~= "fake-os", "fake platform leaked out of its scope")
+    end),
+    core.test.case("default toolchain platform", function()
+        core.test.with_fake_toolchain_host(function(host)
+            local platform = core.platform_info()
+            assert(platform.os == "linux" and platform.arch == "x86_64")
+            assert(#host.calls == 1)
+        end)
+    end),
+    core.test.case("run", function()
+        local failing = core.task({
+            inputs = { sh = core.native_tool("sh") },
+            run = function(exec)
+                exec.action({ argv = { "sh", "-c", "exit 3" }, display = "exit three" })
+            end,
+        })
+        core.test.with_fake_run(function(fake)
+            core.test.resolve(failing)
+            assert(#fake.runs == 1 and fake.runs[1].display == "exit three")
+            assert(fake.runs[1].tools[1] == "sh")
+        end)
+        local ok, problem = pcall(core.test.resolve, failing)
+        assert(not ok, "the real host must run the action after the fake scope")
+        assert(string.find(tostring(problem), "failed with exit code 3", 1, true), tostring(problem))
+    end),
+    core.test.case("real result is not reused inside a fake", function()
+        local real = core.task({
+            inputs = { sh = core.native_tool("sh") },
+            outputs = { status = output.value() },
+            run = function(exec)
+                exec.action({ argv = { "sh", "-c", "true" }, display = "real true", cache = false })
+                return { status = "ok" }
+            end,
+        })
+        assert(core.test.resolve(real.outputs.status) == "ok")
+        core.test.with_fake_run(function(fake)
+            assert(core.test.resolve(real.outputs.status) == "ok")
+            assert(#fake.runs == 1, "the fake scope must run the task again")
+        end)
+    end),
+    core.test.case("real host after a failed fake scope", function()
+        local failing = core.task({
+            inputs = { sh = core.native_tool("sh") },
+            run = function(exec)
+                exec.action({ argv = { "sh", "-c", "exit 3" }, display = "exit three" })
+            end,
+        })
+        local ok = pcall(core.test.with_fake_run, function()
+            core.test.resolve(failing)
+            error("body failed")
+        end)
+        assert(not ok)
+        local real_ok, problem = pcall(core.test.resolve, failing)
+        assert(not real_ok)
+        assert(string.find(tostring(problem), "failed with exit code 3", 1, true), tostring(problem))
+    end),
+    core.test.case("write workspace", function()
+        core.test.with_fake_write_workspace(function(fake)
+            core.write_workspace("dist/app", "sha256:abc", { from = "bin/app" })
+            core.write_workspace("dist/lib", "sha256:def")
+            assert(#fake.calls == 2)
+            assert(fake.calls[1].path == "dist/app")
+            assert(fake.calls[1].digest == "sha256:abc")
+            assert(fake.calls[1].from == "bin/app")
+            assert(fake.calls[2].from == nil)
+        end)
+        local ok, problem = pcall(core.write_workspace, "dist/app", "sha256:missing")
+        assert(not ok, "the real host must write after the fake scope")
+        assert(string.find(tostring(problem), "publish workspace artifact", 1, true), tostring(problem))
+    end),
+    core.test.case("run and write workspace fakes together", function()
+        local publish = core.task({
+            inputs = { sh = core.native_tool("sh") },
+            run = function(exec)
+                local result = exec.action({
+                    argv = { "sh", "-c", "build" },
+                    display = "build app",
+                    outputs = { app = output.file("app") },
+                })
+                core.write_workspace("dist/app", "fake")
+                return nil
+            end,
+        })
+        core.test.with_fake_run(function(run)
+            core.test.with_fake_write_workspace(function(write)
+                core.test.resolve(publish)
+                assert(#run.runs == 1 and run.runs[1].outputs.app == "app")
+                assert(#write.calls == 1 and write.calls[1].path == "dist/app")
+            end)
+        end)
+    end),
+}
+"#,
+        )
+        .await;
+        let report = report.unwrap();
+        assert!(
+            report
+                .as_deref()
+                .unwrap()
+                .contains("test: 7/7 unit(s) passed"),
+            "{report:?}"
+        );
+        assert!(!workspace_root.path().join("dist/app").exists());
+        assert!(!workspace_root.path().join("dist/lib").exists());
+    }
+
+    #[tokio::test]
+    async fn luau_test_fakes_report_misuse() {
+        let (_workspace_root, report) = run_luau_test_module(
+            r#"
+local core = require("@imp/core")
+local output = core.output
+
+local function expect_error(expected, fn, ...)
+    local ok, problem = pcall(fn, ...)
+    assert(not ok, "expected an error: " .. expected)
+    assert(string.find(tostring(problem), expected, 1, true), tostring(problem))
+end
+
+local module_level_ok, module_level_problem = pcall(core.test.with_fake_run, function() end)
+
+return {
+    core.test.case("module level", function()
+        assert(not module_level_ok)
+        expect_error(
+            "core.test.with_fake_run can only run inside a running core.test.case",
+            error,
+            module_level_problem
+        )
+    end),
+    core.test.case("nested", function()
+        core.test.with_fake_run(function()
+            expect_error(
+                "core.test.with_fake_toolchain_host cannot run while another fake replaces the same host function",
+                core.test.with_fake_toolchain_host,
+                function() end
+            )
+        end)
+    end),
+    core.test.case("removed after failure", function()
+        expect_error("body failed", core.test.with_fake_run, function() error("body failed") end)
+        core.test.with_fake_run(function() end)
+    end),
+    core.test.case("bad platform", function()
+        expect_error(
+            "core.test.with_fake_toolchain_host platform requires a non-empty 'arch' string",
+            core.test.with_fake_toolchain_host,
+            { os = "linux" },
+            function() end
+        )
+        expect_error(
+            "core.test.with_fake_toolchain_host expects ([platform,] fn)",
+            core.test.with_fake_toolchain_host,
+            { os = "linux", arch = "x86_64" }
+        )
+    end),
+    core.test.case("fake inside a task", function()
+        local task = core.task({
+            run = function()
+                core.test.with_fake_run(function() end)
+            end,
+        })
+        expect_error(
+            "core.test.with_fake_run cannot run inside a task run or expansion create callback",
+            core.test.resolve,
+            task
+        )
+    end),
+    core.test.case("fake validates like the real host", function()
+        local file = core.task({
+            outputs = { root = output.artifact() },
+            run = function(exec)
+                local result = exec.action({ argv = { "make" }, outputs = { root = output.file("tool") } })
+                return { root = result.outputs.root }
+            end,
+        })
+        local uses_file_tool = core.task({
+            inputs = { tool = core.tool(file.outputs.root, { name = "tool" }) },
+            run = function(exec)
+                exec.action({ argv = { "tool" } })
+            end,
+        })
+        local bad_env = core.task({
+            run = function(exec)
+                exec.action({ argv = { "true" }, env = { ["A=B"] = "x" } })
+            end,
+        })
+        local duplicate_tool = core.task({
+            inputs = { first = core.native_tool("sh"), second = core.native_tool("sh") },
+            run = function(exec)
+                exec.action({ argv = { "sh" }, outputs = { bad = output.value() } })
+            end,
+        })
+        core.test.with_fake_run(function()
+            expect_error("must use a directory artifact", core.test.resolve, uses_file_tool)
+            expect_error("exec.action().env requires valid environment names and values", core.test.resolve, bad_env)
+            expect_error("exec.action received tool name 'sh' more than once", core.test.resolve, duplicate_tool)
+        end)
+    end),
+    core.test.case("resolve non-task", function()
+        expect_error(
+            "core.test.resolve requires a task or task output handle, got native_tool",
+            core.test.resolve,
+            core.native_tool("sh")
+        )
+    end),
+}
+"#,
+        )
+        .await;
+        let report = report.unwrap();
+        assert!(
+            report
+                .as_deref()
+                .unwrap()
+                .contains("test: 7/7 unit(s) passed"),
+            "{report:?}"
+        );
     }
 
     #[tokio::test]
