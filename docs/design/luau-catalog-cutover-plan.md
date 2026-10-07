@@ -58,7 +58,6 @@ starts.
 | Imp | `imp-core-foundation` | 9 | Imp core task |
 | Imp | `imp-generate-validation` | 1 | Imp generate validation task |
 | Imp | `imp-validation` | 15 | Imp host and test task |
-| Rust | `compiled-language-island` | 3 | Split Rust task |
 | Workflows | `workflow-core-runtime` | 6 | Core workflow task |
 | Workflows | `workflow-core-validation` | 6 | Core workflow task |
 | Workflows | `workflow-codegen-runtime` | 3 | Imp core task |
@@ -78,7 +77,8 @@ starts.
 | Python | `python-core` | 14 | Python core task |
 | Python | `python-pex-uv` | 5 | PEX and uv task |
 | Python | `python-ruff` | 6 | Ruff task |
-| Rust | `rust-remainder` | 13 | Split Rust task |
+| Rust | `rust-toolchains` | 9 | Rust toolchain task |
+| Rust | `rust-graph` | 7 | Rust graph task |
 | Odin | `odin-remainder` | 20 | Split Odin task |
 | Tree-sitter | `treesitter-validation` | 2 | Split Tree-sitter task |
 | Tree-sitter | `treesitter-runtime` | 1 | Split Tree-sitter task |
@@ -115,7 +115,7 @@ Review boundaries express ownership. They are not dependency nodes: one
 boundary can contain independent files from different import stages. The
 module-level graph has eleven prerequisite-first stages. Its condensed graph is
 acyclic. It contains one multi-module strongly connected component, owned by
-`compiled-language-island`:
+`rust-graph`:
 
 - `rules/rust/generate_build/index.js`
 - `rules/rust/index.js`
@@ -137,7 +137,8 @@ The main cross-boundary constraints are:
 | CMake | C catalog root, C toolchains, Imp foundations, core, lockfile, and packaging workflows |
 | C BUILD generation | C catalog root, CMake, Imp core with codegen workflows |
 | JavaScript and Python toolchains | Imp foundations, base lockfile workflow |
-| Compiled-language island | C toolchains, Imp foundations, core, codegen, and packaging workflows |
+| Rust toolchains | Imp foundations, base lockfile workflow |
+| Rust graph | Rust toolchains, C toolchains, Imp foundations, core, codegen, and packaging workflows |
 | OCI and Zola | Imp foundations, base lockfile and packaging workflows |
 | Built-in lockfiles | CMake and all shipped language and toolchain packages |
 | Validation boundaries | Test discovery, their runtime boundary, and test host fakes when their tests use fakes |
@@ -165,7 +166,8 @@ The report prints every task cycle with one source edge for each step.
 - Python core and Ruff: Ruff imports `rules/python/index.js`, and
   `rules/python/graph_test.js` imports Ruff.
 
-The CMake task and all of its prerequisite tasks were outside these cycles.
+The CMake task, the two Rust tasks, and all of their prerequisite tasks were
+outside these cycles.
 
 ## Host prerequisites
 
@@ -182,6 +184,8 @@ current requirements are:
 | Tool and path APIs | Hermetic tool acquisition, platform data, environment settings, and path resolution |
 | Test discovery | Luau `TEST` values, BUILD discovery, filtering, execution, and failure locations |
 | Workspace and catalog discovery | Canonical root and nested BUILD addresses, generated BUILD names, installed-rule ownership, and cache identity |
+| Dynamic expansion | Keyed child targets that a rule derives from task outputs, with named and aggregate selection |
+| Unowned file discovery | Sorted workspace files that no loaded target owns, filtered by root, include, and exclude patterns |
 | Test host fakes | Luau test replacements for the JavaScript `withFake*` helpers and `globalThis.__host_*` patches: toolchain host, `run`, workspace writes, goal flags, and diffs |
 
 The report associates each review boundary with proposed host prerequisites. A
@@ -206,14 +210,19 @@ Task ownership follows these rules:
 - The Imp host and test task retires the JavaScript test harness
   (`rules/imp/test/index.js` and its BUILD module). The host test API and test
   host fakes replace it.
+- The Rust work has two tasks. The Rust toolchain task owns the toolchain,
+  Kache, and Cargo input modules with their tests and `rules/rust/BUILD.js`.
+  The Rust graph task owns the three cyclic modules, their tests, and the
+  example BUILD module. The earlier cut between the cycle and the other files
+  made a task cycle: the cyclic modules import the toolchain, Kache, and Cargo
+  input modules, and the other tests import `//rules/rust`.
 - A host task adds test host fakes. Each task whose boundary requires test host
   fakes depends on it.
 
-Before a catalog task outside the CMake chain is claimed, the sprint must
-reconcile the remaining tasks:
+Before a catalog task outside the CMake and Rust chains is claimed, the sprint
+must reconcile the remaining tasks:
 
-- Split the Rust, Odin, and Tree-sitter tasks at their `split from` boundaries.
-  Keep the three cyclic Rust modules together.
+- Split the Odin and Tree-sitter tasks at their `split from` boundaries.
 - Remove the task cycles that the report prints.
 - Replace broad dependency lists with the prerequisites in the report's task
   dependency table and host table.

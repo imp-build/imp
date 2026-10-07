@@ -73,11 +73,18 @@ BOUNDARIES: dict[str, MigrationBoundary] = {
         "rules/imp/{archive,codegen,generate,lockfile,toolchain}",
         ("graph outputs", "tool/path host APIs", "workspace/catalog discovery"),
     ),
-    "compiled-language-island": MigrationBoundary(
-        "Rust graph island",
-        "split from 2026-09-30-port-luau-rust-rules",
-        "The three-module static-import cycle in rules/rust",
-        ("graph outputs", "tool/path host APIs", "workspace/catalog discovery"),
+    "rust-graph": MigrationBoundary(
+        "Rust graph rules",
+        "2026-09-30-port-luau-rust-rules",
+        "The three-module static-import cycle in rules/rust, its tests, and the example BUILD module",
+        (
+            "graph outputs",
+            "tool/path host APIs",
+            "test discovery",
+            "workspace/catalog discovery",
+            "dynamic expansion",
+            "unowned file discovery",
+        ),
     ),
     "imp-validation": MigrationBoundary(
         "Imp test framework and focused validation modules",
@@ -205,10 +212,10 @@ BOUNDARIES: dict[str, MigrationBoundary] = {
         "rules/python/ruff and Ruff graph/toolchain modules",
         ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
     ),
-    "rust-remainder": MigrationBoundary(
-        "Rust rules outside the compiled-language island",
-        "split from 2026-09-30-port-luau-rust-rules",
-        "Remaining rules/rust modules",
+    "rust-toolchains": MigrationBoundary(
+        "Rust toolchain, Kache, and Cargo input rules",
+        "2026-10-07-port-luau-rust-toolchains",
+        "rules/rust/{toolchain,kache,cargo_task_inputs} and rules/rust/BUILD.js",
         ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
     ),
     "odin-remainder": MigrationBoundary(
@@ -266,10 +273,14 @@ WORKSPACE_INTEGRATION_FILES = {
     "imp.workspace.js",
 }
 
-COMPILED_LANGUAGE_ISLAND = {
+RUST_GRAPH = {
+    "rules/rust/example/BUILD.js",
     "rules/rust/generate_build/index.js",
+    "rules/rust/generate_build_test.js",
     "rules/rust/index.js",
+    "rules/rust/index_test.js",
     "rules/rust/workspace_expansion.js",
+    "rules/rust/workspace_expansion_test.js",
 }
 
 WORKFLOW_CORE_RUNTIME = {
@@ -323,8 +334,8 @@ def migration_boundary_for(path: str) -> str | None:
         "rules/imp/toolchain",
     )):
         return "imp-core-foundation"
-    if path in COMPILED_LANGUAGE_ISLAND:
-        return "compiled-language-island"
+    if path in RUST_GRAPH:
+        return "rust-graph"
     if path.startswith("rules/imp/"):
         return "imp-validation"
     if path in WORKFLOW_CORE_RUNTIME:
@@ -391,7 +402,7 @@ def migration_boundary_for(path: str) -> str | None:
     if path.startswith("rules/python/"):
         return "python-core"
     if path.startswith("rules/rust/"):
-        return "rust-remainder"
+        return "rust-toolchains"
     if path.startswith("rules/odin/"):
         return "odin-remainder"
     if path == "rules/treesitter/index.js":
