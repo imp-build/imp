@@ -63,13 +63,13 @@ BOUNDARIES: dict[str, MigrationBoundary] = {
     ),
     "imp-host-foundation": MigrationBoundary(
         "Imp host-facing foundation",
-        "split from 2026-09-30-port-luau-imp-host-and-test-rules",
+        "2026-09-30-port-luau-imp-host-and-test-rules",
         "rules/imp/{mode,native-tool,self-tool}",
         ("tool/path host APIs", "workspace/catalog discovery"),
     ),
     "imp-core-foundation": MigrationBoundary(
         "Imp archive, generate, lockfile, and toolchain rules",
-        "split from 2026-09-30-port-luau-imp-core-rules",
+        "2026-09-30-port-luau-imp-core-rules",
         "rules/imp/{archive,codegen,generate,lockfile,toolchain}",
         ("graph outputs", "tool/path host APIs", "workspace/catalog discovery"),
     ),
@@ -81,61 +81,73 @@ BOUNDARIES: dict[str, MigrationBoundary] = {
     ),
     "imp-validation": MigrationBoundary(
         "Imp test framework and focused validation modules",
-        "split from 2026-09-30-port-luau-imp-host-and-test-rules",
+        "2026-09-30-port-luau-imp-host-and-test-rules",
         "Remaining rules/imp BUILD and test modules",
+        ("test discovery", "workspace/catalog discovery"),
+    ),
+    "imp-generate-validation": MigrationBoundary(
+        "Imp generate tests that use Odin toolchains",
+        "2026-10-07-port-luau-imp-generate-validation",
+        "rules/imp/generate_test.js",
         ("test discovery", "workspace/catalog discovery"),
     ),
     "workflow-core-runtime": MigrationBoundary(
         "Core workflow implementations",
-        "split from 2026-09-30-port-luau-workflow-core",
+        "2026-09-30-port-luau-workflow-core",
         "rules/workflows/{build,fmt,lint,report,run,test} implementations",
         ("graph outputs", "workspace/catalog discovery"),
     ),
     "workflow-core-validation": MigrationBoundary(
         "Core workflow BUILD and test modules",
-        "split from 2026-09-30-port-luau-workflow-core",
+        "2026-09-30-port-luau-workflow-core",
         "Core workflow BUILD and test modules",
         ("test discovery", "workspace/catalog discovery"),
     ),
     "workflow-codegen-runtime": MigrationBoundary(
         "Code-generation workflow implementations",
-        "split from 2026-09-30-port-luau-workflow-codegen",
+        "2026-09-30-port-luau-imp-core-rules",
         "rules/workflows/{codegen,generate,generate_build} implementations",
         ("workspace/catalog discovery",),
     ),
     "workflow-codegen-validation": MigrationBoundary(
         "Code-generation workflow BUILD and test modules",
-        "split from 2026-09-30-port-luau-workflow-codegen",
+        "2026-09-30-port-luau-workflow-codegen",
         "Code-generation workflow BUILD and test modules",
         ("test discovery", "workspace/catalog discovery"),
     ),
     "workflow-lockfiles-runtime": MigrationBoundary(
         "Base lockfile workflow",
-        "split from 2026-09-30-port-luau-workflow-packaging",
-        "rules/workflows/lockfiles/index.js",
+        "2026-10-07-port-luau-workflow-packaging-runtime",
+        "rules/workflows/lockfiles/{index,BUILD}.js",
         ("tool/path host APIs", "workspace/catalog discovery"),
     ),
     "workflow-packaging-runtime": MigrationBoundary(
-        "Package, publish, and VS workflow implementations",
-        "split from 2026-09-30-port-luau-workflow-packaging",
-        "rules/workflows/{package,publish,vs} implementations",
+        "Package and publish workflows and their focused tests",
+        "2026-10-07-port-luau-workflow-packaging-runtime",
+        "rules/workflows/{package,publish} modules",
+        ("graph outputs", "tool/path host APIs", "workspace/catalog discovery"),
+    ),
+    "workflow-vs": MigrationBoundary(
+        "Visual Studio and VS Code configuration workflow",
+        "2026-09-30-port-luau-workflow-packaging",
+        "rules/workflows/vs/index.js",
         ("graph outputs", "tool/path host APIs", "workspace/catalog discovery"),
     ),
     "workflow-packaging-validation": MigrationBoundary(
-        "Lockfile and packaging workflow validation modules",
-        "split from 2026-09-30-port-luau-workflow-packaging",
-        "Lockfile, package, publish, and VS BUILD and test modules",
+        "Lockfile and VS workflow validation modules",
+        "2026-09-30-port-luau-workflow-packaging",
+        "Lockfile and VS BUILD and test modules",
         ("test discovery", "workspace/catalog discovery"),
     ),
     "builtin-lockfiles": MigrationBoundary(
         "Built-in lockfile aggregator",
-        "split from 2026-09-30-port-luau-workflow-packaging",
+        "2026-09-30-port-luau-workflow-packaging",
         "rules/workflows/builtin_lockfiles/index.js",
         ("tool/path host APIs", "workspace/catalog discovery"),
     ),
     "c-shared-toolchain": MigrationBoundary(
         "Shared C toolchain contract",
-        "split from 2026-09-30-port-luau-c-catalog-root",
+        "2026-09-30-port-luau-c-toolchains",
         "rules/c/toolchain.js",
         ("tool/path host APIs", "workspace/catalog discovery"),
     ),
@@ -153,13 +165,13 @@ BOUNDARIES: dict[str, MigrationBoundary] = {
     ),
     "c-catalog-root": MigrationBoundary(
         "C catalog root",
-        "split from 2026-09-30-port-luau-c-catalog-root",
+        "2026-09-30-port-luau-c-catalog-root",
         "rules/c root modules and graph example",
         ("graph outputs", "test discovery", "workspace/catalog discovery"),
     ),
     "c-generate-build": MigrationBoundary(
         "C BUILD generation",
-        "split from 2026-09-30-port-luau-c-catalog-root",
+        "2026-10-07-port-luau-c-generate-build",
         "rules/c/generate_build",
         ("workspace/catalog discovery",),
     ),
@@ -276,9 +288,11 @@ WORKFLOW_CODEGEN_RUNTIME = {
 }
 
 WORKFLOW_PACKAGING_RUNTIME = {
+    "rules/workflows/package/BUILD.js",
+    "rules/workflows/package/graph_package_test.js",
     "rules/workflows/package/index.js",
+    "rules/workflows/publish/BUILD.js",
     "rules/workflows/publish/index.js",
-    "rules/workflows/vs/index.js",
 }
 
 
@@ -299,6 +313,8 @@ def migration_boundary_for(path: str) -> str | None:
         "rules/imp/self-tool/index.js",
     }:
         return "imp-host-foundation"
+    if path == "rules/imp/generate_test.js":
+        return "imp-generate-validation"
     if path.startswith((
         "rules/imp/archive",
         "rules/imp/codegen",
@@ -329,12 +345,14 @@ def migration_boundary_for(path: str) -> str | None:
         "rules/workflows/generate_build/",
     )):
         return "workflow-codegen-validation"
-    if path == "rules/workflows/lockfiles/index.js":
+    if path in {"rules/workflows/lockfiles/BUILD.js", "rules/workflows/lockfiles/index.js"}:
         return "workflow-lockfiles-runtime"
     if path == "rules/workflows/builtin_lockfiles/index.js":
         return "builtin-lockfiles"
     if path in WORKFLOW_PACKAGING_RUNTIME:
         return "workflow-packaging-runtime"
+    if path == "rules/workflows/vs/index.js":
+        return "workflow-vs"
     if path.startswith((
         "rules/workflows/lockfiles/",
         "rules/workflows/package/",
@@ -668,6 +686,54 @@ def static_rule_imports(source: str) -> list[str]:
     return imports
 
 
+NAMED_RULE_IMPORT = re.compile(
+    r"\bimport\s*\{([^}]*)\}\s*from\s*(['\"])(//rules/[^'\"]+)\2",
+)
+
+# The Luau host replaces the JavaScript test harness: `core.test` and
+# `core.test_root` replace every export of `//rules/imp/test`. An import that
+# names only replaced exports is not a Luau dependency. `None` replaces every
+# export of the module.
+HOST_REPLACED_IMPORTS: dict[str, frozenset[str] | None] = {
+    "rules/imp/test/index.js": None,
+}
+# Luau BUILD modules do not declare their own JavaScript sources, so these
+# exports are replaced only in BUILD modules.
+BUILD_REPLACED_IMPORTS: dict[str, frozenset[str]] = {
+    "rules/js/index.js": frozenset({"jsSources"}),
+}
+TEST_HOST_FAKE = re.compile(r"withFake\w+")
+HOST_GLOBAL_PATCH = re.compile(r"\bglobalThis\.__host_\w+\s*=(?!=)")
+IMPORT_ALIAS = re.compile(r"\s+as\s+")
+
+
+def named_rule_imports(source: str) -> dict[str, list[set[str]]]:
+    """Return the imported names of each braced static catalog import statement."""
+    code = mask_comments_and_literals(source)
+    imports: dict[str, list[set[str]]] = collections.defaultdict(list)
+    for match in NAMED_RULE_IMPORT.finditer(source):
+        if code[match.start() : match.start() + 6] != "import":
+            continue
+        names = {
+            IMPORT_ALIAS.split(item.strip())[0]
+            for item in match.group(1).split(",")
+            if item.strip()
+        }
+        imports[match.group(3)].append(names)
+    return imports
+
+
+def host_replaced(path: str, target: str, names: set[str]) -> bool:
+    if not names:
+        return False
+    if target in HOST_REPLACED_IMPORTS:
+        replaced = HOST_REPLACED_IMPORTS[target]
+        return replaced is None or names <= replaced
+    if path.endswith("BUILD.js") and target in BUILD_REPLACED_IMPORTS:
+        return names <= BUILD_REPLACED_IMPORTS[target]
+    return False
+
+
 def resolve_rule_import(specifier: str, tracked: set[str]) -> str | None:
     """Resolve a //rules import with the catalog's file and index conventions."""
     base = specifier.removeprefix("//")
@@ -677,15 +743,37 @@ def resolve_rule_import(specifier: str, tracked: set[str]) -> str | None:
     return None
 
 
-def import_graph(rows: list[dict[str, object]]) -> dict[str, set[str]]:
+@dataclasses.dataclass
+class ImportGraph:
+    edges: dict[str, set[str]]
+    replaced: int
+    fake_users: set[str]
+
+
+def import_graph(rows: list[dict[str, object]]) -> ImportGraph:
+    """Return Luau-relevant static imports; host-replaced imports are left out."""
     tracked = {str(row["path"]) for row in rows}
-    graph = {path: set() for path in tracked}
+    graph = ImportGraph({path: set() for path in tracked}, 0, set())
     for path in sorted(tracked):
         source = (ROOT / path).read_text(encoding="utf-8")
-        for specifier in static_rule_imports(source):
+        if path.endswith(TEST_SUFFIX) and HOST_GLOBAL_PATCH.search(mask_comments_and_literals(source)):
+            graph.fake_users.add(path)
+        named = named_rule_imports(source)
+        occurrences = collections.Counter(static_rule_imports(source))
+        for specifier, count in sorted(occurrences.items()):
             target = resolve_rule_import(specifier, tracked)
-            if target is not None:
-                graph[path].add(target)
+            if target is None:
+                continue
+            statements = named.get(specifier, [])
+            # A namespace, default, side-effect, or re-export statement keeps the edge.
+            if len(statements) == count and all(
+                host_replaced(path, target, names) for names in statements
+            ):
+                graph.replaced += count
+                if any(TEST_HOST_FAKE.fullmatch(name) for names in statements for name in names):
+                    graph.fake_users.add(path)
+                continue
+            graph.edges[path].add(target)
     return graph
 
 
@@ -797,6 +885,36 @@ def boundary_graph(
     return dependencies, evidence
 
 
+def owning_task(boundary: str) -> str:
+    return BOUNDARIES[boundary].task.removeprefix("split from ")
+
+
+def task_graph(
+    dependencies: dict[str, set[str]],
+    evidence: dict[tuple[str, str], tuple[str, str]],
+) -> tuple[dict[str, set[str]], dict[tuple[str, str], tuple[str, str]]]:
+    """Condense the boundary graph by owning task."""
+    tasks = {owning_task(boundary) for boundary in dependencies}
+    graph: dict[str, set[str]] = {task: set() for task in tasks}
+    task_evidence: dict[tuple[str, str], tuple[str, str]] = {}
+    for boundary in sorted(dependencies):
+        for required in sorted(dependencies[boundary]):
+            source = owning_task(boundary)
+            target = owning_task(required)
+            if source == target:
+                continue
+            graph[source].add(target)
+            task_evidence.setdefault((source, target), evidence[(boundary, required)])
+    return graph, task_evidence
+
+
+def host_prerequisites(boundary: str, fake_boundaries: set[str]) -> str:
+    prerequisites = BOUNDARIES[boundary].host_prerequisites
+    if boundary in fake_boundaries:
+        prerequisites += ("test host fakes",)
+    return ", ".join(prerequisites) or "none"
+
+
 def print_report(rows: list[dict[str, object]]) -> None:
     category_names = [
         "mechanical",
@@ -805,8 +923,11 @@ def print_report(rows: list[dict[str, object]]) -> None:
         "excluded/non-authoring JavaScript",
     ]
     role_names = ["production", "workspace/build", "test", "excluded"]
-    graph = import_graph(rows)
+    imports = import_graph(rows)
+    graph = imports.edges
     dependencies, dependency_evidence = boundary_graph(rows, graph)
+    by_path = {str(row["path"]): row for row in rows}
+    fake_boundaries = {str(by_path[path]["boundary"]) for path in imports.fake_users}
 
     print("# JavaScript-to-Luau conversion inventory")
     print()
@@ -875,13 +996,13 @@ def print_report(rows: list[dict[str, object]]) -> None:
         boundary_rows[str(row["boundary"])].append(row)
     for boundary, selected in sorted(boundary_rows.items()):
         definition = BOUNDARIES[boundary]
-        prerequisites = ", ".join(definition.host_prerequisites) or "none"
+        prerequisites = host_prerequisites(boundary, fake_boundaries)
         print(
             f"| `{boundary}` | {len(selected)} | `{definition.task}` | {prerequisites} |"
         )
 
     print()
-    print("Every boundary above has at most 20 tracked JavaScript files. The task names identify current ownership or the task that must be split during backlog reconciliation.")
+    print("Every boundary above has at most 20 tracked JavaScript files. The task names identify current ownership. Divide each `split from` task into separate tasks during backlog reconciliation.")
 
     print()
     print("### Files by migration boundary")
@@ -914,20 +1035,52 @@ def print_report(rows: list[dict[str, object]]) -> None:
     print()
     print("## Boundary dependency table")
     print()
-    print("An edge means that a source boundary has a static import from the prerequisite boundary. Host prerequisites are planning estimates recorded in BOUNDARIES; compare them with the verified host surface and gaps in docs/design/luau-authoring-contract.md before scheduling.")
+    print(f"An edge means that a source boundary has a static import from the prerequisite boundary. The graph leaves out {imports.replaced} import(s) that name only host-replaced JavaScript test scaffolding (`//rules/imp/test` exports, and `jsSources` from `//rules/js` in BUILD modules). A boundary whose tests import `withFake*` helpers or replace `globalThis.__host_*` functions requires test host fakes. Host prerequisites are planning estimates recorded in BOUNDARIES; compare them with the verified host surface and gaps in docs/design/luau-authoring-contract.md before scheduling.")
     print()
     print("| Boundary | Static-import prerequisites | Example edge | Host prerequisites |")
     print("| --- | --- | --- | --- |")
     for boundary in sorted(dependencies):
         required = sorted(dependencies[boundary])
-        imports = ", ".join(f"`{item}`" for item in required) or "none"
+        listed = ", ".join(f"`{item}`" for item in required) or "none"
         if required:
             source, target = dependency_evidence[(boundary, required[0])]
             example = f"`{source}` → `{target}`"
         else:
             example = "none"
-        host = ", ".join(BOUNDARIES[boundary].host_prerequisites) or "none"
-        print(f"| `{boundary}` | {imports} | {example} | {host} |")
+        host = host_prerequisites(boundary, fake_boundaries)
+        print(f"| `{boundary}` | {listed} | {example} | {host} |")
+
+    print()
+    print("## Task dependency table")
+    print()
+    print("This table condenses the boundary graph by owning task. A task's `depends_on` list must contain each prerequisite task, and a prerequisite task must not depend on its dependent.")
+    print()
+    tasks, task_evidence = task_graph(dependencies, dependency_evidence)
+    print("| Task | Prerequisite tasks | Example edge |")
+    print("| --- | --- | --- |")
+    for task in sorted(tasks):
+        required = sorted(tasks[task])
+        listed = ", ".join(f"`{item}`" for item in required) or "none"
+        if required:
+            source, target = task_evidence[(task, required[0])]
+            example = f"`{source}` → `{target}`"
+        else:
+            example = "none"
+        print(f"| `{task}` | {listed} | {example} |")
+    print()
+    task_cycles = [
+        component
+        for component in strongly_connected_components(tasks)
+        if len(component) > 1
+    ]
+    if not task_cycles:
+        print("- Task graph: acyclic")
+    for component in sorted(task_cycles, key=lambda item: (-len(item), item)):
+        print(f"- Task cycle ({len(component)} tasks):")
+        for task in component:
+            for required in sorted(tasks[task] & set(component)):
+                source, target = task_evidence[(task, required)]
+                print(f"  - `{task}` → `{required}`: `{source}` → `{target}`")
 
     print()
     print("### Module island order")

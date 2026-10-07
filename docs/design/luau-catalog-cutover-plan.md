@@ -54,23 +54,25 @@ starts.
 | Host removal | `quickjs-removal` | 2 | QuickJS removal |
 | Examples | `example-decision` | 3 | Example migration decision |
 | Integration | `workspace-integration` | 19 | Workspace, CI, docs, and integration |
-| Imp | `imp-host-foundation` | 3 | Split host/test task |
-| Imp | `imp-core-foundation` | 10 | Split core task |
-| Imp | `imp-validation` | 15 | Split host/test task |
+| Imp | `imp-host-foundation` | 3 | Imp host and test task |
+| Imp | `imp-core-foundation` | 9 | Imp core task |
+| Imp | `imp-generate-validation` | 1 | Imp generate validation task |
+| Imp | `imp-validation` | 15 | Imp host and test task |
 | Rust | `compiled-language-island` | 3 | Split Rust task |
-| Workflows | `workflow-core-runtime` | 6 | Split core workflow task |
-| Workflows | `workflow-core-validation` | 6 | Split core workflow task |
-| Workflows | `workflow-codegen-runtime` | 3 | Split codegen workflow task |
-| Workflows | `workflow-codegen-validation` | 4 | Split codegen workflow task |
-| Workflows | `workflow-lockfiles-runtime` | 1 | Split packaging workflow task |
-| Workflows | `workflow-packaging-runtime` | 3 | Split packaging workflow task |
-| Workflows | `workflow-packaging-validation` | 7 | Split packaging workflow task |
-| Workflows | `builtin-lockfiles` | 1 | Split packaging workflow task |
-| C | `c-shared-toolchain` | 1 | Split C catalog-root task |
+| Workflows | `workflow-core-runtime` | 6 | Core workflow task |
+| Workflows | `workflow-core-validation` | 6 | Core workflow task |
+| Workflows | `workflow-codegen-runtime` | 3 | Imp core task |
+| Workflows | `workflow-codegen-validation` | 4 | Codegen workflow task |
+| Workflows | `workflow-lockfiles-runtime` | 2 | Packaging workflow runtime task |
+| Workflows | `workflow-packaging-runtime` | 5 | Packaging workflow runtime task |
+| Workflows | `workflow-vs` | 1 | Packaging workflow task |
+| Workflows | `workflow-packaging-validation` | 3 | Packaging workflow task |
+| Workflows | `builtin-lockfiles` | 1 | Packaging workflow task |
+| C | `c-shared-toolchain` | 1 | C toolchain task |
 | C | `c-toolchains` | 12 | C toolchain task |
 | C | `c-cmake` | 12 | CMake task |
-| C | `c-catalog-root` | 4 | Split C catalog-root task |
-| C | `c-generate-build` | 1 | Split C catalog-root task |
+| C | `c-catalog-root` | 4 | C catalog-root task |
+| C | `c-generate-build` | 1 | C BUILD generation task |
 | JavaScript | `js-biome` | 9 | Biome task |
 | JavaScript | `js-node-pnpm` | 13 | Node and pnpm task |
 | Python | `python-core` | 14 | Python core task |
@@ -94,6 +96,21 @@ entrypoints, and prints the complete cross-boundary dependency table with one
 source edge for each row. It ignores addressed data such as lockfiles because
 those strings are not module imports.
 
+The report also ignores imports that name only JavaScript test scaffolding
+that the Luau host replaces:
+
+- All exports of `//rules/imp/test`. Luau tests use `core.test` and
+  `core.test_root`.
+- `jsSources` from `//rules/js` in BUILD modules. Luau BUILD modules do not
+  declare their own JavaScript sources. A test that imports `jsSources` keeps
+  its edge.
+
+These imports are not Luau dependencies, and they caused most of the false
+cycles between tasks. A boundary gets the "test host fakes" prerequisite when
+one of its tests imports a `withFake*` helper or replaces a
+`globalThis.__host_*` function. The report prints the number of imports that it
+ignores.
+
 Review boundaries express ownership. They are not dependency nodes: one
 boundary can contain independent files from different import stages. The
 module-level graph has eleven prerequisite-first stages. Its condensed graph is
@@ -116,13 +133,14 @@ The main cross-boundary constraints are:
 | Consumer | Static-import prerequisites |
 | --- | --- |
 | C toolchains | Shared C toolchain, Imp foundations, base lockfile workflow |
-| CMake | C toolchains, Imp foundations, core and packaging workflows |
-| C catalog and BUILD generation | C toolchains, CMake, compiled-language island, workflow codegen |
+| C catalog root | C toolchains, Imp foundations, core and packaging workflows |
+| CMake | C catalog root, C toolchains, Imp foundations, core, lockfile, and packaging workflows |
+| C BUILD generation | C catalog root, CMake, Imp core with codegen workflows |
 | JavaScript and Python toolchains | Imp foundations, base lockfile workflow |
 | Compiled-language island | C toolchains, Imp foundations, core, codegen, and packaging workflows |
 | OCI and Zola | Imp foundations, base lockfile and packaging workflows |
 | Built-in lockfiles | CMake and all shipped language and toolchain packages |
-| Validation boundaries | Test discovery, Imp test rules, and their runtime boundary |
+| Validation boundaries | Test discovery, their runtime boundary, and test host fakes when their tests use fakes |
 | Workspace integration | Every shipped production and validation boundary |
 
 The boundary dependency table lists imports between ownership boundaries. It
@@ -130,6 +148,24 @@ can contain cycles because a boundary can contain modules from different
 stages; do not use it by itself as a task schedule. Use the module island order
 to plan conversion, then split boundaries where needed. Re-run the report so
 the edges and stages come from the current source.
+
+The task dependency table condenses the boundary graph by owning task. Each
+task's Peon `depends_on` list must contain the prerequisite tasks in that table.
+The report prints every task cycle with one source edge for each step.
+
+**Verified:** on 2026-10-07 the report printed three task cycles:
+
+- Biome and Node/pnpm: `rules/js/biome/index.js` imports `rules/js/graph.js`,
+  and `rules/js/graph_test.js` imports Biome.
+- Odin and the packaging workflow: `rules/workflows/vs/index.js` imports
+  `rules/odin/index.js`, and `rules/odin/vscode/index.js` imports the VS
+  workflow. These two boundaries form a cycle by themselves, so a task change
+  alone cannot remove it; it needs a module or boundary split. The built-in
+  lockfile aggregator and the lockfile tests also import Odin.
+- Python core and Ruff: Ruff imports `rules/python/index.js`, and
+  `rules/python/graph_test.js` imports Ruff.
+
+The CMake task and all of its prerequisite tasks were outside these cycles.
 
 ## Host prerequisites
 
@@ -146,6 +182,7 @@ current requirements are:
 | Tool and path APIs | Hermetic tool acquisition, platform data, environment settings, and path resolution |
 | Test discovery | Luau `TEST` values, BUILD discovery, filtering, execution, and failure locations |
 | Workspace and catalog discovery | Canonical root and nested BUILD addresses, generated BUILD names, installed-rule ownership, and cache identity |
+| Test host fakes | Luau test replacements for the JavaScript `withFake*` helpers and `globalThis.__host_*` patches: toolchain host, `run`, workspace writes, goal flags, and diffs |
 
 The report associates each review boundary with proposed host prerequisites. A
 host task must name the first boundary that consumes every new API. Do not add
@@ -153,24 +190,33 @@ an API only to approximate JavaScript behavior that no selected boundary uses.
 
 ## Backlog reconciliation
 
-Before the next catalog task is claimed, the sprint must reconcile the current
-Peon tasks with this plan:
+Task ownership follows these rules:
 
-- Split the C catalog-root task into shared toolchain, catalog root, and BUILD
-  generation boundaries. Reverse any task ordering that conflicts with the
-  report's current imports.
-- Split Imp work into host foundation, core foundation, validation, and the
-  compiled-language island.
-- Split workflow work into runtime, validation, base lockfile, packaging, and
-  built-in lockfile boundaries.
-- Keep the three cyclic Rust modules together. Keep Imp codegen, Odin, Rust
-  cargo input, and Tree-sitter runtime modules in their own boundaries.
-- Keep package tasks that already match one boundary, but replace their broad
-  dependency lists with prerequisites derived from the current import report
-  and host table.
+- The C toolchain task owns the shared C toolchain. A separate task owns C
+  BUILD generation, because it imports CMake.
+- The Imp core task owns the codegen workflow runtime modules, because the Imp
+  codegen and workflow generate modules import each other's packages. The
+  codegen workflow task owns their BUILD and test modules.
+- A separate validation task owns `rules/imp/generate_test.js`, because it
+  imports Odin toolchains. It follows the Odin task.
+- A packaging runtime task owns the base lockfile, package, and publish
+  workflows with their BUILD modules and focused tests. The packaging workflow
+  task owns the VS workflow, the built-in lockfile aggregator, and the lockfile
+  and VS tests.
+- The Imp host and test task retires the JavaScript test harness
+  (`rules/imp/test/index.js` and its BUILD module). The host test API and test
+  host fakes replace it.
+- A host task adds test host fakes. Each task whose boundary requires test host
+  fakes depends on it.
 
-This documentation task does not edit planner-owned task contracts. The sprint
-owns those changes.
+Before a catalog task outside the CMake chain is claimed, the sprint must
+reconcile the remaining tasks:
+
+- Split the Rust, Odin, and Tree-sitter tasks at their `split from` boundaries.
+  Keep the three cyclic Rust modules together.
+- Remove the task cycles that the report prints.
+- Replace broad dependency lists with the prerequisites in the report's task
+  dependency table and host table.
 
 ## QuickJS removal gate
 
