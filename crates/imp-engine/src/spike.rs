@@ -722,6 +722,9 @@ async fn load_workspace_with_rules_and_service(
         live.workspace.graph.roots = luau.load_modules().await?;
         live.workspace.workspace_config = luau.workspace_config();
         live.workspace.config_schemas = luau.configuration_schemas();
+        // Luau workflow modules register their own goals. The JavaScript
+        // seed goals do not apply to a Luau workspace.
+        live.workspace.goals = luau.goal_definitions();
         // The shared goal lifecycle still uses graph-core run bookkeeping,
         // even though Luau owns the pilot handles and callbacks.
         live.ctx
@@ -7061,7 +7064,7 @@ impl Drop for InvocationConfigGuard {
 /// the message alone: the workflow already wrote the sentence the user must
 /// read, so the host adds no wrapper and no stack trace around it.
 #[derive(Debug)]
-struct UserFacingGoalError(String);
+pub(crate) struct UserFacingGoalError(pub(crate) String);
 
 impl std::fmt::Display for UserFacingGoalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -7590,29 +7593,29 @@ pub async fn execute_goal_live_selection(
     let graph_goal_handler_name = live.workspace.graph_goal_handlers.get(goal).cloned();
     let luau_roots: Vec<GraphRoot> = graph_roots.iter().map(|root| (*root).clone()).collect();
     let result = if let Some(luau) = &live.luau {
-        let result = if luau_roots.is_empty() && goal != "test" {
-            Ok(None)
-        } else if luau_roots.is_empty() {
-            Err(anyhow::anyhow!("no Luau test roots selected"))
-        } else {
-            let cancellation = live
-                .scheduler
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|scheduler| scheduler.cancellation_flag())
-                .context("Luau graph execution requires an installed scheduler")?;
-            luau.borrow_mut()
-                .execute_graph(
-                    goal,
-                    &luau_roots,
-                    cancellation,
-                    flags.get("case").and_then(serde_json::Value::as_str),
-                    flags.get("suite").and_then(serde_json::Value::as_str),
-                )
-                .await
-        };
-        result.map_err(|error| anyhow::anyhow!("execute goal '{goal}': {error:#}"))
+        let cancellation = live
+            .scheduler
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|scheduler| scheduler.cancellation_flag())
+            .context("Luau graph execution requires an installed scheduler")?;
+        let ui_multi = live.ui_multi.lock().unwrap().clone();
+        let mut luau = luau.borrow_mut();
+        luau.set_ui_multi(ui_multi);
+        let result = luau
+            .execute_graph(goal, &luau_roots, cancellation, &flags, run_args)
+            .await;
+        luau.set_ui_multi(None);
+        // A workflow that refused on purpose already wrote the sentence the
+        // user must read.
+        result.map_err(|error| {
+            if error.downcast_ref::<UserFacingGoalError>().is_some() {
+                error
+            } else {
+                anyhow::anyhow!("execute goal '{goal}': {error:#}")
+            }
+        })
     } else {
         live.ctx
             .async_with(async move |ctx| -> Result<Option<String>> {
@@ -8752,6 +8755,8 @@ mod tests {
             &workspace.join("BUILD.luau"),
             r#"
 local core = require("@imp/core")
+require("@imp/rules/workflows/build")
+require("@imp/rules/workflows/test")
 local package = require("@imp/rules/workflows/package")
 local output = core.output
 local sh = core.native_tool("sh")
@@ -8818,6 +8823,11 @@ return {
         let live = load_workspace_with_rules(workspace, RulesSource::discover())
             .await
             .unwrap();
+        assert_eq!(
+            live.workspace.goals.keys().collect::<Vec<_>>(),
+            ["build", "package", "test"],
+            "a Luau workspace offers only the goals that its workflow modules register"
+        );
 
         run_goal_live(&live, workspace, "build", &["//:alpha".to_owned()])
             .await
@@ -8854,9 +8864,15 @@ return {
             "beta"
         );
 
-        run_goal_live(&live, workspace, "test", &["//:targets".to_owned()])
+        // The children are build tasks, not test units, so the test workflow
+        // receives each expansion child and rejects its value.
+        let error = run_goal_live(&live, workspace, "test", &["//:targets".to_owned()])
             .await
-            .unwrap();
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("a TEST root must resolve to a list"),
+            "{error:#}"
+        );
 
         let error = run_goal_live(
             &live,

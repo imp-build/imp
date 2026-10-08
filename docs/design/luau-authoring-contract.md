@@ -24,10 +24,10 @@ the gaps that block catalog migration.
 | Module loading | Loads `@imp/core`, `@imp/rules/...`, and `@workspace/...`; caches canonical module values and rejects namespace escapes. | The full catalog and its loader-dependent workspace features are not migrated. |
 | Workspace configuration | Loads `imp.workspace.luau`; on GitHub Actions it deep-merges `imp.workspace.ci.luau`. Luau rule modules can register schemas, read or write configuration, and expose schemas and resolved values to the CLI. | JavaScript and Luau use different field spellings. Luau configuration uses `snake_case`; the JavaScript runtime remains the default. |
 | BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. `imp goal generate-build` can write and check generated `BUILD.luau` files from registered Luau generators. | Language-specific generators must be ported to Luau before a Luau workspace can use them. |
-| Graph construction | Exposes `files`, `glob`, `task`, `expand`, `output`, `native_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. Expansions derive keyed `BUILD`, `PACKAGE`, and `TEST` children from resolved inputs; `get()` selects one child and `all()` selects every child. `register_build_rule` and `register_build_generator` provide the Luau BUILD renderer interface. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
-| Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, and a cache toggle. Captured artifacts can flow to downstream tasks through named outputs. | Allow-failure results and broader toolchain conveniences are not available. |
-| Tests and workflows | Luau BUILD modules can expose `BUILD`, `PACKAGE`, and `TEST` roots. `imp package` gathers selected artifact roots and publishes them under `dist/`. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. Test cases can resolve tasks and fake action runs, the toolchain platform, and workspace writes. | The standard workflow rule modules and mixed JavaScript/Luau test discovery are not available in Luau. Test fakes for goal flags, digest diffs, target addresses, and memo traces wait for those host APIs. |
-| Installed rules | The pilot tree contains Luau `asset`, `resource_package`, `workflows/build`, `workflows/package`, and `imp/native-tool` modules. | Other packages remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
+| Graph construction | Exposes `files`, `glob`, `task`, `expand`, `output`, `native_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. Expansions derive keyed children with goal slots such as `BUILD`, `PACKAGE`, and `TEST` from resolved inputs; `get()` selects one child and `all()` selects every child. `register_build_rule` and `register_build_generator` provide the Luau BUILD renderer interface. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
+| Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, a cache toggle, and allow-failure actions with exit code, stdout, and stderr. Captured artifacts can flow to downstream tasks through named outputs. The `run` workflow can start one interactive program. | Broader toolchain conveniences are not available. |
+| Tests and workflows | One generic driver runs every goal through the Luau workflow module that registers it with `core.goal`. Luau BUILD modules expose roots under the slot key of a registered goal. `imp package` publishes selected artifact roots under `dist/`, and `imp test` reports through `@imp/rules/workflows/test`. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. Test cases can resolve tasks and fake action runs, programs, the toolchain platform, goal flags, and workspace writes. | The `run`, `fmt`, and `lint` workflow modules and mixed JavaScript/Luau test discovery are not available in Luau. Test fakes for digest diffs, target addresses, and memo traces wait for those host APIs. |
+| Installed rules | The pilot tree contains Luau `asset`, `resource_package`, `workflows/build`, `workflows/package`, `workflows/test`, `workflows/report`, and `imp/native-tool` modules. | Other packages remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
 
 The shared C toolchain is the first consumer of `platform_info()`. C compiler
 toolchains and Imp host rules are the first consumers of acquired tool handles,
@@ -41,14 +41,15 @@ module ownership is clear from its address.
 
 ### Luau tests
 
-A Luau BUILD module declares a test root by using `TEST` in the exported value
-table:
+A Luau BUILD module declares a test root by using the `TEST` slot of
+`@imp/rules/workflows/test` in the exported value table:
 
 ```luau
 local core = require("@imp/core")
+local test = require("@imp/rules/workflows/test")
 
 return {
-    rule_tests = { TEST = core.test_root() },
+    rule_tests = { [test.TEST] = core.test_root() },
 }
 ```
 
@@ -64,9 +65,11 @@ but Imp uses its embedded host and does not invoke the Lute CLI.
 
 Select a Luau test root with `imp test //pkg:rule_tests`. Add `--case NAME` to
 run a named case or `--suite NAME` to run a named suite. These flags apply only
-to Luau workspaces. Imp reports each case as a test unit. Failures include the
-test module's canonical workspace address and source location. If a filter
-matches no tests, Imp reports that as a test failure.
+to Luau workspaces. A test root resolves to one `{ name, ok, output }` unit
+for each case, and `@imp/rules/workflows/test` aggregates and reports the
+units. Failures include the test module's canonical workspace address and
+source location. If a filter matches no tests in the selected test roots, the
+goal fails before the workflow runs.
 
 A workspace selects one authoring runtime: it cannot contain both
 `imp.workspace.js` and `imp.workspace.luau`. Luau test roots discover only
@@ -85,6 +88,7 @@ writes. The `core.test` table provides these functions:
 | `core.test.with_fake_run(fn)` | Records each `exec.action` call instead of running it. | `withFakeRun`, and `globalThis.__host_run` patches such as `withFakeGraphRun` |
 | `core.test.with_fake_toolchain_host([platform,] fn)` | Fakes `exec.action` as `with_fake_run` does, and replaces `platform_info()`. `platform` defaults to `{ os = "linux", arch = "x86_64" }`. | `withFakeToolchainHost` |
 | `core.test.with_fake_write_workspace(fn)` | Records each `write_workspace` call instead of writing to the workspace. | `withFakeWriteWorkspace` |
+| `core.test.with_fake_goal_flags(flags, fn)` | Makes `core.goal_flags()` return `flags`, a table of flag names to booleans. Calls `fn` with `flags`. | `withFakeGoalFlags` and `globalThis.__host_current_goal_flags` patches |
 
 Each `with_fake_*` function installs its fake, calls `fn` with a recorder
 table, removes the fake, and returns the values that `fn` returns. Imp removes
@@ -94,9 +98,17 @@ Later code in the same case, and every later case, uses the real host.
 The recorder tables contain these fields:
 
 - `runs`: one entry for each faked action, in call order. An entry has `argv`,
-  `display`, `cache`, `env` (the action `env` table only), `input_count` (the
-  number of `inputs` handles), `tools` (sorted tool names from the task
-  inputs), and `outputs` (output name to declared path).
+  `display`, `cache`, `allow_failure`, `env` (the action `env` table only),
+  `input_count` (the number of `inputs` handles), `tools` (sorted tool names
+  from the task inputs), and `outputs` (output name to declared path). A faked
+  `core.run_program` call adds an entry with `program = true`, `argv` (with
+  the program arguments), `display`, `env`, `inputs` (digests), and the run
+  policy fields `impure`, `sandbox`, `workspace_cwd`, and `stream`.
+- `set_run_stdout(display, text)`, `set_run_stderr(display, text)`, and
+  `set_run_exit_code(display, code)` (run and toolchain host fakes only): set
+  the status that a faked action or program with that `display` returns. The
+  default is exit code 0 and empty output. A nonzero exit code fails the
+  action, as the real host does, unless the action sets `allow_failure`.
 - `calls` (toolchain host only): entries in call order. Imp records
   `{ "platform_info" }` for each `platform_info()` call. It records
   `{ "native_tool", name }` when a faked action receives a `native_tool()`
@@ -172,19 +184,92 @@ Each function fails with a deterministic message when it is used incorrectly:
   and names the handle kind. An argument that is not a handle, or a fake body
   that is not a function, fails with the Luau argument conversion error.
 
-**Limits:** A Luau action result contains only `outputs`, so the fakes do not
-provide the JavaScript `setRunStdout`, `setRunStderr`, `setRunExitCode`, or
-`setRunOutputFiles` controls. The JavaScript toolchain host also replaces
+**Limits:** The fakes do not provide the JavaScript `setRunOutputFiles`
+control. Placeholder artifacts of a faked action have no content that
+`core.read_file_in_digest` can read. The JavaScript toolchain host also replaces
 download, archive, checksum, cache, and worker host functions. Luau rules
 express these steps as graph tasks and actions, so `with_fake_toolchain_host`
 covers them through the action fake.
 
-**Planned:** Luau has no goal flag, digest diff, target address, or memo trace
-host API. Thus there is no Luau replacement yet for `withFakeGoalFlags`,
-`__host_current_goal_flags`, `withFakeDiff`, `__host_target_address`, or
-`__host_memo_trace_write`. Each fake is planned together with its host API. There is
-no plan to add `withFakeSelectedTargets` or `withFakeMergeDigests`, because no
-rule test uses them.
+**Planned:** Luau has no digest diff, target address, or memo trace host API.
+Thus there is no Luau replacement yet for `withFakeDiff`,
+`__host_target_address`, or `__host_memo_trace_write`. Each fake is planned
+together with its host API. There is no plan to add `withFakeSelectedTargets`
+or `withFakeMergeDigests`, because no rule test uses them.
+
+### Goals and workflows
+
+**Verified:** Goal policy is Luau rule code. The Rust host selects roots,
+schedules and resolves them, and runs actions. It has no list of goal names.
+
+A workflow module registers a goal with `core.goal(name, fn, options)` and
+exports the slot key that the call returns. The slot key is the goal name in
+upper case, with `-` changed to `_`. For example, `core.goal("build", fn)`
+returns `"BUILD"`. A goal name uses lowercase letters, digits, and `-`, and a
+runtime can register a name once. `options.flags` declares boolean CLI flags.
+A flag cannot use the name of an option that every goal accepts, such as
+`jobs`, `no-cache`, `case`, or `suite`.
+
+**Illustrative example:** a workflow module that declares a `check` flag. Luau
+has no `fmt` workflow yet.
+
+```luau
+local core = require("@imp/core")
+
+local function graph_fmt_goal(roots)
+    local check = core.goal_flags().check
+    -- ...
+end
+
+return {
+    FMT = core.goal("fmt", graph_fmt_goal, {
+        flags = { check = { description = "Verify formatting without writing changes" } },
+    }),
+}
+```
+
+A BUILD module exposes a root under a slot key in a target table, or as a bare
+handle for `BUILD`. A slot holds a task, task output, or expansion handle. A
+`TEST` slot can also hold `core.test_root()`. Other values, such as tool
+handles, are not roots. A Luau workspace offers only the goals that its loaded
+modules register, so require each workflow module from `imp.workspace.luau` or
+from the rule module that uses its slot key. Imp resolves slot keys after it
+loads all BUILD modules, so the order of the modules does not change the
+result. Imp reports these errors:
+
+- A root under the slot of a goal that no module registers fails at load time
+  with `<address> exports slot 'X', but no goal registers it; require
+  @imp/rules/workflows/x`.
+- A goal with no registered workflow fails with `goal 'x' has no registered
+  Luau workflow; require @imp/rules/workflows/x`.
+
+For each goal invocation, the driver resolves every selected root and calls the
+goal function once with an array of `{ address, result }` entries. When no root
+is selected, the driver does not call the goal function.
+
+- A task output resolves to its value. A task with exactly one output resolves
+  to the value of that output. Another task resolves to its output table.
+- A `TEST` root resolves to its `{ name, ok, output }` units.
+- Artifact handles in a result become `{ type = "artifact", digest, path }`
+  tables.
+
+A string that the goal function returns is the goal report, which Imp prints
+after the progress display stops. These `@imp/core` functions serve workflow
+modules:
+
+| Function | Effect | JavaScript equivalent |
+| --- | --- | --- |
+| `core.goal_flags()` | Returns the flags of the running goal. Declared flags are booleans. For `test`, the table also holds the `case` and `suite` strings when they are set. Fails outside a goal invocation with `core.goal_flags() can only run while a goal executes`. | `goalFlags()` |
+| `core.goal_error(message)` | Fails the goal with `message` as the full user-facing error, without a stack trace or engine context. If the goal catches this error and then raises a different error, Imp reports the different error with its full context. | `throw goalError(message)` |
+| `core.run_args()` | Returns the CLI arguments after `--`, or an empty array outside a goal invocation. | `runArgs()` |
+| `core.read_file_in_digest(digest, path)` | Reads one file from a CAS tree digest. | `readFileInDigest(digest, path)` |
+| `core.run_program({ argv, display?, env?, inputs?, tools? })` | Runs one interactive program and returns `{ exit_code, stdout, stderr }`. `inputs` holds digests or artifact tables to stage, and `tools` holds tool handles. The host sets the `run` policy: the program is impure and sandboxed, starts in the real workspace, streams its output, and receives `core.run_args()` after `argv`. A nonzero exit fails the call. Outside a goal function, the call fails with `core.run_program() can only run in a goal callback`, except in a `core.test.with_fake_run` scope. | `runFromTemplate(runTemplate(opts), { args: runArgs(), sandbox: true, workspaceCwd: true, impure: true, stream: true })` |
+
+`exec.action({ allow_failure = true })` reports a nonzero exit code instead of
+failing the task. When the task declares outputs, the result of `exec.action`
+contains `outputs`, `exit_code`, `stdout`, and `stderr`. When the task declares
+no outputs, `exec.action` returns `nil`. A failed action that allows failure
+must still create its declared outputs, or the action fails.
 
 ### Task and action outputs
 
@@ -208,9 +293,9 @@ actions keep outputs in CAS and do not write them into the workspace.
 
 Use `expand()` when task output names graph children that Imp must select
 separately. The `create` callback receives resolved inputs and returns a table
-keyed by child name. Each child table may contain `BUILD`, `PACKAGE`, or
-`TEST` graph handles. Use `get()` to select one child or `all()` to select the
-children as a group:
+keyed by child name. Each child table may contain graph handles under goal
+slot keys such as `BUILD`, `PACKAGE`, or `TEST`. Use `get()` to select one
+child or `all()` to select the children as a group:
 
 **Illustrative example:**
 

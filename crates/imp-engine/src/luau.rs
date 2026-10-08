@@ -165,40 +165,52 @@ fn empty_json_object() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }
 
+/// One execution unit of a resolved `TEST` root.
 struct TestUnit {
     name: String,
     ok: bool,
     output: String,
 }
 
-fn render_test_report(units: &mut [TestUnit], passed: usize) -> String {
-    units.sort_by(|left, right| {
-        left.ok
-            .cmp(&right.ok)
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    let width = units
-        .iter()
-        .map(|unit| unit.name.len())
-        .max()
-        .unwrap_or_default()
-        + 2;
-    let mut lines = units
-        .iter()
-        .map(|unit| {
-            let (status, color) = if unit.ok {
-                ("PASS", "\x1b[32m")
-            } else {
-                ("FAIL", "\x1b[31m")
-            };
-            format!("{:<width$}{color}{status}\x1b[0m", unit.name, width = width)
-        })
-        .collect::<Vec<_>>();
-    for unit in units.iter().filter(|unit| !unit.output.is_empty()) {
-        lines.push(format!("{}:\n{}", unit.name, unit.output));
+/// A goal that a Luau workflow module registered with `core.goal`.
+#[derive(Clone)]
+struct LuauGoal {
+    callback: LuaFunction,
+    /// Declared boolean flags and their optional descriptions.
+    flags: BTreeMap<String, Option<String>>,
+}
+
+/// The state of the goal that the generic driver is running.
+/// The error that `core.goal_error` raises. The driver finds it in the
+/// callback error chain and shows only its message. A different error that
+/// the callback raises later keeps its full context.
+#[derive(Debug)]
+struct GoalRefusal(String);
+
+impl std::fmt::Display for GoalRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
     }
-    lines.push(format!("test: {passed}/{} unit(s) passed", units.len()));
-    lines.join("\n")
+}
+
+impl std::error::Error for GoalRefusal {}
+
+struct GoalInvocation {
+    flags: serde_json::Value,
+    run_args: Vec<String>,
+}
+
+/// The root slot key for a goal name, for example `BUILD` for `build` and
+/// `GENERATE_BUILD` for `generate-build`.
+fn goal_slot_key(goal: &str) -> String {
+    goal.to_uppercase().replace('-', "_")
+}
+
+fn is_slot_key(key: &str) -> bool {
+    key.starts_with(|first: char| first.is_ascii_uppercase())
+        && key
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
 #[derive(Clone)]
@@ -259,8 +271,11 @@ struct HostState {
     cache_hit_count: usize,
     tools: HashMap<String, u64>,
     paths: HashMap<String, u64>,
-    goals: HashMap<String, LuaFunction>,
-    goal_root_results: Option<LuaTable>,
+    goals: BTreeMap<String, LuauGoal>,
+    goal_invocation: Option<GoalInvocation>,
+    goal_callback_active: bool,
+    ui_multi: Option<indicatif::MultiProgress>,
+    lua: Option<mlua::WeakLua>,
     build_generators: Vec<LuauBuildGenerator>,
     build_rules: BTreeMap<String, LuauBuildRule>,
     workspace_root: PathBuf,
@@ -282,6 +297,7 @@ struct TestFakes {
     toolchain: Option<LuaTable>,
     platform: Option<(String, String)>,
     write_workspace: Option<LuaTable>,
+    goal_flags: Option<LuaTable>,
 }
 
 /// An opt-in Luau workspace runtime for the graph-host pilot.
@@ -341,8 +357,11 @@ impl LuauWorkspace {
             cache_hit_count: 0,
             tools: HashMap::new(),
             paths: HashMap::new(),
-            goals: HashMap::new(),
-            goal_root_results: None,
+            goals: BTreeMap::new(),
+            goal_invocation: None,
+            goal_callback_active: false,
+            ui_multi: None,
+            lua: None,
             build_generators: Vec::new(),
             build_rules: BTreeMap::new(),
             workspace_id,
@@ -386,9 +405,7 @@ impl LuauWorkspace {
                     bootstrap_host.clone(),
                     bootstrap_configuration.clone(),
                 )?;
-                install_package_executor(lua, bootstrap_host.clone())?;
                 install_expansion_executor(lua, bootstrap_host.clone())?;
-                install_goal_executor(lua, bootstrap_host.clone())?;
                 Ok(LuaValue::Nil)
             })
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -436,7 +453,6 @@ impl LuauWorkspace {
         let mut host = self.host.borrow_mut();
         host.task_results.clear();
         host.expansion_results.clear();
-        host.goal_root_results = None;
         host.graph_run_active = true;
         host.cancellation = cancellation;
     }
@@ -586,6 +602,7 @@ impl LuauWorkspace {
         build_files.sort();
 
         let mut roots = Vec::new();
+        let mut slot_roots = Vec::new();
         for file in build_files {
             let relative = file
                 .strip_prefix(&self.loader.workspace_root)
@@ -609,92 +626,82 @@ impl LuauWorkspace {
                 .unwrap_or_default();
             for pair in exports.pairs::<String, LuaValue>() {
                 let (name, value) = pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                let mut handles = Vec::new();
-                match value {
-                    LuaValue::UserData(userdata) => {
-                        if let Ok(handle) = userdata.borrow::<GraphHandle>() {
-                            handles.push((handle.id, "build"));
-                        }
-                    }
-                    LuaValue::Table(table) => {
-                        for (field, workflow) in
-                            [("BUILD", "build"), ("PACKAGE", "package"), ("TEST", "test")]
-                        {
-                            if let Some(userdata) =
-                                table.get::<Option<LuaAnyUserData>>(field).ok().flatten()
-                            {
-                                if let Ok(handle) = userdata.borrow::<GraphHandle>() {
-                                    handles.push((handle.id, workflow));
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
                 let address = if package.is_empty() {
                     format!("//:{name}")
                 } else {
                     format!("//{package}:{name}")
                 };
-                for (handle_id, workflow) in handles {
-                    let state = self.host.borrow();
-                    let node = state.nodes.get(&handle_id);
-                    let valid = match workflow {
-                        "build" => matches!(
-                            node,
-                            Some(
-                                GraphNode::Task
-                                    | GraphNode::TaskOutput { .. }
-                                    | GraphNode::ExpansionGet { .. }
-                                    | GraphNode::ExpansionAll { .. }
-                            )
-                        ),
-                        "package" => match node {
-                            Some(GraphNode::TaskOutput { task_id, name }) => state
-                                .tasks
-                                .get(task_id)
-                                .and_then(|task| task.outputs.get(name))
-                                .is_some_and(|kind| *kind == TaskOutputKind::Artifact),
-                            Some(GraphNode::Task) => {
-                                state.tasks.get(&handle_id).is_some_and(|task| {
-                                    task.outputs
-                                        .values()
-                                        .filter(|kind| **kind == TaskOutputKind::Artifact)
-                                        .count()
-                                        == 1
-                                })
+                let mut handles = Vec::new();
+                match value {
+                    LuaValue::UserData(userdata) => {
+                        if let Ok(handle) = userdata.borrow::<GraphHandle>() {
+                            handles.push((handle.id, "BUILD".to_owned()));
+                        }
+                    }
+                    LuaValue::Table(table) => {
+                        for pair in table.pairs::<LuaValue, LuaValue>() {
+                            let (key, value) =
+                                pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            let (LuaValue::String(key), LuaValue::UserData(userdata)) =
+                                (key, value)
+                            else {
+                                continue;
+                            };
+                            let key = key.to_string_lossy().to_string();
+                            if !is_slot_key(&key) {
+                                continue;
                             }
-                            Some(
-                                GraphNode::ExpansionGet { .. } | GraphNode::ExpansionAll { .. },
-                            ) => true,
-                            _ => false,
-                        },
-                        "test" => matches!(
-                            node,
-                            Some(
-                                GraphNode::Task
-                                    | GraphNode::TaskOutput { .. }
-                                    | GraphNode::TestRoot { .. }
-                                    | GraphNode::ExpansionGet { .. }
-                                    | GraphNode::ExpansionAll { .. }
-                            )
-                        ),
+                            if let Ok(handle) = userdata.borrow::<GraphHandle>() {
+                                handles.push((handle.id, key));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                handles.sort_by(|left, right| left.1.cmp(&right.1));
+                for (handle_id, slot) in handles {
+                    let state = self.host.borrow();
+                    // Other values, such as tool or file handles, are not roots.
+                    let valid = match state.nodes.get(&handle_id) {
+                        Some(
+                            GraphNode::Task
+                            | GraphNode::TaskOutput { .. }
+                            | GraphNode::ExpansionGet { .. }
+                            | GraphNode::ExpansionAll { .. },
+                        ) => true,
+                        Some(GraphNode::TestRoot { .. }) => slot == "TEST",
                         _ => false,
                     };
-                    drop(state);
-                    if !valid {
-                        continue;
+                    if valid {
+                        slot_roots.push((address.clone(), slot, handle_id));
                     }
-                    roots.push(GraphRoot {
-                        address: address.clone(),
-                        workflow: workflow.to_owned(),
-                        facet: None,
-                        handle_id: handle_id as u32,
-                        is_default: false,
-                    });
                 }
             }
         }
+        // Resolve slots after every module has loaded, so that the result does
+        // not depend on which module required a workflow first.
+        let state = self.host.borrow();
+        for (address, slot, handle_id) in slot_roots {
+            let workflow = state
+                .goals
+                .keys()
+                .find(|goal| goal_slot_key(goal) == slot)
+                .cloned()
+                .with_context(|| {
+                    format!(
+                        "{address} exports slot '{slot}', but no goal registers it; require @imp/rules/workflows/{}",
+                        slot.to_lowercase()
+                    )
+                })?;
+            roots.push(GraphRoot {
+                address,
+                workflow,
+                facet: None,
+                handle_id: handle_id as u32,
+                is_default: false,
+            });
+        }
+        drop(state);
         crate::graph::GraphCatalog {
             roots: roots.clone(),
         }
@@ -716,26 +723,72 @@ impl LuauWorkspace {
         self.run_script("@imp/generate-build", &source).await
     }
 
-    /// Run selected graph task handles and then the Luau build-goal callback.
+    /// Goals that Luau workflow modules registered, with their declared
+    /// flags, in the form that the CLI parses.
+    pub fn goal_definitions(&self) -> BTreeMap<String, crate::spike::Goal> {
+        self.host
+            .borrow()
+            .goals
+            .iter()
+            .map(|(name, goal)| {
+                let flags = goal
+                    .flags
+                    .iter()
+                    .map(|(flag, description)| {
+                        (
+                            flag.clone(),
+                            crate::spike::GoalFlagDef {
+                                description: description.clone(),
+                            },
+                        )
+                    })
+                    .collect();
+                (
+                    name.clone(),
+                    crate::spike::Goal {
+                        name: name.clone(),
+                        product: name.clone(),
+                        flags,
+                        selectorless: false,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Give streamed program output a way to suspend the live progress UI.
+    pub fn set_ui_multi(&mut self, multi: Option<indicatif::MultiProgress>) {
+        self.host.borrow_mut().ui_multi = multi;
+    }
+
+    /// Run a goal through its registered Luau workflow callback.
+    ///
+    /// The driver resolves each selected root to a value and calls the
+    /// callback once with an array of `{ address, result }`. It has no list
+    /// of goal names: all goal policy is in the workflow module. A string
+    /// that the callback returns is the goal report.
     pub async fn execute_graph(
         &mut self,
         goal: &str,
         roots: &[GraphRoot],
         cancellation: Arc<AtomicBool>,
-        case_filter: Option<&str>,
-        suite_filter: Option<&str>,
+        flags: &serde_json::Value,
+        run_args: &[String],
     ) -> Result<Option<String>> {
         if !self.host.borrow().graph_run_active {
             self.begin_graph_run(Arc::clone(&cancellation));
         } else {
             self.host.borrow_mut().cancellation = Arc::clone(&cancellation);
         }
-        let result = self
-            .execute_graph_inner(goal, roots, cancellation, case_filter, suite_filter)
-            .await;
+        self.host.borrow_mut().goal_invocation = Some(GoalInvocation {
+            flags: flags.clone(),
+            run_args: run_args.to_vec(),
+        });
+        let result = self.execute_graph_inner(goal, roots, flags).await;
         let mut host = self.host.borrow_mut();
         host.graph_run_active = false;
-        host.goal_root_results = None;
+        host.goal_invocation = None;
+        host.goal_callback_active = false;
         result
     }
 
@@ -743,89 +796,99 @@ impl LuauWorkspace {
         &mut self,
         goal: &str,
         roots: &[GraphRoot],
-        cancellation: Arc<AtomicBool>,
-        case_filter: Option<&str>,
-        suite_filter: Option<&str>,
+        flags: &serde_json::Value,
     ) -> Result<Option<String>> {
-        if goal != "build" && goal != "test" && goal != "package" {
-            bail!("Luau pilot does not implement the '{goal}' workflow");
+        let callback = self
+            .host
+            .borrow()
+            .goals
+            .get(goal)
+            .map(|goal| goal.callback.clone())
+            .with_context(|| {
+                format!(
+                    "goal '{goal}' has no registered Luau workflow; require @imp/rules/workflows/{}",
+                    goal.replace('-', "_")
+                )
+            })?;
+        // As in JavaScript, a goal with no selected roots does not call its
+        // workflow.
+        if roots.is_empty() {
+            return Ok(None);
         }
-        self.host.borrow_mut().cancellation = cancellation;
-        let mut test_units = Vec::new();
+        let lua = self.lua()?;
+        let case_filter = flags.get("case").and_then(serde_json::Value::as_str);
+        let suite_filter = flags.get("suite").and_then(serde_json::Value::as_str);
+        let entries = lua.create_table().map_err(lua_err)?;
+        let mut test_roots = 0;
+        let mut test_units = 0;
         for root in roots {
-            if goal == "test" {
-                let package = match self.host.borrow().nodes.get(&(root.handle_id as u64)) {
-                    Some(GraphNode::TestRoot { package }) => Some(package.clone()),
-                    _ => None,
-                };
-                if let Some(package) = package {
-                    test_units.extend(
-                        self.run_test_root(&root.address, &package, case_filter, suite_filter)
-                            .await?,
-                    );
-                    continue;
+            let package = match self.host.borrow().nodes.get(&(root.handle_id as u64)) {
+                Some(GraphNode::TestRoot { package }) => Some(package.clone()),
+                _ => None,
+            };
+            let result = if let Some(package) = package {
+                let units = self
+                    .run_test_root(&package, case_filter, suite_filter)
+                    .await?;
+                test_roots += 1;
+                test_units += units.len();
+                test_units_value(&lua, units).map_err(lua_err)?
+            } else {
+                let script = format!("return __imp_execute_task({})", root.handle_id);
+                let value = self
+                    .run_script_value("@imp/goal-root", &script)
+                    .await
+                    .with_context(|| format!("execute Luau graph root {}", root.address))?;
+                let value = single_output_value(&self.host.borrow(), root.handle_id as u64, value)
+                    .map_err(lua_err)?;
+                plain_goal_value(&lua, &self.host, value, 0).map_err(lua_err)?
+            };
+            push_goal_entry(&lua, &entries, &root.address, result).map_err(lua_err)?;
+        }
+        if test_roots > 0 && test_units == 0 && (case_filter.is_some() || suite_filter.is_some()) {
+            let filter = case_filter
+                .map(|name| format!("case '{name}'"))
+                .or_else(|| suite_filter.map(|name| format!("suite '{name}'")))
+                .unwrap_or_default();
+            bail!("no {filter} found in selected test roots");
+        }
+        self.host.borrow_mut().goal_callback_active = true;
+        let outcome = callback.call_async::<LuaValue>(entries).await;
+        let mut host = self.host.borrow_mut();
+        host.goal_callback_active = false;
+        host.task_failure = None;
+        drop(host);
+        match outcome {
+            Ok(LuaValue::String(report)) => Ok(Some(report.to_string_lossy().to_string())),
+            Ok(_) => Ok(None),
+            Err(error) => {
+                let refusal = error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<GoalRefusal>());
+                match refusal {
+                    Some(GoalRefusal(message)) => {
+                        log::debug!("goal '{goal}' callback: {error}");
+                        Err(anyhow::Error::new(crate::spike::UserFacingGoalError(
+                            message.clone(),
+                        )))
+                    }
+                    None => Err(anyhow::anyhow!("goal '{goal}' callback: {error}")),
                 }
             }
-            let script = format!("return __imp_execute_task({})", root.handle_id);
-            self.run_script_value("@imp/pilot-execute", &script)
-                .await
-                .with_context(|| format!("execute Luau graph root {}", root.address))?;
-            if goal == "package" {
-                let address = serde_json::to_string(&root.address)?;
-                let script = format!(
-                    "return __imp_add_package_root({}, {})",
-                    root.handle_id, address
-                );
-                self.run_script("@imp/package-root", &script)
-                    .await
-                    .with_context(|| format!("collect Luau package root {}", root.address))?;
-            } else if goal == "test" {
-                test_units.push(TestUnit {
-                    name: root.address.clone(),
-                    ok: true,
-                    output: String::new(),
-                });
-            }
         }
-        if goal == "test" {
-            if test_units.is_empty() {
-                let filter = case_filter
-                    .map(|name| format!("case '{name}'"))
-                    .or_else(|| suite_filter.map(|name| format!("suite '{name}'")))
-                    .unwrap_or_else(|| "tests".to_owned());
-                test_units.push(TestUnit {
-                    name: roots
-                        .first()
-                        .map(|root| root.address.clone())
-                        .unwrap_or_else(|| "Luau tests".to_owned()),
-                    ok: false,
-                    output: format!("no {filter} found in selected test roots"),
-                });
-            }
-            let passed = test_units.iter().filter(|unit| unit.ok).count();
-            let failed = test_units.len().saturating_sub(passed);
-            let report = render_test_report(&mut test_units, passed);
-            if failed > 0 {
-                bail!("{report}");
-            }
-            return Ok(Some(report));
-        }
-        if goal == "package" && !self.host.borrow().goals.contains_key("package") {
-            bail!("Luau package roots require @imp/rules/workflows/package");
-        }
-        if self.host.borrow().goals.contains_key(goal) {
-            let script = format!(
-                "return __imp_execute_goal({})",
-                serde_json::to_string(goal)?
-            );
-            self.run_script("@imp/pilot-goal", &script).await?;
-        }
-        Ok(None)
+    }
+
+    fn lua(&self) -> Result<Lua> {
+        self.host
+            .borrow()
+            .lua
+            .as_ref()
+            .and_then(mlua::WeakLua::try_upgrade)
+            .context("Luau runtime is not initialized")
     }
 
     async fn run_test_root(
         &self,
-        address: &str,
         package: &str,
         case_filter: Option<&str>,
         suite_filter: Option<&str>,
@@ -882,7 +945,7 @@ impl LuauWorkspace {
                 return Ok(Vec::new());
             }
             return Ok(vec![TestUnit {
-                name: address.to_owned(),
+                name: "discovery".to_owned(),
                 ok: false,
                 output: format!("no .test.luau modules found in {}", directory.display()),
             }]);
@@ -969,7 +1032,7 @@ impl LuauWorkspace {
                     Ok(runtime) => runtime,
                     Err(error) => {
                         units.push(TestUnit {
-                            name: format!("{address} {module} {case_name}"),
+                            name: format!("{module} {case_name}"),
                             ok: false,
                             output: format!("{error:#}"),
                         });
@@ -1006,12 +1069,12 @@ impl LuauWorkspace {
                 };
                 units.push(match result {
                     Ok(()) => TestUnit {
-                        name: format!("{address} {module} {case_name}"),
+                        name: format!("{module} {case_name}"),
                         ok: true,
                         output: String::new(),
                     },
                     Err(error) => TestUnit {
-                        name: format!("{address} {module} {case_name}"),
+                        name: format!("{module} {case_name}"),
                         ok: false,
                         output: format!("{error:#}"),
                     },
@@ -1482,90 +1545,102 @@ fn install_task_executor(
     lua.globals().set("__imp_execute_task", execute)
 }
 
-fn install_package_executor(lua: &Lua, host: Rc<RefCell<HostState>>) -> LuaResult<()> {
-    let append = lua.create_function(move |lua, (handle_id, address): (u64, String)| {
-        let node = host.borrow().nodes.get(&handle_id).cloned();
-        let (task_id, output_name) = match node {
-            Some(GraphNode::TaskOutput { task_id, name }) => (task_id, name),
-            Some(GraphNode::Task) => {
-                let task = host
-                    .borrow()
-                    .tasks
-                    .get(&handle_id)
-                    .cloned()
-                    .ok_or_else(|| LuaError::external("package root references an unknown task"))?;
-                let outputs: Vec<_> = task
-                    .outputs
-                    .iter()
-                    .filter(|(_, kind)| **kind == TaskOutputKind::Artifact)
-                    .map(|(name, _)| name.clone())
-                    .collect();
-                if outputs.len() != 1 {
-                    return Err(LuaError::external(format!(
-                        "package root {address} must expose exactly one artifact output"
-                    )));
-                }
-                (handle_id, outputs[0].clone())
-            }
-            _ => {
-                return Err(LuaError::external(format!(
-                    "package root {address} is not an artifact task handle"
-                )))
-            }
-        };
-        if !host
-            .borrow()
-            .tasks
-            .get(&task_id)
-            .and_then(|task| task.outputs.get(&output_name))
-            .is_some_and(|kind| *kind == TaskOutputKind::Artifact)
-        {
-            return Err(LuaError::external(format!(
-                "package root {address} must expose an artifact output"
-            )));
+fn lua_err(error: LuaError) -> anyhow::Error {
+    anyhow::anyhow!(error.to_string())
+}
+
+/// A resolved `TEST` root: an array of `{ name, ok, output? }` units.
+fn test_units_value(lua: &Lua, units: Vec<TestUnit>) -> LuaResult<LuaValue> {
+    let list = lua.create_table()?;
+    for unit in units {
+        let value = lua.create_table()?;
+        value.set("name", unit.name)?;
+        value.set("ok", unit.ok)?;
+        if !unit.output.is_empty() {
+            value.set("output", unit.output)?;
         }
-        let result = host
-            .borrow()
-            .task_results
-            .get(&task_id)
-            .cloned()
-            .ok_or_else(|| LuaError::external("package root task did not produce a result"))?;
-        let value = result.get::<LuaValue>(output_name.as_str())?;
-        let LuaValue::UserData(value) = value else {
-            return Err(LuaError::external(format!(
-                "package root {address} did not return an artifact handle"
-            )));
-        };
-        let artifact_handle = value.borrow::<GraphHandle>()?;
-        let artifact = match host.borrow().nodes.get(&artifact_handle.id) {
-            Some(GraphNode::Artifact(artifact)) => artifact.clone(),
-            _ => {
-                return Err(LuaError::external(format!(
-                    "package root {address} did not return a captured artifact"
-                )))
+        push_record(&list, LuaValue::Table(value))?;
+    }
+    Ok(LuaValue::Table(list))
+}
+
+fn push_goal_entry(
+    lua: &Lua,
+    entries: &LuaTable,
+    address: &str,
+    result: LuaValue,
+) -> LuaResult<()> {
+    let entry = lua.create_table()?;
+    entry.set("address", address)?;
+    entry.set("result", result)?;
+    push_record(entries, LuaValue::Table(entry))
+}
+
+/// A task root whose task declares exactly one output resolves to that
+/// output's value. Other roots keep the value that the task executor returned.
+fn single_output_value(host: &HostState, handle_id: u64, value: LuaValue) -> LuaResult<LuaValue> {
+    let Some(GraphNode::Task) = host.nodes.get(&handle_id) else {
+        return Ok(value);
+    };
+    let Some(task) = host.tasks.get(&handle_id) else {
+        return Ok(value);
+    };
+    if task.outputs.len() != 1 {
+        return Ok(value);
+    }
+    let (name, _) = task.outputs.iter().next().expect("one output");
+    match value {
+        LuaValue::Table(table) => table.get::<LuaValue>(name.as_str()),
+        other => Ok(other),
+    }
+}
+
+/// Copy a resolved root value for a goal callback. Artifact handles become
+/// plain `{ type = "artifact", digest, path }` tables, so that a workflow can
+/// publish or stage them by digest. The task result cache is not changed.
+fn plain_goal_value(
+    lua: &Lua,
+    host: &Rc<RefCell<HostState>>,
+    value: LuaValue,
+    depth: usize,
+) -> LuaResult<LuaValue> {
+    if depth > 64 {
+        return Err(LuaError::external("goal root value is nested too deeply"));
+    }
+    match value {
+        LuaValue::UserData(userdata) => {
+            let artifact = match userdata.borrow::<GraphHandle>() {
+                Ok(handle) => match host.borrow().nodes.get(&handle.id) {
+                    Some(GraphNode::Artifact(artifact)) => Some(artifact.clone()),
+                    _ => None,
+                },
+                Err(_) => None,
+            };
+            let Some(artifact) = artifact else {
+                return Ok(LuaValue::UserData(userdata));
+            };
+            let digest = normalize_luau_artifact(&artifact)
+                .map_err(|error| {
+                    LuaError::external(format!("normalize goal root artifact: {error:#}"))
+                })?
+                .digest()
+                .to_owned();
+            let table = lua.create_table()?;
+            table.set("type", "artifact")?;
+            table.set("digest", digest)?;
+            table.set("path", artifact.path)?;
+            Ok(LuaValue::Table(table))
+        }
+        LuaValue::Table(table) => {
+            let copy = lua.create_table()?;
+            for pair in table.pairs::<LuaValue, LuaValue>() {
+                let (key, value) = pair?;
+                copy.raw_set(key, plain_goal_value(lua, host, value, depth + 1)?)?;
             }
-        };
-        let digest = normalize_luau_artifact(&artifact)
-            .map_err(|error| LuaError::external(format!("normalize package artifact: {error:#}")))?
-            .digest()
-            .to_owned();
-        let artifact_value = lua.create_table()?;
-        artifact_value.set("type", "artifact")?;
-        artifact_value.set("digest", digest)?;
-        artifact_value.set("path", artifact.path)?;
-        let root_value = lua.create_table()?;
-        root_value.set("address", address)?;
-        root_value.set("result", artifact_value)?;
-        let roots = host
-            .borrow()
-            .goal_root_results
-            .clone()
-            .unwrap_or(lua.create_table()?);
-        roots.set(roots.raw_len() + 1, root_value)?;
-        host.borrow_mut().goal_root_results = Some(roots);
-        Ok(())
-    })?;
-    lua.globals().set("__imp_add_package_root", append)
+            Ok(LuaValue::Table(copy))
+        }
+        other => Ok(other),
+    }
 }
 
 fn dependency_order(host: &HostState, root: u64) -> LuaResult<Vec<u64>> {
@@ -1728,32 +1803,6 @@ fn validate_task_result(
     Ok(result)
 }
 
-fn install_goal_executor(lua: &Lua, host: Rc<RefCell<HostState>>) -> LuaResult<()> {
-    let execute = lua.create_async_function(move |lua, name: String| {
-        let prepared = (|| {
-            let state = host.borrow();
-            let callback = state
-                .goals
-                .get(&name)
-                .cloned()
-                .ok_or_else(|| LuaError::external(format!("unknown Luau workflow '{name}'")))?;
-            let roots = state
-                .goal_root_results
-                .clone()
-                .unwrap_or(lua.create_table()?);
-            Ok::<_, LuaError>((callback, roots))
-        })();
-        async move {
-            let (callback, roots) = prepared?;
-            callback
-                .call_async::<LuaValue>(roots)
-                .await
-                .map_err(|error| LuaError::external(error.to_string()))
-        }
-    })?;
-    lua.globals().set("__imp_execute_goal", execute)
-}
-
 fn install_expansion_executor(lua: &Lua, host: Rc<RefCell<HostState>>) -> LuaResult<()> {
     let execute = lua.globals().get::<LuaFunction>("__imp_execute_task")?;
     let discover = lua.create_async_function(move |lua, expansion_id: u64| {
@@ -1848,6 +1897,7 @@ fn create_core(
     loader: ModuleLoader,
     configuration: Rc<RefCell<ConfigurationState>>,
 ) -> LuaResult<LuaValue> {
+    host.borrow_mut().lua = Some(lua.weak());
     let core = lua.create_table()?;
     core.set("BUILD", "BUILD")?;
     core.set("PACKAGE", "PACKAGE")?;
@@ -2516,17 +2566,87 @@ fn create_core(
     let goal_host = Rc::clone(&host);
     core.set(
         "goal",
-        lua.create_function(move |lua, (name, callback, _options): (String, Option<LuaFunction>, Option<LuaTable>)| {
-            let goal = lua.create_table()?;
-            goal.set("name", name.clone())?;
-            if let Some(callback) = callback {
-                goal_host
-                    .borrow_mut()
-                    .goals
-                    .insert(name.clone(), callback.clone());
-                goal.set("handler", callback)?;
+        lua.create_function(
+            move |_, (name, callback, options): (String, LuaFunction, Option<LuaTable>)| {
+                let valid_name = name.starts_with(|first: char| first.is_ascii_lowercase())
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+                if !valid_name {
+                    return Err(LuaError::external(format!(
+                        "core.goal name '{name}' must use lowercase letters, digits, and '-'"
+                    )));
+                }
+                let flags = match options {
+                    Some(options) => parse_goal_options(&name, options)?,
+                    None => BTreeMap::new(),
+                };
+                let mut host = goal_host.borrow_mut();
+                if host.goals.contains_key(&name) {
+                    return Err(LuaError::external(format!(
+                        "goal '{name}' is already registered"
+                    )));
+                }
+                host.goals
+                    .insert(name.clone(), LuauGoal { callback, flags });
+                Ok(goal_slot_key(&name))
+            },
+        )?,
+    )?;
+    let flags_host = Rc::clone(&host);
+    core.set(
+        "goal_flags",
+        lua.create_function(move |lua, ()| {
+            let host = flags_host.borrow();
+            if let Some(flags) = &host.fakes.goal_flags {
+                return Ok(LuaValue::Table(flags.clone()));
             }
-            Ok(goal)
+            let invocation = host.goal_invocation.as_ref().ok_or_else(|| {
+                LuaError::external("core.goal_flags() can only run while a goal executes")
+            })?;
+            lua.to_value(&invocation.flags)
+        })?,
+    )?;
+    let args_host = Rc::clone(&host);
+    core.set(
+        "run_args",
+        lua.create_function(move |lua, ()| {
+            // Outside a goal, as in a rule test, the program has no arguments.
+            let args = args_host
+                .borrow()
+                .goal_invocation
+                .as_ref()
+                .map(|invocation| invocation.run_args.clone())
+                .unwrap_or_default();
+            lua.create_sequence_from(args)
+        })?,
+    )?;
+    core.set(
+        "goal_error",
+        lua.create_function(|_, message: String| -> LuaResult<()> {
+            Err(LuaError::external(GoalRefusal(message)))
+        })?,
+    )?;
+    core.set(
+        "read_file_in_digest",
+        lua.create_function(|_, (digest, path): (String, String)| {
+            let digest = DirectoryDigest::from_digest(digest);
+            imp_store::digest::read_file_in_digest(&digest, &path)
+                .map_err(|error| LuaError::external(format!("read_file_in_digest: {error:#}")))
+        })?,
+    )?;
+    let program_host = Rc::clone(&host);
+    let program_configuration = Rc::clone(&configuration);
+    core.set(
+        "run_program",
+        lua.create_async_function(move |lua, options: LuaTable| {
+            let host = Rc::clone(&program_host);
+            let configuration = Rc::clone(&program_configuration);
+            async move {
+                run_program(lua, host, configuration, options)
+                    .await
+                    .map_err(|error| LuaError::external(format!("{error:#}")))
+            }
         })?,
     )?;
     let workspace_for_write = host.borrow().workspace_root.clone();
@@ -2587,12 +2707,89 @@ fn create_core(
     Ok(LuaValue::Table(core))
 }
 
+/// Read the `core.goal(name, fn, { flags })` option table. Each flag is a
+/// boolean CLI flag with an optional description.
+/// CLI options that every goal accepts. A goal flag with one of these names
+/// would make the goal command line ambiguous.
+const RESERVED_GOAL_FLAGS: &[&str] = &[
+    "axis",
+    "case",
+    "changed-since",
+    "fs-jobs",
+    "help",
+    "jobs",
+    "js-workers",
+    "keep-sandbox",
+    "no-cache",
+    "profile",
+    "suite",
+    "trace-inputs",
+];
+
+fn parse_goal_options(
+    goal: &str,
+    options: LuaTable,
+) -> LuaResult<BTreeMap<String, Option<String>>> {
+    let mut flags = BTreeMap::new();
+    for pair in options.pairs::<String, LuaValue>() {
+        let (key, value) = pair?;
+        if key != "flags" {
+            return Err(LuaError::external(format!(
+                "core.goal('{goal}') options do not accept '{key}'"
+            )));
+        }
+        let LuaValue::Table(declared) = value else {
+            return Err(LuaError::external(format!(
+                "core.goal('{goal}') flags must be a table"
+            )));
+        };
+        for pair in declared.pairs::<String, LuaTable>() {
+            let (flag, definition) = pair.map_err(|_| {
+                LuaError::external(format!(
+                    "core.goal('{goal}') flags must map flag names to tables"
+                ))
+            })?;
+            let valid = flag.starts_with(|first: char| first.is_ascii_lowercase())
+                && flag
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+            if !valid {
+                return Err(LuaError::external(format!(
+                    "core.goal('{goal}') flag '{flag}' must use lowercase letters, digits, and '-'"
+                )));
+            }
+            if RESERVED_GOAL_FLAGS.contains(&flag.as_str()) {
+                return Err(LuaError::external(format!(
+                    "core.goal('{goal}') flag '{flag}' is reserved by the imp CLI"
+                )));
+            }
+            let mut description = None;
+            for pair in definition.pairs::<String, LuaValue>() {
+                let (field, value) = pair?;
+                match (field.as_str(), value) {
+                    ("description", LuaValue::String(text)) => {
+                        description = Some(text.to_string_lossy().to_string());
+                    }
+                    _ => {
+                        return Err(LuaError::external(format!(
+                            "core.goal('{goal}') flag '{flag}' accepts only a 'description' string"
+                        )))
+                    }
+                }
+            }
+            flags.insert(flag, description);
+        }
+    }
+    Ok(flags)
+}
+
 /// Which host replacement a `core.test.with_fake_*` scope installs.
 #[derive(Clone, Copy)]
 enum FakeKind {
     Run,
     ToolchainHost,
     WriteWorkspace,
+    GoalFlags,
 }
 
 impl FakeKind {
@@ -2601,6 +2798,7 @@ impl FakeKind {
             FakeKind::Run => "core.test.with_fake_run",
             FakeKind::ToolchainHost => "core.test.with_fake_toolchain_host",
             FakeKind::WriteWorkspace => "core.test.with_fake_write_workspace",
+            FakeKind::GoalFlags => "core.test.with_fake_goal_flags",
         }
     }
 }
@@ -2638,6 +2836,7 @@ async fn with_test_fake(
         let occupied = match kind {
             FakeKind::Run | FakeKind::ToolchainHost => state.fakes.run.is_some(),
             FakeKind::WriteWorkspace => state.fakes.write_workspace.is_some(),
+            FakeKind::GoalFlags => state.fakes.goal_flags.is_some(),
         };
         if occupied {
             return Err(LuaError::external(format!(
@@ -2653,6 +2852,7 @@ async fn with_test_fake(
                 state.fakes.platform = platform;
             }
             FakeKind::WriteWorkspace => state.fakes.write_workspace = Some(recorder.clone()),
+            FakeKind::GoalFlags => state.fakes.goal_flags = Some(recorder.clone()),
         }
         state.task_results.clear();
         state.expansion_results.clear();
@@ -2668,6 +2868,7 @@ async fn with_test_fake(
                 state.fakes.platform = None;
             }
             FakeKind::WriteWorkspace => state.fakes.write_workspace = None,
+            FakeKind::GoalFlags => state.fakes.goal_flags = None,
         }
         state.task_results.clear();
         state.expansion_results.clear();
@@ -2731,6 +2932,7 @@ fn install_test_host_api(
             async move {
                 let recorder = lua.create_table()?;
                 recorder.set("runs", lua.create_table()?)?;
+                install_run_controls(&lua, &recorder)?;
                 with_test_fake(host, FakeKind::Run, recorder, None, body).await
             }
         })?,
@@ -2759,6 +2961,7 @@ fn install_test_host_api(
                     let recorder = lua.create_table()?;
                     recorder.set("runs", lua.create_table()?)?;
                     recorder.set("calls", lua.create_table()?)?;
+                    install_run_controls(&lua, &recorder)?;
                     with_test_fake(
                         host,
                         FakeKind::ToolchainHost,
@@ -2781,6 +2984,27 @@ fn install_test_host_api(
                 let recorder = lua.create_table()?;
                 recorder.set("calls", lua.create_table()?)?;
                 with_test_fake(host, FakeKind::WriteWorkspace, recorder, None, body).await
+            }
+        })?,
+    )?;
+
+    let flags_host = Rc::clone(&host);
+    test_api.set(
+        "with_fake_goal_flags",
+        lua.create_async_function(move |_, (flags, body): (LuaTable, LuaFunction)| {
+            let host = Rc::clone(&flags_host);
+            async move {
+                for pair in flags.pairs::<LuaValue, LuaValue>() {
+                    let (name, value) = pair?;
+                    if !matches!(name, LuaValue::String(_))
+                        || !matches!(value, LuaValue::Boolean(_))
+                    {
+                        return Err(LuaError::external(
+                            "core.test.with_fake_goal_flags flags must map flag names to booleans",
+                        ));
+                    }
+                }
+                with_test_fake(host, FakeKind::GoalFlags, flags, None, body).await
             }
         })?,
     )?;
@@ -3116,9 +3340,9 @@ fn create_expansion_projection(
     facet: Option<String>,
     all: bool,
 ) -> LuaResult<LuaAnyUserData> {
-    if !matches!(workflow.as_str(), "BUILD" | "PACKAGE" | "TEST") {
+    if !is_slot_key(&workflow) {
         return Err(LuaError::external(format!(
-            "expansion workflow must be BUILD, PACKAGE, or TEST; got '{workflow}'"
+            "expansion workflow must be a goal slot key such as BUILD or TEST; got '{workflow}'"
         )));
     }
     if !all && key.is_empty() {
@@ -3166,42 +3390,18 @@ fn validate_expansion_child(
     workflow: &str,
     key: &str,
 ) -> Result<()> {
-    let kind = host.nodes.get(&handle_id);
-    let valid = matches!(
-        (workflow, kind),
-        (
-            "BUILD" | "PACKAGE",
-            Some(
-                GraphNode::Task
-                    | GraphNode::TaskOutput { .. }
-                    | GraphNode::ExpansionGet { .. }
-                    | GraphNode::ExpansionAll { .. }
-            )
-        ) | (
-            "TEST",
-            Some(
-                GraphNode::Task
-                    | GraphNode::TaskOutput { .. }
-                    | GraphNode::TestRoot { .. }
-                    | GraphNode::ExpansionGet { .. }
-                    | GraphNode::ExpansionAll { .. }
-            )
-        )
-    );
+    let valid = match host.nodes.get(&handle_id) {
+        Some(
+            GraphNode::Task
+            | GraphNode::TaskOutput { .. }
+            | GraphNode::ExpansionGet { .. }
+            | GraphNode::ExpansionAll { .. },
+        ) => true,
+        Some(GraphNode::TestRoot { .. }) => workflow == "TEST",
+        _ => false,
+    };
     if !valid {
         bail!("expansion child '{key}' has no requested {workflow} workflow handle");
-    }
-    if workflow == "PACKAGE" {
-        if let Some(GraphNode::TaskOutput { task_id, name }) = kind {
-            if !host
-                .tasks
-                .get(task_id)
-                .and_then(|task| task.outputs.get(name))
-                .is_some_and(|output| *output == TaskOutputKind::Artifact)
-            {
-                bail!("expansion child '{key}' PACKAGE handle must be an artifact output");
-            }
-        }
     }
     Ok(())
 }
@@ -3233,6 +3433,11 @@ fn valid_output_name(name: &str) -> bool {
 }
 
 fn configured_base_env(configuration: &ConfigurationState) -> Result<BTreeMap<String, String>> {
+    imp_execution::staging::resolve_base_env(&configured_passthrough_entries(configuration)?)
+}
+
+/// The `imp.passthrough_env` entries of the workspace configuration.
+fn configured_passthrough_entries(configuration: &ConfigurationState) -> Result<Vec<String>> {
     let entries = configuration
         .values
         .get("imp")
@@ -3254,7 +3459,7 @@ fn configured_base_env(configuration: &ConfigurationState) -> Result<BTreeMap<St
         })
         .transpose()?
         .unwrap_or_default();
-    imp_execution::staging::resolve_base_env(&entries)
+    Ok(entries)
 }
 
 /// Read `exec.action({ outputs })` into the output names, their declared
@@ -3344,6 +3549,7 @@ struct FakeActionRequest {
     argv: Vec<String>,
     display: String,
     cache: bool,
+    allow_failure: bool,
     env: Option<LuaTable>,
     inputs: Option<LuaTable>,
     task_inputs: LuaTable,
@@ -3430,6 +3636,9 @@ fn run_fake_action(
         .set("display", request.display.clone())
         .map_err(lua_error)?;
     record.set("cache", request.cache).map_err(lua_error)?;
+    record
+        .set("allow_failure", request.allow_failure)
+        .map_err(lua_error)?;
     let env = lua.create_table().map_err(lua_error)?;
     for (name, value) in env_entries {
         env.set(name, value).map_err(lua_error)?;
@@ -3489,9 +3698,76 @@ fn run_fake_action(
     )
     .map_err(lua_error)?;
 
+    let (exit_code, stdout, stderr) =
+        fake_run_status(recorder, &request.display).map_err(lua_error)?;
+    if exit_code != 0 && !request.allow_failure {
+        bail!(
+            "graph action '{}' exited with {exit_code}: {stderr}",
+            request.display
+        );
+    }
     let result = lua.create_table().map_err(lua_error)?;
     result.set("outputs", artifacts).map_err(lua_error)?;
+    set_action_status(&result, exit_code, stdout, stderr).map_err(lua_error)?;
     Ok(result)
+}
+
+/// The status that a run fake returns for an action or program display. The
+/// default is a successful run with empty output.
+fn fake_run_status(recorder: &LuaTable, display: &str) -> LuaResult<(i32, String, String)> {
+    let control = |name: &str| -> LuaResult<LuaValue> {
+        recorder
+            .raw_get::<LuaTable>(name)?
+            .raw_get::<LuaValue>(display)
+    };
+    let exit_code = match control("run_exit_code")? {
+        LuaValue::Integer(code) => code as i32,
+        LuaValue::Number(code) => code as i32,
+        _ => 0,
+    };
+    let text = |value: LuaValue| match value {
+        LuaValue::String(text) => text.to_string_lossy().to_string(),
+        _ => String::new(),
+    };
+    Ok((
+        exit_code,
+        text(control("run_stdout")?),
+        text(control("run_stderr")?),
+    ))
+}
+
+/// Add the run status controls of the JavaScript toolchain fake to a run
+/// recorder: `set_run_stdout`, `set_run_stderr`, and `set_run_exit_code`.
+/// Each control matches an action or program by its display.
+fn install_run_controls(lua: &Lua, recorder: &LuaTable) -> LuaResult<()> {
+    for (setter, field) in [
+        ("set_run_stdout", "run_stdout"),
+        ("set_run_stderr", "run_stderr"),
+        ("set_run_exit_code", "run_exit_code"),
+    ] {
+        let values = lua.create_table()?;
+        recorder.set(field, values.clone())?;
+        let numeric = field == "run_exit_code";
+        recorder.set(
+            setter,
+            lua.create_function(move |_, (display, value): (String, LuaValue)| {
+                let valid = if numeric {
+                    matches!(value, LuaValue::Integer(_))
+                        || matches!(value, LuaValue::Number(number) if number.fract() == 0.0)
+                } else {
+                    matches!(value, LuaValue::String(_))
+                };
+                if !valid {
+                    return Err(LuaError::external(format!(
+                        "{setter}(display, value) requires a {}",
+                        if numeric { "whole number" } else { "string" }
+                    )));
+                }
+                values.raw_set(display, value)
+            })?,
+        )?;
+    }
+    Ok(())
 }
 
 async fn run_action(
@@ -3514,6 +3790,10 @@ async fn run_action(
         .get::<Option<bool>>("cache")
         .map_err(|error| anyhow::anyhow!(error.to_string()))?
         .unwrap_or(true);
+    let allow_failure = options
+        .get::<Option<bool>>("allow_failure")
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        .unwrap_or(false);
     let action_env = options
         .get::<Option<LuaTable>>("env")
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -3530,6 +3810,7 @@ async fn run_action(
                 argv,
                 display,
                 cache,
+                allow_failure,
                 env: action_env,
                 inputs: action_inputs,
                 task_inputs,
@@ -3591,73 +3872,12 @@ async fn run_action(
     }
     let input_digest = imp_execution::staging::resolve_input_digest(&root, &input_specs)?;
 
-    let mut tools = Vec::new();
-    let mut tool_names = std::collections::HashSet::new();
+    let mut tool_values = Vec::new();
     for pair in task_inputs.pairs::<LuaValue, LuaValue>() {
         let (_, value) = pair.map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let LuaValue::UserData(value) = value else {
-            continue;
-        };
-        let handle = match value.borrow::<GraphHandle>() {
-            Ok(handle) => handle,
-            Err(_) => continue,
-        };
-        match nodes.get(&handle.id) {
-            Some(GraphNode::NativeTool(name)) => {
-                if !tool_names.insert(name.clone()) {
-                    bail!("exec.action received tool name '{name}' more than once");
-                }
-                let resolved = crate::spike::which_executable(name)
-                    .with_context(|| format!("native tool '{name}' was not found on PATH"))?;
-                let resolved = dunce::canonicalize(&resolved)
-                    .with_context(|| format!("canonicalize native tool {resolved}"))?;
-                let content_digest = service
-                    .file_sha256(&resolved)
-                    .with_context(|| format!("digest native tool {}", resolved.display()))?;
-                let path =
-                    crate::spike::singleflight_register_native_tool(&service, name, &resolved)
-                        .map_err(anyhow::Error::msg)?;
-                let key = imp_store::cache::digest_json(&serde_json::json!({
-                    "path": resolved,
-                    "digest": content_digest,
-                }))?;
-                tools.push(ExecToolSpec {
-                    name: name.clone(),
-                    cache: "native-tools".to_owned(),
-                    key,
-                    path,
-                    bin_dirs: vec![".".to_owned()],
-                });
-            }
-            Some(GraphNode::Tool {
-                name,
-                bin_dirs,
-                source_id,
-                owner_package,
-            }) => {
-                if !tool_names.insert(name.clone()) {
-                    bail!("exec.action received tool name '{name}' more than once");
-                }
-                let cache = tool_named_cache(&host.borrow(), name, *source_id, owner_package)?;
-                let path = service
-                    .cache_dir_get(&workspace_id, &cache.name, &cache.key)?
-                    .with_context(|| {
-                        format!(
-                            "tool '{}' cache '{}/{}' is missing",
-                            name, cache.name, cache.key
-                        )
-                    })?;
-                tools.push(ExecToolSpec {
-                    name: name.clone(),
-                    cache: cache.name.clone(),
-                    key: cache.key.clone(),
-                    path,
-                    bin_dirs: bin_dirs.clone(),
-                });
-            }
-            _ => {}
-        }
+        tool_values.push(value);
     }
+    let tools = resolve_tool_specs(&host, &service, &workspace_id, tool_values, "exec.action")?;
 
     let (declared_outputs, output_specs) = parse_action_outputs(&options)?;
 
@@ -3676,7 +3896,7 @@ async fn run_action(
         force_cache: false,
         no_cache: !cache,
         sandbox_retention: SandboxRetention::OnFailure,
-        allow_failure: false,
+        allow_failure,
     };
     let execution_cancellation = cancellation;
     let outcome = tokio::task::spawn_blocking(move || {
@@ -3684,7 +3904,7 @@ async fn run_action(
     })
     .await
     .context("join hermetic graph action")??;
-    if outcome.exit_code != 0 {
+    if outcome.exit_code != 0 && !allow_failure {
         bail!(
             "graph action '{display}' exited with {}: {}",
             outcome.exit_code,
@@ -3709,10 +3929,10 @@ async fn run_action(
             .outputs
             .iter()
             .find(|artifact| artifact.path.as_deref() == Some(path.as_str()))
-            .cloned()
-            .with_context(|| {
-                format!("execution service did not return declared output '{name}'")
-            })?;
+            .cloned();
+        let artifact = artifact.with_context(|| {
+            format!("execution service did not return declared output '{name}'")
+        })?;
         let handle = allocate_handle(&host, "artifact");
         host.borrow_mut()
             .nodes
@@ -3731,6 +3951,273 @@ async fn run_action(
     result
         .set("outputs", artifacts)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    set_action_status(&result, outcome.exit_code, outcome.stdout, outcome.stderr)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(result)
+}
+
+fn set_action_status(
+    result: &LuaTable,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+) -> LuaResult<()> {
+    result.set("exit_code", exit_code)?;
+    result.set("stdout", stdout)?;
+    result.set("stderr", stderr)
+}
+
+/// Resolve tool handles to tool specifications for the execution service.
+/// Values that are not tool handles are ignored. A tool name may occur once.
+fn resolve_tool_specs(
+    host: &Rc<RefCell<HostState>>,
+    service: &Arc<dyn ExecutionService>,
+    workspace_id: &str,
+    values: Vec<LuaValue>,
+    api: &str,
+) -> Result<Vec<ExecToolSpec>> {
+    let mut tools = Vec::new();
+    let mut tool_names = std::collections::HashSet::new();
+    for value in values {
+        let LuaValue::UserData(value) = value else {
+            continue;
+        };
+        let handle = match value.borrow::<GraphHandle>() {
+            Ok(handle) => handle,
+            Err(_) => continue,
+        };
+        let node = host.borrow().nodes.get(&handle.id).cloned();
+        match node {
+            Some(GraphNode::NativeTool(name)) => {
+                if !tool_names.insert(name.clone()) {
+                    bail!("{api} received tool name '{name}' more than once");
+                }
+                let resolved = crate::spike::which_executable(&name)
+                    .with_context(|| format!("native tool '{name}' was not found on PATH"))?;
+                let resolved = dunce::canonicalize(&resolved)
+                    .with_context(|| format!("canonicalize native tool {resolved}"))?;
+                let content_digest = service
+                    .file_sha256(&resolved)
+                    .with_context(|| format!("digest native tool {}", resolved.display()))?;
+                let path =
+                    crate::spike::singleflight_register_native_tool(service, &name, &resolved)
+                        .map_err(anyhow::Error::msg)?;
+                let key = imp_store::cache::digest_json(&serde_json::json!({
+                    "path": resolved,
+                    "digest": content_digest,
+                }))?;
+                tools.push(ExecToolSpec {
+                    name,
+                    cache: "native-tools".to_owned(),
+                    key,
+                    path,
+                    bin_dirs: vec![".".to_owned()],
+                });
+            }
+            Some(GraphNode::Tool {
+                name,
+                bin_dirs,
+                source_id,
+                owner_package,
+            }) => {
+                if !tool_names.insert(name.clone()) {
+                    bail!("{api} received tool name '{name}' more than once");
+                }
+                let cache = tool_named_cache(&host.borrow(), &name, source_id, &owner_package)?;
+                let path = service
+                    .cache_dir_get(workspace_id, &cache.name, &cache.key)?
+                    .with_context(|| {
+                        format!(
+                            "tool '{}' cache '{}/{}' is missing",
+                            name, cache.name, cache.key
+                        )
+                    })?;
+                tools.push(ExecToolSpec {
+                    name,
+                    cache: cache.name.clone(),
+                    key: cache.key.clone(),
+                    path,
+                    bin_dirs,
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(tools)
+}
+
+/// Run one interactive program for the `run` workflow. The host owns the
+/// policy, as the JavaScript `run` workflow does: the program is impure, runs
+/// in a sandbox with the workspace as its working directory, streams its
+/// output to the terminal, and receives the CLI arguments after `--`.
+async fn run_program(
+    lua: Lua,
+    host: Rc<RefCell<HostState>>,
+    configuration: Rc<RefCell<ConfigurationState>>,
+    options: LuaTable,
+) -> Result<LuaTable> {
+    let lua_error = |error: LuaError| anyhow::anyhow!(error.to_string());
+    for pair in options.pairs::<String, LuaValue>() {
+        let (key, _) = pair.map_err(lua_error)?;
+        if !matches!(
+            key.as_str(),
+            "argv" | "display" | "env" | "inputs" | "tools"
+        ) {
+            bail!("core.run_program options do not accept '{key}'");
+        }
+    }
+    let mut argv = options
+        .get::<Option<Vec<String>>>("argv")
+        .map_err(lua_error)?
+        .filter(|argv| !argv.is_empty())
+        .context("core.run_program({ argv }) requires a non-empty argv")?;
+    let display = options
+        .get::<Option<String>>("display")
+        .map_err(lua_error)?
+        .unwrap_or_else(|| argv.join(" "));
+    let env = options.get::<Option<LuaTable>>("env").map_err(lua_error)?;
+    let mut digests = Vec::new();
+    if let Some(inputs) = options
+        .get::<Option<LuaTable>>("inputs")
+        .map_err(lua_error)?
+    {
+        for value in inputs.sequence_values::<LuaValue>() {
+            let digest = match value.map_err(lua_error)? {
+                LuaValue::String(digest) => Some(digest.to_string_lossy().to_string()),
+                LuaValue::Table(artifact) => artifact
+                    .get::<Option<String>>("digest")
+                    .map_err(lua_error)?,
+                _ => None,
+            };
+            digests.push(digest.context(
+                "core.run_program inputs must be digest strings or tables with a digest",
+            )?);
+        }
+    }
+    let mut tool_values = Vec::new();
+    if let Some(tools) = options
+        .get::<Option<LuaTable>>("tools")
+        .map_err(lua_error)?
+    {
+        for value in tools.sequence_values::<LuaValue>() {
+            tool_values.push(value.map_err(lua_error)?);
+        }
+    }
+    let run_args = host
+        .borrow()
+        .goal_invocation
+        .as_ref()
+        .map(|invocation| invocation.run_args.clone())
+        .unwrap_or_default();
+    argv.extend(run_args);
+    let env_entries = action_env_entries(env.as_ref())?;
+
+    let fake_run = host.borrow().fakes.run.clone();
+    if fake_run.is_none() && !host.borrow().goal_callback_active {
+        bail!("core.run_program() can only run in a goal callback");
+    }
+    if let Some(recorder) = fake_run {
+        let record = lua.create_table().map_err(lua_error)?;
+        record.set("program", true).map_err(lua_error)?;
+        record.set("argv", argv).map_err(lua_error)?;
+        record.set("display", display.as_str()).map_err(lua_error)?;
+        let env = lua.create_table().map_err(lua_error)?;
+        for (name, value) in env_entries {
+            env.set(name, value).map_err(lua_error)?;
+        }
+        record.set("env", env).map_err(lua_error)?;
+        record.set("inputs", digests).map_err(lua_error)?;
+        record
+            .set(
+                "tools",
+                lua.create_sequence_from(tool_values).map_err(lua_error)?,
+            )
+            .map_err(lua_error)?;
+        for flag in ["impure", "sandbox", "workspace_cwd", "stream"] {
+            record.set(flag, true).map_err(lua_error)?;
+        }
+        push_record(
+            &recorder.raw_get::<LuaTable>("runs").map_err(lua_error)?,
+            LuaValue::Table(record),
+        )
+        .map_err(lua_error)?;
+        let (exit_code, stdout, stderr) =
+            fake_run_status(&recorder, &display).map_err(lua_error)?;
+        if exit_code != 0 {
+            // The same message as a real program that fails.
+            bail!("run program '{display}': {display} failed with exit code {exit_code}");
+        }
+        let result = lua.create_table().map_err(lua_error)?;
+        set_action_status(&result, exit_code, stdout, stderr).map_err(lua_error)?;
+        return Ok(result);
+    }
+
+    let (root, workspace_id, service, cancellation, ui_multi) = {
+        let host = host.borrow();
+        (
+            host.workspace_root.clone(),
+            host.workspace_id.clone(),
+            Arc::clone(&host.service),
+            Arc::clone(&host.cancellation),
+            host.ui_multi.clone(),
+        )
+    };
+    let tools = resolve_tool_specs(
+        &host,
+        &service,
+        &workspace_id,
+        tool_values,
+        "core.run_program",
+    )?;
+    let mut env = configured_passthrough_entries(&configuration.borrow())?;
+    env.extend(
+        env_entries
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}")),
+    );
+    let opts = imp_exec_api::ExecRunOpts {
+        argv,
+        display: display.clone(),
+        env,
+        config_digest: String::new(),
+        inputs: digests
+            .into_iter()
+            .map(|digest| ExecIoSpec {
+                path: None,
+                kind: "digest".to_owned(),
+                digest: Some(digest),
+                named_cache: None,
+            })
+            .collect(),
+        outputs: Vec::new(),
+        tools,
+        cores: 1,
+        impure: true,
+        force_cache: false,
+        sandbox: true,
+        workspace_cwd: true,
+        stream: true,
+        no_cache: false,
+        sandbox_retention: SandboxRetention::default(),
+        allow_failure: false,
+        materialize: false,
+    };
+    let outcome = tokio::task::spawn_blocking(move || {
+        imp_execution::exec::exec_run_local_with_start(
+            &root,
+            opts,
+            Some(cancellation.as_ref()),
+            None,
+            ui_multi.as_ref(),
+        )
+    })
+    .await
+    .context("join interactive program")?
+    .with_context(|| format!("run program '{display}'"))?;
+    host.borrow_mut().action_count += 1;
+    let result = lua.create_table().map_err(lua_error)?;
+    set_action_status(&result, outcome.exit_code, outcome.stdout, outcome.stderr)
+        .map_err(lua_error)?;
     Ok(result)
 }
 
@@ -4091,9 +4578,30 @@ fn normalize_relative(base: &Path, requested: &str) -> LuaResult<String> {
 mod tests {
     use super::*;
 
+    /// A temporary rules tree with the Luau workflow modules of the
+    /// repository rules tree, so that fixtures can register their goals.
+    fn rules_tempdir() -> tempfile::TempDir {
+        let rules_root = tempfile::tempdir().unwrap();
+        let source = crate::loader::RulesSource::discover()
+            .root()
+            .expect("tests need the repository rules tree")
+            .join("workflows");
+        for module in [
+            "report.luau",
+            "build/index.luau",
+            "package/index.luau",
+            "test/index.luau",
+        ] {
+            let destination = rules_root.path().join("workflows").join(module);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::copy(source.join(module), destination).unwrap();
+        }
+        rules_root
+    }
+
     async fn execute_luau_task_source(source: &str) -> anyhow::Error {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         fs::write(workspace_root.path().join("bad.luau"), source).unwrap();
         let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
         let handle = runtime.evaluate("@workspace/bad").await.unwrap();
@@ -4106,13 +4614,14 @@ mod tests {
     #[tokio::test]
     async fn luau_test_roots_discover_cases_and_report_through_test_goal() {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         fs::create_dir_all(workspace_root.path().join("pkg/nested")).unwrap();
         fs::write(
             workspace_root.path().join("pkg/BUILD.luau"),
             r#"
 local core = require("@imp/core")
-return { tests = { TEST = core.test_root() } }
+local test = require("@imp/rules/workflows/test")
+return { tests = { [test.TEST] = core.test_root() } }
 "#,
         )
         .unwrap();
@@ -4141,7 +4650,13 @@ return {
         assert_eq!(roots[0].workflow, "test");
         assert_eq!(roots[0].address, "//pkg:tests");
         let report = runtime
-            .execute_graph("test", &roots, Arc::new(AtomicBool::new(false)), None, None)
+            .execute_graph(
+                "test",
+                &roots,
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({}),
+                &[],
+            )
             .await
             .unwrap();
         assert!(report
@@ -4154,8 +4669,8 @@ return {
                 "test",
                 &roots,
                 Arc::new(AtomicBool::new(false)),
-                Some("passes"),
-                None,
+                &serde_json::json!({ "case": "passes" }),
+                &[],
             )
             .await
             .unwrap();
@@ -4168,8 +4683,8 @@ return {
                 "test",
                 &roots,
                 Arc::new(AtomicBool::new(false)),
-                None,
-                Some("group"),
+                &serde_json::json!({ "suite": "group" }),
+                &[],
             )
             .await
             .unwrap();
@@ -4182,8 +4697,8 @@ return {
                 "test",
                 &roots,
                 Arc::new(AtomicBool::new(false)),
-                Some("missing"),
-                None,
+                &serde_json::json!({ "case": "missing" }),
+                &[],
             )
             .await
             .unwrap_err()
@@ -4193,20 +4708,467 @@ return {
 
     async fn run_luau_test_module(source: &str) -> (tempfile::TempDir, Result<Option<String>>) {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         fs::create_dir_all(workspace_root.path().join("pkg")).unwrap();
         fs::write(
             workspace_root.path().join("pkg/BUILD.luau"),
-            "local core = require('@imp/core')\nreturn { tests = { TEST = core.test_root() } }\n",
+            "local core = require('@imp/core')\nlocal test = require('@imp/rules/workflows/test')\nreturn { tests = { [test.TEST] = core.test_root() } }\n",
         )
         .unwrap();
         fs::write(workspace_root.path().join("pkg/fakes.test.luau"), source).unwrap();
         let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
         let roots = runtime.load_modules().await.unwrap();
         let report = runtime
-            .execute_graph("test", &roots, Arc::new(AtomicBool::new(false)), None, None)
+            .execute_graph(
+                "test",
+                &roots,
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({}),
+                &[],
+            )
             .await;
         (workspace_root, report)
+    }
+
+    #[tokio::test]
+    async fn luau_test_fakes_control_goal_flags_action_status_and_programs() {
+        let (_workspace_root, report) = run_luau_test_module(
+            r#"
+local core = require("@imp/core")
+local output = core.output
+
+local function expect_error(expected, fn, ...)
+    local ok, problem = pcall(fn, ...)
+    assert(not ok, "expected an error: " .. expected)
+    assert(string.find(tostring(problem), expected, 1, true), tostring(problem))
+end
+
+local function lint_task(allow_failure)
+    return core.task({
+        outputs = { status = output.value() },
+        run = function(exec)
+            local result = exec.action({
+                argv = { "lint" },
+                display = "lint",
+                allow_failure = allow_failure,
+            })
+            return {
+                status = { code = result.exit_code, out = result.stdout, err = result.stderr },
+            }
+        end,
+    })
+end
+
+return {
+    core.test.case("goal flags", function()
+        expect_error("core.goal_flags() can only run while a goal executes", core.goal_flags)
+        core.test.with_fake_goal_flags({ check = true }, function(flags)
+            assert(flags.check == true)
+            assert(core.goal_flags().check == true)
+            expect_error(
+                "core.test.with_fake_goal_flags cannot run while another fake replaces the same host function",
+                core.test.with_fake_goal_flags,
+                {},
+                function() end
+            )
+        end)
+        expect_error("core.goal_flags() can only run while a goal executes", core.goal_flags)
+        expect_error(
+            "core.test.with_fake_goal_flags flags must map flag names to booleans",
+            core.test.with_fake_goal_flags,
+            { check = "yes" },
+            function() end
+        )
+    end),
+    core.test.case("action status", function()
+        core.test.with_fake_run(function(host)
+            host.set_run_exit_code("lint", 3)
+            host.set_run_stdout("lint", "out")
+            host.set_run_stderr("lint", "err")
+            local status = core.test.resolve(lint_task(true).outputs.status)
+            assert(status.code == 3 and status.out == "out" and status.err == "err")
+            assert(host.runs[1].allow_failure == true)
+            expect_error("graph action 'lint' exited with 3: err", core.test.resolve, lint_task(false))
+            expect_error("set_run_exit_code(display, value) requires a whole number", host.set_run_exit_code, "lint", "x")
+        end)
+        core.test.with_fake_run(function()
+            local status = core.test.resolve(lint_task(false).outputs.status)
+            assert(status.code == 0 and status.out == "" and status.err == "")
+        end)
+    end),
+    core.test.case("program run", function()
+        core.test.with_fake_run(function(host)
+            local result = core.run_program({
+                argv = { "prog", "--flag" },
+                display = "run //:prog",
+                inputs = { "digest-a", { digest = "digest-b" } },
+            })
+            assert(result.exit_code == 0)
+            local run = host.runs[1]
+            assert(run.program == true and run.display == "run //:prog")
+            assert(#run.argv == 2 and run.argv[2] == "--flag")
+            assert(run.inputs[1] == "digest-a" and run.inputs[2] == "digest-b")
+            assert(run.impure and run.sandbox and run.workspace_cwd and run.stream)
+            host.set_run_exit_code("run //:prog", 2)
+            expect_error("run program 'run //:prog': run //:prog failed with exit code 2", core.run_program, {
+                argv = { "prog" },
+                display = "run //:prog",
+            })
+            expect_error("core.run_program options do not accept 'cwd'", core.run_program, {
+                argv = { "prog" },
+                cwd = ".",
+            })
+        end)
+        expect_error("core.run_program() can only run in a goal callback", core.run_program, {
+            argv = { "prog" },
+        })
+        assert(#core.run_args() == 0)
+    end),
+}
+"#,
+        )
+        .await;
+        let report = report.unwrap().unwrap();
+        assert!(report.contains("test: 3/3 unit(s) passed"), "{report}");
+    }
+
+    /// A rules tree with an inline `hello` goal, and a workspace whose BUILD
+    /// module exports two `HELLO` roots.
+    async fn hello_goal_workspace() -> (tempfile::TempDir, tempfile::TempDir, LuauWorkspace) {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
+        fs::create_dir_all(rules_root.path().join("hello")).unwrap();
+        fs::write(
+            rules_root.path().join("hello/index.luau"),
+            r#"
+local core = require("@imp/core")
+
+local function hello_goal(roots)
+    local lines = {}
+    for _, root in ipairs(roots) do
+        local result = root.result
+        if result.type == "artifact" then
+            local text = core.read_file_in_digest(result.digest, result.path)
+            table.insert(lines, `{root.address} artifact {text}`)
+        else
+            table.insert(lines, `{root.address} status {result.code} {result.out}`)
+        end
+    end
+    table.insert(lines, `loud={core.goal_flags().loud}`)
+    table.insert(lines, `args={table.concat(core.run_args(), " ")}`)
+    if core.goal_flags().refuse then
+        core.goal_error("hello refused on purpose")
+    end
+    if core.goal_flags().mask then
+        pcall(core.goal_error, "caught refusal")
+        error("real internal failure")
+    end
+    return table.concat(lines, "\n")
+end
+
+local function launch_goal(roots)
+    core.run_program({
+        argv = { "sh", "-c", 'test -f "$IMP_SANDBOX_ROOT/$1" && shift && printf "%s," "$@" > ran.txt', "launch", roots[1].result.path },
+        display = "launch",
+        inputs = { roots[1].result },
+    })
+end
+
+return {
+    HELLO = core.goal("hello", hello_goal, {
+        flags = {
+            loud = { description = "Say it loudly" },
+            mask = {},
+            refuse = {},
+        },
+    }),
+    LAUNCH = core.goal("launch", launch_goal),
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local hello = require("@imp/rules/hello")
+local output = core.output
+local sh = core.native_tool("sh")
+
+local greeting = core.task({
+    inputs = { sh = sh },
+    outputs = { file = output.artifact() },
+    run = function(exec)
+        local result = exec.action({
+            argv = { "sh", "-c", "mkdir -p out; printf hi > out/greeting.txt" },
+            outputs = { file = output.file("out/greeting.txt") },
+        })
+        return { file = result.outputs.file }
+    end,
+})
+
+local status = core.task({
+    inputs = { sh = sh },
+    outputs = { status = output.value() },
+    run = function(exec)
+        local result = exec.action({
+            argv = { "sh", "-c", "printf partial; exit 3" },
+            allow_failure = true,
+            cache = false,
+        })
+        return { status = { code = result.exit_code, out = result.stdout } }
+    end,
+})
+
+return {
+    greeting = { [hello.HELLO] = greeting, [hello.LAUNCH] = greeting },
+    status = { [hello.HELLO] = status },
+}
+"#,
+        )
+        .unwrap();
+        let runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        (workspace_root, rules_root, runtime)
+    }
+
+    #[tokio::test]
+    async fn generic_goal_driver_passes_resolved_roots_flags_and_args_to_luau() {
+        let (_workspace_root, _rules_root, mut runtime) = hello_goal_workspace().await;
+        let roots = runtime.load_modules().await.unwrap();
+        let definitions = runtime.goal_definitions();
+        let hello = definitions.get("hello").expect("hello goal is registered");
+        assert_eq!(
+            hello.flags.get("loud").unwrap().description.as_deref(),
+            Some("Say it loudly")
+        );
+        assert_eq!(hello.flags.get("refuse").unwrap().description, None);
+        let hello_roots: Vec<_> = roots
+            .iter()
+            .filter(|root| root.workflow == "hello")
+            .cloned()
+            .collect();
+        assert_eq!(hello_roots.len(), 2);
+
+        let report = runtime
+            .execute_graph(
+                "hello",
+                &hello_roots,
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({ "loud": true, "refuse": false }),
+                &["a".to_owned(), "b".to_owned()],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(report.contains("//:greeting artifact hi"), "{report}");
+        assert!(report.contains("//:status status 3 partial"), "{report}");
+        assert!(report.contains("loud=true"), "{report}");
+        assert!(report.contains("args=a b"), "{report}");
+
+        let error = runtime
+            .execute_graph(
+                "hello",
+                &hello_roots,
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({ "loud": false, "refuse": true }),
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<crate::spike::UserFacingGoalError>()
+                .is_some(),
+            "{error:#}"
+        );
+        assert_eq!(error.to_string(), "hello refused on purpose");
+
+        // A caught refusal does not hide a later error.
+        let error = runtime
+            .execute_graph(
+                "hello",
+                &hello_roots,
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({ "mask": true }),
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<crate::spike::UserFacingGoalError>()
+                .is_none(),
+            "{error:#}"
+        );
+        assert!(
+            format!("{error:#}").contains("real internal failure"),
+            "{error:#}"
+        );
+
+        // As in JavaScript, no selected roots means no workflow call.
+        let report = runtime
+            .execute_graph(
+                "hello",
+                &[],
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({ "refuse": true }),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(report, None);
+
+        let error = runtime
+            .execute_graph(
+                "lint",
+                &hello_roots,
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({}),
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "goal 'lint' has no registered Luau workflow; require @imp/rules/workflows/lint"
+            ),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_program_runs_in_the_workspace_with_staged_inputs_and_cli_args() {
+        let (workspace_root, _rules_root, mut runtime) = hello_goal_workspace().await;
+        let roots: Vec<_> = runtime
+            .load_modules()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|root| root.workflow == "launch")
+            .collect();
+        runtime
+            .execute_graph(
+                "launch",
+                &roots,
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({}),
+                &["one".to_owned(), "two".to_owned()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace_root.path().join("ran.txt")).unwrap(),
+            "one,two,"
+        );
+    }
+
+    #[tokio::test]
+    async fn root_slots_require_a_registered_goal() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+return { lint = { LINT = core.task({ run = function() end }) } }
+"#,
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let error = runtime.load_modules().await.unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "//:lint exports slot 'LINT', but no goal registers it; require @imp/rules/workflows/lint"
+            ),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn slot_registration_does_not_depend_on_module_order() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
+        for package in ["a", "z"] {
+            fs::create_dir_all(workspace_root.path().join(package)).unwrap();
+        }
+        // `a` loads first and uses the slot that only `z` registers.
+        fs::write(
+            workspace_root.path().join("a/BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local output = core.output
+return {
+    shape = {
+        TEST = core.task({
+            outputs = { units = output.value() },
+            run = function()
+                return { units = { a = 1 } }
+            end,
+        }),
+    },
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("z/BUILD.luau"),
+            "local test = require('@imp/rules/workflows/test')\nreturn {}\n",
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].workflow, "test");
+
+        let error = runtime
+            .execute_graph(
+                "test",
+                &roots,
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({}),
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "//a:shape: a TEST root must resolve to a list of { name, ok, output } units"
+        );
+    }
+
+    #[tokio::test]
+    async fn core_goal_validates_names_options_and_flags() {
+        let (_workspace_root, report) = run_luau_test_module(
+            r#"
+local core = require("@imp/core")
+
+local function expect_error(expected, fn, ...)
+    local ok, problem = pcall(fn, ...)
+    assert(not ok, "expected an error: " .. expected)
+    assert(string.find(tostring(problem), expected, 1, true), tostring(problem))
+end
+
+local function goal() end
+
+return {
+    core.test.case("registration", function()
+        assert(core.goal("my-goal", goal) == "MY_GOAL")
+        expect_error("goal 'my-goal' is already registered", core.goal, "my-goal", goal)
+        expect_error("core.goal name 'Bad' must use lowercase letters", core.goal, "Bad", goal)
+        expect_error("options do not accept 'help'", core.goal, "a", goal, { help = "x" })
+        expect_error("flag 'Loud' must use lowercase letters", core.goal, "b", goal, { flags = { Loud = {} } })
+        expect_error("flag 'loud' accepts only a 'description' string", core.goal, "c", goal, {
+            flags = { loud = { default = true } },
+        })
+        expect_error("flag 'jobs' is reserved by the imp CLI", core.goal, "d", goal, { flags = { jobs = {} } })
+    end),
+}
+"#,
+        )
+        .await;
+        let report = report.unwrap().unwrap();
+        assert!(report.contains("1/1 unit(s) passed"), "{report}");
     }
 
     #[tokio::test]
@@ -4492,11 +5454,11 @@ return {
     #[tokio::test]
     async fn luau_test_failure_reports_canonical_module_and_source_location() {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         fs::create_dir_all(workspace_root.path().join("pkg")).unwrap();
         fs::write(
             workspace_root.path().join("pkg/BUILD.luau"),
-            "local core = require('@imp/core')\nreturn { tests = { TEST = core.test_root() } }\n",
+            "local core = require('@imp/core')\nlocal test = require('@imp/rules/workflows/test')\nreturn { tests = { [test.TEST] = core.test_root() } }\n",
         )
         .unwrap();
         fs::write(
@@ -4508,7 +5470,13 @@ return {
         let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
         let roots = runtime.load_modules().await.unwrap();
         let error = runtime
-            .execute_graph("test", &roots, Arc::new(AtomicBool::new(false)), None, None)
+            .execute_graph(
+                "test",
+                &roots,
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({}),
+                &[],
+            )
             .await
             .unwrap_err()
             .to_string();
@@ -4582,7 +5550,7 @@ return { assets = declared }
     #[tokio::test]
     async fn luau_configuration_schema_and_dynamic_apis_validate_values() {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         fs::create_dir_all(rules_root.path().join("sample")).unwrap();
         fs::write(
             rules_root.path().join("sample/index.luau"),
@@ -4657,7 +5625,7 @@ return {}
     #[tokio::test]
     async fn luau_ci_configuration_deep_merges_before_required_validation() {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         fs::create_dir_all(rules_root.path().join("sample")).unwrap();
         fs::write(
             rules_root.path().join("sample/index.luau"),
@@ -4746,7 +5714,7 @@ return {}
     #[tokio::test]
     async fn luau_configuration_errors_name_source_and_field_path() {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         fs::write(
             workspace_root.path().join("imp.workspace.luau"),
             "return { imp = { unknown_setting = true } }\n",
@@ -4790,7 +5758,7 @@ return {}
     #[tokio::test]
     async fn luau_workspace_passthrough_env_reaches_sandboxed_actions() {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         fs::write(
             workspace_root.path().join("imp.workspace.luau"),
             "return { imp = { passthrough_env = { 'IMP_LUAU_CONFIG_TEST=value' } } }\n",
@@ -4800,6 +5768,7 @@ return {}
             workspace_root.path().join("BUILD.luau"),
             r#"
 local core = require("@imp/core")
+require("@imp/rules/workflows/build")
 local check = core.task({
     run = function(exec)
         exec.action({
@@ -4820,8 +5789,8 @@ return { check = check }
                 "build",
                 &roots,
                 Arc::new(AtomicBool::new(false)),
-                None,
-                None,
+                &serde_json::json!({}),
+                &[],
             )
             .await
             .unwrap();
@@ -4839,6 +5808,7 @@ return { check = check }
             workspace_root.path().join("BUILD.luau"),
             r#"
 local core = require("@imp/core")
+require("@imp/rules/workflows/build")
 local output = core.output
 local producer = core.task({
     outputs = { generated = output.artifact(), directory = output.artifact() },
@@ -4931,7 +5901,7 @@ return { final = final }
     #[tokio::test]
     async fn luau_acquired_tool_handles_stage_in_sandbox_and_apply_action_env() {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         fs::write(
             workspace_root.path().join("imp.workspace.luau"),
             "return {}\n",
@@ -5004,7 +5974,7 @@ return { consume = consumer }
     #[tokio::test]
     async fn luau_tool_and_path_handles_keep_package_owner_and_stable_identity() {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         fs::create_dir_all(workspace_root.path().join("pkg")).unwrap();
         fs::write(
             workspace_root.path().join("pkg/BUILD.luau"),
@@ -5055,7 +6025,7 @@ return {
     #[tokio::test]
     async fn workspace_discovers_root_and_nested_build_modules_by_canonical_address() {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         fs::create_dir_all(workspace_root.path().join("pkg")).unwrap();
         fs::write(
             workspace_root.path().join("pkg/shared.luau"),
@@ -5066,6 +6036,7 @@ return {
             workspace_root.path().join("BUILD.luau"),
             r#"
 local core = require("@imp/core")
+require("@imp/rules/workflows/build")
 local first = require("@workspace/pkg/shared")
 local same_module = require("@workspace/pkg/shared.luau")
 assert(first == same_module)
@@ -5077,6 +6048,7 @@ return { root_task = core.task({ run = function() end }) }
             workspace_root.path().join("pkg/BUILD.luau"),
             r#"
 local core = require("@imp/core")
+require("@imp/rules/workflows/build")
 local shared = require("./shared")
 assert(shared.name == "shared")
 return { nested_task = core.task({ run = function() end }) }
@@ -5098,11 +6070,12 @@ return { nested_task = core.task({ run = function() end }) }
     #[tokio::test]
     async fn luau_build_generators_merge_targets_write_and_check_native_build_files() {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         fs::write(
             workspace_root.path().join("imp.workspace.luau"),
             r#"
 local core = require("@imp/core")
+require("@imp/rules/workflows/build")
 core.define_config_schema("sample", {
     build_generate = core.field.bool({ default = false }),
 })
@@ -5178,7 +6151,7 @@ return {
     #[tokio::test]
     async fn luau_build_generator_discovers_unowned_workspace_files() {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         for directory in [
             "crates/a",
             "crates/z",
@@ -5202,6 +6175,7 @@ return {
             workspace_root.path().join("imp.workspace.luau"),
             r#"
 local core = require("@imp/core")
+require("@imp/rules/workflows/build")
 core.define_config_schema("rust", {
     build_generate = core.field.bool({ default = false }),
 })
@@ -5298,7 +6272,7 @@ return {
     #[tokio::test]
     async fn luau_task_output_declarations_reject_action_output_descriptors() {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         fs::write(
             workspace_root.path().join("bad.luau"),
             r#"
@@ -5375,6 +6349,7 @@ return core.task({
             workspace_root.path().join("BUILD.luau"),
             r#"
 local core = require("@imp/core")
+require("@imp/rules/workflows/build")
 local output = core.output
 local producer = core.task({
     outputs = { artifact = output.artifact() },
@@ -5431,7 +6406,7 @@ return { consumer = consumer }
     #[tokio::test]
     async fn cyclic_module_imports_fail_with_the_cycle_addresses() {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         fs::write(
             workspace_root.path().join("a.luau"),
             "require('@workspace/b')\nreturn {}\n",
@@ -5454,7 +6429,7 @@ return { consumer = consumer }
     #[tokio::test]
     async fn workspace_modules_preserve_luau_local_shadowing_semantics() {
         let workspace_root = tempfile::tempdir().unwrap();
-        let rules_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
         fs::write(
             workspace_root.path().join("bindings.luau"),
             r#"
@@ -5497,6 +6472,7 @@ return { binding = binding, nested = nested }
             workspace_root.path().join("BUILD.luau"),
             r#"
 local core = require("@imp/core")
+require("@imp/rules/workflows/build")
 local shell = core.native_tool("sh")
 return {
     slow = core.task({

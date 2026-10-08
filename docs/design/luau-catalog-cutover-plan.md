@@ -187,6 +187,7 @@ current requirements are:
 | Dynamic expansion | Keyed child targets that a rule derives from task outputs, with named and aggregate selection |
 | Unowned file discovery | Sorted workspace files that no loaded target owns, filtered by root, include, and exclude patterns |
 | Test host fakes | Luau test replacements for the JavaScript `withFake*` helpers and `globalThis.__host_*` patches: toolchain host, `run`, workspace writes, goal flags, and diffs |
+| Generic goal driver | One driver that calls the registered Luau `core.goal` function with `{ address, result }` roots, with goal flags, goal errors, action status, `read_file_in_digest`, and the interactive `run` program. `workflow-core-runtime` is its first consumer. |
 
 The report associates each review boundary with proposed host prerequisites. A
 host task must name the first boundary that consumes every new API. Do not add

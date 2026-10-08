@@ -102,7 +102,7 @@ BOUNDARIES: dict[str, MigrationBoundary] = {
         "Core workflow implementations",
         "2026-09-30-port-luau-workflow-core",
         "rules/workflows/{build,fmt,lint,report,run,test} implementations",
-        ("graph outputs", "workspace/catalog discovery"),
+        ("graph outputs", "workspace/catalog discovery", "generic goal driver"),
     ),
     "workflow-core-validation": MigrationBoundary(
         "Core workflow BUILD and test modules",

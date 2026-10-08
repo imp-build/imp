@@ -40,8 +40,6 @@ local function graph_package_goal(roots)
 	end
 end
 
-core.goal("package", graph_package_goal)
-
 return {
-	PACKAGE = core.PACKAGE,
+	PACKAGE = core.goal("package", graph_package_goal),
 }
