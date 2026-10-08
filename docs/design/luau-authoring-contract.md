@@ -26,7 +26,7 @@ the gaps that block catalog migration.
 | BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. `imp goal generate-build` can write and check generated `BUILD.luau` files from registered Luau generators. | Language-specific generators must be ported to Luau before a Luau workspace can use them. |
 | Graph construction | Exposes `files`, `glob`, `task`, `expand`, `output`, `native_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. Expansions derive keyed children with goal slots such as `BUILD`, `PACKAGE`, and `TEST` from resolved inputs; `get()` selects one child and `all()` selects every child. `register_build_rule` and `register_build_generator` provide the Luau BUILD renderer interface. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
 | Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, a cache toggle, and allow-failure actions with exit code, stdout, and stderr. Captured artifacts can flow to downstream tasks through named outputs. The `run` workflow can start one interactive program. | Broader toolchain conveniences are not available. |
-| Tests and workflows | One generic driver runs every goal through the Luau workflow module that registers it with `core.goal`. Luau BUILD modules expose roots under the slot key of a registered goal. `imp package` publishes selected artifact roots under `dist/`, and `imp test` reports through `@imp/rules/workflows/test`. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. Test cases can resolve tasks and fake action runs, programs, the toolchain platform, goal flags, and workspace writes. | The `run`, `fmt`, and `lint` workflow modules and mixed JavaScript/Luau test discovery are not available in Luau. Test fakes for digest diffs, target addresses, and memo traces wait for those host APIs. |
+| Tests and workflows | One generic driver runs every goal through the Luau workflow module that registers it with `core.goal`. Luau BUILD modules expose roots under the slot key of a registered goal. `imp package` publishes selected artifact roots under `dist/`, and `imp test` reports through `@imp/rules/workflows/test`. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. Test cases can resolve tasks and fake action runs, programs, the toolchain platform, goal flags, workspace writes, and digest diffs. | The `run`, `fmt`, and `lint` workflow modules and mixed JavaScript/Luau test discovery are not available in Luau. Luau has no target address or memo trace host API, and no fakes for them. |
 | Installed rules | The pilot tree contains Luau `asset`, `resource_package`, `workflows/build`, `workflows/package`, `workflows/test`, `workflows/report`, and `imp/native-tool` modules. | Other packages remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
 
 The shared C toolchain is the first consumer of `platform_info()`. C compiler
@@ -89,6 +89,7 @@ writes. The `core.test` table provides these functions:
 | `core.test.with_fake_toolchain_host([platform,] fn)` | Fakes `exec.action` as `with_fake_run` does, and replaces `platform_info()`. `platform` defaults to `{ os = "linux", arch = "x86_64" }`. | `withFakeToolchainHost` |
 | `core.test.with_fake_write_workspace(fn)` | Records each `write_workspace` call instead of writing to the workspace. | `withFakeWriteWorkspace` |
 | `core.test.with_fake_goal_flags(flags, fn)` | Makes `core.goal_flags()` return `flags`, a table of flag names to booleans. Calls `fn` with `flags`. | `withFakeGoalFlags` and `globalThis.__host_current_goal_flags` patches |
+| `core.test.with_fake_diff(changes, fn)` | Makes `core.diff_digests` return a copy of `changes`, a list of `{ type, path }` entries, and records each call. | `withFakeDiff` and `globalThis.__host_diff_digests` patches |
 
 Each `with_fake_*` function installs its fake, calls `fn` with a recorder
 table, removes the fake, and returns the values that `fn` returns. Imp removes
@@ -117,6 +118,11 @@ The recorder tables contain these fields:
   named cache. The JavaScript `namedCache` entry records a cache lookup
   instead.
 - `calls` (workspace writes): entries with `path`, `digest`, and `from`.
+- `changes` and `calls` (digest diffs): `changes` is the list that each
+  `core.diff_digests` call returns. `calls` has one `{ before, after }` entry
+  for each call. A list with holes or other keys, a `type` that is not `added`,
+  `removed`, or `modified`, or an entry without a `path` string, fails with `core.test.with_fake_diff changes
+  must be a list of ...`.
 
 A faked action does not stage inputs, look up native tools on `PATH`, read a
 named cache, or call the execution service. It applies the same checks as the
@@ -191,11 +197,13 @@ download, archive, checksum, cache, and worker host functions. Luau rules
 express these steps as graph tasks and actions, so `with_fake_toolchain_host`
 covers them through the action fake.
 
-**Planned:** Luau has no digest diff, target address, or memo trace host API.
-Thus there is no Luau replacement yet for `withFakeDiff`,
-`__host_target_address`, or `__host_memo_trace_write`. Each fake is planned
-together with its host API. There is no plan to add `withFakeSelectedTargets`
-or `withFakeMergeDigests`, because no rule test uses them.
+**Planned:** Luau has no target address or memo trace host API. Luau has no
+label handles, and `core.memo` returns its function and records no trace.
+Thus there is no Luau replacement for `__host_target_address` or
+`__host_memo_trace_write`. A fake for each is added together with its host API,
+when Luau rule code needs that API. There is no plan to add
+`withFakeSelectedTargets` or `withFakeMergeDigests`, because no rule test uses
+them.
 
 ### Goals and workflows
 
@@ -263,6 +271,7 @@ modules:
 | `core.goal_error(message)` | Fails the goal with `message` as the full user-facing error, without a stack trace or engine context. If the goal catches this error and then raises a different error, Imp reports the different error with its full context. | `throw goalError(message)` |
 | `core.run_args()` | Returns the CLI arguments after `--`, or an empty array outside a goal invocation. | `runArgs()` |
 | `core.read_file_in_digest(digest, path)` | Reads one file from a CAS tree digest. | `readFileInDigest(digest, path)` |
+| `core.diff_digests(before, after)` | Compares two CAS tree digests and returns a list of `{ type, path }` entries. `type` is `added`, `removed`, or `modified`. When all of a directory is added or removed, the list has one entry for the directory and no entries for its files. When a path changes between a file, a directory, and a symbolic link, the list has one `modified` entry for that path. | `diffDigests(before, after)` |
 | `core.run_program({ argv, display?, env?, inputs?, tools? })` | Runs one interactive program and returns `{ exit_code, stdout, stderr }`. `inputs` holds digests or artifact tables to stage, and `tools` holds tool handles. The host sets the `run` policy: the program is impure and sandboxed, starts in the real workspace, streams its output, and receives `core.run_args()` after `argv`. A nonzero exit fails the call. Outside a goal function, the call fails with `core.run_program() can only run in a goal callback`, except in a `core.test.with_fake_run` scope. | `runFromTemplate(runTemplate(opts), { args: runArgs(), sandbox: true, workspaceCwd: true, impure: true, stream: true })` |
 
 `exec.action({ allow_failure = true })` reports a nonzero exit code instead of

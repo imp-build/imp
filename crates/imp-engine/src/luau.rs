@@ -20,7 +20,7 @@ use anyhow::{bail, Context, Result};
 use imp_exec_api::{
     CacheOutcome, ExecAction, ExecIoSpec, ExecToolSpec, ExecutionService, SandboxRetention,
 };
-use imp_store::digest::{nest_directory, nest_file, DirectoryDigest};
+use imp_store::digest::{nest_directory, nest_file, DirectoryDigest, PathChange};
 use lune::Runtime;
 use mlua::prelude::*;
 use mlua::{LuaSerdeExt, MetaMethod, UserDataFields, UserDataMethods};
@@ -298,6 +298,7 @@ struct TestFakes {
     platform: Option<(String, String)>,
     write_workspace: Option<LuaTable>,
     goal_flags: Option<LuaTable>,
+    diff: Option<LuaTable>,
 }
 
 /// An opt-in Luau workspace runtime for the graph-host pilot.
@@ -2635,6 +2636,36 @@ fn create_core(
                 .map_err(|error| LuaError::external(format!("read_file_in_digest: {error:#}")))
         })?,
     )?;
+    let diff_host = Rc::clone(&host);
+    core.set(
+        "diff_digests",
+        lua.create_function(move |lua, (before, after): (String, String)| {
+            let recorder = diff_host.borrow().fakes.diff.clone();
+            if let Some(recorder) = recorder {
+                let call = lua.create_table()?;
+                call.set("before", before)?;
+                call.set("after", after)?;
+                push_record(
+                    &recorder.raw_get::<LuaTable>("calls")?,
+                    LuaValue::Table(call),
+                )?;
+                let changes = parse_fake_changes(recorder.raw_get("changes")?)?;
+                return path_changes_value(lua, &changes);
+            }
+            let before = DirectoryDigest::from_digest(before);
+            let after = DirectoryDigest::from_digest(after);
+            let changes = imp_store::digest::diff_digests(&before, &after)
+                .map_err(|error| LuaError::external(format!("diff_digests: {error:#}")))?
+                .into_iter()
+                .map(|change| match change {
+                    PathChange::Added(path) => ("added", path),
+                    PathChange::Removed(path) => ("removed", path),
+                    PathChange::Modified(path) => ("modified", path),
+                })
+                .collect::<Vec<_>>();
+            path_changes_value(lua, &changes)
+        })?,
+    )?;
     let program_host = Rc::clone(&host);
     let program_configuration = Rc::clone(&configuration);
     core.set(
@@ -2790,6 +2821,7 @@ enum FakeKind {
     ToolchainHost,
     WriteWorkspace,
     GoalFlags,
+    Diff,
 }
 
 impl FakeKind {
@@ -2799,6 +2831,7 @@ impl FakeKind {
             FakeKind::ToolchainHost => "core.test.with_fake_toolchain_host",
             FakeKind::WriteWorkspace => "core.test.with_fake_write_workspace",
             FakeKind::GoalFlags => "core.test.with_fake_goal_flags",
+            FakeKind::Diff => "core.test.with_fake_diff",
         }
     }
 }
@@ -2837,6 +2870,7 @@ async fn with_test_fake(
             FakeKind::Run | FakeKind::ToolchainHost => state.fakes.run.is_some(),
             FakeKind::WriteWorkspace => state.fakes.write_workspace.is_some(),
             FakeKind::GoalFlags => state.fakes.goal_flags.is_some(),
+            FakeKind::Diff => state.fakes.diff.is_some(),
         };
         if occupied {
             return Err(LuaError::external(format!(
@@ -2853,6 +2887,7 @@ async fn with_test_fake(
             }
             FakeKind::WriteWorkspace => state.fakes.write_workspace = Some(recorder.clone()),
             FakeKind::GoalFlags => state.fakes.goal_flags = Some(recorder.clone()),
+            FakeKind::Diff => state.fakes.diff = Some(recorder.clone()),
         }
         state.task_results.clear();
         state.expansion_results.clear();
@@ -2869,11 +2904,57 @@ async fn with_test_fake(
             }
             FakeKind::WriteWorkspace => state.fakes.write_workspace = None,
             FakeKind::GoalFlags => state.fakes.goal_flags = None,
+            FakeKind::Diff => state.fakes.diff = None,
         }
         state.task_results.clear();
         state.expansion_results.clear();
     }
     result
+}
+
+/// Build the `{ type, path }` list that `core.diff_digests` returns.
+fn path_changes_value(lua: &Lua, changes: &[(&str, String)]) -> LuaResult<LuaTable> {
+    let list = lua.create_table()?;
+    for (kind, path) in changes {
+        let change = lua.create_table()?;
+        change.set("type", *kind)?;
+        change.set("path", path.as_str())?;
+        push_record(&list, LuaValue::Table(change))?;
+    }
+    Ok(list)
+}
+
+/// Read the changes list of `core.test.with_fake_diff`.
+fn parse_fake_changes(value: LuaValue) -> LuaResult<Vec<(&'static str, String)>> {
+    let invalid = || {
+        LuaError::external(
+            "core.test.with_fake_diff changes must be a list of { type = \"added\"|\"removed\"|\"modified\", path = string }",
+        )
+    };
+    let LuaValue::Table(list) = value else {
+        return Err(invalid());
+    };
+    let len = list.raw_len();
+    if list.pairs::<LuaValue, LuaValue>().count() != len {
+        return Err(invalid());
+    }
+    let mut changes = Vec::with_capacity(len);
+    for index in 1..=len {
+        let LuaValue::Table(entry) = list.raw_get::<LuaValue>(index)? else {
+            return Err(invalid());
+        };
+        let kind = match entry.raw_get::<LuaValue>("type")? {
+            LuaValue::String(kind) if kind == "added" => "added",
+            LuaValue::String(kind) if kind == "removed" => "removed",
+            LuaValue::String(kind) if kind == "modified" => "modified",
+            _ => return Err(invalid()),
+        };
+        let LuaValue::String(path) = entry.raw_get::<LuaValue>("path")? else {
+            return Err(invalid());
+        };
+        changes.push((kind, path.to_str()?.to_owned()));
+    }
+    Ok(changes)
 }
 
 fn parse_fake_platform(value: LuaTable) -> LuaResult<(String, String)> {
@@ -3005,6 +3086,21 @@ fn install_test_host_api(
                     }
                 }
                 with_test_fake(host, FakeKind::GoalFlags, flags, None, body).await
+            }
+        })?,
+    )?;
+
+    let diff_host = Rc::clone(&host);
+    test_api.set(
+        "with_fake_diff",
+        lua.create_async_function(move |lua, (changes, body): (LuaValue, LuaFunction)| {
+            let host = Rc::clone(&diff_host);
+            async move {
+                let changes = parse_fake_changes(changes)?;
+                let recorder = lua.create_table()?;
+                recorder.set("changes", path_changes_value(&lua, &changes)?)?;
+                recorder.set("calls", lua.create_table()?)?;
+                with_test_fake(host, FakeKind::Diff, recorder, None, body).await
             }
         })?,
     )?;
@@ -4828,6 +4924,111 @@ return {
 "#,
         )
         .await;
+        let report = report.unwrap().unwrap();
+        assert!(report.contains("test: 3/3 unit(s) passed"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn luau_diff_digests_compare_trees_and_fake_diff_records_calls() {
+        let before = tempfile::tempdir().unwrap();
+        let after = tempfile::tempdir().unwrap();
+        fs::write(before.path().join("same.txt"), "same").unwrap();
+        fs::write(after.path().join("same.txt"), "same").unwrap();
+        fs::write(before.path().join("edit.txt"), "old").unwrap();
+        fs::write(after.path().join("edit.txt"), "new").unwrap();
+        fs::write(before.path().join("gone.txt"), "gone").unwrap();
+        fs::write(after.path().join("new.txt"), "new").unwrap();
+        fs::create_dir_all(after.path().join("gen/sub")).unwrap();
+        fs::write(after.path().join("gen/sub/out.txt"), "out").unwrap();
+        let before = imp_store::digest::capture_directory(before.path()).unwrap();
+        let after = imp_store::digest::capture_directory(after.path()).unwrap();
+        let source = r#"
+local core = require("@imp/core")
+local output = core.output
+
+local function expect_error(expected, fn, ...)
+    local ok, problem = pcall(fn, ...)
+    assert(not ok, "expected an error: " .. expected)
+    assert(string.find(tostring(problem), expected, 1, true), tostring(problem))
+end
+
+local function by_path(changes)
+    local result = {}
+    for _, change in changes do
+        result[change.path] = change.type
+    end
+    return result
+end
+
+return {
+    core.test.case("real diff", function()
+        local changes = core.diff_digests("BEFORE", "AFTER")
+        assert(#changes == 4, tostring(#changes))
+        local types = by_path(changes)
+        assert(types["edit.txt"] == "modified" and types["gone.txt"] == "removed" and types["new.txt"] == "added")
+        assert(types["gen"] == "added", "a new directory is one entry")
+        assert(#core.diff_digests("BEFORE", "BEFORE") == 0)
+        expect_error("diff_digests: read digest node", core.diff_digests, "BEFORE", "missing-digest")
+    end),
+    core.test.case("fake diff", function()
+        local stale = core.task({
+            outputs = { stale = output.value() },
+            run = function()
+                return { stale = #core.diff_digests("task-before", "task-after") > 0 }
+            end,
+        })
+        core.test.with_fake_diff({ { type = "modified", path = "gen.txt" } }, function(host)
+            local changes = core.diff_digests("x", "y")
+            assert(#changes == 1 and changes[1].type == "modified" and changes[1].path == "gen.txt")
+            changes[1].path = "mutated"
+            assert(core.diff_digests("x", "y")[1].path == "gen.txt")
+            assert(core.test.resolve(stale.outputs.stale) == true)
+            assert(#host.calls == 3)
+            assert(host.calls[1].before == "x" and host.calls[1].after == "y")
+            assert(host.calls[3].before == "task-before" and host.calls[3].after == "task-after")
+            assert(host.changes[1].path == "gen.txt")
+        end)
+        core.test.with_fake_diff({}, function()
+            assert(core.test.resolve(stale.outputs.stale) == false)
+        end)
+        expect_error("diff_digests:", core.diff_digests, "x", "y")
+    end),
+    core.test.case("fake diff misuse", function()
+        core.test.with_fake_diff({}, function()
+            expect_error(
+                "core.test.with_fake_diff cannot run while another fake replaces the same host function",
+                core.test.with_fake_diff,
+                {},
+                function() end
+            )
+        end)
+        local holed = { { type = "added", path = "a" }, { type = "added", path = "b" }, { type = "added", path = "c" }, x = 1 }
+        holed[2] = nil
+        for _, changes in {
+            "added",
+            { { type = "renamed", path = "a" } },
+            { { type = "added" } },
+            { { type = "added", path = 42 } },
+            { { type = "added", path = true } },
+            { "x" },
+            { name = "x" },
+            holed,
+        } do
+            expect_error(
+                "core.test.with_fake_diff changes must be a list of",
+                core.test.with_fake_diff,
+                changes,
+                function() end
+            )
+        end
+        expect_error("body failed", core.test.with_fake_diff, {}, function() error("body failed") end)
+        expect_error("diff_digests:", core.diff_digests, "x", "y")
+    end),
+}
+"#
+        .replace("BEFORE", before.digest())
+        .replace("AFTER", after.digest());
+        let (_workspace_root, report) = run_luau_test_module(&source).await;
         let report = report.unwrap().unwrap();
         assert!(report.contains("test: 3/3 unit(s) passed"), "{report}");
     }
