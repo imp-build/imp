@@ -136,14 +136,14 @@ BOUNDARIES: dict[str, MigrationBoundary] = {
     ),
     "workflow-vs": MigrationBoundary(
         "Visual Studio and VS Code configuration workflow",
-        "2026-09-30-port-luau-workflow-packaging",
-        "rules/workflows/vs/index.js",
+        "2026-10-08-port-luau-odin-vscode",
+        "rules/workflows/vs",
         ("graph outputs", "tool/path host APIs", "workspace/catalog discovery"),
     ),
     "workflow-packaging-validation": MigrationBoundary(
-        "Lockfile and VS workflow validation modules",
+        "Lockfile validation module",
         "2026-09-30-port-luau-workflow-packaging",
-        "Lockfile and VS BUILD and test modules",
+        "rules/workflows/lockfiles/lockfiles_test.js",
         ("test discovery", "workspace/catalog discovery"),
     ),
     "builtin-lockfiles": MigrationBoundary(
@@ -185,19 +185,19 @@ BOUNDARIES: dict[str, MigrationBoundary] = {
     "js-biome": MigrationBoundary(
         "Biome rules",
         "2026-09-30-port-luau-js-biome",
-        "rules/js/biome",
+        "rules/js/biome and rules/js/graph_test.js",
         ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
     ),
     "js-node-pnpm": MigrationBoundary(
         "JavaScript, Node, and pnpm rules",
         "2026-09-30-port-luau-js-node-pnpm",
-        "rules/js root, node, and pnpm modules",
+        "rules/js root, node, and pnpm modules, except rules/js/graph_test.js",
         ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
     ),
     "python-core": MigrationBoundary(
         "Python project and runtime rules",
         "2026-09-30-port-luau-python-core",
-        "rules/python core, project, runtime, source, workspace, and tests",
+        "rules/python core, project, runtime, source, workspace, and tests, except graph_test.js and doc_test.js",
         ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
     ),
     "python-pex-uv": MigrationBoundary(
@@ -209,7 +209,7 @@ BOUNDARIES: dict[str, MigrationBoundary] = {
     "python-ruff": MigrationBoundary(
         "Python Ruff rules",
         "2026-09-30-port-luau-python-ruff",
-        "rules/python/ruff and Ruff graph/toolchain modules",
+        "rules/python/ruff, Ruff graph/toolchain modules, and rules/python/{graph,doc}_test.js",
         ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
     ),
     "rust-toolchains": MigrationBoundary(
@@ -218,21 +218,27 @@ BOUNDARIES: dict[str, MigrationBoundary] = {
         "rules/rust/{toolchain,kache,cargo_task_inputs} and rules/rust/BUILD.js",
         ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
     ),
-    "odin-remainder": MigrationBoundary(
-        "Odin rules outside the compiled-language island",
-        "split from 2026-09-30-port-luau-odin-rules",
-        "Remaining rules/odin modules",
+    "odin": MigrationBoundary(
+        "Odin compiler, odinfmt, and example rules",
+        "2026-09-30-port-luau-odin-rules",
+        "rules/odin, except rules/odin/vscode",
         ("graph outputs", "tool/path host APIs", "test discovery", "workspace/catalog discovery"),
+    ),
+    "odin-vscode": MigrationBoundary(
+        "Odin VS Code integration",
+        "2026-10-08-port-luau-odin-vscode",
+        "rules/odin/vscode",
+        ("graph outputs", "test discovery", "workspace/catalog discovery"),
     ),
     "treesitter-validation": MigrationBoundary(
         "Tree-sitter BUILD and test modules",
-        "split from 2026-09-30-port-luau-treesitter",
+        "2026-09-30-port-luau-treesitter",
         "Remaining rules/treesitter modules",
         ("test discovery", "workspace/catalog discovery"),
     ),
     "treesitter-runtime": MigrationBoundary(
         "Tree-sitter runtime rules",
-        "split from 2026-09-30-port-luau-treesitter",
+        "2026-09-30-port-luau-treesitter",
         "rules/treesitter/index.js",
         ("graph outputs", "tool/path host APIs", "workspace/catalog discovery"),
     ),
@@ -362,13 +368,12 @@ def migration_boundary_for(path: str) -> str | None:
         return "builtin-lockfiles"
     if path in WORKFLOW_PACKAGING_RUNTIME:
         return "workflow-packaging-runtime"
-    if path == "rules/workflows/vs/index.js":
+    if path.startswith("rules/workflows/vs/"):
         return "workflow-vs"
     if path.startswith((
         "rules/workflows/lockfiles/",
         "rules/workflows/package/",
         "rules/workflows/publish/",
-        "rules/workflows/vs/",
     )):
         return "workflow-packaging-validation"
     if path == "rules/c/toolchain.js":
@@ -381,17 +386,22 @@ def migration_boundary_for(path: str) -> str | None:
         return "c-generate-build"
     if path.startswith("rules/c/"):
         return "c-catalog-root"
-    if path.startswith("rules/js/biome/"):
+    # The JS graph test imports Biome, and Biome imports the JS graph.
+    if path.startswith("rules/js/biome/") or path == "rules/js/graph_test.js":
         return "js-biome"
     if path.startswith(("rules/js/node/", "rules/js/pnpm/")) or path in {
         "rules/js/BUILD.js",
         "rules/js/graph.js",
-        "rules/js/graph_test.js",
         "rules/js/index.js",
         "rules/js/index_test.js",
     }:
         return "js-node-pnpm"
-    if path.startswith("rules/python/ruff/") or path.startswith("rules/python/ruff_"):
+    # The graph test imports Ruff. The doc test imports Ruff dynamically from the
+    # DOC.md setup block, so the static-import graph does not show that edge.
+    if path.startswith(("rules/python/ruff/", "rules/python/ruff_")) or path in {
+        "rules/python/doc_test.js",
+        "rules/python/graph_test.js",
+    }:
         return "python-ruff"
     if path.startswith((
         "rules/python/lock.",
@@ -403,8 +413,10 @@ def migration_boundary_for(path: str) -> str | None:
         return "python-core"
     if path.startswith("rules/rust/"):
         return "rust-toolchains"
+    if path.startswith("rules/odin/vscode/"):
+        return "odin-vscode"
     if path.startswith("rules/odin/"):
-        return "odin-remainder"
+        return "odin"
     if path == "rules/treesitter/index.js":
         return "treesitter-runtime"
     if path.startswith("rules/treesitter/"):

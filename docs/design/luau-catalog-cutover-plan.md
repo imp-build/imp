@@ -64,24 +64,25 @@ starts.
 | Workflows | `workflow-codegen-validation` | 4 | Codegen workflow task |
 | Workflows | `workflow-lockfiles-runtime` | 2 | Packaging workflow runtime task |
 | Workflows | `workflow-packaging-runtime` | 5 | Packaging workflow runtime task |
-| Workflows | `workflow-vs` | 1 | Packaging workflow task |
-| Workflows | `workflow-packaging-validation` | 3 | Packaging workflow task |
+| Workflows | `workflow-vs` | 3 | Odin VS Code task |
+| Workflows | `workflow-packaging-validation` | 1 | Packaging workflow task |
 | Workflows | `builtin-lockfiles` | 1 | Packaging workflow task |
 | C | `c-shared-toolchain` | 1 | C toolchain task |
 | C | `c-toolchains` | 12 | C toolchain task |
 | C | `c-cmake` | 12 | CMake task |
 | C | `c-catalog-root` | 4 | C catalog-root task |
 | C | `c-generate-build` | 1 | C BUILD generation task |
-| JavaScript | `js-biome` | 9 | Biome task |
-| JavaScript | `js-node-pnpm` | 13 | Node and pnpm task |
-| Python | `python-core` | 14 | Python core task |
+| JavaScript | `js-biome` | 10 | Biome task |
+| JavaScript | `js-node-pnpm` | 12 | Node and pnpm task |
+| Python | `python-core` | 12 | Python core task |
 | Python | `python-pex-uv` | 5 | PEX and uv task |
-| Python | `python-ruff` | 6 | Ruff task |
+| Python | `python-ruff` | 8 | Ruff task |
 | Rust | `rust-toolchains` | 9 | Rust toolchain task |
 | Rust | `rust-graph` | 7 | Rust graph task |
-| Odin | `odin-remainder` | 20 | Split Odin task |
-| Tree-sitter | `treesitter-validation` | 2 | Split Tree-sitter task |
-| Tree-sitter | `treesitter-runtime` | 1 | Split Tree-sitter task |
+| Odin | `odin` | 17 | Odin task |
+| Odin | `odin-vscode` | 3 | Odin VS Code task |
+| Tree-sitter | `treesitter-validation` | 2 | Tree-sitter task |
+| Tree-sitter | `treesitter-runtime` | 1 | Tree-sitter task |
 | OCI | `oci` | 5 | OCI task |
 | Zola | `zola` | 3 | Zola task |
 
@@ -154,20 +155,24 @@ The task dependency table condenses the boundary graph by owning task. Each
 task's Peon `depends_on` list must contain the prerequisite tasks in that table.
 The report prints every task cycle with one source edge for each step.
 
-**Verified:** on 2026-10-07 the report printed three task cycles:
+**Verified:** on 2026-10-08 the report printed "Task graph: acyclic". Three
+task cycles that the report printed on 2026-10-07 were removed by ownership
+changes:
 
 - Biome and Node/pnpm: `rules/js/biome/index.js` imports `rules/js/graph.js`,
-  and `rules/js/graph_test.js` imports Biome.
+  and `rules/js/graph_test.js` imports Biome. The Biome task now owns
+  `rules/js/graph_test.js`.
 - Odin and the packaging workflow: `rules/workflows/vs/index.js` imports
   `rules/odin/index.js`, and `rules/odin/vscode/index.js` imports the VS
-  workflow. These two boundaries form a cycle by themselves, so a task change
-  alone cannot remove it; it needs a module or boundary split. The built-in
-  lockfile aggregator and the lockfile tests also import Odin.
+  workflow. A new Odin VS Code task owns `rules/odin/vscode` and
+  `rules/workflows/vs`. It follows the Odin task.
 - Python core and Ruff: Ruff imports `rules/python/index.js`, and
-  `rules/python/graph_test.js` imports Ruff.
+  `rules/python/graph_test.js` imports Ruff. The Ruff task now owns
+  `rules/python/graph_test.js` and `rules/python/doc_test.js`.
 
-The CMake task, the two Rust tasks, and all of their prerequisite tasks were
-outside these cycles.
+The report reads only static imports. `rules/python/doc_test.js` imports the
+modules in the `DOC.md` setup block with `import()`, and these include the Ruff
+modules. Its owner is set by hand in `inventory.py`.
 
 ## Host prerequisites
 
@@ -206,8 +211,13 @@ Task ownership follows these rules:
   imports Odin toolchains. It follows the Odin task.
 - A packaging runtime task owns the base lockfile, package, and publish
   workflows with their BUILD modules and focused tests. The packaging workflow
-  task owns the VS workflow, the built-in lockfile aggregator, and the lockfile
-  and VS tests.
+  task owns the built-in lockfile aggregator and the lockfile test.
+- The Odin VS Code task owns `rules/odin/vscode` and `rules/workflows/vs`,
+  because the VS workflow imports Odin and the Odin VS Code module imports the
+  VS workflow. It follows the Odin task.
+- A test that imports a plugin package belongs to the plugin task, not to the
+  package that it tests. The Biome task owns `rules/js/graph_test.js`. The Ruff
+  task owns `rules/python/graph_test.js` and `rules/python/doc_test.js`.
 - The Imp host and test task retires the JavaScript test harness
   (`rules/imp/test/index.js` and its BUILD module). The host test API and test
   host fakes replace it.
@@ -220,13 +230,13 @@ Task ownership follows these rules:
 - A host task adds test host fakes. Each task whose boundary requires test host
   fakes depends on it.
 
-Before a catalog task outside the CMake and Rust chains is claimed, the sprint
-must reconcile the remaining tasks:
-
-- Split the Odin and Tree-sitter tasks at their `split from` boundaries.
-- Remove the task cycles that the report prints.
-- Replace broad dependency lists with the prerequisites in the report's task
-  dependency table and host table.
+On 2026-10-08 the remaining tasks were reconciled. The Odin VS Code module and
+the VS workflow became a separate task. The Tree-sitter task needed no split,
+because its two boundaries have three modules in total. The report has no task
+cycles, and each port task's Peon `depends_on` list contains the prerequisite
+tasks in the report's task dependency table. Each task whose boundary requires
+test host fakes depends on the test host fakes task. Re-run this check after a
+JavaScript file is added, removed, or moved.
 
 ## QuickJS removal gate
 
