@@ -4685,7 +4685,10 @@ mod tests {
         for module in [
             "report.luau",
             "build/index.luau",
+            "fmt/index.luau",
+            "lint/index.luau",
             "package/index.luau",
+            "run/index.luau",
             "test/index.luau",
         ] {
             let destination = rules_root.path().join("workflows").join(module);
@@ -5262,6 +5265,355 @@ return {
             fs::read_to_string(workspace_root.path().join("ran.txt")).unwrap(),
             "one,two,"
         );
+    }
+
+    /// Capture a directory with `files` (path, content) into CAS and return
+    /// its tree digest.
+    fn captured_tree(files: &[(&str, &str)]) -> String {
+        let directory = tempfile::tempdir().unwrap();
+        for (path, content) in files {
+            let path = directory.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+        imp_store::digest::capture_directory(directory.path())
+            .unwrap()
+            .digest()
+            .to_owned()
+    }
+
+    /// Run `goal` with the loaded roots whose address is in `addresses`.
+    async fn execute_workflow(
+        runtime: &mut LuauWorkspace,
+        roots: &[GraphRoot],
+        goal: &str,
+        addresses: &[&str],
+        flags: serde_json::Value,
+        run_args: &[String],
+    ) -> Result<Option<String>> {
+        let selected: Vec<_> = roots
+            .iter()
+            .filter(|root| root.workflow == goal && addresses.contains(&root.address.as_str()))
+            .cloned()
+            .collect();
+        assert_eq!(
+            selected.len(),
+            addresses.len(),
+            "{goal} roots: {addresses:?}"
+        );
+        runtime
+            .execute_graph(
+                goal,
+                &selected,
+                Arc::new(AtomicBool::new(false)),
+                &flags,
+                run_args,
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn fmt_and_lint_workflows_write_and_report_at_the_goal_boundary() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
+        let sources = captured_tree(&[("src/a.txt", "messy\n"), ("src/b.txt", "same\n")]);
+        let formatted = captured_tree(&[
+            ("src/a.txt", "clean\n"),
+            ("src/b.txt", "same\n"),
+            (
+                "tool/extra.txt",
+                "a sandbox entry that is not a declared path\n",
+            ),
+        ]);
+        let fixed = captured_tree(&[("fixed/src/c.txt", "fixed\n")]);
+        fs::create_dir_all(workspace_root.path().join("src")).unwrap();
+        fs::write(workspace_root.path().join("src/a.txt"), "messy\n").unwrap();
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            format!(
+                r#"
+local core = require("@imp/core")
+local fmt = require("@imp/rules/workflows/fmt")
+local lint = require("@imp/rules/workflows/lint")
+local output = core.output
+
+local function value(result)
+    return core.task({{
+        outputs = {{ value = output.value() }},
+        run = function()
+            return {{ value = result }}
+        end,
+    }})
+end
+
+local function fmt_result(path, requested)
+    return {{
+        paths = {{ path }},
+        sources_digest = "{sources}",
+        formatted = {{ digest = "{formatted}" }},
+        check = {{ requested = requested, failed = false }},
+    }}
+end
+
+return {{
+    changed = {{ [fmt.FMT] = value(fmt_result("src/a.txt", false)) }},
+    same = {{ [fmt.FMT] = value(fmt_result("src/b.txt", false)) }},
+    checked = {{ [fmt.FMT] = value(fmt_result("src/a.txt", true)) }},
+    clean = {{ [lint.LINT] = value({{ ok = true }}) }},
+    dirty = {{ [lint.LINT] = value({{ ok = false, output = "bad style" }}) }},
+    fixable = {{
+        [lint.LINT] = value({{
+            result = {{
+                ok = true,
+                fix_applied = true,
+                paths = {{ "src/c.txt" }},
+                fixed = {{ digest = "{fixed}" }},
+            }},
+        }}),
+    }},
+}}
+"#
+            ),
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let read = |path: &str| fs::read_to_string(workspace_root.path().join(path)).unwrap();
+
+        // A write run compares each declared path and writes the formatted
+        // sources. The extra entry in the formatted tree is not a change.
+        let report = execute_workflow(
+            &mut runtime,
+            &roots,
+            "fmt",
+            &["//:changed", "//:same"],
+            serde_json::json!({ "check": false }),
+            &[],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(report.contains("//:changed  \u{1b}[33mCHANGED"), "{report}");
+        assert!(
+            report.contains("//:same     \u{1b}[32mUNCHANGED"),
+            "{report}"
+        );
+        assert!(
+            report.ends_with("fmt: 1 unchanged, 1 changed, 0 failed"),
+            "{report}"
+        );
+        assert_eq!(read("src/a.txt"), "clean\n");
+        assert!(!workspace_root.path().join("tool").exists());
+
+        // A check run reports a changed path as failed and writes nothing.
+        fs::write(workspace_root.path().join("src/a.txt"), "messy\n").unwrap();
+        let error = execute_workflow(
+            &mut runtime,
+            &roots,
+            "fmt",
+            &["//:checked"],
+            serde_json::json!({ "check": true }),
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<crate::spike::UserFacingGoalError>()
+                .is_some(),
+            "{error:#}"
+        );
+        assert!(
+            error
+                .to_string()
+                .ends_with("fmt: 0 unchanged, 0 changed, 1 failed"),
+            "{error:#}"
+        );
+        assert_eq!(read("src/a.txt"), "messy\n");
+
+        // `--fix` writes fixes from `fixed/`, also when another root fails.
+        let error = execute_workflow(
+            &mut runtime,
+            &roots,
+            "lint",
+            &["//:dirty", "//:fixable"],
+            serde_json::json!({ "fix": true }),
+            &[],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("//:dirty:\nbad style"), "{error}");
+        assert!(error.contains("\u{1b}[33mFIXED"), "{error}");
+        assert!(
+            error.ends_with("lint: 0 clean, 1 fixed, 1 failed"),
+            "{error}"
+        );
+        assert_eq!(read("src/c.txt"), "fixed\n");
+
+        fs::remove_file(workspace_root.path().join("src/c.txt")).unwrap();
+        let report = execute_workflow(
+            &mut runtime,
+            &roots,
+            "lint",
+            &["//:clean", "//:fixable"],
+            serde_json::json!({ "fix": false }),
+            &[],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            report.ends_with("lint: 1 clean, 1 fixed, 0 failed"),
+            "{report}"
+        );
+        assert!(!workspace_root.path().join("src/c.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_workflow_starts_one_program_with_the_cli_arguments() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
+        let program = captured_tree(&[("note.txt", "staged\n")]);
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            format!(
+                r#"
+local core = require("@imp/core")
+local run = require("@imp/rules/workflows/run")
+local output = core.output
+local sh = core.native_tool("sh")
+
+local tool = core.task({{
+    inputs = {{ sh = sh, chmod = core.native_tool("chmod") }},
+    outputs = {{ file = output.artifact() }},
+    run = function(exec)
+        local result = exec.action({{
+            argv = {{
+                "sh",
+                "-c",
+                "printf '#!/bin/sh\nprintf \"%%s,\" \"$@\" > staged.txt\n' > tool; chmod +x tool",
+            }},
+            outputs = {{ file = output.file("tool") }},
+        }})
+        return {{ file = result.outputs.file }}
+    end,
+}})
+
+local described = core.task({{
+    outputs = {{ value = output.value() }},
+    run = function()
+        return {{
+            value = {{
+                argv = {{ "sh", "-c", 'cat "$IMP_SANDBOX_ROOT/note.txt" > described.txt; printf "%s," "$@" >> described.txt', "described" }},
+                digest = "{program}",
+            }},
+        }}
+    end,
+}})
+
+return {{
+    tool = {{ [run.RUN] = tool }},
+    described = {{ [run.RUN] = described }},
+}}
+"#
+            ),
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let args = ["one".to_owned(), "two".to_owned()];
+        let read = |path: &str| fs::read_to_string(workspace_root.path().join(path)).unwrap();
+
+        // A built executable starts through the staged launcher, in the
+        // workspace, with the CLI arguments.
+        execute_workflow(
+            &mut runtime,
+            &roots,
+            "run",
+            &["//:tool"],
+            serde_json::json!({}),
+            &args,
+        )
+        .await
+        .unwrap();
+        assert_eq!(read("staged.txt"), "one,two,");
+
+        // A full program description uses its own argv and stages its digest.
+        execute_workflow(
+            &mut runtime,
+            &roots,
+            "run",
+            &["//:described"],
+            serde_json::json!({}),
+            &args,
+        )
+        .await
+        .unwrap();
+        assert_eq!(read("described.txt"), "staged\none,two,");
+
+        let error = execute_workflow(
+            &mut runtime,
+            &roots,
+            "run",
+            &["//:tool", "//:described"],
+            serde_json::json!({}),
+            &[],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.starts_with("run requires a single target, got 2: "),
+            "{error}"
+        );
+        assert!(
+            error.contains("//:tool") && error.contains("//:described"),
+            "{error}"
+        );
+    }
+
+    /// The Luau workspace of this repository loads, and every `TEST` root in
+    /// it passes. This is `IMP_RUNTIME=luau imp test //...` without the CLI.
+    #[tokio::test]
+    async fn repository_luau_workspace_tests_pass() {
+        let rules_root = crate::loader::RulesSource::discover()
+            .root()
+            .expect("tests need the repository rules tree")
+            .to_owned();
+        let workspace_root = rules_root.parent().unwrap();
+        assert!(
+            workspace_root.join("imp.workspace.luau").is_file(),
+            "the test inputs must include imp.workspace.luau"
+        );
+        let mut runtime = LuauWorkspace::new(workspace_root, &rules_root).unwrap();
+        let roots: Vec<_> = runtime
+            .load_modules()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|root| root.workflow == "test")
+            .collect();
+        assert!(
+            roots
+                .iter()
+                .any(|root| root.address == "//rules/workflows:rules_test"),
+            "{:?}",
+            roots.iter().map(|root| &root.address).collect::<Vec<_>>()
+        );
+        let report = runtime
+            .execute_graph(
+                "test",
+                &roots,
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({}),
+                &[],
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{error:#}"))
+            .unwrap();
+        assert!(report.contains("unit(s) passed"), "{report}");
     }
 
     #[tokio::test]

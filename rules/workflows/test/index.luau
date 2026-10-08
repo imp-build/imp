@@ -81,5 +81,6 @@ end
 
 return {
 	TEST = core.goal("test", graph_test_goal),
+	graph_test_goal = graph_test_goal,
 	test_vehicle = test_vehicle,
 }

@@ -3,6 +3,7 @@ import { protoAssets } from "//crates/imp-daemon";
 import {
     engineAssets,
     rulesTree,
+    luauWorkspace,
     testTar,
     testGzip,
     testGit,
@@ -26,9 +27,10 @@ import {
 } from "//";
 
 export const imp_engine = cargoPackage({
-    // rulesTree is a test input, not a build input: the loader reads rules
-    // from disk, and these tests resolve real rules from tempdir workspaces.
-    deps: [engineAssets.files, rulesTree.files, protoAssets.files],
+    // rulesTree and luauWorkspace are test inputs, not build inputs: the
+    // loader reads rules from disk, and these tests resolve real rules from
+    // tempdir workspaces and load the repository Luau workspace.
+    deps: [engineAssets.files, rulesTree.files, luauWorkspace.files, protoAssets.files],
     testTools: [
         testTar,
         testGzip,

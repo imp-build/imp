@@ -500,8 +500,71 @@ struct PendingDependency {
 // Workspace discovery
 // ---------------------------------------------------------------------------
 
-/// Find the nearest ancestor directory that selects a JavaScript or Luau
-/// workspace. A workspace cannot select both runtimes at once.
+/// Selects the authoring runtime of a workspace root that contains both
+/// `imp.workspace.js` and `imp.workspace.luau`. The value is `js` or `luau`.
+/// When the variable is not set, such a workspace uses JavaScript.
+pub const RUNTIME_ENV: &str = "IMP_RUNTIME";
+
+/// The language that a workspace uses for its workspace and BUILD modules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthoringRuntime {
+    JavaScript,
+    Luau,
+}
+
+impl AuthoringRuntime {
+    /// Parse a [`RUNTIME_ENV`] value.
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "js" => Ok(Self::JavaScript),
+            "luau" => Ok(Self::Luau),
+            _ => bail!("{RUNTIME_ENV} must be 'js' or 'luau', got '{value}'"),
+        }
+    }
+
+    /// Read [`RUNTIME_ENV`]. `None` means that the variable is not set.
+    pub fn from_env() -> Result<Option<Self>> {
+        match std::env::var(RUNTIME_ENV) {
+            Ok(value) => Self::parse(&value).map(Some),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(error) => bail!("read {RUNTIME_ENV}: {error}"),
+        }
+    }
+
+    fn workspace_file(self) -> &'static str {
+        match self {
+            Self::JavaScript => WORKSPACE_FILE,
+            Self::Luau => WORKSPACE_LUAU_FILE,
+        }
+    }
+
+    /// Select the runtime of the workspace at `root`. `requested` is the
+    /// [`RUNTIME_ENV`] value, if set. A requested runtime must have its
+    /// workspace file. Without a request, a workspace with both files uses
+    /// JavaScript.
+    pub fn select(root: &Path, requested: Option<Self>) -> Result<Self> {
+        let has_js = root.join(WORKSPACE_FILE).is_file();
+        let has_luau = root.join(WORKSPACE_LUAU_FILE).is_file();
+        if let Some(runtime) = requested {
+            if !root.join(runtime.workspace_file()).is_file() {
+                bail!(
+                    "{RUNTIME_ENV} selects {}, but {} has no such file",
+                    runtime.workspace_file(),
+                    root.display()
+                );
+            }
+            return Ok(runtime);
+        }
+        if has_luau && !has_js {
+            return Ok(Self::Luau);
+        }
+        Ok(Self::JavaScript)
+    }
+}
+
+/// Find the nearest ancestor directory that contains `imp.workspace.js` or
+/// `imp.workspace.luau`. A root can contain both files; [`RUNTIME_ENV`]
+/// selects the runtime.
 pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
     let mut directory = dunce::canonicalize(start)
         .with_context(|| format!("canonicalize workspace start {}", start.display()))?;
@@ -512,14 +575,8 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
             .to_owned();
     }
     loop {
-        let has_js = directory.join(WORKSPACE_FILE).is_file();
-        let has_luau = directory.join(WORKSPACE_LUAU_FILE).is_file();
-        if has_js && has_luau {
-            bail!(
-                "workspace contains both {WORKSPACE_FILE} and {WORKSPACE_LUAU_FILE}; select one runtime"
-            );
-        }
-        if has_js || has_luau {
+        if directory.join(WORKSPACE_FILE).is_file() || directory.join(WORKSPACE_LUAU_FILE).is_file()
+        {
             return Ok(directory);
         }
         if !directory.pop() {
@@ -703,18 +760,25 @@ async fn load_workspace_with_rules_and_service(
     rules_source: RulesSource,
     service: Arc<dyn ExecutionService>,
 ) -> Result<LiveWorkspace> {
+    let requested = AuthoringRuntime::from_env()?;
+    load_workspace_with_runtime(root, rules_source, service, requested).await
+}
+
+/// Like [`load_workspace_with_rules_and_service`], but with an explicit
+/// runtime request instead of [`RUNTIME_ENV`], so that tests do not change
+/// the process environment.
+pub(crate) async fn load_workspace_with_runtime(
+    root: &Path,
+    rules_source: RulesSource,
+    service: Arc<dyn ExecutionService>,
+    requested: Option<AuthoringRuntime>,
+) -> Result<LiveWorkspace> {
     let root = root
         .canonicalize()
         .with_context(|| format!("canonicalize workspace root {}", root.display()))?;
-    let js_workspace = root.join(WORKSPACE_FILE);
-    let luau_workspace = root.join(WORKSPACE_LUAU_FILE);
-    if js_workspace.is_file() && luau_workspace.is_file() {
-        bail!(
-            "workspace contains both {WORKSPACE_FILE} and {WORKSPACE_LUAU_FILE}; select one runtime"
-        );
-    }
+    let runtime = AuthoringRuntime::select(&root, requested)?;
     let mut live = create_live_runtime(&root, rules_source.clone(), Arc::clone(&service)).await?;
-    if luau_workspace.is_file() {
+    if runtime == AuthoringRuntime::Luau {
         let rules_root = rules_source
             .root()
             .with_context(|| "Luau workspaces require an installed rules tree or IMP_RULES_DIR")?;
@@ -12040,6 +12104,116 @@ export const app = target({ kind: "asset", attrs: { marker } });
             find_workspace_root(&nested).unwrap(),
             dunce::canonicalize(root.path()).unwrap()
         );
+    }
+
+    /// A workspace with both runtime files, with one BUILD module for each
+    /// runtime, so that the loaded targets show the selected runtime.
+    fn dual_runtime_workspace() -> TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        write_file(&p.join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        write_file(
+            &p.join(WORKSPACE_LUAU_FILE),
+            "require(\"@imp/rules/workflows/build\")\nreturn {}\n",
+        );
+        write_file(
+            &p.join("js/BUILD.js"),
+            r#"import { target } from "imp:core";
+export const app = target({ kind: "sample" });
+"#,
+        );
+        write_file(
+            &p.join("luau/BUILD.luau"),
+            r#"local core = require("@imp/core")
+local output = core.output
+return {
+    app = core.task({
+        outputs = { value = output.value() },
+        run = function()
+            return { value = true }
+        end,
+    }),
+}
+"#,
+        );
+        root
+    }
+
+    async fn load_dual_runtime(
+        root: &Path,
+        requested: Option<AuthoringRuntime>,
+    ) -> Result<LiveWorkspace> {
+        load_workspace_with_runtime(
+            root,
+            RulesSource::discover(),
+            Arc::new(LocalExecutionService::new()),
+            requested,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn workspace_root_accepts_both_runtime_files() {
+        let root = dual_runtime_workspace();
+        assert_eq!(
+            find_workspace_root(&root.path().join("luau")).unwrap(),
+            dunce::canonicalize(root.path()).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn dual_runtime_workspace_uses_javascript_by_default() {
+        let root = dual_runtime_workspace();
+        let live = load_dual_runtime(root.path(), None).await.unwrap();
+        assert!(live.luau.is_none());
+        assert!(live.workspace.targets.contains_key("//js:app"));
+    }
+
+    #[tokio::test]
+    async fn dual_runtime_workspace_loads_luau_on_request() {
+        let root = dual_runtime_workspace();
+        let live = load_dual_runtime(root.path(), Some(AuthoringRuntime::Luau))
+            .await
+            .unwrap();
+        assert!(live.luau.is_some());
+        assert!(!live.workspace.targets.contains_key("//js:app"));
+        let addresses: Vec<_> = live
+            .workspace
+            .graph
+            .roots
+            .iter()
+            .map(|root| root.address.as_str())
+            .collect();
+        assert!(addresses.contains(&"//luau:app"), "{addresses:?}");
+    }
+
+    #[tokio::test]
+    async fn requested_runtime_requires_its_workspace_file() {
+        let root = tempfile::tempdir().unwrap();
+        write_file(&root.path().join(WORKSPACE_FILE), r#"import "imp:core";"#);
+        let error = load_dual_runtime(root.path(), Some(AuthoringRuntime::Luau))
+            .await
+            .err()
+            .expect("a Luau request without imp.workspace.luau must fail")
+            .to_string();
+        assert!(
+            error.contains("IMP_RUNTIME selects imp.workspace.luau"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn runtime_request_rejects_an_unknown_value() {
+        assert_eq!(
+            AuthoringRuntime::parse("luau").unwrap(),
+            AuthoringRuntime::Luau
+        );
+        assert_eq!(
+            AuthoringRuntime::parse("js").unwrap(),
+            AuthoringRuntime::JavaScript
+        );
+        let error = AuthoringRuntime::parse("lua").unwrap_err().to_string();
+        assert_eq!(error, "IMP_RUNTIME must be 'js' or 'luau', got 'lua'");
     }
 
     #[tokio::test]

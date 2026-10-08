@@ -26,8 +26,8 @@ the gaps that block catalog migration.
 | BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. `imp goal generate-build` can write and check generated `BUILD.luau` files from registered Luau generators. | Language-specific generators must be ported to Luau before a Luau workspace can use them. |
 | Graph construction | Exposes `files`, `glob`, `task`, `expand`, `output`, `native_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. Expansions derive keyed children with goal slots such as `BUILD`, `PACKAGE`, and `TEST` from resolved inputs; `get()` selects one child and `all()` selects every child. `register_build_rule` and `register_build_generator` provide the Luau BUILD renderer interface. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
 | Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, a cache toggle, and allow-failure actions with exit code, stdout, and stderr. Captured artifacts can flow to downstream tasks through named outputs. The `run` workflow can start one interactive program. | Broader toolchain conveniences are not available. |
-| Tests and workflows | One generic driver runs every goal through the Luau workflow module that registers it with `core.goal`. Luau BUILD modules expose roots under the slot key of a registered goal. `imp package` publishes selected artifact roots under `dist/`, and `imp test` reports through `@imp/rules/workflows/test`. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. Test cases can resolve tasks and fake action runs, programs, the toolchain platform, goal flags, workspace writes, and digest diffs. | The `run`, `fmt`, and `lint` workflow modules and mixed JavaScript/Luau test discovery are not available in Luau. Luau has no target address or memo trace host API, and no fakes for them. |
-| Installed rules | The pilot tree contains Luau `asset`, `resource_package`, `workflows/build`, `workflows/package`, `workflows/test`, `workflows/report`, and `imp/native-tool` modules. | Other packages remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
+| Tests and workflows | One generic driver runs every goal through the Luau workflow module that registers it with `core.goal`. Luau BUILD modules expose roots under the slot key of a registered goal. `imp package` publishes selected artifact roots under `dist/`, and `imp test` reports through `@imp/rules/workflows/test`. `@imp/rules/workflows/fmt`, `lint`, and `run` register the `fmt` (with `--check`), `lint` (with `--fix`), and `run` goals. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. Test cases can resolve tasks and fake action runs, programs, the toolchain platform, goal flags, workspace writes, and digest diffs. | Mixed JavaScript/Luau test discovery is not available: one invocation runs one runtime. Luau has no target address or memo trace host API, and no fakes for them. |
+| Installed rules | The tree contains Luau `asset`, `resource_package`, `workflows/build`, `workflows/fmt`, `workflows/lint`, `workflows/package`, `workflows/run`, `workflows/test`, `workflows/report`, and `imp/native-tool` modules. | Other packages remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
 
 The shared C toolchain is the first consumer of `platform_info()`. C compiler
 toolchains and Imp host rules are the first consumers of acquired tool handles,
@@ -71,10 +71,29 @@ units. Failures include the test module's canonical workspace address and
 source location. If a filter matches no tests in the selected test roots, the
 goal fails before the workflow runs.
 
-A workspace selects one authoring runtime: it cannot contain both
-`imp.workspace.js` and `imp.workspace.luau`. Luau test roots discover only
-`.test.luau` modules. JavaScript test roots retain their existing
-`_test.js` discovery path.
+A workspace root can contain `imp.workspace.js`, `imp.workspace.luau`, or
+both. When it contains both, JavaScript is the default runtime. Set
+`IMP_RUNTIME=luau` to select the Luau runtime, or `IMP_RUNTIME=js` to select
+JavaScript. A selected runtime must have its workspace file, and another
+value fails. One invocation uses one runtime: the JavaScript runtime loads
+only `BUILD.js` modules, and the Luau runtime loads only `BUILD.luau`
+modules. Luau test roots discover only `.test.luau` modules. JavaScript test
+roots retain their existing `_test.js` discovery path.
+
+**Verified:** this repository contains both workspace files. A port task adds
+the `BUILD.luau` and `.test.luau` modules of its package and runs them from the
+repository root:
+
+```sh
+# From the repository root, after `cargo build -p imp`:
+IMP_RUNTIME=luau IMP_RULES_DIR="$PWD/rules" target/debug/imp test //rules/...
+```
+
+`IMP_RULES_DIR` points the Luau loader at the checkout rule tree. Without it, a
+development build has no rule tree for `@imp/rules`. The
+`luau::tests::repository_luau_workspace_tests_pass` test runs every Luau `TEST`
+root of the repository, so `imp test //crates/imp-engine:imp_engine` covers
+them.
 
 ### Test host fakes
 
@@ -218,8 +237,8 @@ runtime can register a name once. `options.flags` declares boolean CLI flags.
 A flag cannot use the name of an option that every goal accepts, such as
 `jobs`, `no-cache`, `case`, or `suite`.
 
-**Illustrative example:** a workflow module that declares a `check` flag. Luau
-has no `fmt` workflow yet.
+**Illustrative example:** a workflow module that declares a `check` flag,
+similar to `@imp/rules/workflows/fmt`.
 
 ```luau
 local core = require("@imp/core")

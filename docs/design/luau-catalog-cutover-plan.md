@@ -34,6 +34,12 @@ mechanically.
   branch may be temporarily broken between island completions.
 - Validate an island only when every module in that static-import component and
   all of its prerequisite islands are present in Luau.
+- The repository has an `imp.workspace.luau` beside `imp.workspace.js`. A port
+  task adds the `BUILD.luau` and `.test.luau` modules of its package, requires
+  any new workflow module from `imp.workspace.luau`, and validates with
+  `IMP_RUNTIME=luau imp test //<package>/...`. The
+  `luau::tests::repository_luau_workspace_tests_pass` test runs these tests in
+  `imp test //...`.
 - Keep every review boundary at or below 20 tracked authoring modules. A task
   may need separate runtime and validation boundaries to preserve that limit
   and the import order.
