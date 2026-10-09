@@ -26,7 +26,7 @@ the gaps that block catalog migration.
 | BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. `imp goal generate-build` can write and check generated `BUILD.luau` files from registered Luau generators. | Language-specific generators must be ported to Luau before a Luau workspace can use them. |
 | Graph construction | Exposes `files`, `glob`, `task`, `expand`, `output`, `native_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. Expansions derive keyed children with goal slots such as `BUILD`, `PACKAGE`, and `TEST` from resolved inputs; `get()` selects one child and `all()` selects every child. `register_build_rule` and `register_build_generator` provide the Luau BUILD renderer interface. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
 | Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, fileset paths and digests (`exec.paths`, `exec.digest`), a cache toggle, and allow-failure actions with exit code, stdout, and stderr. Captured artifacts can flow to downstream tasks through named outputs. The `run` workflow can start one interactive program. | Broader toolchain conveniences are not available. |
-| Tests and workflows | One generic driver runs every goal through the Luau workflow module that registers it with `core.goal`. Luau BUILD modules expose roots under the slot key of a registered goal. `imp package` publishes selected artifact roots under `dist/`, and `imp test` reports through `@imp/rules/workflows/test`. `@imp/rules/workflows/fmt`, `lint`, and `run` register the `fmt` (with `--check`), `lint` (with `--fix`), and `run` goals. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. Test cases can resolve tasks and fake action runs, programs, the toolchain platform, goal flags, workspace writes, and digest diffs. | Mixed JavaScript/Luau test discovery is not available: one invocation runs one runtime. Luau has no target address or memo trace host API, and no fakes for them. |
+| Tests and workflows | One generic driver runs every goal through the Luau workflow module that registers it with `core.goal`. Luau BUILD modules expose roots under the slot key of a registered goal. `imp package` publishes selected artifact roots under `dist/`, and `imp test` reports through `@imp/rules/workflows/test`. `@imp/rules/workflows/fmt`, `lint`, and `run` register the `fmt` (with `--check`), `lint` (with `--fix`), and `run` goals. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. Test cases can resolve tasks and fake action runs, programs, the toolchain platform, goal flags, workspace writes, and digest diffs. | Mixed JavaScript/Luau test discovery is not available: one invocation runs one runtime. Luau has no label handles, target address API, or memo trace records (see "Not provided" below). |
 | Installed rules | The tree contains Luau `asset`, `resource_package`, `workflows/build`, `workflows/fmt`, `workflows/lint`, `workflows/package`, `workflows/run`, `workflows/test`, `workflows/report`, and `imp/native-tool` modules. | Other packages remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
 
 The shared C toolchain is the first consumer of `platform_info()`. C compiler
@@ -218,13 +218,18 @@ download, archive, checksum, cache, and worker host functions. Luau rules
 express these steps as graph tasks and actions, so `with_fake_toolchain_host`
 covers them through the action fake.
 
-**Planned:** Luau has no target address or memo trace host API. Luau has no
-label handles, and `core.memo` returns its function and records no trace.
-Thus there is no Luau replacement for `__host_target_address` or
-`__host_memo_trace_write`. A fake for each is added together with its host API,
-when Luau rule code needs that API. There is no plan to add
-`withFakeSelectedTargets` or `withFakeMergeDigests`, because no rule test uses
-them.
+**Not provided:** Luau has no label handles, no target address API, and no
+memo trace records. `core.memo` returns its function unchanged. Luau declares
+graph roots with opaque handles, and a root gets its address from the BUILD
+field that exports it, so rule code does not look up addresses. A rule that
+needs its package directory uses the package context that the handle captures,
+or `core.package_path()`. Memo trace records serve `--changed-since` only for
+the JavaScript `memo()` and `target()` model; graph-native roots use graph
+staleness instead. Thus there is no Luau replacement for
+`__host_target_address` or `__host_memo_trace_write`, and the JavaScript
+`label_test.js` and `memo_test.js` modules are not ported. There is no plan to
+add `withFakeSelectedTargets` or `withFakeMergeDigests`, because no rule test
+uses them.
 
 ### Goals and workflows
 
