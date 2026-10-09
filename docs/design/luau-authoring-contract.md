@@ -86,11 +86,13 @@ repository root:
 
 ```sh
 # From the repository root, after `cargo build -p imp`:
-IMP_RUNTIME=luau IMP_RULES_DIR="$PWD/rules" target/debug/imp test //rules/...
+IMP_RUNTIME=luau target/debug/imp test //rules/...
 ```
 
-`IMP_RULES_DIR` points the Luau loader at the checkout rule tree. Without it, a
-development build has no rule tree for `@imp/rules`. The
+A Cargo build in the checkout reads `@imp/rules` from the checkout's `rules/`
+directory. It finds that directory from the executable path, not from the
+workspace. Set `IMP_RULES_DIR="$PWD/rules"` only for a build in a different
+`CARGO_TARGET_DIR`. A workspace cannot supply `@imp/rules` modules. The
 `luau::tests::repository_luau_workspace_tests_pass` test runs every Luau `TEST`
 root of the repository, so `imp test //crates/imp-engine:imp_engine` covers
 them.

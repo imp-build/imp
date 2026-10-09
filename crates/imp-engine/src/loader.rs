@@ -81,7 +81,8 @@ pub struct RulesSource {
 
 impl RulesSource {
     /// Locates the rule library: `$IMP_RULES_DIR` if set, otherwise the tree
-    /// shipped alongside the executable.
+    /// shipped alongside the executable, or the checkout's `rules/` for a
+    /// Cargo build in an imp checkout.
     pub fn discover() -> Self {
         if let Some(value) = std::env::var_os(RULES_DIR_ENV) {
             if !value.is_empty() {
@@ -191,7 +192,8 @@ pub fn test_rules_dir() -> Option<PathBuf> {
 
 /// Candidate rule libraries for an executable at `exe`, in precedence order:
 /// the installed layout (`<prefix>/bin/imp` beside `<prefix>/share/imp/rules`),
-/// then a `rules/` sibling so an unpacked release archive runs in place.
+/// then a `rules/` sibling so an unpacked release archive runs in place, then
+/// the checkout's `rules/` for a Cargo build (`<checkout>/target/<profile>/imp`).
 /// Returns the first that exists plus every path probed, for diagnostics.
 ///
 /// Pure so it is testable without touching `current_exe` or the environment.
@@ -205,6 +207,18 @@ fn probe_exe_relative(exe: &Path) -> (Option<PathBuf>, Vec<PathBuf>) {
         candidates.push(prefix.join("share").join("imp").join("rules"));
     }
     candidates.push(dir.join("rules"));
+    // A Cargo build in an imp checkout uses the checkout's rules. The check
+    // uses the executable path only, so the current workspace cannot supply
+    // built-in rules.
+    if let Some(checkout) = dir
+        .parent()
+        .filter(|target| target.file_name() == Some(std::ffi::OsStr::new("target")))
+        .and_then(Path::parent)
+    {
+        if checkout.join("crates/imp/Cargo.toml").is_file() {
+            candidates.push(checkout.join("rules"));
+        }
+    }
 
     let root = candidates.iter().find(|path| path.is_dir()).cloned();
     (root, candidates)
@@ -967,6 +981,33 @@ mod tests {
 
         let (root, _) = probe_exe_relative(&stage.path().join("imp"));
         assert_eq!(root.unwrap(), stage.path().join("rules"));
+    }
+
+    #[test]
+    fn exe_relative_probe_finds_checkout_rules() {
+        let checkout = tempfile::tempdir().unwrap();
+        let debug = checkout.path().join("target/debug");
+        std::fs::create_dir_all(&debug).unwrap();
+        std::fs::create_dir_all(checkout.path().join("crates/imp")).unwrap();
+        std::fs::write(checkout.path().join("crates/imp/Cargo.toml"), "").unwrap();
+        std::fs::create_dir_all(checkout.path().join("rules")).unwrap();
+
+        let (root, _) = probe_exe_relative(&debug.join("imp"));
+        assert_eq!(root.unwrap(), checkout.path().join("rules"));
+    }
+
+    /// A `target/` directory alone does not make a checkout: without the imp
+    /// crate manifest, the probe must not use a nearby `rules/`.
+    #[test]
+    fn exe_relative_probe_ignores_target_without_checkout() {
+        let other = tempfile::tempdir().unwrap();
+        let debug = other.path().join("target/debug");
+        std::fs::create_dir_all(&debug).unwrap();
+        std::fs::create_dir_all(other.path().join("rules")).unwrap();
+
+        let (root, searched) = probe_exe_relative(&debug.join("imp"));
+        assert!(root.is_none());
+        assert_eq!(searched.len(), 2);
     }
 
     #[test]
