@@ -371,3 +371,47 @@ undeclared real lookup fails.
 Consumer workspaces do not need to vendor Imp's builtin rules; `rulesTest()`
 stages the builtin bundle for its nested runner while keeping workspace rules
 overrides first.
+
+## Luau modules
+
+**Verified:** on 2026-10-10, `@imp/rules/imp/native-tool` and
+`@imp/rules/imp/self-tool` have Luau modules beside the JavaScript modules.
+JavaScript stays the default runtime of this repository. To use the Luau
+modules here, select the Luau workspace with `IMP_RUNTIME=luau`, as
+`docs/design/luau-authoring-contract.md` describes.
+
+| Module | Luau export |
+| --- | --- |
+| `@imp/rules/imp/native-tool` | `native_tool(name)`: a graph tool handle for an executable on the host `PATH`. A name that is empty or not a string fails with `native_tool(name) requires a non-empty executable name`. |
+| `@imp/rules/imp/self-tool` | `imp_tool`: a graph tool handle for the running Imp executable. Actions run it as `imp`. |
+
+Put a tool handle in the `inputs` of a task. Each action of that task can then
+run the executable by name. The lookup occurs when the action runs, not when
+the handle is declared. Luau has no `nativeToolSpec()`: Luau tasks take the
+tool handle directly, so there is no legacy `run({ tools })` descriptor.
+
+**Illustrative example:**
+
+```luau
+local core = require("@imp/core")
+local native = require("@imp/rules/imp/native-tool")
+
+local version = core.task({
+	inputs = { cmake = native.native_tool("cmake") },
+	run = function(exec)
+		exec.action({ argv = { "cmake", "--version" } })
+	end,
+})
+```
+
+These modules stay JavaScript only:
+
+- `//rules/imp/mode` and the `opt` axis. Luau has no mode axes or profiles yet.
+- `//rules/imp/test`. A Luau package declares a `TEST` root with
+  `core.test_root()` and writes `.test.luau` modules with `core.test.case`, as
+  `rules/workflows/DOC.md` describes. The `core.test.with_fake_*` functions
+  replace the JavaScript fakes. The JavaScript harness is removed with QuickJS.
+
+The `//rules/imp:rules_test` root runs the `.test.luau` modules of this
+package. `rules_test_coverage.test.luau` fails when a directory under `rules/`
+has a `.test.luau` module but its `BUILD.luau` declares no `core.test_root()`.

@@ -60,10 +60,11 @@ starts.
 | Host removal | `quickjs-removal` | 2 | QuickJS removal |
 | Examples | `example-decision` | 3 | Example migration decision |
 | Integration | `workspace-integration` | 19 | Workspace, CI, docs, and integration |
-| Imp | `imp-host-foundation` | 3 | Imp host and test task |
+| Imp | `imp-host-foundation` | 2 | Imp host and test task |
+| Imp | `imp-mode` | 2 | Imp mode axes task |
 | Imp | `imp-core-foundation` | 9 | Imp core task |
 | Imp | `imp-generate-validation` | 1 | Imp generate validation task |
-| Imp | `imp-validation` | 15 | Imp host and test task |
+| Imp | `imp-validation` | 14 | Imp host and test task |
 | Workflows | `workflow-core-runtime` | 6 | Core workflow task |
 | Workflows | `workflow-core-validation` | 6 | Core workflow task |
 | Workflows | `workflow-codegen-runtime` | 3 | Imp core task |
@@ -224,6 +225,10 @@ Task ownership follows these rules:
 - A test that imports a plugin package belongs to the plugin task, not to the
   package that it tests. The Biome task owns `rules/js/graph_test.js`. The Ruff
   task owns `rules/python/graph_test.js` and `rules/python/doc_test.js`.
+- A separate Imp mode axes task owns `rules/imp/mode` and
+  `rules/imp/config/example`, because Luau has no mode axes, profiles,
+  `semantic.mode`, or `configured()` (user decision, 2026-10-10). The Odin
+  task follows it, because Odin imports `rules/imp/mode`.
 - The Imp host and test task retires the JavaScript test harness
   (`rules/imp/test/index.js` and its BUILD module). The host test API and test
   host fakes replace it.

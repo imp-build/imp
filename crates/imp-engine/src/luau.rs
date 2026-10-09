@@ -224,6 +224,8 @@ struct FileSetSpec {
 enum GraphNode {
     Files(FileSetSpec),
     NativeTool(String),
+    /// The running Imp executable, available to actions as the `imp` tool.
+    SelfTool,
     Path {
         source_id: u64,
         owner_package: String,
@@ -2426,6 +2428,18 @@ fn create_core(
             lua.create_userdata(handle)
         })?,
     )?;
+    let graph_host = Rc::clone(&host);
+    core.set(
+        "self_tool",
+        lua.create_function(move |lua, ()| {
+            let handle = allocate_handle(&graph_host, "self_tool");
+            graph_host
+                .borrow_mut()
+                .nodes
+                .insert(handle.id, GraphNode::SelfTool);
+            lua.create_userdata(handle)
+        })?,
+    )?;
     core.set(
         "memo",
         lua.create_function(|_, function: LuaFunction| Ok(function))?,
@@ -3770,6 +3784,22 @@ fn run_fake_action(
                 }
                 tool_names.push(name);
             }
+            Some(GraphNode::SelfTool) => {
+                let name = SELF_TOOL_NAME.to_owned();
+                if !seen_tools.insert(name.clone()) {
+                    bail!("exec.action received tool name '{name}' more than once");
+                }
+                if let Some(calls) = &toolchain_calls {
+                    push_record(
+                        calls,
+                        LuaValue::Table(
+                            lua.create_sequence_from(["self_tool"]).map_err(lua_error)?,
+                        ),
+                    )
+                    .map_err(lua_error)?;
+                }
+                tool_names.push(name);
+            }
             Some(GraphNode::Tool {
                 name,
                 source_id,
@@ -4124,6 +4154,37 @@ fn set_action_status(
     result.set("stderr", stderr)
 }
 
+/// The tool name of the running Imp executable in an action.
+const SELF_TOOL_NAME: &str = "imp";
+
+/// Make a tool specification for a host executable. The cache key includes
+/// the canonical location and the content digest of the executable, so action
+/// identity follows the selected file and not the ambient `PATH`.
+fn host_executable_tool_spec(
+    service: &Arc<dyn ExecutionService>,
+    name: String,
+    resolved: PathBuf,
+) -> Result<ExecToolSpec> {
+    let resolved = dunce::canonicalize(&resolved)
+        .with_context(|| format!("canonicalize tool '{name}' {}", resolved.display()))?;
+    let content_digest = service
+        .file_sha256(&resolved)
+        .with_context(|| format!("digest tool '{name}' {}", resolved.display()))?;
+    let path = crate::spike::singleflight_register_native_tool(service, &name, &resolved)
+        .map_err(anyhow::Error::msg)?;
+    let key = imp_store::cache::digest_json(&serde_json::json!({
+        "path": resolved,
+        "digest": content_digest,
+    }))?;
+    Ok(ExecToolSpec {
+        name,
+        cache: "native-tools".to_owned(),
+        key,
+        path,
+        bin_dirs: vec![".".to_owned()],
+    })
+}
+
 /// Resolve tool handles to tool specifications for the execution service.
 /// Values that are not tool handles are ignored. A tool name may occur once.
 fn resolve_tool_specs(
@@ -4151,25 +4212,16 @@ fn resolve_tool_specs(
                 }
                 let resolved = crate::spike::which_executable(&name)
                     .with_context(|| format!("native tool '{name}' was not found on PATH"))?;
-                let resolved = dunce::canonicalize(&resolved)
-                    .with_context(|| format!("canonicalize native tool {resolved}"))?;
-                let content_digest = service
-                    .file_sha256(&resolved)
-                    .with_context(|| format!("digest native tool {}", resolved.display()))?;
-                let path =
-                    crate::spike::singleflight_register_native_tool(service, &name, &resolved)
-                        .map_err(anyhow::Error::msg)?;
-                let key = imp_store::cache::digest_json(&serde_json::json!({
-                    "path": resolved,
-                    "digest": content_digest,
-                }))?;
-                tools.push(ExecToolSpec {
-                    name,
-                    cache: "native-tools".to_owned(),
-                    key,
-                    path,
-                    bin_dirs: vec![".".to_owned()],
-                });
+                tools.push(host_executable_tool_spec(service, name, resolved.into())?);
+            }
+            Some(GraphNode::SelfTool) => {
+                let name = SELF_TOOL_NAME.to_owned();
+                if !tool_names.insert(name.clone()) {
+                    bail!("{api} received tool name '{name}' more than once");
+                }
+                let resolved =
+                    std::env::current_exe().context("resolve the running imp executable")?;
+                tools.push(host_executable_tool_spec(service, name, resolved)?);
             }
             Some(GraphNode::Tool {
                 name,
@@ -5890,6 +5942,62 @@ return {
         .await;
         let report = report.unwrap().unwrap();
         assert!(report.contains("1/1 unit(s) passed"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn luau_self_tool_puts_the_running_executable_on_the_action_path() {
+        let (_workspace_root, report) = run_luau_test_module(
+            r#"
+local core = require("@imp/core")
+local output = core.output
+
+local function probe(inputs)
+    return core.task({
+        inputs = inputs,
+        outputs = { found = output.value() },
+        run = function(exec)
+            local result = exec.action({
+                argv = { "sh", "-c", ": > marker; command -v imp" },
+                display = "find imp",
+                env = { PATH = "" },
+                allow_failure = true,
+                outputs = { marker = output.file("marker") },
+            })
+            return { found = result.exit_code == 0 }
+        end,
+    })
+end
+
+return {
+    core.test.case("runs with imp on PATH", function()
+        assert(core.test.resolve(probe({ imp = core.self_tool() }).outputs.found) == true)
+        assert(core.test.resolve(probe({}).outputs.found) == false)
+    end),
+    core.test.case("fakes record the self tool", function()
+        core.test.with_fake_toolchain_host(function(host)
+            core.test.resolve(probe({ imp = core.self_tool() }))
+            assert(#host.runs == 1)
+            assert(#host.runs[1].tools == 1 and host.runs[1].tools[1] == "imp")
+            local recorded = false
+            for _, call in host.calls do
+                if call[1] == "self_tool" then
+                    recorded = true
+                end
+            end
+            assert(recorded)
+        end)
+    end),
+    core.test.case("rejects a second imp tool", function()
+        local ok, problem = pcall(core.test.resolve, probe({ a = core.self_tool(), b = core.self_tool() }))
+        assert(not ok)
+        assert(string.find(tostring(problem), "tool name 'imp' more than once", 1, true), tostring(problem))
+    end),
+}
+"#,
+        )
+        .await;
+        let report = report.unwrap().unwrap();
+        assert!(report.contains("test: 3/3 unit(s) passed"), "{report}");
     }
 
     #[tokio::test]

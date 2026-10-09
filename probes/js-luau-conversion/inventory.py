@@ -64,8 +64,14 @@ BOUNDARIES: dict[str, MigrationBoundary] = {
     "imp-host-foundation": MigrationBoundary(
         "Imp host-facing foundation",
         "2026-09-30-port-luau-imp-host-and-test-rules",
-        "rules/imp/{mode,native-tool,self-tool}",
+        "rules/imp/{native-tool,self-tool}",
         ("tool/path host APIs", "workspace/catalog discovery"),
+    ),
+    "imp-mode": MigrationBoundary(
+        "Imp build-mode axes and the configuration probe",
+        "2026-10-10-add-luau-mode-axes-and-profiles",
+        "rules/imp/mode and rules/imp/config/example",
+        ("mode axes and profiles", "workspace/catalog discovery"),
     ),
     "imp-core-foundation": MigrationBoundary(
         "Imp archive, generate, lockfile, and toolchain rules",
@@ -324,8 +330,9 @@ def migration_boundary_for(path: str) -> str | None:
         return "example-decision"
     if path in ENGINE_MODULES:
         return "quickjs-removal"
+    if path in {"rules/imp/mode/index.js", "rules/imp/config/example/BUILD.js"}:
+        return "imp-mode"
     if path in {
-        "rules/imp/mode/index.js",
         "rules/imp/native-tool/index.js",
         "rules/imp/self-tool/index.js",
     }:
