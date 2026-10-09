@@ -25,7 +25,7 @@ the gaps that block catalog migration.
 | Workspace configuration | Loads `imp.workspace.luau`; on GitHub Actions it deep-merges `imp.workspace.ci.luau`. Luau rule modules can register schemas, read or write configuration, and expose schemas and resolved values to the CLI. | JavaScript and Luau use different field spellings. Luau configuration uses `snake_case`; the JavaScript runtime remains the default. |
 | BUILD discovery | Walks the workspace for `BUILD.luau` files and evaluates returned tables. `imp goal generate-build` can write and check generated `BUILD.luau` files from registered Luau generators. | Language-specific generators must be ported to Luau before a Luau workspace can use them. |
 | Graph construction | Exposes `files`, `glob`, `task`, `expand`, `output`, `native_tool`, `tool`, `path`, `platform_info`, `package_path`, `goal`, `test_root`, and opaque handles. Tasks declare named `value` or `artifact` outputs. Expansions derive keyed children with goal slots such as `BUILD`, `PACKAGE`, and `TEST` from resolved inputs; `get()` selects one child and `all()` selects every child. `register_build_rule` and `register_build_generator` provide the Luau BUILD renderer interface. | APIs such as `cargoPackage`, full toolchains, and workspace graph introspection are missing. |
-| Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, a cache toggle, and allow-failure actions with exit code, stdout, and stderr. Captured artifacts can flow to downstream tasks through named outputs. The `run` workflow can start one interactive program. | Broader toolchain conveniences are not available. |
+| Action execution | Runs hermetic argv actions with captured file-set and task-artifact inputs, declared file and directory outputs, native and acquired PATH tools, explicit environment settings, path resolution, fileset paths and digests (`exec.paths`, `exec.digest`), a cache toggle, and allow-failure actions with exit code, stdout, and stderr. Captured artifacts can flow to downstream tasks through named outputs. The `run` workflow can start one interactive program. | Broader toolchain conveniences are not available. |
 | Tests and workflows | One generic driver runs every goal through the Luau workflow module that registers it with `core.goal`. Luau BUILD modules expose roots under the slot key of a registered goal. `imp package` publishes selected artifact roots under `dist/`, and `imp test` reports through `@imp/rules/workflows/test`. `@imp/rules/workflows/fmt`, `lint`, and `run` register the `fmt` (with `--check`), `lint` (with `--fix`), and `run` goals. A `TEST` root can discover package-local `.test.luau` modules and run named cases and suites in fresh Luau runtimes. Test cases can resolve tasks and fake action runs, programs, the toolchain platform, goal flags, workspace writes, and digest diffs. | Mixed JavaScript/Luau test discovery is not available: one invocation runs one runtime. Luau has no target address or memo trace host API, and no fakes for them. |
 | Installed rules | The tree contains Luau `asset`, `resource_package`, `workflows/build`, `workflows/fmt`, `workflows/lint`, `workflows/package`, `workflows/run`, `workflows/test`, `workflows/report`, and `imp/native-tool` modules. | Other packages remain JavaScript; Luau workspaces cannot import those modules through the Luau loader. |
 
@@ -318,6 +318,32 @@ that task output in `inputs`; Imp executes the producer first and supplies the
 resolved value or artifact handle to the consumer. When an action consumes an
 artifact or path handle, Imp stages its CAS digest as an action input. Graph
 actions keep outputs in CAS and do not write them into the workspace.
+
+### Fileset paths and digests
+
+A task reads a files handle from its `inputs` with these `exec` functions:
+
+| Function | Effect | JavaScript equivalent |
+| --- | --- | --- |
+| `exec.paths(files)` | Returns the sorted workspace-relative paths of the fileset. | `exec.paths(fileset)` |
+| `exec.digest(files)` | Returns the CAS tree digest of the fileset. The tree holds each file at its workspace-relative path. | `digestOf(fileset)` |
+
+Imp captures each fileset one time in a task run. `exec.paths`, `exec.digest`,
+and `exec.action({ inputs = ... })` use the same capture. Thus the paths and
+the digest agree with the files that the action stages. The handle must be a
+declared task input, or the call fails with `exec.paths(handle) requires a
+declared task input`. A graph handle that is not a files handle fails with
+`exec.paths(handle) requires a files handle`. `exec.digest` fails with the same
+messages, with the prefix `exec.digest(handle)`. In a `core.test.with_fake_run` scope, these functions still capture
+the real workspace files.
+
+A formatter for the `fmt` workflow uses these functions to fill its `FMT`
+result. The task declares `paths`, `sources_digest`, `check`, and `output` as
+`output.value()` slots and `formatted` as an `output.artifact()` slot. It sets
+`paths` to `exec.paths(inputs.sources)` and `sources_digest` to
+`exec.digest(inputs.sources)`. The action formats the sources in place and
+declares the source root as an `output.directory()`. Thus `formatted.digest`
+holds the same workspace-relative paths as `sources_digest`.
 
 ### Dynamic graph expansion
 

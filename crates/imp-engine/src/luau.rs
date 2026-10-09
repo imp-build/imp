@@ -1457,30 +1457,14 @@ fn install_task_executor(
                 let inputs = resolve_task_inputs(&lua, &host, &task.inputs)?;
                 let returns_outputs = !task.outputs.is_empty();
                 let exec = lua.create_table()?;
+                let captures: FilesetCaptures = Rc::new(RefCell::new(HashMap::new()));
                 let path_host = Rc::clone(&host);
                 let path_inputs = inputs.clone();
                 exec.set(
                     "path",
                     lua.create_function(move |_, handle: LuaAnyUserData| {
                         let graph_handle = handle.borrow::<GraphHandle>()?;
-                        let mut declared = false;
-                        for pair in path_inputs.pairs::<LuaValue, LuaValue>() {
-                            let (_, value) = pair?;
-                            if let LuaValue::UserData(value) = value {
-                                if value
-                                    .borrow::<GraphHandle>()
-                                    .is_ok_and(|input| input.id == graph_handle.id)
-                                {
-                                    declared = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if !declared {
-                            return Err(LuaError::external(
-                                "exec.path(handle) requires a declared task input",
-                            ));
-                        }
+                        require_declared_input(&path_inputs, graph_handle.id, "exec.path")?;
                         let (source_id, owner_package) = match path_host.borrow().nodes.get(&graph_handle.id) {
                             Some(GraphNode::Path { source_id, owner_package }) => (*source_id, owner_package.clone()),
                             Some(GraphNode::Artifact(_)) => (graph_handle.id, String::new()),
@@ -1492,10 +1476,43 @@ fn install_task_executor(
                         ))
                     })?,
                 )?;
+                for (name, want_paths) in [("paths", true), ("digest", false)] {
+                    let fileset_host = Rc::clone(&host);
+                    let fileset_inputs = inputs.clone();
+                    let fileset_captures = Rc::clone(&captures);
+                    exec.set(
+                        name,
+                        lua.create_function(move |lua, handle: LuaAnyUserData| {
+                            let id = handle.borrow::<GraphHandle>()?.id;
+                            let function = format!("exec.{name}");
+                            require_declared_input(&fileset_inputs, id, &function)?;
+                            let captured =
+                                captured_fileset(&fileset_host.borrow(), &fileset_captures, id)
+                                    .map_err(|error| {
+                                        LuaError::external(format!("{function}: {error:#}"))
+                                    })?
+                                    .ok_or_else(|| {
+                                        LuaError::external(format!(
+                                            "{function}(handle) requires a files handle"
+                                        ))
+                                    })?;
+                            if want_paths {
+                                Ok(LuaValue::Table(
+                                    lua.create_sequence_from(captured.files.iter().cloned())?,
+                                ))
+                            } else {
+                                Ok(LuaValue::String(
+                                    lua.create_string(captured.digest.digest())?,
+                                ))
+                            }
+                        })?,
+                    )?;
+                }
                 let action_host = Rc::clone(&host);
                 let action_configuration = Rc::clone(&configuration);
                 let action_lua = lua.clone();
                 let action_inputs = inputs.clone();
+                let action_captures = Rc::clone(&captures);
                 exec.set(
                     "action",
                     lua.create_async_function(move |_, options: LuaTable| {
@@ -1503,6 +1520,7 @@ fn install_task_executor(
                         let action_configuration = Rc::clone(&action_configuration);
                         let action_inputs = action_inputs.clone();
                         let action_lua = action_lua.clone();
+                        let action_captures = Rc::clone(&action_captures);
                         async move {
                             match run_action(
                                 action_lua,
@@ -1510,6 +1528,7 @@ fn install_task_executor(
                                 Rc::clone(&action_configuration),
                                 options,
                                 action_inputs,
+                                action_captures,
                             )
                             .await
                             {
@@ -3417,6 +3436,53 @@ fn validate_tool_bin_dir(directory: &str) -> LuaResult<()> {
     Ok(())
 }
 
+/// The fileset captures of one task run, by files handle id. `exec.paths`,
+/// `exec.digest`, and `exec.action` share them, so that a task sees one
+/// capture of each fileset.
+type FilesetCaptures = Rc<RefCell<HashMap<u64, Rc<crate::spike::GlobResult>>>>;
+
+/// Return the capture of the files handle `id` for this task run. Capture
+/// the workspace files on the first call. Return `None` when `id` is not a
+/// files handle.
+fn captured_fileset(
+    host: &HostState,
+    captures: &FilesetCaptures,
+    id: u64,
+) -> Result<Option<Rc<crate::spike::GlobResult>>> {
+    let Some(GraphNode::Files(spec)) = host.nodes.get(&id) else {
+        return Ok(None);
+    };
+    if let Some(captured) = captures.borrow().get(&id) {
+        return Ok(Some(Rc::clone(captured)));
+    }
+    let captured = Rc::new(crate::spike::workspace_glob_files_captured(
+        &host.workspace_root,
+        &spec.root,
+        &spec.include,
+        &spec.exclude,
+    )?);
+    captures.borrow_mut().insert(id, Rc::clone(&captured));
+    Ok(Some(captured))
+}
+
+/// Fail unless the handle `id` is one of the task inputs.
+fn require_declared_input(inputs: &LuaTable, id: u64, function: &str) -> LuaResult<()> {
+    for pair in inputs.pairs::<LuaValue, LuaValue>() {
+        let (_, value) = pair?;
+        if let LuaValue::UserData(value) = value {
+            if value
+                .borrow::<GraphHandle>()
+                .is_ok_and(|input| input.id == id)
+            {
+                return Ok(());
+            }
+        }
+    }
+    Err(LuaError::external(format!(
+        "{function}(handle) requires a declared task input"
+    )))
+}
+
 fn allocate_handle(host: &Rc<RefCell<HostState>>, kind: &'static str) -> GraphHandle {
     let mut host = host.borrow_mut();
     host.next_id += 1;
@@ -3872,6 +3938,7 @@ async fn run_action(
     configuration: Rc<RefCell<ConfigurationState>>,
     options: LuaTable,
     task_inputs: LuaTable,
+    captures: FilesetCaptures,
 ) -> Result<LuaTable> {
     let argv = options
         .get::<Option<Vec<String>>>("argv")
@@ -3932,13 +3999,7 @@ async fn run_action(
             let handle = value
                 .borrow::<GraphHandle>()
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            if let Some(GraphNode::Files(spec)) = nodes.get(&handle.id) {
-                let captured = crate::spike::workspace_glob_files_captured(
-                    &root,
-                    &spec.root,
-                    &spec.include,
-                    &spec.exclude,
-                )?;
+            if let Some(captured) = captured_fileset(&host.borrow(), &captures, handle.id)? {
                 input_specs.push(ExecIoSpec {
                     path: None,
                     kind: "digest".to_owned(),
@@ -5468,6 +5529,113 @@ return {{
             "{report}"
         );
         assert!(!workspace_root.path().join("src/c.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fmt_workflow_compares_a_real_formatter_task_with_its_sources() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
+        fs::create_dir_all(workspace_root.path().join("src")).unwrap();
+        fs::write(workspace_root.path().join("src/b.txt"), "same\n").unwrap();
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local fmt = require("@imp/rules/workflows/fmt")
+local output = core.output
+
+local sources = core.files({ root = "src", include = { "*.txt" } })
+local other = core.files({ root = "src", include = { "b.txt" } })
+
+local function expect_error(expected, fn, ...)
+    local ok, problem = pcall(fn, ...)
+    assert(not ok, "expected an error: " .. expected)
+    assert(string.find(tostring(problem), expected, 1, true), tostring(problem))
+end
+
+-- A toy formatter: it changes a "messy" line to "clean" in place. It uses
+-- only shell builtins, because the test can run in an Imp sandbox.
+local formatter = core.task({
+    inputs = {
+        sources = sources,
+        sh = core.native_tool("sh"),
+    },
+    outputs = {
+        paths = output.value(),
+        sources_digest = output.value(),
+        formatted = output.artifact(),
+        check = output.value(),
+        output = output.value(),
+    },
+    run = function(exec, inputs)
+        local paths = exec.paths(inputs.sources)
+        assert(#paths == 2 and paths[1] == "src/a.txt" and paths[2] == "src/b.txt")
+        local sources_digest = exec.digest(inputs.sources)
+        assert(exec.digest(inputs.sources) == sources_digest)
+        expect_error("exec.paths(handle) requires a declared task input", exec.paths, other)
+        expect_error("exec.digest(handle) requires a files handle", exec.digest, inputs.sh)
+        local result = exec.action({
+            argv = {
+                "sh",
+                "-c",
+                'for path in "$@"; do read -r line < "$path"; [ "$line" = messy ] && line=clean; printf "%s\\n" "$line" > "$path"; done',
+                "fmt",
+                table.unpack(paths),
+            },
+            inputs = { inputs.sources },
+            outputs = { formatted = output.directory("src") },
+            allow_failure = true,
+        })
+        return {
+            paths = paths,
+            sources_digest = sources_digest,
+            formatted = result.outputs.formatted,
+            check = { requested = false, failed = result.exit_code ~= 0 },
+            output = result.stderr,
+        }
+    end,
+})
+
+return { formatted = { [fmt.FMT] = formatter } }
+"#,
+        )
+        .unwrap();
+        let read = |path: &str| fs::read_to_string(workspace_root.path().join(path)).unwrap();
+        let format = |content: &str| {
+            fs::write(workspace_root.path().join("src/a.txt"), content).unwrap();
+            let workspace_root = workspace_root.path().to_owned();
+            let rules_root = rules_root.path().to_owned();
+            async move {
+                let mut runtime = LuauWorkspace::new(&workspace_root, &rules_root).unwrap();
+                let roots = runtime.load_modules().await.unwrap();
+                execute_workflow(
+                    &mut runtime,
+                    &roots,
+                    "fmt",
+                    &["//:formatted"],
+                    serde_json::json!({ "check": false }),
+                    &[],
+                )
+                .await
+                .unwrap()
+                .unwrap()
+            }
+        };
+
+        let report = format("clean\n").await;
+        assert!(
+            report.ends_with("fmt: 1 unchanged, 0 changed, 0 failed"),
+            "{report}"
+        );
+
+        let report = format("messy\n").await;
+        assert!(
+            report.ends_with("fmt: 0 unchanged, 1 changed, 0 failed"),
+            "{report}"
+        );
+        assert_eq!(read("src/a.txt"), "clean\n");
+        assert_eq!(read("src/b.txt"), "same\n");
     }
 
     #[cfg(unix)]
