@@ -21,7 +21,6 @@ PUBLIC_RULE_NAMESPACES = (
     "asset",
     "c",
     "imp",
-    "init",
     "js",
     "oci",
     "odin",
