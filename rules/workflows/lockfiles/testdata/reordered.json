@@ -1,0 +1,25 @@
+{
+  "tool": "demo",
+  "versions": {
+    "1.0.0": {
+      "macos/aarch64": {
+        "url": "https://example.test/m",
+        "artifact": "m",
+        "size": 2,
+        "sha256": "bbbb"
+      },
+      "windows/x86_64": {
+        "url": "https://example.test/w",
+        "artifact": "w",
+        "size": 3,
+        "sha256": "cccc"
+      },
+      "linux/x86_64": {
+        "url": "https://example.test/l",
+        "artifact": "l",
+        "size": 1,
+        "sha256": "aaaa"
+      }
+    }
+  }
+}

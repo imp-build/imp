@@ -1,0 +1,21 @@
+{
+  "tool": "demo",
+  "versions": {
+    "1.0.0": {
+      "linux/x86_64": {
+        "url": "https://example.test/demo-1.0.0-linux-x86_64.tar.gz",
+        "artifact": "demo-1.0.0-linux-x86_64.tar.gz",
+        "size": 10,
+        "sha256": "aaaa"
+      }
+    },
+    "3.0.0": {
+      "linux/x86_64": {
+        "url": "https://example.test/old",
+        "artifact": "old",
+        "size": 1,
+        "sha256": "0000"
+      }
+    }
+  }
+}

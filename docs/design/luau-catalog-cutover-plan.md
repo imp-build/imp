@@ -228,6 +228,16 @@ Task ownership follows these rules:
 - A packaging runtime task owns the base lockfile, package, and publish
   workflows with their BUILD modules and focused tests. The packaging workflow
   task owns the built-in lockfile aggregator and the lockfile test.
+- The Luau `gen-lockfiles` root downloads and hashes each artifact in an
+  uncached sandbox action, and the goal writes the lockfile at the goal
+  boundary (user decision, 2026-10-11). The Luau host has no download, hash,
+  or file-size functions. The lockfile encoder of
+  `@imp/rules/workflows/lockfiles` writes the shipped lockfiles with the same
+  bytes as the JavaScript generator. `generate_builtin_lockfile(spec)` returns
+  a lockfile task, so the built-in lockfile aggregator must resolve these
+  tasks as graph roots. The goal fails when two roots write one lockfile. The
+  write action gives the lockfile text as one argument, which limits its size
+  (`2026-10-11-write-luau-lockfiles-without-argv-limit`).
 - The Odin VS Code task owns `rules/odin/vscode` and `rules/workflows/vs`,
   because the VS workflow imports Odin and the Odin VS Code module imports the
   VS workflow. It follows the Odin task.

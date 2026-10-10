@@ -4887,7 +4887,9 @@ mod tests {
             "fmt/index.luau",
             "generate_build/index.luau",
             "lint/index.luau",
+            "lockfiles/index.luau",
             "package/index.luau",
+            "publish/index.luau",
             "run/index.luau",
             "test/index.luau",
         ] {
@@ -4895,6 +4897,9 @@ mod tests {
             fs::create_dir_all(destination.parent().unwrap()).unwrap();
             fs::copy(source.join(module), destination).unwrap();
         }
+        let destination = rules_root.path().join("imp/lockfile/index.luau");
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::copy(source.join("../imp/lockfile/index.luau"), destination).unwrap();
         rules_root
     }
 
@@ -5879,6 +5884,189 @@ return {{
             error.contains("//:tool") && error.contains("//:described"),
             "{error}"
         );
+    }
+
+    /// `gen-lockfiles` downloads and hashes each artifact in a real action,
+    /// keeps the versions that the lockfile has, and writes the lockfile into
+    /// the workspace at the goal boundary.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn gen_lockfiles_workflow_hashes_real_downloads_and_writes_at_the_goal_boundary() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
+        let downloads = tempfile::tempdir().unwrap();
+        let artifact = downloads.path().join("demo.tar.gz");
+        fs::write(&artifact, "hello\n").unwrap();
+        fs::create_dir_all(workspace_root.path().join("tools")).unwrap();
+        let existing = r#"{
+  "tool": "demo",
+  "versions": {
+    "0.1.0": {
+      "linux/x86_64": {
+        "url": "https://example.test/old",
+        "artifact": "old",
+        "size": 1,
+        "sha256": "00"
+      }
+    }
+  }
+}
+"#;
+        fs::write(workspace_root.path().join("tools/demo.lock"), existing).unwrap();
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            format!(
+                r#"
+local lockfiles = require("@imp/rules/workflows/lockfiles")
+
+return {{
+    demo = {{
+        [lockfiles.GEN_LOCKFILES] = lockfiles.graph_generate_tool_lockfile({{
+            version = "1.0.0",
+            name = "demo",
+            platforms = {{ {{ os = "linux", arch = "x86_64" }} }},
+            download_url = function()
+                return "file://{artifact}"
+            end,
+            artifact_name = function(version, plat)
+                return `demo-${{version}}-${{plat.os}}.tar.gz`
+            end,
+            lockfile = "@workspace/tools/demo.lock",
+        }}),
+    }},
+}}
+"#,
+                artifact = artifact.display(),
+            )
+            .replace("${", "{"),
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+
+        let report = execute_workflow(
+            &mut runtime,
+            &roots,
+            "gen-lockfiles",
+            &["//:demo"],
+            serde_json::json!({}),
+            &[],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(report, "gen-lockfiles: regenerated 1 lockfile(s): demo");
+        let expected = format!(
+            r#"{{
+  "tool": "demo",
+  "versions": {{
+    "0.1.0": {{
+      "linux/x86_64": {{
+        "url": "https://example.test/old",
+        "artifact": "old",
+        "size": 1,
+        "sha256": "00"
+      }}
+    }},
+    "1.0.0": {{
+      "linux/x86_64": {{
+        "url": "file://{artifact}",
+        "artifact": "demo-1.0.0-linux.tar.gz",
+        "size": 6,
+        "sha256": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+      }}
+    }}
+  }}
+}}
+"#,
+            artifact = artifact.display(),
+        );
+        assert_eq!(
+            fs::read_to_string(workspace_root.path().join("tools/demo.lock")).unwrap(),
+            expected
+        );
+    }
+
+    /// `package` publishes real artifacts under `dist/`, and `publish`
+    /// reports its selected roots.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn package_and_publish_workflows_publish_real_artifacts() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
+        fs::write(
+            workspace_root.path().join("BUILD.luau"),
+            r#"
+local core = require("@imp/core")
+local package = require("@imp/rules/workflows/package")
+local publish = require("@imp/rules/workflows/publish")
+local output = core.output
+
+local function built(path, text)
+    return core.task({
+        inputs = { sh = core.native_tool("sh") },
+        outputs = { artifact = output.artifact() },
+        run = function(exec)
+            local result = exec.action({
+                argv = { "sh", "-c", 'printf %s "$2" > "$1"', "write", path, text },
+                outputs = { artifact = output.file(path) },
+            })
+            return { artifact = result.outputs.artifact }
+        end,
+    }).outputs.artifact
+end
+
+local pushed = core.task({
+    outputs = { value = output.value() },
+    run = function()
+        return { value = "pushed" }
+    end,
+})
+
+return {
+    app = { [package.PACKAGE] = built("app", "executable\n") },
+    hello = { [package.PACKAGE] = built("libhello.so.1", "library\n") },
+    image = { [publish.PUBLISH] = pushed },
+}
+"#,
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let roots = runtime.load_modules().await.unwrap();
+        let read = |path: &str| fs::read_to_string(workspace_root.path().join(path)).unwrap();
+
+        let report = execute_workflow(
+            &mut runtime,
+            &roots,
+            "package",
+            &["//:app", "//:hello"],
+            serde_json::json!({}),
+            &[],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(report.starts_with("Packaged 2 targets:"), "{report}");
+        assert!(report.contains("\n  //:app -> dist/app"), "{report}");
+        assert!(
+            report.contains("\n  //:hello -> dist/libhello.so.1"),
+            "{report}"
+        );
+        assert_eq!(read("dist/app"), "executable\n");
+        assert_eq!(read("dist/libhello.so.1"), "library\n");
+
+        let report = execute_workflow(
+            &mut runtime,
+            &roots,
+            "publish",
+            &["//:image"],
+            serde_json::json!({}),
+            &[],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(report, "Published 1 target:\n  //:image");
     }
 
     /// The Luau workspace of this repository loads, and every `TEST` root in
