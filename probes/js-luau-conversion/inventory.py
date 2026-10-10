@@ -74,10 +74,16 @@ BOUNDARIES: dict[str, MigrationBoundary] = {
         ("mode axes and profiles", "workspace/catalog discovery"),
     ),
     "imp-core-foundation": MigrationBoundary(
-        "Imp archive, generate, lockfile, and toolchain rules",
+        "Imp archive, codegen, generate, and lockfile rules",
         "2026-09-30-port-luau-imp-core-rules",
-        "rules/imp/{archive,codegen,generate,lockfile,toolchain}",
+        "rules/imp/{archive,codegen,generate,lockfile}",
         ("graph outputs", "tool/path host APIs", "workspace/catalog discovery"),
+    ),
+    "imp-toolchain": MigrationBoundary(
+        "Imp toolchain rules",
+        "2026-10-10-port-luau-imp-toolchain",
+        "rules/imp/toolchain and lockfileFor",
+        ("tool/path host APIs", "workspace/catalog discovery"),
     ),
     "rust-graph": MigrationBoundary(
         "Rust graph rules",
@@ -339,12 +345,13 @@ def migration_boundary_for(path: str) -> str | None:
         return "imp-host-foundation"
     if path == "rules/imp/generate_test.js":
         return "imp-generate-validation"
+    if path.startswith("rules/imp/toolchain"):
+        return "imp-toolchain"
     if path.startswith((
         "rules/imp/archive",
         "rules/imp/codegen",
         "rules/imp/generate",
         "rules/imp/lockfile",
-        "rules/imp/toolchain",
     )):
         return "imp-core-foundation"
     if path in RUST_GRAPH:

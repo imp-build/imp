@@ -7,7 +7,10 @@
 -- Require each workflow module that a BUILD.luau module uses, so that its
 -- goal is registered. Add the modules of each ported rule package here.
 require("@imp/rules/workflows/build")
+require("@imp/rules/workflows/codegen")
 require("@imp/rules/workflows/fmt")
+require("@imp/rules/workflows/generate")
+require("@imp/rules/workflows/generate_build")
 require("@imp/rules/workflows/lint")
 require("@imp/rules/workflows/package")
 require("@imp/rules/workflows/run")

@@ -1,0 +1,25 @@
+{
+  "tool": "ruff-toolchain",
+  "versions": {
+    "0.15.21": {
+      "linux/x86_64": {
+        "url": "https://example.com/ruff.tar.gz",
+        "artifact": "ruff.tar.gz",
+        "size": 12345,
+        "sha256": "abc123"
+      }
+    },
+    "0.14.0": {
+      "linux/x86_64": {
+        "url": "https://example.com/ruff-0.14.tar.gz",
+        "artifact": "ruff-0.14.tar.gz",
+        "sha256": "def456"
+      },
+      "any/any": {
+        "url": "https://example.com/ruff-any.pex",
+        "artifact": "ruff-any.pex",
+        "sha256": "fff000"
+      }
+    }
+  }
+}

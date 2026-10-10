@@ -374,8 +374,9 @@ overrides first.
 
 ## Luau modules
 
-**Verified:** on 2026-10-10, `@imp/rules/imp/native-tool` and
-`@imp/rules/imp/self-tool` have Luau modules beside the JavaScript modules.
+**Verified:** on 2026-10-10, `@imp/rules/imp/native-tool`, `self-tool`,
+`archive`, `lockfile`, `generate`, and `codegen` have Luau modules beside the
+JavaScript modules.
 JavaScript stays the default runtime of this repository. To use the Luau
 modules here, select the Luau workspace with `IMP_RUNTIME=luau`, as
 `docs/design/luau-authoring-contract.md` describes.
@@ -384,6 +385,10 @@ modules here, select the Luau workspace with `IMP_RUNTIME=luau`, as
 | --- | --- |
 | `@imp/rules/imp/native-tool` | `native_tool(name)`: a graph tool handle for an executable on the host `PATH`. A name that is empty or not a string fails with `native_tool(name) requires a non-empty executable name`. |
 | `@imp/rules/imp/self-tool` | `imp_tool`: a graph tool handle for the running Imp executable. Actions run it as `imp`. |
+| `@imp/rules/imp/archive` | `extract_archive({ archive, dest, format, strip_components?, named_cache?, display? })` gives the directory artifact of an extracted `tar`, `tar.gz`, `tar.xz`, `zip`, or `zip-unix` archive. `extract_archive_tools(format)` lists the native tools that the extraction uses. |
+| `@imp/rules/imp/lockfile` | `download_tool_artifact(options)` downloads a toolchain artifact and verifies it against its lockfile. `resolve_tool_lockfile`, `locked_download_argv`, `locked_download_tools`, `sha_tool_name`, and `lockfile_address_to_path` are the parts it uses. |
+| `@imp/rules/imp/generate` | `generated_files({ display?, tools?, inputs?, output_paths, argv })` declares a `GENERATE` root for `imp generate`. |
+| `@imp/rules/imp/codegen` | `codegen(options)` takes the options of `generated_files()` and returns a frozen `{ paths, files, BUILD, CODEGEN }`. `stamp_file({ output, text })` returns a frozen `{ file, BUILD }`. `normalize_generated_srcs`, `dedupe_generated_srcs`, and `assert_generated_src_path` are internal to the language rules. |
 
 Put a tool handle in the `inputs` of a task. Each action of that task can then
 run the executable by name. The lookup occurs when the action runs, not when
@@ -404,7 +409,55 @@ local version = core.task({
 })
 ```
 
+Luau option keys use `snake_case`. `argv` of `generated_files()` and
+`codegen()` is `function(exec, resolved)`, and it runs in the task: `resolved`
+holds the resolved `tools` and `inputs`. Put tools in `tools` and run them by
+name.
+
+A Luau root cannot hold artifacts in a value output, so the generator roots
+have a different shape from the JavaScript roots:
+
+- A `generated_files()` root resolves to one artifact for each output path
+  (`out1`, `out2`, and so on) and to `before`, the CAS digest of the same paths
+  in the workspace. The `generate` goal reads the path of each file from its
+  artifact.
+- The `CODEGEN` root of a `codegen()` result is the generator task. It
+  resolves to one artifact for each output path.
+
+**Verified:** on 2026-10-10, `generated_files()` reads the workspace with the
+workspace file walk, which skips gitignored files. Thus `imp generate --check`
+always reports a gitignored output path as out of date. The JavaScript
+`generatedFiles()` reads each path directly and does not have this limit.
+
+`download_tool_artifact()` reads its lockfile with `core.read_file()` when it
+declares the task. A lockfile address must start with `@workspace/` or
+`@imp/rules/`.
+
+**Illustrative example:**
+
+```luau
+local core = require("@imp/core")
+local generate = require("@imp/rules/imp/generate")
+local workflow = require("@imp/rules/workflows/generate")
+
+return {
+	version_file = {
+		[workflow.GENERATE] = generate.generated_files({
+			tools = { sh = core.native_tool("sh") },
+			output_paths = { "gen/version.txt" },
+			argv = function()
+				return { "sh", "-c", "echo 1.0.0 > gen/version.txt" }
+			end,
+		}),
+	},
+}
+```
+
 These modules stay JavaScript only:
+
+- `//rules/imp/toolchain` and `lockfileFor()`. They need host functions to
+  resolve a tool from a named cache, and no Luau rule uses a toolchain yet.
+  The first Luau toolchain consumer ports them.
 
 - `//rules/imp/mode` and the `opt` axis. Luau has no mode axes or profiles yet.
 - `//rules/imp/test`. A Luau package declares a `TEST` root with

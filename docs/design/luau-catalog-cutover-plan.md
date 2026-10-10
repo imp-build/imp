@@ -62,7 +62,8 @@ starts.
 | Integration | `workspace-integration` | 19 | Workspace, CI, docs, and integration |
 | Imp | `imp-host-foundation` | 2 | Imp host and test task |
 | Imp | `imp-mode` | 2 | Imp mode axes task |
-| Imp | `imp-core-foundation` | 9 | Imp core task |
+| Imp | `imp-core-foundation` | 7 | Imp core task |
+| Imp | `imp-toolchain` | 2 | Imp toolchain task |
 | Imp | `imp-generate-validation` | 1 | Imp generate validation task |
 | Imp | `imp-validation` | 14 | Imp host and test task |
 | Workflows | `workflow-core-runtime` | 6 | Core workflow task |
@@ -162,7 +163,7 @@ The task dependency table condenses the boundary graph by owning task. Each
 task's Peon `depends_on` list must contain the prerequisite tasks in that table.
 The report prints every task cycle with one source edge for each step.
 
-**Verified:** on 2026-10-08 the report printed "Task graph: acyclic". Three
+**Verified:** on 2026-10-10 the report printed "Task graph: acyclic". Three
 task cycles that the report printed on 2026-10-07 were removed by ownership
 changes:
 
@@ -214,6 +215,14 @@ Task ownership follows these rules:
 - The Imp core task owns the codegen workflow runtime modules, because the Imp
   codegen and workflow generate modules import each other's packages. The
   codegen workflow task owns their BUILD and test modules.
+- A separate Imp toolchain task owns `rules/imp/toolchain`, its test, and
+  `lockfileFor()` of `rules/imp/lockfile` (user decision, 2026-10-10). The
+  port needs host functions that resolve a tool from a named cache and read a
+  named cache back, and no Luau rule used a toolchain when the Imp core task
+  ran. The first Luau toolchain consumer depends on it.
+- The Imp core task moved the `generate-build` goal into
+  `@imp/rules/workflows/generate_build` (user decision, 2026-10-10). The Luau
+  host keeps only `core.generate_build(check)` and no goal special case.
 - A separate validation task owns `rules/imp/generate_test.js`, because it
   imports Odin toolchains. It follows the Odin task.
 - A packaging runtime task owns the base lockfile, package, and publish

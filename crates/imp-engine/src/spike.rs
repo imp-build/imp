@@ -734,7 +734,6 @@ async fn create_live_runtime(
     Ok(LiveWorkspace {
         workspace,
         luau: None,
-        luau_generate_build_goal: false,
         runtime: rt,
         ctx,
         exec_root,
@@ -800,25 +799,6 @@ pub(crate) async fn load_workspace_with_runtime(
             })
             .await
             .map_err(|error| anyhow::anyhow!("initialize graph core for Luau: {error}"))?;
-        if luau.has_build_generators() && !live.workspace.goals.contains_key("generate-build") {
-            live.workspace.goals.insert(
-                "generate-build".to_owned(),
-                Goal {
-                    name: "generate-build".to_owned(),
-                    product: "generate-build".to_owned(),
-                    flags: BTreeMap::from([(
-                        "check".to_owned(),
-                        GoalFlagDef {
-                            description: Some(
-                                "Check generated BUILD.luau files without writing".to_owned(),
-                            ),
-                        },
-                    )]),
-                    selectorless: true,
-                },
-            );
-            live.luau_generate_build_goal = true;
-        }
         live.luau = Some(std::cell::RefCell::new(luau));
         return Ok(live);
     }
@@ -7185,16 +7165,6 @@ pub async fn execute_goal_live_selection(
         axis_overrides,
         profile,
     } = options;
-    if goal == "generate-build" && live.luau_generate_build_goal {
-        if let Some(luau) = &live.luau {
-            let check = flags
-                .get("check")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            luau.borrow_mut().execute_build_generation(check).await?;
-            return Ok(None);
-        }
-    }
     let goal_def = live.workspace.goals.get(goal).ok_or_else(|| {
         let known: Vec<_> = live.workspace.goals.keys().map(String::as_str).collect();
         anyhow::anyhow!(

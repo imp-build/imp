@@ -178,6 +178,9 @@ struct LuauGoal {
     callback: LuaFunction,
     /// Declared boolean flags and their optional descriptions.
     flags: BTreeMap<String, Option<String>>,
+    /// True for `selection = "none"`: the goal takes no target selectors,
+    /// and the driver calls its callback with an empty roots array.
+    selectorless: bool,
 }
 
 /// The state of the goal that the generic driver is running.
@@ -714,18 +717,6 @@ impl LuauWorkspace {
         Ok(roots)
     }
 
-    pub fn has_build_generators(&self) -> bool {
-        !self.host.borrow().build_generators.is_empty()
-    }
-
-    pub async fn execute_build_generation(&mut self, check: bool) -> Result<()> {
-        let source = format!(
-            "return require('@imp/core').generate_build({})",
-            if check { "true" } else { "false" }
-        );
-        self.run_script("@imp/generate-build", &source).await
-    }
-
     /// Goals that Luau workflow modules registered, with their declared
     /// flags, in the form that the CLI parses.
     pub fn goal_definitions(&self) -> BTreeMap<String, crate::spike::Goal> {
@@ -752,7 +743,7 @@ impl LuauWorkspace {
                         name: name.clone(),
                         product: name.clone(),
                         flags,
-                        selectorless: false,
+                        selectorless: goal.selectorless,
                     },
                 )
             })
@@ -801,12 +792,12 @@ impl LuauWorkspace {
         roots: &[GraphRoot],
         flags: &serde_json::Value,
     ) -> Result<Option<String>> {
-        let callback = self
+        let (callback, selectorless) = self
             .host
             .borrow()
             .goals
             .get(goal)
-            .map(|goal| goal.callback.clone())
+            .map(|goal| (goal.callback.clone(), goal.selectorless))
             .with_context(|| {
                 format!(
                     "goal '{goal}' has no registered Luau workflow; require @imp/rules/workflows/{}",
@@ -814,8 +805,8 @@ impl LuauWorkspace {
                 )
             })?;
         // As in JavaScript, a goal with no selected roots does not call its
-        // workflow.
-        if roots.is_empty() {
+        // workflow, unless the goal takes no selection.
+        if roots.is_empty() && !selectorless {
             return Ok(None);
         }
         let lua = self.lua()?;
@@ -1548,7 +1539,21 @@ fn install_task_executor(
                 host.borrow_mut().graph_callback_depth += 1;
                 let result = task.run.call_async::<LuaValue>((exec, inputs)).await;
                 host.borrow_mut().graph_callback_depth -= 1;
-                let result = result.map_err(|error| LuaError::external(error.to_string()))?;
+                // The run callback can catch a failed action with `pcall`.
+                // When the callback then raises its own error, report that
+                // error and not the action failure. When the error is the
+                // action failure, keep the action message, because it has no
+                // Luau traceback.
+                let result = result.map_err(|error| {
+                    let message = error.to_string();
+                    if !is_host_error(&error) {
+                        host.borrow_mut().task_failure = Some(message.clone());
+                    }
+                    LuaError::external(message)
+                })?;
+                // When the callback returns, a caught action failure does not
+                // fail the task.
+                host.borrow_mut().task_failure = None;
                 let outputs = validate_task_result(&lua, &host, &task, result)?;
                 host.borrow_mut().task_results.insert(task_id, outputs);
             }
@@ -1614,6 +1619,16 @@ fn single_output_value(host: &HostState, handle_id: u64, value: LuaValue) -> Lua
     match value {
         LuaValue::Table(table) => table.get::<LuaValue>(name.as_str()),
         other => Ok(other),
+    }
+}
+
+/// Report whether a Luau error comes from a host function, such as a failed
+/// action, and not from an `error` call in Luau code.
+fn is_host_error(error: &LuaError) -> bool {
+    match error {
+        LuaError::CallbackError { cause, .. } => is_host_error(cause),
+        LuaError::ExternalError(_) => true,
+        _ => false,
     }
 }
 
@@ -2444,6 +2459,31 @@ fn create_core(
         "memo",
         lua.create_function(|_, function: LuaFunction| Ok(function))?,
     )?;
+    let read_loader = loader.clone();
+    core.set(
+        "read_file",
+        lua.create_function(move |_, address: String| read_addressed_file(&read_loader, &address))?,
+    )?;
+    core.set(
+        "json_decode",
+        lua.create_function(|lua, text: String| {
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|error| LuaError::external(format!("core.json_decode: {error}")))?;
+            lua.to_value_with(
+                &value,
+                mlua::SerializeOptions::new()
+                    .serialize_none_to_null(false)
+                    .serialize_unit_to_null(false),
+            )
+        })?,
+    )?;
+    core.set(
+        "log_warn",
+        lua.create_function(|_, message: String| {
+            log::warn!(target: "imp::luau", "{message}");
+            Ok(())
+        })?,
+    )?;
     core.set(
         "package_path",
         lua.create_function(move |_, ()| Ok(current_package_path(&loader)))?,
@@ -2537,7 +2577,9 @@ fn create_core(
                 }
 
                 let mut changed = Vec::new();
+                let mut checked = Vec::new();
                 for (file, targets) in edits {
+                    checked.push(file.clone());
                     let destination = generated_build_destination(&workspace_root, &file)
                         .map_err(LuaError::external)?;
                     let rendered = render_generated_luau_build(&file, &targets, &rules)
@@ -2581,14 +2623,9 @@ fn create_core(
                         ))
                     })?;
                 }
-                if check && !changed.is_empty() {
-                    return Err(LuaError::external(format!(
-                        "generated BUILD files are out of date: {}",
-                        changed.join(", ")
-                    )));
-                }
                 let report = lua.create_table()?;
                 report.set("changed", changed)?;
+                report.set("checked", checked)?;
                 Ok(report)
             }
         })?,
@@ -2611,9 +2648,9 @@ fn create_core(
                         "core.goal name '{name}' must use lowercase letters, digits, and '-'"
                     )));
                 }
-                let flags = match options {
+                let (flags, selectorless) = match options {
                     Some(options) => parse_goal_options(&name, options)?,
-                    None => BTreeMap::new(),
+                    None => (BTreeMap::new(), false),
                 };
                 let mut host = goal_host.borrow_mut();
                 if host.goals.contains_key(&name) {
@@ -2621,8 +2658,14 @@ fn create_core(
                         "goal '{name}' is already registered"
                     )));
                 }
-                host.goals
-                    .insert(name.clone(), LuauGoal { callback, flags });
+                host.goals.insert(
+                    name.clone(),
+                    LuauGoal {
+                        callback,
+                        flags,
+                        selectorless,
+                    },
+                );
                 Ok(goal_slot_key(&name))
             },
         )?,
@@ -2793,10 +2836,22 @@ const RESERVED_GOAL_FLAGS: &[&str] = &[
 fn parse_goal_options(
     goal: &str,
     options: LuaTable,
-) -> LuaResult<BTreeMap<String, Option<String>>> {
+) -> LuaResult<(BTreeMap<String, Option<String>>, bool)> {
     let mut flags = BTreeMap::new();
+    let mut selectorless = false;
     for pair in options.pairs::<String, LuaValue>() {
         let (key, value) = pair?;
+        if key == "selection" {
+            match value {
+                LuaValue::String(text) if text.to_string_lossy() == "none" => selectorless = true,
+                _ => {
+                    return Err(LuaError::external(format!(
+                        "core.goal('{goal}') selection must be \"none\""
+                    )))
+                }
+            }
+            continue;
+        }
         if key != "flags" {
             return Err(LuaError::external(format!(
                 "core.goal('{goal}') options do not accept '{key}'"
@@ -2844,7 +2899,7 @@ fn parse_goal_options(
             flags.insert(flag, description);
         }
     }
-    Ok(flags)
+    Ok((flags, selectorless))
 }
 
 /// Which host replacement a `core.test.with_fake_*` scope installs.
@@ -4755,6 +4810,37 @@ fn resolve_address(
     Ok((path, canonical))
 }
 
+/// Read the file at an `@imp/rules/<path>` or `@workspace/<path>` address.
+/// Return `nil` when no file is at the address. The address cannot escape its
+/// namespace root, and a workspace file never replaces an installed rule file.
+fn read_addressed_file(loader: &ModuleLoader, address: &str) -> LuaResult<Option<String>> {
+    let (root, path) = if let Some(path) = address.strip_prefix("@workspace/") {
+        (&loader.workspace_root, path)
+    } else if let Some(path) = address.strip_prefix("@imp/rules/") {
+        (&loader.rules_root, path)
+    } else {
+        return Err(LuaError::external(format!(
+            "core.read_file('{address}') requires an @imp/rules/ or @workspace/ address"
+        )));
+    };
+    let relative = normalize_relative(Path::new(""), path)
+        .map_err(|error| LuaError::external(format!("core.read_file('{address}'): {error}")))?;
+    let candidate = root.join(relative);
+    if !candidate.is_file() {
+        return Ok(None);
+    }
+    let resolved = dunce::canonicalize(&candidate).map_err(LuaError::external)?;
+    let canonical_root = dunce::canonicalize(root).map_err(LuaError::external)?;
+    if !resolved.starts_with(&canonical_root) {
+        return Err(LuaError::external(format!(
+            "core.read_file('{address}') resolves outside its namespace root"
+        )));
+    }
+    fs::read_to_string(&resolved)
+        .map(Some)
+        .map_err(|error| LuaError::external(format!("core.read_file('{address}'): {error}")))
+}
+
 fn normalize_relative(base: &Path, requested: &str) -> LuaResult<String> {
     let mut parts: Vec<String> = base
         .components()
@@ -4799,6 +4885,7 @@ mod tests {
             "report.luau",
             "build/index.luau",
             "fmt/index.luau",
+            "generate_build/index.luau",
             "lint/index.luau",
             "package/index.luau",
             "run/index.luau",
@@ -6896,6 +6983,19 @@ return { nested_task = core.task({ run = function() end }) }
         assert_eq!(addresses, ["//:root_task", "//pkg:nested_task"]);
     }
 
+    /// Run the selectorless `generate-build` goal of a loaded workspace.
+    async fn generate_build(runtime: &mut LuauWorkspace, check: bool) -> Result<Option<String>> {
+        runtime
+            .execute_graph(
+                "generate-build",
+                &[],
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({ "check": check }),
+                &[],
+            )
+            .await
+    }
+
     #[tokio::test]
     async fn luau_build_generators_merge_targets_write_and_check_native_build_files() {
         let workspace_root = tempfile::tempdir().unwrap();
@@ -6905,6 +7005,7 @@ return { nested_task = core.task({ run = function() end }) }
             r#"
 local core = require("@imp/core")
 require("@imp/rules/workflows/build")
+require("@imp/rules/workflows/generate_build")
 core.define_config_schema("sample", {
     build_generate = core.field.bool({ default = false }),
 })
@@ -6952,14 +7053,18 @@ return {
 
         let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
         runtime.load_modules().await.unwrap();
-        assert!(runtime.has_build_generators());
-        runtime.execute_build_generation(false).await.unwrap();
+        let report = generate_build(&mut runtime, false).await.unwrap().unwrap();
+        assert!(report.contains("1 file(s) written"), "{report}");
         let generated =
             fs::read_to_string(workspace_root.path().join("generated/BUILD.luau")).unwrap();
         assert!(generated.contains("first = __imp_rule_0.sample"));
         assert!(generated.contains("second = __imp_rule_0.sample"));
         assert!(generated.contains("second = __imp_rule_0.sample({})"));
-        runtime.execute_build_generation(true).await.unwrap();
+        let report = generate_build(&mut runtime, true).await.unwrap().unwrap();
+        assert!(
+            report.contains("1 file(s) checked, 0 out of date"),
+            "{report}"
+        );
 
         let mut discovered = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
         let roots = discovered.load_modules().await.unwrap();
@@ -6970,7 +7075,13 @@ return {
 
         let path = workspace_root.path().join("generated/BUILD.luau");
         fs::write(&path, "return { hand_written = true }\n").unwrap();
-        assert!(runtime.execute_build_generation(false).await.is_err());
+        let error = generate_build(&mut runtime, true).await.unwrap_err();
+        assert!(
+            format!("{error:#}")
+                .contains("generated BUILD files are out of date: generated/BUILD.luau"),
+            "{error:#}"
+        );
+        assert!(generate_build(&mut runtime, false).await.is_err());
         assert_eq!(
             fs::read_to_string(path).unwrap(),
             "return { hand_written = true }\n"
@@ -7005,6 +7116,7 @@ return {
             r#"
 local core = require("@imp/core")
 require("@imp/rules/workflows/build")
+require("@imp/rules/workflows/generate_build")
 core.define_config_schema("rust", {
     build_generate = core.field.bool({ default = false }),
 })
@@ -7076,7 +7188,7 @@ return {
 
         let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
         runtime.load_modules().await.unwrap();
-        runtime.execute_build_generation(false).await.unwrap();
+        generate_build(&mut runtime, false).await.unwrap();
 
         let generated_a =
             fs::read_to_string(workspace_root.path().join("crates/a/BUILD.luau")).unwrap();
@@ -7121,6 +7233,156 @@ return {}
         let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
 
         runtime.evaluate("@workspace/bad").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_run_that_catches_a_failed_action_does_not_fail() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
+        fs::write(
+            workspace_root.path().join("recovered.luau"),
+            r#"
+local core = require("@imp/core")
+return core.task({
+    run = function(exec)
+        local ok = pcall(exec.action, {
+            argv = { "sh", "-c", "exit 3" },
+            outputs = { out = core.output.file("out.txt") },
+            cache = false,
+        })
+        assert(not ok)
+    end,
+})
+"#,
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        let LuaValue::UserData(handle) = runtime.evaluate("@workspace/recovered").await.unwrap()
+        else {
+            panic!("test module must return a task handle");
+        };
+        runtime.execute_task(&handle).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_run_error_after_a_caught_action_failure_is_the_reported_error() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
+        let failing_task = |decorate: &str| {
+            format!(
+                r#"
+local core = require("@imp/core")
+return core.task({{
+    run = function(exec)
+        local ok, err = pcall(exec.action, {{
+            argv = {{ "sh", "-c", "exit 3" }},
+            outputs = {{ out = core.output.file("out.txt") }},
+            cache = false,
+        }})
+        assert(not ok)
+        {decorate}
+    end,
+}})
+"#
+            )
+        };
+        fs::write(
+            workspace_root.path().join("decorated.luau"),
+            failing_task(r#"error("RULE HINT: " .. tostring(err), 0)"#),
+        )
+        .unwrap();
+        fs::write(
+            workspace_root.path().join("rethrown.luau"),
+            failing_task("error(err, 0)"),
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        for (module, expected) in [
+            ("@workspace/decorated", "RULE HINT: "),
+            ("@workspace/rethrown", "failed with exit code 3"),
+        ] {
+            let LuaValue::UserData(handle) = runtime.evaluate(module).await.unwrap() else {
+                panic!("test module must return a task handle");
+            };
+            let error = runtime.execute_task(&handle).await.unwrap_err();
+            assert!(
+                format!("{error:#}").contains(expected),
+                "{module}: {error:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_file_reads_namespaced_files_and_decodes_json() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
+        fs::create_dir_all(workspace_root.path().join("tools")).unwrap();
+        fs::write(
+            workspace_root.path().join("tools/pins.json"),
+            r#"{ "tool": "x", "list": [1, 2], "none": null }"#,
+        )
+        .unwrap();
+        fs::write(rules_root.path().join("shipped.lock"), "shipped\n").unwrap();
+        fs::write(
+            workspace_root.path().join("probe.luau"),
+            r#"
+local core = require("@imp/core")
+local text = core.read_file("@workspace/tools/pins.json")
+local pins = core.json_decode(text)
+assert(pins.tool == "x")
+assert(#pins.list == 2 and pins.list[2] == 2)
+assert(pins.none == nil)
+assert(core.read_file("@imp/rules/shipped.lock") == "shipped\n")
+assert(core.read_file("@workspace/tools/missing.json") == nil)
+local function failure(fn, ...)
+    local ok, message = pcall(fn, ...)
+    assert(not ok)
+    return tostring(message)
+end
+assert(string.find(failure(core.read_file, "@workspace/../outside"), "escapes its namespace root", 1, true))
+assert(string.find(failure(core.read_file, "//tools/pins.json"), "requires an @imp/rules/ or @workspace/ address", 1, true))
+assert(string.find(failure(core.json_decode, "{"), "core.json_decode", 1, true))
+return {}
+"#,
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        runtime.evaluate("@workspace/probe").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn goal_selection_option_accepts_only_none() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        let rules_root = rules_tempdir();
+        fs::write(
+            workspace_root.path().join("probe.luau"),
+            r#"
+local core = require("@imp/core")
+local ok, message = pcall(core.goal, "probe-bad", function() end, { selection = "all" })
+assert(not ok)
+assert(string.find(tostring(message), "selection must be \"none\"", 1, true))
+core.goal("probe-none", function(roots)
+    assert(#roots == 0)
+    return "ran with no roots"
+end, { selection = "none" })
+return {}
+"#,
+        )
+        .unwrap();
+        let mut runtime = LuauWorkspace::new(workspace_root.path(), rules_root.path()).unwrap();
+        runtime.evaluate("@workspace/probe").await.unwrap();
+        assert!(runtime.goal_definitions()["probe-none"].selectorless);
+        let report = runtime
+            .execute_graph(
+                "probe-none",
+                &[],
+                Arc::new(AtomicBool::new(false)),
+                &serde_json::json!({}),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.as_deref(), Some("ran with no roots"));
     }
 
     #[tokio::test]

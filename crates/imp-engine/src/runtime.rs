@@ -26,8 +26,6 @@ pub struct LiveWorkspace {
     pub workspace: Workspace,
     /// Present when `imp.workspace.luau` selected the Luau pilot runtime.
     pub luau: Option<RefCell<crate::luau::LuauWorkspace>>,
-    /// True when `generate-build` was installed as the Luau generator entry point.
-    pub luau_generate_build_goal: bool,
     #[allow(dead_code)]
     pub runtime: Runtime,
     pub ctx: JsContext,
