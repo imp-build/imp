@@ -10,19 +10,13 @@
 // [BUILD] handle. attach(label, "build", fn) (the `build()` sugar in
 // imp:core) is a separate, still-supported mechanism and is unaffected.
 //
-// `build` is cache-only: it builds and warms the task cache, but (now that
-// every build product is materialize:false) never leaves files in the
-// workspace. Getting real files out of a target is `package`'s job
-// (writeWorkspace to dist/), the only goal that still writes.
+// `build` is cache-only: it builds and warms the task cache, but it never
+// leaves files in the workspace. Getting real files out of a target is
+// `package`'s job (writeWorkspace to dist/).
 
-import { goal, writeWorkspace } from "imp:core";
+import { goal } from "imp:core";
 
-/** Materialize source-generation graph roots while ordinary builds remain CAS-only. */
-export function graphBuildGoal(roots) {
-	for (const { result } of roots) {
-		if (!result?.generated || typeof result.path !== "string") continue;
-		writeWorkspace(result.path, result.generated.digest, { from: result.path });
-	}
-}
+/** Do nothing with the built roots: `build` is cache-only and writes no workspace files. */
+export function graphBuildGoal(_roots) {}
 
 export const BUILD = goal("build", undefined, { graph: graphBuildGoal });

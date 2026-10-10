@@ -13,7 +13,7 @@ helpers are implementation APIs, not BUILD constructors.
 
 Important boundaries:
 
-- `build` warms the graph and task cache but does not publish ordinary files.
+- `build` warms the graph and task cache. It writes no files into the workspace.
 - `codegen` publishes selected `codegen()` outputs under `dist/codegen/`.
 - `package` publishes graph artifacts under `dist/`.
 - `fmt`, `lint`, and `generate` publish workspace changes only at their goal
