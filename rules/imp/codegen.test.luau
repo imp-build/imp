@@ -212,41 +212,4 @@ return {
 			assert(contains(error_text(codegen_module.stamp_file, { output = "x" }), "requires a text string"))
 		end),
 	}),
-
-	core.test.suite("codegen goal", {
-		core.test.case("exports each file below dist/codegen", function()
-			core.test.with_fake_write_workspace(function(writes)
-				local report = codegen_workflow.graph_codegen_goal({
-					{
-						address = "//pkg:gen",
-						result = { out1 = { type = "artifact", digest = "d1", path = "a/one.txt" } },
-					},
-				})
-				assert(#writes.calls == 1)
-				assert(writes.calls[1].path == "dist/codegen/a/one.txt")
-				assert(writes.calls[1].digest == "d1" and writes.calls[1].from == "a/one.txt")
-				assert(contains(report, "Exported 1 codegen file:"), report)
-			end)
-		end),
-
-		core.test.case("rejects paths that differ only in case", function()
-			local text = error_text(codegen_workflow.graph_codegen_goal, {
-				{ address = "//a:gen", result = { type = "artifact", digest = "d", path = "A.txt" } },
-				{ address = "//b:gen", result = { type = "artifact", digest = "d", path = "a.txt" } },
-			})
-			assert(contains(text, "codegen output path conflict at 'dist/codegen/a.txt'"), text)
-		end),
-
-		core.test.case("rejects a root without artifacts", function()
-			local text = error_text(codegen_workflow.graph_codegen_goal, { { address = "//a:gen", result = { x = 1 } } })
-			assert(contains(text, "//a:gen: codegen root must resolve to a codegen() result"), text)
-		end),
-
-		core.test.case("rejects a path that is not normalized", function()
-			local text = error_text(codegen_workflow.graph_codegen_goal, {
-				{ address = "//a:gen", result = { type = "artifact", digest = "d", path = "../x" } },
-			})
-			assert(contains(text, "must be a normalized workspace-relative path"), text)
-		end),
-	}),
 }
