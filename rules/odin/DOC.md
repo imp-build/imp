@@ -294,16 +294,32 @@ export const app = odinPackage({ deps: [mathlib] });
 ```
 
 ```odin
-// A shared library lands at "build/c/lib<slug>.so" ("<slug>.dll" on Windows).
-foreign import mathlib "build/c/libvendor_mathlib.so"
+// On Linux, a shared library lands at "build/c/lib<slug>.so".
+// On Windows, it lands at "build/c/<slug>.dll", with an import library at
+// "build/c/<slug>.lib". Odin links with MSVC link.exe, which cannot link
+// against a DLL, so name the import library there.
+when ODIN_OS == .Windows {
+	foreign import mathlib "build/c/vendor_mathlib.lib"
+} else {
+	foreign import mathlib "build/c/libvendor_mathlib.so"
+}
 ```
 
 `imp package` publishes the directory, so the library travels with the binary.
 A binary with no shared dep keeps the single-file product it has always had.
 
 `odin test` is the exception: it compiles and runs in one step, so there is no
-product to carry the library in. The staged library's own directory is put on
-`LD_LIBRARY_PATH` for that action instead, which needs nothing from you.
+product to carry the library in. Each platform finds the staged library in a
+different way, and neither needs anything from you:
+
+| Platform | How the `odin test` executable finds the library |
+| --- | --- |
+| Linux | The library's own directory is put on `LD_LIBRARY_PATH` for that action. |
+| Windows | The test executable is written into the DLL's own directory (`-out:`), which the loader searches first. |
+
+On Windows, every DLL that an `odin test` loads must be staged in one
+directory. If they are not, the `odin test` action fails with an error. Every
+`ccLibrary({ shared: true })` writes to `build/c/`.
 
 `deps` also takes a plain graph handle — a `files()` set of fixture data, a
 task output — and stages it into the sandbox as it is:

@@ -73,6 +73,24 @@ export function rpathOriginArgs(bundled) {
 	return [shellQuote("-Wl,-rpath,$ORIGIN")];
 }
 
+// The import library a Windows shared library's own link step writes beside
+// the DLL, or null when there is none. MSVC `link.exe` (which Odin uses) cannot
+// link against a DLL. It needs this import library, and it fails on the DLL
+// with "LNK1107: invalid or corrupt file". The name `<stem>.lib` is the name
+// cl.exe /LD already gives it.
+export function importLibPath(outPath, isShared) {
+	if (!isShared || platformInfo().os !== "windows") return null;
+	return String(outPath).replace(/\.dll$/, ".lib");
+}
+
+// The `-Wl,--out-implib` argument that makes a MinGW-style link step write the
+// importLibPath() file. Shared between gcc and zig, and left out of msvc, which
+// writes the same file without a flag.
+export function importLibArgs(outPath, isShared) {
+	const path = importLibPath(outPath, isShared);
+	return path === null ? [] : [shellQuote(`-Wl,--out-implib,${path}`)];
+}
+
 /**
  * Wrap one provider per OS into a single selectable union — "the same
  * logical target keeps one toolchain shape while selecting GCC on Linux and

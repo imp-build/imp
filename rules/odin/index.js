@@ -1094,6 +1094,15 @@ function graphResourceInputs(specs) {
 				}
 				recognized = true;
 			}
+			// On Windows a `foreign import` names a shared library's import
+			// library, not its DLL: Odin links with MSVC `link.exe`, which cannot
+			// link against a DLL. It is only needed at link time, so it is not
+			// one of sharedLibs.
+			if (Array.isArray(dep?.transitiveImportLibs)) {
+				for (const importLib of dep.transitiveImportLibs) {
+					pushResource(importLib);
+				}
+			}
 			// A dep's own transitiveLinkopts (e.g. a cmakeLibraryDep()'s
 			// pkg-config-derived -L/-l flags for a shared library's own
 			// dependencies) — unlike transitiveArchives, these aren't files Odin
@@ -1380,24 +1389,61 @@ export function odinGccLinkerPathDir(exec, resolvedGccTool) {
  * value on one action: it keys that action's own digest, and it names a staged
  * directory, never a host one.
  *
- * Left out on Windows, which has no `LD_LIBRARY_PATH` — the epic that covers
- * shared-library run-time linkage scopes Windows out, because it finds a DLL
- * beside the executable through its own default search order.
+ * Left out on Windows, which has no `LD_LIBRARY_PATH`. See odinTestOutArgs()
+ * for the Windows mechanism.
  *
  * @param {string[]} sharedLibPaths Sandbox paths of the staged shared libraries.
  * @returns {string[]} `[]`, or a single `LD_LIBRARY_PATH=` env entry.
  */
 export function odinTestLibraryPathEnv(sharedLibPaths) {
 	if (platformInfo().os === "windows") return [];
+	const directories = stagedLibraryDirs(sharedLibPaths);
+	return directories.length > 0
+		? [`LD_LIBRARY_PATH=${directories.join(":")}`]
+		: [];
+}
+
+/**
+ * The `-out:` argument an `odin test` action needs on Windows, or no argument.
+ *
+ * The Windows counterpart of odinTestLibraryPathEnv(). Windows has no
+ * `LD_LIBRARY_PATH`, but its loader looks for a DLL in the executable's own
+ * directory first. So this writes the test executable into the directory the
+ * DLLs are staged under. Without it, the test executable is written to the
+ * sandbox root and does not start. Measured as a real failure before this:
+ * exit code 0xC0000135 (STATUS_DLL_NOT_FOUND).
+ *
+ * `PATH` is not used, because sandbox_command_env() composes it from the
+ * declared tools only.
+ *
+ * An executable has one directory, so DLLs staged under more than one
+ * directory are an error. Every ccLibrary({shared: true}) writes to `build/c/`.
+ *
+ * @param {string[]} sharedLibPaths Sandbox paths of the staged shared libraries.
+ * @returns {string[]} `[]`, or a single `-out:` argument.
+ */
+export function odinTestOutArgs(sharedLibPaths) {
+	if (platformInfo().os !== "windows") return [];
+	const directories = stagedLibraryDirs(sharedLibPaths);
+	if (directories.length === 0) return [];
+	if (directories.length > 1) {
+		throw new Error(
+			`odin test on Windows cannot load DLLs from more than one directory: ${directories.join(", ")}. ` +
+				"The loader finds a DLL beside the test executable, and the executable has one directory.",
+		);
+	}
+	return [`-out:${directories[0]}/${odinExeName()}`];
+}
+
+// The distinct directories of the staged shared libraries, in first-seen order.
+function stagedLibraryDirs(sharedLibPaths) {
 	const directories = [];
 	for (const libraryPath of sharedLibPaths) {
 		const slash = String(libraryPath).lastIndexOf("/");
 		const directory = slash === -1 ? "." : libraryPath.slice(0, slash);
 		if (!directories.includes(directory)) directories.push(directory);
 	}
-	return directories.length > 0
-		? [`LD_LIBRARY_PATH=${directories.join(":")}`]
-		: [];
+	return directories;
 }
 
 // The filename `odin build -out:` writes an executable to. Odin's Windows
@@ -1528,6 +1574,13 @@ function graphOdinBuild(
 			// library-only or test-only package declared directly as a target
 			// (not merely imported as a dep) fails `imp lint` with "Undefined
 			// entry point procedure 'main'", as #100's fixture does.
+			// The staged shared libraries an `odin test` executable must load
+			// when it runs inside this same action.
+			const testSharedLibPaths = test
+				? (resolved.sharedLibResourceIndices || []).map((index) =>
+						exec.path(resolved[`resource${index}`]),
+					)
+				: [];
 			const args = [
 				exec.tool(resolved.odin, "odin"),
 				command,
@@ -1554,6 +1607,7 @@ function graphOdinBuild(
 							: []
 					: []),
 				...(captures ? [`-out:${outputPath}`] : []),
+				...odinTestOutArgs(testSharedLibPaths),
 				...(linkerEnv ? linkerEnv.flags : []),
 				...(useLldOnWindows ? ["-linker:lld"] : []),
 				// Odin's own generated object code carries MSVC-style
@@ -1602,13 +1656,7 @@ function graphOdinBuild(
 						...(linkerEnv ? linkerEnv.pathDirs : []),
 						odinGccLinkerPathDir(exec, resolved.gcc),
 					].join(":")}`,
-					...(test
-						? odinTestLibraryPathEnv(
-								(resolved.sharedLibResourceIndices || []).map((index) =>
-									exec.path(resolved[`resource${index}`]),
-								),
-							)
-						: []),
+					...odinTestLibraryPathEnv(testSharedLibPaths),
 				],
 				allowFailure: lint || test,
 				outputs: captures ? { artifact: output.file(outputPath) } : {},

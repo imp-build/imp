@@ -14,6 +14,7 @@ import {
 	odinExtraLinkerFlagsArgs,
 	odinDefineArgs,
 	odinTestLibraryPathEnv,
+	odinTestOutArgs,
 	odinGccLinkerPathDir,
 	odinLinkerPathDir,
 	odinMergeLinkopts,
@@ -653,6 +654,11 @@ describe("Odin graph rules", () => {
 	// beside the executable. The declared entries are the staged libraries' own
 	// directories, deduped — a build action's cwd is the sandbox root, so a
 	// relative entry resolves against the same root the staged paths use.
+	//
+	// Windows has no LD_LIBRARY_PATH. There the test executable is written into
+	// the DLLs' own directory instead, which the loader searches first.
+	const windows = platformInfo().os === "windows";
+
 	test("odinTestLibraryPathEnv names each staged library directory one time", () => {
 		expect(odinTestLibraryPathEnv([])).toEqual([]);
 		expect(
@@ -661,7 +667,23 @@ describe("Odin graph rules", () => {
 				"build/c/libtwo.so",
 				"build/other/libthree.so",
 			]),
-		).toEqual(["LD_LIBRARY_PATH=build/c:build/other"]);
+		).toEqual(windows ? [] : ["LD_LIBRARY_PATH=build/c:build/other"]);
+	});
+
+	test("odinTestOutArgs writes the test executable beside the staged DLLs", () => {
+		expect(odinTestOutArgs([])).toEqual([]);
+		expect(odinTestOutArgs(["build/c/one.dll", "build/c/two.dll"])).toEqual(
+			windows ? ["-out:build/c/output.exe"] : [],
+		);
+		if (windows) {
+			expect(() =>
+				odinTestOutArgs(["build/c/one.dll", "build/other/two.dll"]),
+			).toThrow("more than one directory");
+		} else {
+			expect(odinTestOutArgs(["build/c/one.so", "build/other/two.so"])).toEqual(
+				[],
+			);
+		}
 	});
 
 	// The GCC graph tool chooses bin/ or bin-unsafe-paths/ before the executor

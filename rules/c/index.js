@@ -5,7 +5,7 @@
 // plain frozen object a caller passes directly as ccBinary({deps:[A]})'s
 // dependency — a flat, eagerly-computed transitiveArchives array (mirrors
 // rules/rust's cargoPackage({deps}) pattern). This output shape
-// ({[BUILD], archive, transitiveArchives, transitiveSharedLibs,
+// ({[BUILD], archive, transitiveArchives, transitiveSharedLibs, transitiveImportLibs,
 // transitiveIncludeDirs, transitiveHdrs, [PACKAGE]}) is a deliberate
 // cross-module contract: rules/c/cmake's graph-native
 // per-target expand() children (issue #62) are meant to expose the same
@@ -64,7 +64,11 @@ import {
 	normalizeGeneratedSrcs,
 } from "//rules/imp/codegen";
 import { defaultZigGraphToolchain } from "//rules/c/zig";
-import { selectCcToolchain, shellQuote } from "//rules/c/toolchain";
+import {
+	importLibPath,
+	selectCcToolchain,
+	shellQuote,
+} from "//rules/c/toolchain";
 
 export const DEFAULT_CPP_SRCS = ["*.c", "*.cc", "*.cpp", "*.cxx"];
 export const DEFAULT_CPP_HDRS = ["*.h", "*.hh", "*.hpp", "*.hxx"];
@@ -334,6 +338,11 @@ function ccTask(spec, isLibrary) {
 		: isLibrary
 			? `build/c/${spec.outputName}.a`
 			: `build/c/${exeName}`;
+	// A Windows shared library also writes an import library: a consumer that
+	// links with MSVC `link.exe` (an Odin package) needs it, and cannot link
+	// against the DLL itself. Null on every other platform and for every
+	// other output kind.
+	const importLib = importLibPath(outPath, isShared);
 	// Own path first, so a target's own headers shadow a same-named header
 	// pulled in transitively.
 	const includeDirs = [
@@ -365,7 +374,10 @@ function ccTask(spec, isLibrary) {
 				transitiveHdrs.map((depHdrs, i) => [`depHdrs${i}`, depHdrs]),
 			),
 		},
-		outputs: { artifact: output.artifact() },
+		outputs: {
+			artifact: output.artifact(),
+			...(importLib ? { importLib: output.artifact() } : {}),
+		},
 		async run(exec, input) {
 			for (const [index, g] of generatedSrcs.entries()) {
 				assertGeneratedSrcPath(
@@ -514,13 +526,24 @@ function ccTask(spec, isLibrary) {
 				env,
 				tools: extraTools,
 				inputs: compileResults.map((r) => r.outputs.object),
-				outputs: { artifact: output.file(outPath) },
+				outputs: {
+					artifact: output.file(outPath),
+					...(importLib ? { importLib: output.file(importLib) } : {}),
+				},
 				display: `cc ${actionKind} ${outPath}`,
 			});
-			return { artifact: result.outputs.artifact };
+			return {
+				artifact: result.outputs.artifact,
+				...(importLib ? { importLib: result.outputs.importLib } : {}),
+			};
 		},
 	});
-	return { built, hdrs, product };
+	return {
+		built,
+		hdrs,
+		product,
+		importLib: importLib ? built.outputs.importLib : null,
+	};
 }
 
 // ccTest()'s [TEST] root: run the built executable, and report its exit code
@@ -570,12 +593,12 @@ function testTask(spec, executable, exePath, bundled) {
  * @param {string[]} [opts.copts=[]] Extra compiler flags.
  * @param {string} [opts.outputName] Portable artifact filename stem. Defaults to the directory-derived slug; rules add the platform-specific library suffix.
  * @param {boolean} [opts.unsafeSystemPaths=false] Bypass Bootlin's toolchain-wrapper unsafe-path guard (which rejects -I/-isystem/-L flags under /usr/include or /usr/lib) so this target can link against host system packages (e.g. libwebkit2gtk-4.1). No-op on a zig toolchain, which has no such guard.
- * @param {boolean} [opts.shared=false] Build a dynamically-loadable shared object (`-shared`, platform-correct extension: `.dll` on Windows, `.so` elsewhere) instead of a static `.a` archive. The result is reported as `transitiveSharedLibs` rather than `transitiveArchives`, so a dependent ccLibrary()/ccBinary() links against it but never tries to `ar` it in. A consumer's product carries the library beside its own executable and is linked with an `$ORIGIN` rpath, so it also loads at run time — see ccBinary().
- * @returns {object} Frozen `{[BUILD], archive, transitiveArchives, transitiveSharedLibs, transitiveIncludeDirs, transitiveHdrs, transitiveLinkopts, [PACKAGE]}`.
+ * @param {boolean} [opts.shared=false] Build a dynamically-loadable shared object (`-shared`, platform-correct extension: `.dll` on Windows, `.so` elsewhere) instead of a static `.a` archive. The result is reported as `transitiveSharedLibs` rather than `transitiveArchives`, so a dependent ccLibrary()/ccBinary() links against it but never tries to `ar` it in. On Windows it also writes an import library, `<name>.lib`, reported as `transitiveImportLibs`, for a consumer that links with MSVC `link.exe`, such as an Odin package. A consumer's product carries the library beside its own executable and is linked with an `$ORIGIN` rpath, so it also loads at run time — see ccBinary().
+ * @returns {object} Frozen `{[BUILD], archive, transitiveArchives, transitiveSharedLibs, transitiveImportLibs, transitiveIncludeDirs, transitiveHdrs, transitiveLinkopts, [PACKAGE]}`.
  */
 export function ccLibrary(opts = {}) {
 	const spec = crateSpec(opts);
-	const { built, hdrs } = ccTask(spec, true);
+	const { built, hdrs, importLib } = ccTask(spec, true);
 	const archive = built.outputs.artifact;
 	return Object.freeze({
 		spec,
@@ -590,6 +613,13 @@ export function ccLibrary(opts = {}) {
 		transitiveSharedLibs: spec.shared
 			? [archive, ...spec.deps.flatMap((d) => d.transitiveSharedLibs || [])]
 			: spec.deps.flatMap((d) => d.transitiveSharedLibs || []),
+		// The link-time half of a Windows shared library (see ccTask()). It is
+		// separate from transitiveSharedLibs because only the DLL travels
+		// beside an executable at run time. Empty on other platforms.
+		transitiveImportLibs: [
+			...(importLib ? [importLib] : []),
+			...spec.deps.flatMap((d) => d.transitiveImportLibs || []),
+		],
 		transitiveIncludeDirs: [
 			spec.path,
 			...spec.deps.flatMap((d) => d.transitiveIncludeDirs),

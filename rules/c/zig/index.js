@@ -20,6 +20,7 @@ import {
 import { toolchainBin } from "//rules/imp/toolchain";
 import {
 	clangOptFlags,
+	importLibArgs,
 	rpathOriginArgs,
 	shellQuote,
 	sonameArgs,
@@ -484,6 +485,7 @@ function zigToolchainCommands(exec, input) {
 				...compiler(isCxx).map(shellQuote),
 				...(isShared ? ["-shared"] : []),
 				...sonameArgs(outPath, isShared),
+				...importLibArgs(outPath, isShared),
 				...rpathOriginArgs(bundled),
 				"-o",
 				shellQuote(outPath),

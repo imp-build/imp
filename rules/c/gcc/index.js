@@ -13,6 +13,7 @@ import {
 import { nativeTool } from "//rules/imp/native-tool";
 import {
 	clangOptFlags,
+	importLibArgs,
 	rpathOriginArgs,
 	shellQuote,
 	sonameArgs,
@@ -571,6 +572,7 @@ function gccToolchainCommands(exec, input, opts = {}) {
 				...compiler(isCxx).map(shellQuote),
 				...(isShared ? ["-shared"] : []),
 				...sonameArgs(outPath, isShared),
+				...importLibArgs(outPath, isShared),
 				...rpathOriginArgs(bundled),
 				"-o",
 				shellQuote(outPath),

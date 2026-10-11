@@ -2,7 +2,7 @@ import { BUILD } from "//rules/workflows/build";
 import { PACKAGE } from "//rules/workflows/package";
 import { RUN } from "//rules/workflows/run";
 import { TEST } from "//rules/workflows/test";
-import { files, tool } from "imp:core";
+import { files, platformInfo, tool } from "imp:core";
 import {
 	describe,
 	expect,
@@ -135,6 +135,38 @@ describe("graph-native ccLibrary/ccBinary", () => {
 			// link-line path (measured: `build/c/<name>.so`), and a DT_NEEDED
 			// holding a slash makes the loader skip its search paths.
 			expect(linkRun.argv.join(" ")).toContain(`-Wl,-soname,${expected}`);
+		});
+	});
+
+	// MSVC link.exe (which Odin uses) cannot link against a DLL. On Windows a
+	// shared library also writes an import library for it to link against.
+	// Elsewhere there is none.
+	test("ccLibrary({shared}) writes an import library on Windows only", () => {
+		return withCcHost(async (host) => {
+			const windows = platformInfo().os === "windows";
+			const sharedLib = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				toolchain: fakeGccGraphToolchain(),
+				shared: true,
+			});
+			const staticLib = ccLibrary({
+				path: "rules/c/testdata/mixed_sources",
+				outputName: "static_only",
+				toolchain: fakeGccGraphToolchain(),
+			});
+			expect(sharedLib.transitiveImportLibs.length).toBe(windows ? 1 : 0);
+			expect(staticLib.transitiveImportLibs).toEqual([]);
+			await resolveIgnoringArtifactValidation([sharedLib[BUILD]]);
+			const linkRun = host.runs.find((run) =>
+				run.display.startsWith("cc shared-link "),
+			);
+			const implib =
+				"-Wl,--out-implib,build/c/rules_c_testdata_mixed_sources.lib";
+			if (windows) {
+				expect(linkRun.argv.join(" ")).toContain(implib);
+			} else {
+				expect(linkRun.argv.join(" ")).not.toContain("--out-implib");
+			}
 		});
 	});
 

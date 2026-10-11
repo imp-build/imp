@@ -11,7 +11,11 @@ import "core:os"
 // The library must also travel beside this executable at run time. Odin links
 // with an `$ORIGIN` rpath by default (measured: RPATH [$ORIGIN]), so the
 // product is a directory that holds both — see odinPackage()'s own docstring.
-foreign import lib "../../../../build/c/librules_odin_example_shared.so"
+when ODIN_OS == .Windows {
+	foreign import lib "../../../../build/c/rules_odin_example_shared.lib"
+} else {
+	foreign import lib "../../../../build/c/librules_odin_example_shared.so"
+}
 
 foreign lib {
 	imp_example_mul :: proc "c" (a, b: i32) -> i32 ---
